@@ -294,6 +294,10 @@ def stage2_score(
             projects=matched_projects,
             category=category,
             grade_source=grade_source,
+            # Second drop site (#1379): this rebuild is field-by-field, so a field
+            # the scanner passes but this omits never reaches
+            # `intel-<date>.jsonl` — the only file the writer reads.
+            published=item.published,
         ))
 
     # Three numbers, because they answer three questions: calls made says the

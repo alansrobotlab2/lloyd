@@ -397,7 +397,12 @@ def scan_youtube_channels() -> Tuple[List[FeedItem], FeedCoverage]:
                 summary=description,
                 discovered_at=datetime.utcnow().isoformat() + "Z",
                 authors=[name] if name else [],
-                source_tags=[handle] if handle else []
+                source_tags=[handle] if handle else [],
+                # The value `_parse_feed_entries` already read (line 232) and the
+                # local above already bound (line 390): passing it is the whole of
+                # the fix, and it is what lets the writer hold a 453-day-old video
+                # instead of filing it under today's heading (backlog #1379).
+                published=published,
             )
             all_items.append(item)
             state.mark_seen(item_id, current_state)

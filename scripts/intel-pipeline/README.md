@@ -27,6 +27,9 @@ Base item from any feed source:
 - `url`: Link to original item
 - `summary`: Brief description
 - `discovered_at`: ISO-8601 timestamp
+- `published`: ISO-8601 date the SOURCE published the item, when it says so
+  (`atom:published` for YouTube). Empty means the source served no date — which is
+  normal for GitHub and is treated as inside the freshness window, never as old.
 - `authors`: List of authors
 - `source_tags`: Tags from source
 
@@ -37,6 +40,23 @@ Extended FeedItem with scoring:
 - `why`: Explanation for scoring
 - `projects`: Matched projects
 - `category`: Primary category
+
+## Write guards (`vault_writer.py`)
+
+Two conditions stop a write, on both routes into the vault
+(`write_all_to_vault` and `write_item_to_vault`):
+
+- **`MAX_ITEM_AGE_DAYS = 30`** — an item whose own `published` date is older than this
+  is held out of the digests, with the held count and the oldest age printed. An item
+  with no `published` is always written, so a source that stops serving dates cannot
+  zero the writer. Without it, the 2026-09-22 run filed 102 videos as the day's
+  `URGENT` news, 28 of them more than 30 days old and the oldest 453 days (backlog
+  #1379).
+- **`STATE_LOSS_MIN_SCORED_ITEMS = 100`** — combined with an *empty* `seen` set in
+  `scanner-state.json`, this is state loss, not a busy day: the run prints
+  `STATE LOSS: ...` and writes nothing. The day it fired measured 258 scored items
+  from 1007 raw against 9 from 49 normally. Restore the state from
+  `~/.lloyd-data-snapshots` (`scripts/backup/restore-data.sh`) and re-run `--write`.
 
 ## Configuration
 
@@ -52,9 +72,13 @@ Interest profile stored in `~/obsidian/interests.md` (markdown format):
 
 ## State Management
 
-- **Seen items**: `~/obsidian/memory/feeds/scanner-state.json`
-- **Raw items**: `~/obsidian/memory/feeds/raw/YYYY-MM-DD.jsonl`
-- **Scoring output**: `~/obsidian/memory/feeds/intel-YYYY-MM-DD.jsonl`
+Under `~/lloyd-data`, not the code tree and not the vault — runtime data moved out of
+`~/lloyd` on 2026-09-22 so no `git clean` or fixture teardown aimed at the code can
+reach it again. `intel_pipeline/_paths.py` derives all three from `app.paths`:
+
+- **Seen items**: `~/lloyd-data/_pipeline/vault-derived/memory/feeds/scanner-state.json`
+- **Raw items**: `~/lloyd-data/_pipeline/vault-derived/memory/feeds/raw/YYYY-MM-DD.jsonl`
+- **Scoring output**: `~/lloyd-data/_pipeline/vault-derived/memory/feeds/intel-YYYY-MM-DD.jsonl`
 
 ## Usage
 

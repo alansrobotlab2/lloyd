@@ -3,10 +3,11 @@
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
+from . import state as scanner_state
 from .models import ScoredItem, GRADE_CALL_CAP, GRADE_KEYWORD
 from .profile import load_profile, get_all_keywords, keyword_match
 
@@ -71,6 +72,122 @@ def refused_by_call_cap(item: ScoredItem) -> bool:
     day, and surviving one is exactly what the keyword fallback is for.
     """
     return getattr(item, "grade_source", GRADE_KEYWORD) == GRADE_CALL_CAP
+
+
+# ── how old an item may be before the vault refuses it (backlog #1379) ────────
+#
+# There was no age bound at all until 2026-09-23: `write_all_to_vault` filtered on
+# `refused_by_call_cap` and `below_floor` only, and the one date it read was
+# `datetime.utcnow()` turned into the `## <today>` heading — so an item's age was
+# invisible to the writer and to the reader alike. Measured by re-fetching each feed
+# the 2026-09-22 run wrote (18 feeds, 0 failures, all 102 ids resolved): 7 videos were
+# ≤2 days old, 23 were 3-7 d, 23 were 8-14 d, 21 were 15-30 d, 28 were >30 d, and the
+# oldest was 453 days old. Every one of them was appended to a `knowledge/` digest as
+# an `URGENT` / `Relevance: 10/10` entry under that morning's date.
+#
+# 30 days is a declared window, not a tuned one: it admits the whole normal
+# distribution of a working day (71% of that bad day was already older than a week,
+# but the oldest of its first four buckets was 30 d) and refuses the tail that made
+# the run's output untrustworthy. Anything older belongs to the channel monitor,
+# which writes the real per-video note.
+MAX_ITEM_AGE_DAYS = 30
+
+# The volume that makes an empty dedup state a claim rather than a quiet day.
+#
+# `state.load_state()` returns `{"seen": set()}` with no signal when the file is
+# absent or empty, and nothing downstream bounded volume, so state loss and a busy day
+# were the same observable. Measured on the state-loss day: 258 scored items from 1007
+# raw. A normal day scores 9 from 49. The floor sits between the two so a genuinely
+# big day still writes; what it cannot do is let an emptied `seen` list publish the
+# entire backlog as today's news.
+STATE_LOSS_MIN_SCORED_ITEMS = 100
+
+
+def _parse_published(value: Any) -> Optional[datetime]:
+    """The item's own publish date as an aware datetime, or None if there is none.
+
+    None is the important answer, not an error: a feed that omits `atom:published`, a
+    GitHub row, or a row written before the field existed all mean "no date", and the
+    gate below must treat that as inside the window rather than as zero age or as old.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
+def item_age_days(item: ScoredItem,
+                  now: Optional[datetime] = None) -> Optional[int]:
+    """Whole days between the item's own publish date and now; None when undated.
+
+    Floors rather than rounds, so an item exactly `MAX_ITEM_AGE_DAYS` old is inside
+    the window and one day past it is outside. A future-dated item is negative, which
+    is inside: clock skew must never become a held item.
+    """
+    published = _parse_published(getattr(item, "published", ""))
+    if published is None:
+        return None
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return int((now - published).total_seconds() // 86400)
+
+
+def too_old_for_vault(item: ScoredItem, now: Optional[datetime] = None) -> bool:
+    """True only when the item's own publish date is past the declared window."""
+    age = item_age_days(item, now)
+    return age is not None and age > MAX_ITEM_AGE_DAYS
+
+
+def seen_id_count() -> int:
+    """How many ids the scanner's dedup state holds: 0 when absent, empty or unreadable."""
+    try:
+        return len(scanner_state.load_state().get("seen", set()))
+    except Exception as exc:  # unreadable state must not read as a clean day
+        print(f"  Dedup state unreadable ({type(exc).__name__}: {exc}) — reading it as"
+              f" empty, which the guard below turns into a blocked day")
+        return 0
+
+
+def scored_item_count_on_disk(date_str: str) -> int:
+    """How many rows `intel-<date>.jsonl` holds, without parsing them."""
+    path = SCORED_FEEDS_DIR / f"intel-{date_str}.jsonl"
+    try:
+        with open(path, "r") as f:
+            return sum(1 for line in f if line.strip())
+    except OSError:
+        return 0
+
+
+def state_loss_detected(scored_count: int, date_str: str) -> bool:
+    """True when an empty dedup state plus an oversized day means the state is gone.
+
+    The only freshness mechanism this pipeline has is the `seen` list, and on
+    2026-09-22 it was empty at run start (the written list held exactly that day's
+    1007 ids, so it had accumulated nothing). Every video the feed still served was
+    therefore "new", including a 453-day-old one. The same shape is reachable without
+    any tree loss: a canary or gate run points `LLOYD_DATA` at a fresh home while
+    `worktree.py` symlinks the LIVE vault, so the write stage starts with an empty
+    state and a real vault to write into.
+    """
+    if seen_id_count() > 0:
+        return False
+    if scored_count <= STATE_LOSS_MIN_SCORED_ITEMS:
+        return False
+    print(f"STATE LOSS: the dedup state ({scanner_state.STATE_FILE}) holds 0 seen ids "
+          f"while intel-{date_str}.jsonl holds {scored_count} scored items, over the "
+          f"{STATE_LOSS_MIN_SCORED_ITEMS}-item floor "
+          f"(vault_writer.STATE_LOSS_MIN_SCORED_ITEMS). An emptied `seen` list makes "
+          f"the whole backlog look like today's news — on 2026-09-22 that wrote 102 "
+          f"videos into the digests, 28 of them more than 30 days old. Writing NOTHING "
+          f"to the vault. Restore scanner-state.json from ~/.lloyd-data-snapshots "
+          f"(scripts/backup/restore-data.sh) or re-seed it, then re-run --write.")
+    return True
 
 
 def load_scored_items(date_str: str) -> List[ScoredItem]:
@@ -342,13 +459,28 @@ def _digest_target(item: ScoredItem, vault_path: Path) -> Path:
 
 def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
     """Write a single scored item to the vault."""
-    # The refusal is enforced here as well as in the batch filter above
+    # Both new guards run here as well as in the batch filter above
     # `write_all_to_vault`, because this is the other public route into the vault
     # and a guard on one of two write surfaces is not a guard: the batch filter
     # prints the count, but any caller that reaches this function directly would
-    # otherwise get an ungraded item written with no filter in its way.
+    # otherwise get a stale item — or an entire backlog after state loss — written
+    # with no filter in its way.
+    #
+    # This route takes no date, so the day it counts is the day of the call — the
+    # same key the `## <today>` heading further down uses, hoisted so the two cannot
+    # disagree across midnight UTC.
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    if state_loss_detected(scored_item_count_on_disk(today), today):
+        return False
+
     if refused_by_call_cap(item):
         print(f"  Refusing (never asked about): {item.url}")
+        return False
+
+    age = item_age_days(item)
+    if age is not None and age > MAX_ITEM_AGE_DAYS:
+        print(f"  Held ({age} d old, past the {MAX_ITEM_AGE_DAYS}-day freshness window"
+              f" vault_writer.MAX_ITEM_AGE_DAYS): {item.url}")
         return False
 
     vault_path = _digest_target(item, determine_vault_path(item, profile))
@@ -439,6 +571,14 @@ def write_all_to_vault(date_str: Optional[str] = None) -> int:
     
     print(f"Loaded {len(items)} scored items")
 
+    # State loss first, before anything is written or claimed as written. An emptied
+    # `seen` list is not a quiet day: it is the whole backlog arriving at once, and
+    # the run that met it on 2026-09-22 published 102 videos, 28 of them over 30 days
+    # old. Returning before `save_written_state` matters — a partial write here would
+    # tell the next run the day had been published.
+    if state_loss_detected(len(items), date_str):
+        return 0
+
     # The call-cap refusal runs *before* the floor, and says its own number: an
     # item the model was never asked about has no relevance to measure, so letting
     # it reach a relevance comparison is what put 101 ungraded items in the vault
@@ -458,6 +598,20 @@ def write_all_to_vault(date_str: Optional[str] = None) -> int:
         print(f"Held {held} item(s) below relevance floor {RELEVANCE_FLOOR} "
               f"(set in vault_writer.RELEVANCE_FLOOR)")
 
+    # Freshness: an item the source published outside the window is not today's news,
+    # whatever the keyword score says. The count alone would not do — the number that
+    # made 2026-09-22 alarming was the age behind it, so the oldest is printed too.
+    # An item with no publish date is inside the window by definition (clause 3): the
+    # gate must never zero the writer on a source that carries no date.
+    fresh = [item for item in keepers if not too_old_for_vault(item)]
+    stale = len(keepers) - len(fresh)
+    if stale:
+        oldest = max(age for age in (item_age_days(item) for item in keepers)
+                     if age is not None)
+        print(f"Held {stale} item(s) published more than {MAX_ITEM_AGE_DAYS} days ago "
+              f"(vault_writer.MAX_ITEM_AGE_DAYS): oldest {oldest} d — the item's own "
+              f"publish date, not the day the scanner found it")
+
     # Load written state
     written_state = load_written_state()
     
@@ -466,7 +620,7 @@ def write_all_to_vault(date_str: Optional[str] = None) -> int:
     
     # Write items
     written_count = 0
-    for item in keepers:
+    for item in fresh:
         if is_written(item.id, written_state):
             print(f"  Skipping (already written): {item.id}")
             continue

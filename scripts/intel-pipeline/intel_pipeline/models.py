@@ -34,7 +34,15 @@ class FeedItem:
     discovered_at: str  # ISO-8601 format
     authors: list = field(default_factory=list)
     source_tags: list = field(default_factory=list)
-    
+    # When the SOURCE says the thing was published, as distinct from when we found
+    # it. YouTube's Atom feed carries `atom:published` on every entry and the
+    # scanner parsed it into a local (backlog #1379) with nowhere to put it, so the
+    # vault writer could not tell a video from this morning from one from 453 days
+    # ago and appended both under today's heading. Empty means the source served no
+    # date — which is a real state (the GitHub scanner has no such field), not a
+    # failure, and the age gate must treat it as inside the window.
+    published: str = ""
+
     @classmethod
     def from_dict(cls, data: dict) -> "FeedItem":
         """Create from dictionary."""
@@ -46,7 +54,11 @@ class FeedItem:
             summary=data.get("summary", ""),
             discovered_at=data["discovered_at"],
             authors=data.get("authors", []),
-            source_tags=data.get("source_tags", [])
+            source_tags=data.get("source_tags", []),
+            # A row written before this field existed has no key at all, and
+            # absence must read as "the source gave no date" — never as today, and
+            # never as a KeyError in a re-run of an old day.
+            published=data.get("published", "")
         )
     
     def to_dict(self) -> dict:
@@ -59,7 +71,8 @@ class FeedItem:
             "summary": self.summary,
             "discovered_at": self.discovered_at,
             "authors": self.authors,
-            "source_tags": self.source_tags
+            "source_tags": self.source_tags,
+            "published": self.published
         }
     
     @classmethod
@@ -99,6 +112,10 @@ class ScoredItem(FeedItem):
             why=data.get("why", ""),
             projects=data.get("projects", []),
             category=data.get("category", ""),
+            # The scoring stage and the write stage are separate processes joined by
+            # `intel-<date>.jsonl`, so a date that survives the scanner but not this
+            # rebuild is invisible exactly where the age gate has to act (#1379).
+            published=data.get("published", ""),
             # A feed file written before #1380 carries no cause, and absence must
             # not read as "cap-refused": defaulting to GRADE_CALL_CAP would turn a
             # re-run of `--write` over an old `intel-<date>.jsonl` into a
