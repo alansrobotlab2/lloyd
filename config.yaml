@@ -675,7 +675,8 @@ models:
     # launcher strips the vision tower unless LANGUAGE_MODEL_ONLY=0 in
     # agent-llm-primary.conf. true with a text-only engine costs one refused
     # request per turn (MultimodalRejectedError), never a dead turn.
-    supports_vision: false
+    supports_vision: true
+    image_token_estimate: 1300   # 1456x819 frame on this ViT (32x32 px per token); measured 640x360 = 220
     context_length: 262144
     display_name: Primary (Local)
     # Case-insensitive substring matched against what the engine reports
