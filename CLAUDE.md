@@ -2409,6 +2409,7 @@ Where each section comes from:
 | `autonomy` | `~/obsidian/autonomy/*.md` frontmatter + the pool's in-flight `scheduled-task` jobs |
 | `backlog` | `~/obsidian/backlog/*.md` frontmatter |
 | `automod` | `app/routers/dashboard.py::_automod` — the loop's scorecard (`scripts/automod/scorecard.py`) over the last 7 days plus its live round state, cached at `_SCORECARD_TTL_S` |
+| `network` | `agent_mcp/egress.py::network_report` — where `http_fetch`/`http_request`/`http_search`/`browser_navigate` went over 7 days, per destination and per scope (#628; the table is `egress_events` in `workers.db`) |
 | `usage` | `usage_store` |
 
 Sections that walk the vault (`autonomy`, `backlog`) are TTL-cached for

@@ -5,7 +5,7 @@ import {
 } from 'lucide-react'
 import {
   dashboardApi, sectionOk, sectionError,
-  type AutomodState, type AutonomyState, type AutonomyTaskRow, type BacklogHealth, type BacklogState,
+  type AutomodState, type AutonomyState, type AutonomyTaskRow, type BacklogHealth, type BacklogState, type NetworkState,
   type BackgroundTask, type DashboardSnapshot, type GpuInfo,
   type RecentSession, type SubagentRun, type UsageBucket, type VllmEngine,
   type WorkersState, type EnginePressure, type PrefixMissSummary,
@@ -1024,6 +1024,61 @@ function BacklogHealthLines({ health }: { health: BacklogHealth }) {
   )
 }
 
+/** #628: the destination inventory. Telemetry runs with enforcement off, so the
+ *  counts are where the fleet actually went — the list an allow-list is seeded
+ *  from. A missing database is said as such, never shown as an idle zero. */
+function NetworkPanel({ network }: { network: NetworkState }) {
+  const d = network.by_decision
+  const top = (network.per_destination ?? []).slice(0, 6)
+  const scopes = (network.per_scope ?? []).slice(0, 4)
+  return (
+    <Panel>
+      <div className="mb-2 flex items-baseline justify-between gap-2">
+        <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+          Network egress · {network.window_days}d
+        </span>
+        <span className="text-[10px] text-muted-foreground">
+          {network.policy.enforce ? 'enforcing' : 'recording only'}
+          {' · '}{network.policy.allow_entries} allow entries
+        </span>
+      </div>
+      {!network.database_present ? (
+        <div className="text-[11px] text-muted-foreground">No egress table yet — nothing has recorded a call.</div>
+      ) : (
+        <>
+          <div className="font-mono text-[11px] tabular-nums text-muted-foreground">
+            {network.total} calls · {network.distinct_hosts} hosts · {d.allow} allow · {d.deny} deny · {d['grant-required']} grant-required
+          </div>
+          {top.length > 0 && (
+            <div className="mt-2 space-y-0.5 border-t border-border pt-2">
+              {top.map(r => (
+                <div key={r.destination} className="flex justify-between gap-2 text-[11px]">
+                  <span className="truncate">{r.destination}</span>
+                  <span className="flex-shrink-0 font-mono tabular-nums text-muted-foreground">
+                    {r.count}{r.denied > 0 ? ` · ${r.denied} denied` : ''}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+          {scopes.length > 0 && (
+            <div className="mt-2 space-y-0.5 border-t border-border pt-2">
+              {scopes.map(s => (
+                <div key={s.scope} className="flex justify-between gap-2 text-[11px]">
+                  <span className="truncate text-muted-foreground">{s.scope}</span>
+                  <span className="flex-shrink-0 font-mono tabular-nums text-muted-foreground">
+                    {s.total} · {s.distinct_hosts} hosts
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </Panel>
+  )
+}
+
 function BacklogPanel({ backlog }: { backlog: BacklogState }) {
   // Same rule as AutonomyPanel: a list can be absent, and must read as empty.
   const byBoard = backlog.by_board ?? []
@@ -1151,7 +1206,7 @@ export default function DashboardPage() {
     )
   }
 
-  const { host, vllm, primary, recent, agents, services, workers, autonomy, backlog, automod, usage } = snap
+  const { host, vllm, primary, recent, agents, services, workers, autonomy, backlog, automod, network, usage } = snap
 
   const engines = sectionOk<VllmEngine[]>(vllm) ? vllm : []
   const primaryEngine = engines.find(e => e.alias === 'primary') ?? engines[0]
@@ -1517,6 +1572,11 @@ export default function DashboardPage() {
           {sectionOk(automod)
             ? <AutomodPanel automod={automod} />
             : <ErrorPanel what="Automod scorecard" error={sectionError(automod)} />}
+        </div>
+        <div className="mt-3">
+          {sectionOk(network)
+            ? <NetworkPanel network={network} />
+            : <ErrorPanel what="Network egress" error={sectionError(network)} />}
         </div>
       </Section>
 

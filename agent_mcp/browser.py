@@ -526,6 +526,31 @@ async def _browser_navigate(url: str, wait_until: str = "domcontentloaded") -> s
     if wait_until not in ("load", "domcontentloaded", "networkidle", "commit"):
         wait_until = "domcontentloaded"
 
+    # #628: the destination decision, before `_get_page()` — so a refused
+    # navigation never launches Chromium, and the refusal is the grant shape
+    # rather than the 30s timeout a blocked route would have surfaced as. The
+    # private-host checks below it (`_host_block_reason`, `_guard_route`,
+    # `_enforce_landing`) are untouched: this adds a destination axis, it does
+    # not replace the address floor, and the floor runs first so an allow-list
+    # entry naming a private address cannot reopen it.
+    #
+    # No `loopback_ok` here, deliberately: this lane has never had a loopback
+    # allowance (`test_navigate_to_a_link_local_address_is_blocked` pins that
+    # `http://169.254.1.1/` is refused, and the comment in
+    # `_is_local_dev_loopback_host` explains why the browser is not given the
+    # one `http_request` has), so the guard's floor refuses the same addresses it
+    # always did. `floor_off` mirrors this module's own `block_private_hosts`
+    # knob (`browser.block_private_hosts: false` exists for a local-only
+    # browser); a guard that reinstated what the operator switched off would be
+    # a behavior change wearing a security badge.
+    from agent_mcp import egress
+    # Off the loop: the guard writes a row and may read a session file, and
+    # this coroutine runs on the aggregator's one event loop.
+    verdict = await egress.aguard("browser_navigate", url,
+                                  floor_off=not _resolve_block_private())
+    if not verdict.allowed:
+        return json.dumps({"error": verdict.reason})
+
     blocked = await _host_block_reason_async(url)
     if blocked:
         return json.dumps({"error": blocked})

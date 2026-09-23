@@ -41,7 +41,13 @@ CREATE TABLE IF NOT EXISTS authority_grants (
   note           TEXT,
   issued_at      TEXT NOT NULL,
   expires_at     TEXT NOT NULL,
-  revoked_at     TEXT
+  revoked_at     TEXT,
+  -- #628: the destination axis. NULL is NOT "any host" — it is "minted before
+  -- destinations existed, or minted for the tool as a whole", and the egress
+  -- guard refuses to read it as authorization for a host. A destination names
+  -- one host and its subdomains, so a grant for `api.example.com` never pays
+  -- for a fetch to `attacker.tld`.
+  destination    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_grants_scope_expiry
   ON authority_grants(scope, expires_at) WHERE revoked_at IS NULL;
@@ -56,6 +62,23 @@ CREATE TABLE IF NOT EXISTS grant_dispatch (
   reason    TEXT
 );
 """
+
+
+def apply_grant_ddl(conn: "sqlite3.Connection") -> None:
+    """Bring `authority_grants` to the current shape, creating or migrating it.
+
+    Both processes that touch the table go through here — the queue's own
+    `_init_db` and `app.harness.policy.GrantStore`, which imports this DDL
+    rather than restating it. `CREATE TABLE IF NOT EXISTS` alone is not a
+    migration: on a database that already has the table it is a no-op, so a
+    column added to the text above would exist on every fresh database and on
+    no live one. The e2e test in `tests/test_egress_policy.py` runs the real
+    chain against a pre-#628 database for exactly that reason.
+    """
+    conn.executescript(GRANT_DDL)
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(authority_grants)")}
+    if "destination" not in cols:
+        conn.execute("ALTER TABLE authority_grants ADD COLUMN destination TEXT")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS queue (
@@ -412,6 +435,10 @@ class WorkQueue:
                 conn.execute("ALTER TABLE queue ADD COLUMN triaged_at TEXT")
             if "triage_json" not in cols:
                 conn.execute("ALTER TABLE queue ADD COLUMN triage_json TEXT")
+            # `authority_grants` migrates too, here and not only in the grant
+            # store: this is the module that owns the table, and a pool that
+            # boots first must not hand the store a table a column behind.
+            apply_grant_ddl(conn)
             conn.commit()
         logger.info("workers.db initialized at %s", self.db_path)
 

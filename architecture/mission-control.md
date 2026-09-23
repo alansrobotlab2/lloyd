@@ -55,7 +55,8 @@ navigate succeeds, the brief comes back, nothing appears. Filed as #1274.
 
 One endpoint rather than one per panel, because the page is open all day, and
 `DashboardPage` polls it every `POLL_MS` (2 s). Sections and their sources are
-tabled in `CLAUDE.md` § "Mission Control dashboard" — eleven of them, and
+tabled in `CLAUDE.md` § "Mission Control dashboard" — twelve of them (the
+twelfth, `network`, is #628's egress destination inventory), and
 `tests/test_dashboard_doc_claims.py` asserts that table's section names
 against the `_gather(...)` call in `app/routers/dashboard.py`, so the count
 here and the table are one fact a run can re-measure. Rules that keep the

@@ -2171,6 +2171,21 @@ export interface AutomodState {
   rollbacks: { count: number; triggers: string[]; true_positives: number | null }
 }
 
+/** #628: where the four egress tools went, from `agent_mcp.egress.network_report`. */
+export interface NetworkState {
+  window_days: number
+  total: number
+  distinct_hosts: number
+  by_decision: { allow: number; deny: number; 'grant-required': number }
+  per_destination: { destination: string; host: string; count: number; denied: number;
+                     grant_required: number; scopes: number; last_at: string }[]
+  per_scope: { scope: string; total: number; denied: number; grant_required: number;
+               distinct_hosts: number }[]
+  database_present: boolean
+  policy: { telemetry: boolean; enforce: boolean; allow_entries: number;
+            permanent_allow_entries: number }
+}
+
 export interface DashboardSnapshot {
   host: HostMetrics | SectionError
   vllm: VllmEngine[] | SectionError
@@ -2183,6 +2198,8 @@ export interface DashboardSnapshot {
   backlog: BacklogState | SectionError
   // Absent on an older backend: read it through sectionOk, never `.error`.
   automod?: AutomodState | SectionError
+  // Absent on a backend older than #628: read it through sectionOk.
+  network?: NetworkState | SectionError
   usage: DashboardUsage | SectionError
   timestamp: number
 }

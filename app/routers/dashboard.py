@@ -850,6 +850,23 @@ def _automod() -> dict[str, Any]:
     return _cached("automod", _SCORECARD_TTL_S, _scan)
 
 
+def _network() -> dict[str, Any]:
+    """Where the fleet's sanctioned tools have been allowed to go (#628).
+
+    Reads the same `workers.db` the queue owns, through the queue's own
+    `configured_db_path` — the reason `egress_events` lives in that database and
+    not in a file of its own is that this reader and the aggregator's writer then
+    cannot disagree about which file is the record. Carries per-destination and
+    per-scope counts over a window plus the policy state that produced them: a
+    destination table without the flag's state is a list of outcomes with no
+    cause attached to any of them. Blocking on sqlite, so it is gathered through
+    `_to_thread` like every other section that opens a file.
+    """
+    from agent_mcp import egress
+
+    return egress.network_report()
+
+
 def _iso(value: Any) -> str:
     """Frontmatter dates arrive as str or datetime depending on the writer."""
     from datetime import date, datetime
@@ -906,6 +923,7 @@ async def _vllm() -> list[dict[str, Any]]:
 async def get_dashboard():
     """One snapshot: host, engines, primary agent, subagents, services."""
     sections = await asyncio.gather(
+        _gather("network", _to_thread(_network)),
         _gather("host", host_metrics.collect()),
         _gather("vllm", _vllm()),
         _gather("primary", _primary_state()),

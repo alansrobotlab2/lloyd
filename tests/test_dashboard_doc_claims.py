@@ -363,6 +363,8 @@ TABLE_ROW = re.compile(r"^\|\s*`([a-z_]+)`\s*\|\s*(.*?)\s*\|\s*$", re.M)
 DASHBOARD_SECTIONS = {
     "host", "vllm", "primary", "recent", "agents", "services",
     "workers", "autonomy", "backlog", "automod", "usage",
+    # #628: the egress destination inventory, twelfth of the twelve.
+    "network",
 }
 
 # The three sentences #1273 falsifies, as `architecture/mission-control.md`

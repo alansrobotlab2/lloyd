@@ -919,3 +919,116 @@ def test_every_chat_section_test_survives_as_a_live_def():
     ]
     assert missing == [], f"these chat-section tests are no longer defined: {missing}"
 
+
+# ── network: the egress destination inventory (#628) ────────────────────────
+#
+# Clause 2 of #628: the destination rows the four web tools write land in
+# `workers.db`, and `/api/dashboard` is where a person can actually read them.
+# The item's whole step 1 is "telemetry before enforcement", and telemetry no one
+# can see is the same as no telemetry — this section is the difference between a
+# table and an inventory.
+
+@pytest.fixture
+def egress_db(tmp_path, monkeypatch):
+    """A scratch destination table, and a scratch grant store beside it.
+
+    `agent_mcp.egress` defaults both to the live `~/lloyd/workers.db` and writes
+    on by default, so a test that did not redirect them would be seeding the real
+    inventory the human is meant to review with fixture hosts.
+    """
+    path = tmp_path / "workers.db"
+    monkeypatch.setenv("LLOYD_EGRESS_DB", str(path))
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(path))
+    from agent_mcp import egress
+    monkeypatch.setattr(egress, "config", lambda: {"telemetry": True, "enforce": False,
+                                                   "allow": [], "retention_days": 90})
+    return path
+
+
+def test_the_network_section_counts_destinations_and_scopes(egress_db):
+    """Both groupings the step-2 decision needs, from rows the real guard wrote.
+
+    The per-scope half is what decides between a per-host allow-list and a
+    per-source profile; the per-destination half is the tail (`192 of 240 hosts
+    seen <=2x`) that made that question askable. Neither is derivable from a
+    total, so a section that returned only a total would not be this section.
+    """
+    from agent_mcp import egress
+
+    egress.guard("http_fetch", "https://html.duckduckgo.com/html/?q=a")
+    egress.guard("http_search", host=egress.SEARCH_BACKEND_HOST)
+    egress.guard("http_fetch", "https://api.github.com/repos/x")
+
+    section = dash._network()
+
+    assert section["total"] == 3
+    assert section["distinct_hosts"] == 2
+    hosts = {row["host"]: row for row in section["per_destination"]}
+    assert hosts["html.duckduckgo.com"]["count"] == 2
+    assert hosts["api.github.com"]["count"] == 1
+    assert set(hosts["api.github.com"]) >= {"destination", "count", "denied",
+                                            "grant_required", "scopes", "last_at"}
+    assert hosts["api.github.com"]["destination"] == "https://api.github.com"
+    (scope_row,) = section["per_scope"]
+    assert scope_row["scope"] == "(interactive/unscoped)"
+    assert scope_row["total"] == 3 and scope_row["distinct_hosts"] == 2
+    assert section["by_decision"] == {"allow": 3, "deny": 0, "grant-required": 0}
+
+
+def test_the_network_section_reports_the_policy_that_produced_the_rows(egress_db,
+                                                                      monkeypatch):
+    """A destination table with no flag state attached is a list of outcomes
+    whose cause is unrecorded: `deny` under enforcement and `allow` with telemetry
+    only look identical in the rows themselves.
+
+    `permanent_allow_entries` is the count the item's acceptance asks to be
+    reported rather than hidden, so it is a field and not an absence of ones.
+    """
+    from agent_mcp import egress
+
+    monkey_state = {"telemetry": True, "enforce": True,
+                    "allow": [{"host": "duckduckgo.com", "reason": "search"},
+                              {"host": "docs.example.org", "reason": "reviewed",
+                               "expires_at": "2099-01-01T00:00:00+00:00"}],
+                    "retention_days": 90}
+    monkeypatch.setattr(egress, "config", lambda: dict(monkey_state))
+
+    policy = dash._network()["policy"]
+
+    assert policy == {"telemetry": True, "enforce": True, "allow_entries": 2,
+                      "permanent_allow_entries": 1}
+
+
+def test_the_network_section_names_its_zero_denominator(egress_db):
+    """`total: 0` with a database present means nobody left the box; with none it
+    means the writer never ran. Collapsing those two is how a broken telemetry
+    path reads as an idle fleet."""
+    section = dash._network()
+
+    assert section["total"] == 0
+    assert section["database_present"] is False
+    assert section["database"].endswith("workers.db")
+
+
+def test_the_network_section_is_one_of_the_gathered_sections(vault, queue, egress_db):
+    """The endpoint seam: a `network` key beside the eleven others a browser reads,
+    with its own error row when it fails.
+
+    Asserted through the real `_gather` list rather than by calling `_network()` —
+    a section computed and never assembled is exactly what
+    `test_every_gathered_section_is_a_key_in_the_payload` exists to catch, and the
+    frontend contract test (`DASHBOARD_SECTIONS`) counts this set.
+    """
+    import asyncio
+
+    from agent_mcp import egress
+    egress.guard("http_fetch", "https://example.org/x")
+
+    name, payload = asyncio.run(dash._gather("network", dash._to_thread(dash._network)))
+    assert name == "network" and payload["total"] == 1
+
+    async def _boom():
+        raise RuntimeError("egress db unreadable")
+
+    failed = asyncio.run(dash._gather("network", _boom()))[1]
+    assert failed == {"error": "RuntimeError: egress db unreadable"}, failed

@@ -67,18 +67,24 @@ logger = logging.getLogger("lloyd-harness-policy")
 GRANT_TABLE = "authority_grants"
 DISPATCH_TABLE = "grant_dispatch"
 
-def _grant_ddl() -> str:
-    """The grant tables' DDL, which lives in `workers/queue.py` — the module
-    that owns the DB — and is imported here rather than duplicated. Two
+
+def _apply_grant_ddl(conn: sqlite3.Connection) -> None:
+    """Create-or-migrate the grant tables, through `workers/queue.py` — the
+    module that owns the DB — rather than a copy of its DDL kept here. Two
     definitions of a table whose NOT-NULL `expires_at` is the whole safety
     property is how one of them stops being true.
 
-    Function-local on purpose: `workers/__init__` pulls in the pool, so a
-    module-level import would tie `app.harness` to the worker package at
+    The queue's migrator and not the DDL text: `CREATE TABLE IF NOT EXISTS` is
+    not a migration, and every live database has held `authority_grants` since
+    #534, so a store that ran the DDL text alone would keep the pre-#628 shape
+    forever while every freshly-created database had the new one.
+
+    Function-local import on purpose: `workers/__init__` pulls in the pool, so
+    a module-level import would tie `app.harness` to the worker package at
     import time and open a cycle whichever side loads first.
     """
-    from workers.queue import GRANT_DDL
-    return GRANT_DDL
+    from workers.queue import apply_grant_ddl
+    apply_grant_ddl(conn)
 
 
 # Default lifetime a deny suggests when it renders the grant shape, so the
@@ -414,6 +420,29 @@ def is_interactive_scope(scope: Any) -> bool:
     return text.split(":")[0] not in NON_INTERACTIVE_PREFIXES
 
 
+def grant_scope_for_source(source: str, payload: dict | None = None) -> str:
+    """The authority scope a queue row of this `source` runs under (#534).
+
+    An autonomy task gets its own scope rather than sharing `worker:scheduled-task`
+    with every other task, because that is the difference between a human
+    granting `email_send` to the nightly mail job and granting it to whatever
+    runs on that source next. Anything else is its source.
+
+    This is the one mapping. `workers.pool.grant_scope_for` delegates here, and
+    so does `agent_mcp.egress.scope_context` on the aggregator side — which
+    cannot call the pool's version because it has no `QueueItem`, only the
+    `item:<source>:<id>` effect scope that crosses the `_meta` seam. Two copies
+    of "whose authority is this turn borrowing" is how a grant minted against
+    one side stops being readable by the gate on the other.
+    """
+    payload = payload if isinstance(payload, dict) else {}
+    if str(source or "") == "scheduled-task":
+        task_id = payload.get("task_id")
+        if task_id is not None:
+            return f"autonomy-task:{task_id}"
+    return f"worker:{source}"
+
+
 def _is_worker_identity(text: str) -> bool:
     return str(text or "").strip().split(":")[0] in NON_INTERACTIVE_PREFIXES
 
@@ -436,30 +465,46 @@ class GrantStore:
         # opened must fail at check time (closed), not at construction time,
         # because construction happens once at import on the dispatch path.
         self.db_path = Path(str(db_path)).expanduser()
+        self._schema_applied = False
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), isolation_level=None, timeout=15.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=15000")
+        # Every path, reads included, once per store. Only the writers used to
+        # apply it, so `live()`/`candidates()` against a database the pool had
+        # not initialised raised "no such table" — which the egress guard reads
+        # as a closed door, denying every unattended fetch on that box — and
+        # against a pre-#628 table they would read rows with no `destination`.
+        if not self._schema_applied:
+            _apply_grant_ddl(conn)
+            self._schema_applied = True
         return conn
 
     def ensure_schema(self) -> None:
         with self._connect() as conn:
-            conn.executescript(_grant_ddl())
+            _apply_grant_ddl(conn)
 
     # ── mint ───────────────────────────────────────────────────────────────
 
     def mint(self, *, scope: str, tool_pattern: str,
              arg_predicate: str = "", quota: int | None = None,
              issued_by: str, expires_at: Any, note: str = "",
-             minted_by: str = "human", now: dt.datetime | None = None) -> dict:
+             minted_by: str = "human", now: dt.datetime | None = None,
+             destination: str | None = None) -> dict:
         """Write one grant. The only write path that creates authority.
 
         Validates rather than defaults: expiry is mandatory, an issuer is
         mandatory, a predicate outside the mini-language is refused, and a
         `minted_by` that identifies a worker scope is refused outright — a
         turn subject to this gate must not be able to write its way out of it.
+
+        `destination` (#628) is validated at mint and never defaulted: an empty
+        string would authorize every host through `destination_covers`, so a
+        caller that means "no destination" passes None and a caller that means
+        "this host" passes the host. A malformed one raises like any other bad
+        field rather than being stored and read loosely later.
         """
         scope = str(scope or "").strip()
         tool = normalize_tool_name(tool_pattern)
@@ -482,21 +527,25 @@ class GrantStore:
                 raise GrantError("quota must be >= 1 when set")
         predicate = validate_predicate(arg_predicate)
         expiry = _parse_expiry(expires_at)
+        dest = (normalize_destination(destination)
+                if destination is not None else None)
         issued = _iso(now or _now())
         with self._connect() as conn:
-            conn.executescript(_grant_ddl())
+            _apply_grant_ddl(conn)
             cur = conn.execute(
                 f"INSERT INTO {GRANT_TABLE} (scope, tool_pattern, arg_predicate,"
-                " quota, issued_by, minted_by, note, issued_at, expires_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?)",
+                " quota, issued_by, minted_by, note, issued_at, expires_at,"
+                " destination)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (scope, tool, predicate, quota, issued_by,
-                 str(minted_by or "human"), note or None, issued, _iso(expiry)),
+                 str(minted_by or "human"), note or None, issued, _iso(expiry),
+                 dest),
             )
             row = self._row(conn, cur.lastrowid)
         logger.info(
-            "[grants] minted id=%s scope=%s tool=%s predicate=%r quota=%s "
-            "expires=%s issued_by=%s", row["id"], scope, tool, predicate,
-            quota, row["expires_at"], issued_by)
+            "[grants] minted id=%s scope=%s tool=%s destination=%s predicate=%r "
+            "quota=%s expires=%s issued_by=%s", row["id"], scope, tool, dest,
+            predicate, quota, row["expires_at"], issued_by)
         return row
 
     # ── read ───────────────────────────────────────────────────────────────
@@ -563,7 +612,7 @@ class GrantStore:
                         grant_id: int | None = None, reason: str = "",
                         now: dt.datetime | None = None) -> None:
         with self._connect() as conn:
-            conn.executescript(_grant_ddl())
+            _apply_grant_ddl(conn)
             conn.execute(
                 f"INSERT INTO {DISPATCH_TABLE} (at, scope, tool, grant_id,"
                 " decision, reason) VALUES (?,?,?,?,?,?)",
@@ -621,19 +670,28 @@ class Decision:
 
 
 def grant_shape(*, scope: str, tool: str, tool_input: dict,
-                now: dt.datetime | None = None) -> str:
+                now: dt.datetime | None = None,
+                destination: str | None = None) -> str:
     """Render the exact grant that would authorize this call.
 
     This is the issuance UI. The denial that interrupts a live run is the
     thing this design replaces; the denial that names the row to mint turns
     it into a batched renewal the human can action in one line.
+
+    `destination` (#628) is rendered as the grant's own field rather than
+    folded into the predicate, because `validate_predicate` accepts only
+    `len(k)<=N` and `k==<integer>` — a hostname cannot be expressed there,
+    which is exactly why this axis needed a column. The rendered row is what a
+    human pastes, so it must be the row the gate actually reads.
     """
     predicate = _suggested_predicate(tool_input)
     expiry = _iso((_utc(now or _now())) + dt.timedelta(days=SUGGESTED_TTL_DAYS))
-    bits = [f"scope='{scope}'", f"tool='{tool}'", f"expires_at='{expiry}'",
-            "issued_by='alan'"]
+    bits = [f"scope='{scope}'", f"tool='{tool}'"]
+    if destination:
+        bits.append(f"destination='{destination}'")
     if predicate:
-        bits.insert(2, f"predicate='{predicate}'")
+        bits.append(f"predicate='{predicate}'")
+    bits += [f"expires_at='{expiry}'", "issued_by='alan'"]
     return f"{GRANT_MINT_TOOL}(" + ", ".join(bits) + ")"
 
 
@@ -648,10 +706,79 @@ def _suggested_predicate(tool_input: dict) -> str:
     return ""
 
 
+#: A registrable hostname, or an IP literal (checked separately in
+#: `normalize_destination`). Labels may not be empty and may not start or end with
+#: a hyphen, which is what stops `a..com` and `-evil.com` reading as hosts.
+_HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]*[a-z0-9])?"
+                          r"(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$")
+
+
+def normalize_destination(text: Any) -> str:
+    """Normalize one destination to a bare lowercase host, or raise `GrantError`.
+
+    Deliberately narrow, and the narrowness is the security property: a host, not
+    a URL, not a port, not a glob. The empty string and a wildcard are refused
+    because `destination_covers` matches on a dot-anchored suffix, so an entry
+    with no dot would authorize the world and `*` would be silently permissive.
+    Validating at mint time is the only place a bad destination can be caught
+    before it becomes authority.
+    """
+    from ipaddress import ip_address
+
+    if text is None or (isinstance(text, str) and not text.strip()):
+        raise GrantError("destination is required — an empty destination would "
+                         "authorize every host")
+    if not isinstance(text, str):
+        raise GrantError(f"destination must be a string, got {type(text).__name__}")
+    raw = text.strip().lower()
+    try:
+        # An IP literal first: an IPv6 address is all colons, and the URL/port
+        # filter below would otherwise refuse `::1` as "not a bare host".
+        return str(ip_address(raw))
+    except ValueError:
+        pass
+    if any(ch in raw for ch in ("*", "/", ":", " ")) or raw.startswith("."):
+        raise GrantError(f"destination {text!r} must be a bare host "
+                         "(example.com), not a URL, a port, or a wildcard")
+    if raw.rsplit(".", 1)[-1].isdigit():
+        # `256.1.1.1` is not an address, and no real hostname ends in an
+        # all-numeric label, so it must not fall through to the hostname grammar
+        # (which it satisfies) and be stored as a host nothing can resolve.
+        raise GrantError(f"destination {text!r} looks like an IPv4 address but "
+                         "is not a valid one")
+    if "." not in raw:
+        raise GrantError(f"destination {text!r} has no dot; a single label would "
+                         "authorize every domain under that suffix")
+    if not _HOSTNAME_RE.match(raw):
+        raise GrantError(f"destination {text!r} is not a valid hostname")
+    return raw
+
+
+def destination_covers(entry: Any, host: Any) -> bool:
+    """Does the grant's destination `entry` authorize the host `host`?
+
+    Exact, or a proper subdomain: `duckduckgo.com` covers `html.duckduckgo.com`
+    and must NOT cover `evil-duckduckgo.com`, which is why the suffix test is
+    anchored on a dot rather than `str.endswith`. An empty entry covers nothing:
+    a grant minted before #628, or minted for the tool as a whole, is not a
+    network licence. One definition lives here because `check_grants` must stay
+    pure and stdlib, and `agent_mcp.egress` imports it from here.
+    """
+    entry = str(entry or "").strip().lower()
+    host = str(host or "").strip().lower()
+    if not entry or not host:
+        return False
+    return host == entry or host.endswith("." + entry)
+
+
 def _explain_missing(scope: str, tool: str, rows: Iterable[dict],
-                     now: dt.datetime) -> str:
+                     now: dt.datetime, *,
+                     destination: str | None = None) -> str:
     at = _utc(now)
     for row in rows:
+        if destination is not None and not destination_covers(
+                row.get("destination"), destination):
+            continue
         if row.get("revoked_at"):
             return (f"grant #{row['id']} for '{tool}' from scope '{scope}' was "
                     f"revoked at {row['revoked_at']}")
@@ -667,16 +794,81 @@ def _explain_missing(scope: str, tool: str, rows: Iterable[dict],
     return ""
 
 
+def _decide_destination(store: GrantStore, *, scope: str, tool: str,
+                        live: list[dict], destination: Any,
+                        at: dt.datetime, now: dt.datetime | None,
+                        record: bool) -> Decision:
+    """Answer a call that names a destination, on the destination axis alone.
+
+    Deliberately not folded into the `match` loop below, because the two
+    questions differ in kind. Tier-2 matching asks "does this scope hold a
+    licence for this tool, bounded by an argument predicate"; the destination
+    answer is "may this scope contact *this host*", and no predicate in
+    `validate_predicate`'s mini-language can say so (it accepts only
+    `len(k)<=N` and `k==<integer>` — `url==example.com` raises, which is the
+    fact that forced a column). Two consequences a reader should expect:
+
+    * a grant with **no** destination never qualifies here — it predates the
+      axis, and reading NULL as "any host" would make every pre-#628 grant a
+      network licence for the tool it names;
+    * a grant whose destination is a different host never qualifies — a grant
+      for `api.example.com` must not pay for a fetch to `attacker.tld`. That
+      non-transferability is the clause #628 exists to pin.
+
+    Quota works as it does for tier 2: a destination grant with `quota=20`
+    bounds how many calls it pays for, not just which host.
+    """
+    host = normalize_destination(destination)
+    for row in live:
+        if row["tool_pattern"] != tool:
+            continue
+        if not destination_covers(row.get("destination"), host):
+            continue
+        quota, consumed = row.get("quota"), row.get("consumed") or 0
+        if quota is not None and consumed >= quota:
+            continue
+        store.consume(row["id"])
+        if record:
+            store.record_dispatch(scope=scope, tool=tool, decision="allow",
+                                  grant_id=row["id"], now=at)
+        return Decision(True, row["id"], "")
+
+    why = _explain_missing(scope, tool,
+                           store.candidates(scope=scope, tool=tool, now=at), at,
+                           destination=host)
+    reason = (f"grant: {'no grant' if not why else why} — '{tool}' to "
+              f"'{host}' is a network egress to a destination scope '{scope}' "
+              f"has not been given.")
+    reason += " " + grant_shape(scope=scope, tool=tool, tool_input={}, now=at,
+                                destination=host)
+    if record:
+        store.record_dispatch(scope=scope, tool=tool, decision="deny",
+                              reason=reason, now=at)
+    logger.warning("[grants] denied egress tool=%s scope=%s host=%s", tool,
+                   scope, host)
+    return Decision(False, None, reason)
+
+
 def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
                  tool_input: dict | None = None,
                  now: dt.datetime | None = None,
-                 record: bool = True) -> Decision:
+                 record: bool = True,
+                 destination: str | None = None) -> Decision:
     """May this call proceed? The only question the dispatch hook asks.
 
     Tier 1 returns before the store is opened — that is what makes a dead
     store a denial for the tools that matter and a non-event for the rest.
     An allowed call consumes one unit of quota, so a grant bounds volume as
     well as reach.
+
+    `destination` (#628) is the host a network call is about to contact. It is
+    the one input that defeats the tier-1 early return, and deliberately so:
+    the egress tools are tier 1 by the ladder's own definition (reading a page
+    is not hard to reverse), so if the ladder short-circuited them the
+    destination axis could never refuse an exfiltration. Pass a destination and
+    only a destination-scoped grant covering that host can pay for the call;
+    omit it and a destination-scoped grant cannot pay for anything (see
+    `_decide_destination` and the `match` loop).
     """
     at = _utc(now or _now())
     tool = normalize_tool_name(tool_name)
@@ -694,7 +886,7 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
                                       tool_input={}, now=at))
 
     tier = effective_tier(tool, args)
-    if tier == 1:
+    if tier == 1 and destination is None:
         return Decision(True, None, "")
 
     if is_interactive_scope(scope):
@@ -708,6 +900,16 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
     except Exception as exc:
         raise GrantError(f"grant store unreadable ({exc.__class__.__name__}: {exc})")
 
+    if destination is not None:
+        # #628: the destination axis, consulted even for a tier-1 tool. The
+        # egress tools are tier 1 — reading a page the operator named is not
+        # hard to reverse, which is exactly why the ladder cannot be what stops
+        # an exfiltration POST — so a call that names a destination is answered
+        # by the destination rows and nothing else.
+        return _decide_destination(store, scope=scope, tool=tool, live=live,
+                                   destination=destination, at=at, now=now,
+                                   record=record)
+
     match = None
     for row in live:
         if row["tool_pattern"] != tool:
@@ -716,6 +918,11 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
         if quota is not None and consumed >= quota:
             continue
         if not predicate_matches(row.get("arg_predicate") or "", args):
+            continue
+        # A grant minted *for a destination* is not a licence for every other
+        # tier-2 call that tool can make: `email_send` to api.example.com does
+        # not authorize a vault write under the same tool pattern.
+        if str(row.get("destination") or "").strip():
             continue
         match = row
         break
@@ -727,7 +934,9 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
                                   grant_id=match["id"], now=at)
         return Decision(True, match["id"], "")
 
-    why = _explain_missing(scope, tool, store.candidates(scope=scope, tool=tool, now=at), at)
+    why = _explain_missing(scope, tool,
+                           store.candidates(scope=scope, tool=tool, now=at), at,
+                           destination=destination)
     reason = (f"grant: {'no grant' if not why else why} — '{tool}' is a "
               f"tier-{tier} (hard-to-reverse) action and scope '{scope}' is "
               f"unattended.")
@@ -742,7 +951,8 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
                    f"when that task runs. To authorise it, a human either adds a "
                    f"`grants:` block to the calling task's frontmatter "
                    f"(scope `autonomy-task:*` only) or runs the line below.")
-    reason += (" " + grant_shape(scope=scope, tool=tool, tool_input=args, now=at))
+    reason += (" " + grant_shape(scope=scope, tool=tool, tool_input=args, now=at,
+                                 destination=destination))
     if record:
         store.record_dispatch(scope=scope, tool=tool, decision="deny",
                               reason=reason, now=at)

@@ -67,6 +67,14 @@ def _default_state_dirs_to_scratch() -> None:
     as the manifest lines above, and worse, because the note is the surface a
     human reads to decide whether the fleet is healthy. Tests that assert on the
     alert point it at their own `tmp_path`.
+    `LLOYD_EGRESS_DB` joined on 2026-09-21 with #628, and it is the sharpest case
+    in this docstring: `agent_mcp/egress.py` records every destination the four
+    web tools name, defaulting to the live `~/lloyd/workers.db`, and telemetry is
+    ON by default — so a suite that fetches `example.com` in a fixture appends
+    rows to the same table the item's own step 2 is derived from. The allow-list
+    a human seeds is read off that table; fixture hosts in it are not noise, they
+    are a forged inventory. Tests that assert on destinations point the variable
+    at their own `tmp_path`, as `tests/test_egress_telemetry.py` does.
     """
     scratch: Path | None = None
     for var, sub in (("LLOYD_AUTOMOD_STATE", "automod"), ("LLOYD_GUARDIAN_STATE", "guardian"),
@@ -79,6 +87,13 @@ def _default_state_dirs_to_scratch() -> None:
             atexit.register(shutil.rmtree, scratch, ignore_errors=True)
         (scratch / sub).mkdir(parents=True, exist_ok=True)
         os.environ[var] = str(scratch / sub)
+    if not os.environ.get("LLOYD_EGRESS_DB"):
+        # A file, not a directory: the tuple above creates directories, and this
+        # one is the sqlite path `agent_mcp.egress.db_path()` reads.
+        if scratch is None:
+            scratch = Path(tempfile.mkdtemp(prefix="lloyd-test-state-"))
+            atexit.register(shutil.rmtree, scratch, ignore_errors=True)
+        os.environ["LLOYD_EGRESS_DB"] = str(scratch / "egress-events.db")
 
 
 _default_state_dirs_to_scratch()

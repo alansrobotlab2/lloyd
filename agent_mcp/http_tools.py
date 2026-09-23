@@ -110,6 +110,15 @@ class _TextExtractor(HTMLParser):
 
 def _http_search(query: str, count: int = 5) -> str:
     count_ = min(max(count, 1), 10)
+    # #628: this tool takes no url argument, so the destination has to be NAMED
+    # rather than parsed — the DuckDuckGo text backend `ddgs` posts to. Recording
+    # it is the point: without a row here, "which hosts does the fleet touch"
+    # cannot be answered, and step 2 of this item is a decision that needs the
+    # answer. Enforcement denies the whole call before `DDGS()` is constructed.
+    from agent_mcp import egress
+    verdict = egress.guard("http_search", host=egress.SEARCH_BACKEND_HOST)
+    if not verdict.allowed:
+        return json.dumps({"error": verdict.reason})
     try:
         raw = list(DDGS().text(query, max_results=count_))
     except Exception as exc:
@@ -391,6 +400,18 @@ def _http_fetch(url: str, extract_mode: str = "markdown", max_chars: int = 50000
         return json.dumps({"error": f"Invalid URL: {url}"})
     if parsed.scheme not in ("http", "https"):
         return json.dumps({"error": f"Only http/https URLs supported"})
+    # #628: the destination decision, before a client exists. With
+    # `harness.egress_policy.enforce` off this only records; with it on, an
+    # unknown destination returns here and no `make_sync_http_client` call has
+    # been reached, so a denial is a refusal rather than a fetch that happened to
+    # fail. It sits above the legacy private-host check, whose `_is_private_host`
+    # call the guard's floor reuses — the floor is a superset of that check (it
+    # also catches `http://::1/`, whose bare IPv6 literal `urlparse().hostname`
+    # returns None for) and is never reopened by an allow-list entry.
+    from agent_mcp import egress
+    verdict = egress.guard("http_fetch", url)
+    if not verdict.allowed:
+        return json.dumps({"error": verdict.reason})
     hostname = parsed.hostname or ""
     if _is_private_host(hostname):
         return json.dumps({"error": f'Blocked — private/internal hostname "{hostname}"'})
@@ -491,6 +512,17 @@ def _http_request(method: str, url: str, headers: dict | None = None, body: str 
         return json.dumps({"error": f"Only http/https supported"})
     hostname = parsed.hostname or ""
     loopback = _is_loopback_host(hostname)
+    # #628: guarded like the other three lanes, but with this tool's own
+    # loopback allowance handed in — `loopback_ok=loopback`, so a request to
+    # 127.0.0.1 clears the floor here and is denied by it in `http_fetch`. The
+    # allowance is how the box drives its own services over the MCP surface; the
+    # test that pins it is `test_http_request_loopback_allowance_is_unchanged`.
+    # A non-loopback private address still denies, and the legacy check below it
+    # is left in place untouched.
+    from agent_mcp import egress
+    verdict = egress.guard("http_request", url, loopback_ok=loopback)
+    if not verdict.allowed:
+        return json.dumps({"error": verdict.reason})
     if _is_private_host(hostname) and not loopback:
         return json.dumps({"error": f'Blocked — private/internal hostname "{hostname}"'})
     # TLS verification is on for everything except the machine's own loopback,
