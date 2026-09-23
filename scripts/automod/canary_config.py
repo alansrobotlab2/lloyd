@@ -85,20 +85,34 @@ def materialize_home(round_dir: Path, worktree: Path,
                      live_root: Path | None = None) -> Path:
     """Build the scratch HOME the canary runs under. Returns its path.
 
-    The worktree must already exist at `<round>/home/lloyd` — `app/paths.py`
-    calls `.resolve()`, so a symlink there would resolve back to the live tree
-    and defeat the entire isolation model.
+    `<round>/canary-home`, NOT `<round>/home`. Since 2026-09-22 the test rungs
+    run under `<round>/home` as a symlink farm over the real home
+    (`worktree.ensure_round_home`), where `obsidian` IS the live vault — and this
+    function, building its scratch vault there, made its directories inside the
+    live vault and died copying SOUL.md onto itself (`SameFileError`, every
+    round's canary_boot from 01:56Z). Only that error kept a canary from booting
+    against the real vault. The two need different `obsidian`s, so they get
+    different homes.
+
+    `lloyd` is a symlink to the worktree. That is safe where a link to the LIVE
+    tree would not be: `app.paths.LLOYD_HOME` comes from `__file__`, and
+    resolving this link lands on the worktree the canary already runs from.
     """
     root = live_root or LIVE_ROOT
-    home = round_dir / "home"
+    home = round_dir / "canary-home"
     home.mkdir(parents=True, exist_ok=True)
 
     expected = home / "lloyd"
+    if not expected.is_symlink() and not expected.exists():
+        expected.symlink_to(worktree.resolve())
     if worktree.resolve() != expected.resolve():
         raise RuntimeError(
-            f"worktree must be at {expected} for HOME isolation to hold, got {worktree}")
+            f"{expected} must resolve to the worktree {worktree} for HOME isolation to hold")
 
     vault = home / "obsidian"
+    # Never through a link: every write below assumes a scratch directory.
+    if vault.is_symlink():
+        raise RuntimeError(f"{vault} is a symlink; the canary's vault must be scratch")
     (vault / "lloyd").mkdir(parents=True, exist_ok=True)
     # Empty on purpose: this is what makes recover_stuck_tasks() a no-op.
     (vault / "autonomy").mkdir(parents=True, exist_ok=True)
@@ -140,7 +154,7 @@ def materialize_home(round_dir: Path, worktree: Path,
 def canary_env(round_dir: Path, worktree: Path, *, overlay: Path,
                python: Path, mcp_port: int = MCP_PORT) -> dict:
     """Environment for the canary processes."""
-    home = round_dir / "home"
+    home = round_dir / "canary-home"   # see materialize_home
     env = dict(os.environ)
     env.update({
         "HOME": str(home),
