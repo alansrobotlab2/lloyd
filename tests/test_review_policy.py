@@ -332,6 +332,172 @@ def test_the_default_roots_name_the_vault():
     assert any(str(r).endswith("obsidian") for r in RV.REVIEW_EVIDENCE_ROOTS)
 
 
+# ---------------------------------------------------------------------------
+# a citation naming a leading-dot file (#1362). The rail trimmed a cited path
+# with `cand.lstrip("./")`, and `str.lstrip` takes a CHARACTER SET, so
+# `'.gitignore'.lstrip('./')` is `'gitignore'` — a file on no disk. Any clause
+# about a dotfile was therefore ungradeable: round SM_20260922_065953 (item
+# #759, whose clause 1 is *about* `.gitignore:33`) was downgraded `met`→partial
+# with "grader wrote '.gitignore:33'", and SM_20260912_184007 (#472,
+# `.gitignore:103`, `.gitignore:25`) ten days before it.
+# ---------------------------------------------------------------------------
+
+def test_a_citation_naming_a_leading_dot_file_resolves(tmp_path):
+    """The file is in the tree and the citation names it; the rail returned ""
+    anyway, and the caller reads "" as "the grader cited nothing"."""
+    (tmp_path / ".gitignore").write_text("*.db\n*.json\n")
+    (tmp_path / ".config").mkdir()
+    (tmp_path / ".config" / "settings.json").write_text("{}")
+    n = RV.normalize_evidence_path
+    assert n(".gitignore:33", tmp_path, roots=()) == ".gitignore"
+    assert n(".gitignore", tmp_path, roots=()) == ".gitignore"
+    assert n("./.gitignore:33", tmp_path, roots=()) == ".gitignore"
+    # A dotfile as a directory name, and one as a file inside it.
+    assert n(".config/settings.json:1", tmp_path, roots=()) == ".config/settings.json"
+
+
+def test_a_dotfile_clause_is_graded_met_and_not_downgraded(tmp_path, monkeypatch):
+    """The downgrade, end to end through the parser that the gate's review rung
+    actually calls: the grader wrote `met` and pointed at a real dotfile, and
+    the rail overrode it. The control beside it is the half that must stay —
+    a dotfile that is NOT in the tree is still no evidence. `parse_review`
+    always consults `REVIEW_EVIDENCE_ROOTS`, and the real vault has a
+    `.gitignore` of its own, so the roots are pinned empty here to keep both
+    readings about the worktree."""
+    monkeypatch.setattr(RV, "REVIEW_EVIDENCE_ROOTS", ())
+    (tmp_path / ".gitignore").write_text("*.db\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_review_policy.py").write_text("x")
+    obj = {"premise": "sound", "summary": "ok", "test_honesty": [],
+           "seams_unverified": [],
+           "clauses": [{"clause": 1, "verdict": "met",
+                        "evidence_path": ".gitignore:33", "evidence_line": 33,
+                        "test_node_id": "tests/test_review_policy.py::test_a",
+                        "how_verified": "ran", "note": "the rule fires"}]}
+    parsed = RV.parse_review(obj, worktree=tmp_path,
+                             changed_tests=["tests/test_review_policy.py"],
+                             n_clauses=1, tests_passed=True,
+                             changed_paths=[".gitignore",
+                                            "tests/test_review_policy.py"])
+    row = parsed["clauses"][0]
+    assert row["verdict"] == "met", row.get("downgraded")
+    assert row["evidence_path"] == ".gitignore"
+    assert not row.get("downgraded")
+
+    (tmp_path / ".gitignore").unlink()
+    gone = RV.parse_review(obj, worktree=tmp_path,
+                           changed_tests=["tests/test_review_policy.py"],
+                           n_clauses=1, tests_passed=True,
+                           changed_paths=["tests/test_review_policy.py"])
+    row = gone["clauses"][0]
+    assert row["verdict"] == "partial"
+    assert any(w.startswith("evidence_path missing or not on disk")
+               and "'.gitignore:33'" in w for w in row["downgraded"]), row["downgraded"]
+
+
+def test_the_vault_root_fallback_resolves_a_dotfile_too(tmp_path):
+    """Second site, same character set: the fallback that accepts a
+    vault-relative citation stripped with its own `lstrip("./")`, so
+    `.hidden-note.md:3` vanished while `plain.md` in the SAME root resolved."""
+    (tmp_path / "wt").mkdir()
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "plain.md").write_text("p")
+    (vault / ".hidden-note.md").write_text("h")
+    n = RV.normalize_evidence_path
+    assert n(".hidden-note.md:3", tmp_path / "wt", roots=(vault,)) \
+        == str(vault / ".hidden-note.md")
+    assert n("plain.md", tmp_path / "wt", roots=(vault,)) == str(vault / "plain.md")
+    assert n(".absent-note.md", tmp_path / "wt", roots=(vault,)) == ""
+
+
+def test_evidence_of_absence_accepts_a_changed_dotfile():
+    """A diff that deletes a dotfile cannot cite it as a file on disk, so the
+    waiver for changed-and-gone files is the only honest evidence — and it
+    never fired, because `first` had its dots eaten before the changed-path
+    lookup: `evidence_of_absence('.gitignore:33', ['.gitignore', …])` was
+    False with `.gitignore` sitting in `changed_paths`."""
+    assert RV.evidence_of_absence(".gitignore:33",
+                                 [".gitignore", "tests/test_x.py"]) is True
+    assert RV.evidence_of_absence("./.gitignore:33", [".gitignore"]) is True
+    # Unchanged readings, both directions.
+    assert RV.evidence_of_absence("tests/test_x.py", ["tests/test_x.py"]) is True
+    assert RV.evidence_of_absence("tests/test_x.py", ["app/x.py"]) is False
+    assert RV.evidence_of_absence("old/note.md (absent)", []) is True
+    assert RV.evidence_of_absence("", [".gitignore"]) is False
+
+
+def test_the_prefix_trim_is_a_prefix_and_not_a_character_set(tmp_path):
+    """The no-widening half. Every spelling that resolved under `lstrip("./")`
+    resolves identically, and a citation to a dotfile that is not there is
+    still nothing — the fix removes the bug, not the rail. The path-level
+    assertions are therefore true at base as well, by design: the clause they
+    pin is "unchanged". The helper's own contract is asserted beside them
+    because it is the one claim here a wrong fix would break."""
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "x.py").write_text("x")
+    n = RV.normalize_evidence_path
+    assert n("./app/x.py:3", tmp_path, roots=()) == "app/x.py"
+    assert n("././app/x.py", tmp_path, roots=()) == "app/x.py"
+    assert n("app/x.py", tmp_path, roots=()) == "app/x.py"
+    # A `..`-prefixed citation keeps the resolution lstrip gave it: the tail
+    # inside the tree, not a file in some sibling checkout.
+    assert n("../app/x.py", tmp_path, roots=()) == "app/x.py"
+    # Dot-only tokens name a directory, not evidence.
+    assert n(".", tmp_path, roots=()) == ""
+    assert n("..", tmp_path, roots=()) == ""
+    # The helper's own contract. A leading-dot name keeps its dots; `./` and
+    # `../` come off as prefixes, repeated prefixes included; a dot-only token
+    # is "", the value every caller reads as "no evidence". `lstrip("./")`
+    # mapped `..gitignore` to `gitignore` — a different file — and no caller
+    # depends on that mapping, so the prefix reading is what ships.
+    t = RV._trim_citation_prefix
+    assert t("./app/.gitignore") == "app/.gitignore"
+    assert t("..gitignore") == "..gitignore"
+    assert t("././x") == "x"
+    assert t("../x") == "x"
+    assert t("./") == ""
+    assert t(".") == ""
+    assert t("..") == ""
+    assert t("") == ""
+    # An absent dotfile is still an unresolvable citation, in either root.
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    assert n(".gitignore", tmp_path, roots=(vault,)) == ""
+    assert n(".env:7", tmp_path, roots=(vault,)) == ""
+    assert n(".gone.md", tmp_path / "wt", roots=(vault,)) == ""
+
+
+def test_the_node_and_honesty_rails_read_a_leading_dot_the_same_way(tmp_path):
+    """The last two sites of the same character set. Neither gates a dotfile's
+    existence — one asks whether a cited test is under `tests/`, the other
+    whether a dishonesty remark is about a test — but both ate leading dots
+    before asking, which is how a citation to `.tests/test_x.py` (no such
+    directory) was judged against the real `tests/test_x.py`."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text("x")
+    holds, reason = RV._node_rail("./tests/test_x.py::test_a", worktree=tmp_path,
+                                  changed=set(), how="ran", tests_passed=True)
+    assert holds, reason
+    assert RV._node_rail("./.tests/test_x.py::test_a", worktree=tmp_path,
+                         changed=set(), how="ran",
+                         tests_passed=True)[0] is False
+    parsed = RV.parse_review(
+        {"premise": "sound", "summary": "ok", "clauses": [], "seams_unverified": [],
+         "test_honesty": [
+             {"file": "./tests/test_x.py", "line": 3, "severity": "blocking",
+              "problem": "asserts a constant"},
+             {"file": ".tests/test_x.py", "line": 3, "severity": "blocking",
+              "problem": "names a directory that is not there"},
+             {"file": ".gitignore", "line": 33, "severity": "blocking",
+              "problem": "not a test"}]},
+        worktree=tmp_path, changed_tests=["tests/test_x.py"], n_clauses=1)
+    severities = {h["file"]: h["severity"] for h in parsed["test_honesty"]}
+    assert severities == {"./tests/test_x.py": "blocking",
+                          ".tests/test_x.py": "advisory",
+                          ".gitignore": "advisory"}
+
+
 def _prompt_text() -> str:
     return RV.build_prompt(
         contract={"clauses": ["c1"], "amendments": [], "human_clauses": [],

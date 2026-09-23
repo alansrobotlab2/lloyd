@@ -1014,6 +1014,29 @@ def _path_candidates(token: str) -> list[str]:
     return candidates
 
 
+def _trim_citation_prefix(text: str) -> str:
+    """A cited path with its leading `./` (or `../`) trimmed — a prefix, not a
+    character set.
+
+    All five evidence rails used `str.lstrip("./")` for this, and `lstrip`
+    takes a SET of characters: `'.gitignore'.lstrip('./')` is `'gitignore'`, a
+    file on no disk. So any citation naming a leading-dot file resolved to
+    nothing and the caller downgraded a `met` for want of an `evidence_path` —
+    which is how item #759's clause 1, a clause ABOUT `.gitignore:33`, could
+    not be graded `met` by any round (#1362). Trimming the prefix as a prefix
+    keeps every other spelling exactly what lstrip produced, `././x` and
+    `../x` included, both of which it also mapped to `x`.
+
+    A dot-only token (`.` or `..`) still yields "" the way lstrip did: it names
+    a directory, and "" is what every caller reads as "no evidence".
+    """
+    while text.startswith("./"):
+        text = text[2:]
+    while text.startswith("../"):
+        text = text[3:]
+    return "" if text and set(text) <= {".", "/"} else text
+
+
 def _resolve_in_worktree(cand: str, worktree: Path) -> str:
     """One candidate path, as a worktree-relative path that exists, or ""."""
     cand = cand.strip("`'\"()[],;")
@@ -1032,7 +1055,7 @@ def _resolve_in_worktree(cand: str, worktree: Path) -> str:
             if (worktree / tail).exists():
                 return str(tail)
         return ""
-    rel = cand.lstrip("./")
+    rel = _trim_citation_prefix(cand)
     if not rel:
         return ""
     if (worktree / rel).exists():
@@ -1083,7 +1106,7 @@ def normalize_evidence_path(raw: str, worktree: Path,
     for root in (REVIEW_EVIDENCE_ROOTS if roots is None else roots):
         for token in tokens:
             for cand in _path_candidates(token):
-                rel = cand.strip("`\'\"()[],;").lstrip("./")
+                rel = _trim_citation_prefix(cand.strip("`\'\"()[],;"))
                 if rel and (Path(root) / rel).exists():
                     return str(Path(root) / rel)
     return ""
@@ -1107,7 +1130,7 @@ def evidence_of_absence(raw_path: str, changed_paths=()) -> bool:
     if not text:
         return False
     first = re.split(r"[\s+;]", text, 1)[0].strip().strip("`'\"()[],;")
-    first = re.sub(r":[\d,\-]+$", "", first).split("::", 1)[0].lstrip("./")
+    first = _trim_citation_prefix(re.sub(r":[\d,\-]+$", "", first).split("::", 1)[0])
     if first and first in set(changed_paths or ()):
         return True
     head = text.split(";", 1)[0].lower()
@@ -1139,7 +1162,7 @@ def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
     file_part = node.split("::", 1)[0].strip()
     if file_part in changed:
         return True, ""
-    node_path = (file_part.split() or [""])[0].lstrip("./")
+    node_path = _trim_citation_prefix((file_part.split() or [""])[0])
     if not (node_path == "tests" or node_path.startswith("tests/")):
         return False, ""
     if not (worktree / node_path).exists():
@@ -1256,7 +1279,7 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                 sev = "blocking"
             # The list is about TESTS in the diff. A remark filed against a
             # vault note or a script is advice, whatever the grader called it.
-            if not file.lstrip("./").startswith("tests/"):
+            if not _trim_citation_prefix(file).startswith("tests/"):
                 sev = "advisory"
             honesty.append({"file": file,
                             "line": int(raw.get("line") or 0) if str(raw.get("line") or "0").isdigit() else 0,
