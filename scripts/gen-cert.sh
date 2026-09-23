@@ -21,6 +21,19 @@
 # tests/test_gen_cert_sans.py mints a throwaway CA + leaf into a temp tree with it,
 # so a test can never reach the live agent-services/cert.
 #
+# Trust: the "install on every device" above was advice nobody had automated. Every
+# path of this script that leaves a CA on disk now hands it to scripts/install-ca.sh,
+# which puts it in the invoking user's NSS store (~/.pki/nssdb, nickname "Lloyd CA").
+# That store is what lets Chromium load the frontend whenever vite serves this private
+# leaf — web/vite.config.ts prefers a Tailscale-issued cert for the MagicDNS name and
+# falls back to lloyd.crt when there is none, and agent_mcp/browser.py passes no
+# ignore_https_errors, so an unprovisioned store means
+# net::ERR_CERT_AUTHORITY_INVALID on that path (backlog #1241). --print-sans returns
+# before this step: inspecting what a mint would contain must never change a device's
+# trust. The machine-wide half — a real anchor under
+# /etc/ca-certificates/trust-source/anchors/ plus update-ca-trust — needs root and is
+# not done here.
+#
 # The tailnet is deliberately part of the server SAN set. lloyd-frontend is
 # reached over the tailnet (the "mTLS dropped 2026-06-14" comment in
 # web/vite.config.ts makes the tailnet the access boundary), so a leaf naming only
@@ -33,6 +46,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+INSTALL_CA="$SCRIPT_DIR/install-ca.sh"
 CERT_DIR="${LLOYD_CERT_DIR:-$REPO/agent-services/cert}"
 CA_CRT="$CERT_DIR/ca.crt"
 CA_KEY="$CERT_DIR/ca.key"
@@ -118,6 +133,11 @@ if [[ -f "$CA_CRT" && -f "$CA_KEY" && -f "$SRV_CRT" && -f "$SRV_KEY" && $FORCE -
   echo "[gen-cert] CA + server cert already exist — skipping (pass --force to regenerate)"
   echo "          CA fingerprint:"
   openssl x509 -in "$CA_CRT" -noout -fingerprint -sha256
+  # Provision trust here as well as after the mint, and before this exit: this is the
+  # path every box that was ever set up takes, so a step appended at the bottom of the
+  # file would never run on exactly the machines that still need it (#1241 — a new
+  # user, or a rebuilt store, on a host whose certs are already in place).
+  bash "$INSTALL_CA" "$CA_CRT"
   exit 0
 fi
 
@@ -195,6 +215,11 @@ echo "[gen-cert] wrote $SRV_KEY"
 echo
 echo "CA fingerprint:"
 openssl x509 -in "$CA_CRT" -noout -fingerprint -sha256
+echo
+# The mint path's share of the trust step (the skip branch above does its own). After
+# a --force re-mint this is also what retires the previous CA's entry, which would
+# otherwise sit in the store still trusted for SSL — see scripts/install-ca.sh.
+bash "$INSTALL_CA" "$CA_CRT"
 echo
 echo "Next: mint at least one client cert before enabling mTLS in Vite, e.g."
 echo "  bash scripts/mint-client-cert.sh host-browser"

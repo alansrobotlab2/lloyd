@@ -82,6 +82,81 @@ def test_launch_no_longer_carries_a_hardcoded_headless_literal():
     assert "headless=False" not in launch_args
 
 
+# ── Certificate verification stays on (backlog #1241) ──────────────────────────
+#
+# #1241's fix is provisioning the Lloyd CA into ~/.pki/nssdb (scripts/install-ca.sh,
+# pinned by tests/test_gen_cert_ca_install.py). What it must NOT do is make the
+# symptom go away by switching verification off: `ignore_https_errors=True` on the
+# context would silence the failure for the MC frontend AND for every public-web
+# navigation, which is exactly why #1089 refused that shape. These two tests are what
+# keeps that refusal true after someone fixes the trust problem.
+
+def test_browser_source_never_disables_https_verification():
+    src = (ROOT / "agent_mcp" / "browser.py").read_text(encoding="utf-8")
+    assert "ignore_https_errors" not in src, \
+        "trusting the Lloyd CA is scripts/install-ca.sh's job, not a flag's"
+
+
+async def test_launch_and_context_args_are_unchanged_so_verification_stays_on(monkeypatch):
+    """Across the playwright seam: what `_launch_browser_locked` actually hands
+    `chromium.launch` / `new_context`, not what the source says it does. The four
+    sandbox/automation flags and the viewport/UA context are the whole call — no
+    trust override appears in either, so an untrusted certificate still ends the
+    navigation in net::ERR_CERT_AUTHORITY_INVALID (the negative arm of
+    tests/test_gen_cert_ca_install.py proves Chromium really does say that here)."""
+    captured: dict = {}
+
+    class _FakeContext:
+        def __init__(self):
+            self.pages = []
+
+        async def route(self, pattern, handler):
+            captured["route"] = (pattern, handler)
+
+    class _FakeBrowser:
+        def is_connected(self):
+            return True
+
+        async def new_context(self, **kwargs):
+            captured["context_kwargs"] = kwargs
+            return _FakeContext()
+
+    class _FakeChromium:
+        async def launch(self, **kwargs):
+            captured["launch_kwargs"] = kwargs
+            return _FakeBrowser()
+
+    class _FakeDriver:
+        chromium = _FakeChromium()
+
+        async def start(self):
+            return self
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr("playwright.async_api.async_playwright", lambda: _FakeDriver())
+    # Reset the module's cached instance so the launch path runs for real, and so
+    # these fakes are what gets put back afterwards.
+    monkeypatch.setattr(browser_module, "_pw", None, raising=False)
+    monkeypatch.setattr(browser_module, "_browser", None, raising=False)
+    monkeypatch.setattr(browser_module, "_context", None, raising=False)
+
+    context = await browser_module._launch_browser_locked()
+
+    launch = captured["launch_kwargs"]
+    assert launch["executable_path"] == "/usr/bin/chromium"
+    assert launch["args"] == [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-blink-features=AutomationControlled",
+    ], "chromium.launch args changed; #1241 requires them unchanged"
+    assert "ignore_https_errors" not in launch, launch
+    assert "ignore_https_errors" not in captured["context_kwargs"], captured["context_kwargs"]
+    assert context is not None and captured["route"][0] == "**/*"
+
+
 # ── State frame ───────────────────────────────────────────────────────────────
 
 class _FakePage:
