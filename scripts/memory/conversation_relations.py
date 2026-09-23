@@ -924,6 +924,65 @@ def cmd_incremental():
     print(f"  Total proposals: {len(data['proposals'])}")
 
 
+def prune_unclassifiable(candidates):
+    """Terminalise every proposal Stage 2 can never classify, before the batch is cut.
+
+    Two causes, kept as two distinct statuses because they have different remedies
+    (#1119):
+
+      * ``skipped-no-session`` — none of the proposal's evidence session files exist
+        on disk. Old UUID-named sessions that predate timestamp naming, or sessions
+        a retention sweep removed.
+      * ``skipped-no-context`` — a session file DOES exist, but no user/assistant
+        prose survives in the window around the co-access. This is the unattended
+        shape: the pair was hit inside ``tool_calls``, so every message in the
+        window is either ``role: "tool"`` (which ``extract_conversation_context``
+        drops as tool-result noise) or a zero-length assistant text block. The
+        matcher's ``None`` is the correct verdict and was previously thrown away, so
+        the proposal stayed ``pending``, re-entered the next run's head-of-list
+        ``[:MAX_CLASSIFY_PER_RUN]`` slice and burned a slot on the same skip forever.
+
+    Both checks are deterministic — ``find_session_file`` and
+    ``extract_conversation_context`` make no LLM call — so this pass can afford to
+    cover the whole eligible pool rather than one batch, which is the only reason
+    marking it terminal is cheap. A proposal that DOES yield a window comes back
+    paired with that window, so the classify loop never re-parses the session file.
+
+    Statuses are written in place; the caller saves.
+    """
+    with_context = []
+    no_session = 0
+    no_context = 0
+
+    for p in candidates:
+        session_files = [f for f in (
+            find_session_file(s)
+            for s in p.get("evidence", {}).get("sessions", [])[:3]
+        ) if f]
+
+        if not session_files:
+            p["status"] = "skipped-no-session"
+            no_session += 1
+            continue
+
+        context = None
+        for session_file in session_files:
+            context = extract_conversation_context(
+                session_file, p["source"], p["target"]
+            )
+            if context:
+                break
+
+        if not context:
+            p["status"] = "skipped-no-context"
+            no_context += 1
+            continue
+
+        with_context.append((p, context))
+
+    return with_context, no_session, no_context
+
+
 def cmd_classify():
     """Stage 2: LLM-classify unclassified high-weight proposals."""
     data = load_proposals()
@@ -938,26 +997,26 @@ def cmd_classify():
         print("Stage 2: No candidates above LLM threshold. Nothing to classify.")
         return
 
-    # Prune proposals whose source sessions no longer exist (old UUID-named sessions
-    # that predate the current timestamp naming). They can never be classified and
-    # would otherwise clog the front of every bounded batch with skips. Mark them so
-    # they leave the pending pool. Spend each run's batch only on resolvable proposals.
-    orphaned = 0
-    resolvable = []
-    for p in candidates:
-        if any(find_session_file(s) for s in p.get("evidence", {}).get("sessions", [])[:3]):
-            resolvable.append(p)
-        else:
-            p["status"] = "skipped-no-session"
-            orphaned += 1
-    if orphaned:
-        print(f"Stage 2: pruned {orphaned} proposals with no resolvable session "
-              f"(status=skipped-no-session)")
+    # Prune BEFORE the cap is taken (#1119). The old pass marked only proposals whose
+    # session files were gone — a condition that catches nothing on this box, where
+    # every evidence session still exists — and left the proposals whose session
+    # exists but holds no prose `pending`, so the head of the file-order slice was
+    # permanently stuck (measured 2026-09-22: 431 eligible, 40 of 40 batch slots were
+    # `no session context found` skips, `Classified: 0/40`). Both causes are terminal
+    # here, under two distinct statuses, and the batch is cut from what survives — so
+    # the run's MAX_CLASSIFY_PER_RUN slots go only on proposals that can answer.
+    candidates, no_session, no_context = prune_unclassifiable(candidates)
+    print(f"Stage 2: pruned {no_session} proposals with no resolvable session file "
+          f"(status=skipped-no-session) and {no_context} whose session file exists but "
+          f"holds no conversation window (status=skipped-no-context)")
+    if no_session or no_context:
+        # Save the terminal statuses before anything else can end the run, so a
+        # pruned proposal never re-enters a later batch even if this run dies here.
         save_proposals(data)
-    candidates = resolvable
 
     if not candidates:
-        print("Stage 2: No classifiable candidates with resolvable sessions.")
+        print("Stage 2: No classifiable candidates — every eligible proposal is "
+              "terminal (see the pruned counts above).")
         return
 
     total_eligible = len(candidates)
@@ -970,24 +1029,7 @@ def cmd_classify():
     print(f"Stage 2: Classifying {len(candidates)} proposals via {model} @ {endpoint}")
     classified = 0
 
-    for p in candidates:
-        sessions = p.get("evidence", {}).get("sessions", [])
-        context = None
-
-        # Try to find conversation context from session files
-        for session_key in sessions[:3]:
-            session_file = find_session_file(session_key)
-            if session_file:
-                context = extract_conversation_context(
-                    session_file, p["source"], p["target"]
-                )
-                if context:
-                    break
-
-        if not context:
-            print(f"  Skip ({p['source']}, {p['target']}): no session context found")
-            continue
-
+    for p, context in candidates:
         result = classify_relationship(p["source"], p["target"], context,
                                        endpoint=endpoint, model=model)
         if not result:

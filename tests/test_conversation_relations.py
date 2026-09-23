@@ -9,6 +9,7 @@ every day it had been blind to. Each test below names the #420 clause it pins.
 """
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -860,7 +861,14 @@ def test_stage2_skips_an_unverifiable_skill_pair_without_an_llm_call(cr, tmp_pat
     assert consulted == [("skills/arxiv/SKILL.md", "skills/discord/SKILL.md")], (
         "the pair never reached the matcher, so the skip proves nothing about it")
     assert calls["calls"] == [], "Stage 2 classified a pair it could not read"
-    assert json.loads(props.read_text())["proposals"][0]["status"] == "pending"
+    # #1119 changed this line, which used to read `== "pending"`. That assertion was
+    # pinning the defect the item names: a proposal the matcher cannot read stayed
+    # `pending`, and so re-entered every later run's bounded batch. Acceptance clause 1
+    # — "ends the run with `status: "skipped-no-context"` written to the proposals file,
+    # instead of staying `pending`" — says that behaviour is wrong, so updating it is
+    # part of the change. The two asserts above still carry this test's original
+    # subject, that the pair never reached the model, and are untouched.
+    assert json.loads(props.read_text())["proposals"][0]["status"] == "skipped-no-context"
 
 
 def test_stage2_classifies_a_skill_pair_whose_session_names_it_barely(cr, tmp_path,
@@ -980,3 +988,291 @@ def test_stage2_posts_the_rescued_window_over_a_real_socket(cr, tmp_path, monkey
     landed = json.loads(props.read_text())["proposals"][0]
     assert landed["classification_source"] == "llm"
     assert landed["type"] == "related-to"
+
+
+# ── #1119: a proposal with no prose is terminal, and terminal BEFORE the cap ──
+#
+# Stage 2 pruned only proposals whose evidence session file was GONE. On this box
+# that condition catches nothing — every evidence session still exists — while the
+# other way a proposal can be unclassifiable left it `pending`: the session exists,
+# the pair is hit inside a `tool_calls` array, and the ±2-message window around the
+# hit holds no non-empty user/assistant text, so `extract_conversation_context`
+# returns `None` (the correct verdict) and `cmd_classify` printed a skip and moved
+# on, writing no status. Measured live on 2026-09-22: 431 eligible, `Classified:
+# 0/40` with all 40 batch slots reporting `no session context found`, and
+# `--approve-strong` landing 0 edges. Each file-order run re-cut the same stuck
+# head, so the drain was not slow, it was stopped.
+#
+# Each test below names the #1119 clause it pins.
+
+
+def _read_call(doc: str, call_id: str) -> dict:
+    """The assistant message a `Read` of `doc` leaves in an unattended session.
+
+    The path appears ONLY inside `tool_calls[].function.arguments`, and `content`
+    is empty — which is precisely why the matcher finds a hit here (it serialises
+    the whole message) and then finds no prose to send. That a `None` from such a
+    session is the no-prose verdict and not needle-matching blindness is pinned
+    separately by `test_the_no_prose_fixture_is_hit_and_still_yields_no_window`;
+    a needle regression returns `None` exactly as the no-prose case does, so the
+    claim needs its own control and not this sentence.
+    """
+    return {"id": call_id, "role": "assistant", "content": [],
+            "tool_calls": [{"id": call_id, "call_id": call_id, "type": "function",
+                            "function": {"name": "Read",
+                                         "arguments": json.dumps({"file_path": doc})}}]}
+
+
+def _no_prose_session(dir_path: Path, source: str, target: str, key: str) -> Path:
+    """A session that hits both docs and yields no conversation window.
+
+    Shape copied from the item's measured case, session
+    `20260912_082637_autotriage_63c5.json`: tool-call turns whose text blocks are
+    empty, interleaved with `role: "tool"` results the matcher drops as tool-result
+    noise. The doc paths appear only in the tool-call arguments.
+    """
+    return _session_file(
+        dir_path,
+        _read_call(source, "call_a"),
+        _tool_says(f"contents of {source.rsplit('/', 1)[-1]}"),
+        _read_call(target, "call_b"),
+        _tool_says(f"contents of {target.rsplit('/', 1)[-1]}"),
+        key=key,
+    )
+
+
+def test_the_no_prose_fixture_is_hit_and_still_yields_no_window(cr, tmp_path):
+    """The control the rest of this section depends on: `None` from a prose-free
+    session is the no-prose verdict, not a needle that stopped matching.
+
+    A needle-matching regression returns `None` the same way a prose-free window
+    does, and the prune writes the same terminal status for both, so every assertion
+    below could stay green on a matcher that never found the pair. The two are told
+    apart here on one fixture: prose reaches the window only if a hit registered, so
+    adding one user and one assistant message to the SAME session shape must produce
+    a window — and on a blind matcher that assert is the one that fails.
+    """
+    bare = _no_prose_session(tmp_path, "knowledge/ctl-a.md", "knowledge/ctl-b.md",
+                             key="ctl_bare")
+    assert cr.extract_conversation_context(
+        bare, "knowledge/ctl-a.md", "knowledge/ctl-b.md") is None, (
+        "the fixture is no longer prose-free, so the skipped-no-context tests below "
+        "are not exercising the branch they name")
+
+    hit = _session_file(
+        tmp_path,
+        _asked("why are these two always opened together?"),
+        _read_call("knowledge/ctl-a.md", "call_a"),
+        _tool_says("contents of ctl-a.md"),
+        _read_call("knowledge/ctl-b.md", "call_b"),
+        _tool_says("contents of ctl-b.md"),
+        _answered("because they describe the same subsystem"),
+        key="ctl_prose")
+    window = cr.extract_conversation_context(hit, "knowledge/ctl-a.md",
+                                             "knowledge/ctl-b.md")
+    assert window and "same subsystem" in window, (
+        "the needle did not register the pair inside tool_calls, so every `None` the "
+        "#1119 tests assert would be matcher blindness, not a prose-free window")
+
+
+def _classified_by_cr(monkeypatch, cr) -> list:
+    """Record every `classify_relationship` call and answer it without the network.
+
+    Clause 3 asks for the classification count "recorded from the
+    `classify_relationship` call and not from printed output", so this is the
+    counter the tests assert on. `resolve_llm_target` is pinned too: it reads live
+    config and the `secondary_enabled` switch, which is not this item's subject.
+    """
+    attempts = []
+
+    def fake_classify(source, target, context, endpoint=None, model=None):
+        attempts.append({"source": source, "target": target, "context": context})
+        return {"type": "related-to", "reason": "read together", "confidence": 0.8}
+
+    monkeypatch.setattr(cr, "classify_relationship", fake_classify)
+    monkeypatch.setattr(cr, "resolve_llm_target",
+                        lambda: ("http://127.0.0.1:1/v1/chat/completions", "fixture-model"))
+    return attempts
+
+
+def _stage2_props(tmp_path, proposals):
+    """Write `proposals` to a fixture proposals file and return its path.
+
+    The caller points the module at it (`PROPOSALS_FILE`, and `LLOYD_SESSIONS` at the
+    same `tmp_path` holding the session files) so nothing here touches the live
+    proposals pool.
+    """
+    props = tmp_path / "proposals.json"
+    props.write_text(json.dumps({"watermark": {}, "stats": {},
+                                 "proposals": proposals}), encoding="utf-8")
+    return props
+
+
+def test_a_proposal_with_no_prose_ends_skipped_no_context(cr, tmp_path, monkeypatch):
+    """Clause 1: the session file EXISTS, the matcher returns None, and the run must
+    leave `status: "skipped-no-context"` in the proposals file instead of `pending`.
+
+    This also covers the save half, which the old code could lose: every proposal in
+    this fixture is pruned, so Stage 2 takes its early-return path and never reaches
+    the loop's `save_proposals`. A terminal status that is never written is not
+    terminal.
+    """
+    _no_prose_session(tmp_path, "knowledge/attended-a.md", "knowledge/attended-b.md",
+                      key="no_ctx_c1")
+    monkeypatch.setattr(cr, "LLOYD_SESSIONS", tmp_path)
+    props = _stage2_props(tmp_path, [
+        _needle_test_proposal("knowledge/attended-a.md", "knowledge/attended-b.md",
+                              "no_ctx_c1")])
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+    calls = _capturing_llm(monkeypatch, cr)
+
+    cr.cmd_classify()
+
+    saved = json.loads(props.read_text())["proposals"][0]
+    assert saved["status"] == "skipped-no-context", saved
+    assert saved["classification_source"] == "co-access", (
+        "terminalising a proposal is not the same as classifying it — the source "
+        "stays what proposed it")
+    assert calls["calls"] == [], "the prune spent an LLM call on a proposal it cannot read"
+
+
+def test_the_two_prune_causes_keep_two_distinct_statuses(cr, tmp_path, monkeypatch):
+    """Clause 2: a session file that is GONE and a session file that is prose-free are
+    different facts with different remedies, so they stay separable in the file.
+    `skipped-no-session` keeps meaning exactly what it meant before: no evidence file
+    on disk. The other one exists and was readable — it just holds no prose."""
+    _no_prose_session(tmp_path, "knowledge/ctx-a.md", "knowledge/ctx-b.md",
+                      key="no_ctx_c2")
+    monkeypatch.setattr(cr, "LLOYD_SESSIONS", tmp_path)
+    props = _stage2_props(tmp_path, [
+        _needle_test_proposal("knowledge/gone-a.md", "knowledge/gone-b.md",
+                              "session_never_written"),
+        _needle_test_proposal("knowledge/ctx-a.md", "knowledge/ctx-b.md", "no_ctx_c2"),
+    ])
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+    _classified_by_cr(monkeypatch, cr)
+
+    cr.cmd_classify()
+
+    by_pair = {p["source"]: p for p in json.loads(props.read_text())["proposals"]}
+    # Each cause pinned to its own value; the two literals differ, so pinning both
+    # also pins that the causes did not collapse into one status.
+    assert by_pair["knowledge/gone-a.md"]["status"] == "skipped-no-session", by_pair
+    assert by_pair["knowledge/ctx-a.md"]["status"] == "skipped-no-context", by_pair
+
+
+def test_the_prune_runs_before_the_batch_cap_is_cut(cr, tmp_path, monkeypatch):
+    """Clause 3: three no-context proposals sit at the HEAD of file order and the cap
+    is 2, so a prune that ran after the slice would classify nothing at all.
+
+    Pre-fix this fixture is exactly the stuck box: `candidates[:2]` = two proposals
+    that both skip, so `attempts` is empty and the classifiable fourth never gets a
+    slot in this run or any later one. Post-fix the three terminal ones leave the pool
+    first, the cap sees one eligible proposal, and exactly one classification is
+    attempted. Counted from the `classify_relationship` call, not from stdout.
+    """
+    for i in (1, 2, 3):
+        _no_prose_session(tmp_path, f"knowledge/dead-{i}a.md", f"knowledge/dead-{i}b.md",
+                          key=f"no_ctx_c3_{i}")
+    _session_file(tmp_path,
+                  _asked("why are these two notes always opened together?"),
+                  _read_call("knowledge/live-a.md", "call_a"),
+                  _tool_says("note a"),
+                  _read_call("knowledge/live-b.md", "call_b"),
+                  _answered("they describe the same subsystem"),
+                  key="ctx_c3_live")
+    monkeypatch.setattr(cr, "LLOYD_SESSIONS", tmp_path)
+    monkeypatch.setattr(cr, "MAX_CLASSIFY_PER_RUN", 2)
+    props = _stage2_props(tmp_path, [
+        _needle_test_proposal(f"knowledge/dead-{i}a.md", f"knowledge/dead-{i}b.md",
+                              f"no_ctx_c3_{i}")
+        for i in (1, 2, 3)
+    ] + [
+        _needle_test_proposal("knowledge/live-a.md", "knowledge/live-b.md", "ctx_c3_live")
+    ])
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+    attempts = _classified_by_cr(monkeypatch, cr)
+
+    cr.cmd_classify()
+
+    assert [a["source"] for a in attempts] == ["knowledge/live-a.md"], (
+        f"expected exactly one classification attempt from the live proposal, "
+        f"got {attempts}")
+    assert "same subsystem" in attempts[0]["context"], (
+        "the window carried to the classifier was not the one around the co-access")
+    saved = {p["source"]: p for p in json.loads(props.read_text())["proposals"]}
+    for i in (1, 2, 3):
+        assert saved[f"knowledge/dead-{i}a.md"]["status"] == "skipped-no-context"
+    assert saved["knowledge/live-a.md"]["classification_source"] == "llm"
+
+
+def test_the_prune_leaves_untouched_what_stage2_never_considers(cr, tmp_path,
+                                                                monkeypatch):
+    """Clause 4: every proposal here holds a session with no prose, so a prune that
+    over-reached would terminalise all four. Only the one Stage 2 would have put in a
+    batch — `pending`, `co-access`, weight above `LLM_CLASSIFY_THRESHOLD` — changes."""
+    cases = {
+        "approved": ("knowledge/appr-a.md", "knowledge/appr-b.md"),
+        "below-threshold": ("knowledge/low-a.md", "knowledge/low-b.md"),
+        "already-llm": ("knowledge/llm-a.md", "knowledge/llm-b.md"),
+        "eligible": ("knowledge/elig-a.md", "knowledge/elig-b.md"),
+    }
+    proposals = []
+    for i, (label, (src, tgt)) in enumerate(cases.items(), start=1):
+        key = f"no_ctx_c4_{i}"
+        _no_prose_session(tmp_path, src, tgt, key=key)
+        p = _needle_test_proposal(src, tgt, key)
+        if label == "approved":
+            p["status"] = "approved"
+        elif label == "below-threshold":
+            p["evidence"]["aggregate_weight"] = cr.LLM_CLASSIFY_THRESHOLD / 2
+        elif label == "already-llm":
+            p["classification_source"] = "llm"
+        proposals.append(p)
+
+    monkeypatch.setattr(cr, "LLOYD_SESSIONS", tmp_path)
+    props = _stage2_props(tmp_path, proposals)
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+    before = json.loads(props.read_text())["proposals"]
+    attempts = _classified_by_cr(monkeypatch, cr)
+
+    cr.cmd_classify()
+
+    after = {p["source"]: p for p in json.loads(props.read_text())["proposals"]}
+    assert [a["source"] for a in attempts] == [], (
+        "Stage 2 classified something outside its own candidate filter")
+    for label, (src, _tgt) in cases.items():
+        if label == "eligible":
+            continue
+        got, was = after[src], next(b for b in before if b["source"] == src)
+        assert got["status"] == was["status"], (f"{label}: {was['status']} -> {got['status']}")
+        assert got["classification_source"] == was["classification_source"], label
+        assert got["evidence"]["aggregate_weight"] == was["evidence"]["aggregate_weight"], label
+    assert after["knowledge/elig-a.md"]["status"] == "skipped-no-context", (
+        "the control proposal was not pruned, so the three asserts above prove nothing")
+
+
+def test_the_run_output_names_both_prune_causes_with_counts(cr, tmp_path, monkeypatch,
+                                                            capsys):
+    """Clause 5: one line, both causes, each count bound to the status it belongs to —
+    so a reader can tell no-session from no-context without re-running the probe."""
+    _no_prose_session(tmp_path, "knowledge/p5-a.md", "knowledge/p5-b.md", key="no_ctx_c5_1")
+    _no_prose_session(tmp_path, "knowledge/p5-c.md", "knowledge/p5-d.md", key="no_ctx_c5_2")
+    monkeypatch.setattr(cr, "LLOYD_SESSIONS", tmp_path)
+    props = _stage2_props(tmp_path, [
+        _needle_test_proposal("knowledge/gone-c.md", "knowledge/gone-d.md",
+                              "session_never_written"),
+        _needle_test_proposal("knowledge/p5-a.md", "knowledge/p5-b.md", "no_ctx_c5_1"),
+        _needle_test_proposal("knowledge/p5-c.md", "knowledge/p5-d.md", "no_ctx_c5_2"),
+    ])
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+    _classified_by_cr(monkeypatch, cr)
+
+    cr.cmd_classify()
+
+    out = capsys.readouterr().out
+    m = re.search(r"pruned (\d+) \D*skipped-no-session\) and (\d+) \D*"
+                  r"skipped-no-context\)", out)
+    assert m, f"no line binding each count to its cause:\n{out}"
+    assert m.groups() == ("1", "2"), (
+        f"expected 1 pruned for no-session and 2 for no-context, got {m.groups()}:\n{out}")
