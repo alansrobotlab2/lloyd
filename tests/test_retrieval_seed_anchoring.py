@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 import app.kg_store as ks  # noqa: E402
 from agent_mcp import retrieval  # noqa: E402
 
-from tests._live_data import require_live_data
+from tests._live_data import require_live_data, require_live_volume
 from app.paths import production_data_root  # noqa: E402
 
 # `_pipeline/` is gitignored, so a git worktree — the automod round this runs in —
@@ -331,11 +331,14 @@ def test_the_fold_never_costs_a_seed_that_outscored_the_canonical_that_replaced_
     # `Pipeline`), and the width then dropped `Lloyd's autonomy pipeline` at 0.3333.
     # The gold entity was promoted and the tail name gave way to it — the ordering
     # doing its job, not a match traded away.
-    paying = [row["id"] for row in displaced]
-    assert paying == ["autonomy-pipeline"], displaced
-    row = displaced[0]
-    assert row["gained"] == [["Autonomy Data Pipeline", 0.3333, 0.5]], row
-    assert row["lost"] == [["Lloyd's autonomy pipeline", 0.3333]], row
+    #
+    # That shape was a property of the pre-2026-09-22 store. The graph rebuilt on
+    # 2026-09-23 holds no `Lloyd's autonomy pipeline` row and its corpus displaces
+    # nothing at production width, so the loop above has nothing to check. That is
+    # a named skip, not a pass: an empty `displaced` is exactly the vacuous green
+    # this control exists to refuse. When a displacement reappears, pin its shape.
+    require_live_volume(displaced, 1, LIVE_KG_DB, "the fold's live displacement set",
+                        noun="displacements")
 
 
 _CORPUS_SCRIPT = """
@@ -395,27 +398,33 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
     exactly what #1260 watches), and the grown residue in full, because that count
     is the denominator every baseline artifact carries. Reaching zero remains
     #1164's recall arm, not this contract.
+
+    Re-pinned 2026-09-23 against the graph rebuilt after the 2026-09-22 deletion:
+    25 of 81, ceiling 0.691, and 8 of the original 20. The store is re-extracted
+    rather than grown, so entity names moved (21 gold labels were re-pointed in
+    `eval/vault_recall_queries.yaml`) and the alias table restarted at 49 rows,
+    which is why `graph-quality` is back: its `relationship graph` alias is gone.
     """
     out = _run_against_the_live_corpus(_CORPUS_SCRIPT)
     assert out["anchorless_first20"] == [
-        "kg-maintenance-tasks", "qwen38-local-serving", "relationships-location",
-        "memory-persistence", "robotics-projects"], out["anchorless_first20"]
+        "backlog-363", "kg-maintenance-tasks", "qwen38-local-serving", "graph-quality",
+        "godnode-threshold", "relationships-location", "memory-persistence",
+        "robotics-projects"], out["anchorless_first20"]
     assert out["anchorless"] == [
-        "kg-maintenance-tasks", "qwen38-local-serving", "relationships-location",
-        "memory-persistence", "robotics-projects",
-        "browser-tool-validation", "three-d-printing-calibration",
-        "config-yaml-readonly", "dream-to-skill-edit", "automod-to-entity-guard",
+        "backlog-363", "kg-maintenance-tasks", "qwen38-local-serving", "graph-quality",
+        "godnode-threshold", "relationships-location", "memory-persistence",
+        "robotics-projects", "gpu-model-naming-collision", "browser-tool-validation",
+        "three-d-printing-calibration", "automod-to-entity-guard",
         "job-that-changes-its-own-code", "stop-auto-merging-entities",
-        "facts-that-contradict", "browser-tool-falls-back",
-        "skill-that-never-improves", "gpu-ram-thin-should-not-reboot",
-        "alarm-comes-back-after-fixed", "djev-decision-engine-integration",
-        "ambient-prefetch-ttl-reclaim", "isaac-gr00t-n17",
-        "retrieval-seed-anchoring-contract", "eval-corpus-naming-conventions",
-        "eval-north-star-candidate",
+        "cheaper-model-every-turn", "nightly-cannot-tell", "facts-that-contradict",
+        "browser-tool-falls-back", "gpu-ram-thin-should-not-reboot",
+        "alarm-comes-back-after-fixed", "numbers-differ-after-rebuild",
+        "djev-decision-engine-integration", "ambient-prefetch-ttl-reclaim",
+        "isaac-gr00t-n17", "graph-rerank-ab-cache",
     ], out["anchorless"]
     ceiling = (out["n_queries"] - len(out["anchorless"])) / out["n_queries"]
     assert (len(out["anchorless"]), out["n_queries"], round(ceiling, 3)) == (
-        23, 81, 0.716
+        25, 81, 0.691
     ), f"{len(out['anchorless'])} anchorless of {out['n_queries']} queries"
 
 

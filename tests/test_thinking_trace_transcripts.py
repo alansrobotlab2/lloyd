@@ -157,7 +157,11 @@ def test_session_recall_corpus_omits_reasoning(tmp_path, monkeypatch):
     monkeypatch.setattr(session_mod, "SESSIONS_DIR", sessions)
     monkeypatch.setattr(session_mod, "_session_index_cache", None)
 
-    index = session_mod._load_session_index()
+    # A window wide enough to hold the fixture forever. The default is 14 days
+    # counted from the wall clock against the filename's date, so this test went
+    # red on 2026-09-22, fourteen days after the fixture's 20260908: a clock
+    # failure in a test about reasoning, which is not what it exists to catch.
+    index = session_mod._load_session_index(max_days=36500)
     blob = json.dumps(index)
 
     assert index, "the fixture session must be indexed"

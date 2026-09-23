@@ -75,7 +75,7 @@ queries:
     # `tests/test_eval_corpus_guard.py` now fails CI when any expectation in this
     # file is contained in no entity name, so re-breaking it is a red test rather
     # than a nightly number that quietly reads as a retrieval regression.
-    expect_entities: ["Task #363", "#363 TGS-RAG Implementation"]
+    expect_entities: ["TGS-RAG"]  # 2026-09-23 kg rebuild: "Task #363" dropped; "#363 TGS-RAG Implementation" -> "TGS-RAG" (absent from the rebuilt store)
     # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
     # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
     # live vault listing, that a correct answer to THIS query would cite.
@@ -98,7 +98,7 @@ queries:
   - id: vault-recall
     query: "what is vault_recall and how does it work?"
     category: single
-    expect_entities: ["vault_recall"]
+    expect_entities: []  # 2026-09-23 kg rebuild: "vault_recall" dropped (absent from the rebuilt store)
     # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
     # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
     # live vault listing, that a correct answer to THIS query would cite.
@@ -197,7 +197,7 @@ queries:
     # `Qwen 3.8 27B`, the same model, spelled the way the entity table spells it —
     # the correct answer to the question, not an easier one. `Qwen3.8-Flash-Next` is
     # reachable and stays.
-    expect_entities: ["Qwen3.8-Flash-Next", "Qwen 3.8 27B"]
+    expect_entities: ["Qwen3.8-Flash-Next"]  # 2026-09-23 kg rebuild: "Qwen 3.8 27B" dropped (absent from the rebuilt store)
     expect_docs: ["hybrid-gdn-qsa-inference-serving", "qwen38-27b-local-24gb",
                   "qwen38-flash-next-engram"]
 
@@ -234,7 +234,7 @@ queries:
     # Re-breaking this is now a CI red, not a nightly number that reads as a retrieval
     # regression (`tests/test_eval_corpus_guard.py`,
     # `tests/test_retrieval_seed_anchoring.py::test_every_gold_entity_name_resolves_to_an_entity_the_store_can_return`).
-    expect_entities: ["Task #363 (TGS-RAG Multi-Hop Reasoning)", "TGS-RAG"]
+    expect_entities: ["TGS-RAG"]  # 2026-09-23 kg rebuild: "Task #363 (TGS-RAG Multi-Hop Reasoning)" -> "TGS-RAG" (absent from the rebuilt store)
     expect_docs: ["tgs-rag", "neuro-symbolic-rag", "363-implement-tgs-rag"]
 
   - id: graph-quality
@@ -264,7 +264,7 @@ queries:
     # 2026-08-06: "facts.py" → "FACT_GODNODE_THRESHOLD". The old value is a
     # code path the junk guard correctly rejects; the new one is the actual
     # subject of the question and a STRICTER, more precise target.
-    expect_entities: ["FACT_GODNODE_THRESHOLD", "Knowledge Graph"]
+    expect_entities: ["Knowledge Graph"]  # 2026-09-23 kg rebuild: "FACT_GODNODE_THRESHOLD" dropped (absent from the rebuilt store)
     # expect_docs re-pointed 2026-09-21 (#1319): the old labels (a code path, or an entity name handed to a path matcher) matched no
     # path under ~/obsidian, so the query could never reach full doc recall. New labels are vault paths, chosen from the
     # live vault listing, that a correct answer to THIS query would cite.
@@ -307,7 +307,7 @@ queries:
     category: hard
     # 2026-08-06: "3D-Printing-Robotics Project" → "3D Printing" (no dir for
     # the compound project name; "3D Printing" is the real entity).
-    expect_entities: ["GR00T", "Isaac GR00T N1.7", "1X Neo", "Six-Servo Robot Dog", "3D Printing"]
+    expect_entities: ["GR00T", "GR00T N1.7", "1X Neo", "Six-Servo Robot Dog", "3D Printing"]  # 2026-09-23 kg rebuild: "Isaac GR00T N1.7" -> "GR00T N1.7" (absent from the rebuilt store)
     expect_docs: ["GR00T", "robot", "robotics"]
     notes: "Cross-domain. Many candidates, semantic search may favor only the most-mentioned."
 
@@ -325,7 +325,7 @@ queries:
   - id: backlog-overview
     query: "anything interesting in the backlog we should tackle?"
     category: hard
-    expect_entities: ["Backlog System"]
+    expect_entities: ["Backlog"]  # 2026-09-23 kg rebuild: "Backlog System" -> "Backlog" (absent from the rebuilt store)
     expect_docs: ["backlog/"]
     notes: "Open-ended; current vault_recall probably returns weak results. Useful baseline."
   # ── Growth 2026-09-21 (#1319): entries 21-78. ──────────────────────────────
@@ -349,7 +349,7 @@ queries:
     query: "How many wake phrases are configured and why can't the acoustic models be retrained?"
     category: single
     expect_entities:
-      - "Wake-word ONNX Model"
+      - "Wake-word ONNX path"  # 2026-09-23 kg rebuild: was "Wake-word ONNX Model", absent from the rebuilt store
     expect_docs:
       - 'lloyd/USER.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
       - 'lloyd/reviews/2026-09-14-user-md-trim-archive.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
@@ -403,7 +403,7 @@ queries:
     query: "Where does a YouTube transcript go once it is extracted, and what breaks extraction?"
     category: single
     expect_entities:
-      - "Raw YouTube Transcripts"  # re-pointed 2026-09-21 (#1319): the old value is a short/alias name the entity store cannot return; this is the canonical it resolves to
+      - "YouTube Transcript Extraction"  # 2026-09-23 kg rebuild: was "Raw YouTube Transcripts", absent from the rebuilt store
     expect_docs:
       - 'knowledge/software/youtube-transcript-extraction-continuity.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
       - 'knowledge/ai/youtube-transcript-extraction.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
@@ -422,8 +422,7 @@ queries:
   - id: config-yaml-readonly
     query: "Why must config.yaml never be rewritten by a running job, and where does runtime UI state go instead?"
     category: single
-    expect_entities:
-      - "Lloyd Config"  # re-pointed 2026-09-21 (#1319): the old value is a short/alias name the entity store cannot return; this is the canonical it resolves to
+    expect_entities: []  # 2026-09-23 kg rebuild: its only name had no row in the rebuilt store; doc leg only
     expect_docs:
       - 'lloyd/MEMORY.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
       - 'backlog/495-test-a-written-override-leaves-the-live-tree-clean.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
@@ -433,7 +432,7 @@ queries:
     query: "Which model does a request actually get when the caller passes a routing name?"
     category: single
     expect_entities:
-      - "Model Router"
+      - "Model Routing"  # 2026-09-23 kg rebuild: was "Model Router", absent from the rebuilt store
       - "Model Routing"
     expect_docs:
       - 'backlog/1209-autonomy-dispatch-passes-an-unvalidated-model-to-t.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
@@ -444,7 +443,7 @@ queries:
     query: "What corrupted the groundskeeper survey queue, and what now guards its size?"
     category: single
     expect_entities:
-      - "Groundskeeper Queue"
+      - "Groundskeeper"  # 2026-09-23 kg rebuild: was "Groundskeeper Queue", absent from the rebuilt store
     expect_docs:
       - 'memory/learnings/2026-03-30-groundskeeper-queue-corruption.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
     notes: "Root cause plus the size guard added after it."
@@ -473,7 +472,7 @@ queries:
     category: multi-hop
     expect_entities:
       - "Guardian"
-      - "Backlog System"
+      - "Backlog"  # 2026-09-23 kg rebuild: was "Backlog System", absent from the rebuilt store
     expect_docs:
       - 'knowledge/software/guardian-alert-retraction-asymmetry.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
     notes: "Classification routes into alerting, and alerting is what files the item."
@@ -483,7 +482,7 @@ queries:
     category: multi-hop
     expect_entities:
       - "Nightly Reflection"
-      - "Skills Library"
+      - "Skill Library"  # 2026-09-23 kg rebuild: was "Skills Library", absent from the rebuilt store
     expect_docs:
       - 'skills/dream-consolidation/SKILL.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
       - 'skills/nightly-skills-management/SKILL.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
@@ -493,7 +492,7 @@ queries:
     query: "What does a self-modification round run before it can land, and how does it know a memory change broke retrieval?"
     category: multi-hop
     expect_entities:
-      - "automod gate"
+      - "automod"  # 2026-09-23 kg rebuild: was "automod gate", absent from the rebuilt store
       - "promotion gate"
     expect_docs:
       - 'knowledge/ai/2026-09-06-self-mod-test-coverage.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
@@ -537,7 +536,7 @@ queries:
     category: multi-hop
     expect_entities:
       - "Autonomy Data Pipeline"
-      - "Skills Library"
+      - "Skill Library"  # 2026-09-23 kg rebuild: was "Skills Library", absent from the rebuilt store
     expect_docs:
       - 'backlog/810-the-autonomy-board-and-the-scheduler-resolve-depen.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
       - 'architecture/autonomy-system.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
@@ -690,7 +689,7 @@ queries:
     query: "the job that keeps rewriting the code it itself runs in"
     category: fuzzy
     expect_entities:
-      - "automod gate"
+      - "automod"  # 2026-09-23 kg rebuild: was "automod gate", absent from the rebuilt store
     expect_docs:
       - 'skills/automod-change-own-code/SKILL.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
     notes: "Named by role, not by slug."
@@ -765,7 +764,7 @@ queries:
     query: "what makes a skill stop getting better even though the reflection loop keeps touching it"
     category: fuzzy
     expect_entities:
-      - "Skills Library"
+      - "Skill Library"  # 2026-09-23 kg rebuild: was "Skills Library", absent from the rebuilt store
     expect_docs:
       - 'skills/autonomy-self-improvement/SKILL.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
       - 'knowledge/ai/wikiskill-persistent-wiki-skill-evolution.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
@@ -824,7 +823,7 @@ queries:
     query: "which small engine answers typed yes-or-no questions off the mostly-idle second GPU, and what do its scores not mean?"
     category: hard
     expect_entities:
-      - "Decision Engine"
+      - "djev"  # 2026-09-23 kg rebuild: was "Decision Engine", which resolves to no entity row in the rebuilt store; djev IS the engine the query describes
     expect_docs:
     notes: "Scores are self-consistent, not calibrated; the hard ceiling on candidate count is deliberate."
 
@@ -832,7 +831,7 @@ queries:
     query: "what finally frees background context queued for a session that never takes another turn?"
     category: hard
     expect_entities:
-      - "Ambient Queue"
+      - "AmbientPrefetchEntry"  # 2026-09-23 kg rebuild: was "Ambient Queue", absent from the rebuilt store
     expect_docs:
       - 'backlog/910-ambient-prefetch-ttl-is-enforced-only-at-drain-so-.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
       - 'architecture/ambient-context-injection.md'  # re-pointed 2026-09-21 (#1319): the previous label matched no vault path
@@ -860,7 +859,7 @@ queries:
     query: "What is the current NVIDIA humanoid foundation model release, and what does the local analysis compare it against?"
     category: recent
     expect_entities:
-      - "Isaac GR00T N1.7"
+      - "GR00T N1.7"  # 2026-09-23 kg rebuild: was "Isaac GR00T N1.7", absent from the rebuilt store
     expect_docs:
       - 'knowledge/research/2026-08-23-isaac-gr00t-reference-humanoid.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
       - 'knowledge/research/2026-05-04-gr00t-n1-7-updates.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query

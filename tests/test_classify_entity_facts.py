@@ -810,7 +810,11 @@ def test_the_live_tree_parses_each_hub_directory_exactly_once(
             "fact files instead of serving the memo")
         assert again == facts, f"{entity}'s memoized list differs from its first"
 
-    assert total_files_read >= 70, (
-        f"the six hubs hold 78 fact files between them as counted 2026-09-19; "
-        f"only {total_files_read} were read, so this test would pass on a "
-        f"directory it never opened")
+    # The floor was 70 of the 78 files these hubs held on 2026-09-19. The graph
+    # rebuilt on 2026-09-23 is a fresh extraction with write-time dedupe and holds
+    # 40, so that number described a corpus that no longer exists. What refuses a
+    # vacuous pass is already above, per hub: every .md on disk read exactly once,
+    # and a non-empty parse. This keeps the one thing a count adds: all six opened.
+    assert total_files_read >= 6, (
+        f"only {total_files_read} fact files were read across six hub directories, "
+        "so at least one hub was never opened")

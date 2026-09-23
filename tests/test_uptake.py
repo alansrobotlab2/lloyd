@@ -661,10 +661,21 @@ def test_live_nightly_band_is_not_the_hardcoded_threshold():
     """
     assert uptake.RETRIEVAL_GATE_HARDCODE == 0.95  # the number being replaced
     baselines = uptake.lloyd_root() / "eval" / "baselines"
-    if not any(baselines.glob("nightly-*.json")):
+    # The gate reads every `*.json` with metrics, not only nightlies (comparability
+    # is by run shape), so the refusal is owed only to a directory with none. This
+    # used to branch on `nightly-*` and then expect the refusal, which held only
+    # while nightlies were all the directory ever held: after the 2026-09-22
+    # deletion it held none, and the first ad-hoc eval written there (the kg
+    # rebuild's, 2026-09-23) made the gate answer with a band and this test red.
+    if not any(baselines.glob("*.json")):
         with pytest.raises(uptake.NoBaselines):
             uptake.retrieval_gate()
         return
+    # Everything below is a claim about real nightly runs. Until three exist again
+    # it has nothing to check, which is a named skip and heals as the nightly runs.
+    from tests._live_data import require_live_volume
+    require_live_volume(sorted(baselines.glob("nightly-*.json")), 3, baselines,
+                        "the nightly retrieval baselines")
     gate = uptake.retrieval_gate()
     assert gate["nights"] >= 3, gate
     assert gate["doc_hit_rate"]["floor"] < 0.95, gate
