@@ -1,11 +1,21 @@
 """Record what djev would have decided, beside what production did decide.
 
-Three seams call this — reranking in `agent_mcp/vault.py`, write-time backlog
-dedupe in `agent_mcp/backlog.py`, and the entity SAME/DIFFERENT gate in
-`scripts/memory/entity_semantic_gate.py`. The point of one recorder rather
-than three hooks is that all three want the same thing (a labelled row per
-real decision) and all three sit on paths where being slow is worse than
-being uninstrumented.
+Two seams record on an ordinary day: write-time backlog dedupe in
+`agent_mcp/backlog.py`, and the entity SAME/DIFFERENT gate in
+`scripts/memory/entity_semantic_gate.py`. The third — the recall's `rerank`
+seam in `agent_mcp/vault.py` — is NOT one of them while djev is the recall's
+ranker. Since #1336 djev IS that ranker (`RECALL_RERANKER = "djev"`), the
+dispatch's first arm takes every call, and the hook below it sits in an `elif`
+that production never reaches: **structurally dark**, not quiet. Its one live
+window is the kill switch pulled to `"qmd"` with the engine still answering — a
+ranker rollback, which is precisely when a djev's-order-beside-fusion's-order
+row is worth having. Measured on the live log, `rerank`'s last row is
+2026-09-21T08:57:40Z while `dedupe` and `entity` still run daily; `seam_log_stats`
+below is what says so on `djev_status` instead of leaving it to this paragraph.
+
+The point of one recorder rather than three hooks is that all three want the
+same thing (a labelled row per real decision) and all three sit on paths where
+being slow is worse than being uninstrumented.
 
 **Nothing here can change a production decision.** `shadow()` returns `None`,
 always, having done one `put_nowait`. It has no return value a caller could
@@ -41,8 +51,12 @@ MUTED UNDER THE EVAL
 --------------------
 `eval/run_eval.py` and the regression runner set `LLOYD_DJEV_SHADOW=0`. A
 pinned-corpus run recorded as production traffic would poison the very
-`label_mass` distribution this log exists to collect the floors from — and the
-rerank arm calls `_vault_recall`, which is where the lead seam lives.
+`label_mass` distribution this log exists to collect the floors from — and
+`run_eval.py` calls `_vault_recall` directly, which is where the `rerank` seam
+sits. It cannot reach the recorder from there today; a mute whose correctness
+depended on that dispatch staying as it is would be a mute with a hidden
+precondition, so the mute stays and the seam's condition is stated above rather
+than inferred from a row count.
 """
 
 from __future__ import annotations
@@ -55,6 +69,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -400,7 +415,15 @@ def flush(timeout: float = 10.0) -> int:
 
 
 def stats() -> dict:
-    """For `djev_status` and `/state`. Offline; touches no socket."""
+    """The recorder's block of `djev_status`. Offline; touches no socket.
+
+    Named for its real reader rather than a list of possible ones: #1372 is a
+    change about descriptions that outlived their facts, and this sentence used
+    to name a second reader — a state route — that never called it. A field
+    added here for a surface that never reads it is stale on arrival, so the
+    reader list stays exact. Grep this function's name for the call sites;
+    `tests/test_djev_doc_claims.py` pins the sentence.
+    """
     q = _queue
     with _lock:
         counts = dict(_counters)
@@ -411,8 +434,77 @@ def stats() -> dict:
         "worker_alive": bool(_worker and _worker.is_alive()),
         "log": str(SHADOW_LOG),
         "log_rows": _log_rows(),
+        # The whole-file count above cannot answer "is THIS seam recording",
+        # which is the question #1372 was filed for: 224 rows looked healthy on
+        # 2026-09-22 while `rerank` had recorded nothing for a day and a half.
+        "seam_log": seam_log_stats(),
         "pending_shutdown_drops": _peek_pending_drops(),
     }
+
+
+#: A seam whose newest row is older than this reads as `dark` on the status
+#: route (#1372 clause 5). Deliberately a day and not a week: `entity` fires
+#: about once a day and `dedupe` several, so the seam that legitimately goes
+#: silent the longest still fits inside it, and 2026-09-22 — `rerank` at zero
+#: rows against `dedupe` 33 and `entity` 25 — sits a whole day outside it.
+DARK_AFTER_S = 86400
+
+
+def seam_log_stats(now: float | None = None) -> dict:
+    """Per-seam rows and newest row, read from `SHADOW_LOG`.
+
+    `stats()` has always reported one whole-file `log_rows`, which cannot answer
+    the question that actually matters: is THIS seam recording? On 2026-09-22 the
+    file held 224 rows and looked healthy while `rerank` had recorded nothing
+    since 2026-09-21T08:57:40Z — and the two seams whose counts made the total
+    look alive were the two that were fine.
+
+    Offline like `_log_rows`, and same about a read failure: `rows` is `None`,
+    not `0`, and `dark` is `None` rather than a verdict, because an unreadable
+    log and an empty one are different answers and only one of them is a
+    finding. Malformed rows are skipped the way `_write`'s reader skips them.
+
+    `now` is injectable so the age boundary is testable without waiting a day
+    for a fixture to go stale.
+    """
+    now = time.time() if now is None else now
+    rows: dict[str, int | None] = {s: 0 for s in SEAMS}
+    newest: dict[str, float | None] = {s: None for s in SEAMS}
+    unreadable = False
+    try:
+        if SHADOW_LOG.exists():
+            with SHADOW_LOG.open(encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        row = json.loads(line)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    seam = row.get("seam")
+                    if seam not in rows:
+                        continue          # a seam this build doesn't know: its
+                                          # rows are not this build's verdict
+                    ts = row.get("ts")
+                    if not isinstance(ts, (int, float)):
+                        continue          # no timestamp, no age claim
+                    rows[seam] += 1
+                    if newest[seam] is None or ts > newest[seam]:
+                        newest[seam] = float(ts)
+    except Exception:  # noqa: BLE001
+        unreadable = True
+
+    out: dict[str, dict] = {}
+    for seam in SEAMS:
+        last = newest[seam]
+        out[seam] = {
+            "rows": None if unreadable else rows[seam],
+            "last_row_utc": (None if last is None else
+                             datetime.fromtimestamp(last, timezone.utc)
+                             .isoformat(timespec="seconds")),
+            "age_s": None if last is None else max(0, int(now - last)),
+            "dark": None if unreadable else (
+                rows[seam] == 0 or (now - last) > DARK_AFTER_S),
+        }
+    return out
 
 
 def _peek_pending_drops() -> int:

@@ -361,6 +361,31 @@ RECALL_RERANK_ALPHA = 0.3      # only consulted when rerank is explicitly on
 RECALL_DJEV_RERANK = False
 RECALL_DJEV_RERANK_TOP = 12
 
+# ── Saying so when a knob the caller set cannot take effect (#1372) ─────────
+#
+# #1336 made djev the recall's RANKER, so the first arm of the dispatch takes
+# every production call and the `elif` below it that reads `djev_rerank` runs
+# zero times — the knob is now inert twice over, once from `RECALL_DJEV_RERANK`
+# and once from the ranker. It was still advertised in `vault_recall`'s own tool
+# schema when #1372 was filed, and the triage probe confirmed what a caller
+# learned from sending it: nothing. Zero shadow rows, zero `_djev_rerank_pool`
+# calls, a normal-looking recall — djev-as-ranker when djev-as-reranker was
+# asked for, a different decision, reported as silence.
+#
+# So a result that was not shaped by a knob the caller set names the knob and
+# why. A log line is not the fix: the caller reads the result, and the
+# alternative — refusing the call — would make an eval harness that passes the
+# knob unconditionally unable to recall at all.
+RECALL_UNUSED_KNOBS_KEY = "recall_knobs_ignored"
+RECALL_ARM_UNUSED_NOTE = (
+    "djev_rerank / djev_rerank_top took no effect: the djev rerank arm applies "
+    "only when qmd is the recall's ranker, and djev ranked this recall, so the "
+    "ordering you got is djev-as-ranker, not djev-as-reranker")
+RECALL_KNOB_STRIPPED_NOTE = ("stripped at the tool boundary: eval-only knob, "
+                             "and production holds its measured value")
+#: The two eval knobs whose inertness has a second cause besides the strip.
+_RECALL_ARM_KNOBS = frozenset({"djev_rerank", "djev_rerank_top"})
+
 # Evaluation knobs: read out of `params` by `_vault_recall` for its in-process
 # callers (`eval/run_eval.py`, the retrieval tests), and deliberately NOT
 # settable by a tool call. Until 2026-09-23 the `vault_recall` schema declared
@@ -1471,8 +1496,58 @@ def _djev_doc_text(doc: dict) -> str:
     return f"{title}\n{snippet}" if snippet else title
 
 
+def shadow_seams_dark_by_dispatch() -> dict[str, str]:
+    """Shadow seams this module's dispatch cannot reach, and what lifts it.
+
+    A row count can report that a seam is quiet; it cannot report that a seam is
+    unreachable, because a dead hook and a day with nothing to record are the
+    same stream of nothing. #1372 is exactly that pair: `rerank` stopped
+    recording on 2026-09-21 because #1336 put djev's ranking in the arm above the
+    hook, and the only surfaces that read the recorder reported three live seams.
+    So the module that owns the dispatch answers the reachability question, and
+    `djev_status` relays it.
+
+    Reads `recall_reranker()` rather than the constant, so pulling the kill
+    switch lifts the verdict as immediately as it lifts the hook.
+    """
+    if recall_reranker() == "djev":
+        return {"rerank": (
+            "unreachable: `ranker == \"djev\"` is the first arm of the "
+            "`_vault_recall` dispatch and returns before the shadow hook's `elif`. "
+            "Pull the kill switch (RECALL_RERANKER=\"qmd\") with the engine "
+            "answering and the seam records again.")}
+    return {}
+
+
+def _recall_knob_report(asked: set[str], ranker: str, arm_on: bool) -> dict[str, str]:
+    """Which knobs the CALLER set this call did not act on, and why (#1372).
+
+    Empty for the defaults: production sets no knob per call, so the ordinary
+    recall gets no explanation it did not ask for. Non-empty whenever a key
+    arrived in `params` and the dispatch could not use it — which, since #1336,
+    is every value of either arm knob while djev is the ranker.
+    """
+    if not asked:
+        return {}
+    if ranker == "djev":
+        return {k: RECALL_ARM_UNUSED_NOTE for k in sorted(asked)}
+    if "djev_rerank_top" in asked and not arm_on:
+        # The switch itself took effect — leaving it off is what sent the recall
+        # down the cross-encoder and the shadow hook — but the width beside it
+        # is read only inside the arm, so it was never looked at.
+        return {"djev_rerank_top": "no effect: the djev rerank arm was off, "
+                                   "so the width was never read"}
+    return {}
+
+
 def _djev_rerank_pool(documents: list[dict], query: str, top: int) -> list[dict]:
     """Reorder the HEAD of the pool through djev; the tail keeps its order.
+
+    The arm, as distinct from the ranker. Reached only when qmd is the recall's
+    ranker: the dispatch calls it under `elif djev_rerank:`, and djev-ranking is
+    the arm above it that returns first (#1336). djev does not reorder a pool it
+    already ordered, so a caller that sets the knob while djev ranks is told so
+    in its own result — `RECALL_UNUSED_KNOBS_KEY`.
 
     Only the head, because djev is a final-stage reranker over a shortlist and
     nothing else: above 32 questions the server splits the canvas into
@@ -1534,9 +1609,18 @@ def _djev_rank_recall(documents: list[dict], query: str) -> list[dict] | None:
 def _djev_shadow_rerank(documents: list[dict], query: str) -> None:
     """Record what djev would have ordered, beside what production returns.
 
-    Unconditional and off-thread: one `put_nowait` on a bounded queue that
-    drops rather than waits. The lead seam of the three, because every
-    `vault_recall` passes through it.
+    Off-thread and drop-tolerant: one `put_nowait` on a bounded queue that drops
+    rather than waits. NOT reached while djev is the recall's ranker — the
+    dispatch calls this only under `elif reranker is None:` and the arm above it
+    returns first for every `ranker == "djev"` call, so while
+    `RECALL_RERANKER = "djev"` (production since #1336) this seam is
+    structurally dark, and `tests/test_djev_rerank_arm.py` pins that by running
+    the recall and counting recorder calls rather than by looking for this call
+    in the source. The name "rerank seam" is historical: production stopped
+    reranking here on 2026-09-21, so the seam now answers a rollback question —
+    what djev's order would have been on the pool qmd's cross-encoder is
+    ordering — and fires only with the kill switch pulled to "qmd" and the
+    engine still answering.
 
     The state and question set are built by a lambda the shadow WORKER runs —
     the recall path holds the texts already and must not spend even a string
@@ -1603,6 +1687,13 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
     graph_hops = int(params.get("graph_hops", RECALL_GRAPH_HOPS))
     # Resolved at call time from the constants, like every knob above, so a
     # test that moves `RECALL_DJEV_RERANK` moves what this call does.
+    #
+    # `asked` is the set the CALLER sent, not the set that took effect — the
+    # defaults are production's own and are not the caller's to be told about
+    # (#1372). Both keys are read here, so both are reported when they are
+    # inert; `djev_rerank_top` is read only inside the arm, which is why
+    # `djev_rerank: false` under qmd still reports the width as unused.
+    _asked = set(params) & {"djev_rerank", "djev_rerank_top"}
     djev_rerank = bool(params.get("djev_rerank", RECALL_DJEV_RERANK))
     djev_rerank_top = int(params.get("djev_rerank_top", RECALL_DJEV_RERANK_TOP))
     # Who orders the document pool (#1336). Keyword-only and never read from
@@ -1904,6 +1995,18 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
         # fusion order and djev orders it. A djev that does not answer sends the
         # whole recall down the cross-encoder path instead of serving fusion
         # order, which measured 0.05 MRR worse.
+        #
+        # That last paragraph is also why #1372 happened. "Neither runs" was
+        # true of the code and false of every description of it — the schema
+        # still advertised `djev_rerank`, the recorder's docstring still called
+        # `rerank` a seam production passes through, and the file's own
+        # reachability check was a source-text string that stayed green — so the
+        # seam went dark with nothing saying so. Three things close that: a
+        # caller who set either arm knob is told in the result
+        # (`RECALL_UNUSED_KNOBS_KEY`), `shadow_seams_dark_by_dispatch()` says
+        # which seam cannot fire and what would lift it, and
+        # `tests/test_djev_rerank_arm.py` runs the recall and counts recorder
+        # calls instead of reading for the call.
         if ranker == "djev":
             ranked = _djev_rank_recall(documents, query)
             if ranked is None:
@@ -1924,6 +2027,13 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
         else:
             documents = documents[:limit]
         result = {"documents": documents, "facts": facts, "query": query}
+        # A knob the caller set that this call could not honour is named here,
+        # not logged (#1372). Absent unless the caller actually sent one, so the
+        # default recall — which is every recall production serves — pays
+        # nothing for an explanation nobody asked for.
+        _unused = _recall_knob_report(_asked, ranker, djev_rerank)
+        if _unused:
+            result[RECALL_UNUSED_KNOBS_KEY] = _unused
         # Fact-leg provenance (#1250). Always present, including when it is 0:
         # a consumer that has to distinguish "the fact leg read nothing" from
         # "the fact leg read everything and matched nothing" cannot do it from
@@ -1978,13 +2088,26 @@ async def call_tool(name: str, arguments: dict):
         "vault_search": _vault_search, "vault_recall": _vault_recall,
     }
     handler = handlers.get(name)
+    stripped: list[str] = []
     if name == "vault_recall":
         # The eval knobs are not the client's to set; see RECALL_EVAL_KNOBS.
-        arguments = {k: v for k, v in (arguments or {}).items()
-                     if k not in RECALL_EVAL_KNOBS}
+        raw = arguments or {}
+        stripped = sorted(k for k in raw if k in RECALL_EVAL_KNOBS)
+        arguments = {k: v for k, v in raw.items() if k not in RECALL_EVAL_KNOBS}
     if handler:
         # Handlers are sync and do subprocess/urllib I/O (QMD search, rg,
         # consolidation LLM call) with multi-second timeouts — run them in a
         # worker thread so the shared event loop never stalls.
-        return _wrap(await asyncio.to_thread(handler, arguments))
+        result = await asyncio.to_thread(handler, arguments)
+        if stripped and isinstance(result, dict) and "error" not in result:
+            # The strip is the right answer about retrieval and was still
+            # silence as an answer to the client (#1372): a caller that sent
+            # `djev_rerank: true` over the wire got a normal recall and no word
+            # that its knob never reached the handler. Name it in the body. Not
+            # onto an error result — an error body is about the failure.
+            result = {**result, RECALL_UNUSED_KNOBS_KEY: {
+                k: (f"{RECALL_KNOB_STRIPPED_NOTE}; {RECALL_ARM_UNUSED_NOTE}"
+                    if k in _RECALL_ARM_KNOBS and recall_reranker() == "djev"
+                    else RECALL_KNOB_STRIPPED_NOTE) for k in stripped}}
+        return _wrap(result)
     return _wrap(_err(f"Unknown tool: {name}", ErrorCode.UNKNOWN_TOOL))

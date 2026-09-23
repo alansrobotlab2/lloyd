@@ -1,9 +1,18 @@
-"""`architecture/djev.md`'s record of the #1324 shadow-log leak stays true.
+"""What the djev prose is allowed to say about the seams it describes.
 
-The behaviour that closes the leak is pinned in
-`tests/test_djev_shadow_isolation.py`. This file pins the *other* half of the
-item: what the doc is allowed to say now that the fix exists, and the numbers
+Two items live here, both because a description was read as a fact. The first
+is `architecture/djev.md`'s record of the #1324 shadow-log leak: the behaviour
+that closes the leak is pinned in `tests/test_djev_shadow_isolation.py`, and
+this file pins the *other* half — what the doc may now say, and the numbers
 inside that prose.
+
+The second is #1372: `app/djev_shadow.py`, `agent_mcp/vault.py` and
+`config.yaml` all described the `rerank` seam as a live one production passes
+through, while since #1336 the dispatch has made it unreachable except under
+the kill switch. Those assertions sit at the bottom of this file because they
+are the same shape as the ones above: they read words out of files rather than
+running code, so they need no daemon, no engine and no fixture, and every
+needle is a string a later reader can `grep` to re-measure.
 
 It matters because the doc is where the item came from. §11 carried "Test runs
 write to production's shadow log" as an open gap and named #1324, so any
@@ -19,6 +28,10 @@ those titles are pinned against the module that defines them.
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
+
+from agent_mcp import vault
 
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "architecture" / "djev.md"
@@ -133,3 +146,163 @@ def test_the_fixture_titles_the_doc_counts_still_exist():
         "so the row counts in the closed record are no longer checkable")
     assert FIXTURE_SPAWN in (ROOT / "tests" / "test_backlog_spawn_loop.py").read_text(), (
         f"{FIXTURE_SPAWN!r} is no longer the fixture title in test_backlog_spawn_loop.py")
+
+
+# ── #1372: the rerank seam's prose says when it can fire ────────────────────
+#
+# The item was filed from prose, not from code. `app/djev_shadow.py` opened with
+# "Three seams call this — reranking in `agent_mcp/vault.py`", `config.yaml`
+# still calls it "The lead seam: both `vault_recall` and `memory_ops.recall`
+# pass through it", and `architecture/djev.md` says the seam runs "on every
+# recall". Since #1336 none of those is true: djev IS the recall's ranker, so
+# the hook sits under an `elif` the first arm never reaches, and `rerank`'s last
+# production row is 2026-09-21T08:57:40Z while `dedupe` and `entity` keep
+# flowing. A description that presents a structurally dark seam as a live one is
+# what makes its silence unreadable — so the descriptions are asserted, not just
+# corrected once.
+
+SHADOW_SRC = ROOT / "app" / "djev_shadow.py"
+VAULT_SRC = ROOT / "agent_mcp" / "vault.py"
+
+
+def _module_docstring(path: Path) -> str:
+    """The module docstring of `path`, by splitting on the delimiters rather
+    than importing: this test is about the words, and it must not need a live
+    qmd daemon or djev engine to read them."""
+    text = path.read_text()
+    body = text.split('"""', 2)
+    assert len(body) >= 3, f"{path.name} no longer opens with a module docstring"
+    return body[1]
+
+
+def test_the_shadow_docstring_names_when_the_rerank_seam_can_fire():
+    """Clause 3. The replacement has to carry the condition, not just drop the
+    claim: the kill switch pulled to `qmd` with the engine still answering, and
+    structurally dark while djev is the ranker."""
+    head = _module_docstring(SHADOW_SRC)
+    assert "Three seams call this" not in head, (
+        "the module still opens by naming three live callers, one of which "
+        "cannot reach the recorder while djev is the recall's ranker")
+    for needle in ("kill switch", "qmd", "dark"):
+        assert needle in head, (
+            f"the module docstring no longer says the rerank seam is dark "
+            f"except under the kill switch to qmd — it lost {needle!r}")
+
+
+#: Every file that describes the seams: the recorder, the caller, and the doc
+#: the #1324 record above is guarded in. #1372 is a defect about descriptions,
+#: so the scan covers all three rather than only the two the clause names.
+SEAM_DESCRIPTIONS = [SHADOW_SRC, VAULT_SRC, DOC]
+
+
+@pytest.mark.parametrize("path", SEAM_DESCRIPTIONS,
+                         ids=["djev_shadow", "vault", "djev.md"])
+def test_no_djev_description_calls_rerank_a_seam_production_reaches(path):
+    """Clause 2, second half. "Lead seam" was the phrase in two of these files —
+    `app/djev_shadow.py`'s eval-muting paragraph and
+    `vault._djev_shadow_rerank`'s own docstring ("The lead seam of the three,
+    because every `vault_recall` passes through it") — and "on every recall" was
+    in the doc, two sections from the one that knew better (§8.1: "The shadow
+    seam does not run when djev ranks"). Those are the claims that make a dark
+    seam read as a quiet one, so the needles are asserted, not just corrected
+    once: a rank or a frequency is where a stale seam description shows up."""
+    text = path.read_text().lower()
+    needles = ["lead seam", "the three shadow seams"]
+    if path != VAULT_SRC:
+        # `vault.py` is 2,000 lines and says "on every recall" about the #1335
+        # latency of the graph arm, which is true of it; the frequency claim
+        # that matters there is the hook's own, checked just below.
+        needles.append("on every recall")
+    for needle in needles:
+        assert needle not in text, (
+            f"{path.name} still says {needle!r} about the rerank seam. While "
+            "djev is the recall's ranker the dispatch never reaches it, so state "
+            "the condition it fires under instead of a volume or a rank.")
+    if path is VAULT_SRC:
+        import inspect
+        hook = inspect.getsource(vault._djev_shadow_rerank).lower()
+        for needle in ("on every recall", "passes through it", "unconditional"):
+            assert needle not in hook, (
+                f"`_djev_shadow_rerank` still claims it happens {needle!r}, "
+                "which is the sentence that made the seam look live")
+
+
+def test_the_seam_section_states_the_row_stream_it_left_behind():
+    """The doc has to carry the measured end of the stream, because "dark" is
+    only checkable against something: the newest `rerank` row is a fact a reader
+    can re-measure in `shadow.jsonl`, and the day it stopped is the day #1336
+    landed."""
+    text = DOC.read_text()
+    section = text[text.index("### 6.1"):text.index("### 6.2")]
+    assert "structurally dark" in section, (
+        "§6.1 no longer says the seam is unreachable rather than idle")
+    assert "2026-09-21T08:57:40" in section, (
+        "§6.1 lost the newest-rerank-row timestamp, which is the sentence that "
+        "makes 'dark' a claim someone else can re-measure")
+    assert "kill switch" in section, "§6.1 no longer names what would lift it"
+
+
+def test_the_shadow_hook_says_it_runs_only_under_the_other_ranker():
+    """`vault._djev_shadow_rerank` is the one function a reader of the dispatch
+    lands on, so its docstring carries the firing condition."""
+    import inspect
+    doc = inspect.getsource(vault._djev_shadow_rerank)
+    assert "qmd" in doc, "the hook's docstring no longer names the ranker it needs"
+    assert "djev is the recall's ranker" in doc or "djev ranks" in doc, (
+        "the hook's docstring no longer says it is dark while djev ranks")
+
+
+def test_the_stats_docstring_names_only_a_reader_that_exists():
+    """`stats()` says the tool route is its only production reader, and used to
+    name `/state` as a second one that never read it — the small version of this
+    item's whole shape, a description carrying a consumer nobody wired up. So
+    the sentence is pinned: add a reader and the test tells you to say so."""
+    import inspect
+
+    from app import djev_shadow
+    doc = inspect.getsource(djev_shadow.stats)
+    assert "djev_status" in doc, "stats() no longer names the route that reads it"
+    assert "/state" not in doc, (
+        "stats() advertises /state as a reader again. Grep for its call sites "
+        "before adding a consumer back — the claim, not the consumer, is what "
+        "has to be true here.")
+    assert "djev_shadow.stats()" in (ROOT / "agent_mcp" / "djev.py").read_text(), (
+        "the named reader stopped calling stats(), so the docstring is now the "
+        "false half")
+    readers = sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / "app").rglob("*.py")
+                     if p.name != "djev_shadow.py" and "djev_shadow.stats()" in p.read_text())
+    assert readers == [], (
+        f"stats() gained a reader under app/ that its docstring does not name: {readers}")
+
+
+def test_the_rerank_arm_says_it_applies_only_under_qmd_ranking():
+    """Clause 2, first half, on the code side: the arm's own docstring and the
+    note a caller gets must both name the ranker that lets it run."""
+    import inspect
+    assert "qmd" in inspect.getsource(vault._djev_rerank_pool), (
+        "`_djev_rerank_pool` no longer says it is reached only when qmd ranks")
+    assert "qmd" in vault.RECALL_ARM_UNUSED_NOTE, (
+        "the unused-knob note no longer tells the caller which ranker would "
+        "have applied its knob")
+
+
+def test_the_recall_schema_does_not_advertise_the_arm_knobs():
+    """Clause 2, schema half, as it stands after `d1b2f8e` took the seven eval
+    knobs out of the `vault_recall` schema: an undeclared knob is now reported
+    as stripped rather than silently obeyed, and the schema itself offers
+    neither arm knob. If one is re-added it has to carry the condition in its
+    own description — a parameter whose description promises an effect the
+    dispatch cannot produce is how this item got filed."""
+    import asyncio
+
+    tool = next(t for t in asyncio.run(vault.list_tools()) if t.name == "vault_recall")
+    props = tool.input_schema["properties"]
+    for knob in ("djev_rerank", "djev_rerank_top"):
+        assert knob not in props, (
+            f"{knob} is advertised as a `vault_recall` parameter again, and its "
+            "description cannot promise an effect the dispatch refuses whenever "
+            "djev is the ranker — which is the sentence #1372 was filed from. "
+            "It belongs in RECALL_EVAL_KNOBS, where a client that sends it gets "
+            "told the knob was stripped.")
+        assert knob in vault.RECALL_EVAL_KNOBS, (
+            f"{knob} left RECALL_EVAL_KNOBS, so call_tool would let a client set it")

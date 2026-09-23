@@ -53,7 +53,8 @@ routes a turn to it. That stays true.
  djev_rank             bounded queue → worker      RECALL_DJEV_RERANK (off)
  djev_decide           → shadow.jsonl              ← eval/run_eval.py --djev-rerank
  djev_status              ▲       ▲        ▲
-                        rerank  dedupe  entity      the three shadow seams
+                        rerank  dedupe  entity    3 seam sites; rerank only
+                                                  under the qmd kill switch
 
  eval/djev/schemas.py   frozen question shapes, floors, thresholds, gate_ready
  eval/djev/replay.py    calibration against recorded corpora
@@ -319,9 +320,10 @@ them (§4):
 ## 4. `app/djev.py` — the one client
 
 It is stdlib at its core, on `urllib.request`, because the callers are hot
-paths and leaves. The dedupe seam sits on the `backlog_write_task` write path,
-the rerank seam on every recall, and the entity sweep runs outside the backend
-entirely. `app/backlog_status.py` and `app/qmd_health.py` are the precedent.
+paths and leaves. The dedupe seam sits on the `backlog_write_task` write path
+and the entity sweep runs outside the backend entirely; the rerank seam is on the
+recall path but records nothing while djev is the ranker (§6.1).
+`app/backlog_status.py` and `app/qmd_health.py` are the precedent.
 httpx appears only behind the function-local import in `ask()`.
 
 | Function | Returns |
@@ -523,7 +525,9 @@ by accident.
   pinned-corpus child: every regression arm and noise run passes through
   that one place. A replay recorded as production traffic would poison
   the `label_mass` distribution the floors are read from. The rerank arm calls
-  `_vault_recall`, which is where the lead seam lives.
+  `_vault_recall`, which is where the `rerank` seam sits — reached only under
+  the qmd kill switch (§6.1), so the mute there is a precondition being kept
+  rather than a live leak being closed.
 
 Rows go to `~/.local/state/lloyd-djev/shadow.jsonl`. That is outside the repo,
 like the automod state dir, because a landing rewrites the tree while this file
@@ -548,14 +552,26 @@ Counters (`djev_status`): `enqueued`, `dropped`, `written`, `errors`,
 
 ## 6. The seams
 
-### 6.1 Reranking (lead) — `agent_mcp/vault.py`
+### 6.1 Reranking (rollback-only) — `agent_mcp/vault.py`
 
-The hook sits between the daily-log demote sort and the `[:limit]` slice,
-**unconditionally**. At that point `documents` holds qmd's reranked pool in the
+**This seam records nothing in production, and #1372 is the item that noticed.**
+Since #1336 put djev in as the recall's ranker, the dispatch's first arm is
+`if ranker == "djev":`, which ranks the pool and returns; this hook is the
+`elif reranker is None:` below it. It is **structurally dark**, not quiet —
+`shadow.jsonl` holds 34 `rerank` rows, newest 2026-09-21T08:57:40Z, while
+`dedupe` and `entity` in the same file have grown past 145 and 46 and still grow
+daily (probe 2026-09-23T19:07Z). Its one live window is the kill switch pulled
+to `"qmd"` with the engine still answering — a ranker rollback, which is exactly
+when djev's-order-beside-the-cross-encoder's is worth having. `djev_status` says
+all of this now: `shadow.seam_log` is rows and newest row per seam, and
+`shadow.structurally_dark` names the seam the dispatch itself cannot reach.
+
+When it does run, the hook sits between the daily-log demote sort and the
+`[:limit]` slice. At that point `documents` holds qmd's reranked pool in the
 order production returns it. It records the head of the pool
 (`RANK_DEFAULT_N`, 12), with `actual` = production's path order and
 `meta` = the query and qmd's scores. `_vault_recall` has one production caller,
-the `vault_recall` tool, which passes through it (`memory_ops.recall` was a
+the `vault_recall` tool (`memory_ops.recall` was a
 second until it was retired on 2026-09-23). `eval/run_eval.py` is another, muted
 one. An earlier estimate of "315-378 prefetch turns a
 day" had no verified caller behind it, and there is no prefetch caller. The
@@ -568,9 +584,15 @@ would have fired zero times in production and read as a quiet seam.
 `tests/test_djev_rerank_arm.py` asserts `_graph_rerank`'s source contains no
 `djev` at all.
 
-**The arm and the shadow are exclusive.** With `djev_rerank` on, djev *is* the
-decision, and a row comparing djev's ordering against djev's ordering is not an
-observation.
+**The arm, the ranker and the shadow are mutually exclusive**, and that part is
+deliberate: with `djev_rerank` on, djev *is* the decision, and a row comparing
+djev's ordering against djev's ordering is not an observation. The defect was
+never the exclusivity — it was that three descriptions, a schema parameter and
+one source-text test all described the pre-#1336 world while it held, so the
+seam went dark with no signal anywhere. `tests/test_djev_rerank_arm.py` now
+establishes reachability by running the recall and counting recorder calls: no
+row under djev-as-ranker, exactly one under qmd-as-ranker, none in the
+cross-encoder fallback.
 
 ### 6.2 Backlog dedupe — `agent_mcp/backlog.py::_dedupe`
 

@@ -207,3 +207,147 @@ def test_status_shows_which_schemas_have_a_floor(monkeypatch):
     assert out["schemas"]["entity"]["label_mass_floor"] is not None
     # And that none of them may gate a production decision yet.
     assert not any(s.get("gate_ready") for s in out["schemas"].values())
+
+
+# ---------------------------------------------------------------------------
+# A dark seam vs a quiet one (#1372 clause 5)
+#
+# What the route reported before this: `seams: {rerank: true, dedupe: true,
+# entity: true}` — the per-seam SWITCH — and one whole-file `log_rows`. On
+# 2026-09-22 that read as three live seams and "224 rows", while `rerank` had
+# recorded nothing since 2026-09-21T08:57:40Z and its hook could not have.
+# Every surface that reads this route therefore had no way to tell a seam that
+# cannot fire from a day with nothing to record.
+# ---------------------------------------------------------------------------
+
+def _shadow_log(tmp_path, monkeypatch, rows):
+    """A `shadow.jsonl` of `rows`, pointed at `SHADOW_LOG`.
+
+    `ts` is an epoch FLOAT because that is what `_process` writes. A UTC-day
+    filter on `str(r["ts"])` selects zero rows and reads as "nothing happened"
+    — the `promotions.jsonl` trap, in this file."""
+    import json as _json
+    from app import djev_shadow
+    log = tmp_path / "shadow.jsonl"
+    log.write_text("".join(_json.dumps(r) + "\n" for r in rows))
+    monkeypatch.setattr(djev_shadow, "SHADOW_LOG", log)
+    return log
+
+
+def test_status_reports_each_seam_s_own_rows_and_last_row(tmp_path, monkeypatch):
+    """Per-seam rows and last-row time, so the stale seam is visible beside the
+    live ones instead of hidden inside one whole-file count."""
+    import time as _time
+    from datetime import datetime, timezone
+    monkeypatch.setattr(djev, "reachable", lambda *a, **k: True)
+    now = _time.time()
+    _shadow_log(tmp_path, monkeypatch, [
+        {"ts": now - 90 * 86400, "seam": "rerank", "actual": ["a.md", "b.md"]},
+        {"ts": now - 120, "seam": "dedupe"},
+        {"ts": now - 60, "seam": "dedupe"},
+        {"ts": now - 30, "seam": "entity"},
+    ])
+    out = _call("djev_status", {})
+    seam_log = out["shadow"]["seam_log"]
+    assert seam_log["rerank"]["rows"] == 1
+    assert seam_log["dedupe"]["rows"] == 2
+    assert seam_log["rerank"]["last_row_utc"] == datetime.fromtimestamp(
+        now - 90 * 86400, timezone.utc).isoformat(timespec="seconds")
+    assert seam_log["rerank"]["dark"] is True, (
+        "a seam whose last row is 90 days old has to read as dark")
+    assert seam_log["dedupe"]["dark"] is False, (
+        "a seam with a row two minutes ago must not read as dark alongside it")
+
+
+def test_a_seam_that_has_never_recorded_reads_as_dark(tmp_path, monkeypatch):
+    """A seam absent from the log is the same verdict, not a missing entry:
+    `rows: 0`, and dark — not an absent key a consumer has to guess about."""
+    import time as _time
+    from app import djev_shadow
+    monkeypatch.setattr(djev, "reachable", lambda *a, **k: True)
+    _shadow_log(tmp_path, monkeypatch, [{"ts": _time.time() - 5, "seam": "dedupe"}])
+    out = _call("djev_status", {})
+    seam_log = out["shadow"]["seam_log"]
+    assert set(seam_log) == set(djev_shadow.SEAMS)
+    assert seam_log["entity"]["rows"] == 0
+    assert seam_log["entity"]["last_row_utc"] is None
+    assert seam_log["entity"]["dark"] is True
+
+
+def test_malformed_rows_are_skipped_not_counted(tmp_path, monkeypatch):
+    """A row the writer never wrote is skipped the way `_write`'s own reader
+    skips it, and a seam left with nothing is dark — not an error, because the
+    log itself opened fine."""
+    import time as _time
+    monkeypatch.setattr(djev, "reachable", lambda *a, **k: True)
+    log = tmp_path / "shadow.jsonl"
+    log.write_text("not json at all\n"
+                   + json.dumps({"ts": _time.time(), "seam": "dedupe"}) + "\n")
+    from app import djev_shadow
+    monkeypatch.setattr(djev_shadow, "SHADOW_LOG", log)
+    out = _call("djev_status", {})
+    seam_log = out["shadow"]["seam_log"]
+    assert seam_log["rerank"]["rows"] == 0
+    assert seam_log["dedupe"]["rows"] == 1
+
+
+def test_an_unreadable_log_is_unknown_and_not_dark(tmp_path, monkeypatch):
+    """`_log_rows` already answers `None` rather than 0 for a log it cannot
+    read, because an unreadable log and an empty one are different answers. The
+    per-seam report keeps that: a log that cannot be opened must not become a
+    verdict that three seams are dead."""
+    monkeypatch.setattr(djev, "reachable", lambda *a, **k: True)
+    from app import djev_shadow
+    log = tmp_path / "shadow.jsonl"
+    log.mkdir()                      # exists, and cannot be opened as a file
+    monkeypatch.setattr(djev_shadow, "SHADOW_LOG", log)
+    out = _call("djev_status", {})
+    rerank = out["shadow"]["seam_log"]["rerank"]
+    assert rerank["rows"] is None
+    assert rerank["dark"] is None
+
+
+def test_status_names_a_seam_whose_hook_cannot_fire(monkeypatch):
+    """Rows and ages cannot answer "cannot fire": a dead hook and a day with
+    nothing to record both look like an empty stream. So the route also names
+    the seam the current dispatch makes unreachable — under production's
+    `RECALL_RERANKER = "djev"` with the engine answering, that is `rerank`, and
+    it is why its row count is stale rather than quiet."""
+    from agent_mcp import vault
+    monkeypatch.setattr(djev, "reachable", lambda *a, **k: True)
+    monkeypatch.setattr(djev, "enabled", lambda: True)
+    monkeypatch.setattr(vault, "RECALL_RERANKER", "djev")
+    out = _call("djev_status", {})
+    dark = out["shadow"]["structurally_dark"]
+    assert "rerank" in dark, "the route no longer says which seam cannot fire"
+    assert "qmd" in dark["rerank"], "the verdict has to name the switch that lifts it"
+    assert "dedupe" not in dark and "entity" not in dark
+
+
+def test_the_rerank_seam_is_not_structurally_dark_under_the_kill_switch(monkeypatch):
+    """Pull the kill switch, keep the engine answering, and the hook is
+    reachable — so the route has to stop calling it dark. A surface built to
+    distinguish dark from quiet is itself a stale claim if it keeps asserting
+    one. The engine stub stays in this test so the only thing that moved between
+    it and the one above is the switch."""
+    from agent_mcp import vault
+    monkeypatch.setattr(djev, "reachable", lambda *a, **k: True)
+    monkeypatch.setattr(djev, "enabled", lambda: True)
+    monkeypatch.setattr(vault, "RECALL_RERANKER", "qmd")
+    out = _call("djev_status", {})
+    assert "rerank" not in out["shadow"]["structurally_dark"]
+
+
+def test_a_status_that_cannot_read_the_ranker_says_so(monkeypatch):
+    """The ranker read is best-effort for the reason the schema read is: a
+    status route that dies because a sibling module moved is worse than one
+    that admits it cannot tell. But "cannot tell" is not `{}`, which would
+    read as "no seam is structurally dark" — the false verdict this whole
+    section exists to remove."""
+    from agent_mcp import vault
+    monkeypatch.setattr(djev, "reachable", lambda *a, **k: True)
+    monkeypatch.setattr(vault, "RECALL_RERANKER", "djev")
+    monkeypatch.setattr(vault, "recall_reranker",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no config")))
+    out = _call("djev_status", {})
+    assert "error" in out["shadow"]["structurally_dark"]

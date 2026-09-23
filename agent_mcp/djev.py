@@ -207,10 +207,26 @@ async def _status(args: dict) -> str:
     try:
         from app import djev_shadow
         body["shadow"] = djev_shadow.stats()
+        # `seams` is the per-seam SWITCH. Read alone it is exactly the sentence
+        # that hid #1372: three `true`s and a whole-file `log_rows`, while the
+        # rerank hook had been unreachable since 2026-09-21. `seam_log` is the
+        # traffic, per seam; `structurally_dark` below is the reachability.
         body["shadow"]["seams"] = {s: djev_shadow.seam_enabled(s)
                                    for s in djev_shadow.SEAMS}
     except Exception as exc:  # noqa: BLE001 — status never fails on a part
         body["shadow"] = {"error": f"{type(exc).__name__}: {exc}"}
+    if "error" not in body["shadow"]:
+        try:
+            # Owned by the module that owns the dispatch, not by the recorder:
+            # `app/djev_shadow.py` cannot know what `vault_recall` reaches. A
+            # verdict that cannot be re-measured belongs in neither file, so a
+            # read that fails says it cannot tell instead of answering `{}` —
+            # which would read as "no seam is dark", the false verdict this
+            # whole report exists to remove.
+            from agent_mcp import vault
+            body["shadow"]["structurally_dark"] = vault.shadow_seams_dark_by_dispatch()
+        except Exception as exc:  # noqa: BLE001 — status never fails on a part
+            body["shadow"]["structurally_dark"] = {"error": f"{type(exc).__name__}: {exc}"}
     try:
         # `eval/` is not a package the aggregator normally imports, so this is
         # best-effort by design: a status route that 500s because a sibling

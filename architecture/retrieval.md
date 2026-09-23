@@ -77,12 +77,18 @@ that matches the earlier pin query for query.
   hands it. Rerank-off pool ceilings (does the pool contain ANY expected doc)
   are cheap and bound every reranker arm.
 - **A ranker that becomes the decision stops being observable.** The djev
-  `rerank` shadow seam is on an `elif` behind `if ranker == "djev"`
-  (`agent_mcp/vault.py:1889-1903`), so since #1336 it records nothing:
+  `rerank` shadow seam is on an `elif` behind `if ranker == "djev"` in
+  `_vault_recall` — cited here as a line range until this round's own change
+  moved the dispatch by ~120 lines, which is the lesson, not a footnote — so
+  since #1336 it records nothing:
   `~/.local/state/lloyd-djev/shadow.jsonl` held 30 rerank rows on 09-20, 4 on
   09-21, none on 09-22, while the `dedupe` and `entity` seams kept flowing, and
   the same dispatch ignores a caller's `djev_rerank: true` (#1372). Volume, not
-  an error, is how this failure shows.
+  an error, is how this failure shows. Fixed rather than only noted: a recall
+  that was sent an inert knob names it in its own result
+  (`RECALL_UNUSED_KNOBS_KEY`), and `djev_status` reports `shadow.seam_log` per
+  seam plus `shadow.structurally_dark` for the seam the dispatch itself cannot
+  reach, so the dark read no longer needs this bullet to survive.
 
 ### 2.1 The gold set was repaired on 2026-09-21
 
