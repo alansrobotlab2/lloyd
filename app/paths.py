@@ -108,6 +108,20 @@ VAULT_FEEDS_DIR = VAULT_DERIVED_ROOT / "memory" / "feeds"
 # it is.
 IS_WORKTREE = (LLOYD_HOME / ".git").is_file()
 
+# The account's home as the passwd entry names it, which `$HOME` no longer does
+# inside an automod gate: since 2026-09-22 the rungs that run candidate code set
+# `HOME=<round>/home`, a symlink farm whose `lloyd` IS the worktree
+# (`scripts/automod/worktree.py::ensure_round_home`). So `Path.home() / "lloyd"`
+# names the worktree there, and a reader that falls back to "the live checkout"
+# through it falls back to the tree it just found empty. A READ of live data
+# (sessions, logs, baselines) goes through this; nothing that writes should.
+try:
+    import pwd as _pwd
+    ACCOUNT_HOME = Path(_pwd.getpwuid(os.getuid()).pw_dir)
+except (ImportError, KeyError):
+    ACCOUNT_HOME = Path.home()
+LIVE_CHECKOUT = ACCOUNT_HOME / "lloyd"
+
 
 def describe_tree() -> str:
     """One line naming the tree these paths resolve in: `… tree=live` or `… tree=worktree`.

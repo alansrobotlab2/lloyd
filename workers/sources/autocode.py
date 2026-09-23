@@ -1001,7 +1001,10 @@ def _rounds_about_to_land(worktrees: list[str]) -> list[str]:
     from scripts.automod import state as S
     out: list[str] = []
     for raw in worktrees:
-        rid = next((part for part in Path(raw).parts if part.startswith("SM_")), "")
+        # The id nearest the leaf (`<root>/SM_x/home/lloyd`): inside a gate the
+        # root itself sits under the gating round's `SM_…/home`, so the first
+        # `SM_` component names the round running the tests, not this one.
+        rid = next((part for part in reversed(Path(raw).parts) if part.startswith("SM_")), "")
         if not rid:
             continue
         try:

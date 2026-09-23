@@ -287,7 +287,11 @@ def lloyd_root() -> Path:
         return Path(env).expanduser()
     if _has_sessions(REPO):
         return REPO
-    return Path.home() / "lloyd"
+    # Not `Path.home() / "lloyd"`: inside a gate that IS the worktree (see
+    # `app.paths.LIVE_CHECKOUT`), so the fallback would land on the tree it
+    # just found empty.
+    from app.paths import LIVE_CHECKOUT
+    return LIVE_CHECKOUT
 
 
 @dataclass

@@ -378,6 +378,9 @@ class NightlyExtraction:
         to all day, so it never settles.
         """
         cfg = _load_pipeline_config()
+        # Resolved like each entry below, or a symlinked `~/obsidian` (the gate's
+        # round home) puts every resolved entry "outside the vault".
+        vault = VAULT.resolve()
         roots = []
         for raw in (cfg.get("sources", {}).get("paths") or []):
             path = Path(str(raw)).expanduser()
@@ -388,7 +391,7 @@ class NightlyExtraction:
             except OSError:
                 continue
             # Never leave the vault, whatever the config says.
-            if path == VAULT or VAULT in path.parents:
+            if path == vault or vault in path.parents:
                 roots.append(path)
             else:
                 print(f"  ⚠ sources.paths entry outside the vault, ignored: {raw}")

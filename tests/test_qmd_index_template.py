@@ -24,6 +24,8 @@ from pathlib import Path
 
 import yaml
 
+from app.paths import ACCOUNT_HOME
+
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = ROOT / "agent-services/conf/qmd-index.yml"
 SETUP = ROOT / "SETUP.md"
@@ -218,7 +220,7 @@ def _documented_paths(section: str, colls: dict) -> set[str]:
     string-matches — a test that only accepted one form would fail the doc for a
     style choice and pass it for a wrong path.
     """
-    home = str(Path.home())
+    home = str(ACCOUNT_HOME)  # the template names paths absolutely, off the account
     found = set()
     for spec in colls.values():
         p = str(spec["path"])
@@ -240,7 +242,7 @@ def test_the_patched_setup_md_accounts_for_every_collection_the_template_defines
     tmpl, setup = _patched(tmp_path)
     colls = yaml.safe_load(tmpl.read_text())["collections"]
     section = _collections_section(setup.read_text())
-    home = str(Path.home())
+    home = str(ACCOUNT_HOME)  # the template names paths absolutely, off the account
     for name, spec in colls.items():
         assert f"`{name}`" in section, f"{name} not accounted for"
         p = str(spec["path"])

@@ -51,8 +51,13 @@ from pathlib import Path
 
 import yaml
 
+from app.paths import ACCOUNT_HOME, LIVE_CHECKOUT
+
+# The vault is read through `$HOME` (a symlink to the real one inside a gate); the
+# sync log and the out-of-vault blob are production files named absolutely, so they
+# come off the account home, which a gate's `HOME=<round>/home` does not move.
 VAULT = Path.home() / "obsidian"
-SYNC_LOG_DIR = Path.home() / "lloyd" / "agent-services" / "logs"
+SYNC_LOG_DIR = LIVE_CHECKOUT / "agent-services" / "logs"
 SYNC_ERR = SYNC_LOG_DIR / "agent-obsidian-sync.err"
 
 #: Obsidian Sync's per-file ceiling. The client divides by 1024**2: it printed a
@@ -64,7 +69,7 @@ REF_DIR = "projects/lloyd/voice/references/dave_cullen"
 BLOB_REL = f"{REF_DIR}/source_nS8PvZv3v0U.webm"
 POINTER_REL = f"{REF_DIR}/source-blob-location.md"
 POINTER = VAULT / POINTER_REL
-OUT_OF_VAULT_BLOB = Path.home() / "vault-external" / BLOB_REL
+OUT_OF_VAULT_BLOB = ACCOUNT_HOME / "vault-external" / BLOB_REL
 SOURCE_NOTE = VAULT / "projects/lloyd/voice/voice-source-dave-cullen.md"
 KNOWLEDGE_NOTE = Path(os.environ.get("LLOYD_SYNC_NOTE") or
                       VAULT / "knowledge/software/obsidian-headless-sync-quota-silent-failure.md")
@@ -129,14 +134,16 @@ def over_cap_files(root: Path, limit: int = SYNC_MAX_BYTES) -> list[tuple[int, P
 
 def test_acceptance_find_pipeline_reports_no_over_cap_file():
     """The literal acceptance probe: no file under `~/obsidian` outside `.git` is over 5 MiB."""
-    probe = (f'find ~/obsidian -path ~/obsidian/.git -prune -o -type f '
+    # `-H`: follow `~/obsidian` itself when it is a symlink (a gate's round home),
+    # which plain `find` lists as one entry and never enters.
+    probe = (f'find -H ~/obsidian -path ~/obsidian/.git -prune -o -type f '
              f'-size +{SYNC_MAX_BYTES}c -printf \'%s\\t%p\\n\'')
     run = _bash(probe)
     assert run.returncode == 0, f"find failed: {run.stderr[:400]}"
     assert run.stdout.strip() == "", f"files over Sync's ceiling are still in the vault:\n{run.stdout}"
     # A green verdict on an empty walk proves nothing — #1028 is exactly this shape — so the
     # same command without the size filter has to show a real tree behind it.
-    walk = _bash('find ~/obsidian -path ~/obsidian/.git -prune -o -type f -printf "%p\\n" | wc -l')
+    walk = _bash('find -H ~/obsidian -path ~/obsidian/.git -prune -o -type f -printf "%p\\n" | wc -l')
     n_files = int(walk.stdout.strip())
     assert n_files > 1000, f"the vault walk saw only {n_files} files — this check saw nothing"
 

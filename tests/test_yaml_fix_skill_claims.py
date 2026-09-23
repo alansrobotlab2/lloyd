@@ -59,12 +59,15 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.paths import LIVE_CHECKOUT  # noqa: E402
+
 SKILLS_DIR = Path.home() / "obsidian" / "skills"
 YAML_SKILL = SKILLS_DIR / "autonomy-pipeline-yaml-fix" / "SKILL.md"
 PIPELINE_SKILL = SKILLS_DIR / "autonomy-data-pipeline" / "SKILL.md"
 # The venv lives in the live checkout, not in a round's worktree (it is
-# gitignored), so it is resolved from $HOME the way the skill prose spells it.
-VENV_PY = Path.home() / "lloyd" / ".venvs" / "lloyd" / "bin" / "python"
+# gitignored). Resolved off the account home, not $HOME: a gate's
+# `HOME=<round>/home` makes `~/lloyd` the worktree, which has no venv.
+VENV_PY = LIVE_CHECKOUT / ".venvs" / "lloyd" / "bin" / "python"
 
 # The literal strings the acceptance grep looks for across the skills tree.
 ABSENCE_CLAIMS = (

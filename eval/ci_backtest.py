@@ -296,7 +296,10 @@ def default_baselines_dir() -> Path:
     own = ROOT / "eval" / "baselines"
     if any(own.glob("nightly-*.json")):
         return own
-    return Path.home() / "lloyd" / "eval" / "baselines"
+    # Off the account home: a gate's `HOME=<round>/home` makes `~/lloyd` the
+    # worktree whose empty baselines sent us here (`app.paths.LIVE_CHECKOUT`).
+    from app.paths import LIVE_CHECKOUT
+    return LIVE_CHECKOUT / "eval" / "baselines"
 
 
 def render(rep: dict) -> str:
