@@ -257,7 +257,15 @@ async def run_query(
         num_turns = 0
         stop_reason = "stop"
         context_overflow_recoveries = 0
-        multimodal_recoveries = 0
+        # One multimodal rejection latches image attachment off for the rest of
+        # THIS run (#1419). The engine's 400 is per request; a desktop turn
+        # takes more than one capture, and `_tool_history_message` attaches
+        # `_image_refs` to every later result whose ref is route "native" — so
+        # the next screenshot put an image back on the wire and the next 400
+        # found the one-retry-per-turn counter spent, which re-raised out of
+        # `run_query` and ended the turn. One bit, flipped by the first
+        # rejection, is what makes the retry the last refusal this turn sees.
+        images_latched = False
         max_context_overflow_recoveries = 2
         echo_guard_reprompts = 0
         # Initialised before the loop: a turn that breaks on its first check
@@ -514,16 +522,31 @@ async def run_query(
             except MultimodalRejectedError as exc:
                 # The engine was sent a screenshot it cannot take — a slot
                 # whose `supports_vision` claims more than it serves. Strip
-                # every image from the turn and retry once; the tool text
-                # (element lists, paths) still carries the work.
-                if multimodal_recoveries >= 1:
+                # every image from the turn and retry; the tool text
+                # (element lists, paths) still carries the work. Stripping the
+                # messages is only half of it: the next capture would attach
+                # refs again through the very code that produced this one, so
+                # the flip latches attachment off as well (#1419).
+                if images_latched:
+                    # Attachment is already off and the engine still saw an
+                    # image, so this is a part the strip cannot reach — a
+                    # caller-supplied image, not a tool ref. Retrying would
+                    # answer a 400 with the same 400, so this stays the one
+                    # case that ends the turn.
                     raise
-                multimodal_recoveries += 1
+                images_latched = True
                 from app.harness.tool_images import strip_all_image_refs
                 n = strip_all_image_refs(chat_messages)
+                # `exc` carries the engine's 400 body, and it goes in the line
+                # because `looks_like_multimodal_rejection` is a substring test:
+                # any 400 mentioning "image" on a payload that carries refs is
+                # classified as a vision refusal, and once the latch makes that
+                # non-fatal the body is the only trace a misclassification left.
                 logger.error(
                     "loop: %s — stripped images from %d message(s) and retrying; "
-                    "set models.%s.supports_vision: false", exc, n, options.model,
+                    "image parts stay off for the rest of this turn; set "
+                    "models.%s.supports_vision: false",
+                    exc, n, options.model,
                 )
                 yield events.stream_raw("", error=f"multimodal_rejected: {exc}")
                 num_turns -= 1
@@ -794,7 +817,8 @@ async def run_query(
                     evt = results.get(tc["id"])
                     if evt is None:
                         continue
-                    chat_messages.append(_tool_history_message(tc["id"], evt))
+                    chat_messages.append(_tool_history_message(
+                        tc["id"], evt, allow_images=not images_latched))
                 _reorder_batch_messages(chat_messages, batch_base)
                 _cap_images(chat_messages, batch_base)
                 tool_calls_committed_done = True
@@ -850,7 +874,8 @@ async def run_query(
                 if options.hooks is not None:
                     await options.hooks.fire_on_event(result_evt)
 
-                chat_messages.append(_tool_history_message(tc["id"], result_evt))
+                chat_messages.append(_tool_history_message(
+                    tc["id"], result_evt, allow_images=not images_latched))
 
             if not tool_calls_committed_done:
                 _reorder_batch_messages(chat_messages, batch_base)
@@ -1943,13 +1968,21 @@ def _batch_is_read_only(tool_calls: list[dict[str, Any]],
     return True
 
 
-def _tool_history_message(call_id: str, evt: dict[str, Any]) -> dict[str, Any]:
+def _tool_history_message(call_id: str, evt: dict[str, Any], *,
+                          allow_images: bool = True) -> dict[str, Any]:
     """The ``role:"tool"`` history message for one result.
 
     Content stays a string. Images the turn's model can see ride on the
     private ``_image_refs`` key and become ``image_url`` parts only at send
     time (``tool_images.wire_messages``); the refs are small, so the history
     list, Inner Voice's handle on it and every estimate stay cheap.
+
+    ``allow_images=False`` is the turn whose image input was already refused
+    (#1419). Attaching refs there is what used to kill it: the route comes from
+    static config, which a rejection never changes, so the next capture would
+    put an image back on the wire and the next 400 would end the turn. The
+    result's text still carries the element list; the note names the file the
+    screenshot was saved to, which is the other thing the turn can act on.
     """
     msg: dict[str, Any] = {
         "role": "tool",
@@ -1961,12 +1994,20 @@ def _tool_history_message(call_id: str, evt: dict[str, Any]) -> dict[str, Any]:
         if isinstance(r, dict) and r.get("route") == "native"
         and not r.get("deduped_from") and not r.get("described")
     ]
-    if refs:
-        msg["_image_refs"] = [
-            {k: r[k] for k in ("path", "sha256", "mime", "width", "height", "bytes")
-             if k in r}
-            for r in refs
-        ]
+    if not refs:
+        return msg
+    if not allow_images:
+        where = refs[0].get("path") or "the tool-results directory"
+        msg["content"] = (
+            f"{msg['content']}\n[screenshot kept on disk at {where}; this turn's "
+            "image input was refused, so it was not shown - drive by the "
+            "element list and that file]")
+        return msg
+    msg["_image_refs"] = [
+        {k: r[k] for k in ("path", "sha256", "mime", "width", "height", "bytes")
+         if k in r}
+        for r in refs
+    ]
     return msg
 
 

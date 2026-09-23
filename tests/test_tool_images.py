@@ -235,6 +235,37 @@ def test_tool_history_message_keeps_only_native_unrepeated_refs():
     assert "_image_refs" not in _tool_history_message("c2", {"content": "t"})
 
 
+def test_an_unrejected_turn_still_puts_native_refs_on_the_wire(cfg):
+    """#1419's non-regression: with no rejection in the run, nothing changed.
+
+    The latch is a parameter defaulted to open, so a turn that was never
+    refused must still ride refs into history and still have them become
+    ``image_url`` parts at send time — otherwise the fix for the second
+    rejection would simply have been "never send screenshots".
+    """
+    from app.harness.loop import _tool_history_message
+    _, refs, hist = _shape("seer")
+    msg = _tool_history_message("c9", {"content": "capture", "images": refs})
+    assert [r["path"] for r in msg["_image_refs"]] == [r["path"] for r in hist]
+    assert msg["content"] == "capture"          # no suppression note
+    out = ti.wire_messages([{"role": "user", "content": "hi"}, msg])
+    assert ti.payload_has_images(out)
+    assert out[1]["content"][1]["type"] == "image_url"
+    assert "_image_refs" not in out[1]          # the private key never ships
+
+
+def test_a_latched_turn_keeps_the_text_and_drops_the_refs(cfg):
+    """The same event one rejection later: text and path, no refs, no parts."""
+    from app.harness.loop import _tool_history_message
+    _, refs, _hist = _shape("seer")
+    msg = _tool_history_message("c9", {"content": "capture", "images": refs},
+                               allow_images=False)
+    assert "_image_refs" not in msg
+    assert "capture" in msg["content"] and ".png" in msg["content"]
+    out = ti.wire_messages([{"role": "user", "content": "hi"}, msg])
+    assert not ti.payload_has_images(out)
+
+
 def test_the_session_row_carries_refs_never_bytes():
     from app.transcript_entries import build_tool_result_entry
     row = build_tool_result_entry("c1", "t", timestamp="T", images=[

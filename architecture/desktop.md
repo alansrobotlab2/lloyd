@@ -201,10 +201,15 @@ This is what made any of the above visible to a model, and it also fixed
     described with Hermes's prompt.
   - **drop** otherwise, with a note to the model.
 - A 400 that names image input raises `MultimodalRejectedError`. The loop
-  strips every image and retries once — once *per turn*, while the rejection is
-  per request: `_tool_history_message` re-attaches refs to every later
-  image-bearing result, so a second capture in the same turn re-arms the
-  condition and the next rejection ends the turn (#1419).
+  strips every image, retries, and latches image attachment off for the rest of
+  the turn: `_tool_history_message` keeps a later capture's element list and the
+  path it saved to but attaches no more `_image_refs`, so a second screenshot
+  cannot put an image back on the wire and end the turn (#1419). The flip logs
+  one line — the advice to set `supports_vision: false` plus the engine's 400
+  body, which is the only trace left of a 400 that was never about vision
+  (`looks_like_multimodal_rejection` is a substring test). A refusal that
+  arrives with the latch already down names an image the strip cannot reach, and
+  still ends the turn.
 - Budget:
   - At most 20 images or 24 MiB per request. Past either, the oldest 8
     image-bearing messages are evicted to `[screenshot removed to save
