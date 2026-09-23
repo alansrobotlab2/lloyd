@@ -1813,37 +1813,56 @@ def test_the_live_corpus_emits_one_file_per_sequence_pattern(tmp_path):
     # `test_a_present_corpus_that_admits_nothing_fails_rather_than_skips` pins, so no
     # run goes green on the corpus not having been read. Read-only; the
     # emitted files go into `tmp_path`.
+    #
+    # Checking that root is not the same act as reading it, and until #1403 this
+    # guard did the first and then the other. `load_trajectories` takes no path
+    # argument: it reads `mt.TRAJECTORY_DIR`, which `scripts/mine-trajectories.py`
+    # derives from `app.paths.PIPELINE_DIR` and which is therefore
+    # CHECKOUT-relative — in a round's worktree that is
+    # `<worktree>/.lloyd-data/_pipeline/trajectories`, absent while the real
+    # corpus two directories away is full. The comment above, that the
+    # worktree-relative read was fixed, was true of `LIVE_CORPUS` and false of
+    # what the guard then loaded, and the node red-blocked every promotion from a
+    # worktree on 2026-09-23 reading 0 rows (#1403 cause B). Its three sibling
+    # live guards bind the miner; this is that binding, and
+    # `test_a_guard_that_reads_a_different_path_than_it_checks_is_caught` is what
+    # keeps it from silently un-binding again.
     require_live_data(LIVE_CORPUS, "live trajectory corpus")
-    rows = mt.load_trajectories(days=7, agent_filter="all", exclude_machine=False)
-    assert rows, f"live corpus at {LIVE_CORPUS} loaded no rows"
-    seqs = mt.mine_sequence_patterns(rows, threshold=2)
-    assert seqs, "no sequence patterns mined, so the assertions below are vacuous"
-    admitted = [p for p in seqs if mt.is_emittable(p)]
-    refused = [p for p in seqs if not mt.is_emittable(p)]
-    assert admitted and refused, (
-        f"the live window must hold both kinds — {len(admitted)} admitted, "
-        f"{len(refused)} refused — or this test compares one empty set with another")
+    previous = mt.TRAJECTORY_DIR
+    mt.set_trajectory_dir(LIVE_CORPUS)
+    try:
+        rows = mt.load_trajectories(days=7, agent_filter="all", exclude_machine=False)
+        assert rows, f"live corpus at {LIVE_CORPUS} loaded no rows"
+        seqs = mt.mine_sequence_patterns(rows, threshold=2)
+        assert seqs, "no sequence patterns mined, so the assertions below are vacuous"
+        admitted = [p for p in seqs if mt.is_emittable(p)]
+        refused = [p for p in seqs if not mt.is_emittable(p)]
+        assert admitted and refused, (
+            f"the live window must hold both kinds — {len(admitted)} admitted, "
+            f"{len(refused)} refused — or this test compares one empty set with another")
 
-    target = tmp_path / "candidates"
-    paths = mt.emit_candidates(seqs, target)
-    seq_paths = [p for p in paths if p.name.startswith("candidate-seq-")]
-    seq_files = list(target.glob("candidate-seq-*.md"))
+        target = tmp_path / "candidates"
+        paths = mt.emit_candidates(seqs, target)
+        seq_paths = [p for p in paths if p.name.startswith("candidate-seq-")]
+        seq_files = list(target.glob("candidate-seq-*.md"))
 
-    assert len(seq_paths) == len(set(seq_paths)), "a path appeared twice"
-    assert len(seq_files) == len(admitted) == len(seq_paths), (
-        f"{len(seq_files)} files for {len(admitted)} admitted patterns")
-    fields = [pattern_field_of(p) for p in seq_files]
-    assert len(set(fields)) == len(fields), "two files share a pattern: field"
+        assert len(seq_paths) == len(set(seq_paths)), "a path appeared twice"
+        assert len(seq_files) == len(admitted) == len(seq_paths), (
+            f"{len(seq_files)} files for {len(admitted)} admitted patterns")
+        fields = [pattern_field_of(p) for p in seq_files]
+        assert len(set(fields)) == len(fields), "two files share a pattern: field"
 
-    # The refused half, stated over the corpus rather than over a fixture: a key
-    # the gate refused must not appear as a `pattern:` field in any file that run
-    # wrote. A rule that admitted every sequence and a rule that admitted none
-    # both keep the equality above plausible; this is what separates them.
-    refused_keys = {mt.candidate_pattern_key(p) for p in refused}
-    assert refused_keys, "the corpus mined no refused sequence pattern"
-    assert not (refused_keys & set(fields)), (
-        f"{sorted(refused_keys & set(fields))[:3]}: a sequence with no failing "
-        "step in it still reached a candidate file")
+        # The refused half, stated over the corpus rather than over a fixture: a key
+        # the gate refused must not appear as a `pattern:` field in any file that run
+        # wrote. A rule that admitted every sequence and a rule that admitted none
+        # both keep the equality above plausible; this is what separates them.
+        refused_keys = {mt.candidate_pattern_key(p) for p in refused}
+        assert refused_keys, "the corpus mined no refused sequence pattern"
+        assert not (refused_keys & set(fields)), (
+            f"{sorted(refused_keys & set(fields))[:3]}: a sequence with no failing "
+            "step in it still reached a candidate file")
+    finally:
+        mt.set_trajectory_dir(previous)
 
 
 # ── one candidate per key, merged evidence (#515) ────────────────────────────
@@ -1876,6 +1895,44 @@ def merge_rows():
         rows.append(error_traj(f"ls{i}", MERGE_TOOL, "not_found", "protocol",
                                {"command": "ls -la"}))
     return rows
+
+
+def merge_rows_two_keys():
+    """`merge_rows()` plus a SECOND colliding key, so the mined corpus reaches exactly
+    `MERGE_MULTI_SIGNATURE_KEYS_MIN` = 2 keys with more than one signature behind them:
+    `Mergetest515/not_found` and `Mergetest1403/logic`, each with two distinct
+    `params_signature`s corroborated across separate sessions.
+
+    This is the smallest corpus on which the merged-total assertions of
+    `test_a_live_week_emits_one_merged_candidate_per_error_key` are evidence at all,
+    which is precisely why it is the corpus the volume skip must NOT fire on. It is the
+    positive control beside `test_a_corpus_whose_error_keys_collide_on_one_key_skips_naming_both_numbers`:
+    one fixture skips, this one must run, and a floor that was lowered to 1 or 2
+    arbitrarily would let both pass for the wrong reason.
+    """
+    rows = merge_rows()
+    for i in (1, 2):
+        rows.append(error_traj(f"head{i}", "Mergetest1403", "logic", "protocol",
+                               {"command": "head -5 notes.md"}))
+    for i in (1, 2, 3):
+        rows.append(error_traj(f"wc{i}", "Mergetest1403", "logic", "protocol",
+                               {"command": "wc -l notes.md"}))
+    return rows
+
+
+def sequence_rows():
+    """Rows that give `test_the_live_corpus_emits_one_file_per_sequence_pattern` both
+    halves of its own vacuity guard: `retrying_traj` n-grams clear the #1181 emission
+    gate (a failing step followed by the same call again), `adjacent_next_step_traj`
+    n-grams are the refused half (a failing step followed by a DIFFERENT call touching
+    the same file). Three sessions each, so both mine at the guard's threshold of 2.
+
+    Used by `test_a_guard_that_reads_a_different_path_than_it_checks_is_caught`, where
+    the point is that every assertion in the guard CAN pass — so the only thing left to
+    break it is reading a directory other than the one it checked.
+    """
+    return ([retrying_traj(f"seqpin1403_{i}") for i in (1, 2, 3)]
+            + [adjacent_next_step_traj(f"seqpin1403_{i}") for i in (1, 2, 3)])
 
 
 def frontmatter_field(body: str, field: str) -> str:
@@ -2280,11 +2337,16 @@ def test_a_live_week_emits_one_merged_candidate_per_error_key(tmp_path):
     2026-09-14 the same run returned 73 paths for 25 files and `Bash/logic` reported
     one bucket while gating 19.
 
-    The corpus is skipped when the path does not exist (#1377 — `_pipeline/` is
-    gitignored, and after the 2026-09-22 wipe it did not exist on the machine that
-    runs this), and everything below that skip runs whenever it does: a green run over
-    an empty pattern list still proves nothing about a collision, which is what
-    `test_a_corpus_whose_error_keys_never_collide_fails_rather_than_skips` pins.
+    Two tiers of "not enough corpus", with two different answers, and conflating
+    them is what made this node block every promotion for five days. No corpus at
+    all: skip by name (#1377 — `_pipeline/` is gitignored, and after the 2026-09-22
+    wipe it did not exist on the machine that runs this). A corpus that exists but
+    cannot discriminate the merge: skip naming the floor and the observed count
+    (#1403). Both are skips; neither is a pass. What stays fatal either way is a
+    corpus deep enough to collide and totals that do not add up, which is what
+    `test_a_two_key_fixture_corpus_runs_the_merge_guard_rather_than_skipping` pins,
+    and a corpus that mines no qualifying error pattern at all is still a finding,
+    asserted below.
     `exclude_machine=False` is
     deliberate — since #493 the nightly default drops worker/autonomy/inner-voice/browser
     sessions, and over a quiet week that corpus holds no qualifying error pattern at all.
@@ -2301,14 +2363,27 @@ def test_a_live_week_emits_one_merged_candidate_per_error_key(tmp_path):
         for pattern in patterns:
             by_key.setdefault(mt.candidate_pattern_key(pattern), []).append(pattern)
         multi = {k: v for k, v in by_key.items() if len(v) > 1}
-        # `>= 2`, not truthy: one multi-bucket key would let a merge that happened to
-        # fold a single pair pass, and the merged-total assertions below are only
-        # evidence across a population. Measured 15 of 30 keys on 2026-09-21, so this
-        # floor has room before a quiet week makes the test vacuous — and if it ever
-        # does, this message is the finding, not a silent pass.
-        assert len(multi) >= 2, (
-            f"only {len(multi)} mined key had more than one signature behind it, so the "
-            "merge was barely exercised and the merged totals below prove nothing")
+        # Below the floor the merge cannot be discriminated EITHER way, and that is a
+        # statement about how deep this machine's corpus happens to be, not about the
+        # merge. `_pipeline/trajectories` restarted at zero with the 2026-09-22
+        # deletion and regrows one bucket a day, so a hard floor of two here, asserted
+        # rather than skipped on, red-blocked every promotion while the corpus refilled
+        # (#1403 cause B);
+        # `tests/_live_data.py::require_live_volume` is the rule for that state —
+        # skip, naming the floor and the observed count beside the path. The floor is
+        # this node's own `>= 2`, not truthy, lifted into
+        # `MERGE_MULTI_SIGNATURE_KEYS_MIN` so a skip can never be softer than the
+        # assertion it replaces, and it is NOT lowered to 1: one multi-bucket key
+        # would let a merge that happened to fold a single pair pass, and the
+        # merged-total assertions below are only evidence across a population
+        # (measured 15 of 30 keys on the whole corpus on 2026-09-21, 1 of 12 keys on
+        # the 2-file corpus on 2026-09-23). What the skip does not license is a silent
+        # pass: at or above the floor every assertion below still runs and is fatal,
+        # which is what
+        # `test_a_two_key_fixture_corpus_runs_the_merge_guard_rather_than_skipping` pins.
+        require_live_volume(list(multi), MERGE_MULTI_SIGNATURE_KEYS_MIN, LIVE_CORPUS,
+                            "mined error keys with more than one signature behind them",
+                            noun="keys")
 
         written = mt.emit_candidates(patterns, tmp_path)
         files = sorted(tmp_path.glob("candidate-*.md"))
@@ -3419,6 +3494,16 @@ MACHINE_PLATFORMS = {"worker", "autonomy", "e2e-harness"}
 #: the number a skip reason quotes. Measured 3,000 files on 2026-09-18, 58 after the
 #: 2026-09-22 wipe.
 SESSION_STORE_MIN_FILES = 501
+#: The fewest mined error keys with MORE THAN ONE signature behind them that the
+#: merged-total assertions of `test_a_live_week_emits_one_merged_candidate_per_error_key`
+#: can discriminate on. It is that node's own `>= 2` — not truthy, because one
+#: multi-bucket key would let a merge that happened to fold a single pair pass —
+#: lifted out of the assertion so the skip and the assertion quote one number
+#: instead of two, the same reason `SESSION_STORE_MIN_FILES` exists above.
+#: Measured 15 of 30 keys on the 7-day corpus on 2026-09-21; 1 of 12 keys on the
+#: 2-file corpus this machine has held since the 2026-09-22 wipe, which is the
+#: reading that made this a red node at base rather than a finding (#1403).
+MERGE_MULTI_SIGNATURE_KEYS_MIN = 2
 
 
 def test_no_live_corpus_row_is_interactive_on_a_machine_platform():
@@ -4315,6 +4400,45 @@ def test_the_volume_skip_reason_carries_the_floor_and_the_observed_count(tmp_pat
     assert f"the {SESSION_STORE_MIN_FILES}-file floor" in reason, reason
     assert str(root) in reason, reason
 
+    # Same shape for the corpus-volume floor #1403 added (`noun="keys"`, because a bare
+    # `count` would have produced `the 2-count floor`): a reader of a skipped run gets
+    # one line, and that line has to say which floor, how many, and where.
+    keys = tmp_path / "trajectories"
+    with pytest.raises(pytest.skip.Exception) as caught:
+        require_live_volume([1], MERGE_MULTI_SIGNATURE_KEYS_MIN, keys, "mined error "
+                            "keys with more than one signature behind them",
+                            noun="keys")
+    reason = str(caught.value)
+    assert "holds 1 keys" in reason, reason
+    assert f"the {MERGE_MULTI_SIGNATURE_KEYS_MIN}-key floor" in reason, reason
+    assert str(keys) in reason, reason
+
+
+def test_the_merge_guard_routes_through_the_one_floor_helper_and_states_its_floor_once():
+    """The floor lives in `MERGE_MULTI_SIGNATURE_KEYS_MIN` and nowhere else, and the
+    below-floor decision is made by `require_live_volume`, not by an inline comparison.
+
+    #1403 clause 5 is that the guard skips BY NAME of the floor and the count. A guard
+    that kept its own `assert len(multi) >= 2` and added a skip above it would satisfy
+    the observable behaviour today and rot the moment one number was edited and the
+    other was not — which is the same defect `SESSION_STORE_MIN_FILES` was lifted out
+    of `#1143`'s inline `> 500` to prevent. So this pins the wiring, over the function's
+    own source: the call is there, it names the constant, and the duplicated comparison
+    is not.
+    """
+    src = inspect.getsource(test_a_live_week_emits_one_merged_candidate_per_error_key)
+    assert "require_live_volume(" in src, (
+        "the merge guard decides corpus depth on its own again, so its skip reason "
+        "carries whatever wording this file happens to use rather than the one shape "
+        "the volume helper gives every live guard")
+    assert "MERGE_MULTI_SIGNATURE_KEYS_MIN" in src, (
+        "the floor is a literal again: the skip and the assertion it replaces are two "
+        "numbers that an edit can move apart")
+    dupes = re.findall(r"assert\s+len\(multi\)\s*[<>=]", src)
+    assert not dupes, (
+        f"an inline comparison survived the move into the helper, so the floor is "
+        f"stated {len(dupes) + 1} times over: {dupes}")
+
 
 def test_a_store_below_the_floor_skips_naming_both_numbers(tmp_path, monkeypatch):
     """Clause 2, first half, over the real guard: the post-wipe store (3 synthetic
@@ -4369,6 +4493,45 @@ def test_a_present_corpus_that_admits_nothing_fails_rather_than_skips(
     assert "must hold both kinds" in str(caught.value), caught.value
 
 
+def test_a_guard_that_reads_a_different_path_than_it_checks_is_caught(
+        tmp_path, monkeypatch):
+    """Clause 4 of #1403: checking a corpus and reading it are two different
+    statements, and until this round the sequence-pattern guard made only the first.
+
+    Here `LIVE_CORPUS` points at a synthetic corpus that WOULD satisfy every
+    assertion in the guard, while the miner's own `TRAJECTORY_DIR` — what
+    `load_trajectories` actually opens, since it takes no path argument — is left on
+    an empty directory. That is exactly the state a round's worktree produces: the
+    production corpus is real two directories away, `<worktree>/.lloyd-data/_pipeline/
+    trajectories` is not, and the guard loaded 0 rows and failed with `loaded no rows`
+    while the `require_live_data` check above it had passed. So the corpus is present
+    here, the rows load, and the ONLY way this fails is a guard that checked one path
+    and read another.
+
+    The node fails three ways, all fatal, none silently-skipping: the guard raises
+    (the #1403 regression or any other), the guard skips (a guard that skips on a
+    present, readable corpus is not checking what it validated), or the guard returns
+    without writing the files it is named for.
+    """
+    corpus = synthetic_corpus(tmp_path, sequence_rows())
+    redirect_live_root(monkeypatch, "corpus", corpus)
+    worktree_mirror = tmp_path / "worktree" / "_pipeline" / "trajectories"
+    worktree_mirror.mkdir(parents=True)
+    monkeypatch.setattr(mt, "TRAJECTORY_DIR", worktree_mirror)
+    try:
+        test_the_live_corpus_emits_one_file_per_sequence_pattern(tmp_path / "out")
+    except pytest.skip.Exception as why:
+        pytest.fail(f"the sequence-pattern guard skipped over a corpus that exists and "
+                    f"has rows in it, so it is not reading what it validated: {why}")
+    except AssertionError as why:
+        pytest.fail(f"the sequence-pattern guard checked {corpus} and then read "
+                    f"{worktree_mirror} — the #1403 missing-binding regression, in "
+                    f"whatever form, is what this message means: {why}")
+    assert list(((tmp_path / "out") / "candidates").glob("candidate-seq-*.md")), (
+        "the guard returned without writing the per-sequence files it is named for, "
+        "so it ran over nothing")
+
+
 def test_a_present_ledger_below_its_coarse_key_floor_still_fails(
         tmp_path, monkeypatch):
     """Clause 3 for the verdict-ledger join: a ledger that EXISTS but has lost rows is
@@ -4396,20 +4559,105 @@ def test_a_corpus_the_verdict_ledger_gates_none_of_fails_rather_than_skips(
     assert "gates none of" in str(caught.value), caught.value
 
 
-def test_a_corpus_whose_error_keys_never_collide_fails_rather_than_skips(
+def test_a_corpus_whose_error_keys_collide_on_one_key_skips_naming_both_numbers(
         tmp_path, monkeypatch):
-    """Clause 3 for the merged-candidate guard: a present corpus that mines two error
-    patterns under two distinct keys, each with ONE signature behind it, so the merge is
-    never exercised and the summed totals below would compare a bucket with itself. It
-    must fail on `more than one signature`, not skip."""
+    """Clause 5 of #1403, and the deliberate reversal of one #1377 clause-3 node.
+
+    That node — `test_a_corpus_whose_error_keys_never_collide_fails_rather_than_skips`,
+    deleted here — demanded a FAILURE on `more than one signature` for exactly this
+    corpus, on the argument that a present corpus too thin to collide was a finding
+    rather than an environment. #1403 is the evidence that the argument was wrong about
+    this one guard: `_pipeline/trajectories` restarted at zero with the 2026-09-22
+    deletion and regrows one bucket a day, so that assertion spent five days red at
+    base and refused every promotion through the gate's `tests` rung while a corpus
+    refilled itself. A corpus that is present, readable and merely shallow is a
+    measurement the machine cannot make YET, and `require_live_volume` is the rule for
+    that state: skip, naming the floor and the observed count beside the path.
+
+    What the reversal does NOT give back is the failure the old node protected: the
+    guard still fails on a corpus deep enough to collide whose merged totals do not add
+    up, and `test_a_two_key_fixture_corpus_runs_the_merge_guard_rather_than_skipping`
+    below pins that this node's fixture skips while a two-key fixture runs. A node that
+    skipped over BOTH corpora would keep this one green — that is the failure mode the
+    second node exists to catch.
+    """
     rows = ([error_traj(f"collide1377_{i}", "Solo1377a", "not_found", "protocol")
              for i in (1, 2)]
             + [error_traj(f"collide1377_{i}", "Solo1377b", "not_found", "protocol")
                for i in (1, 2)])
-    redirect_live_root(monkeypatch, "corpus", synthetic_corpus(tmp_path, rows))
-    with pytest.raises(AssertionError) as caught:
+    corpus = synthetic_corpus(tmp_path, rows)
+    redirect_live_root(monkeypatch, "corpus", corpus)
+    with pytest.raises(pytest.skip.Exception) as caught:
         test_a_live_week_emits_one_merged_candidate_per_error_key(tmp_path / "out")
-    assert "more than one signature" in str(caught.value), caught.value
+    reason = str(caught.value)
+    assert "holds 0 keys" in reason, (
+        f"a one-signature-per-key corpus must be reported as 0 discriminating keys, "
+        f"not counted some other way: {reason}")
+    assert f"the {MERGE_MULTI_SIGNATURE_KEYS_MIN}-key floor" in reason, (
+        f"the skip must name the floor it applied, which is the guard's own `>= 2`: "
+        f"{reason}")
+    assert str(corpus) in reason, (
+        f"and the path it counted, or a skipped run says nothing about which corpus "
+        f"was too shallow: {reason}")
+
+
+def test_a_corpus_whose_merge_floor_is_one_key_short_skips_naming_the_count(
+        tmp_path, monkeypatch):
+    """The boundary itself: ONE key with more than one signature behind it — 1 against
+    the floor of 2 — must skip, not fail and not pass.
+
+    This is the live reading this machine has had since 2026-09-22 (`Bash/timeout` over
+    a 2-file corpus), so it is also the reproduction of the red-at-base node #1403 was
+    filed for. Asserting `holds 1 keys` rather than merely `below the floor` is what
+    stops the helper from reporting the number it did not measure.
+    """
+    corpus = synthetic_corpus(tmp_path, merge_rows())
+    redirect_live_root(monkeypatch, "corpus", corpus)
+    with pytest.raises(pytest.skip.Exception) as caught:
+        test_a_live_week_emits_one_merged_candidate_per_error_key(tmp_path / "out")
+    reason = str(caught.value)
+    assert "holds 1 keys" in reason, (
+        f"the skip has to state the observed count beside the floor: {reason}")
+    assert f"the {MERGE_MULTI_SIGNATURE_KEYS_MIN}-key floor" in reason, reason
+    assert str(corpus) in reason, reason
+
+
+def test_a_two_key_fixture_corpus_runs_the_merge_guard_rather_than_skipping(
+        tmp_path, monkeypatch):
+    """The positive control that keeps clause 5 honest: a corpus with
+    `MERGE_MULTI_SIGNATURE_KEYS_MIN` = 2 colliding keys is enough to discriminate the
+    merge, so the guard must RUN — every merged-total assertion below the skip fires,
+    fatally — and may not skip.
+
+    Without this node, routing the guard through the volume helper is unfalsifiable in
+    the flattering direction: a floor that ignored its argument, or was quietly raised
+    to 3, would skip the production run on every machine forever and the clause-3
+    failure this guard exists to catch would never be observable again. So the two
+    fixtures are the pair: 1 discriminating key skips (node above), 2 runs (this one),
+    and the boundary is the floor, not a constant chosen to make today green.
+    """
+    corpus = synthetic_corpus(tmp_path, merge_rows_two_keys())
+    redirect_live_root(monkeypatch, "corpus", corpus)
+    out = tmp_path / "out"
+    out.mkdir()
+    try:
+        test_a_live_week_emits_one_merged_candidate_per_error_key(out)
+    except pytest.skip.Exception as why:
+        pytest.fail(
+            f"the merge guard skipped over a corpus with "
+            f"{MERGE_MULTI_SIGNATURE_KEYS_MIN} colliding keys, so it skipped on "
+            f"something other than the merge floor and the totals below it are never "
+            f"checked on live data: {why}")
+    error_bodies = [p.read_text(encoding="utf-8")
+                    for p in out.glob("candidate-*.md")]
+    assert len(error_bodies) >= MERGE_MULTI_SIGNATURE_KEYS_MIN, (
+        f"the guard returned but wrote {len(error_bodies)} candidates for a corpus "
+        f"mining {MERGE_MULTI_SIGNATURE_KEYS_MIN} merged error keys")
+    assert sum(1 for b in error_bodies
+               if int(frontmatter_field(b, "occurrences")) > 2) >= (
+        MERGE_MULTI_SIGNATURE_KEYS_MIN), (
+        "no candidate's `occurrences` exceeds any single signature bucket's own total, "
+        "so nothing was actually merged even though the guard claims it ran")
 
 
 def test_a_corpus_that_writes_no_sequence_candidate_fails_rather_than_skips(

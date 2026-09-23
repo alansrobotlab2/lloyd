@@ -520,6 +520,52 @@ def _command_blocks(body: str) -> list[str]:
     return blocks
 
 
+#: One batched `git check-ignore` per scan. Like `_DIRTY_CACHE` this is reached
+#: only once something is already missing, so a green suite still never shells out.
+_IGNORE_QUERY_TIMEOUT_S = 20
+
+
+def _tree_ignores(root: Path, relpaths) -> frozenset[str]:
+    """The subset of `relpaths` that `root`'s OWN ignore rules exclude.
+
+    Asked of git in one batched `--stdin` call rather than from a list kept here,
+    which is what makes this a rule and not an enumeration: the answer is the
+    tree's `.gitignore` plus `.git/info/exclude` plus any `core.excludesFile`, so
+    the next path someone puts into a skill is classified by the same mechanism
+    that classified the last one. `--no-index` because the question is "do the
+    tree's ignore rules cover this path?", not "is this path tracked" — and the
+    path is absent here by definition, since only absent paths reach this point.
+
+    Every failure mode is fail-closed to `frozenset()`: git unaskable (not a
+    repo, timeout, signal) exempts nothing and each absent reference stays
+    reported. An exemption that widened when its own oracle could not be asked
+    would be a guard reading its own missing input, the defect `lloyd/MEMORY.md`
+    keeps a catalogue of.
+    """
+    paths = sorted({p for p in relpaths if p})
+    if not paths:
+        return frozenset()
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(root), "check-ignore", "--no-index", "--stdin"],
+            input="\n".join(paths) + "\n",
+            capture_output=True, text=True, timeout=_IGNORE_QUERY_TIMEOUT_S)
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
+    # 0 = at least one path is ignored, 1 = none is. Anything else is git failing
+    # to answer, which is the unaskable case above.
+    if proc.returncode not in (0, 1):
+        return frozenset()
+    return frozenset(line.strip() for line in proc.stdout.splitlines() if line.strip())
+
+
+def _row_parts(row: str) -> tuple[str, str]:
+    """(tree, rel) out of a `<label>::<tree>:<rel>` row — the same split
+    `_drift_report` uses to pull out the path a doc names."""
+    tree, rel = row.split("::", 1)[1].split(":", 1)
+    return tree, rel
+
+
 def _unresolved_rows() -> dict[str, Path]:
     """`<label>::<tree>:<path>` -> the doc file that names it, for every named
     path that is not on disk.
@@ -527,6 +573,20 @@ def _unresolved_rows() -> dict[str, Path]:
     The doc is kept alongside the row, not thrown away: to say *why* a
     reference is missing, the diagnosis has to ask that file's own repo whether
     the copy on disk is committed (item #1264).
+
+    A `repo:` reference the tree itself ignores is dropped before the comparison
+    (item #1403), because such a path is not checkable from a worktree at all: a
+    round's tree is `git worktree add` from HEAD, which by construction holds no
+    ignored file. `qmd/dist/cli/qmd.js` — present in the live checkout, named by
+    `skills/qmd-index-maintenance/SKILL.md` since vault commit `3d0738d1`, and
+    ignored by `.gitignore` `/qmd/` — was therefore red in every round and green
+    in `~/lloyd`, three nodes, since the two negative controls assert their
+    planted violation is the SOLE drift and that row rode along with theirs.
+    `RUNTIME_SUFFIXES` above already exempts by *suffix* for the same reason ("a
+    file on the machine, not drift"); this exempts by *ignore rule*, which needs
+    no entry per doc and so cannot be re-broken by one prose commit. `vault:`
+    rows are never exempted here: their tree is the vault, whose ignore rules are
+    not the ones this asks.
     """
     bad: dict[str, Path] = {}
     for label, path in _doc_files():
@@ -543,6 +603,11 @@ def _unresolved_rows() -> dict[str, Path]:
                     roots.append(skill_dir / rel)
             if not any(r.exists() for r in roots):
                 bad[f"{label}::{tree}:{rel}"] = path
+    ignored = _tree_ignores(ROOT, [_row_parts(r)[1] for r in bad
+                                   if _row_parts(r)[0] == "repo"])
+    if ignored:
+        bad = {r: d for r, d in bad.items()
+               if not (_row_parts(r)[0] == "repo" and _row_parts(r)[1] in ignored)}
     return bad
 
 
@@ -725,7 +790,105 @@ def test_the_path_check_goes_red_on_a_reference_it_should_see(tmp_path, monkeypa
         f"the scanner did not isolate the one planted violation: {sorted(drift)}")
 
 
-#: The script both controls below name. It is not in the checkout and never will be.
+#: The two names the ignore-rule control below plants, one under each tree.
+_IGNORED_TREE = "ignored_by_the_tree"
+_TRACKED_TREE = "tracked_source"
+_PLANTED_SCRIPT = "a_script_no_commit_has_1403.py"
+
+
+def _fixture_checkout_with_its_own_ignore_rules(tmp_path: Path) -> Path:
+    """A fresh git working tree standing in for a checkout, whose `.gitignore`
+    ignores exactly one top-level directory. Returns the tree root.
+
+    A real `git init`, for the reason `_git_repo_with_committed_task` gives: the
+    exemption is answered by a `git check-ignore` subprocess over the tree's own
+    rules, so the control has to cross that boundary to prove the answer came
+    from a tree and not from a name this file recognises. `.gitignore` is written
+    into the FIXTURE, never into the live checkout — `#1403` clause 2 forbids a
+    round from writing the real `.gitignore`, and the gate denies it anyway.
+    """
+    repo = tmp_path / "checkout"
+    (repo / _IGNORED_TREE).mkdir(parents=True)
+    (repo / _TRACKED_TREE).mkdir()
+    (repo / ".gitignore").write_text(f"/{_IGNORED_TREE}/\n", encoding="utf-8")
+    (repo / _TRACKED_TREE / "keep.py").write_text("x = 1\n", encoding="utf-8")
+    for cmd in (["init", "-q"],
+                # A machine's global excludesfile must not decide the fixture.
+                ["-c", "core.excludesfile=/dev/null", "add", "."],
+                ["-c", "user.name=lloyd-test", "-c", "user.email=lloyd-test@invalid",
+                 "commit", "-q", "-m", "init"]):
+        subprocess.run(["git", *cmd], cwd=str(repo), check=True,
+                       capture_output=True, text=True)
+    return repo
+
+
+def test_a_ref_under_an_ignored_tree_is_dropped_and_a_tracked_one_is_not(
+        tmp_path, monkeypatch):
+    """#1403 clause 1, both halves in ONE scan of one fixture tree.
+
+    The exemption must not become a second way to be blind, so the dropped row
+    and the still-reported row are planted in the same document and read by the
+    same call: an ignored first component drops the reference, a tracked one
+    leaves it exactly as chargeable as the control above. `_uncommitted_edit` is
+    irrelevant here — the assertion is about which rows exist at all, and it is
+    `==`, so a fixture that leaked anything else fails.
+
+    `ROOT` is pointed at the fixture so the exemption is computed from a tree the
+    test wrote, which is the only way to show the answer comes from the tree's
+    ignore rules rather than from `/qmd/` being hard-coded here.
+    """
+    repo = _fixture_checkout_with_its_own_ignore_rules(tmp_path)
+    doc = tmp_path / "9999-ignore.md"
+    doc.write_text(
+        "---\nname: ignore\ntype: autonomy\n---\n# Ignore Task\n\n"
+        "Step 1 names a script under a tree the checkout ignores: "
+        f"`~/lloyd/{_IGNORED_TREE}/{_PLANTED_SCRIPT}`.\n\n"
+        "Step 2 names one under a tree it does not: "
+        f"`~/lloyd/{_TRACKED_TREE}/{_PLANTED_SCRIPT}`.\n",
+        encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "ROOT", repo)
+    monkeypatch.setattr(sys.modules[__name__], "_doc_files",
+                        lambda: [("autonomy/9999-ignore.md", doc)])
+    drift = _unresolved() - PATH_KNOWN_UNFIXED
+    assert drift == {f"autonomy/9999-ignore.md::repo:{_TRACKED_TREE}/{_PLANTED_SCRIPT}"}, (
+        f"the ignore rule did not drop exactly the ignored-tree ref and only that ref: "
+        f"{sorted(drift)}")
+
+
+def test_the_qmd_row_is_dropped_by_the_rule_and_not_by_a_ledger_entry():
+    """#1403 clause 2's teeth, stated against the real tree.
+
+    The green of the three path nodes has two possible causes and only one of
+    them is the fix: the exemption covering `qmd/dist/cli/qmd.js`, or the scanner
+    losing the reference. So this asks for the reference from the doc that put it
+    there (vault commit `3d0738d1`, 2026-09-23, one prose commit that red three
+    nodes for every round), from git's own answer, and from the ledger — which
+    must stay empty of it. `PATH_KNOWN_UNFIXED` is a hand-maintained set keyed by
+    doc; #1317 closed on that shape and the property re-broke in twelve hours, so
+    an entry here would not be a smaller fix, it would be the old bug re-armed.
+    """
+    skill_dir = VAULT / "skills" / "qmd-index-maintenance"
+    refs = {rel for _tree, rel in _named_paths(
+        (skill_dir / "SKILL.md").read_text(encoding="utf-8", errors="replace"),
+        skill_dir)}
+    assert "qmd/dist/cli/qmd.js" in refs, (
+        f"the scanner no longer resolves the path that skill names, so the green of "
+        f"the path nodes proves nothing; the doc may have changed — got {sorted(refs)}")
+
+    # The tree's rules, not this file's: the one real row is ignored, and the
+    # script-shaped path the planted controls use is not.
+    assert _tree_ignores(ROOT, ["qmd/dist/cli/qmd.js",
+                                "eval/a_script_that_does_not_exist_1240.py"]) \
+        == frozenset({"qmd/dist/cli/qmd.js"}), (
+        "git's answer for these two paths is not the one the exemption depends on — "
+        "either `.gitignore` stopped ignoring /qmd/ (then the row is real drift again) "
+        "or the query stopped working")
+
+    enumerated = sorted(e for e in PATH_KNOWN_UNFIXED if "qmd" in e)
+    assert not enumerated, (
+        f"the exemption was enumerated instead of derived: {enumerated} — item #1403 "
+        "clause 2 is that no `skills/qmd-index-maintenance/SKILL.md::repo:qmd/...` "
+        "row goes in here")
 _SKEW_SCRIPT = "scripts/a_script_only_a_vault_edit_names_1264.py"
 
 
