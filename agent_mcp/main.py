@@ -89,7 +89,7 @@ from agent_mcp import (
 # #544: the effect-scope contextvar the harness loop reads at dispatch. Bound
 # here around each dispatch so a `Task` subagent's nested loop inherits it.
 from app.harness import policy as harness_policy
-from app.harness.safety import check_bash_command
+from app.harness.safety import check_bash_command, desktop_refusal
 
 logger = logging.getLogger("lloyd-mcp")
 
@@ -514,16 +514,22 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
                       "session — never to background, worker, bench or sessionless "
                       "calls (the screen and input are Alan's)")
 
-    # 2c. Nothing but Alan grants the desktop lease. Bash is covered by
-    #     `check_bash_command`; this covers every other tool that could reach
-    #     the route (http_request allows loopback) or the file (Write/Edit).
+    # 2c. Nothing but Alan grants the desktop lease, and no tool call reads or
+    #     feeds the retained frame mirror either (#1418). Bash is covered by
+    #     `check_bash_command`; this covers every other tool that could reach a
+    #     route (http_request allows loopback) or the file (Write/Edit).
+    #     `desktop_refusal` matches only the argument fields that can actually
+    #     arrive somewhere — a URL, a path — so a backlog item or vault note
+    #     whose body merely describes the lease route is documentation and
+    #     passes, where scanning the whole serialized blob denied it (#1418
+    #     clause 4).
     if name != "Bash" and name not in tool_annotations.READ_ONLY \
             and isinstance(arguments, dict):
-        blob = json.dumps(arguments, default=str)
-        if "/api/desktop/lease" in blob or "desktop/lease.json" in blob:
-            logger.warning("desktop: refused %s touching the lease for %r", name, sid)
-            return _refused_call(name, "the desktop lease is granted by Alan from "
-                                       "Mission Control, never by a tool call")
+        why = desktop_refusal(arguments)
+        if why:
+            logger.warning("desktop: refused %s reaching a desktop route for %r",
+                           name, sid)
+            return _refused_call(name, why)
 
     # 3. A state-changing call that arrives with no session id is refused
     #    (#1053). `_tool_sandbox.is_sandboxed_session("")` is False by design —

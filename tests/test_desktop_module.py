@@ -183,6 +183,96 @@ def test_discord_non_owners_cannot_use_it():
     assert {"desktop_capture", "desktop_act"} <= set(NON_OWNER_DISALLOWED)
 
 
+# ── the frame mirror: no session's own call reads it (#1418) ──────────────
+
+API = "http://127.0.0.1:8080"
+FRAME_ROUTE = API + "/api/desktop/frame"
+STATE_ROUTE = API + "/api/desktop/state"
+LEASE_ROUTE = API + "/api/desktop/lease"
+LEASE_FILE = "/home/alansrobotlab/lloyd-data/" + "desktop/lease.json"
+CHAT_SID = "20260923_120001_abcd"
+
+
+@pytest.mark.parametrize("cmd", [
+    "curl -s http://127.0.0.1:8080/api/desktop/frame",
+    "curl -s -o /tmp/f.json http://127.0.0.1:8080/api/desktop/frame",
+    "wget -qO- http://100.91.23.4:8080/api/desktop/state",
+    'curl -X POST http://127.0.0.1:8080/api/desktop/state -d \'{"image_b64":"x"}\'',
+])
+def test_bash_cannot_fetch_the_frame_mirror(cmd):
+    """The screen is refused to a session's own shell, the way the lease is.
+
+    ``ApiPeerGate`` answers loopback, so the route cannot tell this call from
+    the Desktop tab's; the deny belongs where a session's intent is visible.
+    """
+    from app.harness.safety import check_bash_command
+    match = check_bash_command(cmd)
+    assert match is not None, cmd
+    assert match[0] == "read the desktop frame mirror"
+
+
+def test_naming_the_frame_routes_in_a_grep_still_passes():
+    """The deny is request-shaped, not string-shaped.
+
+    Investigating the mirror means reading the router that serves it: a grep,
+    an edit or a review note names the route without asking for it. Same rule
+    as ``test_reading_about_the_lease_is_fine``.
+    """
+    from app.harness.safety import check_bash_command
+    assert check_bash_command("grep -rn '/api/desktop/frame' app/routers/") is None
+    assert check_bash_command("grep -c 'api/desktop/state' app/routers/desktop.py") is None
+    assert check_bash_command("curl -s http://127.0.0.1:8080/health") is None
+
+
+def test_no_tool_call_may_read_the_frame_mirror():
+    """``http_request`` allows loopback, so the route is reachable from any
+    session's tool surface — refused here, where every caller passes."""
+    for url in (FRAME_ROUTE, STATE_ROUTE):
+        res = _call("http_request", {"method": "GET", "url": url}, CHAT_SID)
+        assert _is_err(res), (url, _text(res))
+        assert "frame mirror" in _text(res), (url, _text(res))
+
+
+def test_a_note_describing_the_lease_is_not_a_denied_attempt(tmp_path):
+    """#1418 clause 4: the guard reads the fields that can arrive, not the blob.
+
+    The matcher used to scan the serialized arguments, so this write — a review
+    note whose body quotes the human-only route and the file behind it — was
+    refused as if it were the attempt it describes, which is how the triage
+    note for this item got blocked. The same words in a field that can reach
+    nothing must pass, and the file must actually land.
+    """
+    note = tmp_path / "review-note.md"
+    body = ("Documenting the desktop guard: the human-only route is "
+            "/api/desktop/lease and the file behind it is "
+            "desktop/lease.json. Naming both is not reaching either.\n")
+    res = _call("Write", {"file_path": str(note), "content": body}, CHAT_SID)
+    assert not _is_err(res), _text(res)
+    assert "granted by Alan" not in _text(res)
+    assert note.read_text() == body
+
+
+@pytest.mark.parametrize("args,refused", [
+    ({"url": FRAME_ROUTE}, True),
+    ({"url": LEASE_ROUTE}, True),
+    ({"uri": LEASE_ROUTE}, True),
+    ({"file_path": LEASE_FILE}, True),
+    ({"paths": ["obsidian/knowledge/api/desktop/state.md"]}, True),
+    ({"paths": ["obsidian/knowledge/desktop.md"]}, False),
+    ({"description": "the /api/desktop/frame route retains the last capture"}, False),
+    ({"content": "see desktop/lease.json for the seat"}, False),
+    ({"summary": "POST /api/desktop/state accepts a forged frame"}, False),
+])
+def test_the_desktop_guard_reads_only_the_fields_that_can_arrive(args, refused):
+    """Narrowing the matcher must not widen the hole it guards.
+
+    A URL that carries a refused route and a path that carries the lease file
+    are still refused; prose in any other field is not.
+    """
+    from app.harness.safety import desktop_refusal
+    assert bool(desktop_refusal(args)) is refused, args
+
+
 # ── geometry and matching ────────────────────────────────────────────
 
 def test_capture_maps_screenshot_pixels_back_to_the_layout():

@@ -113,6 +113,14 @@ _HARD_DENY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
                 r"desktop/lease\.json"), "write the desktop lease"),
     (re.compile(r"desktop_lease\s*\.\s*(grant|revoke|_store|note_seat)\b"),
      "grant the desktop lease"),
+
+    # The retained desktop frame is Alan's last screen: the JPEG plus the
+    # element names written on it, and the gate in front of that route is only
+    # the peer address (#1418). Asking the route for it is refused the way the
+    # lease above is; naming the path in a grep, an edit or a review note is
+    # not a request, and is not denied.
+    (re.compile(r"\b(curl|wget|xh|http|httpie)\b[^\n]*/api/desktop/(?:frame|state)"),
+     "read the desktop frame mirror"),
 ]
 
 
@@ -122,6 +130,73 @@ _HARD_DENY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 # before 2026-09-14 — while sudo itself needs a password on this host, so the
 # rule protects nothing there. The hook keeps it for the turns that had it.
 _HOOK_ONLY_LABELS = frozenset({"sudo"})
+
+
+# ---------------------------------------------------------------------------
+# Desktop deny-set for tool arguments — scoped to the fields that can arrive
+# ---------------------------------------------------------------------------
+
+# What must not be reachable from a tool call: the human-only lease route and
+# the file behind it, and the two routes that read or feed the retained frame
+# (#1418).
+DESKTOP_DENIED_ROUTES: tuple[str, ...] = (
+    "/api/desktop/lease",
+    "/api/desktop/frame",
+    "/api/desktop/state",
+)
+DESKTOP_DENIED_PATHS: tuple[str, ...] = ("desktop/lease.json",)
+
+# The only argument fields that can put a request on a route or bytes at a
+# path: `url` on the request tools, the path fields on the file tools. Scoping
+# the match to them is the whole point of this helper. The aggregator used to
+# scan the serialized arguments blob for the strings above, so a backlog item
+# or a vault note whose body merely *described* the lease route or the lease
+# file was denied as if it were an attempt — including the write that
+# documented this defect (#1418 clause 4).
+DESKTOP_ROUTE_FIELDS: tuple[str, ...] = ("url", "uri", "href", "endpoint")
+DESKTOP_PATH_FIELDS: tuple[str, ...] = ("file_path", "path", "paths",
+                                        "filename", "destination")
+
+_LEASE_REFUSAL = ("the desktop lease is granted by Alan from Mission Control, "
+                  "never by a tool call")
+_FRAME_REFUSAL = ("the desktop frame mirror retains Alan's last screen capture "
+                  "— a tool call may neither read it nor publish a frame to it "
+                  "(#1418)")
+
+# Lease needles first: a call naming the lease keeps the refusal the lease
+# tests already pin.
+_DESKTOP_NEEDLES: tuple[tuple[str, str], ...] = (
+    ("/api/desktop/lease", _LEASE_REFUSAL),
+    ("desktop/lease.json", _LEASE_REFUSAL),
+    ("/api/desktop/frame", _FRAME_REFUSAL),
+    ("/api/desktop/state", _FRAME_REFUSAL),
+)
+
+
+def _string_field_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [v for v in value if isinstance(v, str)]
+    return []
+
+
+def desktop_refusal(arguments: Any) -> str | None:
+    """Return the reason to refuse `arguments`, or None if they reach nothing.
+
+    Matches only :data:`DESKTOP_ROUTE_FIELDS` and :data:`DESKTOP_PATH_FIELDS`,
+    so an `http_request` carrying the lease or frame URL and a `Write`/`Edit`
+    carrying the lease path are still refused, while prose in any other field —
+    a note describing the route — is not.
+    """
+    if not isinstance(arguments, dict):
+        return None
+    for field in DESKTOP_ROUTE_FIELDS + DESKTOP_PATH_FIELDS:
+        for value in _string_field_values(arguments.get(field)):
+            for needle, reason in _DESKTOP_NEEDLES:
+                if needle in value:
+                    return reason
+    return None
 
 
 def check_bash_command(command: str, cwd: str | None = None, *,
