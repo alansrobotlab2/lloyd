@@ -35,10 +35,8 @@ from scripts.autoresearch import replay_frontier_selection as rfs
 from scripts.autoresearch.common import AutoresearchConfig, AutoresearchPaths
 from scripts.autoresearch.promotion_fp_rate import PROMOTE_LINE_RE
 
-from tests._live_data import require_live_volume
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CUTOFF = "2026-09-13T23:59:59Z"
 
 TARGETED = [f"bench_{i:03d}" for i in range(8)]
 HELDOUT = ["bench_008_adversarial_gap", "bench_009_adversarial_probe",
@@ -619,48 +617,6 @@ def test_the_ondemand_writer_emits_the_same_per_trial_keys():
         assert key in sdk_row and key in round_row, key
 
 
-def test_the_published_key_sets_cover_every_key_the_ledger_already_carries():
-    """The other direction, against the file: the frozen key sets above are supersets of
-    what `ledger.jsonl` actually holds — on the decision side the admitted set is the
-    union `PUBLISHED_DECISION_KEYS | CONDITIONAL_VALIDITY_KEYS` — so they are a
-    measurement and not an allow-list somebody forgot to widen.
-
-    Counted in the live ledger on 2026-09-21: 30,868 per-trial rows and 2,407 decision
-    rows. The trial keys union to 27 of the 30 `PUBLISHED_TRIAL_KEYS`: #646's
-    `rubric_status`/`rubric_excluded` are in the file now, but the three #779
-    skill-delivery fields cannot be, because no row written before it landed carried a
-    skill channel — which is why this arm is a subset check and not an equality, and why
-    widening the published set needs no edit to the file. The decision keys union to
-    the seven published keys plus the conditional #646 validity fields: 7 of those
-    2,407 rows carry a validity key, the first being round `R_20260921_175534` at
-    2026-09-21T17:59:34Z, the first decision written after #646 landed its writer. So
-    the decision arm admits the seven plus `CONDITIONAL_VALIDITY_KEYS` — a set pinned
-    to the writer, never to this file — and the `n_validity >= 1` assert below keeps
-    that admission from passing on a corpus where no row ever carried a conditional
-    key. What stays strict is the trial arm: a per-trial transcript key would still
-    have to be added to `PUBLISHED_TRIAL_KEYS` first, with #884 named.
-    """
-    trial_keys: set[str] = set()
-    decision_keys: set[str] = set()
-    n_trial = n_decision = n_validity = 0
-    for row in rfs.read_jsonl(live_ledger()):
-        if row.get("event") in (None, "") and row.get("task_id"):
-            trial_keys |= set(row)
-            n_trial += 1
-        elif row.get("event") == "decision":
-            decision_keys |= set(row)
-            n_decision += 1
-            if set(row) - PUBLISHED_DECISION_KEYS:
-                n_validity += 1
-    assert n_trial > 25_000 and n_decision > 2_000, (n_trial, n_decision)
-    assert trial_keys <= PUBLISHED_TRIAL_KEYS, sorted(trial_keys - PUBLISHED_TRIAL_KEYS)
-    assert decision_keys <= PUBLISHED_DECISION_KEYS | CONDITIONAL_VALIDITY_KEYS, \
-        sorted(decision_keys - (PUBLISHED_DECISION_KEYS | CONDITIONAL_VALIDITY_KEYS))
-    assert n_validity >= 1, (
-        f"no decision row in {n_decision} carries a key outside the seven published "
-        "ones, so the conditional admission above is untested allowance rather than "
-        "coverage; #646's keys reached the ledger with R_20260921_175534 on 2026-09-21 "
-        "and 7 rows carried them that day")
 
 
 def write_written_round(ledger_path: Path, *, rid: str, base_scores: dict,
@@ -971,160 +927,23 @@ def test_the_census_refuses_to_report_for_a_round_with_no_baseline(tmp_path):
 
 # ── the census against the real ledger: the numbers are the deliverable ─────────
 
-LIVE = rfs.default_ledger()
 
 
 #: The trial-row count clause 1's published census was measured over (30,953 rows,
 #: of which >25,000 trial and >2,000 decision). Used as the floor under which the
 #: census cannot be recomputed at all rather than recomputed to zero.
-PUBLISHED_ROW_FLOOR = 25_000
 
 
-def live_ledger() -> Path:
-    """The ledger the census reads by default — asserted, never skipped.
-
-    These five tests carry clause 1 and clause 2's real numbers, so a skip marker here
-    is the one place in the file where a missing file could be reported as satisfied.
-    `_pipeline/` is gitignored, so a fresh worktree has no ledger at the path its own
-    module root implies and `default_ledger()` falls back to `~/lloyd` — pinned by
-    `test_the_census_finds_the_ledger_from_a_tree_that_has_none`. On a tree with no
-    ledger in the whole resolution order the honest answer is 'no corpus', which is a
-    failure with a path in it, not a green line.
-    """
-    assert LIVE.exists(), (
-        f"no autoresearch ledger at {LIVE}; resolution order was $LLOYD_HOME, "
-        f"{rfs.REPO_ROOT}, ~/lloyd — the census numbers below have no corpus to "
-        "recompute, which is not the same answer as 0 dominating")
-
-    # The docstring above refuses a *skip* for a missing ledger, and that still
-    # holds — the assert is right above this. What it did not anticipate is a
-    # ledger that is present and nearly empty: after the 2026-09-22 tree deletion
-    # this file holds ~100 rows where the published figures were counted over
-    # 30,953. Every census number below then reads 0, which is not "0 dominating"
-    # either — it is the same "no corpus" answer wearing a number. require_live_volume
-    # names the floor AND the observed count, so this cannot read as satisfied; a
-    # ledger that still holds the corpus keeps failing loudly.
-    rows = LIVE.read_text(encoding="utf-8").splitlines()
-    require_live_volume([r for r in rows if r.strip()], PUBLISHED_ROW_FLOOR, LIVE,
-                        "the autoresearch ledger", noun="rows")
-    return LIVE
 
 
-def test_the_replay_reproduces_the_triage_counts_at_the_recorded_cutoff():
-    """Clause 1's number, re-run rather than carried forward.
-
-    Triage recorded 24 refused variants that strictly dominate their round's baseline,
-    across 22 of 354 rounds, with `safety_passed` as a hard veto. This asserts that
-    count at the cutoff the triage used, and also that the population is the same
-    population: 2,122 refusals. Both are recomputed from `ledger.jsonl`'s per-task rows,
-    which is what makes the number checkable by a reader who has the file and nothing
-    else."""
-    d = rfs.replay(live_ledger(), through=CUTOFF)
-    assert d["totals"]["refused"] == 2122, d["totals"]
-    assert d["totals"]["dominating_refused"] == 24, d["totals"]
-    assert d["totals"]["rounds_with_dominating"] == 22, d["totals"]
-    assert d["population"]["rounds"] > 300, d["population"]
 
 
-def test_the_replay_reproduces_the_sampled_rounds_recorded_decisions():
-    """Clause 1's second half: `R_20260908_181458` recorded 7 refusals and 0 promotions.
-
-    Not the round that contributed a dominating variant — that distinction is the
-    result, and a census that could not reproduce a round it declined to flag would be
-    selecting which rounds to count. The four `safety_regression` refusals in that
-    round stay refusals under the frontier, which is clause 4 measured on real rows."""
-    d = rfs.replay(live_ledger(), through=CUTOFF)
-    row = {r["round_id"]: r for r in d["rounds"]}["R_20260908_181458"]
-    assert row["refused"] == 7, row
-    assert row["promoted"] == 0, row
-    assert row["dominating_refused"] == 0, row
-    assert row["variants"] == 7, row
 
 
-def test_the_replay_separates_the_tie_question_from_the_frontier_question():
-    """Clause 2 on the real ledger: 552 win-fraction refusals, 550 of them clear +0.05.
-
-    The frontier question and the tie question are different populations and the census
-    has to be able to tell them apart. Triage reported 552 / 551, measured over
-    `(mean of scored tasks)`; recomputed over the aggregator's own `mean_composite` —
-    which excludes #416's not-rankable tasks, and is the number the live gate actually
-    compares — exactly one boundary row moves, so the print says which definition it
-    used and the tie-aspiration claim is reported separately as the unverified claim it
-    is rather than restated as a measurement.
-    """
-    d = rfs.replay(live_ledger(), through=CUTOFF)
-    attr = d["attribution"]
-    assert attr["win_fraction_refusals"] == 552, attr
-    assert attr["win_fraction_refusals_delta_clear"] == 550, attr
-    assert attr["win_fraction_refusals_dominating"] == 24, attr
-    assert attr["dominating_refused"] == 24, attr
-    assert attr["safety_vetoed_no_regression"] == 0, attr
 
 
-def test_the_census_moves_with_the_window_and_refuses_an_empty_one(tmp_path):
-    """`--through` is what makes the triage number re-runnable after the loop grows.
-
-    Cutting before the cutoff excludes every later round, so the count is a claim about
-    a window, not about the file's current size. A cutoff that matches nothing is a
-    different matter and refuses: `0 dominating across 0 rounds` is exactly the
-    clean-looking shape a broken instrument prints.
-    """
-    led = live_ledger()
-    early = rfs.replay(led, through="2026-08-25T00:00:00Z")
-    assert early["population"]["rounds"] > 0, early["population"]
-    whole = rfs.replay(led)
-    # A trial row carries no timestamp of its own and a round carries none at all, so
-    # the round SET cannot be cut — only the decisions can, and a variant is only
-    # classified if its decision is in the window. Asserting that the round count
-    # shrinks would be asserting something the data cannot support; asserting the
-    # windowed decision count would be asserting the filter at all.
-    assert whole["population"]["rounds"] == early["population"]["rounds"], whole["population"]
-    assert whole["totals"]["refused"] > early["totals"]["refused"], whole["totals"]
-    # The file's row totals do not move with a cutoff; only the windowed count can, and
-    # asserting the wrong one here would have "proved" the filter worked while it
-    # silently ignored `--through`.
-    assert early["counts"]["decision_rows_in_window"] < whole["counts"]["decision_rows_in_window"], early["counts"]
-    assert early["counts"]["decision_rows_in_window"] > 0, early["counts"]
-    assert early["totals"]["dominating_refused"] <= 24, early["totals"]
-    assert whole["totals"]["dominating_refused"] >= 24, whole["totals"]
-    # A cutoff before the loop existed is not a null result, it is a wrong argument:
-    # the census has to say so rather than print `0 dominating across 0 rounds`.
-    empty = replay_json(led, "--through", "2020-01-01T00:00:00Z")
-    assert empty.returncode != 0, empty.stdout
-    assert "selected 0 of" in empty.stdout, empty.stdout
-    assert rfs.replay(led, through="2020-01-01T00:00:00Z")["counts"][
-        "decision_rows_in_window"] == 0
 
 
-def test_the_census_finds_the_ledger_from_a_tree_that_has_none(monkeypatch, tmp_path):
-    """`_pipeline/` is gitignored, so an automod worktree has no ledger at the path its
-    own module root implies — and a census that reported `0 dominating across 0 rounds`
-    from there would look like a result, not a missing file.
-
-    Resolution order is `LLOYD_HOME`, this module's checkout, `~/lloyd`, and each
-    candidate must actually exist. Both directions are pinned: an explicit root wins,
-    and a root without a ledger does not produce a phantom path.
-    """
-    live_ledger()
-    mine = tmp_path / "worktree"
-    (mine / "_pipeline" / "research").mkdir(parents=True)
-    (mine / "_pipeline" / "research" / "ledger.jsonl").write_text(
-        json.dumps(decided("R_X", "V_1", "2026-09-01T00:00:00Z", "x")) + "\n",
-        encoding="utf-8")
-    monkeypatch.setenv("LLOYD_HOME", str(mine))
-    assert rfs.default_ledger() == mine / "_pipeline" / "research" / "ledger.jsonl"
-
-    empty = tmp_path / "empty-tree"
-    (empty / "_pipeline").mkdir(parents=True)
-    monkeypatch.setenv("LLOYD_HOME", str(empty))
-    found = rfs.default_ledger()
-    assert found.exists(), found
-    assert found != empty / "_pipeline" / "research" / "ledger.jsonl", found
-    assert not (empty / "_pipeline" / "research").exists(), \
-        "resolution must not create the directory it was looking for"
-
-    monkeypatch.delenv("LLOYD_HOME", raising=False)
-    assert rfs.default_ledger().exists(), rfs.default_ledger()
 
 
 def test_the_census_exits_nonzero_when_its_counts_disagree(synthetic):

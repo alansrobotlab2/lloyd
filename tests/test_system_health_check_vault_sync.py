@@ -788,13 +788,25 @@ def test_no_account_token_means_no_scratch_client(rig):
     assert "sync-setup" not in [a[0] for a in rig.logged()]
 
 
-def test_both_scratch_directories_are_removed(rig):
-    import tempfile
-    before = set(Path(tempfile.gettempdir()).glob(shc.SCRATCH_PREFIX + "*"))
+def test_both_scratch_directories_are_removed(rig, tmp_path, monkeypatch):
+    """The check must leave no scratch directory behind.
+
+    Scoped to a TMPDIR of its own rather than globbing the shared one. The
+    subprocess builds its env from `dict(os.environ)`, so it lands here too, and
+    only this invocation's scratch can appear in the diff. Globbing the real
+    temp dir made the assertion a statement about the whole machine: under
+    `-n 8` a sibling worker creating a scratch directory with the same prefix
+    showed up in `after - before` and failed this test for someone else's file.
+    """
+    scratch_root = tmp_path / "scratch-tmp"
+    scratch_root.mkdir()
+    monkeypatch.setenv("TMPDIR", str(scratch_root))
+
+    before = set(scratch_root.glob(shc.SCRATCH_PREFIX + "*"))
     rig.plant_live_registration()
     rig.json("--component", "vault_sync", spec=rig.spec(registry=True, replicate=True),
              round_trip=True)
-    after = set(Path(tempfile.gettempdir()).glob(shc.SCRATCH_PREFIX + "*"))
+    after = set(scratch_root.glob(shc.SCRATCH_PREFIX + "*"))
     assert after - before == set(), sorted(after - before)
 
 
