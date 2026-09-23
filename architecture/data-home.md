@@ -3,14 +3,15 @@ segment: architecture
 tags: [architecture, lloyd, data, safety, guardian, backup, automod]
 type: reference
 status: implemented
-date: 2026-09-22
+date: 2026-09-23
 ---
 
 # The data home: runtime data lives outside the code tree
 
 `~/lloyd` holds code. Everything Lloyd *produces* lives in `~/lloyd-data`. That
 covers transcripts, the databases, `_pipeline/`, logs and baselines. `CLAUDE.md`
-has the short version under "Runtime data lives in ~/lloyd-data".
+has the short version under "Runtime data lives in ~/lloyd-data, never in the
+tree".
 
 ## Why
 
@@ -44,6 +45,7 @@ had in the tree, so a path `~/lloyd/X` became `~/lloyd-data/X`:
 │   └── services/             # the engines' supervisor logs (was agent-services/logs/)
 ├── eval/baselines/
 ├── voice_profiles/
+├── desktop/                  # the computer-use lease, created on first use
 ├── data/tool_overrides.yaml
 ├── usage.db  workers.db  research.db
 └── mc-state.json
@@ -83,14 +85,24 @@ The first rule that matches wins:
    kept a canary off the live `workers.db` before this change. It stays the
    default so that the unsafe direction never happens by omission.
 
+Rule 3 reaches whatever imports `app.paths`. It does not reach the stdlib-only
+half, which resolves `${LLOYD_DATA:-~/lloyd-data}` itself and so gets rule 2 with
+neither the marker check nor rule 3: `agent-services/guardian/{policy,datawatch}.py`,
+`idle-worker.py`, `livekit_worker.py`, `snapshot-data.sh`, `restore-data.sh` — and
+`scripts/groundskeeper/retention-sweep.py:59`, which deletes (#1415).
+
 **Nothing exports `LLOYD_DATA` in production, and nothing should.** The backend
 and the aggregator find the root by rule 2. Their Bash children inherit their
 environment. A child that ran a worktree's code with the live root exported
 would write live data, which is the leak rule 3 exists to prevent.
 
-Some readers read live data *on purpose*: the review grader reading a round's
-sessions, and the promoter's knowledge-graph probe. They use
-`production_data_root()`.
+Some consumers reach into live data *on purpose*: the review grader reading a
+round's sessions, and the promoter's knowledge-graph probe. They use
+`production_data_root()`. The name and the `app.paths` docstring both say
+readers only — "nothing that writes should" — but four jobs write through it
+deliberately: the grader's own session file, the nightly extraction's lock, log
+and backups, the content hasher's index, and the tool-override sync. Nothing
+lists them, so an accidental reach looks the same as a deliberate one (#1415).
 
 ## Isolation: who gets which root
 
@@ -131,7 +143,9 @@ opt-in as the tree guard. The live-data cross-checks in `tests/` read through
     48 hourly and 14 daily snapshots and is installed as a system timer; its
     header has the three `sudo` lines.
   - The snapshot script refuses while the data tripwire is set, or when the root
-    shrank below its last healthy measurement.
+    shrank below its last healthy measurement. A refusal exits 0 on purpose, so
+    the timer never shows as failed — and nothing else reads the directory, so
+    no monitor notices if the snapshots stop arriving (#1416).
 - **Tripwire.** `agent-services/guardian/datawatch.py` runs every guardian tick.
   It uses `vaultwatch`'s measurement and thresholds, and trips when:
   - the root is missing or was replaced;
@@ -170,3 +184,17 @@ The supervisor reopens a program's log file only when it restarts that program,
 and reopens its own log only when the unit restarts. So the cutover was one
 stop of `agent-supervisord.service` with the guardian stopped, not a series of
 `round restart`s.
+
+## Review log
+
+- 2026-09-23 — `current`. Checked against `a9f5fef`: the three resolution rules
+  and the marker, the nine `${LLOYD_DATA}` keys in `config.yaml`, the
+  gate/canary/pytest isolation rows, the delete guard's refusals (probed live: the
+  root, a top-level folder, a glob over one, `find` with `-delete`, `rsync
+  --delete`, `mv`, `git clean`, an `rmtree` one-liner — a single file stays
+  allowed), `vaultwatch`'s thresholds (10 %, 200 files, 900 s, a 20-file top
+  dir), the hourly user snapshot timer and the root prune timer, both live, and
+  the migration's six steps. Corrected: the `CLAUDE.md` heading quoted above, the
+  `desktop/` child `265d597` added, and two claims stated past their coverage —
+  rule 3 does not reach the stdlib-only scripts (#1415), and no monitor notices
+  snapshots stopping (#1416).
