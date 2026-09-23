@@ -62,7 +62,11 @@ def _is_runtime_absence(spec: str) -> bool:
     knows it does not), only whether the thing named is regenerable output. A typo in
     a `scripts/` or `app/` path is still drift and still fails.
     """
-    rel = spec.replace("~/lloyd/", "", 1).replace(f"{Path.home()}/lloyd/", "", 1)
+    rel = spec
+    for prefix in ("~/lloyd-data/", f"{Path.home()}/lloyd-data/", "~/lloyd/", f"{Path.home()}/lloyd/"):
+        if rel.startswith(prefix):
+            rel = rel[len(prefix):]
+            break
     return rel.startswith(RUNTIME_ROOTS)
 
 
@@ -319,7 +323,7 @@ WORKER_SOURCES = ROOT / "workers" / "sources"
 #: The staging root as a checkout-relative path, spelled the way a docstring
 #: spells it. Derived from `app.paths` rather than written as a literal so the
 #: doc can never drift from the constant the writer uses.
-STAGING_CHECKOUT_REL = "lloyd/_pipeline/vault-derived/pending-research"
+STAGING_CHECKOUT_REL = "lloyd-data/_pipeline/vault-derived/pending-research"
 
 #: A `~`-anchored path in a worker-source docstring, backticked or not.
 #: `_PATH_RE` above cannot serve here for two reasons: it requires a backtick
@@ -432,14 +436,14 @@ def test_every_path_a_worker_source_docstring_names_resolves():
             f"the only unresolved docstring paths name regenerable output this "
             f"machine holds none of yet: {missing}")
 
-    from app.paths import LLOYD_HOME, VAULT_PENDING_RESEARCH_DIR
+    from app.paths import DATA_ROOT, VAULT_PENDING_RESEARCH_DIR
     import app.routers.workers as W
 
     assert W.PENDING_ROOT == VAULT_PENDING_RESEARCH_DIR, (
         "the Review tab lists a different root than app.paths names, so the "
         "root below is not the surface a human promotes from")
-    root_rel = VAULT_PENDING_RESEARCH_DIR.relative_to(LLOYD_HOME)
-    assert f"lloyd/{root_rel.as_posix()}" == STAGING_CHECKOUT_REL, (
+    root_rel = VAULT_PENDING_RESEARCH_DIR.relative_to(DATA_ROOT)
+    assert f"lloyd-data/{root_rel.as_posix()}" == STAGING_CHECKOUT_REL, (
         f"app.paths moved the staging root to {root_rel}; the docstrings and "
         f"this guard's spelling have to move with it")
 
@@ -450,11 +454,11 @@ def test_every_path_a_worker_source_docstring_names_resolves():
                 continue
             parts = [p for p in spec[len("~/"):].split("/") if p]
             lead = tuple(parts[1:1 + len(root_rel.parts)])
-            if parts[:1] != ["lloyd"] or lead != root_rel.parts:
+            if parts[:1] != ["lloyd-data"] or lead != root_rel.parts:
                 off_root.append((m, spec, f"~/{STAGING_CHECKOUT_REL}"))
     assert not off_root, (
         f"these docstrings name a pending-research root that is not "
-        f"app.paths.VAULT_PENDING_RESEARCH_DIR (checkout-relative "
+        f"app.paths.VAULT_PENDING_RESEARCH_DIR (data-root-relative "
         f"{root_rel}): {off_root}")
 
     # Two non-vacuity pins for the extractors themselves, because each half of
