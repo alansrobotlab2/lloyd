@@ -1090,6 +1090,22 @@ class WorkQueue:
             }
         return out
 
+    def oldest_run_completed_at(self, source: str) -> Optional[str]:
+        """The oldest `completed_at` this source has ever recorded, unfiltered.
+
+        `/api/autonomy/health` needs it to say how old its own verdict is
+        (#1401), and it cannot get that from the window-filtered read: with
+        every row predating the window that read returns nothing at all, and
+        "no data" is precisely the shape the clamp exists to tell apart from a
+        clean bill of health. So this queries the store, not the window — no
+        `completed_at >= ?` predicate, deliberately.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT MIN(completed_at) FROM runs WHERE source=?",
+                (source,)).fetchone()
+        return row[0] if row and row[0] else None
+
     def list_runs_joined(self, source: str, since_iso: str,
                          limit: int = 20000) -> list[dict]:
         """Runs since `since_iso`, joined to their queue row.

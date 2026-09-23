@@ -686,6 +686,20 @@ export interface AutonomyHealthTask {
   failure_count?: number;
 }
 
+/** An `idle_tasks` row: a task file with no run row inside the requested window.
+ *
+ * The two rates are null here and numeric on `tasks` (#1401). Over zero runs
+ * there is no rate to report, and the 0.0 this row used to carry from a
+ * hard-coded literal was byte-identical to a task that ran and passed. Nothing
+ * renders `idle_tasks` today, so this split is what keeps the declared shape
+ * from claiming a measurement the server no longer sends. */
+export interface AutonomyHealthIdleTask
+  extends Omit<AutonomyHealthTask, "fail_rate" | "silent_rate"> {
+  fail_rate: number | null;
+  silent_rate: number | null;
+  unobserved_in_window?: boolean;
+}
+
 export interface AutonomyHealth {
   days: number;
   generated_at: string;
@@ -700,9 +714,15 @@ export interface AutonomyHealth {
     active_tasks: number;
     failed_tasks: string[];
     paused_tasks: string[];
+    /** Present only when `workers.db` holds less history than `days` asks for
+     * (#1401): the stamp of the oldest run row the verdict read, and the hours
+     * of the requested window it actually rests on. `days` is a request; these
+     * two are the measurement. */
+    oldest_input?: string | null;
+    window_clamped_to_hours?: number | null;
   };
   tasks: AutonomyHealthTask[];
-  idle_tasks: AutonomyHealthTask[];
+  idle_tasks: AutonomyHealthIdleTask[];
 }
 
 export interface TodoItem {

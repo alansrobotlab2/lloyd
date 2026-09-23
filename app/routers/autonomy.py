@@ -379,9 +379,15 @@ async def autonomy_health(days: int = 7):
     Reads workers.db rather than the per-task run records, so pool-level
     failures are included — those were previously written without a task_id and
     were unreachable from any per-task view.
+
+    `fleet.oldest_input` / `fleet.window_clamped_to_hours` name the store's own
+    age when it is younger than `days`, because `days` is a request and not a
+    measurement (#1401): the 2026-09-22 rebuild left a ~21 h table reporting a
+    7-day `fail_rate` of 0.0, and the payload had no field a reader could check
+    it against.
     """
     import asyncio as _asyncio
-    from datetime import timedelta, timezone
+    from datetime import timedelta
 
     days = max(1, min(90, int(days)))
     try:
@@ -392,13 +398,25 @@ async def autonomy_health(days: int = 7):
             {"error": f"work queue unavailable: {e}", "days": days}, status_code=503)
 
     import autonomy as _autonomy
-    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    # ONE clock reading, used both to bound the query and to date the verdict.
+    # The window used to come from `datetime.now` while `compute_health` read
+    # `_utcnow()`, so the two edges of the same window were two instants; the
+    # clamp reports the span this query actually ran over, so it has to be
+    # measured from the instant the query was built at.
+    now = _autonomy._utcnow()
+    since = (now - timedelta(days=days)).isoformat()
     loop = _asyncio.get_event_loop()
     try:
         rows = await loop.run_in_executor(
             None, queue.list_runs_joined, "scheduled-task", since)
+        # Unfiltered by the window on purpose: the case the clamp exists for is
+        # a store whose every row predates the window, where the filtered read
+        # above is empty and cannot say how old the data behind it was.
+        oldest_input = await loop.run_in_executor(
+            None, queue.oldest_run_completed_at, "scheduled-task")
         tasks = await loop.run_in_executor(None, _autonomy._iter_task_files)
-        return JSONResponse(_autonomy.compute_health(rows, tasks, days))
+        return JSONResponse(_autonomy.compute_health(
+            rows, tasks, days, now=now, oldest_input=oldest_input))
     except Exception as e:
         logger.error("autonomy health failed: %s", e, exc_info=True)
         return JSONResponse({"error": str(e), "days": days}, status_code=500)

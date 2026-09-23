@@ -392,7 +392,14 @@ async def list_tools():
             "and the top-level `stalled` list names every task more than one "
             "period past its own `next_run` whatever its status — so a "
             "`fail_rate: 0.0` no longer stands for 'healthy' about a job that is "
-            "not running."), inputSchema={
+            "not running. Read the window before trusting a clean fleet number: "
+            "`window_clamped_to_hours` and `oldest_input` in the `fleet` block "
+            "appear "
+            "when `workers.db` holds less history than `days` asks for, so a "
+            "7-day verdict resting on 21 hours of post-rebuild state says so "
+            "rather than implying a week of evidence. And an `idle_tasks` row "
+            "is a task with no run in the window — its `fail_rate` and "
+            "`silent_rate` are null, never 0.0."), inputSchema={
             "type": "object",
             "properties": {"days": {"type": "integer", "description": "Window in days (default 7, max 90)"}},
         }),

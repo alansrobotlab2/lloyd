@@ -2759,9 +2759,57 @@ def _health_gap_fields(task: dict, now: datetime.datetime) -> dict:
     return {k: gap[k] for k in _GAP_ROW_KEYS}
 
 
+def _health_window_fields(now: datetime.datetime, days: int,
+                          oldest_input: Optional[str],
+                          observed: bool) -> dict:
+    """How much of the requested window the report can actually speak over (#1401).
+
+    Two keys, both null when the store covers the window so that `days` alone
+    describes the verdict:
+
+    * `oldest_input` — the ISO stamp of the oldest run row the store holds for
+      this source, named only when the verdict does not span what it claims.
+    * `window_clamped_to_hours` — the hours of the requested window the verdict
+      rests on: `now - max(window_start, oldest_input)`, and `0.0` when the
+      window holds no usable row at all. Present (non-null) only when that is
+      less than `days * 24`, i.e. whenever a reader who took `days` at face
+      value would be over-reading the evidence by an unknown factor.
+
+    The reference is the caller-supplied store age, never the window-filtered
+    rows: those are empty in the case that matters most (every row predates the
+    window), and an absent field there would wear the same face as the clean
+    bill of health this exists to expose. `observed` is False when the window
+    returned no row that reached the tallies — no rows, or only `skipped` ones —
+    which is a verdict over nothing, and nothing is shorter than any window.
+
+    Shaped this way because `app/routers/dashboard.py:458-462` already does the
+    same job for the worker rollup with `window_hours` beside `window_start`,
+    and its comment says why: a reader must be able to reproduce the number
+    instead of guessing at "roughly two days"."""
+    requested_hours = float(days) * 24.0
+    oldest = _parse_iso(oldest_input)
+    if oldest is None:
+        return {"oldest_input": None, "window_clamped_to_hours": None}
+    window_start = now - datetime.timedelta(hours=requested_hours)
+    if not observed:
+        span_hours = 0.0
+    else:
+        span_hours = (now - max(window_start, oldest)).total_seconds() / 3600.0
+    if span_hours >= requested_hours - 1e-9:
+        return {"oldest_input": None, "window_clamped_to_hours": None}
+    return {"oldest_input": oldest_input,
+            "window_clamped_to_hours": round(span_hours, 2)}
+
+
 def compute_health(rows: list[dict], tasks: list[dict], days: int,
-                   now: Optional[datetime.datetime] = None) -> dict:
+                   now: Optional[datetime.datetime] = None,
+                   oldest_input: Optional[str] = None) -> dict:
     """Aggregate run rows into per-task and fleet health. Pure function.
+
+    `oldest_input` is the age of the store the rows came from — the caller reads
+    it with `WorkQueue.oldest_run_completed_at`, unfiltered by the window — and
+    it is what lets the payload say "this 7-day verdict rests on 21 hours"
+    instead of asserting 7 days it never saw. See `_health_window_fields`.
 
     `now` is the one instant every elapsed-time field is measured against, and
     it defaults to `_utcnow()` for the same reason `_is_task_due` takes one: the
@@ -2935,11 +2983,22 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
     out_tasks.sort(key=lambda x: x["wasted_hours"], reverse=True)
 
     # Tasks with a file but no runs in the window are worth seeing too.
+    #
+    # `runs: 0` with a `fail_rate` of 0.0 was the defect (#1401): a task whose
+    # task-file `last_run` sits inside the window while its run row does not —
+    # which is what a young store does to every task older than the rebuild —
+    # rendered byte-identically to a task that ran and passed. A rate over zero
+    # runs is no rate, so these two are null, the same way
+    # `refuted_or_insufficient_rate` below is null over zero claims and
+    # `stalled[].fail_rate` is null over zero rows; `unobserved_in_window` is
+    # the marker for a consumer flattening `tasks` and `idle_tasks` into one
+    # table, where the list a row came from is no longer visible.
     seen = {t["task_id"] for t in out_tasks}
     idle = [{"task_id": str(t.get("id")), "name": t.get("name"),
              "status": t.get("status"), "frequency": t.get("frequency"),
              "runs": 0, "successes": 0, "failures": 0, "timeouts": 0, "empty": 0,
-             "silent": 0, "fail_rate": 0.0, "silent_rate": 0.0, "gpu_hours": 0.0,
+             "silent": 0, "fail_rate": None, "silent_rate": None, "gpu_hours": 0.0,
+             "unobserved_in_window": True,
              "wasted_hours": 0.0, "avg_seconds": 0.0, "max_seconds": 0.0,
              "runs_with_bundle": 0, "runs_without_bundle": 0,
              "claims_checked": 0, "claims_verified": 0, "claims_refuted": 0,
@@ -3016,6 +3075,12 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
                              if str(t.get("status")) == "failed"],
             "paused_tasks": [str(t.get("id")) for t in tasks
                              if str(t.get("status")) == "paused"],
+            # `oldest_input` / `window_clamped_to_hours`: how much of `days` the
+            # rows above actually cover. Null when they cover it. Without these
+            # the block reports `fail_rate` under a label ("the last N days")
+            # that a young store silently contradicts (#1401) — which is how
+            # this endpoint read "fleet healthy, nothing to pause" over ~21 h.
+            **_health_window_fields(now, days, oldest_input, bool(by_task)),
         },
         "tasks": out_tasks,
         "idle_tasks": idle,

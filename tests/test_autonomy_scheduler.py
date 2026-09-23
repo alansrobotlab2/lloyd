@@ -1891,6 +1891,82 @@ def test_health_distinguishes_a_never_run_overdue_task_from_a_weekly_one_not_due
         "daily task from a weekly task that was never due")
 
 
+def test_the_health_payload_keeps_every_key_today_s_consumers_read(aut, monkeypatch):
+    """Clause 5 on #1401: the clamp fields are added, nothing is renamed or re-typed.
+
+    Three readers take this payload apart today — `web/src/api.ts:1251`,
+    `agent_mcp/autonomy.py:418-440` and the arch-review prompt at
+    `workers/sources/arch_review.py:855-856` — and the item's clause 3 says they
+    keep working unchanged. `old_fleet_keys` is the fleet block's shape as
+    measured on live state on 2026-09-23 before the change, so the containment
+    assertion is containment against a real snapshot, not against a wish: the
+    two clamp keys are allowed in, and any other difference fails naming itself.
+
+    The other half of the clause is that dispatch never reads this payload, so
+    `compute_health` has to stay callable exactly as it was called — three
+    positional arguments, no new required parameter — and produce the same key
+    set whether or not the caller knows about `oldest_input`.
+    """
+    _pin(aut, monkeypatch)
+    write_task(aut, 970, frequency="daily",
+               last_run=(PIN - dt.timedelta(hours=30)).isoformat(),
+               next_run=(PIN - dt.timedelta(hours=30)).isoformat())
+    write_task(aut, 971, frequency="weekly", last_run=None,
+               next_run=(PIN + dt.timedelta(days=3)).isoformat())
+    rows = [{"task_id": "970", "status": "success", "duration_seconds": 60.0,
+             "summary": "ok", "response_json": "did work", "meta_json": None,
+             "completed_at": (PIN - dt.timedelta(hours=2)).isoformat()}]
+    old_fleet_keys = {
+        "runs", "failures", "fail_rate", "gpu_hours", "wasted_hours",
+        "empty_runs", "timeout_runs", "claims_checked", "claims_verified",
+        "claims_refuted", "claims_insufficient", "runs_with_bundle",
+        "runs_without_bundle", "refuted_or_insufficient_rate", "active_tasks",
+        "failed_tasks", "paused_tasks",
+    }
+    old_task_keys = {"task_id", "runs", "failures", "fail_rate", "silent_rate",
+                     "gpu_hours", "wasted_hours", "last_run", "never_run",
+                     "gap_ratio", "hours_since_last_run", "expected_interval_seconds"}
+
+    h = autonomy.compute_health(rows, list(aut.dependency_resolution_set()), 1, now=PIN)
+
+    assert old_fleet_keys <= set(h["fleet"]), (
+        f"the fleet block lost {sorted(old_fleet_keys - set(h['fleet']))}")
+    assert set(h["fleet"]) - old_fleet_keys == {"oldest_input",
+                                                "window_clamped_to_hours"}, (
+        f"the fleet block gained {sorted(set(h['fleet']) - old_fleet_keys)} — "
+        "the clause permits the two clamp keys and nothing else")
+    assert isinstance(h["fleet"]["runs"], int)
+    assert isinstance(h["fleet"]["fail_rate"], float)
+    assert h["fleet"]["runs"] == sum(t["runs"] for t in h["tasks"]), (
+        "the fleet count stopped being the sum of the per-task counts. Measured "
+        "on live state 2026-09-23: fleet.runs == 23 == sum(tasks[].runs), with "
+        "the idle rows contributing nothing — that is why nulling an idle rate "
+        "could not move the headline number")
+
+    ran = next(t for t in h["tasks"] if t["task_id"] == "970")
+    assert old_task_keys <= set(ran), (
+        f"the per-task row lost {sorted(old_task_keys - set(ran))}")
+    assert ran["fail_rate"] == 0.0 and ran["silent_rate"] == 0.0, (
+        "a row WITH runs lost the numeric rates clause 4 says it keeps")
+
+    idle = next(t for t in h["idle_tasks"] if t["task_id"] == "971")
+    assert idle["fail_rate"] is None and idle["silent_rate"] is None
+    assert idle["never_run"] is True and "last_run" in idle, (
+        "the idle row's own stamps are the reason it is on the board; the "
+        "change nulls a rate it cannot compute, not the history it has")
+
+    stalled = {s["task_id"]: s for s in h["stalled"]}
+    assert "970" in stalled, "a task 30 h past next_run at daily is missing from stalled"
+    assert stalled["970"]["fail_rate"] == 0.0 and stalled["970"]["runs_in_window"] == 1
+    assert {"hold", "gap_ratio", "hours_past_next_run"} <= set(stalled["970"])
+
+    same = autonomy.compute_health(rows, list(aut.dependency_resolution_set()), 1)
+    assert set(same["fleet"]) == set(h["fleet"]), (
+        "the payload's key set depends on whether the caller passed "
+        "`oldest_input`, so a caller that has not been updated sees a different "
+        "shape than one that has")
+
+
 # ── #832: a declared output artifact is evidence for run status ───────────────
 #
 # Five recorded runs (2026-09-11 #38, 09-14 #57, 09-16 #39, 09-17 #39 twice)
