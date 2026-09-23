@@ -282,3 +282,329 @@ def test_frontend_sources_are_allowed_because_the_frontend_rung_builds_them(path
 
 def test_frontend_tooling_outside_src_is_unlisted_not_allowed():
     assert spec.classify("web/eslint.config.js") == "unlisted"
+
+
+# ---------------------------------------------------------------------------
+# the agent-services widening (#1376): rails for a decision the loop may not make
+# ---------------------------------------------------------------------------
+#
+# #1376 asks for `agent-services/livekit_worker.py` to join ALLOWED_GLOBS, so a
+# voice-stack fix can clear rung 0 at all — round SM_20260922_201113 wrote that
+# fix and its tests and was refused before anything was judged. The item's own
+# acceptance is `human-only: scripts/automod/spec.py`, and the reason is
+# measured, not stylistic: the file that decides the writable set sits under the
+# allowed prefix `scripts/**`, and `grep -rn "automod/spec" --include=*.py .`
+# finds no rail against editing it outside `tests/` and `spec.py` itself. So a
+# round may not make that edit, and this section does not make it either. What
+# it owns is the *shape* the edit has to take: rails aimed at the class of bad
+# widening (a directory glob) rather than at one name, a simulation that proves
+# those rails can fail, a second simulation that runs every one of them against
+# the single named entry the item asks for, and a check that the verdicts they
+# pin are the verdicts a second interpreter reading the tree prints.
+
+#: `ALLOWED_GLOBS` as committed, snapshotted at import. The two simulations below
+#: widen from this and never from `spec.ALLOWED_GLOBS` at call time: a monkeypatch
+#: undo that did not run, in any test anywhere in this file, would otherwise feed
+#: one simulation's grant into the other, and the pair assert opposite verdicts —
+#: the blanket edit must make the rails fire, the named edit must not. A leaked
+#: `"agent-services/**"` therefore turns the green-path test red for a reason that
+#: is not in the tree, which is exactly how a fence test stops meaning anything.
+#: Reproduced before it was fixed: driving these two functions in-process without
+#: restoring the tuple printed 79 violations on the named-file path.
+ALLOWED_GLOBS_AS_SHIPPED: tuple[str, ...] = tuple(spec.ALLOWED_GLOBS)
+
+#: Paths a widening must never reach, none of them named in ALLOWED_GLOBS today.
+#: Each stands in for a whole directory, because that is what a glob does: an
+#: entry that admits one of these admits every tracked file under it.
+AGENT_SERVICES_GLOB_PROBES: tuple[str, ...] = (
+    "agent-services/conf/probe.yml",
+    "agent-services/services/probe/probe_server.py",
+    "agent-services/voice/probe.sh",
+    "agent-services/setup/probe.sh",
+    "agent-services/models/wakeword/probe.onnx",
+)
+
+#: The acoustic weights themselves, all tracked
+#: (`git ls-files agent-services/models` -> 6 files, these 5 plus a SOURCE note).
+#: Named apart from the probes because they are the one `agent-services/**`
+#: content whose bad edit no rung can see: rung 0 matches paths, the drill boots
+#: the stack, and the eval axis is retrieval — none of the three scores whether a
+#: wake-word model still fires, so a rewritten `.onnx` would land silently and
+#: show up as a dead wake word.
+AGENT_SERVICES_ACOUSTIC_WEIGHTS: tuple[str, ...] = (
+    "agent-services/models/wakeword/hey_lloyd.onnx",
+    "agent-services/models/wakeword/Lloyd.onnx",
+    "agent-services/models/openwakeword/embedding_model.onnx",
+    "agent-services/models/openwakeword/melspectrogram.onnx",
+    "agent-services/models/silero-vad/silero_vad.onnx",
+)
+
+
+def tracked_agent_services_paths() -> list[str]:
+    """Every file git tracks under `agent-services/`, read from the index.
+
+    The index and not the working tree because rung 0 classifies the paths a diff
+    touches (`gate.py:928`, `rung_preflight`), which is exactly what a commit can
+    carry there. Measured at `1842b8cf`: 187 files, of which 112 already classify
+    `protected` (writable today, with rung 6's drill) and 75 `unlisted`. Re-read
+    at this round's base `c2bd72b`: 192 files, 117 `protected`, 75 `unlisted` —
+    the five more are `guardian/datawatch.py` and four `systemd/` units, all
+    already `protected`, which is why the unlisted count the rails are priced on
+    has not moved.
+
+    The length check is a denominator control, not decoration: a helper
+    returning an empty list would make every "nothing else changed" assertion in
+    this section vacuously true. It deliberately does not check *verdicts* —
+    `test_a_blanket_agent_services_glob_would_trip_each_rail` calls this helper
+    with ALLOWED_GLOBS deliberately widened, so a verdict check here would fire
+    on the simulation instead of on the tree.
+    """
+    out = subprocess.run(["git", "ls-files", "agent-services"], cwd=REPO_ROOT,
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    paths = sorted(p for p in out.stdout.split() if p)
+    assert len(paths) >= 187, (
+        f"only {len(paths)} tracked files under agent-services/, below the 187 "
+        f"this rail was sized on — 'nothing else changed' would be guarding "
+        f"almost nothing")
+    return paths
+
+
+def agent_services_paths_admitted_without_being_named() -> list[str]:
+    """The violation list for path-exactness: an `agent-services/**` path that
+    classifies `allowed` although no ALLOWED_GLOBS entry is that exact path.
+
+    This is the literal reading of #1376 clause 1 — "no `agent-services/**` file
+    other than the ones named in the edit changes classification" — and it
+    refuses a wildcard spelling of even a single file on purpose: `fnmatch`'s
+    `*` crosses `/` (spec.py:107-112), so a wildcard in that tuple is one
+    keystroke away from a grant over the whole tree.
+    """
+    verbatim = {g for g in spec.ALLOWED_GLOBS if "*" not in g}
+    universe = tracked_agent_services_paths() + list(AGENT_SERVICES_GLOB_PROBES)
+    return sorted(p for p in universe
+                  if p not in verbatim and spec.classify(p) == "allowed")
+
+
+def test_only_a_verbatised_path_under_agent_services_may_be_admitted():
+    """#1376 clause 1, as a property rather than a name.
+
+    The edit the item anticipates — one line, `"agent-services/livekit_worker.py"`
+    added to ALLOWED_GLOBS — keeps this green, because the admitted file is then
+    also the named file. The shortcut edit goes red: `"agent-services/**"` (or
+    `"agent-services/services/**"`) admits the 75 unlisted tracked files plus all
+    five probes — measured 80 violations against the blanket glob — while the 117
+    tracked files under `PROTECTED_GLOBS` stay `protected`, the ordering property
+    `test_a_blanket_agent_services_glob_would_trip_each_rail` pins separately.
+    Same shape as `test_admitting_prompt_surface_did_not_widen_anything_else`,
+    the precedent the item cites for the fix, widened from two root-level
+    samples to the whole tracked `agent-services/` corpus.
+
+    The violation assertion comes first on purpose: with the vacuity guard first,
+    a blanket glob failed on the *count* and the message blamed the corpus for
+    what the grant had done, so the failure read as "this rail has nothing left to
+    guard" instead of naming the illegal admission.
+    """
+    violations = agent_services_paths_admitted_without_being_named()
+    assert violations == [], (
+        f"{len(violations)} agent-services path(s) became writable without being "
+        f"named in ALLOWED_GLOBS: {violations[:8]}"
+        + (f" … (+{len(violations) - 8} more)" if len(violations) > 8 else ""))
+    unlisted = [p for p in tracked_agent_services_paths()
+                if spec.classify(p) == "unlisted"]
+    assert len(unlisted) >= 70, (
+        f"only {len(unlisted)} tracked agent-services paths are still unlisted, "
+        f"against 75 at both 1842b8cf and c2bd72b: the widening #1376 anticipates "
+        f"is effectively complete, so this rail is close to vacuous and the item "
+        f"should be re-read rather than trusted")
+
+
+@pytest.mark.parametrize("path", AGENT_SERVICES_ACOUSTIC_WEIGHTS)
+def test_an_acoustic_model_weight_is_never_writable_by_a_round(path):
+    """#1376 clause 2: nothing under `agent-services/models/**` is `allowed`.
+
+    Rung 0 is the only thing between an unattended round and these bytes, so the
+    grant has to be written as if the blanket glob were the tempting option —
+    which it is: it is one line, and it also closes #1301.
+    """
+    assert spec.classify(path) != "allowed"
+
+
+def test_the_acoustic_weight_rail_covers_every_tracked_model_file():
+    """The five named weights are the whole tracked corpus, not a sample of it.
+
+    Guards the case the parametrised test above cannot see on its own: a model
+    file added to the repo that no name in this file mentions.
+    """
+    models = [p for p in tracked_agent_services_paths()
+              if p.startswith("agent-services/models/")]
+    assert models, "no tracked file under agent-services/models/ — this rail guards nothing"
+    assert set(AGENT_SERVICES_ACOUSTIC_WEIGHTS) <= set(models), (
+        f"tracked model files this rail does not name: "
+        f"{sorted(set(models) - set(AGENT_SERVICES_ACOUSTIC_WEIGHTS))}")
+    assert [p for p in models if spec.classify(p) == "allowed"] == []
+
+
+def test_no_grant_in_the_allowed_tuple_reaches_the_models_tree():
+    """#1376 clause 2, asked of the grants rather than of a sample of paths.
+
+    The two nodes above ask whether known files classify `allowed`; a weight
+    added tomorrow under a directory no name here mentions answers neither, so
+    this turns the question round and interrogates every entry of
+    `ALLOWED_GLOBS` with a path deeper in the tree than anything enumerated.
+    `spec._match` is the matcher rung 0 itself uses (`gate.py:928` →
+    `check_scope` → `classify`), so a grant that reaches this probe is a grant
+    that would reach the weights — and the blanket `"agent-services/**"` edit
+    this item names as the tempting option is what turns it red.
+    """
+    probe = "agent-services/models/probe-dir/probe_weight.onnx"
+    offenders = [g for g in spec.ALLOWED_GLOBS if spec._match(probe, (g,))]
+    assert offenders == [], f"ALLOWED_GLOBS entries reaching the models tree: {offenders}"
+    assert spec.classify(probe) == "unlisted"
+
+
+def test_the_scope_spec_stays_protected_though_scripts_is_allowed():
+    """#1376 clause 3, and the reason the widening is a person's job.
+
+    `scripts/**` is in ALLOWED_GLOBS, so `scripts/automod/spec.py` — the module
+    that decides what a round may write — sits under an allowed prefix. It is
+    `protected` only because `classify` consults PROTECTED before ALLOWED
+    (spec.py:144-147); the item's probe is that no other file in the tree rails
+    it. That asymmetry is why the widening binds only once landed: the gate is
+    spawned against the live tree (`round.py:445`) and grades rung 0 with the
+    spec that interpreter imports (`gate.py:53`, `gate.py:928`), so a round that
+    widened the tuple in its own worktree would still be refused by its own gate,
+    and every *later* round would inherit the widening.
+    """
+    assert "scripts/**" in spec.ALLOWED_GLOBS
+    assert spec.classify("scripts/automod/spec.py") == "protected"
+    assert spec.requires_drill(["scripts/automod/spec.py"])
+    ok, _, buckets = spec.check_scope(["scripts/automod/spec.py"])
+    assert ok and buckets["protected"] == ["scripts/automod/spec.py"], (
+        "protected must stay permitted-but-drilled: refusing it outright would "
+        "make the control surface unfixable, which is the difference between "
+        "guarding a capability and amputating it")
+
+
+def test_a_blanket_agent_services_glob_would_trip_each_rail(monkeypatch):
+    """Proves the rails above can fail, and prices the wrong edit.
+
+    A property of a currently-narrow tuple is worth nothing unless the widening
+    being proposed is the thing that turns it red, so this applies the edit a
+    rushed person makes — one line, `"agent-services/**"`, which would also close
+    #1301 and is the tempting option — to the tuple the rails read, and calls
+    `test_only_a_verbatised_path_under_agent_services_may_be_admitted` expecting
+    it to raise. `fnmatch`'s `*` crosses `/` (spec.py:107-112), so that line is a
+    grant over every tracked file in the tree, weights included: 80 violations
+    measured at this base `c2bd72b`, the 75 unlisted tracked files plus the 5
+    probes, which the assertion re-derives from the corpus rather than pinning.
+    The raised message has to name the illegal admission — with the vacuity guard
+    written ahead of it, the failure blamed the corpus count for what the grant
+    had done.
+
+    The last two assertions are the ordering property that keeps even that bad
+    edit survivable: PROTECTED is consulted first (spec.py:142-147), so widening
+    ALLOWED cannot pull the scope spec, the guardian or the supervisor confs out
+    of the rollback drill.
+    """
+    # The expected violation set, measured from the tuple BEFORE it is widened:
+    # every currently-unlisted tracked file plus every probe, because a blanket
+    # glob admits exactly those — the 117 tracked `protected` paths never leave
+    # `protected` (asserted below), and no currently-allowed path is unnamed.
+    # Derived rather than hard-coded: tracked file count in that tree moves, and
+    # a pinned 80 would go red on an unrelated commit that added one setup script.
+    unlisted_before = [p for p in tracked_agent_services_paths()
+                       if spec.classify(p) == "unlisted"]
+    expected = len(unlisted_before) + len(AGENT_SERVICES_GLOB_PROBES)
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS",
+                        (*ALLOWED_GLOBS_AS_SHIPPED, "agent-services/**"))
+    assert spec.classify("agent-services/livekit_worker.py") == "allowed"
+    # The rail itself, not a restatement of its helper: clause 1 asks that the
+    # same rail turn red under the blanket edit, so the edit is applied to the
+    # tuple the rail reads and the rail is called. The message is the other half
+    # of the assertion — it must name the grant's effect, and with the vacuity
+    # guard ordered ahead it named the corpus instead.
+    with pytest.raises(AssertionError) as fired:
+        test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+    message = str(fired.value)
+    assert "became writable without being named" in message, message
+    assert "are still unlisted" not in message, (
+        f"the failure blamed the corpus denominator rather than the grant: {message}")
+    violations = agent_services_paths_admitted_without_being_named()
+    assert len(violations) == expected, (
+        f"a blanket glob admitted {len(violations)} unnamed paths, not the "
+        f"{expected} that are unlisted today plus the {len(AGENT_SERVICES_GLOB_PROBES)} "
+        f"probes — the helper and the corpus no longer agree, so the rail is "
+        f"guarding a set it cannot see")
+    assert "agent-services/livekit_worker.py" in violations
+    assert "agent-services/models/wakeword/hey_lloyd.onnx" in violations
+    assert spec.classify("scripts/automod/spec.py") == "protected"
+    assert spec.classify("agent-services/guardian/guardian.py") == "protected"
+
+
+def test_the_edit_1376_anticipates_keeps_every_rail_green(monkeypatch):
+    """#1376 clause 4: the rails bound the widening, they must not veto it.
+
+    This is the same simulation with the one line the item asks a person to add,
+    and it is the check that the rails are a fence rather than a wall: the path
+    becomes `allowed`, the rung-0 verdict for the exact diff round
+    SM_20260922_201113 wrote — `agent-services/livekit_worker.py` plus
+    `tests/test_voice_gate.py`, the two files `gate.json` bucketed as
+    `unlisted: ['agent-services/livekit_worker.py']` /
+    `allowed: ['tests/test_voice_gate.py']` — comes back in scope with no drill,
+    and every other path is untouched. Without this half the section would be a
+    way of keeping #1058 unimplementable by a different route.
+    """
+    monkeypatch.setattr(spec, "ALLOWED_GLOBS",
+                        (*ALLOWED_GLOBS_AS_SHIPPED, "agent-services/livekit_worker.py"))
+    assert spec.classify("agent-services/livekit_worker.py") == "allowed"
+    # "Every rail stays green", executed: each rail in this section is called
+    # with the widened tuple in place, so a rail that only looks green in prose
+    # — or that quietly starts vetoing the very edit it exists to shape — fails
+    # here rather than in the reviewer's reading of this file.
+    test_only_a_verbatised_path_under_agent_services_may_be_admitted()
+    for weight in AGENT_SERVICES_ACOUSTIC_WEIGHTS:
+        test_an_acoustic_model_weight_is_never_writable_by_a_round(weight)
+    test_the_acoustic_weight_rail_covers_every_tracked_model_file()
+    test_no_grant_in_the_allowed_tuple_reaches_the_models_tree()
+    test_the_scope_spec_stays_protected_though_scripts_is_allowed()
+    ok, reason, buckets = spec.check_scope(["agent-services/livekit_worker.py",
+                                           "tests/test_voice_gate.py"])
+    assert (ok, reason) == (True, "in scope"), (ok, reason)
+    assert not buckets["protected"] and not buckets["unlisted"]
+    assert spec.requires_drill(["agent-services/livekit_worker.py",
+                                "tests/test_voice_gate.py"]) is False, (
+        "an empty protected bucket is the clause: this diff must not buy a "
+        "guardian drill")
+
+
+def test_the_verdicts_these_rails_pin_are_the_ones_another_interpreter_prints():
+    """The seam rung 0 sits on, crossed the way the gate crosses it.
+
+    `automod_gate` does not grade in-process: it is spawned detached with
+    `cwd=LIVE_ROOT` (`round.py:445`) and rung 0 calls `spec.check_scope(changed)`
+    at `gate.py:928` on the `spec` module *that* interpreter imported. A rail
+    holding only inside the pytest process would certify a widening the gate
+    never sees. Same construction as
+    `test_a_second_interpreter_reaches_the_same_verdict_as_rung_0`, on the paths
+    this section owns: the child's verdicts must equal the parent's, so the test
+    stays green whichever way a later widening moves them and red only if the two
+    interpreters disagree.
+    """
+    universe = tracked_agent_services_paths() + list(AGENT_SERVICES_GLOB_PROBES)
+    probe = (
+        "from scripts.automod import spec; "
+        "import sys; "
+        "print(spec.classify('agent-services/livekit_worker.py')); "
+        "print(spec.classify('agent-services/models/wakeword/hey_lloyd.onnx')); "
+        "print(spec.classify('scripts/automod/spec.py')); "
+        "print(len([p for p in sys.argv[1:] if spec.classify(p) == 'allowed']))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe, *universe], cwd=REPO_ROOT,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    lines = out.stdout.strip().splitlines()
+    assert lines[0] == spec.classify("agent-services/livekit_worker.py"), out.stdout
+    assert lines[1] == spec.classify("agent-services/models/wakeword/hey_lloyd.onnx"), out.stdout
+    assert lines[2] == "protected", out.stdout
+    assert int(lines[3]) == len([p for p in universe if spec.classify(p) == "allowed"]), out.stdout
