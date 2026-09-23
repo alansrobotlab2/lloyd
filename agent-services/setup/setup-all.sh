@@ -265,6 +265,20 @@ else
     warn "thunderbird-mcp bridge present but nothing on :8765 — Thunderbird or its MCP extension is down; those 40 tools will not be served (systemctl --user status thunderbird)"
 fi
 
+# thunderbird + voxtype systemd units (#1109) — tracked in agent-services/systemd/,
+# linked by install-services.sh, WantedBy=graphical-session.target. They lost
+# 40 tools + push-to-talk silently when they were untracked; the check keeps that
+# from regressing on a rebuild.
+for unit in thunderbird voxtype; do
+    if [[ ! -e "$HOME/.config/systemd/user/$unit.service" ]]; then
+        todo "$unit.service not installed — run: bash agent-services/setup/install-services.sh"
+    elif [[ "$(systemctl --user is-enabled "$unit" 2>/dev/null)" != "enabled" ]]; then
+        todo "$unit.service present but not enabled — run: systemctl --user enable $unit"
+    else
+        ok "$unit.service installed and enabled (graphical-session unit)"
+    fi
+done
+
 echo
 echo "============================================"
 if (( ${#MANUAL[@]} )); then

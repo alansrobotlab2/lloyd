@@ -92,8 +92,9 @@ slot. It is at 40 now.
 sources from the query. It used to select fifty rows and skip over-quota ones
 in Python, which is a different thing entirely once a saturated source has
 more than fifty items queued: they fill the window, the claimable row behind
-them is never seen, and the pool reads the queue as empty and sleeps. Three
-sources sharing two slots on this box makes that an ordinary Tuesday.
+them is never seen, and the pool reads the queue as empty and sleeps. A few
+saturated sources sharing the handful of slots on this box makes that an
+ordinary Tuesday.
 
 ### The KV budget gate
 
@@ -504,11 +505,19 @@ Follow-ups, not done: schemas for `deep_research.parse_result` and
 
 ## 6. Configuration
 
+`workers.slots` is the one number a reader is most likely to find stale in a
+doc like this one. The authoritative value lives only in `config.yaml`; it is
+pinned by `tests/test_loop_depth.py` to `rounds + triages + 1` (the number of
+autocode rounds plus the number of autotriage turns, plus one slot so a
+scheduled task is never queued behind them). The copy in the block below is a
+sample of the shape, not the live number — `tests/test_doc_worker_slots_parity.py`
+fails if it ever contradicts `config.yaml`.
+
 ```yaml
 workers:
   db_path: ~/lloyd-data/workers.db
   enabled: true
-  slots: 2                      # concurrent workers
+  slots: 6                      # concurrent workers — see the note above; truth is config.yaml
   max_attempts: 3               # before an item is poisoned
   kv_gate:                      # §2, "The KV budget gate"
     enabled: true

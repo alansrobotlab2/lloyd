@@ -1,0 +1,22 @@
+[Unit]
+Description=Thunderbird (hosts thunderbird-mcp extension, bridge on :8765)
+# Tied to the graphical session rather than default.target: on 2026-09-17 the
+# user manager restarted before Hyprland was up and the old unit (pinned to
+# DISPLAY=:1 / WAYLAND_DISPLAY=wayland-1) failed with "we don't have any
+# display". The display now comes from the session's imported environment.
+PartOf=graphical-session.target
+After=graphical-session.target
+Requisite=graphical-session.target
+
+[Service]
+# The pacman package (/usr/lib/thunderbird) does not self-update. The
+# ~/opt/thunderbird tarball it replaced applied an update at 18:11 on
+# 2026-09-17 and exited 0, which Restart=on-failure does not restart.
+# Profile: ~/.thunderbird/installs.ini maps this install (FDC34C9F024745EB)
+# to mcn0klxv.default-esr, where the thunderbird-mcp extension lives.
+ExecStart=/usr/bin/thunderbird
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

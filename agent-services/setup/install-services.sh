@@ -19,7 +19,18 @@ set -euo pipefail
 #     live. Plus supervisord parks a program in FATAL after startretries and
 #     never un-parks it, while systemd Restart=always never gives up.
 #
-# Anything that is not a watchdog still belongs in supervisor/conf.d/.
+#   thunderbird.service and voxtype.service — two more units that are neither
+#     supervisord programs nor watchdogs, but load-bearing Lloyd infra, and so
+#     are tracked here (#1109). Both are WantedBy=graphical-session.target:
+#     Thunderbird hosts the thunderbird-mcp extension its 40 tools bridge over
+#     (:8765) and voxtype is push-to-talk STT, so each needs the desktop's
+#     display session and must come up with it, which a headless supervisord
+#     child cannot. Before #1109 they existed only as untracked files under
+#     ~/.config/systemd/user/, so a rebuild silently lost 40 tools and voice-in.
+#     Linking them here (this loop) is what makes a rebuild reproduce them.
+#
+# Anything that is not a watchdog or a graphical-session app still belongs in
+# supervisor/conf.d/.
 #
 # Lingering must also be enabled or supervisord dies at logout and never starts
 # at boot:
@@ -74,6 +85,7 @@ fi
 echo ""
 echo "Enable and start:"
 echo "  systemctl --user enable --now agent-supervisord.service"
+echo "  systemctl --user enable thunderbird voxtype   # WantedBy=graphical-session.target — the desktop session starts them"
 echo ""
 echo "Then check the services supervisord manages:"
 echo "  $HOME/.local/share/uv/tools/supervisor/bin/supervisorctl \\"

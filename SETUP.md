@@ -1038,6 +1038,28 @@ The unit runs `bin/cleanup-orphans.sh` as `ExecStartPre`, which kills stale
 listeners on ports 8093/8094/8096/8097/8098/8099/8181/18789 so a dirty shutdown
 doesn't cause "address already in use" on the next boot.
 
+### thunderbird + voxtype (graphical-session units — #1109)
+
+Two more user units are load-bearing Lloyd infra but are **not** supervisord
+programs: `thunderbird.service` (Thunderbird hosts the `thunderbird-mcp`
+extension the 40 email/calendar/contacts tools bridge over on `:8765`) and
+`voxtype.service` (push-to-talk voice-to-text). Both are
+`WantedBy=graphical-session.target`, so they must come up with the desktop
+session — a headless supervisord child can't drive them. Before #1109 they
+existed only as untracked files under `~/.config/systemd/user/`, so a rebuild
+silently lost those 40 tools and push-to-talk. They are now tracked at
+`agent-services/systemd/{thunderbird,voxtype}.service` and linked into place by
+`install-services.sh` like every other unit. Enable them (the desktop starts
+them; `--now` is not wanted since they need a live graphical session):
+
+```bash
+systemctl --user enable thunderbird voxtype
+systemctl --user status thunderbird   # expect active (running), :8765 listening
+```
+
+The `thunderbird-mcp` bridge itself is a separate, gitignored Node install — see
+Part 13, "Thunderbird bridge," and `setup/setup-thunderbird-mcp.sh`.
+
 ### How supervisord is wired
 
 `agent-services/supervisor/supervisord.conf` sets the socket at

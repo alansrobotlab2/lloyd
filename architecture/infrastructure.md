@@ -310,13 +310,14 @@ each. Stop the hands before moving the floor.
 
 Unit files live in `agent-services/systemd/` and `install-services.sh:36`
 **symlinks** every `.service` and `.timer` in that directory into
-`~/.config/systemd/user/`, so editing the repo copy is the deploy. Four
-exceptions to that rule, all of them gaps rather than design. The
-groundskeeper and graph-backup timers, plus `thunderbird.service` and
-`voxtype.service`, exist only as plain untracked files under
-`~/.config/systemd/user/` — a rebuild from `SETUP.md` loses the timers and
-with them Thunderbird's `:8765` bridge (40 MCP tools) and the push-to-talk
-trigger (#1109). The same glob also links the root-only
+`~/.config/systemd/user/`, so editing the repo copy is the deploy. `thunderbird.service`
+and `voxtype.service` are tracked here and linked like every other unit (#1109,
+fixed) — both are `WantedBy=graphical-session.target` (Thunderbird hosts the
+`thunderbird-mcp` extension its 40 tools bridge over; voxtype is push-to-talk),
+so `enable` runs them with the desktop, not via supervisord. Two units are still
+gaps rather than design: the groundskeeper and graph-backup timers exist only as
+plain untracked files under `~/.config/systemd/user/`, so a rebuild from
+`SETUP.md` loses them. The same glob also links the root-only
 `nvidia-power-limit.service` into the user manager, where it can never clamp
 anything, while the copy that does run is at `/etc/systemd/system/` with
 nothing checking it against the tracked one (#1108). And one tracked unit
@@ -557,9 +558,10 @@ mining. The systemd timers above are the only wall-clock schedules.
   access boundary (the backend binds `0.0.0.0` and serves an unauthenticated
   `/api/*` to the LAN — #683), LiveKit's bind (signal is `0.0.0.0`;
   `rtc.node_ip` is only the *advertised* ICE address), the port table (no
-  7881), and the unit-file exception list (four gaps, not two: untracked
-  timers plus `thunderbird`/`voxtype` #1109, the installer linking the
-  root-only power unit into the user manager #1108, and a dead tracked
+   7881), and the unit-file exception list (four gaps, not two: untracked
+   timers plus `thunderbird`/`voxtype` #1109 — now tracked and linked, so that
+   one is closed — the installer linking the
+   root-only power unit into the user manager #1108, and a dead tracked
   `agent-services/autonomy.service` #1110). Recorded without changing: GPU 1
   at 450 W against a declared 400 W (#1107; the unit declares 450 W since
   2026-09-17).
