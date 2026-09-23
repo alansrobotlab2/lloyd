@@ -11,10 +11,17 @@ written and the run says what it *would* have done.
     scripts/memory/fact-improvement.py --apply --max-actions 10
     scripts/memory/fact-improvement.py --report-eval       # score the metric too
 
-Exits 2 when the improvement pass could not complete, and 3 when it completed
-but claims to have changed more facts than its own budget allowed. A consumer
-that reports success when it could not see the graph is worse than none — same
-rule knowledge-health-report.py runs on.
+Exits 2 when the improvement pass could not complete — including when the
+knowledge-graph store could not be read (#1383): the run then prints
+`[warn] knowledge-graph store unreadable: …` beside its counts and exits 2
+even when the markdown-driven half (drift, contradiction pairs) succeeded,
+because partial success must be reportable as partial, not as clean. Exits 3
+when it completed but claims to have changed more facts than its own budget
+allowed — a distinct code, and an overrun keeps it even when the store was
+also unreadable. A consumer that reports success when it could not see the
+graph is worse than none — same rule knowledge-health-report.py runs on (it
+prints `STORE UNAVAILABLE: …` to stderr; this pass keeps its line beside the
+counts on stdout, where a counts-reader cannot miss it).
 """
 
 from __future__ import annotations
@@ -86,6 +93,17 @@ def main() -> int:
               f" near-duplicate pairs reported-not-deleted={near_dupes}")
         print(f"[facts] active {rec['before_active']} -> {rec['after_active']}"
               f" (delta {rec['delta_active']})")
+        # The store verdict beside the counts (#1383): `-1 -> -1` is the
+        # sentinel shape for "the store could not answer", and on its own it
+        # read as a zero. It must sit on the SAME output as the counts — a
+        # warning on stderr next to a clean stdout is the false green again.
+        if rec.get("store_ok") is False:
+            print(f"[warn] knowledge-graph store unreadable: {rec.get('store_error')}")
+        elif rec.get("store_ok") is True:
+            # `is True`, not `else`: a record that carries no verdict at all
+            # must not print the ok line either, or the printed half of this
+            # fix is once again a default rather than a measurement.
+            print(f"[store] ok ({rec.get('kg_db')})")
         if before_eval is not None or rec.get("fact_entity_recall") is not None:
             print(f"[metric] fact_entity_recall {before_eval} -> {rec.get('fact_entity_recall')}")
         if not rec["apply"]:
@@ -109,6 +127,12 @@ def main() -> int:
               " allowed by this run — inspect the record before trusting it",
               file=sys.stderr)
         return 3
+    if rec.get("store_ok") is False:
+        # #1383: the markdown half may have planned and reported everything
+        # correctly and the graph still was never seen. Checked after the
+        # budget rung so an overrun keeps its distinct 3 — but the pass that
+        # could not read the store can no longer exit 0.
+        return 2
     return 0
 
 

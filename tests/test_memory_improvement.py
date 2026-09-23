@@ -351,6 +351,11 @@ def test_improve_tool_reports_the_denominator_over_the_mcp_seam(world):
     payload = json.loads(result.content[0].text)
     assert payload["drift_candidates_total"] == 5, sorted(payload)
     assert payload["signals"] == 2, payload["signals"]
+    # #1383: the store verdict is read by whoever receives this payload, not
+    # only by the script's exit code, so it has to survive the same
+    # serialization. `improve()` is a pass-through, which is exactly why the
+    # key is worth pinning here rather than assumed.
+    assert payload["store_ok"] is True and payload["store_error"] is None, payload
 
 
 def test_corrections_outrank_drift_when_every_drift_write_is_newer(world):
@@ -1402,3 +1407,204 @@ def test_fact_resolve_apply_is_a_registered_writer_and_resolve_stays_a_reader():
             assert (spec.get("description") or "").strip(), f"{name}.{pname}"
         assert "fact_resolve_apply" in (tools["fact_resolve"].description or "") \
             or "fact_resolve_apply" in (tools[name].description or ""), name
+
+
+# ── #1383: an unreadable store must not report success ───────────────────────
+#
+# The 2026-09-23 nightly pass ran with no `kg.sqlite` at all and exited 0:
+# `_known_entities()` and `_active_count()` turn every store failure into the
+# `{}` / `-1` sentinels BY DESIGN (a missing count must never read as a zero),
+# so `run_improvement` never raises, and the wrapper's only store signal was
+# "did it throw" — which the design guarantees it never does. The sentinels
+# stay. What must not stay silent is the verdict: one probe sets a flag and an
+# error text, the record carries both, the wrapper prints the line beside its
+# counts, and the exit code says 2. These tests pin that whole chain across
+# both boundaries — the module call and the subprocess exit status.
+
+def _point_the_store_at_nothing(monkeypatch, tmp_path):
+    """Make `app.kg_store.store()` raise the real `StoreUnavailable`.
+
+    Not `configure()` — that *provisions* an absent path on purpose (the
+    writer's route); `store()` refuses one. Pointing the default path at a
+    missing file and resetting the cached handle reproduces exactly what the
+    09-23 nightly hit: `StoreUnavailable: no knowledge-graph database at …`.
+    """
+    missing = tmp_path / "no-store-here" / "kg.sqlite"
+    monkeypatch.setattr(kg_store, "_default_path", missing)
+    kg_store.reset()
+    return missing
+
+
+def test_record_carries_the_store_verdict_and_the_pass_still_plans(world, monkeypatch,
+                                                                   tmp_path):
+    """Clause 1: the returned record and its on-disk copy name the unreadable
+    store — flag plus error text naming `StoreUnavailable` — from ONE probe,
+    while the markdown half still produces its plan."""
+    facts_root, _st, _vault = world
+    _write_facts(facts_root, "TTS", "state", [
+        {"fact": "TTS built-in voices are working and returning 200 OK.",
+         "created_at": _days_ago(30)},
+        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+         "created_at": _days_ago(2)},
+    ])
+    missing = _point_the_store_at_nothing(monkeypatch, tmp_path)
+    probe = fi._store_probe()
+    assert probe["store_ok"] is False
+    assert "StoreUnavailable" in probe["store_error"], probe
+    assert str(missing) in probe["store_error"], (
+        "the verdict must name the path the failing probe could not open")
+    # "Derived from ONE probe" is the clause, so count the probes: a pass that
+    # asked the store twice could write a record whose flag and its counts
+    # describe two different readings of it — the exact shape that let `-1`
+    # read as a zero while some other line claimed the graph had been seen.
+    calls = []
+    real_probe = fi._store_probe
+
+    def counting_probe():
+        calls.append(None)
+        return real_probe()
+
+    monkeypatch.setattr(fi, "_store_probe", counting_probe)
+    rec = fi.run_improvement(entities=["TTS"])
+    assert len(calls) == 1, f"run_improvement probed the store {len(calls)} times"
+    assert rec["store_ok"] is False
+    assert rec["store_error"] == probe["store_error"], (
+        "the record's verdict must come from the one probe, not a second read")
+    # The markdown-driven half runs on a dead index — that is what makes this
+    # partial success rather than a failed pass, and why exit 2 must still be
+    # reachable after real planning happened.
+    assert rec["actions_planned"] == 1, rec["per_entity"]
+    # The sentinels propagate into the record unchanged (#1383's `Do not`).
+    assert rec["before_active"] == -1 and rec["after_active"] == -1
+    assert rec["delta_active"] is None
+    on_disk = _persisted_record(rec)
+    assert on_disk["store_ok"] is False
+    assert "StoreUnavailable" in on_disk["store_error"]
+
+
+def test_store_probe_reports_ok_and_the_sentinels_stay_when_it_cannot_answer(
+        world, monkeypatch, tmp_path):
+    """Clause 5: `_active_count()` still answers -1 and `_known_entities()`
+    still answers {} when the store cannot — propagated, not removed. The
+    probe must also be able to say ok against the live handle, or it is an
+    unconditional alarm rather than a verdict."""
+    facts_root, st, _vault = world
+    assert fi._store_probe() == {"store_ok": True, "store_error": None}
+    assert fi._active_count() == 0
+    _write_facts(facts_root, "TTS", "state", [
+        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+         "created_at": _days_ago(2)}])
+    _reindex(st, facts_root)
+    assert fi._active_count() == 1
+    assert fi._known_entities() == {"tts": "TTS"}
+    _point_the_store_at_nothing(monkeypatch, tmp_path)
+    assert fi._store_probe()["store_ok"] is False
+    assert fi._active_count() == -1, "the -1 sentinel must stay"
+    assert fi._known_entities() == {}, "the {} sentinel must stay"
+
+
+def _run_wrapper(tmp_path, kg_db, args):
+    """The wrapper as the nightly runs it: a real subprocess, the store moved
+    with `LLOYD_KG_DB`, all runtime data pointed at tmp."""
+    import os
+    import subprocess
+    env = dict(os.environ)
+    env["LLOYD_DATA"] = str(tmp_path / "data")
+    env["LLOYD_FACTS_ROOT"] = str(tmp_path / "facts")
+    env["LLOYD_KG_DB"] = str(kg_db)
+    return subprocess.run(
+        [sys.executable, str(_SCRIPT_PATH), *args],
+        capture_output=True, text=True, env=env, timeout=180,
+        cwd=str(tmp_path))
+
+
+def test_wrapper_warns_and_exits_2_when_the_store_was_unreadable(tmp_path):
+    """Clauses 2+3 against the real process boundary: with `LLOYD_KG_DB`
+    pointing at a missing file the pass prints the unreadable line beside its
+    counts, keeps printing the sentinel counts line, and exits 2 — even though
+    the drift/contradiction half completed."""
+    db = tmp_path / "absent" / "kg.sqlite"
+    proc = _run_wrapper(tmp_path, db, ["--entity", "Probe-Entity"])
+    out = proc.stdout
+    assert proc.returncode == 2, f"exit {proc.returncode}\nstdout:\n{out}\nstderr:\n{proc.stderr}"
+    assert "[warn] knowledge-graph store unreadable:" in out, out
+    assert "StoreUnavailable" in out, out
+    assert "[facts] active -1 -> -1 (delta None)" in out, (
+        "the sentinel line stays beside the warning, not replaced by it")
+    assert "[store] ok" not in out, out
+
+
+def test_wrapper_exits_0_and_calls_the_store_ok_on_the_control(tmp_path):
+    """Clause 4: a real store at the `LLOYD_KG_DB` path flips every reading —
+    store ok, no warning line, exit 0. This is what proves the change is a
+    verdict and not an unconditional alarm."""
+    db = tmp_path / "real" / "kg.sqlite"
+    st = kg_store.KGStore(db)  # the writer's route: provision on purpose
+    st.close()
+    proc = _run_wrapper(tmp_path, db, ["--entity", "Probe-Entity"])
+    out = proc.stdout
+    assert proc.returncode == 0, f"exit {proc.returncode}\nstdout:\n{out}\nstderr:\n{proc.stderr}"
+    assert "[store] ok" in out, out
+    assert "unreadable" not in out.lower(), out
+    assert "[facts] active 0 -> 0 (delta 0)" in out, out
+    records = list((tmp_path / "data" / "_pipeline" / "improvement").glob("*.json"))
+    assert len(records) == 1, records
+    rec = json.loads(records[0].read_text())
+    assert rec["store_ok"] is True and rec["store_error"] is None
+
+
+def test_wrapper_exit_codes_keep_their_distinct_meanings(monkeypatch, capsys):
+    """Clause 3's second half: 2 (store unreadable) and 3 (budget overrun) are
+    distinct codes, and an overrun that COINCIDES with an unreadable store
+    still reports 3 — the budget signal is never swallowed into the new one.
+    Each case also checks the printed store line: `[store] ok` is owed only to
+    a record that actually says so, and a code nobody can read beside the
+    counts is the same false green in a different column."""
+    def run(argv, drop=(), **rec_over):
+        rec = {"apply": False, "signals": 0, "entities": [], "drift_candidates_total": None,
+               "actions_planned": 0, "actions_taken": 0, "before_active": 0,
+               "after_active": 0, "delta_active": 0, "per_entity": [],
+               "store_ok": True, "store_error": None, "kg_db": "/x/kg.sqlite",
+               "fact_entity_recall": None, "record_path": "/x/record.json"}
+        rec.update(rec_over)
+        for key in drop:
+            rec.pop(key, None)
+        spec = importlib.util.spec_from_file_location(
+            "fact_improvement_script_exit_codes", _SCRIPT_PATH)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        monkeypatch.setattr(fi, "run_improvement", lambda **kw: rec)
+        monkeypatch.setattr(sys, "argv", ["fact-improvement.py", *argv])
+        code = mod.main()
+        return code, capsys.readouterr().out
+
+    code, out = run(["--entity", "E"])
+    assert code == 0, "store ok, in budget: clean pass"
+    assert "[store] ok (/x/kg.sqlite)" in out, out
+
+    code, out = run(["--entity", "E"], store_ok=False, store_error="StoreUnavailable: gone",
+                    before_active=-1, after_active=-1, delta_active=None)
+    assert code == 2
+    assert "[warn] knowledge-graph store unreadable: StoreUnavailable: gone" in out, out
+    assert "[store] ok" not in out, out
+
+    code, out = run(["--apply", "--entity", "E", "--max-actions", "5"],
+                    apply=True, actions_planned=7, actions_taken=7)
+    assert code == 3
+
+    code, out = run(["--apply", "--entity", "E", "--max-actions", "5"],
+                    apply=True, actions_planned=7, actions_taken=7,
+                    store_ok=False, store_error="StoreUnavailable: gone",
+                    before_active=-1, after_active=-1, delta_active=None)
+    assert code == 3, "the budget overrun keeps code 3 even when the store was also unreadable"
+    assert "[warn] knowledge-graph store unreadable:" in out, out
+
+    # A record that carries no verdict at all gets neither line: the printed
+    # half of the fix is a measurement, not a default for a missing key. Its
+    # exit code is pinned to 0 here (a missing flag is not evidence of an
+    # unreadable store either) so that if the wrapper ever starts demanding a
+    # verdict, this test is what names the change.
+    code, out = run(["--entity", "E"], drop=("store_ok", "store_error"))
+    assert code == 0
+    assert "[store] ok" not in out, out
+    assert "unreadable" not in out, out

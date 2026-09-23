@@ -155,6 +155,30 @@ _DATE_IN_HEAD_RE = re.compile(r"\b20\d{2}-\d{2}-\d{2}\b|\b[A-Z][a-z]{2,8}\s+\d{1
 
 # ── signal sources ───────────────────────────────────────────────────────────
 
+def _store_probe() -> dict:
+    """Whether the knowledge-graph store answers, from ONE probe.
+
+    #1383: `_known_entities` and `_active_count` convert every store failure
+    into the `{}` / `-1` sentinels by design — a missing count must never read
+    as a zero — so `run_improvement` never sees the exception, and the
+    2026-09-23 nightly ran with no `kg.sqlite` at all, printed
+    `active -1 -> -1 (delta None)`, wrote a record saying
+    `corrections_status: registry_unreadable`, and exited 0 as if the graph
+    had been read and found clean. The sentinels stay; what must not stay
+    silent is the verdict. The probe performs the same read `_active_count`
+    makes — open the store, count active facts — so it describes the store
+    this pass actually consults, and its error text names the failing class
+    and the path it could not open (`StoreUnavailable: no knowledge-graph
+    database at …`). Returns both keys always; a pass can never be silent
+    about whether the store was seen.
+    """
+    try:
+        _store().facts_idx.count(entity=None, active_only=True)
+    except Exception as exc:  # noqa: BLE001 - StoreUnavailable and everything the driver raises
+        return {"store_ok": False, "store_error": f"{type(exc).__name__}: {exc}"}
+    return {"store_ok": True, "store_error": None}
+
+
 def _known_entities() -> dict[str, str]:
     """lowercased entity name → canonical, from the entity registry.
 
@@ -1053,6 +1077,10 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
     """
     started = datetime.datetime.now(datetime.timezone.utc)
     now_iso = started.isoformat()
+    # ONE probe sets the store verdict (#1383): the flag and the error text
+    # the record carries below must come from the same read, so the record
+    # cannot be silent about a store this pass consulted.
+    store_verdict = _store_probe()
     before = _active_count()
 
     if entities:
@@ -1143,6 +1171,11 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
     record_obj = {
         "ran_at": now_iso,
         "apply": bool(apply),
+        # `store_ok` / `store_error` (#1383): whether the store the -1 counts
+        # below were supposed to come from was readable at all. The sentinels
+        # are kept (a missing count is not a zero), so the record is the only
+        # place the two readings part ways.
+        **store_verdict,
         # `facts_root`, `kg_db`, `git_head`, `isolated` (#700): which tree and
         # which store the counts below describe, and which code produced them.
         **run_provenance(),
