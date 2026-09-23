@@ -489,6 +489,16 @@ def _session_identity(session_id: str) -> tuple[str, str]:
             str(data.get("source") or ""))
 
 
+def _tool_surface(platform: str) -> str:
+    """The tool surface for a turn on a session of `platform`.
+
+    `sessions_io.NON_USER_PLATFORMS` is the one definition of "nobody reads
+    this", so it is also the one definition of a worker turn here; everything
+    else, a new chat whose file is not written yet included, is a chat.
+    """
+    return "worker" if platform in sessions_io.NON_USER_PLATFORMS else "chat"
+
+
 def _authority_scope_for(session_id: str, data: dict) -> str:
     """#534 — gate tier-2/3 tools on a live grant, for a non-user turn.
 
@@ -2008,6 +2018,7 @@ async def post_message_stream(request: Request):
         options.final_schema = final_schema
         options.final_schema_prompt = str(data.get("final_schema_prompt") or "")
     options.effect_scope = _effect_scope_for(session_id, data)
+    options.surface = _tool_surface(turn_platform)
 
     # SEAM(http), receiving side: the worker pool posts `"platform": "worker"` in
     # this body (`workers/sources/_common.py:736`), the web UI posts nothing, and
@@ -2131,6 +2142,7 @@ async def build_ambient_turn(
         env=model_env,
         hooks=iv_hooks,
         session_id=session_id,
+        surface=_tool_surface(_session_identity(session_id)[0]),
         priority=0,
         **_get_harness_kwargs(),
     )
@@ -2282,6 +2294,7 @@ async def post_message(request: Request):
         env=model_env,
         hooks=iv_hooks,
         session_id=session_id,
+        surface=_tool_surface(_session_identity(session_id)[0]),
         priority=sync_llm_priority,
         effect_scope=_effect_scope_for(session_id, data),
         **_get_harness_kwargs(),

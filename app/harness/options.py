@@ -172,6 +172,14 @@ class RunOptions:
     effort: str | None = None
     thinking: dict | None = None
 
+    # Which kind of turn this is, for the tool surface (2026-09-23):
+    # "chat" for a session a person reads, "worker" for the autonomy and
+    # worker platforms. It hides the few tools that only make sense on the
+    # other side (`agent_mcp.annotations.hidden_on_surface`), at advertise
+    # time and at dispatch. Empty hides nothing, which is what every caller
+    # that never set it got before this existed.
+    surface: str = ""
+
     # Tool search / progressive disclosure. When activated, the harness
     # advertises a small baseline + ToolSearch instead of the full catalog,
     # and the model loads tool schemas on demand. See app/harness/tool_search.py.

@@ -292,3 +292,46 @@ def plan_mode_blocked_tools(all_tool_names: frozenset[str] | set[str]) -> list[s
         and n not in PLAN_MODE_ALWAYS_ALLOWED
         and not n.startswith("_")
     )
+
+
+# ---------------------------------------------------------------------------
+# Surfaces (2026-09-23): which kind of turn a tool is advertised to.
+#
+# Every turn used to be handed every tool. A few only make sense on one side:
+# a background worker has nobody looking at Mission Control or the IDE, so
+# moving "the user's" view from one is a surprise at best, and grants are
+# minted by a human in a chat (`grant_create` already refuses a worker turn).
+# `session_inject_context` is the other direction: it is how a background job
+# reaches the user, and a chat turn reaches the user by replying.
+#
+# Exceptions only; a tool in neither set is advertised everywhere. The set is
+# deliberately small. Mail, calendar and the browser stay on both surfaces:
+# #534's grants exist to let a worker send mail under a bound, the
+# email-monitoring skills are background jobs, and deep-research reads pages.
+#
+# `RunOptions.surface` names the turn: "chat" for a session a person reads,
+# "worker" for the autonomy and worker platforms, and a Task subagent inherits
+# its parent's through `_meta` (`lloyd/surface`). An empty or unknown surface
+# hides nothing, so a caller that never set one behaves as it did before.
+# ---------------------------------------------------------------------------
+CHAT_ONLY: frozenset[str] = frozenset({
+    "mc_get_state", "mc_navigate", "mc_close_modal",
+    "ide_open_file", "ide_open_folder", "ide_close_tab",
+    "grant_create", "grant_list", "grant_revoke",
+})
+
+WORKER_ONLY: frozenset[str] = frozenset({
+    "session_inject_context",
+})
+
+SURFACE_CHAT = "chat"
+SURFACE_WORKER = "worker"
+
+
+def hidden_on_surface(surface: str) -> frozenset[str]:
+    """Tool names a turn on `surface` is neither shown nor allowed to call."""
+    if surface == SURFACE_WORKER:
+        return CHAT_ONLY
+    if surface == SURFACE_CHAT:
+        return WORKER_ONLY
+    return frozenset()

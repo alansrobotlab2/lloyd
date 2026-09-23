@@ -98,6 +98,24 @@ def _looks_like_unexecuted_command(text: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _surface_hidden(options: RunOptions) -> set[str]:
+    """The tools this turn's surface hides; empty when the table is unreadable.
+
+    Failing open is deliberate: the surface is a catalog trim, not a security
+    boundary (the refusals that are one live in the tools and the policy
+    gate), so an import problem costs the trim and never the turn.
+    """
+    surface = getattr(options, "surface", "") or ""
+    if not surface:
+        return set()
+    try:
+        from agent_mcp.annotations import hidden_on_surface
+    except Exception as exc:  # pragma: no cover - import failure path
+        logger.warning("loop: tool surface table unavailable (%s)", exc)
+        return set()
+    return set(hidden_on_surface(surface))
+
+
 async def run_query(
     messages: list[dict[str, Any]],
     options: RunOptions,
@@ -153,7 +171,12 @@ async def run_query(
     # land with "backend never went idle within 900s" until the next restart.
     try:
         _run_started()
-        catalog = build_tool_list(list(pool.discovered), set(options.disallowed_tools))
+        # The surface's hidden tools join the disallowed set here, for what is
+        # advertised, and in every iteration's dispatch set below, including a
+        # plan-mode refresher's, which would otherwise rebuild it without them.
+        surface_hidden = _surface_hidden(options)
+        catalog = build_tool_list(list(pool.discovered),
+                                  set(options.disallowed_tools) | surface_hidden)
         # Every advertised tool grows one extra string parameter the model
         # fills in with a phrase describing what the call is doing, which
         # the transcript renders beside the tool name. `summary_tools` is
@@ -313,6 +336,7 @@ async def run_query(
                     current_disallowed = set(options.disallowed_tools or [])
             else:
                 current_disallowed = set(options.disallowed_tools or [])
+            current_disallowed |= surface_hidden
 
             iteration_started_at = time.perf_counter()
             iteration_usage: dict[str, int] = {}
@@ -2257,6 +2281,8 @@ async def _execute_tool_call(
             # is empty and the router has set the option from the payload.
             "effect_scope": (getattr(options, "effect_scope", "")
                              or current_effect_scope.get()),
+            # So a Task subagent this call spawns runs on the same surface.
+            "surface": getattr(options, "surface", "") or "",
         }
         if cancel_event is None:
             result = await pool.call_tool(name, dispatch_args, **call_kw)

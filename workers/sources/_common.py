@@ -414,6 +414,9 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
         permission_mode="bypassPermissions",
         mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
         disallowed_tools=disallowed,
+        # A direct worker turn has nobody at Mission Control; see
+        # agent_mcp.annotations.hidden_on_surface.
+        surface="worker",
         env=model_env,
         priority=priority,
         hooks=hooks,

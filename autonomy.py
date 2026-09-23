@@ -2374,6 +2374,9 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             permission_mode="bypassPermissions",
             mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
             disallowed_tools=disallowed_tools,
+            # A scheduled task has nobody at Mission Control; see
+            # agent_mcp.annotations.hidden_on_surface.
+            surface="worker",
             env=model_env,
             priority=1,
             hooks=task_hooks,

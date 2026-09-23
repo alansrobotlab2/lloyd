@@ -229,6 +229,9 @@ META_CALL_ID = "lloyd/call_id"
 # (see agent_mcp/_tool_effects.py). Must match
 # app.harness.mcp_pool.META_EFFECT_SCOPE.
 META_EFFECT_SCOPE = "lloyd/effect_scope"
+# The calling turn's tool surface, inherited by a Task subagent. Must match
+# app.harness.mcp_pool.META_SURFACE.
+META_SURFACE = "lloyd/surface"
 
 # OpenAI's spec caps tool names at 64 chars. Enforced here at registration
 # so a bad name fails loudly on the first list_tools() instead of
@@ -572,6 +575,10 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
     ctok = _task_registry.current_call_id.set(
         call_id if isinstance(call_id, str) else ""
     )
+    parent_surface = meta.get(META_SURFACE, "") if isinstance(meta, dict) else ""
+    surtok = builtin_task.current_parent_surface.set(
+        parent_surface if isinstance(parent_surface, str) else ""
+    )
     # #544: a `Task` subagent re-enters this function over loopback `/mcp`
     # from a fresh ASGI task, so only `_meta` crosses — and its own loop
     # stamps `_meta` from `policy.current_effect_scope` (loop.py). Binding the
@@ -627,6 +634,7 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
         _task_registry.current_call_id.reset(ctok)
         builtin_task.current_parent_model.reset(mtok)
         builtin_task.current_parent_base_url.reset(btok)
+        builtin_task.current_parent_surface.reset(surtok)
         harness_policy.current_effect_scope.reset(etok)
         _tool_sandbox.current_sandboxed.reset(sbtok)
 

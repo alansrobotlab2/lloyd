@@ -48,6 +48,12 @@ current_parent_model: contextvars.ContextVar[str] = contextvars.ContextVar(
 current_parent_base_url: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_parent_base_url", default=""
 )
+# The calling turn's tool surface ("chat"/"worker", `lloyd/surface` in
+# `_meta`), so a subagent a worker spawns is not handed the chat-only tools
+# and one a chat spawns is not handed the worker-only ones.
+current_parent_surface: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_parent_surface", default=""
+)
 
 
 def current_caller_scope() -> CallerScope:
@@ -318,6 +324,7 @@ async def _task(args: dict[str, Any]) -> str:
         hooks=task_hooks,
         mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
         session_id=sub_session_id,
+        surface=current_parent_surface.get(""),
         cancel_event=cancel_evt,
         # A subagent is an agent loop like any other and has the same
         # redundant-reasoning problem the main loop does — more so, since

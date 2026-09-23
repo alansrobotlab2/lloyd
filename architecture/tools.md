@@ -805,6 +805,25 @@ runs it. So the prefixed spelling, which the pool accepts deliberately for old
 session JSON, is still reachable for a disabled tool (#727). `normalize_tool_name`
 in `app/harness/policy.py` is the fix's shape; the tier gate already uses it.
 
+**A turn's surface hides a few tools** (2026-09-23). `RunOptions.surface` is
+`"chat"` for a session a person reads and `"worker"` for the `autonomy` and
+`worker` platforms (`messages._tool_surface`, `autonomy.run_task`,
+`run_prompt_on_primary`); a `Task` subagent inherits its caller's through
+`_meta` (`lloyd/surface`). `agent_mcp.annotations.hidden_on_surface` turns it
+into names the loop adds to its disallowed set, so a hidden tool is neither
+advertised nor dispatchable, plan-mode refresh included. The table is
+exceptions only and deliberately small: `CHAT_ONLY` is Mission Control, the
+IDE and the three grant tools, because a worker has nobody at the screen and
+grants are a human's; `WORKER_ONLY` is `session_inject_context`, because a
+chat reaches the user by replying. Mail, calendar and the browser stay on
+both: #534's grants exist to let a worker send mail under a bound, and the
+email-monitoring skills are background jobs. An empty or unknown surface
+hides nothing, so a caller that never sets one behaves as before. It is a
+catalog trim, not a security boundary, and fails open; the refusals that are
+boundaries (`WORKER_GRANT_MINT_BAN`, the tool sandbox, the policy gate) are
+unchanged. Measured on 2026-09-23: a chat turn is 139 tools and ~29.5k
+tokens of schema, a worker turn 131 tools and ~28.0k.
+
 **No flag may empty a module's `list_tools()`** (`code_graph` has no
 `enabled` key at all; `djev.enabled` switches the engine, not the tools). A
 flag that emptied `list_tools()` would break the annotation staleness test. The

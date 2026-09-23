@@ -116,6 +116,9 @@ META_CALL_ID = "lloyd/call_id"
 # carried per request there is nothing stable across the retry to key an
 # idempotency ledger on. Must match agent_mcp.main.META_EFFECT_SCOPE.
 META_EFFECT_SCOPE = "lloyd/effect_scope"
+# The calling turn's tool surface ("chat"/"worker"), so a Task subagent runs on
+# the same one. Must match agent_mcp.main.META_SURFACE.
+META_SURFACE = "lloyd/surface"
 
 # Ceiling on a single tools/call round trip. Sits above the Bash tool's own
 # 600s hard cap so a legitimately long command finishes on its own terms and
@@ -468,6 +471,7 @@ class MCPPool:
         turn_id: str = "",
         call_id: str = "",
         effect_scope: str = "",
+        surface: str = "",
         timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Dispatch a tool call to the right server.
@@ -533,6 +537,8 @@ class MCPPool:
             meta[META_CALL_ID] = call_id
         if effect_scope:
             meta[META_EFFECT_SCOPE] = effect_scope
+        if surface:
+            meta[META_SURFACE] = surface
         budget = timeout_seconds if timeout_seconds is not None else CALL_TIMEOUT_SECONDS
 
         try:
