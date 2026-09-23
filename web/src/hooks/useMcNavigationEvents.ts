@@ -10,7 +10,7 @@ const VALID_TABS: ReadonlySet<string> = new Set([
   'dashboard',
   'inner_voice', 'chat', 'background', 'backlog', 'autonomy', 'workers',
   'memory', 'architecture', 'skills', 'tools', 'services',
-  'settings', 'graph', 'ide', 'browser',
+  'settings', 'graph', 'ide', 'browser', 'desktop',
 ])
 
 const VALID_IDE_ACTIONS: ReadonlySet<string> = new Set(['open_folder', 'close_tab'])

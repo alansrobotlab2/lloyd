@@ -110,3 +110,13 @@ class ToolDiscoveryError(HarnessError):
     def __init__(self, message: str, *, servers: list[str] | None = None):
         super().__init__(message)
         self.servers = servers or []
+
+
+class MultimodalRejectedError(HarnessError):
+    """The engine refused a request because it carried image input.
+
+    Raised by ``client.stream_chat`` only when the request actually held an
+    ``image_url`` part and the 400 body names image/multimodal input. The
+    loop strips every image from the turn's history and retries once; the
+    fix is ``models.<alias>.supports_vision: false`` for that slot.
+    """

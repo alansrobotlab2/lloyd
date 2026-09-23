@@ -276,7 +276,8 @@ class _RunRecorder:
                     build_tool_result_entry(
                         call_id, result, timestamp=ts,
                         is_error=bool(evt.get("is_error", False)),
-                        raw_chars=evt.get("raw_chars")),
+                        raw_chars=evt.get("raw_chars"),
+                        images=evt.get("images")),
                 ])
 
         elif etype == "result":

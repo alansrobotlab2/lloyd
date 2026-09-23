@@ -80,6 +80,9 @@ NON_OWNER_DISALLOWED = [
     "browser_select",
     "browser_drag",
     "browser_cookies",
+    # Desktop computer use (all)
+    "desktop_capture",
+    "desktop_act",
     # Built-in shell/file tools
     "Bash",
     "Read",

@@ -172,6 +172,40 @@ def _input_schema(tool: Any) -> dict[str, Any]:
     return schema or {"type": "object", "properties": {}}
 
 
+
+def _flatten_result(result: Any) -> dict[str, Any]:
+    """Flatten an MCP ``CallToolResult`` into the pool's result dict.
+
+    Text parts are joined into ``content``. ``ImageContent`` parts are
+    carried out separately under ``images`` (``[{data, mime_type}]``, base64
+    as the server sent it) so the loop can persist them and decide per model
+    whether they reach the engine (``app/harness/tool_images.py``). The key
+    is ABSENT when there are no images, so every caller that reads only
+    ``content``/``is_error`` sees exactly the dict it always has. Any other
+    block type (embedded resource, audio) still renders as a type stub.
+    """
+    text_parts: list[str] = []
+    images: list[dict[str, str]] = []
+    for item in getattr(result, "content", None) or []:
+        text = getattr(item, "text", None)
+        if text is not None:
+            text_parts.append(text)
+            continue
+        kind = getattr(item, "type", "?")
+        data = getattr(item, "data", None)
+        if kind == "image" and isinstance(data, str) and data:
+            images.append({
+                "data": data,
+                "mime_type": (getattr(item, "mime_type", None)
+                              or getattr(item, "mimeType", None) or "image/png"),
+            })
+            continue
+        text_parts.append(json.dumps({"type": kind}))
+    out: dict[str, Any] = {"content": "".join(text_parts), "is_error": _is_error(result)}
+    if images:
+        out["images"] = images
+    return out
+
 class MCPPool:
     """One-process pool that holds open MCP client sessions keyed by
     server name. `aclose()` tears them all down.
@@ -579,17 +613,7 @@ class MCPPool:
                     name, f"transport error: {retry_cause}"
                 ) from retry_exc
 
-        # MCP CallToolResult.content is a list of TextContent /
-        # ImageContent / EmbeddedResource. We flatten to text — the
-        # built-in tools return only TextContent.
-        text_parts: list[str] = []
-        for item in result.content:
-            text = getattr(item, "text", None)
-            if text is not None:
-                text_parts.append(text)
-            else:
-                text_parts.append(json.dumps({"type": getattr(item, "type", "?")}))
-        return {"content": "".join(text_parts), "is_error": _is_error(result)}
+        return _flatten_result(result)
 
     async def _invoke(
         self,

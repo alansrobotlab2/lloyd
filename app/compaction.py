@@ -127,7 +127,17 @@ def estimate_message_tokens(message: dict) -> int:
     reasoning = message.get("reasoning")
     if isinstance(reasoning, str) and reasoning:
         text = f"{text}\n[thinking: {reasoning}]"
-    return estimate_tokens(text)
+    total = estimate_tokens(text)
+    # Screenshots riding on a harness tool message (tool_images). A flat
+    # per-image estimate: the ViT cost depends on pixels, not on bytes.
+    refs = message.get("_image_refs")
+    if refs:
+        try:
+            from app.harness.tool_images import image_token_estimate
+            total += image_token_estimate() * len(refs)
+        except Exception:
+            total += 1500 * len(refs)
+    return total
 
 
 def estimate_conversation_tokens(messages: list[dict], system_prompt: str = "") -> int:

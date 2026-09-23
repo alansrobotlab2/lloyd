@@ -40,6 +40,7 @@ from app.routers import dashboard as _dashboard_router
 from app.routers import health as _health_router
 from app.routers import automod as _automod_router
 from app.routers import browser as _browser_router
+from app.routers import desktop as _desktop_router
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -333,6 +334,7 @@ app.include_router(_dashboard_router.router)
 app.include_router(_health_router.router)
 app.include_router(_automod_router.router)
 app.include_router(_browser_router.router)
+app.include_router(_desktop_router.router)
 
 app.on_event("startup")(_autonomy_router.start_autonomy_ticker)
 app.on_event("startup")(_workers_router.start_worker_pool)

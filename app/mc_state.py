@@ -32,7 +32,7 @@ VALID_TABS = {
     "dashboard",
     "inner_voice", "chat", "background", "backlog", "autonomy", "workers",
     "memory", "architecture", "skills", "tools", "services",
-    "settings", "graph", "ide", "browser",
+    "settings", "graph", "ide", "browser", "desktop",
 }
 
 _STATE_PATH = MC_STATE_PATH

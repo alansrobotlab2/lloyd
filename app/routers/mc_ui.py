@@ -513,6 +513,16 @@ def _summarize_ide() -> dict:
     }
 
 
+def _summarize_desktop() -> dict:
+    """Brief for `mc_navigate(tab="desktop")`: the last capture and the lease.
+
+    Never the image — `latest_frame_summary` exists to make that the default.
+    """
+    from app.routers import desktop as desktop_router
+
+    return desktop_router.latest_frame_summary()
+
+
 def _summarize_browser() -> dict:
     """Brief for `mc_navigate(tab="browser")` — what the page is showing.
 
@@ -580,6 +590,7 @@ _SUMMARIZERS = {
     "graph": lambda: {},
     "ide": _summarize_ide,
     "browser": _summarize_browser,
+    "desktop": _summarize_desktop,
 }
 
 

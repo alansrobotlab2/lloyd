@@ -102,6 +102,17 @@ _HARD_DENY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 
     # `> /etc/...` or system config overwrites via redirect.
     (re.compile(r">\s*/etc/(?!tmp/)"), "redirect to /etc"),
+
+    # The desktop lease is Alan's to grant (app/desktop_lease.py). Lloyd holds
+    # Bash, so the human-facing route and the file behind it are refused here:
+    # a request to the route, a write to the file, or a Python call into the
+    # module that writes it.
+    (re.compile(r"\b(curl|wget|xh|http|httpie)\b[^\n]*/api/desktop/lease"),
+     "grant the desktop lease"),
+    (re.compile(r"(>|\btee\b|\bcp\b|\bmv\b|\bln\b|\binstall\b|\brsync\b)[^\n]*"
+                r"desktop/lease\.json"), "write the desktop lease"),
+    (re.compile(r"desktop_lease\s*\.\s*(grant|revoke|_store|note_seat)\b"),
+     "grant the desktop lease"),
 ]
 
 

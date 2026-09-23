@@ -33,7 +33,7 @@ _VALID_TABS = [
     "dashboard",
     "inner_voice", "chat", "background", "backlog", "autonomy", "workers",
     "memory", "architecture", "skills", "tools", "services",
-    "settings", "graph", "ide", "browser",
+    "settings", "graph", "ide", "browser", "desktop",
 ]
 
 
@@ -174,6 +174,8 @@ async def list_tools():
                 "new editor tab; prefer ide_open_file for richer feedback)\n"
                 "  browser            → no focus; drive the page with "
                 "browser_navigate, which this tab mirrors live\n"
+                "  desktop            → no focus; mirrors desktop_capture and "
+                "holds the lease Alan grants for desktop_act\n"
                 "  architecture / settings / graph / dashboard → no focus "
                 "supported\n\n"
                 "If focus_id is invalid (path doesn't exist, escapes vault), the "

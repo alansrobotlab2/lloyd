@@ -711,7 +711,8 @@ def _tool_pair(call: dict, *, result_str: str, timestamp: str,
         result_row = build_tool_result_entry(
             call_id, result_str, timestamp=timestamp,
             is_error=bool(evt.get("is_error", False)),
-            raw_chars=evt.get("raw_chars"))
+            raw_chars=evt.get("raw_chars"),
+            images=evt.get("images"))
     return [
         build_tool_call_entry(call, timestamp=timestamp, stats=iteration_stats),
         result_row,
@@ -858,7 +859,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
             comp["context_window"],
             comp["threshold"],
         )
-    harness_messages = await _prepare_messages_for_harness(comp["history"])
+    harness_messages = await _prepare_messages_for_harness(comp["history"], model=model)
     # Strip trailing user message if present — we'll append the fresh
     # prefetched version (includes subliminal context the persisted copy lacks).
     if harness_messages and harness_messages[-1].get("role") == "user":
@@ -1181,9 +1182,13 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 result_str = truncate_tool_result(evt.get("content", ""))
                 tool_results_log.append({"call_id": call_id, "result": result_str})
                 set_turn_activity(session_id, "working")
-                await _emit(turn, "tool_complete", {
+                _complete = {
                     "call_id": call_id, "name": evt.get("name", ""), "result": result_str,
-                })
+                }
+                if evt.get("images"):
+                    from app.harness.tool_images import row_refs
+                    _complete["images"] = row_refs(evt["images"])
+                await _emit(turn, "tool_complete", _complete)
                 # `raw_chars` rides here as well as on the row: this call log
                 # is what a later reader reconstructs a turn from, and a size
                 # recorded only on the row is unavailable to anything that
@@ -2307,7 +2312,7 @@ async def post_message(request: Request):
             comp.get("restored_files", 0),
             comp["truncated"],
         )
-    messages = await _prepare_messages_for_harness(comp["history"])
+    messages = await _prepare_messages_for_harness(comp["history"], model=model)
     if messages and messages[-1].get("role") == "user":
         messages = messages[:-1]
     messages.append({"role": "user", "content": prefetched_text})

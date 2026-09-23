@@ -78,6 +78,8 @@ READ_ONLY: frozenset[str] = frozenset({
     # Web + browser observation
     "http_search", "http_fetch",
     "browser_snapshot", "browser_screenshot",
+    # Desktop observation: a screenshot + accessibility list, nothing moves.
+    "desktop_capture",
     # Mail / calendar / contacts — read halves
     "email_accounts", "email_account_access", "email_folders", "email_search",
     "email_read", "email_messages", "email_recent", "email_list_filters",
@@ -174,6 +176,9 @@ REPEAT_EXPECTED: frozenset[str] = frozenset({
     "browser_navigate", "browser_click", "browser_type", "browser_fill",
     "browser_press", "browser_scroll", "browser_select", "browser_drag",
     "browser_tabs", "browser_cookies", "browser_wait", "browser_evaluate",
+    # A second identical click is a second click; the lease and the verdict are
+    # its guards, not the effect ledger.
+    "desktop_act",
 })
 
 # ---------------------------------------------------------------------------
@@ -183,7 +188,9 @@ REPEAT_EXPECTED: frozenset[str] = frozenset({
 # with the full tool pool.
 # ---------------------------------------------------------------------------
 _OPEN_WORLD_PREFIXES = ("http_", "browser_", "email_", "calendar_",
-                        "contacts_", "tasks_", "discord_")
+                        "contacts_", "tasks_", "discord_",
+                        # Every app on the desktop, and every web page in them.
+                        "desktop_")
 _OPEN_WORLD_EXTRA: frozenset[str] = frozenset({"Task", "Bash"})
 
 

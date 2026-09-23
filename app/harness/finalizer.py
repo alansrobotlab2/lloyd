@@ -113,7 +113,8 @@ async def run_finalizer(
     # A copy. `chat_messages` is the loop's live buffer and, with Inner
     # Voice on, is also the observer's handle — appending to it here would
     # put the finalizer's own restate prompt into the next turn's history.
-    messages = list(chat_messages) + [
+    from app.harness.tool_images import wire_messages
+    messages = wire_messages(list(chat_messages)) + [
         {"role": "user", "content": prompt or DEFAULT_PROMPT}
     ]
 

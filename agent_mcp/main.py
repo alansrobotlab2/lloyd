@@ -71,6 +71,7 @@ from agent_mcp import (
     builtin_task,
     builtin_todo,
     code_graph,
+    desktop,
     discord_bot,
     djev,
     facts,
@@ -136,6 +137,7 @@ MODULES = [
     autoresearch,
     backlog,
     browser,
+    desktop,
     code_graph,
     discord_bot,
     djev,
@@ -496,6 +498,31 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
             logger.warning("safety: refused Bash for session %s: %s — %r",
                            sid, label, (arguments.get("command") or "")[:500])
             return _refused_call(name, f"harness safety: blocked {label!r} on {excerpt!r}")
+
+    # 2b. Desktop computer use is for a person's chat only. The screen is
+    #     Alan's private desktop and the input lands under Alan's hands, so a
+    #     worker, an autonomy task, a bench or eval trial, or a subagent of
+    #     one may neither look at it nor touch it — refused here, where every
+    #     caller passes, not in a hook a caller may not have installed.
+    if name.startswith("desktop_"):
+        from app.harness.service_control import is_background_session
+        if sandboxed or not sid or is_background_session(sid, parent_of=_safety_parent_of):
+            logger.warning("desktop: refused %s for non-chat session %r", name, sid)
+            return _refused_call(
+                name, "desktop computer use is only available in a person's chat "
+                      "session — never to background, worker, bench or sessionless "
+                      "calls (the screen and input are Alan's)")
+
+    # 2c. Nothing but Alan grants the desktop lease. Bash is covered by
+    #     `check_bash_command`; this covers every other tool that could reach
+    #     the route (http_request allows loopback) or the file (Write/Edit).
+    if name != "Bash" and name not in tool_annotations.READ_ONLY \
+            and isinstance(arguments, dict):
+        blob = json.dumps(arguments, default=str)
+        if "/api/desktop/lease" in blob or "desktop/lease.json" in blob:
+            logger.warning("desktop: refused %s touching the lease for %r", name, sid)
+            return _refused_call(name, "the desktop lease is granted by Alan from "
+                                       "Mission Control, never by a tool call")
 
     # 3. A state-changing call that arrives with no session id is refused
     #    (#1053). `_tool_sandbox.is_sandboxed_session("")` is False by design —

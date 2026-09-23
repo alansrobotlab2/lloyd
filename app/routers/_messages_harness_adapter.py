@@ -38,10 +38,12 @@ async def _emit(turn: SessionTurn, event: str, data: dict) -> None:
 def _content_to_string(content: Any) -> str:
     """Flatten persisted content (string OR list[{type:text,text:...}]) to a string.
 
-    vLLM's OpenAI endpoint rejects list-shaped content on `role:"tool"`
-    and is unreliable on `role:"assistant"` when content is an empty
-    list alongside `tool_calls`. We normalize everywhere to a plain
-    string so the chat-completions server doesn't 400 us mid-turn.
+    Text stays a string on every role: it is what the prefix cache has always
+    seen, and an assistant message with an empty list beside `tool_calls` is
+    unreliable. (vLLM 0.28 does accept list content on `role:"tool"` when it
+    carries an image part — screenshots ride that way, but as `_image_refs`
+    materialised at send time by `app/harness/tool_images.wire_messages`,
+    not through this function.)
     """
     if isinstance(content, str):
         return content
@@ -60,7 +62,8 @@ def _content_to_string(content: Any) -> str:
     return str(content)
 
 
-async def _prepare_messages_for_harness(history: list[dict]) -> list[dict]:
+async def _prepare_messages_for_harness(history: list[dict],
+                                        model: str = "") -> list[dict]:
     """Normalize a compacted session history for vLLM.
 
     Strips UI-only fields (id, timestamp, stats, source, cancelled,
@@ -69,6 +72,10 @@ async def _prepare_messages_for_harness(history: list[dict]) -> list[dict]:
     content on tool messages and on assistant messages that also carry
     tool_calls.
     """
+    from app.harness.tool_images import (
+        enforce_outbound_cap, refs_for_history, resolve_image_route,
+    )
+    route = resolve_image_route(model) if model else "drop"
     keep_roles = {"user", "assistant", "tool"}
     out = []
     for m in history:
@@ -101,5 +108,13 @@ async def _prepare_messages_for_harness(history: list[dict]) -> list[dict]:
             tc_id = m.get("tool_call_id", "")
             if tc_id:
                 msg["tool_call_id"] = tc_id
+            if m.get("images") and route == "native":
+                refs = refs_for_history(m, route)
+                if refs:
+                    msg["_image_refs"] = refs
         out.append(msg)
+    if route == "native" and any(x.get("_image_refs") for x in out):
+        # The cap applies across turns too: history is rebuilt every turn, so
+        # retiring the oldest screenshots here costs no mid-turn cache.
+        enforce_outbound_cap(out)
     return out

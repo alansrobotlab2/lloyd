@@ -1201,6 +1201,23 @@ window and records the damage as normal.
 
 ---
 
+## Part 11b — Desktop computer use
+
+`desktop_capture` / `desktop_act` (architecture/desktop.md) need nothing beyond
+what an omarchy install already carries: `grim`, `wtype`, `hyprctl`,
+`at-spi2-core` and `python-gobject` (the helper runs on `/usr/bin/python3`, the
+only interpreter with `gi.repository.Atspi`), and `/dev/uinput` writable by the
+user (omarchy's udev ACL). Check:
+
+```bash
+/usr/bin/python3 -c "import gi; gi.require_version('Atspi','2.0'); from gi.repository import Atspi; print('atspi ok')"
+getfacl /dev/uinput | grep "user:$USER:rw"
+```
+
+For Chromium, Electron and Firefox apps to expose element lists, Hyprland must
+export `ACCESSIBILITY_ENABLED=1` (`env = ACCESSIBILITY_ENABLED,1`) before they
+start. Then set `desktop.enabled: true` in config.yaml.
+
 ## Part 12 — Verify
 
 ```bash

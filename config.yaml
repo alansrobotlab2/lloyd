@@ -298,6 +298,19 @@ session_titles:
 # mcp_servers.lloyd-mcp.disabled_tools, and an enabled:false that emptied
 # list_tools() would break the annotation-staleness test in
 # tests/test_mcp_layer.py.
+desktop:
+  # Computer use on Alan's real Hyprland desktop (agent_mcp/desktop,
+  # architecture/desktop.md). desktop_capture is read-only; desktop_act needs
+  # the lease Alan grants from Mission Control's Desktop tab. Never available
+  # to background, worker, bench or eval sessions (refused at dispatch).
+  enabled: true
+  helper_python: /usr/bin/python3   # has gi.repository.Atspi; no venv does
+  max_dimension: 1456               # longest image edge; ~1.2k tokens on Flash-Next's ViT
+  max_elements: 200
+  listed_elements: 60
+  tripwire_px: 24                   # pointer drift that revokes the lease
+  deny_windows: [1password, bitwarden, keepassxc, authenticator, hyprlock, polkit, pinentry]
+
 browser:
   # Chromium for the browser_* tools. Headed mode needs a live display the
   # agent-worker unit does not have, so this stays true outside debugging.
@@ -391,6 +404,20 @@ compaction:
   manual:
     buffer_tokens: 3000
 harness:
+  # Images tools return (screenshots): app/harness/tool_images.py. A model
+  # sees them only when its models.<alias>.supports_vision is literally true
+  # (route native); otherwise aux_model describes them, or they are dropped
+  # with a note. Base64 never enters history or the session file.
+  images:
+    enabled: true
+    route: auto            # native | aux | auto | drop
+    aux_model: ""          # a models.<alias> with supports_vision: true
+    max_outbound: 20       # images per request before the oldest batch is evicted
+    max_bytes: 25165824
+    evict_batch: 8
+    keep_on_compaction: 3
+    token_estimate: 1500
+    dedup_max_consecutive: 2
   stream_chunk_timeout_seconds: 60
   # Re-anchor session.todos this often (in agent-loop iterations) when
   # items are still open and the list has gone untouched. The system
@@ -644,6 +671,11 @@ models:
   primary:
     alias: primary
     base_url: http://127.0.0.1:8096
+    # Whether this slot accepts image input. Must match the engine: the
+    # launcher strips the vision tower unless LANGUAGE_MODEL_ONLY=0 in
+    # agent-llm-primary.conf. true with a text-only engine costs one refused
+    # request per turn (MultimodalRejectedError), never a dead turn.
+    supports_vision: false
     context_length: 262144
     display_name: Primary (Local)
     # Case-insensitive substring matched against what the engine reports

@@ -503,6 +503,39 @@ async def clear_session_goal(session_id: str):
     return JSONResponse({"session_id": session_id, "cleared": True})
 
 
+_SPILL_NAME = __import__("re").compile(r"^[A-Za-z0-9_.-]{1,200}$")
+_SPILL_MEDIA = {
+    "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+    "webp": "image/webp", "gif": "image/gif",
+    "txt": "text/plain; charset=utf-8", "json": "application/json",
+}
+
+
+@router.get("/api/sessions/{session_id}/tool-results/{name}")
+async def get_tool_result_file(session_id: str, name: str):
+    """One file from a session's `<sid>.tool-results/` spill directory.
+
+    Screenshots a tool returned live there (app/harness/tool_images.py) and
+    the chat renders them from here; so do spilled text results. Both path
+    pieces are validated against a plain-filename pattern — no `..`, no
+    separators — and the resolved file must sit inside the spill directory.
+    Files are written once per (call, index), so they cache forever.
+    """
+    from fastapi.responses import FileResponse
+    if not _SPILL_NAME.match(session_id) or not _SPILL_NAME.match(name) \
+            or ".." in session_id or ".." in name:
+        raise HTTPException(status_code=400, detail="bad name")
+    base = (SESSIONS_DIR / f"{session_id}.tool-results").resolve()
+    path = (base / name).resolve()
+    if path.parent != base or not path.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    return FileResponse(
+        path, media_type=_SPILL_MEDIA.get(ext, "application/octet-stream"),
+        headers={"Cache-Control": "private, max-age=31536000, immutable"},
+    )
+
+
 @router.get("/api/messages/{session_id}")
 async def get_messages(session_id: str):
     """Load messages for a session from stored session metadata."""

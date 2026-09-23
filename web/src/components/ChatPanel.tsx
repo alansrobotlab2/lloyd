@@ -4,7 +4,7 @@ import {
   Wrench, Square, Sparkles,
 } from 'lucide-react'
 import { Streamdown } from 'streamdown'
-import { api, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState, type InnerVoiceObservation, type ChangedFile, type RevertResult } from '../api'
+import { api, toolImageUrl, type ToolImageRef, type MessageEntry as ApiMessage, type ModelInfo, type TurnStats, type QueueState, type InnerVoiceObservation, type ChangedFile, type RevertResult } from '../api'
 import TodoList from './TodoList'
 import PlanHeader from './PlanHeader'
 import GoalHeader from './GoalHeader'
@@ -347,6 +347,34 @@ function ThinkingRow({ msg, isMobile, compact, forceLeftAlign }: {
   )
 }
 
+/** Screenshots a tool returned, served from the session's spill directory. */
+export function ToolImages({ images }: { images: ToolImageRef[] }) {
+  return (
+    <div className="space-y-2">
+      {images.map((ref, i) => {
+        const url = toolImageUrl(ref)
+        if (!url) return null
+        const note = [
+          ref.width && ref.height ? `${ref.width}×${ref.height}` : '',
+          ref.deduped_from ? 'unchanged' : '',
+          ref.described ? 'described by aux model' : '',
+          ref.route === 'drop' ? 'not shown to model' : '',
+          ref.evicted ? 'evicted from context' : '',
+        ].filter(Boolean).join(' · ')
+        return (
+          <figure key={`${ref.sha256 || ''}${i}`} className="space-y-1">
+            <a href={url} target="_blank" rel="noreferrer">
+              <img src={url} alt={ref.name || 'tool image'} loading="lazy"
+                   className="max-w-full max-h-96 rounded border border-border" />
+            </a>
+            {note && <figcaption className="text-[10px] text-muted-foreground">{note}</figcaption>}
+          </figure>
+        )
+      })}
+    </div>
+  )
+}
+
 const MessageRow = memo(function MessageRow({
   msg,
   showAgentDetails,
@@ -511,6 +539,9 @@ const MessageRow = memo(function MessageRow({
                         {responseText || '⏳ Running...'}
                       </pre>
                     </div>
+                    {msg.images && msg.images.length > 0 && (
+                      <ToolImages images={msg.images} />
+                    )}
                   </CollapsibleContent>
                 </Collapsible>
               )
@@ -1156,9 +1187,9 @@ export default function ChatPanel({
             { id: `msg_${callId}_result`, role: 'tool', content: [{ type: 'text', text: '⏳ Running...' }], tool_call_id: callId, context_tokens: contextTokens, timestamp: new Date().toISOString() },
           ])
         },
-        onToolComplete: (callId, _name, result) => {
+        onToolComplete: (callId, _name, result, images) => {
           setMessages(prev => {
-            const upd = prev.map(m => m.id === `msg_${callId}_result` ? { ...m, content: [{ type: 'text' as const, text: result }] } : m)
+            const upd = prev.map(m => m.id === `msg_${callId}_result` ? { ...m, content: [{ type: 'text' as const, text: result }], ...(images?.length ? { images } : {}) } : m)
             const stillPending = upd.find(m => m.role === 'tool' && m.content[0]?.text === '⏳ Running...')
             if (!stillPending) setActiveToolName(null)
             return upd
@@ -1346,11 +1377,11 @@ export default function ChatPanel({
           },
         ])
       },
-      onToolComplete: (callId, _name, result) => {
+      onToolComplete: (callId, _name, result, images) => {
         setMessages(prev => {
           const updated = prev.map(m =>
             m.id === `msg_${callId}_result`
-              ? { ...m, content: [{ type: 'text' as const, text: result }] }
+              ? { ...m, content: [{ type: 'text' as const, text: result }], ...(images?.length ? { images } : {}) }
               : m
           )
           const stillPending = updated.find(m => m.role === 'tool' && m.content[0]?.text === '⏳ Running...')

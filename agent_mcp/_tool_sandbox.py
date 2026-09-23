@@ -200,6 +200,11 @@ def refusal(name: str, arguments: dict | None) -> str | None:
                     f"the sandbox is unavailable ({err}); refusing rather than "
                     "running it unsandboxed")
         return None
+    if name.startswith("desktop_"):
+        # Read-only by annotation, and still not for a trial: a capture is a
+        # screenshot of Alan's real desktop taken in-process, where no bwrap
+        # applies.
+        return "desktop tools are not available in a read-only session"
     if name in _annotations.READ_ONLY:
         return None
     return (f"{name} can change state, and this session is read-only (bench and "

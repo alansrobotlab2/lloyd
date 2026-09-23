@@ -277,6 +277,28 @@ def text_result(text: str, *, is_error: bool | None = None) -> CallToolResult:
     )
 
 
+def image_result(text: str, image: bytes, *, mime: str = "image/png",
+                 is_error: bool | None = None) -> CallToolResult:
+    """A text block plus one image, as MCP ``ImageContent``.
+
+    The harness persists the image beside the session's spilled results and
+    decides per model whether the model sees it (app/harness/tool_images.py);
+    the text is what every model gets. Never put base64 in ``text``.
+    """
+    import base64 as _b64
+    from mcp.types import ImageContent
+    if is_error is None:
+        is_error = _looks_like_error_json(text)
+    return CallToolResult(
+        content=[
+            TextContent(type="text", text=text),
+            ImageContent(type="image", data=_b64.b64encode(image).decode(),
+                         mimeType=mime),
+        ],
+        isError=is_error,
+    )
+
+
 def _looks_like_error_json(text: str) -> bool:
     """True if `text` is a JSON object with a top-level "error" key."""
     if not text:

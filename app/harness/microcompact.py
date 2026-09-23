@@ -227,6 +227,13 @@ def _replace_tool_content(message: dict, new_text: str) -> dict:
     tool_call_id, stats, etc.).
     """
     out = dict(message)
+    # A cleared result keeps no screenshot either: the image is on disk
+    # beside the text spill, and its KV is the point of clearing.
+    out.pop("_image_refs", None)
+    if isinstance(message.get("images"), list):
+        # A session row: keep the refs for the UI, but never re-send them.
+        out["images"] = [dict(r, evicted=True) if isinstance(r, dict) else r
+                         for r in message["images"]]
     # Match the original shape: if it was a string, keep a string; if it
     # was a structured list, keep a list. Mixed-content callers see the
     # text variant either way — a cleared result has no other blocks

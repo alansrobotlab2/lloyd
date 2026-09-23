@@ -440,6 +440,21 @@ KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-}"
 # handed images. Set 0 to go back to that.
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-1}"
 
+# Image input, when the tower is loaded (LANGUAGE_MODEL_ONLY=0) — desktop
+# computer use (agent_mcp/desktop) and browser_screenshot, which the harness
+# sends as image_url parts on tool messages (app/harness/tool_images.py).
+#   MM_IMAGES_PER_PROMPT  the engine refuses a request carrying more; the
+#                         harness evicts past harness.images.max_outbound (20),
+#                         so this must be at least that. 0 = refuse images.
+#   MM_MAX_PIXELS         the processor's resize ceiling. The checkpoint ships
+#                         16,777,216 (4096^2 -> ~16k tokens per image, and the
+#                         encoder is profiled at that size at boot). Captures
+#                         are already <=1456 px on the longest edge, so 1456^2
+#                         changes no real input and bounds one image at ~2.1k
+#                         tokens (32x32 px per token on this ViT).
+MM_IMAGES_PER_PROMPT="${MM_IMAGES_PER_PROMPT:-0}"
+MM_MAX_PIXELS="${MM_MAX_PIXELS:-2119936}"
+
 # NVFP4 MoE kernel. Empty = the oracle's own order, which lands on
 # FLASHINFER_CUTLASS here. 'flashinfer_b12x' is the SM120-native FP4 path;
 # the oracle excludes it from AUTO-selection only pending an upstream CUTLASS
@@ -532,7 +547,10 @@ if [[ "$LANGUAGE_MODEL_ONLY" == "1" ]]; then
   # multimodal input to limit once the tower is not loaded.
   AB_ARGS+=(--language-model-only)
 else
-  AB_ARGS+=(--limit-mm-per-prompt '{"image": 0, "video": 0, "audio": 0}')
+  AB_ARGS+=(--limit-mm-per-prompt "{\"image\": ${MM_IMAGES_PER_PROMPT}, \"video\": 0, \"audio\": 0}")
+  if [[ "$MM_IMAGES_PER_PROMPT" != "0" ]]; then
+    AB_ARGS+=(--mm-processor-kwargs "{\"max_pixels\": ${MM_MAX_PIXELS}}")
+  fi
 fi
 [[ -n "$MOE_BACKEND" ]] && AB_ARGS+=(--moe-backend "$MOE_BACKEND")
 [[ -n "$MAX_NUM_BATCHED_TOKENS" ]] && AB_ARGS+=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")

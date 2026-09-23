@@ -121,6 +121,11 @@ AUTONOMY_RUNS_DIR = DATA_ROOT / "autonomy-runs"
 TASKS_DIR = PIPELINE_DIR / "tasks"
 LOGS_DIR = DATA_ROOT / "logs"
 SCREENSHOTS_DIR = LOGS_DIR / "screenshots"
+# Desktop computer use (agent_mcp/desktop): the lease file both the backend
+# (which grants it from Mission Control) and the aggregator (which checks it
+# before every action) read, and the last capture's frame for the Desktop tab.
+DESKTOP_DIR = DATA_ROOT / "desktop"
+DESKTOP_LEASE_PATH = DESKTOP_DIR / "lease.json"
 
 # The fact tree (one dir per entity, markdown fact files). LLOYD_FACTS_ROOT
 # lets a rebuild extract into a fresh tree without touching the live one.

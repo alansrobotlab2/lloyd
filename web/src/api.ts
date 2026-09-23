@@ -47,6 +47,35 @@ export interface QueueState {
   depth: number
 }
 
+/** A screenshot a tool returned, as the harness persisted it — a file under
+ *  the session's `<sid>.tool-results/` directory, never base64. */
+export interface ToolImageRef {
+  path: string
+  name?: string
+  sha256?: string
+  mime?: string
+  width?: number
+  height?: number
+  bytes?: number
+  orig_width?: number
+  orig_height?: number
+  scale?: number
+  route?: 'native' | 'aux' | 'drop'
+  described?: boolean
+  deduped_from?: string
+  evicted?: boolean
+}
+
+/** URL the backend serves a tool image from, derived from its path. */
+export function toolImageUrl(ref: ToolImageRef): string | null {
+  const parts = (ref.path || '').split('/')
+  const name = ref.deduped_from || ref.name || parts[parts.length - 1]
+  const dir = parts[parts.length - 2] || ''
+  if (!name || !dir.endsWith('.tool-results')) return null
+  const sid = dir.slice(0, -'.tool-results'.length)
+  return `/api/sessions/${encodeURIComponent(sid)}/tool-results/${encodeURIComponent(name)}`
+}
+
 export interface MessageEntry {
   id: string
   role: 'user' | 'assistant' | 'tool' | 'subliminal' | 'thinking'
@@ -75,6 +104,8 @@ export interface MessageEntry {
   }
   stats?: TurnStats
   context_tokens?: number
+  /** Screenshots on a `role: 'tool'` row. */
+  images?: ToolImageRef[]
   tool_calls?: Array<{
     id: string
     call_id: string
@@ -396,6 +427,43 @@ export interface BrowserFrame {
   snapshot?: string
   screenshot_b64?: string
   refs?: BrowserRef[]
+}
+
+/** Who may drive the real desktop (app/desktop_lease.py). */
+export interface DesktopLease {
+  holder: 'human' | 'agent'
+  agent_holds: boolean
+  remaining_s?: number | null
+  epoch?: number
+  reason?: string | null
+  granted_by?: string | null
+  expired?: boolean | null
+}
+
+export interface DesktopElement {
+  index: number
+  role: string
+  name: string
+  /** [x, y, w, h] in the frame's image pixels, or null when unknown. */
+  bounds: number[] | null
+}
+
+/** One desktop_capture, as the aggregator publishes it. */
+export interface DesktopFrame {
+  active?: boolean
+  tool?: string
+  ts?: number
+  capture_id?: string
+  kind?: 'window' | 'screen'
+  window?: { title?: string; class?: string; address?: string; workspace?: string; focused?: boolean }
+  width?: number
+  height?: number
+  scale?: number
+  mime?: string | null
+  image_b64?: string | null
+  elements?: DesktopElement[]
+  summary?: string
+  lease?: DesktopLease
 }
 
 /** Result of driving the shared browser from the URL bar. `ok` and `error`
@@ -788,7 +856,7 @@ export const api = {
     callbacks: {
       onSession?: (sessionId: string) => void
       onToolStart?: (callId: string, name: string, args: string, contextTokens?: number, summary?: string) => void
-      onToolComplete?: (callId: string, name: string, result: string) => void
+      onToolComplete?: (callId: string, name: string, result: string, images?: ToolImageRef[]) => void
       onToolProgress?: (name: string, preview: string) => void
       onTextDelta?: (text: string) => void
       onThinkingDelta?: (text: string) => void
@@ -847,7 +915,7 @@ export const api = {
             switch (eventType) {
               case 'session': callbacks.onSession?.(payload.session_id); break
               case 'tool_start': callbacks.onToolStart?.(payload.call_id, payload.name, payload.args, payload.context_tokens, payload.summary); break
-              case 'tool_complete': callbacks.onToolComplete?.(payload.call_id, payload.name, payload.result); break
+              case 'tool_complete': callbacks.onToolComplete?.(payload.call_id, payload.name, payload.result, payload.images); break
               case 'tool_progress': callbacks.onToolProgress?.(payload.name, payload.preview); break
               case 'text_delta': callbacks.onTextDelta?.(payload.text); break
               case 'thinking_delta': callbacks.onThinkingDelta?.(payload.text); break
@@ -1397,6 +1465,16 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url }),
+    }).then(r => r.json()),
+
+  // Desktop computer use: the last capture, and the lease only a human grants.
+  getDesktopFrame: (): Promise<DesktopFrame> =>
+    fetch(`${API_BASE}/desktop/frame`).then(r => r.json()),
+  setDesktopLease: (op: 'grant' | 'revoke', minutes?: number): Promise<DesktopLease> =>
+    fetch(`${API_BASE}/desktop/lease`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op, minutes }),
     }).then(r => r.json()),
 
   getActiveProcs: (): Promise<{ procs: ActiveProc[] }> =>

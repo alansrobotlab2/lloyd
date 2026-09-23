@@ -13,6 +13,7 @@ import InnerVoicePage from './pages/InnerVoicePage'
 import SettingsPage from './pages/SettingsPage'
 import DashboardPage from './pages/DashboardPage'
 import BrowserPage from './pages/BrowserPage'
+import DesktopPage from './pages/DesktopPage'
 import BackgroundPage from './pages/BackgroundPage'
 
 // Architecture renders its own force graph, so it's the other page holding
@@ -90,6 +91,7 @@ const PAGES: Record<string, React.FC> = {
   workers: WorkersPage,
   inner_voice: InnerVoicePage,  // Inner Voice (#345)
   browser: BrowserPage,         // Live browser session (#278)
+  desktop: DesktopPage,         // Desktop computer use: capture mirror + lease
   background: BackgroundPage,   // Autonomy + worker runs, recorded
 }
 

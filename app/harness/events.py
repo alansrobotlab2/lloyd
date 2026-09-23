@@ -143,7 +143,8 @@ def tool_call(
 
 
 def tool_result(*, call_id: str, name: str, content: str, is_error: bool = False,
-                raw_chars: int | None = None) -> NormalizedEvent:
+                raw_chars: int | None = None,
+                images: list[dict] | None = None) -> NormalizedEvent:
     """One tool call's result, as the model is about to be shown it.
 
     ``raw_chars`` is how long ``content`` was BEFORE the caller's spill
@@ -169,6 +170,10 @@ def tool_result(*, call_id: str, name: str, content: str, is_error: bool = False
         raw_chars = len(content)
     if raw_chars is not None:
         evt["raw_chars"] = int(raw_chars)
+    # ``images``: ImageRefs (app/harness/tool_images.py) — paths and hashes,
+    # never base64. Absent when the tool returned none.
+    if images:
+        evt["images"] = list(images)
     return evt
 
 

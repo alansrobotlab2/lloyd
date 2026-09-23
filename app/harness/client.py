@@ -23,7 +23,12 @@ import httpx
 import re
 
 from app.component_manifest import record_request
-from app.harness.errors import ContextOverflowError, ParseError, StreamStalledError
+from app.harness.errors import (
+    ContextOverflowError, MultimodalRejectedError, ParseError, StreamStalledError,
+)
+from app.harness.tool_images import (
+    looks_like_multimodal_rejection, payload_has_images, wire_messages,
+)
 
 logger = logging.getLogger("lloyd-harness-client")
 
@@ -65,6 +70,10 @@ async def stream_chat(
     `timeout_s`'s job. Without this the read is unbounded (`read=None`)
     and a wedged engine mid-generation hangs the turn forever.
     """
+    # Screenshot refs on tool messages become image_url parts here and only
+    # here (app/harness/tool_images.py); a list without refs passes through
+    # as the same object.
+    messages = wire_messages(messages)
     payload: dict[str, Any] = {
         "model": model,
         "messages": messages,
@@ -120,6 +129,14 @@ async def stream_chat(
                     raise ContextOverflowError(
                         f"vLLM returned {resp.status_code}: {body_text}",
                         requested_input_tokens=requested,
+                    )
+                if (
+                    resp.status_code == 400
+                    and payload_has_images(messages)
+                    and looks_like_multimodal_rejection(body_text)
+                ):
+                    raise MultimodalRejectedError(
+                        f"{model} refused image input: {body_text[:300]}"
                     )
                 raise httpx.HTTPStatusError(
                     f"vLLM returned {resp.status_code}: {body_text}",

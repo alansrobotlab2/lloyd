@@ -2559,6 +2559,27 @@ Everything else on the page stays read-only, and not for want of a route:
 the ref overlay has nothing to send, since the tool surface has no "click
 pixel (x,y)" and the a11y tree is gone by render time.
 
+### Desktop computer use: capture freely, act only on a lease
+
+`desktop_capture` / `desktop_act` (`agent_mcp/desktop/`) look at and drive
+Alan's real Hyprland desktop, after Hermes Agent's `computer_use`;
+`architecture/desktop.md` is the long version. Four rules:
+
+- **Acting needs a lease only a human grants** (`app/desktop_lease.py`, the
+  Desktop tab). No file, a corrupt file or an expired grant means the human
+  holds it. Moving the mouse or changing focus revokes it at Lloyd's next
+  action. No tool may reach `/api/desktop/lease` or the lease file:
+  `check_bash_command` and `main.call_tool` both refuse.
+- **Chat sessions only.** Worker, autonomy, bench, eval, sessionless calls and
+  their subagents are refused at dispatch, capture included.
+- **Screenshots are refs, never base64** (`app/harness/tool_images.py`). A model
+  sees an image only when its `models.<alias>.supports_vision` is literally
+  `true`. Otherwise the images are described by `harness.images.aux_model` or
+  dropped with a note.
+- **Chromium, Electron and Firefox apps expose element lists only if they were
+  started with `ACCESSIBILITY_ENABLED=1`.** GTK apps always do. Without it a
+  window is pixel-only.
+
 ### The SSRF guard that was never called
 
 `_is_private_host` was defined in `agent_mcp/browser.py` on 2026-04-11 and

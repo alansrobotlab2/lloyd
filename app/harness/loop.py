@@ -25,6 +25,7 @@ from app.harness.client import stream_chat
 from app.harness.context_meter import ContextMeter, context_window_for
 from app.harness.errors import (
     ContextOverflowError,
+    MultimodalRejectedError,
     ParseError,
     ToolDiscoveryError,
     ToolDispatchError,
@@ -233,6 +234,7 @@ async def run_query(
         num_turns = 0
         stop_reason = "stop"
         context_overflow_recoveries = 0
+        multimodal_recoveries = 0
         max_context_overflow_recoveries = 2
         echo_guard_reprompts = 0
         # Initialised before the loop: a turn that breaks on its first check
@@ -484,6 +486,23 @@ async def run_query(
                     ),
                 )
                 num_turns -= 1   # don't count the recovered attempt against max_turns
+                continue
+            except MultimodalRejectedError as exc:
+                # The engine was sent a screenshot it cannot take — a slot
+                # whose `supports_vision` claims more than it serves. Strip
+                # every image from the turn and retry once; the tool text
+                # (element lists, paths) still carries the work.
+                if multimodal_recoveries >= 1:
+                    raise
+                multimodal_recoveries += 1
+                from app.harness.tool_images import strip_all_image_refs
+                n = strip_all_image_refs(chat_messages)
+                logger.error(
+                    "loop: %s — stripped images from %d message(s) and retrying; "
+                    "set models.%s.supports_vision: false", exc, n, options.model,
+                )
+                yield events.stream_raw("", error=f"multimodal_rejected: {exc}")
+                num_turns -= 1
                 continue
 
             if options.cancel_event is not None and options.cancel_event.is_set():
@@ -751,12 +770,9 @@ async def run_query(
                     evt = results.get(tc["id"])
                     if evt is None:
                         continue
-                    chat_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc["id"],
-                        "content": evt["content"],
-                    })
+                    chat_messages.append(_tool_history_message(tc["id"], evt))
                 _reorder_batch_messages(chat_messages, batch_base)
+                _cap_images(chat_messages, batch_base)
                 tool_calls_committed_done = True
             else:
                 tool_calls_committed_done = False
@@ -810,14 +826,11 @@ async def run_query(
                 if options.hooks is not None:
                     await options.hooks.fire_on_event(result_evt)
 
-                chat_messages.append({
-                    "role": "tool",
-                    "tool_call_id": tc["id"],
-                    "content": result_evt["content"],
-                })
+                chat_messages.append(_tool_history_message(tc["id"], result_evt))
 
             if not tool_calls_committed_done:
                 _reorder_batch_messages(chat_messages, batch_base)
+                _cap_images(chat_messages, batch_base)
 
             # Mid-turn microcompaction. After this iteration's tool calls
             # land, clear stale tool results IF the prompt is actually
@@ -1241,6 +1254,20 @@ def _relieve_context(
         # Unmeasured never counts as over: an iteration-1 turn with no
         # usage report has not been shown to need anything.
         return bool(getattr(meter, "measured", False)) and meter.used > target
+
+    # -- rung 0: old screenshots ----------------------------------------
+    # ~1.3k tokens each and the cheapest thing in the prompt to lose: the
+    # newest few still show the current screen, and the files stay on disk.
+    try:
+        from app.harness.tool_images import images_cfg, keep_newest
+        if any(m.get("_image_refs") for m in chat_messages if isinstance(m, dict)):
+            dropped = keep_newest(
+                chat_messages, int(images_cfg().get("keep_on_compaction") or 3))
+            if dropped:
+                meter.resync(chat_messages)
+                report["rungs"].append(f"images:{dropped}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("loop: relief rung 'images' failed: %s", exc)
 
     # -- rung 1: stale tool results -------------------------------------
     try:
@@ -1892,6 +1919,44 @@ def _batch_is_read_only(tool_calls: list[dict[str, Any]],
     return True
 
 
+def _tool_history_message(call_id: str, evt: dict[str, Any]) -> dict[str, Any]:
+    """The ``role:"tool"`` history message for one result.
+
+    Content stays a string. Images the turn's model can see ride on the
+    private ``_image_refs`` key and become ``image_url`` parts only at send
+    time (``tool_images.wire_messages``); the refs are small, so the history
+    list, Inner Voice's handle on it and every estimate stay cheap.
+    """
+    msg: dict[str, Any] = {
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": evt["content"],
+    }
+    refs = [
+        r for r in (evt.get("images") or [])
+        if isinstance(r, dict) and r.get("route") == "native"
+        and not r.get("deduped_from") and not r.get("described")
+    ]
+    if refs:
+        msg["_image_refs"] = [
+            {k: r[k] for k in ("path", "sha256", "mime", "width", "height", "bytes")
+             if k in r}
+            for r in refs
+        ]
+    return msg
+
+
+def _cap_images(chat_messages: list[dict[str, Any]], batch_base: int) -> None:
+    """Apply the outbound image cap, never touching the batch just appended."""
+    if not any(isinstance(m, dict) and m.get("_image_refs") for m in chat_messages):
+        return
+    try:
+        from app.harness.tool_images import enforce_outbound_cap
+        enforce_outbound_cap(chat_messages, protect_from=batch_base)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("loop: image cap failed: %s", exc)
+
+
 def _reorder_batch_messages(chat_messages: list[dict[str, Any]], base: int) -> None:
     """Put a batch's messages back in wire order, in place.
 
@@ -2284,6 +2349,17 @@ async def _execute_tool_call(
             disallowed_tools=list(options.disallowed_tools or []),
         )
 
+    # Images the tool returned (screenshots). Persisted beside the text
+    # spills, deduped, and routed per model — see app/harness/tool_images.py.
+    # The event carries refs only; base64 never leaves the file and the wire.
+    image_refs: list[dict[str, Any]] = []
+    if result.get("images") and isinstance(content, str):
+        from app.harness.tool_images import shape_tool_images
+        content, image_refs, _ = await shape_tool_images(
+            images=result["images"], content=content, session_id=session_id,
+            call_id=call_id, tool_name=name, model=options.model,
+        )
+
     if options.hooks is not None:
         await options.hooks.fire_post_tool_use(
             session_id=session_id,
@@ -2299,6 +2375,7 @@ async def _execute_tool_call(
         content=content,
         is_error=is_error,
         raw_chars=raw_chars,
+        images=image_refs or None,
     )
 
 
@@ -2515,6 +2592,7 @@ def _truncate_largest_tool_results(
             msg["content"] = [{"type": "text", "text": notice}]
         else:
             msg["content"] = notice
+        msg.pop("_image_refs", None)
         freed += original_size - len(notice)
         truncated += 1
         if freed >= target_chars:

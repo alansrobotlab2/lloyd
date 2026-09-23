@@ -24,7 +24,8 @@ from pathlib import Path
 import httpx
 from mcp.types import Tool
 
-from agent_mcp._shared import text_result
+from agent_mcp._shared import image_result, text_result
+from mcp.types import CallToolResult  # noqa: E402
 
 logger = logging.getLogger("lloyd-browser")
 
@@ -755,7 +756,14 @@ async def _browser_tabs(action: str, page_id: int | None = None, url: str | None
     return json.dumps({"error": f"Unknown action '{action}'. Use: list, switch, close, new"})
 
 
-async def _browser_screenshot() -> str:
+async def _browser_screenshot() -> "str | CallToolResult":
+    """The page as an MCP image, plus a short JSON text block.
+
+    It used to return the PNG as `data_base64` inside the JSON text, which the
+    harness then fed to the model as ~100 KB of base64 characters and wrote
+    into the session file. The harness now carries images as images
+    (app/harness/tool_images.py) and decides per model whether it sees them.
+    """
     global SCREENSHOTS_DIR
     SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
     page = await _get_page()
@@ -764,8 +772,12 @@ async def _browser_screenshot() -> str:
         path = SCREENSHOTS_DIR / f"screenshot_{ts}.png"
         await page.screenshot(path=str(path), full_page=False)
         data = path.read_bytes()
-        b64 = base64.b64encode(data).decode()
-        return json.dumps({"ok": True, "path": str(path), "size_bytes": len(data), "data_base64": b64})
+        vp = page.viewport_size or {}
+        return image_result(json.dumps({
+            "ok": True, "path": str(path), "size_bytes": len(data),
+            "width": vp.get("width"), "height": vp.get("height"),
+            "url": page.url,
+        }), data)
     except Exception as exc:
         return json.dumps({"error": f"Screenshot failed: {exc}"})
 
@@ -1073,8 +1085,9 @@ async def list_tools():
         }),
         # ── Phase 2: Screenshots + JS ──────────────────────────────────────────
         Tool(name="browser_screenshot", description=(
-            "Take a screenshot of the current page. Returns a base64-encoded PNG image "
-            "and saves it to logs/screenshots/. Useful for visual verification."
+            "Take a screenshot of the current page. Returns the image (shown to "
+            "models that can see) and saves it to logs/screenshots/. Useful for "
+            "visual verification."
         ), inputSchema={
             "type": "object",
             "properties": {},
@@ -1246,6 +1259,8 @@ async def call_tool(name: str, arguments: dict):
     # would charge every browser call a loopback round-trip and make the
     # frontend's uptime everyone else's problem.
     _schedule_state_push(name)
+    if isinstance(result, CallToolResult):
+        return result
     return text_result(result)
 
 

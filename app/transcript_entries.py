@@ -151,7 +151,8 @@ def build_tool_call_entry(tool_call: dict, *, timestamp: str,
 
 def build_tool_result_entry(call_id: str, result: str, *, timestamp: str,
                             is_error: bool | None = None,
-                            raw_chars: int | None = None) -> dict:
+                            raw_chars: int | None = None,
+                            images: list[dict] | None = None) -> dict:
     """The `role="tool"` row. `result` is already truncated.
 
     `raw_chars` is the length the tool's answer had before the harness
@@ -164,7 +165,7 @@ def build_tool_result_entry(call_id: str, result: str, *, timestamp: str,
         stats["raw_chars"] = int(raw_chars)
     if is_error is not None:
         stats["is_error"] = bool(is_error)
-    return {
+    row = {
         "id": f"msg_{call_id}_result",
         "role": "tool",
         "content": [{"type": "text", "text": result}],
@@ -172,6 +173,15 @@ def build_tool_result_entry(call_id: str, result: str, *, timestamp: str,
         "timestamp": timestamp,
         "stats": stats,
     }
+    # Screenshots: refs to files under `<sid>.tool-results/`, never base64
+    # (app/harness/tool_images.py). Omitted when there are none, so every
+    # pre-existing row reads the same.
+    if images:
+        from app.harness.tool_images import row_refs
+        refs = row_refs(images)
+        if refs:
+            row["images"] = refs
+    return row
 
 
 def build_thinking_entry(turn_id: str, text: str, duration_ms: int, seq: int,
