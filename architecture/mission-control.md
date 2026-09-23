@@ -32,24 +32,34 @@ backed by a router under `app/routers/`.
 | `ide` | `ide.py`, `lsp.py` | file view with LSP diagnostics |
 | `browser` | `browser.py` | mirrors the agent's Chromium; the URL bar is the one control |
 
-Four lists name the tabs and `tests/test_mc_tab_parity.py` keeps them equal:
-`Page` in `web/src/components/Sidebar.tsx`, `mc_state.VALID_TABS`,
-`mission_control_ui._VALID_TABS`, and `VALID_TABS` in
-`useMcNavigationEvents.ts`. A tab missing from one of them fails in the
-quietest direction: the state mirror keeps serving the previous tab and
-`mc_get_state` answers wrongly. The same test pins a fifth list that fails
-quieter still — `mc_ui._SUMMARIZERS`, the per-tab brief `mc_navigate` hands
-back. A tab absent from it is not an error either: `_summarize_tab` returns
-`{}` and the agent learns nothing about where it just sent the user, which is
-why `architecture`, `settings` and `graph` register an explicit `lambda: {}`
-rather than being left out.
-A sixth list names a tab and is pinned by none of the five: `const PAGES` in
-`web/src/components/Layout.tsx:79`, the map `PageComponent = PAGES[page]`
-(`:315`) renders from. `chat`, `ide` and `memory` are deliberately absent from
-it — they are mounted sticky elsewhere in that file — so today the map plus
-that trio covers all sixteen tabs, and a tab added to the five lists above but
-not to `PAGES` passes every assertion while rendering an empty pane: the
-navigate succeeds, the brief comes back, nothing appears. Filed as #1274.
+Six lists name the tabs and one file keeps them equal:
+`tests/test_mc_tab_parity.py`, over `Page` in
+`web/src/components/Sidebar.tsx`, `mc_state.VALID_TABS`,
+`mission_control_ui._VALID_TABS`, `VALID_TABS` in `useMcNavigationEvents.ts`,
+and `mc_ui._SUMMARIZERS`, the per-tab brief `mc_navigate` hands back. A tab
+missing from one of the first four fails in the quietest direction: the state
+mirror keeps serving the previous tab and `mc_get_state` answers wrongly. A
+tab absent from the summarizer registry is not an error either:
+`_summarize_tab` returns `{}` and the agent learns nothing about where it just
+sent the user, which is why `architecture`, `settings` and `graph` register an
+explicit `lambda: {}` rather than being left out.
+The sixth list is the one that decides whether the tab draws anything:
+`const PAGES` in `web/src/components/Layout.tsx:79`, the map
+`PageComponent = PAGES[page]` (`:315`) looks up and the `{PageComponent && …}`
+guard (`:557`) renders. Its failure is the loudest-looking and the most
+silent-actual: `mc_navigate` returns 200, the brief comes back, the frontend
+switches `page`, and the pane stays empty — the same "nothing moves" symptom as
+the hook list, one level deeper, and until #1274 `tests/test_mc_tab_parity.py`
+parsed none of it. It parses the map now: the keys must satisfy
+`PAGES ∪ STICKY_PAGES == Page` in both directions. The exemption is a declared
+constant — `STICKY_PAGES = {chat, ide, memory}` — because those three tabs are
+absent from the map on purpose: they are mounted elsewhere in `Layout.tsx` and
+deliberately kept mounted there (`:391`, `:528`, `:549`) so Monaco, the LiveKit
+room and the memory graph survive a tab switch. A fourth sticky tab has to be
+declared in that constant *and* really mounted — the same test refuses a
+declaration with no `page === '<name>'` guard behind it. Folding the three
+into `PAGES` with their sticky wrappers, so the map alone is render truth and
+the exception list can go away, is the follow-on this item leaves to a person.
 
 ## The dashboard
 
