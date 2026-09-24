@@ -104,7 +104,16 @@ counters are also deliberately un-fakeable in the other direction:
 `_active_count` returns **-1** when the store cannot answer and
 `_fact_entity_recall` returns **None** when it could not run, so "did not
 measure" can never be recorded as "measured zero" — the same rule
-`knowledge-health-report.py` runs on.
+`knowledge-health-report.py` runs on. Since #702 the record keeps the evidence
+behind that score as well: `fact_entity_recall_detail` (`_recall_detail`) carries
+the query count, how many queries answered and `run_eval`'s per-query hits, and is
+null exactly when the score is — two apply runs that expired 24 and 8 facts had
+both reported a bare 0.375 with nothing to say whether 20 queries moved by zero or
+the eval never ran. The same rule reaches the per-entity rows: a refused entity is
+written with `contradictions: null`, its `checked` fact count and the detector's
+`skipped_reason`, never the `contradictions: 0` a scanned-and-clean entity gets,
+and the CLI's `entities scanned=` line takes the refusals off the count and names
+them (`refused=7 (AI Agents, LLM, …)`).
 
 Signal sources, both real, neither invented:
 - **corrections** — entities named in `~/obsidian/memory/corrections.md`, the

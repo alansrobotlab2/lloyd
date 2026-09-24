@@ -1014,7 +1014,37 @@ def apply_action(action: dict, now_iso: str) -> dict:
             "marked": applied["matched_facts"]}
 
 
+def _recall_detail(records: list[dict], summary: dict) -> dict:
+    """The evidence behind the score, from what `run_eval` already returned.
+
+    The record used to keep only `fact_entity_recall_avg` and discard the
+    per-query rows, so two apply runs that expired 24 and 8 facts both reported
+    a bare 0.375 and the artifact could not say whether the eval ran, how many
+    queries answered, or which entity moved (#702). A per-query
+    `fact_entity_recall` of None is a query with no expected entities — not
+    run, not zero — and stays None here; `queries_answered` counts the rest.
+    """
+    per_query = [{"id": r.get("id"),
+                  "fact_entity_recall": (r.get("scoring") or {}).get("fact_entity_recall"),
+                  "fact_entities_matched": list((r.get("scoring") or {}).get("fact_entities_matched") or []),
+                  "expected_entities": list((r.get("expected") or {}).get("entities") or []),
+                  "error": r.get("error")}
+                 for r in records]
+    return {"score": round(summary["overall"]["fact_entity_recall_avg"], 4),
+            "queries": len(records),
+            "queries_answered": sum(1 for q in per_query if q["fact_entity_recall"] is not None),
+            "errors": int(summary["overall"].get("errors") or 0),
+            "per_query": per_query}
+
+
 def _fact_entity_recall(limit: int = 20) -> float | None:
+    """`_fact_entity_recall_detail`'s score alone — the CLI's before-value and
+    the shape every reader of the metric had before the detail was kept."""
+    detail = _fact_entity_recall_detail(limit)
+    return None if detail is None else detail["score"]
+
+
+def _fact_entity_recall_detail(limit: int = 20) -> dict | None:
     """Score the live fact tree with the eval's own scorer, on production knobs.
 
     `eval/run_eval.py` is a script, not a package, so it is loaded by path. Two
@@ -1034,7 +1064,8 @@ def _fact_entity_recall(limit: int = 20) -> float | None:
         a failure to score returns None, not 0.0.
 
     Returns None when it could not be measured, so "did not run" can never be
-    read as "measured zero".
+    read as "measured zero"; otherwise `_recall_detail`'s dict — the score with
+    the query count, how many answered, and the per-query hits behind it.
     """
     try:
         import importlib.util
@@ -1079,7 +1110,7 @@ def _fact_entity_recall(limit: int = 20) -> float | None:
                 return None
             raise TypeError("fact_entity_recall_avg is null but the fact leg measured "
                             "facts — run_eval nulled it for a reason this reader cannot see")
-        return round(summary["overall"]["fact_entity_recall_avg"], 4)
+        return _recall_detail(records, summary)
     except Exception as exc:  # noqa: BLE001 - a metric that cannot run is not a zero
         logger.warning("improve: fact_entity_recall could not be measured: %s", exc)
         return None
@@ -1170,10 +1201,19 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         except Exception as exc:  # noqa: BLE001 - one bad entity must not stop the run
             per_entity.append({"entity": entity, "error": str(exc)})
             continue
+        # A refused entity was never scanned, so its pair counts are null, not
+        # 0 (#702): `contradictions: 0, refused: true` was byte-identical to a
+        # scanned-and-clean entity once the flag was overlooked, and the seven
+        # god-nodes a night that read that way held 1,048 unscanned facts.
+        # `checked` (the facts the detector saw) and `skipped_reason` (its own
+        # hint) come off the plan, which had carried both since #1251 while the
+        # copy here dropped them.
         entry = {"entity": entity, "signal": signal["source"],
-                 "contradictions": plan["contradictions"],
-                 "near_duplicates": plan.get("near_duplicates", 0),
+                 "contradictions": None if plan["refused"] else plan["contradictions"],
+                 "near_duplicates": None if plan["refused"] else plan.get("near_duplicates", 0),
                  "refused": plan["refused"],
+                 "checked": plan.get("checked", 0),
+                 "skipped_reason": plan.get("skipped_reason") if plan["refused"] else None,
                  # Coverage, carried from the plan. `refused: False` stopped
                  # meaning "scanned whole" the moment an over-bound entity could
                  # be scanned in category-sized pieces, so the record has to say
@@ -1238,6 +1278,7 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         per_entity.append(entry)
 
     after = _active_count()
+    recall = _fact_entity_recall_detail(eval_limit) if report_eval else None
     record_obj = {
         "ran_at": now_iso,
         "apply": bool(apply),
@@ -1272,7 +1313,10 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         # continuity, does not: see the comment on `pairs_before` in plan_entity.
         "pairs_before": sum(e.get("pairs_before", 0) for e in per_entity),
         "pairs_after": sum(e.get("pairs_after", 0) for e in per_entity),
-        "fact_entity_recall": _fact_entity_recall(eval_limit) if report_eval else None,
+        "fact_entity_recall": None if recall is None else recall["score"],
+        # The evidence behind that number, or None when the eval did not run —
+        # null is the only spelling of "not measured" on both keys (#702).
+        "fact_entity_recall_detail": recall,
         # Name the file the signals came from, not the one that was compiled in
         # first. Before this the field was `str(CORRECTIONS_PATH)` unconditionally,
         # so a record that had read USER.md still reported `memory/corrections.md`

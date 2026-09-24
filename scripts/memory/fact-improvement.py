@@ -87,15 +87,22 @@ def main() -> int:
         print(json.dumps(rec, indent=2, default=str))
     else:
         mode = "APPLY" if rec["apply"] else "DRY RUN"
-        near_dupes = sum(e.get("near_duplicates", 0) for e in rec["per_entity"])
+        near_dupes = sum(e.get("near_duplicates") or 0 for e in rec["per_entity"])
         # `of N` is the point (#699): a bare `planned=0` was read as a claim
         # about the knowledge graph when it is a claim about the slice this run
         # scanned. None = drift was not consulted, so there is no pool to name;
         # print the count rather than a fraction over a total nobody measured.
+        # A refused entity is not a scanned one (#702): `scanned=40` with seven
+        # god-nodes refused was a coverage claim about facts nobody compared,
+        # so the refusals come off the count and are named beside it.
+        refused = [e["entity"] for e in rec["per_entity"] if e.get("refused")]
         total = rec.get("drift_candidates_total")
-        scanned = (f"entities scanned={len(rec['entities'])} of {total} drift candidates"
+        n_scanned = len(rec["entities"]) - len(refused)
+        scanned = (f"entities scanned={n_scanned} of {total} drift candidates"
                    if total is not None else
-                   f"entities scanned={len(rec['entities'])}")
+                   f"entities scanned={n_scanned}")
+        if refused:
+            scanned += f" refused={len(refused)} ({', '.join(refused)})"
         print(f"[{mode}] signals={rec['signals']} {scanned}"
               f" actions planned={rec['actions_planned']} taken={rec['actions_taken']}"
               f" near-duplicate pairs reported-not-deleted={near_dupes}")

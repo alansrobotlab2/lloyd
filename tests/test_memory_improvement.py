@@ -979,17 +979,96 @@ def test_run_reports_the_metric_it_claims_to_move(world, monkeypatch):
     `fact_entity_recall` is not this feature — so the run carries the number."""
     facts_root, st, _ = world
     seen = {}
+    detail = {"score": 0.5, "queries": 2, "queries_answered": 1, "errors": 0,
+              "per_query": [{"id": "q1", "fact_entity_recall": 0.5,
+                             "fact_entities_matched": ["A"], "expected_entities": ["A", "B"],
+                             "error": None},
+                            {"id": "q2", "fact_entity_recall": None,
+                             "fact_entities_matched": [], "expected_entities": [],
+                             "error": None}]}
 
     def _fake_report(limit):
         seen["limit"] = limit
-        return 0.5
+        return detail
 
-    monkeypatch.setattr(fi, "_fact_entity_recall", _fake_report)
+    monkeypatch.setattr(fi, "_fact_entity_recall_detail", _fake_report)
     rec = fi.run_improvement(sources=("drift",), days=3, report_eval=True, eval_limit=7)
     assert rec["fact_entity_recall"] == 0.5
     assert seen["limit"] == 7
+    # #702 clause 5: the evidence rides beside the score — how many queries
+    # answered and the raw per-query hits — and it reaches the file.
+    saved = _persisted_record(rec)
+    assert saved["fact_entity_recall"] == 0.5
+    assert saved["fact_entity_recall_detail"]["queries_answered"] == 1
+    assert saved["fact_entity_recall_detail"]["queries"] == 2
+    assert [q["fact_entity_recall"] for q in saved["fact_entity_recall_detail"]["per_query"]] == [0.5, None]
     skipped = fi.run_improvement(sources=("drift",), days=3)
     assert skipped.get("fact_entity_recall") is None, "off by default"
+    assert skipped.get("fact_entity_recall_detail") is None, "null is the only 'did not run'"
+
+
+def test_recall_detail_keeps_the_per_query_evidence_run_eval_returned():
+    """#702 clause 5, on `run_eval`'s own row shape: the count of queries that
+    answered excludes a query with no expected entities (its per-query value is
+    None, which is not-run rather than zero), and every row's hits survive."""
+    records = [
+        {"id": "q1", "scoring": {"fact_entity_recall": 1.0, "fact_entities_matched": ["vllm"]},
+         "expected": {"entities": ["vllm"]}, "error": None},
+        {"id": "q2", "scoring": {"fact_entity_recall": 0.0, "fact_entities_matched": []},
+         "expected": {"entities": ["qmd", "djev"]}, "error": None},
+        {"id": "q3", "scoring": {"fact_entity_recall": None, "fact_entities_matched": []},
+         "expected": {"entities": []}, "error": None},
+    ]
+    summary = {"overall": {"fact_entity_recall_avg": 0.5, "errors": 0}}
+    detail = fi._recall_detail(records, summary)
+    assert detail["score"] == 0.5 and detail["queries"] == 3
+    assert detail["queries_answered"] == 2, detail
+    assert [q["fact_entity_recall"] for q in detail["per_query"]] == [1.0, 0.0, None]
+    assert detail["per_query"][0]["fact_entities_matched"] == ["vllm"]
+    assert detail["per_query"][1]["expected_entities"] == ["qmd", "djev"]
+
+
+def test_a_refused_entity_is_not_recorded_as_scanned_and_clean(world):
+    """#702 clause 2: the record entry for a refused god-node carries the
+    detector's reason and the facts it holds, and null pair counts — a scanned
+    entity with nothing found carries 0 and no reason. The two shapes must not
+    collapse, on the file the nightly refusal count is read from."""
+    facts_root, st, _ = world
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD
+    _write_facts(facts_root, "GODNODE", "state",
+                 _filler("GODNODE", FACT_GODNODE_THRESHOLD + 1))
+    _write_facts(facts_root, "CLEAN", "state", _filler("CLEAN", 3))
+    _reindex(st, facts_root)
+    rec = fi.run_improvement(entities=["GODNODE", "CLEAN"])
+    entries = {e["entity"]: e for e in _persisted_record(rec)["per_entity"]}
+    god, clean = entries["GODNODE"], entries["CLEAN"]
+    assert god["refused"] is True and god["contradictions"] is None and god["near_duplicates"] is None
+    assert god["checked"] == FACT_GODNODE_THRESHOLD + 1 == god["before_active"], god
+    assert god["skipped_reason"] and "category" in god["skipped_reason"], god
+    assert clean["refused"] is False and clean["contradictions"] == 0
+    assert clean["checked"] == 3 and clean["skipped_reason"] is None, clean
+
+
+def test_cli_summary_counts_and_names_the_refusals(world, capsys, monkeypatch):
+    """#702 clause 3: the stdout line is what the nightly run quotes, and
+    `entities scanned=2` over a refused god-node was a coverage claim about
+    facts nobody compared. The refusal comes off the count and is named."""
+    facts_root, st, _ = world
+    from agent_mcp.retrieval import FACT_GODNODE_THRESHOLD
+    _write_facts(facts_root, "GODNODE", "state",
+                 _filler("GODNODE", FACT_GODNODE_THRESHOLD + 1))
+    _write_facts(facts_root, "CLEAN", "state", _filler("CLEAN", 3))
+    _reindex(st, facts_root)
+    spec = importlib.util.spec_from_file_location("fact_improvement_cli_refused", _SCRIPT_PATH)
+    cli = importlib.util.module_from_spec(spec)
+    sys.modules["fact_improvement_cli_refused"] = cli
+    spec.loader.exec_module(cli)
+
+    monkeypatch.setattr(sys, "argv", ["fact-improvement.py", "--entity", "GODNODE", "--entity", "CLEAN"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    assert "entities scanned=1 refused=1 (GODNODE)" in out, out
+    assert "entities scanned=2" not in out, out
 
 
 def test_run_with_no_signals_changes_nothing(world):
