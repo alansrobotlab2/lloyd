@@ -211,6 +211,33 @@ def test_mining_treats_a_persisted_nonzero_exit_code_as_corroborating():
     assert len(mt.mine_error_patterns(traj, threshold=2)) == 1
 
 
+def test_an_error_candidate_renders_the_persisted_message(tmp_path):
+    """#492: the candidate used to show a label and no message, because the
+    example dict was built without `result_summary`."""
+    message = "ERROR: grep: warning: no match  [exit code: 1]"
+    traj = []
+    for i in (1, 2):
+        row = error_traj(f"s{i}", "Bash", "logic", "exit_code")
+        row["error_tools"][0]["exit_code"] = 1
+        row["error_tools"][0]["result_summary"] = message
+        traj.append(row)
+    patterns = mt.mine_error_patterns(traj, threshold=2)
+    assert len(patterns) == 1
+    assert patterns[0]["examples"][0]["result_summary"] == message
+    out = tmp_path / "candidates"
+    path = mt.write_candidate_file(patterns[0], out, verdict_store=tmp_path / "v.jsonl")
+    assert path is not None
+    assert f"- **Message:** {message}" in Path(path).read_text(encoding="utf-8")
+    # A row written before the mirror carried the message says so, rather
+    # than rendering an empty line.
+    legacy = [error_traj(f"l{i}", "Bash", "logic", "exit_code") for i in (1, 2)]
+    for row in legacy:
+        row["error_tools"][0]["exit_code"] = 1
+    lpath = mt.write_candidate_file(mt.mine_error_patterns(legacy, threshold=2)[0], out,
+                                    verdict_store=tmp_path / "v.jsonl")
+    assert "- **Message:** N/A" in Path(lpath).read_text(encoding="utf-8")
+
+
 def test_a_read_timeout_candidate_cannot_be_emitted(tmp_path):
     """The concrete phantom from the 09-06 window: `Read` has no timeout path,
     the word came from the file. End to end — extract, then mine."""

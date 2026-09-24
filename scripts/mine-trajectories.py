@@ -801,6 +801,10 @@ def mine_error_patterns(trajectories: list[dict], threshold: int = 2) -> list[di
                 # reader can see what kind of failure they are grading, not
                 # only that the harness flagged it (#500).
                 "failure_class": error_tool.get("failure_class"),
+                # The persisted message, so the candidate shows what failed
+                # and not only which label it was given (#492). Rows written
+                # before the mirror carried it render "N/A".
+                "result_summary": error_tool.get("result_summary", ""),
                 "params_summary": params_summary,
                 "sequence": error_tool.get("sequence", 0)
             }
@@ -1596,6 +1600,7 @@ These errors occur across {len(pattern["sessions"])} distinct sessions, indicati
 - **Tool:** {example["tool"]}
 - **Input:** `{params_str}`
 - **Error Type:** {example["error_type"]}
+- **Message:** {example.get("result_summary") or "N/A"}
 - **Failure Class:** {example.get("failure_class") or "uncoded"}
 
 """

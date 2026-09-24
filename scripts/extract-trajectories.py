@@ -243,12 +243,12 @@ MENTION_ERROR_PATTERNS = [
 SEMANTIC_ERROR_PATTERNS = MENTION_ERROR_PATTERNS
 
 # The Bash tool reports its exit state as a trailer, e.g. "...output\n\n[exit
-# code: 1]". The trailer is the last thing in the body, so it is gone before
-# `result_summary()` runs (MAX_ERROR_LEN keeps a 200-char *prefix*) — 44 of the
-# 67 non-zero exits in the 09-06→08 window are invisible in the persisted
-# preview (backlog #492). It is therefore read from the full result here and
-# persisted as `exit_code`. A negative value is a signal death (SIGTERM = -15),
-# which is a failure too.
+# code: 1]". The trailer is the last thing in the body, and until #492
+# `result_summary()` kept a 200-char *prefix* — 44 of the 67 non-zero exits in
+# the 09-06→08 window were invisible in the persisted preview. It is therefore
+# read from the full result here and persisted as `exit_code`, whatever the
+# preview keeps. A negative value is a signal death (SIGTERM = -15), which is a
+# failure too.
 EXIT_CODE_RE = re.compile(r"\[exit code:\s*(-?\d+)\]\s*$")
 
 # The exit trailer is tool output, not data; it is not failure vocabulary.
@@ -520,7 +520,15 @@ def extract_result_text(content) -> str:
 def result_summary(content, is_error: bool) -> str:
     text = extract_result_text(content)
     if is_error:
-        preview = text[:MAX_ERROR_LEN].replace("\n", " ").strip()
+        # Head *and* tail, because the Bash tool's `[exit code: N]` trailer and
+        # most tracebacks' final line sit at the end of the body — a prefix cap
+        # discarded exactly the region that corroborates the failure (#492).
+        if len(text) > MAX_ERROR_LEN:
+            sep = " … "
+            head = (MAX_ERROR_LEN - len(sep)) // 2
+            tail = MAX_ERROR_LEN - len(sep) - head
+            text = f"{text[:head]}{sep}{text[-tail:]}"
+        preview = text.replace("\n", " ").strip()
         return f"ERROR: {preview}"
     return f"OK: {len(text)} chars"
 
@@ -797,6 +805,10 @@ def parse_session(path: Path) -> dict | None:
                 # the record it keys hides from the person adjudicating it
                 # (#1055; `result_summary()` caps the body at MAX_ERROR_LEN).
                 "error_type": categorize_error(res_summary),
+                # The miner's error path reads only this list, so the message
+                # has to travel on it too or every candidate renders without
+                # one (#492).
+                "result_summary": res_summary,
                 "error_source": error_source,
                 "failure_class": failure_class,
                 "exit_code": exit_code,

@@ -543,14 +543,15 @@ def test_the_protocol_marker_never_selects_the_label(tmp_path, body, expected):
 
 
 def test_a_keyword_past_the_persisted_prefix_does_not_choose_the_label(tmp_path):
-    """`result_summary()` keeps MAX_ERROR_LEN characters, so a keyword beyond
-    that cap is invisible to everyone who later reads the record — including
-    the person adjudicating the candidate the label keys. #1055 found exactly
-    that on a 2026-09-14 row labelled `resource` whose stored summary matches no
-    pattern at all."""
+    """`result_summary()` keeps MAX_ERROR_LEN characters (head and tail since
+    #492), so a keyword in the elided middle is invisible to everyone who later
+    reads the record — including the person adjudicating the candidate the
+    label keys. #1055 found exactly that on a 2026-09-14 row labelled
+    `resource` whose stored summary matches no pattern at all."""
     assert et.MAX_ERROR_LEN == 200
-    body = "health check output " * 20 + "out of memory while loading model"
-    assert "out of memory" in body[et.MAX_ERROR_LEN:]
+    body = ("health check output " * 20 + "out of memory while loading model"
+            + " more probe output" * 20)
+    assert "out of memory" not in et.result_summary(body, True)
     traj = first_tool(tmp_path, [("Bash", {"command": "./probe.sh"}, body, True)])
     tool = traj["tools"][0]
     assert "out of memory" not in tool["result_summary"]
@@ -823,6 +824,29 @@ def test_a_nonzero_exit_state_is_a_corroborated_error(tmp_path):
     assert traj["error_tools"][0]["name"] == "Bash"
 
 
+def test_a_long_error_body_keeps_its_exit_trailer_in_the_preview(tmp_path):
+    """#492: the trailer is the last thing in the body, so a prefix-only preview
+    destroyed it for any output past the cap — 44 of the 67 non-zero exits in
+    the 09-06→08 window. The preview keeps head and tail now, and the
+    `error_tools[]` mirror (the only list the miner's error path reads)
+    carries the same message the `tools[]` row does."""
+    body = "MemTotal: 263747652 kB\n" * 16 + "grep: warning: no match\n\n[exit code: 1]"
+    assert len(body) > 2 * et.MAX_ERROR_LEN
+    traj = first_tool(tmp_path, [("Bash", {"command": "grep war /proc/meminfo"}, body, False)])
+    tool = traj["tools"][0]
+    assert tool["is_error"] is True
+    assert tool["result_summary"].startswith("ERROR: MemTotal")
+    assert tool["result_summary"].endswith("[exit code: 1]")
+    assert " … " in tool["result_summary"]
+    assert len(tool["result_summary"]) <= len("ERROR: ") + et.MAX_ERROR_LEN
+    err = traj["error_tools"][0]
+    assert err["result_summary"] == tool["result_summary"]
+    # A short body is persisted whole, with no separator invented.
+    short = first_tool(tmp_path, [("Bash", {"command": "false"}, "nope\n\n[exit code: 1]", False)],
+                       name="short")
+    assert short["tools"][0]["result_summary"] == "ERROR: nope  [exit code: 1]"
+
+
 def test_a_zero_exit_code_corroborates_nothing(tmp_path):
     traj = first_tool(tmp_path, [
         ("Bash", {"command": "echo hi"}, "hi\n\n[exit code: 0]", False),
@@ -831,12 +855,14 @@ def test_a_zero_exit_code_corroborates_nothing(tmp_path):
     assert traj["tools"][0]["exit_code"] == 0
 
 
-def test_the_exit_state_is_read_from_full_output_not_the_truncated_preview(tmp_path):
-    """#492: `result_summary()` keeps a 200-char prefix and the Bash marker sits
-    at the end of the output, so corroboration cannot be recovered from the
-    persisted preview — 44 of the 67 non-zero exits in the 09-06→08 window lose
+def test_the_exit_state_is_read_from_full_output_not_the_truncated_preview(tmp_path, monkeypatch):
+    """#492: `result_summary()` kept a 200-char prefix and the Bash marker sits
+    at the end of the output, so corroboration could not be recovered from the
+    persisted preview — 44 of the 67 non-zero exits in the 09-06→08 window lost
     their marker there. It is parsed from the whole result and persisted as a
-    field instead."""
+    field instead — whatever the preview keeps, which is why the cap is
+    shrunk below the marker's length here."""
+    monkeypatch.setattr(et, "MAX_ERROR_LEN", 8)
     body = "x" * 4000 + "\n\n[exit code: 2]"
     traj = first_tool(tmp_path, [("Bash", {"command": "long"}, body, False)])
     tool = traj["tools"][0]
