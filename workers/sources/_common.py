@@ -452,7 +452,7 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20, *,
     is wired in `app/routers/messages.py` and nowhere else, deliberately, so
     that "how a turn is watched" has one definition. What it *does* now have
     is a session and a transcript: `app/run_recorder.py` persists every event
-    as it goes and re-yields it unchanged, so a `gap-fill` or `session-distill`
+    as it goes and re-yields it unchanged, so a `session-distill` or `bench-mine`
     run leaves the same readable record an autocode round does.
 
     That distinction is the whole two-axis model. Recording is cheap and

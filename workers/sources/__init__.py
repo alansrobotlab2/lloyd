@@ -58,7 +58,6 @@ from workers.sources import autoresearch as _autoresearch  # noqa: E402,F401
 from workers.sources import automod_regression as _automod_regression  # noqa: E402,F401
 from workers.sources import autotriage as _autotriage  # noqa: E402,F401
 from workers.sources import autocode as _autocode  # noqa: E402,F401
-from workers.sources import gap_fill as _gap_fill  # noqa: E402,F401
 from workers.sources import session_distill as _session_distill  # noqa: E402,F401
 from workers.sources import bench_mine as _bench_mine  # noqa: E402,F401
 from workers.sources import deep_research as _deep_research  # noqa: E402,F401
@@ -72,7 +71,6 @@ register(_autoresearch)
 register(_automod_regression)
 register(_autotriage)
 register(_autocode)
-register(_gap_fill)
 register(_session_distill)
 register(_bench_mine)
 register(_deep_research)

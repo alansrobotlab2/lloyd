@@ -872,10 +872,10 @@ def test_every_path_a_worker_source_docstring_names_resolves():
         "poisoned #522's acceptance check was bare prose — which is why this "
         "guard does not reuse `_PATH_RE`")
     staging = {m: c["name"] for m, c in speaking.items() if c["name"] and c["leaves"]}
-    assert len(staging) >= 3, (
+    assert len(staging) >= 2, (
         f"only {len(staging)} worker-source docstrings named a "
-        f"pending-research leaf ({sorted(staging)}); the three staging sources "
-        f"all do, so the leaf extractor has stopped matching and a wrong leaf "
+        f"pending-research leaf ({sorted(staging)}); the two staging sources "
+        f"(three until gap-fill was retired, #897) both do, so the leaf extractor has stopped matching and a wrong leaf "
         f"would sail through while the root check stayed green")
 
     wrong_leaf = []
@@ -913,11 +913,10 @@ def test_the_staging_leaf_is_the_directory_a_note_actually_lands_in(tmp_path, mo
     """
     import workers.sources._common as C
     import workers.sources.bench_mine as bench_mine
-    import workers.sources.gap_fill as gap_fill
     import workers.sources.session_distill as session_distill
 
     monkeypatch.setattr(C, "STAGING_ROOT", tmp_path)
-    for mod in (bench_mine, gap_fill, session_distill):
+    for mod in (bench_mine, session_distill):
         note = C.write_staging_note(source=mod.NAME, slug="probe", body="body")
         rel = note.relative_to(tmp_path)
         assert len(rel.parts) == 3, f"{mod.__name__}: expected root/NAME/date/note.md, got {rel}"
@@ -930,30 +929,3 @@ def test_the_staging_leaf_is_the_directory_a_note_actually_lands_in(tmp_path, mo
             "a staged note without frontmatter is unpromotable: the Review tab "
             "reads review_status and source out of it")
 
-
-def test_gap_fill_documents_the_staging_step_not_a_fact_write_it_never_makes():
-    """#705's second half, and it sits two lines under the wrong path.
-
-    The docstring said the handler "and (at high confidence) updates the fact".
-    `gap_fill.execute` researches, calls `write_staging_note`, and returns: no
-    path through that module writes a fact, and the whole point of the staging
-    step is that a human promotes the note. A reader who believed the sentence
-    would look for a confidence threshold that does not exist, and a reader of
-    the facts tree would look for a `resolved_at` this source never sets.
-    """
-    src = (WORKER_SOURCES / "gap_fill.py").read_text(encoding="utf-8")
-    doc = (ast.get_docstring(ast.parse(src)) or "").lower()
-
-    for claim in ("updates the fact", "update the fact", "writes the fact",
-                  "wrote the fact"):
-        assert claim not in doc, f"gap_fill's docstring still promises a fact write: {claim!r}"
-    assert "promot" in doc and "human" in doc, (
-        "the docstring must say where the resolution note actually goes: "
-        "staged under the source's own leaf for a human to promote")
-
-    # The prose is only half of it: the claim fails again the moment the module
-    # grows a fact writer, so pin the behaviour side too.
-    for writer in ("fact_add", "fact_invalidate", "kg_store", "remember("):
-        assert writer not in src, (
-            f"gap_fill now uses {writer}; then the docstring is allowed to "
-            f"mention a fact write again, and this test is the one to change")

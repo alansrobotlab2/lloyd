@@ -383,12 +383,12 @@ what it reads, what it writes, and the measured state of it.
 | `autocode` | 40 | one gated automod round per confirmed item | session, IV on |
 | `backlog-cluster` | 65 | nightly clustering of the open board for the above | none (numpy, off-loop) |
 | `arch-review` | 62 | one `architecture/` doc or one functional group: check it against the tree, edit it, file the rest | session, IV on |
+| `board-steward` | 68 | one board pass: proposed moves and the next item for `autocode`, recorded beside the state machine's | session (primary), IV off |
 | `automod-regression` | 70 | paired A/B eval after a promotion | none (subprocess on a thread) |
 | `autoresearch` | 60 | one prompt-optimisation round | its own |
 | `deep-research` | 70 | one registry topic, through the deep-dive-research skill | session, IV off |
 | `youtube-digest` | 45 | one tracked-channel video: transcript → vault note → Lloyd eval → backlog draft | session, IV on |
 | `session-distill` | 70 | mines finished chats for gaps and patterns | direct |
-| `gap-fill` | 50 | resolves `label: gap` facts | direct |
 | `bench-mine` | 80 | new bench tasks from failed autonomy runs, and from baseline losses when the ledger has any it can read | direct |
 
 Priorities are each module's `DEFAULT_PRIORITY` unless config overrides it, and
@@ -704,10 +704,10 @@ is the known self-grading failure mode, and this is where it is stopped.
   of `max_turns`, 70 %/90 % of `turn_timeout_for(source)` — pinned in
   `tests/test_worker_budget_anchor.py`. Whether the warning changes what those
   turns do is a post-landing traffic question, and this line does not claim it.
-- **`gap-fill` is idle and still untested in production.** Three
-  `label: gap` occurrences across two fact files today, and **zero rows in
-  `runs` for its entire life** — not "few", none. Correct and idle, not broken,
-  but nothing has ever exercised its `execute` path against real input.
+- **`gap-fill` is retired (#897, 2026-09-24).** It resolved `label: gap`
+  facts and no extractor ever emitted one, so it had zero rows in `runs` for
+  its entire life while stat-walking the facts tree every 300 s.
+  [[workers-jobs]] §7 has the rest.
 - **Run history grows without bound.** 6,268 runs and 5,910 queue rows on
   2026-09-11, 9.4 MB — up ~1,400 runs in the three days since this was last
   counted at 4,894 / 4,544 / 6.3 MB. Fine for now; there is no retention job.

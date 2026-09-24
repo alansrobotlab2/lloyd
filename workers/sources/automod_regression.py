@@ -1121,8 +1121,9 @@ def _execute_blocking() -> dict[str, Any]:
     loop which serves every HTTP request and streams every chat turn; the
     109-second run in the history is 109 seconds during which Lloyd answered
     nothing. Every other source that touches the disk hard already hops onto a
-    thread and says why (`gap_fill`, `bench_mine`); this one, the heaviest of
-    them by an order of magnitude, was the one that did not.
+    thread and says why (`bench_mine`, and `gap_fill` before it was retired);
+    this one, the heaviest of them by an order of magnitude, was the one that
+    did not.
 
     Two things had to change before this could ever run.
 

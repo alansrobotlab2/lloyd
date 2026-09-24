@@ -575,7 +575,7 @@ async def workers_pending_promote(request: Request):
       - path: artifact to promote (must be under pending-research/)
       - destination: directory under obsidian vault (absolute or relative).
         Defaults per-source — see _DEFAULT_DEST. Required for sources without
-        a default (gap-fill, session-distill).
+        a default (session-distill).
       - filename: override destination filename. Defaults to the artifact's name,
         except for a `bench-mine` artifact, which defaults to `<task id>.md` so
         the landed id and the landed stem are the same string.

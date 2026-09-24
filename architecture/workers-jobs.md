@@ -20,24 +20,24 @@ chain and the morning triage are all autonomy *task files* that reach the pool
 through the single `scheduled-task` source — [[autonomy]] is that mechanism
 and [[autonomy-jobs]] is what each of those jobs is for, not this document.
 
-The eleven are grouped here by **what they are for**, not by priority, because
+The twelve are grouped here by **what they are for**, not by priority, because
 the families share more than the members do:
 
 | § | family | sources | what it is for |
 |---|---|---|---|
 | §3 | **dispatch** | `scheduled-task` | one door onto the autonomy fleet |
-| §4 | **self-mod** | `backlog-cluster`, `autotriage`, `autocode`, `automod-regression`, `autoresearch` | change Lloyd's own code, behind a gate |
+| §4 | **self-mod** | `arch-review`, `backlog-cluster`, `board-steward`, `autotriage`, `autocode`, `automod-regression`, `autoresearch` | change Lloyd's own code, behind a gate |
 | §5 | **intake** | `youtube-digest`, `deep-research` | turn outside text into vault knowledge |
-| §6 | **mining** | `session-distill`, `gap-fill`, `bench-mine` | turn Lloyd's own exhaust into staged notes |
+| §6 | **mining** | `session-distill`, `bench-mine` | turn Lloyd's own exhaust into staged notes |
 
-§1's roster is the other view — the same eleven in priority order, which is
+§1's roster is the other view — the same twelve in priority order, which is
 the order the pool considers them.
 
 ---
 
 ## 1. The roster
 
-Thirteen sources are registered. Priority is `DEFAULT_PRIORITY` unless config
+Twelve sources are registered. Priority is `DEFAULT_PRIORITY` unless config
 overrides it (`youtube-digest` and `arch-review` do), and **lower runs sooner**.
 
 | source | family | prio | cadence | inflight | turn path | KV-gated | IV | on |
@@ -45,7 +45,6 @@ overrides it (`youtube-digest` and `arch-review` do), and **lower runs sooner**.
 | `scheduled-task` | dispatch | 10–70 | 60 s | 2 | `run_query` direct, recorded | no | per task | yes |
 | `autocode` | self-mod | 40 | 900 s | 1 | session | **yes** | off | yes |
 | `youtube-digest` | intake | **45** | 300 s | 1 | session | no | off | yes |
-| `gap-fill` | mining | 50 | 300 s | 2 | direct (primary) | no | — | yes |
 | `autotriage` | self-mod | 55 | 900 s | 1 | session | **yes** | off | yes |
 | `autoresearch` | self-mod | 60 | 3600 s | 1 | own script | no | — | **no** |
 | `arch-review` | self-mod | **62** | 1800 s | 1 | session | **yes** | off | yes |
@@ -74,8 +73,9 @@ reads as off too: `source_inner_voice` falls back to False since #1015, when
 ## 2. What actually ran
 
 Seven days to 2026-09-11, from `workers.db`. The point of this table is that
-three sources are not doing what their config implies — and that all three are
-the same family (§6).
+the sources not doing what their config implies are all one family (§6). It
+still carries the `gap-fill` row it was measured with; that source was retired
+on 2026-09-24 (§7).
 
 | source | family | runs | ok | failed | skipped | avg |
 |---|---|---|---|---|---|---|
@@ -97,14 +97,14 @@ the same family (§6).
   a failure — that rule is [[workers]] §4 and it is what stops a
   `(no response)` note being written — so what these numbers say is that the
   budget is wrong, not that the rule is.
-- **`gap-fill` has never run, ever.** Not "not this week": zero rows in `runs`
-  for the life of the database. Its input is facts carrying `label: gap` or
-  `provenance: GAP`, and the live tree holds **2 such files out of 69,436**,
-  none of them new. It still stat-walks the whole tree every 5 minutes on a
-  worker thread, which is cheap and correct and finds nothing, because the
-  extractor that would produce its input effectively does not emit gap facts.
-- **The three are one family, and the shared shape is the diagnosis**: all
-  three are `run_prompt_on_primary` with a literal budget and a
+- **`gap-fill` never ran, ever**, and is retired (§7). Zero rows in `runs`
+  for the life of the database: its input was facts carrying `label: gap` or
+  `provenance: GAP`, and nothing in the extraction pipeline ever emitted one
+  (`facts_idx` has no `label` column; 0 of ~313k rows carried `GAP`
+  provenance). It stat-walked the ~70k-file facts tree every 5 minutes on a
+  worker thread, finding nothing, until #897.
+- **The two that remain are one family, and the shared shape is the
+  diagnosis**: both are `run_prompt_on_primary` with a literal budget and a
   `write_staging_note` at the end. §6 is what they have in common; this is what
   it costs.
 - **`automod-regression` skips 30 of 39**, which is the design working: it
@@ -548,29 +548,29 @@ The registry it drains, its seven states and the two producers that fill it:
 
 ## 6. Mining — Lloyd's own exhaust back out
 
-Three sources that read what this system already produced — finished chats, the
-facts tree, failed autonomy runs — and turn it into a note a human promotes.
-They are the same program three times, and that is worth saying once rather
-than three times:
+Two sources that read what this system already produced — finished chats and
+failed autonomy runs — and turn it into a note a human promotes. They are the
+same program twice, and that is worth saying once rather than twice:
 
 - **A direct turn on the primary** through `run_prompt_on_primary`. No session,
   no Inner Voice, no transcript anyone reviews.
-- **A turn budget hard-coded at the call site** — 15, 12 and 8 — rather than
+- **A turn budget hard-coded at the call site** — 15 and 8 — rather than
   read from `src_cfg` the way every session-backed source reads it. No config
   key moves these.
 - **`_common.write_staging_note(source=NAME, …)` at the end**, which fixes the path to
   `pending-research/<source>/<date>/` and stamps `review_status: pending`. The
   Review tab is what promotes them; only `bench-mine` has a default destination
-  in `_DEFAULT_DEST`, so for the other two a human must name where it goes.
+  in `_DEFAULT_DEST`, so for `session-distill` a human must name where it goes.
 
-The shared helper is also why **all three docstrings name a staging directory
-that does not exist** — they still say `distill/`, `gaps/` and `bench/<date>/`
-respectively, from before the path was centralised. Harmless, and the kind of
-drift that makes a grep for the real path fail.
+The shared helper is also why **both docstrings used to name a staging
+directory that does not exist** — `distill/` and `bench/<date>/`, from before
+the path was centralised. Harmless, and the kind of drift that makes a grep for
+the real path fail; `tests/test_research_doc_claims.py` pins the real leaf now.
 
-This is the family that does not work. `gap-fill` has never run; the other two
-fail 42% and 82% of their runs, both at `max_turns` with nothing written. One
-shared shape, one shared defect — §2 has the numbers.
+This is the family that does not work: the two fail 42% and 82% of their runs,
+both at `max_turns` with nothing written. One shared shape, one shared defect —
+§2 has the numbers. The family's third member, `gap-fill`, never ran at all and
+was retired on 2026-09-24 (§7).
 
 ### `session-distill` — mine a finished chat for patterns
 
@@ -599,27 +599,6 @@ wrote it**. Each gate is scar tissue:
 
 **Current state:** 154 of 369 runs in the window failed at `max_turns` with
 nothing written. See §2.
-
-### `gap-fill` — resolve a `label: gap` fact
-
-**Wakes** every 300 s and stat-walks the facts tree behind an mtime watermark,
-enqueuing one item per unresolved gap fact under
-`gap-fill:<entity>:<fact_id>`. **Executes** a direct turn on the primary
-(`max_turns=12`) and writes a resolution note with a parsed confidence to
-`pending-research/gap-fill/<date>/`.
-
-- **The scan must never run on the event loop.** It walks tens of thousands of
-  files; run synchronously every 5 minutes it froze the whole server for
-  minutes. It is `asyncio.to_thread` now, and the watermark turns a ~17 s full
-  parse into a ~0.8 s stat-only walk on the common tick where nothing changed.
-- **No per-tick cap, deliberately.** With the watermark each tick surfaces only
-  gaps from files changed since the last scan, and the dedup key makes a repeat
-  a no-op; capping would strand gaps in already-scanned files once the watermark
-  moved past them.
-- **The module docstring overclaims.** It says the handler "(at high
-  confidence) updates the fact"; `execute` writes the staging note and returns.
-  Nothing in this source writes a fact.
-- **It has never run.** See §2.
 
 ### `bench-mine` — new bench tasks from failure signal
 
@@ -675,12 +654,23 @@ longer in `SOURCE_REGISTRY`.
 | `backlog-selfmod`, `backlog-implement`, `autoimplement` | `autocode` | self-mod |
 | `selfmod-regression`, `autoimplement-regression` | `automod-regression` | self-mod |
 | `domain-research` | retired 2026-09-08 → `deep-research` | intake |
+| `gap-fill` | retired 2026-09-24, no successor | mining |
 
 The renames all landed on 2026-09-09 and are history, not drift.
 `domain-research` is gone from config.yaml, the registry and, since #1278,
 `app/routers/workers.py::_DEFAULT_DEST`: the 142 staged notes that kept that
 entry alive were lost with the 2026-09-22 data wipe, so there is nothing left
 under `pending-research/domain-research/` for the Review tab to promote.
+
+`gap-fill` (#897) leaves nothing behind: it resolved facts carrying
+`label: gap` or `provenance: GAP`, and no extractor ever emitted one, so in
+the life of `workers.db` it had zero `runs` rows and zero staged notes while
+stat-walking the ~70k-file facts tree every 300 s. Giving it a producer meant
+adding a field to the fact schema, not pointing the scanner elsewhere, so it
+went the way `domain-research` did: module, registry entry and config block
+gone, nothing to keep readable. The wikilink
+`[[project_gap_fill_event_loop_freeze]]` in `bench_mine.py` names the incident
+that put every disk-heavy scan on a thread, and stays.
 
 ---
 

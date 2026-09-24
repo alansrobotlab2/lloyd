@@ -29,7 +29,6 @@ import yaml
 from workers.queue import QueueItem, WorkQueue
 from workers.sources import _common as C
 from workers.sources import bench_mine as BM
-from workers.sources import gap_fill as GF
 from workers.sources import session_distill as SD
 
 
@@ -69,7 +68,6 @@ def test_the_failure_summary_names_why_the_turn_ended():
 
 
 @pytest.mark.parametrize("mod,payload", [
-    (GF, {"entity": "E", "text": "a gap", "fact_id": "f1"}),
     (SD, {"session_path": "/tmp/nope.json"}),
     (BM, {"loser_task_id": "bench_1", "composite_score": 0.2}),
 ])
@@ -157,7 +155,7 @@ def test_confidence_parsing_has_one_definition():
     # The pattern only matches a leading 0 or 1, so a number outside the range
     # is not read as an over-confident score — it is not read at all.
     assert C.parse_confidence("confidence: 4.2") == 0.5
-    for mod in (GF, SD):
+    for mod in (SD, BM):
         assert not hasattr(mod, "_parse_confidence"), \
             f"{mod.NAME} still carries its own copy"
 

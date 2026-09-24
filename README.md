@@ -27,7 +27,7 @@ network.)
 | **Mission Control** | React + Vite dashboard: chat, sessions, token usage, service health, an embedded editor. Port 5173. | [`web/`](web/) |
 | **Voice** | LiveKit room → wake word (openwakeword) → VAD → faster-whisper STT → speaker ID → harness → Qwen3-TTS. | [`agent-services/livekit_worker.py`](agent-services/livekit_worker.py) |
 | **Memory** | Obsidian vault at `~/obsidian`, searched by a qmd daemon over seven per-segment collections. | [`architecture/memory.md`](architecture/memory.md) |
-| **Autonomy** | A task scheduler plus a worker pool — autoresearch, gap-fill, session distillation, nightly reflection. | [`autonomy.py`](autonomy.py), [`workers/`](workers/) |
+| **Autonomy** | A task scheduler plus a worker pool — autoresearch, deep research, session distillation, nightly reflection. | [`autonomy.py`](autonomy.py), [`workers/`](workers/) |
 | **Inner Voice** | A second, smaller model that watches the primary's tool calls and can intervene. | [`app/inner_voice/`](app/inner_voice/) |
 | **Usage tracking** | SQLite token and cost accounting per session and model. | [`usage_store.py`](usage_store.py) |
 
