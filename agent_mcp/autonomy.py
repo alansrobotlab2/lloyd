@@ -336,7 +336,7 @@ def _write_config(config: dict, tail: str = "") -> None:
 
 async def list_tools():
     return [
-        Tool(name="autonomy_tasks", description="List the scheduled autonomy tasks, optionally filtered by status, frequency or agent. Returns task objects with their schedule and last-run state, not their full history.", inputSchema={
+        Tool(name="autonomy_tasks", description="Use to find scheduled autonomy tasks; to open one with its run history use autonomy_get_task. List the scheduled autonomy tasks, optionally filtered by status, frequency or agent. Returns task objects with their schedule and last-run state, not their full history.", inputSchema={
             "type": "object",
             "properties": {
                 "status": {"type": "string", "description": "Filter by status (draft, up_next, in_progress)"},
@@ -344,7 +344,7 @@ async def list_tools():
                 "agent_id": {"type": "string", "description": "Filter by agent_id"},
             },
         }),
-        Tool(name="autonomy_write_task", description="Create or update (upsert) autonomy task. If id omitted → CREATE, if id provided → UPDATE.", inputSchema={
+        Tool(name="autonomy_write_task", description="Use for tracked or recurring work that must outlive this turn; for a one-off subtask use Task instead. Create or update (upsert) autonomy task. If id omitted → CREATE, if id provided → UPDATE.", inputSchema={
             "type": "object",
             "properties": {
                 "id": {"type": "integer", "description": "Task ID to update (0 for create)"},
@@ -365,7 +365,7 @@ async def list_tools():
                 "activity_note": {"type": "string", "description": "Note to append to activity log"},
             },
         }),
-        Tool(name="autonomy_get_task", description="Get one autonomy task in full: its definition, schedule, dependencies and its most recent run records with exit status.", inputSchema={
+        Tool(name="autonomy_get_task", description="Use to read one autonomy task's state and last runs before autonomy_run_task or autonomy_write_task. Get one autonomy task in full: its definition, schedule, dependencies and its most recent run records with exit status.", inputSchema={
             "type": "object",
             "properties": {"id": {"type": "integer", "description": "Task ID to retrieve"}},
             "required": ["id"],
@@ -392,7 +392,7 @@ async def list_tools():
             },
             "required": ["key", "value"],
         }),
-        Tool(name="autonomy_run_task", description="Run an autonomy task immediately, outside its schedule. The run happens in the background; use autonomy_get_task to see the result.", inputSchema={
+        Tool(name="autonomy_run_task", description="Use only to fire an existing autonomy task now; to change what it does use autonomy_write_task. Run an autonomy task immediately, outside its schedule. The run happens in the background; use autonomy_get_task to see the result.", inputSchema={
             "type": "object",
             "properties": {"id": {"type": "integer", "description": "Task ID to run"}},
             "required": ["id"],

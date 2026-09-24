@@ -1123,6 +1123,7 @@ async def list_tools():
         Tool(
             name="graph_explain",
             description=(
+                "Use to find a code symbol's callers and callees; for string keys, routes or config use Grep instead. "
                 "Who calls this symbol and what it calls, from the code graph "
                 "(AST-extracted, not grep). Use before hand-searching for "
                 "callers or importers. Blind across HTTP/MCP process seams."
@@ -1144,6 +1145,7 @@ async def list_tools():
         Tool(
             name="graph_affected",
             description=(
+                "Use when about to change a shared symbol; for its direct callers only use graph_explain instead. "
                 "Blast radius: everything that transitively depends on a "
                 "symbol, grouped by depth, with the file list. Call this "
                 "before changing a shared function."
@@ -1165,6 +1167,7 @@ async def list_tools():
         Tool(
             name="graph_path",
             description=(
+                "Use to ask how one symbol reaches another; for every caller of one symbol use graph_explain instead. "
                 "Shortest dependency path between two symbols, hop by hop with "
                 "call sites. 'no path' is an answer, not an error."
             ),

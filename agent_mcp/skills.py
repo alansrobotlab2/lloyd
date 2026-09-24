@@ -503,6 +503,7 @@ async def list_tools():
         Tool(
             name="skills_read",
             description=(
+                "Use to load one skill's full instructions once you know its name; to find one use skills_search first. "
                 "Read the full SKILL.md content for a named skill. Use after skills_search "
                 "to get the complete instructions for a specific skill."
             ),

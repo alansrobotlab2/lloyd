@@ -114,7 +114,7 @@ async def list_tools():
         Tool(name="backlog_boards", description="List the kanban boards in the backlog with a task count for each. Use this to find a board name before filtering tasks with backlog_tasks.", inputSchema={
             "type": "object", "properties": {},
         }),
-        Tool(name="backlog_tasks", description="List tasks with filters (status, board, tag, blocked, assigned)", inputSchema={
+        Tool(name="backlog_tasks", description="Use to find backlog items by status, board or tag; to open one in full use backlog_get_task. List tasks with filters (status, board, tag, blocked, assigned)", inputSchema={
             "type": "object",
             "properties": {
                 "status": {"type": "string", "description": "Filter by status"},
@@ -124,7 +124,7 @@ async def list_tools():
                 "assigned": {"type": "boolean", "description": "Filter by assigned state"},
             },
         }),
-        Tool(name="backlog_get_task", description="Get one backlog task in full: its frontmatter fields, tags, board, blocked/assigned state, and its markdown body.", inputSchema={
+        Tool(name="backlog_get_task", description="Use to read one backlog item in full once you have its id; to change it use backlog_write_task. Get one backlog task in full: its frontmatter fields, tags, board, blocked/assigned state, and its markdown body.", inputSchema={
             "type": "object",
             "properties": {"task_id": {"type": "integer", "description": "Task ID to retrieve"}},
             "required": ["task_id"],

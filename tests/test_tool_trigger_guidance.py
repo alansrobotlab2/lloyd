@@ -119,6 +119,29 @@ PRIORITY_TOOLS = [
     "ide_open_file",
     "ide_open_folder",
     "ide_close_tab",
+    # #641: the families the session corpus says carry traffic, each a pair
+    # the model has to order — list before open, read before run or write,
+    # durable task vs one-off Task, facts vs edges, the memory triple, and the
+    # code-graph trio against Grep. The browser and autoresearch families were
+    # deferred on the same evidence: 0-8 session files each.
+    "backlog_tasks",
+    "backlog_get_task",
+    "backlog_write_task",
+    "autonomy_tasks",
+    "autonomy_get_task",
+    "autonomy_run_task",
+    "autonomy_write_task",
+    "fact_get",
+    "fact_relationships",
+    "memory_read",
+    "memory_add",
+    "memory_remove",
+    "chat_list_sessions",
+    "chat_get_session",
+    "skills_read",
+    "graph_explain",
+    "graph_affected",
+    "graph_path",
 ]
 
 # Conditional phrasing: the description tells the model WHEN, not just WHAT.
@@ -227,13 +250,18 @@ def test_trigger_coverage_rose_materially(descriptions):
     The rewrite has to spread or the priority set is window dressing over a
     catalog that still says nothing.
     """
-    # Denominator and floor are the live internal registry (#640): 46 of 107
-    # guided on 2026-09-24. The old floor of 32 was measured over the 97 the
-    # parser could see and passed while the ten it could not were unguarded.
+    # Denominator and floor are the live internal registry (#640). #641 took
+    # it from 46 to 62 of 107 guided on 2026-09-24 (61 -> 45 guidance-free);
+    # the floor sits 5 under that so deleting a trigger clause fails here.
     guided = [n for n, d in descriptions.items() if CONDITIONAL.search(d)]
-    assert len(guided) >= 43, (
+    assert len(guided) >= 57, (
         f"only {len(guided)} of {len(descriptions)} served descriptions carry "
-        f"a trigger condition (46 of 107 measured 2026-09-24; floor 43)"
+        f"a trigger condition (62 of 107 measured 2026-09-24; floor 57)"
+    )
+    free = len(descriptions) - len(guided)
+    assert free <= 45, (
+        f"{free} of {len(descriptions)} served descriptions are guidance-free "
+        f"(#641's contract: 45 or fewer)"
     )
 
 

@@ -59,10 +59,10 @@ def _get_session(session_id: str) -> str:
 
 async def list_tools():
     return [
-        Tool(name="chat_list_sessions", description="List the Lloyd chat sessions with their ids, titles and last-activity times. Use chat_get_session to read one, or session_recall to search their content.", inputSchema={
+        Tool(name="chat_list_sessions", description="Use to find a chat session's id; to search what was said in chats use session_recall instead. List the Lloyd chat sessions with their ids, titles and last-activity times. Use chat_get_session to read one, or session_recall to search their content.", inputSchema={
             "type": "object", "properties": {},
         }),
-        Tool(name="chat_get_session", description="Get one chat session's metadata: title, model, message count and timestamps. Returns metadata only — use session_recall to search what was actually said.", inputSchema={
+        Tool(name="chat_get_session", description="Use when you have a session id and need its metadata; to find sessions use chat_list_sessions. Get one chat session's metadata: title, model, message count and timestamps. Returns metadata only — use session_recall to search what was actually said.", inputSchema={
             "type": "object",
             "properties": {"session_id": {"type": "string", "description": "Session ID to retrieve"}},
             "required": ["session_id"],
