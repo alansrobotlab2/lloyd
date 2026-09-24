@@ -91,20 +91,11 @@ _SCRIPT_MENTION = re.compile(
     r"/obsidian/skills/[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+\.(?:py|sh)"
 )
 
-#: The three skills whose documented script has never been on disk, each entry
-#: naming the item that owns its removal (#409 clauses 1-2 archive all three).
-#: The set is deliberately not wildcarded and deliberately not empty: the
-#: moment #409's archive lands, an entry here becomes a failure this file has
-#: to delete, which is what stops the ledger quietly becoming the reason the
-#: check never fires.
-MISSING_SCRIPT_EXEMPT: dict[str, str] = {
-    "skills/browser-session-extract/browser_session_extract.py":
-        "absent, named 10x — #409 clause 2 archives this skill",
-    "skills/file-processor/file_processor.py":
-        "absent, named 10x — #409 clause 2 archives this skill",
-    "skills/subagent-orchestrate/subagent_orchestrate.py":
-        "absent, named 9x — #409 clause 1 archives this skill",
-}
+#: Empty since #409 archived the three skills whose documented script had
+#: never been on disk (`browser-session-extract`, `file-processor`,
+#: `subagent-orchestrate`, 2026-09-23). Keep it empty: a new entry is a
+#: regression, and `test_the_exempt_set_stays_empty` below says so.
+MISSING_SCRIPT_EXEMPT: dict[str, str] = {}
 
 
 def _skill_bodies() -> list[tuple[str, str]]:
@@ -156,32 +147,21 @@ def test_every_documented_skill_script_exists():
     assert missing == {}, (
         "active skills document scripts that are not on disk: "
         f"{missing}. Either write the script, name one that exists, or archive "
-        "the skill — and if you are here because #409 archived one of the "
-        "exempt three, delete its entry from MISSING_SCRIPT_EXEMPT."
+        "the skill."
     )
 
 
-def test_the_exempt_set_is_exactly_the_three_known_absent_scripts():
-    """The ledger holds three paths and nothing else (#410 clause 4).
-
-    Asserted against the raw scan as well as the dict's own contents, so a path
-    can neither be added without a defect behind it nor stay in the file after
-    #409 archives the skill it names. Every entry says which item owns its
-    removal, which is the other half of the clause.
+def test_the_exempt_set_stays_empty():
+    """The ledger was exactly three paths, all owned by #409, and #409 archived
+    all three skills (#410 clause 4). Asserted against the raw scan too, so the
+    ledger cannot be re-grown into a quiet allowlist: a new absent script has to
+    be written, repointed, or archived, not exempted.
     """
-    assert set(MISSING_SCRIPT_EXEMPT) == {
-        "skills/browser-session-extract/browser_session_extract.py",
-        "skills/file-processor/file_processor.py",
-        "skills/subagent-orchestrate/subagent_orchestrate.py",
-    }, "the exempt set changed shape; each entry must name the item that owns it"
-    assert all(v.strip() for v in MISSING_SCRIPT_EXEMPT.values()), (
-        "an exemption carries no owning item")
+    assert MISSING_SCRIPT_EXEMPT == {}, (
+        "MISSING_SCRIPT_EXEMPT grew again; fix the skill instead of exempting it")
     raw_paths = {rel for paths in _missing_scripts().values() for rel in paths}
-    assert raw_paths == set(MISSING_SCRIPT_EXEMPT), (
-        "the missing-script corpus and MISSING_SCRIPT_EXEMPT have diverged: this "
-        "file exempts something that is no longer missing, or something new is "
-        f"missing and unexempted. missing={sorted(raw_paths)}"
-    )
+    assert raw_paths == set(), (
+        f"active skills document scripts that are not on disk: {sorted(raw_paths)}")
 
 
 def test_a_newly_documented_absent_script_fails_the_check(tmp_path, monkeypatch):

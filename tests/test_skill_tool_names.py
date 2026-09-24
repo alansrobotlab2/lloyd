@@ -17,10 +17,11 @@ denylist is structurally unable to see either:
     `Agent` is the subagent tool of other harnesses; Lloyd's is `Task`. The
     registry is the authority and `test_phantom_list_is_actually_phantom` asks
     it on every run, so nothing here has to assert how many tools are served or
-    that `Agent` was never one of them. Five active skills use it as a tool
-    anyway — `deep-research`, `research-agent`, `strict-task-mapping` and
-    `subagent-orchestrate` instruct the call, and `discord-social` forbids it,
-    which is correct prose that any matcher has to survive. Because `Agent` is
+    that `Agent` was never one of them. Two active skills still name it —
+    `strict-task-mapping` instructs the call (#410), and `discord-social`
+    forbids it, which is correct prose that any matcher has to survive. #409
+    moved `deep-research` and `research-agent` onto `Task` and archived
+    `subagent-orchestrate`. Because `Agent` is
     also ordinary English, and the literal `author: Hermes Agent (adapted from
     obra/superpowers)` front matter of every Hermes-authored skill, it goes in
     `_AGENT_AS_TOOL` with a tool-shaped matcher rather than into
@@ -112,12 +113,6 @@ _RETIRED_PREFIX = re.compile(r"\bselfmod_[a-z0-9_]+")
 # clause 5); every entry names its owner, and none may be added to for a skill
 # that has no open item saying what to do with it.
 AGENT_MENTION_EXEMPT: dict[str, str] = {
-    # Archives this whole skill, so the mention leaves with the file.
-    "subagent-orchestrate": "#409 clause 1",
-    # Must name `Task` (or route to pipeline-dispatch) instead; the matcher's
-    # offender list is what makes that visible instead of merely asserted.
-    "deep-research": "#409 clause 3",
-    "research-agent": "#409 clause 3",
     # Correct prose about a tool that genuinely does not exist: it *forbids*
     # the Agent tool. #409 clause 3 keeps this sentence intact, so it stays
     # exempt permanently, not until someone fixes it.
@@ -431,7 +426,6 @@ _PY_IN_COMMAND = re.compile(r"(?:^|[\s/])((?:eval|app|tests|scripts)/[A-Za-z0-9_
 #: `test_the_secondary_routing_nightly_docs_are_clean` keeps them out.
 PATH_KNOWN_UNFIXED: set[str] = {
     "skills/ai-engineer-monitor/SKILL.md::vault:autonomy/75-ai-engineer-youtube-monitor.md",
-    "skills/browser-session-extract/SKILL.md::vault:skills/browser-session-extract/browser_session_extract.py",
     "skills/deep-research/SKILL.md::repo:scripts/vault/okf_taxonomy.CANONICAL_TYPES",
     "skills/documentation-digester/SKILL.md::repo:agent-services/llm/llama.cpp",
     "skills/documentation-digester/SKILL.md::repo:agent-services/llm/llama.cpp/build/bin/llama-server",
@@ -439,7 +433,6 @@ PATH_KNOWN_UNFIXED: set[str] = {
     "skills/file-path-resolution/SKILL.md::repo:inner-voice/system_prompt.md",
     "skills/file-path-resolution/SKILL.md::repo:lloyd/inner-voice/system-prompt.md",
     "skills/file-path-resolution/SKILL.md::vault:lloyd/inner-voice/system-prompt.md",
-    "skills/file-processor/SKILL.md::vault:skills/file-processor/file_processor.py",
     "skills/file-read-resilience/SKILL.md::vault:agents/idler/gateway.py",
     "skills/historical-knowledge-refresh/SKILL.md::repo:scripts/memory/extract-session-log.py",
     "skills/iv-plan-review/SKILL.md::repo:app/middleware/session_auth.py",
@@ -450,7 +443,6 @@ PATH_KNOWN_UNFIXED: set[str] = {
     "skills/poisoned-worker-troubleshoot/SKILL.md::vault:logs/autonomy_runs/run_",
     "skills/powerpoint/SKILL.md::repo:scripts/office/soffice.py",
     "skills/quick-research/SKILL.md::repo:scripts/vault/okf_taxonomy.CANONICAL_TYPES",
-    "skills/subagent-orchestrate/SKILL.md::vault:skills/subagent-orchestrate/subagent_orchestrate.py",
     "skills/system-health-check/SKILL.md::repo:tests/test_health_skill_docs_live_fleet.py",
     "skills/system-health-check/SKILL.md::repo:tests/test_system_health_check_frontend_endpoint.py",
     "skills/system-health-check/SKILL.md::repo:tests/test_system_health_check_skill_fleet.py",
