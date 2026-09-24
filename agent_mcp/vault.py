@@ -1448,6 +1448,34 @@ def _guard_knowledge_type(path: str, content: str) -> tuple[str, dict | None, st
     return rewritten, None, replaced
 
 
+def _guard_knowledge_domain(path: str, content: str) -> tuple[str, dict | None, str | None]:
+    """The ``domain`` half of ``_guard_knowledge_type`` (#949), same contract.
+
+    ``domain`` names the ``knowledge/<domain>/`` directory, and a writer that
+    could mint one is how 138 directories came to exist, 90 of them holding two
+    notes or fewer. An alias is rewritten to its canonical value; an invented
+    value is refused by name; a note with no ``domain:`` stays writable.
+    """
+    if not path.startswith("knowledge/") or not path.endswith(".md"):
+        return content, None, None
+    try:
+        from scripts.vault import okf_taxonomy
+    except Exception as exc:  # noqa: BLE001
+        # Fail closed, for the reason the type guard gives.
+        return content, _err(
+            f"cannot validate knowledge/ `domain`: scripts.vault.okf_taxonomy is "
+            f"unimportable ({exc})", ErrorCode.INTERNAL), None
+    try:
+        rewritten, replaced = okf_taxonomy.normalize_document_domain(content)
+    except okf_taxonomy.KnowledgeDomainError as exc:
+        return content, _err(str(exc), ErrorCode.INVALID_PARAM,
+                             invalid_domain=exc.value, path=path), None
+    except Exception as exc:  # noqa: BLE001
+        return content, _err(f"cannot validate knowledge/ `domain`: {exc}",
+                             ErrorCode.INTERNAL), None
+    return rewritten, None, replaced
+
+
 def _vault_write(params: dict) -> dict:
     path, norm_err = _normalize_vault_path(params.get("path", ""))
     if norm_err:
@@ -1457,6 +1485,9 @@ def _vault_write(params: dict) -> dict:
         content, type_err, replaced = _guard_knowledge_type(path, content)
         if type_err is not None:
             return type_err
+        content, domain_err, domain_replaced = _guard_knowledge_domain(path, content)
+        if domain_err is not None:
+            return domain_err
         target = VAULT / path
         if not target.resolve().is_relative_to(VAULT.resolve()):
             return _err("path escapes vault root", ErrorCode.PATH_ESCAPE)
@@ -1497,6 +1528,12 @@ def _vault_write(params: dict) -> dict:
             result["type_normalized"] = {
                 "from": replaced,
                 "to": okf_taxonomy.normalize_type(replaced),
+            }
+        if domain_replaced:
+            from scripts.vault import okf_taxonomy
+            result["domain_normalized"] = {
+                "from": domain_replaced,
+                "to": okf_taxonomy.normalize_domain(domain_replaced),
             }
         return result
     except Exception as exc:

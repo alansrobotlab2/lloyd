@@ -1,4 +1,4 @@
-"""The OKF ``type`` vocabulary, defined once.
+"""The OKF ``type`` vocabulary, defined once — and, since #949, ``domain`` (at the end).
 
 OKF itself refuses to fix a taxonomy — "consumers must tolerate unknown types" —
 so the vocabulary is ours to choose, and unchosen it drifts. On 2026-09-08
@@ -315,3 +315,107 @@ def rejected_document_type(text: str) -> str | None:
     if not raw:
         return None
     return None if raw in CANONICAL_TYPES else raw
+
+
+# ── the ``domain`` axis (#949) ───────────────────────────────────────────────
+# ``domain`` names the ``knowledge/<domain>/`` directory a note belongs in, and
+# until #949 it was free text: 138 top-level directories on 2026-09-18, 90 of
+# them holding two notes or fewer, ``ai`` split nine ways, 146 distinct
+# ``domain:`` values. The set below is the directories that held more than two
+# notes on 2026-09-24, written out by hand. It is a literal on purpose and must
+# never be derived from the tree: a set built from "directories that hold
+# content" admits any invented value the moment its directory exists, which is
+# the defect being closed. Which of the ~99 long-tail values become canonical
+# rather than aliases, and the directory consolidation, are a human ruling that
+# has not been made — add a value here deliberately when it is.
+CANONICAL_DOMAINS = frozenset({
+    "youtube", "ai", "research", "robotics", "stack-updates", "observability",
+    "inference", "tools", "evaluation", "software", "aveva", "ml",
+    "opentelemetry", "llm-serving", "vllm", "synthesis", "computer-vision",
+    "asimov", "patterns", "hardware", "lloyd", "openclaw", "books", "systems",
+    "llm-inference", "agents", "ml-inference", "llm", "application",
+    "video-summaries", "thinking", "papers", "machine-learning",
+    "infrastructure", "foundational", "system", "general", "security",
+    "reading", "ops", "neuroscience", "mission-control", "misc", "inner-voice",
+    "distributed-systems", "browser", "agent-lloyd",
+})
+
+# Retired spelling -> canonical domain. Only the near-duplicates #949 names:
+# the ``ai*`` family (nine directories for one subject) and the empty case and
+# plural twins of ``robotics``. Keys are listed as they appear on disk; lookup
+# goes through ``_lookup_form``, so ``Robotics`` and ``ROBOTS`` fold the same.
+DOMAIN_ALIASES: dict[str, str] = {
+    "ai-agentic": "ai",
+    "ai-agents": "ai",
+    "ai-coding": "ai",
+    "ai-eigenvectors": "ai",
+    "ai-engineering": "ai",
+    "ai-inference": "ai",
+    "ai-llms": "ai",
+    "ai-research": "ai",
+    "Robotics": "robotics",
+    "robots": "robotics",
+}
+_DOMAIN_ALIAS_LOOKUP = {_lookup_form(k): v for k, v in DOMAIN_ALIASES.items()}
+
+
+def normalize_domain(value: object) -> str:
+    """Canonical spelling of a ``domain`` value, or the folded value if unknown.
+
+    The reading rule, like ``normalize_type``: never refuses."""
+    text = _lookup_form(value)
+    if not text or text in CANONICAL_DOMAINS:
+        return text
+    return _DOMAIN_ALIAS_LOOKUP.get(text, text)
+
+
+def is_known_domain(value: object) -> bool:
+    return normalize_domain(value) in CANONICAL_DOMAINS
+
+
+class KnowledgeDomainError(ValueError):
+    """A ``domain`` value that names no canonical or aliased domain."""
+
+    def __init__(self, value: str) -> None:
+        self.value = value
+        super().__init__(
+            f"domain {value!r} may not be written into knowledge/: no such "
+            f"domain exists, and a new one is not minted by writing a note. Use "
+            f"one of okf_taxonomy.CANONICAL_DOMAINS: "
+            f"{', '.join(sorted(CANONICAL_DOMAINS))} — or omit `domain:`."
+        )
+
+
+_TOP_LEVEL_DOMAIN_RE = re.compile(r"^domain:[ \t]*([^#\r\n]*)", re.M)
+
+
+def normalize_document_domain(text: str) -> tuple[str, str | None]:
+    """Rewrite a knowledge note's frontmatter ``domain`` onto its canonical value.
+
+    Same contract as ``normalize_document_type``: ``(text, replaced_or_None)``,
+    ``KnowledgeDomainError`` for an invented value. A note with no ``domain:``
+    key (or an empty one) comes back untouched — 28 of the 74 notes written
+    2026-09-12..18 carried none, and the directory in the path is their domain.
+    """
+    fm = _FRONTMATTER_RE.match(text)
+    if fm is None:
+        return text, None
+    block = fm.group(1)
+    found = _TOP_LEVEL_DOMAIN_RE.search(block)
+    if found is None:
+        return text, None
+    raw = found.group(1).strip().strip("\"'")
+    if not raw:
+        return text, None
+    canonical = normalize_domain(raw)
+    if canonical not in CANONICAL_DOMAINS:
+        raise KnowledgeDomainError(raw)
+    if canonical == raw:
+        return text, None
+    line_end = block.find("\n", found.start())
+    if line_end == -1:
+        line_end = len(block)
+    comment = block[found.end():line_end].strip()
+    new_block = (block[:found.start()] + f"domain: {canonical}"
+                 + (f"  {comment}" if comment else "") + block[line_end:])
+    return text[:fm.start(1)] + new_block + text[fm.end(1):], raw

@@ -16,7 +16,10 @@ frontmatter with a non-empty `type`. It deliberately does NOT fix a taxonomy —
       conformance job red every week and bury the only number that matters, which
       is a NEW stranded file. See #960.
     * WARNS (exit 2 with --strict) on: a `type` value outside the known
-      vocabulary — informational only, not an OKF violation.
+      vocabulary, or a `domain` under `knowledge/` that is neither canonical nor
+      an alias (#949) — informational only, not an OKF violation. ~118 notes
+      carried an out-of-set domain when the vocabulary was closed; failing on
+      them would make re-tagging them a precondition of every run.
 
 Before #960 the body was read by nothing: STRICT_FM_RE is anchored at offset 0
 and applied with `.match()`, so the violations above were the whole check and a
@@ -73,6 +76,7 @@ STRICT_FM_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 # is a second copy of the thing it gates measures its own stale notes.
 # Out-of-set values only WARN (OKF tolerates unknown types).
 from scripts.vault.okf_taxonomy import KNOWN_TYPES  # noqa: E402
+from scripts.vault.okf_taxonomy import is_known_domain  # noqa: E402
 # One detector, shared with the migrator, so the two scripts cannot disagree
 # about what a stranded body block is — and one allow-list, so neither keeps its
 # own count of how big the legacy set is (#960).
@@ -97,7 +101,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", default=None)
     ap.add_argument("--strict", action="store_true",
-                    help="treat unknown-type warnings as failure (exit 2)")
+                    help="treat unknown type/domain warnings as failure (exit 2)")
     ap.add_argument("--root", default=None,
                     help="tree to scan instead of the live vault root "
                          "(app.paths.VAULT_ROOT) — so a fixture can be graded on "
@@ -156,6 +160,10 @@ def main() -> int:
         type_hist[t] += 1
         if t not in KNOWN_TYPES:
             warnings.append(f"{rel}: unknown type '{t}'")
+        # `domain` is governed only where it names a directory: knowledge/.
+        d = str(fm.get("domain", "") or "").strip()
+        if d and rel.startswith("knowledge/") and not is_known_domain(d):
+            warnings.append(f"{rel}: unknown domain '{d}'")
 
     print(f"[validate_okf] scanned {n} concept files"
           + (f" in {args.dir}" if args.dir else ""))
@@ -191,7 +199,7 @@ def main() -> int:
                 print(f"   ... and {len(stale) - 20} more")
 
     if warnings and args.strict:
-        print(f"\n⚠️  {len(warnings)} unknown-type warning(s):")
+        print(f"\n⚠️  {len(warnings)} unknown-type/domain warning(s):")
         for w in warnings[:50]:
             print(f"   {w}")
 
@@ -200,7 +208,7 @@ def main() -> int:
     if warnings and args.strict:
         return 2
     print("\n✅ OKF v0.1 conformant" +
-          (f" ({len(warnings)} unknown-type notes)" if warnings else ""))
+          (f" ({len(warnings)} unknown-type/domain notes)" if warnings else ""))
     return 0
 
 
