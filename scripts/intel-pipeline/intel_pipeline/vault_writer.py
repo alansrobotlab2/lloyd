@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional
 from . import state as scanner_state
 from .models import ScoredItem, GRADE_CALL_CAP, GRADE_KEYWORD
 from .profile import load_profile, get_all_keywords, keyword_match
+from .body import clean_body
 
 
 from ._paths import VAULT_ROOT, KNOWLEDGE_DIR, FEEDS_DIR as SCORED_FEEDS_DIR, VAULT_WRITTEN_STATE
@@ -398,10 +399,21 @@ def _entry_body(item: ScoredItem) -> str:
     stage 2 fills `why`. So the placeholder was the default, not the exception: all 8
     post-floor YouTube records since 2026-09-11 carry an empty `summary` and a
     populated `why`, which the writer never read.
+
+    A GitHub summary goes through `body.clean_body` first (backlog #1225): an
+    unfilled PR template or a body under the floor is not pasted but named, as
+    `None — <reason>`, and a body that only restates the title is left out. That is
+    the one case this returns "", which the caller renders as no body line. Other
+    sources are not upstream templates, and a short feed summary is still a summary.
     """
     summary = (item.summary or "").strip()
-    if summary:
+    if summary and (item.source or "").lower() != "github":
         return summary
+    if summary:
+        body, reason = clean_body(summary, item.title or "")
+        if body:
+            return body
+        return f"None — {reason}" if reason else ""
     why = (getattr(item, "why", "") or "").strip()
     if why:
         return why
@@ -509,6 +521,7 @@ def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
     
     # Format content - just the entry, not the full file
     body = _note_pointer(item, note, vault_path) if note else _entry_body(item)
+    body_block = f"{body}\n\n" if body else ""
 
     content = f"""## {today}
 
@@ -516,9 +529,7 @@ def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
 
 **Source:** {source} | **Relevance:** {relevance}/10
 
-{body}
-
-[Link]({item.url})
+{body_block}[Link]({item.url})
 
 ---
 

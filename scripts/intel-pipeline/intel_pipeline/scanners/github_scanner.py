@@ -12,6 +12,7 @@ from typing import List, Optional, Dict, Any
 import time
 
 from ..models import FeedItem
+from ..body import clip_body
 from .. import state
 from ..profile import load_profile
 
@@ -336,7 +337,7 @@ def scan_github_repos() -> List[FeedItem]:
                     continue
 
                 title = f"Release {tag}: {release.get('name', tag)}"
-                summary = release.get("body", "")[:500] if release.get("body") else "No description"
+                summary = clip_body(release.get("body")) or "No description"
                 url = release.get("html_url", "")
 
                 item = FeedItem(
@@ -371,7 +372,7 @@ def scan_github_repos() -> List[FeedItem]:
                 commit_info = commit.get("commit", {})
                 message = commit_info.get("message", "")
                 first_line = message.split("\n")[0][:100] if message else "Unknown commit"
-                summary = message[:500] if message else ""
+                summary = clip_body(message)
                 url = commit.get("html_url", "")
 
                 item = FeedItem(
@@ -405,7 +406,7 @@ def scan_github_repos() -> List[FeedItem]:
 
                 title = issue.get("title", "")
                 body = issue.get("body", "") or ""
-                summary = body[:500] if body else "No description"
+                summary = clip_body(body) or "No description"
                 url = issue.get("html_url", "")
 
                 item = FeedItem(
