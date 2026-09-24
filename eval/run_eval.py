@@ -230,6 +230,78 @@ def _entity_canonical(name: str) -> str:
         return text
 
 
+def _entity_pair_satisfied(exp: str, exp_canon: str,
+                           got_pairs: list[tuple[str, str]]) -> bool:
+    """THE entity-label rule, written once. `exp`/`exp_canon` are the normalized
+    gold and its canonical; `got_pairs` is the same pair for each name on the other
+    side. An expected entity counts when a returned name either contains it as
+    before, or IS it once both go through the store (#1260). Canonical forms are
+    compared for *equality*, never substring, because resolution answers "is this
+    the same entity", a question substring could not ask: the alias table maps `KG`
+    and `Relationship Graph` onto `Knowledge Graph` and pointedly does NOT map
+    `Graph` onto it, so a returned `Graph` must stay unsatisfied by a gold
+    `Knowledge Graph` even though the two share a word. The substring rule stays as
+    the additive half rather than being replaced: it is what carries an expectation
+    written as a partial surface (`TGS-RAG Implementation` against the row `#363
+    TGS-RAG Implementation`), and dropping it would retire a satisfiability route
+    `tests/test_eval_corpus_guard.py` exists to defend.
+
+    The pair arguments are pre-normalized and pre-resolved rather than resolved
+    inside, because `_score` resolves each side once per query; a labeler-side
+    caller uses `entity_label_satisfied`, which does the resolution for one label.
+    Both routes reach the same two-clause predicate, which is the point: a second
+    *expression* of this rule — even a correct one — is the defect this repo has
+    catalogued twice, since two copies of one matcher drift and then the ceiling
+    and the metric it bounds are measured under different definitions of a match
+    while still looking commensurable.
+    """
+    return any(exp in got or (exp_canon == got_canon)
+               for got, got_canon in got_pairs)
+
+
+def entity_label_satisfied(label: str, choices: list[str]) -> bool:
+    """Does any name in `choices` satisfy the gold label `label`? Same rule as
+    `_score`, reached by way of `_entity_pair_satisfied`.
+
+    Public because `eval/label_agreement_ceiling.py` asks this identical question of
+    a second labeler's answer, and its ceiling is only commensurable with
+    `entity_hit_rate` if "satisfied" means the same thing in both.
+
+    A name that does not resolve keeps its own spelling and an unreadable store
+    degrades to substring-only, exactly as `_entity_canonical` does — so an
+    agreement figure computed against a broken store quietly becomes
+    substring-only, which is why the ceiling artifact records the store it ran
+    against instead of pretending the number is store-independent.
+    """
+    return _entity_pair_satisfied(
+        _norm(label), _norm(_entity_canonical(label)),
+        [(_norm(c), _norm(_entity_canonical(c))) for c in choices])
+
+
+def _doc_pair_satisfied(exp: str, got_docs: list[str]) -> bool:
+    """THE doc-label rule: the normalized gold is a substring of a normalized
+    returned path, as `expect_docs` documents it. Substring only, no
+    canonicalisation — there is no alias table for a path, and inventing one would
+    be a second matcher again. `_score` and the second labeler both come through
+    here; see `_entity_pair_satisfied` for why that matters."""
+    return any(exp in got for got in got_docs)
+
+
+def doc_label_satisfied(label: str, choices: list[str]) -> bool:
+    """Public wrapper: does any path in `choices` satisfy gold label `label`?"""
+    return _doc_pair_satisfied(_norm(label), [_norm(c) for c in choices])
+
+
+def _doc_satisfied_by(exps: list[str], got: str) -> bool:
+    """Does this ONE returned path satisfy any gold label? `_doc_pair_satisfied`
+    read transposed — the rank scan walks the returned paths, so the roles swap and
+    the predicate is reached by name rather than restated. A restatement here is how
+    a rank scan and a recall count start disagreeing about what a hit is: `mrr_doc`
+    would credit a document `doc_recall` did not count, and the two numbers would
+    come from different definitions of the same event."""
+    return any(_doc_pair_satisfied(exp, [got]) for exp in exps)
+
+
 def _ndcg_at_k(got_docs: list[str], expected_docs: list[str], k: int = 10) -> float:
     """Binary-relevance NDCG@k. Each got_docs[i] (i<k) scores 1 if it
     matches any expected substring, else 0. IDCG is computed against the
@@ -239,7 +311,9 @@ def _ndcg_at_k(got_docs: list[str], expected_docs: list[str], k: int = 10) -> fl
     if not expected_docs:
         return 0.0
     import math as _m
-    rel = [1 if any(exp in got for exp in expected_docs) else 0 for got in got_docs[:k]]
+    # Same rule as the rank scan and the recall count, so one document cannot be a
+    # hit for NDCG and a miss for doc_recall.
+    rel = [1 if _doc_satisfied_by(expected_docs, got) else 0 for got in got_docs[:k]]
     num_rel = sum(rel)
     if num_rel == 0:
         return 0.0
@@ -251,41 +325,36 @@ def _ndcg_at_k(got_docs: list[str], expected_docs: list[str], k: int = 10) -> fl
 def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> dict:
     expected_raw = [str(e) for e in (query_spec.get("expect_entities") or [])]
     expected_entities = [_norm(e) for e in expected_raw]
-    expected_docs = [_norm(d) for d in (query_spec.get("expect_docs") or [])]
+    expected_doc_raw = [str(d) for d in (query_spec.get("expect_docs") or [])]
+    expected_docs = [_norm(d) for d in expected_doc_raw]
     got_raw = _entities_in_result(result, seeds)
+    got_paths_raw = _doc_paths(result)
     got_entities = [_norm(e) for e in got_raw]
-    got_docs = [_norm(p) for p in _doc_paths(result)]
+    got_docs = [_norm(p) for p in got_paths_raw]
 
-    # An expected entity counts when a returned name either contains it as before,
-    # or IS it once both go through the store (#1260). Canonical forms are compared
-    # for *equality*, never substring, because resolution answers "is this the same
-    # entity", a question substring could not ask: the alias table maps `KG` and
-    # `Relationship Graph` onto `Knowledge Graph` and pointedly does NOT map `Graph`
-    # onto it, so a returned `Graph` must stay unsatisfied by a gold `Knowledge
-    # Graph` even though the two share a word. The substring rule stays as the
-    # additive half rather than being replaced: it is what carries an expectation
-    # written as a partial surface (`TGS-RAG Implementation` against the row `#363
-    # TGS-RAG Implementation`), and dropping it would retire a satisfiability route
-    # `tests/test_eval_corpus_guard.py` exists to defend.
-    # The fact leg keeps substring alone. Not an oversight: `fact_entity_recall` is
-    # the number #1164's acceptance is written against, so redefining it here would
-    # move a metric another item is measured on. The matched value stays the
-    # expected string, so `entities_matched` remains comparable across two runs.
+    # Both legs match through the ONE rule — `_entity_pair_satisfied` /
+    # `_doc_pair_satisfied`, above — which the second labeler reaches by way of the
+    # public wrappers. That is the whole reason the rule is a function and not a
+    # closure here: `eval/label_agreement_ceiling.py` scores an independent
+    # labeller's answer against these same gold labels, and a ceiling is only a
+    # ceiling if "satisfied" means the same thing on both sides of the division.
+    # The fact leg keeps substring alone — see the comment on `fact_entity_recall`
+    # below; #1164's acceptance is written against that number, and a ceiling for
+    # the fact leg is therefore not measured at all
+    # (`UNMEASURED_METRICS` in label_agreement_ceiling.py).
     expected_canon = [_norm(_entity_canonical(e)) for e in expected_raw]
     got_canon = [_norm(_entity_canonical(e)) for e in got_raw]
-
-    def _entity_satisfied(exp: str, exp_canon: str) -> bool:
-        return any(exp in got or (exp_canon == got_canon)
-                   for got, got_canon in zip(got_entities, got_canon))
+    got_pairs = list(zip(got_entities, got_canon))
 
     entity_matches = [exp for exp, exp_canon in zip(expected_entities, expected_canon)
-                      if _entity_satisfied(exp, exp_canon)]
-    doc_matches = [exp for exp in expected_docs if any(exp in got for got in got_docs)]
+                      if _entity_pair_satisfied(exp, exp_canon, got_pairs)]
+    doc_matches = [exp for exp in expected_docs
+                   if _doc_pair_satisfied(exp, got_docs)]
 
     # Rank of FIRST matching expected doc in returned list (1-indexed; None if none).
     first_doc_rank = None
     for rank, got in enumerate(got_docs, start=1):
-        if any(exp in got for exp in expected_docs):
+        if _doc_satisfied_by(expected_docs, got):
             first_doc_rank = rank
             break
 
@@ -632,6 +701,144 @@ def _fmt_ci(metric: str, overall: dict) -> str:
     return f"  [{ci[0]:.3f},{ci[1]:.3f}] n={n}"
 
 
+#: Which metrics have no gold-side ceiling, and why. Mirrors
+#: `UNMEASURED_METRICS` in `eval/label_agreement_ceiling.py`; restated here as the
+#: reporter's reason string so every metric gets a reason even when the artifact is
+#: absent and nothing can be imported from it.
+CEILING_UNMEASURED = {"fact_entity_recall_avg":
+                      "the second labeler labels entities and document paths, not "
+                      "fact rows, so no gold-side surrogate exists for the fact leg"}
+
+
+def ceiling_context(queries: list[dict], *, scored_ids: list[str] | None = None) -> dict:
+    """Read the label-agreement artifact and turn it into `summary.overall` fields.
+
+    `scored_ids` must be the ids THIS run scored. The ceiling is re-averaged over
+    exactly those queries, because a ratio is only meaningful when both halves are
+    over the same experiment: `--limit 3` scores three queries, and dividing a
+    three-query hit rate by an eighty-one-query ceiling produces a number that looks
+    like a position on a scale and is nothing of the kind. `None` means the whole
+    corpus, which is what the nightly does.
+
+    The returned dict always carries these keys, whatever it finds:
+      `label_agreement`        {"entity_label_agreement", "doc_label_agreement",
+                                "labeler", "artifact", "reason"?}
+      `ceiling`                {"kind", per-metric values, "reason"?}
+      `<metric>_normalized`    score / ceiling, or null
+      `<metric>_ceiling_kind`  which kind of ceiling that divisor was, or null
+
+    Four states it distinguishes, because the whole subject of the field is that an
+    absent or stale ceiling must not read as a measured one: no artifact; an artifact
+    written by a stub labeler; an artifact whose `labels_sha256` no longer matches
+    the corpus (commit `9b028e9` re-pointed 22 gold entity names under an unchanged
+    id set, which the McNemar join on query ids cannot see); and an artifact whose
+    stored agreement does not recompute from its own contents. Each arrives as
+    `ceiling: null` plus a `reason` naming the state — never as a dropped key
+    (invisible to the next reader) and never as a 0.0 (a measured floor that was
+    never measured).
+
+    The two ceilings in this file are different instruments and the normalized value
+    names which one it divided by: `anchorless_query_count` bounds a query the seeds
+    cannot anchor, which no retriever can hit, while `gold_label_surrogate` bounds
+    what any answer agreeing with an independent labeller can score on these gold
+    labels. A query can be anchorable and still be label-noise; conflating the two
+    would let a seed defect excuse a label defect.
+
+    The import is deliberately inside the function: a nightly must still emit its raw
+    numbers if the labeler module is broken, and a reporter that dies because the
+    instrument it annotates is unreadable would take the retrieval metric down with
+    it. That failure is a `reason` string, not a traceback.
+    """
+    try:
+        import eval.label_agreement_ceiling as lac
+    except Exception as exc:
+        return _ceiling_absent_fields(f"labeler module unavailable: {exc}")
+    try:
+        art = lac.load_artifact(expect_labels_sha256=lac.labels_sha256(queries))
+    except lac.ArtifactRefused as refused:
+        return _ceiling_absent_fields(str(refused))
+    except Exception as exc:
+        return _ceiling_absent_fields(f"label-agreement artifact unreadable: {exc}")
+
+    # Recompute rather than read the stored block, and over THIS run's scored ids. The
+    # stored `ceiling` is the corpus-wide one; a run that scored a subset must not
+    # divide by it, and recomputing through `lac.ceiling` costs one pass over rows
+    # already in memory.
+    ceil = lac.ceiling(art, ids=scored_ids) if scored_ids is not None else art["ceiling"]
+    agree = art["agreement"]
+    fields: dict = {
+        "label_agreement": {
+            "entity_label_agreement": agree["entity_label_agreement"],
+            "doc_label_agreement": agree["doc_label_agreement"],
+            "entity_labels": agree["entity_labels"],
+            "entity_labels_agreed": agree["entity_labels_agreed"],
+            "entity_labels_offered": agree["entity_labels_offered"],
+            "doc_labels": agree["doc_labels"],
+            "doc_labels_agreed": agree["doc_labels_agreed"],
+            "doc_labels_offered": agree["doc_labels_offered"],
+            "labeler": art["labeler"],
+            "artifact": art["_path"],
+            "labels_sha256": art["corpus"]["labels_sha256"],
+            # Named inline so a sub-0.80 agreement cannot be read without the labels
+            # that caused it. The full per-query record lives in the artifact.
+            "entity_disagreements": [f"{d['id']} gold={d['gold']}"
+                                     for d in agree["disagreements"]["entity"]],
+            "doc_disagreements": [f"{d['id']} gold={d['gold']}"
+                                  for d in agree["disagreements"]["doc"]],
+        },
+        "ceiling": {"kind": ceil["kind"], "artifact": art["_path"],
+                    "ran_at": art["ran_at"], "labeler": art["labeler"],
+                    "n": ceil["n"], "excluded": ceil["excluded"],
+                    "unmeasured": ceil["unmeasured"],
+                    **{m: v for m, v in ceil["values"].items()}},
+    }
+    for metric in CI_METRICS:
+        fields[f"{metric}_normalized"] = None
+        fields[f"{metric}_ceiling_kind"] = (
+            ceil["kind"] if ceil["values"].get(metric) is not None else None)
+    return fields
+
+
+def _ceiling_absent_fields(reason: str) -> dict:
+    """The null-and-explain shape, used for every state with no usable ceiling."""
+    fields: dict = {
+        "label_agreement": {"entity_label_agreement": None,
+                            "doc_label_agreement": None, "labeler": None,
+                            "artifact": None, "reason": reason},
+        "ceiling": {"kind": None, "reason": reason},
+    }
+    for metric in CI_METRICS:
+        fields[f"{metric}_normalized"] = None
+        fields[f"{metric}_ceiling_kind"] = None
+    return fields
+
+
+def _normalize_against_ceiling(fields: dict, overall: dict) -> None:
+    """Fill `<metric>_normalized = score / ceiling` for each metric that has a
+    ceiling, once the raw aggregates exist. Mutates `fields` in place.
+
+    A ceiling of exactly 0.0 leaves the value null with a note beside it: it means no
+    answer at all could satisfy these gold labels, so the ratio is 0/0 and a printed
+    0.0 would claim a scored position where there is a division by nothing.
+    """
+    ceil = fields.get("ceiling") or {}
+    for metric in CI_METRICS:
+        cap = ceil.get(metric)
+        score = overall.get(metric)
+        if cap is None or score is None:
+            continue
+        # The kind travels with the ratio it describes — set here rather than left to
+        # the caller, so no path can produce a normalized number whose divisor kind is
+        # unknown. A ratio without its kind is the ambiguity this field exists to
+        # remove: the seed-side and gold-side ceilings bound different failures.
+        fields[f"{metric}_ceiling_kind"] = ceil.get("kind")
+        if not cap:
+            fields.setdefault("ceiling_notes", {})[metric] = (
+                "ceiling is 0.0; score/ceiling undefined")
+            continue
+        fields[f"{metric}_normalized"] = round(score / cap, 4)
+
+
 def summarize(records: list[dict]) -> dict:
     by_cat = defaultdict(list)
     for r in records:
@@ -678,6 +885,21 @@ def summarize(records: list[dict]) -> dict:
         "counterfactual_n_moved": len([v for v in moved_vals if v is not None]),
         "counterfactual_n_pinned": len([v for v in pinned_vals if v is not None]),
     }
+    # `label_agreement`, `ceiling` and the per-metric `<metric>_normalized` /
+    # `<metric>_ceiling_kind` go beside the raw aggregates (#654). Emitted for all
+    # seven metrics — including `fact_entity_recall_avg`, which has no gold-side
+    # ceiling at all — so a reader never has to guess whether an absent key meant
+    # "no ceiling exists" or "the instrument has never run": an absent key and a
+    # measured zero look identical to the next tool that reads this file, which is
+    # the failure this whole field exists to close. `ceiling` arrives already
+    # populated by `main`, which knows the corpus labels; `summarize` only places
+    # the keys and does the division, so it stays a function of its records and
+    # every existing caller keeps working unchanged.
+    for metric in CI_METRICS:
+        overall.setdefault(f"{metric}_normalized", None)
+        overall.setdefault(f"{metric}_ceiling_kind", None)
+    overall.setdefault("label_agreement", None)
+    overall.setdefault("ceiling", None)
 
     per_cat = {}
     for cat, rs in by_cat.items():
@@ -799,6 +1021,19 @@ def print_table(records: list[dict], summary: dict) -> None:
     # `errors` keeps its place on the header line — it is a count, not a score,
     # and the zero-denominator rule below is about scores.
     print(f"Overall: n={o['n_queries']}  errors={o['errors']}")
+    # Which ceiling the numbers below are to be read against, and the one reading
+    # that is NOT licensed without a person's call (#654 acceptance): agreement is
+    # the gate on whether a low entity hit rate is a retrieval defect at all.
+    _agree = o.get("label_agreement") or {}
+    if _agree.get("entity_label_agreement") is not None:
+        _ent = _agree["entity_label_agreement"]
+        _verdict = ("labels too ambiguous to call it a retrieval defect"
+                    if _ent < 0.80 else
+                    "labels hold; the entity hit rate stands as a retrieval result"
+                    if _ent > 0.90 else
+                    "labels partly ambiguous; read the normalized gap, not the raw")
+        print(f"  entity_label_agreement={_ent}  "
+              f"doc_label_agreement={_agree.get('doc_label_agreement')}  -> {_verdict}")
     for label, metric, fmt in (("MRR", "mrr_doc", _fmt_rate3),
                                ("NDCG10", "ndcg10", _fmt_rate3),
                                ("doc_hit", "doc_hit_rate", _fmt_rate),
@@ -810,7 +1045,42 @@ def print_table(records: list[dict], summary: dict) -> None:
         # never measured) and the interval as "no verdict" — never a number and
         # never a bracket, so a zero-denominator run cannot read as a pass here
         # either (#1260's rule, applied to the printed page).
-        print(f"  {label:<20}{fmt(o.get(metric))}{_fmt_ci(metric, o)}")
+        # The gold-side ceiling and the normalized score ride in ON the metric's own
+        # line (#654), so a reader cannot copy the raw rate off this page without its
+        # denominator — the same reason #696 put the CI on this line. `null` prints as
+        # null: "no ceiling exists for this metric" and "ceiling is 0.0" are different
+        # facts from a measured value, and a bare `-` would hide which.
+        ceiling = o.get("ceiling") or {}
+        kind = ceiling.get("kind")
+        cap = ceiling.get(metric) if kind else None
+        norm = o.get(f"{metric}_normalized")
+        # What follows `score/ceiling=` is the RATIO, never the divisor. The label
+        # reads as a division, so a first number that is the ceiling would have a
+        # reader copy 0.691 off this page as the position while the position
+        # (0.5357) sits behind it in parentheses — and on the nightly page the two
+        # are one `=` apart. The divisor keeps its own named slot instead.
+        if cap is None:
+            suffix = f"   score/ceiling=null (ceiling=null kind={kind or 'null'})"
+        else:
+            suffix = (f"   score/ceiling={'null' if norm is None else norm}"
+                      f" (ceiling={cap} kind={kind})")
+        print(f"  {label:<20}{fmt(o.get(metric))}{_fmt_ci(metric, o)}{suffix}")
+    # The labeler identity and, below 0.80, the disagreement set. The second half is
+    # the clause that keeps this instrument from becoming an excuse: a low ceiling
+    # reported without the labels that caused it is a reason to stop fixing entity
+    # identification, and a low ceiling reported WITH them is a work list.
+    agree = o.get("label_agreement") or {}
+    if agree.get("entity_label_agreement") is None and agree.get("reason"):
+        print(f"  {'gold_ceiling':<20}null — {agree['reason']}")
+    elif agree:
+        lab = agree.get("labeler") or {}
+        print(f"  {'label_agreement':<20}entity={_fmt_rate(agree['entity_label_agreement'])}"
+              f"  doc={_fmt_rate(agree['doc_label_agreement'])}"
+              f"  (labeler={lab.get('model')}@{lab.get('endpoint')})")
+        if (agree["entity_label_agreement"] or 0) < 0.80:
+            ent = agree.get("entity_disagreements") or []
+            print(f"  {'disagreement set':<20}{len(ent)} gold entity label(s): "
+                  f"{', '.join(ent) if ent else '(none listed)'}")
     print(f"  {'avg_lat':<20}{o['latency_ms_avg']:.0f}ms")
     # Printed beside entity_hit/doc_hit because that gap is what #541 exists to
     # explain: retrieval finds a relevant document far more reliably than it
@@ -1055,6 +1325,22 @@ def main() -> int:
         counterfactual=args.counterfactual,
     )
     summary = summarize(records)
+    # The gold-side ceiling (#654), read HERE and not inside `summarize`: the
+    # artifact has to be checked against the labels THIS run was scored against
+    # (`labels_sha256`), and `summarize` is a pure function of its records that
+    # eleven other callers and tests depend on it remaining. `summarize` has already
+    # placed the keys with nulls, so this is a fill, not a reshape — and it happens
+    # before `out` is assembled, so every consumer of `summary["overall"]` below
+    # (`over_budget`, `print_table`, the written JSON) sees one consistent object
+    # rather than two snapshots of it.
+    _ceiling_fields = ceiling_context(
+        queries,
+        # The ids that were actually scored, not the ids that were asked about: an
+        # errored query has no score to normalize, so including it would widen the
+        # ceiling's denominator past the metric's.
+        scored_ids=[r["id"] for r in records if not r.get("error")])
+    _normalize_against_ceiling(_ceiling_fields, summary["overall"])
+    summary["overall"].update(_ceiling_fields)
     # #1250: a fact leg that read NOTHING is not a fact score of zero. Every
     # per-entity read can fail — `agent_mcp/vault.py:_collect` used to discard
     # each failure with `except Exception: continue`, no log, no counter — and
