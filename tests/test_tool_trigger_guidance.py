@@ -35,11 +35,26 @@ estimator rather than copies of them:
 The coverage floor is a regression guard, not an aspiration. Before this
 change invariant 1 failed outright on 12 of these 20 tools and the
 whole-catalog count was 26.
+
+The audit reads the **live registry** (`agent_mcp.main.list_tools()`), not the
+source text (#640). Its first cut parsed `Tool(name=…, description=…)` calls out
+of `agent_mcp/*.py` by AST, folding f-strings flat, and that collector could not
+see a tool registered through a module-level constant (`SetGoal`, `ClearGoal`,
+`EnterPlanMode`, `ExitPlanMode`, `TodoWrite`, the three `grant_*` tools) nor
+anything under a subpackage its non-recursive glob never opened (`desktop/`).
+Measured on 2026-09-24: 107 internal tools served, 97 visible to the parser, so
+every assertion below ran over a denominator 9% short of what ships and a
+trigger clause deleted from one of the missing ten failed nothing. The
+Thunderbird bridge is excluded the way `tests/test_mcp_layer.py` excludes it:
+its `mcp-bridge.cjs` is gitignored, so it contributes 40 tools in the live
+checkout and 0 in any worktree, and a count that included it could not pass the
+automod gate.
 """
 
 from __future__ import annotations
 
-import ast
+import asyncio
+import functools
 import re
 import sys
 from pathlib import Path
@@ -50,48 +65,32 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-AGENT_MCP = ROOT / "agent_mcp"
+# Constant-registered or subpackage tools the AST audit could not see (#640).
+# Each is asserted individually below, so the trigger condition on one of them
+# can no longer be deleted without failing the suite.
+FORMERLY_INVISIBLE = ["SetGoal", "EnterPlanMode", "TodoWrite", "grant_create"]
 
 
-def _lit(node) -> str:
-    """Literal string of a description node, f-strings folded flat.
-
-    Nine descriptions are f-strings interpolating a constant (a default
-    timeout, a path). Dropping the interpolated value still leaves the prose,
-    which is what the audit is about; refusing to read them would hide nine
-    tools from the coverage count.
-    """
-    if isinstance(node, ast.Constant) and isinstance(node.value, str):
-        return node.value
-    if isinstance(node, ast.JoinedStr):
-        return " ".join(
-            _lit(v) for v in node.values if not isinstance(v, ast.FormattedValue)
-        )
-    return ""
-
-
+@functools.lru_cache(maxsize=None)
 def _tool_descriptions() -> dict[str, str]:
-    """{name: description} for every literal ``Tool(name=…, description=…)``."""
-    found: dict[str, str] = {}
-    for path in sorted(AGENT_MCP.glob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            # `Tool(...)` and `types.Tool(...)` are the same call.
-            if (getattr(node.func, "id", None)
-                    or getattr(node.func, "attr", None)) != "Tool":
-                continue
-            kw = {k.arg: k.value for k in node.keywords}
-            if "name" not in kw or "description" not in kw:
-                continue
-            name, desc = _lit(kw["name"]), _lit(kw["description"])
-            if name and desc:
-                found.setdefault(name, desc)
-    return found
+    """{name: description} for every internal tool the aggregator serves.
+
+    The same registry read `tests/test_mcp_layer.py` makes, filtered by the
+    same `_internal` (tools owned by an external bridge are dropped by module
+    attribution, not by name, so the set is identical with and without the
+    bridge on disk). Cached: the fixture below and `_named_tools` both read it,
+    and discovery is one aggregator-wide `list_tools()`.
+    """
+    from agent_mcp import main as M
+    from tests.test_mcp_layer import _internal
+
+    tools = _internal(asyncio.run(M.list_tools()))
+    return {t.name: (t.description or "") for t in tools}
 
 
-ALL_TOOL_NAMES = set(_tool_descriptions())
+def _all_tool_names() -> set[str]:
+    return set(_tool_descriptions())
+
 
 # The set #361 itself prioritised (Bash, the http trio, the vault tools, the
 # file tools, Task), extended with the pairs those boundaries actually run
@@ -135,7 +134,7 @@ CONDITIONAL = re.compile(
 def _named_tools(text: str, *, exclude: str = "") -> list[str]:
     """Real tool names appearing in `text` — not prose that sounds like one."""
     return sorted(
-        other for other in ALL_TOOL_NAMES - {exclude}
+        other for other in _all_tool_names() - {exclude}
         if re.search(rf"\b{re.escape(other)}\b", text)
     )
 
@@ -148,7 +147,37 @@ def descriptions() -> dict[str, str]:
 def test_audit_sees_the_tools_it_claims(descriptions):
     """If the audit can't find them, every assertion below is vacuous."""
     missing = [n for n in PRIORITY_TOOLS if n not in descriptions]
-    assert missing == [], f"priority tools not found as literal Tool(): {missing}"
+    assert missing == [], f"priority tools not served by the registry: {missing}"
+
+
+def test_audit_set_is_the_served_internal_registry(descriptions):
+    """#640: registry names minus audit names is empty for internal modules.
+
+    The collector IS the registry read now, so a tool registered through a
+    constant, an f-string or a subpackage cannot fall out of the guard the way
+    the ten did under the AST parser. Pinned against a second read rather than
+    against itself so a cached, filtered or truncated fixture would show.
+    """
+    from agent_mcp import main as M
+    from tests.test_mcp_layer import _internal
+
+    served = {t.name for t in _internal(asyncio.run(M.list_tools()))}
+    assert served - set(descriptions) == set()
+    assert set(descriptions) - served == set()
+    empty = sorted(n for n, d in descriptions.items() if not d.strip())
+    assert empty == [], f"served with no description, invisible to the audit: {empty}"
+    missing = [n for n in FORMERLY_INVISIBLE if n not in descriptions]
+    assert missing == [], f"formerly invisible tools still not audited: {missing}"
+
+
+@pytest.mark.parametrize("name", FORMERLY_INVISIBLE)
+def test_formerly_invisible_tool_states_a_trigger_condition(descriptions, name):
+    """Each of these carried a trigger condition the AST audit could not read;
+    deleting it now fails here instead of nowhere."""
+    desc = descriptions[name]
+    assert CONDITIONAL.search(desc), (
+        f"{name}: trigger condition gone — opens: {desc[:120]!r}"
+    )
 
 
 @pytest.mark.parametrize("name", PRIORITY_TOOLS)
@@ -198,10 +227,13 @@ def test_trigger_coverage_rose_materially(descriptions):
     The rewrite has to spread or the priority set is window dressing over a
     catalog that still says nothing.
     """
+    # Denominator and floor are the live internal registry (#640): 46 of 107
+    # guided on 2026-09-24. The old floor of 32 was measured over the 97 the
+    # parser could see and passed while the ten it could not were unguarded.
     guided = [n for n, d in descriptions.items() if CONDITIONAL.search(d)]
-    assert len(guided) >= 32, (
-        f"only {len(guided)} of {len(descriptions)} descriptions carry a "
-        f"trigger condition (baseline 26)"
+    assert len(guided) >= 43, (
+        f"only {len(guided)} of {len(descriptions)} served descriptions carry "
+        f"a trigger condition (46 of 107 measured 2026-09-24; floor 43)"
     )
 
 
@@ -211,6 +243,8 @@ def test_catalog_reminder_stays_under_its_token_ceiling(descriptions):
     Trigger-first descriptions are paid on every request while progressive
     disclosure is on, so the size is measured rather than assumed. Ceiling:
     the ~5k tokens the comment records as unacceptable for whole descriptions.
+    Measured over the served internal registry (2,745 tokens on 2026-09-24),
+    not the parser's subset, which read 21% fewer tools than ship (#640).
     """
     from app.compaction import estimate_tokens
     from app.harness.tool_search import format_catalog_reminder
