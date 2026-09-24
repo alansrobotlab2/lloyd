@@ -532,6 +532,58 @@ def test_a_job_flips_on_defects_even_at_equal_quality():
     assert decision["defect_gap_secondary_minus_primary"] == pytest.approx(0.35)
 
 
+def test_the_margin_block_quotes_no_unmeasured_latency_cost():
+    """#827: the decision policy priced its margin on "roughly 40x ... (9.01 vs
+    357.5 tok/s in eval/measurements.json)", a file no tree ever held; the
+    module's own 2026-09-18 run measured the secondary at ~1.09x the
+    primary's throughput. The block now carries that measurement."""
+    source = Path(ev.__file__).read_text(encoding="utf-8")
+    assert "measurements.json" not in source
+    assert "9.01" not in source
+    assert "2026-09-18" in source and "1.09" in source
+
+
+def _report_meta():
+    return {"started_at": "2026-09-18T12:08:00+00:00", "repeats": 3,
+            "items_per_job": 1, "judge": False,
+            "arms_separate": {"ok": True, "detail": "d"},
+            "router_agreement": {"ok": True, "detail": "d"},
+            "on_primary_now": []}
+
+
+def _report_section(report: str, job: str) -> str:
+    start = report.index(f"(`{job}`)")
+    end = report.find("\n## ", start)
+    return report[start:end if end != -1 else None]
+
+
+def test_a_both_zero_defect_rate_is_said_not_scored():
+    """#827: with both arms at defect_rate 0.0 the composite hands each the
+    same 40 points for length and uniqueness, so the decision and the report
+    row must say the axis discriminated nothing rather than let it read as a
+    measurement. A job where either arm had a defect says no such thing."""
+    silent = _arms(sec_score=88.0, pri_score=90.0)
+    loud = _arms(sec_score=88.0, pri_score=90.0, sec_defect=0.2)
+    decisions = [ev.decide("title", silent), ev.decide("capture", loud)]
+    assert ev.DEFECT_AXIS_SILENT in decisions[0]["reason"]
+    assert decisions[0]["defect_axis_discriminated"] is False
+    assert ev.DEFECT_AXIS_SILENT not in decisions[1]["reason"]
+    assert "defect_axis_discriminated" not in decisions[1]
+
+    # Below the repeat floor the verdict is insufficient_data, and the axis
+    # is still silent: the reason says both things.
+    thin = ev.decide("voice", _arms(n=2, items=2, repeats=1))
+    assert thin["decision"] == "insufficient_data"
+    assert ev.DEFECT_AXIS_SILENT in thin["reason"]
+
+    report = ev.render_report({"title": silent, "capture": loud}, decisions,
+                              _report_meta())
+    title_rows = [ln for ln in _report_section(report, "title").splitlines()
+                  if ln.startswith("|")]
+    assert any(ev.DEFECT_AXIS_SILENT in ln for ln in title_rows)
+    assert ev.DEFECT_AXIS_SILENT not in _report_section(report, "capture")
+
+
 def test_fewer_than_three_repeats_of_the_same_input_declines_to_route():
     """The source walkthrough's own lesson: a harness pairing scored *below*
     the plain model with no error bars shown. One sample of an input cannot

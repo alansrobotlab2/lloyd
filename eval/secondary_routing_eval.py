@@ -106,10 +106,13 @@ JOB_CALLS: dict[str, Callable[[Any], Any]] = {
 
 # ── Decision policy, stated before the run ───────────────────────────────
 #
-# The secondary costs roughly 40x the primary in generation latency (9.01
-# vs 357.5 tok/s in eval/measurements.json). Paying that is only worth it
-# if the cheaper engine's output is *as good*, so the secondary keeps a job
-# only while it stays inside both margins. These two numbers are the
+# Measured cost of the secondary against the primary, 2026-09-18 run of
+# this eval (5 jobs x 4 items x 3 repeats per arm, output tokens over wall
+# seconds pooled across the 60 trials of each arm): secondary 95.4 tok/s,
+# primary 87.8 tok/s, a ratio of ~1.09, and mean wall 0.52 s vs 0.50 s. The
+# 40x figure this block used to quote came from a file no tree ever held.
+# The margins are therefore a quality tolerance, not the price of a latency
+# cost: the secondary keeps a job only while it stays inside both. These two numbers are the
 # tolerance the acceptance clause asks for; changing one is a policy change
 # and belongs in a commit message, not in a result.
 KEEP_MARGIN_POINTS = 5.0      # composite mean: secondary within 5 pts of primary
@@ -588,11 +591,9 @@ def summarise(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 "wall_s_mean": round(statistics.fmean(walls), 2),
                 "wall_s_max": round(max(walls), 2),
                 "output_tokens_mean": round(statistics.fmean(tokens), 1) if tokens else None,
-                # Measured here, not from eval/measurements.json: that file
-                # has the secondary at 9.01 tok/s, and this sweep saw 100+
-                # (400 tokens in 2.98 s on a direct probe). A routing
-                # decision quoted against a 40x cost that is not there is
-                # not a decision.
+                # Measured per run rather than quoted from a constant: a
+                # routing decision priced against a latency cost nobody
+                # measured is not a decision.
                 "output_tokens_per_s": (round(sum(tokens) / sum(
                     r["wall_s"] for r in mine if r["output_tokens"] is not None), 1)
                     if tokens and sum(r["wall_s"] for r in mine
@@ -675,8 +676,32 @@ def _mean_or_none(values: list[Any]) -> Optional[float]:
     return round(statistics.fmean(real), 3) if real else None
 
 
+#: Said in the reason and under the report table when neither arm produced a
+#: single over-long or duplicated output. The composite still awards both arms
+#: the full W_LENGTH + W_UNIQUE (40 points) then, and a constant term shared
+#: by both arms is not a measurement of that axis — the 2026-09-18 run read
+#: 0.0 on all ten arms.
+DEFECT_AXIS_SILENT = ("both arms report defect_rate 0.0, so the over-long/duplicate "
+                      "axis discriminated nothing in this run")
+
+
+def defect_axis_silent(arms: dict[str, Any]) -> bool:
+    """True when both arms have trials and neither produced one defect."""
+    sec, pri = arms.get("secondary"), arms.get("primary")
+    return bool(sec and pri and sec.get("n") and pri.get("n")
+                and sec.get("defect_rate") == 0.0 and pri.get("defect_rate") == 0.0)
+
+
 def decide(job: str, arms: dict[str, Any]) -> dict[str, Any]:
     """Keep or flip one job, against the margins at the top of this file."""
+    verdict = _decide(job, arms)
+    if defect_axis_silent(arms):
+        verdict["reason"] = f"{verdict['reason']}; {DEFECT_AXIS_SILENT}"
+        verdict["defect_axis_discriminated"] = False
+    return verdict
+
+
+def _decide(job: str, arms: dict[str, Any]) -> dict[str, Any]:
     sec, pri = arms.get("secondary"), arms.get("primary")
     if not sec or not pri or not sec["n"] or not pri["n"]:
         return {"job": job, "decision": "insufficient_data",
@@ -1388,6 +1413,8 @@ def render_report(summary: dict[str, Any], decisions: list[dict[str, Any]],
                 f"(σ {arm['score_stdev']}) | {arm['format_ok_rate']:.0%} "
                 f"| {arm['defect_rate']:.0%} | {arm['wall_s_mean']} (max {arm['wall_s_max']}) "
                 f"| {arm['output_tokens_mean']} | {arm.get('output_tokens_per_s')} |")
+        if defect_axis_silent(arms):
+            lines.append(f"| defect axis | {DEFECT_AXIS_SILENT} | | | | | | | |")
         lines += ["", f"**Decision: `{decision.get('decision', 'insufficient_data')}`** — "
                       f"{decision.get('reason', '')}", ""]
         for alias in ("secondary", "primary"):
