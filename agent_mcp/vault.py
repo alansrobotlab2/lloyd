@@ -125,6 +125,14 @@ VAULT_SEGMENTS = [
 # reports one that crosses it (#1129).
 QMD_POOL_FACTOR = 3
 QMD_POOL_MAX = 240
+# The ask `vault_search` makes for a scope nested below a collection
+# (`knowledge/youtube/X`), whose prefix is applied after qmd answers (#670).
+# Every row of the collection outside the prefix competes for the same slots,
+# so the ask is widened and then trimmed back to `max_results`. It is a guess at
+# how much of a collection a subfolder is outranked by, not a measurement;
+# `QMD_POOL_MAX` bounds what it can cost.
+SCOPED_POOL_FACTOR = 10
+SCOPED_POOL_MIN = 100
 # The size of the pool `_vault_recall`'s document leg ranks its answer out of,
 # asked for by name because it is the recall path's decision, not a property of the
 # search: `vault_search` and the entity lookup ask for a document list and take
@@ -1121,9 +1129,24 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
                 scope_prefixes.append(item.rstrip("/") + "/")
 
     coll_list = VAULT_SEGMENTS
+    ask = max_results
     if scope:
-        scope_segs = [s.strip().rstrip("/") for s in scope.split(",") if s.strip()]
-        coll_list = [s for s in scope_segs if s in VAULT_SEGMENTS] or VAULT_SEGMENTS
+        # A scope is a path prefix, and its collection is its FIRST component:
+        # `knowledge/youtube/AI_Engineer` lives in `knowledge`. Matching the whole
+        # entry against the segment names sent every nested scope to all eleven
+        # collections with a `max_results`-row ask, and the prefix filter below
+        # then threw the whole reply away — hundreds of in-scope documents, zero
+        # results (#670).
+        scope_segs = [s.strip().strip("/").split("/")[0]
+                      for s in scope.split(",") if s.strip()]
+        coll_list = list(dict.fromkeys(
+            s for s in scope_segs if s in VAULT_SEGMENTS)) or VAULT_SEGMENTS
+        # A prefix below its collection is a filter on qmd's reply, not a
+        # quota inside it, so the reply has to be wide enough to hold the
+        # in-scope rows the rest of the collection outranks.
+        if any(p.rstrip("/").count("/") for p in scope_prefixes):
+            ask = min(max(max_results * SCOPED_POOL_FACTOR, SCOPED_POOL_MIN),
+                      QMD_POOL_MAX)
 
     # Run QMD search across the requested collections AND the source-code
     # grep fallback in parallel (lever 3) when not scope-restricted.
@@ -1151,7 +1174,7 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
         # `_lookup_entity_facts` pays +2 ms on each of its six `limit=2` calls.
         # The only ask that moves materially is `_vault_recall`'s doc leg, 43 ms
         # -> 322 ms, and that is the ask this change exists to widen.
-        return _qmd_daemon_search(query, max_results, coll_list)
+        return _qmd_daemon_search(query, ask, coll_list)
 
     def _do_grep():
         # Skip grep when caller restricted scope — they want vault-only results.
