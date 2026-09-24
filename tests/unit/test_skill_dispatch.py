@@ -518,6 +518,25 @@ def test_stream_route_installs_the_deliverer():
     print("test_stream_route_installs_the_deliverer: OK")
 
 
+def test_the_routes_without_the_deliverer_say_why(monkeypatch):
+    """#750: the stream route is the ONE install in `messages.py`; the two
+    registries built without it (`build_ambient_turn`, the sync
+    `post_message`) each carry the reason at the site, so the exclusion cannot
+    rot into an oversight. The Task subagent route is pinned in
+    tests/test_task_subagent_skill_dispatch.py."""
+    from app.routers import messages
+
+    text = inspect.getsource(messages)
+    assert text.count("install_skill_dispatch_hook(") == 1
+    for route in (messages.build_ambient_turn, messages.post_message):
+        src = inspect.getsource(route)
+        assert "install_default_safety_hook(iv_hooks)" in src
+        assert "install_skill_dispatch_hook(" not in src
+        after_gate = src[src.index("install_default_safety_hook(iv_hooks)"):]
+        assert "No skill deliverer here, on purpose (#750)" in after_gate, route.__name__
+    print("test_the_routes_without_the_deliverer_say_why: OK")
+
+
 def test_dispatch_path_references_skill_bodies():
     """The premise check from the item: this grep returned zero hits before
     #536. Pinned so a later refactor cannot quietly delete the deliverer and

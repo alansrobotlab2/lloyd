@@ -210,10 +210,15 @@ deliver as provisional and keeps going (`hooks.py:133`, `:146-148`), so a catast
 happened to register first. `install_skill_dispatch_hook` is still called after
 `install_default_safety_hook` (`app/routers/messages.py:1929`) — not because
 order decides the outcome, but so the walk reads in the order that matters.
-That is also its **only** call site: `build_ambient_turn` (`:2057`) and the
-sync `post_message` (`:2208`) install the safety hook without the deliverer,
-as does the Task subagent path (`agent_mcp/builtin_task.py:231`), so flipping
-the flag teaches the streaming chat route and nothing else (#750).
+The Task subagent path installs it the same way, beside its safety hook in
+`agent_mcp/builtin_task.py`, under the same flag and with nothing
+`already_injected` because a subagent gets no turn-start skills (#750). The
+two routes without it say why at the site: `build_ambient_turn` is a short
+decide-and-stop turn that would pay the round-trip for nothing, and the sync
+`post_message` has no caller in the tree.
+`tests/test_task_subagent_skill_dispatch.py` pins the subagent install and
+`tests/unit/test_skill_dispatch.py` the one-install-plus-two-exclusions shape
+of `messages.py`.
 
 Three rules ship (`:112`), ordered so the specific protocol precedes the
 general one that also describes it:

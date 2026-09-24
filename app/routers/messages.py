@@ -2179,6 +2179,9 @@ async def build_ambient_turn(
     install_default_safety_hook(iv_hooks)
     if ambient_scope:
         install_policy_hook(iv_hooks, scope=ambient_scope)
+    # No skill deliverer here, on purpose (#750): an ambient turn is a short
+    # decide-and-stop, and a held call costs it a whole extra round-trip
+    # (~2.7 s TTFT) for a protocol the producer's payload already framed.
 
     options = RunOptions(
         model=model,
@@ -2332,6 +2335,10 @@ async def post_message(request: Request):
     install_default_safety_hook(iv_hooks)
     if sync_grant_scope:
         install_policy_hook(iv_hooks, scope=sync_grant_scope)
+    # No skill deliverer here, on purpose (#750): nothing in the tree calls
+    # the sync route — every real turn posts to /api/message/stream — so an
+    # install would be dead code and, the day it is not, a delivery no
+    # prefetch dedupes.
 
     options = RunOptions(
         model=model,

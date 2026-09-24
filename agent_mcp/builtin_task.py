@@ -228,6 +228,7 @@ async def _task(args: dict[str, Any]) -> str:
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from app.harness.options import RunOptions
     from app.harness.safety import install_default_safety_hook
+    from app.harness.skill_dispatch import install_skill_dispatch_hook
 
     # Resolve model and base_url.
     #
@@ -292,6 +293,13 @@ async def _task(args: dict[str, Any]) -> str:
     # clarify channels) and a subagent has none of those.
     task_hooks = HookRegistry()
     install_default_safety_hook(task_hooks)
+    # The dispatch-time skill deliverer (#536), under the same
+    # `harness.skill_dispatch.enabled` flag as the stream route and installed
+    # after the safety gate for the same reason it is there. A subagent runs
+    # exactly the repeated protocols the deliverer exists for, and it gets no
+    # turn-start skills at all (the prompt is the raw `subagents.<type>`
+    # profile), so `already_injected` is empty by construction (#750).
+    install_skill_dispatch_hook(task_hooks)
 
     # Per-invocation session id so each subagent run gets its own
     # tool_search LoadedToolSet — different disallowed_tools profiles
