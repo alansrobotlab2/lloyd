@@ -8,9 +8,10 @@ the filesystem cannot widen, an alias map for the named near-duplicates, a
 validator that warns (never fails) on an out-of-set value, and the
 ``vault_write`` guard that refuses an invented domain.
 
-Everything runs over scratch trees in ``tmp_path``; nothing reads ~/obsidian.
-Clause 5 (the schema doc and four research skills' domain tables) is vault
-text, landed by hand, and is not pinned here.
+Everything runs over scratch trees in ``tmp_path`` except the one
+``live_vault`` test at the bottom, which pins clause 5: the schema doc and the
+four research skills' domain tables name only canonical or aliased domains and
+no longer tell a writer to "create if needed".
 """
 from __future__ import annotations
 
@@ -174,3 +175,50 @@ def test_a_note_with_no_domain_is_writable_and_lands_in_its_directory(scratch):
 def test_the_domain_guard_governs_only_knowledge(scratch):
     result = _write(scratch, "projects/n.md", "anything-goes")
     assert result.get("success") is True, result
+
+
+# --- clause 5: the guidance a writer reads names only the closed set -------
+
+import pwd  # noqa: E402
+import re  # noqa: E402
+
+# The vault is read off the passwd home, never Path.home(): under a gate's
+# isolated HOME that name is the round's symlink farm (CLAUDE.md §4.3a).
+LIVE_VAULT = Path(pwd.getpwuid(__import__("os").getuid()).pw_dir) / "obsidian"
+GUIDANCE = (
+    "knowledge/KNOWLEDGE_SCHEMA.md",
+    "skills/research-agent/SKILL.md",
+    "skills/deep-research/SKILL.md",
+    "skills/medium-research/SKILL.md",
+    "skills/web-search-and-fetch/SKILL.md",
+)
+_KNOWLEDGE_DIR_RE = re.compile(r"knowledge/([A-Za-z0-9_.-]+)/")
+_BARE_DIR_RE = re.compile(r"`([a-z0-9-]+)/`")
+
+
+def _named_domains(text: str) -> set[str]:
+    named = set(_KNOWLEDGE_DIR_RE.findall(text))
+    # web-search-and-fetch and the schema list folders bare: `ai/`, `papers/`.
+    for line in text.splitlines():
+        if "domain" in line.lower() or "knowledge/" in line:
+            named.update(_BARE_DIR_RE.findall(line))
+    named.discard("knowledge")  # the segment root, `knowledge/`, is no domain
+    return named
+
+
+@pytest.mark.live_vault
+def test_live_domain_guidance_names_only_known_domains():
+    if not (LIVE_VAULT / GUIDANCE[0]).is_file():
+        pytest.skip("live ~/obsidian not readable from this tree")
+    offenders: dict[str, list[str]] = {}
+    for rel in GUIDANCE:
+        text = (LIVE_VAULT / rel).read_text(encoding="utf-8")
+        named = _named_domains(text)
+        bad = sorted(d for d in named if not T.is_known_domain(d))
+        if bad:
+            offenders[rel] = bad
+        assert "create if needed" not in text, rel
+    assert offenders == {}, offenders
+    schema = (LIVE_VAULT / GUIDANCE[0]).read_text(encoding="utf-8")
+    assert "general/`,etc." not in schema
+    assert "CANONICAL_DOMAINS" in schema
