@@ -648,3 +648,172 @@ async def test_the_dashboard_reports_suppressions_next_to_the_workers(monkeypatc
         await M.call_tool("fake_writer", dict(ARGS), META)
     assert len(effects) == 1
     assert dashboard._duplicate_effects_suppressed() == 2
+
+
+# ── #767: a chat turn is recorded, never guarded ───────────────────────────
+#
+# The replay-vs-re-fire question for chats is Alan's, and it could not be
+# answered because no interactive call was ever written down. These pin the
+# half a round may build: a `turn:` scope records and counts, and structurally
+# cannot replay or refuse.
+
+CHAT = "20260924_101500_chat"
+T1 = TE.shadow_scope(CHAT, "turn-1")
+T2 = TE.shadow_scope(CHAT, "turn-2")
+
+#: Ledgered writers a chat actually calls, plus one nobody classified (guarded
+#: by default, so it takes the same path).
+CHAT_WRITERS = ("backlog_write_task", "fact_add", "remember", "forget",
+                "memory_add", "email_send", "email_reply", "email_forward",
+                "calendar_create", "tasks_create", "contacts_create",
+                "session_inject_context", "research_propose",
+                "some_tool_nobody_classified")
+
+
+def _chat_meta(scope: str) -> dict:
+    return {M.META_SESSION_ID: CHAT, M.META_EFFECT_SCOPE: scope}
+
+
+def _shadow_rows(db) -> list[sqlite3.Row]:
+    conn = sqlite3.connect(str(db))
+    conn.row_factory = sqlite3.Row
+    try:
+        return list(conn.execute(
+            "SELECT tool, scope, status, suppress_count, call_digest"
+            " FROM tool_effects ORDER BY scope"))
+    finally:
+        conn.close()
+
+
+async def test_a_chat_turns_write_is_recorded_under_its_turn_and_fires(
+        monkeypatch, ledger):
+    """Clause 1: a row under `turn:<session>:<turn>`, and the real result."""
+    assert T1 == f"turn:{CHAT}:turn-1"
+    effects: list = []
+    _register(monkeypatch, FakeWriter(effects))
+    result = await M.call_tool("fake_writer", dict(ARGS), _chat_meta(T1))
+    assert len(effects) == 1
+    assert _texts(result) == json.dumps({"filed": 42}), "the result was rewritten"
+    rows = _shadow_rows(ledger)
+    assert [(r["tool"], r["scope"], r["status"]) for r in rows] == [
+        ("fake_writer", T1, "ok")]
+    assert rows[0]["call_digest"] == TE.call_digest("fake_writer", ARGS)
+
+
+async def test_a_repeat_inside_one_chat_turn_fires_again_and_is_counted(
+        monkeypatch, ledger):
+    """Clause 2: the same call twice in one turn runs twice. In an item scope
+    the second would be replayed (see the test above that pins that); here it
+    only bumps the would-have-been-suppressed counter."""
+    effects: list = []
+    _register(monkeypatch, FakeWriter(effects))
+    first = await M.call_tool("fake_writer", dict(ARGS), _chat_meta(T1))
+    second = await M.call_tool("fake_writer", dict(ARGS), _chat_meta(T1))
+    assert len(effects) == 2, "a chat repeat was replayed instead of fired"
+    assert _texts(first) == _texts(second) == json.dumps({"filed": 42})
+    assert "already fired" not in _texts(second)
+    assert not _err(second)
+    rows = _shadow_rows(ledger)
+    assert len(rows) == 1 and rows[0]["suppress_count"] == 1
+    # A repeat that was not refused is not a suppression.
+    assert TE.suppressed_total() == 0
+    assert TE.shadow_repeats() == {"calls": 1, "within_turn": 1, "across_turn": 0}
+
+
+async def test_a_repeat_in_a_later_turn_is_counted_apart(monkeypatch, ledger):
+    """Clause 3: per-turn and per-session are two different numbers."""
+    effects: list = []
+    _register(monkeypatch, FakeWriter(effects))
+    await M.call_tool("fake_writer", dict(ARGS), _chat_meta(T1))
+    await M.call_tool("fake_writer", dict(ARGS), _chat_meta(T1))
+    await M.call_tool("fake_writer", dict(ARGS), _chat_meta(T2))
+    # Another session asking for the same thing is not a repeat of this one.
+    other = TE.shadow_scope("20260924_111111_else", "turn-1")
+    await M.call_tool("fake_writer", dict(ARGS),
+                      {M.META_SESSION_ID: "20260924_111111_else",
+                       M.META_EFFECT_SCOPE: other})
+    assert len(effects) == 4
+    assert sorted(r["scope"] for r in _shadow_rows(ledger)) == sorted([T1, T2, other])
+    assert TE.shadow_repeats() == {"calls": 3, "within_turn": 1, "across_turn": 1}
+
+
+async def test_no_writer_can_be_replayed_or_refused_in_a_chat_turn(ledger):
+    """Clause 4: whatever state the row is in — fresh, settled ok, left
+    unknown by a cancel, settled error — a `turn:` claim answers dispatch.
+    That is the property that makes the shadow incapable of over-suppressing
+    a chat, so it is asserted for every writer and every state."""
+    for name in CHAT_WRITERS:
+        assert A.side_effecting(name), name
+        for state in ("fresh", "ok", "unknown", "error"):
+            args = {"n": name, "s": state}
+            first = await TE.claim(name, args, T1, CHAT)
+            assert first.may_dispatch and first.key, (name, state)
+            if state in ("ok", "error"):
+                await TE.finish(first.key, "done", state == "error")
+            # "unknown": the first call never settles, exactly as a cancel leaves it.
+            for _ in range(2):
+                again = await TE.claim(name, args, T1, CHAT)
+                assert again.may_dispatch, (name, state)
+                assert not again.unknown and not again.replay_text, (name, state)
+    assert TE.suppressed_total() == 0
+
+
+async def test_a_chat_call_whose_handler_dies_is_not_refused_next_time(
+        monkeypatch, ledger):
+    """The item-scope twin of this refuses (test above). A chat's does not."""
+    effects: list = []
+    _register(monkeypatch, FakeWriter(effects, mode="raise"))
+    with pytest.raises(RuntimeError):
+        await M.call_tool("fake_writer", dict(ARGS), _chat_meta(T1))
+    _register(monkeypatch, FakeWriter(effects))
+    result = await M.call_tool("fake_writer", dict(ARGS), _chat_meta(T1))
+    assert len(effects) == 2 and not _err(result)
+    assert "effect_state" not in _texts(result)
+
+
+def test_the_worker_contract_and_the_key_are_unchanged():
+    """Clause 5: no attempt or run component entered the key."""
+    assert list(inspect.signature(TE.effect_key).parameters) == [
+        "tool", "arguments", "scope"]
+    assert not TE.is_shadow_scope(SCOPE)
+    assert TE.shadow_scope(CHAT, "") == "" == TE.shadow_scope("", "t")
+
+
+def test_a_ledger_file_from_before_the_shadow_gains_the_column(ledger):
+    conn = sqlite3.connect(str(ledger))
+    conn.executescript(
+        "CREATE TABLE tool_effects (effect_key TEXT PRIMARY KEY, tool TEXT NOT NULL,"
+        " scope TEXT NOT NULL, session_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL,"
+        " result_digest TEXT NOT NULL DEFAULT '', result_text TEXT NOT NULL DEFAULT '',"
+        " result_truncated INTEGER NOT NULL DEFAULT 0, suppress_count INTEGER NOT NULL"
+        " DEFAULT 3, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);"
+        "INSERT INTO tool_effects (effect_key, tool, scope, status, created_at, updated_at)"
+        " VALUES ('k', 'email_send', 'item:x:1', 'ok', 'a', 'a');")
+    conn.close()
+    assert TE.suppressed_total() == 3
+    conn = sqlite3.connect(str(ledger))
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tool_effects)")}
+    finally:
+        conn.close()
+    assert "call_digest" in cols
+    assert TE.shadow_repeats() == {"calls": 0, "within_turn": 0, "across_turn": 0}
+
+
+def test_the_router_gives_a_chat_turn_a_shadow_scope_and_a_worker_its_item(
+        tmp_path, monkeypatch):
+    from app.routers import messages as R
+
+    monkeypatch.setattr(R, "SESSIONS_DIR", tmp_path)
+    (tmp_path / "worker.json").write_text(json.dumps({"platform": "worker"}))
+    (tmp_path / "chat.json").write_text(json.dumps({"platform": "mission-control"}))
+
+    assert R._shadow_effect_scope("chat", "t9", "") == "turn:chat:t9"
+    assert R._shadow_effect_scope("missing", "t9", "") == "turn:missing:t9"
+    # One RunOptions serves several turns: last turn's shadow is replaced.
+    assert R._shadow_effect_scope("chat", "t9", "turn:chat:t8") == "turn:chat:t9"
+    # A worker keeps its enforcing item scope, and without one gets nothing.
+    assert R._shadow_effect_scope("worker", "t9", SCOPE) == SCOPE
+    assert R._shadow_effect_scope("worker", "t9", "") == ""
+    src = Path(R.__file__).read_text()
+    assert "options.effect_scope = _shadow_effect_scope(" in src

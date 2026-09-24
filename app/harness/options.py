@@ -115,8 +115,9 @@ class RunOptions:
     # `policy.current_effect_scope` in its own task; a session-backed worker
     # turn runs in the backend's task after a loopback POST, where that
     # contextvar is empty, so the router sets this from the payload instead
-    # and the loop prefers it over the contextvar. Empty for a chat turn,
-    # which keeps it out of the ledger by design.
+    # and the loop prefers it over the contextvar. A chat turn gets
+    # `turn:<session>:<turn>` instead (#767), which the ledger only records:
+    # it never replays or refuses under that prefix.
     effect_scope: str = ""
 
     # Background-task notification drain. When set, the loop calls this

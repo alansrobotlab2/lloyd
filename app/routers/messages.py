@@ -654,6 +654,27 @@ def _effect_scope_for(session_id: str, data: dict) -> str:
     return scope
 
 
+def _shadow_effect_scope(session_id: str, turn_id: str, current: str) -> str:
+    """#767 — the scope a user-facing turn's side effects are recorded under.
+
+    `_effect_scope_for` keeps refusing a chat an enforcing scope; this hands it
+    `turn:<session>:<turn>`, which the ledger records and counts but never
+    replays or refuses (`agent_mcp/_tool_effects.py::_shadow`), so the repeat
+    rate the replay-vs-re-fire decision needs finally exists. A worker's item
+    scope is kept as it is; a machine session with none gets none, so the
+    shadow numbers stay about chats. Minted per turn because one RunOptions is
+    reused across the user, ambient and voice paths.
+    """
+    from agent_mcp import _tool_effects
+
+    if current and not _tool_effects.is_shadow_scope(current):
+        return current
+    platform, _source = _session_identity(session_id)
+    if platform in sessions_io.NON_USER_PLATFORMS:
+        return ""
+    return _tool_effects.shadow_scope(session_id, turn_id)
+
+
 def _build_notification_drain(session_id: str, turn_id: str):
     """Build the closure handed to ``RunOptions.notification_drain``.
 
@@ -943,6 +964,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # RunOptions can be reused across the user, ambient and voice paths that
     # all run through this function.
     options.turn_id = turn.turn_id
+    options.effect_scope = _shadow_effect_scope(
+        session_id, turn.turn_id, options.effect_scope)
 
     # Inner Voice (#345) — sampled stream-event capture. K=50 deltas; each
     # firing captures position + delta length so we can reconstruct the

@@ -630,7 +630,7 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
             # here on purpose — recording `error` would license a retry to fire a
             # second, possibly-duplicate effect, which is exactly the lie the
             # pool's timeout branch tells today.
-            if effect.key:
+            if effect.key and not _tool_effects.is_shadow_scope(effect_scope):
                 logger.warning(
                     "tool_effects: %s raised %s in scope %r; effect %s… stays "
                     "UNKNOWN — an identical call will be refused until a status "

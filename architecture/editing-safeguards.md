@@ -82,7 +82,11 @@ before assuming a layer can be turned off — or that it is installed.
   stop duplicates. It is `REPEAT_EXPECTED` instead, where its own
   `old_string` match is the idempotency check the model can see. The scope is
   `item:<source>:<id>`, carried across the loopback POST in the payload and
-  honoured only for a non-user platform.
+  honoured only for a non-user platform. A chat turn is handed
+  `turn:<session>:<turn>` instead (#767): recorded and counted, never
+  replayed or refused, and left out of the suppression counter.
+  `_tool_effects.shadow_repeats()` reads the within-turn and across-turn
+  repeat counts the replay-vs-re-fire decision (Alan's) is waiting on.
 - **The grant gate is not vault protection.** Tier 1 is everything
   unclassified and returns before the store is even opened, so `Bash`,
   `Edit`, `Write`, `backlog_write_task` and `vault_write` all pass. What it

@@ -2430,8 +2430,9 @@ async def _execute_tool_call(
             # #544: the queue item this turn is running, bound by the pool per
             # job. It is the aggregator's only handle on "this call is a retry
             # of one I already served", because a retried attempt gets a fresh
-            # session id. Empty on an interactive turn, which leaves it out of
-            # the effect ledger — see agent_mcp/_tool_effects.py. The option
+            # session id. On an interactive turn it is a `turn:` scope the
+            # ledger records but never enforces (#767) — see
+            # agent_mcp/_tool_effects.py. The option
             # wins over the contextvar: a session-backed worker turn runs in
             # the backend after a loopback POST, where the pool's contextvar
             # is empty and the router has set the option from the payload.

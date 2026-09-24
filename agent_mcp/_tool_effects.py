@@ -57,11 +57,19 @@ Rules that are not obvious
   bites here, so the narrow key is the correct one.
 * **An empty scope means no ledger.** A worker item is the case with measured
   re-fire traffic (63 items reached `attempts>=2` in 8 days) and unambiguous
-  semantics. Interactive turns are deliberately unscoped in this first cut:
+  semantics. Interactive turns are deliberately left unguarded:
   within one turn, re-issuing an identical call is often the model retrying
   after fixing a cause, and a silent replay of a stored result there would be a
   stale answer delivered as a fresh one. See the `REPEAT_EXPECTED` note in
   `annotations.py`.
+* **A chat turn is recorded, never guarded** (#767). Whether a chat's
+  byte-identical re-issue should be replayed or re-fired is a decision nobody
+  could make, because no interactive call was ever written down. A user-facing
+  turn now carries a `turn:<session>:<turn>` scope, and that prefix alone sends
+  a claim down `_shadow`, which records the call and counts a repeat but can
+  only ever answer "dispatch": no replay, no unknown-refusal, whatever the row
+  says. Its repeats are left out of `suppressed_total()`, which counts refusals.
+  `shadow_repeats()` is the reading the semantics decision needs.
 """
 
 from __future__ import annotations
@@ -106,7 +114,8 @@ CREATE TABLE IF NOT EXISTS tool_effects (
     result_truncated INTEGER NOT NULL DEFAULT 0,
     suppress_count  INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL
+    updated_at      TEXT NOT NULL,
+    call_digest     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS tool_effects_scope_tool_idx
     ON tool_effects(scope, tool);
@@ -186,6 +195,17 @@ def _ensure(conn: sqlite3.Connection) -> None:
         if key in _init_done:
             return
         conn.executescript(_SCHEMA)
+        # A file created before #767 has no `call_digest`. Additive, so a
+        # reader that predates it is unaffected; two processes racing to add it
+        # is the one error that means it is already there.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(tool_effects)")}
+        if "call_digest" not in cols:
+            try:
+                conn.execute("ALTER TABLE tool_effects ADD COLUMN"
+                             " call_digest TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column" not in str(exc):
+                    raise
         _init_done.add(key)
 
 
@@ -215,6 +235,28 @@ def effect_key(tool: str, arguments: Any, scope: str) -> str:
     return hashlib.sha256(
         f"{tool}\x00{canonical_arguments(arguments)}\x00{scope}".encode("utf-8")
     ).hexdigest()
+
+
+# #767: the scope a user-facing turn is handed. Minted by the router
+# (`app/routers/messages.py::_shadow_effect_scope`), recognised here by prefix
+# only, so no caller can ask for a shadow row to be enforced.
+SHADOW_SCOPE_PREFIX = "turn:"
+
+
+def shadow_scope(session_id: str, turn_id: str) -> str:
+    if not session_id or not turn_id:
+        return ""
+    return f"{SHADOW_SCOPE_PREFIX}{session_id}:{turn_id}"
+
+
+def is_shadow_scope(scope: Any) -> bool:
+    return isinstance(scope, str) and scope.startswith(SHADOW_SCOPE_PREFIX)
+
+
+def call_digest(tool: str, arguments: Any) -> str:
+    """The call without its scope: what makes two turns' calls "the same"."""
+    return hashlib.sha256(
+        f"{tool}\x00{canonical_arguments(arguments)}".encode("utf-8")).hexdigest()
 
 
 def ledgered(name: str) -> bool:
@@ -330,6 +372,33 @@ def _claim(name: str, arguments: Any, scope: str, session_id: str) -> Claim:
         conn.close()
 
 
+def _shadow(name: str, arguments: Any, scope: str, session_id: str) -> Claim:
+    """Record a chat turn's call; count a repeat; always dispatch.
+
+    The first call owns the row and settles it like any other. A repeat only
+    bumps `suppress_count` — here "would have been suppressed" — and gets no
+    key, so it cannot settle a row the first call still has in flight.
+    """
+    key = effect_key(name, arguments, scope)
+    conn = _connect()
+    try:
+        _ensure(conn)
+        now = _now()
+        conn.execute(
+            "INSERT OR IGNORE INTO tool_effects"
+            " (effect_key, tool, scope, session_id, status, created_at, updated_at,"
+            "  call_digest) VALUES (?,?,?,?, 'unknown', ?, ?, ?)",
+            (key, name, scope, session_id or "", now, now,
+             call_digest(name, arguments)),
+        )
+        if conn.execute("SELECT changes()").fetchone()[0] == 1:
+            return Claim(key=key)
+        _bump(conn, key)
+        return Claim()
+    finally:
+        conn.close()
+
+
 async def claim(name: str, arguments: Any, scope: str, session_id: str = "") -> Claim:
     """Decide whether an effect may fire, and reserve it if it may.
 
@@ -339,6 +408,12 @@ async def claim(name: str, arguments: Any, scope: str, session_id: str = "") -> 
     """
     if not scope or not ledgered(name) or not enabled():
         return _UNLEDGERED
+    if is_shadow_scope(scope):
+        try:
+            return await asyncio.to_thread(_shadow, name, arguments, scope, session_id)
+        except Exception as exc:
+            logger.warning("tool_effects: shadow record failed for %s (%s)", name, exc)
+            return _UNLEDGERED
     try:
         return await asyncio.to_thread(_claim, name, arguments, scope, session_id)
     except Exception as exc:
@@ -438,10 +513,42 @@ def suppressed_total() -> int:
         try:
             _ensure(conn)
             row = conn.execute(
-                "SELECT COALESCE(SUM(suppress_count),0) FROM tool_effects").fetchone()
+                "SELECT COALESCE(SUM(suppress_count),0) FROM tool_effects"
+                " WHERE scope NOT LIKE ?", (SHADOW_SCOPE_PREFIX + "%",)).fetchone()
             return int(row[0] or 0)
         finally:
             conn.close()
     except Exception as exc:
         logger.warning("tool_effects: suppression counter unreadable (%s)", exc)
         return 0
+
+
+def shadow_repeats() -> dict:
+    """#767's two numbers over the shadow rows still retained.
+
+    `within_turn`: identical side-effecting calls re-issued inside one chat
+    turn. `across_turn`: identical calls re-issued in a later turn of the same
+    session (each extra turn a call reappears in counts once). `calls` is the
+    number of distinct (turn, call) rows, the denominator. Settled rows age out
+    at `retention_days`, so this is a trailing window, not a lifetime total.
+    """
+    out = {"calls": 0, "within_turn": 0, "across_turn": 0}
+    conn = _connect(create=False)
+    if conn is None:
+        return out
+    try:
+        _ensure(conn)
+        rows = conn.execute(
+            "SELECT scope, call_digest, suppress_count FROM tool_effects"
+            " WHERE scope LIKE ?", (SHADOW_SCOPE_PREFIX + "%",)).fetchall()
+    finally:
+        conn.close()
+    turns: dict[tuple[str, str], int] = {}
+    for r in rows:
+        out["calls"] += 1
+        out["within_turn"] += int(r["suppress_count"] or 0)
+        session = r["scope"][len(SHADOW_SCOPE_PREFIX):].rsplit(":", 1)[0]
+        k = (session, r["call_digest"])
+        turns[k] = turns.get(k, 0) + 1
+    out["across_turn"] = sum(n - 1 for n in turns.values())
+    return out
