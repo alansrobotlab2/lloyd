@@ -323,10 +323,10 @@ plain untracked files under `~/.config/systemd/user/`, so a rebuild from
 by that glob (`SYSTEM_SCOPE_UNITS` in `install-services.sh`, #1108) — it used
 to be linked into the user manager, where it can never clamp anything; the copy
 that runs is a hand install at `/etc/systemd/system/`, still with nothing
-checking it against the tracked one. And one tracked unit
-sits outside the directory — `agent-services/autonomy.service`, a dead Idler
-heartbeat whose `WorkingDirectory` and venv have both been deleted for a
-year (#1110).
+checking it against the tracked one. One tracked unit used to sit outside
+the directory — `agent-services/autonomy.service`, a dead Idler heartbeat
+whose `WorkingDirectory` and venv had both been deleted for a year; it was
+never installed by anything and was removed on 2026-09-24 (#1110).
 
 Thunderbird runs as a user service because `agent_mcp/thunderbird.py` talks
 to a live instance; a closed Thunderbird is the usual reason the aggregator
@@ -565,7 +565,7 @@ mining. The systemd timers above are the only wall-clock schedules.
    timers plus `thunderbird`/`voxtype` #1109 — now tracked and linked, so that
    one is closed — the installer linking the
    root-only power unit into the user manager #1108, and a dead tracked
-  `agent-services/autonomy.service` #1110). Recorded without changing: GPU 1
+  `agent-services/autonomy.service` #1110 — since removed). Recorded without changing: GPU 1
   at 450 W against a declared 400 W (#1107; the unit declares 450 W since
   2026-09-17).
 
