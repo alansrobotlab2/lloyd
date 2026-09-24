@@ -295,6 +295,15 @@ vault tools reject anything under `~/lloyd/` with `PATH_ESCAPE`, so every
 `_pipeline/` artifact in this chain is written with `Write` at an absolute path,
 never `vault_write`.
 
+**A `-latest` overwrite keeps a dated copy, and the directory is checked for it.**
+`scripts/reflection_archive.py` refuses a governed skill that drops its archive
+`cp` (skill text, at `automod_vault_land`), and since #1227 `copy_gaps` reads the
+directory itself: a report that names the copy it made (`Archive copied before
+this write: …`, or any `<stem>-latest-<stamp>.md`) whose file is absent is a lost
+cycle, listed under `## Reflection Retention` in the daily Knowledge Health
+Report. The expectation comes from that pointer, never from the calendar — a
+report naming no copy is not a gap.
+
 **The claims a run makes are re-checked against disk.** The chain's most-repeated
 defect was never a crash, it was a confident number: a handoff reporting the
 graph "restored to 12,131 relationships" against a same-night health report

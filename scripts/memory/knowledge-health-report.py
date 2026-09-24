@@ -26,6 +26,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import PIPELINE_DIR, VAULT_FACTS_ROOT as FACTS_DIR, VAULT_KG_DB
 from app.kg_store import StoreUnavailable, store as _kg_store
+from scripts.reflection_archive import copy_gaps as _copy_gaps, reports_in as _reports_in
 
 DEFAULT_OUTPUT_DIR = PIPELINE_DIR / "reflection"
 
@@ -471,6 +472,7 @@ def generate_report(
     fact_dups: dict | None = None,
     stale_unevaluable: tuple[int, int] | None = None,
     duplicate_id_files: int | None = None,
+    copy_gaps: list | None = None,
 ) -> str:
     """Generate the markdown health report.
 
@@ -483,6 +485,10 @@ def generate_report(
     the m active facts carry no date the stale check can age them from. Omitting
     it means the caller did not measure it, and the section says so rather than
     claiming the store is clean.
+
+    `copy_gaps` is `reflection_archive.copy_gaps` over the reflection directory:
+    a report naming an archive copy the directory lacks is a lost cycle (#1227).
+    None means not measured, and the section says that too.
     """
     lines: list[str] = []
     date_str = now.strftime("%Y-%m-%d")
@@ -690,6 +696,26 @@ def generate_report(
                 lines.append(f"- `{n}` next to `{o}` ({tier})")
             lines.append("")
 
+    # --- Reflection retention ---
+    # The one automated check that a nightly `-latest` overwrite kept its dated
+    # copy; before it, a lost cycle surfaced only to a human's `grep -c` (#436).
+    lines.append("## Reflection Retention")
+    lines.append("")
+    if copy_gaps is None:
+        lines.append("*Not measured: the reflection directory was not checked for missing archive copies.*")
+    elif not copy_gaps:
+        lines.append("Reports naming an archive copy that is missing: 0 — no cycle is missing a copy.")
+    else:
+        lines.append(f"Reports naming an archive copy that is missing: {len(copy_gaps)}")
+        lines.append("")
+        lines.append("| Report | Missing copy |")
+        lines.append("|--------|--------------|")
+        for gap in copy_gaps[:SECTION_ROW_CAP]:
+            lines.append(f"| `{gap.report.name}` | `{gap.copy}` |")
+        if len(copy_gaps) > SECTION_ROW_CAP:
+            lines.append(f"| … | *{len(copy_gaps) - SECTION_ROW_CAP:,} more* |")
+    lines.append("")
+
     lines.append("## Suggested Research Questions")
     lines.append("")
 
@@ -838,11 +864,13 @@ def main():
     hygiene = compute_hygiene(entities, now)
     fact_dups = fact_duplicate_stats()
     dup_id_files = _duplicate_id_files(entities)
+    reflection_dir = DEFAULT_OUTPUT_DIR
+    gaps = _copy_gaps(reflection_dir, _reports_in(reflection_dir))
 
     # Generate report
     report = generate_report(entity_stats, rel_stats, edges, stale_facts, now, hygiene,
                              fact_dups=fact_dups, stale_unevaluable=stale_unevaluable,
-                             duplicate_id_files=dup_id_files)
+                             duplicate_id_files=dup_id_files, copy_gaps=gaps)
 
     # Write output
     output_dir = args.output_dir
@@ -867,6 +895,7 @@ def main():
     print(f"  Exact-duplicate fact rows (facts_idx.text_hash): {_fact_duplicate_cell(fact_dups)}")
     print(f"  Files with duplicate fact IDs: {dup_id_files}")
     print(f"  {edge_type_cardinality(rel_stats['type_distribution'])}")
+    print(f"  Reflection copies named but missing: {len(gaps)}")
     pv = hygiene.get("provenance") or {}
     if "both_pct" in pv:
         print(f"  Provenance coverage: {pv['both_pct']}% of {pv['facts']:,} facts")

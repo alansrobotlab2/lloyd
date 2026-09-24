@@ -53,6 +53,9 @@ the header is missing.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping
 
 #: A live report path under the reflection directory. `-latest` is the in-place
 #: convention this rule polices; the per-day artifacts in the same directory
@@ -329,4 +332,77 @@ def skill_rule_violations(name: str, body: str) -> list[str]:
     for stem in stems_written(body):
         for problem in archive_problems(body, stem):
             out.append(f"{name}:{stem}: {problem}")
+    return out
+
+
+# ── Copy gaps: the one check that reads the directory (#1227) ────────────────
+#
+# Everything above reads skill *text*, so a run that ignores its skill and
+# overwrites a `-latest` report without the `cp` loses that cycle with no signal
+# anywhere. The evidence that an overwrite happened is the writer's own report
+# naming the copy it made; a copy that report names and the directory lacks is a
+# lost cycle. The expectation deliberately comes from that pointer and never
+# from a calendar: copies are stamped in UTC beside locally-dated siblings, and
+# a pattern-file cycle exists only on nights the run actually wrote the file
+# (2026-09-14 and -16 have a knowledge-write report, no tool-patterns copy, and
+# lost nothing). A report that names no copy is therefore not a gap.
+
+#: The line the nightly writers emit, e.g. signals-latest.md's
+#: "Archive copied before this write: `signals-latest-2026-09-20-0517.md`".
+ARCHIVE_POINTER = re.compile(
+    r"Archive copied before this write:\s*`?([A-Za-z0-9_./~-]+\.md)`?")
+
+#: A dated copy named anywhere in a report body. The time component is optional
+#: because the family already holds `signals-latest-2026-08-31.md` beside
+#: fourteen `…-HHMM` copies, and a single-format parser would skip it silently.
+DATED_COPY = re.compile(
+    r"(?<![A-Za-z0-9_-])((?:[A-Za-z0-9_.~-]+/)*[A-Za-z0-9_-]+-latest"
+    r"-\d{4}-\d{2}-\d{2}(?:-\d{4})?\.md)")
+
+
+@dataclass(frozen=True)
+class CopyGap:
+    """A report that names an archive copy the reflection directory lacks."""
+    report: Path
+    copy: str
+
+
+def named_copies(body: str) -> list[str]:
+    """Basenames of every archive copy `body` names, first mention first."""
+    seen: dict[str, None] = {}
+    for rx in (ARCHIVE_POINTER, DATED_COPY):
+        for m in rx.finditer(body):
+            seen.setdefault(Path(m.group(1)).name, None)
+    return list(seen)
+
+
+def copy_gaps(reflection_dir: Path, reports: Mapping[Path, str]) -> list[CopyGap]:
+    """One `CopyGap` per (report, named copy) absent from `reflection_dir`.
+
+    The directory is an argument so the check runs against a tmp fixture on the
+    gate's `not live_vault` rung; the live directory is the caller's business
+    (`scripts/memory/knowledge-health-report.py`).
+    """
+    reflection_dir = Path(reflection_dir)
+    gaps = []
+    for report in sorted(reports, key=str):
+        for name in named_copies(reports[report]):
+            if not (reflection_dir / name).is_file():
+                gaps.append(CopyGap(Path(report), name))
+    return gaps
+
+
+def reports_in(reflection_dir: Path) -> dict[Path, str]:
+    """The reports that carry copy pointers: the dated knowledge-write reports
+    and the live `-latest` files. Dated copies themselves are left out — each
+    one is a frozen earlier report whose pointer was judged in its own cycle."""
+    reflection_dir = Path(reflection_dir)
+    out: dict[Path, str] = {}
+    for pattern in ("knowledge-write-*.md", "*-latest.md"):
+        for p in reflection_dir.glob(pattern):
+            if p.is_file():
+                try:
+                    out[p] = p.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
     return out
