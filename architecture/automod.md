@@ -39,7 +39,7 @@ booting.
 ## 2. Shape
 
 ```
- propose ──► WORKTREE ──► GATE (9 rungs) ──► PROMOTER ──► live tree
+ propose ──► WORKTREE ──► GATE (§4 rungs) ─► PROMOTER ──► live tree
                               │                  │
                               └── fail ──────────┤
                                                  ▼
@@ -142,7 +142,7 @@ automod tools rather than trusted with a prompt that says not to.
 ```bash
 python -m scripts.automod.round start "make X faster"   # cuts a worktree
 #   ...edit that worktree, commit inside it...
-python -m scripts.automod.round gate  SM_<id>           # 9 rungs, ~4 min
+python -m scripts.automod.round gate  SM_<id>           # the rung ladder (§4)
 python -m scripts.automod.round land  SM_<id>           # idle-gated, verified
 ```
 
@@ -1579,9 +1579,14 @@ Three rails keep the verdict honest without trusting the model:
   (`seams_untestable`) and rides the findings. #544's lesson is about seams a
   test *could* have crossed. A bare-string seam keeps the old reading, so the
   calibration cases and the backfill are unchanged. A testable seam refuses
-  only while `automod.review.seams_block` says so — attempt 1 under `first` —
-  and never when the grader calls it a repeat; under the `grader` policy the
-  rule was dead code until 2026-09-13 (§4.5d). What a passing review did not
+  only while `automod.review.seams_block` says so — attempt 1 under `first`,
+  every attempt under `always` — and never when the grader calls it a repeat;
+  the rule was dead code until 2026-09-13 (§4.5d). **Shipped policy is `never`
+  since 2026-09-24**: over the week before, 72 of 130 send-backs had every
+  clause `met` and were refused only on a seam on attempt 1, each costing a
+  review (457 graded, median 326 s), a ~15 min fix cycle and a full re-gate.
+  A seam now always rides as a post-landing check; `first`/`always` stay in
+  code so `review_tools redecide --seams-policy` replays history. What a passing review did not
   refuse on is written onto the item (`post_landing_seams` and one activity
   line, `backlog.note_review_advisories`) and into the rung's data as
   `advisory_seams`/`advisory_findings`. It is recorded, never held open: 23
@@ -1592,7 +1597,7 @@ The rung's four outcomes, and where each goes:
 | grader says | rung | then |
 |---|---|---|
 | every clause `met`, no findings | pass | ladder continues |
-| premise sound; a clause unmet/partial, a `blocking` honesty finding, a seam a test could cross before landing (advisory honesty entries and post-landing seams ride the findings without refusing — #866 and #870, the evening the rung first ran) | fail, `review_retry` + `review_findings` on the gate event | the round fixes what it names, commits, and gates again; the second graded refusal of a *distinct commit* says *abort and report*; a third is refused without asking the model. Re-gating the same commit is answered from the ledger with the same findings and spends nothing. A turn that ends unlanded hands the item back as `implement_outcomes` → `review_retry` (cap 2), findings in `reoffer_reason`, branch kept — the next round passes it as `automod_start(from_branch=…)` and begins where this one stopped, rebased onto live main |
+| premise sound; a clause unmet/partial, a `blocking` honesty finding, a seam a test could cross before landing only under `seams_block: first`/`always` (advisory honesty entries and post-landing seams ride the findings without refusing — #866 and #870, the evening the rung first ran) | fail, `review_retry` + `review_findings` on the gate event | the round fixes what it names, commits, and gates again; the second graded refusal of a *distinct commit* says *abort and report*; a third is refused without asking the model. Re-gating the same commit is answered from the ledger with the same findings and spends nothing. A turn that ends unlanded hands the item back as `implement_outcomes` → `review_retry` (cap 2), findings in `reoffer_reason`, branch kept — the next round passes it as `automod_start(from_branch=…)` and begins where this one stopped, rebased onto live main |
 | premise sound; a clause `unsatisfiable` as written | fail, `review_retry`, the findings name `automod_amend_clause`; **spends no attempt** | a refusal of the contract, not the diff: the author amends exactly that clause (refused for any other), gates again, and the next review sees the amendment as an `<amendments>` block and ratifies it or refuses it and restores the old text (§4.5c). `REVIEW_HARD_CAP` — 5 graded reviews per round, passes included — is the ceiling that keeps the free move from looping |
 | premise unsound | fail, `review_premise_unsound` | the existing `spent` path: `draft` + `needs-human`, tag `review-premise`, the grader's summary on the item |
 | grader unreachable, 503, timeout, unusable object | fail, `external_blocker` | the engine, not the diff; the item keeps its attempt. Never a SKIPPED pass — a waived review is the #544 shape |
@@ -1759,7 +1764,8 @@ The day also showed three dead ends the loop could only escalate:
 
 `automod.review.policy` flipped to `grader` at 2026-09-12 23:46 (`4c9eb35`),
 on a calibration that showed the grader policy's blocking set inside the
-table's *at attempt 1*. Over the next day 4 of 23 graded rounds landed,
+table's *at attempt 1*. (The `table` policy and the `review.policy` key were
+retired on 2026-09-24; `decide` is the grader policy alone.) Over the next day 4 of 23 graded rounds landed,
 against 8.1 landings a day in the 30 hours before, and the board's ready
 queue sat at 87 against a depth bound of 55. Re-deciding the recorded
 refusals on their own grader output named the causes, heaviest first:
@@ -1788,7 +1794,8 @@ refusals on their own grader output named the causes, heaviest first:
 4. **Seams blocked on every attempt.** `seams_block` was never consulted
    under `grader` (decisive in 4 of 21 refusals), and an advisory seam on a
    pass was discarded although the prompt promised the grader it would be
-   recorded.
+   recorded. Since 2026-09-24 the shipped `seams_block` is `never` (§4.5):
+   the seam-only refusals that remained were 72 of a week's 130.
 5. **A declined poll spent the whole interval.** The pool stamped
    `last_enqueue_check` after every `enqueue_if_due`, so an autocode poll that
    found a promotion still under observation waited 900 s to look again —
@@ -1812,9 +1819,11 @@ refusals on their own grader output named the causes, heaviest first:
    that row now, and `tests/test_backlog_unattended.py` pins it through
    `execute` rather than by calling the block builder.
 
-Both policies now share the severity, seam-attempt and refused-amendment
-rules, and a review object without the two judgment fields decides the same
-under both at attempts 1 and 2 (`tests/test_review_grader_policy.py`).
+Both policies then shared the severity, seam-attempt and refused-amendment
+rules, and a review object without the two judgment fields decided the same
+under both at attempts 1 and 2 — which is why retiring `table` (2026-09-24)
+changed no verdict; `tests/test_review_grader_policy.py` pins those decisions.
+`--seams-policy first|always|never` replays under another `seams_block`.
 `python -m scripts.automod.review_tools redecide --since 2026-09-12T23:46`
 replays every graded review under today's rules without asking a model; at
 landing it re-decided 18 of 22 recorded refusals as passes (14 without the

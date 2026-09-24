@@ -235,7 +235,7 @@ the confirmed ones. (Named `selfmod`, then `autoimplement`, until 2026-09-09.)
 ```bash
 python -m scripts.automod.round status              # state + ledger + guardian
 python -m scripts.automod.round start "goal"        # cuts a worktree
-python -m scripts.automod.round gate  SM_<id>       # 9 rungs, ~4 min
+python -m scripts.automod.round gate  SM_<id>       # the rung ladder (§4)
 python -m scripts.automod.round land  SM_<id>       # idle-gated, verified
 python -m scripts.automod.round bless               # HEAD becomes last-known-good
 python -m scripts.automod.round recover             # clear BROKEN, restart the stack
@@ -334,20 +334,20 @@ error-shaped lines.
   (`scripts/automod/review.py`, `architecture/automod.md` §4.5) hands a fresh
   session on the **live** backend — never the canary, which is the
   candidate's own harness grading itself — only the item, its clauses, the
-  diff and the changed tests, and blocks on an unmet clause, a test that
-  cannot fail, or a seam with no test across it. `parse_review` downgrades a
+  diff and the changed tests, and blocks on an unmet clause or a test that
+  cannot fail; a seam with no test across it is recorded on the item, not
+  refused (`seams_block: never`, 2026-09-24). `parse_review` downgrades a
   `met` with no evidence in Python — except a suite-level run
   (`tests/ -k expr`) or an existing test outside the diff that the grader
   `ran` on a green `tests` rung, or evidence naming a file the diff deleted
   beside a changed test, each recorded on the clause as `accepted`.
   **Severity decides, not `actionable_in_round`**: an `advisory` finding
   never refuses, a `blocking` one the grader calls unfixable in the round is
-  demoted, and a testable seam refuses only while `seams_block` says so
-  (attempt 1 under `first`) and never as a repeat. The grader policy's first
-  day had those backwards and landed 4 of 23 rounds (§4.5d);
-  `review_tools redecide --since …` replays recorded reviews under today's
-  rules without a model. What a pass did not refuse on goes onto the item
-  (`post_landing_seams`, an activity line), never held open. An amendment
+  demoted. The grader policy's first day had those backwards and landed 4
+  of 23 rounds (§4.5d); the `table` policy is retired. `review_tools
+  redecide --since … [--seams-policy …]` replays reviews without a model.
+  What a pass did not refuse on goes onto the item (`post_landing_seams`,
+  an activity line), never held open. An amendment
   belongs to its round: another round's `pending` one is `orphaned`, clause
   restored, at `round start` and at the rung, and cannot reopen the cap.
   Premise sound → the round fixes and

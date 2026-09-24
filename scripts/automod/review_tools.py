@@ -120,7 +120,7 @@ def child_env(worktree: Path, scratch: Path) -> dict:
 
 def grade_commit(*, repo: Path, item_id: int, parent: str, commit: str, changed_paths: list[str],
                  label: str, strip_tests: bool = False, python: Path | None = None,
-                 grader=None, keep: bool = False, policy: str | None = None) -> dict:
+                 grader=None, keep: bool = False, seams_policy: str | None = None) -> dict:
     """Run the rung's grader over `parent..commit` as if it were a round.
 
     `grader` defaults to `review.grade`; tests pass a stub. Returns the
@@ -159,9 +159,10 @@ def grade_commit(*, repo: Path, item_id: int, parent: str, commit: str, changed_
                                  else RV.def_test_delta(wt, parent, paths))
         if parsed is None:
             return {"error": "unusable review object", "session_id": res.get("session_id")}
-        kind, findings = RV.decide(parsed, pre, mode=policy)
+        seams_policy = seams_policy or RV.seams_policy()
+        kind, findings = RV.decide(parsed, pre, policy=seams_policy)
         return {**parsed, "kind": kind, "findings": findings, "prechecks": pre,
-                "policy": policy or RV.review_policy(),
+                "seams_policy": seams_policy,
                 "session_id": res.get("session_id"), "clauses_total": len(contract["clauses"])}
     finally:
         if not keep:
@@ -227,14 +228,15 @@ def compare(case: dict, result: dict) -> tuple[bool, str]:
 
 
 def calibrate(*, repo: Path | None = None, fixture_dir: Path | None = None, grader=None,
-              only: str | None = None, policy: str | None = None) -> list[dict]:
+              only: str | None = None, seams_policy: str | None = None) -> list[dict]:
     repo = repo or LIVE_ROOT
     rows = []
     for case in load_fixtures(fixture_dir):
         if only and case["name"] != only:
             continue
         started = time.time()
-        result = grade_commit(repo=repo, item_id=case["item_id"], parent=case["parent"], policy=policy,
+        result = grade_commit(repo=repo, item_id=case["item_id"], parent=case["parent"],
+                              seams_policy=seams_policy,
                               commit=case["commit"], changed_paths=case["changed_paths"],
                               label=f"cal_{case['name']}", strip_tests=case.get("strip_tests", False),
                               grader=grader)
@@ -246,11 +248,11 @@ def calibrate(*, repo: Path | None = None, fixture_dir: Path | None = None, grad
                      # The parsed review and the prechecks, so a policy change
                      # can be judged on THIS grader output rather than on a
                      # second nondeterministic run: `RV.decide(row["result"],
-                     # row["result"]["prechecks"], mode=...)`.
+                     # row["result"]["prechecks"], policy=...)`.
                      "result": {k: result.get(k) for k in (
                          "premise", "clauses", "test_honesty", "seams_unverified",
                          "downgraded", "summary", "amendments_ok", "amendments_note",
-                         "prechecks", "policy")}})
+                         "prechecks", "seams_policy")}})
     return rows
 
 
@@ -364,7 +366,7 @@ def parsed_from_event(ev: dict, *, approximate: bool = True) -> tuple[dict, int]
     return parsed, approximated
 
 
-def redecide(*, since_ts: float, ledger: Path | None = None, policy: str | None = None,
+def redecide(*, since_ts: float, ledger: Path | None = None,
              seams_policy: str | None = None, approximate: bool = True) -> dict:
     """Every graded `review` event since `since_ts`, decided again by today's
     `RV.decide` on the grader output it recorded. No model is asked, nothing
@@ -373,8 +375,7 @@ def redecide(*, since_ts: float, ledger: Path | None = None, policy: str | None 
     from scripts.automod import state as S
     path = ledger or S.LEDGER_PATH
     if seams_policy is None:
-        from scripts.automod.gate import _review_policy
-        seams_policy = _review_policy("seams_block")
+        seams_policy = RV.seams_policy()
     rows: list[dict] = []
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         try:
@@ -388,15 +389,14 @@ def redecide(*, since_ts: float, ledger: Path | None = None, policy: str | None 
         parsed, n_approx = parsed_from_event(ev, approximate=approximate)
         amendments = [{"clause": c} for c in (ev.get("amendments_shown") or [])]
         kind, findings = RV.decide(parsed, list(ev.get("prechecks") or []), amendments,
-                                   attempt=int(ev.get("attempt") or 1), policy=seams_policy,
-                                   mode=policy)
+                                   attempt=int(ev.get("attempt") or 1), policy=seams_policy)
         recorded = ev.get("kind") or ("retry" if ev.get("blocking") else "pass")
         rows.append({"round_id": ev.get("round_id"), "item_id": ev.get("item_id"),
                      "attempt": ev.get("attempt"), "ts": ev.get("ts"), "recorded": recorded,
                      "redecided": kind, "approximated": n_approx, "findings": findings[:400]})
     refusals = [r for r in rows if r["recorded"] != "pass"]
     passes = [r for r in rows if r["recorded"] == "pass"]
-    return {"rows": rows, "policy": policy or RV.review_policy(), "seams_policy": seams_policy,
+    return {"rows": rows, "seams_policy": seams_policy,
             "refusals": len(refusals),
             "refusals_now_pass": sum(1 for r in refusals if r["redecided"] == "pass"),
             "passes": len(passes),
@@ -426,14 +426,15 @@ def main(argv=None) -> int:
     f.add_argument("--note", default="")
     c = sub.add_parser("calibrate", help="run every case and compare")
     c.add_argument("--only", default=None)
-    c.add_argument("--policy", default=None, choices=["table", "grader"],
-                   help="decide under this policy instead of automod.review.policy")
+    c.add_argument("--seams-policy", default=None, choices=["first", "always", "never"],
+                   help="decide under this seams_block instead of automod.review.seams_block")
     b = sub.add_parser("backfill", help="grade every settled landing with an item")
     b.add_argument("--limit", type=int, default=None)
     b.add_argument("--item", type=int, action="append", default=[])
     r = sub.add_parser("redecide", help="re-decide recorded reviews under today's rules, offline")
     r.add_argument("--since", required=True, help="ISO time; naive means UTC")
-    r.add_argument("--policy", default=None, choices=["table", "grader"])
+    r.add_argument("--seams-policy", default=None, choices=["first", "always", "never"],
+                   help="re-decide under this seams_block instead of automod.review.seams_block")
     r.add_argument("--no-approximate", action="store_true",
                    help="do not approximate rule 2 on recorded downgrades")
     r.add_argument("--json", action="store_true")
@@ -446,7 +447,7 @@ def main(argv=None) -> int:
         print(p)
         return 0
     if args.cmd == "calibrate":
-        rows = calibrate(only=args.only, policy=args.policy)
+        rows = calibrate(only=args.only, seams_policy=args.seams_policy)
         for r in rows:
             mark = "PASS" if r["ok"] else "FAIL"
             print(f"[{mark}] {r['name']}{' (provisional)' if r['provisional'] else ''}: {r['why']}"
@@ -458,7 +459,7 @@ def main(argv=None) -> int:
         print(f"\n{len(rows)} graded → {backfill_path()}")
         return 0
     if args.cmd == "redecide":
-        out = redecide(since_ts=_since_ts(args.since), policy=args.policy,
+        out = redecide(since_ts=_since_ts(args.since), seams_policy=args.seams_policy,
                        approximate=not args.no_approximate)
         if args.json:
             print(json.dumps(out, indent=2, default=str))
@@ -468,7 +469,7 @@ def main(argv=None) -> int:
             approx = f" (≈{row['approximated']})" if row["approximated"] else ""
             print(f"{row['round_id']} · #{row['item_id']} · attempt {row['attempt']} · "
                   f"{row['recorded']} → {row['redecided']}{approx}{mark}")
-        print(f"\npolicy {out['policy']}, seams_block {out['seams_policy']}: "
+        print(f"\nseams_block {out['seams_policy']}: "
               f"{out['refusals_now_pass']} of {out['refusals']} recorded refusals re-decide as pass; "
               f"{out['passes_now_refused']} of {out['passes']} recorded passes become refusals")
         if out["note"]:

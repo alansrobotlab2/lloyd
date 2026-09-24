@@ -31,17 +31,18 @@ from workers.sources import autotriage as AT
 
 
 @pytest.fixture(autouse=True)
-def _table_policy(monkeypatch):
-    """This file tests the TABLE review policy's mechanics — seams by attempt,
-    precheck severities, amendment handling. The shipped policy is `grader`
-    since 2026-09-12 (`tests/test_review_grader_policy.py` covers it), and the
-    table code stays for a one-key revert, so its tests keep pinning it. Set
-    through the config both readers consult (`review.review_policy` and
-    `gate._review_policy`), not by patching one of them."""
+def _seams_first(monkeypatch):
+    """This file tests the review rung's mechanics — seams by attempt,
+    precheck severities, amendment handling — so it pins `seams_block: first`,
+    under which a testable seam still refuses on attempt 1. The shipped
+    setting is `never` (2026-09-24, `tests/test_review_grader_policy.py`).
+    Set through the config `review.seams_policy` reads, not by patching it.
+    (These tests ran under the `table` policy until it was retired the same
+    day; they decide under the grader policy, the only one there is.)"""
     from app.config import CONFIG
     automod = dict(CONFIG.get("automod") or {})
     review = dict(automod.get("review") or {})
-    review["policy"] = "table"
+    review["seams_block"] = "first"
     automod["review"] = review
     monkeypatch.setitem(CONFIG, "automod", automod)
 
@@ -913,7 +914,9 @@ def test_only_a_seam_a_test_could_cross_before_landing_refuses(tmp_path):
     p = parsed([{"seam": "a real pool tick", "testable_before_landing": False},
                 {"seam": "loopback POST to the test server", "testable_before_landing": True}])
     assert [s["testable_before_landing"] for s in p["seams_unverified"]] == [False, True]
-    kind, findings = RV.decide(p, [])
+    # Under `first` (the file's fixture pins it) a testable seam refuses on
+    # attempt 1; the shipped `never` advises — see the rung test above.
+    kind, findings = RV.decide(p, [], policy=RV.seams_policy())
     assert kind == "retry" and findings.startswith("seam unverified: loopback POST")
     assert "post-landing seam (not refusing): a real pool tick" in findings
     p = parsed([{"seam": "a real pool tick", "testable_before_landing": False}])
@@ -930,7 +933,8 @@ def test_only_a_seam_a_test_could_cross_before_landing_refuses(tmp_path):
     text = RV.build_prompt(contract={"id": 1, "title": "t", "body": "b", "clauses": ["c"], "path": ""},
                            diff="", diff_truncated=False, changed_tests=[], test_counts={},
                            worktree=tmp_path, run_tests=tmp_path / "rt")
-    assert "Only a testable seam refuses the round" in text
+    assert "recorded on the item as a post-landing check" in " ".join(text.split())
+    assert "Only a testable seam refuses the round" not in text
 
 
 def test_the_review_event_records_seams_as_text_and_names_the_untestable_ones(monkeypatch, tmp_path):
@@ -986,16 +990,6 @@ def test_a_re_offer_with_every_clause_met_runs_before_a_fresh_confirmation(isola
 #
 # Amendments are per round; a pass keeps what the grader still said; the
 # grader sees the item's history while attempts count the round's own.
-
-def _grader_policy(monkeypatch):
-    """The shipped policy, set the same way the autouse fixture sets `table`."""
-    from app.config import CONFIG
-    automod = dict(CONFIG.get("automod") or {})
-    review = dict(automod.get("review") or {})
-    review["policy"] = "grader"
-    automod["review"] = review
-    monkeypatch.setitem(CONFIG, "automod", automod)
-
 
 def _item_with_stale_amendment(d: Path) -> Path:
     path = write_item(d, 7, clauses=["the thing happens, amended"])
@@ -1092,7 +1086,6 @@ def test_a_pass_records_advisory_seams_on_the_item_and_in_the_rung_data(monkeypa
     """The prompt promised the grader an untestable seam is "recorded for the
     item as a post-landing check"; on a pass the rung kept the clauses and
     dropped every advisory."""
-    _grader_policy(monkeypatch)
     path = write_item(isolated, 7, clauses=["the thing happens once"])
     (tmp_path / "app").mkdir(); (tmp_path / "app" / "x.py").write_text("x = 1\n")
     (tmp_path / "tests").mkdir(); (tmp_path / "tests" / "test_x.py").write_text("def test_it():\n    pass\n")
@@ -1119,6 +1112,41 @@ def test_a_pass_records_advisory_seams_on_the_item_and_in_the_rung_data(monkeypa
     assert "needs-human" not in (fm.get("tags") or []), "recorded, never held open for a seam"
     review = [e for e in events if e["event"] == "review"][-1]
     assert review["seams"] == obj["seams_unverified"], "the whole judgment, for a later re-decide"
+
+
+def test_under_the_shipped_never_a_testable_seam_rides_the_pass_to_the_item(
+        monkeypatch, tmp_path, isolated):
+    """`seams_block: never` (2026-09-24): every clause met and one TESTABLE,
+    actionable, new seam on attempt 1 — the case that sent 72 of 130 rounds
+    back in a week. The rung passes; the findings say the seam was advisory,
+    the rung data carries it in `advisory_seams`, and the item gets it as a
+    post-landing check."""
+    from app.config import CONFIG
+    automod = dict(CONFIG.get("automod") or {})
+    automod["review"] = {**(automod.get("review") or {}), "seams_block": "never"}
+    monkeypatch.setitem(CONFIG, "automod", automod)
+    path = write_item(isolated, 7, clauses=["the thing happens once"])
+    (tmp_path / "app").mkdir(); (tmp_path / "app" / "x.py").write_text("x = 1\n")
+    (tmp_path / "tests").mkdir(); (tmp_path / "tests" / "test_x.py").write_text("def test_it():\n    pass\n")
+    obj = {"premise": "sound", "summary": "good", "amendments_ok": True, "amendments_note": "",
+           "clauses": [{"clause": 1, "verdict": "met", "evidence_path": "app/x.py", "evidence_line": 1,
+                        "test_node_id": "tests/test_x.py::test_it", "how_verified": "ran", "note": "ok"}],
+           "test_honesty": [],
+           "seams_unverified": [{"seam": "loopback POST to /api/message/stream",
+                                 "testable_before_landing": True, "actionable_in_round": True,
+                                 "same_as_prior": False}]}
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj), head="",
+                  contract={"id": 7, "title": "t", "body": "b", "clauses": ["the thing happens once"],
+                            "path": str(path), "amendments": [], "human_clauses": []})
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok is True, detail
+    assert data["review_attempt"] == 1
+    assert data["advisory_seams"] == ["loopback POST to /api/message/stream"]
+    review = [e for e in events if e["event"] == "review"][-1]
+    assert review["kind"] == "pass"
+    assert ("seam unverified (advisory under seams_block=never): loopback POST"
+            in review["findings"])
+    assert _fm(path)["post_landing_seams"] == ["loopback POST to /api/message/stream"]
 
 
 def test_the_grader_sees_an_earlier_rounds_review_but_attempts_count_this_round_only(

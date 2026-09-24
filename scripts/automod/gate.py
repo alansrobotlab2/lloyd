@@ -494,16 +494,6 @@ def _gate_cfg(key: str, default):
         return default
 
 
-def _review_policy(key: str, default: str = "first") -> str:
-    """`automod.review.<key>` from config, or the default. Never raises."""
-    try:
-        from app.config import CONFIG
-        return str(((CONFIG.get("automod") or {}).get("review") or {})
-                   .get(key, default))
-    except Exception:
-        return default
-
-
 class Gate:
     def __init__(self, round_id: str, worktree: Path, base: str, *,
                  live_root: Path | None = None, skip_smoke: bool = False,
@@ -1784,8 +1774,7 @@ class Gate:
                 "review_session": res.get("session_id")}
         amendments = contract.get("amendments") or []
         kind, findings = RV.decide(parsed, pre, amendments=amendments,
-                                   attempt=attempt, policy=_review_policy("seams_block"),
-                                   mode=_review_policy("policy", "table"))
+                                   attempt=attempt, policy=RV.seams_policy())
         S.append_event({**base_event, "ok": True, "premise": parsed["premise"],
                         "clauses": parsed["clauses"], "test_honesty": parsed["test_honesty"],
                         "seams_unverified": [s["seam"] if isinstance(s, dict) else s

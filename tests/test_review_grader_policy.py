@@ -6,10 +6,9 @@ by head then patch-id, two caps. Every row answered one of two questions on
 the grader's behalf, from outside the evidence: *is this the same refusal as
 last time?* and *can the author fix this inside the round?* The grader holds
 the diff, the clauses, its own prior reviews and the tree. It is the one
-placed to answer them, and under `automod.review.policy: grader` it does.
-
-The property that makes the flip safe: an object written before the two
-fields existed decides IDENTICALLY under both policies.
+placed to answer them, and since 2026-09-12 it does. The table was retired
+on 2026-09-24; an object written before the two fields existed still
+decides as the table decided it.
 """
 
 from __future__ import annotations
@@ -181,11 +180,11 @@ def test_a_refused_amendment_refuses_under_the_grader_policy_too():
     weakened clause the grader refused could pass on the weakened text."""
     parsed = _parsed(clauses=[_clause(1, "met")], amendments_ok=False,
                      amendments_note="the new clause drops the A/B")
-    kind, findings = RV.decide(parsed, [], amendments=[{"clause": 1}], mode="grader")
+    kind, findings = RV.decide(parsed, [], amendments=[{"clause": 1}])
     assert kind == "retry"
     assert "amendment of clause(s) 1 refused" in findings and "drops the A/B" in findings
     # No amendment shown: the flag is inert, as under the table.
-    assert RV.decide(parsed, [], amendments=[], mode="grader")[0] == "pass"
+    assert RV.decide(parsed, [], amendments=[])[0] == "pass"
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +192,7 @@ def test_a_refused_amendment_refuses_under_the_grader_policy_too():
 # ---------------------------------------------------------------------------
 
 def test_a_testable_seam_refuses_on_the_first_attempt():
-    kind, findings = RV.decide(_parsed(seams_unverified=[_seam()]), [], mode="grader",
+    kind, findings = RV.decide(_parsed(seams_unverified=[_seam()]), [],
                                attempt=1, policy="first")
     assert kind == "retry" and findings.startswith("seam unverified: loopback POST")
 
@@ -201,66 +200,72 @@ def test_a_testable_seam_refuses_on_the_first_attempt():
 def test_a_testable_seam_advises_on_the_second_attempt():
     """`seams_block` was dead code under `grader`: a testable seam refused
     every attempt, decisive in 4 of the first 21 refusals."""
-    kind, findings = RV.decide(_parsed(seams_unverified=[_seam()]), [], mode="grader",
+    kind, findings = RV.decide(_parsed(seams_unverified=[_seam()]), [],
                                attempt=2, policy="first")
     assert kind == "pass"
     assert "seam unverified (attempt 2, not refusing again): loopback POST" in findings
     # `always` still means always.
-    assert RV.decide(_parsed(seams_unverified=[_seam()]), [], mode="grader",
+    assert RV.decide(_parsed(seams_unverified=[_seam()]), [],
                      attempt=2, policy="always")[0] == "retry"
 
 
 @pytest.mark.parametrize("attempt", [1, 2, 3])
 def test_a_repeated_seam_never_refuses(attempt):
-    kind, findings = RV.decide(_parsed(seams_unverified=[_seam(same=True)]), [], mode="grader",
+    kind, findings = RV.decide(_parsed(seams_unverified=[_seam(same=True)]), [],
                                attempt=attempt, policy="always")
     assert kind == "pass"
     assert "(repeat, not refusing again)" in findings
 
 
-# ---------------------------------------------------------------------------
-# the equivalence that makes the flip safe
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("attempt", [1, 2])
-@pytest.mark.parametrize("parsed,pre", [
-    (_parsed(), []),
-    (_parsed(clauses=[_clause(1, "met")]), []),
-    (_parsed(clauses=[_clause(1, "unmet")]), []),
-    (_parsed(clauses=[_clause(1, "partial", downgraded=["x"])]), []),
-    (_parsed(test_honesty=[dict(file="tests/t.py", line=1, severity="blocking", problem="p")]), []),
-    (_parsed(seams_unverified=[dict(seam="s", testable_before_landing=True)]), []),
-    (_parsed(seams_unverified=[dict(seam="s", testable_before_landing=False)]), []),
-    (_parsed(), [{"file": "tests/t.py", "line": 1, "problem": "`or True`", "severity": "blocking"}]),
-    (_parsed(premise="unsound", summary="no"), []),
-])
-def test_an_object_without_the_fields_decides_the_same_under_both_policies(parsed, pre, attempt):
-    """Every calibration case and every backfill row predates the fields.
-    Under `grader` they must come out exactly as under `table` — on attempt
-    1, where the table blocks a testable seam, and on attempt 2, where it
-    advises — so the flip changes nothing about the past, only what the
-    grader is asked from now on. It held at attempt 1 only until the seam
-    rule honoured `seams_block`.
-    """
-    import copy
-    a = RV.decide(copy.deepcopy(parsed), list(pre), mode="table", attempt=attempt, policy="first")
-    b = RV.decide(copy.deepcopy(parsed), list(pre), mode="grader", attempt=attempt, policy="first")
-    assert a[0] == b[0], (a, b)
-
-
-def test_decide_dispatches_on_the_configured_policy(monkeypatch):
-    monkeypatch.setattr(RV, "review_policy", lambda: "grader")
-    parsed = _parsed(seams_unverified=[_seam(actionable=False)])
-    assert RV.decide(parsed, [])[0] == "pass"
-    monkeypatch.setattr(RV, "review_policy", lambda: "table")
-    assert RV.decide(parsed, [], attempt=1)[0] == "retry"
-
-
-def test_the_shipped_policy_is_grader():
-    """Flipped 2026-09-12 after the calibration suite scored the two policies
-    equal on identical grader output. The `table` code stays for a revert."""
+def test_the_shipped_seams_policy_is_never():
+    """2026-09-24: over the week before, 72 of 130 review send-backs had every
+    clause `met` and were refused only on an unverified seam on attempt 1. The
+    seam is recorded on the item as a post-landing check instead. The code
+    default stays `first` so `redecide --seams-policy` replays history, and
+    the retired `review.policy` key is gone from config."""
     from app.config import CONFIG
-    assert ((CONFIG.get("automod") or {}).get("review") or {}).get("policy") == "grader"
+    review = (CONFIG.get("automod") or {}).get("review") or {}
+    assert review.get("seams_block") == "never"
+    assert "policy" not in review
+    assert RV.seams_policy() == "never"
+
+
+def test_under_never_a_testable_seam_on_attempt_one_advises():
+    kind, findings = RV.decide(_parsed(clauses=[_clause(1, "met")], seams_unverified=[_seam()]),
+                               [], attempt=1, policy="never")
+    assert kind == "pass"
+    assert "seam unverified (advisory under seams_block=never): loopback POST" in findings
+    assert "not refusing again" not in findings
+    # The rung-level half — the pass's `advisory_seams` and the item's
+    # `post_landing_seams` — is `tests/test_review_transport.py::
+    # test_under_the_shipped_never_a_testable_seam_rides_the_pass_to_the_item`.
+
+
+@pytest.mark.parametrize("attempt,seam_kind", [(1, "retry"), (2, "pass")])
+@pytest.mark.parametrize("parsed,pre,expected", [
+    (_parsed(), [], "pass"),
+    (_parsed(clauses=[_clause(1, "met")]), [], "pass"),
+    (_parsed(clauses=[_clause(1, "unmet")]), [], "retry"),
+    (_parsed(clauses=[_clause(1, "partial", downgraded=["x"])]), [], "retry"),
+    (_parsed(test_honesty=[dict(file="tests/t.py", line=1, severity="blocking", problem="p")]), [],
+     "retry"),
+    (_parsed(seams_unverified=[dict(seam="s", testable_before_landing=True)]), [], "SEAM"),
+    (_parsed(seams_unverified=[dict(seam="s", testable_before_landing=False)]), [], "pass"),
+    (_parsed(), [{"file": "tests/t.py", "line": 1, "problem": "`or True`", "severity": "blocking"}],
+     "retry"),
+    (_parsed(premise="unsound", summary="no"), [], "unsound"),
+])
+def test_an_object_without_the_fields_decides_as_it_always_did(parsed, pre, expected,
+                                                               attempt, seam_kind):
+    """Every calibration case and every backfill row predates the two
+    judgment fields. Read without them a finding is blocking, actionable and
+    new, so under `first` these decide exactly as the retired table did — a
+    testable seam refuses on attempt 1 and advises on attempt 2 — and
+    `redecide --seams-policy first` replays the past unchanged."""
+    import copy
+    want = seam_kind if expected == "SEAM" else expected
+    assert RV.decide(copy.deepcopy(parsed), list(pre), attempt=attempt,
+                     policy="first")[0] == want
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +324,7 @@ def _write_ledger(path, events):
     path.write_text("".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
 
 
-def test_redecide_replays_recorded_reviews_under_todays_rules(tmp_path):
+def test_redecide_replays_recorded_reviews_under_todays_rules(tmp_path, monkeypatch):
     """The acceptance measurement for the landing-pace change: re-decide the
     grader era's refusals on the output the grader actually recorded, with no
     model in the loop."""
@@ -354,7 +359,7 @@ def test_redecide_replays_recorded_reviews_under_todays_rules(tmp_path):
          "clauses": [{"clause": 1, "verdict": "met"}], "test_honesty": [], "seams_unverified": []},
         {"event": "review", "ok": False, "ts": 1004.0, "round_id": "SM_e", "error": "grader down"},
     ])
-    out = RT.redecide(since_ts=500.0, ledger=ledger, policy="grader", seams_policy="first")
+    out = RT.redecide(since_ts=500.0, ledger=ledger, seams_policy="first")
     got = {r["round_id"]: (r["recorded"], r["redecided"]) for r in out["rows"]}
     assert got == {"SM_a": ("retry", "pass"), "SM_b": ("retry", "pass"),
                    "SM_c": ("retry", "retry"), "SM_d": ("pass", "pass")}
@@ -362,9 +367,19 @@ def test_redecide_replays_recorded_reviews_under_todays_rules(tmp_path):
     assert (out["passes"], out["passes_now_refused"]) == (1, 0)
     assert out["approximated_clauses"] == 1 and "approximated" in out["note"]
     # Without the approximation, the suite-level clause stays what Python recorded.
-    strict = RT.redecide(since_ts=500.0, ledger=ledger, policy="grader", seams_policy="first",
+    strict = RT.redecide(since_ts=500.0, ledger=ledger, seams_policy="first",
                          approximate=False)
     assert {r["round_id"]: r["redecided"] for r in strict["rows"]}["SM_b"] == "retry"
+    # The shipped `never` replays the seam-only refusal as a pass, and the CLI
+    # flag reaches the same argument.
+    never = RT.redecide(since_ts=500.0, ledger=ledger, seams_policy="never")
+    assert {r["round_id"]: r["redecided"] for r in never["rows"]}["SM_c"] == "pass"
+    seen = {}
+    monkeypatch.setattr(RT, "redecide", lambda **kw: seen.update(kw) or {
+        "rows": [], "seams_policy": kw["seams_policy"], "refusals": 0, "refusals_now_pass": 0,
+        "passes": 0, "passes_now_refused": 0, "approximated_clauses": 0, "note": ""})
+    assert RT.main(["redecide", "--since", "2026-09-01", "--seams-policy", "first"]) == 0
+    assert seen["seams_policy"] == "first"
 
 
 def test_redecide_reads_full_seam_judgments_when_the_event_carries_them():

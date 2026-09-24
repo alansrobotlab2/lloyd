@@ -131,8 +131,7 @@ _ADDED_TEST_DENIAL_RX = re.compile(
     r"|\b(?:not|absent)\s+in\s+this\s+diff'?s\s+tests?\b", re.I)
 
 # Two judgments the grader makes about each finding, and the whole of what
-# replaces `decide()`'s policy table under `automod.review.policy: grader`.
-# The table grew a row per incident — seams first/always/never, precheck
+# replaced `decide()`'s old policy table (retired 2026-09-24). The table grew a row per incident — seams first/always/never, precheck
 # severities, amendment exemptions, attempts by head then patch-id — and each
 # row answered one of these two questions on the grader's behalf, from
 # outside the evidence. The grader is holding the diff, the clauses, the
@@ -143,7 +142,8 @@ ACTIONABLE_DESC = (
     "production can answer it (live traffic, a real pool tick, a deployment "
     "shape) or if it is advice rather than a defect. false always rides into the "
     "landing report instead of refusing; true refuses only a `blocking` test-honesty "
-    "entry or a testable seam — an `advisory` entry never refuses."
+    "entry — an `advisory` entry never refuses, and a seam is recorded on the item "
+    "as a post-landing check."
 )
 SAME_AS_PRIOR_DESC = (
     "true if a PRIOR REVIEW of this item (shown to you — this round's or an earlier "
@@ -232,8 +232,8 @@ REVIEW_SCHEMA: dict = {
             "additionalProperties": False,
         }, "description": ("Process boundaries the change crosses (a loopback POST, `_meta` "
                            "over MCP, a Task subagent, a restart) for which no test crosses the "
-                           "seam. Empty when none. Only a testable seam refuses the round; the "
-                           "rest are recorded for the item.")},
+                           "seam. Empty when none. Each one is recorded on the item as a "
+                           "post-landing check.")},
         "amendments_ok": {"type": "boolean",
                           "description": ("true unless an <amendments> block was given and "
                                           "an amended clause weakens what the item asked "
@@ -633,8 +633,8 @@ the test that crosses it. Any seam with no such test goes in \
 `seams_unverified`, with `testable_before_landing`: true when a test in this \
 repo could cross it now (a test server on loopback, the in-process aggregator, \
 a subprocess), false when only production can — a real pool tick, live \
-traffic, a deployment shape. Only a testable seam refuses the round; an \
-untestable one is recorded for the item as a post-landing check. The code \
+traffic, a deployment shape. A seam you list, testable or not, is recorded \
+on the item as a post-landing check. The code \
 graph is blind across these; a grep is not a test. Each seam also carries \
 `actionable_in_round` and `same_as_prior`, as for test honesty.
 
@@ -928,7 +928,9 @@ def grade_vault(*, item_id: int, paths: list[str], diff: str,
 # The case this exists for: round 866-a's grader hit a 503 because ANOTHER
 # round was landing at that moment, the rung recorded `external`, and the
 # turn ended without ever re-gating — reaped 30 minutes later, one attempt
-# spent on a collision with a sibling.
+# spent on a collision with a sibling. This constant is the setting: the
+# `automod.review.unavailable_wait_s` key config.yaml carried was read by
+# nothing and was deleted on 2026-09-24.
 DEFAULT_UNAVAILABLE_WAIT_S = 420.0
 _RETRY_BACKOFF_S = (15.0, 30.0, 60.0)
 _RETRY_AFTER_CAP_S = 60.0
@@ -1058,7 +1060,9 @@ def _grade_once(report: dict, *, backend: str, payload_prompt: str, session_id: 
 # Roots tried after the worktree misses. A code round's evidence can
 # legitimately be a vault file it read — the prompt forbade `~` while the
 # parser already accepted it, and five `met`s were downgraded on 2026-09-11
-# for paths that were real.
+# for paths that were real. This constant is the setting: the
+# `automod.review.evidence_roots` key config.yaml carried was read by nothing
+# and was deleted on 2026-09-24.
 REVIEW_EVIDENCE_ROOTS: tuple[Path, ...] = (Path("~/obsidian").expanduser(),)
 
 
@@ -1564,7 +1568,7 @@ def _prior_reviews_block(prior: list[dict]) -> str:
 def decide_by_grader(parsed: dict, prechecks: list[dict],
                      amendments: list[dict] | None = None, *, attempt: int = 1,
                      seams_policy: str = "first") -> tuple[str, str]:
-    """`(kind, findings)` with the grader's own judgments deciding, not a table.
+    """`(kind, findings)` with the grader's own judgments deciding.
 
     An unmet/partial clause refuses. A test-honesty finding refuses only when
     the grader called it `blocking` AND fixable inside the round; a seam only
@@ -1584,8 +1588,10 @@ def decide_by_grader(parsed: dict, prechecks: list[dict],
 
     **Seams keep the attempt rule.** `seams_block` was dead code here, so a
     testable seam refused every attempt and a round could only abort on it.
-    An object without the judgment fields reads as blocking/actionable/new,
-    so it decides exactly as under the table at any attempt.
+    An object without the judgment fields reads as blocking/actionable/new.
+    Shipped policy is `never` (2026-09-24), so a seam is always advisory and
+    rides to the item as a post-landing check; `first`/`always` stay so
+    `review_tools redecide --seams-policy` can replay history.
     """
     if parsed["premise"] == "unsound":
         return "unsound", parsed["summary"] or "the grader judged the premise unsound"
@@ -1598,22 +1604,30 @@ def decide_by_grader(parsed: dict, prechecks: list[dict],
     for c in parsed["clauses"]:
         if c["verdict"] == "unsatisfiable":
             blocking.append(f"clause {c['clause']} unsatisfiable as written: {c['note'] or '(no note)'} "
-                            f"— amend it with automod_amend_clause and gate again")
+                            f"— amend it with automod_amend_clause(round_id, clause={c['clause']}, "
+                            f"text=…, reason=…) to the nearest clause that is satisfiable and "
+                            f"still what the item asked for, then gate again; the next review "
+                            f"ratifies or refuses the amendment")
         elif c["verdict"] == "post_landing":
+            # Advisory at the gate: the mechanism is in the diff and pinned,
+            # and the claim itself waits for a human after the landing.
             advisory.append(f"clause {c['clause']} observable only after landing: "
-                            f"{c['note'] or '(no note)'}")
+                            f"{c['note'] or '(no note)'} — the item closes carrying the "
+                            f"needs-human tag until someone confirms it")
         elif c["verdict"] != "met":
             tag = f" (downgraded: {'; '.join(c['downgraded'])})" if c.get("downgraded") else ""
             blocking.append(f"clause {c['clause']} {c['verdict']}{tag}: {c['note'] or '(no note)'}")
     for h in prechecks:
         # A precheck is a fact the pattern found; severity is its only policy.
-        (advisory if h.get("severity") == "advisory" else blocking).append(
-            f"test honesty {h['file']}:{h['line']}: {h['problem']}")
+        if h.get("severity") == "advisory":
+            advisory.append(f"advisory {h['file']}:{h['line']}: {h['problem']}")
+        else:
+            blocking.append(f"test honesty {h['file']}:{h['line']}: {h['problem']}")
     for h in parsed["test_honesty"]:
         rep = " [repeat]" if h.get("same_as_prior") else ""
         where = f"{h['file']}:{h['line']}: {h['problem']}{rep}"
         if h.get("severity", "blocking") != "blocking":
-            # The table's spelling, so a finding reads the same under either policy.
+            # One spelling for every advisory honesty finding, precheck or grader.
             advisory.append(f"advisory {where}")
         elif not h.get("actionable_in_round", True):
             advisory.append(f"test honesty {where} (blocking, but not fixable in this round)")
@@ -1625,7 +1639,7 @@ def decide_by_grader(parsed: dict, prechecks: list[dict],
         s = s if isinstance(s, dict) else {}
         # A seam only production can cross is not actionable inside a round
         # whatever the grader wrote in the other field: `testable_before_landing`
-        # is a fact about the seam, and the table read it the same way.
+        # is a fact about the seam.
         if not s.get("testable_before_landing", True):
             advisory.append(f"post-landing seam (not refusing): {text}")
         elif s.get("same_as_prior"):
@@ -1633,7 +1647,10 @@ def decide_by_grader(parsed: dict, prechecks: list[dict],
         elif not s.get("actionable_in_round", True):
             advisory.append(f"seam unverified (not actionable in this round): {text}")
         elif not blocks_this_attempt:
-            advisory.append(f"seam unverified (attempt {attempt}, not refusing again): {text}")
+            if (seams_policy or "").strip().lower() == "never":
+                advisory.append(f"seam unverified (advisory under seams_block=never): {text}")
+            else:
+                advisory.append(f"seam unverified (attempt {attempt}, not refusing again): {text}")
         else:
             blocking.append(f"seam unverified: {text}")
     if not blocking:
@@ -1670,84 +1687,30 @@ def seams_block(policy: str, attempt: int) -> bool:
     return int(attempt or 1) <= 1
 
 
-def review_policy() -> str:
-    """`automod.review.policy`: `table` (the incident-by-incident rules) or
-    `grader` (the grader's own actionable/repeat judgments). Default `table`
-    until the calibration suite says otherwise."""
+def seams_policy() -> str:
+    """`automod.review.seams_block` from config, else `first`. Never raises."""
     try:
         from app.config import CONFIG
-        return str(((CONFIG.get("automod") or {}).get("review") or {}).get("policy", "table"))
+        return str(((CONFIG.get("automod") or {}).get("review") or {})
+                   .get("seams_block", "first"))
     except Exception:
-        return "table"
+        return "first"
 
 
 def decide(parsed: dict, prechecks: list[dict],
            amendments: list[dict] | None = None,
-           *, attempt: int = 1, policy: str = "first",
-           mode: str | None = None) -> tuple[str, str]:
-    """`(kind, findings)`: kind is `pass`, `retry` or `unsound`.
+           *, attempt: int = 1, policy: str = "first") -> tuple[str, str]:
+    """`(kind, findings)`: kind is `pass`, `retry` or `unsound`, decided by
+    the grader's own judgments (`decide_by_grader`). `policy` is the
+    `seams_block` setting.
 
-    Unsound is the grader's call alone. Everything else that is not clean is
-    a retry: an unmet or partial clause, any honesty finding from either
-    half, an unverified seam. Seams are advisory-to-blocking on purpose —
-    #544's three worst defects were all cross-process seams with no test.
-
-    An `unsatisfiable` clause is a retry whose remedy is named — amend the
-    clause — and a refused amendment is a retry that says the clause is
-    back to what it was.
+    There was a second decision here until 2026-09-24: `automod.review.policy:
+    table`, the incident-by-incident rules the grader policy replaced on
+    2026-09-12. Production had not run it since; it survived only as the
+    fixture most review tests ran under, and was retired on Alan's ruling.
     """
-    if (mode or review_policy()) == "grader":
-        # The same three inputs the table reads: a refused amendment is a
-        # refusal under either policy, and the seam rule keys on the attempt.
-        return decide_by_grader(parsed, prechecks, amendments,
-                                attempt=attempt, seams_policy=policy)
-    if parsed["premise"] == "unsound":
-        return "unsound", parsed["summary"] or "the grader judged the premise unsound"
-    lines: list[str] = []
-    if amendments and not parsed.get("amendments_ok", True):
-        idx = ", ".join(str(a.get("clause")) for a in amendments)
-        lines.append(f"amendment of clause(s) {idx} refused (the clause text is restored): "
-                     f"{parsed.get('amendments_note') or '(no note)'}")
-    advisory: list[str] = []
-    for c in parsed["clauses"]:
-        if c["verdict"] == "unsatisfiable":
-            lines.append(f"clause {c['clause']} unsatisfiable as written: {c['note'] or '(no note)'} "
-                         f"— amend it with automod_amend_clause(round_id, clause={c['clause']}, "
-                         f"text=…, reason=…) to the nearest clause that is satisfiable and "
-                         f"still what the item asked for, then gate again; the next review "
-                         f"ratifies or refuses the amendment")
-        elif c["verdict"] == "post_landing":
-            # Advisory at the gate: the mechanism is in the diff and pinned,
-            # and the claim itself waits for a human after the landing.
-            advisory.append(
-                f"clause {c['clause']} observable only after landing: "
-                f"{c['note'] or '(no note)'} — the item closes carrying the "
-                f"needs-human tag until someone confirms it")
-        elif c["verdict"] != "met":
-            tag = f" (downgraded: {'; '.join(c['downgraded'])})" if c.get("downgraded") else ""
-            lines.append(f"clause {c['clause']} {c['verdict']}{tag}: {c['note'] or '(no note)'}")
-    for h in prechecks + parsed["test_honesty"]:
-        if h.get("severity", "blocking") == "advisory":
-            advisory.append(f"advisory {h['file']}:{h['line']}: {h['problem']}")
-            continue
-        lines.append(f"test honesty {h['file']}:{h['line']}: {h['problem']}")
-    blocking_seams = seams_block(policy, attempt)
-    for s in parsed["seams_unverified"]:
-        text = s["seam"] if isinstance(s, dict) else str(s)
-        if isinstance(s, dict) and not s.get("testable_before_landing", True):
-            advisory.append(f"post-landing seam (not refusing): {text}")
-            continue
-        if not blocking_seams:
-            advisory.append(
-                f"seam unverified (attempt {attempt}, not refusing again): {text}")
-            continue
-        lines.append(f"seam unverified: {text}")
-    if not lines:
-        summary = parsed["summary"]
-        if advisory:
-            summary = (summary + " — " if summary else "") + "; ".join(advisory)
-        return "pass", summary
-    return "retry", "; ".join(lines + advisory)
+    return decide_by_grader(parsed, prechecks, amendments,
+                            attempt=attempt, seams_policy=policy)
 
 
 def summarize_clauses(parsed: dict) -> str:

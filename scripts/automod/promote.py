@@ -806,13 +806,6 @@ def _land_failed(round_id: str, why: str, *, external: bool, **extra) -> None:
     raise PromoteError(why)
 
 
-# How many times one landing will chase a moving `main`. Each chase is a full
-# gate run — minutes — and the third miss means someone is committing faster
-# than the loop can retest, which is a reason to stop and say so, not to keep
-# up. The round is left rebased and gated; the reaper closes it, the branch is
-# kept, and the item comes back.
-MAX_REBASES_PER_LANDING = 2
-
 # The chamber (`automod.chamber`). The next round may run its turn and gate
 # while the previous promotion is under observation; only the landing needs
 # the window closed. So a landing that finds a promotion observed waits for
