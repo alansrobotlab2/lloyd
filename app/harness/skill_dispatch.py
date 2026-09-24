@@ -332,6 +332,23 @@ def reset_stats() -> None:
 
 _SKILL_TAG_RE = re.compile(r'<skill(?:-dispatch)? name="([^"]+)"')
 
+#: How a skill body reached the turn, as recorded on that turn's usage row
+#: (#783). `prefetch` is a full body `_format_context` injects at turn start
+#: (`prefetch.py:933`); `prefetch_excerpt` is its `excerpt="true"` variant
+#: (`prefetch.py:941`) — one line of a protocol is not the protocol, so they are
+#: two routes and never one count. `dispatch` and `skills_read` name the routes
+#: that have no writer yet: dispatch is default-off (`enabled()` reads a
+#: `harness.skill_dispatch` key `config.yaml` does not carry) and `skills_read`
+#: is an MCP tool call, so recording it means instrumenting the tool path. They
+#: are declared here so the first of those writers has one vocabulary to write.
+ROUTE_PREFETCH = "prefetch"
+ROUTE_PREFETCH_EXCERPT = "prefetch_excerpt"
+ROUTE_DISPATCH = "dispatch"
+ROUTE_SKILLS_READ = "skills_read"
+
+#: Marks the runner-up render, which carries an excerpt in place of a body.
+_EXCERPT_ATTR = 'excerpt="true"'
+
 #: Reads `dispatch_marker` back out of a tool_result body. Deliberately NOT
 #: `_SKILL_TAG_RE`: that one matches the turn-start `<skill name=…>` tag as well,
 #: because the deliverer has to defer to a body that already arrived. A report of
@@ -355,17 +372,51 @@ def delivered_skill_names(text: str) -> set[str]:
     return set(_DISPATCH_TAG_RE.findall(text))
 
 
+def skill_deliveries(context_text: str) -> list[dict[str, str]]:
+    """Every skill body present in this text, with the route that put it there.
+
+    One walk of the one skill-tag regex: `_SKILL_TAG_RE` decides what counts as a
+    delivered skill and which skill it is — the same decision the IV de-duplication
+    makes — and the route is read off that match's own tag. A second regex to spot
+    `excerpt="true"` is the thing deliberately not done: two regexes over the same
+    markup can fall out of step, and the failure is a full body billed as an
+    excerpt, which is exactly the mislabel this column exists to remove.
+
+    Deduplicated on (name, route), because the numbers attached to a delivery are
+    the *turn's* tokens: a skill rendered twice in one turn is one entry, not two
+    requests. A `<skill-dispatch …>` marker matched by the same tag regex is
+    attributed to `dispatch`, which is what it is.
+    """
+    if not context_text:
+        return []
+    deliveries: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for match in _SKILL_TAG_RE.finditer(context_text):
+        tag_end = context_text.find(">", match.start())
+        tag = (context_text[match.start():] if tag_end < 0
+               else context_text[match.start():tag_end])
+        route = (ROUTE_DISPATCH if tag.startswith("<skill-dispatch")
+                 else ROUTE_PREFETCH_EXCERPT if _EXCERPT_ATTR in tag
+                 else ROUTE_PREFETCH)
+        key = (match.group(1), route)
+        if key in seen:
+            continue
+        seen.add(key)
+        deliveries.append({"name": key[0], "route": route})
+    return deliveries
+
+
 def injected_skill_names(context_text: str) -> set[str]:
     """Skills the turn-start prefetch already injected into this turn.
 
     Parses the `<skill name="...">` blocks `_format_context` renders
-    (`prefetch.py:895/:903`) rather than reaching into prefetch's internals, so
+    (`prefetch.py:933/:941`) rather than reaching into prefetch's internals, so
     this keeps working if the injector changes shape and cannot accidentally
-    diverge from what actually landed in the prompt.
+    diverge from what actually landed in the prompt. It is the name-only
+    projection of `skill_deliveries` — one parser, and the usage row and the IV
+    guard cannot disagree about which skills were in front of the model.
     """
-    if not context_text:
-        return set()
-    return set(_SKILL_TAG_RE.findall(context_text))
+    return {delivery["name"] for delivery in skill_deliveries(context_text)}
 
 
 # ---------------------------------------------------------------------------

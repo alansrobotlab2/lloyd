@@ -5,10 +5,11 @@ Records per-request token counts and provides aggregation queries
 for the Usage dashboard (4-hour window, 7-day window, time-series).
 """
 
+import json
 import sqlite3
 import threading
 from datetime import datetime, timedelta
-from typing import Any, Optional
+from typing import Any, Mapping, Optional, Sequence
 
 from app.paths import USAGE_DB
 
@@ -104,6 +105,53 @@ def _init_schema(conn: sqlite3.Connection):
     for col in ("reprefill_tokens", "prefix_misses"):
         if col not in usage_cols:
             conn.execute(f"ALTER TABLE usage ADD COLUMN {col} INTEGER")
+    # The skill dimension (#783): a JSON array of {"name", "route"} objects
+    # naming the skill bodies that were in front of the model for this turn and
+    # how each got there. Additive, on the same path as the prefix-miss pair, so
+    # a live `usage.db` keeps every row and gains NULLs. The live store held
+    # 3,338 rows of real traffic at #783's triage (2026-09-18), so a recreated
+    # table would have thrown away the dashboard's whole history. NULL means "no
+    # skill recorded for this turn", which covers both a turn that delivered none
+    # and every row written before this column; `skill_breakdown` leaves those
+    # rows out rather than reading them as a skill that cost nothing.
+    if "skills" not in usage_cols:
+        conn.execute("ALTER TABLE usage ADD COLUMN skills TEXT")
+
+
+def _skills_column(
+    skills: Optional[Sequence[Mapping[str, Any]]],
+) -> Optional[str]:
+    """Normalise a turn's skill deliveries into the stored JSON, or None.
+
+    Accepts the dicts `skill_dispatch.skill_deliveries` produces (or
+    `(name, route)` pairs) and keeps only entries that name a skill. Nothing here
+    raises: a row's skill dimension is accounting attached to a token count, and
+    the turn writers wrap the insert in a `try` whose failure would drop the token
+    row with it. An empty list is stored as NULL, so "no skill" and "not recorded"
+    stay the same value and neither is a fake zero.
+
+    A bare string is refused, not split: `str` iterates its own characters, so the
+    likeliest caller mistake — handing over `injected_skill_names()`'s set of
+    names — would otherwise store `{"name": "a", "route": "l"}` for a skill called
+    "alpha". A nameless entry and an entry with no route are both kept as they
+    are, because "a skill, route unknown" is a fact and not a corruption.
+    """
+    entries: list[dict[str, str]] = []
+    for item in skills or ():
+        if isinstance(item, Mapping):
+            name = str(item.get("name") or "")
+            route = str(item.get("route") or "")
+        elif isinstance(item, (tuple, list)) and item and isinstance(item[0], str):
+            name = item[0]
+            route = str(item[1]) if len(item) > 1 else ""
+        else:
+            continue
+        if not name:
+            continue
+        entries.append({"name": name, "route": route})
+    if not entries:
+        return None
+    return json.dumps(entries, sort_keys=True)
 
 
 def record_usage(
@@ -119,12 +167,18 @@ def record_usage(
     num_turns: Optional[int] = None,
     reprefill_tokens: Optional[int] = None,
     prefix_misses: Optional[int] = None,
+    skills: Optional[Sequence[Mapping[str, Any]]] = None,
 ):
     """Insert a single usage record.
 
     `reprefill_tokens` / `prefix_misses` are the turn's prefix-cache misses
     (`app/prefix_miss.py`). None is stored as NULL and means unmeasured, so
     a zero can never stand in for "could not tell".
+
+    `skills` is the turn's skill deliveries — `[{"name", "route"}, ...]`, the
+    output of `app.harness.skill_dispatch.skill_deliveries` over the text the
+    turn was prompted with (#783). Nothing here decides which skills were
+    delivered; the store only records what the turn's own writer saw.
     """
     conn = _conn()
     conn.execute(
@@ -132,12 +186,12 @@ def record_usage(
            (session_id, model, input_tokens, output_tokens,
             cache_create, cache_read, cost_usd,
             duration_ms, duration_api_ms, num_turns,
-            reprefill_tokens, prefix_misses)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            reprefill_tokens, prefix_misses, skills)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (session_id, model, input_tokens, output_tokens,
          cache_create, cache_read, cost_usd,
          duration_ms, duration_api_ms, num_turns,
-         reprefill_tokens, prefix_misses),
+         reprefill_tokens, prefix_misses, _skills_column(skills)),
     )
     conn.commit()
 
@@ -300,6 +354,82 @@ def model_breakdown(
         params,
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def skill_breakdown(
+    hours: Optional[float] = None,
+    days: Optional[float] = None,
+    exclude_models: Optional[list[str]] = None,
+) -> list[dict]:
+    """Per skill-and-route token breakdown for a time window (#783).
+
+    `model_breakdown`'s shape over the same rows, the same window and the same
+    exclusions, with the dimension flipped from the model to the skill body that
+    was in front of it: one row per (skill, route) that at least one turn in the
+    window named. A turn naming two skills gives its full token counts to both
+    rows — this is attribution ("what was being spent while skill X was in the
+    prompt"), not a partition of the window's total, and `requests` counts the
+    turns that named the skill.
+
+    No dollar figure, on purpose: the write sites put `0.0` in `cost_usd` on
+    every row, so a per-skill cost would be a column of zeros dressed up as a
+    cost. Tokens are the only magnitude this store actually carries.
+
+    Rows whose `skills` is NULL are absent, not zeroed: "no skill delivered" and
+    "written before the column" are the same stored value, and neither is
+    evidence about a skill. The explosion runs in Python over the window's rows
+    rather than through SQLite's `json_each`, which is a build option — and a
+    window is hundreds of rows, not millions, so portability costs nothing.
+    """
+    conn = _conn()
+    where: list[str] = []
+    params: list = []
+    if hours or days:
+        where.append("ts >= ?")
+        params.append(_since(hours=hours, days=days))
+    if exclude_models:
+        placeholders = ",".join("?" for _ in exclude_models)
+        where.append(f"model NOT IN ({placeholders})")
+        params.extend(exclude_models)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    rows = conn.execute(
+        f"""SELECT skills, input_tokens, output_tokens,
+                   cache_create, cache_read
+            FROM usage{where_sql}""",
+        params,
+    ).fetchall()
+
+    totals: dict[tuple[str, str], dict[str, int]] = {}
+    for row in rows:
+        raw = row["skills"]
+        if not raw:
+            continue
+        try:
+            deliveries = json.loads(raw)
+        except (ValueError, TypeError):
+            continue                      # not written by `record_usage`
+        if not isinstance(deliveries, list):
+            continue
+        counted: set[tuple[str, str]] = set()
+        for delivery in deliveries:
+            if not isinstance(delivery, Mapping):
+                continue
+            name = str(delivery.get("name") or "")
+            route = str(delivery.get("route") or "")
+            if not name or (name, route) in counted:
+                continue                  # a doubled pair would double the turn
+            counted.add((name, route))
+            bucket = totals.setdefault((name, route), {
+                "skill": name, "route": route, "requests": 0,
+                "input_tokens": 0, "output_tokens": 0,
+                "cache_create": 0, "cache_read": 0,
+            })
+            bucket["requests"] += 1
+            for column in ("input_tokens", "output_tokens",
+                           "cache_create", "cache_read"):
+                bucket[column] += int(row[column] or 0)
+    return sorted(totals.values(),
+                  key=lambda r: (-r["input_tokens"], r["skill"], r["route"]))
 
 
 def recent_requests(limit: int = 20) -> list[dict]:

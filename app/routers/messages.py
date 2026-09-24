@@ -38,7 +38,7 @@ from app.harness import (
     install_skill_dispatch_hook,
 )
 from app.harness.context_meter import ContextMeter, context_window_for
-from app.harness.skill_dispatch import injected_skill_names
+from app.harness.skill_dispatch import injected_skill_names, skill_deliveries
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
     SessionTurn,
@@ -1259,6 +1259,10 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         num_turns=num_turns_val,
                         reprefill_tokens=miss_summary["reprefill_tokens"],
                         prefix_misses=miss_summary["prefix_misses"],
+                        # #783: which skill bodies this turn was prompted with.
+                        # The parser is the one the IV guard uses, so the usage
+                        # row and the guard cannot disagree about the turn.
+                        skills=skill_deliveries(prefetched_text),
                     )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")
@@ -1514,6 +1518,11 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                             output_tokens=stream_stats["output_tokens"],
                             cache_create=stream_stats["cache_create"],
                             cache_read=stream_stats["cache_read"],
+                            # The turn died but its prompt was real: the tokens
+                            # were spent with these skills in front of the model
+                            # (#783), and a half-finished turn is the turn a
+                            # per-skill cost would otherwise understate.
+                            skills=skill_deliveries(prefetched_text),
                             **miss_tracker.summary(),
                         )
                 except Exception as ue:
@@ -2390,6 +2399,10 @@ async def post_message(request: Request):
                         num_turns=evt.get("num_turns"),
                         reprefill_tokens=turn_stats["reprefill_tokens"],
                         prefix_misses=turn_stats["prefix_misses"],
+                        # The same dimension the streaming path writes, so a
+                        # per-skill cost is not a number only one of the two
+                        # chat paths can produce (#783).
+                        skills=skill_deliveries(prefetched_text),
                     )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")

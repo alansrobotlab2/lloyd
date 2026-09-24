@@ -891,6 +891,13 @@ def _usage() -> dict[str, Any]:
         "last_7d": usage_store.summary(days=7),
         "daily": usage_store.history_daily(days=7),
         "by_model_24h": usage_store.model_breakdown(hours=24),
+        # #783: the same 24 h of turns cut by the skill body that was in front
+        # of the model and the route that delivered it. Token-denominated —
+        # `cost_usd` is 0.0 on every row, so a per-skill dollar figure would
+        # read 0 for every skill. Payload-only: the card that renders
+        # `by_model_24h` does not render this yet, and `web/src/api.ts:2014`
+        # types only what it draws.
+        "by_skill_24h": usage_store.skill_breakdown(hours=24),
         # Prefix-cache misses on long re-admissions (app/prefix_miss.py) —
         # the 09-09 stall's signature, counted from the turns' own usage rows.
         "prefix_misses_1h": usage_store.prefix_miss_summary(hours=1),

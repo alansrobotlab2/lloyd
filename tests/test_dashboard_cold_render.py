@@ -200,3 +200,44 @@ async def test_the_warm_cycle_is_an_order_of_magnitude_cheaper_than_cold(monkeyp
         f"the second cycle, with every section cache warm, took {warm:.2f}s. The "
         f"ratio above can be satisfied by a machine where cold and warm are both "
         f"slow; this is the absolute half of the same claim.")
+
+
+async def test_the_usage_section_publishes_by_skill_24h_beside_by_model_24h():
+    """#783 clause 4: the per-skill breakdown reaches the payload a browser
+    decodes, and the model breakdown it sits beside is untouched.
+
+    Read through the real route handler, not by calling `_usage()` directly: the
+    section is serialised by `_gather` on a worker thread (`dashboard.py:937`),
+    so this is the one assertion that catches a value the JSON encoder refuses
+    and a block that never leaves the process. `by_model_24h`'s keys are pinned
+    literally, because the frontend types it (`web/src/api.ts:2014`) and the
+    clause is that its shape and rows do not change.
+    """
+    import usage_store
+    from app.harness import skill_dispatch as sd
+
+    usage_store.record_usage(
+        session_id="dash-skill", model="primary", input_tokens=1200,
+        output_tokens=60, cache_create=10, cache_read=900,
+        skills=sd.skill_deliveries(
+            '<skill name="youtube-transcript" score="4.1" excerpt="true">\n'
+            "excerpt\n</skill>"),
+    )
+
+    payload = await _cold_cycle()
+    usage = payload["usage"]
+    assert "error" not in usage, f"the usage section errored out: {usage}"
+
+    assert usage["by_model_24h"] == [
+        {"model": "primary", "requests": 1, "input_tokens": 1200,
+         "output_tokens": 60, "cache_create": 10, "cache_read": 900,
+         "cost_usd": 0.0},
+    ], usage["by_model_24h"]
+
+    assert usage["by_skill_24h"] == [
+        {"skill": "youtube-transcript", "route": "prefetch_excerpt",
+         "requests": 1, "input_tokens": 1200, "output_tokens": 60,
+         "cache_create": 10, "cache_read": 900},
+    ], usage["by_skill_24h"]
+    print("usage section: by_model_24h 1 row, by_skill_24h 1 row "
+          "(youtube-transcript/prefetch_excerpt)")
