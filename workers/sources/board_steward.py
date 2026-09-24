@@ -416,9 +416,12 @@ def agreement(moves: list[dict], expected: dict[int, tuple], current: dict[int, 
     agree = [i for i, s in proposed.items() if i in expected and expected[i][0] == s]
     # Two different things the first dry-run counted as one. `disagree` is
     # the machine saying A and the steward B — a real conflict. `no_opinion`
-    # is the machine deliberately leaving an item where it is (the stranded
-    # landings it parks `in_progress` for a human) and the steward having a
-    # view; that is not the steward being wrong, it is the machine abstaining.
+    # is an item the ledger has no view on at all — never triaged, never
+    # landed, not parked by the `up_next`→`draft` rule, so `desired_statuses`
+    # returns no row for it — and the steward having a view; that is not the
+    # steward being wrong, it is the machine abstaining. (It used to describe
+    # stranded landings parked `in_progress`; 55789b6 removed that branch —
+    # `in_progress` now means a round is in flight or under observation.)
     disagree = [i for i, s in proposed.items() if i in expected and expected[i][0] != s]
     no_opinion = [i for i, s in proposed.items() if i not in expected]
     missed = [i for i, want in expected.items()

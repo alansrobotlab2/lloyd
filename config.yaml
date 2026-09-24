@@ -1248,12 +1248,16 @@ workers:
     # `implement_outcomes` and its caps, quarantine, expiry, the three-tier
     # `select_confirmed`). Every 15 minutes it reads the ledger since its
     # last pass and the open board and answers with the moves and the next
-    # pick. `apply: false` is the shipped state: it records how far its
-    # answer agrees with the machine's and writes nothing — the
-    # `board_steward` ledger events are what decide whether `apply` flips.
-    # With `apply: true` it writes through the one status writer and
-    # `select_confirmed` takes its pick; then `autocode.status_pipeline`
-    # comes off. It may never set `done`: closing is
+    # pick. `apply: false` is the state it ships and runs in today: it
+    # records how far its answer agrees with the machine's (`agreement()`,
+    # on its `board_steward` ledger rows) and writes nothing. Flip to
+    # `apply: true` only after a run of live ticks at `apply: false` whose
+    # `rate` stands over a minimum event count — `rate` reads 1.0 over zero
+    # judged decisions, so a few ticks prove nothing — and with the
+    # `autocode.status_pipeline` / `close_on_settle` handover decided as a
+    # precondition of the flip, not as its consequence. With `apply: true`
+    # it writes through the one status writer and `select_confirmed` takes
+    # its pick. It may never set `done`: closing is
     # gated on a settled promotion that said `met`, and stays mechanical.
     # Primary since the first live tick: on the secondary it made ordering
     # errors in two of five dry-runs and the live tick died at max_turns on
