@@ -709,13 +709,82 @@ def acceptance_fields(p: dict) -> dict:
     }
 
 
+# ── Below-floor proposals (#1364) ────────────────────────────────────────────
+# This module has exactly one writer of `status: "approved"` — the gate below —
+# and no review route exists anywhere else: no route in `app/routers/`, no MCP
+# tool, nothing under `web/src/`, and none of the CLI flags takes a proposal id.
+# So a proposal this gate refuses is not deferred, it is terminal. Measured
+# 2026-09-22 over the live proposals file: of the 200 proposals Stage 2 has ever
+# classified, 139 (69.5 %) sit below the floor, their maximum score is 0.84 and
+# they have produced zero edges — while staying byte-identical to the proposals
+# Stage 2 has never reached, because the refusal path only did `continue`.
+# The field below is the whole fix: it names the gate and the number, and is
+# deliberately NOT a status. Whether the floor should move, whether a review
+# route should be built for this band, or whether it should land as bare
+# `INFERRED` edges is a graph-quality call with documented pressure in both
+# directions (#1364 human_clauses 1-2), so a row awaiting that decision has to
+# stay pending and re-admittable.
+AWAITING_REVIEW_FIELD = "awaiting_review"
+LLM_CLASSIFICATION_SOURCE = "llm"
+
+
+def awaiting_review_marker(threshold: float) -> str:
+    """Text naming the gate that refused a classified proposal and the number it
+    missed. The mirror of `auto_acceptance_marker`: one names the gate that let
+    an edge through, this one names the gate that did not and says plainly that
+    no route is left to overrule it."""
+    return f"below_auto_approve_floor@{threshold:g}, no review route exists"
+
+
+def below_auto_approve_floor(p: dict,
+                             threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD) -> bool:
+    """True for the dead-end pool: Stage 2 spent an LLM call on the row, its own
+    score is under the floor, and nothing else is going to move it.
+
+    Only `classification_source: llm` counts. A `co-access` row under the floor
+    is a proposal Stage 2 has not scored yet — its confidence is Stage 1's
+    weight, not a verdict — and marking those too would stamp every pending row
+    and distinguish nothing, which is the #773 lesson applied one gate later.
+    """
+    return (p.get("status") == "pending"
+            and p.get("classification_source") == LLM_CLASSIFICATION_SOURCE
+            and float(p.get("confidence", 0) or 0) < threshold)
+
+
+def acceptance_band_counts(proposals: list[dict],
+                           threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD) -> dict:
+    """The two numbers that tell a productive night from one that classified rows
+    into a dead end: what the floor let through, and what it refused with nobody
+    left to overrule the refusal."""
+    auto_approved = sum(1 for p in proposals
+                        if p.get("accepted_by") == AUTO_ACCEPTED_BY)
+    below_floor = sum(1 for p in proposals if below_auto_approve_floor(p, threshold))
+    return {"auto_approved": auto_approved, "below_floor": below_floor}
+
+
+def format_acceptance_band(proposals: list[dict],
+                           threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD) -> str:
+    """One line, both counts, floor named. Printed by `--stats` and by the
+    approve run, which are the two surfaces task #51 reads and reports from;
+    before this its report could say "auto-approved: 0" after a night that
+    classified 28 rows and left all 28 inert, and nothing distinguished that
+    from a night with nothing to classify (#1364)."""
+    c = acceptance_band_counts(proposals, threshold)
+    return (f"Auto-approve floor {threshold:g}: auto-approved {c['auto_approved']} "
+            f"| {c['below_floor']} LLM-classified below the floor, awaiting a "
+            f"review that does not exist")
+
+
 def auto_approve_strong(proposals: list[dict],
                         threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD) -> int:
     """Auto-approve proposals above confidence threshold that are >48h old.
 
     This is an automatic acceptance, not a review, so each flipped proposal is
     marked as such (`accepted_by` + the threshold that admitted it) and
-    `land_approved_edges` carries the mark onto the edge (#773).
+    `land_approved_edges` carries the mark onto the edge (#773). A proposal this
+    gate refuses is marked too — with `awaiting_review` and its status left
+    `pending` — because the refusal is terminal and used to leave no trace at
+    all (#1364).
     """
     now = datetime.now(timezone.utc)
     approved = 0
@@ -723,6 +792,12 @@ def auto_approve_strong(proposals: list[dict],
         if p.get("status") != "pending":
             continue
         if p.get("confidence", 0) < threshold:
+            # Name the refusal instead of falling through it silently. Only a
+            # row Stage 2 actually scored, and only the row's own gate value —
+            # a mark on a proposal that was never adjudicated would be the same
+            # undiscriminating stamp #773 refused to land.
+            if p.get("classification_source") == LLM_CLASSIFICATION_SOURCE:
+                p[AWAITING_REVIEW_FIELD] = awaiting_review_marker(threshold)
             continue
         proposed_at = p.get("proposed_at", "")
         if proposed_at:
@@ -735,6 +810,9 @@ def auto_approve_strong(proposals: list[dict],
         p["status"] = "approved"
         p["accepted_by"] = AUTO_ACCEPTED_BY
         p["auto_acceptance"] = auto_acceptance_marker(threshold)
+        # Admitted — by a lower floor than the one that refused it, if it ever
+        # carried the mark. An approved row must not keep saying it waits.
+        p.pop(AWAITING_REVIEW_FIELD, None)
         approved += 1
     return approved
 
@@ -1095,6 +1173,9 @@ def cmd_stats():
     print("By type:", dict(by_type))
     print("By strength:", dict(by_strength))
     print("By classification:", dict(by_source))
+    # `By status` alone cannot tell a dead-end pool from an untouched one —
+    # both are just `pending` — so this line splits the two (#1364).
+    print(format_acceptance_band(proposals))
 
     if proposals:
         print("\nTop 10 by confidence:")
@@ -1117,6 +1198,10 @@ def cmd_approve():
     save_proposals(data)
     print(f"Auto-approved: {count}")
     print(f"Edges landed in the store: {landed}")
+    # This is the run that creates the dead end, so this is where its size has
+    # to appear: #51 reports what this command printed. (`--stats` carries the
+    # same line; both come out of `format_acceptance_band`.)
+    print(format_acceptance_band(data["proposals"]))
 
 
 def main():

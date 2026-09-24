@@ -7,9 +7,12 @@ under `file_path`. It extracted 7 pairs across 19 trajectory files, autonomy
 task #51 exited 0 on 4 MB of unreadable input, and the watermark advanced past
 every day it had been blind to. Each test below names the #420 clause it pins.
 """
+import copy
 import importlib.util
 import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -1276,3 +1279,250 @@ def test_the_run_output_names_both_prune_causes_with_counts(cr, tmp_path, monkey
     assert m, f"no line binding each count to its cause:\n{out}"
     assert m.groups() == ("1", "2"), (
         f"expected 1 pruned for no-session and 2 for no-context, got {m.groups()}:\n{out}")
+
+
+# ── #1364 clauses 1-4: a proposal the floor refused has to say so ────────────
+#
+# `auto_approve_strong` is the only writer of `status: "approved"` in this
+# pipeline and there is no review route at any layer, so a classified proposal
+# under the floor is terminal, not deferred. Measured 2026-09-22 over the live
+# proposals file: 200 proposals have ever been classified, 61 cleared 0.85 and
+# 139 (69.5 %) did not — and all 139 stayed plain `status: "pending"`, byte
+# indistinguishable from the proposals Stage 2 has never touched. Each test
+# below pins one clause of #1364.
+
+def _classified_proposal(cr, **over):
+    """An aged proposal Stage 2 actually scored: `classification_source: llm`,
+    so the auto-approve floor is what adjudicated it. `_aged_proposal` carries
+    no classification source on purpose — that is the never-classified pool this
+    mark must stay distinguishable from."""
+    return _aged_proposal(cr, classification_source="llm", **over)
+
+
+def _conversation_triples(store):
+    return {(r["source"], r["target"], r["type"])
+            for r in store.conn.execute(
+                "select source, target, type from edges where origin='conversation'")}
+
+
+def test_a_below_floor_classified_proposal_names_the_floor_it_missed(cr):
+    """Clause 1: the refused row gains a field saying which gate refused it and
+    keeps `status: pending`, because the mark records a dead end rather than
+    inventing a review — and a later floor change has to re-admit the row with
+    no other edit."""
+    refused = _classified_proposal(cr, confidence=0.84)
+    admitted = _classified_proposal(cr, target="knowledge/c.md", confidence=0.95)
+    assert cr.auto_approve_strong([refused, admitted]) == 1
+
+    assert refused["status"] == "pending", (
+        "the floor refuses this row; giving it a new status would be the "
+        "floor-lowering decision #1364 leaves to a person")
+    assert "accepted_by" not in refused and "auto_acceptance" not in refused, refused
+    mark = refused[cr.AWAITING_REVIEW_FIELD]
+    assert mark == cr.awaiting_review_marker(
+        cr.DEFAULT_AUTO_APPROVE_THRESHOLD), mark
+    assert "0.85" in mark, f"the field must name the floor the row missed: {mark}"
+    assert cr.AWAITING_REVIEW_FIELD not in admitted, admitted
+
+    # Still pending, so a lower floor re-admits it — and the stale mark goes.
+    assert cr.auto_approve_strong([refused, admitted], threshold=0.80) == 1
+    assert refused["status"] == "approved", refused
+    assert refused["accepted_by"] == cr.AUTO_ACCEPTED_BY, refused
+    assert cr.AWAITING_REVIEW_FIELD not in refused, refused
+
+
+def test_the_mark_names_the_floor_that_was_actually_applied(cr):
+    """Clause 1's derivation half, mirroring `test_the_marker_names_the_threshold_that_admitted_this_edge`:
+    the number in the field is the one this call gated against, so a row never
+    quotes a floor that is no longer the one in use."""
+    props = [_classified_proposal(cr, confidence=0.90)]
+    assert cr.auto_approve_strong(props, threshold=0.92) == 0
+    mark = props[0][cr.AWAITING_REVIEW_FIELD]
+    assert mark == cr.awaiting_review_marker(0.92), mark
+    assert "0.92" in mark and "0.85" not in mark, mark
+
+
+def test_a_proposal_stage2_never_scored_gets_no_mark(cr):
+    """Clause 1's discriminating half, and #773's lesson re-applied: a field on
+    every pending row distinguishes nothing. `classification_source: co-access`
+    is the pool a below-floor row now has to be told apart from."""
+    scored_by_stage1 = _aged_proposal(cr, classification_source="co-access",
+                                      confidence=0.4)
+    untouched = _aged_proposal(cr, target="knowledge/c.md", confidence=0.4)
+    assert cr.auto_approve_strong([scored_by_stage1, untouched]) == 0
+    for p in (scored_by_stage1, untouched):
+        assert p["status"] == "pending", p
+        assert cr.AWAITING_REVIEW_FIELD not in p, (
+            f"the mark landed on a row Stage 2 never classified: {p}")
+
+
+def test_stats_prints_the_below_floor_pool_beside_the_auto_approved_count(
+        cr, tmp_path, monkeypatch, capsys):
+    """Clause 2: one line, both numbers, so a run that classified rows into a
+    dead end cannot read as a productive one. Before this, `--stats` printed
+    `By status: {'pending': N}` and nothing said how many of those N were
+    already terminal. The never-classified row is in the fixture and must NOT be
+    counted, or the count would report the whole pending pool."""
+    proposals = [
+        _classified_proposal(cr, confidence=0.95),
+        _classified_proposal(cr, target="knowledge/c.md", confidence=0.90),
+        _classified_proposal(cr, source="knowledge/b.md",
+                             target="knowledge/c.md", confidence=0.84),
+        _classified_proposal(cr, source="knowledge/c.md",
+                             target="knowledge/a.md", confidence=0.62),
+        # Pending, below the floor, but Stage 2 never scored it: not this count.
+        _aged_proposal(cr, source="knowledge/b.md", target="knowledge/a.md",
+                       confidence=0.55),
+    ]
+    assert cr.auto_approve_strong(proposals) == 2
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", _stage2_props(tmp_path, proposals))
+
+    cr.cmd_stats()
+
+    out = capsys.readouterr().out
+    m = re.search(r"^Auto-approve floor (\S+): auto-approved (\d+) \| (\d+) "
+                  r"LLM-classified below the floor.*$", out, re.M)
+    assert m, f"no line printing both counts:\n{out}"
+    assert m.groups() == ("0.85", "2", "2"), (
+        f"expected floor 0.85, 2 auto-approved and 2 below-floor (not the 3 "
+        f"pending rows), got {m.groups()}:\n{out}")
+
+
+def test_the_cli_stats_output_carries_both_counts_end_to_end(tmp_path):
+    """The seam #51 actually crosses: the skill runs this script as a
+    subprocess and reports what it prints, so the count has to survive argparse
+    and the child's own `LLOYD_DATA` resolution, not just an in-process call."""
+    props = [
+        _classified_proposal_from_file(confidence=0.95),
+        _classified_proposal_from_file(target="knowledge/c.md", confidence=0.84),
+    ]
+    data_root = tmp_path / "data"
+    (data_root / "_pipeline").mkdir(parents=True)
+    (data_root / "_pipeline" / "conversation-relation-proposals.json").write_text(
+        json.dumps({"watermark": {}, "stats": {}, "proposals": props}),
+        encoding="utf-8")
+    env = dict(os.environ, LLOYD_DATA=str(data_root))
+
+    r = subprocess.run([sys.executable, str(SCRIPT), "--stats"], env=env, cwd=ROOT,
+                       capture_output=True, text=True, timeout=120)
+
+    assert r.returncode == 0, r.stderr
+    m = re.search(r"^Auto-approve floor (\S+): auto-approved (\d+) \| (\d+) "
+                  r"LLM-classified below the floor.*$", r.stdout, re.M)
+    assert m, f"the --stats child printed no acceptance line:\n{r.stdout}"
+    assert m.groups() == ("0.85", "0", "1"), (
+        f"this child saw no approved row and one below-floor llm row; the "
+        f"approve stage never ran here, so auto-approved must be 0, got "
+        f"{m.groups()}:\n{r.stdout}")
+
+
+def _classified_proposal_from_file(**over):
+    """`_aged_proposal` needs a loaded module for its `proposed_at` timestamp, so
+    the subprocess fixture writes the ISO stamp itself. Fixed date, three days
+    back of the corpus it is modelled on, and the approve stage is not run in
+    that child anyway."""
+    p = {"source": "knowledge/a.md", "target": "knowledge/b.md",
+         "status": "pending", "type": "related-to", "confidence": 0.95,
+         "reason": "read together in one session",
+         "classification_source": "llm",
+         "evidence": {"sessions": ["20260910_010203_abc"], "aggregate_weight": 1.0},
+         "proposed_at": "2026-09-10T01:01:01+00:00"}
+    p.update(over)
+    return p
+
+
+def test_the_approve_run_persists_the_mark_and_changes_no_landing(tmp_path):
+    """The seam between the two commands #51 runs: `--approve-strong` marks the
+    refused row, saves the file, and lands only what the floor admitted. The
+    mark has to be readable in the JSON the NEXT run loads — an in-memory field
+    that never reaches disk distinguishes nothing."""
+    kg = tmp_path / "kg.sqlite"
+    kg_store.KGStore(kg).close()          # provision the store the child writes to
+    facts = tmp_path / "facts"
+    facts.mkdir()
+    data_root = tmp_path / "data"
+    (data_root / "_pipeline").mkdir(parents=True)
+    props_file = (data_root / "_pipeline"
+                  / "conversation-relation-proposals.json")
+    props_file.write_text(json.dumps({"watermark": {}, "stats": {}, "proposals": [
+        _classified_proposal_from_file(confidence=0.95),
+        _classified_proposal_from_file(target="knowledge/c.md", confidence=0.84),
+    ]}), encoding="utf-8")
+    env = dict(os.environ, LLOYD_DATA=str(data_root), LLOYD_KG_DB=str(kg),
+               LLOYD_FACTS_ROOT=str(facts))
+
+    r = subprocess.run([sys.executable, str(SCRIPT), "--approve-strong"], env=env,
+                       cwd=ROOT, capture_output=True, text=True, timeout=180)
+
+    assert r.returncode == 0, r.stderr
+    saved = json.loads(props_file.read_text())["proposals"]
+    by_pair = {(p["source"], p["target"]): p for p in saved}
+    refused = by_pair[("knowledge/a.md", "knowledge/c.md")]
+    admitted = by_pair[("knowledge/a.md", "knowledge/b.md")]
+    assert refused["status"] == "pending", refused
+    assert "0.85" in refused["awaiting_review"], refused
+    assert refused.get("edge_id") is None, refused
+    assert admitted["status"] == "approved", admitted
+    assert admitted.get("edge_id"), admitted
+    assert "awaiting_review" not in admitted, admitted
+    m = re.search(r"auto-approved (\d+) \| (\d+) LLM-classified below the floor",
+                  r.stdout)
+    assert m and m.groups() == ("1", "1"), (
+        f"the approve run's own report must name both counts, got:\n{r.stdout}")
+
+
+def test_a_proposal_classified_at_0_84_is_still_refused_the_edge(store, cr):
+    """Clause 3: the visibility field must not become a back door. 0.84 is the
+    real maximum of the 139-row pool, and #773's 09-11/09-12 notes push the
+    floor the OTHER way because the 0.95 band is full of queue-scan artifacts,
+    so the gate has to keep refusing exactly what it refused before."""
+    props = [_classified_proposal(cr, confidence=0.84)]
+    assert cr.auto_approve_strong(props) == 0
+    p = props[0]
+    assert p["status"] == "pending" and "accepted_by" not in p \
+        and "auto_acceptance" not in p, p
+    assert p[cr.AWAITING_REVIEW_FIELD] == cr.awaiting_review_marker(
+        cr.DEFAULT_AUTO_APPROVE_THRESHOLD), p
+    assert cr.land_approved_edges(props) == 0
+    assert _conversation_triples(store) == set(), "a below-floor row landed an edge"
+    assert p.get("edge_id") is None, p
+
+
+def test_marking_the_band_changes_no_landing_decision(store, cr, tmp_path):
+    """Clause 4: the same mixed pool landed once with the marks present and
+    once with them stripped has to produce identical edges. The field reports on
+    the pool; it is never an input to the decision."""
+    def pool():
+        return [
+            _classified_proposal(cr, confidence=0.95),
+            _classified_proposal(cr, source="knowledge/b.md",
+                                 target="knowledge/c.md", confidence=0.84),
+            _classified_proposal(cr, source="knowledge/c.md",
+                                 target="knowledge/a.md", confidence=0.5),
+            # Above 0.5 and below the floor, but never classified: pending either way.
+            _aged_proposal(cr, source="knowledge/b.md", target="knowledge/a.md",
+                           confidence=0.7),
+        ]
+
+    marked = pool()
+    assert cr.auto_approve_strong(marked) == 1
+    assert sum(cr.AWAITING_REVIEW_FIELD in p for p in marked) == 2, (
+        f"both below-floor llm rows should carry the mark, so the comparison "
+        f"below has something to compare: {marked}")
+    # Copied BEFORE landing: after it the rows would also carry `edge_id`, and
+    # the second pass would skip them and land nothing.
+    unmarked = copy.deepcopy(marked)
+    for p in unmarked:
+        p.pop(cr.AWAITING_REVIEW_FIELD, None)
+    assert not any(cr.AWAITING_REVIEW_FIELD in p for p in unmarked), unmarked
+    assert cr.land_approved_edges(marked) == 1
+    landed_marked = _conversation_triples(store)
+
+    kg_store.reset()
+    second = kg_store.configure(tmp_path / "kg-second.sqlite")
+    assert cr.land_approved_edges(unmarked) == 1
+
+    assert landed_marked == _conversation_triples(second) == {
+        ("knowledge/a.md", "knowledge/b.md", "related-to")}, (
+        f"marked pool landed {landed_marked}, unmarked landed "
+        f"{_conversation_triples(second)}")
