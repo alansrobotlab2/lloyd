@@ -48,6 +48,7 @@ already uses; arch-review refreshes that one).
 | [[ambient-context-injection]] | how background producers surface context into the active chat |
 | [[skills]] | on-demand SKILL.md procedures from the vault |
 | [[voice]] | the whole voice-to-voice round trip: LiveKit transport, wake word, ASR, speaker id, the cloned TTS voice and its client-side shaping |
+| [[desktop]] | desktop computer use: capture freely, act only on a lease a human grants from the Desktop tab; chat sessions only; screenshots as refs, never base64 |
 
 ## Memory and knowledge
 
