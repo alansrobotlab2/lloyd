@@ -180,9 +180,13 @@ def check_description_drift(description: str) -> tuple[bool, str]:
     # Path 2: first token looks imperative (short verb, not in STOP_OPENERS) → good
     opener = _first_token(first)
     if opener and opener not in STOP_OPENERS and len(opener) <= 10:
-        # Heuristic guard: imperative verbs are usually the FIRST token AND
-        # the second token is typically a noun or article, not another verb.
-        # We don't try to verify — calibration check below catches over-pass.
+        # Nothing here tests that the opener IS a verb: any ≤10-character first
+        # token outside STOP_OPENERS passes, so "Production pipeline for …" and
+        # "Data pipeline: …" clear DRIFT untested. Task #70's calibration
+        # (2026-09-10) measured 102 of 189 descriptions passing this way, which
+        # is why CATEGORY_TRUST marks the DRIFT count untrustworthy. Tightening
+        # or dropping this path is a calibration trade-off (#903, human clause),
+        # not something this comment can promise a later check will catch.
         return False, ""
 
     return True, f"first sentence opens with {opener!r}, no trigger words present"
@@ -673,6 +677,58 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
 
 # ── Report writer ─────────────────────────────────────────────────────────────
 
+#: Per-category answer to "is a 0 in this row trustworthy?", rendered as the
+#: report table's fourth column and repeated in the verdict when nothing fired.
+#:
+#: Task #70's 2026-09-10 calibration instrumented every check and asked, per
+#: category, *could this have flagged anything today?* Two could not: DRIFT
+#: accepts 53% of the library through path 2 above without testing it, and
+#: STALE returns before its age comparison for every skill (194/194 carry
+#: `status: active`; no mtime in the library is older than a month either).
+#: The qualified table was hand-written into the committed report (`218882b5`)
+#: and lost on the next run, because `main` overwrites the file wholesale — so
+#: the answer lives here, where the regeneration cannot drop it (#903).
+#:
+#: Keyed on the category name as the table prints it. Every row rendered by
+#: `render_report` must have an entry, and every entry must be a row:
+#: `tests/test_skill_lint_report_trust.py` asserts both, so a new category
+#: cannot ship with an unqualified zero. `verdict` is one of TRUST_VERDICTS;
+#: only `"no"` makes the category untrustworthy for the verdict below.
+TRUST_VERDICTS = ("yes", "mostly", "no")
+CATEGORY_TRUST: dict[str, tuple[str, str]] = {
+    "DEAD": ("yes", "verified by independent recount over every scanned file"),
+    "MISSING_DESC": ("yes", "same recount; every live skill parses and carries a description"),
+    "DRIFT": ("no", "descriptions whose first token is ≤10 characters pass a "
+                    "length heuristic, verb or not, and are never tested — "
+                    "0 means 'the rest contain a trigger word', not 'none drift'"),
+    "DUPLICATE": ("mostly", "the name + description double gate suppresses a real "
+                            "pair (`periodic-memory-capture-dee`/`-lloyd`), which is "
+                            "a judgment call the report cannot make"),
+    "STALE": ("no", "every skill is marked `status: active` and `check_stale` "
+                    "returns before the age check, so no input reaches the "
+                    "comparison — 0 carries no information"),
+    "PHANTOM_TOOL": ("yes", "positive controls fire and the count suppresses the "
+                            "Clean verdict; the PHANTOM_EXEMPT skills are never scanned"),
+    "MISSING_SCRIPT": ("yes", "the test suite asserts the corpus-wide count, so an "
+                              "absent path has already turned the tests red"),
+    INJECTION_CATEGORY: ("yes", "every line of every skill is matched, but a match is a "
+                                "shape, not a risk — a regex misses paraphrase, so 0 "
+                                "means 'no match', never 'no risk'"),
+}
+
+TRUST_MARK = {"yes": "✅ yes", "mostly": "⚠️ mostly", "no": "❌ no"}
+
+
+def untrustworthy_categories() -> list[str]:
+    """Categories whose 0 says nothing, in table order."""
+    return [c for c, (verdict, _) in CATEGORY_TRUST.items() if verdict == "no"]
+
+
+def trust_cell(category: str) -> str:
+    verdict, cause = CATEGORY_TRUST[category]
+    return f"{TRUST_MARK[verdict]} — {cause}"
+
+
 def render_report(result: dict) -> str:
     lines: list[str] = []
     ts = result["generated_at"]
@@ -702,16 +758,24 @@ def render_report(result: dict) -> str:
     where = ", ".join(f"`{r}`" for r in roots) if roots else "`~/obsidian/skills/`"
     lines.append(f"Scanned **{total}** live skills in {where}.")
     lines.append("")
-    lines.append("| category | count | action |")
-    lines.append("|---|---|---|")
-    lines.append(f"| DEAD (never fires) | **{n_dead}** | fix frontmatter or remove |")
-    lines.append(f"| MISSING_DESC (tags only, no description) | **{n_missing}** | add trigger-condition description |")
-    lines.append(f"| DRIFT (output-framed description) | **{n_drift}** | rewrite first sentence in trigger-condition form |")
-    lines.append(f"| DUPLICATE (near-duplicate names) | **{n_dup}** | resolve ownership, merge, or rename |")
-    lines.append(f"| STALE (>{STALE_DAYS}d mtime, status ≠ active) | **{n_stale}** | review for removal |")
-    lines.append(f"| PHANTOM_TOOL (names a tool that does not exist) | **{n_phantom}** | replace with the real tool name |")
-    lines.append(f"| MISSING_SCRIPT (names a repo script absent from the tree) | **{n_scripts}** | land the script or drop the citation |")
-    lines.append(f"| {INJECTION_CATEGORY} (instructs acting on remote instructions/config, or pipes remote content into a shell) | **{n_inj}** | rewrite to name a local/pinned step, or list in INJECTION_ALLOWLIST with a reason |")
+    # (category, gloss, count, action). The fourth column is looked up by the
+    # category name, so a row added here without a CATEGORY_TRUST entry raises
+    # KeyError on the first render rather than printing an unqualified zero.
+    rows = [
+        ("DEAD", "never fires", n_dead, "fix frontmatter or remove"),
+        ("MISSING_DESC", "tags only, no description", n_missing, "add trigger-condition description"),
+        ("DRIFT", "output-framed description", n_drift, "rewrite first sentence in trigger-condition form"),
+        ("DUPLICATE", "near-duplicate names", n_dup, "resolve ownership, merge, or rename"),
+        ("STALE", f">{STALE_DAYS}d mtime, status ≠ active", n_stale, "review for removal"),
+        ("PHANTOM_TOOL", "names a tool that does not exist", n_phantom, "replace with the real tool name"),
+        ("MISSING_SCRIPT", "names a repo script absent from the tree", n_scripts, "land the script or drop the citation"),
+        (INJECTION_CATEGORY, "instructs acting on remote instructions/config, or pipes remote content into a shell",
+         n_inj, "rewrite to name a local/pinned step, or list in INJECTION_ALLOWLIST with a reason"),
+    ]
+    lines.append("| category | count | action | is this count trustworthy? |")
+    lines.append("|---|---|---|---|")
+    for category, gloss, count, action in rows:
+        lines.append(f"| {category} ({gloss}) | **{count}** | {action} | {trust_cell(category)} |")
     lines.append("")
     # One row per rule in the table, always, including the rules that matched
     # nothing. `n_phantom` is the precedent for why: until 2026-09-11 the count
@@ -885,10 +949,26 @@ def render_report(result: dict) -> str:
 
     if not (n_dead or n_missing or n_drift or n_dup or n_stale or n_phantom
             or n_scripts or n_inj):
-        lines.append("## ✅ Clean")
-        lines.append("")
-        lines.append("All skills pass lint. No advisories.")
-        lines.append("")
+        blind = untrustworthy_categories()
+        if blind:
+            # Every count is 0 and some of them could not have been anything
+            # else. "All skills pass lint" was what the report said on
+            # 2026-09-18 with DRIFT blind to 103 of 194 descriptions, so the
+            # verdict names the categories whose zero is not a finding.
+            lines.append("## No findings on the checks that can fail")
+            lines.append("")
+            lines.append("Every count is 0, but this is not a clean bill: "
+                         f"{', '.join(blind)} cannot detect anything today, so "
+                         "their zeros are not findings. Read them as:")
+            lines.append("")
+            for category in blind:
+                lines.append(f"- **{category}** — 0 is not trustworthy: {CATEGORY_TRUST[category][1]}")
+            lines.append("")
+        else:
+            lines.append("## ✅ Clean")
+            lines.append("")
+            lines.append("All skills pass lint. No advisories.")
+            lines.append("")
 
     return "\n".join(lines) + "\n"
 

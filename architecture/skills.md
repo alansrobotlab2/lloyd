@@ -382,6 +382,13 @@ return 0 for any query), MISSING_DESC, DRIFT (description is output-framed
 rather than trigger-framed), DUPLICATE (difflib name ratio ≥ 0.85 **and** description ratio ≥ 0.60), STALE (mtime
 > 90 days and `status != active`), PHANTOM_TOOL.
 
+Every count row carries a fourth column, "is this count trustworthy?", from
+`CATEGORY_TRUST` in the script (#903): DRIFT and STALE are marked `no` — DRIFT
+passes any ≤10-character opener untested, STALE returns before its age check for
+every `status: active` skill — so an all-zero run renders a qualified verdict
+naming them, never "✅ Clean". The qualification lives in code because the report
+is rewritten wholesale and a hand-written column did not survive one run.
+
 Advisory only — no automatic deletion or rewrites, and it exits 0 always so the
 nightly pipeline does not fail on lint findings. Autonomy task #70 runs it
 weekly.
