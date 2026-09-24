@@ -6,13 +6,16 @@ timeout (default 120s, hard cap 600s), 30000-char output truncation —
 matching the SDK's behavior so SOUL.md prompts and persisted sessions
 keep working unchanged.
 
-IMPORTANT: this server does NOT enforce inner_voice.pretooluse_deny
-rules. Those run UPSTREAM in the harness's PreToolUse hook (see
-app/inner_voice/heuristics.py wired through app/harness/loop.py). If
-you ever invoke this server outside the harness — e.g. by spawning it
-directly via mcp-cli — denial does not apply. That's by design: the
-deny ruleset is bound to a Lloyd session_id and lives at the agent
-layer, not the tool layer.
+IMPORTANT: this module does not gate commands itself. The live Bash gate
+is `app/harness/safety.py` (`check_bash_command`), which runs UPSTREAM in
+two places: the harness's PreToolUse hook that
+`install_default_safety_hook` registers, and `agent_mcp/main.call_tool`
+at dispatch. If you invoke this module standalone — importing `_bash` or
+`call_tool` directly, outside the harness and outside the aggregator's
+dispatch — there is no gate at all.
+
+A foreground command that rewrites a `.py` inside a git work tree gets the
+same pyflakes delta block `Edit` does (`_bash_edit_diagnostics`, #695).
 
 Background mode (``run_in_background=true``) spawns the command with
 stdout/stderr redirected to a file under ``~/lloyd-data/_pipeline/tasks/``,
@@ -34,7 +37,7 @@ from typing import Any
 
 from mcp.types import Tool
 
-from agent_mcp import _task_registry, _tool_sandbox
+from agent_mcp import _bash_edit_diagnostics, _task_registry, _tool_sandbox
 from agent_mcp._shared import get_bound_session, text_result
 
 logger = logging.getLogger("lloyd-builtin-bash")
@@ -145,6 +148,7 @@ async def _bash(args: dict[str, Any]) -> str:
         return err
 
     sandboxed = _tool_sandbox.current_sandboxed.get()
+    snap = None
     if args.get("run_in_background"):
         if sandboxed:  # `main.call_tool` refuses this first; never rely on it
             _bash_failed.set(True)
@@ -174,6 +178,14 @@ async def _bash(args: dict[str, Any]) -> str:
                 start_new_session=True,
             )
         else:
+            # Pre-images for the post-edit rail, taken before the shell can
+            # touch them. A sandboxed session cannot write, so it has none.
+            try:
+                snap = await asyncio.to_thread(
+                    _bash_edit_diagnostics.snapshot, command, cwd)
+            except Exception:
+                logger.warning("bash edit snapshot failed", exc_info=True)
+                snap = None
             proc = await asyncio.create_subprocess_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
@@ -226,11 +238,22 @@ async def _bash(args: dict[str, Any]) -> str:
         if truncated:
             suffix = f"\n[truncated]" + suffix
         _bash_failed.set(True)
-        return (output or "(no output)") + suffix
+        return await _with_edit_diagnostics((output or "(no output)") + suffix, snap)
 
-    if truncated:
-        return output  # truncation marker is already inside `output`
-    return output if output else "(no output)"
+    if not truncated:  # otherwise the marker is already inside `output`
+        output = output if output else "(no output)"
+    return await _with_edit_diagnostics(output, snap)
+
+
+async def _with_edit_diagnostics(text: str, snap) -> str:
+    """`text` plus the `.py` blocks, off the loop; the plain text on any failure."""
+    if snap is None:
+        return text
+    try:
+        return await asyncio.to_thread(_bash_edit_diagnostics.append, text, snap)
+    except Exception:
+        logger.warning("bash edit diagnostics failed", exc_info=True)
+        return text
 
 
 def _background_label(args: dict) -> str:

@@ -42,6 +42,15 @@ before assuming a layer can be turned off — or that it is installed.
   is 34, the whole tree including `scripts/` is ~160, and `config.yaml`'s
   "~69" is neither. A post-image syntax error is always reported; a
   pre-image-only syntax error reports nothing.
+- **A foreground Bash command gets the pyflakes delta too** (#695,
+  `agent_mcp/_bash_edit_diagnostics.py`). A command carrying a write marker
+  (`sed -i`, `patch`/`git apply`, a redirect, `.write_text(`, a formatter)
+  has the `.py` files it names — inside a git work tree, outside `_pipeline/`
+  and `sessions/` — read before the shell starts; afterwards each file whose
+  bytes changed is handed to the same `python_block`. The byte comparison,
+  not the extraction, decides what is reported, so a file the command only
+  read produces nothing. Background and sandboxed Bash get no block, and
+  the blast radius, tsc and the change ledger still see Edit/Write only.
 - **The blast radius reports the module-level symbols the edit touched**
   (`_edit_diagnostics._touched_symbols`, both images, Python only, and a
   created file has no pre-edit callers so it reports nothing) against the
@@ -91,9 +100,8 @@ before assuming a layer can be turned off — or that it is installed.
   paths build their own registries and install the grant gate only, so an
   `autonomy.run_task` or `run_prompt_on_primary` turn has neither this nor
   anything else between it and `rm -rf`; `builtin_bash.py` deliberately does
-  not self-check, and says so in its docstring — naming
-  `app/inner_voice/heuristics.py`, a module that no longer exists; the live
-  gate is this file. Voice is the same shape as the one #534 closed for the
+  not self-check, and says so in its docstring, which names this file and
+  `agent_mcp/main.call_tool`'s dispatch check as the gate. Voice is the same shape as the one #534 closed for the
   grant gate, one layer down and still open.
 
 ## The code graph
@@ -116,6 +124,7 @@ handler — so keep Grep for string keys and routes.
 ## Tests
 
 `tests/test_edit_gates.py`, `tests/test_change_ledger.py`,
+`tests/test_bash_edit_diagnostics.py`, `tests/test_harness_safety_docstring_pointers.py`,
 `tests/test_tool_effects.py`, `tests/test_edit_diagnostics.py`,
 `tests/test_tsc_runner.py`, `tests/test_lint_findings.py`,
 `tests/test_code_graph.py`, `tests/test_code_graph_doc_claims.py`,

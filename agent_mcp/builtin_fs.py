@@ -3,9 +3,13 @@
 
 Recreates the Claude Code built-in tools we lost when we ripped the SDK
 out. Names and input schemas mirror the SDK contracts so persisted
-session JSON, the persona prompt surfaces, and inner_voice.pretooluse_deny
-rules all keep working unchanged. Output formatting (e.g. cat -n line
-prefix on Read) matches too.
+session JSON and the persona prompt surfaces keep working unchanged.
+Output formatting (e.g. cat -n line prefix on Read) matches too.
+
+The Bash gate is not here: it is `app/harness/safety.py`, installed as a
+PreToolUse hook by `install_default_safety_hook` and applied again at
+dispatch in `agent_mcp/main.call_tool`. Bash dispatched standalone, outside
+the harness and the aggregator, has no gate.
 
 Two refusals stand in front of every write here, in this order: the write
 deny-set (`app.harness.protected_paths.write_deny_reason` — a rule about
