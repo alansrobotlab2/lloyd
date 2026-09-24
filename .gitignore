@@ -49,6 +49,9 @@ __pycache__/
 # …and the review-rung calibration cases, which are fixtures, not state.
 # `git add -A` silently skipped them on the branch that introduced them.
 !eval/review_calibration/*.json
+# …and the djev name-prior probe's dated reports (#1452), committed so a
+# djev-gating proposal can cite a measured flip rate.
+!eval/djev/name_prior_*.json
 
 # ─── Secrets ────────────────────────────────────────
 .env
