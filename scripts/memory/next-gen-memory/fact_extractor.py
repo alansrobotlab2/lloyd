@@ -76,6 +76,17 @@ MAX_CHUNKS = 6             # chunks per document PER PASS, not per document
 # remainder is the next pass's job: 5 steps of 7,800 plus the last full chunk.
 CHUNK_BUDGET_CHARS = (MAX_CHUNKS - 1) * (CHUNK_SIZE - CHUNK_OVERLAP) + CHUNK_SIZE
 
+# One model call's client ceiling. It was a flat 120 s, which an idle engine
+# meets (a 6000-token call measured 23.8 s) and a busy one cannot: these calls
+# run at priority 2, behind chat and autonomy, and on 2026-09-23 six changed
+# documents all timed out queued behind `profile_generator --all` (#1405). The
+# waiting is in the engine's queue, not in generation, so the bound has to
+# cover queueing. LLOYD_EXTRACTION_CALL_TIMEOUT_S overrides it for a run.
+try:
+    LLM_CALL_TIMEOUT_S = float(os.environ.get("LLOYD_EXTRACTION_CALL_TIMEOUT_S") or 600)
+except ValueError:
+    LLM_CALL_TIMEOUT_S = 600.0
+
 # The category vocabulary. 287 distinct category spellings existed on
 # 2026-09-03 — `state`, `States`, `current state`, `state/config` and so on —
 # because the model's free-text answer was written through verbatim. Each
@@ -378,7 +389,7 @@ class FactExtractor:
                 headers={'Content-Type': 'application/json'},
                 method='POST'
             )
-            with urllib.request.urlopen(req, timeout=120) as response:
+            with urllib.request.urlopen(req, timeout=LLM_CALL_TIMEOUT_S) as response:
                 data = json.loads(response.read().decode('utf-8'))
                 text = data["choices"][0]["message"]["content"]
         except Exception as e:

@@ -248,14 +248,26 @@ class NightlyExtraction:
             # the content-hash result is the authoritative signal. --full/--clean/--force
             # always run the complete pipeline.
             if files_processed == 0 and not full_mode and not clean and not force:
+                # Nothing extracted is two different runs: no changed files
+                # (noop), or changed files that all failed (#1405: six changed
+                # documents timed out behind a saturated engine and the run said
+                # `status=noop`, which the skill's gate records as NO_NEW_DATA).
+                # The downstream steps still have nothing new either way; only
+                # the verdict differs, and a failure must not read as an idle vault.
+                status = "failed" if failed_files else "noop"
                 end_time = datetime.now()
                 duration = (end_time - start_time).total_seconds()
-                log_lines.append("  → No new/changed files; skipping relation, index, and overview steps")
-                log_lines.append(f"\nNightly Extraction Complete (noop): {end_time.isoformat()} ({duration:.1f}s)")
+                if failed_files:
+                    log_lines.append(f"  → All {failed_files} changed file(s) failed; skipping "
+                                     f"relation, index, and overview steps")
+                else:
+                    log_lines.append("  → No new/changed files; skipping relation, index, and overview steps")
+                log_lines.append(f"\nNightly Extraction Complete ({status}): {end_time.isoformat()} ({duration:.1f}s)")
                 self.log_file.write_text("\n".join(log_lines))
                 return {
-                    "success": True,
-                    "noop": True,
+                    "success": not failed_files,
+                    "noop": not failed_files,
+                    "status": status,
                     "files_processed": 0,
                     "facts_extracted": 0,
                     "failed_files": failed_files,
@@ -299,6 +311,7 @@ class NightlyExtraction:
             return {
                 "success": True,
                 "noop": False,
+                "status": "ran",
                 "files_processed": files_processed,
                 "failed_files": failed_files,
                 # Paths whose tail no pass has read yet, vault-relative. Without
@@ -835,7 +848,8 @@ def main():
         )
         print("\nResult:", json.dumps(result, indent=2))
         # Single-line, grep-friendly summary for the autonomy-data-pipeline skill's
-        # gate. status=noop means nothing changed → caller should skip downstream work.
+        # gate. status=noop means nothing changed → caller should skip downstream work;
+        # status=failed means changed files existed and every one failed (#1405).
         #
         # `truncated` is how many documents this run read only as far as the
         # chunk budget, and it is why the line no longer stops at `failed`: a run
@@ -850,7 +864,7 @@ def main():
             f"facts={result.get('facts_extracted', 0)} "
             f"failed={result.get('failed_files', 0)} "
             f"truncated={len(truncated)} "
-            f"status={'noop' if result.get('noop') else 'ran'}"
+            f"status={result.get('status') or ('noop' if result.get('noop') else 'ran')}"
         )
 
 

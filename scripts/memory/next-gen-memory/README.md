@@ -51,6 +51,10 @@ It prints one machine-readable line the autonomy skill branches on:
 PIPELINE_RESULT files_processed=3 facts=12 failed=0 truncated=0 status=ran
 ```
 
+`status` is `ran`, `noop` (no changed files: nothing to do), `failed` (changed
+files existed and every one failed, so nothing was extracted — not an idle
+vault, #1405) or `locked` (another extractor holds the lock).
+
 `failed=N` counts documents whose extraction raised. Those files are **not**
 content-hashed, so the next run retries them — an LLM error used to return an
 empty fact list, which marked the document extracted forever.
