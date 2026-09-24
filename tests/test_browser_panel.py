@@ -1194,3 +1194,407 @@ async def test_the_error_verdict_crosses_the_mcp_seam(monkeypatch):
         "a fetched error document is not a failed tool call"
     # And on the wire, which is the form the harness's error bookkeeping reads.
     assert res.model_dump(by_alias=True, exclude_none=True)["isError"] is False
+
+
+# ── Backlog #1088: `networkidle` on a page that holds a live socket ───────────
+#
+# Playwright's `networkidle` waits for ~500 ms with no network connections at all.
+# A page holding a websocket, an EventSource, Vite's HMR socket or a long-poll
+# never grants that silence, so the wait dies at the tool's own 30 s deadline on a
+# document that is fully rendered — and the tool handed the raw
+# `Page.goto: Timeout 30000ms exceeded.` back as its error, which reads exactly
+# like a dead site. Re-measured 2026-09-24 at base `b72a2ba` (also seen at
+# `55edf4f1` on 2026-09-23) by driving the real `_browser_navigate`/`_browser_wait`
+# against a fixture that holds an EventSource open (`http://127.0.0.1:5199/`). In
+# that run, in that call order: `wait_until="networkidle"` returned
+# `{"error": "Page.goto: Timeout 30000ms exceeded.…waiting until \"networkidle\""}`
+# after 31.3 s of wall clock; `wait_until="load"` then answered
+# `{"ok": true, "title": "SSE fixture", "status": 200}` immediately, as a
+# same-document navigation to the URL the page already sat on; and
+# `browser_wait("networkidle")` returned `Wait failed: Timeout 6000ms exceeded.`
+# at 6.0 s — while the document was there the whole time. Loopback needs no env
+# change, because both the host guard and the egress floor let the machine itself
+# through at their default, so the fakes below exercise the same landing check
+# against the same kind of host rather than patching it away.
+
+
+class _TimeoutPage:
+    """A page whose `goto` times out on one wait, with the document present.
+
+    `land_on` is where the URL is left when the wait fails: normally the target
+    (Chromium commits the document, then the network never goes quiet), the
+    error-document URL or an empty string when nothing loaded at all, or another
+    machine's URL when the document that came back belongs to somebody else.
+    """
+
+    def __init__(self, url="http://127.0.0.1:5199/stream", title="SSE fixture",
+                 raises_for=("networkidle",), land_on=None):
+        self.url = url
+        self._home = url
+        self._title = title
+        self._raises_for = tuple(raises_for)
+        self._land_on = land_on
+        self.goto_calls: list[tuple[str, dict]] = []
+
+    async def goto(self, url, **kw):
+        self.goto_calls.append((url, kw))
+        if kw.get("wait_until") in self._raises_for:
+            self.url = self._home if self._land_on is None else self._land_on
+            raise TimeoutError(
+                f'Page.goto: Timeout {kw.get("timeout", 30000)}ms exceeded.\n'
+                'Call log:\n'
+                f'  - navigating to "{url}", waiting until "{kw.get("wait_until")}"\n'
+            )
+        self.url = url
+        return type("R", (), {"status": 200})()
+
+    async def title(self):
+        return self._title
+
+    async def wait_for_load_state(self, state, **kw):
+        if state == "networkidle":
+            raise TimeoutError(
+                f'Page.wait_for_load_state: Timeout {kw.get("timeout", 5000)}ms exceeded.'
+            )
+
+    def locator(self, selector):
+        return _FakePage._Locator()
+
+
+async def test_a_networkidle_timeout_on_a_loaded_page_is_never_idle_not_failure(monkeypatch):
+    """Clause 1: a socket-holding page is loaded, and must be reported loaded."""
+    page = _TimeoutPage()
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_navigate(page.url, wait_until="networkidle"))
+
+    assert out.get("ok") is True, out
+    assert out["title"] == "SSE fixture", out
+    assert out["network_idle"] is False, out
+    assert "error" not in out, \
+        "the raw goto timeout is what sent the agent looking for a dead site"
+    # The wait the caller asked for is still the wait that was issued.
+    assert page.goto_calls[0][1]["wait_until"] == "networkidle", page.goto_calls
+
+
+async def test_a_networkidle_timeout_with_no_document_still_reports_the_timeout(monkeypatch):
+    """Clause 2 (first of three nodes): nothing loaded is not "loaded but never idle".
+
+    An empty URL and `chrome-error://chromewebdata/` are what Chromium leaves
+    behind when the navigation itself produced no document, so the timeout is the
+    whole truth there and the raw text still has to reach the caller.
+    """
+    for dead_url in ("", "chrome-error://chromewebdata/"):
+        page = _TimeoutPage(land_on=dead_url)
+        monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+        out = json.loads(await browser_module._browser_navigate(
+            "http://127.0.0.1:5199/stream", wait_until="networkidle"))
+
+        assert "ok" not in out, (dead_url, out)
+        assert "Timeout" in out.get("error", ""), (dead_url, out)
+        assert "network_idle" not in out, (dead_url, out)
+
+
+async def test_a_networkidle_timeout_on_another_host_is_not_the_loaded_page(monkeypatch):
+    """Clause 2 (second node): the document must be the page that was asked for.
+
+    `page.url` survives a navigation that never committed as the *previous*
+    document's URL, so "there is an http URL in `page.url`" alone would let a dead
+    host report itself loaded — that is the first half. The second half is the
+    other direction: an apex-to-`www.` hop, which `_hosts_match` deliberately
+    tolerates, must still count as the same page, or the guard would refuse the
+    navigations it exists to rescue. Both directions are asserted because a
+    comparison that always answered "different" would fail only the second one,
+    and a comparison that always answered "same" only the first.
+    """
+    # Another machine's URL: not the page that was requested.
+    page = _TimeoutPage(land_on="http://198.51.100.7:5199/stream")
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_navigate(
+        "http://127.0.0.1:5199/stream", wait_until="networkidle"))
+
+    assert "ok" not in out, out
+    assert "Timeout" in out.get("error", ""), out
+    assert "network_idle" not in out, out
+
+    # A `www.` hop on the requested host: the same page, so still rescued.
+    hopped = _TimeoutPage(url="https://www.example.com/",
+                          land_on="https://www.example.com/", title="Example")
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(hopped))
+
+    out = json.loads(await browser_module._browser_navigate(
+        "https://example.com/", wait_until="networkidle"))
+
+    assert out.get("ok") is True, out
+    assert out["network_idle"] is False, out
+
+
+async def test_a_load_or_domcontentloaded_wait_timeout_is_still_an_error(monkeypatch):
+    """Clause 2 (third node): the fallback is scoped to `networkidle`, not to timeouts.
+
+    Both waits the schema recommends for an SPA are covered, because both are the
+    recommendation the new sentence makes and neither has the never-idle excuse:
+    a `load` or `domcontentloaded` timeout means the document did not arrive.
+    """
+    for wait in ("load", "domcontentloaded"):
+        page = _TimeoutPage(raises_for=(wait,))
+        monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+        out = json.loads(await browser_module._browser_navigate(
+            "http://127.0.0.1:5199/stream", wait_until=wait))
+
+        assert out.get("ok") is not True, (wait, out)
+        assert "Timeout" in out.get("error", ""), (wait, out)
+        assert "network_idle" not in out, (wait, out)
+
+
+async def test_the_same_fixture_on_a_quiet_wait_still_reports_a_measured_status(monkeypatch):
+    """Control for the fixture above, and the "load unchanged" half of the item.
+
+    `_TimeoutPage` raises only for the wait it is told to, so this node is the
+    only one that reaches its success branch: if the fake had stopped returning a
+    response handle at all, the three error nodes above would still pass and the
+    rescue would be the only thing left standing. What a normal wait must keep: a
+    measured `status`, and no `network_idle` claim, because nothing here measured
+    the network's idleness when the wait finished on its own terms.
+    """
+    page = _TimeoutPage()
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_navigate(
+        "http://127.0.0.1:5199/stream", wait_until="domcontentloaded"))
+
+    assert out.get("ok") is True, out
+    assert out["status"] == 200, out
+    assert "network_idle" not in out, out
+    assert page.goto_calls[0][1]["wait_until"] == "domcontentloaded", page.goto_calls
+
+
+async def test_the_served_schema_no_longer_sends_the_model_to_networkidle_for_spas():
+    """Clause 4: the sentence is the defect's other half — it is served every turn.
+
+    `browser_navigate`'s own `wait_until` description told the model to use the
+    one wait that cannot finish on the page class it names, and the model
+    obeyed: the exchange is quoted tool_call-and-all in backlog #1088 —
+    `browser_navigate(url="http://127.0.0.1:5199/", wait_until="networkidle")`
+    against a vite dev server, answered `Page.goto: Timeout 30000ms exceeded` on
+    a page that was serving. The transcript itself (`20260907_021204_iv4acf.json`,
+    2026-09-06) is gone from `~/lloyd-data/sessions/`, whose oldest file on
+    2026-09-24 is dated 2026-09-09, so the item is the surviving record.
+    """
+    tools = await browser_module.list_tools()
+    nav = next(t for t in tools if t.name == "browser_navigate")
+    # Read the serialized form: `inputSchema` is the alias the MCP wire carries,
+    # and this is the byte string the model is handed every turn.
+    served = nav.model_dump(by_alias=True)
+    desc = served["inputSchema"]["properties"]["wait_until"]["description"]
+
+    assert "Use networkidle for SPAs" not in desc, desc
+    assert "load" in desc, desc
+    assert "browser_wait" in desc, desc
+    assert "text" in desc and "selector" in desc, desc
+    # The value stays accepted — an existing caller must not break — it is only
+    # no longer recommended.
+    assert "networkidle" in served["inputSchema"]["properties"]["wait_until"]["enum"]
+
+
+async def test_browser_wait_networkidle_on_a_loaded_page_is_never_idle(monkeypatch):
+    """Clause 3: the same trap in `browser_wait`, same answer.
+
+    The `networkidle` *condition* reaches the same dead end as the navigate wait,
+    so it gets the same verdict; the `about:blank` half of this node is the scope
+    proof — with no http document there is nothing to call loaded, and the caller
+    must still hear "Wait failed".
+    """
+    page = _TimeoutPage()
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_wait("networkidle", timeout=2000))
+
+    assert out.get("ok") is True, out
+    assert out["network_idle"] is False, out
+    assert "error" not in out, out
+
+    # And the same wait on a page with no http document is still a failure:
+    # there is nothing there to call loaded.
+    blank = _TimeoutPage(url="about:blank")
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(blank))
+    out = json.loads(await browser_module._browser_wait("networkidle", timeout=2000))
+    assert out.get("ok") is not True, out
+    assert "Wait failed" in out.get("error", ""), out
+
+
+async def test_the_never_idle_verdict_crosses_the_mcp_seam_without_isError(monkeypatch):
+    """What the model reads: `call_tool`'s wrapped payload, over the wire.
+
+    `text_result` sniffs a top-level `error` key into `isError`, so the old
+    behaviour was not merely a confusing sentence — the MCP result for a live
+    page was a tool failure.
+    """
+    page = _TimeoutPage()
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    monkeypatch.setattr(browser_module, "_schedule_state_push", lambda name: None)
+
+    res = await browser_module.call_tool(
+        "browser_navigate",
+        {"url": "http://127.0.0.1:5199/stream", "wait_until": "networkidle"})
+
+    payload = json.loads(res.content[0].text)
+    assert payload["ok"] is True, payload
+    assert payload["network_idle"] is False, payload
+    assert payload["title"] == "SSE fixture", payload
+    assert res.is_error is False, \
+        "a page that loaded and never went idle is not a failed tool call"
+    assert res.model_dump(by_alias=True, exclude_none=True)["isError"] is False
+
+
+# ── Clause 5: the same bad advice outside the schema ──────────────────────────
+#
+# `browser_navigate`'s `wait_until` description is not the only place the model
+# learns to ask for `networkidle`. `skills/browser-session-extract/SKILL.md` gave
+# `"wait_until": "networkidle"` as the whole of its one Navigation example, and a
+# live skill body is injected into context when the skill fires — so the setting
+# that cannot finish on a page holding a socket was also being served as an
+# instruction. The example was changed to `load` on the vault's main (commit
+# `147e549a`, 2026-09-23T16:34−07:00); #409 then archived that skill (vault commit
+# `244dd6b8`, 2026-09-23T20:06−07:00), which is why the scan below now measures an
+# empty set where the clause expected one permitted file. What is pinned is
+# therefore strictly stronger than the clause as written: no live skill shows that
+# wait, and no live skill names it even in prose. The clause's named file is not a
+# live skill any more — an archived skill is neither advertised nor injected, so its
+# copies of the string reach nobody, and this file does not assert on a dead file.
+#
+# The roots are named outright rather than read from `prompt_builder`'s constants or
+# `app.paths`' vault path, for the reason `tests/test_archived_skill_artifacts.py:56-63`
+# records: inside an automod worktree those re-anchor to the round's tree and return
+# nothing, and a guard that reads nothing passes. `ACCOUNT_HOME` is the passwd entry,
+# so it survives the gate's `HOME=<round>/home` (`app/paths.py:11-16`), and
+# `Path.home()` is listed beside it because that is what the sibling test scans.
+# Two positive controls, because a clean scan is the one green result that can mean
+# nothing: the floor assert proves the roots resolved, and
+# `test_the_skill_scan_reports_who_names_the_broken_wait` proves the two matchers
+# fire against a synthetic tree. A scan whose roots all failed to resolve would
+# otherwise report a clean board — the one answer worse than the defect.
+
+_LIVE_SKILL_ROOTS = [
+    Path.home() / "obsidian" / "skills",
+    ROOT / "skills",
+]
+
+def _skill_roots() -> list[Path]:
+    """The skill roots, deduped at the call site by ``resolve()``.
+
+    ``ACCOUNT_HOME`` is the passwd entry and ``Path.home()`` is what the gate
+    re-points at the round's home, so on a round these name one vault twice.
+    """
+    from app.data_root import ACCOUNT_HOME
+
+    return [ACCOUNT_HOME / "obsidian" / "skills", *_LIVE_SKILL_ROOTS]
+
+
+def _live_skill_files(roots: list[Path] | None = None) -> list[Path]:
+    """Every live ``SKILL.md`` under ``roots`` (default: :func:`_skill_roots`).
+
+    ``rglob`` would find ``skills/.archived/<name>/SKILL.md`` too, so the archived
+    tree is dropped by name rather than missed by an accident of depth: three
+    archived skills still carry this exact string on 2026-09-24
+    (``browser-navigate-handling``, ``browser-navigate-timeout``,
+    ``browser-session-extract``), and they are out of scope because an archived
+    skill is neither advertised nor readable through ``skills_read``.
+    """
+    found: set[Path] = set()
+    for root in (_skill_roots() if roots is None else roots):
+        if not root.is_dir():
+            continue
+        for path in root.rglob("SKILL.md"):
+            if ".archived" in path.parts:
+                continue
+            # `resolve()` is not cosmetic: under the gate `Path.home()` is
+            # `<round>/home`, whose `obsidian` is a symlink onto the real vault, so
+            # the two vault roots here name the SAME file by two different path
+            # strings. Deduped textually the scan reports every live skill twice,
+            # and the assert on who names `networkidle` fails on its own
+            # duplicate rather than on any drift.
+            found.add(path.resolve())
+    return sorted(found)
+
+
+def test_no_live_skill_recommends_the_networkidle_wait():
+    """Clause 5: the guidance the model copies must stop naming the broken wait.
+
+    Three asserts, because the clause has three claims in it, and each fails for a
+    different regression: the scan having measured nothing, some skill showing the
+    bad value, and the surviving mention drifting from a prohibition back into an
+    example.
+    """
+    files = _live_skill_files()
+    # 191 live SKILL.md files under ~/obsidian/skills on 2026-09-24 (161 more under
+    # skills/.archived/, which are excluded), counted by this same walk. The floor is
+    # well below that and well above zero: it exists to turn "the roots did not
+    # resolve" into a failure instead of a green run.
+    assert len(files) >= 150, (
+        f"the scan found only {len(files)} live SKILL.md files under "
+        f"{[str(r) for r in _skill_roots()]} — it has measured nothing, so a "
+        "clean result here would mean nothing")
+
+    def _rel(p: Path) -> str:
+        return f"{p.parent.name}/{p.name}"
+
+    shown = sorted(_rel(p) for p in files
+                   if '"wait_until": "networkidle"'
+                   in p.read_text(encoding="utf-8", errors="replace"))
+    assert not shown, (
+        f"{shown} still shows a navigation example with the wait that never fires "
+        "on a page holding a live socket; an agent copying it gets a 30 s timeout "
+        "on a fully loaded page")
+
+    naming = sorted(_rel(p) for p in files
+                    if "networkidle" in p.read_text(encoding="utf-8", errors="replace"))
+    # The clause permitted exactly one skill to name the word; that skill is
+    # archived (see the header above), so the surviving reading is the stricter one:
+    # nobody living. A future skill that has to discuss the wait — to tell the model
+    # not to use it — reaches this line as a deliberate edit, not as a silent pass.
+    assert naming == [], (
+        f"{naming} names the wait that never fires on a page holding a live socket; "
+        "no live skill is permitted to")
+
+
+def test_the_skill_scan_reports_who_names_the_broken_wait(tmp_path):
+    """The matcher the clean scan above rests on can fail; this tree makes it.
+
+    An empty result over a corpus is only evidence if the same code reports the
+    string when it is present. `tmp_path` is a synthetic skills root holding one
+    skill that shows the bad wait in an example, one that names it in prose only,
+    and one archived copy under the same name — so this node pins all three ways
+    the real scan could be quietly vacuous: a matcher that matches nothing, an
+    exclusion that excludes everything, and an exclusion that does not exclude the
+    archive.
+    """
+    bodies = {
+        "shows-the-wait": '{"name": "browser_navigate", "arguments": '
+                          '{"url": "https://example.com", "wait_until": "networkidle"}}',
+        "names-it-in-prose": "networkidle is the wait this page never reaches.",
+    }
+    for name, body in bodies.items():
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "SKILL.md").write_text(body, encoding="utf-8")
+    archived = tmp_path / ".archived" / "shows-the-wait"
+    archived.mkdir(parents=True)
+    (archived / "SKILL.md").write_text(bodies["shows-the-wait"], encoding="utf-8")
+
+    files = _live_skill_files([tmp_path])
+    assert [p.parent.name for p in files] == sorted(bodies), \
+        "the archived copy shares a directory name with a live one, so a walk that " \
+        "did not exclude `.archived` would show up here as a duplicate"
+
+    def _who(substring: str) -> list[str]:
+        return sorted(p.parent.name for p in files
+                      if substring in p.read_text(encoding="utf-8"))
+
+    assert _who('"wait_until": "networkidle"') == ["shows-the-wait"], \
+        "the example matcher found nothing even with the example in front of it"
+    assert _who("networkidle") == sorted(bodies), \
+        "the prose matcher found nothing even with the word in front of it"
+

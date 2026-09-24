@@ -518,6 +518,64 @@ async def _locate(page, ref_id: str):
 
 # ── Tool implementations ───────────────────────────────────────────────────────
 
+# Playwright's `networkidle` wants ~500 ms with no network connections at all. A
+# page holding a live socket — an EventSource, a websocket, Vite's HMR channel, a
+# long-poll — never grants that silence, so the wait runs to this tool's own 30 s
+# deadline on a document that is fully rendered. The raw
+# `Page.goto: Timeout 30000ms exceeded.` then reads, to the model and to the
+# harness (`text_result` turns a top-level `error` key into `isError`), exactly
+# like a dead site. Backlog #1088: when a usable document is sitting there, the
+# honest answer is the one the page gave, plus the network declared non-idle.
+def _looks_like_timeout(exc: BaseException) -> bool:
+    """Playwright's TimeoutError, or its text after a re-raise."""
+    if "timeout" in type(exc).__name__.lower():
+        return True
+    text = str(exc).lower()
+    return "timeout" in text and "exceeded" in text
+
+
+def _hosts_match(requested: str, landed: str) -> bool:
+    """Same machine, allowing the redirects that commonly change the URL.
+
+    A page only counts as loaded if it is the page that was asked for. `page.url`
+    survives a navigation that never committed as the *previous* document's URL,
+    and calling that the target is how a dead host would read as a live one. An
+    apex-to-`www.` hop and an http→https upgrade are the ordinary redirects a
+    real navigation takes, so those still count as the same host.
+    """
+    try:
+        want = urllib.parse.urlparse(requested).hostname or ""
+        got = urllib.parse.urlparse(landed).hostname or ""
+    except ValueError:
+        return False
+    if not want or not got:
+        return False
+    return want.removeprefix("www.") == got.removeprefix("www.")
+
+
+async def _document_is_usable(page, requested: str = "") -> bool:
+    """Is there a real document behind a wait that never finished?
+
+    An empty URL, `chrome-error://chromewebdata/` and the blank page a freshly
+    launched browser sits on are all Chromium's answer to "nothing loaded", and
+    all three are free of an http scheme, which is the test. The title is read
+    here because the caller is about to hand it back; a page that cannot answer
+    that is not a page.
+    """
+    try:
+        landed = str(page.url or "")
+    except Exception:
+        return False
+    if not landed.startswith(("http://", "https://")):
+        return False
+    if requested and not _hosts_match(requested, landed):
+        return False
+    try:
+        return isinstance(await page.title(), str)
+    except Exception:
+        return False
+
+
 async def _browser_navigate(url: str, wait_until: str = "domcontentloaded") -> str:
     try:
         parsed = urllib.parse.urlparse(url)
@@ -563,8 +621,28 @@ async def _browser_navigate(url: str, wait_until: str = "domcontentloaded") -> s
     # Until a document is fetched, nothing here knows what this page is.
     _forget_doc_status()
     seq = _block_log["seq"]
+    never_idle = False
     try:
         resp = await page.goto(url, wait_until=wait_until, timeout=30000)
+    except Exception as exc:
+        # A redirect the guard refused arrives here as the same bare timeout —
+        # the aborted hop leaves `goto` waiting for a load that never comes — so
+        # the block reason is asked for first, and it wins. What remains, a
+        # timeout on the `networkidle` wait over a document that is really
+        # there, is not a failed navigation.
+        blocked = _block_since(seq)
+        loaded_never_idle = (
+            not blocked
+            and wait_until == "networkidle"
+            and _looks_like_timeout(exc)
+            # Last, because it costs a round trip to the page and only a real
+            # `networkidle` timeout can make that question worth asking.
+            and await _document_is_usable(page, url)
+        )
+        if not loaded_never_idle:
+            return json.dumps({"error": blocked or str(exc)})
+        resp, never_idle = None, True
+    try:
         landed = await _enforce_landing(page)
         if landed:
             return json.dumps({"error": f"{landed} (redirected from {url[:100]})"})
@@ -594,6 +672,18 @@ async def _browser_navigate(url: str, wait_until: str = "domcontentloaded") -> s
                 f"HTTP {status} — {title or '(untitled page)'}. The document that "
                 "answered is an error page, not the target content: its title and "
                 "url are the error page's own."
+            )
+        if never_idle:
+            # The document is there; the wait for quiet never ended, and with it
+            # the response handle — so `status` here is unmeasured, exactly as it
+            # is for a same-document navigation, rather than evidence of anything.
+            result["network_idle"] = False
+            result["note"] = (
+                "Loaded, but the network never went idle: a live websocket, "
+                "EventSource or HMR connection holds it open, so the "
+                "networkidle wait ran to its deadline. The content is usable; "
+                "the HTTP status was not measured. Pass wait_until=\"load\" "
+                "next time and wait for the content with browser_wait."
             )
         _remember_doc_status(page, status)
         return json.dumps(result)
@@ -913,7 +1003,24 @@ async def _browser_wait(condition: str, value: str = "", timeout: int = 5000) ->
         elif condition == "navigation":
             await page.wait_for_load_state("domcontentloaded", timeout=timeout_)
         elif condition == "networkidle":
-            await page.wait_for_load_state("networkidle", timeout=timeout_)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=timeout_)
+            except Exception as exc:
+                # The same trap as `browser_navigate`, reached the same way: a
+                # page holding a live socket never goes idle, and the useful
+                # answer is that the document is there and the network is not
+                # quiet. Anything else — a page on `about:blank`, a load that
+                # really did fail — stays the failure it reports as.
+                if not (_looks_like_timeout(exc) and await _document_is_usable(page)):
+                    return json.dumps({"error": f"Wait failed: {exc}"})
+                return json.dumps({
+                    "ok": True,
+                    "condition": condition,
+                    "network_idle": False,
+                    "note": "Load state never reached networkidle: a live "
+                            "websocket, EventSource or HMR connection holds the "
+                            "network open. The page itself is loaded.",
+                })
         elif condition == "timeout":
             ms = int(value) if value.isdigit() else 1000
             await asyncio.sleep(min(ms, 10000) / 1000)
@@ -995,7 +1102,15 @@ async def list_tools():
                 "wait_until": {
                     "type": "string",
                     "enum": ["load", "domcontentloaded", "networkidle", "commit"],
-                    "description": "When to consider navigation complete. Use networkidle for SPAs. Default: domcontentloaded",
+                    "description": (
+                        "When to consider navigation complete. For an SPA use "
+                        "\"load\", then `browser_wait` with condition \"text\" or "
+                        "\"selector\" for the content you are waiting for: "
+                        "\"networkidle\" wants ~500 ms of total network silence "
+                        "and never fires on a page holding a live websocket, "
+                        "EventSource or HMR connection, so it times out on pages "
+                        "that are fully loaded. Default: domcontentloaded"
+                    ),
                 },
             },
             "required": ["url"],
