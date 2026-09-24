@@ -1666,9 +1666,16 @@ class Gate:
         started = time.time()
         snapshot, snap_note = self._review_snapshot(head)
         grade_root = snapshot or self.worktree
+        # The tree the grader's citations are validated against, recorded so a
+        # refusal states what it graded: the round that was refused on
+        # `agent_mcp/facts.py:520-540` (a write path, not a test) and a landing
+        # at `08a4f4f0` (not an object) left no way for the next reader to
+        # re-run either check.
+        validated = {"review_validated_head": head, "review_validated_worktree": str(grade_root)}
         base_event = {"event": "review", "round_id": self.round_id, "item_id": self.item_id,
                       "attempt": attempt, "head": head, "grader_model": "primary",
                       "snapshot": bool(snapshot), "snapshot_note": snap_note, "prechecks": pre,
+                      "validated_head": head, "validated_worktree": str(grade_root),
                       # A refusal shown an amendment is a judgment of a new
                       # contract; `backlog.review_disagreement` reads this so
                       # it does not count the amended pass as a repeat.
@@ -1706,9 +1713,42 @@ class Gate:
                                      # stands only on a green tests rung.
                                      tests_passed=any(r.name == "tests" and r.ok
                                                       for r in self.report.rungs),
-                                     changed_paths=changed)
+                                     changed_paths=changed,
+                                     # Every commit the grader cites is asked of
+                                     # the round's own repo, and the `def test_`
+                                     # delta the round really added is the
+                                     # deterministic answer to "this diff adds
+                                     # no test".
+                                     repo=self.live,
+                                     added_tests=RV.def_test_delta(grade_root, self.base, changed))
         finally:
             self._drop_snapshot(snapshot)
+        tree_note = (f" (citations validated against {head[:8] or 'the working tree'} "
+                     f"in {grade_root})")
+        if parsed and parsed.get("unreliable"):
+            # The grader's own evidence is not in the tree it was handed, so
+            # this text is not a judgment of the diff: it is the same shape as
+            # an unreachable grader, and it spends no attempt (#1442).
+            reasons = "; ".join(parsed["unreliable"])
+            S.append_event({**base_event, "ok": False, "blocking": False,
+                            "unreliable": parsed["unreliable"],
+                            # The clause entries carry their own
+                            # `citation_unresolved` markers, so the record shows
+                            # WHICH citation failed, not just that one did.
+                            "clauses": parsed["clauses"],
+                            "error": f"review unreliable: {reasons}"[:400],
+                            "session_id": res.get("session_id"),
+                            "seconds": round(time.time() - started, 1)})
+            return False, ("review is unreliable"
+                           f"{tree_note}: the findings cite evidence that does not exist where "
+                           f"the grader said it looked — {reasons}. The item keeps its attempt and "
+                           f"no review attempt is spent; gate again (the grader may answer) and "
+                           f"report the citation if it repeats"), {
+                               "external_blocker": True, "external_failures": [],
+                               "external_reason": "grader cited evidence not in the graded tree",
+                               "retry_after_s": 120,
+                               "review_unreliable": parsed["unreliable"],
+                               "review_session": res.get("session_id"), **validated}
         if parsed is None:
             S.append_event({**base_event, "ok": False, "blocking": False,
                             "error": "structured review unusable"})
@@ -1764,9 +1804,9 @@ class Gate:
                         "findings": findings[:2000]})
         self._settle_amendments(amendments, parsed, kind)
         if kind == "unsound":
-            return False, f"review: premise unsound — {findings}", {
+            return False, f"review: premise unsound{tree_note} — {findings}", {
                 "review_premise_unsound": True, "review_summary": findings[:800],
-                "review_session": res.get("session_id")}
+                "review_session": res.get("session_id"), **validated}
         if kind == "retry":
             contract_refusal = any(c.get("verdict") == "unsatisfiable" for c in parsed["clauses"])
             if contract_refusal:
@@ -1779,9 +1819,9 @@ class Gate:
                        if attempt < RV.REVIEW_MAX_PER_ROUND else
                        "abort and report — the item comes back with these findings and your branch")
                 shown = f"{attempt}/{RV.REVIEW_MAX_PER_ROUND}"
-            return False, f"review sent it back ({shown}; {nxt}): {findings}", {
+            return False, (f"review sent it back ({shown}; {nxt}){tree_note}: {findings}"), {
                 "review_retry": True, "review_findings": findings[:1500],
-                "review_attempt": attempt, "review_session": res.get("session_id")}
+                "review_attempt": attempt, "review_session": res.get("session_id"), **validated}
         # On a PASS, record the grader's `post_landing` clauses onto the item.
         # Written here rather than by the implementer because it is a fact the
         # grader established about a change that is about to land, not a claim
@@ -1822,7 +1862,8 @@ class Gate:
                           "post_landing_clauses": marked,
                           "advisory_seams": advisory_seams,
                           "advisory_findings": advisory_findings,
-                          "amendments_ratified": [a.get("clause") for a in amendments]}
+                          "amendments_ratified": [a.get("clause") for a in amendments],
+                          **validated}
 
     def _patch_id(self) -> str:
         """`git patch-id --stable` of this round's whole diff, or "".

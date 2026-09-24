@@ -112,6 +112,24 @@ HOW_VERIFIED = ("ran", "read", "inferred")
 # unpinned constant beside one real defect each time.
 HONESTY_SEVERITIES = ("blocking", "advisory")
 
+# A commit-ish, as a grader writes one: 7-40 hex characters on their own. The
+# two lookaheads are the whole of the safety — a token must hold a digit AND a
+# letter, which drops dates (`20260915`, all decimal digits) and hex-looking
+# English (`beadded`, `decode`, `abcdefab`) without dropping real object ids.
+# Anything that survives is then asked of git, because the lookup, not the
+# shape, is what decides: `deadbeef` has the shape of a commit and no repo has
+# one. See `unresolved_shas`.
+_SHA_TOKEN_RX = re.compile(
+    r"\b(?=[0-9a-f]{7,40}\b)(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40}\b")
+_SHA_RAIL_MAX_TOKENS = 8
+# A grader note denying that the diff added a test, in the two shapes the
+# 2026-09-24 refusal used. `\bno\b` is deliberate: `adds nothing to the config`
+# is a true observation about a diff and must not read as a denial.
+_ADDED_TEST_DENIAL_RX = re.compile(
+    r"(?:diff|round|change|commit|patch)\b[^.\n]{0,80}?\bno\s+(?:such\s+|new\s+|added\s+)?"
+    r"tests?\b"
+    r"|\b(?:not|absent)\s+in\s+this\s+diff'?s\s+tests?\b", re.I)
+
 # Two judgments the grader makes about each finding, and the whole of what
 # replaces `decide()`'s policy table under `automod.review.policy: grader`.
 # The table grew a row per incident — seams first/always/never, precheck
@@ -366,6 +384,59 @@ def diff_text(worktree: Path, base: str) -> tuple[str, bool]:
     return out, False
 
 
+_TEST_DEF_RX = re.compile(r"^\s*(?:async\s+)?def test_", re.M)
+
+
+def _test_def_count(text: str) -> int:
+    return len(_TEST_DEF_RX.findall(text))
+
+
+def _post_and_base(worktree: Path, base: str, rel: str) -> tuple[str, str]:
+    """The file as the round left it and as of `base` — the pair every
+    before/after honesty count is taken from."""
+    post_path = worktree / rel
+    post = (post_path.read_text(encoding="utf-8", errors="replace")
+            if post_path.exists() else "")
+    return post, _git(worktree, "show", f"{base}:{rel}")
+
+
+def def_test_delta(worktree: Path, base: str, changed_paths: list[str]) -> int:
+    """How many `def test_` functions the diff ADDED, per changed test file.
+
+    Floored at zero per file, so it answers "what did this diff add" and never
+    goes negative when the round deleted nodes — a round that tightened
+    existing assertions is 0, which is why the `no test function was added`
+    precheck stays advisory. Same arithmetic as `honesty_prechecks`, one
+    implementation, because a grader note gets checked against this number.
+    """
+    total = 0
+    for rel in [p for p in changed_paths if p.startswith("tests/") and p.endswith(".py")]:
+        post, pre = _post_and_base(worktree, base, rel)
+        total += max(0, _test_def_count(post) - _test_def_count(pre))
+    return total
+
+
+def added_test_denials(parsed: dict, *, added_tests: int) -> list[str]:
+    """Notes that deny the diff added tests, against a delta that says it did.
+
+    On 2026-09-24 the review that refused a round's last attempt wrote "This
+    round's diff adds no such test" and "not in this diff's tests" about a diff
+    whose `git diff --stat` listed four test files — and the grader's own prompt
+    contained the line `build_prompt` emits naming those four files. The count is
+    deterministic, so the contradiction needs no model to decide. With a zero
+    delta the same note may be perfectly true, and nothing is reported.
+    """
+    if not added_tests:
+        return []
+    out: list[str] = []
+    for c in parsed.get("clauses") or []:
+        note = str(c.get("note") or "")
+        if note and _ADDED_TEST_DENIAL_RX.search(note):
+            out.append(f"clause {c.get('clause')} says the diff adds no test; the diff adds "
+                       f"{added_tests} `def test_` node(s)")
+    return out
+
+
 def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
                       *, n_clauses: int = 0) -> list[dict]:
     """Findings no model is needed for, on the round's changed test files.
@@ -377,11 +448,11 @@ def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
     """
     out: list[dict] = []
     tests = [p for p in changed_paths if p.startswith("tests/") and p.endswith(".py")]
-    added_tests = 0
+    # One implementation of the count, because `added_test_denials` holds a
+    # grader note to the same number.
+    added_tests = def_test_delta(worktree, base, changed_paths)
     for rel in tests:
-        post_path = worktree / rel
-        post = post_path.read_text(encoding="utf-8", errors="replace") if post_path.exists() else ""
-        pre = _git(worktree, "show", f"{base}:{rel}")
+        post, pre = _post_and_base(worktree, base, rel)
         for pat, why, severity in _HONESTY_PATTERNS:
             rx = re.compile(pat, re.M)
             n_post, n_pre = len(rx.findall(post)), len(rx.findall(pre))
@@ -532,6 +603,13 @@ also accepted, as `lloyd/SOUL.md` or `~/obsidian/lloyd/SOUL.md`. Your review \
 is restated \
 as one JSON object at the end under a fixed token budget, and a long note in \
 clause 1 is how clause 4 gets cut off.
+
+Every path and every commit you cite is checked in Python against the tree at \
+`{worktree}` — a `test_node_id` naming a file that is not there, or a commit \
+`git cat-file -t` cannot resolve in this repo, voids the whole review rather \
+than refusing the round, so cite only a file you opened in THIS tree and only a \
+sha you resolved here, and never write that this diff adds no test when the \
+files listed above contain new ones.
 
 Then the two sweeps the clauses do not cover:
 - **Test honesty.** For each changed test file, look for assertions that \
@@ -1137,6 +1215,51 @@ def evidence_of_absence(raw_path: str, changed_paths=()) -> bool:
     return any(m in head for m in _ABSENCE_MARKERS)
 
 
+def unresolved_shas(text: str, repo: Path | None) -> list[str]:
+    """Commit-ish tokens in `text` that `repo` cannot resolve, at most
+    `_SHA_RAIL_MAX_TOKENS` of them.
+
+    The grader that refused round `SM_20260924_104307`'s last attempt wrote
+    "satisfied by a test in a prior landing (agent_mcp/facts.py:520-540, commit
+    08a4f4f0) that I ran and read": `git cat-file -t 08a4f4f0` is
+    `fatal: Not a valid object name` in `~/lloyd` and in the vault alike, and
+    the cited range is the middle of `_fact_add`'s write path. Nothing
+    previously read a sha-shaped token in a note at all, so the refusal carried
+    it as fact and spent the attempt.
+
+    `repo=None` returns nothing rather than everything: an unreadable root is
+    the catalogued "guard that reads its own missing input" shape, and a rail
+    that invents phantom commits is worse than no rail.
+    """
+    if not text or repo is None:
+        return []
+    probe = _git(repo, "rev-parse", "--git-dir")
+    if not probe.strip():
+        return []
+    out: list[str] = []
+    for tok in _SHA_TOKEN_RX.findall(text)[:_SHA_RAIL_MAX_TOKENS]:
+        if tok not in out and not _git(repo, "cat-file", "-t", tok).strip():
+            out.append(tok)
+    return out
+
+
+def _test_file_cited(node: str) -> str:
+    """The file a `test_node_id` claims to point at, "" when it names none.
+
+    Only the file-shaped spellings count: `tests/ -k foo` and `pytest tests/`
+    are suite-level runs the grader is entitled to cite (see `_node_rail`), and
+    reading their first word as a path would invent a phantom for an honest
+    answer.
+    """
+    if not node:
+        return ""
+    first = (node.split("::", 1)[0].strip().split() or [""])[0]
+    cand = _trim_citation_prefix(first.strip("`'\"()[],;"))
+    if cand.startswith("tests/") and cand.endswith(".py"):
+        return cand
+    return ""
+
+
 def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
                tests_passed: bool) -> tuple[bool, str]:
     """`(holds, accepted_reason)` for a `met` clause's `test_node_id`.
@@ -1176,7 +1299,8 @@ def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
 
 def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                  n_clauses: int, require_tests: bool = True,
-                 tests_passed: bool = False, changed_paths=()) -> dict | None:
+                 tests_passed: bool = False, changed_paths=(),
+                 repo: Path | None = None, added_tests: int = 0) -> dict | None:
     """The grader's object, validated, with `met` downgraded where the
     evidence does not hold up. None if unusable. `require_tests=False` is
     the vault shape: prose has no pytest node to point at.
@@ -1195,6 +1319,14 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     refusing a diff no clause was ever graded against. One usable index is
     enough for the key to stay absent — an abstaining clause is still a verdict
     on the change.
+
+    `repo` is the round's repo, asked of every commit the grader cites in a
+    note, and `added_tests` the diff's deterministic `def test_` delta; both
+    feed `unreliable`, the list of reasons this review cannot be acted on at
+    all — a grader whose own evidence is not in the tree it was handed has not
+    judged the diff, whichever verdict its finalizer's schema printed.
+    Citations are validated on EVERY verdict, not only `met` (see
+    `unresolved_shas`).
     """
     if not isinstance(obj, dict):
         return None
@@ -1203,8 +1335,10 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
         return None
     worktree = Path(worktree)
     changed = set(changed_tests)
+    touched = changed | {str(p) for p in changed_paths or ()}
     clauses: list[dict] = []
     downgraded: list[int] = []
+    broken: dict[int, list[str]] = {}
     seen: set[int] = set()
     raw_clauses = obj.get("clauses") if isinstance(obj.get("clauses"), list) else []
     for raw in raw_clauses:
@@ -1224,6 +1358,29 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
         path = normalize_evidence_path(raw_path, worktree)
         node = str(raw.get("test_node_id") or "").strip()
         how = str(raw.get("how_verified") or "").strip().lower()
+        note = " ".join(str(raw.get("note") or "").split())
+        # ── the grader's citations, checked whatever verdict carries them ──
+        # The rails existed and were skipped: `_node_rail`'s existence check and
+        # `normalize_evidence_path`'s answer were consulted only inside
+        # `if verdict == "met":`, and the review that refused a round's last
+        # attempt on 2026-09-24 was four `partial`s — the schema-shaped
+        # restatement the finalizer emits, not the grading turn, which had
+        # returned `approve`. Its evidence named a test file present in no
+        # commit, branch or directory on the box and a landing sha that is not
+        # an object. A `partial` bought a refusal; a phantom bought nothing.
+        unresolved: list[str] = []
+        ghost = _test_file_cited(node)
+        if ghost and ghost not in touched and not (worktree / ghost).exists():
+            unresolved.append(f"test_node_id names {ghost}, which is not in the tree under "
+                              f"review (the diff did not touch it either)")
+            broken[idx] = unresolved
+        if raw_path and not path and not evidence_of_absence(raw_path, changed_paths):
+            unresolved.append(f"evidence_path {raw_path[:120]!r} resolves to nothing in the tree "
+                              f"under review")
+        for sha in unresolved_shas(note, repo):
+            unresolved.append(f"note cites commit {sha}, which `git cat-file -t` does not resolve "
+                              f"in the repo under review")
+            broken[idx] = unresolved
         why: list[str] = []
         if verdict == "post_landing" and not path:
             # A `post_landing` with nothing to point at is a claim about a
@@ -1266,7 +1423,12 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                         "evidence_line": int(raw.get("evidence_line") or 0)
                         if str(raw.get("evidence_line") or "0").lstrip("-").isdigit() else 0,
                         "test_node_id": node, "how_verified": how if how in HOW_VERIFIED else "inferred",
-                        "note": " ".join(str(raw.get("note") or "").split())[:600],
+                        "note": note[:600],
+                        # The refusal text and the failed citation now travel
+                        # together: `gate.json` shows the citation broke instead
+                        # of the rung quietly restating `agent_mcp/facts.py:520
+                        # -540` as if it named a test.
+                        **({"citation_unresolved": unresolved} if unresolved else {}),
                         **({"downgraded": why} if why else {}),
                         **({"accepted": accepted} if accepted else {})})
     # A clause the grader did not mention is not met — it was not graded.
@@ -1292,6 +1454,18 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                       "keys": sorted({str(k) for e in raw_clauses
                                       if isinstance(e, dict) for k in e})[:16]}
     clauses.sort(key=lambda c: c["clause"])
+    # Why this review cannot be acted on. A broken citation is not a finding
+    # about the diff — it is the grader's own reporting rail failing, so it
+    # spends no attempt (see the rung) rather than refusing a change that may
+    # be finished, tested and green, which is what it did on 2026-09-24.
+    unreliable: list[str] = [f"clause {idx}: {msg}" for idx, msg in sorted(broken.items())
+                             for msg in broken[idx][:2]]
+    graded = sum(1 for c in clauses if c["clause"] in seen)
+    if broken and len(broken) == graded:
+        unreliable.append(f"every graded clause entry ({graded}/{graded}) cited a file or commit "
+                          f"that is not in the tree under review: nothing in this review is "
+                          f"checkable")
+    unreliable.extend(added_test_denials({"clauses": clauses}, added_tests=added_tests))
     honesty = []
     for raw in (obj.get("test_honesty") or []):
         if isinstance(raw, dict) and str(raw.get("problem") or "").strip():
@@ -1331,6 +1505,9 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             "seams_unverified": seams[:10],
             "summary": " ".join(str(obj.get("summary") or "").split())[:600],
             "downgraded": sorted(set(downgraded)),
+            # Non-empty means the rung must not spend an attempt on this text:
+            # the grader's evidence does not exist where it said it looked.
+            "unreliable": unreliable[:8],
             # Absent means "no amendments were shown", which is the same as ok.
             "amendments_ok": amend_ok if isinstance(amend_ok, bool) else True,
             "amendments_note": " ".join(str(obj.get("amendments_note") or "").split())[:600],

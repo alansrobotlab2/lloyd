@@ -352,6 +352,130 @@ def test_prechecks_notice_a_code_change_with_no_new_test(repo):
     assert RV.honesty_prechecks(r, base, ["tests/test_a.py", "app/m.py"], n_clauses=0) == []
 
 
+# ── every citation is validated, whatever verdict carries it (#1442) ───────
+# Round SM_20260924_104307, review attempt 2 of 2: four `partial`s refused the
+# round, and every checkable claim in them was false of the head the gate
+# named. The evidence was a test file that exists in no commit
+# (`tests/test_facts_surviving_readers.py`) and a landing at `08a4f4f0`, which
+# `git cat-file -t` calls `fatal: Not a valid object name` in both `~/lloyd` and
+# the vault. Both rails existed and both were skipped: `_node_rail`'s existence
+# check and `normalize_evidence_path`'s answer were consulted only inside
+# `if verdict == "met":`, so a uniformly-`partial` restatement — the shape the
+# finalizer's schema pass emits, not the grading turn, which returned
+# `verdict: approve` — was checked against nothing. `unresolved_shas` and
+# `added_test_denials` carry the mechanism.
+
+PHANTOM = "tests/test_facts_surviving_readers.py::test_the_surviving_kg_readers_still_register"
+
+
+def _fin(*specs) -> dict:
+    """A `clauses` list in the shape the finalizer emits: one entry per clause."""
+    clauses = []
+    for i, spec in enumerate(specs, 1):
+        c = {"clause": i, "verdict": "met", "evidence_path": "app/x.py", "evidence_line": 3,
+             "test_node_id": "tests/test_x.py::test_it", "how_verified": "ran", "note": "ok"}
+        c.update(spec)
+        clauses.append(c)
+    return {"premise": "sound", "clauses": clauses, "test_honesty": [],
+            "seams_unverified": [], "summary": "fine"}
+
+
+def _judged(wt, obj, n, **kw):
+    return RV.parse_review(obj, worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=n,
+                           tests_passed=True, changed_paths=["app/x.py", "tests/test_x.py"], **kw)
+
+
+@pytest.mark.parametrize("verdict", ["met", "partial", "unmet"])
+def test_a_test_node_absent_from_the_tree_is_rejected_on_every_verdict(wt, verdict):
+    """`partial` is precisely the verdict that skipped the check on 2026-09-24,
+    so the rail cannot live only in the `met` branch."""
+    parsed = _judged(wt, _fin({"verdict": verdict, "test_node_id": PHANTOM}), 1)
+    c = parsed["clauses"][0]
+    assert c.get("citation_unresolved"), "an entry naming an absent test file is marked whatever its verdict"
+    assert "tests/test_facts_surviving_readers.py" in c["citation_unresolved"][0]
+    assert parsed["unreliable"], "a refusal built on a file that is not in the graded tree is not a verdict"
+
+
+@pytest.mark.parametrize("verdict", ["met", "partial", "unmet"])
+def test_an_evidence_path_that_resolves_to_nothing_is_recorded_on_the_clause(wt, verdict):
+    """The refusal then says the citation failed instead of silently
+    accepting `agent_mcp/facts.py:520-540`-shaped text for a test. An evidence
+    path alone stays a graded refusal, not an unusable review."""
+    parsed = _judged(wt, _fin({"verdict": verdict, "evidence_path": "app/facts_gone.py:520-540"}), 1)
+    c = parsed["clauses"][0]
+    assert c.get("citation_unresolved") and "app/facts_gone.py" in c["citation_unresolved"][0]
+    assert parsed["unreliable"] == [], "a path the grader mis-cited is still a finding about the diff"
+
+
+def test_a_review_whose_entries_all_cite_absent_files_is_unusable(wt):
+    """The 2026-09-24 refusal: all four entries named a file in no tree, branch
+    or commit, and the round still spent its last attempt on the text."""
+    specs = [{"verdict": "partial", "test_node_id": f"tests/test_ghost_{i}.py::test_x"}
+             for i in range(4)]
+    parsed = _judged(wt, _fin(*specs), 4)
+    assert len(parsed["clauses"]) == 4
+    assert all(c.get("citation_unresolved") for c in parsed["clauses"])
+    assert any("every" in r.lower() for r in parsed["unreliable"]), parsed["unreliable"]
+
+
+def test_a_commit_cited_in_a_note_that_is_not_an_object_makes_the_review_unreliable(repo):
+    """`git cat-file -t 08a4f4f0` → fatal, yet the rung wrote "a test in a prior
+    landing … commit 08a4f4f0 … that I ran and read" and the gate believed it."""
+    r, _ = repo
+    head = git(r, "rev-parse", "HEAD").stdout.strip()
+    bad = _judged(r, _fin({"verdict": "partial", "test_node_id": "",
+                           "evidence_path": "app/m.py",
+                           "note": "the pin exists from commit 08a4f4f0, not in this diff's tests"}),
+                  1, repo=r)
+    assert bad["clauses"][0]["citation_unresolved"]
+    assert "08a4f4f0" in bad["clauses"][0]["citation_unresolved"][0]
+    assert bad["unreliable"] and "08a4f4f0" in " ".join(bad["unreliable"])
+    # Positive control through the same rail: a sha the repo really has.
+    good = _judged(r, _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/m.py",
+                            "note": f"the pin landed at {head}, and the suite is green"}), 1, repo=r)
+    assert good["unreliable"] == [] and "citation_unresolved" not in good["clauses"][0]
+
+
+def test_a_repo_the_rail_cannot_read_invents_no_unresolved_shas(wt):
+    """Fourth instance of the catalogued class: a guard that reads its own
+    missing input reports what it cannot see. `tmp_path` is not a repo, so
+    `git cat-file` answers nothing, and the answer is to stay quiet."""
+    parsed = _judged(wt, _fin({"verdict": "partial", "test_node_id": "",
+                              "note": "satisfied by commit 08a4f4f0"}), 1, repo=wt)
+    assert parsed["unreliable"] == [] and "citation_unresolved" not in parsed["clauses"][0]
+
+
+def test_the_sha_rail_asks_git_and_does_not_read_prose_as_a_commit(repo):
+    """The shape filter is a cheap pre-check; the git lookup is the whole
+    verdict. Hex-looking English (`decode`, `beadded`), an all-decimal date
+    (`20260915`) and a short line range are not commit-ish at all, while a
+    7-token with a digit and a letter IS asked — and a real sha in the same
+    note is the positive control that the asking works."""
+    r, _ = repo
+    head = git(r, "rev-parse", "HEAD").stdout.strip()
+    quiet = _judged(r, _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/m.py",
+                             "note": f"the decode path, the beadded case, since 20260915, "
+                                     f"agent_mcp/facts.py:520-540 and {head[:12]} are all "
+                                     f"consistent"}), 1, repo=r)
+    assert quiet["unreliable"] == [] and "citation_unresolved" not in quiet["clauses"][0]
+    # The same note with one token the repo does not have.
+    # `0f`×6 keeps the shape filter (hex, 12 chars, has both a digit and a
+    # letter) and is an object no repo has.
+    loud = _judged(r, _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/m.py",
+                            "note": quiet["clauses"][0]["note"].replace(head[:12], "0f" * 6)}),
+                   1, repo=r)
+    assert "0f0f0f0f0f0f" in " ".join(loud["unreliable"]), "the lookup decides, the shape only asks"
+
+
+def test_the_note_of_an_unsound_premise_is_marked_but_its_verdict_still_stands(wt):
+    """The unsound call is the grader's to make about the ITEM, and an
+    unusable-citation flag must not swallow it."""
+    obj = _fin({"verdict": "partial", "test_node_id": PHANTOM})
+    obj["premise"] = "unsound"
+    parsed = _judged(wt, obj, 1)
+    assert parsed["premise"] == "unsound" and parsed["unreliable"]
+
+
 # ── the rung: four outcomes, and the flags ride the event ──────────────────
 
 class _Gate(G.Gate):
@@ -401,6 +525,52 @@ def test_an_unreachable_grader_is_external_not_a_pass(monkeypatch, tmp_path):
     ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
     assert ok is False and data["external_blocker"] is True and "503" in detail
     assert events[-1]["event"] == "review" and events[-1]["ok"] is False
+
+
+def _phantom_entry(verdict="partial", node=PHANTOM, note="the pin is elsewhere"):
+    return {"clause": 1, "verdict": verdict, "evidence_path": "app/x.py", "evidence_line": 1,
+            "test_node_id": node, "how_verified": "ran", "note": note}
+
+
+def _one_tree(tmp_path):
+    (tmp_path / "app").mkdir(); (tmp_path / "app" / "x.py").write_text("1\n")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_x.py").write_text("def test_it():\n    assert 1\n")
+
+
+def test_an_unresolvable_citation_makes_the_review_unreliable_and_spends_no_attempt(
+        monkeypatch, tmp_path):
+    """The 2026-09-24 round died on this text. A grader whose own evidence is
+    not in the tree it was handed has not judged the diff, so the item keeps its
+    attempt exactly as it does when the grader is unreachable."""
+    _one_tree(tmp_path)
+    obj = {"premise": "sound", "summary": "close", "clauses": [_phantom_entry()],
+           "test_honesty": [], "seams_unverified": []}
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj), prior=1)
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok is False and data["external_blocker"] is True
+    assert "unreliable" in detail and "keeps its attempt" in detail
+    assert "review_retry" not in data, "an unreliable review is not a graded refusal"
+    assert "tests/test_facts_surviving_readers.py" in detail
+    assert events[-1]["ok"] is False and events[-1]["blocking"] is False
+    assert "test_facts_surviving_readers" in events[-1]["error"]
+
+
+def test_a_note_denying_added_tests_against_a_positive_delta_spends_no_attempt(
+        monkeypatch, tmp_path):
+    """#1442 clause 4: "This round's diff adds no such test", said of a diff
+    whose `def test_` delta over the base was four nodes. The deterministic half
+    already counts them, so the contradiction is decidable without a model."""
+    _one_tree(tmp_path)
+    obj = {"premise": "sound", "summary": "", "clauses": [
+        _phantom_entry(node="tests/test_x.py::test_it",
+                       note="This round's diff adds no such test; the pin is a prior landing")],
+           "test_honesty": [], "seams_unverified": []}
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj))
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok is False and data["external_blocker"] is True
+    assert "adds no test" in detail and "keeps its attempt" in detail
+    assert events[-1]["blocking"] is False
 
 
 def test_a_sound_premise_with_an_unmet_clause_is_a_retry_with_findings(monkeypatch, tmp_path):

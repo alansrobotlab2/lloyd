@@ -148,7 +148,15 @@ def grade_commit(*, repo: Path, item_id: int, parent: str, commit: str, changed_
                                  n_clauses=len(contract["clauses"]),
                                  # A settled landing passed its tests rung; a
                                  # tree with its tests stripped never ran one.
-                                 tests_passed=not strip_tests, changed_paths=paths)
+                                 tests_passed=not strip_tests, changed_paths=paths,
+                                 # Citations are checked against this tree only
+                                 # when the tree is the whole commit: a
+                                 # `strip_tests` checkout deletes the very files a
+                                 # `test_node_id` names, so validating against it
+                                 # would call an honest citation a phantom.
+                                 repo=None if strip_tests else repo,
+                                 added_tests=0 if strip_tests
+                                 else RV.def_test_delta(wt, parent, paths))
         if parsed is None:
             return {"error": "unusable review object", "session_id": res.get("session_id")}
         kind, findings = RV.decide(parsed, pre, mode=policy)

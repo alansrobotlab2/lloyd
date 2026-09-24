@@ -335,6 +335,46 @@ def test_the_review_event_carries_the_head_and_the_snapshot_verdict(monkeypatch,
     assert "working tree" in ev["snapshot_note"]
 
 
+def test_the_review_rung_records_the_tree_its_citations_were_validated_against(
+        monkeypatch, tmp_path):
+    """#1442: the refusal cited `agent_mcp/facts.py:520-540` as a test and a
+    landing at `08a4f4f0` that is not an object, and the record never said which
+    tree it had graded — so the next reader could not re-run either check. A
+    refusal now names its own tree."""
+    grade = _grader(UNMET)
+    events = _arm(monkeypatch, tmp_path, grade=grade, head="h" * 40)
+    ok, detail, data = _Gate(7, ["app/x.py"], tmp_path).rung_review()
+    assert ok is False and data["review_retry"] is True
+    assert data["review_validated_head"] == "h" * 40
+    assert data["review_validated_worktree"] == str(tmp_path)
+    assert "hhhhhhhh" in detail and str(tmp_path) in detail
+    ev = events[-1]
+    assert ev["validated_head"] == "h" * 40 and ev["validated_worktree"] == str(tmp_path)
+
+
+def test_the_recorded_tree_is_the_snapshot_the_grader_actually_read(
+        monkeypatch, tmp_path, live_repo):
+    """The tree the citations were checked in is the detached checkout, not the
+    author's working tree, so that is the path the record carries."""
+    repo, wt = live_repo
+    head = git(wt, "rev-parse", "HEAD").stdout.strip()
+    seen: dict = {}
+
+    def grade(**kw):
+        seen["root"] = Path(kw["worktree"])
+        return {"ok": True, "error": "", "session_id": "s", "structured": UNMET,
+                "structured_error": "", "text": "", "stop_reason": "stop", "duration_s": 1}
+
+    events = _arm(monkeypatch, tmp_path, grade=grade, head=head)
+    ok, detail, data = _Gate(7, ["app/x.py"], wt, live=repo).rung_review()
+    assert ok is False and seen["root"] != wt
+    assert data["review_validated_head"] == head
+    assert data["review_validated_worktree"] == str(seen["root"])
+    assert str(seen["root"]) in detail, "the refusal states the tree it graded"
+    assert events[-1]["validated_worktree"] == str(seen["root"])
+    assert events[-1]["validated_head"] == head
+
+
 @pytest.fixture
 def live_repo(tmp_path):
     repo = tmp_path / "live"; repo.mkdir()

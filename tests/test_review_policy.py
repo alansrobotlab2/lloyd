@@ -205,6 +205,62 @@ def test_the_no_new_test_precheck_is_advisory(tmp_path, monkeypatch):
     assert kind == "pass"
 
 
+# ── a grader that denies tests the diff demonstrably added (#1442) ─────────
+# The review that refused round SM_20260924_104307's last attempt wrote "This
+# round's diff adds no such test" about a diff whose own `git diff --stat
+# 78f0637f..37179d71` lists four test files, and its prompt contained the line
+# `build_prompt` emits naming those four files. The `def test_` delta was
+# already computed deterministically by `honesty_prechecks`; nothing compared a
+# grader note against it.
+
+def test_the_added_test_delta_counts_only_what_the_diff_added(tmp_path, monkeypatch):
+    """Post minus pre per changed test file, floored at zero, so a round that
+    tightens assertions is 0 and a round that added four nodes is 4."""
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t.py").write_text(
+        "def test_a():\n    assert 1\n\n\ndef test_b():\n    assert 2\n\n\ndef test_c():\n    assert 3\n")
+    monkeypatch.setattr(RV, "_git", lambda *a, **k: "def test_a():\n    assert 1\n")
+    assert RV.def_test_delta(tmp_path, "BASE", ["tests/t.py", "app/x.py"]) == 2
+    # Same count on both sides: assertions tightened, nothing added.
+    monkeypatch.setattr(RV, "_git", lambda *a, **k:
+                        "def test_a():\n    assert 1\n\n\ndef test_b():\n    assert 2\n"
+                        "\n\ndef test_c():\n    assert 3\n")
+    assert RV.def_test_delta(tmp_path, "BASE", ["tests/t.py"]) == 0
+    # Nodes removed are not negative: the delta is what the diff ADDED.
+    monkeypatch.setattr(RV, "_git", lambda *a, **k:
+                        "\n".join(f"def test_{c}():\n    assert 1\n" for c in "abcde"))
+    assert RV.def_test_delta(tmp_path, "BASE", ["tests/t.py"]) == 0
+
+
+def test_a_note_denying_the_added_tests_is_a_contradiction_python_can_see():
+    """Verbatim shapes from the 2026-09-24 refusal, both clauses."""
+    parsed = {"clauses": [
+        {"clause": 3, "verdict": "partial",
+         "note": "This round's diff adds no such test; the clause is satisfied by a test "
+                 "in a prior landing (agent_mcp/facts.py:520-540, commit 08a4f4f0)"},
+        {"clause": 4, "verdict": "partial",
+         "note": "Same as clause 3: the pin exists at agent_mcp/facts.py:540-560 from commit "
+                 "08a4f4f0, not in this diff's tests."}]}
+    reasons = RV.added_test_denials(parsed, added_tests=4)
+    assert len(reasons) == 2, reasons
+    assert "clause 3" in reasons[0] and "clause 4" in reasons[1]
+    assert all("adds no test" in r for r in reasons), reasons
+    assert all("4" in r for r in reasons), "the reason names the delta it contradicts"
+    # Zero delta: the same note is a true observation, not a contradiction.
+    assert RV.added_test_denials(parsed, added_tests=0) == []
+
+
+def test_a_note_naming_the_test_it_ran_is_not_read_as_a_denial():
+    """The rail reads a denial of the diff's tests, not any sentence with the
+    word `test` in it."""
+    parsed = {"clauses": [
+        {"clause": 1, "verdict": "met",
+         "note": "the test the diff adds, test_the_guard_trips, was run and is green"},
+        {"clause": 2, "verdict": "met",
+         "note": "the diff adds nothing to the config and the existing test still pins it"}]}
+    assert RV.added_test_denials(parsed, added_tests=3) == []
+
+
 # ---------------------------------------------------------------------------
 # evidence roots
 # ---------------------------------------------------------------------------
