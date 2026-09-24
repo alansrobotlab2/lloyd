@@ -2001,7 +2001,8 @@ filed #479 saying the gate was unlandable for every round, #376's ended "the
 branch is ready as-is". All of it in prose, in reports that are read once.
 
 So on a failure the rung re-runs the failing **files** at the round's base, in
-a throwaway worktree, and classifies each failing node:
+a throwaway worktree and — since 2026-09-24 — a throwaway data root
+(`<round>/baseline-data`, `LLOYD_DATA` for the probe only), and classifies:
 
 - in a file the round's own diff touches → **the round's**, even if it also
   fails at base (the touched-file rule: a round that edits a red test file
@@ -2021,6 +2022,17 @@ the collected / passed / skipped floors and the removed-files check still
 apply. One new failure fails the rung as before, and the mixed case still
 records `pre_existing_failures` so the author does not spend the fix cycle
 on them. An INCONCLUSIVE probe grants nothing.
+
+**The probe runs in its own data root** (#1436, `<round>/baseline-data`,
+`LLOYD_DATA` for the probe only, removed with the worktree). It used to inherit
+the tests rung's env, whose `LLOYD_DATA` is the round data root that run had
+just written into — so a store the candidate's own tests provisioned (a 0-row
+`kg.sqlite` from `kg_store.configure(VAULT_KG_DB)` in a test the round added)
+was present "at base", the corpus guard read it as the store of record there
+too, and `SM_20260924_063720` was excused for its own defect, twice. Now that a
+pre-existing verdict passes the rung, a probe that can see the candidate's
+residue would pass it outright. `HOME` stays the round's: the round home is a
+symlink farm over the real one, so `lloyd-data` is the only residue it can hold.
 
 It used to **fail** with `external_blocker: true`, on the theory that a red
 tree would open the promotion's observation window against a broken baseline.

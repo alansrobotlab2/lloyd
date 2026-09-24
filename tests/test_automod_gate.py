@@ -8,6 +8,7 @@ and production.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -547,6 +548,71 @@ def test_no_node_ids_is_not_an_exemption(tmp_path):
     failed, note = G._failures_at_base(Path(sys.executable), tmp_path, "HEAD", [],
                                        tmp_path / "scratch")
     assert failed == set() and "no node ids" in note
+
+
+def _repo_with_data_root_sensitive_test(tmp_path):
+    """A test that fails only when its data root carries `poison` — the shape
+    of a store the candidate's own tests provisioned into the round data root
+    (#1436's 0-row kg.sqlite), which the base probe then found "at base"."""
+    r = tmp_path / "live"
+    (r / "tests").mkdir(parents=True)
+    git(tmp_path, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@e.com")
+    git(r, "config", "user.name", "t")
+    (r / "tests" / "test_data.py").write_text(
+        "import os\nfrom pathlib import Path\n\n"
+        "def test_data_root_is_clean():\n"
+        "    assert not (Path(os.environ['LLOYD_DATA']) / 'poison').exists()\n",
+        encoding="utf-8")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "base")
+    return r, git(r, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_the_base_probe_does_not_inherit_the_rounds_data_root(tmp_path):
+    """#1436: the round's tests rung left `poison` in the round data root and
+    the same env reached the probe, so a failure the candidate caused
+    reproduced "at base" and was excused as pre-existing. The probe must run
+    against a data root the candidate run cannot have written."""
+    repo, base = _repo_with_data_root_sensitive_test(tmp_path)
+    round_data = tmp_path / "round-home" / "lloyd-data"
+    (round_data / "poison").mkdir(parents=True)
+    env = {"PATH": os.environ["PATH"], "HOME": str(tmp_path / "round-home"),
+           "LLOYD_DATA": str(round_data)}
+    scratch = tmp_path / "scratch"
+
+    failed, note = G._failures_at_base(
+        Path(sys.executable), repo, base,
+        ["tests/test_data.py::test_data_root_is_clean"], scratch, env)
+
+    assert failed == set(), f"the round's residue reproduced at base: {note}"
+    assert "0 already failing" in note and "fresh data root" in note
+    external, new = G._classify_test_failure(
+        ["tests/test_data.py::test_data_root_is_clean"], failed)
+    assert external is False and new == ["tests/test_data.py::test_data_root_is_clean"]
+    # The round's own root is untouched — the tests rung's evidence stays —
+    # and the probe's is gone with its worktree.
+    assert (round_data / "poison").is_dir()
+    assert not (scratch / "baseline-data").exists()
+
+
+def test_a_probe_without_a_data_root_in_its_env_sets_none(tmp_path):
+    """An env-less probe (the module-level tests above) is unchanged: no
+    `LLOYD_DATA` is invented, and the note does not claim a fresh root."""
+    repo, base = _repo_with_failing_test(tmp_path)
+    failed, note = G._failures_at_base(
+        Path(sys.executable), repo, base,
+        ["tests/test_pre.py::test_already_broken"], tmp_path / "scratch",
+        {"PATH": os.environ["PATH"], "HOME": str(tmp_path)})
+    assert failed == {"tests/test_pre.py::test_already_broken"}
+    assert "fresh data root" not in note
+
+
+def test_rung_tests_reports_pre_existing_breakage_as_an_external_blocker(tmp_path, monkeypatch):
+    """End to end through the real rung: a tree that was already red, plus a
+    round that changed something unrelated. The rung still FAILS — landing onto
+    a red tree would hand the guardian's observation window a broken baseline —
+    but it says whose fault it is, and `backlog.implemented_ids` reads that."""
 
 
 def _round_over_red_tree(tmp_path, monkeypatch, name, *, edit=("unrelated.py", "X = 1\n")):

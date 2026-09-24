@@ -433,11 +433,24 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
     which classifies the failure as the round's own. The cost of being wrong
     that way is the status quo; the cost of being wrong the other way is
     landing a change nobody checked.
+
+    The worktree is at base; the data root has to be too. `env` arrives as the
+    tests rung's own (`_child_env` with the round home), whose `LLOYD_DATA` is
+    the round data root the failing run just wrote into, so a store or cache
+    the CANDIDATE's tests created was present "at base" and its own defect
+    reproduced there — `external_blocker`, the item excused, the real cause
+    never reported (#1436: a 0-row `kg.sqlite` provisioned by the round's own
+    test). The probe therefore swaps in a data root of its own under `scratch`,
+    fresh per probe and removed with the worktree. `HOME` stays the round's:
+    the round home is a symlink farm over the real one, so the only residue it
+    can hold is `lloyd-data`, and that is the directory being replaced.
     """
     if not node_ids:
         return set(), "no node ids to probe"
     wt = scratch / "baseline"
     shutil.rmtree(wt, ignore_errors=True)
+    probe_data = scratch / "baseline-data"
+    shutil.rmtree(probe_data, ignore_errors=True)
     r = W.git(live_root, "worktree", "add", "--detach", "-q", str(wt), base)
     if r.returncode != 0:
         return set(), f"baseline worktree failed: {r.stderr.strip()[:200]}"
@@ -458,6 +471,9 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
         probe_env = dict(env or {})
         if probe_env:
             probe_env["PYTHONPATH"] = str(wt)
+        if "LLOYD_DATA" in probe_env:
+            probe_data.mkdir(parents=True, exist_ok=True)
+            probe_env["LLOYD_DATA"] = str(probe_data)
         # `--no-header -p no:cacheprovider`: the probe must not write a
         # .pytest_cache into a tree it is about to delete, and must not read
         # one written by the candidate run.
@@ -478,7 +494,8 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
             tail = " | ".join(text.strip().splitlines()[-3:])[:200]
             return set(), (f"baseline probe INCONCLUSIVE at base {base[:8]} — "
                            f"pytest produced no summary (rc={r.returncode}): {tail}")
-        return failed, (f"probed {len(files)} file(s) at base {base[:8]}: "
+        where = " in a fresh data root" if "LLOYD_DATA" in probe_env else ""
+        return failed, (f"probed {len(files)} file(s) at base {base[:8]}{where}: "
                         f"{len(failed)} already failing")
     except subprocess.TimeoutExpired:
         return set(), f"baseline probe timed out after {EXTERNAL_PROBE_TIMEOUT:.0f}s"
@@ -488,6 +505,7 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
         W.git(live_root, "worktree", "remove", "--force", str(wt))
         W.git(live_root, "worktree", "prune")
         shutil.rmtree(wt, ignore_errors=True)
+        shutil.rmtree(probe_data, ignore_errors=True)
 
 
 def _probe_conclusive(note: str) -> bool:
