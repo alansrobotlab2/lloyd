@@ -256,45 +256,62 @@ FLOOR_BY_RESOLUTION = "resolution"
 # cached arm, not this one)
 #
 # Two contexts, because the two runs are not the same experiment. The nightly
-# eval hits the LIVE daemon; the pinned paired check runs two arms through a
-# frozen snapshot with one shared `LLOYD_CODE_ROOT`, so it is the same queries at
-# a different absolute cost (measured across the artifacts in `eval/baselines/`:
-# the nightly nights after #504 average 4,226-4,379 ms, and the fourteen newest
-# `automod-check-*.json` run 12,086-12,863 ms). One ceiling for both would be
-# wrong in whichever direction it was set.
+# eval hits the LIVE daemon with fresh queries; the pinned paired check runs two
+# arms through a frozen snapshot with one shared `LLOYD_CODE_ROOT`, and since
+# c6e79b45 its graded (current) arm is usually the djev REPLAY of the baseline's
+# answers — so the same queries cost a different absolute amount in each. One
+# ceiling for both would be wrong in whichever direction it was set.
 #
-# Each value is AT OR ABOVE the worst average that context has EVER recorded, so
-# no already-recorded run reads over budget: #504's accepted 6x cost is
-# grandfathered by construction, and the budget exists to make the NEXT step of
-# that class report itself. Widening a pool is exactly the change that moves this
-# number and nothing else — #504 landed at 708 -> 4,230 ms nightly with every
-# rung green, because latency was recorded and read by nobody.
+# Each value is AT OR ABOVE the worst average its population has recorded, so no
+# run in that population reads over budget: the budget exists to make the NEXT
+# step of the class #504 was report itself (708 -> 4,230 ms nightly with every
+# rung green, because latency was recorded and read by nobody). Widening a pool,
+# or a recall falling off djev onto the cross-encoder, is exactly the change that
+# moves this number and nothing else.
 #
-# The nightly ceiling sits 8.9% over 4,408.0 ms, and that worst run is
-# `nightly-20260904-20260904-060219.json` — nine days BEFORE #504, on the narrow
-# pool. So the nightly series has one unexplained outlier the widening does not
-# account for (it is a finding on #1129, not something this constant settles);
-# the ceiling is set against the worst the context has actually produced rather
-# than against the post-widening 4,378.8, because "grandfather everything already
-# recorded" is the only rule here that cannot be argued with later.
+# paired_check — ONE rule, re-derived 2026-09-24 (#1247): twice the worst
+# average EITHER ARM has read in the current era, rounded up to the next
+# 100 ms. The population is the ledger, not `eval/baselines/` (the 2026-09-22
+# data wipe took every artifact before that day): `regression_check` rows in
+# `promotions.jsonl` whose `pin.daemon.source` names `agent-qmd-daemon.conf`,
+# created at or after the first check under c6e79b45 (2026-09-22T04:08:33Z).
+# Read 2026-09-24T13:46Z: 98 rows, 196 arm readings. Graded arm (current,
+# replayed): median 161.5, p95 248.5, max 274.9 ms (2026-09-22T06:07:48Z).
+# Fresh baseline arm: median 587.3, max 752.3 ms (2026-09-23T14:39:59Z) — it
+# is in the population because a change that moves djev's input is judged on
+# the fresh floor, and a healthy fresh reading must not report. 2 x 752.3 =
+# 1,504.6 -> 1,600 ms. The cross-encoder path this replaced read a median
+# 4,257-4,305 ms, so a recall that falls back onto it (djev not answering, or a
+# re-widening) reads over budget, which is the report this ceiling is for.
 #
-# Correction, 2026-09-18. "The same queries at a different absolute cost" was an
-# observation, not an explanation, and the explanation was a defect: the pin
-# served published qmd on default settings while production's daemon ran the
-# fork with a 4-way reranker and a 1200-char window (`evalpin.QMD_PROGRAM_CONF`).
-# The ledger dates it to the hour — the paired check averaged 0.49-0.69 s a
-# question through 2026-09-14, 11.0-12.9 s from the check after #504 landed, and
-# 15.05 s (every recall at the client's timeout, nothing retrieved) from
-# 2026-09-18 18:03Z. A 12 s average under a 15 s timeout is also why single
-# questions went missing from one arm or the other, and one of those was the
-# false "regression" of 2026-09-17 05:34Z (doc_hit_rate 1.00 -> 0.95). On
-# production's settings the same recall is 4.4-5.5 s. The paired ceiling below
-# still clears the old readings, because "no recorded run reads over budget" is
-# the rule this constant was set by; re-derive it from a week of readings taken
-# on the corrected pin rather than from one day's.
+# Three era breaks bound that population, and readings before each are NOT
+# comparable with what follows:
+#   * a54ccda (2026-09-19T01:22Z): before it the pin served published qmd on
+#     default settings rather than production's retriever (§8.1a row 7 in
+#     architecture/automod.md), so the 11.0-15.1 s readings of 2026-09-14..18,
+#     including the 12,863.4 ms `automod-check-20260917-024810` this constant
+#     was first set against, measured a defect. Excluded.
+#   * aa6bee8 (2026-09-20T05:07Z): QMD_RERANK_CONTEXT_SIZE=2048 in the daemon
+#     conf, a second break inside the corrected-pin series (65 rows before it,
+#     median 4,305 ms; 68 after, median 4,257 ms — both cross-encoder).
+#   * e7bb4280 + c6e79b45 (2026-09-21T19:45Z / 2026-09-22T00:50Z): djev ranks
+#     the recall and the check replays its answers per request. The era above.
+# The 2026-09-20 tail — 11,561 / 11,868 / 16,256 ms on three healthy runs — is
+# deliberately NOT cleared: the verdict is report-only, so a ceiling that
+# admits the tail reports nothing, and the tail was never attributed (median
+# 4,282-4,302 ms in every +/-15 min activity bucket around it; a human's call).
+#
+# nightly — NOT re-derived here. Its population is the nightly artifacts in
+# `eval/baselines/`, and the wipe left two: 766.4 ms (nightly-20260923-073952)
+# and 540.9 ms (nightly-20260924-065033), both djev-ranked at production
+# defaults. Two readings are not a population; the same rule over them would
+# read 1,600 ms and is a human's re-derivation once a week of nightlies exists.
+# 4,800 clears the worst nightly ever recorded before the wipe, 4,408.0 ms on
+# 2026-09-04 (nine days BEFORE #504, on the narrow pool — an outlier the
+# widening does not account for, a finding on #1129), and every nightly since.
 LATENCY_BUDGET_MS = {
-    "nightly": 4800.0,          # worst ever 4,408.0 (nightly-20260904-060219)
-    "paired_check": 14000.0,    # worst ever 12,863.4 (automod-check-20260917-024810)
+    "nightly": 4800.0,          # worst ever 4,408.0 (nightly-20260904-060219, pre-wipe)
+    "paired_check": 1600.0,     # worst ever 752.3 (ledger 2026-09-23T14:39:59Z, fresh arm) x 2
 }
 # The two contexts this module knows, named so a caller passes one rather than a
 # free-text string that silently falls through to a default.

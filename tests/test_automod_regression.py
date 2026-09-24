@@ -86,38 +86,57 @@ def test_report_only_metrics_never_fire():
 # ---------------------------------------------------------------------------
 #
 # `test_report_only_metrics_never_fire` above is deliberately UNCHANGED by this
-# change, including its default `context` (a 9,999 ms run is inside the
-# paired-check ceiling, so it stays a no-verdict comparison). It is the property
+# change, including its default `context` (a 9,999 ms run was inside the
+# 14,000 ms paired-check ceiling, a no-verdict comparison; since #1247 it reads
+# over budget and still does not regress, the same property). It is the property
 # the report-only exemption existed to protect, and the acceptance keeps it green
 # as written rather than editing it to fit. The two new halves — a verdict that
 # fires past the ceiling, and one that still cannot reach the rollback channel —
 # are pinned by the tests below instead of by rewriting that one.
 
-# What each context has recorded, read off `eval/baselines/*.json` on
-# 2026-09-18. `nightly` is `eval/run_eval.py` at production defaults against the
-# live daemon (`matches_production_defaults: true`); `paired_check` is this
-# module's own two-arm run against the frozen snapshot.
+# What each context has recorded. `nightly` is `eval/run_eval.py` at production
+# defaults against the live daemon (`matches_production_defaults: true`), read
+# off `eval/baselines/*.json` on 2026-09-18 — artifacts the 2026-09-22 data wipe
+# has since deleted, so they are cited from the ledger and architecture/automod.md
+# §8.1a, not from disk. `paired_check` is this module's own two-arm run against
+# the frozen snapshot, and its figures are the current era's, read 2026-09-24
+# from `promotions.jsonl` (`regression_check` rows since c6e79b45's first check,
+# 2026-09-22T04:08:33Z, pin naming `agent-qmd-daemon.conf`; n=98, 196 arm
+# readings) — the population the ceiling itself was set from (#1247).
 POST_WIDENING_MS = {
     # The step #504 bought: 708 ms nightly before it, 4,230-4,379 ms after, and
     # nobody graded it because nothing read the field.
     R.CONTEXT_NIGHTLY: 4378.8,        # nightly-20260917-20260917-060324.json
-    R.CONTEXT_PAIRED_CHECK: 12863.4,  # automod-check-20260917-024810.json
+    # The graded (current, replayed) arm's worst reading in the era.
+    R.CONTEXT_PAIRED_CHECK: 274.9,    # ledger 2026-09-22T06:07:48Z, commit b8c39e15
 }
-# The worst each context has EVER produced across every artifact on disk, which
-# is what the ceiling must clear for "no recorded run reads over budget" to be
-# literally true. The nightly one is a 2026-09-04 outlier that predates #504.
+# The worst each context's population has produced, which is what the ceiling
+# must clear for "no recorded run reads over budget" to be literally true. The
+# nightly one is a 2026-09-04 outlier that predates #504. The paired one is the
+# fresh BASELINE arm — in the population because a change that moves djev's
+# input is judged on the fresh floor — and the ceiling is twice it.
 WORST_EVER_MS = {
     R.CONTEXT_NIGHTLY: 4408.0,        # nightly-20260904-20260904-060219.json
-    R.CONTEXT_PAIRED_CHECK: 12863.4,  # automod-check-20260917-024810.json
+    R.CONTEXT_PAIRED_CHECK: 752.3,    # ledger 2026-09-23T14:39:59Z, commit 133a224a
 }
+# Excluded from the paired population on purpose: readings before a54ccda
+# (2026-09-19T01:22Z) measured a pin that restated qmd's settings, not
+# production's retriever. 12,863.4 ms (`automod-check-20260917-024810`) is the
+# worst of those and was what the 14,000 ms ceiling cleared until 2026-09-24.
+PRE_CORRECTION_PAIRED_MS = 12863.4
+# And the 2026-09-20 tail (three healthy cross-encoder runs) is not cleared
+# either: 2.5x the corrected-pin median of that era, and the item's clause 1.
+CROSS_ENCODER_TAIL_MS = 10735.0
 
 
 def test_there_are_two_named_budgets_and_every_context_has_one():
     """One ceiling for both runs would be wrong in whichever direction it moved.
 
-    Nightly averages 4.2-4.4 s and the pinned paired check 12.0-12.9 s: the same
-    queries at a different absolute cost, so a single number either calls every
-    gate run over budget or tolerates any nightly step.
+    Nightly runs fresh queries against the live daemon; the paired check's graded
+    arm is usually djev's replay of the baseline's answers (median 161 ms against
+    nightly's 541-766): the same queries at a different absolute cost, so a
+    single number either calls every gate run over budget or tolerates any
+    nightly step.
     """
     assert set(R.LATENCY_BUDGET_MS) == {R.CONTEXT_NIGHTLY, R.CONTEXT_PAIRED_CHECK}
     assert R.LATENCY_BUDGET_MS[R.CONTEXT_NIGHTLY] != R.LATENCY_BUDGET_MS[R.CONTEXT_PAIRED_CHECK]
@@ -126,17 +145,20 @@ def test_there_are_two_named_budgets_and_every_context_has_one():
 
 
 def test_no_recorded_run_reads_over_budget():
-    """#504's accepted 6x cost is grandfathered by construction.
+    """Each ceiling clears the worst reading of the population it was set from.
 
-    Each ceiling sits at or above the worst average its context has EVER
-    recorded, so the budget cannot fire on history — it exists to catch the NEXT
-    step of that class. A budget set below the current numbers would either be
+    The budget cannot fire on that history — it exists to catch the NEXT step of
+    the class #504 was. A budget set below the current numbers would either be
     edited the first time it fired or silence the report it is for.
 
-    The graded quantity is `WORST_EVER_MS`, the maximum across every artifact on
-    disk, not the worst post-#504 run: the nightly context contains a 4,408.0 ms
-    night on 2026-09-04 that predates #504 entirely, so clearing only the
-    post-widening pair would leave a recorded run reading over budget.
+    The graded quantity is `WORST_EVER_MS`. For nightly that is the maximum across
+    every artifact ever recorded (a 4,408.0 ms night on 2026-09-04 that predates
+    #504). For the paired check it is the current era only — the ledger's
+    `regression_check` rows since c6e79b45 (2026-09-22T04:08:33Z) on the
+    corrected pin, either arm — and the 12,863.4 ms artifact of 2026-09-17 is
+    cited only as EXCLUDED: it measured the pin's restated settings, not the
+    retriever, and clearing it is what kept this ceiling at 14,000 ms while the
+    check read 161 ms.
     """
     for context, worst in WORST_EVER_MS.items():
         assert R.latency_budget(context) >= worst, (
@@ -149,17 +171,45 @@ def test_no_recorded_run_reads_over_budget():
         assert not R.over_budget({"latency_ms_avg": post}, context)["over"]
 
 
-def test_the_paired_check_default_tolerates_a_nightly_sized_run():
+def test_the_paired_ceiling_is_derived_from_the_corrected_pin_not_the_defect():
+    """#1247. The 14,000 ms ceiling was calibrated against readings the pin took
+    on published qmd's default settings (11-15 s a question), and it stood while
+    the corrected check read 4.3 s and then, under djev, 0.16 s — so no
+    re-widening short of 90x could report. Clause 1: the ceiling sits strictly
+    below 2.5x the corrected-pin median; the excluded artifact reads over it; the
+    fresh arm's worst healthy reading does not. Clauses 2-3: the comment above
+    the constant states the one rule, its population, and the three era breaks
+    that bound it, so the next re-derivation starts from the same sentence.
+    """
+    budget = R.latency_budget(R.CONTEXT_PAIRED_CHECK)
+    assert budget < CROSS_ENCODER_TAIL_MS
+    assert R.over_budget({"latency_ms_avg": CROSS_ENCODER_TAIL_MS}, R.CONTEXT_PAIRED_CHECK)["over"]
+    assert R.over_budget({"latency_ms_avg": PRE_CORRECTION_PAIRED_MS}, R.CONTEXT_PAIRED_CHECK)["over"]
+    assert not R.over_budget({"latency_ms_avg": WORST_EVER_MS[R.CONTEXT_PAIRED_CHECK]},
+                             R.CONTEXT_PAIRED_CHECK)["over"]
+    assert budget == 2 * 800.0, "the rule is 2x the era's worst arm reading, rounded up to 100 ms"
+
+    src = Path(R.__file__).read_text(encoding="utf-8")
+    rule = src[src.index("# Two contexts, because"):src.index("LATENCY_BUDGET_MS = {")]
+    for needle in ("promotions.jsonl", "agent-qmd-daemon.conf", "2026-09-22T04:08:33Z",
+                   "a54ccda", "aa6bee8", "c6e79b45", "report-only", "NOT cleared"):
+        assert needle in rule, f"the budget comment no longer names {needle!r}"
+
+
+def test_the_nightly_default_tolerates_a_paired_check_sized_run():
     """The two contexts are two questions, not one threshold with two names.
 
-    6,000 ms is comfortably over anything the nightly arm has ever done and
-    inside what the pinned check does routinely — so the context, not the
-    number, is what makes the verdict meaningful.
+    3,000 ms is over what the pinned check's graded arm has read since djev
+    ranks the recall (max 752 ms on either arm) and inside the nightly ceiling,
+    which still clears the pre-wipe 4,408 ms night — so the context, not the
+    number, is what makes the verdict meaningful. Until 2026-09-24 the two were
+    ordered the other way (6,000 ms over nightly, inside paired); the straddle
+    inverted when the paired ceiling was re-derived on the corrected pin (#1247).
     """
-    over_nightly = R.over_budget({"latency_ms_avg": 6000.0}, R.CONTEXT_NIGHTLY)
-    inside_paired = R.over_budget({"latency_ms_avg": 6000.0}, R.CONTEXT_PAIRED_CHECK)
-    assert over_nightly["over"] is True
-    assert inside_paired["over"] is False
+    over_paired = R.over_budget({"latency_ms_avg": 3000.0}, R.CONTEXT_PAIRED_CHECK)
+    inside_nightly = R.over_budget({"latency_ms_avg": 3000.0}, R.CONTEXT_NIGHTLY)
+    assert over_paired["over"] is True
+    assert inside_nightly["over"] is False
 
 
 def test_the_budget_comment_prices_itself_on_fresh_queries():
