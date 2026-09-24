@@ -2,7 +2,11 @@
 
 This is what a model is shown when asked "does this video hold anything that
 would improve Lloyd?" Keep it current and short: it is a rubric input, not
-documentation. Numbers are as of 2026-09-08.
+documentation. Figures here go stale, so a line that carries one also names the
+call or the file to read the live value from, and a number that names no source
+is a hint, not a measurement. This file is what the sessions that *propose* work
+read, so whatever it asserts becomes the premise of every idea written against
+it.
 
 ## What Lloyd is
 
@@ -58,16 +62,40 @@ projects. It also modifies its own code through a gated loop.
   (`facts/<Entity>/<Entity>-<category>.md`), extracted from the vault by a
   pipeline with an allow-list of source directories.
 - Knowledge graph: SQLite store behind one module (`app.kg_store`): entities,
-  aliases, typed edges (expire, never delete), fact index. ~23.6k entities,
-  ~6.7k edges (4k active), 3.9k aliases (almost all normalisation artifacts:
-  case/punctuation, only 1 semantic alias).
-- Retrieval: `qmd` (a local hybrid BM25 + embedding index over the vault,
-  ~12k documents) plus KG seed-and-expand. A prefetch step runs before each
-  turn to pull likely-relevant vault context into the prompt.
-- Nightly retrieval eval, 20 queries: entity_hit_rate 0.55, doc_hit_rate 0.95,
-  entity_recall 0.41, doc_recall 0.60, MRR(doc) 0.49, nDCG@10 0.60,
-  ~1.6 s per query. The known weak spot is **entity identification**: when a
-  query names something obliquely, seeds land on the wrong entity rows.
+  aliases, typed edges (expire, never delete), fact index. No scale figures are
+  quoted here, deliberately: the store grows nightly and every count this
+  bullet used to carry went stale by an order of magnitude. Read them live
+  through the one sanctioned door — `from app.kg_store import store`, then
+  `store().stats()`, which returns `entities`, `aliases`, `edges_total`,
+  `edges_active`, `facts`. Nothing else may open the database file.
+- Retrieval runs on two paths, and they are not interchangeable. **Prefetch**
+  is the automatic one: before each turn it pulls candidate vault context into
+  the prompt from a fixed set of legs — skills, facts, vault lexical, vault
+  hybrid (`qmd`, a local hybrid BM25 + embedding index over the vault), recent
+  sessions, backlog refs — and it has **no graph arm**: `prefetch.py` never
+  imports `app.kg_store`, and its fact leg is a name→facts lookup ordered by
+  confidence, not a walk over neighbours. **`vault_recall`** is the tool that
+  does graph seed-and-expand over that store (neighbour expansion plus
+  graph-weighted reranking) along with a source-code grep fallback, and it runs
+  only when the model calls it. Graph expansion is therefore available to
+  Lloyd but is not part of what every turn sees — a proposal that assumes the
+  per-turn prompt already carries graph neighbours is assuming something no
+  code does.
+- Nightly retrieval eval on the pinned corpus. The figures below are **one
+  dated run**, the 2026-09-23 nightly (`summary.overall` of
+  `eval/baselines/nightly-20260923-20260923-073952.json` — that directory is
+  `app.paths.EVAL_BASELINES_DIR`, which lives under the data root, not in the
+  code checkout), not a standing property: entity_hit_rate 0.37,
+  doc_hit_rate 0.716, entity_recall_avg 0.394, doc_recall_avg 0.645,
+  mrr_doc 0.368, ndcg10 0.416, fact_entity_recall_avg 0.381, latency_ms_avg
+  766 ms. Latency is graded against a ceiling named in code, not a remembered
+  one: this run sits inside `LATENCY_BUDGET_MS[CONTEXT_NIGHTLY]` = 4800 ms in
+  `workers/sources/automod_regression.py`, and every baseline records its own
+  `latency_budget` block, so the verdict travels with the file.
+  Read *Live measurements* below for the current night — a figure quoted here
+  with no run behind it is how an item came to adopt a bar the tree had already
+  left. The known weak spot is **entity identification**:
+  when a query names something obliquely, seeds land on the wrong entity rows.
 - Session distillation: a worker mines finished user sessions into
   observations; a memory-capture pipeline writes daily learnings and
   trajectories; nightly consolidation ("dream") merges them into USER.md and
@@ -153,9 +181,11 @@ The URLs are for a human or a shell.
   `vllm:kv_cache_usage_perc`, `vllm:num_requests_running`, and the
   time-to-first-token histogram if present. The rate form is on
   `http://127.0.0.1:8080/api/dashboard` under `vllm`.
-- **Retrieval** — `eval/baselines/nightly-*.json` under `~/lloyd` (newest is
-  current): the 20-query numbers quoted above, per query, with the corpus
-  the run saw.
+- **Retrieval** — the newest `eval/baselines/nightly-*.json` in
+  `app.paths.EVAL_BASELINES_DIR` (the mutable data root — `~/lloyd-data` on
+  this box, deliberately *not* inside the code checkout) is current: the
+  numbers quoted above, per query, with the corpus and the latency-budget
+  verdict the run saw.
 - **Workers, autonomy, backlog** — `http://127.0.0.1:8080/api/dashboard`
   (`workers`, `autonomy`, `backlog` sections) and
   `http://127.0.0.1:8080/api/workers/runs` for recent run records.
