@@ -186,3 +186,45 @@ def test_the_cooldown_ends(isolated, repo):
     path.write_text(f"---\n{yaml.dump(fm)}---\n{body}", encoding="utf-8")
     res = B.file_red_tree_item(c["c1"], [RED], "SM_LATER", [], live_root=r)
     assert res["action"] == "created"
+
+
+def _working(iid):
+    """What autocode does the moment a round's turn starts on the item."""
+    B.update_frontmatter(B.item_by_id(iid).path, {"status": "in_progress"})
+
+
+def test_an_item_a_round_is_working_keeps_its_contract(isolated, repo):
+    """#1454, 2026-09-24: a sibling round's gate found three more failures at the
+    same base 20 minutes into #1454's own turn and appended a clause to it — the
+    review would have graded that round on work it was never given."""
+    r, c = repo
+    iid = B.file_red_tree_item(c["c1"], [RED], "SM_A", [], live_root=r)["item_id"]
+    _working(iid)
+    before = _fm(B.item_by_id(iid))["acceptance_clauses"]
+    res = B.file_red_tree_item(c["c1"], [RED, OTHER], "SM_B", [], live_root=r)
+    assert res["action"] == "created" and res["item_id"] != iid
+    assert _fm(B.item_by_id(iid))["acceptance_clauses"] == before
+    assert _fm(B.item_by_id(iid))["red_tree_nodes"] == [RED]
+    assert _fm(B.item_by_id(res["item_id"]))["red_tree_nodes"] == [OTHER], \
+        "only what the worked item does not already cover moves"
+
+
+def test_what_a_worked_item_covers_is_a_no_op(isolated, repo):
+    r, c = repo
+    iid = B.file_red_tree_item(c["c1"], [RED, RED2], "SM_A", [], live_root=r)["item_id"]
+    _working(iid)
+    assert B.file_red_tree_item(c["c1"], [RED], "SM_B", [], live_root=r) is None
+    assert B.file_red_tree_item(c["c2"], [RED2], "SM_C", [], live_root=r) is None, \
+        "not replaced on a newer base either while its round runs"
+    assert len(B.open_red_tree_items()) == 1
+
+
+def test_the_overflow_merges_into_a_second_open_item_that_is_not_worked(isolated, repo):
+    r, c = repo
+    first = B.file_red_tree_item(c["c1"], [RED], "SM_A", [], live_root=r)["item_id"]
+    _working(first)
+    second = B.file_red_tree_item(c["c1"], [OTHER], "SM_B", [], live_root=r)["item_id"]
+    res = B.file_red_tree_item(c["c1"], [RED, OTHER, RED2], "SM_C", [], live_root=r)
+    assert res == {"item_id": second, "action": "merged"}
+    assert _fm(B.item_by_id(second))["red_tree_nodes"] == sorted([OTHER, RED2])
+    assert _fm(B.item_by_id(first))["red_tree_nodes"] == [RED]

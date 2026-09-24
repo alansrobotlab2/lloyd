@@ -1563,9 +1563,14 @@ class Gate:
                                        sorted(self._touched_paths()), live_root=self.live)
             if res:
                 return int(res["item_id"])
-            # Nothing written (already covered): name the open item anyway, so
-            # the round is told who owns these failures.
+            # Nothing written (already covered): name the open item that covers
+            # them, so the round is told who owns these failures.
             items = B.open_red_tree_items()
+            wanted = set(pre_existing)
+            for it in items:
+                covered = {str(n) for n in (B._red_tree_fm(it).get("red_tree_nodes") or [])}
+                if wanted & covered:
+                    return it.id
             return items[0].id if items else None
         except Exception as exc:  # noqa: BLE001 — a filing failure is never the gate
             print(f"[warn] could not file the red-tree item: {exc}")
@@ -1645,6 +1650,10 @@ class Gate:
         red_item = self._file_red_tree(pre_existing) if (pre_existing and conclusive) else None
         if red_item:
             data["red_tree_item"] = red_item
+            if self.item_id and int(red_item) == int(self.item_id):
+                # This round IS the red-tree item's round: the headline must not
+                # tell it to leave its own contract alone.
+                data["red_tree_item_is_own"] = True
 
         if node_ids and not new and conclusive:
             parts = []

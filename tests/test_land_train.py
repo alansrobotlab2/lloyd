@@ -512,9 +512,30 @@ def test_bless_refuses_while_landings_wait_for_a_restart(world, monkeypatch):
 def test_status_reports_the_train(monkeypatch):
     _train(monkeypatch)
     _pend(2)
+    from workers.sources import autocode as AC
+    monkeypatch.setattr(AC, "implement_turns_in_flight", lambda *a, **k: 2)
     out = R._status_pending()
     assert out["count"] == 2 and out["restart_needed"] == 2 and out["train"]["on"] is True
     assert out["flush_due"] is False and len(out["entries"]) == 2
+    assert out["rounds_in_flight"] == 2 and "2 turn(s) in flight" in out["flush_why"]
+
+
+def test_status_counts_turns_the_way_the_backend_trigger_does(monkeypatch):
+    """`round status` runs in its own process and used to pass no count, so it
+    printed "? turn(s) in flight" and could never show the natural gap."""
+    _train(monkeypatch)
+    _pend(1)
+    from workers.sources import autocode as AC
+    monkeypatch.setattr(AC, "implement_turns_in_flight", lambda *a, **k: 0)
+    out = R._status_pending()
+    assert out["flush_due"] is True and "natural gap" in out["flush_why"]
+
+    def unreadable(*a, **k):
+        raise RuntimeError("no queue")
+    monkeypatch.setattr(AC, "implement_turns_in_flight", unreadable)
+    out = R._status_pending()
+    assert out["rounds_in_flight"] is None and out["flush_due"] is False, \
+        "an unreadable count is never a gap"
 
 
 # ── round.land on the train ─────────────────────────────────────────────────

@@ -2079,7 +2079,12 @@ red_tree: true` triage row — so `select_confirmed` takes it next and the depth
 gate never holds it. `red-tree` is not a `spawned-by-*` tag: expiry and the
 write-time merge leave it alone. A report on the same base unions into the open
 item (a clause per new file), a report on a descendant base replaces it, an
-older view is ignored, and the round's own files are never filed. A full green
+older view is ignored, and the round's own files are never filed. An item a
+round is already working (`in_progress`) is never rewritten: what it covers is
+that round's, and anything new goes to another open red-tree item or a new one
+(2026-09-24: a sibling gate had appended a clause to #1454 twenty minutes into
+#1454's own turn). That round's gate headline says the listed failures are its
+own contract (`red_tree_item_is_own`), not "do not fix them". A full green
 run at a base descending from the item's closes it `already_done`
 (`close_healed_red_tree`) — most red trees are healed by a hand commit, and a
 `high` item left open would spend a round proving nothing — unless the round's

@@ -171,6 +171,17 @@ def test_pre_existing_failures_ride_a_pass_as_a_note_naming_their_owner():
     assert "did not block" in out["notes_that_did_not_block"]["what"]
 
 
+def test_the_red_tree_items_own_round_is_told_to_fix_them_not_to_leave_them():
+    """#1454's round was told "tracked by item #1454 — do not fix them in this
+    round" about its own contract (2026-09-24)."""
+    rep = copy.deepcopy(PASSED)
+    ids = ["tests/test_uptake.py::test_a"]
+    rep["rungs"][1]["data"] = {"pre_existing_failures": ids, "red_tree_item": 1454,
+                               "red_tree_item_is_own": True}
+    note = _finished("SM_O", rep)["notes_that_did_not_block"]["pre_existing_failures"]["note"]
+    assert "#1454" in note and "this round's job" in note and "do not fix" not in note
+
+
 def test_another_rungs_failure_names_the_rung():
     rep = _refused(1)
     rep["rungs"] = rep["rungs"][:1] + [{"name": "static", "ok": False,

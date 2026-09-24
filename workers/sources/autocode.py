@@ -1274,6 +1274,22 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
     return DECLINED if slot + 1 < depth else None
 
 
+def implement_turns_in_flight(queue: WorkQueue | None = None, *,
+                              exclude_key: str | None = None) -> int:
+    """This source's live slot rows (queued, claimed or running), less
+    `exclude_key` — the count `promote.flush_due` reads as a natural gap at 0.
+    One definition for the backend's flush trigger and `round status`, which
+    runs in its own process and opens the shared queue by its configured path."""
+    if queue is None:
+        from workers.queue import configured_db_path, get_queue
+        try:
+            queue = get_queue()
+        except Exception:  # noqa: BLE001 — not the backend: no singleton yet
+            queue = get_queue(configured_db_path())
+    return sum(1 for i in range(round_depth())
+               if _slot_key(i) != exclude_key and queue.has_live(_slot_key(i)))
+
+
 def _maybe_flush(queue: WorkQueue | None = None, *, exclude_key: str | None = None) -> None:
     """Start a land-train flush when `promote.flush_due` says so. Never raises.
 
@@ -1287,12 +1303,7 @@ def _maybe_flush(queue: WorkQueue | None = None, *, exclude_key: str | None = No
         if not S.read_pending():
             return
         from scripts.automod import round as R
-        if queue is None:
-            from workers.queue import get_queue
-            queue = get_queue()
-        depth = round_depth()
-        live = sum(1 for i in range(depth)
-                   if _slot_key(i) != exclude_key and queue.has_live(_slot_key(i)))
+        live = implement_turns_in_flight(queue, exclude_key=exclude_key)
         started = R.maybe_flush(by="autocode", rounds_in_flight=live)
         if started:
             logger.info("autocode: land-train flush — %s", started)

@@ -748,8 +748,15 @@ def status() -> dict:
 
 
 def _status_pending() -> dict:
+    live = None
+    if S.read_pending():
+        try:
+            from workers.sources import autocode as AC
+            live = AC.implement_turns_in_flight()
+        except Exception:  # noqa: BLE001 — unreadable reads as "?", never as a gap
+            live = None
     try:
-        return P.pending_summary()
+        return P.pending_summary(live)
     except Exception as exc:  # noqa: BLE001 — a status is never the thing that fails
         return {"error": str(exc)[:300]}
 

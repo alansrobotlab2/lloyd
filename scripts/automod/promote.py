@@ -2006,13 +2006,16 @@ def flush_due(rounds_in_flight: int | None = None, *, now: float | None = None) 
                    f"{rounds_in_flight if rounds_in_flight is not None else '?'} turn(s) in flight")
 
 
-def pending_summary() -> dict:
-    """What `round status` and `automod_status` say about the train."""
+def pending_summary(rounds_in_flight: int | None = None) -> dict:
+    """What `round status` and `automod_status` say about the train.
+    `rounds_in_flight` is the caller's count of implement turns (None when it
+    could not read one), so the natural-gap trigger is judged here exactly as
+    the backend's `autocode._maybe_flush` judges it."""
     entries = S.read_pending()
     now = time.time()
     needs = [e for e in entries if e.get("restart")]
     try:
-        due = flush_due()
+        due = flush_due(rounds_in_flight)
     except Exception as exc:  # noqa: BLE001 — a status is never the thing that fails
         due = (False, f"unreadable: {exc}")
     return {"train": dict(zip(("on", "why"), restart_deferred())),
@@ -2022,6 +2025,7 @@ def pending_summary() -> dict:
             "entries": [{k: e.get(k) for k in ("round_id", "title", "commit", "restart",
                                                "merged_ts")} for e in entries],
             "flush_due": due[0], "flush_why": due[1],
+            "rounds_in_flight": rounds_in_flight,
             "flush_running": S.flush_in_progress()}
 
 

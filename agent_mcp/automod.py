@@ -514,9 +514,12 @@ def _with_headline(rep: dict) -> dict:
                                        "and are not a reason to edit, re-gate or abort.")}
             notes["pre_existing_failures"] = {
                 "ids": pre_ids[:50],
-                "note": ((f"tracked by item #{owner}" if owner else "tracked on the board as a "
-                          "red-tree item") + " — these fail at base too; do not fix them in "
-                         "this round")}
+                "note": ((f"these fail at base too and are your own item #{owner}'s contract: "
+                          "making them pass is this round's job")
+                         if tdata.get("red_tree_item_is_own") else
+                         ((f"tracked by item #{owner}" if owner else "tracked on the board as a "
+                           "red-tree item") + " — these fail at base too; do not fix them in "
+                          "this round"))}
     elif rep.get("next"):
         verdict = (f"NOT JUDGED — the {failed.get('name') if failed else '?'} rung failed for a "
                    f"reason outside your diff")

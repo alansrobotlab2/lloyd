@@ -5778,6 +5778,9 @@ def file_red_tree_item(base: str, node_ids, round_id: str, changed_paths=(), *,
       from the item's, the item is rewritten for the new base — `replaced`. A
       report from an older base than the item's is a no-op: the item already
       describes a newer tree.
+    * An item a round is working (`in_progress`) is never rewritten: the
+      nodes it covers are its round's, and the rest are filed elsewhere — on
+      another open red-tree item, or a new one.
     * With none open, a `red-tree` item closed within `RED_TREE_COOLDOWN_S`
       whose nodes cover the report suppresses it.
     * Else a new item: priority `high`, tag `red-tree`, confirmed through
@@ -5800,7 +5803,21 @@ def file_red_tree_item(base: str, node_ids, round_id: str, changed_paths=(), *,
                         "node_ids": sorted(item_nodes)[:50], "round_id": round_id,
                         "action": action}, path=ledger)
 
-    for item in open_red_tree_items(boards, backlog_dir=backlog_dir):
+    open_items_ = open_red_tree_items(boards, backlog_dir=backlog_dir)
+    # A round is working an `in_progress` item against the contract it was
+    # given. Growing that contract mid-flight graded #1454's round on a clause
+    # added 20 minutes into its turn (2026-09-24): what such an item already
+    # covers is its round's, and only the rest is filed — before any other
+    # item is looked at, or a newer open item would absorb the worked one's.
+    for item in open_items_:
+        if item.status == "in_progress":
+            covered = {str(n) for n in (_red_tree_fm(item).get("red_tree_nodes") or [])}
+            nodes = [n for n in nodes if n not in covered]
+    if not nodes:
+        return None
+    for item in open_items_:
+        if item.status == "in_progress":
+            continue
         fm = _red_tree_fm(item)
         old_base = str(fm.get("red_tree_base") or "")
         old_nodes = [str(n) for n in (fm.get("red_tree_nodes") or [])]
