@@ -751,6 +751,136 @@ def _write_run_record(task_id: int, run_id: str, status: str,
     return path
 
 
+# ── The change-ledger line, and the undo it points at (#963) ──────────────────
+# Pre-images have existed for every scheduled run since `ef294bf` (2026-09-10),
+# which armed the ledger by putting `turn_id=run_id` on the RunOptions below.
+# Only the capture half got built. The single restore caller in the tree is the
+# aggregator's `POST /changes/revert`, so "restore on failure" was in practice
+# "restore on request, from someone who already knows the session id, the turn
+# id and that a 7-day retention window is running" — three facts the one document
+# somebody reads at 03:00 (the run record) named none of. Across 359 turn indexes
+# and 1,051 entries measured at triage, `reverted_at` was set on zero: the undo
+# was unreachable, not merely unused.
+#
+# The line below is what makes it reachable from the record alone. It reports,
+# it does not restore: a nightly that wrote 6 of its 9 notes before dying has 6
+# notes of real progress, and an automatic revert would destroy the progress to
+# save the invariant. Whether to put a run's writes back is a decision, and a
+# decision needs a reader — so the record names the scope and the count, and
+# `revert_run_writes` below is the caller that acts on it.
+
+CHANGE_LEDGER_HEADING = "## Change ledger"
+
+
+def _change_ledger_note(session_id: str, run_id: str) -> tuple[dict, str]:
+    """Front-matter fields and a body block naming this run's pre-images.
+
+    Returns ``({}, "")`` only when there is no session id to name — a
+    ``_record_failure`` call from outside ``run_task`` has no turn of its own,
+    and inventing a directory for it would be worse than saying nothing.
+
+    The count comes from ``_change_ledger.list_changes``, and never from anything
+    the run asserted. That distinction is the whole reason the line is worth
+    writing: the run that died mid-write is the worst possible witness about its
+    own writes, and the tool calls were executed — and the pre-images flushed to
+    ``sessions/<session_id>.changes/<run_id>/index.json`` — over in the
+    aggregator, so the index is the account of record and this process holds no
+    cache of its own to mistake for it. Zero entries reads as zero, not as an
+    omission, because "this run touched no files" is a fact worth having on the
+    record next to "this run touched seven".
+
+    Never raises. A run record that cannot be written because the ledger was
+    unreadable would be the second bug, and the more damaging one.
+    """
+    if not session_id or not run_id:
+        return {}, ""
+    try:
+        from agent_mcp import _change_ledger
+        entries = _change_ledger.list_changes(session_id, run_id)
+        scope = _change_ledger.scope_label(session_id, run_id)
+    except Exception as exc:  # noqa: BLE001 — the record must still be written
+        logger.warning("Task run %s: change ledger unreadable (%s); "
+                       "recording the failure without it", run_id, exc)
+        return {}, ""
+
+    count = len(entries)
+    extra = {"changes": f"{scope} ({count} files)", "changes_files": count}
+    lines = [f"{scope} ({count} files) — pre-images recorded by the aggregator.",
+             ""]
+    if count:
+        lines += [
+            "Nothing restored them automatically: a dead run's partial writes are",
+            "often the progress worth keeping, so restoring is a decision made from",
+            "this record, not a side effect of dying. To put them all back:",
+            "",
+            "```",
+            f"autonomy.revert_run_writes({session_id!r}, {run_id!r})",
+            "```",
+            "",
+            f"Files ({count}):"]
+        lines += [_ledger_entry_line(e) for e in entries]
+    else:
+        lines.append("This run recorded no file writes, so there is nothing to "
+                     "put back.")
+    return extra, f"{CHANGE_LEDGER_HEADING}\n\n" + "\n".join(lines)
+
+
+def _ledger_entry_line(entry: dict) -> str:
+    """One bullet per recorded file, saying what a revert would do to it.
+
+    The qualifier is the actionable half. An entry whose pre-image was never
+    kept (`too_large`, or a snapshot that failed to write) is one revert will
+    REFUSE, and a bullet that just names the file promises an undo that will not
+    arrive. `create` is exempt: it reverts by unlinking, so it needs no
+    pre-image at all.
+    """
+    path = str(entry.get("path") or entry.get("real") or "(unknown path)")
+    if entry.get("reverted_at") is not None:
+        return f"- `{path}` — already put back"
+    if entry.get("op") != "create" and entry.get("snapshot") != "ok":
+        return (f"- `{path}` — no pre-image ({entry.get('snapshot')}), "
+                f"a revert will refuse this one")
+    return f"- `{path}`"
+
+
+def revert_run_writes(session_id: str, run_id: str,
+                      paths: Optional[list[str]] = None) -> dict:
+    """Put back one autonomy run's writes, by the two ids its record names.
+
+    ``run_task`` passes ``turn_id=run_id``, so the run id IS the ledger's turn
+    id: the ``session_id`` and ``run_id`` printed in a run record's front matter
+    are the complete address, and this is the in-process call that takes them —
+    instead of a hand-composed ``POST /changes/revert {session, turn}`` body,
+    which is the only form that existed and is why nothing was ever restored.
+
+    Answers per path, never with a bare success, because per-path is the only
+    granularity that can be honest: a file another writer has changed since the
+    snapshot comes back ``refused`` with its name and reason, and is left
+    exactly as that later writer left it. Restoring over it would destroy the
+    later write, which is the damage the ledger exists to prevent; skipping it
+    silently would make the undo untrustworthy. Refused, by name, is the answer
+    that can be acted on.
+
+    No failure path calls this. Nothing in this module reverts anything
+    unattended.
+
+    Returns ``{scope, dir, recorded, counts, results}`` — ``results`` being the
+    per-path list from ``_change_ledger.revert``, and ``recorded`` the entry
+    count of that turn's index, so a caller can see at a glance when the number
+    of files it was promised and the number it got do not match.
+    """
+    from agent_mcp import _change_ledger
+    entries = _change_ledger.list_changes(session_id, run_id)
+    scope = _change_ledger.scope_label(session_id, run_id)
+    results = _change_ledger.revert(session_id, run_id, paths)
+    counts: dict[str, int] = {}
+    for row in results:
+        status = str(row.get("status") or "unknown")
+        counts[status] = counts.get(status, 0) + 1
+    return {"scope": scope, "dir": str(_change_ledger.turn_dir(session_id, run_id)),
+            "recorded": len(entries), "counts": counts, "results": results}
+
+
 # ── Scheduling logic (used by scheduled-task source) ──────────────────────────
 
 # The statuses dispatch may run a task in, in ONE place. `_all_runnable_tasks`
@@ -2348,11 +2478,19 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
     # (see below), so it carries the unchanged count — the number the next task
     # failure will be counted against either way.
     failures = int(task.get("failure_count") or 0) + (1 if kind == "task" else 0)
+    # Name the pre-images before anything else, so the record a person opens at
+    # 03:00 says what is revertable and how. Reads the ledger's index; writes
+    # nothing, and reverting is not this path's call to make (#963).
+    ledger_extra, ledger_block = _change_ledger_note(
+        str((extra or {}).get("session_id") or ""), run_id)
+    if ledger_block:
+        body = f"{body}\n\n{ledger_block}"
     _write_run_record(
         task_id=task_id, run_id=run_id, status="failed",
         started_at=started_at, completed_at=completed_at,
         duration_seconds=duration, summary=_failure_summary(summary), body=body,
-        extra={**(extra or {}), "failure_kind": kind, "failure_count": failures},
+        extra={**(extra or {}), **ledger_extra,
+               "failure_kind": kind, "failure_count": failures},
     )
 
     max_retries = int(task.get("max_retries") or _DEFAULT_MAX_RETRIES)

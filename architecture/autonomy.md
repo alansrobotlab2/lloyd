@@ -92,6 +92,16 @@ Each run now leaves four records, all joined:
 - **`turn_id` is the load-bearing option.** It is what switches on the
   per-turn change ledger, so a scheduled task's file writes can be undone. It
   was the only turn path with no undo.
+- **The failure record says what is undoable, and undoes nothing.** A failed or
+  timed-out run's front matter carries `changes: sessions/<sid>.changes/<run_id>/
+  (N files)` with N read from that turn's `index.json` — not from anything the
+  dying run asserted, which is why the number can be trusted — and the body lists
+  the paths (`autonomy._change_ledger_note`). Nothing reverts on that path: a
+  nightly that wrote 6 of its 9 notes before dying has 6 notes of real progress,
+  so restoring stays a decision made from the record, through
+  `autonomy.revert_run_writes(session_id, run_id)`. That call answers per path,
+  and a file another writer moved since the snapshot comes back `refused` by name
+  instead of being overwritten or skipped.
 
 **Observation is a separate opt-in.** A task file's `inner_voice: true` makes
 the Inner Voice observer watch the run; `autonomy.inner_voice` in config.yaml

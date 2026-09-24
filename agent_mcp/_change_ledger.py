@@ -272,9 +272,30 @@ def commit(scope_pair: tuple[str, str], entry: Entry, post_sha: str) -> None:
 
 
 def list_changes(session_id: str, turn_id: str) -> list[dict]:
+    """Every file this turn wrote, as the index recorded them.
+
+    A reader in a different process gets the same answer: `_load` falls through
+    to the index on disk when this process never made the writes, which is the
+    normal case for whoever comes after a background run — the pre-images were
+    recorded by the aggregator, and that index is the durable copy it flushed.
+    An absent index and an empty one are one answer: nothing was recorded.
+    """
     with _lock:
         ledger = _load(session_id, turn_id)
         return [asdict(e) for e in ledger.entries.values()]
+
+
+def scope_label(session_id: str, turn_id: str) -> str:
+    """A turn's ledger directory in the form a record should quote.
+
+    `sessions/<session_id>.changes/<turn_id>/` — the layout in this module's
+    docstring, rooted at `CHANGES_ROOT`'s own directory name rather than a
+    hardcoded word, so the label names where the pre-images really are even when
+    a test has pointed the root elsewhere. `turn_dir()` is the absolute path;
+    this shorter form is what a run record quotes, because it shows at a glance
+    that a retention window applies to it.
+    """
+    return f"{CHANGES_ROOT.name}/{session_id}.changes/{turn_id}/"
 
 
 def revert(session_id: str, turn_id: str,

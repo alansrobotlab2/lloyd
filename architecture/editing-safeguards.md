@@ -59,6 +59,10 @@ before assuming a layer can be turned off — or that it is installed.
   autonomy task both the prime suspect in the vault wipe and impossible to
   clear. Both background paths mint one now (`autonomy.py`,
   `workers/sources/_common.py`); a bare `run_query` caller still has none.
+  A failed autonomy run's record names the scope and the count read from that
+  turn's index, and `autonomy.revert_run_writes(session_id, run_id)` is the
+  in-process undo that takes those two ids; the failure path never calls it, so
+  a dead run's partial writes stay on disk until someone decides otherwise.
 - **The effect ledger writes `unknown` before dispatch** and settles after;
   a second identical call in scope replays, an `unknown` one is refused.
   Idempotent tools are not ledgered at all — `Write`, `vault_write`, every

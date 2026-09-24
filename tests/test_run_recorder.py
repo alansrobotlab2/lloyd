@@ -15,6 +15,9 @@ What is pinned here:
     that most needs an undo and it was the only path without one;
   * a run killed mid-stream still leaves the transcript up to the moment it
     died, which is the case the module exists for;
+  * a failed or timed-out run's record names the pre-images it left — the
+    ledger scope and a file count read from that turn's index, zero included —
+    because pre-images nobody can find are not an undo (#963);
   * reasoning is persisted as `role="thinking"`, the role that keeps it out of
     every transcript producer in the tree;
   * the kill switch really is one.
@@ -284,7 +287,12 @@ def test_run_prompt_on_primary_leaves_a_session_and_a_transcript(store,
 
 # ── The autonomy path ──────────────────────────────────────────────────
 
-def _stub_autonomy(monkeypatch, tmp_path, task, stream):
+def _stub_autonomy(monkeypatch, tmp_path, task, stream, *, write_records=False):
+    """`write_records=True` lets the real `_write_run_record` run against a runs
+    directory under `tmp_path`, so a test can assert on the bytes of the record
+    somebody opens at 03:00 rather than on the kwargs it would have been handed.
+    The default keeps the existing tests reading those kwargs.
+    """
     captured: dict = {}
 
     monkeypatch.setattr(autonomy, "_find_task_file", lambda tid: tmp_path / "x.md")
@@ -293,13 +301,17 @@ def _stub_autonomy(monkeypatch, tmp_path, task, stream):
     monkeypatch.setattr(autonomy, "_update_task_field", lambda *a, **k: None)
     monkeypatch.setattr(autonomy, "_append_activity_log", lambda *a, **k: None)
     monkeypatch.setattr(autonomy, "_get_model_env", lambda m: {})
-    monkeypatch.setattr(autonomy, "_write_run_record",
-                        lambda **kw: captured.setdefault("record", kw))
+    if write_records:
+        monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "autonomy-runs")
+    else:
+        monkeypatch.setattr(autonomy, "_write_run_record",
+                            lambda **kw: captured.setdefault("record", kw))
 
     async def _run_query(messages, options):
         captured["options"] = options
         captured["prompt"] = messages[0]["content"]
-        for evt in stream:
+        events = stream(options) if callable(stream) else stream
+        for evt in events:
             yield evt
 
     class Opts:
@@ -403,3 +415,234 @@ def test_a_timed_out_autonomy_run_still_names_its_transcript(store, monkeypatch)
     rows = _session(store)["messages"]
     assert any(m["role"] == "tool" and m["content"][0]["text"] == "partial"
                for m in rows), [m["role"] for m in rows]
+
+
+# ── The failure record names its change ledger (#963) ──────────────────
+#
+# Pre-images have existed for every scheduled run since `ef294bf` (2026-09-10),
+# which armed the ledger with `turn_id=run_id` — the test above pins that half.
+# What never got built was anything telling a reader they were there. Restoring
+# one took the session id, the turn id and the knowledge that a 7-day retention
+# window is running, and the run record — the document somebody actually opens
+# when a 03:00 run dies mid-write — named none of them. At triage, across 359
+# turn indexes and 1,051 entries, `reverted_at` was set on zero.
+
+def _ledger_root(store, monkeypatch):
+    """Point the ledger at the tree the sessions live in, as production does."""
+    from agent_mcp import _change_ledger as CL
+    root = store / "sessions"
+    monkeypatch.setattr(CL, "CHANGES_ROOT", root)
+    CL.reset()
+    return root
+
+
+def _write_files_under_ledger(options, root, names):
+    """Record `names` as this turn's writes, then make the process forget.
+
+    Drives what `agent_mcp/builtin_fs.py` does around a real Edit — `begin`,
+    `snapshot_pre` with the bytes read BEFORE the mutation, `commit` with what is
+    on disk after — so the count the record reports is the count the index on
+    disk holds, not a number this test typed in. Each file is left holding its
+    post-image, which is what makes a revert observable as bytes going back.
+
+    The closing `CL.reset()` is the load-bearing part. In production the writes
+    are recorded in the aggregator process and read back by the backend, which
+    holds nothing but the index on disk; here one process does both, so dropping
+    the mirror is what makes the read cross-process instead of a cache hit.
+    """
+    import os
+    from agent_mcp import _change_ledger as CL
+
+    scope = CL.scope(options.session_id, options.turn_id)
+    assert scope == (options.session_id, options.turn_id), (
+        "if the run does not arm the ledger, nothing below means anything")
+    files = []
+    for i, name in enumerate(names):
+        p = root / "written" / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        pre = f"pre-{i} content for {name}\n"
+        p.write_text(pre)
+        entry = CL.begin(scope, real=os.path.realpath(p), path=os.fspath(p),
+                         op="edit", call_id=f"call-{i}")
+        CL.snapshot_pre(scope, entry, pre.encode())
+        p.write_text(pre + f"appended by run {options.turn_id}\n")
+        CL.commit(scope, entry, CL.sha256_bytes(p.read_bytes()))
+        files.append(p)
+    CL.reset()
+    return files
+
+
+def _plant_an_unreported_write(options, root, name="planted.md"):
+    """Append an entry to the turn's index that the run itself never saw.
+
+    The control that proves the reported number is READ rather than asserted. An
+    account built from the run's own tally of its tool calls could not contain
+    this path, so a record that names it, and counts it, can only have come from
+    the index — which is the copy the aggregator flushed and the dying run never
+    controlled.
+    """
+    import os
+    p = root / "written" / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("recorded by the aggregator, not reported by the run\n")
+    index = (root / f"{options.session_id}.changes" / options.turn_id
+             / "index.json")
+    raw = json.loads(index.read_text())
+    raw["entries"].append({"path": os.fspath(p), "real": os.path.realpath(p),
+                           "op": "write", "call_id": "call-unreported",
+                           "via_session": "", "ts": 0.0, "pre_sha256": "",
+                           "post_sha256": "", "writes": 1, "snapshot": "ok",
+                           "reverted_at": None})
+    index.write_text(json.dumps(raw))
+    return p
+
+
+def _run_record_file(store, task_id, run_id):
+    path = store / "autonomy-runs" / str(task_id) / f"{run_id}.md"
+    assert path.exists(), f"no run record at {path}"
+    return path
+
+
+def _split_record(text):
+    """(front_matter_dict, body) for a run record's bytes."""
+    import yaml
+    _, fm_text, body = text.split("---\n", 2)
+    return yaml.safe_load(fm_text), body
+
+
+def _index_entry_count(store, session_id, run_id):
+    """Entries in that turn's index, read straight off disk — the control."""
+    path = (store / "sessions" / f"{session_id}.changes" / run_id
+            / "index.json")
+    assert path.exists(), f"no change-ledger index at {path}"
+    return len(json.loads(path.read_text())["entries"])
+
+
+def test_a_failed_run_names_its_ledger_scope_and_the_count_read_from_index(
+        store, monkeypatch):
+    """Clause 1: the scope and the count, and the count READ from the index.
+
+    The distinction only bites on a mismatch, so the run records three writes and
+    the index is then given a fourth it never reported. A record assembled from
+    the run's own account could only ever say three; the one that says four and
+    names the fourth file got its number from disk.
+    """
+    task = {"id": 42, "name": "Nightly", "skill_name": "s", "status": "up_next",
+            "timeout_seconds": 300}
+    captured = _stub_autonomy(monkeypatch, store, task, [], write_records=True)
+    root = _ledger_root(store, monkeypatch)
+    names = ["note-a.md", "note-b.md", "lloyd/MEMORY.md"]
+
+    async def _crash(messages, options):
+        captured["options"] = options
+        _write_files_under_ledger(options, root, names)
+        _plant_an_unreported_write(options, root)
+        yield {"type": "text_delta", "text": "writing the notes…"}
+        raise RuntimeError("boom mid-write")
+
+    import app.harness as harness
+    monkeypatch.setattr(harness, "run_query", _crash)
+    out = asyncio.run(autonomy.run_task(42))
+    assert out["success"] is False
+
+    options = captured["options"]
+    run_id, session_id = options.turn_id, options.session_id
+    fm, body = _split_record(_run_record_file(store, 42, run_id).read_text())
+    scope = f"sessions/{session_id}.changes/{run_id}/"
+
+    assert fm["status"] == "failed"
+    assert _index_entry_count(store, session_id, run_id) == 4
+    assert fm["changes"] == f"{scope} (4 files)"
+    assert f"{scope} (4 files)" in body, "the body states it too, not just the yaml"
+    # The write the run never reported is counted AND named: the list the record
+    # carries is the index's, not the dead run's.
+    assert "planted.md" in body
+    for name in names:
+        assert name in body, f"{name} missing from the record's file list"
+
+
+def test_a_failed_run_that_recorded_no_writes_states_zero(store, monkeypatch):
+    """Clause 2: the zero is written down, not inferred from an absent line.
+
+    "This run touched no files" and "nobody looked" render identically as
+    silence, and the difference decides whether a person has anything to undo.
+    There is not even an index file on disk for this turn, so the line can only
+    come from a reader that treats an absent index and an empty one as the same
+    answer: zero.
+    """
+    task = {"id": 43, "name": "Quiet", "skill_name": "s", "status": "up_next",
+            "timeout_seconds": 300}
+    captured = _stub_autonomy(monkeypatch, store, task, [], write_records=True)
+    root = _ledger_root(store, monkeypatch)
+
+    async def _crash(messages, options):
+        captured["options"] = options
+        yield {"type": "text_delta", "text": "read everything, wrote nothing"}
+        raise RuntimeError("died before writing anything")
+
+    import app.harness as harness
+    monkeypatch.setattr(harness, "run_query", _crash)
+    asyncio.run(autonomy.run_task(43))
+
+    options = captured["options"]
+    run_id, session_id = options.turn_id, options.session_id
+    assert not (root / f"{session_id}.changes" / run_id / "index.json").exists()
+
+    fm, body = _split_record(_run_record_file(store, 43, run_id).read_text())
+    scope = f"sessions/{session_id}.changes/{run_id}/"
+    assert fm["changes"] == f"{scope} (0 files)"
+    assert f"{scope} (0 files)" in body
+    assert "no file writes" in body, "and says so in words, not just as a zero"
+
+
+def test_a_timed_out_run_names_its_ledger_and_nobody_reverted_it(
+        store, monkeypatch):
+    """Clause 1's timeout half, and the contract that nothing reverts itself.
+
+    A timeout is the scenario the item is written around: notes half-written,
+    the deadline fires, and the record reads "(no output before timeout)". The
+    record must say what is revertable, and the failure path must leave the
+    partial notes alone — a nightly that finished 6 of 9 notes has 6 notes of
+    real progress, and an automatic revert would destroy the progress to save an
+    invariant. Whether to put them back is a decision, so this reports and stops.
+
+    The absence of a revert is invisible from the record, hence the tripwire:
+    the ledger's own revert is watched, and the files are checked on disk.
+    """
+    from agent_mcp import _change_ledger as CL
+
+    task = {"id": 44, "name": "Slow", "skill_name": "s", "status": "up_next",
+            # A one-second budget: the deadline firing is the subject, not how
+            # long it takes.
+            "timeout_seconds": 1}
+    captured = _stub_autonomy(monkeypatch, store, task, [], write_records=True)
+    root = _ledger_root(store, monkeypatch)
+
+    revert_calls: list = []
+    monkeypatch.setattr(CL, "revert",
+                        lambda *a, **k: (revert_calls.append(a), [])[1])
+
+    async def _hang(messages, options):
+        captured["options"] = options
+        _write_files_under_ledger(options, root, ["kept-1.md", "kept-2.md"])
+        yield {"type": "text_delta", "text": "still writing"}
+        await asyncio.sleep(30)
+
+    import app.harness as harness
+    monkeypatch.setattr(harness, "run_query", _hang)
+    out = asyncio.run(autonomy.run_task(44))
+    assert out["status"] == "failed"
+
+    options = captured["options"]
+    run_id, session_id = options.turn_id, options.session_id
+    fm, body = _split_record(_run_record_file(store, 44, run_id).read_text())
+    scope = f"sessions/{session_id}.changes/{run_id}/"
+    assert fm["changes"] == f"{scope} (2 files)"
+    assert f"{scope} (2 files)" in body
+    assert "kept-1.md" in body and "kept-2.md" in body
+    assert "revert_run_writes" in body, "the record has to say how to put them back"
+
+    assert revert_calls == [], "a dead run's writes must not be reverted unattended"
+    for name in ("kept-1.md", "kept-2.md"):
+        assert "appended by run" in (root / "written" / name).read_text(), (
+            f"{name} was rolled back; a failed run's partial progress stays")
