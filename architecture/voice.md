@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, voice, livekit, tts, stt, asr, wakeword, speaker-id, vad, turn-detection]
 type: reference
 status: implemented
-date: 2026-09-17
+date: 2026-09-24
 ---
 
 # Voice
@@ -37,9 +37,9 @@ which is why each half can be restarted, or break, on its own.
 
 | Process | Port | Role | Launcher |
 |---|---|---|---|
-| `agent-livekit-server` | 7880 (+7881 TCP, 50000–50100 UDP) | the LiveKit SFU binary. Never reads TTS config | `bin/start-livekit-server.sh` |
+| `agent-livekit-server` | 7880 (+7881 TCP, 50000–50100 UDP) | the LiveKit SFU binary. Never reads TTS config | `agent-services/bin/start-livekit-server.sh` |
 | `lloyd-agent-worker` | 8501 (loopback, diag only) | `agent-services/livekit_worker.py` + `agent-services/voice/` — hearing, the gate, streaming TTS | supervisord runs it directly |
-| `agent-tts` | 8090 | Qwen3-TTS, OpenAI-shaped `/v1/audio/speech` | `bin/start-qwen3-tts.sh` |
+| `agent-tts` | 8090 | Qwen3-TTS, OpenAI-shaped `/v1/audio/speech` | `agent-services/bin/start-qwen3-tts.sh` |
 | `lloyd-mc:lloyd-backend` | 8080 | `/api/voice/*`, `/api/livekit/token`, the turn itself | `server.py` |
 | `lloyd-mc:lloyd-frontend` | 5173 | Vite: proxies `/api` to the backend and `/livekit` to the SFU | `npm --prefix web run dev` |
 
@@ -407,9 +407,10 @@ switch.
 
 `livekit.stt.streaming` (off) runs a cache-aware streaming FastConformer CTC
 for live partial transcripts on the data channel (`partial_transcript`).
-Display only — nothing reads partials yet, and the committed transcript is
-always the offline recogniser's. Preemptive generation is the reason to turn
-it on.
+Nothing consumes a partial at either end yet — `VoiceRoom`'s data handler
+returns on any message type but `wake_state` — and the committed transcript is
+always the offline recogniser's, so switching this on today buys a 438 MB model
+and no visible change. Preemptive generation is the reason to turn it on.
 
 ### The gate
 
@@ -572,9 +573,11 @@ next thing the user says is still heard.
 - **`voice_turn` registers the turn id before any text exists**, into
   `_streamed_turns`. Assistant rows now carry `turn_id`
   (`app/transcript_entries.py`, both writers), and the session poller — which
-  still covers typed and ambient turns, with the secondary rewrite — skips any
-  row a streamed turn wrote. Registered first, the stream cannot race the
-  poller for its own reply.
+  still covers typed and ambient turns, rewrite included, though with
+  `secondary_enabled: false` since 2026-09-20 `resolve_model_alias` sends that
+  `/api/voice/summarize` call to the **primary**, the engine this rework moved
+  off it (see #1445) — skips any row a streamed turn wrote. Registered first,
+  the stream cannot race the poller for its own reply.
 - **Text before a tool call is said before the tool runs** ("Let me check the
   calendar."): `tool_start` flushes the clause stream.
 - **A filler covers silence, never an answer**: once per turn, after
@@ -651,6 +654,22 @@ It runs from its own venv (`.venvs/qwen3-tts`) under
 `TTS_BACKEND=optimized`, with `TTS_CONFIG` pointing at the tree's own
 `config.yaml`. `start-qwen3-tts.sh` waits for :8090 to be free rather than
 killing whatever holds it — supervisord owns process lifecycle.
+
+**Eager loading is a supervisor setting, not a script one, and it is what makes
+a restart survivable.** The backend defaults to lazy, and this tree's
+`compile_mode: max-autotune` makes the first synthesis request pay the inductor
+autotune: measured 2026-09-19, the stack restarted at 19:54, the first voice
+turn arrived at 20:04:42 and audio came out at 20:08:48 — 4 min 6 s, of which
+"Warmup 1/3 streaming" alone was 2 min 59 s. `TTS_LAZY_LOAD=false` in
+`agent-tts.conf` loads and compiles inside uvicorn's lifespan instead, which
+means `:8090` does not answer `/health` for ~4 min after every restart — the
+right place to spend it, and the reason that window is *warming*, not down.
+The cost of the lazy path is not only latency: `TTSStreamer._http` is one
+serial client with `read=120.0`, so an utterance that waits longer than that is
+discarded rather than delayed — that same incident lost "One moment." and
+"Honestly?" exactly 120 s apart. The knob is not exported by the launch script,
+so hand-running `start-qwen3-tts.sh` is the lazy path and reproduces that
+incident (#1446).
 
 **Two models, and which one is default is a latency decision.**
 `0.6B-CustomVoice` serves the built-in speakers (Vivian, Ryan);
@@ -1216,3 +1235,20 @@ for `voice_services.py --port 8094` in
 `agent-services/bin/cleanup-orphans.sh`, and one stale doc:
 `agent-services/docs/voice-mode-integration.md` describes the OpenClaw bridge
 and is history, not reference.
+
+## Review log
+
+- 2026-09-24 — **current.** Checked every path, config key, constant, test name
+  and named symbol in the doc against the tree (all 76 backticked filenames, the
+  whole `livekit:` and `guardian.voice:` blocks, `POLL_INTERVAL`/`_IDLE_GRACE_SECONDS`/
+  `NO_AUDIO_WARN_S`/8501/`_PREWARM_DEBOUNCE_S`, the nine tests it cites, and the
+  live routes). Corrected: the two launcher paths in the process table (they are
+  `agent-services/bin/…`; there is no repo-root `bin/`), "Display only" for
+  streaming partials (no consumer exists at either end — `VoiceRoom` handles
+  only `wake_state`), and "the secondary rewrite" on the surviving poller path
+  (it resolves to the primary while `secondary_enabled: false`). Added the
+  `TTS_LAZY_LOAD` boot behaviour and the 120 s serial-read consequence, which
+  the TTS-server section predated. Filed #1444 (wake-miss corpus writes to
+  `~/.lloyd/ww_diag`, outside the data root), #1445 (the spoken rewrite now runs
+  on the primary), #1446 (the eager-load knob lives only in `agent-tts.conf`),
+  #1447 (GPU placement comments contradict their own pins).
