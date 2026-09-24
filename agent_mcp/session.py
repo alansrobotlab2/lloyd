@@ -83,9 +83,41 @@ def _memory_read(params: dict) -> dict:
     return {"content": filepath.read_text(encoding="utf-8"), "file": file}
 
 
+def _date_stamp_enabled() -> bool:
+    """`memory_tools.date_stamp_entries` in config.yaml (default off).
+
+    #622: once a consolidation pass rewrites MEMORY.md, file position stops
+    saying which of two conflicting lines is newer, and the model then acts on
+    whichever sits LAST — 28 of 33 trials when that was the superseded line,
+    0 of 27 when it was not (`eval/measurements/stale-fact-2026-09-24.md`). A
+    written-on date is a recency cue a rewrite carries along with the line.
+    """
+    try:
+        from app.config import CONFIG
+        return bool((CONFIG.get("memory_tools") or {}).get("date_stamp_entries", False))
+    except Exception:
+        return False
+
+
+def _entry_date() -> datetime.date:
+    """The date a `memory_add` entry is stamped with (UTC). Its own function so
+    an eval can plant entries on the dates it means to."""
+    return datetime.datetime.now(datetime.timezone.utc).date()
+
+
+def _date_stamped(entry: str) -> str:
+    """`- text` -> `- (2026-09-02) text`; a line with no bullet gets the prefix
+    at its start. Only the first line is stamped: one call is one entry."""
+    stamp = f"({_entry_date().isoformat()}) "
+    m = re.match(r"(\s*(?:[-*+]|\d+\.)\s+)", entry)
+    return entry[:m.end()] + stamp + entry[m.end():] if m else stamp + entry
+
+
 def _memory_add(params: dict) -> dict:
     file = params.get("file", "MEMORY.md").strip()
     entry = params.get("entry", "").strip()
+    if entry and _date_stamp_enabled():
+        entry = _date_stamped(entry)
     if file not in MEMORY_FILES:
         return _err(f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}", ErrorCode.INVALID_PARAM)
     if not entry:
