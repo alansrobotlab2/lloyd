@@ -24,6 +24,9 @@ Trace shape:
                                # it did until then and which scored prose
                                # vocabulary as tool use.
     "duration_seconds": float,
+    "prompt_tokens": int | None,      # #1132: the engine's usage block, summed
+    "completion_tokens": int | None,  # over every call the trial made; None
+    "total_tokens": int | None,       # when no call reported one (absent != 0)
     "error": "" | "...",
   }
 """
@@ -60,6 +63,35 @@ def _resolved_model_name(model: str) -> str:
     return resolve_model_alias(model)
 
 
+#: The usage keys a trial carries, in the engine's own (OpenAI) names.
+TOKEN_KEYS = ("prompt_tokens", "completion_tokens", "total_tokens")
+
+
+def add_usage(trace: dict[str, Any], usage: dict[str, Any] | None) -> None:
+    """Fold one response's usage block into the trial's running totals (#1132).
+
+    A sum rather than an assignment, so a trial that makes several calls (a
+    draft and a revision) reports what the whole trial spent; comparing
+    strategies at a matched budget is meaningless otherwise. A key the engine
+    did not report leaves the total as it was: None stays None, because a
+    missing count is not a zero.
+    """
+    for key in TOKEN_KEYS:
+        value = (usage or {}).get(key)
+        if isinstance(value, int):
+            trace[key] = (trace.get(key) or 0) + value
+
+
+def token_ledger_fields(trace: dict[str, Any]) -> dict[str, Any]:
+    """The three counts for a per-trial ledger row, for both writers.
+
+    An sdk trace keeps the harness's own `usage` dict instead, whose
+    `input_tokens` is the PEAK single prompt rather than a sum, so it is not
+    restated under these names and its row reads None here.
+    """
+    return {key: trace.get(key) for key in TOKEN_KEYS}
+
+
 def _run_one_sync(
     task: dict[str, Any],
     variant_id: str,
@@ -82,6 +114,7 @@ def _run_one_sync(
         "turns": 1,
         "tool_calls": [],
         "duration_seconds": 0.0,
+        **{key: None for key in TOKEN_KEYS},
         "error": "",
     }
 
@@ -108,6 +141,7 @@ def _run_one_sync(
         )
         resp.raise_for_status()
         data = resp.json()
+        add_usage(trace, data.get("usage"))
         content = data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
         trace["final_text"] = content[-8000:]
     except requests.Timeout:

@@ -20,7 +20,7 @@ from typing import Any
 from app.harness.bench_corpus import probe_ledger_fields
 
 from . import auto_restore, post_promotion
-from .bench_runner import run_bench
+from .bench_runner import run_bench, token_ledger_fields
 from .bench_runner_sdk import DEFAULT_PER_TASK_TIMEOUT as SDK_PER_TASK_TIMEOUT
 from .bench_runner_sdk import run_bench_sdk
 from .common import (
@@ -404,6 +404,10 @@ def trial_ledger_row(round_id: str, trace: dict[str, Any],
         # gets the honest zeros.
         **probe_ledger_fields(trace),
         "duration_seconds": trace.get("duration_seconds"),
+        # #1132: what the trial spent, so a budget-matched comparison of arms
+        # is reconstructible from ledger.jsonl alone. Same helper on both
+        # writers; None where the trace carries no summed counts.
+        **token_ledger_fields(trace),
         "composite_score": score["composite_score"],
         "objective_score": score["objective_score"],
         "rubric_overall": score["rubric_overall"],

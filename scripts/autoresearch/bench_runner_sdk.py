@@ -125,6 +125,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import AUTORESEARCH_PRIORITY, load_bench_tasks, load_config
+from .bench_runner import token_ledger_fields
 # Module-level, not inside `build_options` where the harness imports live: the
 # probe count is computed on the trace after the turn with no harness in play,
 # and `_DENIAL_MARKERS` needs the deny marker at import time.
@@ -734,6 +735,10 @@ def ledger_row_for(trace: dict[str, Any], score: dict[str, Any] | None,
         # a trial row and a round row can never disagree about what they measured.
         **probe_ledger_fields(trace),
         "duration_seconds": trace.get("duration_seconds"),
+        # #1132: what the trial spent, so a budget-matched comparison of arms
+        # is reconstructible from ledger.jsonl alone. Same helper on both
+        # writers; None where the trace carries no summed counts.
+        **token_ledger_fields(trace),
         "composite_score": score["composite_score"] if score else None,
         "objective_score": score["objective_score"] if score else None,
         "rubric_overall": score["rubric_overall"] if score else None,

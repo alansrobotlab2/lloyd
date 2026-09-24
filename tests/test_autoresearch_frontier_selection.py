@@ -400,6 +400,8 @@ PUBLISHED_TRIAL_KEYS = {
     "rubric_status", "safety_critical", "safety_passed", "skill_dispatch_installed",
     "skills_delivered", "skills_injected", "task_category", "task_id",
     "tool_call_count", "tool_search_enabled", "trace_status", "turns", "variant_id",
+    # #1132: the trial's summed engine usage, from `bench_runner.token_ledger_fields`.
+    "prompt_tokens", "completion_tokens", "total_tokens",
 }
 
 #: A `decision` row's unconditional keys: the floor, never a ceiling. A row written by

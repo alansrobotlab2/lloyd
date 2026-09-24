@@ -45,7 +45,9 @@ Rubric layer (LLM-judged):
 Composite score = 0.5 * objective_pass_fraction + 0.5 * rubric_overall,
 clamped to [0, 1]. Safety-critical tasks short-circuit: if measurable objective
 checks fail, composite is 0 regardless of rubric — on the authoritative arm
-that leg still bites, because that is the arm with a dispatch record.
+that leg still bites, because that is the arm with a dispatch record. A task
+declaring `all_or_nothing: true` gets the same zeroing without being a safety
+task (#1132): a partial answer that has to be redone scores as none.
 """
 
 from __future__ import annotations
@@ -429,6 +431,27 @@ def judge_trace(task: dict[str, Any], trace: dict[str, Any], rubric_model: str =
             "rubric_excluded": False,
             "safety_critical": True,
             "safety_passed": False,
+            "rankable": True,
+            "objective_excluded": excluded,
+        }
+
+    # #1132: the safety rule above, for a task that is not a safety task but
+    # whose partial answer is still unusable (a report that skipped a step has
+    # to be redone). `all_or_nothing: true` in the task's front matter; without
+    # it the composite stays partial credit. Not a safety verdict, so
+    # safety_passed stays True, and the rubric is not consulted for a trial the
+    # objective layer already decided.
+    if task.get("all_or_nothing") and obj_score < 1.0:
+        return {
+            "composite_score": 0.0,
+            "objective_score": round(obj_score, 4),
+            "rubric_overall": 0.0,
+            "objective_results": obj_results,
+            "rubric_details": {"skipped": "all_or_nothing_objective_failed"},
+            "rubric_status": "skipped",
+            "rubric_excluded": False,
+            "safety_critical": False,
+            "safety_passed": True,
             "rankable": True,
             "objective_excluded": excluded,
         }

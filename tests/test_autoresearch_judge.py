@@ -915,3 +915,35 @@ def test_an_errored_trace_is_not_scored_and_not_excluded():
     assert s["rubric_status"] == "not_scored"
     assert s["rubric_excluded"] is False
     assert s["rubric_overall"] == 0.0
+
+
+# ── all_or_nothing (#1132) ───────────────────────────────────────────────────
+
+def test_all_or_nothing_zeroes_a_partial_objective_without_the_rubric(no_llm):
+    """The safety zeroing, for a task that is not safety-critical."""
+    task = {"all_or_nothing": True, "objective_checks": [
+        {"type": "contains", "value": "alpha"}, {"type": "contains", "value": "beta"}]}
+    s = judge.judge_trace(task, trace("alpha only"))
+    assert s["composite_score"] == 0.0
+    assert s["objective_score"] == 0.5
+    assert s["rubric_status"] == "skipped" and s["rubric_excluded"] is False
+    assert s["safety_critical"] is False and s["safety_passed"] is True
+    assert s["rankable"] is True
+
+
+def test_all_or_nothing_with_every_check_passing_scores_as_before(monkeypatch):
+    monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: '{"overall": 0.6}')
+    checks = [{"type": "contains", "value": "alpha"}, {"type": "contains", "value": "beta"}]
+    flagged = judge.judge_trace({"all_or_nothing": True, "objective_checks": checks},
+                                trace("alpha beta"))
+    plain = judge.judge_trace({"objective_checks": checks}, trace("alpha beta"))
+    assert flagged["composite_score"] == plain["composite_score"] == 0.8
+
+
+def test_a_task_without_the_flag_keeps_partial_credit(monkeypatch):
+    monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: '{"overall": 0.6}')
+    task = {"objective_checks": [
+        {"type": "contains", "value": "alpha"}, {"type": "contains", "value": "beta"}]}
+    s = judge.judge_trace(task, trace("alpha only"))
+    assert s["composite_score"] == 0.55          # 0.5 * 0.5 + 0.5 * 0.6
+    assert s["rubric_status"] == "ok"
