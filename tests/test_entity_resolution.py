@@ -390,3 +390,38 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ---------------------------------------------------------------------------
+# fact_add's mint gate (#758) keeps write-side attach exact
+# ---------------------------------------------------------------------------
+
+def test_fact_add_through_the_mint_gate_still_performs_no_fuzzy_merge(tmp_path):
+    """Gating the mint must not reopen #340: a near-miss of an existing entity
+    is neither declared nor an exact store name, so it gets its own row."""
+    from agent_mcp import facts, retrieval
+    from app import entity_naming
+    facts_root, aliases_path = _isolate_facts_root(tmp_path)
+    (facts_root / "Lloyd MC").mkdir()
+    entity_naming.reset_identity_schema_cache()
+    patches = _patch_paths(facts_root, aliases_path) + [
+        patch.object(facts, "FACTS_ROOT", facts_root),
+        patch.object(retrieval, "FACTS_ROOT", facts_root),
+    ]
+    try:
+        for p in patches:
+            p.start()
+        kg_store.store().entities.register("Lloyd MC", kind="system")
+        out = facts._fact_add({"entity": "lloyd-mc", "category": "state",
+                               "fact": "serves the dashboard"})
+        assert out.get("success") is True, out
+        assert out["entity"] == "lloyd-mc"
+        assert "resolved_from" not in out
+        assert (facts_root / "lloyd-mc" / "lloyd-mc-state.md").exists()
+        assert not (facts_root / "Lloyd MC" / "Lloyd MC-state.md").exists()
+        assert kg_store.store().entities.exists("lloyd-mc")
+    finally:
+        for p in reversed(patches):
+            p.stop()
+        entity_naming.reset_identity_schema_cache()
+        kg_store.reset()

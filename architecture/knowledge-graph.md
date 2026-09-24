@@ -221,7 +221,9 @@ Three other writers:
   `app.kg_store.EDGE_TYPES`, the closed edge vocabulary (#546); anything else
   is refused with the list, because a free-form type had been minting a
   count-1 type per novel word. The health report's `Edge-type cardinality:
-  PASS|FAIL` line watches the result (report output only, not an alarm). The `remember` and
+  PASS|FAIL` line watches the result (report output only, not an alarm). A new
+  entity `fact_add` names is minted through the declared-identity gate, with a
+  kind (below). The `remember` and
   `forget` verbs that routed onto `fact_add` and `fact_invalidate` from
   2026-09-09 were retired on 2026-09-23; see `architecture/memory.md`.
 - **`conversation_relations.py`** (#51) — co-access pairs from session
@@ -291,6 +293,18 @@ Graph` plus five variants with one edge among them; `Autonomy Data Pipeline`
 plus three), and a similarity rule is what would fuse the pairs that are
 genuinely distinct. `tests/test_entity_identity_schema.py` pins that it never
 consults one.
+
+**`fact_add` mints through the same gate** (#758, 2026-09-24). It registered a
+new name with no kind, and its reindex registered the directory a second time,
+also untyped — the source of nearly every `kind IS NULL` row. A new or declared
+name now goes through `gate_entity_name` with the caller's optional
+`entity_type`, or `app.entity_kind.derive_kind` when none is given: a caller
+naming a new thing is declaring it, so the tool gets `typed_new` where the
+extractor would get `candidate`. A type the schema does not carry is refused
+before anything is written, and the post-write `update_file` passes
+`register_entities=False`. Attach is still exact + alias + declaration, never
+fuzzy (#340). Whether an unattended caller should be refused an undeclared name
+outright is Alan's call and not implemented. `tests/test_fact_add_entity_kind.py`.
 
 `scripts/memory/entity_identity_schema.json` is the declaration: human-edited,
 extractor-read-only, and validated on load — a type outside

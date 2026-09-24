@@ -37,6 +37,13 @@ except Exception:  # pragma: no cover - defensive import
     def _is_junk_entity(name: str) -> bool:
         return False
 
+from app.entity_kind import derive_kind as _derive_kind
+from app.entity_naming import (
+    SCHEMA_TYPES as _SCHEMA_TYPES,
+    gate_entity_name as _gate_entity_name,
+    normalize_declared_type as _normalize_declared_type,
+    schema_identity as _schema_identity,
+)
 from agent_mcp._shared import (
     FACTS_ROOT,
     ErrorCode,
@@ -508,6 +515,15 @@ def _fact_add(params: dict) -> dict:
             "run, not an entity; use a concept/project/person name",
             ErrorCode.INVALID_PARAM,
         )
+    declared_raw = params.get("entity_type")
+    declared = None
+    if declared_raw not in (None, ""):
+        # Refused before anything is written: a type the schema does not carry
+        # would otherwise be dropped and the entity typed by guesswork (#758).
+        declared = _normalize_declared_type(declared_raw)
+        if declared is None:
+            return _err(f"entity_type {declared_raw!r} is not a declared type; use one "
+                        f"of {', '.join(_SCHEMA_TYPES)}", ErrorCode.INVALID_PARAM)
     confidence = float(params.get("confidence", 0.9))
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     try:
@@ -515,6 +531,21 @@ def _fact_add(params: dict) -> dict:
         # on the literal name the caller specified. (#340 PR 3 — fixes the
         # silent fuzzy-merge data-corruption bug.)
         entity, is_new = _resolve_entity(raw_entity, mode="write")
+        # A new name, or a declared one, is minted through the extractor's gate
+        # so the row gets a kind: this path registered untyped and was where
+        # nearly every `kind IS NULL` entity came from (#758). A caller with no
+        # entity_type is still a declaration that the thing exists, so the kind
+        # falls back to the shape rule rather than to a refusal. The gate asks
+        # the schema first, so a declared alias files under its canonical.
+        kind = declared or _derive_kind(raw_entity, source_doc)
+        if is_new or _schema_identity(raw_entity):
+            gated, verdict = _gate_entity_name(raw_entity, declared_type=kind,
+                                               source_doc=source_doc)
+            if not gated:
+                return _err(f"'{raw_entity}' is not filed as an entity (gate verdict "
+                            f"{verdict}); use a concept/project/person name",
+                            ErrorCode.INVALID_PARAM)
+            entity = gated
         entity_dir = _find_entity_dir(entity)
         if not entity_dir:
             entity_dir = FACTS_ROOT / entity
@@ -576,8 +607,13 @@ def _fact_add(params: dict) -> dict:
                         "entity": entity, "category": category}
         try:
             st = _store()
-            st.entities.register(entity)
-            st.facts_idx.update_file(fact_file, root=FACTS_ROOT)
+            # Only fills a registry that lags the tree; the gate above has
+            # already registered a new name with its kind. The reindex must not
+            # register the directory name itself: that was a second, untyped
+            # mint of the same entity on the same write (#758).
+            st.entities.register(entity, kind=None if st.entities.exists(entity)
+                                 else (declared or _derive_kind(entity, source_doc)))
+            st.facts_idx.update_file(fact_file, root=FACTS_ROOT, register_entities=False)
         except StoreUnavailable as exc:
             # The markdown write already succeeded and is the fact layer; the
             # index is derived and `kg reindex` rebuilds it. Say so, don't fail.
@@ -996,7 +1032,7 @@ async def list_tools():
         Tool(name="fact_get", description=f"Use to read what is known about one entity; for a question across documents and facts use vault_recall instead. Returns the entity's facts, at most {FACT_RANK_CAP_SEED} per category (most recent, or most relevant to `query`); a capped category is named in truncated_categories.", inputSchema={
             "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "query": {"type": "string", "description": "Rank each category by relevance to this text instead of recency"}, "limit_per_category": {"type": "integer", "description": f"Facts kept per category (default {FACT_RANK_CAP_SEED}; 0 = no cap)"}, "as_of": {"type": "string", "description": "ISO date — return facts valid at this point in time"}, "include_expired": {"type": "boolean", "description": "If true, include expired/invalidated facts"}}, "required": ["entity"]}),
         Tool(name="fact_add", description="Add a structured fact for a named entity and category. Writes a line to the entity's markdown fact file and indexes it; use one clear sentence per call rather than a paragraph. An entity that already carries that text verbatim is refused: the result reports success with skipped=true and the surviving copy in `duplicate_of`, and nothing is written, whatever category was asked for.", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "fact": {"type": "string", "description": "The fact, as one self-contained sentence that will still make sense read on its own"}, "confidence": {"type": "number", "description": "0.0-1.0 belief in the fact (default 0.9); the weaker side loses a contradiction"}, "valid_at": {"type": "string", "description": "ISO date the fact started being true (default: today)"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the fact was derived (default: STATED)"}, "source_doc": {"type": "string", "description": "Vault path this fact came from, for provenance"}}, "required": ["entity", "category", "fact"]}),
+            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "fact": {"type": "string", "description": "The fact, as one self-contained sentence that will still make sense read on its own"}, "confidence": {"type": "number", "description": "0.0-1.0 belief in the fact (default 0.9); the weaker side loses a contradiction"}, "valid_at": {"type": "string", "description": "ISO date the fact started being true (default: today)"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the fact was derived (default: STATED)"}, "source_doc": {"type": "string", "description": "Vault path this fact came from, for provenance"}, "entity_type": {"type": "string", "enum": list(_SCHEMA_TYPES), "description": "What kind of thing a NEW entity is; ignored for one that already exists (default: derived from the name)"}}, "required": ["entity", "category", "fact"]}),
         Tool(name="fact_resolve", description=f"Report contradictions between an entity's facts. Reports only — it marks nothing; `fact_resolve_apply` is the call that marks. Refused above {FACT_GODNODE_THRESHOLD} facts; pass `category` to scan a slice.", inputSchema={
             "type": "object", "properties": {
                 "entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"},

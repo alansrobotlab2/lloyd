@@ -1286,9 +1286,10 @@ class _FactsIdx:
                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (_now(),))
         return stats
 
-    def update_file(self, path: Path, root: Optional[Path] = None) -> int:
+    def update_file(self, path: Path, root: Optional[Path] = None,
+                    *, register_entities: bool = True) -> int:
         """Re-read one fact file after a write. Returns rows indexed."""
-        return self.reindex([path], root=root)["facts"]
+        return self.reindex([path], root=root, register_entities=register_entities)["facts"]
 
     # ── reads ───────────────────────────────────────────────────────────
     @staticmethod
