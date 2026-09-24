@@ -1184,7 +1184,7 @@ workers:
   # so at 5 every round's `tests` rung was red on a test no round had touched.
   slots: 6
   # KV budget gate (workers/pool.py). A source that declares LONG_LIVED —
-  # autocode, autotriage, deep-research: tens of iterations, each
+  # autocode, autotriage, deep-research, arch-review: tens of iterations, each
   # re-submitting a 100-200k context — is not claimed while the primary's KV
   # usage is above `max_kv_usage`; everything else claims as before. A held
   # item stays queued with its attempt intact, and no reading means open.

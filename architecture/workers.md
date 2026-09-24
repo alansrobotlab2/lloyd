@@ -99,8 +99,13 @@ ordinary Tuesday.
 ### The KV budget gate
 
 A source that declares `LONG_LIVED = True` — `autocode`, `autotriage`,
-`deep-research` — is not claimed while the primary's KV usage is above
-`workers.kv_gate.max_kv_usage` (0.60); every other source claims as before.
+`deep-research`, `arch-review` — is not claimed while the primary's KV usage
+is above `workers.kv_gate.max_kv_usage` (0.60); every other source claims as
+before. The flag in `workers/sources/<name>.py` is the truth and this list is
+a copy of it: `tests/test_kv_gate_docs.py` fails when a source flips the flag
+without this sentence, the `kv_gate` comment in `config.yaml` or `vllm.md`
+§6.3 being updated (#1341 — `arch-review` had been gated for a week while
+both enumerations named three).
 Held sources join the same `NOT IN` as the saturated ones, for the same
 reason, and a held item keeps its place and its attempt.
 
