@@ -6,15 +6,18 @@ A modular pipeline for discovering, filtering, and scoring intelligence items fr
 
 ```
 intel_pipeline/
-├── __init__.py          # Package init
-├── models.py            # Data models (FeedItem, ScoredItem)
-├── state.py             # State management helpers
-├── profile.py           # Interest profile loading
-├── scoring.py           # Two-stage scoring pipeline
+├── __init__.py            # Package init
+├── __main__.py            # CLI: --scan / --score / --write / --date
+├── _paths.py              # Feeds and vault paths, derived from app.paths
+├── models.py              # Data models (FeedItem, ScoredItem)
+├── state.py               # Seen-set and raw JSONL helpers
+├── profile.py             # Interest profile loading
+├── scoring.py             # Two-stage scoring pipeline
+├── vault_writer.py        # Digests into the vault, with the write guards
 └── scanners/
-    ├── __init__.py      # Scanners package init
-    ├── arxiv_scanner.py # arXiv API scanner
-    └── hn_scanner.py    # Hacker News scanner
+    ├── __init__.py        # Scanners package init
+    ├── github_scanner.py  # GitHub releases/commits/issues (config/github-repos.yml)
+    └── youtube_scanner.py # YouTube channel RSS (config/youtube-channels.yml)
 ```
 
 ## Data Models
@@ -84,30 +87,32 @@ reach it again. `intel_pipeline/_paths.py` derives all three from `app.paths`:
 
 ### CLI Entry Points
 
-Run as module:
+Run as a module from the package directory (this is what autonomy task #30 does;
+with no flag it scans, scores and writes in one pass):
 ```bash
-cd ~/obsidian/agents/lloyd/intel-pipeline
-python -m intel_pipeline.scanners.arxiv_scanner
-python -m intel_pipeline.scanners.hn_scanner
+cd ~/lloyd/scripts/intel-pipeline
+python -m intel_pipeline                       # scan + score + write for today
+python -m intel_pipeline --scan                # scanners only
+python -m intel_pipeline --score --write --date 2026-09-22
 ```
 
 ### Programmatic Usage
 
 ```python
-from intel_pipeline.scanners.arxiv_scanner import scan_arxiv
-from intel_pipeline.scanners.hn_scanner import scan_hn
+from intel_pipeline.scanners.github_scanner import scan_github_repos
+from intel_pipeline.scanners.youtube_scanner import scan_youtube_channels
 from intel_pipeline.scoring import run_scoring_pipeline
 from intel_pipeline.profile import load_profile
 
 # Load profile
 profile = load_profile()
 
-# Scan sources
-arxiv_items = scan_arxiv("all:reinforcement learning", max_results=10)
-hn_items = scan_hn("machine learning", max_results=10)
+# Scan sources (each reads its config/*.yml and saves its own raw JSONL)
+github_items = scan_github_repos()
+youtube_items, coverage = scan_youtube_channels()
 
 # Combine and score
-all_items = arxiv_items + hn_items
+all_items = github_items + youtube_items
 scored = run_scoring_pipeline(all_items, profile)
 
 # Process results
@@ -142,7 +147,7 @@ Install dependencies:
 pip install pyyaml requests
 ```
 
-Run tests:
+Run tests (they live in the repo's suite, not in this directory):
 ```bash
-python -m pytest
+cd ~/lloyd && .venvs/lloyd/bin/python -m pytest tests/test_intel_pipeline_*.py
 ```
