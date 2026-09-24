@@ -210,6 +210,12 @@ def catalog_signature(catalog: list[dict[str, Any]]) -> str:
 # does; the full description arrives with the schema on ToolSearch. Emitting
 # the whole description here defeats the point — with 119 tools it cost ~5k
 # tokens per request, a third of what deferring the schemas saved.
+#
+# That budget governs only while `harness.tool_search.enabled` is on, and it
+# is off (config.yaml, #456). What every request ships today is the FULL
+# schema from `tool_schema.build_tool_list` plus the `summary` parameter, and
+# its ceiling is `tests/test_tool_schema_budget.py` (#639) — measure that one
+# when a tool description grows, not this gist.
 CATALOG_GIST_CHARS = 110
 
 
