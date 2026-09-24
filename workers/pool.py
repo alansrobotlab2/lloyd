@@ -341,6 +341,7 @@ class WorkerPool:
         self._scheduler_task: Optional[asyncio.Task] = None
         self._in_flight: dict[int, dict[str, Any]] = {}
         self._landing_probe: tuple[float, bool] = (0.0, False)
+        self._service_probe = None  # workers.service_probe.ServiceProbe, lazily
         # KV gate state, reported by `status()`. See `_kv_gate_held`.
         self._kv_gate: dict[str, Any] = {
             "engaged": False,
@@ -759,6 +760,7 @@ class WorkerPool:
         interval = 60
         while self._running:
             await self._maybe_sweep_poisoned()
+            await self._probe_services()
 
             try:
                 await self._scheduler_pass()
@@ -845,6 +847,22 @@ class WorkerPool:
             )
         except Exception as e:
             logger.error("Poison sweep failed: %s", e, exc_info=True)
+
+    async def _probe_services(self) -> None:
+        """Announce a supervised program whose port never opens (#1359).
+
+        Same seat as the poison sweep and for the same reason: it must run
+        whether or not a worker slot is free. Never raises.
+        """
+        try:
+            from workers import service_probe
+
+            if self._service_probe is None:
+                self._service_probe = service_probe.ServiceProbe(
+                    announce=service_probe.guardian_announce)
+            await asyncio.to_thread(service_probe.run_probe, self._service_probe)
+        except Exception as e:
+            logger.error("Service probe failed: %s", e, exc_info=True)
 
     # ── Worker loop — claims items and runs them ──────────────────────────
 

@@ -41,7 +41,11 @@ Two loops, both inside the **backend** process (`server.py`):
 
 - **The scheduler** wakes every 60 s, and for each enabled source whose
   `interval_seconds` has elapsed calls `enqueue_if_due`. It is the only thing
-  that creates work.
+  that creates work. The same tick carries two deterministic chores that must
+  not wait for a free slot: the poison sweep (`workers/maintenance.py`) and
+  the service probe (`workers/service_probe.py`, #1359), which announces a
+  supervised infra program whose declared port stays closed past its grace
+  while supervisord still reports it up — the crash loop that reads RUNNING.
 - **The workers** — `workers.slots` of them — claim one item at a time and
   await its source's `execute`.
 
