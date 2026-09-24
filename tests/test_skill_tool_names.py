@@ -62,6 +62,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+# Bound here, not read at call time, so a test can point the fence at a fixture.
+from app.paths import IS_WORKTREE, LIVE_CHECKOUT  # noqa: E402
+
 SKILLS_DIRS = [Path.home() / "obsidian" / "skills", ROOT / "skills"]
 
 # Tool names that were never real in Lloyd, or no longer are. The first group
@@ -557,6 +560,56 @@ def _tree_ignores(root: Path, relpaths) -> frozenset[str]:
     return frozenset(line.strip() for line in proc.stdout.splitlines() if line.strip())
 
 
+def _present_at(repo: Path, rev: str, relpaths: list[str]) -> frozenset[str]:
+    """The subset of `relpaths` that commit `rev` of `repo` carries, from one
+    batched `cat-file`. Raises on a git that cannot answer; callers fail closed."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "--batch-check=%(objecttype)"],
+        input="".join(f"{rev}:{p}\n" for p in relpaths),
+        capture_output=True, text=True, timeout=_IGNORE_QUERY_TIMEOUT_S, check=True)
+    lines = proc.stdout.splitlines()
+    if len(lines) != len(relpaths):
+        raise subprocess.SubprocessError("cat-file answered a different number of lines")
+    return frozenset(p for p, line in zip(relpaths, lines) if not line.endswith(" missing"))
+
+
+def _landed_after_base(root: Path, live: Path, relpaths) -> frozenset[str]:
+    """The subset of `relpaths` that `live`'s HEAD carries and the merge-base of
+    `root`'s HEAD with it does not: files that landed on main AFTER this
+    worktree's base, which a rebase brings in and nothing in the round can fix.
+
+    The merge-base is what keeps this an exemption for the base and not for the
+    branch: a file the round itself deleted is at the base and at live HEAD
+    both, so it stays a violation. Every failure — git unaskable, the two trees
+    sharing no history, a timeout — is fail-closed to `frozenset()`, the rule
+    `_tree_ignores` follows and for the same reason.
+    """
+    paths = sorted({p for p in relpaths if p})
+    if not paths:
+        return frozenset()
+    try:
+        live_head = subprocess.run(
+            ["git", "-C", str(live), "rev-parse", "--verify", "HEAD"],
+            capture_output=True, text=True, timeout=_IGNORE_QUERY_TIMEOUT_S,
+            check=True).stdout.strip()
+        base = subprocess.run(
+            ["git", "-C", str(root), "merge-base", "HEAD", live_head],
+            capture_output=True, text=True, timeout=_IGNORE_QUERY_TIMEOUT_S,
+            check=True).stdout.strip()
+        if not live_head or not base:
+            return frozenset()
+        return _present_at(live, live_head, paths) - _present_at(root, base, paths)
+    except (OSError, subprocess.SubprocessError):
+        return frozenset()
+
+
+#: `<label>::repo:<path>` -> naming doc, for every reference the last scan set
+#: aside as out of scope: at live HEAD, not at this worktree's base. Filled by
+#: `_unresolved_rows` and read by `_drift_report`, so the tally says what was
+#: dropped and why rather than dropping it silently (#1411).
+_OUT_OF_SCOPE: dict[str, Path] = {}
+
+
 def _row_parts(row: str) -> tuple[str, str]:
     """(tree, rel) out of a `<label>::<tree>:<rel>` row — the same split
     `_drift_report` uses to pull out the path a doc names."""
@@ -585,7 +638,21 @@ def _unresolved_rows() -> dict[str, Path]:
     no entry per doc and so cannot be re-broken by one prose commit. `vault:`
     rows are never exempted here: their tree is the vault, whose ignore rules are
     not the ones this asks.
+
+    The corpus is the LIVE vault while the tree is whatever checkout this file
+    runs from, and the two are only the same age in `~/lloyd` (item #1411). A
+    skill that names `architecture/desktop.md` the day it lands is correct
+    against `main` and a dangling reference in every open round whose base
+    predates that commit — 213 refused gate rows on 2026-09-23 alone, and the
+    base probe faithfully reproduces it, because the skew is a property of the
+    checkout and not of the diff. So in a worktree (`IS_WORKTREE`) a `repo:`
+    reference that live HEAD carries and this worktree's base does not is set
+    aside into `_OUT_OF_SCOPE` rather than counted: a rebase resolves it and no
+    edit here can. `_landed_after_base` says why the merge-base, not the base
+    itself, is the second side of that comparison. Never applied outside a
+    worktree, where the tree IS what the vault was written against.
     """
+    _OUT_OF_SCOPE.clear()
     bad: dict[str, Path] = {}
     for label, path in _doc_files():
         body = path.read_text(encoding="utf-8", errors="replace")
@@ -606,6 +673,13 @@ def _unresolved_rows() -> dict[str, Path]:
     if ignored:
         bad = {r: d for r, d in bad.items()
                if not (_row_parts(r)[0] == "repo" and _row_parts(r)[1] in ignored)}
+    if IS_WORKTREE:
+        landed = _landed_after_base(ROOT, LIVE_CHECKOUT,
+                                    [_row_parts(r)[1] for r in bad
+                                     if _row_parts(r)[0] == "repo"])
+        for r in list(bad):
+            if _row_parts(r)[0] == "repo" and _row_parts(r)[1] in landed:
+                _OUT_OF_SCOPE[r] = bad.pop(r)
     return bad
 
 
@@ -680,6 +754,15 @@ def _uncommitted_edit(doc: Path) -> tuple[str, str] | None:
     return None
 
 
+def _tracked_at_head(top: str, rel: str) -> bool | None:
+    """Whether `top`'s HEAD holds `rel` at all. None when git cannot say, which
+    the caller words as the tracked case — the hint that costs least if wrong."""
+    try:
+        return rel in _present_at(Path(top), "HEAD", [rel])
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _drift_report(drift: set[str]) -> str:
     """Say why each unresolved reference is missing.
 
@@ -693,8 +776,19 @@ def _drift_report(drift: set[str]) -> str:
     is reported as the first, which is how four rounds on 2026-09-19 were refused
     for a skew no commit had produced.
 
+    A third case is the uncommitted edit's limit (#1411): a naming file that is
+    NEW — untracked, in no commit at all, the shape of a skill written today.
+    The tracked-file hint (`git show HEAD:<rel> | grep -c`) necessarily says 0
+    for it and then offers two remedies that both fail: committing keeps the
+    citation and stays red (`test_a_committed_doc_naming_an_absent_file_still_
+    goes_red_alone` is what pins that), reverting deletes a skill somebody
+    wrote. So that case gets its own sentence, pointing at the cited path.
+
     This function only *explains*. The assertion it feeds still requires an
-    empty drift either way — the diagnosis adds no leniency.
+    empty drift either way — the diagnosis adds no leniency. The one thing it
+    adds is the tally of rows the scan set aside as out of scope, so a red
+    report in a worktree also says which references it deliberately did not
+    count.
     """
     rows = _unresolved_rows()
     gaps: list[str] = []
@@ -717,6 +811,16 @@ def _drift_report(drift: set[str]) -> str:
         # What the doc names, pulled out of the row itself (`label::tree:path`),
         # so the command a reader pastes has no placeholder left in it.
         named = row.split("::", 1)[1].split(":", 1)[1]
+        if _tracked_at_head(top, rel) is False:
+            parts.append(
+                f"{row}: the naming file {rel} is NEW and UNTRACKED in the working "
+                f"tree at {top} — a working-tree skew with no committed copy to "
+                "compare against, so this row is not evidence that the code never "
+                "landed. Committing that file keeps the citation and stays red; "
+                "reverting it deletes a file someone wrote. The fix is on the cited "
+                f"side: put {named} in the repo or point the doc at where it really "
+                "lives — and if it is already at live HEAD, a rebase clears this row.")
+            continue
         parts.append(
             f"{row}: the naming file {rel} is an UNCOMMITTED EDIT in the working "
             f"tree at {top} — a working-tree skew, so this row is not evidence "
@@ -725,6 +829,12 @@ def _drift_report(drift: set[str]) -> str:
             f"`git -C {top} show HEAD:{rel} | grep -c '{named}'` — and if that "
             "says 0, committing or reverting that one vault file is the fix, not "
             "adding the path to PATH_KNOWN_UNFIXED.")
+    if _OUT_OF_SCOPE:
+        parts.append(
+            f"OUT OF SCOPE for this worktree, not counted: {sorted(_OUT_OF_SCOPE)} "
+            f"— each names a file at live HEAD ({LIVE_CHECKOUT}) that this "
+            "checkout's base predates. A rebase resolves them; nothing here needs "
+            "fixing for them.")
     return "\n".join(parts)
 
 
@@ -887,6 +997,142 @@ def test_the_qmd_row_is_dropped_by_the_rule_and_not_by_a_ledger_entry():
         f"the exemption was enumerated instead of derived: {enumerated} — item #1403 "
         "clause 2 is that no `skills/qmd-index-maintenance/SKILL.md::repo:qmd/...` "
         "row goes in here")
+
+
+#: The three paths the fence control below plants: one that landed on the live
+#: tree after the worktree's base, one only the live WORKING tree has, one in
+#: neither tree.
+_LANDED_AFTER_BASE = "eval/a_script_that_landed_after_the_base_1411.py"
+_UNCOMMITTED_AT_LIVE = "eval/a_script_only_the_live_working_tree_has_1411.py"
+_ABSENT_EVERYWHERE = "eval/a_script_no_tree_has_1411.py"
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-c", "user.name=lloyd-test", "-c", "user.email=lloyd-test@invalid",
+                    "-c", "core.excludesfile=/dev/null", *args],
+                   cwd=str(repo), check=True, capture_output=True, text=True)
+
+
+def _live_tree_and_an_older_worktree(tmp_path: Path) -> tuple[Path, Path]:
+    """A stand-in for `~/lloyd` and a `git worktree` of it cut one commit
+    earlier — the shape of every open round the moment a doc lands on main.
+
+    Returns `(live, worktree)`. `live` has two commits: a base carrying
+    `tracked_source/keep.py`, and one more adding `_LANDED_AFTER_BASE`. It also
+    holds `_UNCOMMITTED_AT_LIVE` in its working tree only. The worktree sits at
+    the base. Real git on both sides, because the fence is answered by
+    `merge-base` and `cat-file` subprocesses over the two trees' shared object
+    store, and the control has to prove the answer came from there.
+    """
+    live = tmp_path / "live"
+    (live / _TRACKED_TREE).mkdir(parents=True)
+    (live / _TRACKED_TREE / "keep.py").write_text("x = 1\n", encoding="utf-8")
+    _git(live, "init", "-q")
+    _git(live, "add", ".")
+    _git(live, "commit", "-q", "-m", "base")
+    wt = tmp_path / "round"
+    _git(live, "worktree", "add", "-q", "--detach", str(wt), "HEAD")
+    (live / _LANDED_AFTER_BASE).parent.mkdir()
+    (live / _LANDED_AFTER_BASE).write_text("y = 2\n", encoding="utf-8")
+    _git(live, "add", _LANDED_AFTER_BASE)
+    _git(live, "commit", "-q", "-m", "landed after the base")
+    (live / _UNCOMMITTED_AT_LIVE).write_text("z = 3\n", encoding="utf-8")
+    assert not (wt / _LANDED_AFTER_BASE).exists()
+    return live, wt
+
+
+def _doc_naming(tmp_path: Path, *rels: str) -> Path:
+    doc = tmp_path / "9999-fence.md"
+    doc.write_text("---\nname: fence\ntype: autonomy\n---\n# Fence Task\n\n"
+                   + "".join(f"Step names `~/lloyd/{r}`.\n\n" for r in rels),
+                   encoding="utf-8")
+    return doc
+
+
+def _point_the_fence(monkeypatch, *, root: Path, live: Path, worktree: bool) -> None:
+    mod = sys.modules[__name__]
+    monkeypatch.setattr(mod, "ROOT", root)
+    monkeypatch.setattr(mod, "LIVE_CHECKOUT", live)
+    monkeypatch.setattr(mod, "IS_WORKTREE", worktree)
+
+
+def test_a_ref_that_landed_after_the_base_is_out_of_scope_in_a_worktree(tmp_path,
+                                                                        monkeypatch):
+    """#1411, the mechanism itself. Three references in one doc, one scan: the
+    file that landed on the live tree after this worktree's base is set aside
+    and named in the tally; the file only the live WORKING tree holds is still
+    a violation (HEAD is the question, a rebase brings in commits); the file no
+    tree has is still a violation. `==`, so a fence that dropped more than the
+    one row it should fails here."""
+    live, wt = _live_tree_and_an_older_worktree(tmp_path)
+    doc = _doc_naming(tmp_path, _LANDED_AFTER_BASE, _UNCOMMITTED_AT_LIVE, _ABSENT_EVERYWHERE)
+    _point_the_fence(monkeypatch, root=wt, live=live, worktree=True)
+    monkeypatch.setattr(sys.modules[__name__], "_doc_files",
+                        lambda: [("autonomy/9999-fence.md", doc)])
+
+    drift = _unresolved() - PATH_KNOWN_UNFIXED
+    assert drift == {f"autonomy/9999-fence.md::repo:{_UNCOMMITTED_AT_LIVE}",
+                     f"autonomy/9999-fence.md::repo:{_ABSENT_EVERYWHERE}"}, (
+        f"the fence did not set aside exactly the landed-after-base row: {sorted(drift)}")
+    assert set(_OUT_OF_SCOPE) == {f"autonomy/9999-fence.md::repo:{_LANDED_AFTER_BASE}"}
+
+    msg = _drift_report(drift)
+    assert "OUT OF SCOPE" in msg and _LANDED_AFTER_BASE in msg, (
+        f"the report never says which row it set aside, or why: {msg}")
+    assert str(live) in msg, f"the report never names the live tree it compared against: {msg}"
+
+
+def test_a_file_the_round_itself_removed_is_still_a_violation(tmp_path, monkeypatch):
+    """The leniency the merge-base exists to refuse. `keep.py` is at the base
+    and at live HEAD; the worktree deletes it. "Present at live HEAD, absent
+    here" is true of it exactly as of a file that landed after the base, and
+    only the base tells them apart — a doc naming a file this branch removed is
+    the drift #1240 was written for."""
+    live, wt = _live_tree_and_an_older_worktree(tmp_path)
+    (wt / _TRACKED_TREE / "keep.py").unlink()
+    doc = _doc_naming(tmp_path, f"{_TRACKED_TREE}/keep.py")
+    _point_the_fence(monkeypatch, root=wt, live=live, worktree=True)
+    monkeypatch.setattr(sys.modules[__name__], "_doc_files",
+                        lambda: [("autonomy/9999-fence.md", doc)])
+
+    drift = _unresolved() - PATH_KNOWN_UNFIXED
+    assert drift == {f"autonomy/9999-fence.md::repo:{_TRACKED_TREE}/keep.py"}, (
+        f"a file the round deleted was excused as out of scope: {sorted(drift)}")
+    assert _OUT_OF_SCOPE == {}
+
+
+def test_the_fence_is_closed_outside_a_worktree(tmp_path, monkeypatch):
+    """Same trees, `IS_WORKTREE` off: the exemption is for a round whose base
+    a rebase will move, never for a checkout that is simply behind. In `~/lloyd`
+    the tree is what the vault was written against and every row counts."""
+    live, wt = _live_tree_and_an_older_worktree(tmp_path)
+    doc = _doc_naming(tmp_path, _LANDED_AFTER_BASE)
+    _point_the_fence(monkeypatch, root=wt, live=live, worktree=False)
+    monkeypatch.setattr(sys.modules[__name__], "_doc_files",
+                        lambda: [("autonomy/9999-fence.md", doc)])
+
+    drift = _unresolved() - PATH_KNOWN_UNFIXED
+    assert drift == {f"autonomy/9999-fence.md::repo:{_LANDED_AFTER_BASE}"}
+    assert _OUT_OF_SCOPE == {}
+
+
+def test_a_fence_that_cannot_be_asked_exempts_nothing(tmp_path, monkeypatch):
+    """Fail-closed: a live tree that shares no history with the worktree (or
+    is not a repo at all) answers no merge-base, and the scan must count every
+    row rather than widen because its oracle went quiet."""
+    live, wt = _live_tree_and_an_older_worktree(tmp_path)
+    stranger = tmp_path / "stranger"
+    stranger.mkdir()
+    doc = _doc_naming(tmp_path, _LANDED_AFTER_BASE)
+    _point_the_fence(monkeypatch, root=wt, live=stranger, worktree=True)
+    monkeypatch.setattr(sys.modules[__name__], "_doc_files",
+                        lambda: [("autonomy/9999-fence.md", doc)])
+
+    drift = _unresolved() - PATH_KNOWN_UNFIXED
+    assert drift == {f"autonomy/9999-fence.md::repo:{_LANDED_AFTER_BASE}"}
+    assert _OUT_OF_SCOPE == {}
+
+
 _SKEW_SCRIPT = "scripts/a_script_only_a_vault_edit_names_1264.py"
 
 
@@ -987,6 +1233,31 @@ def test_a_committed_doc_naming_an_absent_file_still_goes_red_alone(tmp_path, mo
     assert "not in this checkout" in msg, f"the row lost its real diagnosis: {msg}"
     assert "UNCOMMITTED EDIT" not in msg, (
         f"a committed doc was excused as a working-tree skew: {msg}")
+
+
+def test_a_new_untracked_naming_file_gets_its_own_diagnosis(tmp_path, monkeypatch):
+    """#1411's second defect. The skew hint told a reader to `git show HEAD:<rel>`
+    and, on 0, to commit or revert the vault file. For a doc in NO commit — a
+    brand-new skill, `desktop-computer-use` all of 2026-09-23 — that grep is 0
+    by construction and both remedies are wrong. The report has to say the file
+    is untracked, must not offer the commit-or-revert line, and must still not
+    call the row a missing file."""
+    repo = _git_repo_with_committed_task(tmp_path)
+    doc = repo / "autonomy" / "9998-new.md"
+    doc.write_text(_task_body(names_script=True), encoding="utf-8")   # never added
+
+    label = "autonomy/9998-new.md"
+    monkeypatch.setattr(sys.modules[__name__], "_doc_files", lambda: [(label, doc)])
+    drift = _unresolved() - PATH_KNOWN_UNFIXED
+    assert drift == {f"{label}::repo:{_SKEW_SCRIPT}"}, sorted(drift)
+
+    msg = _drift_report(drift)
+    assert "UNTRACKED" in msg and label in msg, f"the text never says the file is new: {msg}"
+    assert "committing or reverting" not in msg, (
+        f"a file no commit holds was offered the tracked-file remedy: {msg}")
+    assert _SKEW_SCRIPT in msg, f"the text never names the cited path to fix: {msg}"
+    assert "not in this checkout" not in msg, (
+        f"a working-tree skew was still reported as a missing file: {msg}")
 
 
 def test_the_secondary_routing_nightly_docs_are_clean():
