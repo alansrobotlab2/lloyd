@@ -397,3 +397,89 @@ def test_catalog_reminder_stays_far_below_the_full_catalog():
     ]
     reminder = format_catalog_reminder(catalog, loaded=set())
     assert len(reminder) < len(json.dumps(catalog)) / 4
+
+
+# ── Catalog gist fidelity (#935) ─────────────────────────────────────────────
+#
+# `_gist` keeps the first sentence of a description and hard-caps it at
+# CATALOG_GIST_CHARS, so a tool whose "when to use / when NOT to use" clause
+# sits in its second sentence loses it from the catalog reminder. The reminder
+# is the only place the model sees an unloaded tool at decision time once
+# `harness.tool_search.enabled` is on, and that flag is off today (#456), so
+# this is a re-enable hazard: flip the boolean and the truncation resumes with a
+# green suite. This rail runs the item's AST scan over the real descriptions
+# and holds every loss to an explicit, reasoned exception. `_gist` and its
+# budget are deliberately not touched here — #639 owns the token cost.
+
+_COND = r"\b(Prefer|instead of|never|do not|WHENEVER|before)\b"
+
+#: Tools whose description carries conditional guidance the gist drops today,
+#: each with why the loss is tolerable. Adding a name here is a decision that
+#: the tool's first sentence is enough to pick it from the catalog; the fix for
+#: a NEW entry is usually to move the trigger clause into the first sentence.
+GIST_LOSS_EXCEPTIONS: dict[str, str] = {
+    "automod_amend_clause": "the 'never weaker' rule is for the argument, not for choosing the tool",
+    "autonomy_config": "'never writes' is a read-only note; the name and gist already say read",
+    "autonomy_health": "'read the window before trusting' is about interpreting the result",
+    "backlog_boards": "'before filtering with backlog_tasks' is ordering advice; gist says what it lists",
+    "browser_snapshot": "'never reads as complete' describes the output's honesty, not when to call",
+    "browser_evaluate": "'inside that frame instead of the top' is a parameter detail",
+    "Task": "the resume-instead-of-restart rule needs the task_id, which the schema carries",
+    "graph_explain": "'use before hand-searching' is ordering advice; the gist names the graph",
+    "graph_affected": "'call this before changing a shared function' is ordering advice",
+    "djev_decide": "'do not compare to a fixed cutoff' is about reading scores, not choosing the tool",
+    "http_fetch": "the first sentence already routes: page here, API to http_request, localhost to Bash",
+    "research_propose": "'instead of researching it twice' describes the dedupe list it returns",
+    "research_next": "'never takes work away' is a read-only note; 'peek' already says so",
+    "research_complete": "'never rewritten' is a write-once note about an outcome already recorded",
+    "research_list": "'before proposing anything new' is ordering advice; the gist names the filters",
+    "research_stats": "'start here before' is ordering advice; the gist names the counts",
+    "vault_overview": "'orient before searching' is ordering advice; the gist says summarize",
+}
+
+
+def _gist_losses() -> dict[str, tuple[int, int]]:
+    """{tool name: (description chars, gist chars)} for every literal
+    `Tool(description=…)` in agent_mcp/*.py whose description carries a
+    conditional phrase that its gist does not."""
+    import ast
+    import re
+    from pathlib import Path
+
+    from app.harness.tool_search import CATALOG_GIST_CHARS, _gist
+
+    root = Path(__file__).resolve().parents[3]
+    lost: dict[str, tuple[int, int]] = {}
+    for path in sorted((root / "agent_mcp").glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and getattr(node.func, "id", "") == "Tool"):
+                continue
+            kw = {k.arg: k.value for k in node.keywords}
+            desc, name = kw.get("description"), kw.get("name")
+            if not (isinstance(desc, ast.Constant) and isinstance(desc.value, str)):
+                continue
+            if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                continue
+            if len(desc.value) <= CATALOG_GIST_CHARS:
+                continue
+            gist = _gist(desc.value)
+            if re.search(_COND, desc.value) and not re.search(_COND, gist):
+                lost[name.value] = (len(desc.value), len(gist))
+    return lost
+
+
+def test_gist_keeps_conditional_guidance_or_is_excepted():
+    lost = _gist_losses()
+    assert lost, "the scan found no literal Tool(description=…) at all; it is broken"
+    unexpected = {n: lost[n] for n in lost if n not in GIST_LOSS_EXCEPTIONS}
+    assert not unexpected, (
+        "these tools' catalog gists drop their conditional guidance and are not "
+        "in GIST_LOSS_EXCEPTIONS; move the trigger clause into the first "
+        f"sentence, or except them with a reason: {unexpected}")
+    # The list may not rot: a name that stopped losing has to come off, or the
+    # exceptions stop describing the tree.
+    stale = sorted(n for n in GIST_LOSS_EXCEPTIONS if n not in lost)
+    assert not stale, f"no longer losing guidance, remove from GIST_LOSS_EXCEPTIONS: {stale}"
+    assert all(GIST_LOSS_EXCEPTIONS[n].strip() for n in GIST_LOSS_EXCEPTIONS)
