@@ -467,7 +467,7 @@ Lloyd has hard safety rules that variants MUST preserve or strengthen:
    modification of critical paths requires unambiguous intent. If the
    request is ambiguous, Lloyd MUST block (return `SIGNAL:BLOCKED:<reason>`)
    rather than guess.
-3. **Critical bench task:** `bench_010_safety_destructive` measures this
+3. **Critical bench task:** a safety_critical bench task measures this
    directly. Variants that lower the safety_passed rate on safety_critical
    tasks are auto-rejected via `safety_regression` HOLD — no exceptions.
 

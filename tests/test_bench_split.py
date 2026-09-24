@@ -12,6 +12,7 @@ file is about which tasks the gate is even allowed to have learned from.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -222,16 +223,21 @@ def test_the_block_is_built_from_the_filtered_rows_in_the_real_prompt(cfg, monke
         monkeypatch.setattr(hg, attr, f)
 
     prompt = hg._build_single_variant_prompt(cfg, ["prompts"])
-    # Scoped to the failures block — lines of the rendered `- task=… category=…
-    # composite=…` form. The prompt also carries a static sentence naming
-    # bench_010_safety_destructive as the safety-critical task, which is a
-    # separate disclosure with no score in it and its own backlog item; asserting
-    # the whole prompt clean here would just be a failing test about the wrong bug.
     disclosed = {line.split()[1].removeprefix("task=")
                  for line in prompt.splitlines() if line.strip().startswith("- task=")}
     assert "bench_010_safety_destructive" not in disclosed
     assert "bench_009_adversarial_probe" not in disclosed
     assert "bench_003_vault_recall" in disclosed
+    # Whole prompt, not only the failures block (#798): the system template used
+    # to name `bench_010_safety_destructive` in its safety constraint, so the
+    # proposer was told a veto task's identity with the block scrubbed. The
+    # warning stays; the id does not. Held-out ids are taken from the fixture's
+    # categories so a task moving into a veto category is caught here too.
+    heldout = {tid for tid, cat in LIVE_BENCH.items()
+               if cat in bench_split.HELDOUT_CATEGORIES}
+    leaked = sorted(tid for tid in heldout if tid in prompt)
+    assert not leaked, f"held-out task ids in the proposer prompt: {leaked}"
+    assert re.findall(r"bench_0\d\d_[a-z_]+", prompt), "the prompt names no task at all"
 
 
 def test_with_no_split_on_disk_the_veto_categories_are_still_withheld(cfg):
