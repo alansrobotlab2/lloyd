@@ -279,6 +279,9 @@ it the kind of regression nobody notices. Three independent checks:
   must say `kv_cache_dtype=fp8` and the pool must be ≥ 600,000 tokens. Exit 1
   on a regression, **2** while the boot has not logged its pool yet.
   `EXPECT_KV_DTYPE=` / `EXPECT_KV_POOL_MIN=0` waive them for a deliberate arm.
+  It also fails a boot with no image input (no non-zero `limit_mm_per_prompt`
+  image count), since `models.primary.supports_vision` depends on it;
+  `EXPECT_IMAGE_INPUT=` waives that for a text-only arm (#1420).
 - **`app/model_identity.py`** reads the same two facts off the engine's live
   `/metrics` against `models.primary.expect_kv_cache_dtype` and
   `expect_kv_pool_tokens_min`, and logs ERROR at boot on a miss. The plain

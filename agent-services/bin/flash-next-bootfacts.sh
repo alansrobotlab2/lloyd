@@ -38,9 +38,17 @@ grep -a -E "ERROR|Traceback|does not support|Falling back|falling back|not suppo
 # invocation, right before exec (the rule flash-next-run-arm.sh slices on).
 # For a deliberate arm: EXPECT_KV_DTYPE= (empty) skips the dtype check and
 # EXPECT_KV_POOL_MIN=0 skips the size check.
+#
+# Image input (#1420): config.yaml's models.primary.supports_vision is true only
+# while the conf keeps LANGUAGE_MODEL_ONLY=0 — the launcher's default is
+# text-only, so a boot that lost that line serves every text request and
+# refuses every screenshot. The engine's own `non-default args` must carry a
+# non-zero `limit_mm_per_prompt` image count. A deliberate text-only arm
+# (LANGUAGE_MODEL_ONLY=1) passes with EXPECT_IMAGE_INPUT= (empty).
 # Exit status: 0 ok, 1 regression, 2 the boot has not logged its KV pool yet.
 EXPECT_KV_DTYPE="${EXPECT_KV_DTYPE-fp8}"
 EXPECT_KV_POOL_MIN="${EXPECT_KV_POOL_MIN-600000}"
+EXPECT_IMAGE_INPUT="${EXPECT_IMAGE_INPUT-1}"
 
 start=$(grep -an '^A/B config:' "$LOG" | tail -1 | cut -d: -f1)
 [[ -z "$start" ]] && start=$(grep -an 'non-default args' "$LOG" | tail -1 | cut -d: -f1)
@@ -49,6 +57,10 @@ dtype=$(tail -n "+$start" "$LOG" | grep -a -m1 'Initializing a V1 LLM engine' \
   | grep -o -E 'kv_cache_dtype=[A-Za-z0-9_]+' | head -1 | cut -d= -f2)
 pool=$(tail -n "+$start" "$LOG" | grep -a -o -E 'GPU KV cache size: [0-9,]+ tokens' \
   | tail -1 | grep -o -E '[0-9,]+' | tr -d ,)
+images=$(tail -n "+$start" "$LOG" | grep -a -m1 'non-default args' \
+  | grep -o -E "'limit_mm_per_prompt': \{[^}]*'image': [0-9]+" | grep -o -E '[0-9]+$')
+lm_only=$(tail -n "+$start" "$LOG" | grep -a -m1 '^A/B config:' \
+  | grep -o -E 'lm_only=[0-9]+' | cut -d= -f2)
 
 echo
 echo "=== regression asserts (boot from log line $start) ==="
@@ -72,6 +84,16 @@ if [[ "$EXPECT_KV_POOL_MIN" -gt 0 ]]; then
   else
     echo "FAIL  GPU KV cache size $pool tokens, expected >= $EXPECT_KV_POOL_MIN" \
          "(FP8 production: 692263; BF16: 398175)"
+    rc=1
+  fi
+fi
+if [[ -n "$EXPECT_IMAGE_INPUT" ]]; then
+  if [[ "${images:-0}" -gt 0 ]]; then
+    echo "ok    image input: limit_mm_per_prompt image=$images"
+  else
+    echo "FAIL  no image input this boot (limit_mm_per_prompt image=${images:-<not set>}," \
+         "lm_only=${lm_only:-?}) but models.primary.supports_vision is true — check" \
+         "LANGUAGE_MODEL_ONLY=0/MM_IMAGES_PER_PROMPT in supervisor/conf.d/agent-llm-primary.conf"
     rc=1
   fi
 fi

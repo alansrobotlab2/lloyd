@@ -39,11 +39,14 @@ BF16 = (
     "cache size: 398,175 tokens, Maximum concurrency for 262,144 tokens per "
     "request: 1.52x\n"
 )
+# Its `limit_mm_per_prompt` and `lm_only=0` are today's production boot's
+# (#1420), grafted on: the tower was not loaded that morning.
 FP8_BOOTING = (
     "A/B config: venv=/home/alansrobotlab/lloyd/.venvs/vllm-flash-next-main "
-    "ple=uva kv_dtype=fp8 max_num_seqs=8\n"
+    "ple=uva kv_dtype=fp8 max_num_seqs=8 lm_only=0\n"
     "(APIServer pid=1768813) INFO 09-10 11:29:56 [api_utils.py:286] non-default "
-    "args: {'port': 8096, 'kv_cache_dtype': 'fp8'}\n"
+    "args: {'port': 8096, 'kv_cache_dtype': 'fp8', 'limit_mm_per_prompt': "
+    "{'image': 20, 'video': 0, 'audio': 0}}\n"
     "(EngineCore pid=1781980) INFO 09-10 11:30:07 [core.py:123] Initializing a "
     "V1 LLM engine (v0.28.1rc1.dev661+g6ee5bb0a0) with config: model='/m', "
     "kv_cache_dtype=fp8, max_seq_len=262144\n"
@@ -83,9 +86,41 @@ def test_a_boot_still_loading_is_incomplete_not_a_pass(tmp_path):
     assert "INCOMPLETE" in r.stdout
 
 
-def test_a_deliberate_arm_can_waive_both_checks(tmp_path):
-    r = _bootfacts(tmp_path, FP8 + BF16, EXPECT_KV_DTYPE="", EXPECT_KV_POOL_MIN="0")
+def test_a_deliberate_arm_can_waive_every_check(tmp_path):
+    r = _bootfacts(tmp_path, FP8 + BF16, EXPECT_KV_DTYPE="", EXPECT_KV_POOL_MIN="0",
+                   EXPECT_IMAGE_INPUT="")
     assert r.returncode == 0, r.stdout
+
+
+# ── image input (#1420): supports_vision is true only while the tower loads ──
+
+# The same FP8 boot with LANGUAGE_MODEL_ONLY=1: the launcher passes
+# --language-model-only instead of --limit-mm-per-prompt.
+FP8_TEXT_ONLY = FP8.replace("lm_only=0", "lm_only=1").replace(
+    ", 'limit_mm_per_prompt': {'image': 20, 'video': 0, 'audio': 0}",
+    ", 'language_model_only': True")
+
+
+def test_a_boot_with_image_input_passes_the_image_check(tmp_path):
+    r = _bootfacts(tmp_path, FP8)
+    assert r.returncode == 0, r.stdout
+    assert "ok    image input: limit_mm_per_prompt image=20" in r.stdout
+
+
+def test_a_text_only_boot_is_a_regression(tmp_path):
+    """The KV numbers are production's; only the tower is gone."""
+    r = _bootfacts(tmp_path, FP8 + FP8_TEXT_ONLY)
+    assert r.returncode == 1, r.stdout
+    assert "ok    kv_cache_dtype=fp8" in r.stdout
+    assert "FAIL  no image input this boot" in r.stdout and "lm_only=1" in r.stdout
+    zero = FP8.replace("{'image': 20,", "{'image': 0,")
+    assert _bootfacts(tmp_path, zero).returncode == 1
+
+
+def test_a_text_only_arm_can_waive_the_image_check(tmp_path):
+    r = _bootfacts(tmp_path, FP8_TEXT_ONLY, EXPECT_IMAGE_INPUT="")
+    assert r.returncode == 0, r.stdout
+    assert "image input" not in r.stdout
 
 
 def test_a_log_without_launcher_lines_falls_back_to_the_engines_own(tmp_path):
@@ -112,6 +147,10 @@ def test_the_supervisord_environment_pins_the_fix():
     # The chunk budget adopted from the Layer 3 arms (the conf's comment and
     # architecture/vllm.md §3.3).
     assert env.get("MAX_NUM_BATCHED_TOKENS") == "4096"
+    # config.yaml's models.primary.supports_vision stands on these two: the
+    # launcher's own defaults are text-only (#1420).
+    assert env.get("LANGUAGE_MODEL_ONLY") == "0"
+    assert int(env.get("MM_IMAGES_PER_PROMPT") or 0) > 0
 
 
 def _dry_run(tmp_path, **extra) -> str:
@@ -138,6 +177,7 @@ def test_the_supervisord_environment_launches_fp8_on_the_main_venv(tmp_path):
     assert "--kv-cache-dtype fp8" in out
     assert "vllm-flash-next-main/bin/python -m vllm.entrypoints.openai.api_server" in out
     assert "--max-num-batched-tokens 4096" in out
+    assert "--limit-mm-per-prompt" in out and "--language-model-only" not in out
 
 
 def test_the_chunk_budget_is_a_knob(tmp_path):

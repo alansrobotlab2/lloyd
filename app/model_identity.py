@@ -33,12 +33,25 @@ The right model can still be served wrongly. `expect_kv_cache_dtype` and
 and a boot that lands back on BF16 answers every request correctly while
 undoing it. `agent-services/bin/flash-next-bootfacts.sh` asserts the same two
 things against the boot log.
+
+A slot can also be served without the half its config promises.
+`models.<alias>.supports_vision: true` routes screenshots to the slot as
+images, and it is true only while the conf keeps `LANGUAGE_MODEL_ONLY=0`: the
+launcher defaults to text-only, so an A/B arm, a rollback or a reverted conf
+leaves the flag pointing at an engine that refuses every image. The engine
+publishes no modality list (`/v1/models` and `vllm:cache_config_info` carry
+none), so `probe_image_input` asks it — one tiny image, one token — and
+classifies the refusal with the same test the harness's turn-time latch uses
+(#1420). A slot whose flag is not literally `true` is never sent one.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import struct
+import zlib
 from typing import Any
 
 import httpx
@@ -46,6 +59,29 @@ import httpx
 logger = logging.getLogger("lloyd-server")
 
 PROBE_TIMEOUT_SECONDS = 5.0
+
+# The image probe is a real generation, so it can queue behind a live turn's
+# prefill; 5 s would read a busy engine as a broken one.
+IMAGE_PROBE_TIMEOUT_SECONDS = 30.0
+# Behind every interactive and worker request (lower runs sooner): the probe
+# answers a boot-time question and must never cost a turn its place.
+IMAGE_PROBE_PRIORITY = 10
+
+
+def _solid_png(side: int = 32) -> bytes:
+    """A grey `side`x`side` PNG. Not 1x1: Qwen's processor resizes to a
+    multiple of its patch size and a degenerate image can be refused for its
+    size, which would read as a missing tower."""
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+    raw = b"".join(b"\x00" + b"\x80" * side for _ in range(side))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", side, side, 8, 0, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+PROBE_IMAGE_URL = "data:image/png;base64," + base64.b64encode(_solid_png()).decode()
 
 # Result of the most recent verification sweep, keyed by alias. Read by
 # `GET /api/models/identity`; refreshed by the boot sweep and on demand.
@@ -112,6 +148,51 @@ async def probe_kv_config(base_url: str, *, timeout: float = PROBE_TIMEOUT_SECON
         return None
 
 
+def expects_image_input(cfg: dict[str, Any]) -> bool:
+    """The slot's own claim, read the way the image router reads it
+    (`tool_images.model_supports_vision`): literally `true`, nothing else."""
+    return cfg.get("supports_vision") is True
+
+
+async def probe_image_input(base_url: str, model: str, *,
+                            timeout: float = IMAGE_PROBE_TIMEOUT_SECONDS) -> tuple[str, str]:
+    """(status, detail) from one image-bearing request. Never raises.
+
+    ok          — the engine generated from an image
+    REFUSED     — a 400 the harness's latch would read as "no image input"
+    unreachable — the request did not connect
+    unknown     — any other answer (a timeout, a 5xx, a 400 about something
+                  else); reported, never called a refusal
+    """
+    from app.harness.tool_images import looks_like_multimodal_rejection
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "."},
+            {"type": "image_url", "image_url": {"url": PROBE_IMAGE_URL}},
+        ]}],
+        "max_tokens": 1,
+        "temperature": 0,
+        "priority": IMAGE_PROBE_PRIORITY,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as cli:
+            resp = await cli.post(url, json=payload)
+    except httpx.ConnectError as exc:
+        return "unreachable", f"image probe did not connect: {exc}"
+    except Exception as exc:
+        return "unknown", f"image probe failed: {type(exc).__name__}: {exc}"[:300]
+    body = " ".join((resp.text or "").split())[:300]
+    if resp.status_code < 300:
+        return "ok", "engine accepted an image"
+    if resp.status_code == 400 and looks_like_multimodal_rejection(body):
+        return "REFUSED", body
+    return "unknown", f"HTTP {resp.status_code}: {body}"
+
+
 def judge_kv(cfg: dict[str, Any], kv: dict[str, Any] | None,
              reachable: bool) -> tuple[str, str]:
     """(status, detail) for a slot's KV cache against its config.
@@ -149,6 +230,10 @@ async def verify_models() -> list[dict[str, Any]]:
       MISMATCH   — it reports something else (the drift this module exists for)
       unreachable— nothing answered (engine stopped, still loading)
       unchecked  — no `expect_model` declared for this alias
+
+    `image_status` is the same kind of verdict for image input, expected
+    exactly when `supports_vision` is literally true (`probe_image_input`);
+    otherwise `unchecked`, and no image is sent.
     """
     from app.config import MODEL_CONFIGS
 
@@ -168,6 +253,9 @@ async def verify_models() -> list[dict[str, Any]]:
             "kv": None,
             "kv_status": "unchecked",
             "kv_detail": "",
+            "supports_vision": expects_image_input(cfg),
+            "image_status": "unchecked",
+            "image_detail": "",
         }
         if not base_url:
             rows.append(row)
@@ -186,6 +274,13 @@ async def verify_models() -> list[dict[str, Any]]:
         if cfg.get("expect_kv_cache_dtype") or cfg.get("expect_kv_pool_tokens_min"):
             row["kv"] = await probe_kv_config(base_url)
             row["kv_status"], row["kv_detail"] = judge_kv(cfg, row["kv"], bool(served))
+        if not row["supports_vision"]:
+            row["image_detail"] = "supports_vision is not true; no image sent"
+        elif not served:
+            row["image_status"], row["image_detail"] = "unreachable", "engine did not answer"
+        else:
+            row["image_status"], row["image_detail"] = await probe_image_input(
+                base_url, str(cfg.get("alias") or alias))
         rows.append(row)
 
     LAST_RESULT.clear()
@@ -207,7 +302,7 @@ async def verify_models_with_retry(
     for attempt in range(1, attempts + 1):
         rows = await verify_models()
         if not any(r["status"] == "unreachable" or r.get("kv_status") == "unreachable"
-                   for r in rows):
+                   or r.get("image_status") == "unreachable" for r in rows):
             break
         if attempt < attempts:
             await asyncio.sleep(delay_seconds)
@@ -241,4 +336,17 @@ async def verify_models_with_retry(
             logger.warning("model KV: alias %r — %s", row["alias"], row["kv_detail"])
         elif row.get("kv_status") == "ok":
             logger.info("model KV ok: alias %r %s", row["alias"], row["kv_detail"])
+        if row.get("image_status") == "REFUSED":
+            logger.error(
+                "image input REFUSED: alias %r at %s — models.%s.supports_vision is "
+                "true but the engine refuses images (%s); the launcher strips the "
+                "vision tower unless LANGUAGE_MODEL_ONLY=0 (with MM_IMAGES_PER_PROMPT "
+                "> 0) in agent-services/supervisor/conf.d/agent-llm-primary.conf — "
+                "restore it, or set supports_vision: false",
+                row["alias"], row["base_url"], row["alias"], row["image_detail"],
+            )
+        elif row.get("image_status") == "unknown":
+            logger.warning("model image input: alias %r — %s", row["alias"], row["image_detail"])
+        elif row.get("image_status") == "ok":
+            logger.info("model image input ok: alias %r", row["alias"])
     return rows

@@ -44,7 +44,9 @@ async def get_model_identity(refresh: bool = False):
     Answers from the boot sweep's cached verdict; `?refresh=1` re-probes.
     A `MISMATCH` row means the endpoint behind an alias is serving a
     different model than `models.<alias>.expect_model` declares — the
-    shape a reverted launcher takes (see app/model_identity.py).
+    shape a reverted launcher takes (see app/model_identity.py). Every
+    row carries `image_status`: `REFUSED` is a slot whose
+    `supports_vision: true` sits behind an engine booted text-only.
     """
     from app import model_identity
 
@@ -55,6 +57,7 @@ async def get_model_identity(refresh: bool = False):
     return JSONResponse({
         "models": rows,
         "mismatches": [r["alias"] for r in rows if r["status"] == "MISMATCH"],
+        "image_refused": [r["alias"] for r in rows if r.get("image_status") == "REFUSED"],
     })
 
 

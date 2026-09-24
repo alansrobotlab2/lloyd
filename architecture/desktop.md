@@ -243,13 +243,15 @@ This is what made any of the above visible to a model, and it also fixed
    - `models.primary.supports_vision: true` (`b3dc8bf`).
 
    The tower costs ~0.84 GiB, which is ~29k KV tokens, and
-   `expect_kv_pool_tokens_min` must allow for that. Nothing probes that
-   agreement: the launcher's own defaults are text-only, `model_identity`
-   checks the served model name and the KV cache and nothing else, and the
-   engine is never asked whether it accepts image input (#1420). Until that
-   lands, read the live command line
-   (`pgrep -fa vllm | grep -o 'limit-mm-per-prompt.*'`) before believing
-   `supports_vision`. When it is false, captures reach the model as the element
+   `expect_kv_pool_tokens_min` must allow for that. The launcher's own
+   defaults are text-only, so the agreement is probed twice (#1420): the
+   identity sweep sends a slot whose `supports_vision` is literally `true` one
+   small image and reports `image_status` (`ok` / `REFUSED` / `unknown` /
+   `unreachable`, `unchecked` for every other slot) on
+   `GET /api/models/identity`, logging ERROR on a refusal; and
+   `flash-next-bootfacts.sh` fails a boot whose `non-default args` carry no
+   non-zero `limit_mm_per_prompt` image count (`EXPECT_IMAGE_INPUT=` waives it
+   for a text-only arm). When it is false, captures reach the model as the element
    list only, which already works for GTK apps.
 3. Accessibility for Chromium, Electron and Firefox apps: see §2.
 

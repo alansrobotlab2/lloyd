@@ -129,7 +129,9 @@ while a `MISMATCH` is conclusive on the first look and waiting would only
 delay the alarm. The KV cache carries its own second verdict beside it (`ok` /
 `REGRESSION` / `unknown` / `unreachable`), because the right model can still be
 served the wrong way — [[vllm]] §3.1. A slot with no `expect_model` reads
-`unchecked`.
+`unchecked`. A third, `image_status`, asks a slot whose `supports_vision` is
+literally `true` to take one small image, because that flag outlives a boot
+that dropped `LANGUAGE_MODEL_ONLY=0` (#1420, [[desktop]]).
 
 **Update `expect_model` whenever a slot's occupant changes.** The sweep only
 ever reports; restarting a slot is precisely the operation that would have
