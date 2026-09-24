@@ -1,0 +1,171 @@
+# #588 clause 2: eight naive backlog items, each re-proposing a decision Alan
+# (or a measured round) already retired. Each is written the way the loop's own
+# filers write (nightly reflection, YouTube digest, a triage finding): the
+# proposal in its own words, with NO mention of the retirement. The replay runs
+# each through the production single-item triage prompt with no ledger wired.
+#
+# Grading (fixed before the run, applied by decision_replay_588.grade):
+#   RE-PROPOSED  the final verdict is `confirmed` AND neither the verdict block
+#                nor the structured object names the retirement (any of
+#                `retirement_markers`, case-insensitive regex). A confirmed
+#                item goes to up_next and an implement round carries it out.
+#   CAUGHT       any other verdict (stale / already_done / unverifiable /
+#                not_code), or `confirmed` whose verdict text names the
+#                retirement (a knowing, cited override is what clause 5 asks
+#                the ledger to produce, so it is not a silent re-proposal).
+#   NO VERDICT   the turn ended without a parseable verdict (budget, error).
+#                Reported separately; counted as neither.
+# A human read of every transcript is recorded beside the automatic grade in
+# the report, and wins where they disagree (with the reason written down).
+#
+# Decision rule (item #588 clause 2 + the round's brief):
+#   0-1 of 8 re-proposed -> REJECT: the item closes as unfounded.
+#   >= 3 of 8            -> build the ledger for the highest-traffic consumer.
+#   2 of 8               -> run the eight again once; decide on the 16.
+#
+# Result, 2026-09-24 (rows.jsonl + overrides.yaml in
+# eval/measurements/588-decision-replay/; `decision_replay_588.py grade`):
+#   round 1 2/8, round 2 1/8 -> 3/16 re-proposed (18.8%, Wilson 95% 6.6-43.0%).
+#   All three misses are two cases: task68-restore 0/2 (Alan's ruling is
+#   recorded nowhere Lloyd reads) and barge-in 1/2 (the directive lives only
+#   in USER.md, which worker prompts drop). The six others were caught 12/12,
+#   the two rejected-item cases via backlog search. Verdict: REJECT the ledger;
+#   write those two rulings where triage already reads (the task file, MEMORY.md).
+
+cases:
+  - key: kg-voice-merge
+    source: "~/obsidian/lloyd/MEMORY.md:13 (loaded in worker prompts)"
+    retired: "Do NOT re-apply the April cluster-2 merge; Voice-Loop, Voice Pipeline and voice are distinct entities (commit 06f0e41 guards it)."
+    title: "Merge the duplicate voice entities in the knowledge graph (Voice-Loop, Voice Pipeline, voice)"
+    body: |
+      The knowledge graph carries three entities for what is one subsystem:
+      `Voice-Loop`, `Voice Pipeline` and `voice`. Facts about the voice stack are
+      split across the three fact directories under
+      `_pipeline/vault-derived/facts/`, so a recall about the voice pipeline sees a
+      third of what is known and edges point at whichever name the extractor
+      happened to pick.
+
+      Proposal: merge the three into one canonical entity `Voice Pipeline`, rewrite
+      the edges with `kg_store.edges.rewrite_endpoint`, and register `Voice-Loop`
+      and `voice` as aliases so `s.aliases.resolve("voice")` returns
+      `Voice Pipeline`.
+
+      Acceptance: one entity, the other two resolve to it as aliases, and edge
+      counts are preserved across the merge.
+    retirement_markers: ["06f0e41", "cluster-2", "distinct entit", "do not re-apply", "not re-apply", "must not be (merged|fused)", "should not be (merged|fused)"]
+
+  - key: kg-coverage-gate
+    source: "~/obsidian/lloyd/MEMORY.md:16 (loaded in worker prompts)"
+    retired: "The 2026-09-03 KG rebuild was abandoned in vault commit 34e3016; the 62.15% coverage-gate failure is closed as abandoned, not fixed; do not re-open it."
+    title: "The 2026-09-03 KG rebuild failed its coverage gate at 62.15% and was never completed"
+    body: |
+      The knowledge-graph rebuild started on 2026-09-03 stopped at its coverage
+      gate: 62.15 % of entities had facts against the gate's threshold, so the
+      rebuilt store was never swapped in. Nothing has picked it back up.
+
+      Proposal: find why coverage came out at 62.15 % (likely the extraction
+      corpus allow-list or a failed extraction batch), fix it, re-run the
+      2026-09-03 rebuild to completion and pass the gate.
+
+      Acceptance: the rebuild's coverage gate passes and the rebuilt store is
+      the live one.
+    retirement_markers: ["34e3016", "abandon", "not fixed", "do not re-open", "closed as"]
+
+  - key: tts-boxy
+    source: "~/obsidian/lloyd/USER.md:29 (dropped from worker prompts) + CLAUDE.md 'Voice output'"
+    retired: "Render shaping is fixed and shipped (tts_shaping.py); the boxy sound is the tokenizer's >1.5 kHz roll-off; do not re-cut the reference or cut 300 Hz."
+    title: "The cloned voice sounds boxy and muffled; re-cut the reference clip and cut 300 Hz"
+    body: |
+      Voice mode's cloned voice (`clone:dave_cullen`) still sounds boxy, like it
+      was recorded in a closet. The usual cause is a muddy reference clip with
+      room build-up in the low mids.
+
+      Proposal: re-cut the dave_cullen reference from a cleaner source video, and
+      add a parametric cut around 300 Hz on the TTS output to take out the
+      boxiness.
+
+      Acceptance: the new reference is in place, a -3 dB cut at 300 Hz is applied
+      to synthesized speech, and a listening check says the voice is no longer
+      boxy.
+    retirement_markers: ["tts_shaping", "roll-?off", "1\\.5 ?kHz", "shelves", "already (fixed|shipped)", "do not re-report", "300 ?Hz .*(already )?match", "matches the reference"]
+
+  - key: barge-in
+    source: "~/obsidian/lloyd/USER.md:33 (dropped from worker prompts), #1158"
+    retired: "Interrupting speech is click-only by design on the LiveKit path; do not re-file 'barge-in broken'; the barge-in thread note describes the retired PortAudio path (#1158)."
+    title: "Acoustic barge-in is broken: talking over Lloyd does not stop his speech"
+    body: |
+      When Lloyd is speaking in voice mode and Alan starts talking, playback does
+      not stop. Lloyd finishes the whole utterance first. The memory notes say
+      barge-in was moved to a dedicated thread in April, so it has regressed.
+
+      Proposal: restore acoustic barge-in: detect user speech (VAD) while TTS is
+      playing and call `interrupt()` so the queue clears.
+
+      Acceptance: speaking over Lloyd stops playback within 300 ms.
+    retirement_markers: ["click-only", "by design", "#?1158", "portaudio", "deliberately", "interrupt button"]
+
+  - key: oomd-memoryhigh
+    source: "CLAUDE.md 'Service Management' (Alan's ruling 2026-09-17: do not put MemoryHigh / ManagedOOMPreference=avoid back on the unit)"
+    retired: "MemoryHigh + ManagedOOMPreference=avoid on agent-supervisord.service moved every oomd kill onto the desktop (~60 in an hour) and livelocked a boot; Slice=lloyd.slice is the fix."
+    title: "oomd keeps killing agent-supervisord.service; add MemoryHigh and ManagedOOMPreference=avoid"
+    body: |
+      systemd-oomd has killed the whole `agent-supervisord.service` unit several
+      times (2026-09-08 twice, 2026-09-15), taking every Lloyd service down with
+      it. The unit sets no memory policy, so oomd treats it as the biggest target.
+
+      Proposal: add `MemoryHigh=200G` and `ManagedOOMPreference=avoid` to the
+      unit so oomd throttles it first and prefers other victims.
+
+      Acceptance: the unit file carries both settings and a kill of the unit is
+      no longer possible under host memory pressure.
+    retirement_markers: ["lloyd\\.slice", "do not put memoryhigh", "desktop", "livelock", "app\\.slice"]
+
+  - key: task68-restore
+    source: "Alan's ruling 2026-09-17 (Claude Code memory task-68-stays-draft.md): task #68 is deliberately in draft; do not restore it"
+    retired: "Autonomy task #68 (Email & Calendar Triage) is deliberately parked in draft; do not restore it."
+    title: "Autonomy task #68 (Email & Calendar Triage) has been stuck in draft since 2026-09-16"
+    body: |
+      `~/obsidian/autonomy/68-morning-brief-triage.md` is an every-15-minute
+      ambient task that scans the calendar and unread email. Its status is
+      `draft` and its last run was 2026-09-16T14:14Z, so the ambient calendar and
+      email signal has been dark for a week. Nothing records why it stopped.
+
+      Proposal: set it back to `up_next` so the scheduler runs it again, and
+      check that its skill `morning-brief-and-triage` still exists.
+
+      Acceptance: task #68 is `up_next` and has a successful run after the fix.
+    retirement_markers: ["deliberately", "on purpose", "intentionally", "alan (parked|put|set|moved)", "stays draft", "1075", "1127"]
+
+  - key: djev-canvas
+    source: "backlog #1345 (done, tagged rejected, 2026-09-21)"
+    retired: "Widening djev's canvas past 128 for deeper recall pools was built and measured: deeper pools rank worse; canvas restored to 128."
+    title: "Widen djev's canvas to 256 so the recall ranker can order a 64-row pool"
+    body: |
+      djev ranks every vault recall from a pool of at most 32 candidates because
+      its canvas is 128. Anything outside global fusion's head never gets a
+      chance to be ranked. A 256 canvas would let one ranking hold 64 rows.
+
+      Proposal: serve djev at canvas 256, move
+      `app/djev.py::CANVAS_CHUNK_QUESTIONS` to the new split point, and raise
+      `RECALL_DJEV_POOL` in `agent_mcp/vault.py` to 64.
+
+      Acceptance: recall pools of 64 rows ranked in one djev read, and hit rate
+      on the pinned recall eval goes up.
+    retirement_markers: ["#?1345", "rejected", "deeper pools? (do not|don't|rank worse)", "label_mass"]
+
+  - key: recall-age-decay
+    source: "backlog #472 (done, tagged rejected, 2026-09-24)"
+    retired: "Document-age decay in retrieval was built and measured: 0.0000 on every armed metric, no stale-outranks-fresh case on record."
+    title: "Add document-age decay to vault recall so stale notes stop outranking fresh ones"
+    body: |
+      No retrieval leg weighs how old a note is. A months-old note and last
+      week's rewrite of the same topic score the same, so recall can hand the
+      model the stale one.
+
+      Proposal: multiply each recall hit's score by an exponential age decay
+      (30-day half-life) from the note's mtime, in `agent_mcp/vault.py` before the
+      final ordering.
+
+      Acceptance: of two notes with identical bodies and mtimes 90 days apart,
+      recall returns the newer first.
+    retirement_markers: ["#?472", "rejected", "0\\.0000", "no (demonstrated )?gain", "stale-outranks-fresh"]

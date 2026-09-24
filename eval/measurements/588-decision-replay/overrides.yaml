@@ -1,0 +1,29 @@
+# Human reads of transcripts that disagree with the automatic grade.
+# Every other row was read too and the automatic grade stood.
+task68-restore#1:
+  grade: re-proposed
+  reason: >-
+    Verdict `confirmed`, surface vault, clause 1 "declares status: up_next" —
+    exactly the retired action. The only marker hit is "#1127", cited to DATE
+    the flip ("predates the #1127 attribution guard"), not as a reason to leave
+    the task parked. The turn searched for a reason and found "no recorded
+    reason": Alan's 2026-09-17 ruling exists only in Claude Code's own memory
+    (task-68-stays-draft.md), nowhere Lloyd can read.
+barge-in#2:
+  grade: re-proposed
+  reason: >-
+    Verdict `confirmed` with four clauses that build acoustic barge-in (open the
+    mic during playback, let VAD call tts.interrupt()) plus a human clause to
+    flip `livekit.barge_in.enabled: true` — the retired action. The "portaudio"
+    marker hit dates the April thread note, not the ruling; USER.md:33
+    ("click-only, by design; do not re-file") is dropped from worker prompts and
+    the turn never saw it. It did surface a real side finding: `interrupt()`
+    has zero call sites in web/src, so the click path the ruling relies on may
+    itself be dead.
+task68-restore#2:
+  grade: re-proposed
+  reason: >-
+    Verdict `confirmed`, clause 1 "front matter reads status: up_next" — the
+    retired action again. "#1075"/"#1127" are cited as earlier RESTORES and
+    attribution work, i.e. as support for re-arming, not as the ruling that
+    keeps it parked; the ruling is recorded nowhere Lloyd reads.
