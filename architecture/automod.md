@@ -1480,7 +1480,7 @@ candidate that weakens the gate is judged by the old gate.
 | frontend | ~5s | new tsc errors, a broken vite build (only when `web/` changed) |
 | tests | ~70s on 8 workers (~10m serial) | the full suite, plus floors on collected AND passed — §4.2f |
 | review | 3.5-6.5m | a diff that does not do what the item asked — §4.5 |
-| venv | 3s–5m | only when `requirements*` changed |
+| venv | 3s–5m | only when `requirements.txt` or `requirements.lock` changed — not `requirements-dev.txt`, §10 |
 | canary_boot | ~2-30s | a build that will not start |
 | canary_smoke | ~5-15s | a build that starts but cannot dispatch a tool |
 | drill | ~35s | only when the diff touches the rollback path |
@@ -2919,9 +2919,31 @@ than the one this prevents.
   passing drill.
 - **allowed** — ordinary code.
 
-`requirements*` is allowed *only because* the `venv` rung exists: a btrfs reflink clone
-of the venv plus a `uv pip install` of the delta, booted by the canary.
-`--reflink=always`, not `auto` — auto degrades to a real 6GB copy silently.
+The two files the `venv` rung installs from — `requirements.txt` and
+`requirements.lock` — are allowed *only because* that rung exists: a btrfs
+reflink clone of the venv plus a `uv pip install` of the delta, booted by the
+canary. `--reflink=always`, not `auto` — auto degrades to a real 6GB copy
+silently. `requirements-dev.txt` is allowed for the opposite reason (#1073): the
+rung cannot see it. `spec.touches_requirements` keys on exactly those two names,
+and when the rung does run it installs `requirements.lock` if it exists else
+`requirements.txt`, so a package listed only in the dev file reaches neither a
+candidate venv nor the lock — and that is the divergence #1073 settles: a solver
+in `requirements.txt` alone is in the live venv and missing from every rebuilt
+candidate, and the round that notices is the round sitting on a 1000-passed
+floor. `SETUP.md`, where #1073 says the decision gets written down, joins
+`README.md` and `CLAUDE.md` as an allowed root file; the writing belongs to the
+round this grant unblocks (#1378), so until that one lands the decision is
+**not** in that file.
+
+What #1378 owes, and why it is three places rather than one: the lock is a
+`pip freeze` snapshot, and the regeneration command is unfiltered —
+`.venvs/lloyd/bin/python -m pip freeze > requirements.lock` appears at
+`SETUP.md:310` and in `requirements.lock`'s own header comment at line 3, and
+`requirements.txt` lines 4-5 send a reader to that header. A solver installed
+out of band is therefore swept into the rebuild dependency set by whoever
+follows the instructions next, through whichever of the three they read. The
+dev-package exclusion has to be written into all three in the same change, or
+the route is only delayed.
 
 ---
 

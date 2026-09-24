@@ -159,10 +159,121 @@ def test_supervisor_confs_stop_process_groups(conf):
     ("app/routers/health.py", "protected"),
     ("requirements.lock", "allowed"),
     ("app/harness/loop.py", "allowed"),
+    # #1073: the two paths the settled solver route needs, both `unlisted`
+    # before this round, which is why no round could have landed the route.
+    ("requirements-dev.txt", "allowed"),
+    ("SETUP.md", "allowed"),
 ])
 def test_path_policy_matches_the_doc(path, expected):
     from scripts.automod import spec
     assert spec.classify(path) == expected
+
+
+def test_the_dev_requirements_file_is_documented_as_never_an_install_target():
+    """§10 has to say WHY a third requirements file is allowed, because the
+    sentence it replaces ("`requirements*` is allowed only because the `venv`
+    rung exists") is false for it — and that sentence is the whole hazard
+    #1073 is about: a reader who believes it would put a solver in
+    `requirements.txt`, where the candidate venv installs it but the live venv
+    may already have it, or not put it anywhere the candidate can see.
+
+    So the doc names the two files the rung installs from and states, beside
+    them, that `requirements-dev.txt` is not one of them. Both halves are
+    checked against the code that decides it, not just against the prose.
+
+    What this test does NOT do, and must not be read as doing: it is §10 of
+    *this* file, not `SETUP.md`. #1073's clauses 1 and 2 put the route and the
+    refreeze exclusion in `SETUP.md`, and this round cannot write that file —
+    admitting the path and writing it are two rounds, because rung 0 reads
+    `ALLOWED_GLOBS` from the live tree (`round.py:445` spawns the gate with
+    `cwd=LIVE_ROOT`). Those two clauses are #1378's, and when it lands it should
+    assert the same two facts against `SETUP.md`'s dependency and refreeze
+    sections here, not only against §10.
+    """
+    from scripts.automod import spec
+    doc = (ROOT / "architecture" / "automod.md").read_text()
+    section = doc.split("## 10. What Lloyd may change", 1)[1].split("\n## 11", 1)[0]
+    assert "requirements-dev.txt" in section
+    assert "requirements.lock" in section and "requirements.txt" in section
+    # The claim is only true because of these two facts, so pin them here.
+    assert spec.classify("requirements-dev.txt") == "allowed"
+    assert not spec.touches_requirements(["requirements-dev.txt"])
+    assert spec.touches_requirements(["requirements.txt"])
+    assert spec.touches_requirements(["requirements.lock"])
+
+
+def test_the_install_targets_stay_free_of_the_solver():
+    """#1073 clause 1's checkable half, pinned on the files instead of on prose.
+
+    `grep -n z3 requirements.txt requirements.lock` has to stay empty for as long
+    as the settled route holds. Those two names are the only install lists the
+    gate's candidate venv reads, so a solver reaching either one does two things
+    at once: it makes an optional dev package a container-rebuild dependency, and
+    it is the only way the live venv and a candidate can end up disagreeing about
+    whether `import z3` succeeds. The route sends it to `requirements-dev.txt`,
+    which neither mechanism can name — pinned just above.
+    """
+    for name in ("requirements.txt", "requirements.lock"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        assert "z3" not in text.lower(), f"{name} gained the solver; the route changed"
+
+
+def test_the_doc_names_every_site_carrying_the_refreeze_command():
+    """#1073 clause 2's hazard, recorded where a refreeze will be read.
+
+    `requirements.lock` is a `pip freeze` snapshot, so a package installed out of
+    band — which is how the solver reaches the live venv — is captured by the next
+    refreeze and becomes a container-rebuild dependency. The fix is a dev-package
+    exclusion, and the trap is that the regeneration command is written in three
+    places, so amending one of them leaves two readers still following the
+    unfiltered form. §10 has to name all three.
+
+    Line 310 of `SETUP.md` is the one #1073's clause names; the lock's own header
+    and `requirements.txt`'s pointer are the other two, and the assertion below
+    re-reads each of them so the section cannot stay green on a remembered
+    address.
+    """
+    section = (DOC.read_text(encoding="utf-8")
+               .split("## 10. What Lloyd may change", 1)[1].split("\n## 11", 1)[0])
+    assert "SETUP.md:310" in section
+    assert "requirements.lock" in section and "header" in section
+    assert "requirements.txt" in section and "lines 4-5" in section
+    setup = (ROOT / "SETUP.md").read_text(encoding="utf-8").splitlines()
+    assert ".venvs/lloyd/bin/python -m pip freeze > requirements.lock" in setup[309]
+    lock_head = (ROOT / "requirements.lock").read_text(encoding="utf-8").splitlines()[2]
+    assert "pip freeze > requirements.lock" in lock_head
+    txt = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+    assert "then refreeze" in txt[3] and "requirements.lock header" in txt[4]
+
+
+def test_item_559_carries_the_solver_route_itself():
+    """#1073 clause 5: #559's acceptance names the file and the command, not #815.
+
+    The pointer this clause exists to break was real: #559's acceptance deferred
+    the route to #815, #815 was folded into #1072, and #1072 is `done` and never
+    covered this finding — so the route was deferred to an item that could not
+    answer. #559's own body now carries the file (`requirements-dev.txt`), the pin
+    (`z3-solver==4.15.4.0`) and the install command, and says in words that the
+    route is not #815.
+
+    Read from the live board through `board_presence`, unmarked like the other
+    board-reading claims in this tree (`test_bench_split`, `test_bench_invariants`):
+    a `live_vault`-marked node is deselected by the gate's own `-m "not
+    live_vault"` and certifies nothing — failure mode (1) in the header of
+    `tests/test_archived_skill_artifacts.py`. The coupling that buys is real:
+    rewriting #559's acceptance reddens the next round that runs this.
+    """
+    import board_presence
+
+    files = [p for p in board_presence.board_files_or_stop(what="#559 route claim",
+                                                           numeric_names=True)
+             if p.name.startswith("559-")]
+    assert len(files) == 1, f"expected exactly one #559 item file, got {[p.name for p in files]}"
+    body = files[0].read_text(encoding="utf-8")
+    assert "requirements-dev.txt" in body
+    assert "pip install -r requirements-dev.txt" in body
+    assert "z3-solver==4.15.4.0" in body
+    assert "see #815" not in body, "the acceptance deferred the route to #815 again"
 
 
 # ── §4 the gate ─────────────────────────────────────────────────────────────

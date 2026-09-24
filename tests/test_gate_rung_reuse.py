@@ -14,6 +14,7 @@ MEANS), the entry is fresh, and the cached head is an ancestor of this one.
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from pathlib import Path
@@ -154,6 +155,44 @@ def test_an_empty_delta_reuses_everything(tmp_path, stub_git):
     g = _Gate(tmp_path, cached={"canary_smoke": _entry()})
     got = g._reuse("canary_smoke")
     assert got is not None and "nothing committed" in got[1]
+
+
+@pytest.mark.parametrize("delta,reused", [
+    (["requirements.txt"], False),
+    (["requirements.lock"], False),
+    # #1073: the dev-only requirements file is neither a trigger here nor an
+    # install target, which is what makes it a safe home for an optional solver.
+    (["requirements-dev.txt"], True),
+    (["SETUP.md"], True),
+    (["requirements.txt", "requirements-dev.txt"], False),
+])
+def test_the_venv_rung_reuses_unless_a_real_install_target_moved(tmp_path, stub_git,
+                                                                 delta, reused):
+    """Two surfaces decide whether a candidate venv gets rebuilt, and #1073's
+    hazard has to be closed on both: `_reuse_rule` (gate.py:665, whose delta
+    check is :674) and `spec.touches_requirements` inside `rung_venv`
+    (gate.py:1800). They name the
+    same two files, so a `requirements-dev.txt` delta keeps the cached verdict
+    instead of resurrecting a rebuild whose install list cannot contain it.
+    """
+    stub_git["delta"] = delta
+    g = _Gate(tmp_path, cached={"venv": _entry()})
+    assert (g._reuse("venv") is not None) is reused
+
+
+def test_the_venv_rung_installs_from_two_named_files():
+    """The install list is a two-name expression, not a glob over `requirements*`.
+
+    `lock if lock.exists() else requirements.txt`, cloned from the live venv —
+    so a package that lives only in `requirements-dev.txt` cannot reach a
+    candidate, and the live venv and the candidate cannot disagree about whether
+    `import z3` succeeds. If a third name ever appears here, or a wildcard, this
+    is the test that says the #1073 route stopped being a dev-only route.
+    """
+    src = inspect.getsource(G.Gate.rung_venv)
+    assert "requirements-dev" not in src
+    assert 'lock = self.worktree / "requirements.lock"' in src
+    assert 'req = lock if lock.exists() else self.worktree / "requirements.txt"' in src
 
 
 def test_the_kill_switch_disables_reuse(tmp_path, stub_git, monkeypatch):

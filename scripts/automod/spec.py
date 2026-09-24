@@ -60,8 +60,22 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     "server.py",
     "requirements.txt",
     "requirements.lock",
+    # #1073 (2026-09-22): the settled home for an optional solver — a package
+    # that must NOT become a container-rebuild dependency. Admitting it is safe
+    # because of two facts, both pinned by `test_the_dev_requirements_file_is_
+    # never_an_install_target`: `touches_requirements` below keys on exactly the
+    # two names above, and `rung_venv` installs from `requirements.lock` else
+    # `requirements.txt` (gate.py:1800, :1825-1826). A third requirements file
+    # can therefore neither trigger the candidate-venv rung nor be installed by
+    # it, which is the whole point: a solver listed only here can never diverge
+    # the live venv from the candidate.
+    "requirements-dev.txt",
     "CLAUDE.md",
     "README.md",
+    # Also #1073: the item's contract puts the dependency decision in SETUP.md,
+    # and this path was unlisted, so no round could have landed it — the same
+    # defect #1242 fixed for `prompt_surface.py` above, found the same way.
+    "SETUP.md",
     "web/src/**",
     "web/index.html",
     "web/public/**",

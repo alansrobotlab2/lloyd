@@ -8,6 +8,7 @@ listing a denied path in `writable_paths`.
 
 from __future__ import annotations
 
+import inspect
 import subprocess
 import sys
 from pathlib import Path
@@ -96,6 +97,105 @@ def test_requirements_are_allowed_only_because_rung_3_exists():
     assert spec.classify("requirements.lock") == "allowed"
     assert spec.touches_requirements(["app/x.py", "requirements.lock"])
     assert not spec.touches_requirements(["app/x.py"])
+
+
+# ---------------------------------------------------------------------------
+# #1073: the dev-only requirements file, and the doc that names it
+# ---------------------------------------------------------------------------
+
+def test_the_dev_requirements_file_is_writable():
+    """`requirements-dev.txt` is where an optional solver goes, and a round has
+    to be able to create it: `spec.classify` returned `unlisted` for it, and
+    `check_scope` refuses an unlisted path, so the route item #1073 had to
+    settle could not have been landed by any round at all. `SETUP.md` — the file
+    #1073's contract says the decision belongs in — had the same defect.
+
+    Both are exact filenames next to `README.md` and `CLAUDE.md`, which have been
+    allowed all along.
+    """
+    assert spec.classify("requirements-dev.txt") == "allowed"
+    assert spec.classify("SETUP.md") == "allowed"
+    ok, reason, buckets = spec.check_scope(
+        ["SETUP.md", "requirements-dev.txt", "tests/test_automod_spec.py"])
+    assert ok, reason
+    assert reason == "in scope"
+    assert not buckets["unlisted"] and not buckets["protected"]
+
+
+def test_the_dev_requirements_file_is_never_an_install_target():
+    """The grant is safe for exactly one reason, and it is this function.
+
+    `rung_venv` skips unless `spec.touches_requirements` is true
+    (`scripts/automod/gate.py:1800`), and when it does run it installs from
+    `requirements.lock` if that exists, else `requirements.txt`
+    (`gate.py:1825-1826`). Neither can see a third file, so admitting
+    `requirements-dev.txt` cannot put a package into a candidate venv — which is
+    the divergence #1073 is about: a solver in `requirements.txt` alone never
+    reaches the candidate, and the live venv and the candidate then disagree on
+    whether `import z3` succeeds, against a floor of 1000 passed.
+    """
+    assert not spec.touches_requirements(["requirements-dev.txt"])
+    assert not spec.touches_requirements(["SETUP.md", "requirements-dev.txt",
+                                          "requirements-dev"])
+    # The rule's own source names exactly two files, and no third spelling:
+    # widening it is what would make the dev file an install target, so the
+    # claim is pinned here rather than inferred from one call returning False.
+    rule = inspect.getsource(spec.touches_requirements)
+    assert '"requirements.txt"' in rule and '"requirements.lock"' in rule
+    assert "requirements-dev" not in rule
+
+
+@pytest.mark.parametrize("path", [
+    "SETUP.md.bak", "SETUP.md/README.md", "docs/SETUP.md", "SETUP.MD",
+    "requirements-dev.txt.asc", "requirements-devs.txt", "requirements_dev.txt",
+    "dev/requirements-dev.txt", "Makefile", "some/random/thing.txt",
+])
+def test_the_solver_route_grant_is_two_filenames_not_a_pattern(path):
+    """Admitting two root filenames must not admit a pattern, and must not
+    touch the control surface: `scripts/automod/spec.py` stays protected, so the
+    round that edits it still owes a live rollback drill.
+    """
+    assert spec.classify(path) == "unlisted"
+    assert spec.classify("scripts/automod/spec.py") == "protected"
+    assert spec.requires_drill(["scripts/automod/spec.py"])
+
+
+def test_the_solver_route_grant_holds_in_the_interpreter_that_gates():
+    """The seam the grant is actually consumed across, crossed the way rung 0
+    crosses it.
+
+    `gate_detached` spawns `[LIVE_ROOT/.venvs/lloyd/bin/python, "-m",
+    "scripts.automod.round", "gate", <id>]` with `cwd=LIVE_ROOT`
+    (`scripts/automod/round.py:425-445`), so rung 0's `spec.check_scope`
+    (`gate.py:928`, inside `rung_preflight`) runs in a process this test does not
+    share, on the tuple that
+    interpreter imported. Same spawn shape here: a fresh interpreter, started from
+    this tree. That mechanism is also the safety property that makes admitting
+    these two names safe at all — a round editing `spec.py` inside its own
+    worktree cannot widen the set its own gate measures it against, so the grant
+    binds only once it has landed, which is why #1073's file-writing half is
+    #1378 and not this round.
+
+    `test_a_second_interpreter_reaches_the_same_verdict_as_rung_0` crosses the
+    same seam for `prompt_surface.py`; this crosses it for the two names the
+    solver route needs, plus the negative the route rests on — a delta that only
+    touches `requirements-dev.txt` must not read as a requirements change, or the
+    candidate venv would be rebuilt against an install list that cannot contain
+    the solver.
+    """
+    probe = (
+        "from scripts.automod import spec; "
+        "print(spec.classify('SETUP.md')); "
+        "print(spec.classify('requirements-dev.txt')); "
+        "print(spec.check_scope(['SETUP.md', 'requirements-dev.txt', "
+        "'tests/test_automod_spec.py'])[0:2]); "
+        "print(spec.touches_requirements(['requirements-dev.txt', 'SETUP.md']))"
+    )
+    out = subprocess.run([sys.executable, "-c", probe], cwd=REPO_ROOT,
+                         capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip().splitlines() == [
+        "allowed", "allowed", "(True, 'in scope')", "False"], out.stdout
 
 
 # ---------------------------------------------------------------------------
