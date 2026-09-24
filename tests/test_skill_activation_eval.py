@@ -118,6 +118,11 @@ def test_activation_is_what_prefetch_injects(monkeypatch):
     monkeypatch.setattr(prefetch, "_search_skills",
                         lambda toks, skills=None: [(9.0, a), (prefetch.SKILL_THRESHOLD_SECOND, b)])
     assert A.injected("a long enough turn") == ["a", "b"]
+    # Since #435 `_search_skills` returns every offer above the report floor;
+    # one below SKILL_THRESHOLD_FIRST is offered, never injected.
+    monkeypatch.setattr(prefetch, "_search_skills",
+                        lambda toks, skills=None: [(prefetch.SKILL_THRESHOLD_FIRST - 0.1, a)])
+    assert A.injected("a long enough turn") == []
     assert A.injected("hi") == [], "prefetch skips a message under MIN_MESSAGE_LEN"
 
 

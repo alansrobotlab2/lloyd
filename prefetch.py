@@ -32,6 +32,7 @@ from agent_mcp.facts import _extract_entities_from_query, _get_facts_sync
 from agent_mcp.session import _load_session_index, _score_session
 from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords, strip_qmd_snippet
 from prompt_builder import PROMPT_BUDGET_CHARS
+from app.event_log import log_event
 from app.sessions_io import ambient_clock_stamp
 
 logger = logging.getLogger("lloyd.prefetch")
@@ -52,6 +53,37 @@ SKILL_EXCERPT_CONSTRAINTS_MAX = 300  # same, second skill
 _HARD_CONSTRAINT_RE = re.compile(
     r"\b(?:MUST(?: NOT)?|NEVER|DO NOT|ALWAYS|CRITICAL|HARD RULE)\b|\bIMPORTANT:"
 )
+
+# ── Skill-injection telemetry (#435) ──────────────────────────────────────────
+# What gets *recorded* is a different set from what gets injected, and the two
+# gates below are deliberately not the same number. `SKILL_THRESHOLD_FIRST`
+# decides what a turn is handed; recording against it would emit a
+# `landed: false` row only when three skills crossed 3.0 or the #2 slot sat in
+# [3.0, 4.0) — rare — so the instrument would report a healthy zero at the one
+# question it exists to answer.
+#
+# An *offer* is therefore any skill scoring strictly above `SKILL_REPORT_FLOOR`.
+# `0.0` is the scorer's own floor, not a guess: `_score_skill(...,
+# require_metadata_hit=True)` returns exactly 0.0 for a skill with no
+# name/desc/tag token hit however much its body matched, so `> 0` is the whole
+# band the matcher had a signal about.
+#
+# `SKILL_REPORT_TOP_K` then bounds how much of that band is written per turn.
+# Measured 2026-09-24 over the first real message of 382 recent sessions against
+# the 187 cached skills, scoring above 0 is not a near-miss tail — it is most of
+# the corpus every turn: mean 110.5, median 88, p90 179, max 183 offers (the
+# modal score is 3.2, i.e. sitting on the injection threshold, because scores
+# scale with corpus frequency rather than with query specificity). Uncapped that
+# is ~110 rows per prefetched turn. Rank is the only quantity comparable across
+# turns, and only ranks 1 and 2 can ever render (full body, then excerpt at
+# `SKILL_THRESHOLD_SECOND`), so the informative band is a few places below the
+# renderable one: K = 4× the render cap of 2, costing ≤ 8 rows/turn against the
+# ~770 rows a busy session's whole log holds today. Raising K is a scope call a
+# person owns — see the `needs-human` clause on #435 — not something to widen
+# silently from here.
+SKILL_REPORT_FLOOR = 0.0
+SKILL_REPORT_TOP_K = 8
+SKILL_MATCH_EVENT = "prefetch.skill_match"
 FACT_MAX_ENTITIES = 2           # top N entities to look up
 FACT_MAX_PER_ENTITY = 3         # top N facts per entity (by confidence)
 MIN_MESSAGE_LEN = 10            # skip prefetch for very short messages
@@ -560,12 +592,18 @@ def _get_backlog_index() -> dict[int, dict]:
 
 def _search_skills(query_tokens: set[str],
                    skills: list[dict] | None = None) -> list[tuple[float, dict]]:
-    """Return scored skills sorted descending.
+    """Return every skill above `SKILL_REPORT_FLOOR`, scored, sorted descending.
+
+    This is the turn's *offer* set (#435) — everything the matcher surfaced,
+    including what never got rendered. It is not what gets injected:
+    `_injectable_skills` applies the injection gate to that, so widening the
+    record did not widen the prompt, and a caller asking "would this be
+    injected?" must pass the result through `_injectable_skills`.
 
     Uses the metadata-hit-required scoring (see skills._score_skill). A skill
     with zero name/desc/tag match scores 0.0 regardless of body accidents —
     fixes #311 where generic stopword queries pulled powerpoint/youtube skills
-    into graph-classifier sessions.
+    into graph-classifier sessions, and is also what keeps the offer set finite.
 
     `skills` replaces the live inventory, so the skill-activation gate (#711)
     can judge a candidate SKILL.md through this function rather than a copy.
@@ -573,10 +611,91 @@ def _search_skills(query_tokens: set[str],
     scored = []
     for skill in (_get_skills_cached() if skills is None else skills):
         score = _score_skill(skill, query_tokens, require_metadata_hit=True)
-        if score >= SKILL_THRESHOLD_FIRST:
+        if score > SKILL_REPORT_FLOOR:
             scored.append((score, skill))
     scored.sort(key=lambda x: -x[0])
     return scored
+
+
+def _injectable_skills(scored: list[tuple[float, dict]]) -> list[tuple[float, dict]]:
+    """The offered skills the renderer may show: `SKILL_THRESHOLD_FIRST` and up.
+
+    The gate `_search_skills` used to apply before returning anything, moved one
+    step later so the telemetry can record the near-miss band without changing
+    a single byte of what a turn is injected.
+    """
+    return [pair for pair in scored if pair[0] >= SKILL_THRESHOLD_FIRST]
+
+
+def _reported_offers(scored: list[tuple[float, dict]]) -> list[tuple[float, dict]]:
+    """The slice of the offer set that gets a `prefetch.skill_match` row.
+
+    The best `SKILL_REPORT_TOP_K` of `_search_skills`' output. Not a second
+    threshold: the offers past it stay above `SKILL_REPORT_FLOOR`, they are just
+    not written, which is what keeps the emitter at ≤ 8 rows per turn instead of
+    the measured median of 88. `_search_skills` is sorted, so the slice is the
+    highest-scoring ones; ties keep corpus order, so the cut is deterministic.
+    """
+    return scored[:SKILL_REPORT_TOP_K]
+
+
+def _skill_injection_plan(scored: list[tuple[float, dict]]) -> list[tuple[float, dict, str]]:
+    """Which injectable skills `_format_context` renders, and in what form.
+
+    One function holds the rule and both consumers read it — the renderer
+    renders from it, and `_emit_skill_match_events` marks `landed` from it — so
+    a `prefetch.skill_match` row cannot claim a skill landed that the renderer
+    skipped. `scored` must already be `_injectable_skills(...)` output: the
+    first entry gets the full body, and a second gets an excerpt only at or
+    above `SKILL_THRESHOLD_SECOND`.
+    """
+    plan: list[tuple[float, dict, str]] = []
+    if scored:
+        plan.append((scored[0][0], scored[0][1], "body"))
+    if len(scored) >= 2 and scored[1][0] >= SKILL_THRESHOLD_SECOND:
+        plan.append((scored[1][0], scored[1][1], "excerpt"))
+    return plan
+
+
+def _emit_skill_match_events(session_id: str | None,
+                             offers: list[tuple[float, dict]],
+                             plan: list[tuple[float, dict, str]]) -> None:
+    """Record what this turn was *offered*, not just what it was given (#435).
+
+    One `prefetch.skill_match` event per reported offer (`_reported_offers`: the
+    top `SKILL_REPORT_TOP_K` of the scored set), into that session's own
+    append-only event log — the skill name, its match score, whether it landed
+    in the `<context>` block, and `injected_body` to tell the full-body injection
+    from the excerpt one. The `landed: false` rows are the point: the
+    offered-but-not-rendered set is the "ignored" half of "loaded vs. ignored",
+    and until now it was discarded inside `_search_skills` before anything was
+    written. `app.skill_telemetry.skill_injection_counts` reads them back.
+
+    Called after `_format_context` has returned, so what it writes describes a
+    block that already exists and a writer cannot alter what the turn was
+    handed. Best-effort by construction: `app.event_log.log_event` already
+    swallows its own write errors and drops a session-less event with a WARNING,
+    so "telemetry must not break a turn" is inherited; the guard here is for the
+    writer call raising, which is why it wraps the loop rather than each row.
+    """
+    if not session_id or not offers:
+        return
+    injected = {skill.get("name"): mode for _, skill, mode in plan}
+    try:
+        for score, skill in _reported_offers(offers):
+            name = skill.get("name")
+            if not isinstance(name, str) or not name:
+                continue        # unattributable: a "" row would read as a skill
+            mode = injected.get(name)
+            log_event(session_id, SKILL_MATCH_EVENT, {
+                "skill": name,
+                "score": float(score),
+                "landed": mode is not None,
+                "injected_body": mode == "body",
+            })
+    except Exception as e:  # noqa: BLE001 — telemetry never breaks a turn
+        logger.debug("prefetch.skill_match emit failed (session=%s): %s",
+                     session_id, e)
 
 
 def _task_ref_candidates(text: str) -> set[int]:
@@ -989,18 +1108,19 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
             + "\n</ambient-signals>"
         )
 
-    # First skill: full body
-    if skills:
-        score, skill = skills[0]
-        body = _clip_skill(skill["raw"], SKILL_BODY_MAX, SKILL_CONSTRAINTS_MAX)
-        parts.append(f'<skill name="{skill["name"]}" score="{score:.1f}">\n{body}\n</skill>')
-
-    # Second skill: excerpt only
-    if len(skills) >= 2 and skills[1][0] >= SKILL_THRESHOLD_SECOND:
-        score2, skill2 = skills[1]
-        excerpt = _clip_skill(skill2["raw"], SKILL_EXCERPT_MAX,
-                              SKILL_EXCERPT_CONSTRAINTS_MAX)
-        parts.append(f'<skill name="{skill2["name"]}" score="{score2:.1f}" excerpt="true">\n{excerpt}\n</skill>')
+    # Skills: the first goes in as a full body, the second as an excerpt only
+    # and only above `SKILL_THRESHOLD_SECOND`. The rule itself is
+    # `_skill_injection_plan`, shared with the #435 telemetry writer so a
+    # `landed` flag can only ever describe what this renderer rendered.
+    for score, skill, mode in _skill_injection_plan(skills):
+        name = skill["name"]
+        if mode == "body":
+            body = _clip_skill(skill["raw"], SKILL_BODY_MAX, SKILL_CONSTRAINTS_MAX)
+            parts.append(f'<skill name="{name}" score="{score:.1f}">\n{body}\n</skill>')
+        else:
+            excerpt = _clip_skill(skill["raw"], SKILL_EXCERPT_MAX,
+                                  SKILL_EXCERPT_CONSTRAINTS_MAX)
+            parts.append(f'<skill name="{name}" score="{score:.1f}" excerpt="true">\n{excerpt}\n</skill>')
 
     # Backlog refs — live task-summary lookups for `#NNN` / bare-number
     # references in the user message. More authoritative than fact-store
@@ -1128,9 +1248,16 @@ def _prefetch_prepare(text: str, session_id: str | None,
 
 
 def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
-                  plan_mode: bool) -> str:
+                  plan_mode: bool,
+                  session_id: str | None = None) -> str:
     """Blocking half of prefetch: budgeted parallel search + formatting.
-    Safe to run in a worker thread."""
+    Safe to run in a worker thread.
+
+    `session_id` is here for the #435 skill-match events, which are written to
+    that session's own event log. Nothing else in this half needs it: the focus
+    tracker arrives already resolved from `_prefetch_prepare`, which is why the
+    turn's identity had to be threaded this far rather than re-read here.
+    """
     query_tokens = _query_tokens(text)
 
     # Plan B — synthetic skill-match tokens. When the session is in
@@ -1266,7 +1393,15 @@ def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
         or bool(_CONTINUATION_RE.match(text.strip()))
     )
 
-    context = _format_context(skills_result, facts_result, vault_result,
+    # The scored list splits here. `injectable` is what the renderer may show —
+    # the same `SKILL_THRESHOLD_FIRST` gate that was applied inside
+    # `_search_skills` before #435, so what lands in the prompt is unchanged —
+    # and `injection_plan` is the subset of it actually rendered, which is also
+    # what the telemetry marks `landed`.
+    injectable = _injectable_skills(skills_result)
+    injection_plan = _skill_injection_plan(injectable)
+
+    context = _format_context(injectable, facts_result, vault_result,
                               session_result, ambient_entries=ambient_entries,
                               backlog_refs=backlog_result,
                               show_skill_hint=not is_continuation)
@@ -1286,9 +1421,15 @@ def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
         else:
             context = "<context>\n" + ide_block + "\n</context>"
 
+    # #435: the offer half of the turn, recorded after the block is final so a
+    # writer that raises cannot alter what this turn was handed. `skills_result`
+    # is the offer set, `injection_plan` what got rendered out of it.
+    _emit_skill_match_events(session_id, skills_result, injection_plan)
+
     logger.debug(
-        "prefetch %dms: skills=%d facts=%d backlog=%d vault=%d(%s%s) sessions=%d ambient=%d landed=%s",
-        int((time.monotonic() - t0) * 1000), len(skills_result), len(facts_result),
+        "prefetch %dms: skills=%d/%d offers facts=%d backlog=%d vault=%d(%s%s) sessions=%d ambient=%d landed=%s",
+        int((time.monotonic() - t0) * 1000), len(injectable), len(skills_result),
+        len(facts_result),
         len(backlog_result), len(vault_result),
         "hybrid" if vault_hybrid_result is not None else ("lex" if "vault" in landed else "lex-straggling"),
         f"+{len(carried)} carried" if carried else "",
@@ -1358,7 +1499,7 @@ def prefetch_context(text: str, session_id: str | None = None,
     prep = _prefetch_prepare(text, session_id, plan_mode)
     if prep is None:
         return text
-    return _prefetch_run(text, *prep)
+    return _prefetch_run(text, *prep, session_id=session_id)
 
 
 async def prefetch_context_async(text: str, session_id: str | None = None,
@@ -1370,7 +1511,7 @@ async def prefetch_context_async(text: str, session_id: str | None = None,
     prep = _prefetch_prepare(text, session_id, plan_mode)
     if prep is None:
         return text
-    return await asyncio.to_thread(_prefetch_run, text, *prep)
+    return await asyncio.to_thread(_prefetch_run, text, *prep, session_id=session_id)
 
 
 def _format_ide_state() -> str:

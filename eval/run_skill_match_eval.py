@@ -70,7 +70,9 @@ def baseline_path() -> Path:
 def lexical_top5(turn: str) -> list[str]:
     """The production lexical selection, imported rather than reimplemented."""
     import prefetch
-    scored = prefetch._search_skills(prefetch._query_tokens(turn))
+    # The injectable set, as before #435 widened `_search_skills` to every offer.
+    scored = prefetch._injectable_skills(
+        prefetch._search_skills(prefetch._query_tokens(turn)))
     return [skill["name"] for _score, skill in scored[:K]]
 
 

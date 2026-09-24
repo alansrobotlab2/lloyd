@@ -106,6 +106,10 @@ def test_the_scorer_imports_the_production_matcher(monkeypatch):
     ev = _load()
     seen = []
     monkeypatch.setattr(prefetch, "_search_skills",
-                        lambda toks: seen.append(toks) or [(1.0, {"name": "k"})])
+                        lambda toks: seen.append(toks) or [
+                            (prefetch.SKILL_THRESHOLD_FIRST, {"name": "k"}),
+                            (prefetch.SKILL_THRESHOLD_FIRST - 0.1, {"name": "offered"})])
+    # An offer below the injection gate is not a lexical pick (#435 widened
+    # `_search_skills` to the whole offer set).
     assert ev.lexical_top5("restart the backend please") == ["k"]
     assert seen and isinstance(seen[0], set)

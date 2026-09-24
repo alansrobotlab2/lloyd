@@ -1233,3 +1233,215 @@ def test_short_skill_is_injected_unchanged():
     out = prefetch._format_context([(9.0, {"name": "tiny", "raw": raw})], [])
     assert f'<skill name="tiny" score="9.0">\n{raw}\n</skill>' in out
     assert "truncated" not in out
+
+
+# ── #435 skill-injection telemetry: prefetch.skill_match events ───────────────
+#
+# The half of skill usage that had no source: `_search_skills` kept the matches
+# and threw the rest away, and the only record of any of it was an aggregate
+# `logger.debug` count line. These tests pin the per-turn event, its agreement
+# with what the renderer actually put in `<context>`, and that a broken event
+# writer cannot touch the turn. The reader over those events is
+# `app.skill_telemetry`, tested in tests/test_skill_injection_telemetry.py.
+
+_SKM_QUERY = "please frobnicate the widget"
+
+
+def _skm_skill(name: str, *, desc: str = "", body: str = "", raw: str | None = None) -> dict:
+    """A skill dict shaped like `_iter_skills`' output for the two consumers
+    that matter here: the scorer reads `description`/`tags`/`body`, the
+    renderer reads `raw`."""
+    return {"name": name, "description": desc, "tags": [],
+            "raw": body if raw is None else raw, "body": body}
+
+
+def _skm_offers(*pairs) -> list[tuple[float, dict]]:
+    """`[(score, name)]` in the shape `_search_skills` returns."""
+    return [(score, _skm_skill(name, raw=f"{name} body text"))
+            for score, name in pairs]
+
+
+def _skm_turn(tmp_path, monkeypatch, offers, session_id: str) -> str:
+    """One real `prefetch_context` turn, with every other leg stubbed to
+    nothing and the event-log root aimed at this test's `tmp_path`.
+
+    Only `_search_skills` is stubbed, because the offer list is what these
+    tests fix; the emitter, the renderer and the event writer are the real
+    ones.
+    """
+    log_root = tmp_path / "event_logs"
+    monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", log_root)
+    monkeypatch.setattr("app.event_log.BLOBS_DIR", log_root / "blobs")
+    monkeypatch.setattr(prefetch, "_search_skills", lambda q: list(offers))
+    monkeypatch.setattr(prefetch, "_search_facts", lambda t: [])
+    monkeypatch.setattr(prefetch, "_search_recent_sessions", lambda t: [])
+    monkeypatch.setattr(prefetch, "_search_backlog_refs", lambda t: [])
+    monkeypatch.setattr(prefetch, "_search_vault", lambda *a, **k: [])
+    monkeypatch.setattr(prefetch, "_format_ide_state", lambda: "")
+    monkeypatch.setattr(prefetch, "PREFETCH_BUDGET_MS", 300)
+    return prefetch.prefetch_context(_SKM_QUERY, session_id=session_id,
+                                     plan_mode=False)
+
+
+def _skm_events(tmp_path, session_id: str) -> list[dict]:
+    """Parsed rows of the session's event log, as the on-disk file holds them."""
+    path = tmp_path / "event_logs" / f"{session_id}.events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def _skm_matches(tmp_path, session_id: str) -> dict[str, dict]:
+    rows = [e for e in _skm_events(tmp_path, session_id)
+            if e.get("event") == "prefetch.skill_match"]
+    return {r["data"]["skill"]: r for r in rows}
+
+
+def test_matched_skill_appends_one_skill_match_event_per_skill(tmp_path, monkeypatch):
+    """Clause 1: three matched skills, three rows, in this session's log file,
+    each carrying a name, a numeric score and a boolean `landed`."""
+    _skm_turn(tmp_path, monkeypatch,
+              _skm_offers((6.0, "alpha"), (4.5, "beta"), (3.2, "gamma")),
+              "skm-clause1")
+
+    rows = _skm_matches(tmp_path, "skm-clause1")
+
+    assert (tmp_path / "event_logs" / "skm-clause1.events.jsonl").exists(), (
+        "the events went somewhere other than the session's own log file")
+    assert set(rows) == {"alpha", "beta", "gamma"}, rows
+    for name, row in rows.items():
+        data = row["data"]
+        assert isinstance(data["skill"], str) and data["skill"] == name
+        assert isinstance(data["score"], (int, float)), f"{name}: {data!r}"
+        assert isinstance(data["landed"], bool), f"{name}: {data!r}"
+        assert row["session_id"] == "skm-clause1"
+    assert rows["alpha"]["data"]["score"] == 6.0
+    assert rows["beta"]["data"]["score"] == 4.5
+    assert rows["gamma"]["data"]["score"] == 3.2
+
+
+def test_turn_with_no_skill_match_appends_no_event(tmp_path, monkeypatch):
+    """Clause 1's negative half: an empty offer list writes nothing at all, so
+    the reader's empty store stays a store with no telemetry rather than a
+    store full of zero-score rows."""
+    _skm_turn(tmp_path, monkeypatch, [], "skm-none")
+
+    assert _skm_events(tmp_path, "skm-none") == []
+
+
+def test_landed_marks_exactly_the_skills_rendered_into_context(tmp_path, monkeypatch):
+    """Clause 2: the first matched skill is rendered as a full body, the second
+    only at or above `SKILL_THRESHOLD_SECOND`, and everything else — including
+    a skill above the injection threshold — is an offer with `landed: false`.
+
+    One rule drives both sides: `_skill_injection_plan` is what the renderer
+    renders from and what the emitter marks, so a row cannot claim a skill
+    landed that the renderer skipped.
+    """
+    out = _skm_turn(tmp_path, monkeypatch,
+                    _skm_offers((6.0, "alpha"), (4.5, "beta"), (3.2, "gamma")),
+                    "skm-landed")
+
+    assert '<skill name="alpha"' in out, out
+    assert '<skill name="beta" score="4.5" excerpt="true">' in out, out
+    assert 'name="gamma"' not in out, (
+        f"gamma sits at 3.2 — injected as #2 only at 4.0 — but rendered: {out}")
+
+    rows = _skm_matches(tmp_path, "skm-landed")
+    assert rows["alpha"]["data"]["landed"] is True
+    assert rows["alpha"]["data"]["injected_body"] is True
+    assert rows["beta"]["data"]["landed"] is True
+    assert rows["beta"]["data"]["injected_body"] is False
+    assert rows["gamma"]["data"]["landed"] is False, (
+        "a matched skill the renderer dropped produced no row, or claimed to land")
+    assert rows["gamma"]["data"]["injected_body"] is False
+
+
+def test_second_skill_below_the_excerpt_threshold_is_offered_not_landed(tmp_path, monkeypatch):
+    """The discrimination `landed` has to carry: 3.5 clears the injection gate
+    but not the excerpt gate, so it is an offer that was not rendered — the
+    exact row a retirement rule needs and #435 never had a source for."""
+    out = _skm_turn(tmp_path, monkeypatch,
+                    _skm_offers((6.0, "alpha"), (3.5, "delta")),
+                    "skm-below")
+
+    assert 'name="delta"' not in out, out
+    rows = _skm_matches(tmp_path, "skm-below")
+    assert rows["alpha"]["data"]["landed"] is True
+    assert rows["delta"]["data"]["landed"] is False
+    assert rows["delta"]["data"]["score"] == 3.5
+
+
+def test_search_skills_reports_every_skill_above_the_reporting_floor(tmp_path, monkeypatch):
+    """The floor itself, through the real scorer.
+
+    `SKILL_THRESHOLD_FIRST` is 3.0 and discards everything below it, so an
+    offer set defined by that gate would record almost no `landed: false` rows.
+    The reporting floor is `score > 0` instead, which `_score_skill` bounds by
+    construction (a skill with no name/desc/tag token hit scores 0.0 however
+    much its body matches). Scores below are the real scorer's on this query:
+    a name hit lands `widget-frobnicator` on exactly 3.0, a description-only
+    hit puts `gizmo` at 2.0 — the near-miss band the old code threw away
+    before anything was recorded — and `unrelated` matches on body text only,
+    which `require_metadata_hit` scores 0.0.
+    """
+    hot = _skm_skill("widget-frobnicator")
+    warm = _skm_skill("gizmo", desc="handles widget calibration")
+    cold = _skm_skill("unrelated", body="widget frobnicator widget frobnicator")
+    monkeypatch.setattr(prefetch, "_get_skills_cached", lambda: [hot, warm, cold])
+
+    scored = prefetch._search_skills(prefetch._query_tokens(_SKM_QUERY))
+
+    assert [(round(s, 1), sk["name"]) for s, sk in scored] == [
+        (3.0, "widget-frobnicator"), (2.0, "gizmo")], scored
+    assert prefetch._injectable_skills(scored) == [scored[0]], (
+        "the injection gate moved: `gizmo` at 2.0 must stay below "
+        "SKILL_THRESHOLD_FIRST while still being an offer")
+
+
+def test_raising_event_writer_leaves_the_injected_context_unchanged(tmp_path, monkeypatch):
+    """Clause 3: telemetry is a side effect. With the writer raising, the turn
+    gets byte-identical context — same skills, same bodies, same order."""
+    offers = _skm_offers((6.0, "alpha"), (4.5, "beta"), (3.2, "gamma"))
+    out_ok = _skm_turn(tmp_path, monkeypatch, offers, "skm-writer-ok")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("event store on fire")
+
+    monkeypatch.setattr(prefetch, "log_event", _boom)
+    out_raising = _skm_turn(tmp_path, monkeypatch, offers, "skm-writer-raises")
+
+    assert '<skill name="alpha"' in out_ok, out_ok
+    assert out_raising == out_ok, (
+        "the event writer changed what the turn was handed")
+    assert _skm_events(tmp_path, "skm-writer-raises") == [], (
+        "a raising writer still left rows behind")
+
+
+def test_reported_offers_are_capped_at_skill_report_top_k(monkeypatch, tmp_path):
+    """`SKILL_REPORT_FLOOR` = 0.0 records everything the matcher had a signal
+    about, which measured over the 382 most recent sessions' first real message
+    (2026-09-24) is a mean of 110.5 and a median of 88 of the 187 cached skills —
+    so the floor alone would write ~110 rows per prefetched turn.
+    `SKILL_REPORT_TOP_K` = 8 (4× the two slots that can render) bounds that;
+    the cap is a scope call a person owns (#435's `needs-human` clause), so the
+    two numbers are pinned here rather than left implicit in a slice.
+    """
+    skills = [_skm_skill(f"sk{i:02d}", desc="widget calibration")
+              for i in range(12)]
+    monkeypatch.setattr(prefetch, "_get_skills_cached", lambda: skills)
+
+    scored = prefetch._search_skills(prefetch._query_tokens(_SKM_QUERY))
+
+    assert len(scored) == 12, "all twelve match `widget`; the floor is 0.0"
+    assert len(prefetch._reported_offers(scored)) == prefetch.SKILL_REPORT_TOP_K == 8
+    assert [sk["name"] for _, sk in prefetch._reported_offers(scored)] == [
+        f"sk{i:02d}" for i in range(8)], "the cap must keep the top K, not any K"
+
+    monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", tmp_path / "event_logs")
+    prefetch._emit_skill_match_events(
+        "cap-session", scored,
+        prefetch._skill_injection_plan(prefetch._injectable_skills(scored)))
+
+    assert [row["data"]["skill"] for row in _skm_events(tmp_path, "cap-session")] == [
+        f"sk{i:02d}" for i in range(8)], "the cap is what reaches the log, not just the slice"

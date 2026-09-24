@@ -68,11 +68,12 @@ def injected(turn: str, skills: list[dict] | None = None) -> list[str]:
     import prefetch
     if len(turn.strip()) < prefetch.MIN_MESSAGE_LEN:
         return []
-    scored = prefetch._search_skills(prefetch._query_tokens(turn), skills=skills)
-    names = [s["name"] for _score, s in scored[:1]]
-    if len(scored) >= 2 and scored[1][0] >= prefetch.SKILL_THRESHOLD_SECOND:
-        names.append(scored[1][1]["name"])
-    return names
+    # `_search_skills` returns the whole offer set since #435; the injection
+    # gate and the render rule are prefetch's own, so ask them rather than
+    # restating the thresholds here.
+    offers = prefetch._search_skills(prefetch._query_tokens(turn), skills=skills)
+    plan = prefetch._skill_injection_plan(prefetch._injectable_skills(offers))
+    return [skill["name"] for _score, skill, _mode in plan]
 
 
 def _rate(n: int, d: int) -> float | None:
