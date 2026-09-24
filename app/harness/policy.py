@@ -219,10 +219,16 @@ def predicate_matches(predicate: str, tool_input: dict) -> bool:
 # not gated, because a gate that guesses wrong denies real work and a worker
 # that cannot write its output burns a run.
 #
-# Bash is not in either list. It is durable-external and hard-to-reverse in
-# the same breath depending on the string, and command-level tiering is a
-# different mechanism (`safety.py`'s pattern set) — so it stays outside this
-# gate rather than being gated as a name, which would deny every worker.
+# Bash is in neither list and stays out of both: it is durable-external and
+# hard-to-reverse in the same breath depending on the string, so gating the
+# NAME would deny every worker for running `ls`. What it does instead, from
+# #740, is resolve per command STRING — `tool_tier` asks
+# `app.harness.safety.bash_command_tier`, whose durable-external table beside
+# `_HARD_DENY_PATTERNS` is the one place that reasoning lives, because a shape
+# is a `safety.py` question and a tier number is a ladder question. Omit the
+# command and Bash answers tier 1, which is the same honest empty default the
+# rest of this section uses, and what the name-level side-effect census
+# reports for it.
 
 TIER2_TOOLS = frozenset({
     # Durable-external: the counterparty is outside this machine, or the
@@ -356,8 +362,52 @@ def changes_schedule_state(name: Any, tool_input: Any) -> bool:
     return bool(schedule_fields_changed(tool_input))
 
 
-def tool_tier(name: Any) -> int:
+#: The one tool whose reversibility is not a property of its name. Every other
+#: name in the ladder means the same thing whatever it is handed; this one is
+#: `ls` in one call and a service restart in the next.
+BASH_TOOL = "Bash"
+
+
+def bash_command_of(tool_input: Any) -> str:
+    """The command string inside a Bash call's arguments, or '' if there is none.
+
+    A bare string is accepted too, for a caller that already holds the command:
+    `tool_tier("Bash", "git push origin main")` is the tier of that command.
+    """
+    if isinstance(tool_input, str):
+        return tool_input
+    if isinstance(tool_input, dict):
+        command = tool_input.get("command")
+        if isinstance(command, str):
+            return command
+    return ""
+
+
+def tool_tier(name: Any, tool_input: Any = None) -> int:
+    """Tier of a call, optionally of a specific call.
+
+    `tool_input` is consulted by exactly one tool — `Bash`, whose shape lives in
+    the command string — and its answer comes from `app.harness.safety`, which
+    owns the durable-external pattern set. Nothing here pattern-matches a
+    command: the shape table and the tier ladder would otherwise drift, and the
+    ladder has no business re-deciding what a `git push` is.
+
+    Omit `tool_input` and Bash is tier 1. That is not a hole, it is the ladder's
+    own rule applied to a name no table names: the callers that enumerate tools
+    by name — the side-effect census above all — get the name-level answer, and
+    the callers that gate a real call pass the arguments and get the real tier.
+    Callers that gate a call must pass `tool_input`; `effective_tier` is the
+    spelling they should reach for.
+
+    The import is deferred for the reason every other cross-module check in this
+    file defers one: `safety.py` imports `outbound_content`, which imports this
+    module, so a top-level import here would close the cycle in the wrong
+    direction at boot.
+    """
     tool = normalize_tool_name(name)
+    if tool == BASH_TOOL:
+        from app.harness.safety import bash_command_tier
+        return bash_command_tier(bash_command_of(tool_input))
     if tool in TIER3_TOOLS:
         return 3
     if tool in TIER2_TOOLS:
@@ -368,15 +418,17 @@ def tool_tier(name: Any) -> int:
 def effective_tier(name: Any, tool_input: Any = None) -> int:
     """The tier that governs THIS call, not the tier of the tool's name.
 
-    Every tool except `autonomy_write_task` answers with `tool_tier`. That one
-    tool has two shapes with opposite risk — an update that appends a run record
-    to its own task, and an update that re-arms another task — and one tier
-    cannot cover both, so the benign shape is demoted. It reuses the existing
-    tier machinery (the `check_grants` check, the denial ledger, the `grants:`
-    materialisation) rather than opening a parallel authority system, which is
-    why it is a tier function and not a second gate.
+    Two tools need the arguments to answer, and both are the same failure of
+    naming: `Bash`, whose shape is the command string (#740), and
+    `autonomy_write_task`, which has two shapes with opposite risk — an update
+    that appends a run record to its own task, and an update that re-arms another
+    task — so the benign shape is demoted back to 1. Everything else answers with
+    its name. Both reuses of the existing tier machinery (the `check_grants`
+    check, the denial ledger, the `grants:` materialisation) rather than opening a
+    parallel authority system, which is why this is a tier function and not a
+    second gate.
     """
-    tier = tool_tier(name)
+    tier = tool_tier(name, tool_input)
     if tier == 2 and normalize_tool_name(name) == SCHEDULE_STATE_TOOL:
         if not changes_schedule_state(name, tool_input):
             return 1
@@ -940,6 +992,19 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
     reason = (f"grant: {'no grant' if not why else why} — '{tool}' is a "
               f"tier-{tier} (hard-to-reverse) action and scope '{scope}' is "
               f"unattended.")
+    if tool == BASH_TOOL:
+        # Name-level tools are gated on a name, so `tool` alone says what is
+        # being asked. For Bash it does not: the same name ran `ls` a call ago.
+        # Whoever has to decide has to see which shape this call is, or the
+        # grant they mint on the strength of one denial is issued blind.
+        from app.harness.safety import match_durable_external
+        shape = match_durable_external(bash_command_of(args)) or "unclassified"
+        reason += (f" The durable-external shape this call matched is "
+                   f"'{shape}'. One live `tool='{BASH_TOOL}'` grant authorises "
+                   f"EVERY Bash command in scope '{scope}' — the argument "
+                   f"predicate bounds lengths and integers, not a command "
+                   f"string — so the line below is a decision about all the "
+                   f"Bash this scope runs, not only this shape.")
     if tool == SCHEDULE_STATE_TOOL:
         # The scope and tool alone are not actionable here: the same tool call
         # either appends a run record or re-arms a nightly, and whoever has to
@@ -1004,7 +1069,15 @@ def install_policy_hook(hooks: HookRegistry, *, store: GrantStore | None = None,
     async def _policy_pretool_cb(input_data: dict[str, Any],
                                 _tool_use_id: str | None, _ctx: Any) -> dict:
         tool_name = input_data.get("tool_name", "")
-        if tool_tier(tool_name) == 1 and tool_name != GRANT_MINT_TOOL:
+        tool_input = input_data.get("tool_input") or {}
+        # Per-call, not per-name, and the difference is #740: a name-level read
+        # here answered tier 1 for `Bash` and returned before `check_grants`
+        # could look at the command, so the short-circuit in this callback — not
+        # the ladder — was the half that left a service restart ungated. It has
+        # to be the same number `check_grants` computes below, or the two gates
+        # on one registry disagree about the same call.
+        if (effective_tier(tool_name, tool_input) == 1
+                and tool_name != GRANT_MINT_TOOL):
             return {}
         active = store
         try:
@@ -1014,7 +1087,7 @@ def install_policy_hook(hooks: HookRegistry, *, store: GrantStore | None = None,
                 active,
                 scope=scope or current_scope.get(),
                 tool_name=tool_name,
-                tool_input=input_data.get("tool_input") or {},
+                tool_input=tool_input,
                 now=now,
             )
         except Exception as exc:

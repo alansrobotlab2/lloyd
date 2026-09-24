@@ -694,12 +694,20 @@ def test_the_whole_gated_surface_is_listed_even_with_no_traffic(sessions, db):
         assert tool in rows, tool
     assert rows["email_empty_trash"]["tier"] == 3
     assert rows["email_send"]["tier"] == 2
-    # `Bash` and the vault writers are tier 1 by deliberate choice: tier 1 is
-    # whatever is in NEITHER table (`TIER2_TOOLS` `policy.py:227`, `TIER3_TOOLS`
-    # `:244`, `tool_tier()` returning 1 at `:365`), and the comment at
-    # `:222-225` keeps `Bash` out of both on purpose. They stay visible as such:
-    # #1056 step 3 requires any new gate to say what it does about them.
+    # `Bash` and the vault writers print tier 1, and this row asks the NAME-level
+    # question: tier 1 is whatever is in NEITHER table (`TIER2_TOOLS` /
+    # `TIER3_TOOLS` in `app/harness/policy.py`), and `Bash` is kept out of both on
+    # purpose because gating the name would deny every worker for running `ls`.
+    # Since #740 `Bash` ALSO has a per-command tier, decided by `app/harness/
+    # safety.py`'s durable-external table and reachable only with the arguments in
+    # hand — so this row is NOT a claim that a `git push` from an unattended scope
+    # goes ungated, and the two assertions below are what keep that split from
+    # being lost. No line numbers quoted: the four this comment carried rotted
+    # inside one round of edits to `policy.py`. Both stay visible as such: #1056
+    # step 3 requires any new gate to say what it does about them.
     assert rows["Bash"]["tier"] == 1
+    assert policy.tool_tier("Bash") == 1
+    assert policy.tool_tier("Bash", {"command": "git push origin main"}) == 2
     assert rows["vault_write"]["tier"] == 1
 
 

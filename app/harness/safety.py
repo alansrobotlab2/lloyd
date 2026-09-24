@@ -133,6 +133,176 @@ _HOOK_ONLY_LABELS = frozenset({"sudo"})
 
 
 # ---------------------------------------------------------------------------
+# Durable-external pattern set — the reversibility TIER axis, not the deny axis
+# ---------------------------------------------------------------------------
+#
+# `_HARD_DENY_PATTERNS` above answers one question: must this command never run?
+# This table answers a different one, and the difference is the whole design: is
+# this command's effect *outside this machine, or in front of someone else, after
+# the fact*? Its answer is a reversibility tier, consumed by
+# `app/harness/policy.py`'s grant gate — never a denial. A tier-2 command runs
+# from an unattended scope when a human minted a live grant for it (#534), and is
+# refused with the exact grant to mint when nobody did. The catastrophic table
+# above has no such escape hatch and must never gain one.
+#
+# Why they cannot be one table: every shape here has an obvious legitimate use —
+# `git push` is how work ships, a service restart is how a deploy takes effect —
+# which is exactly why the hard-deny rule ("only ops with no plausible legitimate
+# agent use case") excludes them. And why the tier ladder cannot answer it by
+# tool NAME: one name, `Bash`, covers `ls` and `dd` in the same breath, so a
+# name-level tier would deny every worker in the fleet. The command string is the
+# only place the distinction exists, which is why the table is here, next to the
+# matcher that already reads command strings, and not in the ladder.
+#
+# Matching is per *segment* and anchored to the segment's program word, after
+# quoted arguments are scrubbed (`_scrubbed_segments`). Both halves are
+# deliberate: anchoring is what keeps `grep -rn 'git push' tests/` — a command
+# that only *talks about* a push, which is what most of the corpus matching these
+# strings actually is — at tier 1, and scrubbing is what keeps a heredoc full of
+# other people's command strings from tiering the turn that carried it. The cost
+# is that `bash -c 'git push origin main'` also reads tier 1: this axis catches
+# the ordinary shape of a durable action, not a determined evasion. That is the
+# same property the hard-deny table has, and for the same reason — authority, not
+# sandboxing.
+#
+# Each entry is `(compiled_regex, label)`, the same shape as the hard-deny table,
+# and the label is user-visible (it appears in the grant denial's reason). Adding
+# an entry here is the whole extension point: `bash_command_tier` below is the
+# only consumer, and it is what `policy.tool_tier` asks, so a new shape changes
+# the tier of a Bash call with no change to `app/harness/policy.py` — which is the
+# property `tests/test_grant_bash_tier.py` pins.
+
+#: Program-word anchor: leading whitespace, then any number of `NAME=value`
+#: assignments (`LANG=C git push …`). Deliberately nothing else: a wrapper
+#: (`timeout 5 git push`) resolves to tier 1, honestly.
+_DURABLE_LEAD = r"^\s*(?:[\w.+-]+=\S*\s+)*"
+
+#: Read-only `supervisorctl`/`systemctl` verbs are absent on purpose —
+#: `supervisorctl -c …/supervisord.conf status` is the health probe the runbooks
+#: tell every unattended turn to run, and tiering it would deny the fleet's own
+#: liveness check. The state-changing verb set mirrors `_SUPERVISOR_VERBS` /
+#: `_SYSTEMCTL_VERBS` in `app/harness/service_control.py`, which is the *hard-deny*
+#: axis for the same shapes: a background session may not restart a service at
+#: all, and an attended-or-granted one now pays a grant for it.
+_DURABLE_EXTERNAL_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+    # A supervisor program changing state: `supervisorctl [-c <conf>] restart <unit>`.
+    (
+        re.compile(
+            _DURABLE_LEAD
+            + r"(?:[\w./-]*supervisorctl)\b(?:\s+\S+)*?"
+            r"\s+(?:restart|start|stop|signal|reload|update|remove|add|clear)\b",
+        ),
+        "supervisorctl state change (restart/stop a service)",
+    ),
+
+    # The same thing through systemd (`agent-supervisord.service` and
+    # `agent-obsidian-sync` are real units on this box).
+    (
+        re.compile(
+            _DURABLE_LEAD
+            + r"(?:[\w./-]*systemctl)\b(?:\s+\S+)*?"
+            r"\s+(?:restart|start|stop|kill|reload|reload-or-restart|try-restart"
+            r"|daemon-reload|isolate|reset-failed)\b",
+        ),
+        "systemctl state change (restart/stop a unit)",
+    ),
+
+    # The restart form this box actually uses: restarts go through the promoter's
+    # own CLI, which shells out to supervisorctl itself
+    # (`scripts/automod/round.py`), so a tier keyed on the literal word
+    # `supervisorctl` would miss the sanctioned path entirely.
+    (
+        re.compile(
+            _DURABLE_LEAD
+            + r"(?:(?:[\w./-]*python[\d.]*\b(?:\s+\S+)*?\s+"
+              r"scripts[/\.]automod[/\.]round(?:\.py)?"
+              r"|[\w./-]*automod[/\.]round\.py)\b"
+              r"(?:\s+\S+)*?\s+(?:restart|recover)\b)",
+        ),
+        "automod round restart (restarts a live service)",
+    ),
+
+    # Publishing a branch: the counterparty is every other clone of the remote.
+    # `push` must be the subcommand, not an argument of one — `git grep push` is
+    # a search. The global-flag run allows `git -C <path> push`, which is how
+    # this repo's own scripts address the tree.
+    (
+        re.compile(
+            _DURABLE_LEAD
+            + r"git\b(?:\s+(?:-C\s+\S+|-c\s+\S+|-\S+))*\s+push\b",
+        ),
+        "git push (publishes to a remote other people clone)",
+    ),
+
+    # An HTTP *write* aimed at a host that is not this machine. Two order-free
+    # lookaheads: a write verb anywhere in the segment, and a non-loopback URL
+    # anywhere in it. Loopback stays tier 1 because every health probe, engine
+    # call and queue poke on this box is a loopback POST — measured over the
+    # retained transcripts, a deny keyed on "any POST" would have caught real
+    # fleet traffic while the durable kind was at zero.
+    (
+        re.compile(
+            _DURABLE_LEAD
+            + r"(?:[\w./-]*)(?:curl|wget|xh|httpie)\b"
+            + r"(?=[^|;&]*?\s(?:-X\s*(?:POST|PUT|PATCH|DELETE)"
+              r"|--request[=\s]+(?:POST|PUT|PATCH|DELETE)"
+              r"|-d\b|--data(-raw)?\b|-F\b|--form(-multipart)?\b"
+              r"|-T\b|--upload-file\b))"
+            + r"(?=[^|;&]*?https?://"
+              r"(?!127\.0\.0\.1|localhost|\[?::1\]?|0\.0\.0\.0))",
+            re.IGNORECASE,
+        ),
+        "HTTP write to a non-loopback host (a POST to someone else's API)",
+    ),
+]
+
+#: Quoted spans become a single space before matching: an argument in quotes is
+#: data the command carries, not the shape of the command.
+_DURABLE_QUOTED_SPAN_RE = re.compile(r"'[^']*'|\"[^\"\\]*(?:\\.[^\"\\]*)*\"")
+#: Shell segment boundaries: `;`, `|`, `||`, `&&`, `&`, newlines, subshell parens.
+_DURABLE_SEGMENT_RE = re.compile(r"[\n;|&()]+")
+
+
+def _scrubbed_segments(command: str) -> list[str]:
+    """Quote-scrubbed `command`, split into shell segments.
+
+    Order matters: scrubbing first is what stops a quoted `&&` or a command
+    string inside an argument from being read as a segment of its own.
+    """
+    unquoted = _DURABLE_QUOTED_SPAN_RE.sub(" ", command)
+    return [s for s in _DURABLE_SEGMENT_RE.split(unquoted) if s.strip()]
+
+
+def match_durable_external(command: Any) -> str | None:
+    """Label of the durable-external shape this command carries, else None.
+
+    The label exists because a grant denial has to name what it is asking
+    permission for: `check_grants` puts this string in the reason a human reads,
+    the way the hard-deny table's label reaches a safety refusal.
+    """
+    if not command or not isinstance(command, str):
+        return None
+    for segment in _scrubbed_segments(command):
+        for pattern, label in _DURABLE_EXTERNAL_PATTERNS:
+            if pattern.match(segment):
+                return label
+    return None
+
+
+def bash_command_tier(command: Any) -> int:
+    """Reversibility tier of one Bash command string: 2 durable-external, else 1.
+
+    The one function `app/harness/policy.py` asks. It answers 1 rather than
+    `policy`'s constant because a tier number is the ladder's vocabulary and
+    `policy.py` owns the ladder; this module owns the shape. Anything the table
+    does not name is tier 1 — the same deliberate empty case the name-level
+    ladder uses, because a gate that guesses wrong denies real work and a worker
+    that cannot run `ls` burns a run.
+    """
+    return 2 if match_durable_external(command) else 1
+
+
+# ---------------------------------------------------------------------------
 # Desktop deny-set for tool arguments — scoped to the fields that can arrive
 # ---------------------------------------------------------------------------
 

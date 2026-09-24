@@ -25,6 +25,7 @@ from __future__ import annotations
 import datetime as dt
 import sqlite3
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -34,6 +35,7 @@ sys.path.insert(0, str(LLOYD_HOME))
 
 from app.harness import HookRegistry  # noqa: E402
 from app.harness import policy  # noqa: E402
+from app.harness import safety  # noqa: E402
 from app.harness.policy import (  # noqa: E402
     GRANT_MINT_TOOL,
     GrantError,
@@ -855,3 +857,203 @@ def test_the_shipped_nightly_rearm_grant_materialises_and_reopens_the_write(tmp_
     other = check_grants(store, scope="autonomy-task:41",
                          tool_name="autonomy_write_task", tool_input=SCHED_CALL)
     assert other.allowed is False, "a declared grant leaked to another task's scope"
+
+
+# ── Bash tiered by command shape (#740) ────────────────────────────────────
+#
+# The silent no-op this section closes: `GrantStore.mint` accepts a
+# `tool='Bash'` row, and until #740 a Bash call was answered tier 1 and returned
+# before the store was opened — so a human who minted that row got a grant that
+# could never be consulted, and `consumed` stayed 0 forever. Clauses 4 and 5 are
+# the two halves of that: the deny must fire and name what it matched, and a live
+# row must actually be read and consumed.
+#
+# The tier NUMBER and the shape table are `tests/test_grant_bash_tier.py`; what
+# lives here is the authority question — who may run a durable command — and the
+# hook that is the only enforcement point on an unattended turn.
+
+DURABLE_BASH = "supervisorctl restart agent-tts"
+ORDINARY_BASH = "ls -la"
+
+
+class _NeverOpenedStore(GrantStore):
+    """A real store that fails the test if the tier check reaches it.
+
+    Clause 5 asserts more than an allow: for a tier-1 command and for every
+    interactive call the store must not be opened at all, because the gate's cost
+    model is that an ordinary command pays no sqlite read. A flag on a fake would
+    prove the fake; subclassing the real store proves `check_grants`.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.touched = []
+
+    def _connect(self):
+        self.touched.append("connect")
+        return super()._connect()
+
+
+def _bash(store, command, *, scope="autonomy-task:39"):
+    return _check(store, scope=scope, tool="Bash",
+                  tool_input={"command": command})
+
+
+def test_a_durable_bash_command_from_an_unattended_scope_is_denied(store):
+    """Clause 4. The same call that triage proved allowed, four shapes and all."""
+    d = _bash(store, DURABLE_BASH)
+    assert d.allowed is False
+    assert d.grant_id is None
+
+
+@pytest.mark.parametrize("command", [
+    "supervisorctl restart agent-tts",
+    "git push origin main",
+    "curl -X POST https://api.vendor/v1/deploy",
+    'python -m scripts.automod.round restart --only lloyd-backend --reason "x"',
+])
+def test_the_deny_reason_names_the_matched_shape_and_shows_the_mint_shape(command):
+    """Clause 4's informative half, on all four shapes the item names.
+
+    `email_send`'s deny is actionable from the tool name alone. `Bash` is not:
+    the same name ran `ls` one call earlier, so whoever mints the grant has to
+    see WHICH shape this call matched, or the decision is made blind — and the
+    mint line still has to be there, because that line is what makes issuance a
+    batched renewal rather than a live interruption (#534's design).
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store = GrantStore(Path(tmp) / "workers.db")
+        store.ensure_schema()
+        d = _bash(store, command)
+        assert d.allowed is False, command
+        label = safety.match_durable_external(command)
+        assert label and label in d.reason, (command, d.reason)
+        for fragment in ("grant_create", "scope", "Bash", "expires"):
+            assert fragment in d.reason, (command, fragment, d.reason)
+
+
+def test_the_bash_deny_discloses_the_grant_s_breadth():
+    """One live `tool='Bash'` row authorises every durable-shaped command in the
+    scope, because `_PREDICATE_RE` bounds lengths and integers and cannot express
+    "only this shape". That is Alan's open decision on #740, and until it is made
+    the deny text has to say it — a grant minted on the strength of one denied
+    `git push` silently covers a service restart in the same scope.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        store = GrantStore(Path(tmp) / "workers.db")
+        store.ensure_schema()
+        d = _bash(store, "git push origin main")
+        assert "EVERY" in d.reason and "predicate" in d.reason, d.reason
+
+
+def test_a_live_bash_grant_is_consulted_and_consumed(store):
+    """Clause 5's positive half, and the exact probe the item says to re-run:
+    `allowed=True`, a `grant_id` returned, `consumed` incremented.
+
+    Before this change the same call returned `allowed=True` with
+    `grant=None, consumed=0` — indistinguishable from having no grant at all,
+    which is what made the minted row false assurance rather than a broken
+    control."""
+    g = _mint(store, tool="Bash")
+    d = _bash(store, "git push origin main")
+    assert d.allowed is True, d.reason
+    assert d.grant_id == g["id"]
+    assert store.get(g["id"])["consumed"] == 1
+    assert [(r["decision"], r["grant_id"]) for r in store.dispatch_rows()] == [
+        ("allow", g["id"])]
+
+
+def test_one_bash_grant_covers_each_durable_shape_in_its_scope(store):
+    """The breadth, pinned as behaviour rather than argued: one row, three
+    different shapes, three consumes. A narrower row would need a predicate the
+    mini-language does not have — which is why the deny text discloses it."""
+    g = _mint(store, tool="Bash")
+    for command in ("git push origin main", DURABLE_BASH,
+                    "curl -X POST https://api.vendor/v1/deploy"):
+        assert _bash(store, command).allowed is True, command
+    assert store.get(g["id"])["consumed"] == 3
+
+
+def test_a_tier1_bash_command_never_reaches_the_store(tmp_path):
+    """Clause 5's negative half, measured rather than inferred from `allowed`:
+    `ls -la` must not cost a store read, from an unattended scope or any other."""
+    store = _NeverOpenedStore(tmp_path / "workers.db")
+    store.ensure_schema()
+    store.touched.clear()        # schema creation is setup, not the measured call
+    for scope in ("autonomy-task:39", "worker:scheduled-task", "interactive"):
+        d = _bash(store, ORDINARY_BASH, scope=scope)
+        assert d.allowed is True and d.grant_id is None, scope
+    assert store.touched == [], "tier-1 Bash opened the grant store"
+
+
+def test_an_interactive_bash_call_keeps_the_tier1_passthrough(tmp_path):
+    """Every Bash call from an interactive scope stays passthrough — with the
+    store closed, not merely with an allow.
+
+    A chat turn may restart a service, push a branch and POST to a vendor API
+    exactly as it did before #740; the tier exists to gate unattended scopes, and
+    making a human's own turn pay a grant check it cannot fail would be friction
+    with no authority content."""
+    store = _NeverOpenedStore(tmp_path / "workers.db")
+    store.ensure_schema()
+    store.touched.clear()        # schema creation is setup, not the measured call
+    for command in (DURABLE_BASH, "git push origin main",
+                    "curl -X POST https://api.vendor/v1/deploy"):
+        d = _bash(store, command, scope="interactive")
+        assert d.allowed is True and d.grant_id is None, command
+    assert store.touched == [], "an interactive Bash call opened the grant store"
+
+
+def test_hook_denies_a_durable_bash_command_from_a_worker_scope(store, monkeypatch):
+    """The seam the fleet actually runs through: `workers/sources/_common.py`
+    installs this hook, and the callback's own tier short-circuit is where a
+    name-level read used to return before `check_grants` ever saw the command."""
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(store.db_path))
+    hooks = HookRegistry()
+    install_policy_hook(hooks, store=store, scope="worker:scheduled-task", now=NOW)
+    out = _fire(hooks, "Bash", {"command": DURABLE_BASH})
+    assert _denied(out)
+    assert "supervisorctl" in (
+        out["hookSpecificOutput"]["permissionDecisionReason"])
+
+
+def test_hook_allows_a_durable_bash_command_on_a_live_grant(store, monkeypatch):
+    """The seam's positive half, at the same instant the hook is installed:
+    allowed, and the row consumed — the unattended path can still do real
+    durable work when a person said it may."""
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(store.db_path))
+    g = _mint(store, scope="worker:scheduled-task", tool="Bash")
+    hooks = HookRegistry()
+    install_policy_hook(hooks, store=store, scope="worker:scheduled-task", now=NOW)
+    assert not _denied(_fire(hooks, "Bash", {"command": DURABLE_BASH}))
+    assert store.get(g["id"])["consumed"] == 1
+
+
+def test_hook_passes_an_ordinary_bash_command_through(store, monkeypatch):
+    """A worker still runs `ls`: the hook must not become a Bash gate in general.
+    Asserted with a store that has no Bash row, so the allow is the tier and not
+    a grant."""
+    monkeypatch.setenv("LLOYD_GRANT_DB", str(store.db_path))
+    hooks = HookRegistry()
+    install_policy_hook(hooks, store=store, scope="worker:scheduled-task", now=NOW)
+    assert not _denied(_fire(hooks, "Bash", {"command": ORDINARY_BASH}))
+    assert store.dispatch_rows() == []
+
+
+def test_a_minted_bash_grant_is_no_longer_a_silent_no_op(store):
+    """The row that used to be inert is now load-bearing, so the guard that made
+    it safe to mint one is what a reviewer would want to see: an expired row
+    denies. `mint` still will not refuse a `Bash` pattern — refusing it was the
+    alternative to making the row live, and making it live is the fix."""
+    g = _mint(store, tool="Bash", expires=-1.0)          # expired before NOW
+    d = _bash(store, DURABLE_BASH)
+    assert d.allowed is False
+    assert store.get(g["id"])["consumed"] == 0, "an expired grant was consumed"
+
+
+def test_a_tier2_bash_grant_does_not_leak_to_another_scope(store):
+    """A `Bash` grant is scoped the way every other grant is: task 39's row does
+    not authorise task 40's restart."""
+    _mint(store, scope="autonomy-task:39", tool="Bash")
+    d = _bash(store, DURABLE_BASH, scope="autonomy-task:40")
+    assert d.allowed is False
