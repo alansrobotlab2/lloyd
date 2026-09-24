@@ -2308,6 +2308,26 @@ export interface BacklogHealth {
   self_spawned_open: number
   landed_items_7d: number
   implement_pool: { ready: number; bound: number; floor: number }
+  // #904, `scripts/automod/board_decisions.summary`. Optional: absent on an older
+  // snapshot, null when the join failed.
+  decisions?: BoardDecisions | null
+}
+
+/** #904: what the queue decisions produced over the window. `outcome` carries
+ *  no rate below its minimum — "insufficient" with the count, never a guess. */
+export interface BoardDecisions {
+  window: { days: number; since: string; until: string }
+  promotions: {
+    count: number
+    by_decider: Record<string, number>
+    outcome: { verdict: 'insufficient' | 'measured'; promotions: number; min?: number
+               done_rate?: number; landed_rate?: number; dwell_h_median?: number | null
+               terminal?: Record<string, number> }
+  }
+  per_day: { day: string; promotions: number; by_decider: Record<string, number> }[]
+  zero_streak: { longest: number; current: number }
+  retire_reopen: { retired: number; reopened: number; ids: number[]
+                   by_kind: Record<string, { retired: number; reopened: number; after_retriage: number; by_reopen_item: number }> }
 }
 
 // scripts/automod/scorecard.py, last 7 days. Every rate is null when its

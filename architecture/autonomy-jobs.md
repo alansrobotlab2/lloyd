@@ -565,7 +565,14 @@ monitor rule it shares with #60, stated under
 
 Three jobs that decide what future effort goes to — what gets researched, what
 reaches `up_next` on the kanban at `~/obsidian/backlog/`, what gets archived.
-Nothing in the fleet measures how well they decide.
+Nothing in the fleet measures how well they decide. The board-side half is
+measured since #904 — `scripts/automod/board_decisions.py`, surfaced through
+`board_health.decisions` (dashboard backlog panel, the steward's
+`<board_health>` block) and `round board-decisions`: every promotion into
+`up_next` joined to the ledger event that made it and to its terminal state,
+per-day counts, and retirements later reversed. It sees #35 only when a round
+picks its promotion up (`unrecorded`, since the MCP store writes no ledger
+row); #65's registry conversion is still unmeasured.
 
 | ID | Freq | Role |
 |----|------|---|

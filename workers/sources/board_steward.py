@@ -327,12 +327,14 @@ def _item_line(i: Any) -> str:
 
 
 def _health_lines(h: dict | None) -> str:
-    """`backlog.board_health` as the nine lines the steward reads. The board
+    """`backlog.board_health` as the ten lines the steward reads. The board
     below is at most eighty items of ~560; these are the counts it cannot see.
 
     The ninth (#1210): closed items carrying `needs-human`. A landed `met` item
     now closes with that tag, so without this line the steward would watch
-    `draft.needs_human` fall and conclude nobody owes anything."""
+    `draft.needs_human` fall and conclude nobody owes anything. The tenth
+    (#904): what the queue decisions produced — promotions by decider and
+    their outcome, per-day counts, and retirements later reversed."""
     if not h:
         return "(unavailable)"
     d, u, f = h.get("draft") or {}, h.get("up_next") or {}, h.get("flow") or {}
@@ -356,7 +358,15 @@ def _health_lines(h: dict | None) -> str:
         f"items landed in 7 d: {h.get('landed_items_7d', 0)}",
         (f"implement pool: {pool.get('ready', 0)} ready against a bound of {pool.get('bound', 0)} "
          f"(floor {pool.get('floor', 0)}); single-item triage pauses at or above it"),
+        _decisions_line(h.get("decisions")),
     ])
+
+
+def _decisions_line(d: dict | None) -> str:
+    """#904: what the queue decisions produced — the one line of
+    `board_decisions.summary` the steward reads."""
+    from scripts.automod import board_decisions as BD
+    return BD.health_line(d)
 
 
 def build_prompt(*, events: list[dict], items: list[Any], n_open: int, since_ts: float,

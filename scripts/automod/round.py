@@ -1023,6 +1023,12 @@ def main(argv=None) -> int:
     uo.add_argument("--dry-run", action="store_true")
     sub.add_parser("sweep-status", help="how far the backlog sweep has got: unread, ranked, "
                                         "parked, and the last batches")
+    bd = sub.add_parser("board-decisions", help="what the queue decisions produced (#904): every "
+                                                "promotion into up_next with its deciding event "
+                                                "and terminal state, per-day counts, and "
+                                                "retirements later reopened")
+    bd.add_argument("--days", type=int, default=7)
+    bd.add_argument("--summary", action="store_true", help="omit the per-item listings")
     pb = sub.add_parser("priority-backfill", help="write the default priority (low) onto every "
                                                   "backlog item, any board or status, whose "
                                                   "priority is absent, `none` or unknown")
@@ -1085,6 +1091,11 @@ def main(argv=None) -> int:
                          indent=2, default=str))
     elif args.cmd == "sweep-status":
         print(json.dumps(sweep_status(), indent=2, default=str))
+    elif args.cmd == "board-decisions":
+        from scripts.automod import backlog as B, board_decisions as BD
+        reading = BD.board_decisions(S.LEDGER_PATH, items=B.all_items(None), days=args.days)
+        print(json.dumps(BD.summary(reading) if args.summary else reading,
+                         indent=2, default=str))
     elif args.cmd == "priority-backfill":
         from scripts.automod import backlog as B
         rows = B.backfill_priority(None, dry_run=args.dry_run, reset_open=args.reset_open)

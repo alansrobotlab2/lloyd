@@ -856,6 +856,47 @@ def test_a_closed_owed_check_survives_only_in_closed_needs_human(vault):
     assert "done" not in h, "board_health keeps no closed-side bucket but this one"
 
 
+def test_board_decisions_reach_the_backlog_payload_and_the_steward_block(vault):
+    """#904 clause 5: the decision figures ride `board_health`, so the
+    dashboard's existing backlog payload and the steward's `<board_health>`
+    block both carry them — no new job, no new route, the same 60 s TTL."""
+    import time
+    from workers.sources import board_steward as BS
+
+    _backlog_item(vault, 1, "a", "up_next")
+    now = time.time()
+    (vault / "ledger.jsonl").write_text(json.dumps(
+        {"event": "backlog_triage", "item_id": 1, "verdict": "confirmed", "held": False,
+         "closed": False, "ts": now - 3600}) + "\n")
+    h = dash._backlog()["health"]
+    d = h["decisions"]
+    assert d["promotions"]["count"] == 1 and d["promotions"]["by_decider"] == {"triage": 1}
+    assert d["promotions"]["outcome"] == {"verdict": "insufficient", "promotions": 1, "min": 5}
+    assert len(d["per_day"]) == 8 and "entries" not in d, "the summary, not the listing"
+
+    lines = BS._health_lines(h)
+    assert "board decisions 7d: 1 promotions into the pool (triage 1)" in lines
+    assert "outcome insufficient (1 < 5)" in lines
+
+    # Same cache, same interval: the figures did not buy themselves a new poll.
+    assert dash._SCORECARD_TTL_S == 60.0
+    from app.routers.dashboard import router
+    assert not [r for r in router.routes if "decision" in getattr(r, "path", "")]
+
+
+def test_a_failing_decision_join_costs_its_key_only(vault, monkeypatch):
+    from scripts.automod import board_decisions as BD
+    from workers.sources import board_steward as BS
+
+    def boom(*a, **k):
+        raise RuntimeError("join broke")
+    monkeypatch.setattr(BD, "board_decisions", boom)
+    _backlog_item(vault, 1, "a", "draft")
+    h = dash._backlog()["health"]
+    assert h is not None and h["decisions"] is None and h["draft"]["pool"] == 1
+    assert "board decisions: (unavailable)" in BS._health_lines(h)
+
+
 def test_a_failing_board_health_costs_the_sub_object_only(vault, monkeypatch):
     from scripts.automod import backlog as B
 

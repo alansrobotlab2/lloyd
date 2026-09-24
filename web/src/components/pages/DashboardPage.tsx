@@ -5,7 +5,7 @@ import {
 } from 'lucide-react'
 import {
   dashboardApi, sectionOk, sectionError,
-  type AutomodState, type AutonomyState, type AutonomyTaskRow, type BacklogHealth, type BacklogState, type NetworkState,
+  type AutomodState, type AutonomyState, type AutonomyTaskRow, type BacklogHealth, type BoardDecisions, type BacklogState, type NetworkState,
   type BackgroundTask, type DashboardSnapshot, type GpuInfo,
   type RecentSession, type SubagentRun, type UsageBucket, type VllmEngine,
   type WorkersState, type EnginePressure, type PrefixMissSummary,
@@ -1020,6 +1020,26 @@ function BacklogHealthLines({ health }: { health: BacklogHealth }) {
           )}
         </div>
       )}
+      {health.decisions && <DecisionsLine d={health.decisions} />}
+    </div>
+  )
+}
+
+/** #904: promotions into `up_next` over the window and what became of them. A
+ *  window with too few promotions says so rather than showing a rate. */
+function DecisionsLine({ d }: { d: BoardDecisions }) {
+  const o = d.promotions.outcome
+  const days = d.per_day.map((p) => p.promotions).join(' ')
+  return (
+    <div title={`per day ${days}`}>
+      {d.window.days}d: {d.promotions.count} promoted ·{' '}
+      {o.verdict === 'measured'
+        ? `${Math.round((o.done_rate ?? 0) * 100)}% done · dwell ${o.dwell_h_median ?? '—'} h`
+        : `outcome insufficient (${o.promotions})`}
+      {d.zero_streak.current > 0 && (
+        <span className="text-amber-400"> · {d.zero_streak.current} d without a promotion</span>
+      )}
+      {' · '}reopened {d.retire_reopen.reopened}/{d.retire_reopen.retired} retired
     </div>
   )
 }

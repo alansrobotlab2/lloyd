@@ -3642,8 +3642,11 @@ def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BO
         if set_status(iid, status, why,
                       add_tags=(NEEDS_HUMAN_TAG,) if needs_human else (),
                       remove_tags=() if needs_human else (NEEDS_HUMAN_TAG,)):
+            # `needs_human` on the row itself: `board_decisions` counts a
+            # hand-off to a person, and read off the reason text it was a guess.
             S.append_event({"event": "status_moved", "item_id": iid, "from": current.get(iid),
-                            "to": status, "reason": why[:200]}, path=ledger)
+                            "to": status, "reason": why[:200], "needs_human": needs_human},
+                           path=ledger)
             moved.append({"item_id": iid, "from": current.get(iid), "to": status})
     return moved
 
@@ -5354,6 +5357,16 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
                              if i.status in CLOSED_STATUSES and NEEDS_HUMAN_TAG in i.tags)
 
     pool = implement_pool_bound(ledger, floor=floor, now=now)
+    # #904: what the queue decisions produced — promotions joined to their
+    # source event and terminal state, per-day counts, retire-then-reopen.
+    # The summary only; `round board-decisions` has the per-item listing. A
+    # failure costs this key, never the rest of the board's shape.
+    try:
+        from scripts.automod import board_decisions as BD
+        decisions = BD.summary(BD.board_decisions(ledger, items=everything, now=now))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("board_decisions failed: %s", exc)
+        decisions = None
     return {
         "open": open_counts,
         "draft": draft,
@@ -5368,6 +5381,7 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
         "landed_items_7d": pool["landed_items_7d"],
         "implement_pool": {"ready": len(ready), "bound": pool["bound"], "floor": pool["floor"]},
         "sweep": sweep,
+        "decisions": decisions,
     }
 
 
