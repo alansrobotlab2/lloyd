@@ -1223,7 +1223,7 @@ workers:
     # `board_steward` ledger events are what decide whether `apply` flips.
     # With `apply: true` it writes through the one status writer and
     # `select_confirmed` takes its pick; then `autocode.status_pipeline`
-    # and `close_on_settle` come off. It may never set `done`: closing is
+    # comes off. It may never set `done`: closing is
     # gated on a settled promotion that said `met`, and stays mechanical.
     # Primary since the first live tick: on the secondary it made ordering
     # errors in two of five dry-runs and the live tick died at max_turns on
@@ -1365,13 +1365,6 @@ workers:
       # round can meet. Clauses are capped at 6 (backlog.MAX_CLAUSES).
       group_max_items: 4
       group_max_turns: 120
-      # An umbrella whose one unattended implement attempt is spent unfolds
-      # and closes (`done`, tag `unfolded`); its members drop `grouped` and
-      # are triaged or expire on their own (Alan, 2026-09-14). Runs in
-      # autocode's housekeeping. On 09-14, 156 members sat under umbrellas,
-      # expiry-exempt, and 5 of 68 umbrellas formed had landed. false: a
-      # spent umbrella parks needs-human with its members folded, as before.
-      unfold_spent_umbrellas: true
       # Inner Voice. Every background run is RECORDED regardless
       # (`harness.background_recording`); this is whether the observer
       # watches. It runs on the primary at priority 1 and spends a
@@ -1396,15 +1389,6 @@ workers:
       # sections live, so the original content survives. 6000 cut more than
       # half of the oldest item on the board.
       body_chars: 30000
-      # Ask the harness to restate the finished turn's verdict as a JSON
-      # object under scripts/automod/backlog.TRIAGE_VERDICT_SCHEMA, instead of
-      # relying on a regex over `VERDICT:` lines. The text block stays in the
-      # prompt and the regex stays as the fallback — the finalizer is skipped
-      # whenever the turn did not end of its own accord, and a verdict
-      # pipeline with no fallback turns a transient engine error into a lost
-      # triage. The ledger records `verdict_source` so the fallback rate is
-      # visible rather than the two being indistinguishable.
-      structured_verdict: true
       # New items one single triage may file, and only when the item it read
       # is closing; a kept item gets its findings appended instead. 3 -> 1 on
       # 2026-09-13: triage filed 0.989 items per item it closed, and 80 of
@@ -1527,7 +1511,7 @@ workers:
       # clustering, group triage, a human — picked up in
       # expire_spawns_after_days is closed, tagged `expired`, and reopens by
       # setting its status back to draft. Runs in this source's housekeeping
-      # beside close_on_settle. Off: held items only accumulate, visible in the
+      # beside the settle closer. Off: held items only accumulate, visible in the
       # triage skip summary and the scorecard's over-bound gauge, never lost.
       expire_spawns: true
       # 14, not the code's 30-day fallback (Alan, 2026-09-13): at 30 expiry had

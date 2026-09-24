@@ -875,7 +875,6 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     # when the item was queued, not whatever it is by the time it runs.
     payload = {"max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),
                "body_chars": int(src_cfg.get("body_chars", DEFAULT_BODY_CHARS)),
-               "structured_verdict": bool(src_cfg.get("structured_verdict", True)),
                "spawn_cap": int(src_cfg.get("spawn_cap", SPAWN_CAP)),
                "implement_pool_floor": int(src_cfg.get("implement_pool_floor",
                                                        DEFAULT_IMPLEMENT_POOL_FLOOR)),
@@ -1058,12 +1057,6 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
 
     budget = int((item.payload or {}).get("max_turns") or DEFAULT_MAX_TURNS)
     body_chars = int((item.payload or {}).get("body_chars") or DEFAULT_BODY_CHARS)
-    # Kill switch, in the payload like the budgets so a queued item runs under
-    # the config that was live when it was enqueued. With it off the turn runs
-    # identically and only the regex path reads the result — which is what
-    # makes flipping it a real rollback rather than a code path nobody has
-    # exercised. Items queued before this landed default to on.
-    want_structured = bool((item.payload or {}).get("structured_verdict", True))
     logger.info("triaging backlog #%s (%s days old, budget %d): %s",
                 candidate.id, candidate.age_days, budget, candidate.name[:70])
 
@@ -1078,7 +1071,7 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
         run = await run_prompt_in_session(
             prompt, title=f"backlog triage #{candidate.id}: {candidate.name[:48]}",
             source=NAME, max_turns=budget, priority=1,
-            final_schema=B.TRIAGE_VERDICT_SCHEMA if want_structured else None,
+            final_schema=B.TRIAGE_VERDICT_SCHEMA,
             final_schema_prompt=(
                 "Restate the verdict block above as a single JSON object "
                 "matching the schema. Same verdict, same acceptance check, "
@@ -1101,7 +1094,7 @@ async def execute(item: QueueItem, claim) -> dict[str, Any]:
 
     session_id = run["session_id"]
     stop_reason = run.get("stop_reason")
-    structured = run.get("structured") if want_structured else None
+    structured = run.get("structured")
     structured_error = str(run.get("structured_error") or "")
     parsed = parse_verdict(run["text"], structured)
 
@@ -1235,7 +1228,6 @@ async def _execute_group(item: QueueItem, cluster: dict, members: list) -> dict[
     payload = item.payload or {}
     budget = int(payload.get("group_max_turns") or DEFAULT_GROUP_MAX_TURNS)
     body_chars = int(payload.get("body_chars") or DEFAULT_BODY_CHARS)
-    want_structured = bool(payload.get("structured_verdict", True))
     cid = str(cluster.get("id") or "")
     per_item = max(PER_ITEM_MIN_CHARS, body_chars // max(1, len(members)))
     member_ids = [m.id for m in members]
@@ -1255,7 +1247,7 @@ async def _execute_group(item: QueueItem, cluster: dict, members: list) -> dict[
         run = await run_prompt_in_session(
             prompt, title=f"backlog group triage {cid}: {len(members)} items",
             source=NAME, max_turns=budget, priority=1,
-            final_schema=B.GROUP_TRIAGE_SCHEMA if want_structured else None,
+            final_schema=B.GROUP_TRIAGE_SCHEMA,
             final_schema_prompt=(
                 "Restate the GROUP_VERDICTS block above as a single JSON object matching "
                 "the schema: one entry per item with its verdict, the umbrella you filed "
@@ -1271,7 +1263,7 @@ async def _execute_group(item: QueueItem, cluster: dict, members: list) -> dict[
 
     session_id = run["session_id"]
     stop_reason = run.get("stop_reason")
-    structured = run.get("structured") if want_structured else None
+    structured = run.get("structured")
     parsed = parse_group_verdict(run.get("text") or "", structured, member_ids)
     if not parsed:
         attempts = sum(1 for d in B._ledger_events(S.LEDGER_PATH, "backlog_group_triage", require_item=False)
@@ -1338,7 +1330,6 @@ async def _execute_sweep(item: QueueItem, members: list) -> dict[str, Any]:
     payload = item.payload or {}
     budget = int(payload.get("sweep_max_turns") or DEFAULT_SWEEP_MAX_TURNS)
     body_chars = int(payload.get("body_chars") or DEFAULT_BODY_CHARS)
-    want_structured = bool(payload.get("structured_verdict", True))
     member_ids = [m.id for m in members]
     batch_id = B.sweep_batch_id(member_ids)
     per_item = max(PER_ITEM_MIN_CHARS, body_chars // max(1, len(members)))
@@ -1351,7 +1342,7 @@ async def _execute_sweep(item: QueueItem, members: list) -> dict[str, Any]:
             prompt, title=f"backlog sweep {batch_id}: {len(members)} items",
             source=NAME, max_turns=budget, priority=1,
             extra_disallowed=list(SWEEP_DISALLOWED),
-            final_schema=B.SWEEP_SCHEMA if want_structured else None,
+            final_schema=B.SWEEP_SCHEMA,
             final_schema_prompt=(
                 "Restate the SWEEP_VERDICTS block above as a single JSON object matching "
                 "the schema: one entry per item with its verdict, duplicate_of (0 unless "
@@ -1364,7 +1355,7 @@ async def _execute_sweep(item: QueueItem, members: list) -> dict[str, Any]:
 
     session_id = run["session_id"]
     stop_reason = run.get("stop_reason")
-    structured = run.get("structured") if want_structured else None
+    structured = run.get("structured")
     parsed = parse_sweep_verdict(run.get("text") or "", structured, member_ids)
     if not parsed:
         return _sweep_out_of_budget(batch_id, member_ids, budget, session_id=session_id,

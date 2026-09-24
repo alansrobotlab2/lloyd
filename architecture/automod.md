@@ -500,8 +500,8 @@ this loop's own close of that commit. It moves the item to `up_next` (the
 writes `item_reopened {by: rollback}`. An item a human closed is never touched.
 The `rolled_back` re-offer names the commit to cherry-pick: the landed commit
 outlives the rollback, held by the guardian tag, and a squashed round's history
-is at `refs/automod/rounds/<round>`. Switch
-`workers.sources.autocode.reopen_reverted`. Why the guardian reset past the
+is at `refs/automod/rounds/<round>`. No switch (`autocode.reopen_reverted`
+was retired 2026-09-24). Why the guardian reset past the
 newer promotion at all is #1358. `tests/test_backlog_unattended.py` pins it
 with the incident's rows.
 
@@ -872,7 +872,8 @@ landed marker is unfolded, closed `done` tagged `unfolded` with
 are not re-clustered (`group_triaged_ids`) and self-filed ones stay
 quarantined and expire; `grouped` stays in `EXPIRY_EXEMPT_TAGS`, because a
 member of a live umbrella closed by expiry would be misattributed by
-`close_settled_items`. Switch `workers.sources.autotriage.unfold_spent_umbrellas`.
+`close_settled_items`. No switch (`autotriage.unfold_spent_umbrellas` was
+retired 2026-09-24).
 
 **One automatic second life.** A spent attempt parked the item for a human:
 ~35 a week, and 42 of the 67 a person reopened later landed.
@@ -1384,7 +1385,7 @@ Four changes, each with its own switch or none needed:
    `waited_s` and `behind`, mirroring `land_wait_rounds`. A successful settle
    wait wrote nothing at all before, so the cost this change is about was
    invisible; scorecard row 14 carries both waits, because they have different
-   fixes (the window's length, and depth) and the `landing` idle class cannot
+   fixes (the window's length, and depth) and the `promotion_gap` idle class cannot
    tell them apart.
 
 7. **A landing that lost the race for a settled window waits out the
@@ -3085,18 +3086,22 @@ bounced once.
 off the ledger, the backlog's front matter and a week of `git log` — fourteen
 rows (row 12, `arch review`, landed 2026-09-11; row 13, board net flow,
 09-13; row 14, `autocode duty cycle`, 09-15: how much of the window had an
-implement turn in flight and what each idle gap was waiting on — landing,
-abort, restart — for Alan's rule that a round runs 100% of the time; 88%
+implement turn in flight and what each idle gap was waiting on —
+`promotion_gap` (a gap that contains a promotion; the landing's own waits
+lead the row, and the restart is not measured), abort, restart — for Alan's rule that a round runs 100% of the time; 88%
 over the 24 h before the row existed, 97 min of it across six landings),
 each null rather than 0% when
 it has no denominator: acceptance hit
 rate, the audit delta between the author's and the grader's `met` clauses,
 review refusals (and how many were fixed in turn, re-offered, escalated),
 spawn ratio per source (with merges, appended findings, expiries and the
-open self-spawned count against its bound), landed rounds a human commit
-touched within seven days, test-honesty findings, bookkeeping defects
+open self-spawned count against its bound; `seam_only_refusals`), landed
+rounds whose added lines a later non-`lloyd` commit removed within seven
+days (row 5, redefined 2026-09-24: "shared a file with a human commit" read
+88% in a week whose commits were 92% a person's), test-honesty findings, bookkeeping defects
 (nameless deferrals, stranded landings, bare aborts), the regex-fallback
-rate, throughput, rollbacks, and grouping — clusters formed, duplicates
+rate, throughput (gate time per round beside the median full gate, and the
+red-tree passes and items), rollbacks, and grouping — clusters formed, duplicates
 closed, folds, umbrellas landed and the members each one closed (§3.2c). The dashboard's `automod` section shows the 7-day row; `--record`
 appends it to `scorecard.jsonl` in the state dir so the trend survives. Its
 baseline, from the loop's first 4.3 days: 32% acceptance met, 7 items closed

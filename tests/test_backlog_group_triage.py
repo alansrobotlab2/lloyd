@@ -424,24 +424,19 @@ def test_an_umbrella_still_owed_an_attempt_or_landed_is_left_alone(isolated):
     assert _fm(_path(isolated, 2))["group"] == 50 and _fm(_path(isolated, 7))["group"] == 60
 
 
-def test_unfolding_spent_umbrellas_can_be_switched_off(isolated):
-    _folded_umbrella(isolated)
-    assert B.unfold_spent_umbrellas(S.LEDGER_PATH, enabled=False) == []
-    assert _fm(_path(isolated, 2))["group"] == 50
-
-
-def test_autocode_housekeeping_unfolds_with_triages_switch(monkeypatch):
+def test_autocode_housekeeping_always_unfolds(monkeypatch):
+    """`autotriage.unfold_spent_umbrellas` was retired on 2026-09-24: the pass
+    runs on every housekeeping tick and takes no switch."""
     from workers.sources import autocode as A
-    seen = {}
-    monkeypatch.setattr(B, "unfold_spent_umbrellas", lambda ledger, **kw: seen.update(kw) or [])
-    monkeypatch.setattr(A, "_source_cfg", lambda name: {"unfold_spent_umbrellas": False}
-                        if name == "autotriage" else {})
+    seen = []
+    monkeypatch.setattr(B, "unfold_spent_umbrellas", lambda ledger, **kw: seen.append(kw) or [])
+    monkeypatch.setattr(A, "_source_cfg", lambda name: {})
     monkeypatch.setattr(A, "reap_abandoned_rounds", lambda *a, **k: [])
     for name in ("close_settled_items", "reconcile_statuses", "expire_stale_spawns",
                  "release_held_confirmations"):
         monkeypatch.setattr(B, name, lambda *a, **k: [])
     A._housekeeping({})
-    assert seen == {"enabled": False}
+    assert seen == [{}]
 
 
 def test_a_board_pass_by_hand_runs_the_passes_once_and_records_it(isolated, monkeypatch):

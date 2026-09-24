@@ -265,13 +265,30 @@ def _land_detached(round_id: str) -> dict:
             "Detached, because landing restarts lloyd-mcp and would otherwise kill "
             "the promoter mid-flight. It now waits for the backend to be IDLE — and "
             "your own turn is what is keeping it busy. Polling automod_status in a "
-            "loop starves the gate you are waiting on, and after 15 minutes the "
-            "landing gives up. Stop talking and the landing proceeds within seconds. "
+            f"loop starves the gate you are waiting on, and {_landing_minutes_note()}. "
+            "Stop talking and the landing proceeds within seconds. "
             "It will restart the backend, which ends this turn anyway. Check "
             "automod_status on your NEXT turn: `current.state` goes landing -> "
-            "observing, and the guardian settles it to last-known-good 15 minutes "
-            f"after that. Progress is logged to {log}."),
+            "observing, and the guardian settles it to last-known-good at the end of "
+            f"its observation window. Progress is logged to {log}."),
     }
+
+
+def _landing_minutes_note() -> str:
+    """The idle budget and the observation window, read from config at call
+    time. Both are `automod.landing` keys that have moved (the window went
+    900 s → 450/120 s on 2026-09-20) while this note said "15 minutes" for
+    each; a restated number is wrong the day the key changes."""
+    try:
+        from scripts.automod import promote as P
+        budget, _hard = P._idle_budget(None)
+        window = P.errors_window(restart=True)
+        quiet = P.errors_window(restart=False)
+        return (f"after about {round(budget / 60)} minutes of a busy backend the landing "
+                f"gives up; once landed, the guardian observes it for about "
+                f"{round(window / 60)} minutes ({round(quiet / 60)} when nothing restarted)")
+    except Exception:  # noqa: BLE001 — a note is never the landing
+        return "after its idle budget the landing gives up"
 
 
 def _background_tasks_for_session() -> list[dict]:
@@ -673,8 +690,8 @@ async def list_tools() -> list[Tool]:
                 "verifies the running commit changed. END YOUR TURN once this returns — "
                 "your own turn is what keeps the backend busy, so polling starves the "
                 "gate the landing is waiting on. Check automod_status on your next "
-                "turn. The guardian then watches for 15 minutes before the commit "
-                "becomes last-known-good."
+                "turn: automod_status shows the landing, then the guardian's observation "
+                "window, then the commit settling to last-known-good."
             ),
             inputSchema={
                 "type": "object",

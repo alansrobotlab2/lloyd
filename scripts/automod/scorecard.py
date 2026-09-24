@@ -22,11 +22,13 @@ The metrics, each defined where it is computed:
   4  spawn_ratio             filed / closed, triage and implement separately;
                              merges, appended findings, expiries, and the
                              open self-spawned gauge against its bound
-  5  human_touch             landed rounds a human commit touched within 7 d
+  5  human_touch             landed rounds whose added lines a later non-`lloyd`
+                             commit removed within 7 d
   6  test_honesty            findings per gated round, grader + deterministic
   7  bookkeeping             nameless deferrals, stranded landings, bare aborts
   8  verdict_plumbing        regex-fallback rate, truncations
-  9  throughput              items closed/day, median turns, median gate seconds
+  9  throughput              items closed/day, median turns, gate time per round,
+                             median full gate, red-tree passes and items
  10  rollbacks               count (precision is a human judgment; recorded null)
  11  grouping                clusters formed, group triages and what they judged
  12  arch review             units reviewed, docs edited vs rejected, what was filed
@@ -38,6 +40,7 @@ The metrics, each defined where it is computed:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import re
 import statistics
@@ -280,12 +283,102 @@ def _git_log(repo: Path, since_ts: float) -> list[dict]:
 
 
 def _commit_diff(repo: Path, sha: str) -> str:
+    """`git show -U0` of one commit, every file. Memoised per (repo, sha): a
+    commit's diff never changes, and rows 5 and 6 both read it."""
+    return _commit_diff_cached(str(repo), sha)
+
+
+@functools.lru_cache(maxsize=4096)
+def _commit_diff_cached(repo: str, sha: str) -> str:
     try:
-        r = subprocess.run(["git", "-C", str(repo), "show", "--format=", "--unified=0", sha,
-                            "--", "tests/"], capture_output=True, text=True, timeout=60, check=False)
+        r = subprocess.run(["git", "-C", repo, "show", "--format=", "--unified=0",
+                            "--no-renames", "--no-color", sha],
+                           capture_output=True, text=True, timeout=60, check=False)
         return r.stdout if r.returncode == 0 else ""
     except Exception:
         return ""
+
+
+def _diff_lines(diff: str) -> dict[str, tuple[list[str], list[str]]]:
+    """`{path: (added, removed)}` from a `-U0` diff, the marker stripped.
+
+    `---`/`+++` are read as file names only in a file's header, before its
+    first hunk: inside a hunk `--- x` is a removed line that began `-- x`."""
+    out: dict[str, tuple[list[str], list[str]]] = {}
+    cur: tuple[list[str], list[str]] | None = None
+    header = False
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            cur, header = None, True
+        elif header and line.startswith("@@"):
+            header = False
+        elif header and line.startswith(("--- ", "+++ ")):
+            path = line[4:]
+            if path == "/dev/null":
+                continue
+            path = path[2:] if path[:2] in ("a/", "b/") else path
+            cur = out.setdefault(path, ([], []))
+        elif header:
+            continue
+        elif cur is not None and line.startswith("+"):
+            cur[0].append(line[1:])
+        elif cur is not None and line.startswith("-"):
+            cur[1].append(line[1:])
+    return out
+
+
+def _tests_diff(diff: str) -> str:
+    """The `tests/` sections of a diff, as row 6 has always read it."""
+    keep, out = False, []
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            keep = " b/tests/" in line
+        if keep:
+            out.append(line)
+    return "\n".join(out)
+
+
+# A line is only evidence of being undone if it says something: a lone `)`,
+# `}` or blank line is removed and re-added by every reformat.
+_MEANINGFUL = re.compile(r"[A-Za-z0-9]")
+
+
+def _undone_by_hand(repo: Path, landing: dict, later: list[dict]) -> bool:
+    """Row 5: whether a later non-`lloyd` commit removed a line this landing added.
+
+    The old question — "did any later human commit touch a file the landing
+    touched" — was answered yes 88% of the time in the week to 2026-09-24,
+    because 350 of 381 commits on `main` were a person's and they share files
+    with everything. Removing a line the loop wrote is what cleaning up after
+    the loop actually looks like (Alan's ruling on the plan, 2026-09-24).
+    """
+    sha = str(landing.get("commit") or "")
+    if not sha:
+        return False
+    added = {path: {ln.strip() for ln in plus if _MEANINGFUL.search(ln)}
+             for path, (plus, _minus) in _diff_lines(_commit_diff(repo, sha)).items()}
+    added = {path: lines for path, lines in added.items() if lines}
+    if not added:
+        return False
+    for c in later:
+        shared = added.keys() & set(c["files"])
+        if not shared:
+            continue
+        theirs = _diff_lines(_commit_diff(repo, c["sha"]))
+        for path in shared:
+            removed = {ln.strip() for ln in (theirs.get(path) or ((), ()))[1]}
+            if added[path] & removed:
+                return True
+    return False
+
+
+def _full_gate_median(ledger: Path) -> float | None:
+    try:
+        from scripts.automod.backlog import gate_duration_stats
+        stats = gate_duration_stats(ledger)
+    except Exception:  # noqa: BLE001 — a scorecard cell is never the scorecard
+        return None
+    return round(float(stats["median_s"]), 1) if stats.get("n") else None
 
 
 # ── the row ──────────────────────────────────────────────────────────────
@@ -297,10 +390,11 @@ def _duty_cycle(ev: list[dict], since: float, now: float) -> dict[str, Any]:
     Alan's rule (2026-09-15): an autocoder round runs 100% of the time. A
     turn is `backlog_implement` `started` until its `finished`,
     `infra_failed` or `skipped` row (an open one runs to `now`). A gap of at
-    least a minute between turns is classified by what sits in it: a
-    `promoted` row is a landing (the restart and, before the chamber, the
-    observation window), a `round_aborted` row is an abort's finalizer and
-    the retry, a `restart` row is a human restart, anything else `other`.
+    least a minute between turns is classified by what sits in it, first
+    match in `GAP_CLASSES`: a `promoted` row makes it a `promotion_gap` (an
+    idle gap that CONTAINS a promotion — not the landing's own time, which
+    `waits` measures), a `round_aborted` row an abort's finalizer and the
+    retry, a `restart` row a human restart, anything else `other`.
     `rate` is None with no turn in the window: unmeasured, not perfect.
     """
     spans: list[tuple[float, float]] = []
@@ -327,15 +421,15 @@ def _duty_cycle(ev: list[dict], since: float, now: float) -> dict[str, Any]:
     idle: dict[str, float] = {}
     gaps: dict[str, int] = {}
     largest = 0.0
-    markers = [e for e in ev if e.get("event") in ("promoted", "round_aborted", "restart")]
+    marker_events = {m for _cls, events in GAP_CLASSES for m in events}
+    markers = [e for e in ev if e.get("event") in marker_events]
     for i in range(len(merged) - 1):
         end, nxt = merged[i][1], merged[i + 1][0]
         gap = nxt - end
         if gap < 60:
             continue
         kinds = {str(e["event"]) for e in markers if end - 60 <= _ts(e) <= nxt + 5}
-        cls = ("landing" if "promoted" in kinds else "abort" if "round_aborted" in kinds
-               else "restart" if "restart" in kinds else "other")
+        cls = next((c for c, events in GAP_CLASSES if kinds & set(events)), "other")
         idle[cls] = idle.get(cls, 0.0) + gap
         gaps[cls] = gaps.get(cls, 0) + 1
         largest = max(largest, gap)
@@ -348,10 +442,26 @@ def _duty_cycle(ev: list[dict], since: float, now: float) -> dict[str, Any]:
             "waits": _landing_waits(ev)}
 
 
+# Row 14's idle-gap classes, first match wins. A class is a name and the
+# ledger events whose presence in (or a minute before) a gap claims it.
+GAP_CLASSES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("promotion_gap", ("promoted",)),
+    ("abort", ("round_aborted",)),
+    ("restart", ("restart",)),
+)
+# The waits a landing records, as `(key, ledger event)`; each row carries
+# `waited_s`. The restart itself (drain, stop, boot, verify) writes no such
+# row, so it is reported as not measured rather than folded into a class.
+LANDING_WAITS: tuple[tuple[str, str], ...] = (
+    ("settle", "land_wait_settle"),
+    ("rounds", "land_wait_rounds"),
+)
+
+
 def _landing_waits(ev: list[dict]) -> dict[str, Any]:
     """What the landings spent waiting, split by which wait it was.
 
-    The `landing` idle class above says a gap had a `promoted` row near it; it
+    The `promotion_gap` idle class above says a gap had a `promoted` row near it; it
     cannot say whether the loop was waiting out an observation window
     (`wait_for_settle`) or a sibling round's turn (`wait_for_rounds`). Those
     have different fixes — one is the window's length, the other is depth — and
@@ -361,7 +471,7 @@ def _landing_waits(ev: list[dict]) -> dict[str, Any]:
     and `waited` counts only the ones that actually blocked.
     """
     out: dict[str, Any] = {}
-    for key, event in (("settle", "land_wait_settle"), ("rounds", "land_wait_rounds")):
+    for key, event in LANDING_WAITS:
         secs = [float(e.get("waited_s") or 0) for e in ev if e.get("event") == event]
         real = [s for s in secs if s > 1]
         out[key] = {"n": len(secs), "waited": len(real),
@@ -369,6 +479,22 @@ def _landing_waits(ev: list[dict]) -> dict[str, Any]:
                     "median_s": round(statistics.median(real), 1) if real else None,
                     "max_s": round(max(secs), 1) if secs else None}
     return out
+
+
+def _blocking(findings) -> bool:
+    return any(isinstance(f, dict) and str(f.get("severity") or "blocking") == "blocking"
+               for f in findings or [])
+
+
+def _seam_only_refusal(e: dict) -> bool:
+    """A `review` row that sent the round back (`kind: retry`) with every clause
+    graded `met`, no blocking test-honesty finding or precheck, and an
+    unverified seam — i.e. refused on the seam alone."""
+    clauses = e.get("clauses") or []
+    return (e.get("kind") == "retry" and bool(clauses)
+            and all(isinstance(c, dict) and c.get("verdict") == "met" for c in clauses)
+            and not _blocking(e.get("test_honesty")) and not _blocking(e.get("prechecks"))
+            and bool(e.get("seams_unverified")))
 
 
 def _iso_of(event: dict) -> str:
@@ -505,7 +631,11 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
               # Waits the grader sat out because another round was landing.
               "grader_retries": sum(int(e.get("retries") or 0) for e in review_gates),
               # Rungs answered from the round's own cache rather than re-run.
-              "reused_rungs": sum(1 for e in by("gate") if e.get("reused"))}
+              "reused_rungs": sum(1 for e in by("gate") if e.get("reused")),
+              # Send-backs that refused a change the grader called fully met:
+              # the only reason left is an unverified seam. 55 of 130 in the
+              # week to 2026-09-24; with `seams_block: never` it should be 0.
+              "seam_only_refusals": sum(1 for e in by("review") if _seam_only_refusal(e))}
 
     # ── 4 spawn ratio ───────────────────────────────────────────────────
     triage = [e for e in by("backlog_triage") if e.get("verdict") in
@@ -564,11 +694,10 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
     touched = 0
     touched_rounds: list[str] = []
     for rid, p in promoted.items():
-        files = set(p.get("changed_paths") or [])
         pts = _ts(p)
-        hit = any(c["ct"] > pts and c["ct"] - pts <= HUMAN_TOUCH_DAYS * 86400
-                  and files & set(c["files"]) for c in human_commits)
-        if hit:
+        later = [c for c in human_commits
+                 if c["ct"] > pts and c["ct"] - pts <= HUMAN_TOUCH_DAYS * 86400]
+        if later and _undone_by_hand(repo, p, later):
             touched += 1
             touched_rounds.append(rid)
     human = {"landed": len(promoted), "touched_within_7d": touched,
@@ -580,7 +709,7 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
     static_hits = 0
     for rid, p in promoted.items():
         sha = str(p.get("commit") or "")
-        if sha and _HONESTY_RE.search(_commit_diff(repo, sha)):
+        if sha and _HONESTY_RE.search(_tests_diff(_commit_diff(repo, sha))):
             static_hits += 1
     honesty = {"grader_findings": grader_findings, "landed_with_or_true": static_hits,
                "per_gated_round": _rate(grader_findings, len(graded_rounds))}
@@ -664,7 +793,19 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
                   "rounds_rejected": rejected,
                   "median_turns_landed": _median([float(e.get("num_turns") or 0) for e in landed
                                                   if e.get("num_turns")]),
-                  "median_gate_seconds": _median(list(gate_seconds.values()))}
+                  # Every rung of every gate run a round made, summed per round:
+                  # "gate time per round", not the length of one gate.
+                  "median_gate_seconds": _median(list(gate_seconds.values())),
+                  # One full ladder run (whole suite, reached review), the newest
+                  # 20 — the number a round's pacing is told.
+                  "median_full_gate_s": _full_gate_median(ledger),
+                  # The tests rung passing over failures that also fail at the
+                  # round's base, and the red-tree items that tracks them.
+                  "tests_pre_existing_passes": sum(
+                      1 for e in by("gate") if e.get("rung") == "tests" and e.get("ok")
+                      and e.get("pre_existing_failures")),
+                  "red_tree_filed": len(by("red_tree_filed")),
+                  "red_tree_closed": len(by("red_tree_closed"))}
 
     # ── 10 rollbacks ────────────────────────────────────────────────────
     # ...and how much of what landed the regression detector actually looked
@@ -748,13 +889,13 @@ def render(row: dict) -> str:
         "| # | metric | value | detail |", "|---|---|---|---|",
         f"| 1 | acceptance hit rate | {_pct(a['hit_rate'])} | {a['met']} met of {a['with_outcome']} landed with an outcome ({a['landed']} landed) |",
         f"| 2 | audit delta | {_pct(au['delta'])} | grader {au['grader_met']} / author {au['author_met']} met clauses over {au['rounds_compared']} rounds |",
-        f"| 3 | review refusal rate | {_pct(r['refusal_rate'])} | {r['rounds_refused']} of {r['rounds_graded']} graded rounds; {r['fixed_in_turn']} fixed in turn, {r['premise_unsound']} unsound, {r['escalated']} escalated, {r['grader_unavailable']} grader-unavailable |",
+        f"| 3 | review refusal rate | {_pct(r['refusal_rate'])} | {r['rounds_refused']} of {r['rounds_graded']} graded rounds; {r['fixed_in_turn']} fixed in turn, {r['premise_unsound']} unsound, {r['escalated']} escalated, {r['grader_unavailable']} grader-unavailable, {r.get('seam_only_refusals', '—')} refused on a seam alone |",
         f"| 4 | spawn ratio | triage {s['triage_ratio'] if s['triage_ratio'] is not None else '—'} · implement {s['implement_ratio'] if s['implement_ratio'] is not None else '—'} | filed/closed: triage {s['triage_filed']}/{s['triage_closed']}, implement {s['implement_filed']}/{s['implement_closed']}; merged {s.get('triage_merged', 0)}+{s.get('implement_merged', 0)}, appended {s.get('findings_appended', 0)}, expired {s.get('expired', 0)}; open self-spawned {s.get('self_spawned_open', {}).get('count', 0)} (oldest {s.get('self_spawned_open', {}).get('oldest_days', 0)} d, bound {s.get('self_spawned_open', {}).get('bound_days', 0)}, over bound {s.get('self_spawned_open', {}).get('over_bound', 0)}) |",
-        f"| 5 | human-touch cost | {_pct(h['rate'])} | {h['touched_within_7d']} of {h['landed']} landed rounds touched by a human commit within {HUMAN_TOUCH_DAYS} d |",
+        f"| 5 | undone by hand | {_pct(h['rate'])} | {h['touched_within_7d']} of {h['landed']} landed rounds had a line they added removed by a non-`{AUTOMOD_AUTHOR}` commit within {HUMAN_TOUCH_DAYS} d |",
         f"| 6 | test honesty | {t['grader_findings']} findings | {t['per_gated_round'] if t['per_gated_round'] is not None else '—'} per graded round; {t['landed_with_or_true']} landed commits add `or True`/`assert True` |",
         f"| 7 | bookkeeping defects | {b['nameless_deferrals'] + b['stranded_landings'] + b['bare_aborts']} | {b['nameless_deferrals']} nameless deferrals, {b['stranded_landings']} stranded landings, {b['bare_aborts']} bare aborts |",
         f"| 8 | verdict plumbing | {_pct(p['regex_rate'])} regex | {p['regex']} of {p['verdicts_with_source']} verdicts fell back; {p['truncated']} truncated; median finalizer tokens {p['finalizer_tokens_median'] if p['finalizer_tokens_median'] is not None else '—'} |",
-        f"| 9 | throughput | {th['items_closed_per_day']}/day | {th['items_closed']} closed; {th['rounds_landed']} of {th['rounds_finished']} rounds landed, {th.get('rounds_rejected', 0)} rejected on evidence, {th.get('landings_rescued', 0)} landed by the reaper after their turn ended, {th.get('gates_rescued', 0)} gated again after an unreachable grader ({th.get('reviews_unavailable', 0)} review(s) could not run), {th.get('landed_without_restart', 0)} landed without a restart, {th.get('item_verdicts_refused', 0)} item verdict(s) not taken from a landing round; median turns {th['median_turns_landed'] if th['median_turns_landed'] is not None else '—'}; median gate {th['median_gate_seconds'] if th['median_gate_seconds'] is not None else '—'} s |",
+        f"| 9 | throughput | {th['items_closed_per_day']}/day | {th['items_closed']} closed; {th['rounds_landed']} of {th['rounds_finished']} rounds landed, {th.get('rounds_rejected', 0)} rejected on evidence, {th.get('landings_rescued', 0)} landed by the reaper after their turn ended, {th.get('gates_rescued', 0)} gated again after an unreachable grader ({th.get('reviews_unavailable', 0)} review(s) could not run), {th.get('landed_without_restart', 0)} landed without a restart, {th.get('item_verdicts_refused', 0)} item verdict(s) not taken from a landing round; median turns {th['median_turns_landed'] if th['median_turns_landed'] is not None else '—'}; gate time per round {th['median_gate_seconds'] if th['median_gate_seconds'] is not None else '—'} s (median full gate {th.get('median_full_gate_s') if th.get('median_full_gate_s') is not None else '—'} s); tests rung passed over pre-existing failures {th.get('tests_pre_existing_passes', '—')}×, red-tree items filed {th.get('red_tree_filed', '—')}, closed {th.get('red_tree_closed', '—')} |",
         f"| 10 | rollbacks | {rb['count']} | triggers {', '.join(rb['triggers']) or '—'}; true positives: human judgment, not computed; regression check measured {(rb.get('regression_coverage') or {}).get('measured', '—')} of {(rb.get('regression_coverage') or {}).get('promotions', '—')} promotions ({(rb.get('regression_coverage') or {}).get('could_not_evaluate', '—')} could not be evaluated, {(rb.get('regression_coverage') or {}).get('compared_nothing', 0)} compared nothing with nothing) |",
         f"| 11 | grouping | {row.get('grouping', {}).get('group_triages', 0)} group triages | {row.get('grouping', {}).get('clusters_formed', 0)} clusters over {row.get('grouping', {}).get('items_clustered', 0)} items last night; {row.get('grouping', {}).get('duplicates_closed', 0)} duplicates closed, {row.get('grouping', {}).get('retired_in_group', 0)} retired, {row.get('grouping', {}).get('folded', 0)} folded, {row.get('grouping', {}).get('kept', 0)} kept; {row.get('grouping', {}).get('umbrellas_formed', 0)} umbrellas formed, {row.get('grouping', {}).get('umbrellas_landed', 0)} landed closing {row.get('grouping', {}).get('members_closed', 0)} members |",
     ]
@@ -788,9 +929,9 @@ def render(row: dict) -> str:
     lines.append(
         f"| 14 | autocode duty cycle | {_pct(d.get('rate'))} | "
         f"{d.get('busy_hours', 0)} h of {d.get('window_hours', 0)} h with an implement turn in flight, "
-        f"{d.get('turns', 0)} turns; {d.get('gaps', 0)} gaps: {by_class}; "
-        f"largest {d.get('largest_gap_minutes', 0):g} min; "
-        f"landings waited: {by_wait} |")
+        f"{d.get('turns', 0)} turns; landings waited: {by_wait}; restart: not measured; "
+        f"{d.get('gaps', 0)} gaps: {by_class}; "
+        f"largest {d.get('largest_gap_minutes', 0):g} min |")
     lines.append(_render_overrides(row))
     return "\n".join(lines)
 

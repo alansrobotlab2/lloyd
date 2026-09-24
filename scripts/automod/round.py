@@ -820,12 +820,10 @@ def board_pass() -> dict:
             return {}
     auto, tri = cfg("autocode"), cfg("autotriage")
     before = B.board_health(S.LEDGER_PATH)
-    closed = B.close_settled_items(S.LEDGER_PATH, enabled=bool(auto.get("close_on_settle", True)),
+    closed = B.close_settled_items(S.LEDGER_PATH,
                                    close_members=bool(auto.get("close_members_on_settle", True)))
-    reopened = B.reopen_reverted_landings(S.LEDGER_PATH,
-                                          enabled=bool(auto.get("reopen_reverted", True)))
-    unfolded = B.unfold_spent_umbrellas(S.LEDGER_PATH,
-                                        enabled=bool(tri.get("unfold_spent_umbrellas", True)))
+    reopened = B.reopen_reverted_landings(S.LEDGER_PATH)
+    unfolded = B.unfold_spent_umbrellas(S.LEDGER_PATH)
     retriaged = B.retriage_spent_items(S.LEDGER_PATH, enabled=bool(auto.get("retriage_spent", True)))
     moved = B.reconcile_statuses(S.LEDGER_PATH, enabled=bool(auto.get("status_pipeline", True)))
     released = B.release_held_confirmations(

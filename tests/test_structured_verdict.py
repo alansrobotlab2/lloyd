@@ -129,23 +129,19 @@ def test_the_worker_sends_the_schema_and_records_where_the_verdict_came_from():
     assert "B.TRIAGE_VERDICT_SCHEMA" in src
     assert '"verdict_source"' in src
     assert '"structured_error"' in src
-    assert 'want_structured' in src
 
 
-def test_the_kill_switch_rides_in_the_payload():
-    """Like the budgets: a queued item runs under the config that was live
-    when it was enqueued."""
-    assert '"structured_verdict"' in inspect.getsource(W.enqueue_if_due)
-    assert 'payload or {}).get("structured_verdict", True)' in inspect.getsource(W.execute)
-
-
-def test_the_kill_switch_is_documented_in_config():
+def test_the_structured_verdict_is_always_asked_for():
+    """The `structured_verdict` kill switch was retired on 2026-09-24 after two
+    weeks on: every triage turn asks for the object, and the regex stays only as
+    the fallback for a finalizer that was skipped or failed."""
     import yaml
     from pathlib import Path
+    for fn in (W.execute, W.enqueue_if_due):
+        assert "structured_verdict" not in inspect.getsource(fn)
     root = Path(B.__file__).resolve().parent.parent.parent
     cfg = yaml.safe_load((root / "config.yaml").read_text())
-    src = cfg["workers"]["sources"]["autotriage"]
-    assert src["structured_verdict"] is True
+    assert "structured_verdict" not in cfg["workers"]["sources"]["autotriage"]
 
 
 def test_run_prompt_in_session_forwards_the_schema_and_returns_the_object():

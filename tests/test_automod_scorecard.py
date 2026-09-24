@@ -509,14 +509,18 @@ def test_row_14_measures_turn_coverage_and_names_what_each_gap_waited_on(tmp_pat
     row = SC.compute(since_days=1, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
     d = row["duty_cycle"]
     assert d["turns"] == 3 and d["gaps"] == 2
-    assert d["idle_minutes"] == {"abort": 6.0, "landing": 30.0} and d["gap_counts"] == {"abort": 1, "landing": 1}
+    assert d["idle_minutes"] == {"abort": 6.0, "promotion_gap": 30.0}
+    assert d["gap_counts"] == {"abort": 1, "promotion_gap": 1}
     assert d["largest_gap_minutes"] == 30.0
     # busy: 2 h + 4 h + 16.4 h of 24 h, less the hour before turn A
     assert abs(d["busy_hours"] - 22.4) < 0.05 and d["window_hours"] == 24.0
     assert abs(d["rate"] - 22.4 / 24) < 0.01
     text = SC.render(row)
     assert "| 14 | autocode duty cycle | 93% |" in text
-    assert "2 gaps: abort 6 min (1), landing 30 min (1); largest 30 min" in text
+    assert "2 gaps: abort 6 min (1), promotion_gap 30 min (1); largest 30 min" in text
+    # The measured waits lead; the restart itself has no ledger row and says so.
+    assert text.index("landings waited:") < text.index("2 gaps:")
+    assert "restart: not measured" in text
 
 
 def test_row_14_is_unmeasured_with_no_turn_in_the_window(tmp_path, repo):
@@ -725,7 +729,7 @@ def test_row_14_splits_the_two_waits_a_landing_makes(tmp_path, repo):
     `wait_for_settle` waits out the previous promotion's observation window —
     shortened by changing the window; `wait_for_rounds` waits for a sibling
     round's turn to end so the restart does not kill it — shortened only by
-    changing depth. The duty-cycle row's `landing` idle class cannot tell them
+    changing depth. The duty-cycle row's `promotion_gap` idle class cannot tell them
     apart: it says a gap had a `promoted` row near it. On 2026-09-20 that put
     7.7 h under one label and the first read of it attributed the whole lot to
     the window.
@@ -750,3 +754,102 @@ def test_row_14_splits_the_two_waits_a_landing_makes(tmp_path, repo):
                                "median_s": 120.0, "max_s": 120.0}
     assert "settle 15 min (2/3)" in SC.render(row)
     assert "rounds 2 min (1/2)" in SC.render(row)
+
+
+# ── plan C5 / A5 (2026-09-24) ────────────────────────────────────────────
+
+def test_row_5_counts_a_landing_only_when_a_person_removed_a_line_it_added(tmp_path, repo):
+    """Redefined on Alan's ruling: sharing a file with a later human commit is
+    not cleaning up after the loop (350 of 381 commits that week were a
+    person's). Removing a line the landing added is."""
+    undone = _commit(repo, "lloyd", {"app/a.py": "def f():\n    return 1\n",
+                                     "app/b.py": "X = 1\n"}, 5)
+    kept = _commit(repo, "lloyd", {"app/c.py": "def g():\n    return 2\n"}, 4.5)
+    # A person rewrites f's body (removes a landed line) ...
+    _commit(repo, "alan", {"app/a.py": "def f():\n    return 3\n"}, 4)
+    # ... and only APPENDS to c.py, which touches the file but undoes nothing.
+    _commit(repo, "alan", {"app/c.py": "def g():\n    return 2\n\n\nY = 1\n"}, 3)
+    # A line removed after the 7-day bound does not count.
+    late = _commit(repo, "lloyd", {"app/d.py": "Z = 10\n"}, 6.5)
+    _commit(repo, "alan", {"app/d.py": "Z = 11\n"}, 6.5 - 7.2)
+    ledger = _ledger(tmp_path, [
+        _ev("promoted", 5, round_id="SM_U", commit=undone, changed_paths=["app/a.py", "app/b.py"]),
+        _ev("promoted", 4.5, round_id="SM_K", commit=kept, changed_paths=["app/c.py"]),
+        _ev("promoted", 6.5, round_id="SM_L", commit=late, changed_paths=["app/d.py"]),
+    ])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "none",
+                     repo=repo, now=NOW)
+    h = row["human_touch"]
+    assert h["rounds"] == ["SM_U"] and h["touched_within_7d"] == 1 and h["landed"] == 3
+    assert "undone by hand" in SC.render(row)
+
+
+def test_row_5_ignores_punctuation_only_lines(tmp_path, repo):
+    """A reformat that moves a lone `)` removes a landed line that says nothing."""
+    sha = _commit(repo, "lloyd", {"app/p.py": "X = f(\n    1,\n)\n"}, 3)
+    _commit(repo, "alan", {"app/p.py": "X = f(\n    1,\n    )\n"}, 2)
+    ledger = _ledger(tmp_path, [_ev("promoted", 3, round_id="SM_P", commit=sha)])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    assert row["human_touch"]["touched_within_7d"] == 0 and row["human_touch"]["landed"] == 1
+
+
+def test_diff_lines_reads_a_removed_line_that_starts_with_two_dashes():
+    diff = ("diff --git a/q.sql b/q.sql\n--- a/q.sql\n+++ b/q.sql\n@@ -1 +1 @@\n"
+            "--- a comment\n+SELECT 1;\n")
+    assert SC._diff_lines(diff) == {"q.sql": (["SELECT 1;"], ["-- a comment"])}
+
+
+def test_commit_diff_is_memoised_per_sha(tmp_path, repo, monkeypatch):
+    sha = _commit(repo, "lloyd", {"app/m.py": "V = 9\n"}, 1)
+    SC._commit_diff_cached.cache_clear()
+    calls = []
+    real = subprocess.run
+    monkeypatch.setattr(SC.subprocess, "run", lambda *a, **k: calls.append(a) or real(*a, **k))
+    first = SC._commit_diff(repo, sha)
+    assert SC._commit_diff(repo, sha) == first and "+V = 9" in first
+    assert len(calls) == 1
+
+
+def test_row_3_counts_refusals_on_a_seam_alone(tmp_path, repo):
+    met = [{"clause": 1, "verdict": "met"}, {"clause": 2, "verdict": "met"}]
+    ledger = _ledger(tmp_path, [
+        # every clause met, advisory findings only, a seam: seam-only
+        _ev("review", 1, round_id="SM_A", kind="retry", ok=True, blocking=True, clauses=met,
+            test_honesty=[{"severity": "advisory"}], prechecks=[{"severity": "advisory"}],
+            seams_unverified=["the live boot"]),
+        # a blocking honesty finding: not seam-only
+        _ev("review", 1, round_id="SM_B", kind="retry", ok=True, blocking=True, clauses=met,
+            test_honesty=[{"severity": "blocking"}], prechecks=[], seams_unverified=["x"]),
+        # a partial clause: not seam-only
+        _ev("review", 1, round_id="SM_C", kind="retry", ok=True, blocking=True,
+            clauses=[{"clause": 1, "verdict": "partial"}], test_honesty=[], prechecks=[],
+            seams_unverified=["x"]),
+        # a pass with a seam is not a refusal
+        _ev("review", 1, round_id="SM_D", kind="pass", ok=True, blocking=False, clauses=met,
+            test_honesty=[], prechecks=[], seams_unverified=["x"]),
+    ])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    assert row["review"]["seam_only_refusals"] == 1
+    assert "1 refused on a seam alone" in SC.render(row)
+
+
+def test_row_9_reports_full_gates_and_the_red_tree(tmp_path, repo):
+    def run(rid, t0, suite_s, review_s):
+        return [_ev("gate", t0, round_id=rid, rung="preflight", ok=True, seconds=1),
+                _ev("gate", t0 - suite_s / DAY, round_id=rid, rung="tests", ok=True,
+                    seconds=suite_s, detail="1000 passed",
+                    pre_existing_failures=["tests/test_x.py::t"] if rid == "SM_A" else []),
+                _ev("gate", t0 - (suite_s + review_s) / DAY, round_id=rid, rung="review",
+                    ok=True, seconds=review_s)]
+    ledger = _ledger(tmp_path, [*run("SM_A", 2, 300, 300), *run("SM_B", 1, 500, 300),
+                                _ev("red_tree_filed", 2, item_id=900),
+                                _ev("red_tree_closed", 1, item_id=900)])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    th = row["throughput"]
+    assert th["median_full_gate_s"] == 701.0
+    assert th["median_gate_seconds"] == 701.0
+    assert th["tests_pre_existing_passes"] == 1
+    assert th["red_tree_filed"] == 1 and th["red_tree_closed"] == 1
+    text = SC.render(row)
+    assert "gate time per round 701.0 s (median full gate 701.0 s)" in text
+    assert "red-tree items filed 1, closed 1" in text

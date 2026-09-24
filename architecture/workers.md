@@ -496,9 +496,8 @@ beside `text` and `stop_reason`.
 - The router honours a schema only for a session whose platform is in
   `sessions_io.NON_USER_PLATFORMS`. A chat turn that quietly ran a second
   completion under a grammar would be paying tokens for something nobody reads.
-- Kill switch `workers.sources.autotriage.structured_verdict`, carried in
-  the queue payload like the budgets so a queued item runs under the config
-  that was live when it was enqueued.
+- No kill switch: `workers.sources.autotriage.structured_verdict` was
+  retired on 2026-09-24, and every triage turn asks for the object.
 
 Follow-ups, not done: schemas for `deep_research.parse_result` and
 `autocode.parse_spawned_line`.
@@ -534,7 +533,7 @@ workers:
 ```
 
 Anything past those keys is the source's own: `autotriage` reads
-`group_min_items` and `structured_verdict`, `deep-research` a `daily_max`,
+`group_min_items` and `spawn_cap`, `deep-research` a `daily_max`,
 `backlog-cluster` a `min_age_seconds`. The pool never looks at them — it
 forwards `src_cfg` to `enqueue_if_due`, and most sources copy what they need
 into the queue payload so a queued item runs under the config that was live

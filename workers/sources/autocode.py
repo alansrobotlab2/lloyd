@@ -1272,7 +1272,6 @@ def _housekeeping(src_cfg: dict) -> None:
         # `settled` and `finished` back to the item. Same rule as the reaper —
         # this must never take the scheduler down.
         for r in B.close_settled_items(S.LEDGER_PATH,
-                                       enabled=bool(src_cfg.get("close_on_settle", True)),
                                        close_members=bool(src_cfg.get("close_members_on_settle", True))):
             logger.info("backlog #%s landed: %s (acceptance=%s)", r["item_id"],
                         "closed" if r["closed"] else "noted, left open", r["acceptance"])
@@ -1281,8 +1280,7 @@ def _housekeeping(src_cfg: dict) -> None:
     try:
         # The regression check reads a promotion after it settles, so its
         # rollback lands on an item the closer above already closed.
-        for r in B.reopen_reverted_landings(S.LEDGER_PATH,
-                                            enabled=bool(src_cfg.get("reopen_reverted", True))):
+        for r in B.reopen_reverted_landings(S.LEDGER_PATH):
             logger.info("backlog #%s reopened to %s: landing %s was reverted",
                         r["item_id"], r["to"], r["commit"][:8])
     except Exception as exc:
@@ -1290,9 +1288,8 @@ def _housekeeping(src_cfg: dict) -> None:
     tri = _source_cfg("autotriage")
     try:
         # Before the reconcile, so a released member is judged in the same
-        # pass. The switch lives in triage's block, which owns umbrellas.
-        for r in B.unfold_spent_umbrellas(S.LEDGER_PATH,
-                                          enabled=bool(tri.get("unfold_spent_umbrellas", True))):
+        # pass.
+        for r in B.unfold_spent_umbrellas(S.LEDGER_PATH):
             logger.info("umbrella #%s unfolded, %d member(s) released: %s",
                         r["umbrella_id"], len(r["released"]), r["reason"])
     except Exception as exc:
@@ -1368,13 +1365,13 @@ def _escalate_review_disagreement(candidate, round_id: str | None) -> bool:
 
 def _second_life_owed(candidate) -> bool:
     """Whether housekeeping, not a person, handles this spend next: an
-    umbrella is unfolded while `autotriage.unfold_spent_umbrellas` is on; any
+    umbrella is always unfolded (`backlog.unfold_spent_umbrellas`); any
     other item is re-triaged while `retriage_spent` is on and it has not had
     its one re-triage."""
     from scripts.automod import backlog as B, state as S
     try:
         if B.is_umbrella(candidate):
-            return bool(_source_cfg("autotriage").get("unfold_spent_umbrellas", True))
+            return True
         if not bool(_source_cfg(NAME).get("retriage_spent", True)):
             return False
         return B.retriage_counts(S.LEDGER_PATH).get(int(candidate.id), 0) < B.RETRIAGE_CAP
@@ -1469,7 +1466,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             if _vault_landed_since(candidate.id, started):
                 cfg = _source_cfg(NAME)
                 for r in B.close_settled_items(
-                        S.LEDGER_PATH, enabled=bool(cfg.get("close_on_settle", True)),
+                        S.LEDGER_PATH,
                         close_members=bool(cfg.get("close_members_on_settle", True))):
                     logger.info("backlog #%s landed: %s (acceptance=%s)", r["item_id"],
                                 "closed" if r["closed"] else "noted, left open", r["acceptance"])

@@ -964,8 +964,8 @@ function AutomodPanel({ automod }: { automod: AutomodState }) {
         <AutomodRow label="Spawn ratio" value={`${s.triage_ratio ?? '—'} · ${s.implement_ratio ?? '—'}`}
           sub={`triage ${s.triage_filed}/${s.triage_closed} · implement ${s.implement_filed}/${s.implement_closed}`}
           tone={(s.implement_ratio ?? 0) > 1 ? 'warn' : 'idle'} />
-        <AutomodRow label="Human touch" value={pctOrDash(automod.human_touch.rate)}
-          sub={`${automod.human_touch.touched_within_7d}/${automod.human_touch.landed} landed rounds`} />
+        <AutomodRow label="Undone by hand" value={pctOrDash(automod.human_touch.rate)}
+          sub={`${automod.human_touch.touched_within_7d}/${automod.human_touch.landed} landed rounds lost a line to a person`} />
         <AutomodRow label="Test honesty" value={String(automod.test_honesty.grader_findings)}
           sub={`findings · ${automod.test_honesty.landed_with_or_true} landed with or True`}
           tone={automod.test_honesty.landed_with_or_true > 0 ? 'crit' : 'idle'} />
@@ -976,7 +976,7 @@ function AutomodPanel({ automod }: { automod: AutomodState }) {
           sub={`${p.regex}/${p.verdicts_with_source} verdicts · ${p.truncated} truncated`}
           tone={(p.regex_rate ?? 0) > 0.1 ? 'warn' : 'idle'} />
         <AutomodRow label="Throughput" value={`${t.items_closed_per_day}/d`}
-          sub={`${t.items_closed} closed · ${t.rounds_landed}/${t.rounds_finished} rounds landed · gate ${t.median_gate_seconds ?? '—'}s`} />
+          sub={`${t.items_closed} closed · ${t.rounds_landed}/${t.rounds_finished} rounds landed · gate/round ${t.median_gate_seconds ?? '—'}s`} />
         <AutomodRow label="Rollbacks" value={String(automod.rollbacks.count)}
           sub={automod.rollbacks.triggers.join(', ') || 'none'}
           tone={automod.rollbacks.count > 0 ? 'warn' : 'idle'} />

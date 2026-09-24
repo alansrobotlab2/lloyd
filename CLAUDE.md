@@ -804,9 +804,9 @@ closes the item `done`, tagged `rejected`, with the measurement on it — no
 re-triage, no `needs-human`. Before this a negative result had no exit: the
 round either forced a landing or spent its attempts as `not_met`. Row 9 of
 the scorecard counts rejections beside landings; the loop is judged on items
-resolved, not shipped. Kill switches:
-`workers.sources.autocode.close_on_settle` and `structured_outcome`
-(carried in the queue payload like the budgets).
+resolved, not shipped. Kill switch:
+`workers.sources.autocode.structured_outcome` (carried in the queue payload
+like the budgets); the closer itself has no switch since 2026-09-24.
 
 `SPAWN_CAP` bounds fan-out per run — 1 for both since 2026-09-13 (triage's
 was 3 plus a "Further findings from…" overflow item, now gone); findings past
@@ -997,8 +997,7 @@ attempt is spent and that never landed: members drop `grouped` (self-filed
 ones stay quarantined and expire; none is re-clustered, a group triage
 already judged it), the umbrella closes `done` tagged `unfolded`. `grouped`
 stays expiry-exempt, because a member of a live umbrella closed by expiry
-would be misattributed when that umbrella lands. Switch
-`workers.sources.autotriage.unfold_spent_umbrellas`.
+would be misattributed when that umbrella lands. No switch since 2026-09-24.
 
 ### Throughput: pacing, the chamber, the clause budget, a second life
 
@@ -1320,7 +1319,7 @@ rollbacks in the ledger's history came from `promote_failed` and the detached
   A successful one wrote nothing at all before, so the cost this change is
   about was invisible. Scorecard row 14 carries both landing waits, because
   they have different fixes — the window's length, and depth — and the
-  `landing` idle class cannot tell them apart. `settle_max_wait` derives from
+  `promotion_gap` idle class cannot tell them apart. `settle_max_wait` derives from
   the **larger** window: what a landing waits on is somebody else's promotion.
 
 ### Every promotion is measured, by a check a landing cannot kill
@@ -3317,9 +3316,10 @@ The router honours `final_schema` only for a session whose platform is in
 `sessions_io.NON_USER_PLATFORMS`. A chat turn that quietly ran a second
 completion under a grammar would be paying tokens for something nobody reads.
 
-Kill switch: `workers.sources.autotriage.structured_verdict`, carried in
-the queue payload like the budgets so a queued item runs under the config that
-was live when it was enqueued.
+Every triage turn asks for the object; its kill switch
+(`autotriage.structured_verdict`) was retired on 2026-09-24 with
+`close_on_settle`, `reopen_reverted` and `unfold_spent_umbrellas`, all on
+since landing.
 
 ## YouTube channel digests: the script fetches, a session judges
 

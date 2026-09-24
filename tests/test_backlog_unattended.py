@@ -1387,8 +1387,6 @@ def test_an_umbrella_disagreement_is_left_to_the_unfold_pass(isolated, monkeypat
     umbrella = B.item_by_id(931)
     umbrella.tags.append("umbrella")
     assert I._second_life_owed(umbrella) is True
-    monkeypatch.setattr(I, "_source_cfg", lambda name: {"unfold_spent_umbrellas": False})
-    assert I._second_life_owed(umbrella) is False
 
 
 # ===========================================================================
@@ -2129,11 +2127,10 @@ def test_a_vault_round_lands_on_its_own_commit_with_no_window(isolated):
     assert ev["vault"] is True and "a vault round" in _fm(p)["activity_log"][-1]
 
 
-def test_the_kill_switch_and_an_already_closed_item(isolated):
+def test_an_already_closed_item(isolated):
     write_item(isolated, 607, status="done")
     _landed(607, "SM_607", "c105edc105ed",
             outcome={"acceptance": "met", "landed": True, "deferred_to": [], "summary": "", "spawned": []})
-    assert B.close_settled_items(S.LEDGER_PATH, enabled=False) == []
     assert B.close_settled_items(S.LEDGER_PATH) == [], "a human closed it; nothing to do"
 
 

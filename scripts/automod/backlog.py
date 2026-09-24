@@ -33,7 +33,7 @@ import logging
 import time
 import re
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1332,14 +1332,64 @@ def all_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
     passes its own."""
     wanted = {b.lower() for b in boards} if boards else None
     out = []
-    for path in sorted((backlog_dir or BACKLOG_DIR).glob("*.md")):
-        item = load_item(path)
+    seen: set[str] = set()
+    root = backlog_dir or BACKLOG_DIR
+    for path in sorted(root.glob("*.md")):
+        seen.add(str(path))
+        item = _load_item_cached(path)
         if not item:
             continue
         if wanted is not None and item.board.lower() not in wanted:
             continue
         out.append(item)
+    _forget_vanished(root, seen)
     return out
+
+
+# path -> ((mtime_ns, size, inode), parsed Item or None). The board is ~1,400
+# files and housekeeping alone walked it ~13 times a pass, each walk a YAML
+# parse per file; an item changes a few times a day. Keyed like
+# `state.ledger_rows`: every writer here rewrites the file (new mtime, usually
+# a new size), and a rename or replace is a new inode. The stat is taken
+# BEFORE the read, so a write landing in between leaves the cached version
+# older than what was parsed and the next walk parses again — the safe way
+# round. Never shared: a hit hands back a copy (`_item_copy`), so a caller
+# that appends to `item.tags` cannot change what the next walk sees.
+_items_cache: dict[str, tuple[tuple[int, int, int], "Item | None"]] = {}
+# path -> times this process parsed it. Instrument for
+# `tests/test_backlog_item_cache.py`, like `state._rows_reads`.
+_items_parses: dict[str, int] = {}
+
+
+def _item_copy(item: "Item | None") -> "Item | None":
+    if item is None:
+        return None
+    return _dc_replace(item, tags=list(item.tags), members=list(item.members))
+
+
+def _load_item_cached(path: Path) -> "Item | None":
+    key = str(path)
+    try:
+        st = path.stat()
+    except OSError:
+        _items_cache.pop(key, None)
+        return None
+    version = (st.st_mtime_ns, st.st_size, st.st_ino)
+    cached = _items_cache.get(key)
+    if cached is not None and cached[0] == version:
+        return _item_copy(cached[1])
+    item = load_item(path)
+    _items_parses[key] = _items_parses.get(key, 0) + 1
+    _items_cache[key] = (version, item)
+    return _item_copy(item)
+
+
+def _forget_vanished(root: Path, seen: set[str]) -> None:
+    """Drop cache entries for files under `root` the walk no longer found."""
+    prefix = str(root).rstrip("/") + "/"
+    for key in [k for k in _items_cache if k.startswith(prefix) and k not in seen
+                and "/" not in k[len(prefix):]]:
+        _items_cache.pop(key, None)
 
 
 def open_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
@@ -2852,7 +2902,7 @@ _CLOSE_SWEEP_LOCK = threading.Lock()
 
 
 def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
-                        enabled: bool = True, close_members: bool = True) -> list[dict]:
+                        close_members: bool = True) -> list[dict]:
     """The sweep: note every settled landing on its item, close the ones whose
     round said the acceptance check was met.
 
@@ -2863,8 +2913,6 @@ def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
     A closed item is never re-triaged, which is why the default is to leave
     it open rather than guess.
     """
-    if not enabled:
-        return []
     # One sweep at a time. Housekeeping runs it in a worker thread and
     # `autocode.execute` runs it at the end of a vault-landing turn; the
     # landed-marker check and the write are not atomic, so two overlapping
@@ -3604,8 +3652,8 @@ def _on_live_main(commit: str) -> bool:
     return r.returncode == 0
 
 
-def reopen_reverted_landings(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
-                             enabled: bool = True) -> list[dict]:
+def reopen_reverted_landings(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS
+                             ) -> list[dict]:
     """Reopen an item this loop closed on a landing the guardian then reverted.
 
     `close_settled_items` closes an item when its promotion settles, and the
@@ -3623,18 +3671,32 @@ def reopen_reverted_landings(ledger: Path, boards: tuple[str, ...] | None = DEFA
     `up_next` when `implement_outcomes` re-offers it (the `rolled_back` verdict,
     whose detail names the reverted commit and its kept history), else to
     `draft` for triage.
+
+    Skipped outright when nothing it reads has changed since a pass that left
+    nothing pending (`_reopen_watermark`): what can make an item eligible is a
+    new `rollback_succeeded` (a commit joins the reverted set) or a new
+    `item_landed` (an item is closed on a commit), both ledger rows. A pass
+    that refused a write (an unparsed file, a status move that did not take)
+    does not advance the mark, so that item is retried every pass as before.
     """
-    if not enabled:
-        return []
     from scripts.automod import state as S
+    rows = _ledger_rows(ledger)
+    mark = (str(ledger), tuple(boards) if boards else None,
+            hash(tuple((e.get("event"), str(e.get("commit") or ""), str(e.get("item_id") or ""),
+                        e.get("ts")) for e in rows
+                       if e.get("event") in _REOPEN_INPUT_EVENTS)))
+    if _reopen_watermark.get(mark[:2]) == mark[2]:
+        return []
     reverted = _reverted_commits(ledger)
     if not reverted:
+        _reopen_watermark[mark[:2]] = mark[2]
         return []
     last_landed: dict[int, dict] = {}
     for d in _ledger_events(ledger, "item_landed"):
         last_landed[int(d["item_id"])] = d
     outcomes: dict[int, tuple[str, str]] | None = None
     out: list[dict] = []
+    pending = False
     for item in all_items(boards):
         if item.status != "done":
             continue
@@ -3644,6 +3706,7 @@ def reopen_reverted_landings(ledger: Path, boards: tuple[str, ...] | None = DEFA
         text = item.path.read_text(encoding="utf-8")
         fm, body = _split_frontmatter(text)
         if _unparsed_guard(item.path, text, fm, "reopen_reverted_landings"):
+            pending = True
             continue
         marked = str(fm.get(LANDED_MARKER) or "")
         commit = str(row.get("commit") or "")
@@ -3662,6 +3725,7 @@ def reopen_reverted_landings(ledger: Path, boards: tuple[str, ...] | None = DEFA
         why = (f"its landing `{commit[:8]}` was reverted by the guardian after the item was "
                f"closed; " + (detail or "offered back to triage"))
         if not record_status_move(fm, to, why):
+            pending = True
             continue
         fm.pop(LANDED_MARKER, None)
         fm[REVERTED_MARKER] = commit
@@ -3671,7 +3735,17 @@ def reopen_reverted_landings(ledger: Path, boards: tuple[str, ...] | None = DEFA
         S.append_event({"event": "item_reopened", "item_id": item.id, "by": "rollback",
                         "commit": commit, "to": to, "verdict": verdict}, path=ledger)
         out.append({"item_id": item.id, "commit": commit, "to": to, "verdict": verdict})
+    if not pending:
+        _reopen_watermark[mark[:2]] = mark[2]
     return out
+
+
+# The ledger rows `reopen_reverted_landings` reads; `item_reopened`, which it
+# writes, is not one of them.
+_REOPEN_INPUT_EVENTS = ("rollback_succeeded", "rollback_requested", "item_landed", "promoted")
+# (ledger, boards) -> a digest of those rows as of the last pass that left
+# nothing pending.
+_reopen_watermark: dict[tuple, int] = {}
 
 
 def reopen_item(item_id: int, reason: str, *, ledger: Path | None = None) -> dict:
@@ -4922,8 +4996,8 @@ def unfold_umbrella(umbrella_id: int, reason: str, *, ledger: Path | None = None
 UNFOLDED_TAG = "unfolded"
 
 
-def unfold_spent_umbrellas(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
-                           enabled: bool = True) -> list[dict]:
+def unfold_spent_umbrellas(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS
+                           ) -> list[dict]:
     """Unfold every open umbrella whose one unattended attempt is spent, and
     close it. Returns one `{umbrella_id, released, reason}` per umbrella.
 
@@ -4940,8 +5014,6 @@ def unfold_spent_umbrellas(ledger: Path, boards: tuple[str, ...] | None = DEFAUL
     `EXPIRY_EXEMPT_TAGS`, because a member of a still-live umbrella closed by
     expiry would be misattributed by `close_settled_items` when it lands.
     """
-    if not enabled:
-        return []
     from scripts.automod import state as S
     history = implement_history(ledger)
     outcomes = implement_outcomes(ledger)
