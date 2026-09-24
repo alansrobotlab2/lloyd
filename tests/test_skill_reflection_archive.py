@@ -4,12 +4,16 @@ overwritten, and the archive name must not come from a hand-written stamp.
 Why this is a code problem and not a skill problem
 --------------------------------------------------
 The nightly chain writes three live reports in place under
-``~/lloyd/_pipeline/reflection/``: ``signals-latest.md``,
-``tool-patterns-latest.md`` and ``conversation-patterns-latest.md``. That
-directory is gitignored (``~/lloyd/.gitignore:25`` ``/_pipeline/``;
-``git ls-files _pipeline | wc -l`` → 0), so an overwrite with no prior copy
-destroys the only version that has ever existed — the same irreversibility that
-made the 2026-08-22 entity-graph destruction unrecoverable.
+``~/lloyd-data/_pipeline/reflection/``: ``signals-latest.md``,
+``tool-patterns-latest.md`` and ``conversation-patterns-latest.md``. (They lived
+under ``~/lloyd/_pipeline/`` until the 2026-09-22 data-home move,
+``architecture/data-home.md``, and the skills followed them.) That directory is
+under no version control: it was gitignored in the tree (``~/lloyd/.gitignore:25``
+``/_pipeline/``; ``git ls-files _pipeline | wc -l`` → 0) and is outside every repo
+now, so an overwrite with no prior copy destroys the only version that has ever
+existed, bar whatever the data home's hourly snapshot happened to catch — the
+same irreversibility that made the 2026-08-22 entity-graph destruction
+unrecoverable.
 
 Measured at triage (2026-09-12T10:15Z), against ~22 nightly cycles since 08-22:
 ``signals-latest*`` → 7 files (6 dated copies), and **zero** dated copies for
@@ -84,8 +88,8 @@ What each clause is pinned by
 Two more assertions hold up claims that are not clauses.
 ``test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree`` crosses the one
 process boundary the rule's single exemption sits on — ``vault_write`` rejecting a
-``~/lloyd/`` target is why a skill prescribing that call cannot destroy a report, and
-until round ``SM_20260912_163822`` that rested on a note in ``lloyd/MEMORY.md``, which
+``~/lloyd/`` or ``~/lloyd-data/`` target is why a skill prescribing that call cannot
+destroy a report, and until round ``SM_20260912_163822`` that rested on a note in ``lloyd/MEMORY.md``, which
 is not a test. ``test_the_section_2e_guard_fails_on_every_way_it_could_be_satisfied_wrongly``
 breaks the §2e text as landed, three ways, and shows the per-file guard names the broken
 file each time while the two section-wide greps the previous round used stay silent —
@@ -112,8 +116,8 @@ same skill text, and the vault writer refuses to land the skill without it.
 value, because narrowing that tuple narrows the clause.
 
 ``vault-write`` is the single exemption, and its reason is not a loophole: those
-calls reject any ``~/lloyd/`` target with ``PATH_ESCAPE`` (recorded in
-``nightly-reflection-signals`` Phase 0, ``nightly-reflection-knowledge-analysis``
+calls reject any ``~/lloyd/`` or ``~/lloyd-data/`` target with ``PATH_ESCAPE``
+(recorded in ``nightly-reflection-signals`` Phase 0, ``nightly-reflection-knowledge-analysis``
 step 1, and MEMORY.md), so nothing they prescribe can overwrite anything. Those
 five (skill, report) pairs are re-verified every run and the discovered set must
 equal the recorded one; if a skill there ever gains a real ``Write`` call it moves
@@ -211,8 +215,8 @@ EXPECTED_BOUND_WRITERS: dict[str, tuple[str, set[str]]] = {
 # set must equal this set. If a skill here gains a real Write call it moves to
 # tier 1 and owes an archive step; both families are recorded as findings on #436.
 #: Write prescriptions routed through vault_write / mem_write, which reject any
-#: ~/lloyd/ target with PATH_ESCAPE — the instruction cannot destroy a report, so
-#: the absence of an archive step costs nothing today.
+#: ~/lloyd/ or ~/lloyd-data/ target with PATH_ESCAPE — the instruction cannot
+#: destroy a report, so the absence of an archive step costs nothing today.
 #: (`autonomy-reflection-pipeline` names prompt-audit-latest and test-results-latest
 #: only inside Step 6.1's *read* list, so they classify as reads; it prescribes
 #: producing them by bare filename, which no path-shaped check can attribute.)
@@ -421,19 +425,21 @@ def test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree(tmp_path, mo
     reflection report without a dated copy, with one exempt tier: a write
     prescribed through `vault_write`. The reason is a claim about a *different
     process* — the MCP server resolves that call against `~/obsidian` and rejects a
-    `~/lloyd/` target — and until now nothing pinned it (review finding, round
-    SM_20260912_163822: the exemption rested on a note in `lloyd/MEMORY.md`, and a
-    memory file is not a test). If that resolver ever starts accepting a `~/lloyd/`
-    path, the exempt tier stops being a no-op and silently re-opens the loss this
+    `~/lloyd/` or `~/lloyd-data/` target — and until now nothing pinned it (review
+    finding, round SM_20260912_163822: the exemption rested on a note in
+    `lloyd/MEMORY.md`, and a memory file is not a test). If that resolver ever starts
+    accepting either home the reports have had (`~/lloyd/_pipeline/` until
+    2026-09-22, `~/lloyd-data/_pipeline/` since — `architecture/data-home.md`), the
+    exempt tier stops being a no-op and silently re-opens the loss this
     item is about, so the refusal is asserted against the real handler.
 
-    Three shapes, because the skills write the path three ways and the guard's
-    three branches are separate code: a `~/`-prefixed home path, an absolute path
-    outside the vault, and a `..` traversal that reaches the same file. All three
+    Three shapes per home, because the skills write the path three ways and the
+    guard's three branches are separate code: a `~/`-prefixed home path, an absolute
+    path outside the vault, and a `..` traversal that reaches the same file. All six
     must say `PATH_ESCAPE`, for a read as well as a write — the skills' read lists
     name the same paths.
 
-    Then the positive control, which is what makes the six refusations above mean
+    Then the positive control, which is what makes the twelve refusals above mean
     anything: with `VAULT` pointed at a scratch tree, the same handler really does
     write a file that is inside the vault. Without it, a handler broken to fail
     every call would satisfy the exemption for the wrong reason forever.
@@ -450,22 +456,30 @@ def test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree(tmp_path, mo
 
     The root identity is asserted unpatched, before the patch: the exemption is a
     claim about where the writer resolves paths, and "outside the vault" only implies
-    "cannot reach ~/lloyd" while the writer's root really is ~/obsidian."""
+    "cannot reach ~/lloyd or ~/lloyd-data" while the writer's root really is ~/obsidian."""
     from agent_mcp import vault as vault_tool
 
     assert Path(vault_tool.VAULT).expanduser().resolve() == (Path.home() / "obsidian").resolve(), (
         f"the vault writer's root is {vault_tool.VAULT!r}, not the vault: the "
-        "`vault-write` exemption claims a `~/lloyd/` target is outside everything "
+        "`vault-write` exemption claims a `~/lloyd-data/` target is outside everything "
         "this handler can write to, and that is false the moment its root moves"
     )
 
     monkeypatch.setattr(vault_tool, "VAULT", tmp_path)
     monkeypatch.setattr(vault_tool, "_audit_write", lambda *a, **k: None)
 
+    # Both homes the reports have had. `~/lloyd/` is the 2026-07 incident path and the
+    # spelling older skill text still carries; `~/lloyd-data/` is where the reports
+    # live since 2026-09-22 and what the exempt skills prescribe today
+    # (`autonomy-reflection-pipeline`'s `vault_write(path="~/lloyd-data/…")`), so the
+    # exemption is only honest while the resolver refuses that one too.
     targets = (
         "~/lloyd/_pipeline/reflection/signals-latest.md",
         "/home/alansrobotlab/lloyd/_pipeline/reflection/signals-latest.md",
         "../../../home/alansrobotlab/lloyd/_pipeline/reflection/signals-latest.md",
+        "~/lloyd-data/_pipeline/reflection/signals-latest.md",
+        "/home/alansrobotlab/lloyd-data/_pipeline/reflection/signals-latest.md",
+        "../../../home/alansrobotlab/lloyd-data/_pipeline/reflection/signals-latest.md",
     )
     for target in targets:
         for handler in (vault_tool._vault_write, vault_tool._vault_read):
@@ -486,13 +500,13 @@ def test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree(tmp_path, mo
             assert result.get("code") == "PATH_ESCAPE", (
                 f"{handler.__name__}({target!r}) returned {result!r}. The "
                 "`vault-write` exemption in scripts/reflection_archive.py is only "
-                "honest while a `~/lloyd/` target is refused here"
+                "honest while a `~/lloyd/` or `~/lloyd-data/` target is refused here"
             )
     written = vault_tool._vault_write(
         {"path": "reflection-archive-probe.md", "content": "inside the vault\n"}
     )
     assert written.get("success") is True, (
-        f"the handler no longer writes a path inside the vault, so the six "
+        f"the handler no longer writes a path inside the vault, so the twelve "
         f"refusations above prove nothing: {written!r}"
     )
     assert (tmp_path / "reflection-archive-probe.md").read_text(
@@ -510,7 +524,7 @@ def test_the_exempt_tier_is_a_call_that_cannot_reach_the_lloyd_tree(tmp_path, mo
 # --- The enforcement point: the vault writer, not a test rung -------------------
 _SKILL_FRONT = "---\nname: test-skill\ndescription: A skill that overwrites a report\n---\n\n"
 _STEM = "tool-patterns-latest"
-_LIVE = f"/home/alansrobotlab/lloyd/_pipeline/reflection/{_STEM}.md"
+_LIVE = f"/home/alansrobotlab/lloyd-data/_pipeline/reflection/{_STEM}.md"
 # Written the way the skills write it: one instruction wrapped over three lines
 # with backslash continuations, so this fixture also exercises logical_lines.
 _READ_LINE = f'Read("{_LIVE}")'
@@ -627,7 +641,7 @@ def test_the_writer_and_the_test_share_one_definition():
     )
 
 
-_P = "/home/alansrobotlab/lloyd/_pipeline/reflection/"
+_P = "/home/alansrobotlab/lloyd-data/_pipeline/reflection/"
 
 #: §2e of `nightly-reflection-knowledge-write`, transcribed from the live vault
 #: (heading at line 151; the copy blocks landed in vault commit 56e71846, whose
@@ -889,7 +903,7 @@ def test_the_archive_check_can_actually_fail():
         "the copy pointed at a different file": _mutate(
             good,
             f"{_LIVE[:-3]}-$STAMP.md",
-            "/home/alansrobotlab/lloyd/_pipeline/reflection/other-latest-$STAMP.md",
+            "/home/alansrobotlab/lloyd-data/_pipeline/reflection/other-latest-$STAMP.md",
         ),
         # "before it is overwritten" is part of the clause, not a suggestion: the
         # same two instructions in the other order copy the new report and lose the
@@ -912,7 +926,7 @@ def test_the_archive_check_can_actually_fail():
     # not be demanded an archive step.
     assert classify(_READ_LINE + "\n", _STEM) == "read"
     # A write prescribed through vault_write is a broken instruction, not a writer.
-    vault = f'Write to `vault_write(path="~/lloyd/_pipeline/reflection/{_STEM}.md")`:\n'
+    vault = f'Write to `vault_write(path="~/lloyd-data/_pipeline/reflection/{_STEM}.md")`:\n'
     assert classify(vault, _STEM) == "vault-write"
 
     # A line that reads *and* destroys the file is a write. If `read` won here, a
@@ -921,7 +935,7 @@ def test_the_archive_check_can_actually_fail():
     # the unclassified alarm all at once — so this case is the leak, pinned.
     read_merge = (
         f'Read the previous report and merge everything into '
-        f'`~/lloyd/_pipeline/reflection/{_STEM}.md`\n'
+        f'`~/lloyd-data/_pipeline/reflection/{_STEM}.md`\n'
     )
     assert classify(read_merge, _STEM) == "prose-write", (
         "a read-and-merge instruction was classified as a harmless read"
@@ -930,7 +944,7 @@ def test_the_archive_check_can_actually_fail():
     # file further down the line stays a reader. Without this pair the rule would
     # simply be "any line mentioning a write verb is a writer", which is wrong.
     annotated_read = (
-        f'1. Signal report: `Read(file_path="/home/alansrobotlab/lloyd/_pipeline/'
+        f'1. Signal report: `Read(file_path="/home/alansrobotlab/lloyd-data/_pipeline/'
         f'reflection/{_STEM}.md")` — absolute path, not `vault_read`. Same rule for '
         f"the handoff write below and for reading it back.\n"
     )
@@ -961,7 +975,7 @@ def test_the_bound_tiers_are_the_two_that_can_lose_a_report():
     # not excused by its tier.
     prose_only = (
         "1. **Consolidate signals:** Merge everything into "
-        "`~/lloyd/_pipeline/reflection/signals-latest.md`\n"
+        "`~/lloyd-data/_pipeline/reflection/signals-latest.md`\n"
     )
     assert classify(prose_only, "signals-latest") == "prose-write"
     assert archive_problems(prose_only, "signals-latest"), (
@@ -978,7 +992,7 @@ def test_the_bound_tiers_are_the_two_that_can_lose_a_report():
     # putting its archive block first in Phase 3.
     prose_after = (
         "1. **Consolidate signals:** Merge everything into "
-        "`~/lloyd/_pipeline/reflection/signals-latest.md`\n"
+        "`~/lloyd-data/_pipeline/reflection/signals-latest.md`\n"
         "   STAMP=$(date -u +%Y-%m-%d-%H%M) && "
         "cp signals-latest.md signals-latest-$STAMP.md\n"
     )
@@ -1094,8 +1108,8 @@ def test_the_only_exemption_is_a_call_that_cannot_reach_the_path(skills):
     """One exemption is allowed, and it is the one that cannot destroy a report.
 
     Anything routed through `vault_write`/`mem_write` returns `PATH_ESCAPE` on a
-    `~/lloyd/` target, so no archive step can be owed by it — but that reason has
-    an expiry date: the moment such a skill gains a real `Write`/`Edit` call it is
+    `~/lloyd/` or `~/lloyd-data/` target, so no archive step can be owed by it —
+    but that reason has an expiry date: the moment such a skill gains a real `Write`/`Edit` call it is
     a writer and owes the step. So the exempt set is asserted equal to the
     recorded one (it cannot grow unlisted) and each entry is re-checked to still
     classify as `vault-write` (an entry whose reason lapsed fails rather than
@@ -1213,8 +1227,8 @@ def test_the_recorded_debt_is_measured_by_archive_presence(skills):
 # protect, and a fixture holding only the in-flight write would still pass with the `cp`
 # deleted because nothing in it overwrites the pointer any more.
 
-_SIGNALS_LIVE = "/home/alansrobotlab/lloyd/_pipeline/reflection/signals-latest.md"
-_SIGNALS_INFLIGHT = "/home/alansrobotlab/lloyd/_pipeline/reflection/signals-inflight.md"
+_SIGNALS_LIVE = "/home/alansrobotlab/lloyd-data/_pipeline/reflection/signals-latest.md"
+_SIGNALS_INFLIGHT = "/home/alansrobotlab/lloyd-data/_pipeline/reflection/signals-inflight.md"
 _REAL_SIGNALS_READ = f'Read("{_SIGNALS_LIVE}")   # MUST come first'
 _REAL_SIGNALS_INFLIGHT_READ = (
     f'Read("{_SIGNALS_INFLIGHT}")   # exists from last night too; '
