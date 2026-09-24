@@ -13,6 +13,11 @@ Writes `~/obsidian/autonomy/skill-lint-report.md` with eight categories:
   8. INJECTION_PATTERN — body instructs acting on remotely hosted instructions or
                         config, or pipes remote content into a shell (#677)
 
+It also counts authorship (#774): how many live skills carry a `written_by:`
+front-matter key naming an unattended job, how many say `interactive`, and how
+many say nothing. That is a measurement, not a finding, so it never enters the
+category table or the Clean verdict.
+
 Advisory only. No automatic deletion or rewrites. Exit 0 always (so nightly
 pipeline doesn't fail on lint findings).
 
@@ -328,6 +333,30 @@ def check_stale(skill_path: Path, fm: dict) -> tuple[bool, int]:
     return age > STALE_DAYS, age
 
 
+# ── authorship (#774) ───────────────────────────────────────────────────────
+#
+# "Which live skills did an unattended job write?" was answerable only by
+# matching vault commit subjects, which breaks the first time a job commits with
+# a generic message. The writer knows the answer when it writes, so the four
+# writer skills stamp `written_by: {job: <task>, date: <UTC>}` and this counts
+# the stamps — no git walk. Files written before the stamp existed carry none and
+# are counted as unrecorded, never guessed at.
+INTERACTIVE_AUTHOR = "interactive"
+
+
+def written_by_job(fm: dict) -> str:
+    """The `written_by` job a skill declares, or "" when it declares none.
+
+    Accepts the mapping the writer skills emit and a bare string, since a hand
+    edit will write `written_by: interactive`; anything else reads as unrecorded
+    rather than as a job, so a malformed stamp cannot inflate the machine count.
+    """
+    value = fm.get("written_by")
+    if isinstance(value, dict):
+        value = value.get("job")
+    return value.strip() if isinstance(value, str) else ""
+
+
 # ── Runner ────────────────────────────────────────────────────────────────────
 
 # ── named repo scripts that no longer exist ─────────────────────────────────
@@ -567,6 +596,8 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
     phantom: list[dict] = []
     missing_script: list[dict] = []
     injection: list[dict] = []
+    authors: Counter = Counter()
+    unrecorded: list[str] = []
     skills: list[tuple[str, str]] = []
     total = 0
 
@@ -587,6 +618,14 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
             continue
 
         fm, _body, yaml_err = parse_frontmatter(content)
+
+        # Counted before the dead check: a dead skill is still in the library,
+        # and who wrote it is the first question when it has to be fixed.
+        job = written_by_job(fm)
+        if job:
+            authors[job] += 1
+        else:
+            unrecorded.append(entry.name)
 
         is_dead, dead_reasons = check_dead(fm, yaml_err)
         if is_dead:
@@ -672,6 +711,13 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
         "phantom": phantom,
         "missing_script": missing_script,
         "injection": injection,
+        "authorship": {
+            "by_job": dict(sorted(authors.items())),
+            "machine_written": sum(n for j, n in authors.items()
+                                   if j != INTERACTIVE_AUTHOR),
+            "interactive": authors.get(INTERACTIVE_AUTHOR, 0),
+            "unrecorded": sorted(unrecorded),
+        },
     }
 
 
@@ -791,6 +837,24 @@ def render_report(result: dict) -> str:
     for rule_name in sorted(INJECTION_RULES):
         lines.append(f"| `{rule_name}` | {inj_lines.get(rule_name, 0)} "
                      f"| {inj_skills.get(rule_name, 0)} |")
+    lines.append("")
+    # A measurement beside the table, never a row in it: 0 of 194 skills carried
+    # `written_by` when the key was introduced, so as a finding it would have
+    # read 194 on every run and hidden the categories that can fail.
+    authorship = result.get("authorship") or {}
+    n_unrecorded = len(authorship.get("unrecorded", []))
+    lines.append("### Authorship (`written_by`)")
+    lines.append("")
+    lines.append(f"Machine-written live skills: **{authorship.get('machine_written', 0)}** · "
+                 f"interactive: **{authorship.get('interactive', 0)}** · "
+                 f"no `written_by`: **{n_unrecorded}** of {total}.")
+    by_job = authorship.get("by_job") or {}
+    if by_job:
+        lines.append("")
+        lines.append("| job | skills |")
+        lines.append("|---|---|")
+        for job, n in by_job.items():
+            lines.append(f"| `{job}` | {n} |")
     lines.append("")
     lines.append("This report is **advisory**. No automatic changes.")
     lines.append("")
@@ -999,7 +1063,9 @@ def main() -> int:
           f"stale={len(result.get('stale', []))}, "
           f"phantom={len(result.get('phantom', []))}, "
           f"missing_script={n_scripts}, "
-          f"injection={len(result.get('injection', []))}")
+          f"injection={len(result.get('injection', []))}, "
+          f"machine_written={(result.get('authorship') or {}).get('machine_written', 0)}, "
+          f"unrecorded_author={len((result.get('authorship') or {}).get('unrecorded', []))}")
     return 0
 
 

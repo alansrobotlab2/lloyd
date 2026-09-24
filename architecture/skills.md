@@ -306,6 +306,7 @@ empty mapping and a body, never an exception. Fields the loaders actually read:
 | `tags` | scorer (×1.5) | required by `skill_lint` |
 | `category` | scorer (not weighted), `/api/skills` | on 139 of 194 |
 | `status` | both loaders | quarantine; 189 of 194 read `active`, 5 `archived` |
+| `written_by` | `skill_lint` authorship count (#774) | `{job, date}` from a writer skill, or `interactive`; on 0 of 194 when introduced |
 
 The directory name is the skill's `name` for every purpose that matters — the
 scorer's ×3 weight is on the directory name, not the frontmatter `name:` field
@@ -388,6 +389,13 @@ passes any ≤10-character opener untested, STALE returns before its age check f
 every `status: active` skill — so an all-zero run renders a qualified verdict
 naming them, never "✅ Clean". The qualification lives in code because the report
 is rewritten wholesale and a hand-written column did not survive one run.
+
+Beside the table, not in it, the report counts authorship (#774): live skills
+whose `written_by.job` names an unattended writer, those marked `interactive`, and
+those with no stamp — read off the front matter, so "which skills did a job
+write?" no longer needs a walk over vault commit subjects. It is a measurement
+rather than a category, so it never moves the verdict; the stamps come from the
+writer skills' own write step, and files written before that step carry none.
 
 Advisory only — no automatic deletion or rewrites, and it exits 0 always so the
 nightly pipeline does not fail on lint findings. Autonomy task #70 runs it
