@@ -37,6 +37,11 @@ SECTION_ROW_CAP = 50
 GOD_ENTITY_THRESHOLD = 20
 THIN_ENTITY_MAX_FACTS = 2
 STALE_DAYS_THRESHOLD = 60
+# Edge-type cardinality (#546): a type used fewer than this many times is a
+# one-off, and one type holding more than this share of active edges is a
+# catch-all absorbing relations that should have been typed.
+EDGE_TYPE_MIN_USES = 5
+EDGE_TYPE_MAX_SHARE = 0.5
 
 # Questions, not a listing — 20 is plenty for the section a research worker
 # reads out of `## Suggested Research Questions`.
@@ -603,6 +608,8 @@ def generate_report(
 
     lines.append("## Relationship Type Distribution")
     lines.append("")
+    lines.append(edge_type_cardinality(type_dist))
+    lines.append("")
 
     if type_dist:
         lines.append("| Type | Count |")
@@ -725,6 +732,28 @@ EXIT_OK = 0
 EXIT_ALARM = 2
 
 
+def edge_type_cardinality(type_dist: dict[str, int]) -> str:
+    """The `Edge-type cardinality: PASS|FAIL` verdict line (#546).
+
+    Report output only, never an alarm: the store as measured holds a dozen
+    under-floor types, so wiring this into `_alarms()` would page on every
+    nightly run and turn the exit code the scheduler reads into noise. Which of
+    those types to grandfather before it may escalate is a human's call.
+    """
+    total = sum(type_dist.values())
+    if not total:
+        return "Edge-type cardinality: PASS — no active edges"
+    rare = sorted((t for t, n in type_dist.items() if n < EDGE_TYPE_MIN_USES),
+                  key=lambda t: (type_dist[t], t))
+    dominant = max(type_dist, key=lambda t: (type_dist[t], t))
+    share = type_dist[dominant] / total
+    verdict = "FAIL" if rare or share > EDGE_TYPE_MAX_SHARE else "PASS"
+    rare_txt = (", ".join(f"{t} ({type_dist[t]})" for t in rare) if rare else "none")
+    return (f"Edge-type cardinality: {verdict} — types under {EDGE_TYPE_MIN_USES} uses: "
+            f"{rare_txt}; dominant type {dominant} is {share:.1%} of {total:,} active edges "
+            f"(limit {EDGE_TYPE_MAX_SHARE:.0%})")
+
+
 def _alarms(store_stats: dict | None, hygiene: dict, duplicate_id_files: int,
             baseline: int) -> list[str]:
     """Conditions that make this run an alarm rather than a report."""
@@ -837,6 +866,7 @@ def main():
     # different measurements and the #499 trend is read from this one.
     print(f"  Exact-duplicate fact rows (facts_idx.text_hash): {_fact_duplicate_cell(fact_dups)}")
     print(f"  Files with duplicate fact IDs: {dup_id_files}")
+    print(f"  {edge_type_cardinality(rel_stats['type_distribution'])}")
     pv = hygiene.get("provenance") or {}
     if "both_pct" in pv:
         print(f"  Provenance coverage: {pv['both_pct']}% of {pv['facts']:,} facts")

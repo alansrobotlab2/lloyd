@@ -40,8 +40,8 @@ DEFAULT_MAX_CTX_CHARS = 1500
 DEFAULT_TIMEOUT_SEC = 60
 
 # Vocabulary the classifier is allowed to emit. Any type not in this set is
-# coerced back to "mentions" with low confidence. Keep in sync with
-# agent_mcp/memory.py EDGE_TYPE_WEIGHTS.
+# coerced back to "mentions" with low confidence. Every member must be in
+# app.kg_store.EDGE_TYPES, the closed vocabulary (tests/test_edge_type_vocabulary.py).
 VOCABULARY = [
     "uses",
     "depends_on",

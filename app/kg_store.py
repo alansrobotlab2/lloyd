@@ -492,6 +492,29 @@ def canonical_edge_type(type_: str) -> str:
     return folded
 
 
+#: The closed edge-type vocabulary (#546): every type a writer in this tree
+#: emits, in canonical spelling. `fact_relate` refuses anything outside it,
+#: because that tool took `type` verbatim and minted a one-off type per call
+#: (`informs`, `ships`, `shares_mechanism_with`, `upgrade_candidate_for` were
+#: all count-1 `fact_relate` rows). Retrieval's weights, the relation
+#: classifier's `VOCABULARY` and the conversation linker's types are asserted
+#: to be members by `tests/test_edge_type_vocabulary.py` rather than kept in
+#: sync by comment. Adding a type is an edit here plus a weight in
+#: `agent_mcp/retrieval.py` if it should rank above the default.
+EDGE_TYPES: frozenset[str] = frozenset({
+    # the relation classifier's vocabulary (classify-relationships.py)
+    "uses", "depends_on", "implements", "supersedes", "part_of", "created_by",
+    "discusses", "competes_with", "related_to", "mentions",
+    # structural / cooccurrence edges retrieval down-weights
+    "co_mentioned", "wiki_link_co_occurrence",
+    # directional types retrieval can walk (DIRECTIONAL_EDGE_TYPES)
+    "built_on", "describes",
+    # the conversation linker (conversation_relations.py) and its default
+    "designed_by", "superseded_by", "required_by", "derived_from", "produces",
+    "conflicts_with", "co_accessed",
+})
+
+
 class _Edges:
     def __init__(self, store: KGStore):
         self._s = store

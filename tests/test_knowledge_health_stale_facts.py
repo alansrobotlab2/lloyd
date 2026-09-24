@@ -15,6 +15,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -353,3 +354,81 @@ def test_main_prints_the_line_and_exits_zero(tmp_path, monkeypatch):
     assert UNEVALUABLE_RE.search(_stale_section(text)) is not None
     assert "old claim" in text
     assert "No stale facts found" not in text
+
+
+# ── edge-type cardinality (#546) ─────────────────────────────────────────────
+
+CARDINALITY_RE = re.compile(r"^Edge-type cardinality: (PASS|FAIL) — ", re.M)
+
+
+def _drifted_edges() -> list[dict]:
+    """`mentions` at 60% of 100 active edges, two count-1 types and one at 3 —
+    the shape the live store had when #546 was measured."""
+    edges = [{"source": f"S{i}", "target": f"T{i}", "type": "mentions"} for i in range(60)]
+    edges += [{"source": f"U{i}", "target": f"V{i}", "type": "uses"} for i in range(35)]
+    edges += [{"source": f"D{i}", "target": f"E{i}", "type": "depends_on"} for i in range(3)]
+    edges += [{"source": "A", "target": "B", "type": "informs"},
+              {"source": "C", "target": "D", "type": "ships"}]
+    return edges
+
+
+def test_cardinality_line_lists_rare_types_and_the_dominant_share():
+    dist = {"mentions": 60, "uses": 35, "depends_on": 3, "informs": 1, "ships": 1}
+    line = khr.edge_type_cardinality(dist)
+    assert CARDINALITY_RE.match(line).group(1) == "FAIL"
+    for rare in ("informs (1)", "ships (1)", "depends_on (3)"):
+        assert rare in line
+    assert "uses (" not in line  # 35 uses is above the floor
+    assert "dominant type mentions is 60.0% of 100 active edges" in line
+
+
+def test_cardinality_passes_a_spread_vocabulary_with_no_rare_type():
+    line = khr.edge_type_cardinality({"uses": 40, "part_of": 35, "related_to": 25})
+    assert CARDINALITY_RE.match(line).group(1) == "PASS"
+    assert "types under 5 uses: none" in line
+
+
+@pytest.mark.parametrize("dist", [{"mentions": 51, "uses": 49},
+                                  {"uses": 50, "part_of": 50, "informs": 4}])
+def test_either_signal_alone_fails(dist):
+    """A catch-all with no rare types fails, and so does a rare type with no
+    catch-all — they are two different drifts."""
+    assert CARDINALITY_RE.match(khr.edge_type_cardinality(dist)).group(1) == "FAIL"
+
+
+def test_cardinality_fail_is_report_output_and_still_exits_zero(tmp_path, monkeypatch):
+    """The verdict is printed, not alarmed: a drifted store prints FAIL in the
+    report and exits EXIT_OK with no alert, so `_alarms()`'s four conditions
+    stay the only ones that move the exit code."""
+    root = tmp_path / "facts"
+    out = tmp_path / "out"
+    _write(root, "Pile", "state", [{"fact": "fresh claim", "event_date": _iso(1)}])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    edges = _drifted_edges()
+    monkeypatch.setattr(khr, "_kg_store",
+                        lambda: _FakeStore(edges, {"edges_active": len(edges),
+                                                   "edges_total": len(edges)}))
+    monkeypatch.setattr(khr, "fact_duplicate_stats",
+                        lambda: {"unavailable": True, "reason": "store faked in test"})
+    alerts: list = []
+    monkeypatch.setattr(khr, "_alert", lambda alarms, path: alerts.append(alarms))
+    monkeypatch.setattr(sys, "argv", ["knowledge-health-report.py",
+                                      "--facts-dir", str(root),
+                                      "--output-dir", str(out)])
+
+    rc = khr.main()
+
+    assert rc == khr.EXIT_OK
+    assert alerts == []
+    text = next(out.glob("knowledge-health-*.md")).read_text()
+    m = CARDINALITY_RE.search(text)
+    assert m is not None and m.group(1) == "FAIL"
+    assert "informs (1)" in text and "mentions is 60.0%" in text
+
+
+def test_alarms_take_no_edge_type_input():
+    """Pinned by signature: `_alarms()` cannot see the type distribution, so no
+    cardinality verdict can reach the exit code through it."""
+    assert list(inspect.signature(khr._alarms).parameters) == [
+        "store_stats", "hygiene", "duplicate_id_files", "baseline"]
+    assert khr._alarms({"edges_active": 100}, {}, 0, 0) == []

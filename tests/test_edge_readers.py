@@ -139,6 +139,27 @@ def test_fact_relate_writes_an_edge_with_its_origin(store):
     assert store.edges.count() == 1
 
 
+def test_fact_relate_refuses_a_type_outside_the_vocabulary(store):
+    """#546: `type` was written verbatim, so every novel word became a count-1
+    edge type (`informs`, `ships`, `upgrade_candidate_for`). The refusal names
+    the allowed set, so the caller's next attempt can pick one."""
+    r = facts_mod._fact_relate({"source": "Lloyd", "target": "vLLM",
+                                "type": "upgrade_candidate_for"})
+    assert "error" in r
+    assert "upgrade_candidate_for" in r["error"]
+    for member in ("uses", "depends_on", "related_to", "part_of"):
+        assert member in r["error"]
+    assert store.edges.count(active_only=False) == 0
+
+    ok = facts_mod._fact_relate({"source": "Lloyd", "target": "vLLM", "type": "built_on"})
+    assert ok["action"] == "created" and ok["type"] == "built_on"
+    assert store.edges.by_id(ok["edge_id"])["type"] == "built_on"
+    # A member in the other spelling is the same member, not a refusal.
+    hy = facts_mod._fact_relate({"source": "Lloyd", "target": "vLLM", "type": "depends-on"})
+    assert hy["action"] == "created" and hy["type"] == "depends_on"
+    assert store.edges.count() == 2
+
+
 def test_fact_relate_refuses_a_self_loop(store):
     r = facts_mod._fact_relate({"source": "Lloyd", "target": "Lloyd", "type": "uses"})
     assert "error" in r and "resolve to" in r["error"]

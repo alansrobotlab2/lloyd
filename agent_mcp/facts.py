@@ -52,7 +52,9 @@ from agent_mcp._shared import (
 )
 from app.atomic_io import locked_file
 from app.fact_ids import assign_ids as _assign_fact_ids, category_prefix, next_fact_id
-from app.kg_store import StoreUnavailable, text_hash as _text_hash, store as _store
+from app.kg_store import (
+    EDGE_TYPES, StoreUnavailable, canonical_edge_type, text_hash as _text_hash, store as _store,
+)
 from agent_mcp.retrieval import (  # noqa: F401  (re-exported compat names)
     EDGE_TYPE_WEIGHTS,
     RelationshipsCorrupt,
@@ -807,6 +809,16 @@ def _fact_relate(params: dict) -> dict:
     rel_type = params.get("type", "").strip()
     if not source or not target or not rel_type:
         return _err("source, target, and type are required", ErrorCode.MISSING_PARAM)
+    # A closed vocabulary (#546): a free-form type here became a count-1 type
+    # in the store on every novel call. Checked in canonical spelling, which is
+    # what the store writes, so `depends-on` is accepted as `depends_on`.
+    rel_type = canonical_edge_type(rel_type)
+    if rel_type not in EDGE_TYPES:
+        return _err(
+            f"type {params.get('type')!r} is not an edge type; use one of: "
+            + ", ".join(sorted(EDGE_TYPES)),
+            ErrorCode.INVALID_PARAM,
+        )
     confidence = float(params.get("confidence", 0.9))
     provenance = params.get("provenance", "STATED")
     if provenance not in ("STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"):

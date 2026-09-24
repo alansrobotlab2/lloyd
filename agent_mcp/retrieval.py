@@ -49,8 +49,8 @@ RelationshipsCorrupt = StoreUnavailable
 # Edge-type weights for weighted graph expansion in vault_recall.
 # Typed semantic edges dominate; cooccurrence-style edges are down-weighted so
 # they still contribute but don't drown out real relationships.
-# Keep this in sync with the vocabulary emitted by the relation classifier
-# (scripts/memory/classify-relationships.py, Phase 1B of backlog #294).
+# Every key must be in app.kg_store.EDGE_TYPES, the closed vocabulary the
+# classifier and fact_relate are held to (tests/test_edge_type_vocabulary.py).
 EDGE_TYPE_WEIGHTS = {
     # semantic, high-confidence
     "uses": 1.0,

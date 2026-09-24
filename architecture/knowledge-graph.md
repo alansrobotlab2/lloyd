@@ -217,7 +217,11 @@ entity-resolution-sweep.py  (#48, daily, DRY RUN ONLY)
 Three other writers:
 
 - **`fact_relate` / `fact_add`** (MCP tools) — a fact or edge stated in a chat
-  turn. `provenance: STATED`, `origin: fact_relate`. The `remember` and
+  turn. `provenance: STATED`, `origin: fact_relate`. Its `type` must be in
+  `app.kg_store.EDGE_TYPES`, the closed edge vocabulary (#546); anything else
+  is refused with the list, because a free-form type had been minting a
+  count-1 type per novel word. The health report's `Edge-type cardinality:
+  PASS|FAIL` line watches the result (report output only, not an alarm). The `remember` and
   `forget` verbs that routed onto `fact_add` and `fact_invalidate` from
   2026-09-09 were retired on 2026-09-23; see `architecture/memory.md`.
 - **`conversation_relations.py`** (#51) — co-access pairs from session
