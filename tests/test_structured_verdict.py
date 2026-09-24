@@ -203,3 +203,24 @@ def test_done_and_the_persisted_message_carry_the_object():
     assert 'structured=stats_dict.get("structured")' in src
     entries = Path(M.__file__).parent.parent / "transcript_entries.py"
     assert 'entry["structured"] = structured' in entries.read_text()
+
+
+# ── the other adopters (#710): the block stays, the regex stays ─────────────
+
+def test_deep_research_and_youtube_digest_keep_the_block_and_its_parser():
+    """The item that routed these two onto the schema asked for the RESULT
+    block to leave the prompt. It must not: the finalizer is skipped on any
+    turn that did not end of its own accord (`should_finalize`), so the block
+    is the only verdict a `max_turns` turn has."""
+    from app.harness.finalizer import FINALIZABLE_STOP_REASONS
+    from workers.sources import deep_research as D
+    from workers.sources import youtube_digest as Y
+
+    assert "max_turns" not in FINALIZABLE_STOP_REASONS
+    assert "RESULT: <written|nothing_found|duplicate>" in inspect.getsource(D.execute)
+    assert "RESULT: <written|kept|failed>" in Y.PROMPT
+    for mod in (D, Y):
+        assert "final_schema=RESULT_SCHEMA if want_structured else None" in inspect.getsource(mod.execute)
+        assert '.get("structured_verdict", True)' in inspect.getsource(mod.enqueue_if_due)
+        got = mod.parse_verdict("RESULT: failed\n" if mod is Y else "RESULT: nothing_found\n", None)
+        assert got["source"] == "regex", f"{mod.__name__}: the text fallback is gone"

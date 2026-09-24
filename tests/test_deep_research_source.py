@@ -69,7 +69,9 @@ def _turn(text: str, *, writes: Path | None = None, **kw):
             writes.write_text("# A note\n\n" + "body " * 200, encoding="utf-8")
         return {"text": text, "session_id": "20260908_deep_x",
                 "stop_reason": kw.get("stop_reason", "stop"),
-                "num_turns": kw.get("num_turns", 12), "errors": []}
+                "num_turns": kw.get("num_turns", 12), "errors": [],
+                "structured": kw.get("structured"),
+                "structured_error": kw.get("structured_error", "")}
     run.seen = {}
     run.prompt = ""
     return run
@@ -543,3 +545,108 @@ def test_the_source_yields_to_the_automod_workers():
     from workers.sources import autocode, autotriage
     assert autocode.DEFAULT_PRIORITY < autotriage.DEFAULT_PRIORITY
     assert autotriage.DEFAULT_PRIORITY < D.DEFAULT_PRIORITY
+
+
+# ---------------------------------------------------------------------------
+# The structured verdict (#710): the finalizer's object first, the block after
+# ---------------------------------------------------------------------------
+
+
+def _obj(result="written", **kw):
+    base = {"result": result, "note": "", "duplicate_of": "", "facts": "3", "sources": "5"}
+    base.update(kw)
+    return base
+
+
+def test_the_schema_admits_exactly_the_three_outcomes():
+    s = D.RESULT_SCHEMA
+    assert s["properties"]["result"]["enum"] == ["written", "nothing_found", "duplicate"]
+    assert s["properties"]["result"]["enum"] == list(D._RESULTS)
+    assert s["additionalProperties"] is False
+    assert set(s["required"]) == set(s["properties"])
+
+
+async def test_the_turn_is_sent_the_schema(registry, queue, notes, monkeypatch):
+    payload, _, path = _payload(registry, notes)
+    turn = _turn(f"RESULT: written\nNOTE: {path}\n", writes=path)
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+    await D.execute(_item(payload))
+    assert turn.seen["final_schema"] is D.RESULT_SCHEMA
+    assert turn.seen["final_schema_prompt"]
+
+
+async def test_the_kill_switch_rides_in_the_payload(registry, queue, notes, monkeypatch):
+    payload, _, path = _payload(registry, notes)
+    turn = _turn(f"RESULT: written\nNOTE: {path}\n", writes=path)
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+    await D.execute(_item({**payload, "structured_verdict": False}))
+    assert turn.seen["final_schema"] is None
+
+
+async def test_the_kill_switch_is_read_at_enqueue_time(registry, queue, notes):
+    """Like autotriage's: a queued item runs under the config that was live
+    when it was enqueued."""
+    registry.propose("a topic")
+    await D.enqueue_if_due(queue, {"structured_verdict": False})
+    assert queue.list_items(source=D.NAME)[0].payload["structured_verdict"] is False
+
+
+async def test_a_structured_verdict_wins_and_the_regex_is_never_reached(
+        registry, queue, notes, monkeypatch):
+    """The text says nothing_found, the object says duplicate: the object is
+    the record, and parse_result is not consulted at all."""
+    payload, topic_id, _ = _payload(registry, notes)
+    monkeypatch.setattr(D, "run_prompt_in_session", _turn(
+        "RESULT: nothing_found\n",
+        structured=_obj("duplicate", duplicate_of="knowledge/research/x.md")))
+
+    def boom(text):
+        raise AssertionError("parse_result reached with a structured verdict present")
+    monkeypatch.setattr(D, "parse_result", boom)
+
+    out = await D.execute(_item(payload))
+    assert out["meta"]["result"] == "duplicate"
+    assert out["meta"]["verdict_source"] == "structured"
+    assert registry.get(topic_id)["extra"]["verdict_source"] == "structured"
+
+
+async def test_no_object_falls_back_to_the_block_and_says_so(
+        registry, queue, notes, monkeypatch):
+    payload, topic_id, _ = _payload(registry, notes)
+    seen = []
+    real = D.parse_result
+    monkeypatch.setattr(D, "parse_result", lambda text: seen.append(text) or real(text))
+    monkeypatch.setattr(D, "run_prompt_in_session", _turn(
+        "RESULT: nothing_found\nFACTS: 0\n", structured=None,
+        structured_error="skipped: stop_reason=max_turns"))
+
+    out = await D.execute(_item(payload))
+    assert seen, "the block is the fallback when the finalizer gave nothing"
+    assert out["meta"]["result"] == "nothing_found"
+    assert out["meta"]["verdict_source"] == "regex"
+    assert out["meta"]["structured_error"] == "skipped: stop_reason=max_turns"
+
+
+async def test_an_out_of_vocabulary_object_is_not_a_verdict(registry, queue, notes, monkeypatch):
+    payload, _, _ = _payload(registry, notes)
+    monkeypatch.setattr(D, "run_prompt_in_session", _turn(
+        "RESULT: nothing_found\n", structured=_obj("probably_written")))
+    out = await D.execute(_item(payload))
+    assert out["meta"]["verdict_source"] == "regex"
+    assert out["meta"]["result"] == "nothing_found"
+
+
+async def test_a_structured_verdict_never_takes_the_no_block_branch(
+        registry, queue, notes, monkeypatch):
+    """Note on disk, no RESULT in the text, an object from the finalizer: the
+    object is the verdict, so this is not a "no RESULT block" guess."""
+    payload, topic_id, path = _payload(registry, notes)
+    monkeypatch.setattr(D, "run_prompt_in_session", _turn(
+        "I have finished the research.", writes=path,
+        structured=_obj("written", note=str(path))))
+
+    out = await D.execute(_item(payload))
+    assert out["status"] == "success" and out["meta"]["result"] == "written"
+    assert "result_block_missing" not in registry.get(topic_id)["extra"]
+    assert "no RESULT block" not in out["summary"]
+    assert out["meta"]["verdict_source"] == "structured"

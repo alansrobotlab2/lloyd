@@ -110,6 +110,33 @@ _FIELD_RE = re.compile(
     re.I)
 _ID_RE = re.compile(r"#?\s*(\d+)")
 
+#: The RESULT block as the harness finalizer's schema (app/harness/finalizer.py).
+#: Every enum is the tuple the text parser validates against, so the two paths
+#: cannot disagree on a vocabulary; an outcome outside `_RESULTS` is a schema
+#: rejection, not a field that quietly comes back None. The id fields stay
+#: strings ("#123" or "none") and go through the same `_id_or_none` as the text.
+#: No `maxLength`: the guided decoder would stop mid-sentence at it.
+RESULT_SCHEMA: dict = {
+    "type": "object",
+    "title": "youtube_digest_result",
+    "properties": {
+        "result": {"type": "string", "enum": list(_RESULTS)},
+        "note": {"type": "string"},
+        # Clamped to 0-100 in `_shape`, like the text path, not in the grammar.
+        "relevance": {"type": "integer"},
+        "verdict": {"type": "string", "enum": list(VERDICTS)},
+        "areas": {"type": "array", "items": {"type": "string", "enum": list(AREAS)}},
+        "source_kind": {"type": "string", "enum": list(SOURCE_KINDS)},
+        "approach": {"type": "string", "enum": list(APPROACHES)},
+        "idea": {"type": "string", "description": "One line naming the specific thing, or none."},
+        "duplicate_of": {"type": "string", "description": "#id or none"},
+        "filed": {"type": "string", "description": "#id or none"},
+    },
+    "required": ["result", "note", "relevance", "verdict", "areas", "source_kind",
+                 "approach", "idea", "duplicate_of", "filed"],
+    "additionalProperties": False,
+}
+
 
 class ScriptError(RuntimeError):
     """The monitor script did not produce its JSON line."""
@@ -337,7 +364,9 @@ def parse_result(text: str) -> Optional[dict]:
     does: a model that states an outcome, reconsiders and restates would
     otherwise have its first verdict paired with its last evidence. Fields
     outside their vocabulary come back as None rather than failing the parse —
-    the note is the primary product and is verified on disk separately.
+    the note is the primary product and is verified on disk separately. On the
+    finalizer path (`parse_verdict`) an outcome outside `_RESULTS` is a schema
+    rejection instead, and `execute` no longer counts it as a turn that ran.
     """
     lines = (text or "")[-6000:].splitlines()
     start = None
@@ -357,8 +386,13 @@ def parse_result(text: str) -> Optional[dict]:
         elif current:
             fields[current].append(line)
 
+    return _shape(lambda key: " ".join(fields.get(key, [])))
+
+
+def _shape(raw) -> dict:
+    """One set of clamps for both paths: `raw(FIELD)` is the field's text."""
     def one(key: str) -> str:
-        return " ".join(" ".join(fields.get(key, [])).split()).strip().strip("`'\"")
+        return " ".join(str(raw(key) or "").split()).strip().strip("`'\"")
 
     result = one("RESULT").lower().split()
     result = result[0] if result else ""
@@ -383,6 +417,27 @@ def parse_result(text: str) -> Optional[dict]:
         "duplicate_of": _id_or_none(one("DUPLICATE_OF")),
         "filed": _id_or_none(one("FILED")),
     }
+
+
+def parse_verdict(text: str, structured: Optional[dict] = None) -> Optional[dict]:
+    """The turn's outcome, from the finalizer's object or from the RESULT block.
+
+    `autotriage.parse_verdict`'s rule: the object wins when it carries a known
+    result, and the block stays in the prompt regardless, because the
+    finalizer is skipped on any turn that did not end of its own accord and
+    can fail on one that did. `source` names the path that answered.
+    """
+    if isinstance(structured, dict):
+        def raw(key: str):
+            value = structured.get(key.lower())
+            if isinstance(value, list):
+                return ", ".join(str(v) for v in value)
+            return "" if value is None else str(value)
+        parsed = _shape(raw)
+        if parsed["result"] is not None:
+            return {**parsed, "source": "structured"}
+    parsed = parse_result(text)
+    return {**parsed, "source": "regex"} if parsed is not None else None
 
 
 # ── Disk checks ──────────────────────────────────────────────────────────────
@@ -571,7 +626,10 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
                 kind="video",
                 payload={"channel": channel, "video_id": row["video_id"],
                          "title": row.get("title", ""), "published": row.get("published", ""),
-                         "max_turns": max_turns},
+                         "max_turns": max_turns,
+                         # Kill switch, in the payload like autotriage's: off,
+                         # the turn runs identically and only the block is read.
+                         "structured_verdict": bool(src_cfg.get("structured_verdict", True))},
                 priority=priority,
                 dedup_key=f"{NAME}:{channel}:{row['video_id']}",
             )
@@ -651,13 +709,20 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     tracked = await asyncio.to_thread(tracked_items)
     prompt = build_prompt(meta, tracked)
     vault_before = await asyncio.to_thread(_vault_dirty_paths)
+    want_structured = bool(payload.get("structured_verdict", True))
     try:
         run = await run_prompt_in_session(
             prompt, title=f"{meta.get('channel_name', channel)}: {title[:52]}",
             source=NAME,
             max_turns=int(payload.get("max_turns") or src_cfg.get("max_turns", 40)),
             priority=1,
-            extra_disallowed=list(DISALLOWED))
+            extra_disallowed=list(DISALLOWED),
+            final_schema=RESULT_SCHEMA if want_structured else None,
+            final_schema_prompt=(
+                "Restate the RESULT block above as a single JSON object "
+                "matching the schema. Same outcome, same verdict, same filed id — "
+                "this is a transcription, not a re-decision."
+            ))
     except DrainActive as exc:
         # Not the video's fault: the entry stays `fetched` and is re-offered.
         return {"status": "skipped", "summary": f"landing in progress: {exc}"[:500],
@@ -670,7 +735,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     session_id = run.get("session_id")
     text = run.get("text") or ""
     stop_reason = run.get("stop_reason")
-    parsed = parse_result(text)
+    parsed = parse_verdict(text, run.get("structured"))
+    structured_error = str(run.get("structured_error") or "")
+    verdict_meta = {"verdict_source": parsed["source"] if parsed else "none",
+                    "structured_error": structured_error}
     on_disk = await asyncio.to_thread(_note_is_real, note_path, video_id)
     unexpected = await asyncio.to_thread(_unexpected_vault_writes, vault_before)
 
@@ -694,7 +762,18 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     #     for a refresh the evidence is the RESULT block, or at least a clean
     #     stop with text. Without that rule a failed turn over an old note was
     #     recorded as completed "no verdict" — four of them on 2026-09-09.
-    turn_ran = parsed is not None or (stop_reason in ("stop", "end_turn") and bool(text.strip()))
+    #     Once the finalizer has run, that fallback is gone: it runs only on a
+    #     clean stop, so "a clean stop with text" would pass every turn it ran
+    #     on, including one whose verdict it could not read — a verdict with a
+    #     known result is required instead, from either path.
+    finalizer_ran = want_structured and (
+        run.get("structured") is not None
+        or bool(structured_error and "skipped" not in structured_error))
+    has_verdict = parsed is not None and parsed.get("result") in _RESULTS
+    if finalizer_ran:
+        turn_ran = has_verdict
+    else:
+        turn_ran = parsed is not None or (stop_reason in ("stop", "end_turn") and bool(text.strip()))
     if not on_disk or (meta.get("existing_note") and not turn_ran):
         what = "without a note" if not on_disk else "without a RESULT block over a pre-existing note"
         why = f"turn ended ({stop_reason}, {run.get('num_turns')} iterations) {what} at {note_path.name}"
@@ -704,7 +783,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                 "meta": {**base_meta, "session_id": session_id,
                          "stop_reason": stop_reason,
                          "empty_response": not text.strip(),
-                         "unexpected_vault_writes": unexpected}}
+                         "unexpected_vault_writes": unexpected, **verdict_meta}}
 
     eval_result = _eval_record(parsed, session_id)
     if eval_result.get("filed"):
@@ -749,5 +828,5 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         "meta": {**base_meta, "session_id": session_id, "note": str(note_path),
                  "stop_reason": run.get("stop_reason"), "num_turns": run.get("num_turns"),
                  "eval": eval_result, "unexpected_vault_writes": unexpected,
-                 "parsed": parsed is not None},
+                 "parsed": parsed is not None, **verdict_meta},
     }

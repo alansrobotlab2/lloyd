@@ -91,6 +91,25 @@ DISALLOWED: tuple[str, ...] = (
 _RESULTS = ("written", "nothing_found", "duplicate")
 _FIELD_RE = re.compile(r"^(RESULT|NOTE|DUPLICATE_OF|FACTS|SOURCES):\s*(.*)$", re.I)
 
+#: The RESULT block as the harness finalizer's schema (app/harness/finalizer.py).
+#: The enum is `_RESULTS`, not a restatement of it, so an outcome the text
+#: parser does not know cannot reach the grammar. No `maxLength`: the guided
+#: decoder would stop mid-sentence at it.
+RESULT_SCHEMA: dict = {
+    "type": "object",
+    "title": "deep_research_result",
+    "properties": {
+        "result": {"type": "string", "enum": list(_RESULTS)},
+        "note": {"type": "string", "description": "The note path, for written; else empty."},
+        "duplicate_of": {"type": "string",
+                         "description": "What already covers the topic, for duplicate; else empty."},
+        "facts": {"type": "string", "description": "How many fact_add calls were made."},
+        "sources": {"type": "string", "description": "How many sources were read."},
+    },
+    "required": ["result", "note", "duplicate_of", "facts", "sources"],
+    "additionalProperties": False,
+}
+
 
 def _store():
     from app.research_store import store
@@ -155,6 +174,42 @@ def parse_result(text: str) -> Optional[dict]:
         "facts": one("FACTS"),
         "sources": one("SOURCES"),
     }
+
+
+def _from_structured(obj: dict) -> Optional[dict]:
+    """The finalizer's object in `parse_result`'s shape, or None to fall back."""
+    result = str(obj.get("result") or "").strip().lower()
+    if result not in _RESULTS:
+        return None
+
+    def one(key: str) -> str:
+        return " ".join(str(obj.get(key) or "").split()).strip()
+
+    return {
+        "result": result,
+        "note": one("note").strip("`'\"() "),
+        "duplicate_of": one("duplicate_of").strip("`'\"() "),
+        "facts": one("facts"),
+        "sources": one("sources"),
+    }
+
+
+def parse_verdict(text: str, structured: Optional[dict] = None) -> Optional[dict]:
+    """The turn's outcome, from the finalizer's object or from the RESULT block.
+
+    `autotriage.parse_verdict`'s rule: the object wins when it carries a known
+    result, and the block stays in the prompt regardless, because the
+    finalizer is skipped on any turn that did not end of its own accord
+    (`max_turns`, a cancel) and can fail on one that did. `source` says which
+    path answered, so a finalizer that quietly stopped working does not look
+    exactly like one that works.
+    """
+    if isinstance(structured, dict):
+        parsed = _from_structured(structured)
+        if parsed is not None:
+            return {**parsed, "source": "structured"}
+    parsed = parse_result(text)
+    return {**parsed, "source": "regex"} if parsed is not None else None
 
 
 def _note_is_real(path: Path) -> bool:
@@ -224,7 +279,10 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
             payload={"topic_id": topic["id"], "topic": topic["topic"],
                      "domain": topic["domain"] or "",
                      "artifact_path": str(path),
-                     "max_turns": int(src_cfg.get("max_turns", 60))},
+                     "max_turns": int(src_cfg.get("max_turns", 60)),
+                     # Kill switch, in the payload like autotriage's: off, the
+                     # turn runs identically and only the RESULT block is read.
+                     "structured_verdict": bool(src_cfg.get("structured_verdict", True))},
             priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
             dedup_key=f"deep-research:{topic['id']}",
         )
@@ -319,11 +377,18 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # Baseline before the turn: anything already dirty is not this turn's.
     vault_before = await asyncio.to_thread(_vault_dirty_paths)
 
+    want_structured = bool(payload.get("structured_verdict", True))
     try:
         run = await run_prompt_in_session(
             prompt, title=f"deep research #{topic_id}: {topic[:48]}",
             source=NAME, max_turns=int(payload.get("max_turns", 60)),
-            priority=1, extra_disallowed=list(DISALLOWED))
+            priority=1, extra_disallowed=list(DISALLOWED),
+            final_schema=RESULT_SCHEMA if want_structured else None,
+            final_schema_prompt=(
+                "Restate the RESULT block above as a single JSON object "
+                "matching the schema. Same outcome, same path, same counts — "
+                "this is a transcription, not a re-decision."
+            ))
     except DrainActive as exc:
         await asyncio.to_thread(store.release, int(topic_id),
                                 error=f"landing in progress: {exc}", backoff_seconds=0)
@@ -332,14 +397,18 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         return await give_up_or_retry(str(exc), {"turn_timeout": True})
 
     session_id = run["session_id"]
-    parsed = parse_result(run.get("text") or "")
+    parsed = parse_verdict(run.get("text") or "", run.get("structured"))
     on_disk = await asyncio.to_thread(_note_is_real, path)
     strays = await asyncio.to_thread(_unexpected_vault_writes, vault_before)
     if strays:
         logger.warning("deep-research #%s changed vault paths outside knowledge/: %s",
                        topic_id, strays[:10])
 
-    extra: dict[str, Any] = {"session_id": session_id}
+    extra: dict[str, Any] = {
+        "session_id": session_id,
+        "verdict_source": parsed["source"] if parsed else "none",
+        "structured_error": str(run.get("structured_error") or ""),
+    }
     if strays:
         extra["unexpected_vault_writes"] = strays[:20]
 
@@ -359,7 +428,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             f"no RESULT block and no note (stop_reason={run.get('stop_reason')}, "
             f"turns={run.get('num_turns')}); session {session_id}",
             {"session_id": session_id, "stop_reason": run.get("stop_reason"),
-             "empty_response": not (run.get("text") or "").strip()})
+             "empty_response": not (run.get("text") or "").strip(),
+             "verdict_source": "none", "structured_error": extra["structured_error"]})
 
     result = parsed["result"]
     if result == "written" and not on_disk:

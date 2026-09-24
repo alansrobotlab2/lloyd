@@ -74,7 +74,8 @@ class _Script:
 
 
 def _turn(text: str, *, writes: Path | None = None, video_id: str = "abc123",
-          raises: Exception | None = None, stop_reason: str = "stop"):
+          raises: Exception | None = None, stop_reason: str = "stop",
+          structured: dict | None = None, structured_error: str = ""):
     async def run(prompt, **kwargs):
         run.prompt = prompt
         run.kwargs = kwargs
@@ -84,7 +85,8 @@ def _turn(text: str, *, writes: Path | None = None, video_id: str = "abc123",
             writes.parent.mkdir(parents=True, exist_ok=True)
             writes.write_text(f"---\nsegment: knowledge\nvideo_id: {video_id}\n---\n# Note\n\n" + "body " * 200)
         return {"text": text, "session_id": "20260908_youtubed_ab12", "stop_reason": stop_reason,
-                "num_turns": 9, "errors": []}
+                "num_turns": 9, "errors": [], "structured": structured,
+                "structured_error": structured_error}
     run.prompt = ""
     run.kwargs = {}
     return run
@@ -498,3 +500,151 @@ def test_a_filing_merged_into_an_existing_item_still_verifies(tmp_path):
     assert not Y._filed_item_exists(10, "other0video", backlog_dir=d)
     (d / "11-plain.md").write_text("---\nstatus: draft\ntags: [backlog]\n---\n\n# P\n\nabc123XYZ\n")
     assert not Y._filed_item_exists(11, "abc123XYZ", backlog_dir=d), "neither the tag nor a merge"
+
+
+# ---------------------------------------------------------------------------
+# The structured verdict (#710): the finalizer's object first, the block after
+# ---------------------------------------------------------------------------
+
+
+def _obj(result="written", **kw):
+    base = {"result": result, "note": "n.md", "relevance": 140, "verdict": "worth_a_look",
+            "areas": ["memory", "retrieval"], "source_kind": "paper",
+            "approach": "experiment", "idea": "none", "duplicate_of": "none",
+            "filed": "none"}
+    base.update(kw)
+    return base
+
+
+def _old_note(tmp_path: Path) -> Path:
+    existing = tmp_path / "vault" / "20260904-old.md"
+    existing.parent.mkdir(parents=True, exist_ok=True)
+    existing.write_text("---\nsegment: knowledge\nvideo_id: abc123\n---\n# Old\n\n" + "body " * 200)
+    return existing
+
+
+def test_the_schema_enums_are_the_parsers_vocabularies():
+    props = Y.RESULT_SCHEMA["properties"]
+    assert props["result"]["enum"] == ["written", "kept", "failed"] == list(Y._RESULTS)
+    assert props["verdict"]["enum"] == list(Y.VERDICTS)
+    assert props["source_kind"]["enum"] == list(Y.SOURCE_KINDS)
+    assert props["approach"]["enum"] == list(Y.APPROACHES)
+    assert props["areas"]["items"]["enum"] == list(Y.AREAS)
+    assert Y.RESULT_SCHEMA["additionalProperties"] is False
+    assert set(Y.RESULT_SCHEMA["required"]) == set(props)
+    assert "maxLength" not in json.dumps(Y.RESULT_SCHEMA)
+
+
+def test_the_structured_object_goes_through_the_same_clamps():
+    got = Y.parse_verdict("", _obj(filed="#523", duplicate_of="none"))
+    assert got["source"] == "structured"
+    assert got["result"] == "written" and got["relevance"] == 100
+    assert got["areas"] == ["memory", "retrieval"] and got["filed"] == 523
+    assert got["duplicate_of"] is None and got["idea"] == ""
+
+
+async def test_a_structured_verdict_wins_and_the_regex_is_never_reached(
+        tmp_path, backlog, monkeypatch):
+    meta = _meta(tmp_path)
+    note = Path(meta["target_note"])
+    script = _Script({"ok": True, "meta": meta})
+    turn = _turn("prose with no block", writes=note, structured=_obj())
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", turn)
+
+    def boom(text):
+        raise AssertionError("parse_result reached with a structured verdict present")
+    monkeypatch.setattr(Y, "parse_result", boom)
+
+    result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
+    assert result["status"] == "success"
+    assert turn.kwargs["final_schema"] is Y.RESULT_SCHEMA
+    assert result["meta"]["verdict_source"] == "structured"
+    assert json.loads(script.opt(1, "--eval-json"))["verdict"] == "worth_a_look"
+
+
+async def test_no_object_falls_back_to_the_block_and_says_so(tmp_path, backlog, monkeypatch):
+    meta = _meta(tmp_path)
+    note = Path(meta["target_note"])
+    script = _Script({"ok": True, "meta": meta})
+    _filed(backlog, 523)
+    seen = []
+    real = Y.parse_result
+    monkeypatch.setattr(Y, "parse_result", lambda text: seen.append(text) or real(text))
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", _turn(
+        BLOCK.format(note=note), writes=note,
+        structured_error="finalizer failed: output is not JSON"))
+
+    result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
+    assert seen and result["status"] == "success"
+    assert result["meta"]["verdict_source"] == "regex"
+    assert result["meta"]["structured_error"] == "finalizer failed: output is not JSON"
+
+
+async def test_the_kill_switch_rides_in_the_payload(tmp_path, backlog, monkeypatch):
+    meta = _meta(tmp_path)
+    note = Path(meta["target_note"])
+    monkeypatch.setattr(Y, "_script", _Script({"ok": True, "meta": meta}))
+    turn = _turn(BLOCK.format(note=note), writes=note)
+    monkeypatch.setattr(Y, "run_prompt_in_session", turn)
+    await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123",
+                           "structured_verdict": False}))
+    assert turn.kwargs["final_schema"] is None
+
+
+async def test_an_unreadable_verdict_over_an_old_note_is_not_a_turn_that_ran(
+        tmp_path, backlog, monkeypatch):
+    """The finalizer ran (so the stop was clean) and neither it nor the text
+    produced a known outcome. "A clean stop with text" used to pass exactly
+    this turn and record it completed over a note it never wrote."""
+    existing = _old_note(tmp_path)
+    meta = _meta(tmp_path, existing=str(existing))
+    script = _Script({"ok": True, "meta": meta})
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", _turn(
+        "RESULT: probably_fine\nVERDICT: background\n", stop_reason="stop",
+        structured_error="finalizer failed: output is not JSON"))
+
+    result = await Y.execute(_item({"channel": "ai-engineer", "video_id": "abc123"}))
+    assert result["status"] == "failed"
+    assert script.modes() == ["--fetch", "--fail"]
+
+
+async def test_a_clean_stop_without_the_finalizer_keeps_the_old_rule(
+        tmp_path, backlog, monkeypatch):
+    """Switched off, nothing about the gate moves: a clean stop with text over
+    an old note still reads as a turn that ran."""
+    existing = _old_note(tmp_path)
+    meta = _meta(tmp_path, existing=str(existing))
+    script = _Script({"ok": True, "meta": meta})
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", _turn("Kept the note as it was."))
+
+    result = await Y.execute(_item({"channel": "ai-engineer", "video_id": "abc123",
+                                    "structured_verdict": False}))
+    assert result["status"] == "success"
+
+
+async def test_a_kept_note_from_the_object_is_a_success(tmp_path, backlog, monkeypatch):
+    existing = _old_note(tmp_path)
+    meta = _meta(tmp_path, existing=str(existing))
+    script = _Script({"ok": True, "meta": meta})
+    monkeypatch.setattr(Y, "_script", script)
+    monkeypatch.setattr(Y, "run_prompt_in_session", _turn(
+        "Left it.", structured=_obj("kept", note=str(existing))))
+
+    result = await Y.execute(_item({"channel": "ai-engineer", "video_id": "abc123"}))
+    assert result["status"] == "success" and "note kept" in result["summary"]
+    assert result["meta"]["verdict_source"] == "structured"
+
+
+async def test_the_kill_switch_is_read_at_enqueue_time(tmp_path, monkeypatch):
+    queue = WorkQueue(tmp_path / "workers.db")
+
+    async def script(channel, *args, timeout):
+        return {"ok": True, "pending": [{"video_id": "v1", "title": "t"}]}
+    monkeypatch.setattr(Y, "_script", script)
+    await Y.enqueue_if_due(queue, {"channels": ["discover-ai"], "structured_verdict": False})
+    items = queue.list_items(source=Y.NAME)
+    assert items and items[0].payload["structured_verdict"] is False

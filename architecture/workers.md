@@ -504,8 +504,17 @@ beside `text` and `stop_reason`.
 - No kill switch: `workers.sources.autotriage.structured_verdict` was
   retired on 2026-09-24, and every triage turn asks for the object.
 
-Follow-ups, not done: schemas for `deep_research.parse_result` and
-`autocode.parse_spawned_line`.
+`deep-research` and `youtube-digest` take the same path since #710: each
+module's `RESULT_SCHEMA` is built from the tuples its `parse_result` validates
+against, `parse_verdict(text, structured)` prefers the object and falls back to
+the `RESULT:` block (which stays in both prompts), the run's `meta` carries
+`verdict_source` and `structured_error`, and each has its own
+`structured_verdict` kill switch carried in the payload (default on, no config
+key). One behaviour moved with it: once the finalizer has run on a
+youtube-digest turn, "a clean stop with text" no longer counts as a turn that
+ran over a pre-existing note — it needs a verdict with a known `RESULT`, since
+the finalizer only runs on a clean stop and the old fallback would pass every
+such turn. Follow-up, not done: a schema for `autocode.parse_spawned_line`.
 
 ## 6. Configuration
 
