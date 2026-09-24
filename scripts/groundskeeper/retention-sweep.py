@@ -31,6 +31,19 @@ the transcript scratch home from backlog #566:
    archive window — the point of spilling is that the model re-reads the file
    via Read, so a still-open session's spill is not garbage.
 
+8. ~/lloyd-data/workers.db table `runs` — the queue's own run history, appended by
+   `WorkQueue.record_run` and pruned by nothing until now: `DELETE FROM runs` appeared
+   in no commit in this repository's history (#1018). DELETE rows whose `completed_at`
+   is older than WORKER_RUN_MAX_AGE_DAYS. The db is reached through `WORKERS_DB`, which
+   is `workers.queue.configured_db_path()` — the queue's own resolution, imported rather
+   than restated, because a second rule here would prune a file the queue never writes to
+   and report success. No VACUUM: a DELETE frees pages for the next INSERT to reuse, which
+   bounds the file, and VACUUM takes an exclusive lock on a WAL database the live pool is
+   writing. The sibling `queue` table is NOT pruned — its horizon is an open decision on
+   #1018. A database the pool will not release inside the bounded busy wait is reported
+   `SKIPPED (database locked …)` and exits 0, never a traceback: a weekly sweep that
+   fails because the queue was busy reads as "the store is fine" to everything downstream.
+
 Age signal: sessions are aged by the `last_active` field in the JSON
 (mtime lies — any reprocessing touches the file); task logs and transcript
 scratch by mtime (a transcript is written once and only ever read back); a
@@ -58,8 +71,9 @@ import argparse
 import gzip
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import shutil
+import sqlite3
 import sys
 import time
 from pathlib import Path
@@ -71,6 +85,7 @@ _TREE = Path(__file__).resolve().parents[2]
 for _p in (_TREE, _TREE / "app"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
+del _p  # a module-level Path left by that loop is a name a test could delete from
 try:
     from app.data_root import (DataRootMissing, resolve_data_root_for_tree,
                                vault_root)
@@ -163,6 +178,19 @@ TRANSCRIPT_MAX_AGE_DAYS = 30
 SPILL_DIR_SUFFIX = ".tool-results"
 SPILL_DIR_GLOB = f"*{SPILL_DIR_SUFFIX}"
 SPILL_MAX_AGE_DAYS = 30
+# The queue's run history (`workers.db` table `runs`). Same horizon as the markdown run
+# records above, because they are the same event written twice — once by the task runner
+# into `autonomy-runs/`, once by the queue into sqlite — and a reader who compares "what
+# ran last month" across the two surfaces should not get two different answers. The name
+# is the one `skills/retention-sweep/SKILL.md` documents; the two are pinned together by
+# tests/test_retention_sweep.py.
+WORKER_RUN_MAX_AGE_DAYS = 30
+# How long to wait for a write lock the live queue pool is holding before giving up on
+# this store. Bounded on purpose: the sweep is a weekly background job and the queue is
+# the thing users wait on, so the sweep yields rather than contends — and the bound is
+# what makes the skip reportable at all, since an unbounded wait would hang the job that
+# is supposed to report it.
+DB_BUSY_TIMEOUT_MS = 5000
 # candidates still awaiting action are never pruned regardless of age
 CANDIDATE_KEEP_STATUSES = ("pending", "proposed", "flagged_for_authoring")
 _CANDIDATE_STATUS_RE = re.compile(r"^status:\s*(\S+)", re.MULTILINE)
@@ -528,6 +556,114 @@ def sweep_session_spills(apply: bool, now: float) -> tuple[int, int]:
     return count, freed
 
 
+# --------------------------------------------------------------------------
+# workers.db — the queue's own run history
+# --------------------------------------------------------------------------
+
+def _resolve_workers_db() -> Path:
+    """The queue's database, resolved by the queue's own rule.
+
+    Imported from `workers.queue.configured_db_path` rather than restated: that
+    function folds in `config.yaml`'s `workers.db_path` and the data-root move, and
+    a second rule written here would prune whichever file the literal points at
+    while the queue kept writing somewhere else — a sweep that reports "3 deleted"
+    about a database nobody reads is worse than one that never runs.
+
+    Falls back to `DATA_ROOT / "workers.db"` when the import is unavailable. That is
+    the common case this script is written for — cron and autonomy task #79 invoke it
+    with a bare `python3`, and `workers.queue` pulls in `app.config`, which needs the
+    project venv. The fallback is `configured_db_path`'s own default (`app.paths`'
+    `DATA_ROOT / "workers.db"`) reached by the resolver this module already trusts, so
+    the two agree in a venv and disagree only into a report that says which file it
+    counted.
+    """
+    try:
+        from workers.queue import configured_db_path
+
+        return Path(configured_db_path())
+    except Exception:  # noqa: BLE001 - no-venv invocation is the expected path
+        return DATA_ROOT / "workers.db"
+
+
+#: The ONE path this module opens the queue database at. The test fixture redirects
+#: this constant into tmp_path, and that fixture's guard treats a `_DB`-suffixed
+#: Path as destructive exactly like a `_DIR`, so a new caller that forgets to patch
+#: it fails a test instead of pruning the live queue.
+WORKERS_DB = _resolve_workers_db()
+
+
+def _db_skip_note(exc: BaseException) -> str:
+    """The report form `skills/retention-sweep/SKILL.md` documents for a lock.
+
+    A skip is reported with its reason and never as `0 deleted`, because `0` and
+    "the prune did not run" arrive at the same number and mean opposite things: one
+    says the window was empty, the other says the store is still unbounded.
+    """
+    text = str(exc)
+    if "locked" in text or "busy" in text:
+        return f"SKIPPED (database locked: {text})"
+    return f"SKIPPED (database error: {text})"
+
+
+def sweep_worker_runs(apply: bool, now: float, *, db: Path | None = None,
+                      busy_timeout_ms: int = DB_BUSY_TIMEOUT_MS) -> tuple[int, int, str]:
+    """DELETE `runs` rows whose `completed_at` is older than WORKER_RUN_MAX_AGE_DAYS.
+
+    Returns `(rows, bytes, skip_note)`; `skip_note` is "" when the store was reached.
+    Bytes is a size delta and is 0 in dry run — the row count is what the horizon
+    bounds, and a DELETE that reuses its pages for the next INSERT frees no bytes on
+    disk while deleting exactly as many rows as it was asked to.
+
+    The count and the delete share one write transaction: `BEGIN IMMEDIATE` takes the
+    lock before either, so the number reported is the number removed and a row the
+    queue inserts in between is in neither. Taking that lock is also what makes a busy
+    queue observable — with a deferred begin the read succeeds and only the DELETE
+    notices, which is a report of `0` for a store that was never swept.
+    """
+    path = db if db is not None else WORKERS_DB
+    if not path.is_file():
+        # Absent db is the empty case, not a repair: a round, a sandbox or a fresh
+        # install has no queue yet, and "nothing to prune" is the true answer.
+        return 0, 0, ""
+
+    try:
+        size_before = path.stat().st_size
+        conn = sqlite3.connect(str(path), timeout=busy_timeout_ms / 1000.0)
+    except sqlite3.Error as exc:
+        return 0, 0, _db_skip_note(exc)
+
+    try:
+        conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+        table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'").fetchone()
+        if table is None:
+            # A database with no runs table is the same case as no database at all —
+            # a fresh or relocated store, not something to repair. The sweep's job is
+            # to bound rows, and creating or migrating schema here would put a weekly
+            # cleanup tool in the path of the queue's own migration.
+            return 0, 0, ""
+        cutoff = (datetime.fromtimestamp(now, tz=timezone.utc)
+                  - timedelta(days=WORKER_RUN_MAX_AGE_DAYS)).isoformat()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as exc:
+            return 0, 0, _db_skip_note(exc)
+        try:
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM runs WHERE completed_at < ?", (cutoff,)
+            ).fetchone()[0]
+            if apply and rows:
+                conn.execute("DELETE FROM runs WHERE completed_at < ?", (cutoff,))
+            conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            return 0, 0, _db_skip_note(exc)
+        freed = max(0, size_before - path.stat().st_size) if apply else 0
+        return rows, freed, ""
+    finally:
+        conn.close()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -537,8 +673,8 @@ def main() -> int:
     mode = "APPLY" if args.apply else "DRY RUN"
 
     # The header goes out before anything is counted or deleted, and in both
-    # modes. An operator approves `--apply` from the dry run's seven numbers, and
-    # all seven describe whichever root this run resolved — a value that depends
+    # modes. An operator approves `--apply` from the dry run's eight numbers, and
+    # all eight describe whichever root this run resolved — a value that depends
     # on the caller's tree, its environment and its `$HOME`, and appears nowhere
     # in the report today (#1415). Naming the root above the numbers is what makes
     # them approvable, and is the only line that says which tree they describe.
@@ -552,6 +688,7 @@ def main() -> int:
     cand_n, cand_b = sweep_candidates(args.apply, now)
     scr_n, scr_b = sweep_transcript_scratch(args.apply, now)
     spill_n, spill_b = sweep_session_spills(args.apply, now)
+    wr_n, wr_b, wr_skip = sweep_worker_runs(args.apply, now)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -572,6 +709,14 @@ def main() -> int:
     # line nobody can compare against the run they just approved.
     print(f"  session spill dirs (*{SPILL_DIR_SUFFIX}) >{SPILL_MAX_AGE_DAYS}d: "
           f"{spill_n} deleted, {spill_b / 1024:.0f} KiB freed")
+    # Same line in both modes for the same reason as the spill line above. A skip is put
+    # in place of the counts, never beside a `0`, so the number `0` on this store keeps
+    # its only honest meaning — the window held nothing.
+    if wr_skip:
+        print(f"  workers.db runs >{WORKER_RUN_MAX_AGE_DAYS}d: {wr_skip} — nothing pruned")
+    else:
+        print(f"  workers.db runs >{WORKER_RUN_MAX_AGE_DAYS}d: "
+              f"{wr_n} deleted, {wr_b / 1024:.0f} KiB freed")
     return 0
 
 

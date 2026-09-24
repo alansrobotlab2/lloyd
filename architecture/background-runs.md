@@ -385,7 +385,16 @@ days of inactivity, a conversation after 90. Same gzip-never-delete rule: an
 archived run is out of every listing and still recoverable. The platform is
 read from the file's first 4 KB, and an unreadable head keeps the *longer*
 window — a few stale kilobytes beat losing a conversation from the history
-two months early. `workers.db` itself still has no retention job.
+two months early. `workers.db` is on the same sweep: the `runs` table loses rows
+whose `completed_at` is older than 30 days (`WORKER_RUN_MAX_AGE_DAYS`), reaching the
+database through `workers.queue.configured_db_path()` so the sweep and the queue can
+never name different files, and a database the live pool is holding reports
+`SKIPPED (database locked …)` with exit 0 instead of a traceback. It is a DELETE with
+no VACUUM — freed pages are reused by the next INSERT, which is what bounds the file,
+and VACUUM would take an exclusive lock on a WAL database the pool is writing. The
+sibling `queue` table is still append-only: whether its terminal rows are pruned on
+the same horizon or kept for the operator history view is an open decision on #1018,
+not an oversight.
 
 ---
 
@@ -604,7 +613,8 @@ transcripts stay on disk for 30 days, openable by id.
   `/api/workers/health` reports it `false` rather than `null` — observable-
   but-off, for a source with no agent turn (§9).
 - The Background tab shows the newest 150 runs out of at most 600 scanned (§11).
-- `workers.db` has no retention; session files do (§8).
+- `workers.db` now prunes `runs` at 30 d and still does not prune `queue` — the
+  horizon for those rows is a decision on #1018, not a gap nobody noticed (§8).
 - Session ids are local time; an autonomy `run_id` is UTC. Both are labels,
   and the join between them is explicit (§7), but they will not line up by eye.
 - The vault-protection audit of `safety.py` is not done (§10).

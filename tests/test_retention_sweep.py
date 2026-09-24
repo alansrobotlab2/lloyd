@@ -13,7 +13,9 @@ import importlib.util
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -25,6 +27,44 @@ import app.paths as paths
 _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "groundskeeper" / "retention-sweep.py"
 
 
+#: Module-level `Path` constants that are not delete targets, so they may stay where
+#: the module resolved them, each with the reason:
+#:
+#:   DATA_ROOT  the root every other store is derived from, pinned against `app.paths`
+#:              by name below; the sweep removes things inside it, never the root
+#:   _TREE      the checkout the script itself lives in, used only to find `app/` on
+#:              sys.path — it is never passed to a delete
+
+#: Anything else UPPER_CASE-ish and a `Path` is assumed to be something a test could
+#: delete from until it says otherwise here. (The name test is deliberately case-blind:
+#: a `_FOO` private constant holding a path is just as deletable as a public one.)
+NON_TARGET_PATHS = frozenset({"DATA_ROOT", "_TREE"})
+
+
+def _unredirected_destructive_paths(mod, keep_under: Path,
+                                    exempt=NON_TARGET_PATHS) -> list[str]:
+    """Names of `mod`'s module-level path constants that do not live under `keep_under`.
+
+    The rule is "every UPPER_CASE module constant that is a `Path`", not a list of name
+    suffixes. A suffix rule (`_DIR`, then `_DIR` + `_DB`) is only as wide as the last
+    name somebody thought of: `WORKERS_DB_FILE`, `QUEUE_DB` or `SPILL_ROOT` would each
+    have reached a live store with this guard nodding, because a suffix records how a
+    constant is *named*, not what it *points at*. A constant that genuinely is not a
+    delete target has to be exempted by name, which turns each such gap into a decision
+    somebody wrote down.
+
+    One predicate, used by the fixture below to fail loudly and by
+    `test_the_guard_names_any_unredirected_path_constant` to prove it names a file
+    constant and a name that does not exist in the script yet. A second copy written
+    inside the test would pass whatever the fixture did, which is the thing asserted.
+    """
+    return sorted(
+        name for name, value in vars(mod).items()
+        if isinstance(value, Path) and not name.startswith("__") and name not in exempt
+        and not (value == keep_under or keep_under in value.parents)
+    )
+
+
 @pytest.fixture
 def rs(tmp_path, monkeypatch):
     spec = importlib.util.spec_from_file_location("retention_sweep", _SCRIPT)
@@ -34,24 +74,30 @@ def rs(tmp_path, monkeypatch):
     # them means a test that touches an unpatched root silently operates on real
     # data — sweep_autonomy_runs(apply=True) did exactly that and removed 844
     # live run records during development.
-    for attr, sub in (
-        ("TASKS_DIR", "tasks"),
-        ("SESSIONS_DIR", "sessions"),
-        ("AUTONOMY_RUNS_DIR", "autonomy-runs"),
-        ("AUTONOMY_TASKS_DIR", "autonomy"),
-        ("CANDIDATES_DIR", "skill-candidates"),
-        ("TRANSCRIPT_SCRATCH_DIR", "transcript-scratch"),
+    for attr, sub, make_dir in (
+        ("TASKS_DIR", "tasks", True),
+        ("SESSIONS_DIR", "sessions", True),
+        ("AUTONOMY_RUNS_DIR", "autonomy-runs", True),
+        ("AUTONOMY_TASKS_DIR", "autonomy", True),
+        ("CANDIDATES_DIR", "skill-candidates", True),
+        ("TRANSCRIPT_SCRATCH_DIR", "transcript-scratch", True),
+        # A database FILE, not a directory — and deliberately not created. The
+        # absent-file path is both the state a fresh install, a sandbox and a
+        # round's tree are in and the case clause 1 must not turn into a schema
+        # repair; a `mkdir` here would hand every test a directory where a
+        # database should be, which sqlite reports as "unable to open".
+        ("WORKERS_DB", "workers.db", False),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
-            (tmp_path / sub).mkdir(exist_ok=True)
+            if make_dir:
+                (tmp_path / sub).mkdir(exist_ok=True)
     # Fail loudly if the module grows a new destructive root that this fixture
     # does not cover, rather than letting it reach the real filesystem.
-    for name, value in list(vars(mod).items()):
-        if name.endswith("_DIR") and isinstance(value, Path):
-            assert tmp_path in value.parents or value == tmp_path, (
-                f"{name} is not redirected into tmp_path (points at {value}) — "
-                f"add it to the fixture before writing tests that touch it")
+    unredirected = _unredirected_destructive_paths(mod, tmp_path)
+    assert not unredirected, (
+        f"{unredirected} not redirected into tmp_path — add them to the fixture "
+        f"before writing tests that touch them")
     # The patching above says only that each dir is patchable. Before the patch,
     # the module resolved a root for itself; every destructive test in this file
     # runs against the module that resolved it, so pin what it resolved: the
@@ -692,7 +738,7 @@ def test_the_resolved_root_is_printed_in_both_modes(rs, capsys, monkeypatch):
     """Clause 4: the dry run and `--apply` both print the root their numbers
     describe.
 
-    The operator approves `--apply` from the dry run's seven counts, and every one
+    The operator approves `--apply` from the dry run's eight counts, and every one
     of them is a count of whatever root this run resolved — a value that depends on
     the caller's tree, its environment and its `$HOME`, and appeared nowhere in the
     report until #1415. Through `main()`, like the two reporting tests above: the
@@ -826,3 +872,404 @@ def test_the_sweep_imports_the_resolver_instead_of_restating_it(monkeypatch):
     src = _SCRIPT.read_text(encoding="utf-8")
     assert 'Path.home() / "lloyd-data"' not in src, (
         "the second implementation of rule 2 is back in the script that deletes")
+
+
+# ---------------------------------------------------------------------------
+# The eighth rung: workers.db table `runs` (backlog #1018).
+#
+# The queue appended a row per run and nothing in this repository ever deleted
+# one — `DELETE FROM runs` appears in no commit in its history, so the store the
+# architecture doc called unbounded stayed unbounded. These tests seed a real
+# sqlite database holding the queue's real schema and drive both the rung and the
+# CLI that reports it, because every prior claim about this store was made from
+# the other side: from the doc, or from a dry-run line that printed nothing.
+# ---------------------------------------------------------------------------
+
+#: (run_id, age in days). 31 is one day past the horizon, 29 is one day inside it;
+#: the pair is the boundary, and a rule that got the comparison backwards would
+#: keep the first and delete the second.
+_RUNS_ROWS = (("run-past", 31.0), ("run-inside", 29.0), ("run-today", 0.0))
+
+
+def _seed_runs_db(path: Path, rows=_RUNS_ROWS) -> Path:
+    """Create a database carrying the queue's own schema, with `rows` in `runs`.
+
+    The schema is `workers.queue._SCHEMA` — the same string `WorkQueue` runs
+    through `executescript` — not a hand-written lookalike. A `runs` table
+    invented here would let this whole section pass against a database whose
+    `completed_at` had been renamed, dropped, or made nullable, and the column
+    being `TEXT NOT NULL` is load-bearing: the horizon compares ISO strings, and
+    a NULL would sort before all of them.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from workers.queue import _SCHEMA
+
+    conn = sqlite3.connect(path)
+    conn.executescript(_SCHEMA)
+    now = datetime.now(timezone.utc)
+    for run_id, age_days in rows:
+        ts = (now - timedelta(days=age_days)).isoformat()
+        conn.execute(
+            "INSERT INTO runs (run_id, source, status, started_at, completed_at,"
+            " duration_seconds, summary) VALUES (?,?,?,?,?,?,?)",
+            (run_id, "scheduled-task", "success", ts, ts, 1.0, run_id),
+        )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _store_line(stdout: str, store: str) -> str:
+    """The one report line naming `store`, from a captured `main()` stdout.
+
+    Asserting exactly one line rather than the first match: a store reported twice
+    means two different numbers on screen for the same table, which is the failure
+    mode an operator reading a dry run cannot see.
+    """
+    lines = [ln for ln in stdout.splitlines() if store in ln]
+    assert len(lines) == 1, f"expected one {store} line, got {lines}"
+    return lines[0]
+
+
+def _run_ids(path: Path) -> set[str]:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return {row[0] for row in conn.execute("SELECT run_id FROM runs")}
+    finally:
+        conn.close()
+
+
+def test_runs_older_than_the_horizon_are_deleted_and_younger_kept(rs):
+    """#1018 clause 1: one `--apply` deletes every row past `WORKER_RUN_MAX_AGE_DAYS` and
+    leaves a row completed 29 days ago untouched.
+
+    `WORKER_RUN_MAX_AGE_DAYS` is asserted to be 30 rather than assumed: the horizon
+    is a policy the operator reads off the report line and the skill's table, so a
+    constant that drifted would drift the report with it and stay self-consistent.
+    """
+    assert rs.WORKER_RUN_MAX_AGE_DAYS == 30
+    path = _seed_runs_db(rs.WORKERS_DB)
+    now = time.time()
+
+    rows, freed, skip = rs.sweep_worker_runs(apply=False, now=now, db=path)
+    assert (rows, freed, skip) == (1, 0, "")
+    assert _run_ids(path) == {"run-past", "run-inside", "run-today"}, (
+        "a dry run must not remove a row it counted")
+
+    rows, freed, skip = rs.sweep_worker_runs(apply=True, now=now, db=path)
+    assert (rows, skip) == (1, "")
+    assert _run_ids(path) == {"run-inside", "run-today"}
+
+
+def test_dry_run_and_apply_print_the_same_workers_store_line(rs, capsys, monkeypatch):
+    """#1018 clause 2: dry-run deletes nothing and prints the store with its `>30d`
+    horizon in the form the other store lines use, and `--apply` prints the same
+    numbers it promised.
+
+    Run through `main()`, which is what task #79 and cron invoke: the operator
+    approves `--apply` from the dry run's eight lines, so a line that only exists
+    in one mode, or counts differently in the two, is a number nobody can approve
+    against.
+    """
+    path = _seed_runs_db(rs.WORKERS_DB)
+
+    def store_line() -> str:
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if "workers.db" in ln]
+        assert len(lines) == 1, f"expected exactly one workers.db line, got {lines}"
+        return lines[0]
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0, "dry run must exit 0"
+    dry = store_line()
+    assert f">{rs.WORKER_RUN_MAX_AGE_DAYS}d" in dry, dry
+    assert "1 deleted" in dry, f"dry run must count the row the apply will remove: {dry!r}"
+    assert _run_ids(path) == {"run-past", "run-inside", "run-today"}
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0, "--apply must exit 0"
+    applied = store_line()
+    assert "1 deleted" in applied, (
+        f"--apply must report what it removed, not restate the dry run: {applied!r}")
+    assert _run_ids(path) == {"run-inside", "run-today"}
+
+
+def test_the_store_is_reached_through_the_queue_configured_path(monkeypatch):
+    """Clause 3, first half: the module's one database constant equals
+    `workers.queue.configured_db_path()`.
+
+    Loaded unpatched, on purpose — the `rs` fixture redirects `WORKERS_DB`
+    precisely so tests cannot reach the live queue, which also makes it unable to
+    say what the constant would have been. This is the resolution the sweep runs
+    with, and the reason it is an import rather than a literal: a second rule
+    here would prune a file the queue never writes and report success about it.
+    """
+    from workers.queue import configured_db_path
+
+    mod = _load(monkeypatch)
+    assert mod.WORKERS_DB == Path(configured_db_path())
+
+
+def test_the_path_fallback_when_the_queue_module_cannot_be_imported(rs, monkeypatch):
+    """Clause 3, second half: with no venv the constant is `DATA_ROOT / "workers.db"`.
+
+    Cron and autonomy task #79 run this script with a bare `python3`, and
+    `workers.queue` pulls in `app.config`, which needs the project venv — which is
+    why `app/data_root.py` is stdlib-only (#1415). So the import failing is the
+    normal case for the one invocation that prunes real rows, and its answer has
+    to be the same file, reached through the resolver this module already trusts.
+    """
+    monkeypatch.setitem(sys.modules, "workers.queue", None)
+    assert rs._resolve_workers_db() == rs.DATA_ROOT / "workers.db"
+
+
+#: Run by a child process: take the write lock and hold it open, uncommitted, until
+#: stdin closes. `BEGIN IMMEDIATE` plus an uncommitted INSERT is what `WorkQueue` does
+#: from the backend, so the contention is the real one — and it crosses a process
+#: boundary, which two connections inside one interpreter cannot guarantee: they share
+#: the same sqlite handle table and one process's locking quirks.
+_LOCK_HOLDER = """
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1], timeout=30)
+conn.execute("BEGIN IMMEDIATE")
+conn.execute("INSERT INTO runs (run_id, source, status, started_at, completed_at)"
+             " VALUES ('holder', 'scheduled-task', 'success', 'x', 'x')")
+print("HELD", flush=True)
+sys.stdin.readline()
+conn.rollback()
+"""
+
+
+@pytest.fixture
+def db_write_lock_holder():
+    """Hold a write transaction open on a database from a SECOND PROCESS."""
+    procs = []
+
+    def hold(db_path):
+        proc = subprocess.Popen(
+            [sys.executable, "-c", _LOCK_HOLDER, str(db_path)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        first = proc.stdout.readline().strip()
+        assert first == "HELD", f"holder child never took the write lock: {first!r}"
+        procs.append(proc)
+        return proc
+
+    yield hold
+    for proc in procs:
+        proc.stdin.close()
+        try:
+            proc.wait(timeout=20)
+        except subprocess.TimeoutExpired:      # never leave a lock holder running
+            proc.kill()
+            proc.wait(timeout=20)
+
+
+def test_a_database_the_queue_holds_open_is_skipped_not_a_failure(rs, db_write_lock_holder):
+    """#1018 clause 4: a db another PROCESS holds is a skip with a bounded wait.
+
+    The contention that matters is the backend's queue pool writing the live database
+    while the weekly sweep runs — two processes, no shared state — so the lock is held
+    by a child process, not by a second connection in this interpreter. The wait is
+    timed as well as checked: the clause's whole promise is that the sweep yields in
+    about `DB_BUSY_TIMEOUT_MS` rather than hanging the job that is supposed to report
+    the skip, and a `busy_timeout_ms` nobody asserts is a constant that can silently
+    drift back to blocking.
+    """
+    assert rs.DB_BUSY_TIMEOUT_MS == 5000, (
+        "the bound is a 5 s yield to the live queue; the elapsed-time assertion below "
+        "is written against this constant, so it has to be pinned, not assumed")
+    path = _seed_runs_db(rs.WORKERS_DB)
+    db_write_lock_holder(path)
+
+    started = time.monotonic()
+    rows, freed, skip = rs.sweep_worker_runs(apply=True, now=time.time(), db=path)
+    waited = time.monotonic() - started
+
+    assert (rows, freed) == (0, 0)
+    assert skip.startswith("SKIPPED (database locked"), (
+        f"a locked store must report the reason the skill documents: {skip!r}")
+    assert 4.5 <= waited < 60, (
+        f"waited {waited:.2f}s — the default must be one bounded wait of about "
+        f"{rs.DB_BUSY_TIMEOUT_MS} ms, not a no-try and not a hang")
+    assert "run-past" in _run_ids(path), "a skip must not have deleted anything"
+
+
+def test_main_reports_the_skip_and_still_exits_zero(rs, capsys, monkeypatch,
+                                                   db_write_lock_holder):
+    """Clause 4, across the process boundary the operator sees: `main()` reports
+    `SKIPPED` on the store line and returns 0.
+
+    Exit status is the contract task #79's run record is graded on — a non-zero
+    exit makes the weekly job fail and hides which store could not be swept, while
+    exit 0 with the word on the line says both that the job ran and that this
+    particular store is still unbounded. `SKIPPED` replaces the counts rather than
+    sitting beside a `0`, because the skill tells the operator that a `0` on this
+    store means the window genuinely held nothing.
+    """
+    path = _seed_runs_db(rs.WORKERS_DB)
+    db_write_lock_holder(path)
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0, "a locked store must not fail the whole sweep"
+
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if "workers.db" in ln]
+    assert len(lines) == 1, lines
+    assert "SKIPPED" in lines[0], lines[0]
+    assert "database locked" in lines[0], lines[0]
+    assert "0 deleted" not in lines[0], (
+        f"a skip must not read as an empty window: {lines[0]!r}")
+    assert "run-past" in _run_ids(path)
+
+
+def test_an_absent_database_or_table_is_zero_deleted_not_a_repair(rs):
+    """An absent db, and a db with no `runs` table, are both `0 deleted` with no skip.
+
+    The acceptance names this explicitly to keep the change small: the sweep is a
+    cleanup tool, and schema creation or migration belongs to `WorkQueue` — a
+    cleanup job that repairs schema is a second owner of the schema, which is how
+    the store got two definitions of itself in the first place.
+    """
+    assert not rs.WORKERS_DB.exists()
+    assert rs.sweep_worker_runs(apply=True, now=time.time()) == (0, 0, "")
+    assert not rs.WORKERS_DB.exists(), "the sweep must not create a queue database"
+
+    other = rs.WORKERS_DB.parent / "other.db"
+    sqlite3.connect(other).close()
+    assert rs.sweep_worker_runs(apply=True, now=time.time(), db=other) == (0, 0, "")
+    conn = sqlite3.connect(other)
+    tables = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    conn.close()
+    assert "runs" not in tables, "the sweep must not create the runs table either"
+
+
+def test_the_bare_invocation_prunes_the_store_it_resolves(tmp_path):
+    """#1018 clauses 1-3 across the boundary the weekly job actually runs on.
+
+    Task #79 invokes `python3 retention-sweep.py --apply` under cron — an
+    interpreter with no project venv, so the `workers.queue` import inside
+    `_resolve_workers_db` fails and the fallback resolves the store as
+    `DATA_ROOT / "workers.db"`. Every other test in this file runs in the venv, where
+    that import *succeeds*, so none of them exercises the fallback that production
+    actually takes; and the dry-run subprocess test only proves the line prints.
+
+    This one runs the shipped script the way cron does — system `python3`, no venv, no
+    pytest — against a data root of its own, and asserts the whole claim: the store
+    line names its `>30d` horizon in both modes, `--apply` deletes the 31-day-old row
+    and keeps the 29-day one, and nothing printed a path outside this test's tree.
+    """
+    py3 = shutil.which("python3")
+    if not py3:
+        pytest.skip("no bare python3 to prove the no-venv path against")
+    root = tmp_path / "data"
+    root.mkdir()
+    db = root / "workers.db"
+    _seed_runs_db(db)
+
+    env = dict(os.environ)
+    env["LLOYD_DATA"] = str(root)
+    # An empty vault root: `AUTONOMY_TASKS_DIR` is derived from it, and the apply pass
+    # must not reach the live board's task bodies while this test is proving a store.
+    env["LLOYD_VAULT_ROOT"] = str(tmp_path / "no-vault")
+
+    dry = subprocess.run([py3, str(_SCRIPT)], capture_output=True, text=True,
+                         env=env, cwd="/", timeout=120)
+    assert dry.returncode == 0, dry.stderr[-800:]
+    dry_line = _store_line(dry.stdout, "workers.db")
+    assert ">30d" in dry_line, (
+        f"the bare interpreter reports the store without its horizon, so an operator "
+        f"approving `--apply` cannot see how far back it reaches: {dry_line}")
+    assert "1 deleted" in dry_line, (
+        "dry-run must count exactly the one row past the horizon, because that number "
+        f"is what the operator approves: {dry_line}")
+    assert _run_ids(db) == {"run-past", "run-inside", "run-today"}, "dry run deleted rows"
+
+    applied = subprocess.run([py3, str(_SCRIPT), "--apply"], capture_output=True,
+                             text=True, env=env, cwd="/", timeout=120)
+    assert applied.returncode == 0, applied.stderr[-800:]
+    assert "Traceback" not in applied.stdout + applied.stderr
+    assert _store_line(applied.stdout, "workers.db") == dry_line, (
+        "the line an operator approved in dry-run must be the line apply prints")
+    assert _run_ids(db) == {"run-inside", "run-today"}, (
+        "the store the venv tests cover is not the store cron prunes: with no venv the "
+        "`workers.queue` import fails, and the fallback resolved somewhere other than "
+        "the data root this run was given")
+
+
+def test_the_guard_names_any_unredirected_path_constant(rs):
+    """#1018 clause 3, third half: the fixture's fail-loud guard catches any path.
+
+    Before #1018 the guard looked only at names ending `_DIR`, so a `WORKERS_DB`
+    that was never redirected would have been caught by nothing — and the
+    consequence is not a failed assertion but a `DELETE` against the live queue,
+    which is the one store a user's Background tab reads. A suffix list is not an
+    answer either: it is only as wide as the last name somebody thought of. So the
+    shipped rule is "every module-level `Path` that is not exempted by name", and
+    this proves it by naming three constants no suffix rule would have seen — a
+    `_FILE` variant of the name that already exists, a second store's database, and
+    a root that is neither.
+
+    The predicate is `_unredirected_destructive_paths`, the same function the fixture
+    calls, so this exercises the shipped rule rather than a paraphrase of it.
+    """
+    tmp = rs.WORKERS_DB.parent
+
+    # The shipped rule, applied to the module as the fixture left it: nothing
+    # deletable is still pointing outside tmp_path.
+    assert _unredirected_destructive_paths(rs, tmp) == []
+
+    # The same rule against a module carrying the shapes this round found and the
+    # shapes the next store might take, none of them redirected.
+    class Unredirected:
+        SESSIONS_DIR = rs.DATA_ROOT / "sessions"
+        WORKERS_DB = rs.DATA_ROOT / "workers.db"
+        WORKERS_DB_FILE = rs.DATA_ROOT / "workers.db"
+        QUEUE_DB = rs.DATA_ROOT / "queue.db"
+        SPILL_ROOT = rs.DATA_ROOT / "spill"
+        SPILL_DIR_SUFFIX = ".tool-results"  # not a Path; never a candidate
+
+    found = _unredirected_destructive_paths(Unredirected, tmp)
+    assert found == ["QUEUE_DB", "SESSIONS_DIR", "SPILL_ROOT",
+                     "WORKERS_DB", "WORKERS_DB_FILE"], (
+        f"the guard reaches only {found} — a path constant still slips past it")
+
+    # And the exemption is a written-down decision, not a blind spot: an exempted
+    # name stops being reported, which is what `DATA_ROOT` and the script's own tree
+    # root are for.
+    assert _unredirected_destructive_paths(Unredirected, tmp,
+                                          exempt=frozenset({"WORKERS_DB"})) == [
+        "QUEUE_DB", "SESSIONS_DIR", "SPILL_ROOT", "WORKERS_DB_FILE"]
+
+
+def test_the_skill_table_names_the_constant_and_split_the_code_uses(rs):
+    """Clause 5, first half: `skills/retention-sweep/SKILL.md` agrees with the script.
+
+    The skill is the operator's procedure for the weekly task, and its table already
+    promised this prune with a `SKIPPED` form and a `WORKER_RUN_MAX_AGE_DAYS`
+    constant while no code defined either — a procedure describing a rung that does
+    not exist is worse than one that omits it, because the operator reads `0
+    deleted` and believes the bound held. This pins the agreement in both
+    directions: the name and age the code uses appear in the row, and the row for
+    the spill store names the suffix and horizon the code uses.
+    """
+    skill = rs.vault_root() / "skills" / "retention-sweep" / "SKILL.md"
+    if not skill.is_file():
+        pytest.skip(f"the vault skill is not reachable from here: {skill}")
+
+    rows = {ln.split("|")[1].strip(): ln
+            for ln in skill.read_text(encoding="utf-8").splitlines()
+            if ln.startswith("| ") and ln.count("|") >= 3}
+
+    # Matched on `workers.db`, not on "runs": `autonomy-runs/<id>/run_*.md` is a
+    # different store, on a different horizon, in the same table.
+    runs_row = next((ln for store, ln in rows.items() if "workers.db" in store), None)
+    assert runs_row is not None, f"no `runs` row in the skill's store table: {list(rows)}"
+    assert "WORKER_RUN_MAX_AGE_DAYS" in runs_row, (
+        "the skill names a constant the script does not define")
+    assert f">{rs.WORKER_RUN_MAX_AGE_DAYS}d" in runs_row, runs_row
+    assert "SKIPPED" in runs_row, runs_row
+
+    spill_row = next((ln for store, ln in rows.items() if "tool-results" in store), None)
+    assert spill_row is not None, (
+        f"the skill omits the spill store the script sweeps: {list(rows)}")
+    assert "SPILL_MAX_AGE_DAYS" in spill_row, spill_row
+    assert f">{rs.SPILL_MAX_AGE_DAYS}d" in spill_row, spill_row
