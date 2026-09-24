@@ -98,16 +98,18 @@ _LATENCY_HISTOGRAMS = (
 # `agent-services/bin/bench-prefix-reuse.py` carries the same reconciliation
 # (#605).
 #
-# The llama.cpp aliases below do NOT satisfy the parity: llama.cpp's
-# `prompt_tokens_total` excludes cached tokens, so
-# `prompt_tokens_cached_total / prompt_tokens_total` is not a fraction of a
-# total at all, and the card rendered it as "961%" on the 2026-09-13 probe and
-# 343% on the 2026-09-18 re-read. The bullet above `_LLAMACPP_TO_VLLM` still
-# calls that pair "the same quantity vLLM's … pair reports"; #1083 owns
-# correcting both halves. No llama.cpp engine is configured on this box to render
-# it (the secondary slot was retired 2026-09-20 in 551e9044, and
-# `configured_engines()` is primary + djev), so as of this comment the defect is
-# latent in the mapping, not live in a card.
+# The llama.cpp aliases below never satisfied that parity, and do not need
+# to: llama.cpp's `prompt_tokens_total` excludes cached tokens, so the two
+# series are a disjoint partition and `_translate_llamacpp` synthesizes
+# `vllm:prefix_cache_queries_total` as their SUM rather than renaming one
+# series into it (#1083). Dividing cached by the exclude-cached series
+# instead is not a fraction of a total at all — it rendered "961%" on the
+# 2026-09-13 probe and 343% on the 2026-09-18 re-read.
+#
+# No llama.cpp engine is configured on this box to render either number
+# (the secondary slot was retired 2026-09-20 in 551e9044, and
+# `configured_engines()` is primary + djev), so the mapping is exercised by
+# tests until a llama engine is configured again.
 _RATIOS = (
     ("prefix_cache", "vllm:prefix_cache_hits_total", "vllm:prefix_cache_queries_total"),
     (
@@ -137,16 +139,27 @@ _RATIOS = (
 #     directly. There is no equivalent for TTFT (no per-request count),
 #     so `ttft_s` stays None rather than being faked from prefill time.
 #
-#   * `prompt_tokens_cached_total / prompt_tokens_total` is the prefix
-#     cache hit rate, in tokens, which is the same quantity vLLM's
-#     prefix_cache_hits/queries pair reports.
+#   * `prompt_tokens_cached_total` is the prefix-cache hit count in tokens.
+#     Its denominator is NOT `prompt_tokens_total`: the server's own HELP
+#     text documents that series as "Number of prompt tokens processed,
+#     excluding cached tokens", and llama.cpp's own unit test counts cached
+#     tokens apart ("cached tokens are counted apart, they cost no
+#     decode"). That server source is NOT vendored here — no llama.cpp
+#     checkout exists on this box as of 2026-09-24 — so the authority is
+#     the wording the /metrics endpoint serves, which
+#     `tests/test_vllm_metrics.py` quotes and pins, not a line number to go
+#     read. The two series are a DISJOINT PARTITION, so the
+#     `prefix_cache_queries_total` denominator must be their SUM, which is
+#     what `_LLAMACPP_SUMS_TO_VLLM` synthesizes below. Dividing cached by
+#     processed is not a fraction of anything — it read 9.6x on the
+#     2026-09-13 probe (card: "961%") and 3.4x on the 2026-09-18 re-read
+#     (card: "343%"), which is #1083.
 _LLAMACPP_TO_VLLM: dict[str, tuple[str, ...]] = {
     "llamacpp:requests_processing": ("vllm:num_requests_running",),
     "llamacpp:requests_deferred": ("vllm:num_requests_waiting",),
-    "llamacpp:prompt_tokens_total": (
-        "vllm:prompt_tokens_total",
-        "vllm:prefix_cache_queries_total",
-    ),
+    # NOT onto vllm:prefix_cache_queries_total — that target is synthesized
+    # as processed+cached in `_LLAMACPP_SUMS_TO_VLLM` below.
+    "llamacpp:prompt_tokens_total": ("vllm:prompt_tokens_total",),
     "llamacpp:prompt_tokens_cached_total": (
         "vllm:prompt_tokens_cached_total",
         "vllm:prefix_cache_hits_total",
@@ -166,6 +179,26 @@ _LLAMACPP_TO_VLLM: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Targets no single llama series can be renamed into, because their value
+# is a SUM of llama series rather than a rename of one (target -> sources).
+#
+# `prefix_cache_queries_total` is here because llama.cpp's two prompt series
+# are disjoint — `prompt_tokens_total` counts only tokens NOT served from
+# cache — so every vLLM ratio that divides by queries needs the sum of both
+# to have a denominator that is a total. Synthesizing it in the translate
+# pass, rather than special-casing `_RATIOS`, also fixes the windowed value
+# for free: `_delta` then runs on a monotonic counter whose delta is
+# d_processed + d_cached. A target is synthesized only when every source
+# series is present — with one missing the sum is unknown, and reporting
+# cached/cached as a 100 % hit rate is the same misreport this mapping
+# exists to prevent.
+_LLAMACPP_SUMS_TO_VLLM: dict[str, tuple[str, ...]] = {
+    "vllm:prefix_cache_queries_total": (
+        "llamacpp:prompt_tokens_total",
+        "llamacpp:prompt_tokens_cached_total",
+    ),
+}
+
 # alias -> human label for a llama.cpp engine, resolved once from /props.
 # llama.cpp does not label its metrics with a model name the way vLLM
 # does, and the loaded file cannot change while the process lives, so
@@ -177,7 +210,15 @@ _llamacpp_model_name: dict[str, str] = {}
 def _translate_llamacpp(
     parsed: dict[str, list[tuple[dict[str, str], float]]],
 ) -> dict[str, list[tuple[dict[str, str], float]]]:
-    """Rename llama.cpp series into the vLLM names the snapshot expects."""
+    """Rename llama.cpp series into the vLLM names the snapshot expects.
+
+    Also synthesizes the targets in `_LLAMACPP_SUMS_TO_VLLM`, which no
+    single llama series can be renamed into. Emitted as one unlabelled
+    series holding the sum of every source series — all of them, or none,
+    because a sum over a subset is not a total — which is what the
+    downstream `_sum_all` reduction would collapse to anyway: llama.cpp
+    labels none of these counters.
+    """
     out: dict[str, list[tuple[dict[str, str], float]]] = {}
     for src, targets in _LLAMACPP_TO_VLLM.items():
         series = parsed.get(src)
@@ -185,6 +226,20 @@ def _translate_llamacpp(
             continue
         for target in targets:
             out.setdefault(target, []).extend(series)
+
+    for target, sources in _LLAMACPP_SUMS_TO_VLLM.items():
+        if not all(parsed.get(src) for src in sources):
+            # A sum is a denominator only when EVERY named series is on the
+            # wire. Hand this a truncated scrape carrying only
+            # `prompt_tokens_cached_total` and cached/cached would render a
+            # 100% hit rate that nothing measured — the same class of
+            # misreport the mapping exists to stop, in the other direction.
+            # `_ratio` sees a missing denominator and the card shows nothing.
+            continue
+        out[target] = [(
+            {},
+            sum(value for src in sources for _labels, value in parsed[src]),
+        )]
     return out
 
 

@@ -8,9 +8,14 @@ against a stale pre-outage sample does the same. Both are pinned here.
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import httpx
 import pytest
 
 from app import vllm_metrics as vm
+
+MODULE_SRC = Path(__file__).resolve().parent.parent / "app" / "vllm_metrics.py"
 
 
 @pytest.fixture(autouse=True)
@@ -251,8 +256,10 @@ async def test_collect_returns_empty_for_no_configured_engines():
 def _llamacpp_text(*, prompt=1000.0, cached=800.0, predicted=200.0,
                    predicted_s=4.0, processing=1.0, deferred=2.0):
     return f"""
-# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.
+# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed, excluding cached tokens.
 # TYPE llamacpp:prompt_tokens_total counter
+# HELP llamacpp:prompt_tokens_cached_total Number of prompt tokens reused from the cache.
+# TYPE llamacpp:prompt_tokens_cached_total counter
 llamacpp:prompt_tokens_total {prompt}
 llamacpp:prompt_tokens_cached_total {cached}
 llamacpp:tokens_predicted_total {predicted}
@@ -303,9 +310,169 @@ def test_llamacpp_inter_token_latency_from_seconds_over_tokens():
     assert snap["itl_s"] == pytest.approx(0.02)
 
 
-def test_llamacpp_prefix_cache_hit_rate_from_cached_prompt_tokens():
+def test_llamacpp_prefix_cache_hit_rate_divides_by_processed_plus_cached():
+    """#1083. llama.cpp's two prompt series are a disjoint partition: the
+    server documents `prompt_tokens_total` as "processed, excluding cached
+    tokens" and counts cached tokens apart, so processed is not a total that
+    cached is a share of. The only valid denominator is the sum.
+
+    The assertion this replaces demanded 0.8 for this body, which is
+    cached/processed — a ratio that is not a fraction of anything, and the
+    reason the card rendered 961% on 2026-09-13 and 343% on 2026-09-18.
+    """
     snap = vm._snapshot_from_text("secondary", _llamacpp_text(prompt=1000.0, cached=800.0))
-    assert snap["prefix_cache_hit_rate"] == pytest.approx(0.8)
+    assert snap["prefix_cache_hit_rate"] == pytest.approx(800.0 / 1800.0)
+
+
+def test_llamacpp_hit_rate_stays_a_fraction_when_cached_exceeds_processed():
+    """Live :8091/metrics on 2026-09-18: cached 1,444,390 over processed
+    421,563. Cached is 3.4x processed, which is impossible for a subset and
+    is exactly what drove the card field to 3.426273178623361."""
+    snap = vm._snapshot_from_text(
+        "secondary", _llamacpp_text(prompt=421563.0, cached=1444390.0)
+    )
+    rate = snap["prefix_cache_hit_rate"]
+    assert 0.0 <= rate <= 1.0
+    assert rate == pytest.approx(1444390.0 / (421563.0 + 1444390.0))
+
+
+def test_llamacpp_windowed_hit_rate_is_the_delta_over_the_delta_sum():
+    """The windowed value must be fixed by the same change, not just the
+    lifetime one: it is built from the synthesized queries counter's delta,
+    so it inherits the corrected denominator."""
+    vm._snapshot_from_text("secondary", _llamacpp_text(prompt=1000.0, cached=800.0))
+    snap = vm._snapshot_from_text(
+        "secondary", _llamacpp_text(prompt=1300.0, cached=1600.0)
+    )
+    recent = snap["prefix_cache_hit_rate_recent"]
+    # d_cached 800 over d_cached + d_processed 800 + 300.
+    assert recent == pytest.approx(800.0 / 1100.0)
+    assert recent <= 1.0
+
+
+def test_llamacpp_partial_prompt_series_reports_no_hit_rate_not_one_hundred():
+    """The denominator is the SUM of two named series, so it is unknown when
+    either one is off the wire. A truncated scrape carrying only
+    `prompt_tokens_cached_total` 800.0 would give cached/cached = 1.0, which
+    renders as "100% hit rate" out of a body that measured no denominator at
+    all — the >100% misreport in the other direction. No number beats an
+    invented one."""
+    body = _llamacpp_text(cached=800.0).replace(
+        "llamacpp:prompt_tokens_total 1000.0\n", ""
+    )
+    assert "llamacpp:prompt_tokens_total 1000.0" not in body  # fixture mutated
+    snap = vm._snapshot_from_text("secondary", body)
+    assert snap["prefix_cache_hit_rate"] is None
+
+
+def test_the_llamacpp_mapping_comment_states_the_exclude_cached_semantics():
+    """#1083's fifth clause, pinned as a test: the comment above
+    `_LLAMACPP_TO_VLLM` is the artifact that made an impossible ratio look
+    deliberate, which is why a green suite blessed it — the bullet asserted
+    the llama pair was "the same quantity vLLM's prefix_cache_hits/queries
+    pair reports", so every reader of the mapping read the bug as intended.
+    Wording is the subject here, exactly as in `test_prefix_cache_doc_claims.py`,
+    which pins the `_RATIOS` comment for the same reason.
+
+    The second half matters as much as the first: this file's fixture HELP
+    line used to omit "excluding cached tokens", the clause that decides the
+    answer, so the body under test was not the body the server sends. Both
+    copies of the clause are checked, so neither can drift alone.
+    """
+    text = MODULE_SRC.read_text()
+    lines = text.splitlines()
+    site = next(i for i, ln in enumerate(lines) if ln.startswith("_LLAMACPP_TO_VLLM"))
+    block = []
+    for ln in reversed(lines[:site]):
+        if not ln.startswith("#"):
+            break
+        block.append(ln)
+    # Positive control first: an empty recovered block would satisfy every
+    # substring check below, and a walk that stopped early would read as the
+    # comment having lost its semantics rather than as the walk failing.
+    assert len(block) > 20, (
+        f"only {len(block)} comment lines attach to _LLAMACPP_TO_VLLM;"
+        " the mapping's comment block moved or shrank")
+    comment = "\n".join(reversed(block))
+
+    assert "excluding cached tokens" in comment, (
+        "the comment no longer states that llamacpp:prompt_tokens_total excludes cached tokens")
+    assert "DISJOINT PARTITION" in comment, (
+        "the comment no longer gives the reason the denominator is the sum")
+    assert "_LLAMACPP_SUMS_TO_VLLM" in comment, (
+        "the comment does not name the synthesized sum it relies on")
+    assert "same quantity" not in text, (
+        "the module again claims the llama pair is the same quantity vLLM's pair reports")
+    assert "excluding cached tokens" in _llamacpp_text(), (
+        "the fixture body lost the clause the real server sends")
+
+
+@pytest.mark.asyncio
+async def test_a_real_llama_metrics_body_over_a_socket_yields_a_fraction_hit_rate():
+    """The process boundary #1083 actually serves: bytes from a llama.cpp
+    `/metrics` endpoint over TCP into `_scrape_one`. The stub-client test
+    below pins the arithmetic; this one puts the same body on a real loopback
+    server so the GET, the framing, the `"llamacpp:" in resp.text` engine
+    detection and the `/props` name probe all run over the wire the dashboard
+    uses — the mapping is only correct if the bytes that reach it are the
+    bytes a server sent."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    body = _llamacpp_text(prompt=421563.0, cached=1444390.0).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            props = self.path.endswith("/props")
+            payload = b'{"model_path": "/x/secondary.gguf"}' if props else body
+            self.send_response(200)
+            self.send_header(
+                "Content-Type",
+                "application/json" if props else "text/plain; version=0.0.4")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        async with httpx.AsyncClient() as client:
+            snap = await vm._scrape_one(
+                client, "secondary", f"http://127.0.0.1:{server.server_address[1]}")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert snap["reachable"] is True, snap
+    assert snap["engine"] == "llama.cpp"
+    rate = snap["prefix_cache_hit_rate"]
+    assert 0.0 <= rate <= 1.0
+    assert rate == pytest.approx(1444390.0 / (421563.0 + 1444390.0))
+
+
+@pytest.mark.asyncio
+async def test_scraped_llamacpp_snapshot_reports_a_fractional_hit_rate():
+    """The boundary #1083 crosses is a real HTTP /metrics body from a
+    llama.cpp server arriving at the dashboard snapshot, so the corrected
+    denominator is pinned at `_scrape_one`, not only at the parser.
+
+    Counters are the live 2026-09-18 readings: the field the card rendered
+    as "343%" was 1444390/421563, and the fraction it should have been is
+    1444390/(421563+1444390) = 0.7741.
+    """
+    class _Client:
+        async def get(self, url, **_kw):
+            if url.endswith("/props"):
+                return _Resp(json_body={"model_path": "/x/secondary.gguf"})
+            return _Resp(text=_llamacpp_text(prompt=421563.0, cached=1444390.0))
+
+    snap = await vm._scrape_one(_Client(), "secondary", "http://127.0.0.1:8091")
+    rate = snap["prefix_cache_hit_rate"]
+    assert 0.0 <= rate <= 1.0
+    assert rate == pytest.approx(1444390.0 / (421563.0 + 1444390.0))
 
 
 def test_llamacpp_throughput_is_a_rate_not_a_since_boot_total():
