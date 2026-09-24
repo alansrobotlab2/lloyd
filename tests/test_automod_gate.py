@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1595,3 +1596,77 @@ def test_the_unreadable_verdict_names_the_grader_keys_not_a_refusal_to_act_on(tm
     assert "none carried a usable 1-based `clause` index" in detail, detail
     assert "not a judgment of the diff" in detail, detail
     assert data["external_blocker"] is True and data["review_session"] == "sess_r"
+
+
+# ── #1322: one "is this a test file?" for every site, read from pytest.ini ──
+
+def test_the_testpath_predicate_reads_pytest_ini_and_owns_the_harness_suite(tmp_path):
+    """The review rung built its changed-test set with `startswith("tests/")`
+    while the tests rung ran bare `pytest`, whose `testpaths` include
+    `app/harness/tests` — so every clause pinned there was downgraded
+    (SM_20260921_030016, four of five). The list comes from the file, not
+    from a second literal."""
+    from scripts.automod import testpaths as TP
+    root = Path(__file__).resolve().parents[1]
+    assert TP.read_testpaths(root) == ("tests", "app/harness/tests", "scripts")
+    assert TP.is_test_file("app/harness/tests/test_x.py", root)
+    assert TP.is_test_file("app/harness/tests/conftest.py", root)
+    assert TP.is_test_file("tests/test_x.py", root)
+    assert TP.is_test_file("scripts/test_helper.py", root)
+    # `scripts` is walked, not a test tree: its code is code.
+    assert not TP.is_test_file("scripts/automod/review.py", root)
+    assert not TP.is_test_file("app/harness/loop.py", root)
+    assert TP.pick_test_files(["app/harness/loop.py", "app/harness/tests/test_x.py",
+                               "tests/test_y.py", "eval/q.yaml"], root) == [
+        "app/harness/tests/test_x.py", "tests/test_y.py"]
+
+    # Read, not restated: another pytest.ini gives another answer, and none
+    # at all is the root `tests/` reading the tree grew up with.
+    (tmp_path / "pytest.ini").write_text("[pytest]\ntestpaths = spec\n")
+    assert TP.read_testpaths(tmp_path) == ("spec",)
+    assert TP.is_test_file("spec/test_x.py", tmp_path)
+    assert not TP.is_test_file("tests/test_x.py", tmp_path)
+    bare = tmp_path / "bare"; bare.mkdir()
+    assert TP.read_testpaths(bare) == ("tests",)
+    assert not TP.is_test_file("app/harness/tests/test_x.py", bare)
+
+
+def test_the_review_rung_builds_its_changed_tests_through_the_predicate():
+    """Widening one site moves the refusal to the next (the item's finding:
+    14 sites). No review-path module may keep a root-only literal."""
+    root = Path(__file__).resolve().parents[1]
+    for rel in ("scripts/automod/gate.py", "scripts/automod/review.py",
+                "scripts/automod/review_tools.py"):
+        src = (root / rel).read_text()
+        assert 'startswith("tests/")' not in src, rel
+        assert "TP." in src, rel
+    gate_src = (root / "scripts/automod/gate.py").read_text()
+    assert "changed_tests = TP.pick_test_files(changed, self.worktree)" in gate_src
+
+
+def test_the_tests_rung_partial_narrowing_counts_a_harness_test_as_a_test(tmp_path):
+    """The partial run reads the same predicate: a delta touching only a
+    harness test is a test-only delta, one touching harness code is not."""
+    repo = tmp_path / "wt"
+    (repo / "app" / "harness" / "tests").mkdir(parents=True)
+    run = lambda *a: subprocess.run(["git", "-C", str(repo), *a], capture_output=True,
+                                    text=True, check=True)
+    run("init", "-q", "-b", "main")
+    run("config", "user.email", "t@e"); run("config", "user.name", "t")
+    (repo / "pytest.ini").write_text("[pytest]\ntestpaths = tests app/harness/tests\n")
+    (repo / "app" / "harness" / "loop.py").write_text("X = 1\n")
+    (repo / "app" / "harness" / "tests" / "test_h.py").write_text("def test_h():\n    pass\n")
+    run("add", "-A"); run("commit", "-q", "-m", "base")
+    old = run("rev-parse", "HEAD").stdout.strip()
+    (repo / "app" / "harness" / "tests" / "test_h.py").write_text("def test_h():\n    assert 1\n")
+    run("commit", "-qam", "test only")
+    head = run("rev-parse", "HEAD").stdout.strip()
+    g = G.Gate.__new__(G.Gate)
+    g.worktree, g.base = repo, "BASE"
+    g.report = type("R", (), {"head": head})()
+    g._reuse_load = lambda: {"tests": {"base": "BASE", "head": old, "ts": time.time()}}
+    assert g._tests_delta_only() == ["app/harness/tests/test_h.py"]
+    (repo / "app" / "harness" / "loop.py").write_text("X = 2\n")
+    run("commit", "-qam", "code")
+    g.report.head = run("rev-parse", "HEAD").stdout.strip()
+    assert g._tests_delta_only() is None, "a code path in the delta is a full run"

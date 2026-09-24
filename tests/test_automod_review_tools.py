@@ -138,3 +138,31 @@ def test_the_shipped_fixture_for_544_expects_the_human_review():
     assert stripped["strip_tests"] is True and stripped["expect"]["kind"] == "retry"
     names = {c["name"] for c in RT.load_fixtures()}
     assert {"544-first-cut", "544-stripped-tests"} <= names
+
+
+def test_a_harness_only_test_change_is_a_changed_test_to_the_backfill(world):
+    """#1322's fourth site: the after-the-fact route built its changed-test set
+    from root `tests/` too, so a landing whose test lives in app/harness/tests/
+    had every `met` downgraded and `strip_tests` stripped nothing."""
+    repo = world["repo"]
+    (repo / "pytest.ini").write_text("[pytest]\ntestpaths = tests app/harness/tests scripts\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-q", "-m", "ini")
+    parent = git(repo, "rev-parse", "HEAD").stdout.strip()
+    (repo / "app" / "m.py").write_text("V = 3\n")
+    h = repo / "app" / "harness" / "tests"; h.mkdir(parents=True)
+    (h / "test_m.py").write_text("def test_v():\n    assert 3 == 3\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-q", "-m", "harness round")
+    commit = git(repo, "rev-parse", "HEAD").stdout.strip()
+    paths = ["app/m.py", "app/harness/tests/test_m.py"]
+    node = "app/harness/tests/test_m.py::test_v"
+
+    grade = _stub(_met(node=node))
+    out = RT.grade_commit(repo=repo, item_id=9, parent=parent, commit=commit,
+                          changed_paths=paths, label="h1", grader=grade)
+    assert out["kind"] != "retry", out
+    assert all(c["verdict"] == "met" and "downgraded" not in c for c in out["clauses"])
+
+    grade = _stub(_met(node=node))
+    RT.grade_commit(repo=repo, item_id=9, parent=parent, commit=commit,
+                    changed_paths=paths, label="h2", grader=grade, strip_tests=True)
+    assert grade.calls[0]["changed_paths"] == ["app/m.py"], "the harness test is stripped"

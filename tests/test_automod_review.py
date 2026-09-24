@@ -194,6 +194,49 @@ def test_a_suite_level_run_the_grader_only_read_is_partial(wt):
     assert c["verdict"] == "partial"
 
 
+# ── #1322: a node under a non-root testpath is judged like one under tests/ ──
+
+@pytest.fixture
+def harness_wt(wt):
+    """`wt` with the tree's own testpaths and a harness suite beside root
+    `tests/`: one file the diff changed, one it did not."""
+    (wt / "pytest.ini").write_text("[pytest]\ntestpaths = tests app/harness/tests scripts\n")
+    h = wt / "app" / "harness" / "tests"; h.mkdir(parents=True)
+    (h / "test_x.py").write_text("def test_y():\n    assert 1\n")
+    (h / "test_old.py").write_text("def test_before():\n    assert 1\n")
+    return wt
+
+
+def _harness_met(wt, *, tests_passed=True, **clause):
+    changed = ["app/harness/loop.py", "app/harness/tests/test_x.py"]
+    parsed = RV.parse_review(_obj(**clause), worktree=wt, changed_tests=changed[1:], n_clauses=1,
+                             tests_passed=tests_passed, changed_paths=changed)
+    return parsed, parsed["clauses"][0]
+
+
+def test_a_met_pinned_in_a_changed_harness_test_stands(harness_wt):
+    """SM_20260921_030016: all five clauses graded met, four downgraded
+    because their tests lived in app/harness/tests/."""
+    parsed, c = _harness_met(harness_wt, test_node_id="app/harness/tests/test_x.py::test_y",
+                             how_verified="read", tests_passed=False)
+    assert c["verdict"] == "met" and "downgraded" not in c and parsed["downgraded"] == []
+
+
+def test_an_unchanged_harness_node_needs_a_run_and_a_green_rung(harness_wt):
+    node = "app/harness/tests/test_old.py::test_before"
+    _, c = _harness_met(harness_wt, test_node_id=node, how_verified="ran")
+    assert c["verdict"] == "met" and "existing test" in c["accepted"][0]
+    for how, passed in (("read", True), ("ran", False)):
+        _, c = _harness_met(harness_wt, test_node_id=node, how_verified=how, tests_passed=passed)
+        assert c["verdict"] == "partial"
+        assert c["downgraded"] == ["test_node_id not in a test file this diff changed"]
+    # `scripts` is a testpath pytest walks, not a test tree: its code is no node.
+    (harness_wt / "scripts" / "automod").mkdir(parents=True)
+    (harness_wt / "scripts" / "automod" / "review.py").write_text("def f():\n    pass\n")
+    _, c = _harness_met(harness_wt, test_node_id="scripts/automod/review.py::f", how_verified="ran")
+    assert c["verdict"] == "partial"
+
+
 def test_an_existing_test_outside_the_diff_stands_when_it_was_run(wt):
     """#487's clause 4 named a real test file the round did not change."""
     c = _met(wt, test_node_id="tests/test_old.py::test_before", how_verified="ran")

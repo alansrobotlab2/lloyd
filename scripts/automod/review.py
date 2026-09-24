@@ -62,6 +62,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+from scripts.automod import testpaths as TP
+
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # How many times one round may be sent back before the rung tells it to abort
@@ -410,7 +412,7 @@ def def_test_delta(worktree: Path, base: str, changed_paths: list[str]) -> int:
     implementation, because a grader note gets checked against this number.
     """
     total = 0
-    for rel in [p for p in changed_paths if p.startswith("tests/") and p.endswith(".py")]:
+    for rel in TP.pick_test_files(changed_paths, worktree):
         post, pre = _post_and_base(worktree, base, rel)
         total += max(0, _test_def_count(post) - _test_def_count(pre))
     return total
@@ -447,7 +449,7 @@ def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
     a change to code under a contract that adds no test cannot have pinned it.
     """
     out: list[dict] = []
-    tests = [p for p in changed_paths if p.startswith("tests/") and p.endswith(".py")]
+    tests = TP.pick_test_files(changed_paths, worktree)
     # One implementation of the count, because `added_test_denials` holds a
     # grader note to the same number.
     added_tests = def_test_delta(worktree, base, changed_paths)
@@ -471,7 +473,8 @@ def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
                             "severity": severity})
         added_tests += max(0, len(re.findall(r"^\s*(?:async\s+)?def test_", post, re.M))
                            - len(re.findall(r"^\s*(?:async\s+)?def test_", pre, re.M)))
-    code_changed = any(p.endswith(".py") and not p.startswith("tests/") for p in changed_paths)
+    code_changed = any(p.endswith(".py") and not TP.is_test_file(p, worktree)
+                       for p in changed_paths)
     if n_clauses and code_changed and tests and added_tests == 0:
         out.append({"file": tests[0], "line": 0,
                     "problem": ("test files changed but no test function was added while "
@@ -750,7 +753,7 @@ def grade(*, round_id: str, worktree: Path, base: str, contract: dict,
     what it says is `parse_review`'s business.
     """
     worktree = Path(worktree)
-    changed_tests = [p for p in changed_paths if p.startswith("tests/") and p.endswith(".py")]
+    changed_tests = TP.pick_test_files(changed_paths, worktree)
     diff, truncated = diff_text(worktree, base)
     run_tests = write_run_tests(scratch_dir, worktree=worktree, python=python, env=child_env)
     prompt = build_prompt(contract=contract, diff=diff, diff_truncated=truncated,
@@ -1292,7 +1295,7 @@ def unresolved_shas(text: str, repo: Path | None) -> list[str]:
     return out
 
 
-def _test_file_cited(node: str) -> str:
+def _test_file_cited(node: str, root: Path | None = None) -> str:
     """The file a `test_node_id` claims to point at, "" when it names none.
 
     Only the file-shaped spellings count: `tests/ -k foo` and `pytest tests/`
@@ -1304,7 +1307,7 @@ def _test_file_cited(node: str) -> str:
         return ""
     first = (node.split("::", 1)[0].strip().split() or [""])[0]
     cand = _trim_citation_prefix(first.strip("`'\"()[],;"))
-    if cand.startswith("tests/") and cand.endswith(".py"):
+    if TP.is_test_file(cand, root):
         return cand
     return ""
 
@@ -1341,8 +1344,10 @@ def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
       round did not touch. A clause the tree already satisfied is pinned by
       the test that already pinned it (#487's clause 4).
 
-    The path must be under `tests/` and exist: those are what the tests rung
-    ran. `read` is not enough for either — nothing was measured.
+    The path must be under one of `pytest.ini`'s testpaths and exist: the
+    tests rung runs bare `pytest`, so those are what it ran — root `tests/`
+    and `app/harness/tests/` alike (#1322). `read` is not enough for either —
+    nothing was measured.
 
     A node in `pre_existing` — or in a file that holds one — never holds,
     whatever `how` says: it fails at base with the diff absent, and the tests
@@ -1356,7 +1361,7 @@ def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
     if file_part in changed:
         return True, ""
     node_path = _trim_citation_prefix((file_part.split() or [""])[0])
-    if not (node_path == "tests" or node_path.startswith("tests/")):
+    if not TP.is_test_path(node_path, worktree):
         return False, ""
     if not (worktree / node_path).exists():
         return False, ""
@@ -1446,7 +1451,7 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
         # commit, branch or directory on the box and a landing sha that is not
         # an object. A `partial` bought a refusal; a phantom bought nothing.
         unresolved: list[str] = []
-        ghost = _test_file_cited(node)
+        ghost = _test_file_cited(node, worktree)
         if ghost and ghost not in touched and not (worktree / ghost).exists():
             unresolved.append(f"test_node_id names {ghost}, which is not in the tree under "
                               f"review (the diff did not touch it either)")
@@ -1570,7 +1575,7 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                 sev = "blocking"
             # The list is about TESTS in the diff. A remark filed against a
             # vault note or a script is advice, whatever the grader called it.
-            if not _trim_citation_prefix(file).startswith("tests/"):
+            if not TP.is_test_path(_trim_citation_prefix(file), worktree):
                 sev = "advisory"
             honesty.append({"file": file,
                             "line": int(raw.get("line") or 0) if str(raw.get("line") or "0").isdigit() else 0,

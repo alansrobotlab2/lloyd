@@ -1689,6 +1689,13 @@ Three rails keep the verdict honest without trusting the model:
   commit; and an `evidence_path` naming something the diff deleted (in the
   diff's paths and gone, or marked `(absent)`/`(deleted)`/`(removed)`) beside
   a node in a changed test file — never stacked on the suite-level waiver.
+  "Test file" means one of `pytest.ini`'s `testpaths` — `tests/` and
+  `app/harness/tests/` alike, and a collectable `test_*.py` under `scripts/` —
+  through the one predicate in `scripts/automod/testpaths.py`, which the
+  changed-test set, the prechecks, the grader prompt, the node rail, the tests
+  rung's partial narrowing and `review_tools` all call. A root-only
+  `startswith("tests/")` downgraded every clause pinned in the harness suite
+  (#1322, SM_20260921_030016: four of five).
 - **Deterministic honesty checks run first**, as a delta against the base
   version of each changed test file: `or True`, `assert True`, a new skip or
   xfail, and — when the item has clauses and code changed — no new `def
@@ -1974,7 +1981,7 @@ the merge base and fails only on *new* findings.
 
 `pytest -q` exits 0 if a round deletes the test that was failing. Under
 auto-landing that is not hypothetical, so the rung asserts a minimum
-collected count and refuses a diff that removes files under `tests/`.
+collected count and refuses a diff that removes files under a testpath.
 
 It exits 0 just as happily having **collected everything and run none of it** —
 one broad `skipif`, or a conftest import that degrades to a module-level skip.

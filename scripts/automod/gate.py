@@ -66,7 +66,7 @@ from pathlib import Path
 
 from app import lint_findings
 from scripts.automod import canary as C
-from scripts.automod import spec, state as S, vet as V, worktree as W
+from scripts.automod import spec, state as S, testpaths as TP, vet as V, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 PYTEST_MIN_COLLECTED = 1000
@@ -717,8 +717,8 @@ class Gate:
             return "no requirements path in the delta"
         if name in ("canary_boot", "canary_smoke", "drill"):
             # A canary boots the candidate: any code change invalidates it.
-            if all(p.startswith("tests/") or p.endswith(".md") for p in delta):
-                return "only tests/ and docs in the delta"
+            if all(TP.is_test_path(p) or p.endswith(".md") for p in delta):
+                return "only tests and docs in the delta"
             return None
         if name == "prompt_surface":
             if any(p in ("prompt_builder.py", "prefetch.py")
@@ -1029,11 +1029,12 @@ class Gate:
             if not contract["clauses"]:
                 return False, (f"item #{self.item_id} has no acceptance clauses to judge "
                                f"against — the review rung cannot grade it"), data
-            py_changed = any(p.endswith(".py") and not p.startswith("tests/") for p in changed)
-            if py_changed and not any(p.startswith("tests/") for p in changed):
+            py_changed = any(p.endswith(".py") and not TP.is_test_file(p, self.worktree)
+                             for p in changed)
+            if py_changed and not any(TP.is_test_path(p, self.worktree) for p in changed):
                 return False, (f"item #{self.item_id} has {len(contract['clauses'])} acceptance "
                                f"clause(s) and this diff changes code with no test under "
-                               f"tests/ — nothing pins a clause"), data
+                               f"a pytest testpath — nothing pins a clause"), data
             data["item_id"] = self.item_id
             data["clauses"] = len(contract["clauses"])
 
@@ -1306,7 +1307,7 @@ class Gate:
             return None
         files = []
         for rel in delta:
-            if not (rel.startswith("tests/") and rel.endswith(".py")):
+            if not TP.is_test_file(rel, self.worktree):
                 return None                       # any code path: full run
             base = rel.rsplit("/", 1)[-1]
             if base == "conftest.py" or base.startswith("_"):
@@ -1459,7 +1460,7 @@ class Gate:
             # floors below do not apply — they would fail every partial run
             # by construction. The removed-files check still runs.
             removed = [p for p in self.report.changed_paths
-                       if p.startswith("tests/") and not (self.worktree / p).exists()]
+                       if TP.is_test_path(p, self.worktree) and not (self.worktree / p).exists()]
             if removed:
                 return False, (f"test files removed by this round: {removed}"), {**counts, **extra}
             return True, (lead + f"pytest (partial, {len(only)} changed test file(s) since the "
@@ -1486,7 +1487,7 @@ class Gate:
                            f"(limit {PYTEST_MAX_SKIPPED}) — a round that skips its way "
                            "to green is not a round that passed"), {**counts, **extra}
         removed = [p for p in self.report.changed_paths
-                   if p.startswith("tests/") and not (self.worktree / p).exists()]
+                   if TP.is_test_path(p, self.worktree) and not (self.worktree / p).exists()]
         if removed:
             return False, f"test files removed: {removed}", {**counts, **extra}
         flinched = counts.get("parallel_only_failures") or []
@@ -1839,7 +1840,7 @@ class Gate:
                                "review_attempt": attempt,
                                "review_findings": str(last.get("findings") or "")[:1500]}
         changed = list(self.report.changed_paths)
-        changed_tests = [p for p in changed if p.startswith("tests/") and p.endswith(".py")]
+        changed_tests = TP.pick_test_files(changed, self.worktree)
         pre = RV.honesty_prechecks(self.worktree, self.base, changed,
                                    n_clauses=len(contract["clauses"]))
         test_counts = next((r.data for r in self.report.rungs if r.name == "tests"), {}) or {}

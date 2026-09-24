@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 
 from scripts.automod import review as RV
+from scripts.automod import testpaths as TP
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 FIXTURE_DIR = LIVE_ROOT / "eval" / "review_calibration"
@@ -131,7 +132,7 @@ def grade_commit(*, repo: Path, item_id: int, parent: str, commit: str, changed_
     contract = RV.item_contract(item_id)
     if not contract["clauses"]:
         return {"error": f"item #{item_id} has no acceptance to grade against"}
-    tests = [p for p in changed_paths if p.startswith("tests/") and p.endswith(".py")]
+    tests = TP.pick_test_files(changed_paths, repo)
     where = Path.home() / "lloyd-work" / f"review_{label}" / "home" / "lloyd"
     scratch = where.parent.parent / "gate-state"
     wt = checkout(repo, commit, where, strip_tests=tests if strip_tests else None)
@@ -144,7 +145,7 @@ def grade_commit(*, repo: Path, item_id: int, parent: str, commit: str, changed_
         if not res.get("ok"):
             return {"error": res.get("error") or "no structured review", "session_id": res.get("session_id")}
         parsed = RV.parse_review(res["structured"], worktree=wt,
-                                 changed_tests=[p for p in paths if p.startswith("tests/")],
+                                 changed_tests=TP.pick_test_files(paths, wt),
                                  n_clauses=len(contract["clauses"]),
                                  # A settled landing passed its tests rung; a
                                  # tree with its tests stripped never ran one.
