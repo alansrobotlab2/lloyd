@@ -2401,19 +2401,55 @@ promotions are halted is excused; `EXITED` never is.
    reverted itself inline. Its recorded `rollback_target` still points
    somewhere real, so every other check passes and the guardian would happily
    rewind the tree a second time, discarding whatever landed since. Absence
-   from `git merge-base --is-ancestor` is the tell.
+   from `git merge-base --is-ancestor` is the tell — and it is asked of the
+   commit being **blamed**, not of the record sitting in `current.json`: a stale
+   duplicate request naming an already-reverted commit otherwise passes every
+   gate while a live observation record vouches for someone else, which is how
+   one rollback could become two (#1358).
 
 ### 7.4 Rollback order
 
-**Reset when HEAD is still the promotion; revert in place when it is not.**
-`reset --hard` to the promotion's parent is only correct while HEAD *is* the
-promotion. Nightly jobs commit straight to live `main`, so an observation
+**Reset when HEAD is still the commit being *blamed*; revert in place when it is
+not.** `reset --hard` to a promotion's parent is only correct while HEAD *is*
+that promotion. Nightly jobs commit straight to live `main`, so an observation
 window can legitimately close over work the loop never touched, and resetting past it
 destroys commits nobody asked the guardian to judge. That is the 26-commit
 incident one level down: there the wrong *target* was chosen, here the right
 target is reached by the wrong *route*. When HEAD has moved on, the guardian
-reverts exactly the promoted commit and leaves the rest standing; a conflict
+reverts exactly the blamed commit and leaves the rest standing; a conflict
 has no safe automatic answer, so it escalates instead of guessing.
+
+**Blame and observation are two different questions** (#1358, 2026-09-24). The
+sentence above says *the commit being blamed*, and that word is load. Two things
+reach `do_rollback`: a liveness trip, which blames the promotion under
+observation because that is the only change it can see, and a written rollback
+request, which names a commit the detached quality check measured and may blame a
+promotion that **settled** hours earlier while a newer one sits under observation.
+Until #1358 the requested commit was read only when `current.json` was absent, so
+a request that arrived while a window was open had its blame dropped and the
+observed promotion was punished for it: HEAD *was* the observed promotion, the
+route was `reset`, and both changes left `main` while the ledger row named the one
+nobody blamed (2026-09-21, `a802b979`→`1e219da9`, then `dbec85aa`→`edc8ec60`). So
+now the blame is resolved once, at the top of `do_rollback`, and the route, the
+is-ancestor guard, the denylist and the alert all read *that*; a request whose
+commit differs from the observed promotion's also makes that record's
+`rollback_target` unreachable, because it describes the tree before some *other*
+promotion. A promotion under observation and not blamed has its window **closed
+unjudged** (Alan's decision, 2026-09-23): not settled, so LKG does not advance to
+it, and `rollback_succeeded.left_unjudged` names it beside the reverted commit.
+Reopening it across the rollback's own restart would convict it of the rollback,
+and every rollback this loop has performed so far has been a false positive.
+
+**The pointer must not outlive the change it certifies.** `maybe_settle` used to
+be the only writer of `last_known_good.json`, so a rollback that removed the
+commit LKG named left the pointer aimed at a dead commit — and
+`rollback_target(None)`, asked with no `current.json`, hands that dead commit to
+the *next* rollback, which would reset `main` back onto it and discard everything
+since (2026-09-21: `dbec85aa` settled 21:37:32Z, reverted 21:45:05Z; the pointer
+was cleared by hand with `round bless` at 2026-09-22T01:12:49Z, row
+`b444b25de`, note "blessed by hand"). `_rollback_once` now repoints
+LKG at the commit it restored whenever the rollback took the certified commit out
+of the restored history, and says so in the row as `lkg_repointed_from`.
 
 Stop the writers *before* moving the floor. The agent is what writes into this
 repo, and `git reset --hard` during an `Edit` produces a half-applied revert —

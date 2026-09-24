@@ -492,3 +492,453 @@ def test_rollback_title_prefers_the_items_name_and_falls_back_to_hashes():
     assert "SM_" not in t and "edc3ce7d" not in t
     assert guardian.rollback_title({"round_id": "SM_X"}, "edc3ce7dae94", "a223a2ed2613") == "Rolled back edc3ce7d → a223a2ed"
     assert guardian.rollback_title(None, None, "a223a2ed2613") == "Rolled back ? → a223a2ed"
+
+
+# ---------------------------------------------------------------------------
+# Which commit a rollback BLAMES, and which route it takes there (#1358).
+#
+# 2026-09-21, twice. The detached regression check asked for a rollback of an
+# older, already-settled promotion while a NEWER promotion sat in `current.json`
+# under observation. `do_rollback` read the requested commit only when
+# `current.json` was absent (`if not current and explicit_commit:`), so the
+# blamed commit was dropped and the promotion under observation became the bad
+# commit: HEAD *was* that promotion, `surgical` came out False, and
+# `git reset --hard` to the request's target deleted BOTH promotions while the
+# `rollback_succeeded` row named the newer one. Ledger, re-read from
+# `~/.local/state/lloyd-automod/promotions.jsonl`:
+#   20:35:41Z rollback_requested commit=a802b979 → rollback_succeeded
+#     commit=1e219da9 route=reset restored=c1ca704e
+#   21:44:52Z rollback_requested commit=dbec85aa → 21:45:05Z rollback_succeeded
+#     commit=edc8ec60 route=reset restored=c1ca704e
+# Honouring the requested commit makes the route a surgical `revert` of one
+# commit, and leaves the promotion nobody blamed standing.
+#
+# Everything below drives the real `Guardian.do_rollback` against a throwaway
+# repo, so the four process boundaries the routing reaches are all in play: the
+# git tree, `denied.json`, `last_known_good.json` and `promotions.jsonl`.
+# ---------------------------------------------------------------------------
+
+class _RecordingSup:
+    """supervisord as a recorder. Which programs a rollback stops and starts,
+    in what order, is `policy.RESTART_ORDER` and the staging gate's business
+    (`agent-services/bin/guardian-stage.sh`, tested in
+    `test_guardian_selftest.py`); what these tests are about is which COMMIT
+    the rollback moved."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def stop(self, program, wait=False):
+        self.calls.append(("stop", program))
+        return True, "stopped"
+
+    def start(self, program, wait=False):
+        self.calls.append(("start", program))
+        return True, "started"
+
+
+def _promotion_repo(tmp_path):
+    """base → OLDER (settled, and the commit a later check blames) → NEWER
+    (under observation, and HEAD): the 2026-09-21 shape exactly. The two
+    promotions touch disjoint files, so a revert of one cannot conflict."""
+    r = tmp_path / "lloyd"
+    (r / "app").mkdir(parents=True)
+    git(r.parent, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@example.com")
+    git(r, "config", "user.name", "t")
+    (r / ".gitignore").write_text("*.db\n.env\n.venvs/\n", encoding="utf-8")
+    (r / "app" / "base.py").write_text("BASE = 1\n", encoding="utf-8")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "base")
+    out: dict = {"path": r}
+    for rel, msg in (("older.py", "older item"), ("newer.py", "newer item")):
+        (r / "app" / rel).write_text(f"{rel.split('.')[0].upper()} = 'x'\n",
+                                     encoding="utf-8")
+        git(r, "add", "-A")
+        git(r, "commit", "-q", "-m", msg)
+        out[rel.split(".")[0]] = git(r, "rev-parse", "HEAD").stdout.strip()
+    out["base"] = git(r, "rev-list", "--max-parents=0", "HEAD").stdout.strip()
+    return out
+
+
+def _human_commit(r, rel):
+    """A nightly job's commit, made straight to live `main` after a landing."""
+    (r / "app" / rel).write_text(f"{rel.split('.')[0].upper()} = 1\n", encoding="utf-8")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", f"nightly: {rel}")
+    return git(r, "rev-parse", "HEAD").stdout.strip()
+
+
+def _fake_guardian(tmp_path, repo_path, monkeypatch):
+    """A Guardian with no systemd, no supervisord and no HTTP, in front of a
+    real git repo and a real state dir.
+
+    `probes.probe` reports the repo's LIVE HEAD as the running commit, which is
+    what `/health` does in production — so the post-restart check that the tree
+    actually moved is exercised rather than stubbed away.
+    """
+    import guardian
+
+    monkeypatch.setattr(guardian.probes, "probe", lambda url, timeout: {
+        "status": 200, "url": url,
+        "body": {"commit": rb.head_commit(str(repo_path)), "boot_id": "boot-2"}})
+    monkeypatch.setattr(guardian.probes, "wait_healthy",
+                        lambda url, budget, timeout, on_tick=None: (True, {"status": 200}))
+
+    g = guardian.Guardian.__new__(guardian.Guardian)
+    g.repo = str(repo_path)
+    g.state = gstate.AutomodState(tmp_path / "state")
+    g.sup = _RecordingSup()
+    g.programs = list(policy.RESTART_ORDER)
+    g.probe_fail, g.probe_timeout, g.start_history = {}, {}, {}
+    g.quiet_until = 0.0
+    g.backend_url = "http://127.0.0.1:9/health"
+    g.mcp_url = "http://127.0.0.1:9/health"
+    g._alert_seen = {}
+    g.last_alert = ""
+    g.started_ts = 0.0
+    g.alerts: list[dict] = []
+    g.alert = lambda level, title, body, **kw: g.alerts.append(
+        {"level": level, "title": title, "body": body, **kw})
+    g._beat = lambda: None
+    # Enough more of the loop's own state that a test can call `tick` and reach
+    # the rollback branch through it, not only through `do_rollback`.
+    g.tick_n = 1
+    g.sup_down_streak = 0
+    g.probe_http = {}
+    g.probe_degraded = {}
+    g.chronic = set()
+    g.last_errors_at = {}
+    g.mem = None
+    monkeypatch.setattr(rb, "_drain_writers", lambda *a, **kw: [])
+    return g
+
+
+def _settle(st, *commits):
+    """Advance LKG the way `maybe_settle` does, in order, so `floor` is the
+    first one — the value it really has in production, where it was pinned long
+    ago and never moves."""
+    for c in commits:
+        st.set_lkg(c)
+
+
+def _observe(st, repo, **over):
+    """`current.json` for the NEWER promotion: landed, window still open."""
+    rec = {
+        "schema": 1, "state": "observing",
+        "commit": repo["newer"], "parent": repo["older"],
+        "rollback_target": repo["older"],
+        "round_id": "SM_NEWER", "title": "Newer promotion still under observation",
+        "changed_paths": ["app/newer.py"], "boot_id": "boot-1",
+        "errors_until_ts": time.time() + 900,
+    }
+    rec.update(over)
+    gstate.write_json_atomic(st.current_path, rec)
+
+
+def _regression_request(g, repo, commit):
+    """The call the detached regression check actually makes: target is the
+    blamed commit's parent, `commit` is the blamed commit, `changed_paths` are
+    its own — and it can land minutes after the check chose its subject."""
+    return g.do_rollback("regression",
+                         f"retrieval-quality regression after {commit[:8]} [floors] ...",
+                         explicit_target=git(repo["path"], "rev-parse",
+                                             f"{commit}^").stdout.strip(),
+                         explicit_commit=commit,
+                         explicit_changed=["app/older.py"])
+
+
+def _row(g, event):
+    rows = _halt_rows(g.state.ledger, event)
+    assert len(rows) == 1, [r.get("event") for r in
+                            _halt_rows(g.state.ledger, "rollback_succeeded")]
+    return rows[0]
+
+
+def test_a_request_blaming_an_older_settled_promotion_reverts_only_it(tmp_path, monkeypatch):
+    """Clause 1 of #1358: the request's commit is the one that gets reverted.
+
+    `current.json` names the newer promotion and the request names the older
+    settled one — the exact 20:35:41Z and 21:44:52Z shapes. The route must be
+    `revert`, the row must name the requested commit, `restored` must be the
+    revert commit, and the newer promotion's change must still be in the tree.
+    """
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"], repo["older"])
+    _observe(g.state, repo)
+
+    assert _regression_request(g, repo, repo["older"]) is True
+
+    row = _row(g, "rollback_succeeded")
+    head = rb.head_commit(str(repo["path"]))
+    assert row["route"] == "revert", row
+    assert row["commit"] == repo["older"], "the ledger names the commit the request named"
+    assert row["restored"] == head, "`restored` is the new revert commit"
+    assert row["head_before"] == repo["newer"]
+    assert head != repo["base"], "the tree was not reset back to the target"
+    assert rb.is_ancestor(str(repo["path"]), repo["newer"], head), \
+        "the promotion under observation is still in this history"
+    assert not (repo["path"] / "app" / "older.py").exists(), "the blamed change is gone"
+    assert (repo["path"] / "app" / "newer.py").read_text(encoding="utf-8") == \
+        "NEWER = 'x'\n", "the newer promotion's change is still present in the tree"
+    assert (repo["path"] / "app" / "base.py").read_text(encoding="utf-8") == "BASE = 1\n"
+    assert [c for c, _ in g.sup.calls if c == "stop"] and \
+        [c for c, _ in g.sup.calls if c == "start"], "the stack was restarted, not just rewound"
+
+
+def test_a_rollback_request_the_worker_writes_reaches_the_blamed_commit(
+        tmp_path, monkeypatch):
+    """The whole seam, end to end: the quality worker writes a request file, the
+    guardian's own tick reads it and reverts the commit that file NAMES.
+
+    The routing fix sits two calls in from where the request arrives, so a test
+    that calls `do_rollback` itself never crosses the seam the incident crossed:
+    `workers/sources/automod_regression.py` calls `state.request_rollback(target
+    =baseline_commit, commit=commit)` — the BASELINE as target, the blamed
+    promotion as commit — and the target is the one argument that must NOT
+    decide the route. Here the request is written by the real writer into a real
+    file, read by the real reader from inside the real `tick`, and both rows
+    land in the one ledger a reader would grep.
+
+    `tick`'s collection side (log tails, the vault tripwire, memory pressure) is
+    stubbed; the request → blame → route → revert chain is not.
+    """
+    from scripts.automod import state as S
+
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _observe(g.state, repo)
+
+    state_dir = g.state.dir
+    monkeypatch.setattr(S, "ROLLBACK_REQUEST_PATH",
+                        state_dir / "rollback_request.json")
+    monkeypatch.setattr(S, "LEDGER_PATH", state_dir / "promotions.jsonl")
+    # The tick's collection side, all of it about logs/vault/memory, none about
+    # routing — and the snapshot shape the guardian's own predicate tests use.
+    g.collect = lambda: {"supervisord": "running", "procs": {}, "probes": {},
+                         "now": time.time()}
+    g.drain_logs = lambda: None
+    g.check_vault = lambda: None
+    g.check_data = lambda: None
+    g.check_memory = lambda: None
+
+    S.request_rollback(
+        reason=f"retrieval-quality regression after {repo['older'][:8]} [floors] "
+               "recall@5 fell past a defended floor",
+        trigger="regression", target=repo["base"], commit=repo["older"],
+        changed_paths=["app/older.py"])
+
+    assert g.tick() == "rolling_back"
+
+    row = _row(g, "rollback_succeeded")
+    assert row["route"] == "revert", row
+    assert row["commit"] == repo["older"], \
+        "the ledger names the commit the request named, not the one under observation"
+    assert rb.is_ancestor(str(repo["path"]), repo["newer"], row["restored"]), \
+        "the promotion under observation is still in history"
+    assert (repo["path"] / "app" / "newer.py").exists()
+    assert [r["event"] for r in _halt_rows(g.state.ledger, "rollback_requested")
+            + [row]] == ["rollback_requested", "rollback_succeeded"], \
+        "request and outcome in ONE ledger, which is what a reader greps"
+    assert g.state.current() is None
+
+
+def test_the_denylist_and_the_alert_name_the_blamed_commit(tmp_path, monkeypatch):
+    """Clause 2 of #1358: the promotion that was observed but not blamed must
+    stay off the denylist, and the alert must not point at it either.
+
+    Denying the promotion under observation left the actual regressing commit
+    un-denied — free to be re-derived and re-landed — while a change nobody
+    blamed was blocked by SHA *and* by content hash.
+    """
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"], repo["older"])
+    _observe(g.state, repo)
+
+    _regression_request(g, repo, repo["older"])
+
+    denied = json.loads(g.state.denied.read_text(encoding="utf-8"))
+    assert denied["commits"] == [repo["older"]]
+    assert repo["newer"] not in denied["commits"], \
+        "the promotion under observation was not blamed, so it is not denylisted"
+    assert denied["trees"], "the content hash is the half that stops a re-cut"
+
+    fired = [a for a in g.alerts if "Rolled back" in a["title"]]
+    assert len(fired) == 1, g.alerts
+    alert = fired[0]
+    assert alert["commit"] == repo["older"]
+    assert repo["older"][:8] in alert["body"]
+    assert repo["newer"][:8] not in alert["body"], alert["body"]
+    # The item title on `current.json` belongs to the promotion that was NOT
+    # reverted, so the headline cannot use it: a request carries no title.
+    assert "Newer promotion" not in alert["title"], alert["title"]
+
+
+def test_lkg_is_repointed_when_the_rollback_removed_the_commit_it_named(
+        tmp_path, monkeypatch):
+    """Clause 3 of #1358: `last_known_good.json` may not name a commit this
+    rollback undid.
+
+    dbec85aa settled at 21:37:32Z, so LKG named it; the detached check reverted
+    it at 21:45:05Z and nothing repointed the pointer. `set_lkg` was called only
+    from `maybe_settle`, so with `current.json` absent
+    `gstate.rollback_target(None)` handed the next rollback that same reverted
+    commit as its target — which would have reset `main` onto it and discarded
+    every commit since.
+    """
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"], repo["older"])
+    _observe(g.state, repo)
+    assert g.state.rollback_target(None)[0] == repo["older"], "LKG names the blamed commit"
+
+    _regression_request(g, repo, repo["older"])
+
+    row = _row(g, "rollback_succeeded")
+    lkg = g.state.lkg()
+    assert lkg["commit"] == row["restored"]
+    assert not g.state.current_path.exists()
+    target, source = g.state.rollback_target(None)
+    assert target == row["restored"], source
+    assert target != repo["older"], "the reverted commit can no longer be a rollback target"
+    assert lkg["floor"] == repo["base"], "the floor is pinned and does not move with a rollback"
+
+
+def test_a_rollback_that_left_lkg_in_history_does_not_move_it(tmp_path, monkeypatch):
+    """The repoint is for a pointer the rollback broke, not for every rollback.
+
+    On a reset back to the promotion's own parent, LKG is an ancestor of what
+    was restored and still describes a live, in-effect commit. Advancing it
+    there would rewrite a verdict the guardian never earned.
+    """
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe(g.state, repo)
+
+    assert g.do_rollback("crash", "backend not answering") is True
+
+    row = _row(g, "rollback_succeeded")
+    assert row["route"] == "reset" and row["commit"] == repo["newer"]
+    assert rb.head_commit(str(repo["path"])) == repo["older"] == row["restored"]
+    assert g.state.lkg()["commit"] == repo["base"], "untouched"
+    assert g.state.rollback_target(None)[0] == repo["base"]
+
+
+def test_rolling_back_the_promotion_under_observation_still_resets_when_head_is_it(
+        tmp_path, monkeypatch):
+    """Clause 4 of #1358: the route is chosen by whether HEAD *is* the blamed
+    commit, not by whether `current.json` exists. A crash rollback of the
+    promotion being observed, with the tree not yet moved, still resets."""
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe(g.state, repo)
+
+    assert g.do_rollback("crash", "backend not answering") is True
+
+    row = _row(g, "rollback_succeeded")
+    assert row["route"] == "reset"
+    assert row["commit"] == repo["newer"]
+    assert rb.head_commit(str(repo["path"])) == repo["older"]
+    assert not (repo["path"] / "app" / "newer.py").exists()
+    assert row["left_unjudged"] is None, "the record closed is the record that was blamed"
+
+
+def test_a_human_commit_on_top_moves_the_rollback_to_a_surgical_revert(
+        tmp_path, monkeypatch):
+    """Clause 4 again, other side: the tree moved past the promotion under
+    observation, so the same blame reverts instead of resetting past the
+    nightly work the loop never promoted."""
+    repo = _promotion_repo(tmp_path)
+    human = _human_commit(repo["path"], "human.py")
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe(g.state, repo)
+
+    assert g.do_rollback("error_rate", "novel traceback spike") is True
+
+    row = _row(g, "rollback_succeeded")
+    assert row["route"] == "revert"
+    assert row["commit"] == repo["newer"] and row["head_before"] == human
+    assert (repo["path"] / "app" / "human.py").exists(), \
+        "a nightly commit the loop never promoted survives"
+    assert not (repo["path"] / "app" / "newer.py").exists()
+
+
+def test_a_request_naming_a_settled_promotion_with_no_current_record_reverts_it(
+        tmp_path, monkeypatch):
+    """Clause 4's last limb, and the case the settled-request path was built
+    for: no `current.json` at all, so the request's own commit decides the
+    route — revert while the tree has moved on."""
+    repo = _promotion_repo(tmp_path)
+    human = _human_commit(repo["path"], "human.py")
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"], repo["older"])
+    assert not g.state.current_path.exists(), "the window closed an hour ago"
+
+    assert _regression_request(g, repo, repo["older"]) is True
+
+    row = _row(g, "rollback_succeeded")
+    assert row["route"] == "revert" and row["commit"] == repo["older"]
+    assert row["head_before"] == human
+    assert not (repo["path"] / "app" / "older.py").exists()
+    assert (repo["path"] / "app" / "newer.py").exists()
+    assert (repo["path"] / "app" / "human.py").exists()
+
+
+def test_a_request_naming_a_commit_not_in_this_history_does_not_rewind_again(
+        tmp_path, monkeypatch):
+    """The absence check must judge the blamed commit, not whatever record
+    happens to be on disk.
+
+    A stale duplicate of a request whose commit an earlier rollback already
+    removed used to be judged against `current.json`'s commit — which *is* in
+    the history — so it passed every check and rewound the tree a second time,
+    discarding work this loop never touched.
+    """
+    repo = _promotion_repo(tmp_path)
+    git(repo["path"], "checkout", "-q", "-b", "side")
+    ghost = _human_commit(repo["path"], "ghost.py")
+    git(repo["path"], "checkout", "-q", "main")
+    assert not rb.is_ancestor(str(repo["path"]), ghost, repo["newer"])
+
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"], repo["older"])
+    _observe(g.state, repo)
+    before = rb.head_commit(str(repo["path"]))
+
+    assert _regression_request(g, repo, ghost) is False
+
+    assert rb.head_commit(str(repo["path"])) == before, "the tree did not move"
+    assert not g.state.denied.exists(), "nothing was denylisted"
+    assert g.state.current_path.exists(), \
+        "the promotion still under observation keeps its record"
+    fired = [a for a in g.alerts if "no longer in this history" in a["title"]]
+    assert len(fired) == 1, g.alerts
+    assert ghost[:8] in fired[0]["body"], "the alert names the commit that is gone"
+
+
+def test_a_surgical_revert_closes_the_observation_window_unjudged(
+        tmp_path, monkeypatch):
+    """Alan's decision on #1358 (2026-09-23): after a surgical revert of an
+    older promotion the newer one's window CLOSES UNJUDGED — it is not settled,
+    so LKG does not advance to it — and the ledger row says so beside the
+    reverted commit. Judging it on the errors this rollback's own restart makes
+    would convict it of the rollback; every rollback so far has been a false
+    positive, and the detached regression check still measures it."""
+    repo = _promotion_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"], repo["older"])
+    _observe(g.state, repo)
+
+    _regression_request(g, repo, repo["older"])
+
+    row = _row(g, "rollback_succeeded")
+    assert row["commit"] == repo["older"]
+    assert row["left_unjudged"] == repo["newer"]
+    assert not g.state.current_path.exists(), "the window is closed"
+    assert g.state.lkg()["commit"] != repo["newer"], "closing unjudged is not settling"
+    assert not g.state.last_settled.exists(), "it never settled, so nothing claims it did"

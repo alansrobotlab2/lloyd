@@ -382,19 +382,33 @@ class Guardian:
                     explicit_commit: str | None = None,
                     explicit_changed: list | None = None) -> bool:
         current = self.state.current() or {}
-        if not current and explicit_commit:
-            # A request about a promotion that has already SETTLED — the
-            # quality check runs long after `current.json` is gone. Without
-            # the bad commit, route selection below would fall back to a blunt
-            # reset to the target and take any later work with it; with it,
-            # the revert stays surgical.
-            current = {"commit": explicit_commit,
-                       "rollback_target": explicit_target,
-                       "changed_paths": list(explicit_changed or [])}
+        # Which commit this request BLAMES, decided once, here, before anything
+        # else reads `current.json`. It is a different question from "which
+        # promotion is under observation", and running the two together is what
+        # discarded two promotions on 2026-09-21: a detached regression check
+        # asked for a revert of an older, already-settled commit while a newer
+        # promotion sat in `current.json`, the requested commit was read only
+        # when that file was absent, and so the observed promotion was the one
+        # blamed — HEAD *was* that promotion, the reset route deleted both, and
+        # the ledger row named the wrong one (`commit=a802b979` in the request,
+        # `commit=1e219da9 route=reset` in the result; then `dbec85aa` →
+        # `edc8ec60` an hour later).
+        blamed = (explicit_commit if gstate._is_sha(explicit_commit)
+                  else current.get("commit"))
+        blamed_is_observed = bool(blamed) and blamed == current.get("commit")
+        changed = (list(current.get("changed_paths") or []) if blamed_is_observed
+                   else list(explicit_changed or []))
+
         if explicit_target and gstate._is_sha(explicit_target):
             target, source = explicit_target, "explicit rollback request"
-        else:
+        elif blamed_is_observed or not blamed:
             target, source = self.state.rollback_target(current)
+        else:
+            # The request names a commit that is NOT the promotion under
+            # observation. That record's `rollback_target` is the tree as it
+            # stood before some *other* promotion, so it is not this rollback's
+            # to reach; fall through the ladder as if nothing were observed.
+            target, source = self.state.rollback_target(None)
         head = rb.head_commit(self.repo)
         floor = self.state.floor()
 
@@ -402,20 +416,27 @@ class Guardian:
             self.escalate("no rollback target", f"{reason}\n\n{source}")
             return False
 
-        # The promotion may already be gone — reverted by hand, or by a
+        # The blamed commit may already be gone — reverted by hand, or by a
         # promoter that failed after its merge and undid itself inline. Its
         # `rollback_target` still points somewhere real, so every check below
         # passes and the guardian would happily rewind the tree a second time,
-        # discarding whatever landed since. Absence from history is the tell.
-        promoted = current.get("commit")
-        if promoted and head and promoted != head and not rb.is_ancestor(
-                self.repo, promoted, head):
+        # discarding whatever landed since. Absence from history is the tell,
+        # and it has to be asked of the commit being BLAMED: asked of the record
+        # on disk instead, a stale duplicate request naming an already-reverted
+        # commit passes every gate while a live `current.json` vouches for
+        # someone else — which is how one rollback could become two.
+        if blamed and head and blamed != head and not rb.is_ancestor(
+                self.repo, blamed, head):
             self.alert("error", "Promotion is no longer in this history",
-                       f"{reason}\n\n{promoted[:8]} is not an ancestor of HEAD "
+                       f"{reason}\n\n{blamed[:8]} is not an ancestor of HEAD "
                        f"({head[:8]}), so it has already been reverted or was never "
                        "landed here. Not rewinding again — that would discard work "
                        "this loop never touched.")
-            self.state.clear_current()
+            if blamed_is_observed:
+                # The vanished commit is the record on disk, so that record is
+                # the stale thing and it goes. Otherwise the window still open
+                # belongs to a promotion this request never touched.
+                self.state.clear_current()
             return False
         if target == head:
             # Invariant 1. Nothing was promoted; this is infrastructure.
@@ -440,7 +461,8 @@ class Guardian:
 
         for attempt in range(1, policy.ROLLBACK_MAX_ATTEMPTS + 1):
             try:
-                self._rollback_once(target, stamp, trigger, reason, current)
+                self._rollback_once(target, stamp, trigger, reason, current,
+                                    blamed=blamed, changed=changed)
                 return True
             except Exception as exc:
                 log(f"rollback attempt {attempt} failed: {exc}")
@@ -461,20 +483,30 @@ class Guardian:
         return False
 
     def _rollback_once(self, target: str, stamp: str, trigger: str, reason: str,
-                       current: dict | None = None) -> None:
+                       current: dict | None = None, *,
+                       blamed: str | None = None,
+                       changed: list | None = None) -> None:
         head_before = rb.head_commit(self.repo)
         current = current if current is not None else (self.state.current() or {})
+        if blamed is None:
+            blamed = current.get("commit")
+        if changed is None:
+            changed = list(current.get("changed_paths") or [])
         boot_before = current.get("boot_id")
-        promoted = current.get("commit")
-        changed = list(current.get("changed_paths") or [])
+        observed = current.get("commit")
 
-        # Which ROUTE back. `reset --hard` to the promotion's parent is only
-        # correct while HEAD still *is* the promotion. Nightly jobs commit
-        # straight to live `main`, so a 15-minute window can legitimately close
-        # over work the loop never touched — and resetting past it destroys
-        # commits nobody asked the guardian to judge. When the tree has moved
-        # on, revert exactly the promoted commit and leave the rest standing.
-        surgical = bool(promoted and head_before and head_before != promoted)
+        # Which ROUTE back, decided by whether HEAD *is* the commit being
+        # blamed — never by whether a `current.json` happens to exist.
+        # `reset --hard` to the promotion's parent is only correct while HEAD
+        # still *is* that promotion. Nightly jobs commit straight to live
+        # `main`, and a detached quality check can ask for a commit that
+        # SETTLED hours ago, so the tree has often moved on: resetting past
+        # that destroys commits nobody asked the guardian to judge, and — when
+        # the blame and the observation are different commits — destroys the
+        # promotion under observation along with the blamed one, which is what
+        # happened twice on 2026-09-21. When HEAD is not the blamed commit,
+        # revert exactly that commit and leave the rest standing.
+        surgical = bool(blamed and head_before and head_before != blamed)
 
         # 3. Stop the writers first — see the module docstring.
         for program in reversed(policy.RESTART_ORDER):
@@ -497,16 +529,19 @@ class Guardian:
 
         # 6-8. Move the tree, verify it, undo any venv swap.
         if surgical:
-            kept = rb.commits_between(self.repo, promoted, head_before)
-            expected = rb.revert_commit(self.repo, promoted, reason=reason)
-            log(f"reverted {promoted[:8]} in place → {expected[:8]}, "
+            kept = rb.commits_between(self.repo, blamed, head_before)
+            expected = rb.revert_commit(self.repo, blamed, reason=reason)
+            log(f"reverted {blamed[:8]} in place → {expected[:8]}, "
                 f"keeping {kept} later commit(s)")
         else:
             rb.restore_tree(self.repo, target, policy.CLEAN_PATHS, policy.PYCACHE_PATHS)
             rb.verify_tree(self.repo, target)
             expected = target
         self._beat()
-        if current.get("venv_swapped"):
+        # The venv swap belongs to the landing that recorded it. Reverting an
+        # older, already-settled commit must not undo a NEWER promotion's venv:
+        # that swap is not what this rollback was asked about.
+        if current.get("venv_swapped") and observed == blamed:
             failed = rb.swap_venv_back(self.repo)
             log(f"venv reverted, failed clone kept at {failed}")
 
@@ -535,18 +570,50 @@ class Guardian:
             raise rb.RollbackError("backend boot_id unchanged — process was never replaced")
 
         # 11-12. Record, denylist, re-arm quiet.
-        # Deny the PROMOTED commit, not whatever HEAD happened to be: on the
-        # surgical route HEAD was a later human commit, and denying that would
-        # blocklist work the loop never made. Content hash alongside the SHA,
-        # so the same change re-derived under a new SHA is caught too.
-        bad = promoted or head_before
+        # Deny the BLAMED commit, not whatever HEAD happened to be and not the
+        # promotion that merely happened to be under observation: on the
+        # surgical route HEAD was a later human commit, and denying the
+        # observed promotion instead of the blamed one left the change that
+        # actually regressed free to be re-derived and re-landed while a change
+        # nobody blamed was blocklisted by SHA *and* by content hash. Content
+        # hash alongside the SHA, so the same change re-derived under a new SHA
+        # is caught too.
+        bad = blamed or head_before
         if bad:
             self.state.deny(bad, tree_hash=rb.changed_tree_hash(self.repo, bad, changed))
+
+        # A promotion that was under observation but NOT blamed now has no
+        # window and no verdict. Alan's decision on #1358 (2026-09-23) is to
+        # close it unjudged rather than reopen it on the new HEAD: a window
+        # re-opened across this rollback's own restart would convict it of the
+        # rollback, and every rollback this loop has performed so far has been a
+        # false positive. It is not unguarded — the detached regression check
+        # still measures it — it is simply not judged by this process, and the
+        # row below says so beside the commit that was reverted.
+        left_unjudged = observed if (observed and observed != bad) else None
+
+        # LKG must not outlive the change it certifies. `maybe_settle` is the
+        # only other writer of this pointer, so without a repoint the rollback
+        # that undid or removed the commit LKG names would leave
+        # `rollback_target(None)` handing that same dead commit to the NEXT
+        # rollback — and on 2026-09-21 dbec85aa settled at 21:37:32Z and was
+        # reverted at 21:45:05Z, so the following rollback would have reset
+        # `main` back onto it and discarded every commit since. Point it at what
+        # this rollback actually restored.
+        lkg = self.state.lkg() or {}
+        lkg_from = lkg.get("commit")
+        repointed = bool(expected and lkg_from) and (
+            lkg_from == bad or not rb.is_ancestor(self.repo, lkg_from, expected))
+        if repointed:
+            self.state.set_lkg(expected)
+
         self.state.clear_current()
         gstate.append_event(self.state.ledger, {
             "event": "rollback_succeeded", "trigger": trigger, "commit": bad,
             "restored": expected, "target": target,
             "route": "revert" if surgical else "reset",
+            "left_unjudged": left_unjudged,
+            "lkg_repointed_from": lkg_from if repointed else None,
             "head_before": head_before, "tag": tag, "stash": evidence.get("stash"),
         })
         self.quiet_until = time.time() + policy.POST_ROLLBACK_QUIET_SECONDS
@@ -570,9 +637,14 @@ class Guardian:
 
         route = ("Reverted in place, keeping later commits."
                  if surgical else "Reset to the pre-promotion tree.")
+        # The item name on `current.json` is the OBSERVED promotion's, and a
+        # request carries no title, so when this rollback blamed someone else
+        # the headline has no right to that name — it falls back to the hashes
+        # rather than reading out the title of a change still standing in the
+        # tree. (`rollback_title` prefers `title` whenever the record has one.)
         self.alert(
             "critical" if extra else "warn",
-            rollback_title(current, bad, expected),
+            rollback_title(current if observed == blamed else None, bad, expected),
             f"Trigger: {trigger}\n{reason}\n{route}\n"
             f"Reverted {(bad or '?')[:8]} → {expected[:8]}{extra}",
             evidence=json.dumps(evidence, indent=2),
