@@ -6,6 +6,7 @@ test_kg_store.py). What still needs pinning is the boundary this file now
 tests — that an unreadable store never reads as an empty graph to a writer,
 and that read-only ranking paths degrade instead of failing.
 """
+import asyncio
 import sys
 from pathlib import Path
 
@@ -178,21 +179,73 @@ def test_fact_relationships_direction_and_type_filters(store):
     assert facts_mod._fact_relationships({"entity": "A", "type": "uses"})["count"] == 1
 
 
-def test_fact_path_finds_a_route_and_reports_a_miss(store):
-    store.edges.add(_edge("A", "B"), origin="test")
-    store.edges.add(_edge("B", "C"), origin="test")
-    hit = facts_mod._fact_path({"source": "A", "target": "C"})
-    assert hit["found"] and hit["path"] == ["A", "B", "C"] and hit["hops"] == 2
-    assert facts_mod._fact_path({"source": "A", "target": "Nowhere"})["found"] is False
+@pytest.fixture
+def facts_root(store, tmp_path, monkeypatch):
+    """`store` moves the roots held by reference; `facts.py` imported
+    `FACTS_ROOT` by value, so a write through `_fact_add` would otherwise land
+    in the real corpus."""
+    import agent_mcp._shared as shared
+    monkeypatch.setattr(facts_mod, "FACTS_ROOT", tmp_path / "facts")
+    shared._invalidate_entity_dirs_cache()
+    yield tmp_path / "facts"
+    shared._invalidate_entity_dirs_cache()
 
 
-def test_fact_neighbors_honours_min_confidence_and_caps(store):
+def test_the_surviving_kg_readers_still_register_and_answer(facts_root):
+    """#1077 deleted `fact_path` and `fact_neighbors` off this server; this
+    pins what the deletion had to leave alone — the reads that stay, still
+    advertised and still answering through the handlers a caller reaches.
+
+    Registration is asserted through `list_tools()`, the call an MCP client
+    actually makes: a handler that stays importable but drops out of the
+    registration is exactly the state this item is about, and an import check
+    would not see it. The per-tool traffic that motivated the deletion is not
+    quoted here — the transcript window under `~/lloyd-data/sessions` rotates,
+    so a count written into a docstring is stale within days — and #1077
+    carries the probe that re-measures it.
+
+    `fact_profile` is pinned absent rather than passed over. The item names it
+    among the surviving reads, but it was retired on 2026-09-23 by `ed78a3a9`,
+    which subsumed its per-category cap and `query` ranking into `fact_get`;
+    so the three below are the whole surviving read surface, and the fourth
+    name in that clause is asserted absent with its provenance rather than
+    quietly dropped.
+    """
+    names = {t.name for t in asyncio.run(facts_mod.list_tools())}
+    assert {"fact_get", "fact_relationships", "fact_relate"} <= names, sorted(names)
+    assert "fact_profile" not in names, (
+        "fact_profile is advertised again — ed78a3a9 retired it and fact_get "
+        "took its cap and query ranking"
+    )
+
+    added = facts_mod._fact_add({"entity": "Widgetboard", "category": "state",
+                                 "fact": "Widgetboard ships on the second Tuesday"})
+    assert added.get("success") is True, added
+    got = facts_mod._fact_get({"entity": "Widgetboard"})
+    assert [f["fact"] for f in got["facts"]] == ["Widgetboard ships on the second Tuesday"]
+
+    related = facts_mod._fact_relate({"source": "Widgetboard", "target": "Goliath",
+                                      "type": "uses"})
+    assert related["action"] == "created", related
+    edges = facts_mod._fact_relationships({"entity": "Widgetboard"})
+    assert edges["count"] == 1 and edges["edges"][0]["target"] == "Goliath"
+
+
+def test_fact_relationships_honours_min_confidence(store):
+    """The confidence floor the deleted `fact_neighbors` walk used to hold
+    (#1077) now sits on the surviving edge reader.
+
+    The default is `edges.active`'s own 0.0 — every edge, whatever its
+    confidence — so a caller that passes nothing gets exactly the edges it got
+    before this change: this assertion is here as much to pin that as to pin
+    the cut, which is the second half.
+    """
     store.edges.add(_edge("A", "Strong", confidence=0.9), origin="test")
     store.edges.add(_edge("A", "Weak", confidence=0.2), origin="test")
-    out = facts_mod._fact_neighbors({"entity": "A", "min_confidence": 0.5})
-    assert out["nodes"] == ["A", "Strong"]
-    capped = facts_mod._fact_neighbors({"entity": "A", "min_confidence": 0.0, "max_edges": 1})
-    assert capped["truncated"] is True and "hint" in capped
+    assert facts_mod._fact_relationships({"entity": "A"})["count"] == 2
+    narrow = facts_mod._fact_relationships({"entity": "A", "min_confidence": 0.5})
+    assert narrow["count"] == 1
+    assert [e["target"] for e in narrow["edges"]] == ["Strong"]
 
 
 # ── conversation relation linking (#51) ──────────────────────────────────────

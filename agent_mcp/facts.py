@@ -4,12 +4,23 @@ Lloyd MCP Server: Facts — knowledge-graph facts and typed relationships.
 
 Tools:
     fact_get, fact_add, fact_resolve, fact_resolve_apply, fact_invalidate,
-    fact_relate, fact_relationships, fact_path, fact_neighbors  (9 tools)
+    fact_relate, fact_relationships  (7 tools)
 
 `fact_profile` and `fact_check` were retired on 2026-09-23: `fact_get` took the
 profile's per-category cap and `query` ranking, and `fact_check` was
 `fact_resolve` under a second name. `_fact_check` stays as a function, the
 contradiction detector's direct entry point for tests.
+
+`fact_path` and `fact_neighbors` were deleted from this module on 2026-09-24
+(#1077, on the #877 precedent for an advertised-but-never-called surface):
+zero calls across every stored session, while the writer `fact_add` has
+hundreds. Nothing is hidden behind a flag — no non-test caller existed for
+either, so both handlers, their caps and their registrations are gone. What
+the removed walk owned that survives is the confidence floor, now taken by
+`fact_relationships` as `min_confidence`. What does NOT survive is a
+walk-time-bounded expansion: `agent_mcp.retrieval.graph_weighted_neighbors`
+bounds nothing during its walk (`top_k` sliced only at the end), so whoever
+wires a graph arm into per-turn retrieval (#1025) re-implements the caps.
 
 Data root: app.paths.VAULT_FACTS_ROOT
     (currently ~/lloyd-data/_pipeline/vault-derived/facts/)
@@ -896,131 +907,26 @@ def _fact_relationships(params: dict) -> dict:
         return _err("entity is required", ErrorCode.MISSING_PARAM, edges=[])
     direction = params.get("direction", "both")
     rel_type = params.get("type") or None
+    # The confidence floor `fact_neighbors` applied during its walk (#1077).
+    # 0.0 is `edges.active`'s own default, so a call that passes nothing gets
+    # byte-for-byte the edges it got before the removed tool existed.
+    min_confidence = float(params.get("min_confidence", 0.0))
     try:
         resolved, _ = _resolve_entity(entity, mode="read")
         st = _store()
         types = [rel_type] if rel_type else None
         if direction == "out":
-            edges = st.edges.active(source=resolved, types=types)
+            edges = st.edges.active(source=resolved, types=types,
+                                    min_confidence=min_confidence)
         elif direction == "in":
-            edges = st.edges.active(target=resolved, types=types)
+            edges = st.edges.active(target=resolved, types=types,
+                                    min_confidence=min_confidence)
         else:
-            edges = st.edges.active(either=resolved, types=types)
+            edges = st.edges.active(either=resolved, types=types,
+                                    min_confidence=min_confidence)
         return {"entity": resolved, "edges": edges, "count": len(edges)}
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL, edges=[])
-
-
-def _fact_path(params: dict) -> dict:
-    """Find shortest path between two entities via BFS on relationship graph."""
-    source = params.get("source", "").strip()
-    target = params.get("target", "").strip()
-    max_hops = int(params.get("max_hops", 3))
-    if not source or not target:
-        return _err("source and target are required", ErrorCode.MISSING_PARAM)
-    try:
-        src_resolved, _ = _resolve_entity(source, mode="read")
-        tgt_resolved, _ = _resolve_entity(target, mode="read")
-        adj = _store().edges.adjacency()
-        from collections import deque
-        queue = deque([(src_resolved, [src_resolved], [])])
-        visited = {src_resolved}
-        while queue:
-            node, path, edges_path = queue.popleft()
-            if node == tgt_resolved:
-                return {"found": True, "path": path, "edges": edges_path, "hops": len(edges_path)}
-            if len(path) > max_hops:
-                continue
-            for edge in adj.get(node, ()):
-                neighbor = edge["target"] if edge["source"] == node else edge["source"]
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append((neighbor, path + [neighbor],
-                                  edges_path + [{"source": edge["source"], "target": edge["target"],
-                                                 "type": edge["type"]}]))
-        return {"found": False, "path": [], "edges": [], "hops": -1}
-    except Exception as exc:
-        return _err(str(exc), ErrorCode.INTERNAL)
-
-
-# Soft caps on fact_neighbors result size. The harness spills any result
-# above ~50KB to disk (app.harness.tool_result_spill), so the model never
-# loses information — but explicit caps + a `hint` field steer the model
-# toward narrower queries (hops=1, higher min_confidence) BEFORE it pays
-# the spill cost. Defaults are generous; hub-entity hops=2 still hits them.
-_FACT_NEIGHBORS_MAX_NODES = 1000
-_FACT_NEIGHBORS_MAX_EDGES = 2000
-
-
-def _fact_neighbors(params: dict) -> dict:
-    """Get neighborhood subgraph around an entity within N hops.
-
-    Truncates at ``_FACT_NEIGHBORS_MAX_NODES`` / ``_FACT_NEIGHBORS_MAX_EDGES``
-    to bound result size. When truncated, sets ``truncated=True`` and adds
-    a ``hint`` field telling the caller to narrow with ``hops=1`` or a
-    higher ``min_confidence`` threshold. Without this cap, hub-entity
-    queries return tens of thousands of nodes in a single tool result.
-    """
-    entity = params.get("entity", "").strip()
-    if not entity:
-        return _err("entity is required", ErrorCode.MISSING_PARAM)
-    hops = int(params.get("hops", 1))
-    min_confidence = float(params.get("min_confidence", 0.5))
-    max_nodes = int(params.get("max_nodes", _FACT_NEIGHBORS_MAX_NODES))
-    max_edges = int(params.get("max_edges", _FACT_NEIGHBORS_MAX_EDGES))
-    try:
-        resolved, _ = _resolve_entity(entity, mode="read")
-        adj = _store().edges.adjacency(min_confidence=min_confidence)
-        visited = {resolved}
-        current_layer = [resolved]
-        all_edges: list[dict] = []
-        truncated = False
-        for _ in range(hops):
-            next_layer = []
-            for node in current_layer:
-                for edge in adj.get(node, ()):
-                    if len(all_edges) >= max_edges:
-                        truncated = True
-                        break
-                    all_edges.append({"source": edge["source"], "target": edge["target"],
-                                      "type": edge["type"], "confidence": edge["confidence"]})
-                    neighbor = edge["target"] if edge["source"] == node else edge["source"]
-                    if neighbor not in visited:
-                        if len(visited) >= max_nodes:
-                            truncated = True
-                            continue
-                        visited.add(neighbor)
-                        next_layer.append(neighbor)
-                if truncated and len(all_edges) >= max_edges:
-                    break
-            if truncated and len(all_edges) >= max_edges:
-                break
-            current_layer = next_layer
-        seen_edges = set()
-        unique_edges = []
-        for e in all_edges:
-            key = (e["source"], e["target"], e["type"])
-            if key not in seen_edges:
-                seen_edges.add(key)
-                unique_edges.append(e)
-        result: dict = {
-            "entity": resolved,
-            "nodes": sorted(visited),
-            "edges": unique_edges,
-            "node_count": len(visited),
-            "edge_count": len(unique_edges),
-        }
-        if truncated:
-            result["truncated"] = True
-            result["hint"] = (
-                f"Result truncated at {max_nodes} nodes / {max_edges} edges. "
-                f"Hub entity '{resolved}' has too many connections at hops={hops}. "
-                f"Retry with hops=1, raise min_confidence (currently {min_confidence}), "
-                f"or pass smaller max_nodes/max_edges."
-            )
-        return result
-    except Exception as exc:
-        return _err(str(exc), ErrorCode.INTERNAL)
 
 
 # ── Graph traversal (used by vault.py for vault_recall) ──────────────────────
@@ -1047,18 +953,8 @@ async def list_tools():
             "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "category": {"type": "string", "description": "Fact category (e.g. state, identity, preference) — one markdown file per entity/category"}, "fact_substring": {"type": "string", "description": "Match facts containing this text"}, "ended": {"type": "string", "description": "ISO date when the fact stopped being true (default: today)"}, "reason": {"type": "string", "description": "Why the fact was expired"}}, "required": ["entity"]}),
         Tool(name="fact_relate", description="Add a typed relationship edge between two entities in the knowledge graph. Edges are expired rather than deleted, so a wrong edge is recoverable.", inputSchema={
             "type": "object", "properties": {"source": {"type": "string", "description": "Entity the edge points from (alias-resolved)"}, "target": {"type": "string", "description": "Entity the edge points to (alias-resolved)"}, "type": {"type": "string", "description": "Relationship type (e.g. built_on, uses, part_of, related_to)"}, "confidence": {"type": "number", "description": "0.0-1.0 belief in the edge (default 0.9)"}, "provenance": {"type": "string", "enum": ["STATED", "EXTRACTED", "INFERRED", "AMBIGUOUS"], "description": "How the edge was derived (default: STATED)"}, "source_doc": {"type": "string", "description": "Vault path this edge came from, for provenance"}}, "required": ["source", "target", "type"]}),
-        Tool(name="fact_relationships", description="Get all relationships for an entity (inbound + outbound edges).", inputSchema={
-            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "direction": {"type": "string", "enum": ["in", "out", "both"], "description": "Edge direction to return (default both)"}, "type": {"type": "string", "description": "Only return edges of this relationship type"}}, "required": ["entity"]}),
-        Tool(name="fact_path", description="Find shortest path between two entities via relationship graph.", inputSchema={
-            "type": "object", "properties": {"source": {"type": "string", "description": "Entity to start from (alias-resolved)"}, "target": {"type": "string", "description": "Entity to reach (alias-resolved)"}, "max_hops": {"type": "integer", "description": "Give up beyond this many hops (default 4)"}}, "required": ["source", "target"]}),
-        Tool(name="fact_neighbors", description=f"Neighborhood subgraph around an entity within N hops. Truncates at {_FACT_NEIGHBORS_MAX_NODES} nodes / {_FACT_NEIGHBORS_MAX_EDGES} edges; hub entities at hops=2 will truncate — narrow with hops=1 or a higher min_confidence.", inputSchema={
-            "type": "object", "properties": {
-                "entity": {"type": "string", "description": "Entity at the centre of the subgraph (alias-resolved)"},
-                "hops": {"type": "integer", "description": "Traversal depth (default 1)"},
-                "min_confidence": {"type": "number", "description": "Drop edges below this confidence (default 0.5)"},
-                "max_nodes": {"type": "integer", "description": f"Cap on returned nodes (default {_FACT_NEIGHBORS_MAX_NODES})"},
-                "max_edges": {"type": "integer", "description": f"Cap on returned edges (default {_FACT_NEIGHBORS_MAX_EDGES})"},
-            }, "required": ["entity"]}),
+        Tool(name="fact_relationships", description="Use to list the typed edges one entity sits on (inbound + outbound); for what is known about an entity use fact_get instead, and for a question across documents and facts use vault_recall. `min_confidence` drops weaker edges (default 0.0 — every edge, whatever its confidence).", inputSchema={
+            "type": "object", "properties": {"entity": {"type": "string", "description": "Entity name; resolved through the alias table, so a near-miss usually still lands"}, "direction": {"type": "string", "enum": ["in", "out", "both"], "description": "Edge direction to return (default both)"}, "type": {"type": "string", "description": "Only return edges of this relationship type"}, "min_confidence": {"type": "number", "description": "Drop edges below this confidence (default 0.0 — keep all of them)"}}, "required": ["entity"]}),
     ]
 
 
@@ -1069,7 +965,6 @@ async def call_tool(name: str, arguments: dict):
         "fact_resolve_apply": _fact_resolve_apply,
         "fact_invalidate": _fact_invalidate,
         "fact_relate": _fact_relate, "fact_relationships": _fact_relationships,
-        "fact_path": _fact_path, "fact_neighbors": _fact_neighbors,
     }
     handler = handlers.get(name)
     if handler:

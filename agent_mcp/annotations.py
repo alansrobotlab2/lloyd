@@ -39,8 +39,11 @@ READ_ONLY: frozenset[str] = frozenset({
     # Knowledge graph
     # `fact_resolve` is a report since #1326: `auto_resolve` is gone and the
     # marking lives in `fact_resolve_apply`, deliberately in no table.
+    # `fact_path` and `fact_neighbors` left this table with the tools that
+    # carried them (#1077): a name here describes a served tool, and an
+    # un-served one is a claim nothing can check.
     "fact_get", "fact_resolve",
-    "fact_relationships", "fact_path", "fact_neighbors",
+    "fact_relationships",
     # Vault + memory + sessions
     "vault_read", "vault_overview", "vault_search", "vault_recall",
     "memory_read", "session_recall", "chat_list_sessions", "chat_get_session",

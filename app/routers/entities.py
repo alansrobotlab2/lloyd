@@ -46,7 +46,7 @@ router = APIRouter()
 _FACTS_ROOT = VAULT_FACTS_ROOT
 
 # Edge types that are co-occurrence noise rather than a stated relationship.
-# Kept out of the graph view; `fact_neighbors` still returns them.
+# Kept out of the graph view; `fact_relationships` still returns them.
 _STRUCTURAL_EDGE_TYPES = frozenset({"mentions", "co_mentioned", "wiki_link_co_occurrence"})
 
 # Response caches. Keyed on the store's version plus its last reindex, so a

@@ -593,7 +593,7 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `djev_decide` | RO | `state`, `questions` | Typed questions (yes/no, one-of-N, ordered scale) about one text, in ~40 ms |
 | `djev_status` | RO | — | Enabled, reachable, per-seam latency, shadow queue, per-schema floors and gate status |
 
-#### `facts` (9)
+#### `facts` (7)
 
 | Tool | Properties | Required | Does |
 |---|---|---|---|
@@ -603,9 +603,15 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `fact_resolve_apply` | FX | `entity` | Mark the lower-confidence side of each pair `invalid_at` (never expired). Was `fact_resolve`'s `auto_resolve` |
 | `fact_invalidate` | DX ID | `entity` | Expire facts that stopped being true. Refuses an unscoped call; `ended` defaults to today. Absorbed `forget` |
 | `fact_relate` | FX | `source`, `target`, `type` | Add a typed edge between two entities |
-| `fact_relationships` | RO | `entity` | An entity's inbound and outbound edges |
-| `fact_path` | RO | `source`, `target` | Shortest relationship path between two entities |
-| `fact_neighbors` | RO | `entity` | N-hop subgraph around an entity (truncates at 1000 nodes / 2000 edges) |
+| `fact_relationships` | RO | `entity` | An entity's inbound and outbound edges; `min_confidence` (default 0.0 = keep all) drops weaker ones |
+
+`fact_path` and `fact_neighbors` were deleted on 2026-09-24 (#1077, on the #877
+precedent): zero calls in every stored session against hundreds for `fact_add`,
+so the surface advertised a graph-expansion read no caller used. Both handlers
+and their 1000-node / 2000-edge caps are gone. The surviving expansion lives in
+`agent_mcp/retrieval.py`, which bounds nothing during its walk and slices
+`top_k` only at the end — so a graph arm wired into per-turn retrieval (#1025)
+re-implements the caps.
 
 #### `vault` (5)
 

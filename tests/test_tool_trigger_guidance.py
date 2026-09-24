@@ -237,6 +237,29 @@ def test_trigger_coverage_rose_materially(descriptions):
     )
 
 
+def test_no_description_tells_a_caller_to_work_around_a_dead_tool(descriptions):
+    """`fact_neighbors` described its own 1000-node / 2000-edge caps and told
+    the caller to "narrow with hops=1 or a higher min_confidence" — advice for
+    a query the server answered in 0.8 s. The tool was deleted on 2026-09-24
+    (#1077) with 0 recorded calls, so that sentence would have gone on
+    presenting a hops=2 hub query as something to route around, on a surface
+    that no longer offers it.
+
+    Scoped to the MCP-advertised descriptions, which is what `descriptions`
+    already is, not to the whole repo: the same words survive as history in
+    `architecture/knowledge-graph.md` and in the deletion note in
+    `agent_mcp/facts.py`, and prose that records a deletion is not prose
+    recommending the query.
+    """
+    offenders = {n: d for n, d in descriptions.items()
+                 if "hops=2 will truncate" in d
+                 or "narrow with hops=1" in d}
+    assert not offenders, (
+        f"a registered tool still presents a hops=2 hub truncation as "
+        f"something to work around: {sorted(offenders)}"
+    )
+
+
 def test_catalog_reminder_stays_under_its_token_ceiling(descriptions):
     """The ~5k note at tool_search.py:209-212 is why `_gist` exists.
 

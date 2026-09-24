@@ -611,15 +611,21 @@ holds, and the count is a stock, not a leak.
 ## Tools
 
 `fact_get`, `fact_add`, `fact_resolve`, `fact_resolve_apply`,
-`fact_invalidate`, `fact_relate`, `fact_relationships`, `fact_path`,
-`fact_neighbors` (`agent_mcp/facts.py`), and `vault_recall`
-(`agent_mcp/vault.py`).
+`fact_invalidate`, `fact_relate`, `fact_relationships` (`agent_mcp/facts.py`),
+and `vault_recall` (`agent_mcp/vault.py`).
 
 #376's four verbs (`remember`, `recall`, `forget`, `improve`) sat over these
 from 2026-09-09 and were retired on 2026-09-23, with `fact_check` (a second
 name for `fact_resolve`) and `fact_profile` (whose cap and `query` ranking
-`fact_get` took). `architecture/memory.md` has why, and the `improve` loop
-(#84, nightly, plan mode), which runs from its script.
+`fact_get` took). `fact_path` and `fact_neighbors` were then deleted on
+2026-09-24 (#1077): no session stored on this box has ever called either, while
+the writer `fact_add` has hundreds, so the server was advertising an
+N-hop expansion no caller used — and its description told callers to work
+around a truncation only that dead walk could reach. `fact_relationships`, the
+edge reader that does carry traffic, took the confidence floor the walk used
+to hold (`min_confidence`, default 0.0 = keep every edge).
+`architecture/memory.md` has why, and the `improve` loop (#84, nightly, plan
+mode), which runs from its script.
 
 Three of those address a fact by `<file, id>` -- `fact_resolve`,
 `fact_invalidate` and every revert report -- so the ID has to name exactly one

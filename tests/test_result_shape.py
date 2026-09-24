@@ -24,6 +24,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -121,16 +123,22 @@ def test_fact_relate_missing_required_returns_dict_with_code():
     assert result["code"] == "MISSING_PARAM"
 
 
-def test_fact_path_missing_target_returns_dict_with_code():
-    result = facts._fact_path({"source": "A"})  # missing target
-    assert isinstance(result, dict)
-    assert result["code"] == "MISSING_PARAM"
-
-
-def test_fact_neighbors_missing_entity_returns_dict_with_code():
-    result = facts._fact_neighbors({})
-    assert isinstance(result, dict)
-    assert result["code"] == "MISSING_PARAM"
+# These two nodes stood here as `*_missing_*_returns_dict_with_code`, exercising
+# `_fact_path` and `_fact_neighbors` directly. Both handlers were deleted on
+# 2026-09-24 (#1077) — 0 calls each across the stored session transcripts — so
+# what the dispatch contract has to pin now is the answer a caller still using
+# one gets. Before the removal each returned MISSING_PARAM, which reads as
+# "this tool exists, fix your arguments"; now it is the server's UNKNOWN_TOOL
+# payload, which is the truth.
+@pytest.mark.parametrize("name", ("fact_path", "fact_neighbors"))
+def test_a_call_to_a_pruned_kg_read_gets_the_unknown_tool_payload(name):
+    wrapped = asyncio.run(facts.call_tool(name, {}))
+    assert isinstance(wrapped, CallToolResult)
+    assert wrapped.is_error is True
+    assert json.loads(wrapped.content[0].text) == {
+        "error": f"Unknown tool: {name}",
+        "code": "UNKNOWN_TOOL",
+    }
 
 
 def test_vault_read_missing_path_returns_dict_with_code():

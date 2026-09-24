@@ -233,13 +233,47 @@ def test_path_constants_follow_the_running_code_not_the_home_dir():
 EXPECTED_TOOL_NAMES = {
     "fact_get", "fact_add", "fact_resolve",
     "fact_resolve_apply",
-    "fact_invalidate", "fact_relate", "fact_relationships", "fact_path",
-    "fact_neighbors",
+    "fact_invalidate", "fact_relate", "fact_relationships",
     "vault_read", "vault_write", "vault_overview", "vault_search",
     "vault_recall",
     "memory_read", "memory_add", "memory_replace", "memory_remove",
     "session_recall",
 }
+
+
+# Deleted from the facts server on 2026-09-24 (#1077, on the #877 precedent for
+# an advertised-but-never-called read). Written here in the clear, unlike
+# #877's own pin, which had to assemble its names from parts because a clause
+# of that item greps the repo for those literals; nothing here does.
+_PRUNED_KG_READS = ("fact_path", "fact_neighbors")
+
+
+def test_the_pruned_kg_graph_reads_stay_off_the_surface():
+    """The set assertion above already goes red if either name returns as an
+    `extra`; this one names them so a re-add is attributed to the item that
+    removed them, and checks the handler went with the registration instead of
+    sitting on the module unadvertised — which is the unwired-remnant shape
+    #877 deleted, and an advertisement-only check cannot see it.
+
+    No call counts are quoted here on purpose. The transcript window under
+    `~/lloyd-data/sessions` rotates, so a number written into a docstring is
+    wrong within days and reads as evidence long after it was taken. What does
+    not move is the shape of the finding, and #1077 carries the probe that
+    re-measures it: neither of these two reads has ever been called, while the
+    writer to the same store is used constantly.
+    """
+    names = {t.name for t in asyncio.run(_aggregated_list_tools())}
+    assert not (set(_PRUNED_KG_READS) & names), (
+        f"re-advertised on the MCP surface: {sorted(set(_PRUNED_KG_READS) & names)}"
+    )
+    for name in _PRUNED_KG_READS:
+        # Underscore-prefixed, because that is how this server spells a
+        # handler; the bare name was never a module attribute, so asserting
+        # against it could not fail and proved nothing.
+        assert not hasattr(_facts_mod, f"_{name}"), (
+            f"_{name} is back: an unregistered handler is the unwired-remnant "
+            f"shape #877 deleted, not a surface"
+        )
 
 
 def test_list_tools_returns_expected_set():

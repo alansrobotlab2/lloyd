@@ -21,6 +21,7 @@ gate is derived from.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import types
 from pathlib import Path
@@ -221,6 +222,25 @@ async def test_unknown_tool_is_an_error_result():
     result = await M.call_tool("NoSuchToolAtAll", {})
     assert isinstance(result, CallToolResult)
     assert result.is_error is True
+
+
+# The generic case above names a tool that never existed. These two name tools
+# that used to be served and were deleted (#1077), which is a different failure
+# to pin: `tools/list` is cached by the client for TOOLS_LIST_TTL_MS, so a
+# session opened before the landing keeps sending the old name for up to that
+# window, and the answer it gets comes from `main`'s dispatch map, not from
+# `agent_mcp.facts` — the aggregator resolves the name against a map discovery
+# rebuilt, and returns its own payload (no `code` field, unlike the module
+# handler's `_err`). That is the boundary a real client crosses, so the
+# assertion sits here rather than only in tests/test_result_shape.py.
+@pytest.mark.parametrize("name", ("fact_neighbors", "fact_path"))
+async def test_a_deleted_kg_graph_read_is_answered_by_the_aggregator(name):
+    await M.list_tools()          # rebuild the map, as a live server did at discovery
+    assert name not in M._dispatch, f"{name} still routes to a handler"
+    result = await M.call_tool(name, {})
+    assert isinstance(result, CallToolResult)
+    assert result.is_error is True
+    assert json.loads(result.content[0].text) == {"error": f"Unknown tool: {name}"}
 
 
 # ── Schema hygiene ───────────────────────────────────────────────────────────
@@ -897,14 +917,24 @@ def test_run_task_refuses_to_dispatch_a_task_whose_grants_block_is_malformed(
 # the tree's own part of it (the Thunderbird bridge is gitignored, so its ~40
 # tools are measured separately in test_thunderbird_discovery_cache).
 
-# The twelve tools retired as duplicates or subsumed on 2026-09-23. A name
+# The twelve tools retired as duplicates or subsumed on 2026-09-23, plus the two
+# KG graph reads deleted on 2026-09-24 (#1077) — advertised for their whole
+# life, never called, while `fact_add` wrote the same store constantly. Two
+# different reasons, one table: what the test below refuses is the same in both
+# cases, a name on the advertised surface or in an annotation table. A name
 # coming back is a decision, not drift, so it has to be taken out of here.
+#
+# The annotation half is what the deletion had to reach: `READ_ONLY`
+# (agent_mcp/annotations.py) is the table the plan-mode blocked set is derived
+# from at discovery, so an entry left behind after the tool goes is a claim
+# about a tool nothing serves.
 RETIRED_TOOLS = frozenset({
     "fact_check", "fact_profile",
     "remember", "recall", "forget", "improve",
     "browser_type",
     "autoresearch_round", "autoresearch_promote", "autoresearch_bench_add",
     "autoresearch_bench_list", "autoresearch_ledger_query",
+    "fact_path", "fact_neighbors",
 })
 
 # chars/4 via `app.compaction.estimate_tokens`, over the OpenAI-shaped JSON the

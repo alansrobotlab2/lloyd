@@ -278,7 +278,8 @@ def normalize_and_register(name: str) -> str:
 #
 # Fuzzy is read-only and bounded to names sharing a first token. The unbounded
 # version compared the query against all 23,560 registry names on every miss:
-# `fact_path` to an unknown entity cost 746 ms, all of it Levenshtein.
+# a `fact_path` read (that tool is gone, #1077) to an unknown entity cost
+# 746 ms, all of it Levenshtein.
 
 _FUZZY_THRESHOLD = 0.85
 
