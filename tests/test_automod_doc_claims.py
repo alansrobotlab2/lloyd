@@ -839,3 +839,73 @@ def test_architecture_states_the_loop_axis_and_stops_naming_the_check_behavioura
     assert "eval` slot" in sec13, "§13 does not address the last-known-good eval slot"
     assert "eval_for_recorded_commit" in sec13, \
         "§13 does not name the field that says whether the eval is this commit's"
+
+
+# ---------------------------------------------------------------------------
+# The rung table vs the ladder the gate actually runs (#679)
+# ---------------------------------------------------------------------------
+
+#: The module's `NUMBER_WORDS` stops at ten, and widening it would widen the
+#: armed-metric regexes that share it. The ladder needs eleven.
+RUNG_NUMBERS = {**NUMBER_WORDS, "eleven": 11}
+
+
+def _real_ladder(monkeypatch) -> list[str]:
+    """The rung names `Gate.run` executes, in order, by stubbing `_rung`."""
+    from scripts.automod import gate as G
+    names: list[str] = []
+    g = G.Gate("SM_DOC_CLAIMS", ROOT, "HEAD")
+
+    def _record(name, fn):          # every rung "passes": only the names matter
+        names.append(name)
+        return True
+
+    monkeypatch.setattr(g, "_rung", _record)
+    g.run()
+    return names
+
+
+def test_the_doc_rung_table_lists_the_ladder_that_actually_runs(monkeypatch):
+    """The doc's rung table is a claim about the code, so it gets pinned to it.
+
+    This is the shape §4 has always had a silent gap in: adding `vet` to the
+    ladder is a change to eleven names, and only one of the doc's two places
+    that enumerate them (`architecture/testing.md` counted `nine rungs` until
+    this round) said anything at all. A rung missing from this table is a rung
+    an operator reading §4 at 3am does not know exists — which is exactly how
+    `prompt_surface` sat unlisted here for a week while the ladder ran it.
+    """
+    real = _real_ladder(monkeypatch)
+    text = DOC.read_text(encoding="utf-8")
+
+    start = text.index("| Rung | Typical | Catches |")
+    rows = []
+    for line in text[start:].splitlines()[2:]:
+        if not line.startswith("|"):
+            break
+        rows.append(line.split("|")[1].strip())
+    assert rows, "no rung table found in §4"
+    assert rows == real, (
+        f"doc lists {rows} but the gate runs {real}; "
+        "a rung must be added to the table in the same commit that adds it "
+        "to the ladder")
+
+
+def test_the_doc_rung_count_matches_the_ladder_that_runs(monkeypatch):
+    """§4 names the rung count in its opening sentence, so the count is checked.
+
+    A hand-typed integer in prose is a second definition of the ladder, and the
+    second definition is the one that goes stale: `architecture/testing.md` said
+    "nine rungs" while the gate ran ten, and it took this round adding an
+    eleventh to notice. The number the doc states is now compared with the
+    length of the ladder read out of `Gate.run`, so the sentence cannot survive
+    a rung being added or removed without being edited in the same commit.
+    """
+    real = len(_real_ladder(monkeypatch))
+    stated = re.search(r"\b([A-Za-z]+) rungs, cheapest first",
+                       DOC.read_text(encoding="utf-8"))
+    assert stated, "§4 no longer states the rung count next to the ladder"
+    word = stated.group(1).lower()
+    assert word in RUNG_NUMBERS, f"unparseable rung count {word!r}"
+    assert RUNG_NUMBERS[word] == real, (
+        f"§4 states {word!r} rungs but Gate.run executes {real}")

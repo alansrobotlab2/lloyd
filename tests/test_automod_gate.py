@@ -80,7 +80,12 @@ class _StubGate(G.Gate):
 # `prompt_surface` sits after `tests` and before `review`: after, so a broken
 # tree fails first and cheaply; before, because a behavioural regression in
 # what the model is TOLD is a fact the reviewer should be able to see.
-RUNGS = ("preflight", "static", "frontend", "tests", "prompt_surface",
+# `vet` sits immediately behind `preflight`: it reads the same two things the
+# scope check just enumerated (the resolved base, the changed-path list), costs
+# about as much, and is the only rung that judges the change set itself instead
+# of the behaviour it produces — so it runs before anything executes the
+# candidate. It is observe-only (#679): it records, it never fails.
+RUNGS = ("preflight", "vet", "static", "frontend", "tests", "prompt_surface",
          "review", "venv", "canary_boot", "canary_smoke", "drill")
 ALL_PASS = {n: (True, "ok", {}) for n in RUNGS}
 
@@ -103,14 +108,20 @@ def test_the_stub_ladder_is_the_real_ladder(monkeypatch):
 
 
 def test_a_failing_rung_short_circuits_the_expensive_ones(monkeypatch):
-    """An import error must cost 3 seconds, not a full canary boot."""
+    """An import error must cost 3 seconds, not a full canary boot.
+
+    `vet` is in the called list because #679's clause 5 puts it on every round
+    immediately behind `preflight`, which is before anything executes the
+    candidate: an emptied file or a stray blob is reported even on a tree that
+    then fails `static`.
+    """
     monkeypatch.setattr(G.S, "append_event", lambda *a, **k: None)
     outcomes = dict(ALL_PASS)
     outcomes["static"] = (False, "import smoke failed", {})
     g = _StubGate(outcomes)
     report = g.run()
     assert not report.ok
-    assert g.called == ["preflight", "static"]
+    assert g.called == ["preflight", "vet", "static"]
     assert "canary_boot" not in g.called
 
 
@@ -1152,3 +1163,130 @@ def test_the_web_tree_declares_the_runner_the_rung_looks_for():
     assert "vitest" in pkg["devDependencies"] and pkg["scripts"]["test"] == "vitest run"
     assert (web / "vitest.config.ts").exists()
     assert list((web / "src").rglob("*.test.ts")), "a runner with nothing to run passes nothing"
+
+
+# ---------------------------------------------------------------------------
+# The observe-only vet rung (#679)
+# ---------------------------------------------------------------------------
+
+def _vet_round(tmp_path, monkeypatch, *, mode: str = "empty"):
+    """A real Gate over a scratch repo, with a head commit of the given `mode`.
+
+    `mode="empty"` empties one non-empty tracked file (a violation);
+    `mode="clean"` adds an ordinary text file (a real change set the vet must
+    call clean — not the vacuous zero-file diff of a round that committed
+    nothing). `app/__init__.py` is committed empty at base in both, because the
+    empty check's whole discipline is the file that is *supposed* to be empty.
+
+    Returns (gate, captured ledger events). The round dir is redirected into
+    `tmp_path` so the rung cache cannot touch the live state directory, and
+    `append_event` is captured rather than written.
+    """
+    root = tmp_path / "wt"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
+    for k, v in (("user.email", "vet@example.invalid"), ("user.name", "vet")):
+        subprocess.run(["git", "-C", str(root), "config", k, v], check=True)
+    (root / "app").mkdir()
+    (root / "app" / "service.py").write_text("def handle(e):\n    return e\n")
+    (root / "app" / "__init__.py").write_text("")          # legitimately empty
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", "base"], check=True)
+    base = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+    if mode == "empty":
+        (root / "app" / "service.py").write_text("")
+        subject = "clobbered"
+    elif mode == "clean":
+        (root / "app" / "new_text.py").write_text("X = 1\n")
+        subject = "an ordinary change"
+    else:
+        raise AssertionError(f"unknown mode {mode!r}")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", subject], check=True)
+
+    events: list[dict] = []
+    monkeypatch.setattr(G.S, "append_event", events.append)
+    monkeypatch.setattr(G.W, "round_dir", lambda *a, **k: tmp_path / "round")
+    g = G.Gate("SM_VET_ROUND", root, base)
+    return g, events
+
+
+def test_the_ladder_runs_the_vet_records_its_findings_and_blocks_nothing(tmp_path, monkeypatch):
+    """Clause 5, end to end: the real ladder, the real rung, a real git repo.
+
+    Only `vet` is the real method; the other ten rungs are stubbed, because what
+    is under test is that the ladder itself calls the vet on every round, that
+    the finding lands in the round's gate report, and that a violation cannot
+    turn the round red — the soak that decides whether it may block has not run.
+    """
+    g, events = _vet_round(tmp_path, monkeypatch)
+    for name in ("preflight", "static", "frontend", "tests", "prompt_surface",
+                 "review", "venv", "canary_boot", "canary_smoke", "drill"):
+        monkeypatch.setattr(g, f"rung_{name}", lambda n=name: (True, f"stub {n}", {}))
+
+    report = g.run()
+
+    assert report.ok, "an observe-only rung must never decide a round"
+    vet_rungs = [r for r in report.rungs if r.name == "vet"]
+    assert len(vet_rungs) == 1, [r.name for r in report.rungs]
+    rung = vet_rungs[0]
+    assert rung.ok is True
+    assert rung.detail.startswith("observe-only:"), rung.detail
+    assert [v["path"] for v in rung.data["vet"]["violations"]] == ["app/service.py"]
+    assert rung.data["vet"]["counts"] == {"empty_file": 1}
+    assert rung.data["vet"]["labels"] == ["empty_file:app/service.py"]
+    assert rung.data["vet"]["observe_only"] is True
+    # Recorded where the soak will read it: the event survives the worktree,
+    # gate.json does not.
+    ev = [e for e in events if e.get("rung") == "vet"]
+    assert len(ev) == 1, events
+    assert ev[0]["ok"] is True
+    assert ev[0]["vet"]["counts"] == {"empty_file": 1}
+    assert ev[0]["vet"]["labels"] == ["empty_file:app/service.py"]
+    assert "observe-only" in ev[0]["detail"]
+
+
+def test_a_clean_round_records_the_vet_ran_rather_than_recording_nothing(tmp_path, monkeypatch):
+    """The soak's denominator is "the vet ran", which needs a green record too.
+
+    A rung that recorded only findings would make an unexecuted `vet`
+    indistinguishable from a clean one across a month of landings.
+    """
+    g, events = _vet_round(tmp_path, monkeypatch, mode="clean")
+    ok, detail, data = g.rung_vet()
+    assert ok is True
+    assert detail.startswith("observe-only: clean"), detail
+    assert data["vet"]["violations"] == []
+    assert data["vet"]["totals"]["files"] >= 1
+    assert data["vet"]["totals"]["max_diff_lines"] == 12_000
+    # `observe_only: True` on a clean record, not just on a dirty one: the soak
+    # counts landings, and a count that only appears with findings cannot be a
+    # denominator.
+    assert data["vet"]["observe_only"] is True
+    assert data["vet"]["labels"] == []
+
+    # And on the ladder it is a rung every round, not one that appears when it
+    # has something to say. Every other rung is stubbed — the real `static` here
+    # would import the candidate, which is not this test's subject.
+    for name in ("preflight", "static", "frontend", "tests", "prompt_surface",
+                 "review", "venv", "canary_boot", "canary_smoke", "drill"):
+        monkeypatch.setattr(g, f"rung_{name}", lambda n=name: (True, f"stub {n}", {}))
+    report = g.run()
+    assert [r.name for r in report.rungs if r.name == "vet"] == ["vet"]
+    clean_ev = [e for e in events if e.get("rung") == "vet"]
+    assert len(clean_ev) == 1 and clean_ev[0]["vet"]["counts"] == {}
+
+
+def test_a_vet_that_could_not_run_is_recorded_as_unevaluated_not_clean(tmp_path, monkeypatch):
+    """Clause 4 at the seam that consumes it: the rung keeps the distinction."""
+    g, events = _vet_round(tmp_path, monkeypatch)
+    monkeypatch.setattr(G.V, "vet_change_set",
+                        lambda *a, **k: G.V.VetResult(status=G.V.UNEVALUATED,
+                                                      reason="git ls-tree failed"))
+    ok, detail, data = g.rung_vet()
+    assert ok is True, "an unevaluated vet is a finding about the gate, not a red round"
+    assert data["vet"]["status"] == G.V.UNEVALUATED
+    assert data["vet"]["violations"] == []
+    assert "UNEVALUATED" in detail and "git ls-tree failed" in detail
+    assert "clean" not in detail, "an unread change set must never read as clean"

@@ -1465,7 +1465,7 @@ build there would otherwise dirty the tree, and both `gate.py` and
 
 ## 4. The gate
 
-Nine rungs, cheapest first, short-circuiting. **Every rung fails closed** —
+Eleven rungs, cheapest first, short-circuiting. **Every rung fails closed** —
 `_rung` catches exceptions and records them as failures, because with no human
 review tier a rung that errors and reads as "didn't fail" silently removes a
 check.
@@ -1476,9 +1476,11 @@ candidate that weakens the gate is judged by the old gate.
 | Rung | Typical | Catches |
 |---|---|---|
 | preflight | ~0s | dirty tree, moved base, merge commits, out-of-scope paths; an item with no clauses, a code diff with no test |
+| vet | <1s | **observe-only (#679)**: a tracked file non-empty at base and empty at HEAD, a newly-added binary outside the allowlist, a diff over `automod.gate.max_diff_lines`. Records to `gate.json` and the ledger; blocks nothing during the soak |
 | static | ~2s | syntax errors, **import failures**, new pyflakes findings |
 | frontend | ~5s | new tsc errors, a broken vite build (only when `web/` changed) |
 | tests | ~70s on 8 workers (~10m serial) | the full suite, plus floors on collected AND passed — §4.2f |
+| prompt_surface | conditional | a scored regression in what the model is told (only when the prompt surface moved) |
 | review | 3.5-6.5m | a diff that does not do what the item asked — §4.5 |
 | venv | 3s–5m | only when `requirements.txt` or `requirements.lock` changed — not `requirements-dev.txt`, §10 |
 | canary_boot | ~2-30s | a build that will not start |

@@ -1,4 +1,4 @@
-"""The promotion gate: nine rungs, cheapest first, every one fails closed.
+"""The promotion gate: eleven rungs, cheapest first, every one fails closed.
 
 "Fails closed" is not a slogan here — it is the reason `_rung` catches every
 exception and records it as a FAILED rung. With no human review tier, a rung
@@ -12,24 +12,37 @@ cost 3 seconds, not a full canary boot.
 
   0 preflight      ~1s    lock, clean tree, ancestry, diff scope; with an item
                           bound, that it has clauses and the diff has a test
-  1 static         ~8s    compileall, import smoke, pyflakes delta
-  2 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
+  1 vet            ~1s    OBSERVE-ONLY structural pass over the change set
+                          itself (scripts/automod/vet.py): a file non-empty at
+                          base and empty at HEAD, a newly-added binary blob
+                          outside the binary allowlist, a diff over the changed-
+                          line ceiling. Records into report + ledger; blocks
+                          nothing until a soak of real landings says it may.
+  2 static         ~8s    compileall, import smoke, pyflakes delta
+  3 tests         ~70s    full pytest on `automod.gate.test_workers` xdist
                           workers (~600 s serial) + a collected-count floor.
                           A failure under load is re-run serially before it
                           is believed; a real one re-probes the failing files
                           at the round's base to say whose breakage it is
-  3 review      60-180s   a second reader: a fresh session on the LIVE
+  4 review      60-180s   a second reader: a fresh session on the LIVE
                           backend grades the diff against the item's
                           acceptance clauses (scripts/automod/review.py).
                           Refuses with findings; the premise verdict decides
                           whether the item is retried or handed to a human.
                           Skipped (recorded) only when no item is bound.
-  4 venv        0-300s    only when requirements changed (reflink + uv)
-  5 canary boot   ~30s    both /health green, tool floor, config-follows-code
-  6 canary smoke  ~30s    one real turn, sentinel through a real Bash call
+  5 venv        0-300s    only when requirements changed (reflink + uv)
+  6 canary boot   ~30s    both /health green, tool floor, config-follows-code
+  7 canary smoke  ~30s    one real turn, sentinel through a real Bash call
                           (recorded as SKIPPED when the engine is unreachable;
                            `skip_smoke` is refused while it answers)
-  7 drill         ~90s    only when the diff touches the rollback path
+  8 drill         ~90s    only when the diff touches the rollback path
+
+Two rungs are not numbered above because they only exist conditionally:
+`frontend` (between `static` and `tests`: tsc delta + vite build, recorded as
+SKIPPED when no `web/` path changed) and `prompt_surface` (between `tests` and
+`review`: the scored behavioural check, only for a prompt-surface diff). Of the
+eleven, `vet` is the only rung that reads the change set rather than the
+behaviour it produces, and the only one deliberately written not to block.
 
 `review` sits after `tests` so the grader can trust a green tree and is
 handed the counts, and before `venv` so a refusal saves the venv build, the
@@ -50,7 +63,7 @@ from pathlib import Path
 
 from app import lint_findings
 from scripts.automod import canary as C
-from scripts.automod import spec, state as S, worktree as W
+from scripts.automod import spec, state as S, vet as V, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 PYTEST_MIN_COLLECTED = 1000
@@ -733,6 +746,20 @@ class Gate:
         for key in ("review_findings", "review_summary", "review_attempt"):
             if (res.data or {}).get(key):
                 event[key] = (res.data or {})[key]
+        # The vet's record rides the event because it is the record of a rung
+        # that never fails, and #679's soak asks a question only the ledger can
+        # answer months later: "did the vet run on every landing, and what did
+        # it see?". `gate.json` is copied by the landing and deleted with the
+        # worktree, so a non-blocking observation preserved only there has no
+        # denominator. Compact by construction — status, counts, labels, the
+        # totals — so an always-present rung does not bloat the ledger.
+        if (res.data or {}).get("vet"):
+            v = res.data["vet"]
+            event["vet"] = {"status": v.get("status"),
+                            "observe_only": True,
+                            "counts": v.get("counts") or {},
+                            "labels": v.get("labels") or [],
+                            "totals": v.get("totals") or {}}
         S.append_event(event)
         if ok:
             self._reuse_save(name, res.data)
@@ -744,7 +771,15 @@ class Gate:
         # `skip_smoke` was passed, so a skipped rung left no trace at all: the
         # report listed seven rungs and a reader had to know the eighth existed
         # to notice it was gone. A skip is now a recorded rung that says so.
-        ladder = [("preflight", self.rung_preflight), ("static", self.rung_static),
+        # `vet` is second, immediately behind the scope check that shares its
+        # inputs (a resolved base, the enumerated change set) and costs about as
+        # much: it is the only rung that reads the change set itself rather than
+        # the behaviour it produces, so it runs before anything is executed —
+        # before compileall imports the candidate, long before a canary boots
+        # it. Observe-only today, so its position is about when the record is
+        # written, not about what can fail.
+        ladder = [("preflight", self.rung_preflight), ("vet", self.rung_vet),
+                  ("static", self.rung_static),
                   ("frontend", self.rung_frontend),
                   ("tests", self.rung_tests),
                   ("prompt_surface", self.rung_prompt_surface),
@@ -968,6 +1003,47 @@ class Gate:
         if dirty:
             detail += f"; tolerating {len(dirty)} uncommitted live path(s) outside this diff"
         return True, detail, {"buckets": buckets, **data}
+
+    def rung_vet(self):
+        """OBSERVE-ONLY structural vet of the change set (#679).
+
+        Every other rung on this ladder asks whether the system still behaves;
+        this one asks whether the change set is structurally what the round
+        claims to have done — files emptied relative to base, binary blobs
+        dropped into the tree, a diff far outside anything this repo lands. It
+        is stdlib, deterministic, sub-second, and it blocks nothing: the
+        violation list rides onto the report and the ledger event, and a person
+        decides after a soak whether any of the three checks earns a `False`.
+        (Backlog #679's acceptance: >=20 landings and <5% false flags first.)
+
+        It never reports "clean" for a pass that could not run: an
+        `unevaluated` result says `VET UNEVALUATED` in the detail and carries
+        `status: unevaluated` in the data, which is why the soak's denominator
+        is readable from the ledger rather than assumed.
+        """
+        res = V.vet_change_set(self.base, self.worktree)
+        data = {"vet": res.to_dict()}
+        totals = res.totals or {}
+        counts = {k: sum(1 for v in res.violations if v.kind == k)
+                  for k in (V.EMPTY_FILE, V.BINARY_ARTIFACT, V.DIFF_TOO_LARGE)}
+        data["vet"]["counts"] = {k: n for k, n in counts.items() if n}
+        # Two fields the SOAK needs and a verdict never does: `observe_only` so
+        # no reader infers enforcement from a green rung, and `labels` — one
+        # short string per finding, no prose — so the soak can tally kinds
+        # across rounds without parsing detail text. Bounded, because a round
+        # that trips the size ceiling writes one entry, not forty.
+        data["vet"]["observe_only"] = True
+        data["vet"]["labels"] = [v.label() for v in res.violations[:20]]
+        if not res.evaluated:
+            return True, f"observe-only: VET UNEVALUATED ({res.reason})", data
+        if not res.violations:
+            return True, (f"observe-only: clean — {totals.get('files', 0)} file(s), "
+                          f"{totals.get('changed_lines', 0)} changed line(s) of "
+                          f"{totals.get('max_diff_lines', 0)} allowed"), data
+        listed = "; ".join(v.label() for v in res.violations[:6])
+        more = f" (+{len(res.violations) - 6} more)" if len(res.violations) > 6 else ""
+        return True, (f"observe-only: {len(res.violations)} violation(s) — "
+                      f"{listed}{more}"), data
 
     def rung_static(self):
         r = _run([str(self.python), "-m", "compileall", "-q", str(self.worktree)], timeout=300)
