@@ -586,8 +586,11 @@ SPILL_SAMPLE = ("powerpoint", "deep-research", "nightly-reflection-knowledge-wri
                 "system-health-check", "entity-resolution-sweep")
 
 #: The vault state the spill delta is measured from: the last vault commit on or
-#: before this instant, i.e. before any #624 spill landed.
-SPILL_BASELINE_BEFORE = "2026-09-24T23:59:59"
+#: before this instant, i.e. before any #624 spill landed. Local time, as git
+#: reads it. It was end-of-day, which is AFTER the spill commit (landed the same
+#: afternoon) and so measured the spill against itself: a delta of 0 forever.
+#: The last pre-spill vault commit is 6f429bdd (13:28:19 -07:00).
+SPILL_BASELINE_BEFORE = "2026-09-24T13:30:00"
 
 _HEADING_RE = re.compile(r"^#{2,3}\s+\S")
 
@@ -602,6 +605,28 @@ def _largest_block(body_lines: list[str]) -> dict:
                 best = {"heading": heading, "lines": i - start}
             start, heading = i, line.strip()
     return best
+
+
+def skill_folder_text(skill_dir: Path, content: str) -> str:
+    """`content` (the SKILL.md) plus every sibling `*.md` in the skill's folder.
+
+    A spilled skill (#624) keeps its detail in sibling files the index line names,
+    and a check that reads SKILL.md alone stops seeing whatever moved: a phantom
+    tool name, an injection pattern or a dead script path in a sibling is read by
+    the model exactly as it would be in the body. So the text checks read the
+    folder. Siblings are appended in name order; an unreadable one is skipped.
+    """
+    parts = [content]
+    try:
+        siblings = sorted(p for p in skill_dir.glob("*.md") if p.name != "SKILL.md")
+    except OSError:
+        siblings = []
+    for sibling in siblings:
+        try:
+            parts.append(sibling.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return "\n".join(parts)
 
 
 def skill_size(name: str, path: Path, content: str, body: str) -> dict:
@@ -805,7 +830,10 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
                     "reason": drift_reason,
                 })
 
-        bad_tools = check_phantom_tools(entry.name, content)
+        # The folder, not the file: detail spilled into a sibling is still text
+        # the model reads (#624).
+        folder = skill_folder_text(entry, content)
+        bad_tools = check_phantom_tools(entry.name, folder)
         if bad_tools:
             phantom.append({
                 "name": entry.name,
@@ -816,7 +844,7 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
         # Allow-listed hits are kept in the payload and the report: the permit is
         # on the gate, not on being seen. `unlisted_injection_findings` is what
         # `tests/test_skill_lint_gates.py` fails on.
-        inj_hits = check_injection_patterns(entry.name, content)
+        inj_hits = check_injection_patterns(entry.name, folder)
         if inj_hits:
             injection.append({
                 "name": entry.name,
@@ -824,7 +852,7 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
                 "hits": inj_hits,
             })
 
-        bad_scripts = check_script_paths(content, skill_dir=entry)
+        bad_scripts = check_script_paths(folder, skill_dir=entry)
         live_scripts = [b for b in bad_scripts if not b["known_stale"]]
         if live_scripts:
             missing_script.append({

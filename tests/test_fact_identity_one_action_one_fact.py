@@ -458,8 +458,11 @@ def _scan_corpus(skill_lint, skills_dir: Path):
         if not skill_file.is_file():
             continue
         scanned += 1
+        # The folder, as the lint reads it (#624): a spilled skill cites from its
+        # sibling files too, and a citation that moved there is still a citation.
         for hit in skill_lint.check_script_paths(
-                skill_file.read_text(encoding="utf-8", errors="replace"),
+                skill_lint.skill_folder_text(
+                    entry, skill_file.read_text(encoding="utf-8", errors="replace")),
                 skill_dir=entry, repo_root=ROOT):
             if not hit["known_stale"]:
                 offenders.setdefault(entry.name, []).append(hit["path"])
@@ -511,8 +514,11 @@ def test_the_absent_script_ledger_only_carries_drift_still_cited():
         skill_file = entry / "SKILL.md"
         if not skill_file.is_file():
             continue
+        # The folder, as the lint reads it (#624): a spilled skill cites from its
+        # sibling files too, and a citation that moved there is still a citation.
         for hit in skill_lint.check_script_paths(
-                skill_file.read_text(encoding="utf-8", errors="replace"),
+                skill_lint.skill_folder_text(
+                    entry, skill_file.read_text(encoding="utf-8", errors="replace")),
                 skill_dir=entry, repo_root=ROOT):
             if hit["known_stale"]:
                 cited.add(hit["path"])

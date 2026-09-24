@@ -410,6 +410,18 @@ log (`app/skill_embed.py`; routes `prefetch`, `prefetch_excerpt`,
 `autonomy_task`, `worker_prompt`), so a report can say which route paid for what.
 The 100-line cap is advisory; whether it becomes a failure is a person's call.
 
+A spilled skill is a folder: the body keeps the procedure, every upper-case hard
+rule and a `## Files in this skill` index whose lines name each sibling `.md` by
+absolute path (`Read` and `vault_read` both take it) and say when to read it,
+inside the first 6000 chars. The five `SPILL_SAMPLE` skills were spilled on
+2026-09-24 (105,167 → 45,505 embedded chars, `eval/measurements/skill-spill-624-2026-09-24.md`;
+`tests/test_skill_spill_624.py` pins headings, index lines and guardrails against
+the pre-spill vault). The phantom-tool, injection and script-path checks read the
+folder (`skill_folder_text`), so text moved into a sibling is still linted; the
+vault writer's per-skill validators (`vault_round.reflection_archive_errors`,
+`skill_timezone_errors`) and `tests/test_skill_tool_names.py` still read
+`SKILL.md` only.
+
 Advisory only — no automatic deletion or rewrites, and it exits 0 always so the
 nightly pipeline does not fail on lint findings. Autonomy task #70 runs it
 weekly.
