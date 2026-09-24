@@ -25,6 +25,7 @@ Run: .venvs/lloyd/bin/python -m pytest tests/test_memory_improvement.py
 """
 import asyncio
 import importlib.util
+import inspect
 import json
 import re
 import sys
@@ -174,11 +175,15 @@ def test_correction_signal_names_the_entity_the_user_contested(world):
     _write_facts(facts_root, "TTS", "state",
                  [{"fact": "TTS built-in voices return 500 errors.", "created_at": _days_ago(4)}])
     _reindex(st, facts_root)
+    # Relative dates, not literals: this fixture feeds a windowed read, and a
+    # hard-coded heading is inside the window only until the calendar says
+    # otherwise — the same trap #802 names for the live log, and one that a
+    # green suite cannot see coming (`_ago`, section 1c).
     (vault_root / "memory" / "corrections.md").write_text(
         "# Corrections Log\n\n"
-        "## 2026-09-08 07:00 PDT — TTS service status\n"
+        f"## {_ago(1)} 07:00 PDT — TTS service status\n"
         "**Correction:** TTS is fixed; the built-in voices were returning 500s.\n\n"
-        "## 2026-09-07 09:00 PDT — plain prose with no entity\n"
+        f"## {_ago(2)} 09:00 PDT — plain prose with no entity\n"
         "**Correction:** nothing entity-shaped here.\n",
         encoding="utf-8")
     found = fi.read_correction_signals()
@@ -374,8 +379,10 @@ def test_corrections_outrank_drift_when_every_drift_write_is_newer(world):
     _aged(facts_root, "TTS", days=30)
     _aged(facts_root, "AAA", days=1)
     _aged(facts_root, "BBB", hours=1)
+    # `_ago`, not a literal date: the corrections branch is windowed, so a
+    # hard-coded heading silently stops being a correction (see 1c).
     (vault_root / "memory" / "corrections.md").write_text(
-        "## 2026-09-14 09:00 PDT — TTS regression\n"
+        f"## {_ago(1)} 09:00 PDT — TTS regression\n"
         "**Correction:** TTS broke again.\n", encoding="utf-8")
 
     # The docstring's premise — every drift mtime is newer than TTS's — is a
@@ -389,6 +396,173 @@ def test_corrections_outrank_drift_when_every_drift_write_is_newer(world):
     signals = fi.collect_signals(sources=("corrections", "drift"), days=3, limit=2)
     assert [(s["entity"], s["source"]) for s in signals] == [
         ("TTS", "corrections"), ("BBB", "drift")], signals
+
+
+# ── 1c. #802: the corrections window, its threading, and its stale marker ────
+#
+# `memory/corrections.md` has had one commit ever (the 2026-08-22 baseline) and
+# its newest dated heading is 2026-05-08, yet the corrections branch of the
+# signal union applied no date filter at all while the drift branch took
+# `days=DRIFT_WINDOW_DAYS`. The two 2026-05-08 headings therefore entered every
+# nightly run as if they were fresh corrections — and, because
+# `_collect_signals` extends corrections into the union first, ahead of every
+# drift candidate. A window constant exists now; what is pinned below is the
+# four things that make it real: it filters in both directions, the caller's
+# window is the one the reader uses, a wholly stale log is recorded as stale
+# rather than as a zero, and the function's own prose names the route it is.
+#
+# Dates here are relative to an explicit `now` (`_ago`) or to the constant, so
+# no fixture ages out of the window it is testing — the shape that made the two
+# hard-coded headings above (#802's own hazard, noted at filing) rot within a
+# fortnight of being written.
+
+def _ago(days: int, now: datetime | None = None) -> str:
+    """ISO date `days` before `now` (default: real now, UTC)."""
+    base = now or datetime.now(timezone.utc)
+    return (base - timedelta(days=days)).date().isoformat()
+
+
+def _corrections_log(path, entries):
+    """Write a `memory/corrections.md` carrying one dated heading per entry."""
+    path.write_text(
+        "# Corrections Log\n\n" + "".join(
+            f"## {date} 07:00 PDT — {entity} service status\n"
+            f"**Correction:** the {entity} status was wrong.\n\n"
+            for date, entity in entries),
+        encoding="utf-8")
+    return path
+
+
+def test_the_corrections_window_admits_an_in_window_entry_and_drops_an_older_one(world):
+    """Both directions, pinned against an injected `now`.
+
+    An entry 3 days old is a correction; one 15 days past the window is not an
+    entry at all, but it is still counted, because a window that silently drops
+    is indistinguishable from a log that is empty.
+    """
+    facts_root, st, vault_root = world
+    now = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
+    for name in ("TTS", "ZED"):
+        _write_facts(facts_root, name, "state",
+                     [{"fact": f"{name} is running on the box.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+    head = _corrections_log(vault_root / "memory" / "corrections.md", [
+        (_ago(3, now), "TTS"), (_ago(fi.CORRECTIONS_WINDOW_DAYS + 15, now), "ZED")])
+
+    found = fi.read_correction_signals(now=now)
+    assert [s["entity"] for s in found] == ["TTS"], (
+        "an entry inside the window must survive and one past it must not", found)
+    per = fi.last_corrections_read()["sources"][str(head)]
+    assert (per["in_window"], per["outside_window"]) == (1, 1), per
+
+
+def test_collect_signals_threads_its_corrections_window_into_the_read(world):
+    """The window is an argument, not only a default.
+
+    Before this, `collect_signals(days=…)` threaded the window to the drift
+    branch alone and the corrections branch received none, so no caller could
+    narrow or widen what a stale log contributes. The same log must yield a
+    signal under a 60-day window and nothing under a 7-day one, and the read
+    must report the window it actually used.
+    """
+    facts_root, st, vault_root = world
+    _write_facts(facts_root, "TTS", "state",
+                 [{"fact": "TTS built-in voices return 500 errors.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+    _corrections_log(vault_root / "memory" / "corrections.md", [(_ago(40), "TTS")])
+    (vault_root / "lloyd" / "USER.md").write_text(
+        "# User\n\n## corrections_log\n", encoding="utf-8")
+
+    narrow = fi.collect_signals(sources=("corrections",), corrections_days=7)
+    assert narrow == [], "a 40-day-old correction must not pass a 7-day window"
+    assert fi.last_corrections_read()["window_days"] == 7
+
+    wide = fi.collect_signals(sources=("corrections",), corrections_days=60)
+    assert [s["entity"] for s in wide] == ["TTS"], (
+        "the same entry must pass a 60-day window — the argument, not the "
+        "constant, decides what is admitted", wide)
+    assert fi.last_corrections_read()["window_days"] == 60
+
+
+def test_a_fully_stale_corrections_log_is_recorded_as_stale_not_as_zero(world):
+    """"0 corrections" and "the log has been stale since 2026-05-08" are two
+    different verdicts, and a run record that cannot say which it means is the
+    instrument that reads as a quiet week while it is dead.
+    """
+    facts_root, st, vault_root = world
+    _write_facts(facts_root, "TTS", "state",
+                 [{"fact": "TTS built-in voices return 500 errors.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+    newest = _ago(400)
+    _corrections_log(vault_root / "memory" / "corrections.md", [(newest, "TTS")])
+    (vault_root / "lloyd" / "USER.md").write_text(
+        "# User\n\n## corrections_log\n\nStanding corrections only.\n", encoding="utf-8")
+
+    rec = fi.run_improvement(sources=("corrections",))
+    assert rec["signals"] == 0, rec["signals"]
+    assert rec["corrections_status"] == "no_entries_in_window", rec["corrections_status"]
+    # The marker: newest entry in the stale log, and the window that excluded it.
+    assert rec["corrections_stale_since"] == newest, rec["corrections_stale_since"]
+    assert rec["corrections_window_days"] == fi.CORRECTIONS_WINDOW_DAYS
+    assert rec["corrections_path"] is None, (
+        "no signal came from any log, so no log may be named as its source")
+
+    # The other zero stays distinguishable from it: a log with nothing in it is
+    # `empty`, and there is no date to name.
+    (vault_root / "memory" / "corrections.md").write_text(
+        "# Corrections Log\n", encoding="utf-8")
+    fresh = fi.run_improvement(sources=("corrections",))
+    assert fresh["corrections_status"] == "empty", fresh["corrections_status"]
+    assert fresh["corrections_stale_since"] is None, fresh["corrections_stale_since"]
+    assert fresh["corrections_window_days"] == fi.CORRECTIONS_WINDOW_DAYS
+
+
+def test_cli_reports_a_stale_corrections_log_instead_of_a_bare_zero(world, capsys,
+                                                                    monkeypatch):
+    """The process boundary: the nightly job runs this script and quotes its
+    stdout, so a dead channel has to be visible on the line it prints and in the
+    record it persists — not only in a key inside the JSON nobody opens.
+    """
+    facts_root, st, vault_root = world
+    _write_facts(facts_root, "TTS", "state",
+                 [{"fact": "TTS built-in voices return 500 errors.", "created_at": _days_ago(4)}])
+    _reindex(st, facts_root)
+    newest = _ago(400)
+    _corrections_log(vault_root / "memory" / "corrections.md", [(newest, "TTS")])
+    (vault_root / "lloyd" / "USER.md").write_text(
+        "# User\n\n## corrections_log\n\nStanding corrections only.\n", encoding="utf-8")
+
+    spec = importlib.util.spec_from_file_location("fact_improvement_cli_stale",
+                                                 _SCRIPT_PATH)
+    cli = importlib.util.module_from_spec(spec)
+    sys.modules["fact_improvement_cli_stale"] = cli
+    spec.loader.exec_module(cli)
+
+    monkeypatch.setattr(sys, "argv", ["fact-improvement.py", "--sources", "corrections"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    assert f"log stale since {newest} (window {fi.CORRECTIONS_WINDOW_DAYS} days)" in out, out
+
+    # The same verdict has to survive into the persisted record, since that is
+    # what an audit reads a week later.
+    record = sorted(Path(fi.RECORD_DIR).glob("*.json"))[-1]
+    persisted = json.loads(record.read_text(encoding="utf-8"))
+    assert persisted["corrections_stale_since"] == newest, sorted(persisted)
+    assert persisted["corrections_window_days"] == fi.CORRECTIONS_WINDOW_DAYS
+
+
+def test_the_corrections_reader_docstring_names_the_route_and_the_window():
+    """The docstring used to assert that nothing routes `corrections.md` into
+    *fact* quality while the function below it was exactly that route. Prose
+    that denies the call path is how a dead channel survives: the reader, the
+    record and the metric all said "no corrections" and nothing said "the
+    channel is the fact-quality signal, and here is its window".
+    """
+    doc = inspect.getdoc(fi.read_correction_signals)
+    assert "nothing routes" not in doc, doc
+    for named in ("fact quality", "collect_signals", "run_improvement",
+                  "CORRECTIONS_WINDOW_DAYS"):
+        assert named in doc, f"docstring must name {named!r}: {doc}"
 
 
 # ── 2. the loop: evidence + reason, dry-run by default ───────────────────────

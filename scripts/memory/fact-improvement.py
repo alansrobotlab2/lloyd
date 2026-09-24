@@ -47,6 +47,13 @@ def main() -> int:
                     help="improve only this entity (repeatable); bypasses signal sources")
     ap.add_argument("--days", type=int, default=fi.DRIFT_WINDOW_DAYS,
                     help=f"drift window in days (default {fi.DRIFT_WINDOW_DAYS})")
+    ap.add_argument("--corrections-window-days", type=int,
+                    default=fi.CORRECTIONS_WINDOW_DAYS,
+                    help=f"corrections window in days (default "
+                         f"{fi.CORRECTIONS_WINDOW_DAYS}). An entry older than "
+                         "this names no entity; the run then says the log is "
+                         "stale since <date> instead of reporting no "
+                         "corrections (#802)")
     ap.add_argument("--limit", type=int, default=40,
                     help="max entities to examine (default 40)")
     ap.add_argument("--max-actions", type=int, default=fi.MAX_ACTIONS_PER_RUN,
@@ -70,6 +77,7 @@ def main() -> int:
             apply=args.apply, sources=sources, entities=args.entity or None,
             days=args.days, limit=args.limit, max_actions=args.max_actions,
             report_eval=args.report_eval,
+            corrections_days=args.corrections_window_days,
         )
     except Exception as exc:  # noqa: BLE001 - a consumer must not exit 0 on a failed pass
         print(f"[error] improvement pass failed: {type(exc).__name__}: {exc}", file=sys.stderr)
@@ -97,6 +105,16 @@ def main() -> int:
         # sentinel shape for "the store could not answer", and on its own it
         # read as a zero. It must sit on the SAME output as the counts — a
         # warning on stderr next to a clean stdout is the false green again.
+        # A stale corrections log beside the counts, not a bare `signals=0`
+        # (#802): `memory/corrections.md` went unwritten on 2026-05-08 and every
+        # pass still printed a quiet zero, because a zero from a dead channel and
+        # a zero from a quiet fortnight printed identically. Same rule as the
+        # store verdict above — the caveat goes on stdout, where the
+        # counts-reader is, never only in the JSON nobody opens.
+        if rec.get("corrections_stale_since"):
+            print(f"[corrections] 0 signals in window: log stale since "
+                  f"{rec['corrections_stale_since']} (window "
+                  f"{rec.get('corrections_window_days')} days)")
         if rec.get("store_ok") is False:
             print(f"[warn] knowledge-graph store unreadable: {rec.get('store_error')}")
         elif rec.get("store_ok") is True:

@@ -210,7 +210,8 @@ _TIME_IN_HEAD_RE = re.compile(r"^\s*\d{1,2}:\d{2}(:\d{2})?\s*[A-Za-z]{1,4}?\s*[�
 # What a run record says when the corrections read never happened — a
 # `--sources drift` pass consults no log, and `corrections_status: null` would
 # read as "the log was empty", which is the same false verdict in a new costume.
-_NOT_READ: dict = {"status": "not_read", "sources": {}, "paths_yielding_signals": []}
+_NOT_READ: dict = {"status": "not_read", "sources": {}, "paths_yielding_signals": [],
+                   "window_days": None, "stale_since": None, "newest_entry": None}
 _LAST_CORRECTIONS_READ: dict = {}
 
 # Every status the corrections read can report, best first. One vocabulary, so a
@@ -313,16 +314,34 @@ def read_correction_signals(limit: int = 25, window_days: int = CORRECTIONS_WIND
                             now: datetime.datetime | None = None) -> list[dict]:
     """Entities named in the operator's own corrections logs.
 
-    Reads every path in `CORRECTIONS_SOURCES` — the compiled-in
+    This function **is** the corrections → fact quality route, and the only one
+    that exists: `collect_signals` puts what it returns first in the signal
+    union (a user saying "that was wrong" is a better reason to look than a file
+    being new), `run_improvement` scans exactly those entities for superseded and
+    out-ranked claims, and the `improve` tool defaults to
+    `sources=("corrections", "drift")`. The prose here used to claim the
+    opposite — that `memory/corrections.md` fed only the behaviour/prompt loops
+    and that no path into fact quality existed — while this function underneath
+    it was that path. Prose that denies its own call graph is how the channel
+    stayed unnoticed while it spent two entity slots every night on headings
+    last written 2026-05-08 (#802).
+
+    Recency is what makes a correction evidence rather than history, so
+    `window_days` bounds it: `CORRECTIONS_WINDOW_DAYS` by default, threaded
+    through from `collect_signals(corrections_days=…)` and
+    `run_improvement(corrections_days=…)`. An entry older than the window names
+    no entity but is counted in `outside_window`, and so is an undated one: a
+    correction that cannot say when it happened cannot say whether it still
+    applies. When that filter empties a log, `last_corrections_read()` reports
+    `no_entries_in_window` with the log's newest entry date, so a stale log is
+    never reported as a quiet week.
+
+    Reads every path in `corrections_paths()` — the compiled-in
     `memory/corrections.md` *and* `lloyd/USER.md`'s `## corrections_log`, which
     is where corrections have actually been written since the compiled-in file
     stopped being. An entry is credited to an entity only when a token in it is
     a registered entity name; dates and prose are stripped first, so
-    "2026-09-08 — TTS service status" yields `TTS` and nothing else does.
-
-    Entries older than `window_days` contribute nothing. Undated lines contribute
-    nothing either, and are counted: a correction that cannot say when it
-    happened cannot say whether it still applies.
+    "TTS service status" yields `TTS` and nothing else does.
 
     The `[]` case is where the honesty lives — see `last_corrections_read()`.
     """
@@ -336,6 +355,11 @@ def read_correction_signals(limit: int = 25, window_days: int = CORRECTIONS_WIND
         in_window = 0
         outside = 0
         undated = 0
+        # Newest parseable entry date, window included. The stale marker is
+        # "stale since <this date>", which cannot be recovered from a count:
+        # `outside_window: 10` says nothing about when the log went quiet, and
+        # the date is the part an operator can act on.
+        newest: str | None = None
         for date, text in entries:
             if date is None:
                 undated += 1
@@ -346,6 +370,8 @@ def read_correction_signals(limit: int = 25, window_days: int = CORRECTIONS_WIND
             except ValueError:
                 undated += 1
                 continue
+            if newest is None or date > newest:      # ISO dates sort as strings
+                newest = date
             if abs((now - when).days) > window_days:
                 outside += 1
                 continue
@@ -369,7 +395,8 @@ def read_correction_signals(limit: int = 25, window_days: int = CORRECTIONS_WIND
             status = "entries_no_entity"          # in-window entries name no entity
         read[str(path)] = {"status": status, "entries": len(entries),
                            "in_window": in_window, "outside_window": outside,
-                           "undated": undated, "signals": signals_here}
+                           "undated": undated, "signals": signals_here,
+                           "newest_entry": newest}
     global _LAST_CORRECTIONS_READ
     if not known and not out:
         # No registry means every token is a guess. Say the store is why the read
@@ -379,10 +406,27 @@ def read_correction_signals(limit: int = 25, window_days: int = CORRECTIONS_WIND
                                   "no_entries_in_window"):
                 info["status"] = "registry_unreadable"
                 info["why"] = "entity registry unreadable; no token can be resolved"
+    # The stale marker is computed after the registry fix-up above: a pass that
+    # could not resolve any entity name did not establish that the log is stale,
+    # it established that it could not read, and reporting a date in the same
+    # breath would dress the second failure up as the first.
+    stale_dates = [info["newest_entry"] for info in read.values()
+                   if info["status"] == "no_entries_in_window" and info["newest_entry"]]
     _LAST_CORRECTIONS_READ = {"sources": read,
                               "paths_yielding_signals": sorted(
                                   {s["corrections_path"] for s in out}),
-                              "status": _roll_up(read, bool(out), known)}
+                              "status": _roll_up(read, bool(out), known),
+                              # The window THIS read used, so a run that threaded
+                              # its own still reports the one that filtered.
+                              "window_days": window_days,
+                              # Newest entry in a log whose every entry fell
+                              # outside the window, else None. This is the half
+                              # that makes "0 corrections" and "the log has been
+                              # stale since 2026-05-08" different records.
+                              "stale_since": max(stale_dates) if stale_dates else None,
+                              "newest_entry": max(
+                                  (i["newest_entry"] for i in read.values()
+                                   if i["newest_entry"]), default=None)}
     return out
 
 
@@ -405,10 +449,15 @@ def last_corrections_read() -> dict:
     """What the most recent `read_correction_signals()` call actually saw.
 
     `{status, sources: {path: {status, entries, in_window, outside_window,
-    undated, signals}}, paths_yielding_signals}`. The run record stores this and
-    stores `corrections_path` from `paths_yielding_signals`, so a zero in the
-    record can be told apart from an unread file — the distinction the compiled-in
-    constant destroyed by naming itself whether or not it had been read.
+    undated, signals, newest_entry}}, paths_yielding_signals, window_days,
+    stale_since, newest_entry}`. The run record stores `corrections_path` from
+    `paths_yielding_signals`, `corrections_window_days` from `window_days`, and
+    `corrections_stale_since` from `stale_since`, so a zero in the record can be
+    told apart from an unread file and from a dead log — the distinction the
+    compiled-in constant destroyed by naming itself whether or not it had been
+    read. `stale_since` is the newest entry of a log whose every entry fell
+    outside the window, which is what makes "no corrections tonight" and "the
+    corrections log last heard from the operator on 2026-05-08" two records.
 
     Before any read has happened it reports `not_read`: a pass that consulted no
     log has to be able to say so, and it must not inherit the shape of a pass
@@ -482,7 +531,9 @@ def read_drift_signals(days: int = DRIFT_WINDOW_DAYS, limit: int = 50) -> list[d
 
 
 def _collect_signals(sources=("corrections", "drift"), days: int = DRIFT_WINDOW_DAYS,
-                     limit: int = 40) -> tuple[list[dict], dict]:
+                     limit: int = 40,
+                     corrections_days: int = CORRECTIONS_WINDOW_DAYS,
+                     ) -> tuple[list[dict], dict]:
     """`collect_signals` plus what it selected from.
 
     The tally is read off the same tree walk that produced the slice, so the
@@ -490,13 +541,18 @@ def _collect_signals(sources=("corrections", "drift"), days: int = DRIFT_WINDOW_
     `drift_candidates_total` is None when drift was not consulted at all — a
     run over `--sources corrections` did not measure a drift population, and 0
     would be a number it never measured.
+
+    `days` windows drift and `corrections_days` windows corrections. They were
+    once one argument threaded to the drift branch alone, which is why a
+    five-month-old correction outranked every fresh write: the corrections
+    branch received no window at all (#802).
     """
     wanted = set(sources)
     out: list[dict] = []
     seen: set[str] = set()
     drift_candidates_total: int | None = None
     if "corrections" in wanted:
-        out.extend(read_correction_signals(limit=limit))
+        out.extend(read_correction_signals(limit=limit, window_days=corrections_days))
     if "drift" in wanted:
         candidates = _drift_candidates(days)
         drift_candidates_total = len(candidates)
@@ -513,14 +569,21 @@ def _collect_signals(sources=("corrections", "drift"), days: int = DRIFT_WINDOW_
 
 
 def collect_signals(sources=("corrections", "drift"), days: int = DRIFT_WINDOW_DAYS,
-                    limit: int = 40) -> list[dict]:
+                    limit: int = 40,
+                    corrections_days: int = CORRECTIONS_WINDOW_DAYS) -> list[dict]:
     """Union of the enabled sources, deduped by entity, corrections first.
 
     Corrections outrank drift because a user saying "that was wrong" is a
     better reason to look than a file being new — and drift is ranked
     newest-write-first within its own block (see `read_drift_signals`).
+
+    Two windows, one per source: `days` bounds drift writes and
+    `corrections_days` bounds correction entries (default
+    `CORRECTIONS_WINDOW_DAYS`) and is passed to `read_correction_signals`, which
+    is the only thing that decides whether an old log contributes entities.
     """
-    return _collect_signals(sources=sources, days=days, limit=limit)[0]
+    return _collect_signals(sources=sources, days=days, limit=limit,
+                            corrections_days=corrections_days)[0]
 
 
 # ── the plan ─────────────────────────────────────────────────────────────────
@@ -1065,10 +1128,16 @@ def run_provenance() -> dict:
 
 def run_improvement(apply: bool = False, sources=("corrections", "drift"),
                     entities=None, days: int = DRIFT_WINDOW_DAYS,
+                    corrections_days: int = CORRECTIONS_WINDOW_DAYS,
                     limit: int = 40, report_eval: bool = False,
                     eval_limit: int = 20, record: bool = True,
                     max_actions: int = MAX_ACTIONS_PER_RUN) -> dict:
     """One improvement pass. Dry-run unless `apply=True`.
+
+    `days` is the drift window and `corrections_days` the corrections window
+    (default `CORRECTIONS_WINDOW_DAYS`); both are threaded to the reader that
+    consults them, and the record reports the corrections window it ran with as
+    `corrections_window_days` so a zero in the record is reproducible.
 
     Reports `fact_entity_recall` when asked: #376's own acceptance bar is that
     a change which cannot move that metric is not this feature, so the number
@@ -1088,7 +1157,8 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
                    for e in entities]
         tally = {"drift_candidates_total": None}
     else:
-        signals, tally = _collect_signals(sources=sources, days=days, limit=limit)
+        signals, tally = _collect_signals(sources=sources, days=days, limit=limit,
+                                          corrections_days=corrections_days)
 
     planned = taken = 0
     per_entity: list[dict] = []
@@ -1212,6 +1282,17 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
                              else None),
         "corrections_paths_read": sorted(last_corrections_read()["sources"]),
         "corrections_status": last_corrections_read()["status"],
+        # `corrections_status: no_entries_in_window` says the window emptied a
+        # log; these two keys say which date it stopped hearing from the
+        # operator and how wide the window was that decided it. Without the
+        # date, "0 corrections" from a dead channel and "0 corrections" from a
+        # quiet fortnight are one record, and #125's rate-over-time metric
+        # reads the dead one as a calm week. `corrections_window_days` is the
+        # window the read used, not the constant it defaulted from, so a run
+        # that overrode it is reproducible from its own record.
+        "corrections_stale_since": last_corrections_read()["stale_since"],
+        "corrections_window_days": last_corrections_read()["window_days"],
+        "corrections_newest_entry": last_corrections_read()["newest_entry"],
         "corrections_sources": {p: {"status": i["status"], "entries": i["entries"],
                                     "in_window": i["in_window"],
                                     "outside_window": i["outside_window"],
