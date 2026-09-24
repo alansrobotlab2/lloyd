@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Collect everything that exists ONLY on this disk before reimaging.
 #
-# The daily backup (scripts/backup.sh) covers ~/obsidian and ~/lloyd/scripts,
-# but writes to ~/backups on the same disk — and it misses the untracked
-# runtime assets below. This script gathers all of it into one directory you
-# can copy off-box.
+# The vault's on-box copies — lloyd-vault-backup.timer's 15-minute git
+# snapshots and lloyd-data-snapshot.timer's hourly btrfs snapshots — sit on
+# the same disk as the vault, and nothing ships them anywhere (off-box is
+# #1142). This script gathers them and every untracked runtime asset below
+# into one directory you can copy off-box.
 #
 # Runtime data (sessions, _pipeline/, the databases, baselines, voice profiles,
 # tool overrides, logs) lives in the data root, `${LLOYD_DATA:-~/lloyd-data}`
@@ -158,16 +159,17 @@ else
     log "SKIP  KG daily snapshot — no graph-*.tar.gz in $PIPELINE/backups/daily"
 fi
 
-# ── Latest daily backup archive ──
-if compgen -G "$HOME_DIR/backups/backup_*.tar.gz" >/dev/null; then
-    latest="$(ls -1t "$HOME_DIR"/backups/backup_*.tar.gz | head -1)"
-    log "COPY  latest daily backup ($(basename "$latest"))"
-    mkdir -p "$DEST/backups"
-    cp -a "$latest" "$DEST/backups/"
-    [[ -f "$latest.sha256" ]] && cp -a "$latest.sha256" "$DEST/backups/"
+# ── The vault's 15-minute git snapshots (lloyd-vault-backup.timer) ──
+# The vault copy above carries the vault's own .git; this repository is the
+# history a wipe of ~/obsidian cannot reach, and it exists nowhere else. Its
+# absence is MISSING rather than SKIP: every other gap here is optional or
+# regenerable, this one means the timer has never run on this box.
+VAULT_BACKUP_REPO="${LLOYD_VAULT_BACKUP_REPO:-$HOME_DIR/.local/state/lloyd-vault-backup/vault.git}"
+if [[ -d "$VAULT_BACKUP_REPO" ]]; then
+    copy "vault snapshot repo"  "$VAULT_BACKUP_REPO/"                              "vault-backup/vault.git/"
 else
-    missing+=("daily backup archive ($HOME_DIR/backups/backup_*.tar.gz)")
-    log "SKIP  daily backup archive — none found"
+    missing+=("vault snapshot repo ($VAULT_BACKUP_REPO) — lloyd-vault-backup.timer has never run here")
+    log "MISSING vault snapshot repo — $VAULT_BACKUP_REPO does not exist; lloyd-vault-backup.timer has never run here" >&2
 fi
 
 # ── LLM weights (opt-in: ~311GB) ──

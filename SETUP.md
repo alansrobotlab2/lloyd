@@ -17,21 +17,24 @@ restart anything until the rebuild is done.
 
 ## Part 0 — Before you wipe
 
-`scripts/backup.sh` writes to `/home/alansrobotlab/backups`, which is **on the
-same disk you are about to erase**. Copy the archive off-box, and grab the
-items below that the daily backup does not cover.
+Every on-box copy — the vault's 15-minute git snapshots in
+`~/.local/state/lloyd-vault-backup/vault.git` and the hourly btrfs snapshots of
+`~/lloyd-data` — is **on the same disk you are about to erase**, and nothing
+ships either off-box (#1142). The collector below copies the vault snapshot
+repository with everything else and reads the data root from its newest
+snapshot.
 
-> **Check the daily backup is not stale.** `backup.timer` ships `disabled` and
-> has to be enabled by hand (Part 11). As of 2026-08-21 it was off and the newest
-> archive in `~/backups` was from **2026-07-06** — 46 days old. Verify before you
+> **Check the vault snapshots are not stale.** `lloyd-vault-backup.timer` has to
+> be enabled (Part 11) and refuses to record a tripped or shrunken vault, so a
+> healthy-looking timer can still be sitting on an old commit. Verify before you
 > trust it:
 >
 > ```bash
-> systemctl --user list-timers backup.timer
-> ls -lt ~/backups/backup_*.tar.gz | head -1
+> systemctl --user list-timers lloyd-vault-backup.timer
+> git --git-dir ~/.local/state/lloyd-vault-backup/vault.git log -1 --format=%ci
 > ```
 >
-> If it is stale, run `bash scripts/backup.sh` once before collecting.
+> If it is stale, run `bash scripts/backup/backup-vault.sh` once before collecting.
 
 Run the collector, then move its output to external storage:
 
@@ -54,7 +57,7 @@ What it captures, and why each matters:
 | `~/lloyd/qmd/` — branch `lloyd` | small (the branch; `node_modules` reinstalls) | **The qmd fork the daemon runs** ([Part 6](#part-6--qmd-vault-search)). The clone is gitignored by this repo and its `lloyd` branch exists only on this disk until pushed: `git -C ~/lloyd/qmd push -u origin lloyd` (origin = `alansrobotlab2/qmd`). Its `WORKLOG.md`/`GAMEPLAN.md` are force-added to that branch, so the push carries them. |
 | `~/lloyd-data/_pipeline/research/` — `ledger.jsonl`, `rounds/`, `snapshots/` | ~19 MB | **Autoresearch history.** Gitignored and single-copy: the ledger and round reports are the only record of past promotions (the May 2026 threshold data is already gone, #430), and `snapshots/` is what a promotion is restored from. `variants/` regenerates and is skipped. |
 | `~/lloyd-data/` (everything else in it) | varies | **All runtime data** since 2026-09-22 ([data-home](architecture/data-home.md)): `sessions/` (conversation history, not recoverable), `usage.db`, `workers.db`, `research.db`, `event_logs/`, `autonomy-runs/`, `eval/baselines/`, logs. Simplest: back up the whole directory. A btrfs snapshot (`~/.lloyd-data-snapshots/`) is a consistent copy of all of it, databases included. |
-| `~/backups/backup_*.tar.gz` (latest + `.sha256`) | varies | The daily archive itself. |
+| `~/.local/state/lloyd-vault-backup/vault.git` | ~vault size | The vault's 15-minute git snapshots (Part 11), kept outside the vault so a wipe of `~/obsidian` cannot reach them. The vault's own `.git` travels with the vault row above; this is the second history. |
 
 Five things that **used** to live only on this disk are now tracked in the repo,
 so they arrive with a `git clone` and need no backup: the custom-trained
@@ -1163,7 +1166,6 @@ Snapshots land in `~/.lloyd-data-snapshots/<UTC stamp>`. Restore with
 ### Optional timers
 
 ```bash
-systemctl --user enable --now backup.timer               # scripts/backup.sh, daily 02:00
 systemctl --user enable --now lloyd-graph-backup.timer   # knowledge graph, daily 05:30
 systemctl --user enable --now lloyd-qmd-cleanup.timer    # qmd orphan cleanup, daily 04:45
 ```
@@ -1174,10 +1176,9 @@ like the guardian units, so it only needs enabling. It runs the fork's
 `qmd cleanup` after the 22:00–04:00 nightly write window and before the
 05:30 graph backup.
 
-Note that `backup.sh` targets `~/backups` on the local disk and covers only
-`~/obsidian` and `~/lloyd/scripts`. Consider pointing `BACKUP_BASE` at external
-storage and widening `SOURCE_DIRS` to include the untracked items listed in
-[Part 0](#part-0--before-you-wipe).
+There is no daily archive job. The vault and data snapshots above are the
+on-box copies, and the off-box leg is [Part 0](#part-0--before-you-wipe)'s
+collector until #1142 lands one.
 
 `lloyd-graph-backup.timer` is the one that matters most and is easiest to
 forget, because it is the only copy of state that cannot be regenerated. Its

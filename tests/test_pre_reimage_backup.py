@@ -14,6 +14,7 @@ byte-for-byte into `<HOME>/lloyd/scripts/` and run from there. Nothing under the
 real `_pipeline` is read or written by these tests.
 """
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -88,7 +89,8 @@ def _fake_home(tmp_path: Path, dailies: dict[str, bytes] | None = None) -> Path:
 def _run(home: Path, dest: Path, env_extra: dict[str, str] | None = None
          ) -> subprocess.CompletedProcess:
     env = {k: v for k, v in os.environ.items()
-           if k not in SWITCHES and k not in ("LLOYD_DATA", "LLOYD_DATA_SNAPSHOTS")}
+           if k not in SWITCHES
+           and k not in ("LLOYD_DATA", "LLOYD_DATA_SNAPSHOTS", "LLOYD_VAULT_BACKUP_REPO")}
     env["HOME"] = str(home)
     env.update(env_extra or {})
     return subprocess.run(
@@ -232,3 +234,67 @@ def test_a_snapshot_is_the_source_when_one_exists(tmp_path):
     assert result.returncode == 0, _fail(result)
     assert (dest / "lloyd-data/_pipeline/vault-derived/kg.sqlite").read_bytes() \
         == b"SNAPSHOT STORE"
+
+
+# ---------------------------------------------------------------------------
+# #1032: the daily archive never existed; the vault snapshot repo is what does
+# ---------------------------------------------------------------------------
+
+VAULT_BACKUP_REL = ".local/state/lloyd-vault-backup/vault.git"
+
+
+def test_the_vault_snapshot_repo_is_carried_off_box(tmp_path):
+    """`lloyd-vault-backup.timer` commits the vault into a git dir outside the
+    vault every 15 minutes (SETUP.md Part 11 says to back it up "with the rest
+    of Part 0"). Until #1032 the script shipped a `~/backups/backup_*.tar.gz`
+    that no job on this box has ever written, and named nothing else."""
+    home = _fake_home(tmp_path)
+    repo = home / VAULT_BACKUP_REL
+    (repo / "refs" / "heads").mkdir(parents=True)
+    (repo / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (repo / "refs" / "heads" / "main").write_text("deadbeef\n", encoding="utf-8")
+    dest = tmp_path / "dest"
+
+    result = _run(home, dest)
+    assert result.returncode == 0, _fail(result)
+    shipped = dest / "vault-backup" / "vault.git"
+    assert (shipped / "HEAD").read_text(encoding="utf-8") == "ref: refs/heads/main\n"
+    assert (shipped / "refs" / "heads" / "main").is_file()
+    assert "MISSING" not in result.stdout + result.stderr, _fail(result)
+
+
+def test_an_absent_vault_snapshot_repo_is_a_named_missing_line(tmp_path):
+    """Every other gap is optional or regenerable; this one means the timer
+    has never run, so it is `MISSING` on stderr and in the manifest, not a
+    `SKIP` line read by nobody — which is what `SKIP daily backup archive —
+    none found` was on every run this script ever made."""
+    home = _fake_home(tmp_path)
+    dest = tmp_path / "dest"
+
+    result = _run(home, dest)
+    assert result.returncode == 0, _fail(result)
+    assert "MISSING vault snapshot repo" in result.stderr, _fail(result)
+    assert "lloyd-vault-backup.timer" in result.stderr, _fail(result)
+    manifest = (dest / "MANIFEST.txt").read_text(encoding="utf-8")
+    assert "NOT captured" in manifest, manifest
+    assert "vault snapshot repo" in manifest and "lloyd-vault-backup.timer" in manifest, manifest
+    assert not (dest / "vault-backup").exists()
+
+
+# `backup.sh` / `backup.timer` on their own; `pre-reimage-backup.sh`,
+# `backup-vault.sh` and `lloyd-vault-backup.timer` are not the retired job.
+RETIRED_ARCHIVE = re.compile(r"(?<![\w-])backup\.(sh|timer|service)\b|~/backups\b|HOME_DIR/backups")
+
+
+def test_nothing_vouches_for_the_retired_daily_archive():
+    """`scripts/backup.sh` never ran here (`~/backups` was never created, and
+    no unit scheduled it), yet SETUP.md told a rebuilder to enable its timer
+    and this script's header vouched for it. The script is gone; the two
+    documents that named it must name what actually runs instead."""
+    assert not (ROOT / "scripts" / "backup.sh").exists()
+    for rel in ("SETUP.md", "scripts/pre-reimage-backup.sh"):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        hits = [(i, line.strip()) for i, line in enumerate(text.splitlines(), 1)
+                if RETIRED_ARCHIVE.search(line)]
+        assert not hits, f"{rel} still names the retired daily archive: {hits}"
+        assert "lloyd-vault-backup" in text, f"{rel} does not name lloyd-vault-backup"
