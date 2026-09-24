@@ -57,6 +57,7 @@ from typing import Any, AsyncIterator
 from app import event_log as _event_log
 from app import compaction_record as _compaction_record
 from app import prefix_miss as _prefix_miss
+from app import turn_usage
 from app.sessions_io import _append_messages
 from app.transcript_entries import (
     build_assistant_text_entry,
@@ -300,13 +301,18 @@ class _RunRecorder:
             self.saw_result = True
             self.stop_reason = evt.get("stop_reason", "stop")
             usage = evt.get("usage") or {}
+            # Same mapper as the chat path (#859): background runs are most of
+            # the traffic the prefix-cache table reads, and a rule enforced
+            # only in `messages.py` is a rule this writer breaks.
+            usage_row = turn_usage.turn_usage_row(usage)
             stats = {
-                "input_tokens": usage.get("input_tokens")
-                    or usage.get("prompt_tokens", 0),
+                "input_tokens": usage_row["input_tokens"],
                 "output_tokens": usage.get("output_tokens")
                     or usage.get("completion_tokens", 0),
-                "cache_read": usage.get("cache_read", 0) or 0,
+                "cache_read": usage_row["cache_read"],
                 "cache_create": usage.get("cache_create", 0) or 0,
+                "prompt_tokens_sum": usage_row["prompt_tokens_sum"],
+                "cache_read_sum": usage_row["cache_read_sum"],
                 "duration_ms": evt.get("duration_ms", 0),
                 "num_turns": evt.get("num_turns", 0),
                 "model": self.model,

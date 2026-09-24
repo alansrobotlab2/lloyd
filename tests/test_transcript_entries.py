@@ -19,6 +19,7 @@ import json
 import pytest
 
 from app import transcript_entries as te
+from app import turn_usage
 
 
 # ── Shapes ─────────────────────────────────────────────────────────────
@@ -157,10 +158,17 @@ def _chat_entries(events: list[dict]) -> list[dict]:
                                       evt=evt))
         elif t == "result":
             usage = evt["usage"]
+            # The same mapper `messages.py` applies inline (#859), so this
+            # mirror cannot drift from the writer it mirrors again: the turn
+            # row now carries the summed pair alongside the peak pair, and
+            # hand-copying the key list is how it would have missed it.
+            usage_row = turn_usage.turn_usage_row(usage)
             stats = {
-                "input_tokens": usage["input_tokens"],
+                "input_tokens": usage_row["input_tokens"],
                 "output_tokens": usage["output_tokens"],
-                "cache_read": 0, "cache_create": 0,
+                "cache_read": usage_row["cache_read"], "cache_create": 0,
+                "prompt_tokens_sum": usage_row["prompt_tokens_sum"],
+                "cache_read_sum": usage_row["cache_read_sum"],
                 "duration_ms": evt["duration_ms"],
                 "num_turns": evt["num_turns"], "model": "primary",
                 # Prefix-miss accounting (app/prefix_miss.py): one

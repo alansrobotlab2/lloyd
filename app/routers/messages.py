@@ -66,6 +66,7 @@ from app.compaction import load_and_compact_session
 from app import event_log as _event_log  # Inner Voice — agent-side event capture
 from app import compaction_record as _compaction_record  # which context policy fired
 from app import prefix_miss as _prefix_miss
+from app import turn_usage
 from app import sessions_io
 
 
@@ -1307,8 +1308,13 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
 
             elif etype == "result":
                 usage = evt.get("usage") or {}
-                # Map vLLM's OpenAI-style keys → legacy internal keys
-                input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens", 0)
+                # #859: one mapper, both writers. The cached pair and the
+                # prompt pair come back in the same unit each, so no reader of
+                # `usage.db` or of the persisted stats row can divide its way
+                # past 100% cached. `input_tokens` keeps meaning the peak
+                # single prompt; the sums arrive under their own names.
+                usage_row = turn_usage.turn_usage_row(usage)
+                input_tokens = usage_row["input_tokens"]
                 output_tokens = usage.get("output_tokens") or usage.get("completion_tokens", 0)
                 stop_reason = evt.get("stop_reason", "stop")
                 duration_ms = evt.get("duration_ms", 0)
@@ -1322,7 +1328,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 # The position-0 rule exists to keep the prompt prefix cached
                 # across a long turn, and this is the only number that says
                 # whether it is working.
-                cache_read_tokens = usage.get("cache_read", 0) or 0
+                cache_read_tokens = usage_row["cache_read"]
                 cache_create_tokens = usage.get("cache_create", 0) or 0
                 miss_summary = _prefix_miss.finish(miss_tracker, log=_miss_log)
 
@@ -1372,6 +1378,13 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     "output_tokens": output_tokens,
                     "cache_read": cache_read_tokens,
                     "cache_create": cache_create_tokens,
+                    # The summed pair, alongside the peak pair above. Readable
+                    # off disk so #520's cached fraction can be computed for a
+                    # whole turn without re-adding its per-iteration rows — and
+                    # so nobody has to divide `cache_read` by `input_tokens`
+                    # again to get a turn-level number. #859.
+                    "prompt_tokens_sum": usage_row["prompt_tokens_sum"],
+                    "cache_read_sum": usage_row["cache_read_sum"],
                     "duration_ms": duration_ms,
                     "num_turns": num_turns_val,
                     "peak_input_tokens": last_turn_input,
@@ -2479,15 +2492,22 @@ async def post_message(request: Request):
                     duration_ms=int(evt.get("duration_ms") or 0), log=_miss_log)
             elif evt["type"] == "result":
                 usage = evt.get("usage") or {}
-                input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens", 0)
+                # Third writer of a usage row — streaming chat, the background
+                # recorder, and this non-streaming endpoint — through the same
+                # mapper, so the bounded-pair rule holds on every path into
+                # usage.db and not only the two anyone remembered (#859).
+                usage_row = turn_usage.turn_usage_row(usage)
+                input_tokens = usage_row["input_tokens"]
                 output_tokens = usage.get("output_tokens") or usage.get("completion_tokens", 0)
-                cache_read_tokens = usage.get("cache_read", 0) or 0
+                cache_read_tokens = usage_row["cache_read"]
                 cache_create_tokens = usage.get("cache_create", 0) or 0
                 turn_stats = {
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "cache_create": cache_create_tokens,
                     "cache_read": cache_read_tokens,
+                    "prompt_tokens_sum": usage_row["prompt_tokens_sum"],
+                    "cache_read_sum": usage_row["cache_read_sum"],
                     "cost_usd": 0.0,
                     "duration_ms": evt.get("duration_ms"),
                     "num_turns": evt.get("num_turns"),

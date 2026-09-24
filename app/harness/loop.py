@@ -236,9 +236,11 @@ async def run_query(
         #   iteration_usage — populated freshly each loop pass; reflects
         #     ONE chat-completion's tokens. Emitted on assistant_message
         #     so the UI can attach per-row stats.
-        #   total_usage — cross-iteration aggregate. input_tokens is max
-        #     (peak), everything else is summed. Reported on the final
-        #     `result` event so usage_store/UI see the whole turn.
+        #   total_usage — cross-iteration aggregate. `input_tokens` and
+        #     `cache_read` are a PEAK pair and `*_sum` the summed pair, so
+        #     either ratio is a real fraction; other counters are summed.
+        #     Reported on the final `result` event so usage_store/UI see the
+        #     whole turn — see `_accumulate_iteration_usage`.
         total_usage: dict[str, int] = {}
         last_iteration_usage: dict[str, int] = {}
         # Caption bookkeeping — see `_CAPTION_NUDGE` and events.result.
@@ -1650,29 +1652,92 @@ def _intra_turn_microcompact(
         )
 
 
+# The pair a consumer divides to get a cached fraction. They have to be the
+# same KIND of figure — both peak or both sum — or the quotient is not a
+# fraction at all. Until #859 they were not: `input_tokens` was the peak and
+# `cache_read` the sum, and every reader from `usage_store.summary()` to the
+# dashboard's usage panel divided them anyway. See `app/turn_usage.py`.
+_PEAK_USAGE_KEYS = ("input_tokens", "cache_read")
+
+# Folded by hand below, never by the generic SUM branch: a dict that already
+# carried one of these would otherwise be counted twice.
+_EXPLICIT_SUM_USAGE_KEYS = ("prompt_tokens_sum", "cache_read_sum")
+
+
 def _accumulate_iteration_usage(
     total: dict[str, int], iteration: dict[str, int],
 ) -> dict[str, int]:
     """Fold one iteration's usage into the cross-iteration total.
 
-    Each chat-completion request reports its own input/output counts.
-    Across the agent loop we want:
-      - ``input_tokens``: the peak (last iteration is typically largest
-        because tool results keep appending; max is conservative).
-      - ``output_tokens``, ``cache_read``, ``cache_create``: SUM —
-        every iteration writes new tokens and may hit cache.
-    Without this, the final ``result`` event would show only the LAST
-    iteration's usage (replace semantics from ``_merge_usage``).
+    Each chat-completion request reports its own input/output counts. Across
+    the agent loop the aggregate row carries TWO units, each named for its
+    unit, because one unit cannot answer both questions anyone asks:
+
+      - ``input_tokens`` / ``cache_read``: the PEAK across iterations.
+        ``input_tokens`` has always meant the peak single prompt (the last
+        iteration is typically largest because tool results only append, so max
+        is conservative) and everything in the tree reads it that way —
+        `_maybe_finalize` deliberately declines to fold the finalizer's prompt
+        into it for exactly that reason. ``cache_read`` is a peak too, which is
+        what makes the pair commensurable: since vLLM reports
+        ``cached_tokens <= prompt_tokens`` for one request, the max of the
+        cached column can never pass the max of the prompt column, so no
+        reader can divide its way past 100%.
+      - ``prompt_tokens_sum`` / ``cache_read_sum``: the SUM across iterations.
+        This is what the turn actually cost and what it actually read from
+        cache, and it is also bounded at 100% because a sum of cached tokens
+        cannot exceed the sum of the prompts that carried them.
+      - ``output_tokens``, ``cache_create``, ``total_tokens``: SUM as before.
+        ``cache_create`` in particular can legitimately exceed the peak prompt
+        — each iteration writes its own new suffix into the cache — and nothing
+        divides by it, so it stays a sum by design.
+
+    Without the fold at all the final ``result`` event would show only the LAST
+    iteration's usage (replace semantics from ``_merge_usage``), which is the
+    reason this function exists; mixing units across the fold is the reason it
+    needed this docstring.
+
+    The clamps at the end are not decoration. An engine cannot report more
+    cached tokens than prompt tokens, so a row that does is a parser or engine
+    defect, and publishing it would put a 900% hit rate into `usage.db` and
+    read as excellent prefix-cache performance. Clamping bounds the published
+    aggregate while the exact per-request numbers stay on the turn's
+    per-iteration rows, where the defect is still visible.
     """
     out = dict(total)
     for k, v in iteration.items():
-        if not isinstance(v, int):
+        if not isinstance(v, int) or isinstance(v, bool) or k in _EXPLICIT_SUM_USAGE_KEYS:
             continue
-        if k == "input_tokens":
+        if k in _PEAK_USAGE_KEYS:
             out[k] = max(out.get(k, 0), v)
         else:
             out[k] = out.get(k, 0) + v
+
+    out["prompt_tokens_sum"] = out.get("prompt_tokens_sum", 0) + max(
+        0, _int_usage(iteration, "input_tokens", "prompt_tokens"))
+    out["cache_read_sum"] = out.get("cache_read_sum", 0) + max(
+        0, _int_usage(iteration, "cache_read", "prompt_tokens_cached"))
+
+    if out.get("cache_read", 0) > out.get("input_tokens", 0):
+        logger.warning(
+            "loop: iteration reported %d cached over a %d-token prompt; "
+            "publishing the bounded pair (engine/parser defect — the raw "
+            "reading is still on the per-iteration rows)",
+            out["cache_read"], out.get("input_tokens", 0),
+        )
+        out["cache_read"] = out.get("input_tokens", 0)
+    if out["cache_read_sum"] > out["prompt_tokens_sum"]:
+        out["cache_read_sum"] = out["prompt_tokens_sum"]
     return out
+
+
+def _int_usage(usage: dict[str, Any], *keys: str) -> int:
+    """First int-valued key in ``usage``, or 0. Guards the sum fold above."""
+    for key in keys:
+        value = usage.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return 0
 
 
 def _accumulate_tool_call(
