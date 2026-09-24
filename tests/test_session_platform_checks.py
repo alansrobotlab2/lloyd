@@ -1512,3 +1512,136 @@ async def test_the_orphans_reach_the_listing_past_both_budgets(
     assert payload["scanned"] == 1, (
         "the read ceiling was not the one this test set, so the reach being "
         "proved here is not the reach that was missing")
+
+
+# ── #1154 clause 2: a session body's own clock says which clock it is ────────
+
+def _has_offset(stamp: str) -> bool:
+    from datetime import datetime
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00")).tzinfo is not None
+
+
+@pytest.mark.anyio
+async def test_every_session_body_writer_stamps_an_offset(tmp_path, monkeypatch):
+    """#1154: `created_at`/`last_active` were naive, and a naive stamp cannot be
+    assumed local — eight `autonomy` files carry naive UTC. Every writer of those
+    two fields now emits local time WITH its offset: `create_session`, the lazy
+    create and the update in `_save_session_meta`, `_append_messages`, and the
+    review grader's `write_session`. The compaction swap in `messages.py` is
+    pinned by the source scan below."""
+    from app import sessions_io
+    from scripts.automod import review
+
+    monkeypatch.setattr(sessions_io, "SESSIONS_DIR", tmp_path)
+
+    created = sessions_io.create_session(
+        "20260924_101112_autocode_ab12", platform="worker", sessions_dir=tmp_path)
+    lazy = "20260924_101113_ef5678"
+    await sessions_io._save_session_meta(lazy, "primary", "hi")
+    lazy_created = json.loads((tmp_path / f"{lazy}.json").read_text())["created_at"]
+    await sessions_io._save_session_meta(lazy, "primary", "again")      # update path
+    await sessions_io._append_messages(created, [{"role": "user", "content": "x"}])
+    graded = review.write_session(tmp_path, item_id=1154, round_id="SM_x", model="primary")
+
+    stamps = {"lazy create": lazy_created}
+    for sid in (created, lazy, graded):
+        body = json.loads((tmp_path / f"{sid}.json").read_text())
+        stamps[f"{sid}.created_at"] = body["created_at"]
+        stamps[f"{sid}.last_active"] = body["last_active"]
+    naive = {k: v for k, v in stamps.items() if not _has_offset(v)}
+    assert naive == {}, f"naive session body stamps written: {naive}"
+    assert _has_offset(sessions_io.session_now_iso())
+
+
+def test_no_session_body_writer_stamps_a_naive_now():
+    """The source half: no `created_at`/`last_active` assignment in the writers
+    uses a bare `datetime.now().isoformat()` or a zone-less `time.strftime` —
+    which is how `messages.py`'s compaction swap, not reachable from a unit test
+    without a whole turn, is held to the same rule."""
+    naive = re.compile(
+        r'(last_active|created_at)["\']\]?\s*[:=][^\n]*'
+        r'(datetime\.now\(\)\.isoformat\(\)|time\.strftime\()')
+    offenders = []
+    for rel in ("app/sessions_io.py", "app/routers/messages.py",
+                "scripts/automod/review.py"):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        for i, line in enumerate(text.splitlines(), 1):
+            if naive.search(line):
+                offenders.append(f"{rel}:{i}: {line.strip()}")
+    assert offenders == []
+    msgs = (ROOT / "app" / "routers" / "messages.py").read_text(encoding="utf-8")
+    assert 'data["last_active"] = session_now_iso()' in msgs
+    # `now` in those two functions is the offset-bearing helper, not a naive now.
+    sio = (ROOT / "app" / "sessions_io.py").read_text(encoding="utf-8")
+    assert sio.count("now = session_now_iso()") == 2
+    rv = (ROOT / "scripts" / "automod" / "review.py").read_text(encoding="utf-8")
+    assert 'now = datetime.now().astimezone().isoformat(timespec="seconds")' in rv
+
+
+@pytest.mark.anyio
+async def test_a_mixed_naive_and_aware_directory_lists_in_instant_order(tmp_path, monkeypatch):
+    """Old files stay naive, new ones carry an offset, the old Inner Voice stub
+    wrote `Z` — all in one directory, forever. Every listing that orders by
+    `last_active` must take the mix without a `TypeError` and order it by
+    INSTANT, not by string: `"…T11:30:00"` and `"…T18:45:00+00:00"` sort the
+    wrong way round as text. Run in America/Los_Angeles so a naive stamp means a
+    known instant, through the chat listing, the Inner Voice listing, the
+    Background listing and the landing tab's recent chats."""
+    import httpx
+
+    import server
+    from app.routers import dashboard as dash
+    from app.routers import inner_voice as iv_router
+    from app.routers import sessions as sessions_router
+
+    monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr(iv_router, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr("app.paths.SESSIONS_DIR", tmp_path)
+
+    # Instants, PDT = UTC-7:  a 17:00Z  b 17:30Z  c 18:00Z  d 18:30Z  e 18:45Z
+    stamps = {
+        "a": "2026-09-20T10:00:00",          # naive local (old writer)
+        "b": "2026-09-20T17:30:00Z",         # old Inner Voice stub
+        "c": "2026-09-20T11:00:00-07:00",    # new writer
+        "d": "2026-09-20T11:30:00",          # naive local, sorts after c as text
+        "e": "2026-09-20T18:45:00+00:00",    # aware UTC, sorts first as text
+    }
+    expected = ["e", "d", "c", "b", "a"]
+    chat_ids, bg_ids = {}, {}
+    for i, (key, stamp) in enumerate(stamps.items()):
+        chat = f"20260920_10{i:02d}00_{key}{key}1154"
+        bg = f"20260920_10{i:02d}00_autocode_{key}{key}54"
+        chat_ids[key], bg_ids[key] = chat, bg
+        for sid, platform in ((chat, "mission-control"), (bg, "worker")):
+            body = {"session_id": sid, "title": sid, "platform": platform,
+                    "inner_voice": platform != "worker", "messages": [],
+                    "created_at": stamp, "last_active": stamp}
+            path = tmp_path / f"{sid}.json"
+            path.write_text(json.dumps(body), encoding="utf-8")
+            # mtime in the REVERSE order, so a listing that fell back to it fails.
+            mtime = 1_800_000_000 + expected.index(key) * 60
+            os.utime(path, (mtime, mtime))
+
+    saved_tz = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    time.tzset()
+    try:
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            chats = (await client.get("/api/sessions")).json()["sessions"]
+            ivs = (await client.get("/api/inner_voice/sessions")).json()["sessions"]
+            bgs = (await client.get("/api/background/sessions")).json()["sessions"]
+        recent = dash._scan_recent_sessions()
+    finally:
+        if saved_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved_tz
+        time.tzset()
+
+    want_chat = [chat_ids[k] for k in expected]
+    want_bg = [bg_ids[k] for k in expected]
+    assert [s["id"] for s in chats] == want_chat
+    assert [s["session_id"] for s in ivs] == want_chat
+    assert [s["id"] for s in bgs] == want_bg
+    assert [r["session_id"] for r in recent] == want_chat

@@ -60,6 +60,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 from scripts.automod import testpaths as TP
@@ -722,7 +723,9 @@ def write_run_tests(scratch: Path, *, worktree: Path, python: Path, env: dict) -
 def write_session(sessions_dir: Path, *, item_id: int, round_id: str, model: str) -> str:
     session_id = f"{time.strftime('%Y%m%d_%H%M%S')}_review_{secrets.token_hex(2)}"
     sessions_dir.mkdir(parents=True, exist_ok=True)
-    now = time.strftime("%Y-%m-%dT%H:%M:%S")
+    # Local wall clock with its offset, as `app.sessions_io.session_now_iso`
+    # writes it (#1154); not imported, so the gate does not pull `app/` in.
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
     (sessions_dir / f"{session_id}.json").write_text(json.dumps({
         "session_id": session_id, "id": session_id,
         "title": f"review #{item_id} ({round_id})"[:80],

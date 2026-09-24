@@ -56,6 +56,7 @@ from app.sessions_io import (
     ambient_clock_stamp,
     set_turn_activity,
     tool_activity_detail,
+    session_now_iso,
 )
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_harness_kwargs
 from app.post_capture import _post_session_capture, _maybe_extract_focus
@@ -1913,7 +1914,7 @@ async def _slash_compact_sse(
         # compaction is a separate change — it needs a merge that puts them
         # back at the right positions, which this swap cannot express.
         data["messages"] = new_messages
-        data["last_active"] = datetime.now().isoformat()
+        data["last_active"] = session_now_iso()
         data["message_count"] = len(new_messages)
 
     await mutate_session(session_id, _swap)

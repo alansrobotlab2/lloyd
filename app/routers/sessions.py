@@ -53,7 +53,11 @@ def _last_active_ts(path, data: dict) -> float:
     """
     raw = data.get("last_active") or ""
     try:
-        # Naive local ISO, as `datetime.now().isoformat()` writes it.
+        # Offset-bearing local ISO since #1154 (`sessions_io.session_now_iso`),
+        # naive local before it, `Z` from the old Inner Voice stub. `.timestamp()`
+        # puts all three on one axis — a naive value is read as host local —
+        # so a mixed directory sorts by instant and never compares naive with
+        # aware.
         return datetime.fromisoformat(raw).timestamp()
     except (TypeError, ValueError):
         try:

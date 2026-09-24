@@ -254,6 +254,23 @@ def names_a_machine_platform(data: dict) -> bool:
     return (data.get("platform") or "") in NON_USER_PLATFORMS
 
 
+def session_now_iso() -> str:
+    """Now, as a session body's `created_at`/`last_active` is written: local
+    wall clock WITH its UTC offset (`2026-09-24T09:15:02.123456-07:00`).
+
+    Until #1154 these were naive (`datetime.now().isoformat()`), and a naive
+    value cannot be assumed local: eight `autonomy` files carry naive UTC. The
+    offset makes each new stamp self-describing. Every reader already copes
+    with both shapes, and old files are not rewritten: `_last_active_ts` and
+    the retention sweep take `.timestamp()` (a naive value is read as host
+    local, an aware one by its offset, so both land on one axis), the
+    exporters and `trajectory_date_key` call `.astimezone()` the same way, and
+    the Inner Voice writer has stamped `Z` for months. Nothing compares or
+    sorts these strings raw.
+    """
+    return datetime.now().astimezone().isoformat()
+
+
 def new_background_session_id(slug: str) -> str:
     """Mint a four-part background session id from a producer slug.
 
@@ -385,7 +402,7 @@ def create_session(session_id: str, *, platform: str, model: str = "",
             raise FileExistsError(f"session {session_id} already exists")
         return session_id
     directory.mkdir(parents=True, exist_ok=True)
-    now = datetime.now().isoformat()
+    now = session_now_iso()
     evaluate_user_turns = (bool(inner_voice) if inner_voice_evaluate_user_turns is None
                            else bool(inner_voice_evaluate_user_turns))
     data = {
@@ -1109,7 +1126,7 @@ async def _save_session_meta(session_id: str, model: str, preview: str = "",
     unread whatever its platform says.
     """
     meta_path = SESSIONS_DIR / f"{session_id}.json"
-    now = datetime.now().isoformat()
+    now = session_now_iso()
     background_shaped = is_background_session_name(session_id)
     requested = platform if platform in NON_USER_PLATFORMS else None
     async with _get_file_lock(session_id):
@@ -1153,5 +1170,5 @@ async def _append_messages(session_id: str, new_messages: list[dict]):
         msgs = data.get("messages", [])
         msgs.extend(new_messages)
         data["messages"] = msgs
-        data["last_active"] = datetime.now().isoformat()
+        data["last_active"] = session_now_iso()
     await mutate_session(session_id, _append)
