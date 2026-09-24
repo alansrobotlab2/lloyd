@@ -1,0 +1,606 @@
+# eval/skill_match_queries.yaml — labelled query -> skill set for the prefetch skill matcher (#557).
+#
+# Purpose: the ONLY measurement of whether the skill matcher can FIND the skill a
+# turn needs. Before this file there was no recall-side number anywhere: #311
+# hardened precision (the matcher was injecting off-topic skills on 96% of turns),
+# and nothing has measured what that hardening cost since.
+#
+# Provenance: every `turn` is verbatim user text from a real session transcript
+# in the sessions directory (under the data root since 2026-09-22; the `source`
+# line gives the file and message index).
+# `lexical_arm_returned_nothing` is the run's own replay of the current matcher
+# over the turn: the 68 live "No skills matched automatically" hints are that
+# function's output, so replaying it reproduces the hint-emitting population
+# rather than depending on a hint string that is not stored in transcripts.
+#
+# Labelling: assigned by reading each turn against the full 189-skill inventory.
+# Both arms' top hits were displayed while labelling (pooled labelling), which
+# biases labels toward what retrieval already finds; ~10 of the empty labels are
+# turns where the arms confidently named a skill and that name is recorded as
+# wrong on purpose. Labels name a skill when running its procedure is the turn's
+# job; a question ABOUT a skill's subject is expected-empty.
+#
+# Caveats to keep honest:
+#   * Skills are renamed/retired, so an `expected_skills` entry can go stale. The
+#     eval fails loudly (not silently) when an expected skill is not in the
+#     active set, so this file roars rather than drifting.
+#   * `expected_empty` is the #311 precision control: on these turns the correct
+#     answer is that nothing matched, and it is the population where a hint that
+#     names a wrong skill costs tokens and misdirects the model.
+#   * #711's per-skill should_trigger files are meant to consume these same
+#     records: `turn` is the query, `expected_skills` membership is the trigger
+#     label, so a per-skill file is a filter over this file, not a second corpus.
+#
+# Run: .venvs/lloyd/bin/python eval/run_skill_match_eval.py
+
+
+counts:
+  records: 75
+  expected_empty: 24
+  lexical_arm_returned_nothing: 12
+
+records:
+- id: smq001
+  turn: "🔔 Brief + Triage — 2026-09-11 05:10 PDT 🔔 Act now: - **Sarmiento** — Seeking Your Input on the County Strategic Financial Plan (OC supervisor asking for budget input before final decisions) 📅 Today: Rosh Hashana Eve"
+  expected_skills: [morning-brief-and-triage]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "the ambient brief turn itself"
+  source: "sessions/20260911_013411_ivc96f.json message_index=10"
+
+- id: smq002
+  turn: "ok so what exactly did you change?"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "continuation; no skill's job"
+  source: "sessions/20260911_012901_ivf346.json message_index=106"
+
+- id: smq003
+  turn: "pull the youtube transcript and give me the highlights https://www.youtube.com/watch?v=o_FJ1NIH9yw"
+  expected_skills: [youtube-transcript, youtube-content]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260911_002852_iv1a23.json message_index=0"
+
+- id: smq004
+  turn: "Reply with exactly the word pong and nothing else."
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "tool-choice bench probe; no skill"
+  source: "sessions/20260911_000522_iv201f.json message_index=0"
+
+- id: smq005
+  turn: "is there anything here we can use to improve performance in our vllm instance or lloyd"
+  expected_skills: [local-llm-gotchas]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260910_234910_iva63a.json message_index=25"
+
+- id: smq006
+  turn: "hey there, new day and new configuration. full systems check please. we made vllm, worker, and autonomy changes."
+  expected_skills: [system-health-check, service-health-check]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260910_231357_ive07d.json message_index=0"
+
+- id: smq007
+  turn: "tell me more about the regression. what system and what does this impact?"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "follow-up question about an answer already given"
+  source: "sessions/20260910_231357_ive07d.json message_index=53"
+
+- id: smq008
+  turn: "ok coast is clear. run the comand."
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "go-ahead on an in-flight task"
+  source: "sessions/20260910_231357_ive07d.json message_index=78"
+
+- id: smq009
+  turn: "hey it looks like we have some more poisoned workers. what happened? and can you clear them for me?"
+  expected_skills: [poisoned-worker-troubleshoot]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260910_034059_iv75ea.json message_index=0"
+
+- id: smq010
+  turn: "hey. how you feelin?"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: true
+  note: "small talk"
+  source: "sessions/20260910_011742_iv1350.json message_index=0"
+
+- id: smq011
+  turn: "tell me a bit about selfmod"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: true
+  note: "a question about the system, not a request to run a procedure"
+  source: "sessions/20260910_011742_iv1350.json message_index=4"
+
+- id: smq012
+  turn: "give me a few paragraphs about black holes."
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: true
+  note: "general knowledge, no workflow"
+  source: "sessions/20260910_011742_iv1350.json message_index=44"
+
+- id: smq013
+  turn: "full systems check plesae"
+  expected_skills: [system-health-check]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "typo'd 'plesae'"
+  source: "sessions/20260910_014610_ivd127.json message_index=0"
+
+- id: smq014
+  turn: "one more time please. include everything"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "repeat-the-last-thing continuation"
+  source: "sessions/20260910_014610_ivd127.json message_index=70"
+
+- id: smq015
+  turn: "full systems check please"
+  expected_skills: [system-health-check]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260910_014618_iv6a62.json message_index=0"
+
+- id: smq016
+  turn: "quite a few changes today. how are you feeling?"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "small talk"
+  source: "sessions/20260909_185855_iv044e.json message_index=0"
+
+- id: smq017
+  turn: "ok fill me in. what backlog items have you completed and created overnight?"
+  expected_skills: [backlog-triage]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "what landed overnight on the board"
+  source: "sessions/20260909_135557_iv2a95.json message_index=0"
+
+- id: smq018
+  turn: "Check the root disk usage with df, then read the first 5 lines of config.yaml, then tell me in one sentence what you found."
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "tool-choice bench probe; no skill"
+  source: "sessions/20260908_selftest_thinktrace.json message_index=0"
+
+- id: smq019
+  turn: "we've made a few changes today. full systems check please."
+  expected_skills: [system-health-check]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260909_022107_iv0ffa.json message_index=0"
+
+- id: smq020
+  turn: "uh frontend is not down. i'm chatting with you on it right now."
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: true
+  note: "a correction about live state"
+  source: "sessions/20260909_022107_iv0ffa.json message_index=108"
+
+- id: smq021
+  turn: "do you have a skill written to clear poisoned workers yet?"
+  expected_skills: [poisoned-worker-troubleshoot]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "asks whether a skill exists for it; that skill is the job either way"
+  source: "sessions/20260909_020810_iv6514.json message_index=0"
+
+- id: smq022
+  turn: "we have 6 poisoned workers. go ahead and clear them all."
+  expected_skills: [poisoned-worker-troubleshoot]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260909_020810_iv6514.json message_index=7"
+
+- id: smq023
+  turn: "yeah if you see a problem with the skill def lets just fix it right now."
+  expected_skills: [skill-lint]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "fixing a skill definition"
+  source: "sessions/20260909_020810_iv6514.json message_index=48"
+
+- id: smq024
+  turn: "hmm seems like we have a few poisoned workers. can you take a look?"
+  expected_skills: [poisoned-worker-troubleshoot]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260909_001815_ivf098.json message_index=0"
+
+- id: smq025
+  turn: "is there anything here we can use to improve lloyd?"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "open-ended 'improve lloyd' — deliberately no single owner"
+  source: "sessions/20260908_175625_iv4b8e.json message_index=13"
+
+- id: smq026
+  turn: "capture this with attribution to a new draft lloyd backlog item"
+  expected_skills: [backlog-as-handoff]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "capture a conversation into a draft item"
+  source: "sessions/20260908_175625_iv4b8e.json message_index=40"
+
+- id: smq027
+  turn: "How are you doing making progress on the Lloyd backlog"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "status question about the board"
+  source: "sessions/20260908_144704_iv732e.json message_index=0"
+
+- id: smq028
+  turn: "Hey wah hey what do you know about tencentDB for memory?"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "knowledge question"
+  source: "sessions/20260908_045305_iv0938.json message_index=0"
+
+- id: smq029
+  turn: "ok firstly the voice references that whole folder doens't belong in the vault at all. let's move that to ~/lloyd to an appropriate subfolder and update all references."
+  expected_skills: [memory-path-scoping]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "what belongs in the vault vs the repo"
+  source: "sessions/20260907_185707_iv57ab.json message_index=176"
+
+- id: smq030
+  turn: "what does purge do?"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: true
+  note: "a question about what a flag does"
+  source: "sessions/20260907_185707_iv57ab.json message_index=182"
+
+- id: smq031
+  turn: "[INNER VOICE] The report is delivered and complete — call TodoWrite now to mark \"Check background pipeline integrity\" and \"Compile report with pass/fail and severities\" as completed, so the user's task view reflects the finished work."
+  expected_skills: [turn-end-todo-bookkeeping]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "inner-voice nudge to reconcile the todo list"
+  source: "sessions/20260907_220430_iv15a0.json message_index=50"
+
+- id: smq032
+  turn: "lets fix 7 - TTS first. i thought tts was working?"
+  expected_skills: [voice-mode]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260907_220430_iv15a0.json message_index=55"
+
+- id: smq033
+  turn: "ok now run a test. lets hear some tts"
+  expected_skills: [voice-mode]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "asking for a TTS render"
+  source: "sessions/20260907_220430_iv15a0.json message_index=123"
+
+- id: smq034
+  turn: "hmm tts is starting well later than i see the response on screen. can you take a look? is it running on gpu?"
+  expected_skills: [voice-mode]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "TTS latency in the voice pipeline"
+  source: "sessions/20260907_220430_iv15a0.json message_index=143"
+
+- id: smq035
+  turn: "🔔 Brief + Triage — 2026-09-07 12:49 PDT 🔔 Act now: - [RSSC-List] MockBOT Meeting Tonight! (7pm Pacific) — mailing list meeting at 7pm tonight, needs attention 📅 Today: Labor Day | Tomorrow: Eric Micheal Bradley's birthday"
+  expected_skills: [morning-brief-and-triage]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260907_220430_iv15a0.json message_index=165"
+
+- id: smq036
+  turn: "how much hard drive free space do we have right now?"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: true
+  note: "one df command; no skill needed"
+  source: "sessions/20260907_222438_iv9b3c.json message_index=2"
+
+- id: smq037
+  turn: "put maker faire oc on my calendar for this coming saturday and sunday. include the address and other details"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "no active skill covers calendar writes (google-workspace is Google-only, email-calendar-monitoring only reads); the arm names apple-reminders"
+  source: "sessions/20260907_213816_iv0adc.json message_index=72"
+
+- id: smq038
+  turn: "looks like autonomy task knowledgegraph health report has failed? can you take a look?"
+  expected_skills: [knowledge-health-report, autonomy-task-diagnosis]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260907_211213_ivdcf7.json message_index=0"
+
+- id: smq039
+  turn: "glm 5.3 flash performance using the rtx 6000 pro blackwell?"
+  expected_skills: [local-llm-gotchas]
+  expected_empty: false
+  lexical_arm_returned_nothing: true
+  note: "serving a model on specific hardware"
+  source: "sessions/20260907_161840_iv4b74.json message_index=21"
+
+- id: smq040
+  turn: "what does the video, their github or their paper say about glm 5.3 flash performance?"
+  expected_skills: [youtube-content, arxiv, web-search-and-fetch]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "multi-source: any one counts"
+  source: "sessions/20260907_161840_iv4b74.json message_index=55"
+
+- id: smq041
+  turn: "so i'm seeing a toast with lloyd guardian: rollback, but with the word \"body\" in the body and no detail."
+  expected_skills: [automod-guardian-triage]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260907_155201_iveaa1.json message_index=48"
+
+- id: smq042
+  turn: "go ahead and commit your changes to main"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "a git commit; naming automod-change-own-code here is the over-naming risk"
+  source: "sessions/20260907_155201_iveaa1.json message_index=97"
+
+- id: smq043
+  turn: "does opencode read an opencode.md file?"
+  expected_skills: [opencode]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "lexical arm is confidently wrong here"
+  source: "sessions/20260907_142410_ivd971.json message_index=0"
+
+- id: smq044
+  turn: "just do a web search"
+  expected_skills: [web-search-and-fetch]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260907_142410_ivd971.json message_index=20"
+
+- id: smq045
+  turn: "we've covered alot of ground today. full systems check please."
+  expected_skills: [system-health-check]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260907_045433_iv724c.json message_index=0"
+
+- id: smq046
+  turn: "doublecheck your vllm setup and lloyd utilization for llm-primary. are we using reasoning_effort xhigh?"
+  expected_skills: [local-llm-gotchas]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260907_033132_ivd756.json message_index=0"
+
+- id: smq047
+  turn: "is there an opencode api that lloyd could use to write and review code? opencode is already installed and configured."
+  expected_skills: [opencode]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260907_023814_iv5079.json message_index=0"
+
+- id: smq048
+  turn: "so the ide tab has an open button. let's repurpose that button to bring up a directory selector modal dialog box."
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: true
+  note: "novel frontend feature work; no skill covers it"
+  source: "sessions/20260907_021204_iv4acf.json message_index=0"
+
+- id: smq049
+  turn: "how are we doing on keeping up with the ai engineer videos?"
+  expected_skills: [ai-engineer-monitor]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "lexical top hit is songwriting-and-ai-music"
+  source: "sessions/20260907_020601_ivf74d.json message_index=0"
+
+- id: smq050
+  turn: "hey i see that there are multiple autonomy tasks that are overdue, some are not paused. can you look into this and confirm?"
+  expected_skills: [autonomy-task-diagnosis]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260907_014811_iv166f.json message_index=0"
+
+- id: smq051
+  turn: "so we need to recreate the models for our 3 openwakewords. until this is done asr won't trigger. can you handle it?"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "retraining openWakeWord models is not covered by any active skill"
+  source: "sessions/20260907_011347_iv668f.json message_index=0"
+
+- id: smq052
+  turn: "i think we've fixed the cloned voice. can you have lloyd say something for me?"
+  expected_skills: [voice-mode]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260907_004855_iv6456.json message_index=0"
+
+- id: smq053
+  turn: "ok i've made a few changes. can you play an updated sample tts?"
+  expected_skills: [voice-clone-sample, voice-mode]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260907_004855_iv6456.json message_index=43"
+
+- id: smq054
+  turn: "hey we need to set up tts on our new system. we were cloning someone's voice. check the repo for who/how then grab a snippet so we can get tts working again."
+  expected_skills: [voice-clone-sample, voice-mode]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_214751_iv1620.json message_index=0"
+
+- id: smq055
+  turn: "pull a clip from a video from this channel. make a note that your voice source is Dave Cullen from this channel."
+  expected_skills: [voice-clone-sample, youtube-content]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_214751_iv1620.json message_index=98"
+
+- id: smq056
+  turn: "please continue. what's the hangup?"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: true
+  note: "continue-prompt"
+  source: "sessions/20260906_214751_iv1620.json message_index=135"
+
+- id: smq057
+  turn: "go ahead and do all 3"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: true
+  note: "go-ahead on listed items"
+  source: "sessions/20260906_214751_iv1620.json message_index=157"
+
+- id: smq058
+  turn: "ok so is it set up. can have lloyd say something as a test?"
+  expected_skills: [voice-mode]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_214751_iv1620.json message_index=245"
+
+- id: smq059
+  turn: "so its closer but I don't like how the voice is rendered. it sounds like it's in a broom closet. can you pull a sample from this video and try again? https://www.youtube.com/watch?v=5o0Yvq44lK0"
+  expected_skills: [voice-clone-sample]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  note: "the 'broom closet' render complaint"
+  source: "sessions/20260906_214751_iv1620.json message_index=270"
+
+- id: smq060
+  turn: "ok the samples sound fine, the closed voice does not. what's changed since we reinstalled lloyd and recloned the voice?"
+  expected_skills: [voice-mode, restart-lloyd]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_214751_iv1620.json message_index=339"
+
+- id: smq061
+  turn: "do we have any poisoned workers right now?"
+  expected_skills: [poisoned-worker-troubleshoot]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_234316_iv0788.json message_index=0"
+
+- id: smq062
+  turn: "looks like we have a poisoned worker. can you clear that please?"
+  expected_skills: [poisoned-worker-troubleshoot]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_225900_ivf8d3.json message_index=0"
+
+- id: smq063
+  turn: "lets take a look at our failed autonomy tasks. first give me a list of the failing tasks."
+  expected_skills: [autonomy-task-diagnosis]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_171700_iv4855.json message_index=0"
+
+- id: smq064
+  turn: "lets switch gears. what would be the best 4b-9b small model that we can load 4b quants as secondary that gives us a full context window on the 3090?"
+  expected_skills: [local-llm-gotchas]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_171700_iv4855.json message_index=108"
+
+- id: smq065
+  turn: "lets move llm-secondary to an unsloth qwen3.6 35b quant that will fit on the card with a full context window. q3?"
+  expected_skills: [local-llm-gotchas, huggingface-model-download]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_171700_iv4855.json message_index=153"
+
+- id: smq066
+  turn: "lets troubleshoot why the 35b model can't be used for agent tasks."
+  expected_skills: [local-llm-gotchas]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_171700_iv4855.json message_index=268"
+
+- id: smq067
+  turn: "Count the .py files in app/harness with a shell command, then tell me the number."
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: false
+  note: "tool-choice bench probe; no skill"
+  source: "sessions/20260906_113956_3c8d19.json message_index=0"
+
+- id: smq068
+  turn: "so i'm running flash next at nvfp4"
+  expected_skills: []
+  expected_empty: true
+  lexical_arm_returned_nothing: true
+  note: "a statement of current state, not a request"
+  source: "sessions/20260906_160431_ivcbad.json message_index=23"
+
+- id: smq069
+  turn: "can you check the internet to see which tool parser is recommended for flash next through vllm?"
+  expected_skills: [web-search-and-fetch]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_160431_ivcbad.json message_index=36"
+
+- id: smq070
+  turn: "do we have an appropriate baseline unit tests to start from?"
+  expected_skills: [test-driven-development]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_032832_ivbf4f.json message_index=93"
+
+- id: smq071
+  turn: "lets start with a list. what would you do to improve test coverage?"
+  expected_skills: [test-driven-development]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_032832_ivbf4f.json message_index=109"
+
+- id: smq072
+  turn: "ok create a feature branch, make all your testing changes, then run them. let me know when everything's been done and tested."
+  expected_skills: [github-pr-workflow, test-driven-development]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260906_032832_ivbf4f.json message_index=116"
+
+- id: smq073
+  turn: "ok lets push this branch to main and switch back to main."
+  expected_skills: [github-pr-workflow]
+  expected_empty: false
+  lexical_arm_returned_nothing: true
+  note: "lexical arm returns nothing on this one"
+  source: "sessions/20260906_032832_ivbf4f.json message_index=274"
+
+- id: smq074
+  turn: "requesting an architecture and code review of your inner voice implementation."
+  expected_skills: [requesting-code-review, code-review]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260905_161842_iv2314.json message_index=0"
+
+- id: smq075
+  turn: "requesting a full architecture and code review of our subliminal implementation."
+  expected_skills: [requesting-code-review, code-review]
+  expected_empty: false
+  lexical_arm_returned_nothing: false
+  source: "sessions/20260905_042357_iv6245.json message_index=0"
