@@ -81,6 +81,10 @@ def build_skill_prompt(skill_text: str, *, job: str, task_block: str) -> str:
     prepends the `[SILENT]` hint, which exists so a scheduled task can decline
     to notify the user — a worker reports through its run record instead, and
     a turn that answers `[SILENT]` here would read as an empty turn.
+
+    The skill goes in whole, uncapped: a caller books its size with
+    `app.skill_embed.record_skill_embed(route=ROUTE_WORKER_PROMPT)` once the
+    run's session exists (#624), as `deep_research` does.
     """
     return "\n".join([
         f'[SYSTEM: You are running the "{job}" worker job. Follow the skill '

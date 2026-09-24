@@ -398,6 +398,18 @@ write?" no longer needs a walk over vault commit subjects. It is a measurement
 rather than a category, so it never moves the verdict; the stamps come from the
 writer skills' own write step, and files written before that step carry none.
 
+Beside the table, never a row in it, the report carries a **SIZE** section
+(#624): body lines and chars per live skill with front matter excluded, p50/p90/
+max, the count over `MAX_BODY_LINES` (100), each skill's chars past the chat
+injector's 6000-char cut and its largest `##`/`###` block, and — from the vault's
+git history — the before/after embedded size of the five `SPILL_SAMPLE` skills.
+Size is a cost only on the uncapped routes: the autonomy task prompt and the
+worker prompt splice the whole file in, while the chat injector truncates. Each
+route books what it embedded as a `skill.embedded` event on its session's event
+log (`app/skill_embed.py`; routes `prefetch`, `prefetch_excerpt`,
+`autonomy_task`, `worker_prompt`), so a report can say which route paid for what.
+The 100-line cap is advisory; whether it becomes a failure is a person's call.
+
 Advisory only — no automatic deletion or rewrites, and it exits 0 always so the
 nightly pipeline does not fail on lint findings. Autonomy task #70 runs it
 weekly.

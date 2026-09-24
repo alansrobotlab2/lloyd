@@ -2883,6 +2883,14 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
 
     _update_task_field(task_id, status="in_progress", updated=now_iso)
     prompt = _build_task_prompt(task, skill_content)
+    # #624: this route splices the whole SKILL.md in, uncapped, for the run —
+    # the one where a shorter body is a real saving, so it is the one measured.
+    from app.harness.skill_dispatch import ROUTE_AUTONOMY_TASK
+    from app.skill_embed import record_skill_embed
+    record_skill_embed(session_id, route=ROUTE_AUTONOMY_TASK,
+                       skill=skill_name or skill_path, turn_id=run_id,
+                       embedded_chars=len(skill_content),
+                       source_chars=len(skill_content))
     # Appended payload only — see `_evidence_prompt` for the cache reasoning.
     prompt += _evidence_prompt(task_id)
 

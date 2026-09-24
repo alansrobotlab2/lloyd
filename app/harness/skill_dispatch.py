@@ -349,6 +349,13 @@ ROUTE_PREFETCH = "prefetch"
 ROUTE_PREFETCH_EXCERPT = "prefetch_excerpt"
 ROUTE_DISPATCH = "dispatch"
 ROUTE_SKILLS_READ = "skills_read"
+#: The two routes that splice a whole SKILL.md into a prompt with no cap (#624):
+#: `autonomy._build_task_prompt` for a scheduled task and
+#: `workers.sources._common.build_skill_prompt` for a worker job. Neither renders
+#: a `<skill>` tag, so `skill_deliveries` cannot see them; they are recorded by
+#: `app.skill_embed.record_skill_embed` at the call site instead.
+ROUTE_AUTONOMY_TASK = "autonomy_task"
+ROUTE_WORKER_PROMPT = "worker_prompt"
 
 #: Marks the runner-up render, which carries an excerpt in place of a body.
 _EXCERPT_ATTR = 'excerpt="true"'
@@ -376,6 +383,31 @@ def delivered_skill_names(text: str) -> set[str]:
     return set(_DISPATCH_TAG_RE.findall(text))
 
 
+def _walk_deliveries(context_text: str):
+    """Yield `(name, route, body)` once per delivered (name, route) in the text.
+
+    The one walk of the one skill-tag regex that both `skill_deliveries` and
+    `skill_delivery_sizes` read, so the usage row and the size record cannot
+    disagree about which skills were delivered or by which route.
+    """
+    if not context_text:
+        return
+    seen: set[tuple[str, str]] = set()
+    for match in _SKILL_TAG_RE.finditer(context_text):
+        tag_end = context_text.find(">", match.start())
+        body_start = len(context_text) if tag_end < 0 else tag_end + 1
+        tag = context_text[match.start():body_start]
+        route = (ROUTE_DISPATCH if tag.startswith("<skill-dispatch")
+                 else ROUTE_PREFETCH_EXCERPT if _EXCERPT_ATTR in tag
+                 else ROUTE_PREFETCH)
+        key = (match.group(1), route)
+        if key in seen:
+            continue
+        seen.add(key)
+        close = context_text.find("</skill", body_start)
+        yield key[0], route, context_text[body_start:close if close >= 0 else None]
+
+
 def skill_deliveries(context_text: str) -> list[dict[str, str]]:
     """Every skill body present in this text, with the route that put it there.
 
@@ -391,23 +423,23 @@ def skill_deliveries(context_text: str) -> list[dict[str, str]]:
     requests. A `<skill-dispatch …>` marker matched by the same tag regex is
     attributed to `dispatch`, which is what it is.
     """
-    if not context_text:
-        return []
-    deliveries: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for match in _SKILL_TAG_RE.finditer(context_text):
-        tag_end = context_text.find(">", match.start())
-        tag = (context_text[match.start():] if tag_end < 0
-               else context_text[match.start():tag_end])
-        route = (ROUTE_DISPATCH if tag.startswith("<skill-dispatch")
-                 else ROUTE_PREFETCH_EXCERPT if _EXCERPT_ATTR in tag
-                 else ROUTE_PREFETCH)
-        key = (match.group(1), route)
-        if key in seen:
-            continue
-        seen.add(key)
-        deliveries.append({"name": key[0], "route": route})
-    return deliveries
+    return [{"name": name, "route": route}
+            for name, route, _body in _walk_deliveries(context_text)]
+
+
+def skill_delivery_sizes(context_text: str) -> list[dict[str, Any]]:
+    """`skill_deliveries` plus the size of what each delivery put in the prompt.
+
+    `chars` is the body between the tag and its closing `</skill…>` — what the
+    model was handed after prefetch's cut, not the file on disk — and `truncated`
+    says whether that cut fired (prefetch appends `[... truncated]`). Kept apart
+    from `skill_deliveries` because that shape is the stored `usage.skills`
+    contract (#783); a size is this turn's measurement, recorded by
+    `app.skill_embed` (#624).
+    """
+    return [{"name": name, "route": route, "chars": len(body.strip("\n")),
+             "truncated": "[... truncated]" in body}
+            for name, route, body in _walk_deliveries(context_text)]
 
 
 def injected_skill_names(context_text: str) -> set[str]:

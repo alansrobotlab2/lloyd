@@ -17,6 +17,10 @@ It also counts authorship (#774): how many live skills carry a `written_by:`
 front-matter key naming an unattended job, how many say `interactive`, and how
 many say nothing. That is a measurement, not a finding, so it never enters the
 category table or the Clean verdict.
+It also measures size (#624): body lines and characters per live skill
+(front matter excluded), library percentiles and a count over `MAX_BODY_LINES`,
+plus the before/after size of the sampled spill skills read from the vault's git
+history. Like authorship, that is a measurement beside the table, not a finding.
 
 Advisory only. No automatic deletion or rewrites. Exit 0 always (so nightly
 pipeline doesn't fail on lint findings).
@@ -35,6 +39,7 @@ import datetime as dt
 import difflib
 import json
 import re
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -557,6 +562,147 @@ def unlisted_injection_findings(result: dict) -> list[dict]:
             if not str(hit.get("allow_reason", "")).strip()]
 
 
+# ── size (#624) ─────────────────────────────────────────────────────────────
+#
+# "Your skill is really a folder": the SKILL.md body is an index and the detail
+# lives in sibling files read on demand. Whether that pays depends on the route.
+# The chat injector cuts at `CHAT_SKILL_CUT` chars, so a long body there costs
+# nothing extra — it loses its tail instead, which is why `past_chat_cut` is
+# reported. The autonomy task prompt and the worker prompt splice the whole file
+# in uncapped, so there the size is the cost (`app/skill_embed.py` records which
+# route paid what per run). Advisory: the 100-line figure is one team's
+# heuristic, and the ceiling is to be set from the measured curve, by a person.
+
+#: The body-length ceiling the SIZE bucket counts against (front matter excluded).
+MAX_BODY_LINES = 100
+
+#: `prefetch.SKILL_BODY_MAX`, restated because this script runs by path and
+#: importing prefetch pulls in the retrieval stack; a test pins the two equal.
+CHAT_SKILL_CUT = 6000
+
+#: The five oversized skills #624 samples for a spill pass. The pass itself is a
+#: vault edit; `spill_delta` reports what it has done to their embedded size.
+SPILL_SAMPLE = ("powerpoint", "deep-research", "nightly-reflection-knowledge-write",
+                "system-health-check", "entity-resolution-sweep")
+
+#: The vault state the spill delta is measured from: the last vault commit on or
+#: before this instant, i.e. before any #624 spill landed.
+SPILL_BASELINE_BEFORE = "2026-09-24T23:59:59"
+
+_HEADING_RE = re.compile(r"^#{2,3}\s+\S")
+
+
+def _largest_block(body_lines: list[str]) -> dict:
+    """The largest `##`/`###`-delimited block: the first spill candidate."""
+    best = {"heading": "", "lines": 0}
+    start, heading = 0, "(before first heading)"
+    for i, line in enumerate(body_lines + ["## (end)"]):
+        if _HEADING_RE.match(line):
+            if i - start > best["lines"]:
+                best = {"heading": heading, "lines": i - start}
+            start, heading = i, line.strip()
+    return best
+
+
+def skill_size(name: str, path: Path, content: str, body: str) -> dict:
+    """One skill's SIZE row. `body` is the text after front matter."""
+    body = body.strip("\n")
+    lines = body.splitlines()
+    return {
+        "name": name,
+        "path": str(path),
+        "body_lines": len(lines),
+        "body_chars": len(body),
+        # What the autonomy and worker prompts embed: the file, front matter and all.
+        "file_chars": len(content),
+        "over_cap": len(lines) > MAX_BODY_LINES,
+        "past_chat_cut": max(0, len(content) - CHAT_SKILL_CUT),
+        "largest_block": _largest_block(lines),
+    }
+
+
+def _percentile(values: list[int], q: float) -> int:
+    """Nearest-rank percentile; 0 for an empty list."""
+    if not values:
+        return 0
+    ordered = sorted(values)
+    rank = max(1, -(-len(ordered) * q // 100))  # ceil(n * q / 100)
+    return ordered[int(rank) - 1]
+
+
+def size_summary(rows: list[dict]) -> dict:
+    """The SIZE bucket: library percentiles, the over-cap count, every row."""
+    lines = [r["body_lines"] for r in rows]
+    chars = [r["body_chars"] for r in rows]
+    return {
+        "max_body_lines": MAX_BODY_LINES,
+        "chat_skill_cut": CHAT_SKILL_CUT,
+        "count": len(rows),
+        "over_cap": sum(1 for r in rows if r["over_cap"]),
+        "p50_lines": _percentile(lines, 50),
+        "p90_lines": _percentile(lines, 90),
+        "max_lines": max(lines, default=0),
+        "p50_chars": _percentile(chars, 50),
+        "p90_chars": _percentile(chars, 90),
+        "max_chars": max(chars, default=0),
+        "skills": sorted(rows, key=lambda r: (-r["body_lines"], r["name"])),
+    }
+
+
+def _git_show(repo: Path, rev: str, rel: str) -> str | None:
+    try:
+        out = subprocess.run(["git", "-C", str(repo), "show", f"{rev}:{rel}"],
+                             capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout if out.returncode == 0 else None
+
+
+def spill_delta(vault: Path, names: Sequence[str] = SPILL_SAMPLE,
+                before: str = SPILL_BASELINE_BEFORE) -> dict:
+    """Before/after size of the sampled skills as the autonomy prompt embeds them.
+
+    "Before" is `skills/<name>/SKILL.md` at the last vault commit on or before
+    `before`; "after" is the file on disk now. Read-only git. The delta is the
+    saving #624 can actually claim — on the uncapped routes; on the capped chat
+    route a shorter body changes what survives the cut, not what it costs. A
+    delta of 0 means the spill has not been done, and the report says so.
+    """
+    base = None
+    try:
+        out = subprocess.run(["git", "-C", str(vault), "rev-list", "-1",
+                              f"--before={before}", "HEAD"],
+                             capture_output=True, text=True, timeout=30)
+        if out.returncode == 0:
+            base = out.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        base = None
+    rows = []
+    for name in names:
+        rel = f"skills/{name}/SKILL.md"
+        then = _git_show(vault, base, rel) if base else None
+        path = vault / rel
+        try:
+            now = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            now = None
+        now_body = parse_frontmatter(now)[1].strip("\n") if now is not None else None
+        then_body = parse_frontmatter(then)[1].strip("\n") if then is not None else None
+        rows.append({
+            "name": name,
+            "before_chars": len(then) if then is not None else None,
+            "after_chars": len(now) if now is not None else None,
+            "delta_chars": (len(now) - len(then)) if now is not None and then is not None else None,
+            "before_body_lines": len(then_body.splitlines()) if then_body is not None else None,
+            "after_body_lines": len(now_body.splitlines()) if now_body is not None else None,
+            "siblings": sorted(p.name for p in path.parent.glob("*.md")
+                               if p.name != "SKILL.md") if path.parent.is_dir() else [],
+        })
+    measured = [r["delta_chars"] for r in rows if r["delta_chars"] is not None]
+    return {"baseline_rev": base, "baseline_before": before, "skills": rows,
+            "total_delta_chars": sum(measured) if measured else None}
+
+
 def lint(skill_records: Optional[Sequence] = None) -> dict:
     """Lint every *live* skill — the set `agent_mcp.skills.iter_active_skills` owns.
 
@@ -598,6 +744,7 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
     injection: list[dict] = []
     authors: Counter = Counter()
     unrecorded: list[str] = []
+    sizes: list[dict] = []
     skills: list[tuple[str, str]] = []
     total = 0
 
@@ -617,7 +764,7 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
             })
             continue
 
-        fm, _body, yaml_err = parse_frontmatter(content)
+        fm, body, yaml_err = parse_frontmatter(content)
 
         # Counted before the dead check: a dead skill is still in the library,
         # and who wrote it is the first question when it has to be fixed.
@@ -638,6 +785,7 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
 
         desc = (fm.get("description") or "").strip()
         skills.append((entry.name, desc))
+        sizes.append(skill_size(entry.name, skill_file, content, body))
         tags = fm.get("tags") or []
         if not desc and tags:
             # Has tags but no description → MISSING_DESC (fires via tag/name only,
@@ -703,6 +851,9 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
         # `~/obsidian/skills/`, which was a claim rather than a measurement now that
         # the walker follows `config.yaml skills.directories` and may scan two roots.
         "roots": [str(r) for r in roots_walked],
+        # #624. Over the skills that parse (a DEAD skill has no body boundary to
+        # measure from); a measurement, so it never enters the verdict.
+        "size": size_summary(sizes),
         "dead": dead,
         "missing_desc": missing_desc,
         "drift": drift,
@@ -775,6 +926,54 @@ def trust_cell(category: str) -> str:
     return f"{TRUST_MARK[verdict]} — {cause}"
 
 
+def render_size(result: dict) -> list[str]:
+    """The SIZE section (#624): summary, the sampled spill delta, every skill.
+
+    Beside the category table, never a row in it: over half the library is over
+    the cap, so as a finding it would read the same every night and hide the
+    categories that can fail. Every skill gets a row so the per-skill number is
+    in the report, not only the JSON.
+    """
+    size = result.get("size")
+    if not size:
+        return []
+    out = [f"### SIZE — body length (advisory; cap {size['max_body_lines']} lines)", ""]
+    out.append(f"Over the cap: **{size['over_cap']}** of {size['count']} · "
+               f"body lines p50 **{size['p50_lines']}**, p90 **{size['p90_lines']}**, "
+               f"max **{size['max_lines']}** · body chars p50 {size['p50_chars']}, "
+               f"p90 {size['p90_chars']}, max {size['max_chars']}.")
+    out.append("")
+    out.append(f"The chat injector keeps the first {size['chat_skill_cut']} chars of a "
+               "skill, so there a long body loses its tail rather than costing more; "
+               "the autonomy and worker prompts embed the whole file for the run.")
+    out.append("")
+    delta = size.get("spill_delta")
+    if delta:
+        total = delta.get("total_delta_chars")
+        out.append(f"Sampled spill (#624), embedded chars vs vault `{(delta.get('baseline_rev') or 'no baseline')[:10]}` "
+                   f"(last commit before {delta.get('baseline_before')}): "
+                   f"**{total if total is not None else 'not measured'}**"
+                   + (" — the spill has not been done yet." if total == 0 else "."))
+        out.append("")
+        out.append("| skill | chars before | chars now | delta | body lines before → now | sibling files |")
+        out.append("|---|---|---|---|---|---|")
+        for r in delta.get("skills", []):
+            sib = ", ".join(f"`{n}`" for n in r.get("siblings") or []) or "—"
+            out.append(f"| `{r['name']}` | {r['before_chars']} | {r['after_chars']} | "
+                       f"{r['delta_chars']} | {r['before_body_lines']} → {r['after_body_lines']} | {sib} |")
+        out.append("")
+    out.append("| skill | body lines | body chars | over cap | chars past chat cut | largest block |")
+    out.append("|---|---|---|---|---|---|")
+    for r in size.get("skills", []):
+        block = r.get("largest_block") or {}
+        heading = str(block.get("heading", "")).replace("|", "\\|")
+        out.append(f"| `{r['name']}` | {r['body_lines']} | {r['body_chars']} | "
+                   f"{'yes' if r['over_cap'] else ''} | {r['past_chat_cut'] or ''} | "
+                   f"{heading} ({block.get('lines', 0)} lines) |")
+    out.append("")
+    return out
+
+
 def render_report(result: dict) -> str:
     lines: list[str] = []
     ts = result["generated_at"]
@@ -830,6 +1029,7 @@ def render_report(result: dict) -> str:
     # live skills today, so without these rows its zero would be exactly that
     # ambiguity — and the whole point of shipping it is that the number gets
     # re-measured weekly instead of being asserted once at implementation time.
+    lines.extend(render_size(result))
     lines.append(f"### {INJECTION_CATEGORY} — per-rule counts")
     lines.append("")
     lines.append("| rule | matched lines | skills |")
@@ -1039,6 +1239,11 @@ def render_report(result: dict) -> str:
 
 def main() -> int:
     result = lint()
+    # Git, so here and not in `lint()`: a test points `lint` at a temp root with
+    # no history. The sample lives in the vault root the report is written into.
+    vault = REPORT_PATH.parent.parent
+    if (vault / ".git").exists() and "size" in result:
+        result["size"]["spill_delta"] = spill_delta(vault)
     report = render_report(result)
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(report, encoding="utf-8")
@@ -1054,6 +1259,12 @@ def main() -> int:
 
     print(f"Wrote {REPORT_PATH}")
     print(f"Wrote {json_path}")
+    # .get, like every count on the Totals line below: a caller that hands
+    # `lint` a stub result must still get its totals printed.
+    size = result.get("size")
+    if size:
+        print(f"Size: over_cap={size['over_cap']}/{size['count']} (>{MAX_BODY_LINES} lines), "
+              f"p50={size['p50_lines']} p90={size['p90_lines']} max={size['max_lines']}")
     # `phantom` was absent from this line as well, same class of gap one category
     # earlier: the count reached the report and not the stdout the nightly job's
     # log keeps, so `web_search`-shaped breakage had no line to grep.

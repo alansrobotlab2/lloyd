@@ -436,6 +436,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         return await give_up_or_retry(str(exc), {"turn_timeout": True})
 
     session_id = run["session_id"]
+    # #624: `build_skill_prompt` spliced the whole SKILL.md in, uncapped. Booked
+    # once the session exists, so the size lands on this run's own event log.
+    from app.harness.skill_dispatch import ROUTE_WORKER_PROMPT
+    from app.skill_embed import record_skill_embed
+    record_skill_embed(session_id, route=ROUTE_WORKER_PROMPT, skill=SKILL,
+                       embedded_chars=len(skill), source_chars=len(skill))
     parsed = parse_verdict(run.get("text") or "", run.get("structured"))
     on_disk = await asyncio.to_thread(_note_is_real, path)
     strays = await asyncio.to_thread(_unexpected_vault_writes, vault_before)
@@ -445,6 +451,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     extra: dict[str, Any] = {
         "session_id": session_id,
+        "skill_embedded_chars": len(skill),
         "verdict_source": parsed["source"] if parsed else "none",
         "structured_error": str(run.get("structured_error") or ""),
     }
