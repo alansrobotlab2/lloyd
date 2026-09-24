@@ -50,16 +50,17 @@ themselves instead — `start-qwen38-flash-next.sh:558` (with
 environment shows no pin and the pin is nonetheless there. `agent-tts` is the
 one pinned twice, in both places, to the same device.
 
-Read the launcher, not only its header: `start-qwen3-tts.sh` still says
-"(GPU 1)" on line 4 while line 24 exports `CUDA_VISIBLE_DEVICES=0`. The
-export is the correct half — GPU 0 is the RTX 3090 this table puts TTS on —
-and the comment is the stale one.
+Read the launcher, not only its header: until 2026-09-24 (#1447)
+`start-qwen3-tts.sh` said "(GPU 1)" on line 4 while exporting
+`CUDA_VISIBLE_DEVICES=0` twenty lines down. The export was the correct half —
+GPU 0 is the RTX 3090 this table puts TTS on — and the header now says so;
+`tests/test_gpu_placement_comments.py` holds the two in step.
 
 | GPU | Hardware | VRAM | Serves |
 |---|---|---|---|
 | 0 | RTX 3090 | 24 GB | Qwen3-TTS (`agent-tts`), the LiveKit voice worker, qmd embeddings (`agent-qmd-daemon`, `agent-qmd-watcher`) |
 | 1 | RTX PRO 6000 Blackwell | 96 GB | the primary LLM, vLLM (`agent-llm-primary`) |
-| 2 | RTX 3090 | 24 GB | the secondary LLM, llama.cpp (`agent-llm-secondary`), single-tenant at ~21.7 GB |
+| 2 | RTX 3090 | 24 GB | djev, DiffusionGemma on vLLM (`agent-djev`) at `GPU_UTIL=0.97` since 2026-09-20 — or the secondary LLM, llama.cpp (`agent-llm-secondary`, ~21.7 GB) if that slot is re-armed; never both, see [[djev]] |
 
 Board power limits are clamped at boot by the system unit
 `nvidia-power-limit.service` (Xid 79 mitigation) — see [[vllm]] §2, which

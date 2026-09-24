@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Starts the Qwen3-TTS API server on port 8090 (GPU 1)
+# Starts the Qwen3-TTS API server on port 8090 (GPU 0, the desktop 3090 —
+# the CUDA_VISIBLE_DEVICES export below is the pin; agent-tts.conf repeats it)
 #
 # OpenAI-compatible TTS with streaming PCM output
 # Model: Qwen/Qwen3-TTS-12Hz-1.7B-Base (local copy)
