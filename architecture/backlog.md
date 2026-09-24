@@ -384,7 +384,12 @@ Two merge rules, both requiring the target to be **open**:
 - **Rule A** — reranker score ≥ `threshold` **and** the lexical leg agrees. The
   score alone never merges: measured 2026-09-11, a verbatim title scores its own
   item 1.0 and the nearest distinct neighbour 0.55–0.60, but an unrelated query
-  still put **0.75** on its top hit.
+  still put **0.75** on its top hit. The leg is the jaccard (`lexical_min`) and
+  only that: until #934 (2026-09-24) a shared-token count of `shared_min` also
+  satisfied it, and 178 of the first 179 merges fired below the jaccard floor on
+  4–12 tokens of the fleet's own vocabulary against a reranker 1.0 — items about
+  different files, absorbed into each other. `shared` is still reported on every
+  `similar` row and still decides whether a lexical neighbour is *listed*.
 - **Rule B** — a strong lexical match on an item created inside
   `recent_window_seconds`. This covers the qmd watcher's debounce: the daemon
   cannot have embedded a file written seconds ago, and the only thing that
@@ -410,14 +415,20 @@ backlog:
     enabled: true
     merge: true          # false = observation mode: compute `similar`, never merge
     threshold: 0.78      # reranker floor for rule A
-    lexical_min: 0.4     # jaccard floor (either this or shared_min)
-    shared_min: 4        # shared-token floor
+    lexical_min: 0.4     # jaccard floor: the lexical leg of rule A
+    shared_min: 4        # shared-token floor for listing a neighbour; not a merge leg
     recent_lexical_min: 0.6
     recent_window_seconds: 600
 ```
 
 `timeout_seconds` (5.0), `limit` (5), `head_bytes` (2048) and `body_chars`
-(600) keep their module defaults and are not in `config.yaml`.
+(600) keep their module defaults and are not in `config.yaml`. `head_bytes` is
+the chunk size, not a ceiling: the head read follows the front matter to its
+anchored closing `---` (up to 64 KB, the dashboard's `_frontmatter` rule),
+because a flat 2048-byte read skipped the parse for the 587 of 1184 items whose
+closing line sat past it — every one of them read as `status: draft` with the
+file slug for a title and no `created`, so 284 closed items were merge targets
+and rule B could never fire on them (#934).
 `tests/test_backlog_dedupe.py` pins the rules, the fail-open behaviour, and
 that a merge never loses text.
 

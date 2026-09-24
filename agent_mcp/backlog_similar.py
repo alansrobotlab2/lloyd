@@ -10,9 +10,10 @@ three "Further findings" items carrying the same two findings.
 Two legs, and the second is mandatory:
 
 * **lexical** — token Jaccard over the title and the first few hundred chars
-  of every item on disk (the `research_store._similar` rule: accept on
-  jaccard OR shared-token count, small stoplist). Reads disk, so it sees an
-  item written one second ago.
+  of every item on disk (small stoplist; a neighbour is *listed* on jaccard OR
+  shared-token count, the `research_store._similar` rule, but only the
+  jaccard can carry a merge). Reads disk, so it sees an item written one
+  second ago.
 * **semantic** — the qmd daemon's reranked vector search over the `backlog`
   collection it already embeds. Its score is graded (a verbatim title scores
   its own item 1.0, the nearest *distinct* neighbour 0.55-0.60) but an
@@ -45,8 +46,12 @@ DEFAULTS: dict = {
     # False = observation mode: compute and return `similar`, never merge.
     "merge": True,
     "threshold": 0.78,          # reranker score floor for rule A
-    "lexical_min": 0.4,         # jaccard floor (either this or shared_min)
-    "shared_min": 4,            # shared-token floor
+    "lexical_min": 0.4,         # jaccard floor: the lexical leg of rule A
+    # Shared-token floor for LISTING a lexical neighbour in `similar`. Never a
+    # merge leg: until #934 it was OR'd into rule A, and 178 of the first 179
+    # merges fired below `lexical_min` on 4-12 tokens of shared vocabulary
+    # (the fleet's own tags and handoff boilerplate) against a reranker 1.0.
+    "shared_min": 4,
     "recent_lexical_min": 0.6,  # rule B: strong lexical match on a very new item
     "recent_window_seconds": 600,
     "timeout_seconds": 5.0,
@@ -67,6 +72,17 @@ file files test tests run runs should still after before when that this
 """.split())
 
 _ID_RE = re.compile(r"^(\d+)[-_]")
+# The closing delimiter of a front-matter block: `---` alone on its own line.
+# Anchored, because `str.split("---")` also fires on a `---` in prose or
+# inside a quoted activity-log entry (the dashboard's `_frontmatter` rule).
+_FM_END_RE = re.compile(r"^---[ \t]*$", re.M)
+# Bounds the FRONT MATTER, not the prefix read: `head_bytes` is the chunk
+# size. A flat 2048-byte read skipped the whole parse for the 587 of 1184
+# items whose closing `---` sat past it (#934): every one of them read as
+# `status: draft` with the file slug for a title and no `created`, so 284
+# closed items were merge targets, rule B was unreachable for them, and the
+# lexical leg compared body prose to their raw YAML.
+_FM_LIMIT_BYTES = 65536
 _QMD_ID_RE = re.compile(r"(?:^|/)(\d+)[-_][^/]*\.md$")
 
 
@@ -111,27 +127,41 @@ def _parse_created(value) -> float | None:
 
 
 def _head(path: Path, *, head_bytes: int, body_chars: int) -> dict | None:
-    """Id, title, status, created and the first `body_chars` of the body —
-    from the first `head_bytes` of the file, because this runs on every
-    create against ~800 files."""
+    """Id, title, status, created and the first `body_chars` of the body.
+    Read `head_bytes` at a time — the ordinary case is still one small read,
+    because this runs on every create against ~1200 files — and on past the
+    closing `---` when the front matter is longer, up to `_FM_LIMIT_BYTES`.
+    Anything past that with no closing line is malformed rather than large
+    and falls through to the no-front-matter reading."""
     m = _ID_RE.match(path.name)
     if not m:
         return None
+    status, created = "", None
+    end = None
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             head = fh.read(head_bytes)
+            if head.startswith("---"):
+                while (end := _FM_END_RE.search(head, 3)) is None and len(head) < _FM_LIMIT_BYTES:
+                    chunk = fh.read(head_bytes)
+                    if not chunk:
+                        break
+                    head += chunk
+                # The body has to hold the H1 and `body_chars` of prose too.
+                while end is not None and len(head) < end.end() + body_chars + head_bytes:
+                    chunk = fh.read(head_bytes)
+                    if not chunk:
+                        break
+                    head += chunk
     except OSError:
         return None
-    status, created = "", None
     body = head
-    if head.startswith("---"):
-        parts = head.split("---", 2)
-        if len(parts) >= 3:
-            fm, body = parts[1], parts[2]
-            sm = re.search(r"^status:\s*['\"]?([A-Za-z_]+)", fm, re.M)
-            cm = re.search(r"^created:\s*['\"]?([^'\"\n]+)", fm, re.M)
-            status = sm.group(1) if sm else ""
-            created = _parse_created(cm.group(1).strip()) if cm else None
+    if end is not None:
+        fm, body = head[:end.start()], head[end.end():]
+        sm = re.search(r"^status:\s*['\"]?([A-Za-z_]+)", fm, re.M)
+        cm = re.search(r"^created:\s*['\"]?([^'\"\n]+)", fm, re.M)
+        status = sm.group(1) if sm else ""
+        created = _parse_created(cm.group(1).strip()) if cm else None
     tm = re.search(r"^#\s+(.+)$", body, re.M)
     title = tm.group(1).strip() if tm else path.stem
     text = body[tm.end():] if tm else body
@@ -241,7 +271,10 @@ def merge_target(similar: list[dict], *, cfg: dict | None = None,
                  now: float | None = None) -> dict | None:
     """The one open item a spawn-tagged write should be appended to, or None.
 
-    Rule A: reranker score over the threshold AND the lexical leg agrees.
+    Rule A: reranker score over the threshold AND the lexical leg agrees —
+    the jaccard, not the shared-token count. `shared` is reported on the row
+    and is not a merge leg: the fleet's tags and handoff boilerplate put 4-12
+    tokens in common between items about different files (#934).
     Rule B: a strong lexical match on an item created inside the recent
     window — the same session filing the same finding twice, before qmd has
     seen the first copy. The reranker score alone never merges.
@@ -252,8 +285,7 @@ def merge_target(similar: list[dict], *, cfg: dict | None = None,
     for r in similar:
         if r.get("status") not in OPEN_STATUSES:
             continue
-        lex_ok = (float(r.get("lexical") or 0) >= float(cfg["lexical_min"])
-                  or int(r.get("shared") or 0) >= int(cfg["shared_min"]))
+        lex_ok = float(r.get("lexical") or 0) >= float(cfg["lexical_min"])
         rule_a = float(r.get("score") or 0) >= float(cfg["threshold"]) and lex_ok
         created = r.get("created")
         rule_b = (float(r.get("lexical") or 0) >= float(cfg["recent_lexical_min"])

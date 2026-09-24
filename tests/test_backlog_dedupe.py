@@ -41,10 +41,13 @@ def board(tmp_path, monkeypatch):
 
 
 def write(d: Path, item_id: int, name: str, body: str, *, status="draft",
-          age_seconds: float = 3600.0, tags=("backlog",), broken_yaml=False) -> Path:
+          age_seconds: float = 3600.0, tags=("backlog",), broken_yaml=False,
+          activity_log=()) -> Path:
     created = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat()
     fm = {"status": status, "priority": "medium", "created": created,
           "board": "lloyd", "tags": list(tags)}
+    if activity_log:
+        fm["activity_log"] = list(activity_log)
     text = yaml.dump(fm, default_flow_style=False)
     if broken_yaml:
         text += "tags: [unclosed\n"
@@ -187,7 +190,98 @@ def test_an_old_item_needs_the_daemon_to_agree(board, monkeypatch):
     assert out["created"] is True and out["similar"][0]["id"] == 10
 
 
-# ── failing open ───────────────────────────────────────────────────────────
+# ── #934: the token count is not a merge leg, and the head read reaches the status
+
+# The 2026-09-14 instance: a knowledge-note frontmatter defect merged into
+# #372 (log.md audit files) at score 1.0 / lexical 0.061 / shared 6 — the
+# fleet's own vocabulary (okf, frontmatter, knowledge, segment) is what the
+# two had in common. Different files, different fixes.
+LOGMD = ("OKF Phase 2b: create log.md change history files",
+         "Every knowledge note under the vault gets a log.md beside it recording each frontmatter "
+         "edit with its session and date, so the okf validator can audit who changed a note's segment.")
+SEGMENT = ("Knowledge-note writers emit files without a segment frontmatter key",
+           "Three producers write knowledge notes with no segment in the frontmatter, and the okf "
+           "validator flags every one of them on the next nightly pass; the writers need a default.")
+
+# ~60 activity-log lines: the shape of an item that has been worked on, and
+# the shape whose closing `---` sat past the old 2048-byte head read.
+LONG_LOG = [f"**2026-09-{1 + i % 20:02d}T10:00:00** — triage pass {i} re-read the item and appended a "
+            "finding about the retry path, the cooldown and the nightly window" for i in range(60)]
+
+
+def _frontmatter_bytes(path: Path) -> int:
+    text = path.read_text(encoding="utf-8")
+    return text.index("\n---\n", 3) + 5
+
+
+def test_the_recorded_false_merge_now_creates():
+    """Clause 1, on the recorded numbers: the row that merged on 09-14 is not
+    a target however high the reranker and the token count read."""
+    recorded = {"id": 372, "title": LOGMD[0], "status": "draft", "score": 1.0,
+                "lexical": 0.061, "shared": 6, "created": 1_700_000_000.0, "source": "both"}
+    assert SIM.merge_target([recorded], cfg=dict(SIM.DEFAULTS)) is None
+    # The same row with the jaccard at the floor is still rule A, and a
+    # seconds-old strong lexical twin is still rule B — the gate is not off.
+    assert SIM.merge_target([{**recorded, "lexical": 0.4, "shared": 2}],
+                            cfg=dict(SIM.DEFAULTS))["rule"] == "A"
+    now = 1_700_000_100.0
+    assert SIM.merge_target([{**recorded, "score": 0.0, "lexical": 0.6}],
+                            cfg=dict(SIM.DEFAULTS), now=now)["rule"] == "B"
+
+
+def test_shared_vocabulary_below_the_lexical_floor_is_advised_not_merged(board, monkeypatch):
+    """Clauses 1 and 2 end to end: seven shared tokens at jaccard 0.17 against
+    a reranker 1.0 creates, and the neighbour is still returned with its
+    non-zero `shared` — a reported quantity, not a leg."""
+    write(board, 372, *LOGMD)
+    _vec(monkeypatch, [{"id": 372, "score": 1.0}])
+    out = _write(_spawn(*SEGMENT))
+    assert out["created"] is True and "merged_into" not in out
+    assert len(list(board.glob("*.md"))) == 2
+    row = out["similar"][0]
+    assert row["id"] == 372 and row["score"] == 1.0
+    assert row["shared"] >= SIM.DEFAULTS["shared_min"] and row["lexical"] < SIM.DEFAULTS["lexical_min"]
+
+
+def test_a_closed_item_with_long_frontmatter_reads_closed_and_is_not_a_target(board, monkeypatch):
+    """Clause 3: `status: done` past the old 2048-byte read is still `done`.
+    The pair itself passes rule A (score 0.9, jaccard 0.46, the merge fixture
+    above), so only the status keeps this from merging."""
+    path = write(board, 10, *EXISTING, status="done", activity_log=LONG_LOG)
+    assert _frontmatter_bytes(path) > 2048
+    _vec(monkeypatch, [{"id": 10, "score": 0.9}])
+    out = _write(_spawn(*SAME))
+    assert out["created"] is True and "merged_into" not in out
+    assert out["similar"][0]["id"] == 10 and out["similar"][0]["status"] == "done"
+
+
+def test_a_long_frontmatter_item_reports_its_heading_and_created(board, monkeypatch):
+    """Clause 4: the row carries the H1 as `title` and a non-null `created`,
+    so the lexical leg compares prose to prose and rule B stays reachable —
+    and an OPEN item of that shape is a rule A target again."""
+    path = write(board, 10, *EXISTING, activity_log=LONG_LOG)
+    assert _frontmatter_bytes(path) > 2048
+    head = SIM._head(path, head_bytes=2048, body_chars=600)
+    assert head["title"] == EXISTING[0] and head["status"] == "draft"
+    assert head["created"] is not None and head["text"].startswith("`agent_mcp/http_tools.py:254`")
+    assert "activity_log" not in head["text"], "the YAML is not the item's prose"
+    _vec(monkeypatch, [{"id": 10, "score": 0.9}])
+    out = _write(_spawn(*SAME))
+    assert out["merged_into"] == 10 and out["similar"][0]["title"] == EXISTING[0]
+
+
+def test_a_dashed_line_in_the_prose_does_not_close_the_frontmatter(board):
+    """`---` alone on a line inside the body is a horizontal rule, and a `---`
+    inside a quoted activity-log entry is prose; only the anchored closing
+    line ends the block."""
+    log = ["**2026-09-12** — merged finding 'a --- b' from session x"]
+    path = write(board, 10, EXISTING[0], "Intro paragraph.\n\n---\n\nSecond half.",
+                 status="done", activity_log=log)
+    head = SIM._head(path, head_bytes=2048, body_chars=600)
+    assert head["status"] == "done" and head["title"] == EXISTING[0]
+    assert head["text"].startswith("Intro paragraph.")
+
+
 
 def test_dedupe_fails_open_when_qmd_is_down(board, monkeypatch):
     write(board, 10, *EXISTING)
