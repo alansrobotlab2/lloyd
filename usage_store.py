@@ -85,7 +85,8 @@ def _init_schema(conn: sqlite3.Connection):
             latency_ms INTEGER,
             model TEXT,
             error TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            safeguard TEXT                        -- deterministic rule that decided; NULL = the model (#770)
         );
         CREATE INDEX IF NOT EXISTS idx_iv_obs_session ON inner_voice_observations(session_id);
         CREATE INDEX IF NOT EXISTS idx_iv_obs_turn    ON inner_voice_observations(turn_id);
@@ -101,6 +102,10 @@ def _init_schema(conn: sqlite3.Connection):
         conn.execute("ALTER TABLE inner_voice_observations ADD COLUMN cache_read INTEGER")
     if "cache_create" not in existing_cols:
         conn.execute("ALTER TABLE inner_voice_observations ADD COLUMN cache_create INTEGER")
+    # Forward-only (#770): rows written before it read NULL, and iv_grade falls
+    # back to its prose regex for exactly those. A backfill is a human call.
+    if "safeguard" not in existing_cols:
+        conn.execute("ALTER TABLE inner_voice_observations ADD COLUMN safeguard TEXT")
     usage_cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage)").fetchall()}
     for col in ("reprefill_tokens", "prefix_misses"):
         if col not in usage_cols:
@@ -465,6 +470,7 @@ def record_inner_voice_observation(
     latency_ms: Optional[int] = None,
     model: Optional[str] = None,
     error: Optional[str] = None,
+    safeguard: Optional[str] = None,
 ) -> int:
     """Insert one Inner Voice observation row. Returns the new row's id."""
     # `created_at` is written explicitly as local-naive ISO (`datetime.now().isoformat()`)
@@ -478,12 +484,12 @@ def record_inner_voice_observation(
            (session_id, turn_id, sequence_in_turn, trigger, action,
             reason, content, related_tool,
             input_tokens, output_tokens, cache_read, cache_create,
-            latency_ms, model, error, created_at)
-           VALUES (?, ?, ?, ?, ?,  ?, ?, ?,  ?, ?, ?, ?,  ?, ?, ?, ?)""",
+            latency_ms, model, error, created_at, safeguard)
+           VALUES (?, ?, ?, ?, ?,  ?, ?, ?,  ?, ?, ?, ?,  ?, ?, ?, ?, ?)""",
         (session_id, turn_id, sequence_in_turn, trigger, action,
          reason, content, related_tool,
          input_tokens, output_tokens, cache_read, cache_create,
-         latency_ms, model, error, datetime.now().isoformat()),
+         latency_ms, model, error, datetime.now().isoformat(), safeguard),
     )
     conn.commit()
     return cur.lastrowid
@@ -510,7 +516,7 @@ def list_inner_voice_observations(
                    reason, content, related_tool,
                    input_tokens, output_tokens, cache_read, cache_create,
                    latency_ms, model, error,
-                   created_at
+                   created_at, safeguard
             FROM inner_voice_observations{where_sql}
             ORDER BY id DESC LIMIT ?""",
         params + [limit],

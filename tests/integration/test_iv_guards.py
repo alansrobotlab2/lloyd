@@ -890,3 +890,78 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# ---------------------------------------------------------------------------
+# #770: the grader splits guard interventions by the `safeguard` key
+# ---------------------------------------------------------------------------
+
+
+def _load_grader(name: str):
+    spec = importlib.util.spec_from_file_location(
+        name, LLOYD_HOME / "scripts" / "iv_grade.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_key_decides_and_the_prose_only_covers_unkeyed_rows():
+    g = _load_grader("iv_grade_safeguard_split")
+    # Keyed: the key wins whatever the reason says.
+    assert g._safeguard_of({"reason": "looks like a model reason",
+                            "safeguard": "repetition"}) == "repetition"
+    # Unkeyed rows written before the column: both prose forms still classify.
+    assert g._safeguard_of({"reason": "deterministic: 3 near-identical Read calls",
+                            "safeguard": None}) == "repetition"
+    assert g._safeguard_of({"reason": "fast-path: terminal stub-announce stall — "
+                            "forcing continuation"}) == "stall_rescue"
+    assert g._safeguard_of({"reason": "x [unattended: content replaced; observer "
+                            "said 'y']"}) == "unattended_content"
+    assert g._safeguard_of({"reason": "primary is drifting", "safeguard": None}) is None
+
+
+def test_the_report_breaks_guards_out_per_safeguard_and_the_alarm_names_one(
+        tmp_path, capsys, monkeypatch):
+    g = _load_grader("iv_grade_safeguard_report")
+    db = tmp_path / "usage.db"
+    conn = sqlite3.connect(db)
+    conn.execute("""CREATE TABLE inner_voice_observations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, turn_id TEXT,
+        sequence_in_turn INTEGER, trigger TEXT, action TEXT, reason TEXT,
+        content TEXT, related_tool TEXT, input_tokens INTEGER, output_tokens INTEGER,
+        cache_read INTEGER, cache_create INTEGER, latency_ms INTEGER, model TEXT,
+        error TEXT, created_at TEXT, safeguard TEXT)""")
+    rows = [
+        # Four repetition fires in one turn — three keyed, one legacy — plus a
+        # stall rescue: the alarm must say the repetition guard is the one.
+        ("pretool", "inject", "deterministic: 3 near-identical Grep calls", "repetition"),
+        ("pretool", "inject", "deterministic: 3 near-identical Grep calls", "repetition"),
+        ("pretool", "inject", "deterministic: 3 near-identical Grep calls", "repetition"),
+        ("pretool", "inject", "deterministic: 3 near-identical Read calls", None),
+        ("assistant_message", "inject", "stall", "stall_rescue"),
+        ("assistant_message", "noop", "on task", None),
+    ]
+    for i, (trig, action, reason, key) in enumerate(rows, 1):
+        conn.execute(
+            "INSERT INTO inner_voice_observations (session_id, turn_id, "
+            "sequence_in_turn, trigger, action, reason, model, created_at, safeguard) "
+            "VALUES ('s', 'turnA', ?, ?, ?, ?, 'primary', '2026-09-24T10:00:00', ?)",
+            (i, trig, action, reason, key))
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setattr(g, "DB_PATH", db)
+    monkeypatch.setattr(sys, "argv", ["iv_grade.py", "--json"])
+    assert g.main() == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["cost"]["guard_by_safeguard"] == {"repetition": 4, "stall_rescue": 1}
+    assert report["cost"]["by_trigger"]["pretool"]["guard"] == 4
+    assert report["precision_proxy"]["deterministic_worst_turns"][0]["safeguards"] == {
+        "repetition": 4, "stall_rescue": 1}
+
+    monkeypatch.setattr(sys, "argv", ["iv_grade.py"])
+    assert g.main() == 0
+    out = capsys.readouterr().out
+    assert "guard interventions by safeguard" in out
+    alarm = next(line for line in out.splitlines() if "!!" in line)
+    assert "turnA" in alarm and "repetition 4" in alarm, alarm

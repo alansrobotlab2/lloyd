@@ -682,7 +682,36 @@ def test_grader_does_not_score_guard_injects_as_precision():
     assert got["deterministic_injects"] == 3
     assert got["stranded"] == 1
     assert got["landed_rate"] == 0.0, "the real inject was stranded, not perfect"
-    assert got["deterministic_worst_turns"][0] == {"turn_id": "t1", "injects": 3}
+    assert got["deterministic_worst_turns"][0] == {
+        "turn_id": "t1", "injects": 3, "safeguards": {"repetition": 3}}
+
+
+def test_grader_counts_bracket_suffix_rewrites_as_guard_injects():
+    """#770: a guard that REWRITES the model's decision into an inject leaves
+    its name as a bracketed suffix, not a prefix. 19 of the 57 "model-judged"
+    injects in the 09-08 window were these, scored as precision."""
+    iv_grade = _grade_module()
+    rows = [
+        # Pre-#770 rows: no key, so the prose decides.
+        {"turn_id": "t1", "sequence_in_turn": 1, "trigger": "assistant_message",
+         "action": "inject",
+         "reason": "the turn stopped early [stall-rescue: ambient→inject so the loop continues]"},
+        {"turn_id": "t1", "sequence_in_turn": 2, "trigger": "assistant_message",
+         "action": "inject",
+         "reason": "deliver it [unattended: content replaced; observer said 'report now']"},
+        # A post-#770 row: the key decides.
+        {"turn_id": "t1", "sequence_in_turn": 3, "trigger": "assistant_message",
+         "action": "inject", "reason": "drifting", "safeguard": "unattended_content"},
+        {"turn_id": "t1", "sequence_in_turn": 4, "trigger": "tool_result",
+         "action": "inject", "reason": "primary is drifting from the request",
+         "safeguard": None},
+        {"turn_id": "t1", "sequence_in_turn": 5, "trigger": "assistant_message",
+         "action": "noop", "reason": "on task"},
+    ]
+    got = iv_grade._grade_injects(rows)
+    assert got["deterministic_injects"] == 3, got
+    assert got["injects"] == 1, "only the unkeyed, unsuffixed inject is model-judged"
+    assert got["landed"] == 1
 
 
 def test_grader_shows_a_trigger_that_acts_without_spending():

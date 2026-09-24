@@ -1096,3 +1096,102 @@ def test_shared_terms_lead_with_the_rarest():
     assert verdict.shared_terms[0] == "zzq_phantom_handle_v3", verdict.shared_terms
     assert guards.repetition_inject_content(verdict).index("zzq_phantom_handle_v3") < 120
     print("test_shared_terms_lead_with_the_rarest: OK")
+
+
+# ---------------------------------------------------------------------------
+# #770: every guard decision is written with the guard's name
+# ---------------------------------------------------------------------------
+
+
+def _record_here(monkeypatch) -> list:
+    """A recorder installed for this test only. The module-level RECORDED patch
+    is set once at import, and another file in the same worker can replace the
+    writer after that — which read as a guard that stamped nothing."""
+    rows: list = []
+    monkeypatch.setattr(obs_mod, "record_inner_voice_observation",
+                        lambda **kw: (rows.append(kw), len(rows))[1])
+    return rows
+
+
+def test_the_repetition_guard_row_carries_its_safeguard_key(monkeypatch):
+    """Driven through the real pretool hook, as the live fires were."""
+    from unittest.mock import patch
+    from app.harness.hooks import HookRegistry
+    install_observer = obs_mod.install_observer
+    recorded = _record_here(monkeypatch)
+
+    cfg = obs_mod._observer_cfg()
+    cfg.update({"pretool_llm_enabled": False, "fast_path_enabled": True})
+    hunt = [
+        "grep -rn iv_inject_queue app/inner_voice",
+        "grep -rn iv_inject_queue app/routers --include=*.py | head -40",
+        'grep -rn "iv_inject_queue" workers/; echo EXIT=$?',
+    ]
+
+    async def run():
+        hooks = HookRegistry()
+        with patch.object(obs_mod, "_observer_cfg", return_value=cfg), \
+             patch.object(obs_mod, "extract_goal_card", new=_no_goal_card):
+            state = install_observer(
+                hooks=hooks, session_id="safeguard_rep", turn_id="safeguard_rep_turn",
+                user_request="find the queue", chat_messages_handle=[],
+                cancel_event=asyncio.Event(), primary_model="primary",
+            )
+        for command in hunt:
+            await hooks.fire_pre_tool_use(
+                session_id="safeguard_rep", tool_name="Bash",
+                tool_input={"command": command},
+            )
+        obs_mod.close_observer(state)
+
+    asyncio.new_event_loop().run_until_complete(run())
+    rows = [r for r in recorded if r["session_id"] == "safeguard_rep"]
+    injects = [r for r in rows if r["action"] == "inject"]
+    assert len(injects) == 1, rows
+    assert injects[0]["safeguard"] == "repetition", injects[0]
+    # The observation-only rows beside it are named too, not left to read as
+    # model verdicts.
+    assert {r["safeguard"] for r in rows if r["action"] == "noop"} <= {
+        "observation_only", "fast_path"}, rows
+
+
+def test_stall_rescue_and_the_guard_rewrites_name_themselves():
+    stall = _fast_path_assistant_message("Now let me check the logs:", [])
+    assert stall.action == "inject" and stall.safeguard == "stall_rescue"
+
+    # Terminal ambient upgraded to inject: the model chose ambient, the guard
+    # chose inject, so the row is the guard's.
+    state = _state()
+    amb = ObserverDecision(action="ambient", reason="follow up later", content="")
+    _apply_decision_guards(state, amb, trigger="assistant_message", tool_calls=[],
+                           is_terminal=True)
+    assert amb.action == "inject" and amb.safeguard == "stall_rescue_ambient", amb
+
+    # Unattended terminal inject: Python wrote the words.
+    state = _state(unattended=True)
+    inj = ObserverDecision(action="inject", reason="deliver the report", content="report now")
+    _apply_decision_guards(state, inj, trigger="assistant_message", tool_calls=[],
+                           is_terminal=True)
+    assert inj.action == "inject" and inj.safeguard == "unattended_content", inj
+
+    # A model inject no guard touched stays unkeyed.
+    state = _state()
+    plain = ObserverDecision(action="inject", reason="drifting", content="refocus")
+    _apply_decision_guards(state, plain, trigger="tool_result", tool_calls=[])
+    assert plain.action == "inject" and plain.safeguard is None, plain
+
+
+def test_persist_writes_the_key_and_marks_fast_path_rows(monkeypatch):
+    state = _state()
+    recorded = _record_here(monkeypatch)
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(obs_mod._persist(
+        state, _fast_path_assistant_message("Now let me check the logs:", []),
+        "assistant_message"))
+    loop.run_until_complete(obs_mod._persist(
+        state, ObserverDecision(action="noop", reason="fast-path: x", fast_path=True),
+        "tool_result"))
+    loop.run_until_complete(obs_mod._persist(
+        state, ObserverDecision(action="noop", reason="on task"), "assistant_message"))
+    got = [r["safeguard"] for r in recorded]
+    assert got == ["stall_rescue", "fast_path", None], got

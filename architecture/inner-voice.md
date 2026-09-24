@@ -1106,7 +1106,8 @@ CREATE TABLE inner_voice_observations (
     latency_ms INTEGER,
     model TEXT,              -- the model that served the OBSERVER's call (v5)
     error TEXT,              -- non-null on no_tool_call / timeout / http error
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    safeguard TEXT           -- deterministic rule that decided; NULL = the model (#770)
 );
 CREATE INDEX idx_iv_obs_session ON inner_voice_observations(session_id);
 CREATE INDEX idx_iv_obs_turn    ON inner_voice_observations(turn_id);
@@ -1150,6 +1151,18 @@ dispatcher downgraded:
 
 Fast-path decisions are persisted with `reason` prefixed `"fast-path: ..."` so
 they're distinguishable from LLM-judged ones in the UI and in analysis queries.
+
+Since #770 (2026-09-24) the row also names the rule in `safeguard`
+(`ObserverDecision.safeguard`, last writer wins): `repetition`, `stall_rescue`,
+`stall_rescue_ambient`, `unattended_content`, `consecutive_inject`,
+`inject_cooldown`, `unattended_cancel`, `cancel_unread_injects`,
+`cancel_for_completion`, `intervention_budget`, `deterministic_inject_cap`,
+`context_pressure`, `observation_only`, and `fast_path` for any other fast-path
+row. `scripts/iv_grade.py` splits guard interventions by it and names the guard
+in its per-turn alarm. The column is forward-only: older rows are NULL and are
+classified by the prose — the `deterministic:`/`fast-path:` prefix and the
+`[stall-rescue: …]`/`[unattended: …]` suffix, which the grader missed before and
+so scored those guard injects as model precision. A backfill is a human call.
 
 ## API surface
 

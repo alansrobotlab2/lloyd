@@ -76,11 +76,44 @@ INTERVENTIONS = ("inject", "cancel", "ambient", "clarify")
 # fired 19 injects. They also trivially satisfy the precision proxy: they only
 # ever fire mid-turn, so the loop always continues afterwards, and 19 false
 # positives read as a 1.0 landed rate. Score them apart.
+#
+# Since #770 the row says which rule decided in its `safeguard` column, and that
+# key is what this reads. The prose below is the fallback for rows written
+# before the column existed (NULL key), and it has two forms: a reason PREFIX,
+# and a bracketed SUFFIX appended when a guard rewrote the model's decision into
+# an inject — which the prefix match never saw, so 19 of 57 "model-judged"
+# injects in the 09-08 window were guard injects scored as precision.
 _DETERMINISTIC_REASON_RE = re.compile(r"^(?:deterministic:|fast-path:)", re.IGNORECASE)
+_GUARD_SUFFIX_RE = re.compile(r"\[(stall-rescue|unattended):", re.IGNORECASE)
+_LEGACY_SUFFIX_KEY = {"stall-rescue": "stall_rescue_ambient",
+                      "unattended": "unattended_content"}
+
+
+def _safeguard_of(row: dict) -> str | None:
+    """The deterministic rule behind this row, or None when the model decided.
+
+    The key when present; otherwise the name the legacy prose implies, so old
+    rows still split by guard.
+    """
+    key = row.get("safeguard")
+    if key:
+        return key
+    reason = row.get("reason") or ""
+    if _DETERMINISTIC_REASON_RE.match(reason):
+        low = reason.lower()
+        if low.startswith("deterministic:"):
+            return "repetition"
+        if "stub-announce stall" in low:
+            return "stall_rescue"
+        return "fast_path"
+    m = _GUARD_SUFFIX_RE.search(reason)
+    if m:
+        return _LEGACY_SUFFIX_KEY[m.group(1).lower()]
+    return None
 
 
 def _is_deterministic(row: dict) -> bool:
-    return bool(_DETERMINISTIC_REASON_RE.match(row.get("reason") or ""))
+    return _safeguard_of(row) is not None
 
 # The user's next message reading as a correction is the strongest cheap
 # signal that a terminal noop was wrong. Deliberately narrow: a follow-up
@@ -97,9 +130,13 @@ _CORRECTION_RE = re.compile(
 
 def _rows(conn: sqlite3.Connection, where: str, params: list) -> list[dict]:
     conn.row_factory = sqlite3.Row
+    # Read-only: a db no writer has migrated yet has no `safeguard` column,
+    # and every row then classifies by the prose fallback.
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(inner_voice_observations)")}
+    safeguard = ", safeguard" if "safeguard" in cols else ""
     sql = f"""SELECT id, session_id, turn_id, sequence_in_turn, trigger, action,
                      reason, content, related_tool, input_tokens, output_tokens,
-                     cache_read, latency_ms, model, error, created_at
+                     cache_read, latency_ms, model, error, created_at{safeguard}
               FROM inner_voice_observations {where} ORDER BY id"""
     return [dict(r) for r in conn.execute(sql, params)]
 
@@ -140,18 +177,21 @@ def _grade_injects(rows: list[dict]) -> dict[str, Any]:
     landed = stranded = 0
     deterministic = 0
     deterministic_turns: Counter = Counter()
+    turn_guards: dict[str, Counter] = defaultdict(Counter)
     stranded_examples: list[dict] = []
     for turn_id, turn_rows in by_turn.items():
         turn_rows.sort(key=lambda r: r["sequence_in_turn"])
         for i, r in enumerate(turn_rows):
             if r["action"] != "inject":
                 continue
-            if _is_deterministic(r):
+            guard = _safeguard_of(r)
+            if guard is not None:
                 # A guard inject always fires mid-turn, so "the loop continued"
                 # is true by construction and says nothing about whether the
                 # nudge was right. Count them; do not score them.
                 deterministic += 1
                 deterministic_turns[turn_id] += 1
+                turn_guards[turn_id][guard] += 1
                 continue
             later = turn_rows[i + 1:]
             continued = any(x["trigger"] == "assistant_message" for x in later)
@@ -176,8 +216,10 @@ def _grade_injects(rows: list[dict]) -> dict[str, Any]:
         "deterministic_injects": deterministic,
         # More than a couple of guard injects in one turn is the shape of a
         # miscalibrated guard, not of a primary in trouble.
+        # Named per guard, so the alarm says WHICH guard to go and check.
         "deterministic_worst_turns": [
-            {"turn_id": t, "injects": n} for t, n in worst
+            {"turn_id": t, "injects": n, "safeguards": dict(turn_guards[t])}
+            for t, n in worst
         ],
     }
 
@@ -289,9 +331,14 @@ def _cost(rows: list[dict]) -> dict[str, Any]:
     # which is why `pretool` disappeared from this table entirely on the
     # evening the repetition guard fired 19 times. Count them separately so a
     # trigger that is spending nothing but acting a lot is still visible.
+    # And once per guard: a per-trigger count cannot say which guard acted,
+    # which is the question a verdict per safeguard (#545) has to answer.
+    by_safeguard: Counter = Counter()
     for r in rows:
-        if r["action"] in INTERVENTIONS and _is_deterministic(r):
+        guard = _safeguard_of(r) if r["action"] in INTERVENTIONS else None
+        if guard is not None:
             by_trigger[r["trigger"]]["guard"] += 1
+            by_safeguard[guard] += 1
     return {
         "observations": len(rows),
         "turns": len(turns),
@@ -316,6 +363,7 @@ def _cost(rows: list[dict]) -> dict[str, Any]:
         "latency_ms_per_call_p90": _percentile(lat_ok, 90),
         "latency_ms_per_call_p99": _percentile(lat_ok, 99),
         "by_trigger": {k: dict(v) for k, v in sorted(by_trigger.items())},
+        "guard_by_safeguard": dict(by_safeguard.most_common()),
         "models": dict(Counter(r["model"] or "?" for r in rows)),
         "errors": dict(Counter(
             (r["error"] or "").split(":")[0] for r in rows if r["error"]
@@ -435,6 +483,10 @@ def main() -> int:
         per = f"{b['in_tok'] // b['interventions']:,}" if b["interventions"] else "—"
         print(f"    {trig:<20}{b['calls']:>7}{b['interventions']:>8}"
               f"{b.get('guard', 0):>7}{b['in_tok']:>12,}{per:>12}")
+    if c.get("guard_by_safeguard"):
+        print("\n  guard interventions by safeguard:")
+        for name, n in c["guard_by_safeguard"].items():
+            print(f"    {name:<28}{n:>7}")
 
     print(f"\nPRECISION PROXY  (did an inject keep the primary working?)")
     print(f"  model-judged injects   {p['injects']}")
@@ -448,8 +500,10 @@ def main() -> int:
           f"continued' is true by construction)")
     for t in p["deterministic_worst_turns"]:
         if t["injects"] >= 3:
+            named = ", ".join(f"{g} {n}" for g, n in
+                              sorted(t.get("safeguards", {}).items(), key=lambda kv: -kv[1]))
             print(f"    !! {t['injects']} guard injects in turn {t['turn_id']} "
-                  f"— check the guard, not the primary")
+                  f"({named}) — check the guard, not the primary")
 
     print(f"\nRECALL PROXY  (did a signed-off turn draw a correction?)")
     print(f"  terminal noops checked {r['terminal_noops_with_a_following_user_message']}")

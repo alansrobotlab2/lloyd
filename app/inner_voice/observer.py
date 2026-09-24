@@ -69,6 +69,15 @@ class ObserverDecision:
     # judged, and at ~8 fast-path rows per iteration they otherwise crowd
     # every real decision out of both windows.
     fast_path: bool = False
+    # Which deterministic rule decided or last rewrote this row; None means the
+    # observer model's verdict stood. Persisted as `safeguard` (#770) so a
+    # per-guard count is a GROUP BY, not a regex over the prose in `reason` —
+    # half of which appends the guard's identity as a bracketed suffix that no
+    # prefix match can see. Last writer wins: the rule that shaped the final
+    # action is the one a verdict about that action must be charged to. The
+    # result trigger's inject→ambient translation is not stamped: it moves the
+    # model's decision to the lever that can still fire, it does not make one.
+    safeguard: str | None = None
     # Forensic / persistence fields
     raw_response: str = ""
     input_tokens: int = 0
@@ -814,6 +823,7 @@ def _fast_path_assistant_message(
             reason="fast-path: terminal stub-announce stall — forcing continuation",
             content=_guards.STALL_RESCUE_CONTENT,
             bypass_budget=True,
+            safeguard="stall_rescue",
         )
     return None
 
@@ -1227,6 +1237,7 @@ async def _apply_lever(
         budget=state.intervention_budget,
     ):
         decision.action = "noop_budget_exhausted"
+        decision.safeguard = "intervention_budget"
         decision.reason = ((decision.reason or "") + " [budget exhausted]").strip()
         return
 
@@ -1248,6 +1259,7 @@ async def _apply_lever(
                 turn_id=state.turn_id,
             )
             decision.action = "noop_deterministic_budget_exhausted"
+            decision.safeguard = "deterministic_inject_cap"
             decision.reason = (
                 (decision.reason or "")
                 + f" [deterministic inject cap of {cap} reached this turn]"
@@ -1420,6 +1432,7 @@ async def _persist(
             # The model that served THIS row's call, not the primary's.
             model=state.observer_model or state.primary_model,
             error=decision.error,
+            safeguard=decision.safeguard or ("fast_path" if decision.fast_path else None),
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("[iv.observer] persist failed: %s", e)
@@ -1856,6 +1869,7 @@ def _apply_decision_guards(
         ).strip()
         decision.action = "inject"
         decision.bypass_budget = True
+        decision.safeguard = "stall_rescue_ambient"
 
     # On an unattended turn the LLM still decides WHETHER to speak; Python
     # decides what it says.
@@ -1884,6 +1898,7 @@ def _apply_decision_guards(
             (decision.reason or "")
             + f" [unattended: content replaced; observer said {original[:200]!r}]"
         ).strip()
+        decision.safeguard = "unattended_content"
 
     # Consecutive-inject suppression, across all mid-work triggers.
     if _guards.suppress_consecutive_inject(
@@ -1904,6 +1919,7 @@ def _apply_decision_guards(
             turn_id=state.turn_id,
         )
         decision.action = "noop_inject_after_inject"
+        decision.safeguard = "consecutive_inject"
         decision.reason = (
             (decision.reason or "")
             + " [suppressed: the previous mid-work decision was also an inject; "
@@ -1943,6 +1959,7 @@ def _apply_decision_guards(
             turn_id=state.turn_id,
         )
         decision.action = "noop_inject_on_cooldown"
+        decision.safeguard = "inject_cooldown"
         decision.reason = (
             (decision.reason or "")
             + f" [suppressed: only {since} primary iterations since the last "
@@ -1983,6 +2000,7 @@ def _apply_decision_guards(
             turn_id=state.turn_id,
         )
         decision.action = "noop_unattended_cancel_unseen"
+        decision.safeguard = "unattended_cancel"
         decision.reason = (
             (decision.reason or "")
             + " [downgraded: unattended turn, and the primary has not yet seen "
@@ -2009,6 +2027,7 @@ def _apply_decision_guards(
                 turn_id=state.turn_id,
             )
             decision.action = "noop_cancel_unread_injects"
+            decision.safeguard = "cancel_unread_injects"
             decision.reason = (
                 (decision.reason or "")
                 + " [blocked: no primary iteration has completed since those "
@@ -2056,6 +2075,7 @@ def _apply_decision_guards(
             turn_id=state.turn_id,
         )
         decision.action = downgrade
+        decision.safeguard = "cancel_for_completion"
         decision.reason = ((decision.reason or "") + " " + note).strip()
 
 
@@ -2370,6 +2390,7 @@ def install_observer(
                     # rather than nagging, and it is the observer's most
                     # reliable signal — it never guesses at intent.
                     bypass_budget=True,
+                    safeguard="repetition",
                 )
                 await _apply_lever(
                     state, decision, trigger="pretool", related_tool=tool_name,
@@ -2398,7 +2419,7 @@ def install_observer(
         if not pretool_llm_enabled:
             decision = fp or ObserverDecision(
                 action="noop", reason="observation-only: pretool LLM disabled",
-                fast_path=True,
+                fast_path=True, safeguard="observation_only",
             )
             await _persist(state, decision, trigger="pretool", related_tool=tool_name)
             return {}
@@ -2488,6 +2509,7 @@ def install_observer(
                     if cp.exhausted:
                         await _persist(state, ObserverDecision(
                             action="noop_context_exhausted",
+                            safeguard="context_pressure",
                             reason=(
                                 f"context exhausted: {cp.used} of {cp.window} "
                                 f"tokens used, under the "
