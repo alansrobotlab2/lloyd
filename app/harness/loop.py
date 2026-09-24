@@ -40,7 +40,7 @@ from app.harness.tool_result_spill import (
 from app.harness.events import NormalizedEvent
 from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS, MCPPool, get_or_open_pool
 from app.harness.options import RunOptions
-from app.harness.policy import current_effect_scope
+from app.harness.policy import current_effect_scope, normalize_tool_name
 from app.harness.tool_schema import (
     add_summary_param,
     build_tool_list,
@@ -2168,23 +2168,34 @@ async def _pre_dispatch(
     Kept ordered and sequential even in a parallel batch: `mark_loaded`
     mutates the shared LoadedToolSet, and a hook deny is a decision the
     model must see in the order it made the calls.
+
+    Every gate here reads the BARE tool name. The model is advertised bare
+    names, but `MCPPool.call_tool` still dispatches the legacy
+    `mcp__<server>__<tool>` spelling so old session JSON replays — which made
+    that spelling a route past this function: `mcp__lloyd-mcp__Bash` matched
+    nothing in a deny list carrying `Bash` and skipped every hook keyed on
+    `"Bash"`, the safety deny included (#727). The deny list is normalised the
+    same way, since config and plan mode write one spelling and rolled-forward
+    overrides the other. The events keep `raw_name`: they record what the
+    model emitted, and `call_id` is what joins them to the result.
     """
-    name = tc["function"]["name"]
+    raw_name = tc["function"]["name"]
+    name = normalize_tool_name(raw_name)
     args_dict = tc["_args_dict"]
     call_id = tc["id"]
 
     if args_dict.get("__parse_error__"):
         msg = _parse_failure_text(args_dict, meter=meter)
-        return events.tool_result(call_id=call_id, name=name, content=msg, is_error=True)
+        return events.tool_result(call_id=call_id, name=raw_name, content=msg, is_error=True)
 
     effective_disallowed = (
         runtime_disallowed
         if runtime_disallowed is not None
         else set(options.disallowed_tools or [])
     )
-    if name in effective_disallowed:
+    if name in {normalize_tool_name(d) for d in effective_disallowed}:
         return events.tool_result(
-            call_id=call_id, name=name,
+            call_id=call_id, name=raw_name,
             content=f"Tool {name!r} is disabled by configuration.",
             is_error=True,
         )
@@ -2207,7 +2218,7 @@ async def _pre_dispatch(
             query, max_results, len(matched_names), len(loaded_set.loaded),
         )
         return events.tool_result(
-            call_id=call_id, name=name, content=content, is_error=False,
+            call_id=call_id, name=raw_name, content=content, is_error=False,
         )
 
     # Soft gate: if the model calls a deferred tool that's in the catalog
@@ -2251,12 +2262,12 @@ async def _pre_dispatch(
                 # make the fleet look sicker precisely where it is being taught
                 # something. Shape matches the synthetic ToolSearch result above.
                 return events.tool_result(
-                    call_id=call_id, name=name,
+                    call_id=call_id, name=raw_name,
                     content=str(deliver.get("content") or ""), is_error=False,
                 )
             reason = hso.get("permissionDecisionReason") or "denied by hook"
             return events.tool_result(
-                call_id=call_id, name=name,
+                call_id=call_id, name=raw_name,
                 content=f"Tool call denied: {reason}", is_error=True,
             )
 
@@ -2278,6 +2289,9 @@ async def _execute_tool_call(
     an injected argument would arrive as though it were a real parameter.
     """
     name = tc["function"]["name"]
+    # Post hooks are keyed on the bare name like the pre hooks (#727); the
+    # pool resolves the legacy prefix itself, so `name` goes to it as emitted.
+    hook_name = normalize_tool_name(name)
     args_dict = tc["_args_dict"]
     call_id = tc["id"]
     dispatch_args = dict(args_dict)
@@ -2362,7 +2376,7 @@ async def _execute_tool_call(
         if options.hooks is not None:
             await options.hooks.fire_post_tool_use_failure(
                 session_id=session_id,
-                tool_name=name,
+                tool_name=hook_name,
                 tool_input=args_dict,
                 error=str(exc),
                 tool_use_id=call_id,
@@ -2375,7 +2389,7 @@ async def _execute_tool_call(
         if options.hooks is not None:
             await options.hooks.fire_post_tool_use_failure(
                 session_id=session_id,
-                tool_name=name,
+                tool_name=hook_name,
                 tool_input=args_dict,
                 error=str(exc),
                 tool_use_id=call_id,
@@ -2431,7 +2445,7 @@ async def _execute_tool_call(
     if options.hooks is not None:
         await options.hooks.fire_post_tool_use(
             session_id=session_id,
-            tool_name=name,
+            tool_name=hook_name,
             tool_input=args_dict,
             tool_response=content,
             tool_use_id=call_id,

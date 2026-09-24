@@ -241,9 +241,9 @@ advertising has three consequences in `app/harness/tool_schema.py::build_tool_li
    grant to re-arm or park a task and does not need one to write an activity
    note. It is installed for worker sources (`workers/sources/_common.py`),
    autonomy task turns (`autonomy.py`), and the ambient and sync dispatch
-   paths — not only "background". Every hook here keys on the name the model
-   emitted, so the legacy `mcp__lloyd-mcp__` spelling skips them (filed, #727).
-   The bench
+   paths — not only "background". Every hook here keys on the bare tool name,
+   which `loop._pre_dispatch` resolves from whatever the model emitted, so
+   the legacy `mcp__lloyd-mcp__` spelling reaches them too (#727). The bench
    runner installs `install_bench_corpus_hook` on its own registry
    (`scripts/autoresearch/bench_runner_sdk.py`). A denial becomes a tool result
    the model reads ("Tool call denied: …"). Non-Bash writes have their own
@@ -797,13 +797,14 @@ directly misses both the overrides and `${VAR}` expansion. Routes:
 
 `Bash` disabled this way is blocked under both spellings at **advertise** time
 (`tool_schema.build_tool_list` matches the bare name and
-`mcp__<server>__<bare>`). At **dispatch** the check is a raw comparison against
-the name the model emitted — `loop._pre_dispatch` tests
-`name in effective_disallowed` with the unnormalised name, and
-`MCPPool.call_tool` then resolves the legacy prefixed form to the bare tool and
-runs it. So the prefixed spelling, which the pool accepts deliberately for old
-session JSON, is still reachable for a disabled tool (#727). `normalize_tool_name`
-in `app/harness/policy.py` is the fix's shape; the tier gate already uses it.
+`mcp__<server>__<bare>`) and at **dispatch**: `loop._pre_dispatch` resolves
+the emitted name and every entry of the deny list through
+`policy.normalize_tool_name` before comparing, and fires the hook walk with
+the bare name. Until 2026-09-24 it compared the raw spelling, so
+`mcp__lloyd-mcp__Bash` — which `MCPPool.call_tool` accepts deliberately for
+old session JSON — passed a deny list carrying `Bash` and skipped the safety
+deny keyed on `"Bash"` (#727, `tests/test_harness_disallowed_tools.py`). The
+tool-result events keep the spelling the model emitted.
 
 **A turn's surface hides a few tools** (2026-09-23). `RunOptions.surface` is
 `"chat"` for a session a person reads and `"worker"` for the `autonomy` and
