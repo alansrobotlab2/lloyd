@@ -15,8 +15,21 @@ pair, so one pair carries one typed relation. The JSON version could leave
 two active rows for a pair when the classifier had seen it twice — nine such
 pairs were live on 2026-09-03.
 
-The whole run is ONE transaction: a crash halfway through leaves the graph
-untouched rather than half-upgraded. A backup is taken first anyway.
+One apply pass is NOT the fixed point (#1257). A record's eligibility is read
+against the index built before the pass: when a pair holds an active eligible
+`mentions` edge in BOTH directions and the input carries one orientation's
+`related_to` record, the pass consumes the edge in the record's own direction,
+and only the next pass — whose index no longer holds that direction — reaches
+the reversed-fold branch and retypes the other one. Measured 2026-09-20 on a
+copy of the live store: `--apply` wrote 145, the dry-run after it planned 11,
+the next `--apply` wrote 11, the next dry-run 0. So `--apply` re-plans and
+re-applies until a pass plans zero, bounded at MAX_PASSES; the cap is reported
+with the residual plan rather than raised, because the next nightly run picks
+it up. What a single retype expires is unchanged — #1246 owns that seam.
+
+Each pass is ONE transaction: a crash halfway through leaves that pass's
+graph untouched rather than half-upgraded. A backup is taken before the
+first write.
 
 Usage:
   .venvs/lloyd/bin/python scripts/memory/apply-classifications-v4.py            # dry-run
@@ -27,7 +40,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
 from collections import Counter
 from datetime import datetime, timezone
@@ -45,6 +57,13 @@ DEFAULT_MIN_CONF = 0.6
 # Anything else (`STATED`, `INFERRED`, prior `EXTRACTED_CLASSIFIER*` outputs)
 # represents human or prior-classifier intent we shouldn't override here.
 ELIGIBLE_PROVENANCES = frozenset({"EXTRACTED"})
+
+# Apply passes per invocation. Two reach the fixed point on every store
+# measured so far (the reversed-fold case above needs exactly one more pass
+# than the record count suggests); four is the bound that keeps a store some
+# future input could make oscillate from looping forever. Hitting it is
+# reported, not raised.
+MAX_PASSES = 4
 
 
 def _load_v4_records(classified_dir: Path, pattern: str) -> list[dict]:
@@ -107,31 +126,19 @@ def _build_active_mentions_index(edges: list[dict]) -> dict[tuple[str, str], int
     return idx
 
 
-def main() -> int:
-    p = argparse.ArgumentParser()
-    p.add_argument("--classified-dir", type=Path, default=CLASSIFIED_DIR)
-    p.add_argument("--pattern", default=DEFAULT_GLOB,
-                   help="Glob inside classified-dir (default: classified-v4*.jsonl)")
-    p.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_CONF)
-    p.add_argument("--apply", action="store_true", help="Actually write changes")
-    p.add_argument("--dry-run", action="store_true", help="Preview only (default)")
-    p.add_argument("--db", type=Path, default=VAULT_KG_DB)
-    args = p.parse_args()
+def _plan(st: KGStore, records: list[dict], min_confidence: float, now: str,
+          ) -> tuple[list[dict], dict, Counter, Counter]:
+    """One pass's plan against the store AS IT IS NOW.
 
-    if not args.apply and not args.dry_run:
-        print("[info] no --apply specified → dry-run (no writes)")
-        args.dry_run = True
-
-    records = _load_v4_records(args.classified_dir, args.pattern)
-
-    st = KGStore(args.db)
+    Re-read on every pass, which is the whole fix: the index this builds is
+    what decides eligibility, and the previous pass's retypes moved it.
+    """
     active = st.edges.active()
     active_mentions = _build_active_mentions_index(active)
     print(f"[info] {st.edges.count(active_only=False)} total edges, {len(active)} active, "
           f"{len(active_mentions)} eligible active mentions edges "
           f"(type=mentions, provenance in {sorted(ELIGIBLE_PROVENANCES)})")
 
-    now = datetime.now(timezone.utc).isoformat()
     stats = {
         "total_records": len(records),
         "below_threshold": 0,
@@ -158,7 +165,7 @@ def main() -> int:
             continue
 
         conf = float(rec.get("confidence") or 0)
-        if conf < args.min_confidence:
+        if conf < min_confidence:
             stats["below_threshold"] += 1
             continue
 
@@ -233,10 +240,14 @@ def main() -> int:
             "tgt_type_hint": rec.get("tgt_type_hint"),
             "prompt_version": rec.get("prompt_version", "v4"),
         })
+    return changes, stats, transitions, new_type_counts
 
+
+def _print_plan(pass_no: int, stats: dict, transitions: Counter,
+                new_type_counts: Counter) -> None:
     print()
     print("=" * 70)
-    print("v4 reclassification plan:")
+    print(f"v4 reclassification plan (pass {pass_no}):")
     for k, v in stats.items():
         print(f"  {k:<28} {v:>6}")
     print()
@@ -248,23 +259,9 @@ def main() -> int:
     for t, c in new_type_counts.most_common():
         print(f"  {c:>5}  {t}")
 
-    if args.dry_run:
-        print()
-        print("[dry-run] no changes written. Re-run with --apply to commit.")
-        return 0
 
-    if not changes:
-        print("\n[info] no changes to apply")
-        st.close()
-        return 0
-
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_dir = args.db.parent / "store-backups"
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    backup = st.backup(backup_dir / f"kg-v4-{ts}.sqlite")
-    print(f"\n[info] backup written → {backup}")
-
-    # One transaction for the whole run: 3,902 retypes either all land or
+def _apply(st: KGStore, changes: list[dict], now: str) -> None:
+    # One transaction for the whole pass: 3,902 retypes either all land or
     # none do.
     with st.transaction():
         for ch in changes:
@@ -291,8 +288,76 @@ def main() -> int:
                 origin="classifier",
                 reason=f"v4 reclassified mentions → {ch['new_type']}",
             )
-    after = st.stats()
-    print(f"[info] applied {len(changes)} retypes; store now {after}")
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("--classified-dir", type=Path, default=CLASSIFIED_DIR)
+    p.add_argument("--pattern", default=DEFAULT_GLOB,
+                   help="Glob inside classified-dir (default: classified-v4*.jsonl)")
+    p.add_argument("--min-confidence", type=float, default=DEFAULT_MIN_CONF)
+    p.add_argument("--apply", action="store_true",
+                   help="Actually write changes, re-planning until a pass plans "
+                        f"zero upgrades (at most {MAX_PASSES} passes)")
+    p.add_argument("--dry-run", action="store_true", help="Preview only (default)")
+    p.add_argument("--db", type=Path, default=VAULT_KG_DB)
+    args = p.parse_args()
+
+    if not args.apply and not args.dry_run:
+        print("[info] no --apply specified → dry-run (no writes)")
+        args.dry_run = True
+
+    records = _load_v4_records(args.classified_dir, args.pattern)
+
+    st = KGStore(args.db)
+    now = datetime.now(timezone.utc).isoformat()
+    per_pass: list[int] = []
+    backup: Path | None = None
+
+    for pass_no in range(1, MAX_PASSES + 1):
+        changes, stats, transitions, new_type_counts = _plan(
+            st, records, args.min_confidence, now)
+        _print_plan(pass_no, stats, transitions, new_type_counts)
+        per_pass.append(len(changes))
+
+        if args.dry_run:
+            print()
+            print("[dry-run] no changes written. Re-run with --apply to commit.")
+            if changes:
+                # A dry run can only show the first pass: what the second pass
+                # would plan depends on writes this run is not making.
+                print(f"[dry-run] pass 1 plans {len(changes)} upgrades; --apply "
+                      f"repeats until a pass plans zero")
+            st.close()
+            return 0
+
+        if not changes:
+            break
+
+        if backup is None:
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup_dir = args.db.parent / "store-backups"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+            backup = st.backup(backup_dir / f"kg-v4-{ts}.sqlite")
+            print(f"\n[info] backup written → {backup}")
+
+        _apply(st, changes, now)
+        print(f"[info] pass {pass_no}: applied {len(changes)} retypes; store now {st.stats()}")
+    else:
+        # The cap pass wrote, so the residual is whatever a fresh plan says —
+        # counted, never applied: the next nightly run takes it.
+        residual = len(_plan(st, records, args.min_confidence, now)[0])
+        print(f"\n[warn] pass cap reached: passes={MAX_PASSES} upgrades_per_pass={per_pass} "
+              f"applied={sum(per_pass)}; {residual} upgrades still planned after the "
+              f"cap — re-run --apply to continue")
+        st.close()
+        return 0
+
+    applied = sum(per_pass)
+    if applied == 0:
+        print("\n[info] no changes to apply")
+    print(f"\n[info] converged: passes={len(per_pass)} upgrades_per_pass={per_pass} "
+          f"applied={applied}; last pass planned 0 upgrades")
     st.close()
     return 0
 
