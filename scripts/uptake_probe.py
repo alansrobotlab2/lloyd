@@ -203,6 +203,72 @@ def _repo_relative(path: str | Path) -> str:
         return str(p)
 
 
+#: The only `retrieval_gate()` key that must NOT reach the table: a filesystem
+#: path of the machine that ran the probe, and the committed artifact is
+#: evidence somebody else reads. Everything else the gate returns is copied,
+#: which is a change of rule and not just a refactor — see `retrieval_gate_block`.
+GATE_TABLE_EXCLUDED_KEYS = ("baselines_dir",)
+
+
+def retrieval_gate_block(gate: dict[str, Any]) -> dict[str, Any]:
+    """Copy `uptake.retrieval_gate()` into `classifier.retrieval_gate`.
+
+    This copy used to be an inline whitelist of four top-level keys plus the two
+    metric blocks. A whitelist on a producer that grows keys is how #1220's
+    window silently evaporated: the item's own triage named that a new top-level
+    `window_nights` — the number saying how many nights a `band` was computed
+    over, which is the whole point of the field — would be dropped from every
+    `eval/uptake/uptake-<date>.json`, and only a key parked *inside* a metric
+    block would arrive. The reader of a table then quotes a band whose sample
+    size nobody wrote down.
+
+    So the rule is inverted to copy-everything-but-the-path, and the suite pins
+    the exclusion list rather than a key list: `retrieval_gate` adds a field and
+    it reaches the artifact by default, and the only way to stop it is to name it
+    here, in the one place that has to justify excluding something.
+    """
+    return {k: v for k, v in gate.items() if k not in GATE_TABLE_EXCLUDED_KEYS}
+
+
+#: The key of `classifier` the gate lands under — the same name the skill tells
+#: the consolidation job to read. One constant, because the writer here and the
+#: reader in a nightly run must not drift, and a test drives this function into
+#: `uptake.write_table` and reads the name back out of the artifact.
+GATE_TABLE_KEY = "retrieval_gate"
+
+#: What that key holds when the gate cannot be computed: a named absence with its
+#: reason, so a reader sees why there is no band instead of reading a missing key
+#: as an oversight and going looking for a number elsewhere.
+GATE_ABSENT_KEY = "absent"
+
+
+def attach_retrieval_gate(classifier_block: dict[str, Any],
+                          gate_factory=uptake.retrieval_gate) -> dict[str, Any]:
+    """Write `uptake.retrieval_gate()` into `classifier_block["retrieval_gate"]`.
+
+    Everything the gate returns is copied (`retrieval_gate_block`), and so is a
+    refusal. `retrieval_gate` raises `NoBaselines` when the baselines directory
+    holds no `nightly-*.json` (#1220) — the right answer from that function, and
+    not one this probe may propagate: the classifier is scored before the gate is
+    read, and a missing retrieval sample is no reason to lose the
+    `uptake-<date>.json` whose rows a nightly job decides keep/archive from. So
+    the refusal is transcribed under the same key with its reason, never thrown
+    and never quietly omitted.
+
+    One named function owns the assignment because the value crosses three
+    boundaries: computed in `app/uptake.py`, keyed here, then read from the
+    committed table by a separate process. A test drives this call into
+    `uptake.write_table` and asserts the path in the JSON, which is what the
+    whitelist it replaced could not be tested through.
+    """
+    try:
+        block = retrieval_gate_block(gate_factory())
+    except uptake.NoBaselines as exc:
+        block = {GATE_ABSENT_KEY: str(exc)}
+    classifier_block[GATE_TABLE_KEY] = block
+    return classifier_block
+
+
 def run_classifier_eval(cache: dict[str, Any] | None = None, *,
                         record_raw: bool = False) -> dict[str, Any]:
     """Score the classifier against the hand-labeled corpus.
@@ -451,14 +517,7 @@ def main(argv: list[str] | None = None) -> int:
             # invalidates is the figure in the previously committed artifact, and
             # the reader has to be told that from the artifact that replaces it.
             print(f"WARNING: {replay['note']}", file=sys.stderr)
-        gate = uptake.retrieval_gate()
-        classifier_block["retrieval_gate"] = {
-            k: gate[k] for k in ("nights", "latest", "hardcoded_gate",
-                                 "hardcoded_gate_would_have_failed_nights") if k in gate
-        }
-        for metric in ("doc_hit_rate", "ndcg10"):
-            if metric in gate:
-                classifier_block["retrieval_gate"][metric] = gate[metric]
+        attach_retrieval_gate(classifier_block)
 
     if args.eval_only:
         return 0 if report["passed"] else 3

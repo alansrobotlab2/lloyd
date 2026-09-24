@@ -65,6 +65,20 @@ REPO = Path(__file__).resolve().parents[1]
 #: recorded here so the code that replaces it can be pointed at what it replaced.
 RETRIEVAL_GATE_HARDCODE = 0.95
 
+#: How many of the NEWEST comparable nights a band is computed over (#1220).
+#: Comparability by run shape is a filter, not a window: with no cap the pool is
+#: every nightly the baselines directory ever held, so the tolerance published
+#: today is widened by nights measured against a corpus that no longer exists —
+#: the 13 nights on disk 2026-09-17 spanned `corpus.facts` 205,693 -> 314,653 and
+#: published a doc_hit_rate band of 0.15 where the newest 7 give 0.05, three
+#: times looser and loosened entirely by nights nobody can reproduce. Seven is
+#: one week of nightly runs: long enough to contain a real spread, short enough
+#: that every night in it retrieved against roughly today's corpus. The value is
+#: a judgement call and the item leaves it open, so it is recorded here rather
+#: than inferred from the code; anything >= 6 also keeps the six-night fixture in
+#: tests/test_uptake.py describing a whole window instead of a truncated one.
+RETRIEVAL_GATE_WINDOW_NIGHTS = 7
+
 #: Step 2's stop condition from the item: below this precision, do not build a
 #: table on top of the classifier.
 PRECISION_FLOOR = 0.70
@@ -1558,7 +1572,34 @@ def retrieval_gate(baselines_dir: Path | str | None = None,
 
     Comparability is by run shape (`limit`, `matches_production_defaults`), not
     by filename: folding a 40-query or rerank-on night into the spread would
-    widen the band with somebody else's experiment.
+    widen the band with somebody else's experiment. Only a `nightly-*.json` is a
+    night at all (#1220). The rest of the directory is one-off runs — A/B arms,
+    `kg-rebuild` before/after snapshots, an item's scale check — each scored
+    against whatever store happened to be standing the minute it ran, so a
+    directory whose last night had gone used to report a band computed entirely
+    from those one-off runs and call it the nightly tolerance. Zero nights is
+    `NoBaselines`, not a number.
+
+    The comparable population is then CAPPED to the newest
+    `RETRIEVAL_GATE_WINDOW_NIGHTS` of them (#1220). Shape is a filter, not a
+    window: the pool used to be every night the directory ever held, so a band
+    published this week was dominated by nights scored against a corpus that has
+    since been rebuilt — the same rot #801 was filed against, moved one level up
+    from a number copied into prose to a window that quietly keeps an obsolete
+    regime in the sample. So the reader can tell the two counts apart: `nights`
+    is what the band was computed over, `nights_in_shape` how many nights were
+    comparable at all, and every metric block repeats the pair as
+    `window_nights`/`n_nights` because `scripts/uptake_probe.py` copies metric
+    blocks whole into the uptake table and drops any top-level key it does not
+    name.
+
+    A latest of 1.0 and a band of 0 both mean the published floor discriminates
+    nothing — one is a rate saturated at its ceiling, the other a pool with no
+    spread. Each block says which via `at_ceiling`/`ceiling_reason`, and states
+    `granularity` = 1/`n_queries`, the smallest move the metric can make on the
+    newest night: a floor nearer to `latest` than that cannot be crossed by any
+    change the eval is able to measure, so treating it as a tolerance is reading
+    a rounding step as a regression.
     """
     d = Path(baselines_dir) if baselines_dir else (lloyd_root() / "eval" / "baselines")
     rows: list[tuple[float, Path, dict, dict]] = []
@@ -1581,35 +1622,79 @@ def retrieval_gate(baselines_dir: Path | str | None = None,
     # different experiment, and letting whichever night happened to run last set
     # the reference would compare tonight's change against a single unrelated
     # run. Modal shape, newest wins the tie.
+    #
+    # Nothing that is not a nightly is ever a fallback (#1220). The `or rows`
+    # that used to end this chain made the leftovers answer for the nightly
+    # spread once the nightlies ran out: the A/B arms and the kg-rebuild `after`
+    # snapshot from the live directory, copied into a directory holding no night,
+    # answered `nights: 5`, doc band 0.025, floor 0.691 before this shipped — a
+    # "measured tolerance" assembled from one-off runs, each scored against
+    # whatever store was standing the minute it ran. A missing sample raises; it
+    # does not borrow somebody else's run.
     prod = [r for r in nightly if bool(r[2].get("matches_production_defaults"))]
-    basis = prod or nightly or rows
+    if not nightly:
+        raise NoBaselines(
+            f"no nightly-*.json under {d}: the {len(rows)} eval JSON(s) with "
+            "metrics there are one-off runs (A/B arms, rebuild snapshots), not "
+            "nights, and cannot band a nightly gate")
+    basis = prod or nightly
     shapes: dict[Any, list] = {}
     for r in basis:
         shapes.setdefault((r[2].get("limit"),
                            bool(r[2].get("matches_production_defaults"))), []).append(r)
-    shape, pool = max(shapes.items(), key=lambda kv: (len(kv[1]), kv[1][0][0]))
+    shape, comparable = max(shapes.items(), key=lambda kv: (len(kv[1]), kv[1][0][0]))
+    # Newest first: `rows` was sorted by mtime descending and `shapes` was filled
+    # in that order, so the front slice is the newest M nights of this shape.
+    pool = comparable[:RETRIEVAL_GATE_WINDOW_NIGHTS]
     newest_mtime, newest_path, newest_doc, newest_met = pool[0]
 
     out: dict[str, Any] = {
         "baselines_dir": str(d),
         "shape": {"limit": shape[0], "matches_production_defaults": shape[1]},
+        # Two counts, because the window makes them different quantities: the
+        # band is computed over `nights`, drawn from `nights_in_shape` comparable
+        # nights. One number is what let a 14-night sample read as a 7-night one.
         "nights": len(pool),
+        "nights_in_shape": len(comparable),
+        "window_nights": RETRIEVAL_GATE_WINDOW_NIGHTS,
         "latest": {"label": newest_doc.get("label") or newest_path.name,
                    "measured_at": newest_doc.get("ran_at") or newest_doc.get("measured_at"),
                    "path": str(newest_path)},
         "hardcoded_gate": RETRIEVAL_GATE_HARDCODE,
+        # Counted over the pooled window, not over all history: the nights this
+        # figure is about are the nights the band is about.
         "hardcoded_gate_would_have_failed_nights": 0,
     }
+    n_queries = newest_met.get("n_queries")
+    n_queries = n_queries if isinstance(n_queries, (int, float)) and n_queries else None
+    # The metric's own step size on the newest night — at 81 queries one query is
+    # 1/81 of the rate — so a reader can see whether the floor they are being
+    # handed is a tolerance or just the grid the number moves on.
+    granularity = round(1.0 / n_queries, 4) if n_queries else None
     for key in metrics:
         vals = [float(r[3][key]) for r in pool if isinstance(r[3].get(key), (int, float))]
         if not vals:
             continue
         latest = float(newest_met[key]) if isinstance(newest_met.get(key), (int, float)) else min(vals)
         band = max(vals) - min(vals)
+        # Two ways a floor stops meaning anything, and both have to be said out
+        # loud instead of published as a passing threshold: a rate pinned at its
+        # ceiling (doc_hit_rate read 1.0 on five straight nights to 2026-09-18),
+        # and a pool with no spread, which a one-night window always is.
+        reasons: list[str] = []
+        if latest >= 1.0:
+            reasons.append(f"latest {latest} is the metric ceiling")
+        if band <= 0.0:
+            reasons.append(f"the {len(vals)}-night pool spans no spread")
         out[key] = {
             "latest": latest, "min": min(vals), "max": max(vals),
             "band": round(band, 4), "floor": round(latest - band, 4),
             "n_nights": len(vals),
+            "window_nights": RETRIEVAL_GATE_WINDOW_NIGHTS,
+            "n_queries": n_queries,
+            "granularity": granularity,
+            "at_ceiling": bool(reasons),
+            "ceiling_reason": "; ".join(reasons) or None,
         }
         if key == "doc_hit_rate":
             out["hardcoded_gate_would_have_failed_nights"] = sum(

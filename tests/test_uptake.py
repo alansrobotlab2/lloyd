@@ -615,23 +615,45 @@ def _mk_baseline(path: Path, label: str, doc_hr: float, ndcg: float, *, prod=Tru
     }))
 
 
+def _mk_night(d: Path, i: int, label: str, doc_hr: float, ndcg: float, **kw) -> None:
+    """One fixture night whose mtime is strictly later than its predecessor's.
+
+    `retrieval_gate` orders its pool by mtime, so a fixture that wants to say
+    "newest" has to set it; `os.utime` is the only honest way to do that here.
+    """
+    p = d / f"{label}-{i}.json"
+    _mk_baseline(p, label, doc_hr, ndcg, **kw)
+    os.utime(p, (1_700_000_000 + i, 1_700_000_000 + i))
+
+
 def test_retrieval_gate_is_derived_from_the_newest_baseline_plus_its_noise_band(tmp_path):
     """A gate that hard-codes `doc_hit_rate >= 0.95` is decided by noise: on six
     identical-config nights the metric alone spans 0.85-0.95. The re-based gate
     is the newest measurement minus the spread of comparable nights, so the
-    tolerance is a measured quantity, not a remembered one."""
+    tolerance is a measured quantity, not a remembered one.
+
+    And the sample it measured has to be readable from the artifact (#1220): every
+    metric block names the window it is capped to and the nights actually pooled,
+    so a quoted `band` cannot travel without its denominator.
+    """
     d = tmp_path / "baselines"
     for i, (lab, dh, nd) in enumerate([
         ("nightly-20260904", 0.95, 0.591), ("nightly-20260905", 0.90, 0.557),
         ("nightly-20260906", 0.90, 0.536), ("nightly-20260907", 0.90, 0.562),
         ("nightly-20260908", 0.95, 0.595), ("nightly-20260909", 0.85, 0.536),
     ]):
-        _mk_baseline(d / f"{lab}-x.json", lab, dh, nd)
-        os.utime(d / f"{lab}-x.json", (1_700_000_000 + i, 1_700_000_000 + i))
+        _mk_night(d, i, lab, dh, nd)
 
     gate = uptake.retrieval_gate(baselines_dir=d)
     assert gate["latest"]["label"] == "nightly-20260909"
     assert gate["nights"] == 6
+    # Six nights here, below the cap, so pooled == comparable and both are named.
+    assert gate["nights_in_shape"] == 6
+    assert gate["window_nights"] == uptake.RETRIEVAL_GATE_WINDOW_NIGHTS
+    for metric in ("doc_hit_rate", "ndcg10"):
+        blk = gate[metric]
+        assert blk["window_nights"] == uptake.RETRIEVAL_GATE_WINDOW_NIGHTS, metric
+        assert blk["n_nights"] == 6, f"{metric}: band published without its sample size"
     assert gate["doc_hit_rate"]["band"] == pytest.approx(0.10)
     assert gate["doc_hit_rate"]["floor"] == pytest.approx(0.75)
     assert gate["ndcg10"]["band"] == pytest.approx(0.059)
@@ -648,39 +670,365 @@ def test_retrieval_gate_ignores_nights_it_cannot_compare(tmp_path):
     _mk_baseline(d / "nightly-off.json", "nightly-off", 0.40, 0.20, prod=False)
     gate = uptake.retrieval_gate(baselines_dir=d)
     assert gate["nights"] == 2
+    assert gate["nights_in_shape"] == 2
     assert gate["doc_hit_rate"]["floor"] == pytest.approx(0.75)
 
 
-def test_live_nightly_band_is_not_the_hardcoded_threshold():
-    """The re-basing has to be true of the real files, not only of fixtures.
+def test_the_band_window_excludes_nights_older_than_the_window(tmp_path):
+    """Comparability of run shape is a filter, not a window (#1220).
+
+    The real directory on 2026-09-17 held fourteen same-shape nights whose
+    `corpus.facts` had grown 205,693 -> 314,653: half the pool was scored against
+    a corpus that no longer existed, and the band it published (0.15) was three
+    times the newest-seven band (0.05). So a fixture of M+4 comparable nights,
+    whose OLDEST is far outside the recent regime, must publish the band of the
+    newest M — the 0.50 night must not reach `min`, and the band must be the
+    window's spread, not the history's.
+    """
+    m = uptake.RETRIEVAL_GATE_WINDOW_NIGHTS
+    total = m + 4
+    d = tmp_path / "baselines"
+    #: Oldest first. Index 0 is the obsolete-regime night; the rest alternate two
+    #: rates so that ANY window of two or more holds both, keeping the expected
+    #: band independent of the value chosen for M.
+    nights = [("nightly-old-regime", 0.50, 0.200)] + [
+        (f"nightly-{i:02d}", 0.95 if i % 2 else 0.90, 0.58 if i % 2 else 0.55)
+        for i in range(1, total)]
+    assert m < total, "the fixture is only a window test if the cap bites"
+    for i, (lab, dh, nd) in enumerate(nights):
+        _mk_night(d, i, lab, dh, nd)
+
+    gate = uptake.retrieval_gate(baselines_dir=d)
+    assert gate["nights_in_shape"] == total
+    assert gate["nights"] == m
+    assert gate["doc_hit_rate"]["n_nights"] == m
+    assert gate["doc_hit_rate"]["window_nights"] == m
+
+    doc = gate["doc_hit_rate"]
+    newest_doc = [dh for _, dh, _ in nights][-m:]
+    assert doc["min"] > 0.50, "the out-of-band night leaked into the band"
+    assert doc["min"] == pytest.approx(min(newest_doc))
+    assert doc["max"] == pytest.approx(max(newest_doc))
+    assert doc["band"] == pytest.approx(max(newest_doc) - min(newest_doc))
+    assert doc["band"] == pytest.approx(0.05)
+    # The uncapped band this fixture would produce — 0.45, the number the cap
+    # exists to refuse — is strictly wider than what is published.
+    all_doc = [dh for _, dh, _ in nights]
+    assert doc["band"] < max(all_doc) - min(all_doc)
+
+    nd = gate["ndcg10"]
+    newest_nd = [nd_ for _, _, nd_ in nights][-m:]
+    assert nd["n_nights"] == m
+    assert (nd["min"], nd["max"]) == (pytest.approx(min(newest_nd), abs=1e-4),
+                                      pytest.approx(max(newest_nd), abs=1e-4))
+    assert nd["band"] == pytest.approx(max(newest_nd) - min(newest_nd), abs=1e-4)
+
+
+def test_a_saturated_or_spreadless_metric_says_its_floor_means_nothing(tmp_path):
+    """A floor on a saturated rate is not a tolerance (#1220 symptom 2).
+
+    `doc_hit_rate` read 1.0 on five straight nights to 2026-09-18 while
+    `n_queries` was 20, so one query is 0.05 and the metric's own grid is coarser
+    than any floor the gate could name; `latest - band` there is 1.0, which reads
+    as the strictest gate ever passed and discriminates nothing at all. A
+    one-night pool is the other spreadless shape — band 0 by definition. Both have
+    to be reported as such, and every block states the grid the metric moves on.
+    """
+    pinned = tmp_path / "pinned"
+    for i, (lab, dh, nd) in enumerate([("nightly-20260914", 1.0, 0.52),
+                                       ("nightly-20260915", 1.0, 0.50),
+                                       ("nightly-20260916", 1.0, 0.51)]):
+        _mk_night(pinned, i, lab, dh, nd)
+    gate = uptake.retrieval_gate(baselines_dir=pinned)
+    doc = gate["doc_hit_rate"]
+    assert doc["latest"] == 1.0 and doc["band"] == 0.0
+    assert doc["at_ceiling"] is True, doc
+    assert "ceiling" in doc["ceiling_reason"], doc
+    assert doc["n_queries"] == 20                 # `_mk_baseline` stamps n_queries = limit
+    assert doc["granularity"] == pytest.approx(0.05), "1/20: one query is five points"
+    # Per metric, not per night: ndcg10 moved across the same three nights, so it
+    # keeps a real band and a floor that means something.
+    assert gate["ndcg10"]["at_ceiling"] is False
+    assert gate["ndcg10"]["ceiling_reason"] is None
+
+    solo = tmp_path / "solo"
+    _mk_night(solo, 0, "nightly-alone", 0.72, 0.40)
+    s = uptake.retrieval_gate(baselines_dir=solo)["doc_hit_rate"]
+    assert s["latest"] == pytest.approx(0.72) and s["band"] == 0.0
+    assert s["at_ceiling"] is True, "a one-night band is not a measured tolerance"
+    assert "no spread" in s["ceiling_reason"], s
+
+    discriminating = tmp_path / "spread"
+    for i, (lab, dh, nd) in enumerate([("nightly-a", 0.95, 0.55), ("nightly-b", 0.88, 0.50)]):
+        _mk_night(discriminating, i, lab, dh, nd)
+    ok = uptake.retrieval_gate(baselines_dir=discriminating)["doc_hit_rate"]
+    assert ok["at_ceiling"] is False and ok["ceiling_reason"] is None, ok
+    assert ok["band"] == pytest.approx(0.07) and ok["granularity"] == pytest.approx(0.05)
+
+
+def test_the_probe_carries_the_window_and_the_ceiling_flag_into_the_table(tmp_path):
+    """Seam: the gate is computed here, the table is written there, and the
+    consolidator that decides what to rewrite reads only the table.
+
+    #1220's triage named how a key dies on that seam: `uptake_probe` used to copy
+    four named top-level keys plus two whole metric blocks, so a new top-level
+    field — the window count, which is the denominator of every `band` in the
+    artifact — would be absent from every committed table while present in the
+    gate's own return value, and only a key parked inside a metric block would
+    arrive. The copy is now everything-but-the-machine-path, and this pins that
+    the exclusion list is the only thing dropped, so the next key added upstream
+    cannot go missing quietly.
+    """
+    import scripts.uptake_probe as probe
+
+    d = tmp_path / "baselines"
+    for i, (lab, dh, nd) in enumerate([("nightly-20260914", 1.0, 0.52),
+                                       ("nightly-20260915", 1.0, 0.50)]):
+        _mk_night(d, i, lab, dh, nd)
+    gate = uptake.retrieval_gate(baselines_dir=d)
+    block = probe.retrieval_gate_block(gate)
+
+    assert block["window_nights"] == uptake.RETRIEVAL_GATE_WINDOW_NIGHTS
+    assert block["nights"] == gate["nights"] == 2
+    assert block["nights_in_shape"] == 2
+    assert block["shape"] == gate["shape"], "which pool the band came from must travel"
+    for metric in ("doc_hit_rate", "ndcg10"):
+        assert block[metric] == gate[metric], f"{metric} block was not copied whole"
+        assert block[metric]["window_nights"] == uptake.RETRIEVAL_GATE_WINDOW_NIGHTS
+    assert block["doc_hit_rate"]["at_ceiling"] is True
+    assert block["doc_hit_rate"]["granularity"] == pytest.approx(0.05)
+    assert set(gate) - set(block) == set(probe.GATE_TABLE_EXCLUDED_KEYS)
+    assert probe.GATE_TABLE_EXCLUDED_KEYS == ("baselines_dir",), \
+        "the excluded key must be a machine-local path, not a measurement"
+
+
+def test_a_directory_of_one_off_runs_raises_rather_than_banding(tmp_path):
+    """Only a `nightly-*.json` is a night (#1220).
+
+    The live baselines directory after the 2026-09-22 deletion held one surviving
+    night beside A/B arms and a kg-rebuild `after` snapshot, all of them written
+    at `limit=20, matches_production_defaults=True`, so the leftovers shared the
+    night's modal shape. That is what made `basis = prod or nightly or rows`
+    dangerous rather than merely untidy: as soon as a directory held no night,
+    the leftovers answered for the nightly spread by themselves. Measured on this
+    box before the change, `retrieval_gate('/tmp/t1220')` — the five non-night
+    files copied out of that directory and nothing else — answered `nights: 5`,
+    doc band 0.025, floor 0.691: a "measured tolerance" assembled from five
+    one-off runs, each scored against whatever store was standing the minute it
+    ran. The honest answer for zero nights is `NoBaselines`.
+    """
+    d = tmp_path / "baselines"
+    for name, dh, nd in [("abba-A1-empty", 0.700, 0.400),
+                         ("abba-B1-rebuild", 0.690, 0.390),
+                         ("kg-rebuild-before", 0.660, 0.370),
+                         ("rebuild-after", 0.716, 0.416)]:
+        _mk_baseline(d / f"{name}-20260923.json", name, dh, nd)
+
+    with pytest.raises(uptake.NoBaselines) as ei:
+        uptake.retrieval_gate(baselines_dir=d)
+    msg = str(ei.value)
+    assert "nightly-*.json" in msg, msg
+    assert "4 eval JSON" in msg, f"the refusal must name what it refused to use: {msg}"
+
+    # One night added to the same directory is a one-night sample: the runs beside
+    # it stay out of the band, and the count the reader sees is 1, not 5.
+    _mk_night(d, 9, "nightly-20260923", 0.716, 0.416)
+    gate = uptake.retrieval_gate(baselines_dir=d)
+    assert gate["nights"] == 1, gate
+    assert gate["nights_in_shape"] == 1, gate
+    assert gate["doc_hit_rate"]["n_nights"] == 1, gate
+    assert gate["latest"]["label"] == "nightly-20260923"
+
+
+def test_a_missing_nightly_leaves_a_named_absence_in_the_table_not_a_crash(tmp_path):
+    """Seam, other edge: the gate refusing is right, the probe dying is not.
+
+    `retrieval_gate` now raises on a baselines directory with no night (#1220),
+    and `uptake_probe.main` reads it *after* the classifier has been scored.
+    Letting that refusal propagate would cost the whole `uptake-<date>.json` — the
+    artifact the nightly consolidator reads its keep/archive decisions from — over
+    a retrieval sample that has nothing to do with the classifier figures inside
+    it. So the refusal is transcribed under `classifier.retrieval_gate` carrying
+    its reason: an absence a reader can act on, not a missing key that reads like
+    an oversight, and not a lost table.
+
+    Both edges are asserted on the written artifact. `main` cannot be driven here
+    (it scores the classifier against the secondary engine first), so what is
+    pinned is the one function `main` calls to assign the key, with the value
+    pushed through `write_table` and read back by path — the boundary the
+    consolidation job actually reads, which a whitelist copy could cross while
+    writing nothing.
+    """
+    import scripts.uptake_probe as probe
+
+    def table_with_gate(out_dir: Path, classifier: dict) -> dict:
+        path = uptake.write_table(
+            uptake.build_uptake_table(turns=[_mk_turn(1, "wrong", "ok")],
+                                      dispute_flags={"s1#1": True},
+                                      memory_entries=[], skills_read={}),
+            out_dir=out_dir, date="2026-09-24", classifier=classifier)
+        return json.loads(path.read_text())
+
+    d = tmp_path / "baselines"
+    _mk_baseline(d / "abba-B1-rebuild-20260923.json", "abba-B1-rebuild", 0.690, 0.390)
+
+    block = probe.attach_retrieval_gate({}, lambda: uptake.retrieval_gate(baselines_dir=d))
+    assert set(block) == {probe.GATE_TABLE_KEY}, block
+    field = block[probe.GATE_TABLE_KEY]
+    assert set(field) == {probe.GATE_ABSENT_KEY}, field
+    assert "nightly-*.json" in field[probe.GATE_ABSENT_KEY], field
+    assert "doc_hit_rate" not in field and "floor" not in field, \
+        f"a refused gate must not publish a tolerance: {field}"
+
+    j = table_with_gate(tmp_path / "eval" / "absent", block)
+    assert j["classifier"][probe.GATE_TABLE_KEY][probe.GATE_ABSENT_KEY] \
+        .startswith("no nightly-*.json"), j["classifier"]
+
+    # The other edge, same call and same artifact: nights present yield the whole
+    # block under the same key, so the absent shape is that directory's state and
+    # not how the key always looks. Two nights, because one night spans no spread
+    # and would flag itself non-discriminating (correctly — see
+    # test_a_saturated_or_spreadless_metric_says_its_floor_means_nothing).
+    _mk_night(d, 11, "nightly-20260923", 0.950, 0.520)
+    _mk_night(d, 12, "nightly-20260924", 0.900, 0.500)
+    ok = probe.attach_retrieval_gate({}, lambda: uptake.retrieval_gate(baselines_dir=d))
+    gate_blk = ok[probe.GATE_TABLE_KEY]
+    assert probe.GATE_ABSENT_KEY not in gate_blk, ok
+    assert gate_blk["nights"] == 2, gate_blk
+    j2 = table_with_gate(tmp_path / "eval" / "present", ok)
+    written = j2["classifier"]["retrieval_gate"]["doc_hit_rate"]
+    assert written["window_nights"] == uptake.RETRIEVAL_GATE_WINDOW_NIGHTS, written
+    assert written["at_ceiling"] is False and written["granularity"] == pytest.approx(0.05), written
+    # floor = latest - band = 0.90 - (0.95 - 0.90)
+    assert written["floor"] == pytest.approx(0.85), written
+
+
+def test_the_skill_states_the_window_the_code_applies_and_the_ceiling_caveat():
+    """The instruction a nightly run obeys is pinned to the code it describes.
+
+    `skills/nightly-reflection-knowledge-write/SKILL.md` is read as procedure by the
+    consolidation job, and its previous version told the reader the band was computed
+    "over the newest 6 of the nightly files" at a time when the code applied no cap
+    whatsoever — so every pass/fail claim written from that sentence cited a sample
+    size nobody had measured. The skill lives in the vault, a live tree with no
+    worktree, so nothing but a text assertion stops the retired sentence coming back
+    (same shape as `tests/test_retrieval_eval_skill_ci_contract.py`). The number is
+    asserted against the constant rather than typed in: change
+    `RETRIEVAL_GATE_WINDOW_NIGHTS` and this goes red until the prose follows.
+    """
+    skill = (Path(os.environ.get("LLOYD_VAULT", Path.home() / "obsidian"))
+             / "skills" / "nightly-reflection-knowledge-write" / "SKILL.md")
+    if not skill.exists():
+        # Same convention as the sibling this copies: the vault is not part of the
+        # checkout, so its absence is a named skip, not an error.
+        pytest.skip(f"vault skill not present at {skill}")
+    text = skill.read_text()
+
+    assert "newest 6" not in text, "the uncapped window is back in the instruction"
+    assert f"the newest {uptake.RETRIEVAL_GATE_WINDOW_NIGHTS} comparable nights" in text, \
+        "the skill no longer states the window retrieval_gate() applies"
+    # The two readings that turn a floor into a meaningless number, both named.
+    assert "at_ceiling" in text and "discriminates nothing" in text, \
+        "the skill still tells the reader to quote a floor it cannot check"
+    assert "granularity" in text, "no statement of the metric's own step size"
+    # Only a nightly is a night, and zero nights is a refusal, not a band.
+    assert "`nightly-*.json` only" in text and "NoBaselines" in text, \
+        "the skill still describes a band that may be computed from A/B arms"
+
+
+def test_live_nightly_band_is_a_capped_window_of_the_real_files():
+    """The re-basing has to be true of the real files, not only of fixtures — and
+    after #1220 the thing owed changed: the published band must equal the
+    newest-M recomputation, never the whole history's.
+
+    This guard used to assert `gate["doc_hit_rate"]["floor"] < 0.95`. That is not
+    a statement about the window: with the doc leg at its ceiling and a 0.05 band,
+    `latest - band` lands on exactly 0.95 and a strict `<` fails on correct
+    behaviour — the trap the item's triage named. What is checkable instead is
+    recomputed here from the files themselves, at whatever volume this box holds.
 
     Meaningful in both states rather than erroring on a clean checkout:
     `eval/baselines/` is gitignored, so a tree without it must still see the
-    documented behaviour — `retrieval_gate()` refusing to invent a band. On a box
-    that has run the nightly eval, the real numbers are asserted.
+    documented behaviour — `retrieval_gate()` refusing to invent a band.
     """
     assert uptake.RETRIEVAL_GATE_HARDCODE == 0.95  # the number being replaced
     baselines = uptake.lloyd_root() / "eval" / "baselines"
-    # The gate reads every `*.json` with metrics, not only nightlies (comparability
-    # is by run shape), so the refusal is owed only to a directory with none. This
-    # used to branch on `nightly-*` and then expect the refusal, which held only
-    # while nightlies were all the directory ever held: after the 2026-09-22
-    # deletion it held none, and the first ad-hoc eval written there (the kg
-    # rebuild's, 2026-09-23) made the gate answer with a band and this test red.
+    # Nightly-only (#1220): the guard's old form was
+    # `if not any(baselines.glob("*.json")): expect a refusal; return`, and it
+    # carried the claim that the gate reads every `*.json` with metrics. That
+    # sentence described `basis = prod or nightly or rows`, which is the fallback
+    # this item removed — keeping it here would have pinned the bug as behaviour.
+    # Both shapes are now distinguished on purpose: a directory with no JSON at
+    # all is gitignored state a checkout may legitimately lack (the documented
+    # refusal, then stop), while a directory with JSONs but no NIGHT is exactly
+    # the 2026-09-23 state that used to publish a band from A/B arms, so it must
+    # fail here rather than return quietly.
     if not any(baselines.glob("*.json")):
         with pytest.raises(uptake.NoBaselines):
             uptake.retrieval_gate()
         return
-    # Everything below is a claim about real nightly runs. Until three exist again
-    # it has nothing to check, which is a named skip and heals as the nightly runs.
+    assert any(baselines.glob("nightly-*.json")), (
+        f"{baselines} holds eval JSONs but no nightly-*.json — the gate must "
+        "refuse, and the leftovers must not answer for the nightly spread")
+    gate = uptake.retrieval_gate()
+    window = uptake.RETRIEVAL_GATE_WINDOW_NIGHTS
+
+    def newest_values(metric: str) -> list[float]:
+        """The same pool from the other direction: nightly, production-config,
+        this shape's `limit`, newest first, capped at M — read off the files and
+        sorted by mtime here, not returned by the function under test."""
+        rows = []
+        for p in baselines.glob("nightly-*.json"):
+            doc = json.loads(p.read_text())
+            if doc.get("limit") != gate["shape"]["limit"]:
+                continue
+            if not bool(doc.get("matches_production_defaults")):
+                continue
+            v = ((doc.get("summary") or {}).get("overall") or {}).get(metric)
+            if isinstance(v, (int, float)):
+                rows.append((p.stat().st_mtime, float(v)))
+        rows.sort(reverse=True)
+        return [v for _, v in rows][:window]
+
+    assert gate["window_nights"] == window
+    assert gate["nights"] == min(window, gate["nights_in_shape"]), gate
+    for metric in ("doc_hit_rate", "ndcg10"):
+        blk = gate[metric]
+        vals = newest_values(metric)
+        assert vals, f"no live {metric} value found under {baselines}"
+        assert blk["n_nights"] == len(vals), (metric, blk, len(vals))
+        assert blk["window_nights"] == window, metric
+        assert blk["min"] == pytest.approx(min(vals), abs=1e-4), metric
+        assert blk["max"] == pytest.approx(max(vals), abs=1e-4), metric
+        assert blk["band"] == pytest.approx(max(vals) - min(vals), abs=1e-4), metric
+        assert blk["floor"] == pytest.approx(blk["latest"] - blk["band"], abs=1e-4), metric
+        n_q = blk.get("n_queries")
+        assert isinstance(n_q, int) and n_q > 0, (
+            f"{metric}: the live baseline records no n_queries, so the metric's "
+            f"step size is unmeasurable and granularity cannot be checked: {blk}")
+        assert blk["granularity"] == pytest.approx(1.0 / n_q, abs=1e-4), metric
+        # Semantics, not the flag's own formula re-derived from the block's own
+        # fields: `vals` is recomputed from the files above, newest first, so
+        # `vals[0] >= 1.0` and `spread <= 0.0` are the two states the flag is
+        # supposed to report, established without trusting `blk`.
+        spread = max(vals) - min(vals)
+        assert blk["at_ceiling"] is (vals[0] >= 1.0 or spread <= 0.0), \
+            f"{metric}: rate {vals[0]} over a {spread}-wide pool, flagged {blk}"
+        if blk["at_ceiling"]:
+            # Which of the two fired has to be the one that holds: a saturated
+            # rate says ceiling, a spreadless pool says spread.
+            assert ("ceiling" in blk["ceiling_reason"]) is (vals[0] >= 1.0), \
+                (metric, blk["ceiling_reason"], vals[0])
+
+    # Two claims are about volume rather than shape, and this box held a single
+    # nightly after the 2026-09-22 deletion: a named skip naming the floor is the
+    # honest answer, and it heals as the nightly runs rebuild the sample.
     from tests._live_data import require_live_volume
     require_live_volume(sorted(baselines.glob("nightly-*.json")), 3, baselines,
                         "the nightly retrieval baselines")
-    gate = uptake.retrieval_gate()
     assert gate["nights"] >= 3, gate
-    assert gate["doc_hit_rate"]["floor"] < 0.95, gate
-    assert gate["doc_hit_rate"]["floor"] == pytest.approx(
-        gate["doc_hit_rate"]["latest"] - gate["doc_hit_rate"]["band"], abs=1e-4), gate
+    # The hard-coded 0.95 really would have fired on at least one pooled night —
+    # the observation #801 was filed on, now scoped to the nights the band uses.
     assert gate["hardcoded_gate_would_have_failed_nights"] >= 1, gate
 
 
