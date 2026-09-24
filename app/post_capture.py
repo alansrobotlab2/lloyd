@@ -422,10 +422,14 @@ def _append_daily_note(session_id: str, summary: str,
             default_flow_style=False,
         ).rstrip()
         daily_path.write_text(
-            f"---\n{frontmatter}\n---\n\n# {today} Daily Notes\n\n## Sessions\n{entry}"
+            f"---\n{frontmatter}\n---\n\n# {today} Daily Notes\n\n## Sessions\n{entry}",
+            encoding="utf-8",
         )
     else:
-        with open(daily_path, "a") as f:
+        # Explicit on both branches: the heading carries an em dash, so a
+        # locale-default encoding that is not UTF-8 would raise here on the
+        # day's second capture and mangle the first (#602).
+        with open(daily_path, "a", encoding="utf-8") as f:
             f.write(entry)
 
 

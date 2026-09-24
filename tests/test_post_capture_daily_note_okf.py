@@ -121,6 +121,47 @@ def test_existing_note_header_is_left_alone(memory_dir):
     assert _frontmatter(note) == {"segment": "memory", "type": "note"}
 
 
+# --- Item #602: both branches name their encoding -------------------------------
+# The heading is `### Session HH:MM ZONE — Auto-captured`, an em dash on every
+# capture, and the creation branch passed `encoding="utf-8"` while the append
+# branch used a bare `open(daily_path, "a")`. Under a UTF-8 locale the two are
+# indistinguishable, which is why a read-the-bytes-back test cannot see this:
+# the defect only appears on a host whose locale default is not UTF-8, where
+# the day's SECOND capture raises `UnicodeEncodeError` and the first did not.
+# So the pin spies on the two writers and asserts the argument itself.
+
+
+def test_both_daily_note_writes_name_utf8_explicitly(memory_dir, monkeypatch):
+    import builtins
+    import pathlib
+
+    seen: list[tuple[str, object]] = []
+    real_open = builtins.open
+    real_write_text = pathlib.Path.write_text
+
+    def spy_open(file, mode="r", *args, **kwargs):
+        if "a" in str(mode) and str(file).endswith(".md"):
+            seen.append(("open", kwargs.get("encoding")))
+        return real_open(file, mode, *args, **kwargs)
+
+    def spy_write_text(self, data, *args, **kwargs):
+        if str(self).endswith(".md"):
+            seen.append(("write_text", kwargs.get("encoding")))
+        return real_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy_open)
+    monkeypatch.setattr(pathlib.Path, "write_text", spy_write_text)
+
+    post_capture._append_daily_note("sess-a", "Première capture — ✓")   # creates
+    post_capture._append_daily_note("sess-b", "Deuxième capture — ✓")   # appends
+
+    assert seen == [("write_text", "utf-8"), ("open", "utf-8")], (
+        f"a daily-note write relies on the locale default encoding: {seen}"
+    )
+    text = _today_note(memory_dir).read_bytes().decode("utf-8")
+    assert "Première capture — ✓" in text and "Deuxième capture — ✓" in text
+
+
 # --- Item #601 (umbrella #1189): the heading's zone word comes from the clock -----
 # Until now the suffix was the literal `PDT` in one f-string, so the whole winter
 # archive — first Sunday in November to second Sunday in March, when
