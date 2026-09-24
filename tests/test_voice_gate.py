@@ -15,6 +15,7 @@ line somebody has to go and read:
     what follows, not as two half-questions.
 """
 import asyncio
+import logging
 import sys
 from pathlib import Path
 
@@ -106,6 +107,7 @@ def test_a_transcript_that_opens_with_the_wake_phrase_wakes_lloyd():
     "The alloy wheels are shiny.",
     "So I told Lloyd about it.",   # the name, not an address
     "Lloyd's car is outside.",
+    "Eloid",                       # a mis-heard wake word, no acoustic fire
 ])
 def test_a_near_miss_does_not(text):
     b = _bridge([text])
@@ -121,6 +123,27 @@ def test_the_text_path_has_a_kill_switch():
 def test_an_acoustic_wake_strips_the_word_from_the_request():
     b = _bridge(["Hey Lloyd, turn on the lights."])
     assert _hear(b, wake=True) == ["turn on the lights."]
+
+
+@pytest.mark.parametrize("text", ["Stop", "Go! Go!"])
+def test_a_short_command_on_a_fired_wake_is_injected_whole(text):
+    """"Lloyd, stop" mis-heard as "Stop". The acoustic model heard the wake word
+    inside this utterance, so a transcript too short for the matcher to strip is
+    a command, not a mis-heard name. Before this the branch had no path to an
+    injection at all: it opened the window and returned, discarding the word.
+    Both texts are cases from the retained diag corpus (`Go!` fired at 0.44,
+    `Go! Go!` at 0.79), and both were commands said to Lloyd."""
+    b = _bridge([text])
+    assert _hear(b, wake=True) == [text]
+
+
+def test_the_acoustic_bare_wake_word_still_injects_nothing():
+    """The legitimate case survives: a cleanly-spelled wake word strips to an
+    empty tail and takes the bare-wake arm, which opens the window and injects
+    nothing — even with the detection fired inside the same utterance."""
+    b = _bridge(["Hey Lloyd."])
+    assert _hear(b, wake=True) == []
+    assert b.wake.in_continuation()
 
 
 def test_a_bare_wake_opens_the_window_and_the_follow_up_needs_no_wake_word():
@@ -239,6 +262,47 @@ def test_barge_in_is_gated_on_the_switch_the_speaker_and_the_speech(
 def test_an_acoustic_wake_on_a_mention_is_not_a_request(text, injected):
     b = _bridge([text])
     assert _hear(b, wake=True) == injected
+
+
+def _log_bodies(caplog, needle):
+    """Worker log messages naming `needle`, with the `[room] ` prefix removed."""
+    bodies = []
+    for record in caplog.records:
+        msg = record.getMessage()
+        if needle in msg:
+            bodies.append(msg.split("] ", 1)[1] if msg.startswith("[") else msg)
+    return bodies
+
+
+def test_a_short_transcript_with_no_acoustic_fire_is_still_dropped(caplog):
+    """The other half of the branch, which must keep discarding. With no
+    detection inside the utterance the wake came from the transcript alone, so
+    a short transcript the matcher cannot strip is a mistranscribed bare wake
+    word, not a command — and the line it logs must not be confusable with the
+    legitimate bare-wake line, which shares its opening words today.
+
+    Reached the way it happens in a room: a half-sentence held from an earlier
+    utterance is glued in front of this one, so the joined audio is
+    re-transcribed and the transcript that reaches the gate is not the one that
+    woke it.
+    """
+    b = _bridge(["Hey Lloyd", "Eloid"])
+    b._hold("user-a", np.zeros(16000 // 4, dtype=np.float32))
+    with caplog.at_level(logging.INFO, logger="lloyd-agent-worker"):
+        assert _hear(b) == []
+    bodies = _log_bodies(caplog, "Eloid")
+    assert any("no acoustic fire" in line for line in bodies), bodies
+    assert not any(line.startswith("bare wake-word") for line in bodies), bodies
+
+
+def test_a_mis_heard_wake_word_on_a_fired_wake_is_the_accepted_cost():
+    """The trade-off this fix buys, named so it cannot be silently widened.
+    "Eloid" with no detection is a near-miss and stays dropped; with the
+    acoustic model having fired inside the utterance there is no way to tell it
+    from "Stop", so it is injected as a question. A confidence floor above the
+    0.4 firing threshold is the human decision that would change this."""
+    b = _bridge(["Eloid"])
+    assert _hear(b, wake=True) == ["Eloid"]
 
 
 def test_the_mention_check_reads_the_name_not_the_phrases():

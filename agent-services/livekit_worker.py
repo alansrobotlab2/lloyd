@@ -1934,15 +1934,29 @@ class RoomBridge:
                     return
                 inject_text = tail or text
             elif word_count <= 2:
-                # A short transcript the matcher did not recognise, on an
-                # utterance the acoustic model *did*. That is a mistranscribed
-                # bare wake word, so open the window and wait for the follow-up
-                # rather than injecting "Eloid" as a question.
-                LOG.info(
-                    "[%s] bare wake-word inferred from short transcript %r (%s/%.2f) — opening %.1fs window",
-                    self.room_name, text[:40], ww_name, ww_score, wake.continuation_seconds,
-                )
-                return
+                if ev.wake is not None:
+                    # The acoustic model heard the wake word inside this
+                    # utterance; the ASR simply did not spell it. A short
+                    # transcript is then a command, not a mis-heard name:
+                    # "Lloyd, stop" reaching us as "Stop" has to be a turn. The
+                    # window cannot rescue the old behaviour either — by the
+                    # time this ran, the speaker had already stopped talking.
+                    inject_text = text
+                else:
+                    # No detection inside the span: this utterance woke on the
+                    # transcript alone and the matcher cannot strip it, so the
+                    # likeliest reading is a mistranscribed bare wake word —
+                    # keep the open window and wait for the follow-up rather
+                    # than injecting "Eloid" as a question. The wording is
+                    # deliberately not the bare-wake line's: both used to open
+                    # with "bare wake-word", which is how a discarded utterance
+                    # stayed invisible in a grep.
+                    LOG.info(
+                        "[%s] short transcript %r dropped, no acoustic fire "
+                        "(woke from transcript only) — window open %.1fs",
+                        self.room_name, text[:40], wake.continuation_seconds,
+                    )
+                    return
             elif _mentions_wake_name(text, wake.words):
                 # The name is in the transcript, but in the middle of the
                 # sentence: "Did Lloyd finish the report?" is ABOUT Lloyd, not
