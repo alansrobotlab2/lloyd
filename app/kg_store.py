@@ -61,6 +61,15 @@ ALIAS_KINDS = ("self", "case", "punct", "suffix", "semantic", "manual")
 # Where a row came from. Free-form is allowed, these are the known writers.
 ORIGINS = ("extractor", "sweep", "semantic", "fact_add", "fact_relate", "seed",
            "classifier", "conversation", "revert", "migration", "manual", "legacy")
+# The edge origins a rebuild cannot re-derive, so `kg_rebuild.py export` carries
+# them into `edges.json` instead of leaving them to extraction. Re-extraction
+# builds an edge only from an entity named inside a fact's prose
+# (`fact_extractor.py:551`), so an edge written by anything that never read the
+# prose — `fact_relate`, or a maintenance linker stamping `manual` (#1019) — has
+# no second source and is gone if it is not carried. Lives here rather than as a
+# literal in the export filter because several readers share the value, which is
+# what #1151's rule says such a value's address is.
+CARRY_EDGE_ORIGINS = ("fact_relate", "manual")
 
 EDGE_COLUMNS = (
     "id", "source", "target", "type", "confidence", "provenance", "created_at",

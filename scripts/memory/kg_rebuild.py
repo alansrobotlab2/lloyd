@@ -46,7 +46,7 @@ sys.path.insert(0, str(HERE))
 from app.paths import (  # noqa: E402
     EVAL_BASELINES_DIR, PIPELINE_DIR, VAULT_DERIVED_ROOT, VAULT_FACTS_ROOT, VAULT_KG_DB,
 )
-from app.kg_store import KGStore  # noqa: E402
+from app.kg_store import CARRY_EDGE_ORIGINS, KGStore  # noqa: E402
 from _invocation import invocation_ledger  # noqa: E402
 # The extractor writes this index (as a subprocess, with LLOYD_CONTENT_HASHES
 # pointed here) and this module reads it, so the rule for what one of its entries
@@ -335,10 +335,11 @@ def cmd_export(args) -> int:
                 n_review += 1
 
     # (e) Stated edges. Extracted ones are re-derived; a stated edge is a claim
-    #     someone made.
+    #     someone made. The origin list is kg_store's, not a literal here, so a
+    #     writer that stamps a carried origin cannot silently fall outside it.
     edges = [e for e in st.edges.all(include_expired=False)
              if (e.get("provenance") or "") in CARRY_PROVENANCE
-             or (e.get("origin") or "") in ("fact_relate", "manual")]
+             or (e.get("origin") or "") in CARRY_EDGE_ORIGINS]
     (out / "edges.json").write_text(json.dumps(edges, indent=2, default=str))
     st.close()
 
