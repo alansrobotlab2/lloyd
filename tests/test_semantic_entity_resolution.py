@@ -869,3 +869,85 @@ def test_no_dated_path_is_built_from_a_naive_now():
         if "datetime.now()" in line
     ]
     assert naive == [], f"naive datetime.now() in the script: {naive}"
+
+
+# ---------------------------------------------------------------------------
+# #745: `_definition` must not grow sys.path, and must still reach the gate
+# ---------------------------------------------------------------------------
+
+
+def _memory_entries(path=None):
+    return [p for p in (path if path is not None else sys.path)
+            if p.rstrip("/").endswith("scripts/memory")]
+
+
+def test_definition_leaves_sys_path_alone(monkeypatch, tmp_path):
+    """50 calls: len(sys.path) unchanged and no new scripts/memory entry.
+
+    The insert used to live inside the function — one duplicate per call —
+    so the module-level guard is what this pins. The first call is made
+    before the snapshot because it pays the one-time lazy import of
+    entity_semantic_gate, whose own module-level insert is that file's
+    business, not per-call growth here."""
+    monkeypatch.setattr(ser, "FACTS_ROOT", tmp_path)
+    ser._definition("warm the lazy import")
+    before = list(sys.path)
+    for _ in range(50):
+        ser._definition("anything")
+    assert len(sys.path) == len(before), (len(before), len(sys.path))
+    assert _memory_entries() == _memory_entries(before)
+
+
+def _fabricate_entity(root: Path, entity: str) -> str:
+    definition = "A fabricated entity that exists only in this test."
+    d = root / entity
+    d.mkdir()
+    (d / f"{entity}-overview.md").write_text(
+        f"---\ndefinition: {definition}\n---\n"
+        "# Summary\n\nProse paragraph long enough to be a fallback line if the field is missed.\n",
+        encoding="utf-8",
+    )
+    # A sibling fact file the fallback would concatenate first (sorted order).
+    (d / f"{entity}-facts.md").write_text("- some fact about it\n", encoding="utf-8")
+    return definition
+
+
+def test_script_adds_scripts_memory_to_sys_path_at_most_once(tmp_path):
+    """Fresh interpreter, only the script loaded: after 50 calls exactly one
+    scripts/memory entry, and the gate still answers. The in-process tests
+    cannot say either — entity-resolution-sweep.py, which this module also
+    loads, puts scripts/memory on the path itself and would mask a deleted
+    insert — so both clauses are checked where nothing else is on the path."""
+    definition = _fabricate_entity(tmp_path, "Fabricated Thing")
+    code = (
+        "import importlib.util, json, sys, pathlib\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        f"spec = importlib.util.spec_from_file_location('ser_fresh', {str(SCRIPT)!r})\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        f"m.FACTS_ROOT = pathlib.Path({str(tmp_path)!r})\n"
+        "m._definition('warm')\n"
+        "before = len(sys.path)\n"
+        "for _ in range(50): m._definition('anything')\n"
+        "mem = [p for p in sys.path if p.rstrip('/').endswith('scripts/memory')]\n"
+        "print(json.dumps({'before': before, 'after': len(sys.path), 'memory': mem,\n"
+        "  'definition': m._definition('Fabricated Thing')}))\n"
+    )
+    res = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                         cwd=str(ROOT))
+    assert res.returncode == 0, res.stderr
+    got = json.loads(res.stdout.strip().splitlines()[-1])
+    assert got["before"] == got["after"], got
+    assert got["memory"] == [str(MEMORY)], got
+    assert got["definition"] == definition, got
+
+
+def test_definition_resolves_through_the_gate_not_the_fallback(monkeypatch, tmp_path):
+    """The sibling-dir import has to keep resolving with the per-call insert
+    gone: `except Exception` would otherwise hand back load_fact_snippets for
+    every pair and nothing downstream would notice."""
+    entity = "Fabricated Thing"
+    definition = _fabricate_entity(tmp_path, entity)
+    monkeypatch.setattr(ser, "FACTS_ROOT", tmp_path)
+    got = ser._definition(entity)
+    assert got == definition
+    assert got != ser.load_fact_snippets(entity, 300)

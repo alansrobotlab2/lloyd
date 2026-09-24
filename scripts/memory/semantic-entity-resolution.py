@@ -60,6 +60,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+# entity_semantic_gate lives beside this file, not under the repo root above,
+# and `_definition` imports it lazily. Add the sibling dir ONCE, guarded: the
+# insert used to sit inside `_definition`, one duplicate entry per call, ~4000
+# a weekly run (#745).
+_HERE = str(Path(__file__).resolve().parent)
+if _HERE not in sys.path:
+    sys.path.insert(1, _HERE)
 from app.paths import VAULT_FACTS_ROOT as FACTS_ROOT
 from app.paths import PIPELINE_DIR  # noqa: E402
 
@@ -558,7 +565,6 @@ Respond with strict JSON:
 def _definition(entity: str) -> str:
     """The entity's own definition line, or its first facts as a stand-in."""
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
         import entity_semantic_gate
         return entity_semantic_gate.entity_definition(entity, FACTS_ROOT) or ""
     except Exception:
