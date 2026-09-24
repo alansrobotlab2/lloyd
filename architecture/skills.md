@@ -143,6 +143,7 @@ winner's body into a `<context>` block ahead of the turn. Thresholds
 | `SKILL_THRESHOLD_SECOND` | 4.0 — inject second skill as excerpt |
 | `SKILL_BODY_MAX` | 6000 chars |
 | `SKILL_EXCERPT_MAX` | 500 chars |
+| `SKILL_CONSTRAINTS_MAX` / `SKILL_EXCERPT_CONSTRAINTS_MAX` | 1000 / 300 chars — hard-constraint lines carried from past the cut (#657) |
 
 Rendered as `<skill name="…" score="…">` and, for the runner-up,
 `<skill name="…" score="…" excerpt="true">` (`:930`, `:941`). When nothing

@@ -609,6 +609,7 @@ Tier-2 topic extraction (above).
 | `SKILL_THRESHOLD_SECOND` | 4.0 | Min score to inject second skill (excerpt) |
 | `SKILL_BODY_MAX` | 6000 chars | Max first skill body |
 | `SKILL_EXCERPT_MAX` | 500 chars | Max second skill excerpt |
+| `SKILL_CONSTRAINTS_MAX` / `SKILL_EXCERPT_CONSTRAINTS_MAX` | 1000 / 300 chars | Hard-constraint lines (uppercase MUST/NEVER/…, outside fences) carried from past the cut (#657) |
 | `_BODY_HITS_CAP` | 4 | Cap on body-token hits in skill scoring |
 | `FACT_MAX_ENTITIES` | 2 | Max entities to look up |
 | `FACT_MAX_PER_ENTITY` | 3 | Max facts per entity |

@@ -1185,3 +1185,51 @@ def test_ambient_fact_lines_are_never_prefixed_by_a_bare_task_id(tmp_path,
     assert any(re.fullmatch(r"#?\d+", p) for p in unfixed_prefixed), (
         f"the fixture can no longer fail: `[294]` did not speak even with the "
         f"guard disabled — {unfixed}")
+
+
+# ── #657: hard constraints past the skill cut ────────────────────────────────
+
+def _long_skill(tail: str) -> dict:
+    filler = "".join(f"step {i}: do the ordinary thing carefully.\n" for i in range(400))
+    assert len(filler) > prefetch.SKILL_BODY_MAX
+    return {"name": "pipeline", "raw": "# Pipeline\n" + filler + tail}
+
+
+def test_truncated_skill_keeps_its_hard_constraints():
+    rule = "- **HARD RULE — NEVER modify `~/lloyd/.venvs/`**. SIGNAL:BLOCKED instead."
+    tail = ("## Notes\nsome prose that must not be carried.\n"
+            "```json\n{\"note\": \"NEVER in a sample\"}\n```\n" + rule + "\n")
+    skill = _long_skill(tail)
+    out = prefetch._format_context([(9.0, skill)], [])
+    assert rule.strip() in out
+    assert "NEVER in a sample" not in out           # fenced code is not a rule
+    assert "some prose that must" not in out         # lowercase prose is not either
+    assert "[... truncated]\n</skill>" in out
+    assert len(out) < prefetch.SKILL_BODY_MAX + prefetch.SKILL_CONSTRAINTS_MAX + 200
+
+
+def test_carried_constraints_are_bounded():
+    tail = "".join(f"- NEVER do bad thing number {i} under any circumstance.\n"
+                   for i in range(200))
+    out = prefetch._format_context([(9.0, _long_skill(tail))], [])
+    carried = out.split("[... hard constraints from beyond the cut]\n", 1)[1]
+    carried = carried.split("\n[... truncated]", 1)[0]
+    assert 0 < len(carried) <= prefetch.SKILL_CONSTRAINTS_MAX
+
+
+def test_second_skill_excerpt_keeps_its_hard_constraints():
+    rule = "- ALWAYS run the dry-run first."
+    first = {"name": "a", "raw": "short"}
+    second = _long_skill(rule + "\n")
+    out = prefetch._format_context([(9.0, first), (9.0, second)], [])
+    excerpt = out.split('excerpt="true">', 1)[1]
+    assert rule in excerpt
+    assert len(excerpt) < (prefetch.SKILL_EXCERPT_MAX
+                           + prefetch.SKILL_EXCERPT_CONSTRAINTS_MAX + 200)
+
+
+def test_short_skill_is_injected_unchanged():
+    raw = "# Tiny\nNEVER do the thing.\n"
+    out = prefetch._format_context([(9.0, {"name": "tiny", "raw": raw})], [])
+    assert f'<skill name="tiny" score="9.0">\n{raw}\n</skill>' in out
+    assert "truncated" not in out

@@ -42,6 +42,16 @@ SKILL_THRESHOLD_FIRST = 3.0     # minimum score to inject first skill (full body
 SKILL_THRESHOLD_SECOND = 4.0    # minimum score to inject second skill (excerpt only)
 SKILL_BODY_MAX = 6000           # chars, first skill
 SKILL_EXCERPT_MAX = 500         # chars, second skill
+# A skill longer than its cut used to lose everything past it, and the
+# rules nightly consolidation appends go at the bottom — e.g. the
+# autonomy-data-pipeline HARD RULEs sat ~10k chars past the 6000 cut and
+# never reached the model on this route (#657). The lines written as hard
+# constraints are carried through, bounded, after the head.
+SKILL_CONSTRAINTS_MAX = 1000    # chars of carried constraints, first skill
+SKILL_EXCERPT_CONSTRAINTS_MAX = 300  # same, second skill
+_HARD_CONSTRAINT_RE = re.compile(
+    r"\b(?:MUST(?: NOT)?|NEVER|DO NOT|ALWAYS|CRITICAL|HARD RULE)\b|\bIMPORTANT:"
+)
 FACT_MAX_ENTITIES = 2           # top N entities to look up
 FACT_MAX_PER_ENTITY = 3         # top N facts per entity (by confidence)
 MIN_MESSAGE_LEN = 10            # skip prefetch for very short messages
@@ -900,6 +910,40 @@ def _vault_rel_path(file_val: str) -> str:
     return path.strip()
 
 
+def _clip_skill(raw: str, cut: int, constraints_max: int) -> str:
+    """Head of ``raw`` up to ``cut`` chars, plus its hard-constraint lines
+    from beyond the cut, at most ``constraints_max`` chars of them.
+
+    Uppercase keywords only: prose "must" is everywhere and would spend the
+    budget on sentences that are not rules. Lines inside fenced code are
+    skipped — a sample JSON string saying NEVER is not an instruction.
+    A line straddling the cut is carried whole, since its tail was dropped.
+    """
+    if len(raw) <= cut:
+        return raw
+    carried: list[str] = []
+    used = 0
+    in_fence = False
+    offset = 0
+    for line in raw.splitlines(keepends=True):
+        offset += len(line)
+        text = line.strip()
+        if text.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if offset <= cut or in_fence or not _HARD_CONSTRAINT_RE.search(text):
+            continue
+        if used + len(text) + 1 > constraints_max:
+            break
+        carried.append(text)
+        used += len(text) + 1
+    body = raw[:cut]
+    if carried:
+        body += ("\n[... hard constraints from beyond the cut]\n"
+                 + "\n".join(carried))
+    return body + "\n[... truncated]"
+
+
 def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
                     vault_results: list[dict] = None,
                     session_results: list[dict] = None,
@@ -948,17 +992,14 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
     # First skill: full body
     if skills:
         score, skill = skills[0]
-        body = skill["raw"][:SKILL_BODY_MAX]
-        if len(skill["raw"]) > SKILL_BODY_MAX:
-            body += "\n[... truncated]"
+        body = _clip_skill(skill["raw"], SKILL_BODY_MAX, SKILL_CONSTRAINTS_MAX)
         parts.append(f'<skill name="{skill["name"]}" score="{score:.1f}">\n{body}\n</skill>')
 
     # Second skill: excerpt only
     if len(skills) >= 2 and skills[1][0] >= SKILL_THRESHOLD_SECOND:
         score2, skill2 = skills[1]
-        excerpt = skill2["raw"][:SKILL_EXCERPT_MAX]
-        if len(skill2["raw"]) > SKILL_EXCERPT_MAX:
-            excerpt += "\n[... truncated]"
+        excerpt = _clip_skill(skill2["raw"], SKILL_EXCERPT_MAX,
+                              SKILL_EXCERPT_CONSTRAINTS_MAX)
         parts.append(f'<skill name="{skill2["name"]}" score="{score2:.1f}" excerpt="true">\n{excerpt}\n</skill>')
 
     # Backlog refs — live task-summary lookups for `#NNN` / bare-number
