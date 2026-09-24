@@ -1121,7 +1121,10 @@ automod:
     # (the interlock), and for batch_suspend_after_rollback_s after a batch
     # rollback, so re-landings are judged one at a time. Ships false: flip it
     # after the guardian is restaged and `rehearse --batch` is green.
-    defer_restart: false
+    # On since 2026-09-24: guardian restaged (BATCH_SCHEMA 2) and
+    # `rehearse --batch` green on all four routes (reset, revert, batch-reset,
+    # batch-revert keeping a foreign commit).
+    defer_restart: true
     restart_after_s: 2700
     restart_batch_max: 4
     batch_suspend_after_rollback_s: 21600
