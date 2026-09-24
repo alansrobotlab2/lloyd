@@ -394,39 +394,129 @@ def select_candidates(
     candidates: list[dict],
     min_score: float = DEFAULT_MIN_SCORE,
     limit: int | None = None,
-) -> tuple[list[dict], int]:
+    cache: dict[str, dict] | None = None,
+) -> tuple[list[dict], int, int]:
     """What this run may judge, and how much eligible work is left.
 
-    Two rules, both before the limit, so `--limit N` cuts the eligible head and a
-    run can never spend budget below the floor:
+    Three rules, all applied BEFORE the budget is spent, so that `--limit N` buys
+    N NEW judgments:
 
     - the score floor — `--min-score`, default 4.0;
     - the artifact-name filter, re-applied here. Generation already drops those
       pairs, but `--from-candidates` loads a file written by an older run, and
       re-judging a stale pool is exactly how the budget goes back to being spent
       on `.md` twins.
+    - the verdict cache, consulted *during* selection whenever a `limit` is set —
+      `cache` is the loaded cache, or `None` for an empty one. It used to be
+      consulted only inside the judgment loop, where a hit `continue`d while still
+      occupying one of the N slots, so every already-judged pair at the head of the
+      pool consumed budget, the slice never advanced, and the backlog drained at the
+      rate definitions happened to change rather than at the rate the limit claims
+      (#535).
 
-    Returns `(selected, above_floor_total)`; `above_floor_total - len(selected)`
-    is the eligible backlog left for later runs.
+    Returns `(selected, above_floor_total, cached_skipped)`. Eligible pairs left
+    for later runs is `above_floor_total - len(selected) - cached_skipped`:
+    `cached_skipped` comes off because those pairs are already judged, not still
+    queued. Each selected pair carries the `_cache_key` computed here, so the
+    judgment loop never reads either definition a second time.
+
+    With no `limit` the cache is not consulted at all: there is no budget to
+    protect, and dropping cached pairs from an unlimited slice would silently
+    remove their verdicts from this run's proposal record.
     """
     eligible = [c for c in candidates
                 if float(c.get("score", 0.0)) >= min_score
                 and not is_artifact_pair(str(c.get("a") or ""), str(c.get("b") or ""))]
-    return (eligible[:limit] if limit else eligible), len(eligible)
+    if not limit:
+        return eligible, len(eligible), 0
+
+    cache = cache or {}  # one path whether a cache was supplied or not
+    read_definition = _definition  # resolved per call, so a caller can stub it
+    memo: dict[str, str] = {}
+
+    def _def(name: str) -> str:
+        # One definition read per entity, not per pair: a definition is a file
+        # read, and the same names recur all the way down the list. Measured
+        # 2026-09-15T23:20Z over the live 2026-09-08 pool: the 2,580 pairs a
+        # `--limit 2000` selection walks (2,000 new + 580 cached) name 1,643
+        # distinct entities, so this memo costs 1,643 reads where one per pair
+        # side costs 5,160. Re-measure by counting `_definition` calls across
+        # one selection — against the LIVE facts root. `app.paths` resolves
+        # VAULT_FACTS_ROOT through LLOYD_DATA, which the gate and conftest point
+        # at a scratch root with no facts in it; there every definition is ""
+        # and the count is a count of nothing.
+        if name not in memo:
+            memo[name] = read_definition(name)
+        return memo[name]
+
+    selected: list[dict] = []
+    taken_keys: set[str] = set()
+    cached_skipped = 0
+    for cand in eligible:
+        if len(selected) >= limit:
+            break
+        a, b = str(cand.get("a") or ""), str(cand.get("b") or "")
+        key = _cache_key(a, b, _def(a), _def(b))
+        if key in cache or key in taken_keys:
+            # `taken_keys` covers a pool that names the same pair twice, which is
+            # likewise not new work (the 2026-09-08 pool has 0 such rows).
+            cached_skipped += 1
+            continue
+        taken_keys.add(key)
+        selected.append({**cand, "_cache_key": key})
+    return selected, len(eligible), cached_skipped
+
+
+def above_floor_remaining(above_floor_total: int | None, selected: int,
+                          cached_skipped: int = 0) -> int | None:
+    """Eligible pairs still queued after this run, or None when there was no pool.
+
+    `None` is a replay, which never touches the pool: the summary prints that as
+    `unknown` instead of inventing a backlog (#730). `cached_skipped` is not
+    backlog — the verdict cache already holds those pairs — so it comes off here
+    as well as out of `from_cache` (#535).
+    """
+    if above_floor_total is None:
+        return None
+    return max(above_floor_total - selected - cached_skipped, 0)
 
 
 def run_summary(newly_judged: int, from_cache: int, above_floor_total: int | None,
-                selected: int, min_score: float) -> str:
+                selected: int, min_score: float, cached_skipped: int = 0) -> str:
     """One line: judged newly, judged free from cache, and eligible pairs left.
 
     Without the third number a run read as an unbounded backlog over a
     566,170-pair pool when what is actually left is a countable set just above
     the floor (#730). `None` means the run had no pool to measure — `--replay`.
+    `cached_skipped` is the count of pairs selection passed over as already
+    judged, or as a pair the pool named twice (#535): they are served from cache,
+    so `from_cache` includes them, and they are not backlog, so the remainder
+    subtracts them.
     """
-    remaining = ("unknown" if above_floor_total is None
-                 else max(above_floor_total - selected, 0))
+    remaining = above_floor_remaining(above_floor_total, selected, cached_skipped)
     return (f"[summary] newly_judged={newly_judged} from_cache={from_cache} "
-            f"above_floor_remaining={remaining} (min_score={min_score})")
+            f"above_floor_remaining={'unknown' if remaining is None else remaining} "
+            f"(min_score={min_score})")
+
+
+def report_selection(above_floor_total: int, selected: int, cached_skipped: int,
+                     limit: int | None, min_score: float) -> None:
+    """The slice line: what was eligible, what this run will pay for, what it skipped.
+
+    With `--limit` the line has to count UNcached pairs, since that is what the
+    budget bought. `limited to first N candidates` over a list that had already
+    been judged could not tell a new pair from a spent one, which is what hid
+    #535: the run printed a full slice and bought 1,420 judgments with a
+    2,000-judgment budget.
+    """
+    if limit:
+        print(f"[info] {above_floor_total} candidates at or above min_score={min_score}; "
+              f"limited to first {selected} uncached candidates (--limit {limit} = new "
+              f"judgments; {cached_skipped} already-judged-or-duplicate pairs "
+              f"skipped, not charged to the budget)")
+    else:
+        print(f"[info] {above_floor_total} of them at or above min_score={min_score}; "
+              f"judging {selected} of those")
 
 
 # ---------------------------------------------------------------------------
@@ -776,7 +866,9 @@ def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser()
     p.add_argument("--limit", type=int, default=None,
-                   help="Cap number of candidate pairs judged (dev).")
+                   help="Budget of NEW judgments: takes the first N eligible "
+                        "candidates whose verdict-cache key is absent, so cached "
+                        "pairs do not consume the budget (#535).")
     p.add_argument("--merge-threshold", type=float, default=0.85,
                    help="confidence ≥ this + verdict==same triggers full merge")
     p.add_argument("--alias-threshold", type=float, default=0.65,
@@ -818,6 +910,11 @@ def main() -> int:
     newly_judged = 0
     above_floor_total: int | None = 0
     candidates: list[dict] = []
+    # Budget bookkeeping for `--limit`: pairs passed over because the verdict
+    # cache already holds them, and the cache itself, loaded once here so
+    # selection and the judgment loop read the same snapshot.
+    cached_skipped = 0
+    cache: dict[str, dict] | None = None
 
     if args.replay:
         judgments = []
@@ -841,9 +938,12 @@ def main() -> int:
         if args.skip_judge:
             return 0
 
-        candidates, above_floor_total = select_candidates(pool, args.min_score, args.limit)
-        print(f"[info] {above_floor_total} of them at or above min_score="
-              f"{args.min_score}; judging {len(candidates)} of those")
+        if args.limit:
+            cache = load_verdict_cache()
+        candidates, above_floor_total, cached_skipped = select_candidates(
+            pool, args.min_score, args.limit, cache)
+        report_selection(above_floor_total, len(candidates), cached_skipped,
+                         args.limit, args.min_score)
     else:
         print("[info] generating candidates…")
         candidates = generate_candidates(entities, aliases, neighbors)
@@ -857,20 +957,28 @@ def main() -> int:
         if args.skip_judge:
             return 0
 
-        candidates, above_floor_total = select_candidates(candidates, args.min_score, args.limit)
-        print(f"[info] {above_floor_total} of them at or above min_score="
-              f"{args.min_score}; judging {len(candidates)} of those")
+        if args.limit:
+            cache = load_verdict_cache()
+        candidates, above_floor_total, cached_skipped = select_candidates(
+            candidates, args.min_score, args.limit, cache)
+        report_selection(above_floor_total, len(candidates), cached_skipped,
+                         args.limit, args.min_score)
 
     # Judgment loop (skipped in replay mode)
     t_start = time.perf_counter()
     if not args.replay:
         judgments = []
         verdict_counts = Counter()
-        cache = load_verdict_cache()
+        if cache is None:
+            cache = load_verdict_cache()
         for i, pair in enumerate(candidates, 1):
             t0 = time.perf_counter()
-            da, db = _definition(pair["a"]), _definition(pair["b"])
-            key = _cache_key(pair["a"], pair["b"], da, db)
+            # The key selection computed, when it computed one — re-deriving it
+            # would read both definitions again for every pair.
+            key = pair.pop("_cache_key", None)
+            if key is None:
+                da, db = _definition(pair["a"]), _definition(pair["b"])
+                key = _cache_key(pair["a"], pair["b"], da, db)
             cached = cache.get(key)
             if cached is not None:
                 cache_hits += 1
@@ -968,8 +1076,18 @@ def main() -> int:
           f"sweep has not reached cannot be lost by the next run")
     print("[info] no changes made. The sweep reads these as review input; "
           "run `entity-resolution-sweep.py` to see them in its plan.")
-    print(run_summary(newly_judged, cache_hits, above_floor_total,
-                      len(candidates), args.min_score))
+    # #535's three reports, in the words the item uses, printed beside #879's
+    # `[summary]` line rather than replacing it. `cached` is every pair this run
+    # did NOT pay an LLM call for — passed over while filling the slice plus any
+    # hit inside the loop — and the split beside it is what shows the budget went
+    # to new work instead of to pairs already judged.
+    remaining = above_floor_remaining(above_floor_total, len(candidates), cached_skipped)
+    print(f"[info] run: judged={newly_judged} cached={cache_hits + cached_skipped} "
+          f"({cached_skipped} skipped while filling the slice, {cache_hits} served "
+          f"in-loop) remaining-above-floor="
+          f"{'unknown' if remaining is None else remaining}")
+    print(run_summary(newly_judged, cache_hits + cached_skipped, above_floor_total,
+                      len(candidates), args.min_score, cached_skipped))
     return 0
 
 

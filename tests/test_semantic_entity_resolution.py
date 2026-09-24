@@ -120,7 +120,7 @@ def test_filter_does_not_drop_real_duplicates():
     test_no_candidate_below_the_floor_is_selected and by the main() tests below.
     """
     assert KEEP_PAIR in _pairs(_candidates())
-    selected, _above = ser.select_candidates(_candidates())
+    selected, _above, _skipped = ser.select_candidates(_candidates())
     assert KEEP_PAIR not in {(c["a"], c["b"]) for c in selected}
 
 
@@ -219,7 +219,7 @@ def test_no_candidate_below_the_floor_is_selected():
     """clause 5 — default floor."""
     pool = [_cand("a1", "b1", 9.0), _cand("a2", "b2", 4.0),
             _cand("a3", "b3", 3.9), _cand("a4", "b4", 0.1)]
-    selected, above_floor = ser.select_candidates(pool)
+    selected, above_floor, _skipped = ser.select_candidates(pool)
     assert [c["a"] for c in selected] == ["a1", "a2"]
     assert above_floor == 2
 
@@ -227,7 +227,7 @@ def test_no_candidate_below_the_floor_is_selected():
 def test_min_score_zero_reopens_the_tail():
     """clause 6 — the floor is a knob, not a hard-coded cut."""
     pool = [_cand("a1", "b1", 9.0), _cand("a3", "b3", 3.9), _cand("a4", "b4", 0.1)]
-    selected, above_floor = ser.select_candidates(pool, min_score=0.0)
+    selected, above_floor, _skipped = ser.select_candidates(pool, min_score=0.0)
     assert [c["a"] for c in selected] == ["a1", "a3", "a4"]
     assert above_floor == 3
 
@@ -235,7 +235,7 @@ def test_min_score_zero_reopens_the_tail():
 def test_floor_is_applied_before_the_limit_slice():
     """`--limit` must cut the eligible head, never reach below the floor."""
     pool = [_cand("a1", "b1", 9.0), _cand("a2", "b2", 5.0), _cand("a3", "b3", 1.0)]
-    selected, above_floor = ser.select_candidates(pool, min_score=4.0, limit=10)
+    selected, above_floor, _skipped = ser.select_candidates(pool, min_score=4.0, limit=10)
     assert [c["a"] for c in selected] == ["a1", "a2"]
     assert above_floor == 2
 
@@ -249,7 +249,7 @@ def test_selection_drops_artifact_pairs_from_a_stale_pool():
     pool = [_cand("knowledge-library", "knowledge-library.md", 9.0),
             _cand("2026-09-08-note", "2026-09-08-notes", 8.0),
             _cand("intel-pipeline", "intel-pipeline config", 7.0)]
-    selected, above_floor = ser.select_candidates(pool, min_score=0.0)
+    selected, above_floor, _skipped = ser.select_candidates(pool, min_score=0.0)
     assert [c["a"] for c in selected] == ["intel-pipeline"]
     assert above_floor == 1
 
