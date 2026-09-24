@@ -48,6 +48,10 @@ from app.paths import (  # noqa: E402
 )
 from app.kg_store import KGStore  # noqa: E402
 from _invocation import invocation_ledger  # noqa: E402
+# The extractor writes this index (as a subprocess, with LLOYD_CONTENT_HASHES
+# pointed here) and this module reads it, so the rule for what one of its entries
+# means lives with the writer and is imported, not restated (#1151).
+from content_hasher import count_extracted  # noqa: E402
 
 REBUILD_FACTS = VAULT_DERIVED_ROOT / "facts-rebuild"
 REBUILD_DB = VAULT_DERIVED_ROOT / "kg-rebuild.sqlite"
@@ -350,14 +354,20 @@ def cmd_export(args) -> int:
 # ── extract ──────────────────────────────────────────────────────────────────
 
 def _hashed_count() -> int:
-    """Documents the rebuild has actually extracted.
+    """Documents the rebuild has extracted END TO END.
 
-    A failed extraction is deliberately not hashed, so this is the count of
-    successes — which is exactly what the gate's corpus-coverage check reads.
+    A failed extraction is deliberately not hashed, and since #1151 neither is a
+    truncated one recorded as done: an entry can carry a coverage offset and
+    `complete: false`, meaning the chunk budget stopped mid-document and the tail
+    is owed. `file_count` counts those entries too, so reading the scalar here
+    would let the gate's corpus-coverage check pass on unread tails — the defect
+    #1151 exists to end, re-imported at the seam that promotes a whole rebuilt
+    tree. `count_extracted` is that rule, and both this helper and the gate's
+    `extracted` figure go through it, so the two can never disagree.
     """
     try:
-        return int(json.loads(
-            (VAULT_DERIVED_ROOT / "rebuild-content-hashes.json").read_text())["file_count"])
+        return count_extracted(json.loads(
+            (VAULT_DERIVED_ROOT / "rebuild-content-hashes.json").read_text()))
     except Exception:
         return 0
 
@@ -638,13 +648,13 @@ def cmd_gate(args) -> int:
     # 6. Corpus coverage. Without this the gate would pass a tree built from
     #    80% of the vault: every structural check is a RATIO, and a rebuild
     #    that stopped early looks just as clean as one that finished.
-    #    Documents that failed extraction are deliberately not content-hashed,
-    #    so the hash index is the count of documents actually extracted.
-    hashes = VAULT_DERIVED_ROOT / "rebuild-content-hashes.json"
-    try:
-        extracted = int(json.loads(hashes.read_text())["file_count"])
-    except Exception:
-        extracted = 0
+    #    Documents that failed extraction are deliberately not content-hashed, and
+    #    since #1151 a document whose chunk budget stopped short is hashed without
+    #    being extracted either — so both go through `_hashed_count()`, which
+    #    refuses an entry whose own record says the tail is owed. Reading
+    #    `file_count` here counted that entry, and a rebuild of feeds capped at one
+    #    pass apiece would have passed this check on ~5 % of each of them.
+    extracted = _hashed_count()
     corpus = _corpus_size()
     cov = round(100.0 * extracted / corpus, 2) if corpus else 0.0
     record("corpus_coverage_pct", cov >= GATE["corpus_coverage_pct"], cov,

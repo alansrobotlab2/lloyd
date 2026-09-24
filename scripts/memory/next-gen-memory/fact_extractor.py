@@ -56,11 +56,24 @@ from app.paths import VAULT_FACTS_ROOT as FACTS_DIR
 # Chunked extraction. The old hard `content[:3000]` cap dropped ~40% of the median
 # vault doc (70% of docs exceed 3000 chars) — including the structured Tools /
 # GitHub / Papers sections at the bottom of YouTube notes. We now window the doc
-# so most files (≤ CHUNK_SIZE) are still a single LLM call, while longer docs get
-# full coverage across a bounded number of chunks.
+# so most files (≤ CHUNK_SIZE) are still a single LLM call.
+#
+# What the windowing does NOT do is read a long document: one pass sends at most
+# MAX_CHUNKS chunks, so it covers at most CHUNK_BUDGET_CHARS of one document, and
+# whatever lies past that is unread by that pass. This comment used to promise
+# that longer docs were read end to end, and the same promise sat in
+# `_chunk_content`'s docstring — which is how a 957,489-char feed could have 4.9%
+# of its chars sent to the model, be reported as processed with no failure, get
+# its content hash recorded, and then be skipped by every later run (#1151).
+# Coverage is a value now, not a warning line: `extract_from_document` returns
+# `chars_covered`/`chars_total`, and the caller resumes an unfinished document
+# from the offset the last pass stopped at.
 CHUNK_SIZE = 8000          # chars per chunk (~2000 tokens); 90% of docs fit in one
 CHUNK_OVERLAP = 200        # carry a little context across the cut so facts aren't split
-MAX_CHUNKS = 6             # bound cost on huge docs (sessions can be 100KB+)
+MAX_CHUNKS = 6             # chunks per document PER PASS, not per document
+# Chars one pass over one document can reach. Beyond this the pass stops and the
+# remainder is the next pass's job: 5 steps of 7,800 plus the last full chunk.
+CHUNK_BUDGET_CHARS = (MAX_CHUNKS - 1) * (CHUNK_SIZE - CHUNK_OVERLAP) + CHUNK_SIZE
 
 # The category vocabulary. 287 distinct category spellings existed on
 # 2026-09-03 — `state`, `States`, `current state`, `state/config` and so on —
@@ -190,21 +203,26 @@ class FactExtractor:
         self.model_port = model_port
         self.facts_dir = FACTS_DIR
     
-    def _chunk_content(self, content: str) -> list:
-        """Window long docs so most files stay a single LLM call but long docs get
-        full coverage. Returns [content] unchanged for docs <= CHUNK_SIZE."""
-        if len(content) <= CHUNK_SIZE:
-            return [content]
+    def _chunk_content(self, content: str, start: int = 0) -> list:
+        """Window ONE pass over a document.
+
+        Returns `[(source_offset, chunk_text), ...]`: at most `MAX_CHUNKS`
+        chunks of `CHUNK_SIZE` chars, stepping `CHUNK_SIZE - CHUNK_OVERLAP`
+        chars, beginning at `start`. A pass therefore reaches at most
+        `CHUNK_BUDGET_CHARS` (47,000) chars of a document — everything past that
+        is NOT sent to the model by this pass and is the caller's to resume,
+        which is why the offsets come back with the text (#1151). When the rest
+        of the document fits one chunk the answer is `[(start, content[start:])]`.
+        """
+        start = max(0, min(int(start), len(content)))
+        if len(content) - start <= CHUNK_SIZE:
+            return [(start, content[start:])]
         chunks = []
-        start = 0
         step = CHUNK_SIZE - CHUNK_OVERLAP
-        while start < len(content) and len(chunks) < MAX_CHUNKS:
-            chunks.append(content[start:start + CHUNK_SIZE])
-            start += step
-        if start < len(content):
-            covered = (MAX_CHUNKS - 1) * step + CHUNK_SIZE
-            print(f"  ⚠️ doc is {len(content)} chars; capped at {MAX_CHUNKS} chunks "
-                  f"(~{covered} chars covered)")
+        pos = start
+        while pos < len(content) and len(chunks) < MAX_CHUNKS:
+            chunks.append((pos, content[pos:pos + CHUNK_SIZE]))
+            pos += step
         return chunks
 
     def _parse_response(self, response: str) -> dict:
@@ -232,14 +250,28 @@ class FactExtractor:
         return result
 
     def extract_from_document(self, doc_path: Path, content: str,
-                              existing_facts: str = "") -> dict:
-        """Extract facts from a document.
+                              existing_facts: str = "",
+                              start_offset: int = 0) -> dict:
+        """Extract facts from ONE pass over a document.
 
-        Long docs are windowed (see CHUNK_SIZE) and extracted chunk-by-chunk;
-        facts from all chunks are merged and de-duplicated by text. Each fact
-        carries its own sanitized "entity" so a multi-entity doc fans out to
-        per-entity fact files instead of collapsing onto one primary entity.
-        Return shape stays {entity, category, facts} for backward compatibility.
+        Docs longer than `CHUNK_SIZE` are windowed (see `_chunk_content`) and
+        extracted chunk-by-chunk; facts from the chunks are merged and
+        de-duplicated by text. Each fact carries its own sanitized "entity" so a
+        multi-entity doc fans out to per-entity fact files instead of collapsing
+        onto one primary entity.
+
+        `start_offset` is where this pass begins reading `content`; 0 is the top
+        of the document. A caller passes the offset a previous pass reported when
+        that pass stopped short of the end, which is how a document too long for
+        one pass is finished over several passes instead of having its tail
+        dropped (#1151).
+
+        Returns {entity, category, facts, chars_covered, chars_total}:
+        `chars_total` is len(content), `chars_covered` is the end offset of the
+        last chunk this pass sent to the model — `chars_total` when this pass read
+        what it was given, `start_offset + CHUNK_BUDGET_CHARS` when more of the
+        document remained than one pass can reach. A document whose tail went
+        unread is reported as such rather than printing a warning nobody reads.
         """
         existing = existing_facts[:1000] if existing_facts else "None"
         primary_entity = None
@@ -247,8 +279,13 @@ class FactExtractor:
         all_facts = []
         seen_fact_text = set()
         gated_out = 0
+        # Starts at the top of what this pass was given, not at the end: the
+        # figure has to be earned by a chunk that reached the model, or a
+        # document that raised before the first call would report itself read.
+        chars_covered = max(0, min(int(start_offset), len(content)))
 
-        for chunk in self._chunk_content(content):
+        for offset, chunk in self._chunk_content(content, start_offset):
+            chars_covered = max(chars_covered, offset + len(chunk))
             known = _known_entities(chunk, 60)
             known_block = "\n".join(f"- {k}" for k in known) if known else "(none recognised)"
             prompt = EXTRACTION_PROMPT.format(content=chunk, existing_facts=existing,
@@ -303,6 +340,8 @@ class FactExtractor:
             "entity": primary_entity or "general",
             "category": primary_category or "general",
             "facts": all_facts,
+            "chars_covered": chars_covered,
+            "chars_total": len(content),
         }
     
     def _call_llm(self, prompt: str) -> str:

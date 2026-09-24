@@ -31,7 +31,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(_REPO_ROOT / "scripts" / "memory"))  # content_hasher
 sys.path.insert(0, str(_REPO_ROOT))                         # app.*
 from app.atomic_io import hash_bytes  # noqa: E402
-from fact_extractor import ExtractionFailed  # noqa: E402
+from fact_extractor import CHUNK_BUDGET_CHARS, ExtractionFailed  # noqa: E402
 
 try:
     from content_hasher import ContentHasher
@@ -110,6 +110,14 @@ class NightlyExtraction:
         # Thread-safe locks per entity for parallel processing
         self.entity_locks = {}
         self.locks_lock = threading.Lock()
+        # What the last extraction pass did, for `run_full_extraction`'s summary.
+        # `last_truncated_files` is the vault-relative paths of documents whose
+        # tail no pass has read (#1151); it pairs with `last_failed_files` and the
+        # two must not be conflated — a truncated document extracted fine, it just
+        # is not finished.
+        self.last_files_processed = 0
+        self.last_failed_files = 0
+        self.last_truncated_files: list = []
     
     def _get_entity_lock(self, entity: str) -> threading.Lock:
         """Get or create a lock for an entity."""
@@ -209,13 +217,20 @@ class NightlyExtraction:
             log_lines.append("\n[Step 1] Full Vault Fact Extraction")
             self.last_files_processed = 0
             self.last_failed_files = 0
+            self.last_truncated_files = []
             facts_extracted = self._extract_all_facts(full_mode=full_mode, workers=workers, limit=limit)
             files_processed = getattr(self, "last_files_processed", 0)
             failed_files = getattr(self, "last_failed_files", 0)
+            truncated_files = list(getattr(self, "last_truncated_files", []))
             log_lines.append(f"  → Processed {files_processed} files, extracted {facts_extracted} new facts")
             if failed_files:
                 log_lines.append(f"  ⚠ {failed_files} file(s) failed extraction and were NOT hashed; "
                                  f"they will be retried next run")
+            if truncated_files:
+                log_lines.append(f"  ⚠ {len(truncated_files)} file(s) were read only as far as the "
+                                 f"{CHUNK_BUDGET_CHARS}-char chunk budget: {truncated_files}. "
+                                 f"Each was recorded with its coverage offset and not as "
+                                 f"complete, so the next run continues from there")
 
             # Gate: Steps 2-5 (derives, relation discovery, index rebuild, overview
             # generation) only have new material to chew on when extraction touched
@@ -235,6 +250,10 @@ class NightlyExtraction:
                     "files_processed": 0,
                     "facts_extracted": 0,
                     "failed_files": failed_files,
+                    # Named even on the noop path: a summary whose shortfall key
+                    # appears only when something was truncated is a summary that
+                    # reports full coverage by omission.
+                    "truncated_files": truncated_files,
                     "total_relationships": None,
                     "overviews_generated": 0,
                     "duration_seconds": duration,
@@ -273,6 +292,10 @@ class NightlyExtraction:
                 "noop": False,
                 "files_processed": files_processed,
                 "failed_files": failed_files,
+                # Paths whose tail no pass has read yet, vault-relative. Without
+                # this a run that finished 5% of three feeds reported the same
+                # numbers as one that finished three feeds (#1151 clause 4).
+                "truncated_files": truncated_files,
                 "duration_seconds": duration,
                 "facts_extracted": facts_extracted,
                 "total_relationships": index['total_relationships'],
@@ -284,18 +307,34 @@ class NightlyExtraction:
             self.log_file.write_text("\n".join(log_lines))
             raise
     
-    def _process_single_file(self, md_file, full_mode, index, total):
-        """Extract one file. Returns (processed, facts, ok, source_hash).
+    def _process_single_file(self, md_file, full_mode, index, total, resume=None):
+        """Extract one file. Returns
+        `(processed, facts, ok, source_hash, chars_covered, chars_total)`.
 
         `ok=False` means the extraction failed and the caller must NOT save
         this file's content hash — otherwise a transient vLLM error marks the
         document done and it is never revisited. On a failure `source_hash` is
-        the empty string.
+        the empty string and no chars were read, so both coverage figures are 0.
 
         `source_hash` is returned as well as used, because the caller is the one
         that records it in the content-hash gate. It has to be the digest of
         THESE bytes, not of the file as it looks when the checkpoint flushes;
         see the comment at its computation.
+
+        `chars_covered` / `chars_total` report how much of the document reached
+        the model. One pass sends at most `CHUNK_BUDGET_CHARS` (47,000) chars, so
+        a long document is genuinely unfinished work: `ok` stays True — facts were
+        extracted — but the caller must not record this digest as done while
+        `chars_covered < chars_total` (#1151 clause 3). The tuple deliberately
+        says both things at once, which the old 4-tuple could not: it reported
+        `ok=True` for a 955,125-char feed whose remaining 95% was then skipped
+        forever.
+
+        `resume` is the `(covered_through, stored_hash)` the gate holds for this
+        path. The offset is used only while `stored_hash` still equals the digest
+        of the bytes just read: an offset taken from a document that has since
+        been rewritten points at other people's bytes, and trusting it would both
+        skip new content and let the pass claim it had reached the end.
         """
         processed = 0
         facts_count = 0
@@ -304,7 +343,7 @@ class NightlyExtraction:
             raw = md_file.read_bytes()
         except OSError as e:
             print(f"Cannot read {md_file}: {e}")
-            return 0, 0, False, ""
+            return 0, 0, False, "", 0, 0
 
         # Hash the bytes we actually extracted from. Re-hashing the file
         # afterwards records whatever it looks like then, so a note appended
@@ -320,16 +359,30 @@ class NightlyExtraction:
         except ValueError:
             doc_path = str(md_file)
 
+        # Trust the gate's resume point only for the bytes it was written under.
+        resume_from, resume_hash = resume if resume else (0, "")
+        if resume_from and resume_hash != source_hash:
+            resume_from = 0
+
         try:
             result = self.extractor.extract_from_document(
-                md_file, content, existing_facts=""
+                md_file, content, existing_facts="", start_offset=resume_from
             )
         except ExtractionFailed as e:
             print(f"[{index}/{total}] FAILED: {doc_path}: {e}")
-            return 0, 0, False, ""
+            return 0, 0, False, "", 0, 0
         except Exception as e:
             print(f"[{index}/{total}] ERROR: {doc_path}: {e}")
-            return 0, 0, False, ""
+            return 0, 0, False, "", 0, 0
+
+        # A result that names no coverage was produced by something that read the
+        # whole document it was handed — the double in
+        # `test_a_failed_file_is_not_hashed`, for one. Defaulting to
+        # `chars_total` keeps such a caller honest and this one honest too: the
+        # alternative default of 0 would make every such file look truncated and
+        # it would be re-extracted nightly forever.
+        chars_total = len(content)
+        chars_covered = int(result.get("chars_covered", chars_total) or 0)
 
         try:
             if result.get("facts"):
@@ -363,9 +416,9 @@ class NightlyExtraction:
                 processed = 1
         except Exception as e:
             print(f"Error writing facts for {md_file}: {e}")
-            return 0, 0, False, ""
+            return 0, 0, False, "", 0, 0
 
-        return processed, facts_count, True, source_hash
+        return processed, facts_count, True, source_hash, chars_covered, chars_total
 
     def _eligible_files(self, full_mode: bool) -> list:
         """The corpus, from `pipeline_config.yaml` `sources.paths`.
@@ -454,14 +507,90 @@ class NightlyExtraction:
         total_files = len(eligible_files)
         print(f"Found {total_files} eligible files")
 
-        # Filter by content hash - skip files already extracted (unchanged content).
-        # Applied in BOTH window and full mode so --full is a resumable backfill that
-        # skips already-done files rather than reprocessing the whole corpus.
+        # Skip files whose recorded extraction is DONE and unchanged. Applied in
+        # BOTH window and full mode so --full is a resumable backfill that skips
+        # already-done files rather than reprocessing the whole corpus.
+        #
+        # "Done" is now two things at once (#1151): the digest must still match,
+        # AND the pass that recorded it must have reached the end of the document.
+        # A digest match alone used to mean "extracted", while one pass over a
+        # document reaches at most `CHUNK_BUDGET_CHARS` (47,000) chars — so
+        # `knowledge/tools/openclaw/updates.md` (957,489 chars, 4.9% of its chars
+        # ever sent to the model) was skipped as complete on a digest written
+        # 2026-09-14. An unfinished document goes back into this run carrying the
+        # offset where the last pass stopped, so its tail is read next rather than
+        # never. The two halves of that cannot be swapped: a withheld digest would
+        # restart the same 47,000 chars every night and coverage would never
+        # advance, which is the trap the item's own acceptance wording names.
         hasher = ContentHasher() if _HAS_HASHER else None
+        resume_map: dict = {}
         if hasher is not None:
-            changed_files = hasher.get_changed_files(eligible_files)
+            # Judge the recorded entries BEFORE the change filter, over the WHOLE
+            # allow-list, and without writing to the index.
+            #
+            # Whole allow-list, because a record that cannot be trusted is owed
+            # work whatever the file's mtime. The nightly window (touched in the
+            # last 24 h) is a policy about changed documents; `openclaw/updates.md`
+            # is appended to daily and would come back under it on its own, but a
+            # feed that stopped being edited has nothing left to re-trigger it and
+            # would sit 4.9 % covered forever. The window still decides for every
+            # record that IS judgeable — this walk only says which records are.
+            #
+            # A read, because deleting an entry to make its file count as changed
+            # is not a decision anyone can re-read: `--limit` truncates the
+            # eligible list below, so a file de-registered and then capped away
+            # lost its record and returned next run as a path the index has never
+            # seen. Re-admission is membership in `re_admitted` instead.
+            #
+            # An entry carrying a coverage offset is self-describing and goes into
+            # `resume_map` as-is; `has_changed` decides beside it whether the file
+            # is due. What is left to judge is the entries that say nothing about
+            # coverage — every entry written before #1151. Trusting those keeps the
+            # oversized feeds skipped forever, which is the bug; distrusting all of
+            # them would put the whole recorded corpus back through the model in
+            # one night. Size separates them: a document shorter than
+            # `CHUNK_BUDGET_CHARS` could only have been read whole by the pass that
+            # recorded it, so its digest still means done. Byte size, because
+            # bytes >= chars — the error runs one way, and re-reading a document
+            # that did fit one pass costs a call, not a fact.
+            re_admitted: set = set()
+            untracked_long = []
+            sweep_files = (eligible_files if full_mode
+                           else self._eligible_files(full_mode=True))
+            for md_file in sweep_files:
+                covered, digest = hasher.coverage(md_file)
+                if not digest:
+                    continue
+                if covered >= 0:
+                    resume_map[md_file] = (covered, digest)
+                    continue
+                try:
+                    too_long_for_one_pass = md_file.stat().st_size > CHUNK_BUDGET_CHARS
+                except OSError:
+                    too_long_for_one_pass = False
+                if too_long_for_one_pass:
+                    # Read it from the top this run. Its entry stays in the index
+                    # exactly as it was, still silent about coverage, so a run whose
+                    # `--limit` cap passes this file by leaves a record the next run
+                    # can judge by the same size rule.
+                    resume_map[md_file] = (0, digest)
+                    re_admitted.add(md_file)
+                    untracked_long.append(md_file.name)
+            if untracked_long:
+                print(f"Re-processing {len(untracked_long)} files whose digest "
+                      f"predates coverage tracking and which exceed "
+                      f"{CHUNK_BUDGET_CHARS} chars, so no single pass could have "
+                      f"finished them: {untracked_long}")
+            changed_files = [f for f in eligible_files
+                             if f in re_admitted or hasher.has_changed(f)]
+            # Re-admitted files the window excluded are owed work and join the
+            # run anyway, in allow-list order so a `--limit` cap spends itself
+            # deterministically instead of on whatever the mtime sort gave.
+            in_window = set(eligible_files)
+            owed_past_the_window = [f for f in sweep_files
+                                    if f in re_admitted and f not in in_window]
             skipped_unchanged = len(eligible_files) - len(changed_files)
-            eligible_files = changed_files
+            eligible_files = changed_files + owed_past_the_window
             if skipped_unchanged > 0:
                 print(f"Skipped {skipped_unchanged} unchanged files (content hash match)")
 
@@ -479,6 +608,20 @@ class NightlyExtraction:
         # appended-to-during-the-run edit as already extracted (#482).
         CHECKPOINT_EVERY = 25
         pending: list = []
+        truncated: list = []
+
+        def _record(md_file, source_hash, chars_covered, chars_total):
+            """Book one successful extraction, and say how far of it we read.
+
+            The digest always travels with the offset it was computed from;
+            `complete` is the flag `ContentHasher.has_changed` consults when the
+            digest matches again. Recording a partly-read document as complete is
+            what skipped a 957,489-char feed at 4.9% coverage (#1151 clause 3).
+            """
+            complete = chars_covered >= chars_total
+            pending.append((md_file, source_hash, chars_covered, complete))
+            if not complete:
+                truncated.append(md_file)
 
         def _flush_checkpoint():
             if hasher is not None and pending:
@@ -492,14 +635,17 @@ class NightlyExtraction:
         if workers == 1:
             # Sequential processing (default)
             for index, md_file in enumerate(eligible_files, 1):
-                p, f, ok, source_hash = self._process_single_file(
-                    md_file, full_mode, index, total_files)
+                p, f, ok, source_hash, covered, chars_total = self._process_single_file(
+                    md_file, full_mode, index, total_files,
+                    resume=resume_map.get(md_file))
                 processed += p
                 total_facts += f
                 if ok:
                     # Only a file we actually extracted gets its hash saved.
-                    # Hashing a failed file marks it done forever.
-                    pending.append((md_file, source_hash))
+                    # Hashing a failed file marks it done forever — and hashing
+                    # one that is only partly read marks its unread tail done,
+                    # which is the same mistake one layer further in.
+                    _record(md_file, source_hash, covered, chars_total)
                 else:
                     failed += 1
                 if len(pending) >= CHECKPOINT_EVERY:
@@ -509,7 +655,8 @@ class NightlyExtraction:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 # Submit all tasks
                 futures = {
-                    executor.submit(self._process_single_file, md_file, full_mode, index, total_files):
+                    executor.submit(self._process_single_file, md_file, full_mode,
+                                    index, total_files, resume_map.get(md_file)):
                     (index, md_file)
                     for index, md_file in enumerate(eligible_files, 1)
                 }
@@ -518,11 +665,11 @@ class NightlyExtraction:
                 for future in as_completed(futures):
                     index, md_file = futures[future]
                     try:
-                        p, f, ok, source_hash = future.result()
+                        p, f, ok, source_hash, covered, chars_total = future.result()
                         processed += p
                         total_facts += f
                         if ok:
-                            pending.append((md_file, source_hash))
+                            _record(md_file, source_hash, covered, chars_total)
                         else:
                             failed += 1
                         if len(pending) >= CHECKPOINT_EVERY:
@@ -531,13 +678,23 @@ class NightlyExtraction:
                         failed += 1
                         print(f"Error processing {md_file}: {e}")
 
-        print(f"Processed {processed} documents, extracted {total_facts} facts, {failed} failed")
+        vault = VAULT.resolve()
+        self.last_truncated_files = [
+            str(p.relative_to(vault)) if vault in p.resolve().parents else str(p)
+            for p in truncated
+        ]
+        print(f"Processed {processed} documents, extracted {total_facts} facts, "
+              f"{failed} failed, {len(truncated)} truncated (tail not read: "
+              f"{self.last_truncated_files})")
         self.last_failed_files = failed
 
         # Final checkpoint for any remaining processed files
         _flush_checkpoint()
         if hasher is not None:
-            print(f"Updated content hashes for {processed} processed files")
+            print(f"Updated content hashes for {processed} processed files "
+                  f"({len(truncated)} of them mid-document: recorded with their "
+                  "coverage offset and not as complete, so the next run continues "
+                  "where this one stopped)")
 
         # Expose file-processed count so run_full_extraction can gate the
         # expensive downstream steps on whether any new/changed file was seen.
@@ -638,7 +795,10 @@ def main():
 
     _lock = acquire_single_instance_lock()
     if _lock is None:
-        print("PIPELINE_RESULT files_processed=0 facts=0 failed=0 status=locked")
+        # Carries every field the normal line carries: a reader parsing this
+        # line out of a run log should not find a key missing because the run
+        # never started.
+        print("PIPELINE_RESULT files_processed=0 facts=0 failed=0 truncated=0 status=locked")
         print("Another nightly_extraction.py holds the lock; exiting without "
               "starting a second one.")
         return
@@ -662,10 +822,20 @@ def main():
         print("\nResult:", json.dumps(result, indent=2))
         # Single-line, grep-friendly summary for the autonomy-data-pipeline skill's
         # gate. status=noop means nothing changed → caller should skip downstream work.
+        #
+        # `truncated` is how many documents this run read only as far as the
+        # chunk budget, and it is why the line no longer stops at `failed`: a run
+        # that read 47,000 of 957,489 chars of a feed reported
+        # `failed=0 status=ran` — indistinguishable from having read it — and the
+        # file's digest was then recorded, so no later run read the rest either
+        # (#1151 clause 4). Names are in the JSON result; the count is what a
+        # grep of a run log sees.
+        truncated = result.get("truncated_files") or []
         print(
             f"PIPELINE_RESULT files_processed={result.get('files_processed', 0)} "
             f"facts={result.get('facts_extracted', 0)} "
             f"failed={result.get('failed_files', 0)} "
+            f"truncated={len(truncated)} "
             f"status={'noop' if result.get('noop') else 'ran'}"
         )
 

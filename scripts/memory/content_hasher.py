@@ -25,7 +25,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional, Union
+from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import production_data_root  # noqa: E402
@@ -39,6 +39,26 @@ from app.paths import production_data_root  # noqa: E402
 DEFAULT_INDEX_PATH = Path(os.environ["LLOYD_CONTENT_HASHES"]) \
     if os.environ.get("LLOYD_CONTENT_HASHES") \
     else Path(os.environ.get("LLOYD_DATA") or production_data_root()) / "_pipeline" / "content-hashes.json"
+
+
+def count_extracted(index_data: dict) -> int:
+    """How many documents an index payload says were read to the end.
+
+    #1151 gave an entry a second meaning: besides the digest, it records how far
+    of the file the pass that wrote it got. So `file_count` — every entry,
+    including one whose document was cut off at the chunk budget — is no longer a
+    count of documents that were extracted. A reader that needs that number must
+    ask the entries, not the scalar: a gate that promotes a corpus built from
+    unread tails has exactly the defect the coverage records were added to catch.
+
+    An entry counts unless its own record says the tail is owed. A record with no
+    `complete` key predates those records and says nothing either way; treating
+    one as not-extracted would rewrite the meaning of every index written before
+    #1151, so `nightly_extraction` refutes such a record by document size when it
+    can and leaves it alone when it cannot.
+    """
+    return sum(1 for entry in (index_data.get("hashes") or {}).values()
+               if not (isinstance(entry, dict) and entry.get("complete") is False))
 
 
 class ContentHasher:
@@ -77,7 +97,29 @@ class ContentHasher:
         return h.hexdigest()
 
     def has_changed(self, path: Path) -> bool:
-        """Check if a file has changed since last recorded hash."""
+        """Does this file still need processing?
+
+        Two ways to need it, not one. The obvious one: the bytes moved under the
+        recorded digest. The other — the one this method could not express until
+        #1151 — the recorded digest is a perfect match and still stands for less
+        than the file, because the pass that recorded it stopped at the end of its
+        chunk budget with the tail unread. An entry recorded that way carries
+        `complete: false`, and reading its digest as "done" is how a 957,489-char
+        feed sat in this index at 4.9% coverage, re-skipped every night.
+
+        An entry written before #1151 carries no `complete` key and therefore
+        keeps the old answer: digest match means done. Defaulting that the other way
+        would put every legacy entry back in the queue at once — however many the
+        index holds the morning this ships, and the count moves with pruning —
+        turning one night's extraction into a re-extraction of the corpus. The
+        bounded migration lives in `nightly_extraction._extract_all_facts`, which
+        re-reads a digest-less entry only when the file is too long for a single
+        pass to have finished it.
+
+        The entry keeps its digest in that case; what the flag changes is only
+        this answer. Withholding the digest instead would restart the next pass at
+        offset 0 forever, and a 955k-char document would never be finished either.
+        """
         key = str(path)
         current_hash = self._hash_file(path)
         if not current_hash:
@@ -85,14 +127,42 @@ class ContentHasher:
         stored = self._hashes.get(key, {})
         if isinstance(stored, str):
             return stored != current_hash  # legacy format: bare hash string
-        return stored.get("sha256") != current_hash
+        if stored.get("sha256") != current_hash:
+            return True
+        return not stored.get("complete", True)
+
+    def coverage(self, path: Path) -> tuple:
+        """`(chars_covered, sha256)` for one path, from the stored entry.
+
+        `chars_covered` is -1 when the entry records no coverage — every entry
+        written before #1151, and any written by a caller that hashed a file it
+        never read — which is not the same as 0: it asserts nothing about how much
+        of the document was read, so a caller cannot treat it as finished. An
+        unknown path is `(0, "")`.
+        """
+        stored = self._hashes.get(str(path), {})
+        if isinstance(stored, str):
+            return (-1, stored)
+        covered = stored.get("covered_through")
+        return (-1 if covered is None else int(covered), stored.get("sha256", ""))
 
     def get_changed_files(self, paths: list[Path]) -> list[Path]:
         """Filter a list of paths to only those that have changed."""
         return [p for p in paths if self.has_changed(p)]
 
-    def update_hash(self, path: Path, sha256: Optional[str] = None):
-        """Record the digest of one file.
+    def update_hash(self, path: Path, sha256: Optional[str] = None,
+                    covered_through=None, complete: bool = True):
+        """Record the digest of one file, and how far of it that pass read.
+
+        `covered_through` is the char offset the recording pass stopped at and
+        `complete` says whether that offset was the end of the document. Both
+        default to what a caller that only knows the digest can mean — "the whole
+        file, done" — so every caller that predates #1151 keeps its old meaning and
+        no legacy entry becomes unfinished just by being read by new code. The
+        nightly extraction pass is the one caller that reads a bounded window and
+        must therefore say so: it records `complete=False` with the offset it
+        reached, and `has_changed` answers "changed" from that flag even while the
+        digest still matches.
 
         Pass `sha256` — the digest of the bytes the caller actually read — from
         any code path that read the file itself. Re-hashing here instead records
@@ -115,18 +185,26 @@ class ContentHasher:
             self._hashes[key] = {
                 "sha256": digest,
                 "checked_at": datetime.now(timezone.utc).isoformat(),
+                # `None` covered_through is every caller that has no coverage to
+                # report — the CLI route below, and every entry that predates
+                # #1151. `coverage()` reads that as -1 ("nothing is asserted"),
+                # never as "0 chars read".
+                "covered_through": (None if covered_through is None
+                                    else max(0, int(covered_through))),
+                "complete": True if covered_through is None else bool(complete),
             }
 
-    def update_hashes(self, paths: Iterable[Union[Path, tuple[Path, str]]]):
+    def update_hashes(self, paths):
         """Record digests for several files.
 
-        An item is either a `(path, sha256)` pair — the nightly extraction
-        checkpoint, which still holds the digest of the bytes it extracted — or
-        a bare path, hashed from disk.
+        An item is a bare path (hashed from disk), a `(path, sha256)` pair — the
+        nightly extraction checkpoint, which still holds the digest of the bytes it
+        extracted — or `(path, sha256, covered_through, complete)` once the caller
+        knows how far of the document it read (#1151).
         """
         for item in paths:
             if isinstance(item, tuple):
-                self.update_hash(item[0], item[1])
+                self.update_hash(*item)
             else:
                 self.update_hash(item)
 

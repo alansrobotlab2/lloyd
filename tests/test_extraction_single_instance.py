@@ -20,13 +20,24 @@ a `kill -9` or an OOM cannot strand a lock that wedges the pipeline forever.
 """
 from __future__ import annotations
 
+import json
+import os
+import re
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
 
-_NGM = "/home/alansrobotlab/lloyd/scripts/memory/next-gen-memory"
+# Tree-relative, like every other path in this checkout (#755). The absolute
+# form named the LIVE checkout, so a child interpreter spawned from a
+# self-modification worktree imported the live `nightly_extraction` while the
+# parent inspected its own copy — the silent hybrid that would let a
+# `PIPELINE_RESULT` assertion grade whatever happened to be deployed instead of
+# the code under test.
+ROOT = Path(__file__).resolve().parent.parent
+_NGM = str(ROOT / "scripts" / "memory" / "next-gen-memory")
 
 
 def _in_child(body: str) -> str:
@@ -112,3 +123,153 @@ def test_an_unusable_lock_path_does_not_block_extraction(ne, monkeypatch):
     `False` is distinct from `None` — only `None` means "someone else has it"."""
     monkeypatch.setattr(ne, "_LOCK_PATH", ne.Path("/proc/nope/x.lock"))
     assert ne.acquire_single_instance_lock() is False
+
+
+# ── the machine-readable summary carries coverage (#1151 clause 4) ───────────
+#
+# `PIPELINE_RESULT` is what `autonomy-data-pipeline` reads to decide whether the
+# corpus is healthy, and until now its whole vocabulary was
+# `files_processed` / `facts` / `failed` / `status`. A 60,000-char document from
+# which one pass can read at most 47,000 chars therefore reported exactly like a
+# document that was read: `failed=0 status=ran`. The shortfall existed only as a
+# `⚠️ capped at 6 chunks` line in prose (`run_24_20260917_153605.md:66`), and the
+# run then hashed the file and skipped it forever.
+#
+
+_MAIN_DRIVER = '''
+"""Run `nightly_extraction.main()` as the separate process it is.
+
+`argv[1]` is the test's tmp directory, which the environment points every state
+path at: `LLOYD_DATA` (the `_pipeline` root, and so the content-hash index),
+`LLOYD_FACTS_ROOT`, `LLOYD_EXTRACTION_LOCK`. `TEST_REPO_ROOT` names the checkout
+under test.
+
+Three things are replaced, and none of them is the code clause 4 is about: the
+model call answers with an empty fact list; Steps 2 and 3 (the relations-index
+rebuild and the overview pass) are stubbed, because they read the live fact tree
+and cost minutes; and the corpus is the one document the test wrote.
+`run_full_extraction`, the content-hash gate, the resume offset and the
+`PIPELINE_RESULT` line `main()` prints are all the real ones.
+"""
+import json
+import os
+import sys
+from pathlib import Path
+
+ROOT = Path(os.environ["TEST_REPO_ROOT"])
+sys.path.insert(0, str(ROOT / "scripts" / "memory" / "next-gen-memory"))
+sys.path.insert(0, str(ROOT))
+
+from app import kg_store                      # noqa: E402
+import fact_extractor as fx                   # noqa: E402
+import nightly_extraction as ne               # noqa: E402
+
+TMP = Path(sys.argv[1]).resolve()
+# The pipeline log and the content-hash index both live under `_pipeline`;
+# `ContentHasher.save` makes that directory, but the noop path writes its log
+# without ever saving, and a missing parent there is an OSError, not a noop.
+(TMP / "_pipeline").mkdir(parents=True, exist_ok=True)
+kg_store.configure(TMP / "kg.sqlite")
+
+
+class _StubIndex:
+    def rebuild(self):
+        return {"total_relationships": 0}
+
+
+class _StubOverviews:
+    def regenerate_all(self, workers=8):
+        return 0
+
+
+class _Headless(ne.NightlyExtraction):
+    def __init__(self):
+        super().__init__()
+        self.rel_generator = _StubIndex()
+        self.profile_generator = _StubOverviews()
+
+
+ne.NightlyExtraction = _Headless
+ne.VAULT = TMP
+ne._load_pipeline_config = lambda: {"sources": {"paths": ["docs"]}}
+fx.FactExtractor._call_llm = lambda self, prompt: json.dumps(
+    {"entity": "", "category": "state", "facts": []})
+
+sys.argv = ["nightly_extraction.py"]
+ne.main()
+'''
+
+DOC_CHARS = 60_000
+
+
+def _run_main(tmp_path) -> str:
+    """One real `main()` in a child interpreter over `tmp_path`; returns stdout."""
+    env = dict(os.environ,
+               TEST_REPO_ROOT=str(ROOT),
+               LLOYD_DATA=str(tmp_path),
+               LLOYD_FACTS_ROOT=str(tmp_path / "facts"),
+               LLOYD_EXTRACTION_LOCK=str(tmp_path / "extraction.lock"))
+    # The index under test is the one under LLOYD_DATA, not an inherited
+    # override pointing at a live run's resume point.
+    env.pop("LLOYD_CONTENT_HASHES", None)
+    r = subprocess.run([sys.executable, str(tmp_path / "driver.py"), str(tmp_path)],
+                       capture_output=True, text=True, timeout=300, env=env,
+                       cwd=str(tmp_path))
+    assert r.returncode == 0, r.stderr[-3000:]
+    return r.stdout
+
+
+def _result_fields(stdout: str) -> dict:
+    lines = [ln for ln in stdout.splitlines() if ln.startswith("PIPELINE_RESULT")]
+    assert len(lines) == 1, f"expected exactly one summary line, got:\n{stdout[-2000:]}"
+    return dict(kv.split("=", 1) for kv in lines[0].split()[1:])
+
+
+def _result_json(stdout: str) -> dict:
+    """The summary dict `main()` prints as `Result: {…}`.
+
+    Anchored at a line start, not split on the bare substring: the extraction log
+    interleaves model chatter, and one `Result:` inside a log line or a fact body
+    would silently hand back the wrong object — a JSON decoder starting at the
+    wrong brace usually still decodes *something*.
+    """
+    hit = re.search(r"^Result: ", stdout, re.MULTILINE)
+    assert hit, f"no `Result:` summary line in\n{stdout[-2000:]}"
+    return json.JSONDecoder().raw_decode(stdout[hit.end():].strip())[0]
+
+
+def test_the_pipeline_result_names_documents_whose_tail_went_unread(tmp_path):
+    """Three runs over one 60,000-char document — past the 47,000 one pass can
+    cover. Run 1 reports `truncated=1` and names the document in the summary
+    dict while still reporting `failed=0`; run 2 resumes at the stored offset,
+    reads the tail and reports `truncated=0`; run 3 has nothing left to read and
+    still carries the field."""
+    (tmp_path / "driver.py").write_text(_MAIN_DRIVER, encoding="utf-8")
+    (tmp_path / "facts").mkdir()
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    doc = docs / "feed.md"
+    doc.write_text("".join("CELL%06d" % c + "y" * 90 for c in range(600)),
+                   encoding="utf-8")
+    assert len(doc.read_text(encoding="utf-8")) == DOC_CHARS
+
+    first = _run_main(tmp_path)
+    fields = _result_fields(first)
+    assert fields["failed"] == "0" and fields["files_processed"] == "1"
+    assert fields["truncated"] == "1", (
+        "a document whose tail went unread is invisible in the summary: "
+        "failed=0 again means full coverage")
+    assert _result_json(first)["truncated_files"] == ["docs/feed.md"]
+
+    second = _run_main(tmp_path)
+    assert _result_fields(second)["truncated"] == "0", (
+        "the second pass never finished the document, or the field is sticky")
+    entry = json.loads((tmp_path / "_pipeline" / "content-hashes.json").read_text()) \
+        ["hashes"][str(doc)]
+    assert entry["covered_through"] == DOC_CHARS
+    assert entry["complete"] is True
+
+    third = _run_main(tmp_path)
+    late = _result_fields(third)
+    assert late["files_processed"] == "0", "a fully covered document was extracted again"
+    assert late["truncated"] == "0"

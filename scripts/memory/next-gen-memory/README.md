@@ -48,12 +48,27 @@ cd ~/lloyd/scripts/memory/next-gen-memory
 It prints one machine-readable line the autonomy skill branches on:
 
 ```
-PIPELINE_RESULT files_processed=3 facts=12 failed=0 status=ran
+PIPELINE_RESULT files_processed=3 facts=12 failed=0 truncated=0 status=ran
 ```
 
 `failed=N` counts documents whose extraction raised. Those files are **not**
 content-hashed, so the next run retries them — an LLM error used to return an
 empty fact list, which marked the document extracted forever.
+
+`truncated=N` counts documents this run read only as far as the one-pass chunk
+budget (`fact_extractor.CHUNK_BUDGET_CHARS`, 47,000 chars). Their coverage offset
+is recorded and they are **not** marked done, so the next run continues from that
+offset — but nothing past it has been read yet. **`failed=0` no longer means the
+corpus was read: branch on `truncated` too.** The document paths are in the JSON
+`Result:` block as `truncated_files`, not on this line, which stays `key=value`
+tokens a caller can split.
+
+This line is a contract with its readers, and `tests/test_fact_extractor.py`
+checks this file against the code. Two of them matter most:
+`skills/autonomy-data-pipeline/SKILL.md` parses it as the gate for the rest of the
+nightly chain, and `kg_rebuild.py` decides whether a rebuilt knowledge tree may be
+promoted from the same content-hash index this step writes — which is why an entry
+written for a capped pass carries `complete: false` and is not counted there.
 
 ## What a fact carries
 
