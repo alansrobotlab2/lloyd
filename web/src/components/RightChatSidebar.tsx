@@ -5,6 +5,7 @@ import { type LocalAudioTrack, type RemoteAudioTrack } from 'livekit-client'
 import ChatPanel from './ChatPanel'
 import { AgentAudioVisualizerAura } from './agents-ui/agent-audio-visualizer-aura'
 import { WakeStatePill } from './agents-ui/wake-state-pill'
+import { VoiceInterruptButton, useSpeakingHold } from './VoiceInterruptButton'
 import { Button } from '@/components/ui/button'
 import {
   Tooltip,
@@ -310,6 +311,8 @@ export default function RightChatSidebar({ isMobile = false }: { isMobile?: bool
     smoothingTimeConstant: 0.4,
   })
   const isSpeaking = agentVolume > AGENT_SPEAKING_THRESHOLD
+  // Interrupt stays clickable across the gaps between words.
+  const canInterrupt = useSpeakingHold(isSpeaking) && status === 'connected'
 
   // Aura state machine, computed locally:
   //   - 'idle' when the room isn't connected
@@ -515,6 +518,14 @@ export default function RightChatSidebar({ isMobile = false }: { isMobile?: bool
               <Square className="w-3.5 h-3.5 mr-1.5" />
               Stop
             </Button>
+            {/* Click-to-interrupt Lloyd's speech. Present whenever the
+                room exists (voice engaged); enabled while he is talking. */}
+            {room && (
+              <VoiceInterruptButton
+                active={canInterrupt}
+                onInterrupt={() => { void room.interrupt() }}
+              />
+            )}
             <Button
               variant={agentDetails ? 'secondary' : 'outline'}
               size="sm"
