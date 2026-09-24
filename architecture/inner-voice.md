@@ -1,6 +1,6 @@
 ---
 title: Inner Voice — Architecture
-status: active
+status: implemented
 created: 2026-05-02
 updated: 2026-09-18
 related:

@@ -293,6 +293,12 @@ def infer_type(path: Path, fm: dict, body: str,
 
     if top == "autonomy":
         return "autonomy"
+    # A backlog task is `type: backlog` — the value every writer of one stamps
+    # (`backlog_write_task`, the Mission Control router). With no branch it fell
+    # to the catch-all `note`, which satisfies the OKF gate while erasing the
+    # semantic the gate protects; 46 task files carried it on 2026-09-09 (#585).
+    if top == "backlog":
+        return "backlog"
     if name == "SKILL.md" or top == "skills":
         return "skill"
     if top == "people":

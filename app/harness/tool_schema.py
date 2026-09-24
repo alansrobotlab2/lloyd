@@ -35,9 +35,11 @@ OPENAI_TOOL_NAME_MAX = 64
 # Every advertised tool carries one extra string parameter the model fills
 # in with a short phrase describing what the call is doing. It is display
 # metadata only: `_commit_tool_calls` lifts it off the parsed arguments and
-# onto the `tool_call` event, and it never reaches the MCP server — the
-# aggregator validates arguments against each tool's real inputSchema, so an
-# unknown key there is a dispatch error, not a spare field.
+# onto the `tool_call` event, and it never reaches the MCP server. Nothing
+# validates `arguments` against a tool's inputSchema — the pool coerces
+# top-level primitives only (`mcp_pool._coerce_args`) and unknown keys reach
+# the handler — so keeping it out is the harness's job, not the server's:
+# a leaked caption would land in the handler's arguments unannounced.
 SUMMARY_ARG = "summary"
 
 SUMMARY_PROPERTY: dict[str, Any] = {

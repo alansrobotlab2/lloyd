@@ -97,7 +97,11 @@ ada.zip
 /morning-brief-*.md
 
 # retrieval eval run outputs (summary numbers live in architecture/subliminal.md)
-eval/baselines/
+# `/*`, not `/`: git never reads a negation inside an ignored DIRECTORY, so the
+# directory form would make the carve-out below inert. The per-skill paired
+# table (#548/#1173) is the one committable artifact; its runs/ sidecars stay out.
+eval/baselines/*
+!eval/baselines/skill-ab-*.md
 
 # scratch output some tools drop in the repo root
 /tmp/

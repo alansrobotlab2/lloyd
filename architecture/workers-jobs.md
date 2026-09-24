@@ -37,19 +37,20 @@ the order the pool considers them.
 
 ## 1. The roster
 
-Twelve sources are registered. Priority is `DEFAULT_PRIORITY` unless config
+Thirteen sources are registered. Priority is `DEFAULT_PRIORITY` unless config
 overrides it (`youtube-digest` and `arch-review` do), and **lower runs sooner**.
 
 | source | family | prio | cadence | inflight | turn path | KV-gated | IV | on |
 |---|---|---|---|---|---|---|---|---|
 | `scheduled-task` | dispatch | 10–70 | 60 s | 2 | `run_query` direct, recorded | no | per task | yes |
-| `autocode` | self-mod | 40 | 900 s | 1 | session | **yes** | on | yes |
-| `youtube-digest` | intake | **45** | 300 s | 1 | session | no | on | yes |
+| `autocode` | self-mod | 40 | 900 s | 1 | session | **yes** | off | yes |
+| `youtube-digest` | intake | **45** | 300 s | 1 | session | no | off | yes |
 | `gap-fill` | mining | 50 | 300 s | 2 | direct (primary) | no | — | yes |
-| `autotriage` | self-mod | 55 | 900 s | 1 | session | **yes** | on | yes |
+| `autotriage` | self-mod | 55 | 900 s | 1 | session | **yes** | off | yes |
 | `autoresearch` | self-mod | 60 | 3600 s | 1 | own script | no | — | **no** |
-| `arch-review` | self-mod | **62** | 1800 s | 1 | session | **yes** | on | yes |
+| `arch-review` | self-mod | **62** | 1800 s | 1 | session | **yes** | off | yes |
 | `backlog-cluster` | self-mod | 65 | 3600 s poll | 1 | none (numpy) | no | — | yes |
+| `board-steward` | self-mod | 68 | 900 s | 1 | session (primary) | no | off | yes |
 | `deep-research` | intake | 70 | 3600 s | 1 | session | **yes** | off | yes |
 | `session-distill` | mining | 70 | 1800 s | 1 | direct (primary) | no | — | yes |
 | `automod-regression` | self-mod | 70 | 3600 s | 1 | none (subprocess) | no | — | yes |
@@ -63,9 +64,12 @@ sources declare it; `backlog-cluster` declares it `False` explicitly.
 **IV** is `workers.sources.<name>.inner_voice`, and `—` is not "off": it is
 meaningful only on a source that runs through `run_prompt_in_session`, because
 the observer is wired in `app/routers/messages.py` and nowhere else.
-`/api/workers/health` reports it tri-state for exactly that reason. config.yaml
-sets `inner_voice: false` on `backlog-cluster`, which runs no agent turn at
-all — harmless, and the one value the tri-state exists to avoid.
+`/api/workers/health` reports it tri-state for exactly that reason. Every
+session source sets it `false` explicitly, and a session source with no key
+reads as off too: `source_inner_voice` falls back to False since #1015, when
+`board-steward` shipped unkeyed and was observed by nobody's decision.
+`tests/test_background_inner_voice.py` discovers the session sources from
+`workers/sources/*.py` rather than naming them.
 
 ## 2. What actually ran
 
@@ -238,6 +242,29 @@ No session, deliberately: a clustering pass is arithmetic, not a judgement
 anyone needs to review.
 
 Long version: [[automod]] §clustering.
+
+### `board-steward` — one judgment beside the state machine
+
+**Wakes** every 900 s and enqueues one pass (`board-steward:tick`). **Executes**
+as one session on the **primary** (`inner_voice: false`): it reads the ledger
+events since its last run and up to 80 open items, and answers with one
+structured object — a list of board moves and the item `autocode` should take
+next. It runs on the primary because on the secondary it made ordering errors
+in two of five dry-runs and its live tick died at `max_turns` on tool reads
+with no answer; a two-minute judgment every fifteen minutes is a cost the
+primary carries, and the round hold keeps it off the engine while a round runs.
+
+**Writes** nothing to the board while `apply: false`, which is the shipped
+state: it records how far its answer agrees with what the state machine would
+have done, and that record is what decides whether `apply` flips. The state
+machine in `scripts/automod/backlog.py` is still the writer today — the
+module docstring's "the replacement" is the plan, not the present. With
+`apply: true` one mechanical writer would apply its moves and
+`select_confirmed` would take its pick.
+
+**It may never set `done`.** Closing is gated on a settled promotion whose
+outcome said `met` and stays mechanical in `close_settled_items`: a closed
+item is never re-triaged, so it is the one move the loop cannot recover from.
 
 ### `autotriage` — is this backlog item still true?
 

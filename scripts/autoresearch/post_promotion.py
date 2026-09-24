@@ -7,9 +7,10 @@ The defect this was filed on
 ----------------------------
 `promote()` decides, writes and logs, and then nothing ever looks again.
 `rollback()` (:mod:`scripts.autoresearch.promote`) had one entry point, the manual
-`autoresearch_rollback` MCP handler, when this was written; across the live ledger's
-30,953 rows the string `rollback`/`revert` appears **0** times while
-`"promoted": true` appears 65 — no promotion had ever been detected as a
+`autoresearch_rollback` MCP handler, when this was written. Measured on
+2026-09-10 over the live ledger (`_pipeline/research/ledger.jsonl`, 30,953 rows
+then), the string `rollback`/`revert` appeared **0** times while
+`"promoted": true` appeared 65 — no promotion had ever been detected as a
 false positive, because nothing re-measured anything after a promotion landed.
 `run_round.py`'s only reference to prior rounds was
 :func:`~scripts.autoresearch.common.find_last_promoted_variant`, used for parent

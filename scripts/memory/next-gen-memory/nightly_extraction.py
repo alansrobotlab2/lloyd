@@ -504,8 +504,7 @@ class NightlyExtraction:
 
         eligible_files = self._eligible_files(full_mode)
 
-        total_files = len(eligible_files)
-        print(f"Found {total_files} eligible files")
+        print(f"Found {len(eligible_files)} eligible files")
 
         # Skip files whose recorded extraction is DONE and unchanged. Applied in
         # BOTH window and full mode so --full is a resumable backfill that skips
@@ -599,6 +598,12 @@ class NightlyExtraction:
         if limit and limit > 0 and len(eligible_files) > limit:
             print(f"Limiting this run to {limit} of {len(eligible_files)} eligible files")
             eligible_files = eligible_files[:limit]
+
+        # The `[N/M]` denominator is the queue this run will actually work, set
+        # after BOTH the hash skip and the `--limit` cap. It was taken from the
+        # pre-skip scan, so a finished run's last line read `[6/31]` (#1011); the
+        # scan size stays on the `Found … eligible` / `Skipped …` lines above.
+        total_files = len(eligible_files)
 
         # Incremental checkpoint: persist hashes for already-processed files every
         # CHECKPOINT_EVERY files so a timeout/kill never loses the whole run's work.

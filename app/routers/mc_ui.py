@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import mc_state
 from app.paths import LLOYD_HOME, SESSIONS_DIR
-from app.sessions_io import is_conversation_session
+from app.sessions_io import is_background_session_name, is_conversation_session
 
 logger = logging.getLogger("lloyd-server")
 
@@ -322,10 +322,27 @@ def _summarize_background() -> dict:
             "by_source": by_source, "recent": rows}
 
 
+_CHAT_SCAN_CEILING = 400
+
+
 def _summarize_chat() -> dict:
+    """The Chat tab's summary for `mc_navigate` — its only caller.
+
+    Skips a background-named file unread, as `_summarize_background` and
+    `/api/sessions` do (#1228): `is_conversation_session` rejects every such
+    name anyway, so reading one first only cost the parse. The walk stops at
+    five rows or `_CHAT_SCAN_CEILING` files opened, so a directory with fewer
+    than five chats does not read every file it holds.
+    """
     sessions = []
+    opened = 0
     for sf in sorted(SESSIONS_DIR.glob("*.json"),
                       key=lambda f: f.stat().st_mtime, reverse=True):
+        if is_background_session_name(sf.name):
+            continue
+        if opened >= _CHAT_SCAN_CEILING:
+            break
+        opened += 1
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))
             # One predicate with `/api/sessions`, so the summary the model

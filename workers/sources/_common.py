@@ -165,7 +165,7 @@ def turn_timeout_for(source: str, default: float = 3600.0) -> float:
     return float(max(60, cap - POOL_TIMEOUT_MARGIN_SECONDS))
 
 
-def source_inner_voice(source: str, default: bool = True) -> bool:
+def source_inner_voice(source: str, default: bool = False) -> bool:
     """Whether the Inner Voice observer watches this source's turns.
 
     The second axis. Every background run is *recorded* — cheap, universal,
@@ -180,11 +180,15 @@ def source_inner_voice(source: str, default: bool = True) -> bool:
     `deep-research` came to pass `inner_voice=False` as a literal, unreachable
     from config, while `youtube-digest` read the key.
 
-    The fallback is True because that is what the four session-backed sources
-    do today; config.yaml is where a source turns it off. Only a source that
-    runs through `run_prompt_in_session` can be observed at all — the observer
-    is wired in `app/routers/messages.py` and nowhere else — so the key means
-    nothing on a `run_prompt_on_primary` source and is not set for one.
+    The fallback is False (#1015). It was True, and `board-steward` — added
+    the same day cut 1 of senses-not-supervision turned the observer off on
+    every keyed source — named no answer and so was watched on the primary
+    every 900 s without anyone deciding it should be. An unkeyed source now
+    reads as the fleet default, off; being observed is something config.yaml
+    has to say. Only a source that runs through `run_prompt_in_session` can
+    be observed at all — the observer is wired in `app/routers/messages.py`
+    and nowhere else — so the key means nothing on a `run_prompt_on_primary`
+    source and is not set for one.
     """
     try:
         from workers.sources import get_sources_config

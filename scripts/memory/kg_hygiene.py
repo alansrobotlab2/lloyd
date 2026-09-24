@@ -157,11 +157,15 @@ def _parse_ts(v) -> float | None:
         return None
 
 
-def _born(d: Path) -> float:
+def _born(d: Path) -> float | None:
     """When this entity first existed: the earliest fact `created_at` in the
     directory, falling back to file mtime. mtime alone is unreliable — a bulk
     revert, merge or retag rewrites every file and makes a year-old entity look
-    born today (6,625 "new" dirs after the 2026-09-03 repairs)."""
+    born today (6,625 "new" dirs after the 2026-09-03 repairs).
+
+    None when the directory vanished after it was listed — the entity sweep
+    renames dirs while this runs, and a monitor that dies on its subject being
+    edited reports nothing at all (#1404)."""
     best: float | None = None
     mtimes = []
     for f in d.glob("*.md"):
@@ -179,14 +183,26 @@ def _born(d: Path) -> float:
                         best = t
     if best is not None:
         return best
-    return min(mtimes) if mtimes else d.stat().st_mtime
+    if mtimes:
+        return min(mtimes)
+    try:
+        return d.stat().st_mtime
+    except OSError:
+        return None
 
 
 def regrowth(root: Path = VAULT_FACTS_ROOT, days: int = 7,
              now: float | None = None) -> dict[str, Any]:
     s = sweep()
     now = now or dt.datetime.now().timestamp()
-    born = {d.name: _born(d) for d in iter_entity_dirs(root)}
+    born: dict[str, float] = {}
+    vanished = 0
+    for d in iter_entity_dirs(root):
+        t = _born(d)
+        if t is None:
+            vanished += 1
+        else:
+            born[d.name] = t
     by: dict[str, list[str]] = defaultdict(list)
     for n in born:
         by[s.normalize_full(n)].append(n)
@@ -198,7 +214,10 @@ def regrowth(root: Path = VAULT_FACTS_ROOT, days: int = 7,
             dups.append(n)
             tiers[s.classify_pair(n, older[0])[0]] += 1
     return {"days": days, "new_dirs": len(new), "near_dup_new": len(dups),
-            "by_tier": dict(tiers), "samples": dups[:8]}
+            "by_tier": dict(tiers), "samples": dups[:8],
+            # A dir renamed mid-pass is skipped, not fatal; counted so a mass
+            # skip reads as one and not as a quietly smaller denominator.
+            "skipped_vanished": vanished}
 
 
 def snapshot(root: Path = VAULT_FACTS_ROOT, days: int = 7) -> dict[str, Any]:

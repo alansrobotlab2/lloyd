@@ -655,21 +655,24 @@ It runs from its own venv (`.venvs/qwen3-tts`) under
 `config.yaml`. `start-qwen3-tts.sh` waits for :8090 to be free rather than
 killing whatever holds it — supervisord owns process lifecycle.
 
-**Eager loading is a supervisor setting, not a script one, and it is what makes
-a restart survivable.** The backend defaults to lazy, and this tree's
+**Eager loading is the launcher's default, and it is what makes a restart
+survivable.** The backend defaults to lazy, and this tree's
 `compile_mode: max-autotune` makes the first synthesis request pay the inductor
 autotune: measured 2026-09-19, the stack restarted at 19:54, the first voice
 turn arrived at 20:04:42 and audio came out at 20:08:48 — 4 min 6 s, of which
-"Warmup 1/3 streaming" alone was 2 min 59 s. `TTS_LAZY_LOAD=false` in
-`agent-tts.conf` loads and compiles inside uvicorn's lifespan instead, which
-means `:8090` does not answer `/health` for ~4 min after every restart — the
-right place to spend it, and the reason that window is *warming*, not down.
-The cost of the lazy path is not only latency: `TTSStreamer._http` is one
-serial client with `read=120.0`, so an utterance that waits longer than that is
-discarded rather than delayed — that same incident lost "One moment." and
-"Honestly?" exactly 120 s apart. The knob is not exported by the launch script,
-so hand-running `start-qwen3-tts.sh` is the lazy path and reproduces that
-incident (#1446).
+"Warmup 1/3 streaming" alone was 2 min 59 s. `TTS_LAZY_LOAD=false` loads and
+compiles inside uvicorn's lifespan instead, which means `:8090` does not answer
+`/health` for ~4 min after every restart — the right place to spend it, and the
+reason that window is *warming*, not down. The cost of the lazy path is not only
+latency: `TTSStreamer._http` is one serial client with `read=120.0`, so an
+utterance that waits longer than that is discarded rather than delayed — that
+same incident lost "One moment." and "Honestly?" exactly 120 s apart.
+Since #1446 the launcher itself carries that default and the reason for it:
+`start-qwen3-tts.sh` exports `${TTS_LAZY_LOAD:-false}`, so the script a person
+runs by hand boots the same engine `agent-tts` boots. The `:-` form is what
+keeps `agent-tts.conf`'s `environment=` line the operator's override — a hard
+export in the launcher would clobber a value supervisor injected, and the conf's
+`environment=` is still where a deliberate return to lazy belongs.
 
 **Two models, and which one is default is a latency decision.**
 `0.6B-CustomVoice` serves the built-in speakers (Vivian, Ryan);
@@ -1252,3 +1255,9 @@ and is history, not reference.
   `~/.lloyd/ww_diag`, outside the data root), #1445 (the spoken rewrite now runs
   on the primary), #1446 (the eager-load knob lives only in `agent-tts.conf`),
   #1447 (GPU placement comments contradict their own pins).
+- 2026-09-24 — #1446 landed the same day it was filed. `start-qwen3-tts.sh` now
+  defaults `TTS_LAZY_LOAD` to `false` through `${TTS_LAZY_LOAD:-false}` and
+  carries the reason in its own comments, so the launcher is the definition and
+  the conf's `environment=` is the override; "lives only in `agent-tts.conf`"
+  above describes the tree before that fix. Pinned by
+  `tests/test_qwen3_tts_launcher.py` and `tests/test_voice_doc_claims.py`.

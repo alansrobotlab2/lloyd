@@ -10,6 +10,7 @@ Each skill is a folder containing a SKILL.md with YAML frontmatter
 """
 
 import json
+import logging
 import re
 from pathlib import Path
 from typing import Iterator, NamedTuple, Optional
@@ -21,6 +22,8 @@ from mcp.types import Tool
 # Local alias preserves the existing internal name `_QUERY_STOPWORDS` so
 # the rest of skills.py doesn't change.
 from agent_mcp._shared import _SKILLS_QUERY_STOPWORDS as _QUERY_STOPWORDS, text_result
+
+logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -83,8 +86,19 @@ _QUARANTINE_STATUSES = {"inactive", "archived", "disabled", "retired", "quaranti
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _parse_frontmatter(content: str) -> tuple[dict, str]:
-    """Return (frontmatter_dict, body_text). Body is everything after the closing ---."""
+# (source, front-matter text) pairs already warned about, so a skill walked on
+# every search logs its broken block once per edit, not once per call.
+_WARNED_UNPARSEABLE: set[tuple[str, int]] = set()
+
+
+def _parse_frontmatter(content: str, source: str = "") -> tuple[dict, str]:
+    """Return (frontmatter_dict, body_text). Body is everything after the closing ---.
+
+    An unparseable block still yields `{}` — the skill loads, with no
+    description and no tags — but it is no longer silent (#561): a skill in
+    that state has quietly left retrieval while looking installed, so the
+    parse error is logged once, naming `source` (the skill) when given.
+    """
     if not content.startswith("---"):
         return {}, content
     end = content.find("\n---", 3)
@@ -94,7 +108,14 @@ def _parse_frontmatter(content: str) -> tuple[dict, str]:
     body = content[end + 4:].strip()
     try:
         fm = yaml.safe_load(fm_text) or {}
-    except Exception:
+    except Exception as exc:
+        key = (source, hash(fm_text))
+        if key not in _WARNED_UNPARSEABLE:
+            _WARNED_UNPARSEABLE.add(key)
+            logger.warning(
+                "skills: front matter of %s does not parse (%s); it loads with "
+                "no description or tags and drops out of retrieval",
+                source or "a skill", str(exc).splitlines()[0] if str(exc) else type(exc).__name__)
         fm = {}
     return fm, body
 
@@ -108,7 +129,7 @@ def _load_skill(skill_dir: Path) -> Optional[dict]:
         content = skill_file.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    fm, body = _parse_frontmatter(content)
+    fm, body = _parse_frontmatter(content, source=f"skill {skill_dir.name!r} ({skill_file})")
     status = str(fm.get("status", "") or "").strip().lower()
     if status in _QUARANTINE_STATUSES:
         # Quarantined — present on disk but pulled from retrieval.
@@ -227,7 +248,8 @@ def iter_active_skills(overlay: Optional[Path] = None,
                 content = skill_file.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 content = ""
-            fm, _body = _parse_frontmatter(content)
+            fm, _body = _parse_frontmatter(
+                content, source=f"skill {entry.name!r} ({skill_file})")
             status = str(fm.get("status", "") or "").strip().lower()
             if status in _QUARANTINE_STATUSES:
                 continue

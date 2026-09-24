@@ -539,9 +539,12 @@ def snapshot_current_prompts(cfg: AutoresearchConfig) -> Path:
     # A snapshot is the only rollback point a promotion has, and `mkdir` had
     # been the whole guarantee: a copy that raised still left a directory, so
     # `promote` went on to overwrite the live contract with nothing to restore.
-    # 26 of the ledger's 83 promotions have no matching snapshot. Found while
-    # writing `test_promote_refuses_when_the_snapshot_cannot_be_written` on
-    # 2026-09-06 and carried as an xfail until now.
+    # On 2026-09-06, writing `test_promote_refuses_when_the_snapshot_cannot_be_
+    # written`, 26 promotions were counted with no matching snapshot; the
+    # denominator quoted then was never sourced. This guard is what closed that:
+    # measured 2026-09-19, every one of the 67 snapshot dirs held a prompt file
+    # (#784). It stays because it is the reason that coverage holds, not a
+    # response to a defect still open.
     if not any(name in CANONICAL_PROMPTS for name in saved):
         raise RuntimeError(
             f"snapshot {snap_dir} holds no prompt file — refusing to promote "

@@ -80,8 +80,9 @@ META_BASE_URL = "lloyd/base_url"
 
 # `_meta` key carrying the model's own one-line caption for THIS call (the
 # injected `summary` display parameter). It travels here rather than in
-# `args` for the same reason the session id does — the aggregator validates
-# `args` against each tool's real inputSchema — but also because a caption
+# `args` for the same reason the session id does — `args` is what the
+# handler receives (nothing validates it against the inputSchema; unknown
+# keys reach the handler as if they were parameters) — but also because a caption
 # in `args` is a caption in `tool_input`, which is what the repetition guard
 # hashes: two identical calls reworded would stop comparing equal.
 #
@@ -103,8 +104,9 @@ META_SUMMARY = "lloyd/summary"
 # change ledger records a file write against (session, turn) so a chat can
 # show "changed 2 files" and offer a revert; `call_id` is what ties an entry
 # back to the Edit that made it. They ride in `_meta` for the same reason
-# everything else here does — `args` is validated against each tool's real
-# inputSchema, and is what the repetition guard hashes. Must match
+# everything else here does — `args` is what the handler receives (unknown
+# keys are not rejected, they reach it), and is what the repetition guard
+# hashes. Must match
 # agent_mcp.main.META_TURN_ID / META_CALL_ID.
 META_TURN_ID = "lloyd/turn_id"
 META_CALL_ID = "lloyd/call_id"
@@ -485,9 +487,10 @@ class MCPPool:
 
         `session_id`, `model`, `base_url` and `summary` travel in the
         request's ``_meta``, not in ``args``.
-        The MCP server validates ``args`` against the tool's inputSchema
-        before its handler runs, so anything injected there is validated
-        as a real parameter; ``_meta`` is the field the spec reserves for
+        Nothing validates ``args`` against the tool's inputSchema: top-level
+        primitives are coerced only (``_coerce_args``) and unknown keys reach
+        the handler, so anything injected there arrives as though it were a
+        real parameter; ``_meta`` is the field the spec reserves for
         exactly this kind of implementation metadata.
 
         `effect_scope` (#544) rides in ``_meta`` for the same reason and is
@@ -813,10 +816,12 @@ def _coerce_args(args: dict[str, Any], schema: dict[str, Any] | None) -> dict[st
     """Coerce primitive args to match the tool's inputSchema.
 
     vLLM occasionally emits string-shaped scalars (`"5"` for an integer
-    field, `"true"` for a boolean) and MCP's strict jsonschema validator
-    rejects them. We coerce best-effort using the declared `type` of each
-    top-level property; anything ambiguous is passed through untouched
-    so the validator can still surface real errors.
+    field, `"true"` for a boolean) and a handler reading a typed field
+    would get the wrong type. We coerce best-effort using the declared
+    `type` of each top-level property; anything ambiguous is passed through
+    untouched. This is the only shape defense on the path: nothing
+    validates arguments against the inputSchema, and unknown keys reach the
+    handler, whose own checks are what surface a bad argument.
     """
     if not isinstance(args, dict) or not isinstance(schema, dict):
         return args

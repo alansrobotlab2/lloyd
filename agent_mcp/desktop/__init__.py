@@ -58,7 +58,9 @@ DEFAULTS: dict[str, Any] = {
     "push_frames": True,
     # How coordinates are spoken with the model: "pixels" of the screenshot,
     # or "norm1000" (0-1000 on each axis — how Qwen3-VL-family models ground).
-    # Chosen by eval/desktop_grounding, not by guess.
+    # "pixels" is an untested default, not a measured choice: nothing has
+    # measured which space the primary grounds in (architecture/desktop.md §7,
+    # #1421).
     "coordinate_space": "pixels",
 }
 

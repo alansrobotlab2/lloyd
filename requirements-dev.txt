@@ -1,0 +1,15 @@
+# Lloyd development-only packages (#1073, #1378).
+#
+# Install into the live venv by hand, when you need them:
+#   .venvs/lloyd/bin/python -m pip install -r requirements-dev.txt
+#
+# This file is NEVER installed by the automod gate's candidate venv — that rung
+# installs only from requirements.lock, else requirements.txt
+# (spec.touches_requirements does not name this file) — and it is NEVER frozen
+# into requirements.lock: the refreeze command in SETUP.md Part 4 and in the
+# lock's header excludes every package named here. Code that uses one of these
+# must import it lazily and degrade when it is absent.
+
+# Constraint solver for the declarative checks. Same pin every vLLM venv on
+# this box carries (agent-services/setup/*.versions.txt).
+z3-solver==4.15.4.0

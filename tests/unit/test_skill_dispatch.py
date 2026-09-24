@@ -699,3 +699,25 @@ def test_the_dispatch_marker_and_its_recogniser_cannot_drift():
         '<skill name="restart-lloyd" score="9">\nBODY\n</skill>'
     ) == set()
     assert sd.delivered_skill_names("") == set()
+
+
+def test_probe_reports_chars_measured_and_tokens_as_a_labelled_estimate(monkeypatch):
+    """#752: the probe used to report `avg_injected_tokens_per_event` from
+    chars/4 while the cap is in chars, so a capped body read as exactly 1500
+    "tokens" — the cap's arithmetic. It now reports chars, an estimate named
+    as one, and how many events hit the cap."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "skill_dispatch_probe_752",
+        Path(__file__).resolve().parents[2] / "eval" / "run_skill_dispatch_probe.py")
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    monkeypatch.setattr(sd, "skill_body", lambda name: "x" * (sd.MAX_DELIVERY_CHARS * 2))
+    report = probe.score([{"name": "Bash", "args": {"command": "yt-dlp x"}}],
+                         scanned_sessions=1)
+    row = next(r for r in report["per_protocol"].values() if r["triggered"])
+    assert "avg_injected_tokens_per_event" not in row
+    assert row["avg_injected_chars_per_event"] == sd.MAX_DELIVERY_CHARS
+    assert row["est_tokens_per_event_chars_div_4"] == sd.MAX_DELIVERY_CHARS / 4
+    assert row["capped_events"] == 1
+

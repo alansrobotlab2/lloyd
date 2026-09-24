@@ -35,9 +35,10 @@ failure, and the block is appended only to a *success* string — `text_result`
 sniffs a leading JSON object with an "error" key to set `isError`, so
 appending to an error payload would break the JSON and flip the flag.
 
-One constraint the second block adds: `_append_diagnostics` runs on the event
-loop, not in the edit's worker thread, so a graph read here would stall SSE
-chat and voice as well. `code_graph` loads 12 MB of JSON in ~0.2 s, which is
+One constraint the second block adds: an edit's latency. `_append_diagnostics`
+runs in a worker thread off the event loop (#726 — before that it ran on the
+loop, and pyflakes on two large images stalled SSE chat and voice), but the
+edit still waits for it. `code_graph` loads 12 MB of JSON in ~0.2 s, which is
 over budget, so the whole graph half runs in a daemon thread the edit joins
 for at most `RAIL_BUDGET_S` — too slow means no block, never a slow edit. The
 load lands in a per-root cache the next edit reuses, and the lookup after a
@@ -510,22 +511,17 @@ def _entry_for(cg: Any, root: str, deadline: float) -> Any:
 
 
 def _node_here(cg: Any, entry: Any, sym: str, edited_rel: str) -> str:
-    """Resolve `sym` and prove the node belongs to this file.
+    """Resolve `sym` to its node in this file, or "".
 
-    `resolve_symbol`'s own file narrowing is a *preference*: when nothing
-    matches the hint it falls back to every candidate. So the source_file
-    check here is the one that decides, and it is what stops a same-named
-    symbol in another module being reported as this edit's blast radius.
+    `resolve_symbol` treats the file hint as a filter (#725): a symbol with
+    no definition in `edited_rel` resolves to no node, so a same-named symbol
+    in another module is never reported as this edit's blast radius. The
+    re-check this function used to carry now lives in the resolver.
     """
+    if not edited_rel:
+        return ""
     res = cg.resolve_symbol(entry, sym, edited_rel)
-    node = res.node or ""
-    if not node:
-        return ""
-    try:
-        src = entry.graph.nodes[node].get("source_file") or ""
-    except Exception:
-        return ""
-    return node if _same_file(src, edited_rel) else ""
+    return res.node or ""
 
 
 def _call_sites(cg: Any, entry: Any, node: str, edited_rel: str) -> list[tuple[str, int]]:

@@ -19,6 +19,7 @@ summary: The markdown kanban at ~/obsidian/backlog/ — one file per task, a
   tools, write-time dedupe, and the tags the unattended loop writes on itself.
 type: reference
 date: 2026-09-13
+status: implemented
 
 ---
 

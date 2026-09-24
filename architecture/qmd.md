@@ -37,8 +37,8 @@ every measured change — is `architecture/retrieval.md`.
   process keeps what it loaded until it restarts.
 
 What the fork adds over upstream, newest first. `WORKLOG.md` covers the 09-07
-and 09-19 work; the two 2026-09-21 changes are fork commits `fa71e57` and
-`db52729` with no WORKLOG section yet (#1369):
+and 09-19 work in §6–7 and the two 2026-09-21 changes (fork commits `fa71e57`
+and `db52729`) in §8:
 
 | change | what it does | since |
 |---|---|---|
@@ -256,8 +256,8 @@ re-titled copy) are served by patching `snapshot()` — the pattern
   their own sockets and read only `results` — their rerank fallbacks go uncounted
   and `memory_search` sends an unsanitized query (#302). Corrected too: the
   nightly cleanup also empties the cache and drops inactive documents and orphaned
-  hashes, not only vectors; `lexMode` and the `update` pending-hint fix exist in
-  the tree with no `WORKLOG.md` section (#1369); `agent-qmd-daemon.conf`'s
+  hashes, not only vectors; `lexMode` and the `update` pending-hint fix had no
+  `WORKLOG.md` section (added as §8 on 2026-09-24); `agent-qmd-daemon.conf`'s
   documented one-line revert names the published `@tobilu/qmd` that was
   uninstalled on 09-19 (#1368); and §8 was missing `test_qmd_query_shape.py` and
   `test_service_health_check_qmd.py`. No vector or document count is pinned here

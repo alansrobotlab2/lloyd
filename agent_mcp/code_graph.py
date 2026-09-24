@@ -607,6 +607,19 @@ class Resolution:
     node: str | None = None
     candidates: list[str] = field(default_factory=list)
     nearest: list[str] = field(default_factory=list)
+    # The file hint that matched none of the symbol's definitions (#725). Set
+    # with no `node`; `nearest` then lists where the symbol does live, so the
+    # caller can say "no X in that file" instead of answering about another.
+    unmatched_hint: str = ""
+
+
+def _in_file(source_file: str, hint: str) -> bool:
+    """Does a node's `source_file` name the hinted file? Equal, or one ends
+    with the other on a path boundary — `b.py` names `pkg/b.py`, but
+    `pkg/b.py` does not name `otherpkg/b.py`."""
+    return bool(source_file) and bool(hint) and (
+        source_file == hint or source_file.endswith("/" + hint)
+        or hint.endswith("/" + source_file))
 
 
 def _looks_like_path(q: str) -> bool:
@@ -618,13 +631,19 @@ def resolve_symbol(entry: Entry, query: str, file_hint: str = "") -> Resolution:
 
     Ambiguity is an answer, not an error: `main` exists in a dozen files
     and a listing lets the model pick, where an error makes it guess again.
+
+    `file_hint` is a filter, not a preference (#725): when the symbol exists
+    but none of its definitions sits in the hinted file, the answer is
+    `unmatched_hint` with no node — never a same-named symbol from another
+    file, which a caller scoped to one file has no way to tell apart.
     """
     g = entry.graph
     q = (query or "").strip()
     if not q:
         return Resolution()
+    fh = (file_hint or "").strip()
 
-    if q in g:
+    if q in g and (not fh or _in_file(g.nodes[q].get("source_file") or "", fh)):
         return Resolution(node=q)
 
     if _looks_like_path(q):
@@ -657,13 +676,11 @@ def resolve_symbol(entry: Entry, query: str, file_hint: str = "") -> Resolution:
         if kept:
             ids = kept
 
-    if file_hint:
-        fh = file_hint.strip()
-        narrowed = [n for n in ids
-                    if (g.nodes[n].get("source_file") or "").endswith(fh)
-                    or fh.endswith(g.nodes[n].get("source_file") or "\0")]
-        if narrowed:
-            ids = narrowed
+    if fh and ids:
+        narrowed = [n for n in ids if _in_file(g.nodes[n].get("source_file") or "", fh)]
+        if not narrowed:
+            return Resolution(unmatched_hint=fh, nearest=sorted(ids)[:8])
+        ids = narrowed
 
     if len(ids) == 1:
         return Resolution(node=ids[0])
@@ -779,6 +796,14 @@ def _ambiguous(g: Any, cands: list[str], query: str, limit: int) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+def _unmatched_hint_error(g: Any, sym: str, res: Resolution) -> str:
+    """The symbol exists, but not in the file the caller named (#725)."""
+    return json.dumps({
+        "error": f"no symbol named {sym!r} in {res.unmatched_hint}",
+        "defined_elsewhere": [describe(g, n) for n in res.nearest],
+    })
+
+
 async def _prepare(args: dict) -> tuple[Path, Entry | None, Staleness, list[str], str | None]:
     root = resolve_root(args.get("root"))
     allow = args.get("refresh")
@@ -806,6 +831,8 @@ async def _explain(args: dict) -> str:
     head = await _header_lines(root, entry, st, notes)
     if res.candidates:
         return _cap(head + _ambiguous(g, res.candidates, sym, limit), limit)
+    if res.unmatched_hint:
+        return _unmatched_hint_error(g, sym, res)
     if not res.node:
         return json.dumps({
             "error": f"no node matching {sym!r} in {root}",
@@ -868,6 +895,8 @@ async def _affected(args: dict) -> str:
     head = await _header_lines(root, entry, st, notes)
     if res.candidates:
         return _cap(head + _ambiguous(g, res.candidates, sym, limit), limit)
+    if res.unmatched_hint:
+        return _unmatched_hint_error(g, sym, res)
     if not res.node:
         return json.dumps({
             "error": f"no node matching {sym!r} in {root}",
@@ -962,6 +991,8 @@ async def _path(args: dict) -> str:
         res = resolve_symbol(entry, q, args.get(fkey) or "")
         if res.candidates:
             return _cap(head + _ambiguous(g, res.candidates, q, limit), limit)
+        if res.unmatched_hint:
+            return _unmatched_hint_error(g, q, res)
         if not res.node:
             return json.dumps({
                 "error": f"no node matching {q!r} in {root}",

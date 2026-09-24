@@ -64,11 +64,11 @@ content += """
 # Show statistics without writing files
 python3 ~/lloyd/scripts/mine-trajectories.py --stats
 
-# Generate candidates for last 7 days (worker agent only)
-python3 ~/lloyd/scripts/mine-trajectories.py --days 7 --agent worker --threshold 2
+# Generate candidates for the last 7 days (interactive sessions; the default)
+python3 ~/lloyd/scripts/mine-trajectories.py --days 7 --threshold 2
 
-# Generate for all agents
-python3 ~/lloyd/scripts/mine-trajectories.py --days 7 --agent all --threshold 2
+# Include unattended (worker/autonomy/...) sessions too
+python3 ~/lloyd/scripts/mine-trajectories.py --days 7 --include-machine --threshold 2
 
 # Custom output directory
 python3 ~/lloyd/scripts/mine-trajectories.py --days 7 --output-dir ~/custom/output/

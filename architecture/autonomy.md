@@ -3,7 +3,7 @@ segment: architecture
 tags:
 - architecture
 - lloyd
-status: active
+status: implemented
 type: reference
 timestamp: '2026-09-13T00:00:00'
 ---

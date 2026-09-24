@@ -269,6 +269,55 @@ def attach_retrieval_gate(classifier_block: dict[str, Any],
     return classifier_block
 
 
+def engine_provenance() -> dict[str, Any]:
+    """Which engine actually answered the classifier, resolved, not named (#1310).
+
+    `uptake.SECONDARY_MODEL` is the alias the classifier asks for. With
+    `secondary_enabled: false` the tree's resolver rewrites that alias to the
+    primary, so a table stamped from the constant says `secondary` over numbers
+    the primary produced. This records the endpoint and model the request is
+    really sent to, and `rerouted` says the two came apart.
+    """
+    alias = uptake.SECONDARY_MODEL
+    try:
+        from app.secondary_models import _endpoint
+        url, resolved = _endpoint("uptake")
+    except Exception as exc:            # noqa: BLE001 - describe, never propagate
+        url, resolved = f"<unresolved: {type(exc).__name__}: {exc}>", ""
+    return {"alias": alias, "endpoint": url, "resolved_model": resolved,
+            "rerouted": resolved != alias}
+
+
+def stamp_engine(result: dict[str, Any],
+                 provenance: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Write the resolved engine onto a classifier block, and refuse a
+    `measured: true` that was scored by an engine other than the one named.
+
+    The metrics are kept — they are real numbers about *some* engine — but
+    every block the stop condition reads goes `measured: False` with the
+    reason beside it, so `measurement_clears_floors` fails closed and a reader
+    quoting `precision` sees on the same table that the secondary never
+    answered.
+    """
+    prov = engine_provenance() if provenance is None else provenance
+    result["engine"] = prov["resolved_model"] or prov["alias"]
+    result["engine_alias"] = prov["alias"]
+    result["engine_endpoint"] = prov["endpoint"]
+    result["engine_rerouted"] = bool(prov["rerouted"])
+    if prov["rerouted"]:
+        reason = (f"alias {prov['alias']!r} resolved to "
+                  f"{prov['resolved_model'] or 'nothing'!r} at {prov['endpoint']} "
+                  "(secondary_enabled is false?); not a measurement of the secondary")
+        for key in ("metrics", "holdout", "zero_shot"):
+            block = result.get(key)
+            if isinstance(block, dict):
+                block["measured"] = False
+                block["unmeasured_reason"] = reason
+        result["passed"] = False
+        result["engine_note"] = reason
+    return result
+
+
 def run_classifier_eval(cache: dict[str, Any] | None = None, *,
                         record_raw: bool = False) -> dict[str, Any]:
     """Score the classifier against the hand-labeled corpus.
@@ -372,7 +421,7 @@ def run_classifier_eval(cache: dict[str, Any] | None = None, *,
         "pipeline": pipeline,
     }
     passed = uptake.measurement_clears_floors(gate_report)
-    return {
+    return stamp_engine({
         "metrics": metrics,
         "passed": passed,
         "labels_check": label_check,
@@ -382,7 +431,8 @@ def run_classifier_eval(cache: dict[str, Any] | None = None, *,
         "pipeline": pipeline,
         "split_note": split["note"],
         "floors": {"precision": uptake.PRECISION_FLOOR, "recall": uptake.RECALL_FLOOR},
-        "engine": uptake.SECONDARY_MODEL,
+        # `engine`, `engine_endpoint` and `engine_rerouted` are written by
+        # `stamp_engine` from the resolved endpoint, never from the alias (#1310).
         # The prompt's exemplars were authored against this corpus's shapes and
         # some quote a labeled turn's own words, so THIS block is an in-sample
         # estimate. It is not the whole measurement: `holdout` re-scores the turns
@@ -406,7 +456,7 @@ def run_classifier_eval(cache: dict[str, Any] | None = None, *,
                                if int(p["label"]) == 1 and int(p["predicted"]) == 0],
         },
         "per_item": per_item,
-    }
+    })
 
 
 def run(days: int, cache: dict[str, Any]) -> tuple[dict[str, Any], list[uptake.Turn]]:
@@ -474,6 +524,12 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.out_dir) if args.out_dir else (REPO / "eval" / "uptake")
     classifier_block = {
         "engine": report["engine"], "labels_file": report["labels_file"],
+        # Which slot served these numbers, resolved rather than named (#1310).
+        "engine_alias": report.get("engine_alias"),
+        "engine_endpoint": report.get("engine_endpoint"),
+        "engine_rerouted": report.get("engine_rerouted"),
+        **({"engine_note": report["engine_note"]} if report.get("engine_note") else {}),
+        "measured": m.get("measured"),
         "precision": m["precision"], "recall": m["recall"],
         "tp": m["tp"], "fp": m["fp"], "fn": m["fn"], "tn": m["tn"],
         "n_positives": m["n_positives"], "n_scored": m["n_scored"],

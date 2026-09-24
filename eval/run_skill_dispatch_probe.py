@@ -39,6 +39,13 @@ from app.harness import skill_dispatch as sd  # noqa: E402
 # silently reports zero dispatches. Transcripts are a fact about the live box.
 from app.paths import production_data_root  # noqa: E402
 DEFAULT_SESSIONS_DIR = production_data_root() / "sessions"
+# The per-event injection cost is MEASURED in characters (the unit
+# `sd.MAX_DELIVERY_CHARS` caps in) and only ESTIMATED in tokens, at this ratio.
+# Nothing here runs the serving tokenizer: markdown with fenced code and long
+# identifiers can exceed 4 chars/token, so a capped 6,000-char body may be more
+# than 1,500 real tokens. And a body longer than the cap reports exactly
+# cap / CHARS_PER_TOKEN — the cap's arithmetic, not a measurement — which is
+# why `capped_events` counts how often that happened (#752).
 CHARS_PER_TOKEN = 4.0
 
 # What the protocol requires, expressed as the argument shape that shows the
@@ -97,7 +104,7 @@ def harvest(sessions_dir: Path, limit_sessions: int) -> tuple[list[dict], int]:
 def score(calls: list[dict], *, scanned_sessions: int) -> dict:
     per: dict[str, dict] = defaultdict(lambda: {
         "dispatched": 0, "triggered": 0, "compliant": 0, "violating": 0,
-        "unlabelled": 0, "injected_chars": 0, "examples": [],
+        "unlabelled": 0, "injected_chars": 0, "capped_events": 0, "examples": [],
     })
     total_dispatched = 0
     total_triggered = 0
@@ -123,6 +130,8 @@ def score(calls: list[dict], *, scanned_sessions: int) -> dict:
             row["examples"].append(text.replace("\n", " ")[:160])
         body = sd.skill_body(rule.skill)
         row["injected_chars"] += min(len(body), sd.MAX_DELIVERY_CHARS)
+        if len(body) > sd.MAX_DELIVERY_CHARS:
+            row["capped_events"] += 1
 
     out: dict[str, dict] = {}
     for skill, row in per.items():
@@ -135,14 +144,15 @@ def score(calls: list[dict], *, scanned_sessions: int) -> dict:
             "examples": row["examples"],
             "compliance_before_pct": before,
             "compliance_after_predicted_pct": after,
-            "avg_injected_tokens_per_event": round(row["injected_chars"] / max(1, row["triggered"]) / CHARS_PER_TOKEN, 1),
+            "avg_injected_chars_per_event": round(row["injected_chars"] / max(1, row["triggered"]), 1),
+            "est_tokens_per_event_chars_div_4": round(row["injected_chars"] / max(1, row["triggered"]) / CHARS_PER_TOKEN, 1),
         }
     for skill, spec in PROTOCOL_STEPS.items():
         out.setdefault(skill, {
             "dispatched": 0, "triggered": 0, "compliant": 0, "violating": 0,
-            "unlabelled": 0, "injected_chars": 0, "examples": [],
+            "unlabelled": 0, "injected_chars": 0, "capped_events": 0, "examples": [],
             "compliance_before_pct": None, "compliance_after_predicted_pct": None,
-            "avg_injected_tokens_per_event": 0,
+            "avg_injected_chars_per_event": 0, "est_tokens_per_event_chars_div_4": 0,
         })
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -170,7 +180,7 @@ def main() -> int:
     print(f"Dispatches triggered:    {report['dispatches_triggered']}")
     print(f"Spurious rate (trigger / all dispatches) = {report['spurious_rate_pct']} %   <-- guard, target < 10 %")
     print()
-    hdr = f"{'protocol':<20} {'held':>5} {'ok':>4} {'viol':>5} {'?':>4} {'before%':>8} {'after*%':>8} {'tok/evt':>8}"
+    hdr = f"{'protocol':<20} {'held':>5} {'ok':>4} {'viol':>5} {'?':>4} {'before%':>8} {'after*%':>8} {'chr/evt':>8} {'~tok/ev':>8} {'capped':>6}"
     print(hdr)
     print("-" * len(hdr))
     for skill, row in sorted(report["per_protocol"].items()):
@@ -184,11 +194,15 @@ def main() -> int:
             f"{row['unlabelled']:>4}",
             f"{'n/a' if before is None else before:>8}",
             f"{'n/a' if after is None else after:>8}",
-            f"{row['avg_injected_tokens_per_event']:>8}",
+            f"{row['avg_injected_chars_per_event']:>8}",
+            f"{row['est_tokens_per_event_chars_div_4']:>8}",
+            f"{row['capped_events']:>6}",
         ]
         print(" ".join(cells))
     print("\n* after is PREDICTED (every held-and-non-compliant dispatch re-issued "
           "informed). The measured delta needs the flag on; see the item's soak.")
+    print(f"~tok/ev is chr/evt / {CHARS_PER_TOKEN:g}, an estimate — no tokenizer ran. A protocol "
+          "whose events are all capped reports the cap's arithmetic, not its body's size.")
     for skill, row in report["per_protocol"].items():
         if row["examples"]:
             print(f"\n{skill} examples:")

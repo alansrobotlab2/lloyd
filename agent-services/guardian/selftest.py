@@ -60,17 +60,20 @@ PROFILES = (PROFILE_DAILY, PROFILE_STAGING)
 SKIPPED_NOTE = "stack-dependent; judged by the daily profile"
 
 
-def _check(name: str, fn, verbose: bool) -> bool:
+def _check(name: str, fn, verbose: bool, failures: list | None = None) -> bool:
     try:
         ok, detail = fn()
     except Exception as exc:
         ok, detail = False, f"{type(exc).__name__}: {exc}"
     if verbose:
         print(f"  [{'ok ' if ok else 'FAIL'}] {name}: {detail}")
+    if not ok and failures is not None:
+        failures.append((name, str(detail)))
     return ok
 
 
-def run(g, verbose: bool = True, profile: str = PROFILE_DAILY) -> bool:
+def run(g, verbose: bool = True, profile: str = PROFILE_DAILY,
+        failures: list | None = None) -> bool:
     """Judge the guardian's preconditions under one profile; True if all judged checks pass.
 
     The profile selects *which* checks are asked, never *how* they are judged:
@@ -78,6 +81,11 @@ def run(g, verbose: bool = True, profile: str = PROFILE_DAILY) -> bool:
     check the profile excludes prints `[skip]`, is not executed, and cannot move
     the verdict — so `staging` passing is a weaker claim than `daily` passing,
     and the daily run inside the guardian is what still makes the strong one.
+
+    `failures`, when given, receives `(name, detail)` for every judged check that
+    failed. The running guardian passes one so its alert can name the cause: with
+    `verbose=False` the detail was otherwise computed and dropped, and every
+    post-boot page said only "may not be able to act" (#1178).
     """
     if profile not in PROFILES:
         raise ValueError(f"unknown selftest profile {profile!r}, "
@@ -179,7 +187,7 @@ def run(g, verbose: bool = True, profile: str = PROFILE_DAILY) -> bool:
 
     if verbose:
         print(f"guardian selftest [{profile}]:")
-    results = [_check(n, f, verbose) for n, f in judged]
+    results = [_check(n, f, verbose, failures) for n, f in judged]
     if verbose:
         for name in skipped:
             print(f"  [skip] {name}: {SKIPPED_NOTE}")

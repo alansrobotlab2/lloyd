@@ -202,6 +202,21 @@ async def test_successes_do_not_set_is_error(tool, args):
     assert result.is_error is False
 
 
+async def test_undeclared_argument_reaches_handler_and_is_ignored():
+    """#1125: no layer validates `arguments` against the tool's inputSchema.
+    A key no schema declares is not a dispatch error; it reaches the handler,
+    which ignores it. Comments that claimed otherwise were corrected, and
+    this pins the real contract so a future claim can be checked against it.
+    """
+    target = ROOT / "agent_mcp" / "annotations.py"
+    result = await M.call_tool(
+        "Read", {"file_path": str(target), "bogus_key_zzz": 123}, HARNESS_META)
+    assert isinstance(result, CallToolResult)
+    assert result.is_error is False
+    first_line = target.read_text().splitlines()[0]
+    assert first_line in result.content[0].text
+
+
 async def test_unknown_tool_is_an_error_result():
     result = await M.call_tool("NoSuchToolAtAll", {})
     assert isinstance(result, CallToolResult)
@@ -211,10 +226,14 @@ async def test_unknown_tool_is_an_error_result():
 # ── Schema hygiene ───────────────────────────────────────────────────────────
 
 def test_no_toplevel_additional_properties_false(tools):
-    """P2-2: the aggregator strips a legacy `_session_id` argument, but the
-    SDK validates arguments against inputSchema *before* the handler runs.
-    A top-level `additionalProperties: false` would reject the call
-    outright. Session id moved to `_meta`, and this keeps the door shut.
+    """P2-2: nothing validates `arguments` against inputSchema today — the
+    low-level server checks the params model only and unknown keys reach
+    the handler (see `test_undeclared_argument_reaches_handler_and_is_ignored`).
+    So a top-level `additionalProperties: false` would be a promise nothing
+    keeps, and it is the one schema shape that would start rejecting the
+    harness-injected keys (`_session_id`, a leaked `summary`) the day anyone
+    switches validation on. Session id moved to `_meta`; this keeps the door
+    shut.
     """
     offenders = [
         t.name for t in tools

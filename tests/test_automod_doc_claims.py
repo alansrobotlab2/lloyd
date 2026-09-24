@@ -181,14 +181,9 @@ def test_the_dev_requirements_file_is_documented_as_never_an_install_target():
     them, that `requirements-dev.txt` is not one of them. Both halves are
     checked against the code that decides it, not just against the prose.
 
-    What this test does NOT do, and must not be read as doing: it is §10 of
-    *this* file, not `SETUP.md`. #1073's clauses 1 and 2 put the route and the
-    refreeze exclusion in `SETUP.md`, and this round cannot write that file —
-    admitting the path and writing it are two rounds, because rung 0 reads
-    `ALLOWED_GLOBS` from the live tree (`round.py:445` spawns the gate with
-    `cwd=LIVE_ROOT`). Those two clauses are #1378's, and when it lands it should
-    assert the same two facts against `SETUP.md`'s dependency and refreeze
-    sections here, not only against §10.
+    This is §10 of *this* file only. The same two facts are asserted against
+    `SETUP.md` Part 4 by the #1378 tests below
+    (`test_setup_names_the_dev_file_its_install_command_and_the_candidate_targets`).
     """
     from scripts.automod import spec
     doc = (ROOT / "architecture" / "automod.md").read_text()
@@ -218,30 +213,71 @@ def test_the_install_targets_stay_free_of_the_solver():
         assert "z3" not in text.lower(), f"{name} gained the solver; the route changed"
 
 
-def test_the_doc_names_every_site_carrying_the_refreeze_command():
-    """#1073 clause 2's hazard, recorded where a refreeze will be read.
+def _dev_packages() -> list[str]:
+    """Package names `requirements-dev.txt` lists, read the way the refreeze reads them."""
+    import re
+    text = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
+    return [m.group(1) for m in re.finditer(r"(?m)^([A-Za-z0-9._-]+)", text)]
 
-    `requirements.lock` is a `pip freeze` snapshot, so a package installed out of
-    band — which is how the solver reaches the live venv — is captured by the next
-    refreeze and becomes a container-rebuild dependency. The fix is a dev-package
-    exclusion, and the trap is that the regeneration command is written in three
-    places, so amending one of them leaves two readers still following the
-    unfiltered form. §10 has to name all three.
 
-    Line 310 of `SETUP.md` is the one #1073's clause names; the lock's own header
-    and `requirements.txt`'s pointer are the other two, and the assertion below
-    re-reads each of them so the section cannot stay green on a remembered
-    address.
-    """
-    section = (DOC.read_text(encoding="utf-8")
-               .split("## 10. What Lloyd may change", 1)[1].split("\n## 11", 1)[0])
-    assert "SETUP.md:310" in section
-    assert "requirements.lock" in section and "header" in section
-    assert "requirements.txt" in section and "lines 4-5" in section
-    setup = (ROOT / "SETUP.md").read_text(encoding="utf-8").splitlines()
-    assert ".venvs/lloyd/bin/python -m pip freeze > requirements.lock" in setup[309]
-    lock_head = (ROOT / "requirements.lock").read_text(encoding="utf-8").splitlines()[2]
-    assert "pip freeze > requirements.lock" in lock_head
+def _setup_lloyd_venv_section() -> str:
+    text = (ROOT / "SETUP.md").read_text(encoding="utf-8")
+    return text.split("### `lloyd` — backend", 1)[1].split("\n### ", 1)[0]
+
+
+def test_the_dev_requirements_file_pins_the_solver_and_says_it_is_never_installed():
+    """#1378 clause 1: the file exists, carries the pin, and its header says it is
+    never installed by the candidate venv and never frozen into the lock."""
+    text = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
+    assert "z3-solver==4.15.4.0" in text.splitlines()
+    header = " ".join(l.lstrip("# ") for l in text.splitlines() if l.startswith("#"))
+    assert "NEVER installed by the automod gate's candidate venv" in header
+    assert "NEVER frozen" in header and "requirements.lock" in header
+    assert _dev_packages() == ["z3-solver"]
+
+
+def test_setup_names_the_dev_file_its_install_command_and_the_candidate_targets():
+    """#1378 clauses 2 and 4: SETUP.md Part 4's lloyd section names the file, the
+    exact install command, and that the candidate venv installs only from the lock
+    else requirements.txt — and that last half is re-derived from the code that
+    decides it, so a change to the rung's targets reddens here."""
+    from scripts.automod import spec
+    section = _setup_lloyd_venv_section()
+    assert "requirements-dev.txt" in section
+    assert ".venvs/lloyd/bin/python -m pip install -r requirements-dev.txt" in section
+    flat = " ".join(section.split())
+    assert "installs only from `requirements.lock`, else `requirements.txt`" in flat
+    assert spec.touches_requirements(["requirements.lock"])
+    assert spec.touches_requirements(["requirements.txt"])
+    assert not spec.touches_requirements(["requirements-dev.txt"])
+
+
+def test_both_refreeze_sites_exclude_every_dev_package():
+    """#1378 clause 3 (#1073 clause 2): the lock is a `pip freeze` snapshot, so a
+    dev package installed out of band would be swept into the rebuild set by the
+    next refreeze. Both surviving copies of the command — SETUP.md Part 4 and the
+    lock's header — exclude what requirements-dev.txt lists, and name that; the
+    unfiltered form is gone from all three files. `requirements.txt` only points at
+    the lock header, which is still what its lines 4-5 say."""
+    import re
+    import subprocess
+    for name in ("SETUP.md", "requirements.lock", "requirements.txt"):
+        assert "pip freeze > requirements.lock" not in (ROOT / name).read_text(
+            encoding="utf-8"), f"{name} still carries the unfiltered refreeze"
+    setup_cmds = [l for l in _setup_lloyd_venv_section().splitlines()
+                  if "pip freeze" in l and "> requirements.lock" in l]
+    lock_cmds = [l.lstrip("# ") for l in (ROOT / "requirements.lock").read_text(
+        encoding="utf-8").splitlines()[:8] if "pip freeze" in l]
+    assert len(setup_cmds) == 1 and len(lock_cmds) == 1
+    for cmd in (setup_cmds[0], lock_cmds[0]):
+        assert "requirements-dev.txt" in cmd and "--exclude" in cmd
+        # Run the command's own exclusion clause and check it names every package.
+        clause = re.search(r"\$\((sed .*)\) > requirements\.lock", cmd).group(1)
+        out = subprocess.run(["bash", "-c", clause], cwd=ROOT, capture_output=True,
+                             text=True, check=True).stdout.split()
+        assert [out[i + 1] for i in range(0, len(out), 2)] == _dev_packages()
+        assert set(out[0::2]) == {"--exclude"}
+    assert "excluding every package" in " ".join(_setup_lloyd_venv_section().split())
     txt = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
     assert "then refreeze" in txt[3] and "requirements.lock header" in txt[4]
 
@@ -909,3 +945,35 @@ def test_the_doc_rung_count_matches_the_ladder_that_runs(monkeypatch):
     assert word in RUNG_NUMBERS, f"unparseable rung count {word!r}"
     assert RUNG_NUMBERS[word] == real, (
         f"§4 states {word!r} rungs but Gate.run executes {real}")
+
+
+WORKERS_JOBS = ROOT / "architecture" / "workers-jobs.md"
+
+
+def test_workers_jobs_counts_and_rosters_every_registered_source():
+    """#1015: the roster said twelve while thirteen were registered, and the
+    missing one (`board-steward`) was the source running observed by nobody's
+    decision. The count is read off `register(` lines, not restated."""
+    text = WORKERS_JOBS.read_text()
+    init = (ROOT / "workers" / "sources" / "__init__.py").read_text()
+    registered = len(re.findall(r"^register\(", init, re.M))
+    words = {v: k for k, v in {**NUMBER_WORDS, "eleven": 11, "twelve": 12,
+                                "thirteen": 13, "fourteen": 14,
+                                "fifteen": 15}.items()}
+    m = re.search(r"^(\w+) sources are registered\.", text, re.M)
+    assert m, "the roster's count sentence is gone"
+    assert m.group(1).lower() == words[registered], (m.group(1), registered)
+    names = re.findall(r'^NAME = "([a-z-]+)"', "\n".join(
+        p.read_text() for p in (ROOT / "workers" / "sources").glob("*.py")), re.M)
+    for name in names:
+        assert f"| `{name}` |" in text, f"no roster row for {name}"
+
+
+def test_workers_jobs_documents_the_board_steward():
+    text = WORKERS_JOBS.read_text()
+    m = re.search(r"^### `board-steward`.*?(?=^### |^## )", text, re.M | re.S)
+    assert m, "no ### board-steward entry"
+    body = m.group(0)
+    assert "apply: false" in body
+    assert "primary" in body and "secondary" in body
+    assert "never set `done`" in body

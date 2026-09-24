@@ -1040,53 +1040,8 @@ def error_traj(session_key, name, error_type, source, params=None):
     }
 
 
-def test_mining_ignores_a_keyword_only_error():
-    """Rows written before #389 carry `error_source: "semantic"`; they must not
-    reach skill authoring either."""
-    traj = [error_traj(f"s{i}", "Read", "timeout", "semantic") for i in (1, 2)]
-    assert mt.mine_error_patterns(traj, threshold=2) == []
-
-
-def test_mining_keeps_a_corroborated_error():
-    traj = [error_traj(f"s{i}", "Bash", "timeout", "protocol") for i in (1, 2)]
-    patterns = mt.mine_error_patterns(traj, threshold=2)
-    assert len(patterns) == 1
-    assert patterns[0]["tool_name"] == "Bash"
-    assert patterns[0]["error_type"] == "timeout"
-
-
-def test_mining_treats_a_persisted_nonzero_exit_code_as_corroborating():
-    traj = []
-    for i in (1, 2):
-        row = error_traj(f"s{i}", "Bash", "logic", None)
-        row["error_tools"][0]["exit_code"] = 1
-        traj.append(row)
-    assert len(mt.mine_error_patterns(traj, threshold=2)) == 1
-
-
-def test_a_read_timeout_candidate_cannot_be_emitted(tmp_path):
-    """The concrete phantom from the 09-06 window: `Read` has no timeout path,
-    the word came from the file. End to end — extract, then mine."""
-    out = []
-    for i in (1, 2):
-        path = write_session(
-            tmp_path,
-            [("Read", {"file_path": f"/x/{i}.py"}, "request timed out after 30s", False)],
-            name=f"read-timeout-{i}",
-        )
-        out.append(et.parse_session(path))
-    assert mt.mine_error_patterns(out, threshold=2) == []
-
-
-def test_success_mining_does_not_count_a_keyword_only_step_as_a_failure(tmp_path):
-    calls = [("Bash", {"command": "pytest"}, "Error: 0 warnings\n755 passed\n", False)]
-    new = [et.parse_session(write_session(tmp_path, calls, name=f"ok{i}")) for i in (1, 2)]
-    legacy = [error_traj(f"legacy{i}", "Bash", "validation", "semantic") for i in (1, 2)]
-    for rows in (new, legacy):
-        patterns = mt.mine_success_patterns(rows, threshold=2)
-        assert len(patterns) == 1
-        assert patterns[0]["error_count"] == 0
-        assert patterns[0]["error_rate"] == 0.0
+# The five miner-side corroboration tests (`test_mining_ignores_a_keyword_only_error`
+# and its siblings) live in tests/test_mine_trajectories.py since #511.
 
 
 # ── signature keys and candidate emission (backlog #391) ─────────────────────

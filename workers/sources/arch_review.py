@@ -856,6 +856,13 @@ live health routes for anything the doc states as a measured number:
     curl -s 'localhost:8080/api/autonomy/health?days=7'
     curl -s 'localhost:8080/api/autonomy/tasks'
 
+Then check the unit **against itself**. For each quantity, path, count or \
+cadence it states, grep the unit for every other statement of the same thing \
+and require them to agree — an armed/disarmed, on/off or N-vs-M pair can sit \
+thirty lines apart, and the tree can only ever confirm one of them. An \
+internal disagreement you do not reconcile means the unit is **not** \
+`current`: correct the false side and classify it `stale`, or file it.
+
 Classify the unit as exactly one of:
   - `current` — the prose describes what runs;
   - `stale` — it described what ran, and the code has moved;

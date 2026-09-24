@@ -1,6 +1,6 @@
 ---
 title: Desktop computer use
-status: current
+status: implemented
 updated: 2026-09-23
 ---
 
@@ -94,9 +94,11 @@ screenshot pixels of the capture it came from. `Capture.to_screen` maps a
 coordinate back through that capture's origin and scale.
 `desktop.coordinate_space: norm1000` switches both directions to a 0–1000 grid
 per axis instead, which is how Qwen3-VL-family models ground. Which of the two
-is in force is simply the key's default (`pixels`): `eval/desktop_grounding/`,
-the instrument the code comment beside it says chose that default, is not built
-(§7), so nothing has measured which space this primary actually grounds in.
+is in force is simply the key's default (`pixels`), and the code comment beside
+it says so: `eval/desktop_grounding/`, the instrument that would choose it, is
+not built (§7), so nothing has measured which space this primary actually
+grounds in. Both branches are pinned behaviourally (`tests/test_desktop_module.py`),
+which shows the mapping is consistent, not that either space is accurate.
 
 ### Accessibility coverage
 

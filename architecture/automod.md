@@ -2969,19 +2969,17 @@ candidate venv nor the lock — and that is the divergence #1073 settles: a solv
 in `requirements.txt` alone is in the live venv and missing from every rebuilt
 candidate, and the round that notices is the round sitting on a 1000-passed
 floor. `SETUP.md`, where #1073 says the decision gets written down, joins
-`README.md` and `CLAUDE.md` as an allowed root file; the writing belongs to the
-round this grant unblocks (#1378), so until that one lands the decision is
-**not** in that file.
+`README.md` and `CLAUDE.md` as an allowed root file. The decision is written
+there now (#1378, landed by hand): `SETUP.md` Part 4's `lloyd` venv section names
+`requirements-dev.txt` and its install command.
 
-What #1378 owes, and why it is three places rather than one: the lock is a
-`pip freeze` snapshot, and the regeneration command is unfiltered —
-`.venvs/lloyd/bin/python -m pip freeze > requirements.lock` appears at
-`SETUP.md:310` and in `requirements.lock`'s own header comment at line 3, and
-`requirements.txt` lines 4-5 send a reader to that header. A solver installed
-out of band is therefore swept into the rebuild dependency set by whoever
-follows the instructions next, through whichever of the three they read. The
-dev-package exclusion has to be written into all three in the same change, or
-the route is only delayed.
+Why the refreeze had to change with it: the lock is a `pip freeze` snapshot, so
+a solver installed out of band would be swept into the rebuild dependency set by
+whoever refroze next. The regeneration command is written in two places —
+`SETUP.md` Part 4 and `requirements.lock`'s own header comment — and
+`requirements.txt` lines 4-5 send a reader to that header. Both copies now pass
+a `--exclude` for every package `requirements-dev.txt` names, and the unfiltered
+form appears nowhere (`tests/test_automod_doc_claims.py` pins both).
 
 ---
 

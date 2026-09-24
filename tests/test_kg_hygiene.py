@@ -140,3 +140,20 @@ def test_regrowth_dates_entities_by_fact_created_at_not_mtime(tree):
     r = kg_hygiene.regrowth(tree, days=7, now=now)
     assert r["new_dirs"] == 1                  # only the lowercase twin is genuinely new
     assert r["samples"] == ["vLLM V1 engine"]
+
+
+def test_regrowth_survives_a_dir_renamed_mid_pass(tree, monkeypatch):
+    """#1404: the entity sweep renamed a dir between the listing and the
+    `d.stat()` fallback, and the health report died with FileNotFoundError."""
+    listed = kg_hygiene.iter_entity_dirs(tree)
+    # a dir with no parseable timestamp and no .md files takes the fallback
+    ghost = tree / "World Action Models"
+    monkeypatch.setattr(kg_hygiene, "iter_entity_dirs", lambda root: listed + [ghost])
+    assert not ghost.exists()
+    r = kg_hygiene.regrowth(tree, days=7)
+    assert r["skipped_vanished"] == 1
+    assert kg_hygiene._born(ghost) is None
+
+
+def test_regrowth_reports_zero_vanished_on_a_quiet_tree(tree):
+    assert kg_hygiene.regrowth(tree, days=7)["skipped_vanished"] == 0

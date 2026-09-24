@@ -51,15 +51,21 @@ _MAX_ENQUEUE_PER_TICK = 3
 # How long a session must have sat untouched before it is worth distilling.
 _QUIET_SECONDS = 30 * 60
 
-# Only the head of a session file is read to find its platform. The field is
-# written by every producer within the first few keys (`sessions_io` and
-# `_common.new_worker_session` both put it 5th), while the file itself carries
-# the whole transcript and runs to megabytes — and this check happens per
-# candidate, per tick. A prefix that does not contain the key reads as a user
-# session, which is the same default `is_user_session` applies to a session
-# with no platform at all.
+# The head of a session file is read first to find its platform: most
+# producers write the field within the first few keys, while the file itself
+# carries the whole transcript and runs to megabytes, and this check happens
+# per candidate, per tick. A head with no `platform` in it is NOT read as a
+# user session (#1271): the chat path's `_save_session_meta` merges keys into
+# an existing file, so a session can carry `platform` after an 8 KB messages
+# array — measured 2026-09-19, 104 of 3,502 files, 7 of them `worker` and 24
+# `browser`, mined as human chats. A miss parses the whole file and reads the
+# top-level key, cached per (path, mtime) so an unchanged file is parsed once.
+# A top-level key only: the regex would also match a nested "platform" inside
+# a message's structured content, which is not the session's.
 _PLATFORM_PREFIX_BYTES = 8192
 _PLATFORM_RE = re.compile(r'"platform"\s*:\s*"([^"]*)"')
+_FULL_PARSE_CACHE: dict[str, tuple[int, str]] = {}
+_FULL_PARSE_CACHE_MAX = 4096
 
 
 def _done_key(name: str) -> str:
@@ -72,8 +78,33 @@ def _session_platform(path: Path) -> str:
             head = f.read(_PLATFORM_PREFIX_BYTES)
     except OSError:
         return ""
+    # Only trust the head when it opens the top-level object and the match is
+    # the object's first-level key region, i.e. before any nested structure.
     m = _PLATFORM_RE.search(head)
-    return m.group(1) if m else ""
+    if m and "{" not in head[1:m.start()]:
+        return m.group(1)
+    return _full_platform(path)
+
+
+def _full_platform(path: Path) -> str:
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        return ""
+    key = str(path)
+    hit = _FULL_PARSE_CACHE.get(key)
+    if hit and hit[0] == mtime:
+        return hit[1]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return ""
+    value = data.get("platform") if isinstance(data, dict) else None
+    platform = value if isinstance(value, str) else ""
+    if len(_FULL_PARSE_CACHE) >= _FULL_PARSE_CACHE_MAX:
+        _FULL_PARSE_CACHE.clear()
+    _FULL_PARSE_CACHE[key] = (mtime, platform)
+    return platform
 
 
 def _eligible(path: Path, mtime: float, now: float) -> tuple[bool, str]:

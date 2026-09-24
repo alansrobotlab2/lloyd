@@ -445,6 +445,17 @@ def _fact_duplicate_cell(d: dict) -> str:
             f"distinct texts: {d['distinct_texts']})")
 
 
+def _provenance_cell(pv: dict | None) -> str:
+    """The Provenance row. `both_pct` alone cannot tell "no date" from "no
+    source", so the components ride with it; an unmeasured store says so rather
+    than printing `None%` (the STALE_UNEVALUABLE convention, #841)."""
+    if not pv or "both_pct" not in pv:
+        why = (pv or {}).get("error")
+        return "not measured" + (f" ({why})" if why else "")
+    return (f"{pv['both_pct']}% of {pv['facts']:,} facts "
+            f"(created_at {pv['created_at_pct']}%, source_doc {pv['source_doc_pct']}%)")
+
+
 def generate_report(
     entity_stats: dict,
     rel_stats: dict,
@@ -454,8 +465,14 @@ def generate_report(
     hygiene: dict | None = None,
     fact_dups: dict | None = None,
     stale_unevaluable: tuple[int, int] | None = None,
+    duplicate_id_files: int | None = None,
 ) -> str:
     """Generate the markdown health report.
+
+    `duplicate_id_files` is `main()`'s `_duplicate_id_files` count. It and the
+    hygiene dict's `provenance` go into the Hygiene table because the dated
+    file is what the briefing and the sweep read; both used to be printed after
+    the file was written, so neither reached any reader (#1289).
 
     `stale_unevaluable` is the `(n, m)` pair from `stale_coverage`: how many of
     the m active facts carry no date the stale check can age them from. Omitting
@@ -647,6 +664,10 @@ def generate_report(
         lines.append(f"| Foreign facts | {hygiene['foreign_facts']} |")
         lines.append(f"| Near-duplicate name clusters | {hygiene['near_dup_clusters']} ({hygiene['near_dup_dirs']} dirs; {hygiene['near_dup_tiers']}) |")
         lines.append(f"| Near-duplicates born in the last {hygiene['regrowth_days']} days | {len(hygiene['regrown'])} of {hygiene['new_dirs']} new dirs |")
+        lines.append(f"| Provenance coverage (created_at and source_doc) | {_provenance_cell(hygiene.get('provenance'))} |")
+        dup_cell = ("not measured" if duplicate_id_files is None
+                    else str(duplicate_id_files))
+        lines.append(f"| Files with duplicate fact IDs | {dup_cell} |")
         lines.append("")
         if hygiene["contaminated"]:
             lines.append("**Contamination must be 0.** A rise means an entity merge fused two different things; "
@@ -791,7 +812,8 @@ def main():
 
     # Generate report
     report = generate_report(entity_stats, rel_stats, edges, stale_facts, now, hygiene,
-                             fact_dups=fact_dups, stale_unevaluable=stale_unevaluable)
+                             fact_dups=fact_dups, stale_unevaluable=stale_unevaluable,
+                             duplicate_id_files=dup_id_files)
 
     # Write output
     output_dir = args.output_dir

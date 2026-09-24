@@ -521,3 +521,52 @@ def test_a_passing_selftest_keeps_the_daily_cadence(cold_stack, monkeypatch):
     cold_stack.last_selftest -= policy.SELFTEST_RETRY_SECONDS + 1
     cold_stack.maybe_selftest()
     assert calls == [], "a healthy guardian re-ran its selftest on the retry clock"
+
+
+# ── #1178: the page names the failing check and its detail ─────────────
+
+
+def _record_alert_bodies(g) -> list[dict]:
+    seen: list[dict] = []
+    g.alert = lambda level, title, body, **kw: seen.append(
+        {"title": title, "body": body, **kw})
+    return seen
+
+
+def test_run_hands_its_caller_every_failed_check_and_its_detail(cold_stack, monkeypatch):
+    _supervisor_answers(cold_stack)
+    _no_endpoint_answers(monkeypatch)
+    failures: list = []
+    assert ST.run(cold_stack, verbose=False, failures=failures) is False
+    named = dict(failures)
+    assert "health endpoints reachable" in named
+    assert "backend=None" in named["health endpoints reachable"]
+    assert "supervisord reachable" not in named, "a passing check was reported as failed"
+
+
+def test_the_selftest_page_names_the_failing_check_and_its_detail(cold_stack, monkeypatch):
+    """The 09-15 13:34:52 shape: past the boot grace, with both endpoint probes
+    answering nothing, the page must say which check failed and why — before
+    this it said only "may not be able to act"."""
+    import policy
+    _supervisor_answers(cold_stack)
+    _no_endpoint_answers(monkeypatch)
+    seen = _record_alert_bodies(cold_stack)
+    cold_stack.started_ts -= policy.SELFTEST_BOOT_GRACE_SECONDS + 1
+    cold_stack.maybe_selftest()
+    assert len(seen) == 1 and seen[0]["title"] == "Guardian self-test failed"
+    for text in (seen[0]["body"], seen[0]["evidence"]):
+        assert "health endpoints reachable" in text
+        assert "backend=None" in text
+
+
+def test_a_raising_selftest_is_named_in_the_page_too(cold_stack, monkeypatch):
+    import policy
+    def boom(*a, **k):
+        raise RuntimeError("selftest module broke")
+    monkeypatch.setattr(ST, "run", boom)
+    seen = _record_alert_bodies(cold_stack)
+    cold_stack.started_ts -= policy.SELFTEST_BOOT_GRACE_SECONDS + 1
+    cold_stack.maybe_selftest()
+    assert cold_stack.selftest_ok is False
+    assert "selftest module broke" in seen[0]["body"]

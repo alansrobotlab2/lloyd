@@ -26,7 +26,7 @@ from agent_mcp._shared import text_result
 
 logger = logging.getLogger("lloyd-autoresearch-mcp")
 
-# Keep imports lazy inside handlers — the round orchestrator pulls in claude_agent_sdk,
+# Keep imports lazy inside handlers — the round orchestrator pulls in the harness,
 # requests, etc., which we'd rather not load until the tool is actually called.
 
 

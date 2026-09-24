@@ -176,7 +176,7 @@ blocker or calling `automod_abort`.
 {reoffer}**The triage evidence above was measured today, on this tree.** File
 sizes, git shas and grep results in it are current: read them, do not re-derive
 them. Re-measure only the acceptance check: confirm it fails before you start
-and passes when you finish.
+and passes when you finish. Absence greps: `git grep`, not `grep -r`.
 
 **Pacing.** You have {max_turns} iterations and a wall clock. A full gate
 takes about {gate_minutes} minutes now (measured), so: `automod_start` by

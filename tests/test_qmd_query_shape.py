@@ -606,3 +606,20 @@ def test_a_daemon_that_hangs_up_mid_response_never_answers_with_nothing(monkeypa
     assert "RemoteDisconnected" in str(ei.value), \
         "the message must carry the class urllib actually raised"
     assert "search failed" in capsys.readouterr().err, "logged as well as raised"
+
+
+TASK_81 = Path.home() / "obsidian" / "autonomy" / "81-qmd-index-maintenance.md"
+
+
+@pytest.mark.skipif(not TASK_81.exists(), reason="vault task #81 not present")
+def test_task_81_safety_bullet_states_the_code_triggers():
+    """#1062: the body said "20% and 50,000 rows" for three weeks after the
+    code floor dropped to 2,000. It is read by people and served to Mission
+    Control, so the two numbers it names are pinned to the constants."""
+    from scripts.maintenance import qmd_index_maintenance as m
+
+    body = TASK_81.read_text(encoding="utf-8")
+    safety = body.split("## Safety", 1)[1].split("\n## ", 1)[0]
+    assert f"**{m.ORPHAN_RATIO_TRIGGER:.2f}**" in safety
+    assert f"**{m.ORPHAN_ABS_TRIGGER:,}**" in safety
+    assert "50,000" not in body and "50000" not in body

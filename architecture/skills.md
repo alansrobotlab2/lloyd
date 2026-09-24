@@ -12,6 +12,7 @@ summary: 'Skill system: SKILL.md procedures in ~/obsidian/skills/, the four surf
   loader), and the phantom-tool gate.'
 type: reference
 date: '2026-09-20'
+status: implemented
 
 ---
 
@@ -440,17 +441,15 @@ instead of a deleted row.
 off except retiring it, and a retired skill is now absent from the response on every
 surface rather than listed and refusing (#1292).
 
-**Three of the page's API calls hit routes that do not exist.**
-`api.skillToggle` → `POST /api/skill-toggle`, `api.skillContentSave` →
-`POST /api/skill-content`, and `api.skillsRefresh` → `POST /api/skills/refresh`
-are all defined in `web/src/api.ts:1094-1120` and called from the page
-(`SkillsPage.tsx:96`, `:109`, `:120`), but only the two GETs are registered
-(`server.py:124` includes a router carrying `@router.get` twice and nothing
-else). The toggle, the in-place editor's save, and the refresh button are
-therefore dead, and there is no toggle state to write anyway — see the
-hardcoded `enabled` above. Recorded, not
-fixed — the page is read-useful as it stands, and a skill is edited in the
-vault.
+**The page is read-only (#1293).** It used to call three routes that were never
+registered — `POST /api/skill-toggle`, `POST /api/skill-content` and
+`POST /api/skills/refresh` — and since `fetch` resolves on a 404/405 and none of
+those calls checked `ok`, the toggle flipped and stayed flipped and Save closed
+the editor as if SKILL.md had been written. The toggle, the editor and the three
+client calls are gone; Refresh re-runs the `GET /api/skills` loader; a skill is
+edited in the vault. `tests/test_api_contracts.py` now matches every
+`${API_BASE}/…` path in `web/src/api.ts` against the app's registered routes, so
+a client call to a route that does not exist fails the suite.
 
 `app/routers/mc_ui.py:457` counts the same directories for the Mission Control
 tab summary, which is a count only and does not go through either loader.

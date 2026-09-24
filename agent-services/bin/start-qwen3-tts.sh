@@ -27,6 +27,34 @@ export TTS_BACKEND=optimized
 export TTS_CONFIG="$QWEN3_TTS_DIR/config.yaml"
 export PORT=8090
 
+# Eager loading: load and compile the model at BOOT, not on the first thing
+# anyone says. The backend's own default is lazy — api/main.py resolves
+# `TTS_LAZY_LOAD = _env_bool("TTS_LAZY_LOAD", True)` — and this model's
+# `compile_mode: max-autotune` makes the first synthesis request pay the
+# inductor autotune. Measured 2026-09-19: the stack restarted at 19:54, the
+# first voice turn arrived at 20:04:42 and audio came out at 20:08:48 — 4 min
+# 6 s, of which "Warmup 1/3 streaming" alone was 2 min 59 s.
+#
+# The cost of that first request is not only latency. TTSStreamer._http in
+# agent-services/livekit_worker.py is one serial client with `read=120.0`, so an
+# utterance that waits longer than 120 s is DISCARDED, not merely delayed: that
+# incident lost "One moment." and "Honestly?" exactly 120 s apart, and the answer
+# to a 20:04:39 question was first heard at 20:08:56, starting mid-sentence.
+#
+# Eager loading moves the wait to where nobody is talking: the warmup runs
+# inside uvicorn's lifespan, so :8090 does not answer /health for ~4 min after a
+# restart. TTS_WARMUP_ON_START (set in conf.d/agent-tts.conf) rides along but
+# does nothing for this Base model — eager init is the fix, not the warmup.
+#
+# `${VAR:-default}`, never a bare export: supervisor passes its `environment=`
+# line into this script's environment before bash runs it, so a hard `export
+# TTS_LAZY_LOAD=false` would silently clobber an operator who set it back to lazy
+# there. The default lives here rather than only in the conf so that a person
+# running this script gets the engine production boots — until #1446 the knob
+# existed only in conf.d/agent-tts.conf, and a hand-run of this file reproduced
+# the 2026-09-19 loss exactly.
+export TTS_LAZY_LOAD="${TTS_LAZY_LOAD:-false}"
+
 cd "$QWEN3_TTS_DIR"
 
 # Wait for port to be free (don't kill — supervisor handles process lifecycle)

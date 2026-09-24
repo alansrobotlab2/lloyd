@@ -279,6 +279,21 @@ def test_the_migrator_emits_canonical_types_for_knowledge_notes(tmp_path):
         migrator.VAULT_ROOT = real_root
 
 
+def test_the_migrator_types_a_backlog_task_as_backlog(tmp_path):
+    """#585: `backlog/` fell to the catch-all `note`, so a migrator pass over
+    the board stamped task files as notes. `root` is passed explicitly, so no
+    global is touched."""
+    for rel in ("backlog/100-speaker-id-train.md", "backlog/backlog.md"):
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# x\n", encoding="utf-8")
+        assert infer_type(path, {}, "# x\n", root=tmp_path) == "backlog", rel
+    other = tmp_path / "projects" / "thing.md"
+    other.parent.mkdir(parents=True)
+    other.write_text("# x\n", encoding="utf-8")
+    assert infer_type(other, {}, "# x\n", root=tmp_path) == "note", "catch-all unchanged"
+
+
 # ── 3. the acceptance check itself, on the live vault ─────────────────────────
 
 @pytest.mark.live_vault

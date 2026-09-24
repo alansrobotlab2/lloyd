@@ -109,6 +109,24 @@ def test_nobody_hand_rolls_the_autonomy_platform_check():
     )
 
 
+def test_a_late_browser_session_is_still_distilled(tmp_path, monkeypatch):
+    """#1271 reads `platform` past the 8 KB head now. That must exclude a late
+    `worker` and keep a late `browser` — the Chrome side panel is a human."""
+    import os
+    import time
+    from workers.sources import session_distill as SD
+
+    monkeypatch.setattr(SD, "SESSIONS_DIR", tmp_path)
+    p = tmp_path / "20260916_140210_iv9f8e.json"
+    p.write_text(json.dumps({"id": p.stem, "messages": [
+        {"role": "user", "content": "q" * 20000}], "platform": "browser"}),
+        encoding="utf-8")
+    old = time.time() - 7200
+    os.utime(p, (old, old))
+    assert SD._session_platform(p) == "browser"
+    assert SD._eligible(p, p.stat().st_mtime, time.time()) == (True, "")
+
+
 def test_the_definition_covers_both_background_platforms():
     from app.sessions_io import NON_USER_PLATFORMS, is_user_session
 

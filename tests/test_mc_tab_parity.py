@@ -415,3 +415,62 @@ def test_the_architecture_doc_no_longer_calls_the_render_map_unpinned():
         "the paragraph no longer states why three tabs are exempt from the "
         "map, so the next reader cannot tell the declared exemption from an "
         "oversight and will widen or delete it")
+
+
+# ── #1228: the chat summary skips background-named files unread ──────────────
+
+
+def _mixed_sessions_dir(tmp_path):
+    import json
+    import os
+    import time
+    d = tmp_path / "sessions"
+    d.mkdir()
+    now = time.time()
+    names = []
+    for i in range(40):
+        p = d / f"20260918_{100000 + i:06d}_autocode_{i:04x}.json"
+        p.write_text(json.dumps({"session_id": p.stem, "platform": "worker"}))
+        os.utime(p, (now - i, now - i))
+    for i in range(7):
+        p = d / f"20260918_{110000 + i:06d}_iv{i:04x}.json"
+        p.write_text(json.dumps({"session_id": p.stem, "platform": "mission-control",
+                                 "preview": f"chat {i}", "model": "primary"}))
+        os.utime(p, (now - 5 - 10 * i, now - 5 - 10 * i))
+        names.append(p.stem)
+    return d, names
+
+
+def test_the_chat_summary_opens_no_background_named_file(tmp_path, monkeypatch):
+    from app.sessions_io import is_background_session_name
+
+    d, chats = _mixed_sessions_dir(tmp_path)
+    monkeypatch.setattr(mc_ui, "SESSIONS_DIR", d)
+    opened: list[str] = []
+    real = Path.read_text
+
+    def _counting(self, *a, **kw):
+        opened.append(self.name)
+        return real(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "read_text", _counting)
+    out = mc_ui._summarize_chat()
+    assert [r["id"] for r in out["recent_sessions"]] == chats[:5]
+    assert not [n for n in opened if is_background_session_name(n)], opened
+    assert len(opened) == 5
+
+
+def test_the_name_skip_changes_no_output(tmp_path, monkeypatch):
+    import json
+    from app.sessions_io import is_conversation_session
+
+    d, _ = _mixed_sessions_dir(tmp_path)
+    monkeypatch.setattr(mc_ui, "SESSIONS_DIR", d)
+    reference = []
+    for sf in sorted(d.glob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True):
+        data = json.loads(sf.read_text())
+        if is_conversation_session(sf.name, data):
+            reference.append(data["session_id"])
+    out = mc_ui._summarize_chat()
+    assert [r["id"] for r in out["recent_sessions"]] == reference[:5]
+    assert out["total_session_count"] == len(list(d.glob("*.json"))) == 47

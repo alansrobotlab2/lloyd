@@ -1683,9 +1683,10 @@ def _commit_tool_calls(
     `summary_tools` is the set of tools whose advertised schema carried the
     injected `summary` display parameter (see
     ``tool_schema.add_summary_param``). For those, the value is lifted onto
-    `_summary` and removed from `_args_dict` — the aggregator validates
-    arguments against the tool's real inputSchema, so an extra key there is
-    a dispatch error rather than a spare field. It is deliberately NOT
+    `_summary` and removed from `_args_dict` — nothing validates arguments
+    against the tool's inputSchema (top-level primitives are coerced only,
+    unknown keys reach the handler), so a leaked caption would arrive in the
+    handler's arguments unannounced. It is deliberately NOT
     removed from the `arguments` string: that string is what gets replayed
     to the engine as history, and it is the only record of this call the
     model will see again. Tools outside the set are left completely alone;
@@ -2272,9 +2273,9 @@ async def _execute_tool_call(
     """The MCP call and everything after it. Safe to run concurrently.
 
     Session correlation rides in the request's `_meta` (see
-    MCPPool.call_tool), not in the arguments — the MCP server validates
-    arguments against the tool's inputSchema before its handler runs, so
-    an injected argument is validated as if it were a real parameter.
+    MCPPool.call_tool), not in the arguments — nothing validates arguments
+    against the tool's inputSchema and unknown keys reach the handler, so
+    an injected argument would arrive as though it were a real parameter.
     """
     name = tc["function"]["name"]
     args_dict = tc["_args_dict"]

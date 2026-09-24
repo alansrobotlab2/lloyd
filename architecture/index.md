@@ -17,7 +17,11 @@ code behind a gate and a rollback watchdog ([[automod]]).
 
 One doc per area. `status: implemented` docs describe what runs; a doc that
 turns out to describe something gone or never built is moved to
-`architecture/.archive/` (gitignored) rather than left to mislead.
+`architecture/.archive/` (gitignored) rather than left to mislead. Every
+tracked doc here carries `status: implemented` — the only accepted value — and
+at least one date key, `date`, `updated` or `timestamp` (whichever the doc
+already uses; arch-review refreshes that one).
+`tests/test_architecture_doc_frontmatter.py` walks the tracked docs for both.
 
 ## Runtime
 

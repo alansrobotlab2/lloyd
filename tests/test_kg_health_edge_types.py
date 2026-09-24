@@ -82,3 +82,12 @@ def test_by_type_does_not_merge_two_relations_that_differ_by_more_than_a_hyphen(
 
     assert kg_health.build_snapshot()["edges"]["by_type"] == {
         "conflicts_with": 1, "competes_with": 1}
+
+
+def test_captured_at_is_utc_with_an_offset(db):
+    """#822: the stamp was naive local time, so a 20:58 PDT run read as the
+    previous UTC day's snapshot and no reader could tell which clock it was."""
+    import datetime as dt
+    stamp = dt.datetime.fromisoformat(kg_health.build_snapshot()["captured_at"])
+    assert stamp.utcoffset() == dt.timedelta(0), stamp
+    assert abs((dt.datetime.now(dt.timezone.utc) - stamp).total_seconds()) < 300

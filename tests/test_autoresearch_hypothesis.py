@@ -20,9 +20,12 @@ from __future__ import annotations
 import ast
 import inspect
 import json
+import logging
+import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1043,3 +1046,84 @@ def test_the_bounded_response_contract_holds_while_the_shown_surface_grows(
         "bought, and the item's fallback (a size-triggered section outline) is now "
         "the live problem rather than a future one"
     )
+
+
+# ── the dump pile is bounded per prefix (#681) ───────────────────────────────
+
+
+
+def _seed(d, prefix, n, base):
+    """n dumps of one prefix, one minute apart, oldest first from `base`."""
+    d.mkdir(parents=True, exist_ok=True)
+    out = []
+    for i in range(n):
+        p = d / f"{prefix}seed{i:03d}.txt"
+        p.write_text("x")
+        t = base + 60 * i
+        os.utime(p, (t, t))
+        out.append(p)
+    return out
+
+
+def _round(rounds, when):
+    name = time.strftime("R_%Y%m%d_%H%M%S", time.gmtime(when))
+    (rounds / name).mkdir(parents=True)
+
+
+def test_prune_keeps_the_newest_fifty_per_prefix(redirect_debug_dir, tmp_path):
+    base = time.time() - 30 * 86400
+    fails = _seed(redirect_debug_dir, hg.FAIL_DUMP_PREFIX, 60, base)
+    rejects = _seed(redirect_debug_dir, hg.REJECT_DUMP_PREFIX, 60, base)
+    rounds = tmp_path / "rounds"
+    _round(rounds, base + 86400 * 20)          # a round after every seeded dump
+    for prefix in (hg.FAIL_DUMP_PREFIX, hg.REJECT_DUMP_PREFIX):
+        assert hg.prune_debug_dumps(prefix, rounds_dir=rounds) == 10
+    assert {p for p in fails if p.exists()} == set(fails[10:])
+    assert {p for p in rejects if p.exists()} == set(rejects[10:])
+
+
+def test_prune_never_deletes_a_dump_newer_than_the_newest_round(
+        redirect_debug_dir, tmp_path):
+    base = time.time() - 30 * 86400
+    fails = _seed(redirect_debug_dir, hg.FAIL_DUMP_PREFIX, 60, base)
+    rounds = tmp_path / "rounds"
+    _round(rounds, base - 3600)                 # an older round, ignored
+    _round(rounds, base + 60 * 5)               # newest round starts at dump #5
+    assert hg.prune_debug_dumps(hg.FAIL_DUMP_PREFIX, rounds_dir=rounds) == 5
+    assert all(p.exists() for p in fails[5:])
+    assert not any(p.exists() for p in fails[:5])
+
+
+def test_the_51st_dump_bounds_its_own_prefix_only(redirect_debug_dir, tmp_path,
+                                                  monkeypatch):
+    monkeypatch.setattr(hg, "ROUNDS_DIR", tmp_path / "no-rounds-yet")
+    base = time.time() - 30 * 86400
+    _seed(redirect_debug_dir, hg.FAIL_DUMP_PREFIX, 50, base)
+    rejects = _seed(redirect_debug_dir, hg.REJECT_DUMP_PREFIX, 70, base)
+    hg._dump_raw_on_failure("v1", {"messages": []}, "raw", "bad comma")
+    assert len(list(redirect_debug_dir.glob(f"{hg.FAIL_DUMP_PREFIX}*"))) == 50
+    assert all(p.exists() for p in rejects)
+
+
+def test_prune_under_the_bound_or_on_no_dir_is_a_no_op(redirect_debug_dir, tmp_path):
+    rounds = tmp_path / "rounds"
+    assert hg.prune_debug_dumps(hg.FAIL_DUMP_PREFIX, rounds_dir=rounds) == 0
+    assert not redirect_debug_dir.exists()
+    fails = _seed(redirect_debug_dir, hg.FAIL_DUMP_PREFIX, 50, time.time() - 86400)
+    assert hg.prune_debug_dumps(hg.FAIL_DUMP_PREFIX, rounds_dir=rounds) == 0
+    assert all(p.exists() for p in fails)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    assert hg.prune_debug_dumps(hg.FAIL_DUMP_PREFIX, debug_dir=empty, rounds_dir=rounds) == 0
+    assert empty.is_dir()
+
+
+def test_a_prune_logs_prefix_count_and_newest_retained(redirect_debug_dir, tmp_path,
+                                                       caplog):
+    base = time.time() - 30 * 86400
+    _seed(redirect_debug_dir, hg.REJECT_DUMP_PREFIX, 53, base)
+    with caplog.at_level(logging.INFO, logger="autoresearch.hypothesis"):
+        hg.prune_debug_dumps(hg.REJECT_DUMP_PREFIX, rounds_dir=tmp_path / "rounds")
+    msgs = [r.getMessage() for r in caplog.records if r.name == "autoresearch.hypothesis"]
+    newest = time.strftime("%Y-%m-%dT%H:%M", time.gmtime(base + 60 * 52))
+    assert any("pruned 3 hypothesis_reject_*" in m and newest in m for m in msgs), msgs

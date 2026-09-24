@@ -451,6 +451,38 @@ def test_a_big_doc_is_told_to_read_in_sections(tree):
     assert "offset/limit" in p
 
 
+SELF_CHECK = "check the unit **against itself**"
+SELF_CHECK_CONSEQUENCE = "An internal disagreement you do not reconcile means the unit is **not** `current`"
+
+
+def _joined(p: str) -> str:
+    return " ".join(p.split())
+
+
+@pytest.mark.parametrize("shape", ["doc", "group", "big_doc"])
+def test_every_unit_is_checked_against_itself_before_it_is_classified(tree, shape):
+    """#1007: automod.md armed and disarmed the same seven metrics 31 lines
+    apart and an arch-review pass graded it `current`, because the accuracy
+    step only ever asked the tree. The within-document check sits in the
+    accuracy step, before classification, for every unit shape — a big doc's
+    sectioned-read hint does not displace it."""
+    if shape == "big_doc":
+        (tree["arch"] / "memory.md").write_text(SOLO + "filler\n" * 800)
+        p = _prompt_for(tree, "memory", "doc")
+        assert "offset/limit" in p
+    elif shape == "group":
+        p = _prompt_for(tree, "workers-jobs", "group", "Dispatch")
+    else:
+        p = _prompt_for(tree, "memory", "doc")
+    flat = _joined(p)
+    assert SELF_CHECK in flat
+    assert "grep the unit for every other statement of the same thing" in flat
+    assert _joined(SELF_CHECK_CONSEQUENCE) in flat
+    assert "classify it `stale`, or file it" in flat
+    accuracy, classify = flat.index("**1. Accuracy.**"), flat.index("Classify the unit as")
+    assert accuracy < flat.index(SELF_CHECK) < classify
+
+
 # ── 5. the verdict ───────────────────────────────────────────────────────────
 
 

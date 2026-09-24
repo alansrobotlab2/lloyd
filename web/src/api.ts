@@ -1178,6 +1178,8 @@ export const api = {
     }
   },
 
+  // Skills are read-only here (#1293): no toggle, save or refresh route
+  // exists, and a skill is retired or edited in the vault, not by a flag.
   skills(): Promise<SkillsData> {
     return fetch(`${API_BASE}/skills`).then(r => r.json()).then(d => ({
       workspace: Array.isArray(d?.workspace) ? d.workspace : [],
@@ -1185,28 +1187,8 @@ export const api = {
     }))
   },
 
-  async skillToggle(skillName: string, enabled: boolean): Promise<void> {
-    await fetch(`${API_BASE}/skill-toggle`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skillName, enabled }),
-    })
-  },
-
   skillContent(name: string): Promise<{ content: string; location: string }> {
     return fetch(`${API_BASE}/skill-content?name=${encodeURIComponent(name)}`).then(r => r.json())
-  },
-
-  async skillContentSave(name: string, content: string): Promise<void> {
-    await fetch(`${API_BASE}/skill-content`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ skillName: name, content }),
-    })
-  },
-
-  async skillsRefresh(): Promise<void> {
-    await fetch(`${API_BASE}/skills/refresh`, { method: 'POST' })
   },
 
   tools(): Promise<ToolsData> {

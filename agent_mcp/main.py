@@ -212,7 +212,8 @@ META_BASE_URL = "lloyd/base_url"
 
 # `_meta` key carrying the model's caption for this call — the injected
 # `summary` display parameter, which the harness pops before dispatch so it
-# never reaches a tool's inputSchema validation. Consumed by the two tools
+# never reaches a tool's arguments (nothing validates those against the
+# inputSchema; an unknown key would reach the handler). Consumed by the two tools
 # that label a row someone reads later (background Bash, Task). Must match
 # app.harness.mcp_pool.META_SUMMARY.
 META_SUMMARY = "lloyd/summary"
@@ -323,11 +324,13 @@ def _bound_session_id(arguments: dict, meta: Any = None) -> str:
     reserves for implementation metadata, and where the 2026-07-28 spec
     puts all per-request context. Falls back to the legacy `_session_id`
     argument so a harness and aggregator at different versions still
-    correlate. `_meta` is strictly better than the argument form: the SDK
-    validates `arguments` against the tool's inputSchema *before* the
-    handler runs, so an injected argument is validated as if it were a
-    real parameter and would be rejected outright by any schema setting
-    `additionalProperties: false`.
+    correlate. `_meta` is strictly better than the argument form. Nothing
+    validates `arguments` against the tool's inputSchema — the low-level
+    server checks only the JSON-RPC params model, the harness pool coerces
+    top-level primitives only, and unknown keys reach the handler — so an
+    injected argument is not rejected; it lands in the handler's arguments
+    as though the model had sent it, where per-parameter checks are the
+    handler's own job.
     """
     if isinstance(meta, dict):
         sid = meta.get(META_SESSION_ID)

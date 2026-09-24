@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useReportMcFocus, usePendingFocusFor } from "../../contexts/McUiContext";
-import { Sparkles, Pencil, X, Save, Search, RefreshCw } from "lucide-react";
+import { Sparkles, Search, RefreshCw } from "lucide-react";
 import { Streamdown } from "streamdown";
 import { api, type SkillInfo } from "../../api";
 import { Input } from "@/components/ui/input";
@@ -14,33 +14,11 @@ function formatFrontmatter(content: string): string {
   return "```yaml\n" + yaml + "\n```\n\n" + body;
 }
 
-function ToggleSwitch({ enabled, onToggle, disabled }: { enabled: boolean; onToggle: () => void; disabled?: boolean }) {
-  return (
-    <button
-      onClick={onToggle}
-      disabled={disabled}
-      className={`relative w-8 h-[18px] rounded-full transition-colors flex-shrink-0 ${
-        disabled ? "bg-secondary opacity-40 cursor-not-allowed" : enabled ? "bg-primary" : "bg-muted"
-      }`}
-      aria-label={enabled ? "Disable skill" : "Enable skill"}
-    >
-      <span
-        className={`absolute top-[2px] w-[14px] h-[14px] rounded-full bg-white transition-transform ${
-          enabled ? "left-[14px]" : "left-[2px]"
-        }`}
-      />
-    </button>
-  );
-}
-
 export default function SkillsPage() {
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [selectedSkill, setSelectedSkill] = useState<SkillInfo | null>(null);
   const [content, setContent] = useState<string | null>(null);
   const [loadingContent, setLoadingContent] = useState(false);
-  const [isEditing, setIsEditing] = useState(false);
-  const [editContent, setEditContent] = useState("");
-  const [saving, setSaving] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
 
   useReportMcFocus(
@@ -77,7 +55,6 @@ export default function SkillsPage() {
   useEffect(() => {
     if (!selectedSkill) return;
     setContent(null);
-    setIsEditing(false);
     setLoadingContent(true);
     api
       .skillContent(selectedSkill.name)
@@ -86,38 +63,11 @@ export default function SkillsPage() {
       .finally(() => setLoadingContent(false));
   }, [selectedSkill?.name]);
 
-  const handleToggle = async (skill: SkillInfo) => {
-    const newEnabled = !skill.enabled;
-    const patch = (list: SkillInfo[]) =>
-      list.map((s) => (s.name === skill.name ? { ...s, enabled: newEnabled } : s));
-    setSkills((prev) => patch(prev));
-    setSelectedSkill((prev) => (prev?.name === skill.name ? { ...prev, enabled: newEnabled } : prev));
-    try {
-      await api.skillToggle(skill.name, newEnabled);
-    } catch {
-      const revert = (list: SkillInfo[]) =>
-        list.map((s) => (s.name === skill.name ? { ...s, enabled: skill.enabled } : s));
-      setSkills((prev) => revert(prev));
-      setSelectedSkill((prev) => (prev?.name === skill.name ? { ...prev, enabled: skill.enabled } : prev));
-    }
-  };
-
-  const handleSave = async () => {
-    if (!selectedSkill) return;
-    setSaving(true);
-    try {
-      await api.skillContentSave(selectedSkill.name, editContent);
-      setContent(editContent);
-      setIsEditing(false);
-    } catch (e) {
-      console.error("Save failed", e);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleRefresh = async () => {
-    await api.skillsRefresh();
+  // Read-only page (#1293). The enable toggle and the editor's Save posted to
+  // routes that were never registered; fetch resolves on a 404, so the toggle
+  // flipped and the editor closed as if the SKILL.md had been written. Skills
+  // are edited in the vault. Refresh is just the GET-backed list reload.
+  const handleRefresh = () => {
     loadSkills();
   };
 
@@ -214,40 +164,9 @@ export default function SkillsPage() {
                 </span>
               )}
             </div>
-            <div className="flex items-center gap-3 flex-shrink-0">
-              <ToggleSwitch
-                enabled={selectedSkill.enabled}
-                onToggle={() => handleToggle(selectedSkill)}
-              />
-              {content !== null && !isEditing && (
-                <button
-                  onClick={() => { setEditContent(content); setIsEditing(true); }}
-                  className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground rounded-lg hover:bg-card transition-colors"
-                >
-                  <Pencil size={12} />
-                  Edit
-                </button>
-              )}
-              {isEditing && (
-                <>
-                  <button
-                    onClick={handleSave}
-                    disabled={saving}
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs bg-primary hover:bg-primary text-white rounded-lg transition-colors disabled:opacity-50"
-                  >
-                    <Save size={12} />
-                    {saving ? "Saving..." : "Save"}
-                  </button>
-                  <button
-                    onClick={() => setIsEditing(false)}
-                    className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground rounded-lg hover:bg-card transition-colors"
-                  >
-                    <X size={12} />
-                    Cancel
-                  </button>
-                </>
-              )}
-            </div>
+            <span className="flex-shrink-0 text-[10px] text-muted-foreground">
+              Read-only — edit SKILL.md in the vault
+            </span>
           </div>
 
           <div className="flex-1 overflow-y-auto px-6 py-4">
@@ -257,14 +176,7 @@ export default function SkillsPage() {
             {!loadingContent && content === null && (
               <div className="text-xs text-muted-foreground">No SKILL.md found for this skill.</div>
             )}
-            {!loadingContent && content !== null && isEditing && (
-              <textarea
-                value={editContent}
-                onChange={(e) => setEditContent(e.target.value)}
-                className="w-full h-full min-h-[400px] bg-background border border-border rounded-lg p-3 text-xs font-mono text-foreground resize-none outline-none focus:border-primary"
-              />
-            )}
-            {!loadingContent && content !== null && !isEditing && (
+            {!loadingContent && content !== null && (
               <div className="prose-doc">
                 <Streamdown>{formatFrontmatter(content)}</Streamdown>
               </div>

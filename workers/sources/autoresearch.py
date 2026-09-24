@@ -34,7 +34,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
 
 
 async def execute(item: QueueItem) -> dict[str, Any]:
-    # Lazy import — avoid loading claude_agent_sdk at boot.
+    # Lazy import — avoid loading the round orchestrator and its harness at boot.
     from scripts.autoresearch.run_round import run as run_round
 
     payload = item.payload or {}

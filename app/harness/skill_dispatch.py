@@ -51,8 +51,12 @@ from app.harness.hooks import HookRegistry
 logger = logging.getLogger("lloyd-harness-skill-dispatch")
 
 # A delivered body has to be small enough that the extra round-trip it buys is
-# not paid for twice in prompt. 6000 chars ≈ 1.5k tokens at the ~4 chars/token
-# this repo measures elsewhere (prefetch's SKILL_BODY_MAX is the same size).
+# not paid for twice in prompt. The cap is in CHARACTERS; "≈ 1.5k tokens" is
+# only the ~4 chars/token estimate, never checked against the serving
+# tokenizer — markdown with fenced code can run denser, so 6000 chars may be
+# more than 1.5k real tokens (#752). eval/run_skill_dispatch_probe.py reports
+# chars as measured and tokens as that estimate, labelled so.
+# (prefetch's SKILL_BODY_MAX is the same size.)
 MAX_DELIVERY_CHARS = 6000
 
 # Skill bodies are read off disk; this is the cache lifetime, in seconds. The

@@ -9,38 +9,24 @@ measurement lives in :mod:`scripts.autoresearch.promotion_fp_rate` and its resul
 published in
 ``~/obsidian/knowledge/evaluation/autoresearch-promotion-fp-rate-at-threshold-0p5.md``.
 
-A published number is only worth as much as the check that it holds. This file is
-that check, in two layers:
+What this file checks
+---------------------
+Only the machinery. Every test here runs on synthetic ``tmp_path`` fixtures and
+touches no live store: they prove the derivation can report a **non-zero**
+false-positive rate and can report zero for the right reason (the headline result
+was ``0/65``, and "it returned 0" is not by itself evidence that the rule was ever
+applied), and they pin the declared-cutoff invariant from #1193 —
+``test_appending_a_later_round_changes_no_counted_field_at_the_declared_cutoff`` —
+so a round appended after the cutoff changes no counted field.
 
-  * Synthetic fixtures (the bulk of the file) prove the machinery can report a
-    **non-zero** false-positive rate and can report zero for the right reason. The
-    headline result is ``0/65``; a measurement that returns ``0`` for a real
-    regression would be worthless, and "it returned 0" is not by itself evidence
-    that the rule was ever applied.
-  * The two tests at the bottom re-run the derivation over the frozen ledger window
-    and assert the published figures, including every field of the note's
-    machine-checked block.
-
-Isolation
----------
-Everything above the live section works on ``tmp_path`` fixtures and touches no
-live store. The live section reads ``_pipeline/research/`` read-only, anchored to a
-declared cutoff round so rounds that accrue after the promotion loop is re-armed
-(#506) cannot change the numbers. The anchor is only real because ``measure`` cuts
-*every* counted quantity at it — which it did not: three nodes here pinned counts taken
-over the whole live file, the worker appended a round six minutes after the last
-promotion landed, and because the store is reached through an absolute path a base
-worktree reproduced the red, the gate classified every promotion as externally blocked
-and refused it (#1193). Nothing in this file asserts a whole-file count any more: the
-invariant is pinned on synthetic data by
-``test_appending_a_later_round_changes_no_counted_field_at_the_declared_cutoff`` and
-against a copy of the live store by
-``test_the_published_recipe_survives_a_round_appended_to_a_copy_of_the_live_store``,
-and the note's shell reproduce block is re-run and re-checked by
-``test_the_note_s_reproduce_block_commands_agree_with_the_numbers_beside_them``. No test in this file carries the ``live_vault``
-marker — including the two that open the published note: reading it is the
-repo-to-vault seam this file exists to guard, so it runs on the graded gate pass
-(see ``test_note_fields_are_reproduced_by_a_fresh_derivation`` for the argument).
+The published note is no longer machine-checked
+-----------------------------------------------
+Until 2026-09-22 a live section at the bottom re-ran the derivation over the note's
+frozen ledger window (ending ``R_20260908_181458``), compared every field of its
+machine-checked block, and re-ran its shell reproduce block. The 09-22 data-home
+incident destroyed that window, and 9185539e retired those checks rather than
+leave them permanently skipped; the note is annotated to say so. Restoring them
+means collecting new data and re-pinning, not repairing a test.
 """
 from __future__ import annotations
 
@@ -631,9 +617,9 @@ def test_an_unlanded_gate_pass_is_a_control_only_if_that_round_promoted_nothing(
     """Control-ness is computed from the data, and the data can say no.
 
     In this fixture the gate-passing round landed nothing, so it *is* a clean
-    no-landing control — which is exactly why the live-data test below is worth
-    writing: on the live ledger the same query returns rounds that all promoted
-    something else, and the flag flips to false.
+    no-landing control. On the published window's live ledger the same query
+    returned rounds that all promoted something else and the flag flipped to
+    false; the live check that pinned that was retired with the window (9185539e).
     """
     result = measure_world(world)
     passes = result["unlanded_gate_passes"]
@@ -881,90 +867,3 @@ def test_the_module_runs_as_the_published_python_m_command(world, tmp_path):
     assert report["denominator"] == 3
     assert report["fp_count"] == 1
     assert report["data_cutoff_round"] == "R_20260112_000000"
-
-
-# ── the published figures ────────────────────────────────────────────────────
-#
-# Read-only against the production store, frozen by cutoff. If one of these fails,
-# either the derivation changed or the note no longer matches it — both are findings,
-# and neither is fixed by editing an assertion.
-
-
-#: The declared right edge of the published window, and the note's
-#: ``data_cutoff_round``. Every live figure below is counted over
-#: ``round_id <= WINDOW_CUTOFF`` — the store may grow past it freely.
-WINDOW_CUTOFF = "R_20260908_181458"
-
-#: The lookahead each non-promoted round needs before it can contribute a null
-#: value. Named here because the volume floor below is derived from it, not
-#: typed twice: under ``WINDOW + 1`` rounds no round in the window has a full
-#: lookahead, so `pfr.measure` cannot form a null population at all and raises
-#: rather than returning a figure this file could compare.
-WINDOW = 3
-
-
-#: Backlog #324's independent figure, knowledge/evaluation/autoresearch-baseline-stability.md
-
-#: Exact text of the note's ``noise_floor_source`` field. Compared for equality, not
-#: by substring: the claim is about which store the floor is computed from, and a
-#: substring check would pass on prose that named the wrong one.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-#: Every field the note publishes that is a count or a rate — the ones a reader is
-#: tempted to nudge. ``schema`` and ``noise_floor_source`` are prose promises and are
-#: pinned by the whole-block comparison instead.
-
-
-
-
-
-
-# ── the note's shell reproduce block ─────────────────────────────────────────
-#
-# The note publishes a second way to check its own numbers: a bash block under
-# "## Denominator — shell-reproducible" that counts the ledger with jq and prints the
-# expected figure in a comment beside each command. Until #1193 those commands counted
-# the WHOLE live ledger while the comments printed the window's figures — so the block
-# the note offers as the check was the one thing in the note that could not be checked,
-# and it silently disagreed with the number next to it the moment the worker appended a
-# round. No test ran the block, which is how that shipped. These two tests close that:
-# one re-runs the block as a reader would and compares every printed count to the
-# number printed beside it, the other proves the published derivation is blind to a
-# round appended to a copy of the live store.
-
-
-
-
-
-
-
-
-
-
-
-
-

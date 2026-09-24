@@ -186,3 +186,51 @@ def test_the_script_prints_the_fact_level_total(tmp_path):
     # is what a nightly run is actually read from.
     assert ("  Exact-duplicate fact rows (facts_idx.text_hash): 1 redundant of 2 rows "
             "(entities with an exact twin: 1; distinct texts: 1)") in proc.stdout, proc.stdout[-1500:]
+
+
+# ── #1289: the printed metrics are in the written report ────────────────────
+
+def _hygiene(**over):
+    h = {"contaminated_dirs": 0, "foreign_facts": 0, "near_dup_clusters": 0,
+         "near_dup_dirs": 0, "near_dup_tiers": {}, "regrown": [], "new_dirs": 0,
+         "regrowth_days": 7, "contaminated": []}
+    h.update(over)
+    return h
+
+
+def _report(hygiene, **kw):
+    now = datetime.now(timezone.utc)
+    return khr.generate_report({}, khr.compute_relationship_stats([], {}), [], [], now,
+                               hygiene, **kw)
+
+
+def _row(report, label):
+    rows = [l for l in report.splitlines() if l.startswith(f"| {label}")]
+    assert len(rows) == 1, report
+    return rows[0]
+
+
+def test_provenance_coverage_row_carries_both_pct_count_and_components():
+    pv = {"facts": 318396, "created_at_pct": 35.7, "source_doc_pct": 35.69,
+          "both_pct": 35.69}
+    row = _row(_report(_hygiene(provenance=pv), duplicate_id_files=0),
+               "Provenance coverage")
+    assert "35.69% of 318,396 facts" in row
+    assert "created_at 35.7%" in row and "source_doc 35.69%" in row
+
+
+def test_unmeasured_provenance_says_so():
+    for pv in ({"error": "StoreUnavailable: locked"}, None):
+        h = _hygiene() if pv is None else _hygiene(provenance=pv)
+        row = _row(_report(h), "Provenance coverage")
+        assert "not measured" in row and "None" not in row, row
+    assert "StoreUnavailable" in _row(
+        _report(_hygiene(provenance={"error": "StoreUnavailable: locked"})),
+        "Provenance coverage")
+
+
+def test_duplicate_fact_id_row_is_present_at_zero_and_nonzero():
+    for n in (0, 4):
+        row = _row(_report(_hygiene(), duplicate_id_files=n),
+                   "Files with duplicate fact IDs")
+        assert row.endswith(f"| {n} |"), row

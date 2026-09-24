@@ -954,12 +954,17 @@ class Guardian:
             return
         self.last_selftest = now
         was = self.selftest_ok
+        failures: list = []
         try:
             import selftest
-            self.selftest_ok = selftest.run(self, verbose=False)
+            self.selftest_ok = selftest.run(self, verbose=False, failures=failures)
         except Exception as exc:
             self.selftest_ok = False
+            failures.append(("selftest raised", f"{type(exc).__name__}: {exc}"))
             log(f"selftest raised: {exc}")
+        # Named here, not only at the page: the detail is what says whether a
+        # failure is a boot race or a guardian fault (#1178).
+        cause = "\n".join(f"- {n}: {d}" for n, d in failures) or "- (no check reported a detail)"
         if self.selftest_ok:
             if was is False:
                 log("selftest: passing again")
@@ -968,7 +973,8 @@ class Guardian:
         if now - self.started_ts < policy.SELFTEST_BOOT_GRACE_SECONDS:
             log(f"selftest failed {now - self.started_ts:.0f}s after start "
                 f"(boot grace {policy.SELFTEST_BOOT_GRACE_SECONDS:.0f}s); "
-                f"retrying in {policy.SELFTEST_RETRY_SECONDS:.0f}s")
+                f"retrying in {policy.SELFTEST_RETRY_SECONDS:.0f}s: "
+                + "; ".join(f"{n}: {d}" for n, d in failures))
             return
         # One page per failure episode, repeated daily while it lasts — the
         # cadence the old 24 h check gave, now that the check runs every retry.
@@ -977,8 +983,9 @@ class Guardian:
         self._selftest_alerted = now
         self.alert("error", "Guardian self-test failed",
                    "The watchdog can no longer perform one of its own preconditions. "
-                   "It is still running but may not be able to act.",
-                   needs_human=True)
+                   "It is still running but may not be able to act.\n\n"
+                   f"Failing check(s):\n{cause}",
+                   needs_human=True, evidence=cause)
 
     # ── main loop ──────────────────────────────────────────────────────
     def tick(self) -> str:

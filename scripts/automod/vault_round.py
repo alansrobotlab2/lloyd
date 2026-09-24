@@ -403,9 +403,14 @@ def _vault_review(norm: list[str], item_id: int) -> tuple[str, str, list[dict]]:
                 "no grader configured: this caller never wires one "
                 "(module CLI or autoresearch promote — the reviewer was not consulted)", [])
     try:
-        diff = _git("diff", "HEAD", "--", *norm).stdout
+        # `-M`: a rename already staged with `git mv` is shown as one, so the
+        # reader grades the move the committer commits (#1360). The new-file
+        # fallback covers only what git cannot see — an UNTRACKED path, the
+        # plain-`mv` destination — or a staged destination would appear twice.
+        diff = _git("diff", "-M", "HEAD", "--", *norm).stdout
         for p in norm:
-            if _git("cat-file", "-e", f"HEAD:{p}").returncode != 0 and (VAULT / p).exists():
+            if (_git("cat-file", "-e", f"HEAD:{p}").returncode != 0 and (VAULT / p).exists()
+                    and not _in_index(p)):
                 diff += f"\n+++ new file {p}\n" + (VAULT / p).read_text(encoding="utf-8", errors="replace")
         res = tuple(GRADER(item_id=item_id, paths=norm, diff=diff))
         graded = res[2] if len(res) > 2 else []
@@ -416,6 +421,39 @@ def _vault_review(norm: list[str], item_id: int) -> tuple[str, str, list[dict]]:
         return str(res[0]), str(res[1]), clauses
     except Exception as exc:  # noqa: BLE001 — the grader never fails a landing on its own
         return ("skipped", f"grader raised {type(exc).__name__}: {str(exc)[:200]}", [])
+
+
+def _in_index(path: str) -> bool:
+    return _git("ls-files", "--error-unmatch", "--", path).returncode == 0
+
+
+def _stageable(norm: list[str]) -> list[str]:
+    """The named paths `git add` can still match: on disk or in the index.
+
+    A source path whose rename was already staged with `git mv` is in neither,
+    and naming it made `git add -A` die with `pathspec did not match` — AFTER
+    the review had passed, so the land never committed (#1360, #409). Its
+    deletion is already in the index, so dropping it from the pathspec loses
+    nothing. The plain-`mv` destination is untracked but on disk, so it stays.
+    A path in neither that was never staged away is caught after the commit,
+    by the rename-aware landing check, which grades it `unmet` by name.
+    """
+    return [p for p in norm if (VAULT / p).exists() or _in_index(p)]
+
+
+def _committed_paths(sha: str) -> set[str]:
+    """Every path a commit touched, both sides of a rename or copy.
+
+    `git show --name-only` prints only a rename's destination under git's
+    default rename detection, so a clean archive move graded its own source
+    path `unmet` (#1360). `--name-status` carries the `R<score>` pair.
+    """
+    out: set[str] = set()
+    for line in _git("show", "--name-status", "--format=", sha).stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            out.update(p.strip() for p in parts[1:] if p.strip())
+    return out
 
 
 def _landing_clause_indices(item_id: int) -> list[int]:
@@ -533,9 +571,12 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                         "clauses": clauses})
 
     _ensure_main()
-    add = _git("add", "-A", "--", *norm)
-    if add.returncode != 0:
-        raise VaultRoundError(f"git add failed: {add.stderr.strip()[:300]}")
+    # Never `git add -A --` with an empty pathspec: that stages the whole vault.
+    stage = _stageable(norm)
+    if stage:
+        add = _git("add", "-A", "--", *stage)
+        if add.returncode != 0:
+            raise VaultRoundError(f"git add failed: {add.stderr.strip()[:300]}")
     if _git("diff", "--cached", "--quiet").returncode == 0:
         raise VaultRoundError("nothing to commit on those paths")
     commit = _git("commit", "-q", "-m", message.strip())
@@ -551,8 +592,7 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
     # of them — a path identical to HEAD, a path someone else had staged away —
     # comes back `unmet`. "Always met" would be the same unevidenceable claim the
     # reviewer was refused for making.
-    committed = {line.strip() for line in
-                 _git("show", "--name-only", "--format=", sha).stdout.splitlines()}
+    committed = _committed_paths(sha)
     missing = sorted(set(norm) - committed)
     landing_verdict = "met" if not missing else "unmet"
     landing_note = (f"named paths not in this commit: {', '.join(missing[:5])}"

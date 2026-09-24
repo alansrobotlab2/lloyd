@@ -357,6 +357,112 @@ def test_wire_spelling_with_the_vault_root_is_stripped_too(monkeypatch):
     assert "[... truncated]" in out
 
 
+# ── #994: qmd's diff formatting comes off before the cap ────────────────────
+#
+# The daemon hands back a snippet as a diff hunk. vault_search stripped the
+# header and the `NN:` prefixes; the live prefetch injection did not, so ~16%
+# of every injected snippet was formatting. One helper strips for both now,
+# and the header's start line survives as a `line:` attribute.
+
+_HUNK = "@@ -39,4 @@ (38 before, 11 after)"
+_HUNKED = (f"40: {_HUNK}\n41: \n42: The assistant extracted the auto-generated "
+           "transcript\n43: and filed the action items.")
+
+
+def _hunk_daemon(snippet: str):
+    def _search(query, limit, collections, **kw):
+        return [{"file": f"qmd://{_MARCH}", "title": "March 5 Transcript",
+                 "score": 0.9, "snippet": snippet}]
+    return _search
+
+
+def _entry(out: str) -> str:
+    return next(ln for ln in out.split("<vault-context>\n", 1)[1].split("\n- **")
+                if "March 5" in ln)
+
+
+def test_injected_entry_carries_no_hunk_header(monkeypatch):
+    monkeypatch.setattr(prefetch, "_qmd_daemon_search", _hunk_daemon(_HUNKED))
+    out = _render_vault(*prefetch._search_vault(_PROBE_QUERY))
+    assert "@@" not in out.split("<vault-context>", 1)[1]
+
+
+def test_injected_entry_carries_no_line_prefixes_and_loses_no_content(monkeypatch):
+    monkeypatch.setattr(prefetch, "_qmd_daemon_search", _hunk_daemon(_HUNKED))
+    hits = prefetch._search_vault(_PROBE_QUERY)
+    entry = _entry(_render_vault(*hits))
+    assert not re.search(r"\b\d{2,4}: ", entry.split("): ", 1)[1])
+    # Stripped, not truncated: every non-metadata character is still there.
+    content = re.sub(r"@@[^@]*@@ *(?:\([^)]*\))?", "", _HUNKED)
+    content = re.sub(r"^\d+: ?", "", content, flags=re.MULTILINE)
+    assert "".join(content.split()) in "".join(entry.split())
+    assert hits[0]["truncated"] is False
+
+
+def test_start_line_is_an_attribute_exactly_when_a_header_came_in(monkeypatch):
+    monkeypatch.setattr(prefetch, "_qmd_daemon_search", _hunk_daemon(_HUNKED))
+    hits = prefetch._search_vault(_PROBE_QUERY)
+    assert hits[0]["line"] == 39
+    head = _entry(_render_vault(*hits)).split("): ", 1)[0]
+    assert f"file: {_MARCH}, line: 39" in head
+
+    monkeypatch.setattr(prefetch, "_qmd_daemon_search", _hunk_daemon("plain text hit"))
+    hits = prefetch._search_vault(_PROBE_QUERY)
+    assert hits[0]["line"] is None
+    assert "line:" not in _entry(_render_vault(*hits)).split("): ", 1)[0]
+
+
+def test_strip_runs_before_the_cap(monkeypatch):
+    body = "\n".join(f"{n}: " + "q" * 60 for n in range(40, 60))
+    monkeypatch.setattr(prefetch, "_qmd_daemon_search",
+                        _hunk_daemon(f"{_HUNK}\n{body}"))
+    hits = prefetch._search_vault(_PROBE_QUERY)
+    assert len(hits[0]["snippet"]) == prefetch.VAULT_SNIPPET_MAX
+    assert hits[0]["truncated"] is True
+    assert "@@" not in hits[0]["snippet"]
+    assert not re.search(r"(?m)^\d+:", hits[0]["snippet"])
+    assert "[... truncated]" in _render_vault(*hits)
+
+
+# qmd's own shape: header first, then the lines (what `extractSnippet` emits).
+_HEADER_FIRST = (f"{_HUNK}\n40: The assistant extracted the auto-generated "
+                 "transcript\n41: and filed the action items.")
+
+
+def _both_surfaces(monkeypatch, snippet: str) -> tuple[str, str]:
+    row = {"file": f"qmd://{_MARCH}", "title": "March 5 Transcript",
+           "score": 0.9, "snippet": snippet}
+    # vault_search, through its real handler body.
+    monkeypatch.setattr(vault_mod, "_qmd_daemon_search", lambda *a, **k: [dict(row)])
+    monkeypatch.setattr(vault_mod, "_grep_lloyd_code", lambda *a, **k: [])
+    got = vault_mod._run_vault_search("march 5 transcript", 5, 0.0, "", False)
+    monkeypatch.setattr(prefetch, "_qmd_daemon_search", _hunk_daemon(snippet))
+    return got["results"][0]["snippet"], prefetch._search_vault(_PROBE_QUERY)[0]["snippet"]
+
+
+def test_both_surfaces_strip_the_same_row_and_vault_search_is_unchanged(monkeypatch):
+    vs, pf = _both_surfaces(monkeypatch, _HEADER_FIRST)
+    # Byte-identical to what the handler produced before #994 (its old inline
+    # strip, restated here as the reference).
+    old = re.sub(r"@@[^@]*@@\s*(?:\([^)]*\)\s*)?", "", _HEADER_FIRST).strip()
+    old = re.sub(r"^\d+:\s*", "", old, flags=re.MULTILINE).strip()[:300]
+    assert vs == old
+    # prefetch, same row: the same text, free of both artefacts.
+    assert pf == vs
+    for s in (vs, pf):
+        assert "@@" not in s and not re.search(r"(?m)^\d+:", s)
+
+
+def test_a_numbered_header_line_is_stripped_on_both_surfaces(monkeypatch):
+    # The shape the injected corpus shows (`40: @@ -39,4 @@ …`). The old inline
+    # strip left `41: ` standing here; the shared helper does not, on either.
+    vs, pf = _both_surfaces(monkeypatch, _HUNKED)
+    assert pf == vs
+    for s in (vs, pf):
+        assert "@@" not in s and not re.search(r"(?m)^\d+:", s)
+        assert s.startswith("The assistant extracted")
+
+
 def test_carried_hit_crosses_the_thread_hand_off_still_marked(quiet_workers, monkeypatch):
     # The hybrid (vec) leg runs on a worker thread and stashes its result on the
     # SessionFocus; the NEXT turn drains that stash, merges it, and renders it.

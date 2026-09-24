@@ -24,6 +24,8 @@ Usage:
   python scripts/memory/kg_health.py                 # human-readable summary
   python scripts/memory/kg_health.py --json          # raw JSON to stdout
   python scripts/memory/kg_health.py --json -o FILE  # write snapshot to FILE
+                                                     # (name FILE per run, in UTC:
+                                                     # kg-health-<date -u +%Y-%m-%dT%H%M%SZ>.json)
 """
 from __future__ import annotations
 
@@ -171,7 +173,10 @@ def build_snapshot() -> dict[str, Any]:
     long_names = sum(1 for e in entities if len(e.split()) >= 5)
 
     return {
-        "captured_at": dt.datetime.now().isoformat(),
+        # UTC with an offset, like the per-run `kg-health-<UTC>Z.json` name the
+        # skill writes it under; a naive local stamp labelled a 20:58 PDT run
+        # with the previous UTC day's date (#822).
+        "captured_at": dt.datetime.now(dt.timezone.utc).isoformat(),
         "facts_root": str(root),
         "entities": {
             "count": entity_count,

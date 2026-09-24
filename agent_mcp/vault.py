@@ -1077,6 +1077,41 @@ def _graph_rerank(
     return rescored
 
 
+_QMD_HUNK_RE = re.compile(r"@@[^@]*@@\s*(?:\([^)]*\)\s*)?")
+_QMD_HUNK_START_RE = re.compile(r"@@\s*-(\d+)")
+_QMD_LINE_PREFIX_RE = re.compile(r"^\d+:\s*", flags=re.MULTILINE)
+# A numbered snippet numbers the header line too (`40: @@ -39,4 @@ …`), and
+# that prefix then sits in front of the next line once the header is gone,
+# where the line-start rule cannot reach it.
+_QMD_HEADER_PREFIX_RE = re.compile(r"^\d+:\s*(?=@@)", flags=re.MULTILINE)
+
+
+def strip_qmd_snippet(raw: str) -> tuple[str, int | None]:
+    """qmd's snippet without its diff formatting, and the line it starts at.
+
+    The daemon returns a snippet as a diff hunk: an `@@ -39,4 @@ (38 before,
+    11 after)` header and an `NN:` prefix on every line. Neither is content —
+    in the live prefetch injection they were ~16% of the snippet budget
+    (#994). This is the one definition both surfaces use (`vault_search`
+    here, `prefetch._search_vault` for the injected `<vault-context>`), so
+    they cannot drift apart again. The start line is parsed from the header
+    before it is thrown away — `None` when the snippet carried none — so a
+    caller can still say where in the file the match sat.
+
+    For a snippet whose header comes first (qmd's own shape) the text is
+    byte-identical to vault_search's pre-#994 inline strip. The one shape it
+    changes is a numbered header line, where that strip left the next line's
+    `NN:` prefix standing.
+    """
+    raw = raw or ""
+    m = _QMD_HUNK_START_RE.search(raw)
+    line = int(m.group(1)) if m else None
+    text = _QMD_HEADER_PREFIX_RE.sub("", raw)
+    text = _QMD_HUNK_RE.sub("", text).strip()
+    text = _QMD_LINE_PREFIX_RE.sub("", text).strip()
+    return text, line
+
+
 def _run_vault_search(query: str, max_results: int, min_score: float, scope: str, consolidate: bool) -> dict:
     scope_prefixes = []
     if scope:
@@ -1155,8 +1190,7 @@ def _run_vault_search(query: str, max_results: int, min_score: float, scope: str
             continue
         if scope_prefixes and not any(path.startswith(p) for p in scope_prefixes):
             continue
-        snippet = re.sub(r"@@[^@]*@@\s*(?:\([^)]*\)\s*)?", "", r.get("snippet", "")).strip()
-        snippet = re.sub(r"^\d+:\s*", "", snippet, flags=re.MULTILINE).strip()
+        snippet, _line = strip_qmd_snippet(r.get("snippet", ""))
         parsed.append({"path": path, "score": round(score, 4), "snippet": snippet[:300], "citation": path})
 
     trimmed = parsed[:max_results]
@@ -1679,10 +1713,11 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
     limit = int(params.get("limit", 20))
     include_facts = params.get("include_facts", True)
     expand_graph = bool(params.get("expand_graph", RECALL_EXPAND_GRAPH))
-    # graph_rerank default-on as of 2026-05-12 — the perf optimization
-    # (regex over voters instead of full entity scan) drops latency from
-    # ~2s extra to near-zero, while the MRR lift (+6-13%) is consistent.
-    # Alpha defaults to 0.3 (graph-heavy) per the May 11 alpha sweep.
+    # The graph rerank's default is RECALL_GRAPH_RERANK — see that constant
+    # and the 2026-09-04 measurement block above it, not a restatement here.
+    # rerank_alpha (RECALL_RERANK_ALPHA) is only consulted when a caller
+    # turns the rerank on; _graph_rerank scores voters by regex rather than
+    # a full entity scan, which keeps that path cheap when it is.
     graph_rerank = bool(params.get("graph_rerank", RECALL_GRAPH_RERANK))
     rerank_alpha = float(params.get("rerank_alpha", RECALL_RERANK_ALPHA))
     demote_daily_logs = bool(params.get("demote_daily_logs", RECALL_DEMOTE_DAILY_LOGS))
@@ -1778,7 +1813,7 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
         Eval verdict (2026-05-12): on average HURTS single-entity queries
         by injecting alternatives that displace the perfect QMD top-1
         match. HELPS the 'hard' cross-domain category. Net regression
-        when default-on (-12% MRR overall). Default-off, opt-in via
+        when on by default (-12% MRR overall). Default-off, opt-in via
         `graph_lookup: True`."""
         if not params.get("graph_lookup", False):
             return []

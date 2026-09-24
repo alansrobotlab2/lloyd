@@ -448,6 +448,67 @@ def test_a_retirement_by_rename_lands_as_one_commit(livevalidatorvault):
     assert {"skills/foo/SKILL.md", "skills/.archived/foo/SKILL.md"} <= set(shown.splitlines()), shown
 
 
+# ── #1360: an archive staged with `git mv` lands, and is graded as a move ────
+
+ARCHIVE_PATHS = ["skills/foo/SKILL.md", "skills/.archived/foo/SKILL.md"]
+LANDING_CLAUSE = ("The change is submitted through `automod_vault_land` as one call "
+                  "naming exactly skills/foo/SKILL.md and skills/.archived/foo/SKILL.md.")
+
+
+def _retire_by_git_mv(vault) -> None:
+    (vault / "skills" / ".archived").mkdir(parents=True)
+    assert git(vault, "mv", "skills/foo", "skills/.archived/foo").returncode == 0
+    (vault / "skills" / ".archived" / "foo" / "SKILL.md").write_text(
+        "---\nname: foo\nstatus: archived\n---\n# foo\n")
+
+
+@pytest.mark.parametrize("shape", ["git_mv", "plain_mv"])
+def test_both_archive_shapes_land_as_one_met_commit(livevalidatorvault, items, monkeypatch, shape):
+    """Clauses 1, 2 and 4. `git mv` made `git add -A -- <source>` fatal after a
+    passing review; plain `mv` survived. Both land now, the reviewer sees a
+    rename for the staged shape, and the landing clause derives `met` because
+    the source path counts as covered by the rename."""
+    vault = livevalidatorvault
+    write_item(items, 409, [LANDING_CLAUSE])
+    seen = {}
+
+    def _grader(**kw):
+        seen["diff"] = kw["diff"]
+        return ("pass", "moved", [{"clause": 1, "verdict": "post_landing",
+                                   "subject": "landing"}])
+
+    monkeypatch.setattr(V, "GRADER", _grader)
+    before = int(git(vault, "rev-list", "--count", "HEAD").stdout.strip())
+    (_retire_by_git_mv if shape == "git_mv" else _retire_by_rename)(vault)
+    out = V.land(ARCHIVE_PATHS, "archive foo (#409)", item_id=409)
+    assert out["ok"], out
+    assert int(git(vault, "rev-list", "--count", "HEAD").stdout.strip()) == before + 1
+    status = git(vault, "show", "--name-status", "--format=", out["commit"]).stdout
+    assert "skills/.archived/foo/SKILL.md" in status, status
+    assert git(vault, "cat-file", "-e", f"{out['commit']}:skills/foo/SKILL.md").returncode != 0
+    assert not (vault / "skills" / "foo" / "SKILL.md").exists()
+    if shape == "git_mv":
+        assert "rename from skills/foo/SKILL.md" in seen["diff"], seen["diff"]
+        assert "rename to skills/.archived/foo/SKILL.md" in seen["diff"], seen["diff"]
+        assert "+++ new file" not in seen["diff"], "a staged destination shown twice"
+    assert out["landing_clauses"] == [{"clause": 1, "verdict": "met",
+                                       "commit": out["commit"]}]
+
+
+def test_a_named_path_in_neither_head_nor_the_commit_is_still_unmet(livevalidatorvault, items,
+                                                                     monkeypatch):
+    """Clause 3. Tolerating a vanished pathspec must not hide a dropped path."""
+    vault = livevalidatorvault
+    write_item(items, 410, [LANDING_CLAUSE])
+    monkeypatch.setattr(V, "GRADER", lambda **kw: ("pass", "moved", []))
+    _retire_by_git_mv(vault)
+    ghost = "skills/ghost/SKILL.md"
+    out = V.land(ARCHIVE_PATHS + [ghost], "archive foo (#410)", item_id=410)
+    row = out["landing_clauses"][0]
+    assert row["verdict"] == "unmet" and ghost in row["note"], row
+    assert "skills/foo/SKILL.md" not in row["note"], "the renamed source is covered"
+
+
 # Two real gate-role sections with nothing but gate bytes beside them: the gate stack is
 # ~100% of the contract, so `check_contract` refuses it on the ceiling. The headings carry
 # their trigger text because `check_contract` demands the named tokens live under them —

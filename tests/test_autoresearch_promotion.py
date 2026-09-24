@@ -1963,3 +1963,30 @@ def test_validity_report_lines_print_both_means_and_the_excluded_names(tmp_path)
     assert "DISAGREE on promote/no-promote" in text
     assert "excluded as lint-invalid (4): poison_1, poison_2, poison_3, poison_4" in text
     assert "advisory" in text
+
+
+# ── #784: the snapshot guard's comment is history, dated ─────────────────────
+
+_ROOT = Path(__file__).resolve().parent.parent
+
+
+def test_the_snapshot_guard_comment_carries_no_undated_promotion_count():
+    src = (_ROOT / "scripts" / "autoresearch" / "promote.py").read_text()
+    assert "CANONICAL_PROMPTS" in src, "positive control: the file is the one we mean"
+    assert "26 of the ledger's 83 promotions" not in src
+    body = src[src.index("def snapshot_current_prompts"):]
+    body = body[:body.index("\ndef ")]
+    comment = " ".join(l.strip().lstrip("#").strip() for l in body.splitlines()
+                       if l.strip().startswith("#"))
+    for m in re.finditer(r"\b(\d+) (?:promotions|snapshot dirs)", comment):
+        before = comment[:m.start()]
+        assert re.search(r"\b20\d\d-\d\d-\d\d\b", before[-200:]), (m.group(0), comment)
+    assert "It stays because" in comment
+
+
+def test_post_promotion_dates_its_ledger_figures():
+    import scripts.autoresearch.post_promotion as pp
+    doc = " ".join((pp.__doc__ or "").split())
+    i = doc.index("30,953")
+    assert re.search(r"\b20\d\d-\d\d-\d\d\b", doc[max(0, i - 120):i]), doc[i - 120:i + 40]
+    assert "appeared 65" in doc and "appears 65" not in doc

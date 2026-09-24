@@ -7,7 +7,7 @@
 #
 # Existing LIVEKIT_API_* lines in .env are replaced; other lines are preserved.
 # After running this, restart the affected services:
-#   supervisorctl restart lloyd-mc:lloyd-backend lloyd-agent-worker agent-livekit-server
+#   ~/.local/share/uv/tools/supervisor/bin/supervisorctl -c ~/lloyd/agent-services/supervisor/supervisord.conf restart lloyd-mc:lloyd-backend lloyd-agent-worker agent-livekit-server
 #
 # Usage:
 #   bash scripts/gen-livekit-secrets.sh         # rotate
@@ -50,4 +50,4 @@ chmod 600 "$ENV_FILE"
 
 echo "[gen-livekit-secrets] wrote LIVEKIT_API_KEY + LIVEKIT_API_SECRET to $ENV_FILE"
 echo "[gen-livekit-secrets] Restart services to pick up the new values:"
-echo "  supervisorctl restart lloyd-mc:lloyd-backend lloyd-agent-worker agent-livekit-server"
+echo "  ~/.local/share/uv/tools/supervisor/bin/supervisorctl -c ~/lloyd/agent-services/supervisor/supervisord.conf restart lloyd-mc:lloyd-backend lloyd-agent-worker agent-livekit-server"

@@ -831,9 +831,11 @@ def _append_diagnostics(text: str, mut: _Mutation) -> str:
     error payload would both break the JSON and flip the flag — a lint
     finding would start reading as a failed edit.
 
-    This runs on the event loop, not in the edit's worker thread, so both
-    halves are budget-bounded inside `_edit_diagnostics`; a graph read here
-    would stall SSE chat and voice too.
+    `call_tool` runs this in a worker thread, never on the event loop
+    (#726): pyflakes on two images of up to `MAX_SOURCE_BYTES` each is
+    unbudgeted, and the loop also serves SSE chat, voice and the observer.
+    The graph half keeps its own `RAIL_BUDGET_S` join inside
+    `_edit_diagnostics`, which bounds what an edit waits for it.
 
     Never raises: the model would rather have an edit with no diagnostics
     than an edit that failed because the linter did.
@@ -901,7 +903,9 @@ async def call_tool(name: str, arguments: dict):
             # The writer updates the record, so an Edit immediately after a
             # Write or Edit by the same session is allowed without re-Reading.
             _record_seen(mut.session_id, mut.real, mut.post_stat)
-            text = _append_diagnostics(text, mut)
+            # Off the loop, like the handler: pyflakes on a large file must
+            # not stall every other stream this process serves (#726).
+            text = await asyncio.to_thread(_append_diagnostics, text, mut)
             text = await _append_tsc_hint(text, mut)
     elif name == "Grep":
         text = await _grep(arguments)

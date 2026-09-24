@@ -250,39 +250,107 @@ def test_a_source_reads_its_switch_from_config(monkeypatch):
                  "quiet": {}})
     assert C.source_inner_voice("autocode") is True
     assert C.source_inner_voice("deep-research") is False
-    # A source with no key keeps today's behaviour for a session-backed turn.
-    assert C.source_inner_voice("quiet") is True
-    assert C.source_inner_voice("never-heard-of-it") is True
+    # #1015: a source with no key reads as the fleet default, off. It used to
+    # read True, which is how board-steward came to be observed by nobody's
+    # decision.
+    assert C.source_inner_voice("quiet") is False
+    assert C.source_inner_voice("never-heard-of-it") is False
+    # The `default` keyword stays, for a caller that means to name one.
+    assert C.source_inner_voice("quiet", default=True) is True
 
 
-def test_the_shipped_config_matches_the_intended_defaults():
-    """Named individually, because these are the sources that can be observed
-    at all and each answer is a judgement, not a default.
+def test_an_unreadable_config_resolves_to_off(monkeypatch):
+    from workers.sources import _common as C
 
-    All off since cut 1 of senses-not-supervision (2026-09-12). The observer's
-    measured effect on unattended turns was negative — #874 abandoned at
-    iteration 38 on an invented premise, sixteen false repetition fires in a
-    day — and what it provided there is done by the anchors and the gate now.
-    Recording is untouched: every one of these is still a real session in the
-    Background tab. `tests/test_automod_hardening.py` pins the same four on
-    the automod gate's side.
-    """
-    from app.config import CONFIG
+    def _boom():
+        raise RuntimeError("config import failed")
 
-    sources = (CONFIG.get("workers") or {}).get("sources") or {}
-    for name in ("autocode", "autotriage", "youtube-digest", "arch-review", "deep-research"):
-        assert sources[name]["inner_voice"] is False, name
+    monkeypatch.setattr("workers.sources.get_sources_config", _boom)
+    assert C.source_inner_voice("autocode") is False
+
+
+def test_an_unkeyed_session_source_gets_an_unobserved_session(monkeypatch, tmp_path):
+    """#1015 clause 2: `inner_voice=None` on a source with no key creates the
+    session with both observer flags off."""
+    import asyncio
+    from app import sessions_io
+    from workers.sources import _common as C
+
+    monkeypatch.setattr("workers.sources.get_sources_config",
+                        lambda: {"quiet": {}})
+    made = {}
+    real_create = sessions_io.create_session
+
+    class _Stop(Exception):
+        pass
+
+    def _create(session_id, **kw):
+        kw["sessions_dir"] = tmp_path
+        real_create(session_id, **kw)
+        made["id"] = session_id
+        raise _Stop()
+
+    monkeypatch.setattr(sessions_io, "create_session", _create)
+    with pytest.raises(_Stop):
+        asyncio.run(C.run_prompt_in_session("hi", title="t", source="quiet",
+                                            inner_voice=None, timeout_seconds=5))
+    data = json.loads((tmp_path / f"{made['id']}.json").read_text())
+    assert data["inner_voice"] is False
+    assert data["inner_voice_evaluate_user_turns"] is False
+
+
+def _session_backed_sources():
+    """Every registered source whose module runs a turn through
+    `run_prompt_in_session`, discovered from `workers/sources/*.py` — never a
+    hand-named list, which is how a sixth observable source (board-steward)
+    shipped with no key while the old test still named five."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "workers" / "sources"
+    found = {}
+    for path in sorted(root.glob("*.py")):
+        if path.name.startswith("_"):
+            continue
+        tree = ast.parse(path.read_text())
+        calls = any(isinstance(n, ast.Call)
+                    and getattr(n.func, "attr", getattr(n.func, "id", None))
+                    == "run_prompt_in_session"
+                    for n in ast.walk(tree))
+        if not calls:
+            continue
+        name = next((n.value.value for n in tree.body
+                     if isinstance(n, ast.Assign)
+                     and any(getattr(t, "id", None) == "NAME" for t in n.targets)
+                     and isinstance(n.value, ast.Constant)), None)
+        assert name, f"{path.name} runs a session turn but declares no NAME"
+        found[name] = path
+    return found
+
+
+def test_every_session_backed_source_is_unobserved_in_the_shipped_config():
+    """All off since cut 1 of senses-not-supervision (2026-09-12). The
+    observer's measured effect on unattended turns was negative — #874
+    abandoned at iteration 38 on an invented premise, sixteen false
+    repetition fires in a day — and what it provided there is done by the
+    anchors and the gate now. Recording is untouched: every one of these is
+    still a real session in the Background tab.
+
+    Resolved through `source_inner_voice` against the real config, so a new
+    session source with no key fails here rather than opting itself in."""
+    from workers.sources import _common as C
+
+    sources = _session_backed_sources()
+    assert {"autocode", "autotriage", "board-steward"} <= set(sources), sources
+    for name in sources:
+        assert C.source_inner_voice(name) is False, name
 
 
 def test_no_call_site_bakes_its_own_answer_in():
     """`deep-research` passed `inner_voice=False` as a literal, which is to
     say it was not a setting. One reader, or the config is decoration."""
-    for rel in ("workers/sources/deep_research.py",
-                "workers/sources/youtube_digest.py",
-                "workers/sources/autocode.py",
-                "workers/sources/autotriage.py"):
-        text = open(rel).read()
-        assert "inner_voice=" not in text, rel
+    for name, path in _session_backed_sources().items():
+        assert "inner_voice=" not in path.read_text(), name
 
 
 def test_the_switch_is_ui_mutable_without_dirtying_the_tracked_config(tmp_path,

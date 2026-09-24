@@ -812,3 +812,102 @@ async def test_the_board_reports_a_parked_upstreams_hold_over_http(
         f"dispatch offers neither #2 nor #4 ({sorted(due)}); with #4 also missing "
         "the two assertions above compare the board against a scheduler that "
         "refused everything, which is not agreement")
+
+
+# ── Every path api.ts calls is a registered route (#1293) ─────────────────────
+#
+# Response shapes were pinned above; nothing pinned that a path the client
+# calls exists at all, which is how three dead Skills-page POSTs survived from
+# the first commit. This enumerates every `${API_BASE}/…` template literal in
+# api.ts with the method its fetch sends, and matches it against the app's
+# routes. The allowlist may name only the two chat-surface misses #1293's
+# triage found (both 404 today, owned elsewhere) — never a skill path.
+
+import re as _re  # noqa: E402
+
+_API_TS = Path(__file__).resolve().parent.parent / "web" / "src" / "api.ts"
+_API_LITERAL = _re.compile(r"`\$\{API_BASE\}((?:[^`$]|\$\{[^}]*\})*)`")
+
+KNOWN_DEAD_CLIENT_PATHS = {
+    "POST /api/clear": "api.clearSession; the route is /api/sessions/clear",
+    "GET /api/messages?session_key=": "api.loadMessages fallback; only /api/messages/{id} exists",
+}
+
+
+def _concrete_path(tmpl: str) -> str:
+    """The path part of a template literal, each `${…}` segment made concrete.
+
+    The query string goes: a literal `?` ends the path, and an expression glued
+    to a non-`/` character with nothing after it (`/tasks${qs}`,
+    `/entity-graph${qs ? "?" + qs : ""}`) is a query suffix, not a segment.
+    """
+    parts = _re.split(r"(\$\{[^}]*\})", tmpl)
+    path = ""
+    for i, part in enumerate(parts):
+        if part.startswith("${"):
+            rest = "".join(parts[i + 1:])
+            if not rest and path and not path.endswith("/"):
+                break
+            path += "x"
+        else:
+            if "?" in part:
+                path += part.split("?", 1)[0]
+                break
+            path += part
+    return path
+
+
+def _client_calls() -> list[tuple[str, str, str]]:
+    """(method, concrete path, allowlist key) per API_BASE literal."""
+    src = _API_TS.read_text()
+    out = []
+    for m in _API_LITERAL.finditer(src):
+        tmpl = m.group(1)
+        window = src[m.end(): m.end() + 400]
+        if "fetch(" in window:
+            window = window[: window.index("fetch(")]
+        mm = _re.search(r"method:\s*['\"](\w+)['\"]", window)
+        method = mm.group(1).upper() if mm else "GET"
+        key = f"{method} /api{tmpl.split('${', 1)[0]}"
+        out.append((method, "/api" + _concrete_path(tmpl), key))
+    return out
+
+
+def _route_table() -> list[tuple[_re.Pattern, set]]:
+    table = []
+    for r in server.app.routes:
+        methods = getattr(r, "methods", None)
+        path = getattr(r, "path", None)
+        if not methods or not path:
+            continue
+        rx = _re.compile("^" + _re.sub(r"\{[^}]+\}", r"[^/]+", path) + "$")
+        table.append((rx, set(methods)))
+    return table
+
+
+def test_every_api_ts_path_is_a_registered_route():
+    calls = _client_calls()
+    assert len(calls) > 50, "extractor found too few paths to mean anything"
+    table = _route_table()
+    unmatched = {}
+    for method, path, key in calls:
+        if not any(rx.match(path) and method in ms for rx, ms in table):
+            unmatched[key] = path
+    assert set(unmatched) - set(KNOWN_DEAD_CLIENT_PATHS) == set()
+
+
+def test_the_dead_path_allowlist_is_exactly_the_two_named_misses():
+    assert set(KNOWN_DEAD_CLIENT_PATHS) == {"POST /api/clear",
+                                            "GET /api/messages?session_key="}
+    assert not any("skill" in k for k in KNOWN_DEAD_CLIENT_PATHS)
+    # Each entry still names a real miss, so none can outlive its bug unseen.
+    keys = {k for _, _, k in _client_calls()}
+    assert set(KNOWN_DEAD_CLIENT_PATHS) <= keys
+
+
+def test_the_parity_check_catches_a_dead_skill_route():
+    # Positive control: the retired POST would be unmatched.
+    table = _route_table()
+    assert not any(rx.match("/api/skill-toggle") and "POST" in ms for rx, ms in table)
+    assert not any(rx.match("/api/skill-content") and "POST" in ms for rx, ms in table)
+    assert any(rx.match("/api/skill-content") and "GET" in ms for rx, ms in table)

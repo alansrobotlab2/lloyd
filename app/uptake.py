@@ -282,9 +282,26 @@ def _has_sessions(base: Path) -> bool:
     failures "new in this round". Review re-gates run a partial suite and never
     met it; a landing's chase after `main` moved runs the whole suite, and on
     2026-09-17 that refused #1213 after nine green rungs and a 5-of-5 review.
+
+    Nor the review rung's grader sessions (#1375). The review worker's records
+    (`<date>_<time>_review_<hex>.json`, platform `worker`, source
+    `automod-review`) land in the round's `sessions/` too, and a store of 18
+    of them read as the corpus: `human_turns()` returned 0 and five
+    `tests/test_uptake.py` nodes went red for that round only. Matched by name,
+    like the canary, so no file is opened to decide.
     """
     d = base / "sessions"
-    return d.is_dir() and any(not p.name.startswith("canary_") for p in d.glob("*.json"))
+    return d.is_dir() and any(not _is_gate_session(p.name) for p in d.glob("*.json"))
+
+
+#: The review worker's session ids, minted by `scripts/automod/review.py::
+#: write_session` as `<%Y%m%d_%H%M%S>_review_<hex>`.
+_REVIEW_SESSION_RE = re.compile(r"^\d{8}_\d{6}_review_[0-9a-f]+\.json$")
+
+
+def _is_gate_session(name: str) -> bool:
+    """A session file the gate itself wrote into a round's tree, never a user's."""
+    return name.startswith("canary_") or bool(_REVIEW_SESSION_RE.match(name))
 
 
 def lloyd_root() -> Path:

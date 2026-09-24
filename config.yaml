@@ -1282,6 +1282,11 @@ workers:
       max_events: 300
       max_items: 80
       priority: 68
+      # Off, like every other unattended turn since cut 1 of
+      # senses-not-supervision (2026-09-12). It landed the same day with no
+      # key and inherited the old True fallback, so it was the one source
+      # still watched on the primary every 900 s (#1015).
+      inner_voice: false
     # OFF since 2026-09-08. This source promoted generated prompt variants
     # straight over the live `lloyd/SOUL.md` / `MEMORY.md` every hour with no
     # gate, no test, no review and no revert. It is what produced the #464
@@ -1610,8 +1615,9 @@ workers:
       exhausted_min_age_seconds: 7200
       max_inflight: 1
       max_duration_seconds: 900
-      # No session: a numpy pass plus a few JSON calls to the secondary.
-      inner_voice: false
+      # No session and no `inner_voice` key: a numpy pass plus a few JSON
+      # calls to the secondary, so there is no turn to observe and
+      # /api/workers/health renders it null (#1015).
       threshold: 0.75
       # Kill switch for the LLM pair-judge; off = cosine, paths and parents only.
       judge: true

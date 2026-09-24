@@ -316,6 +316,13 @@ a surface with zero calls is `stale` whatever its premise says.
 `eval/run_eval.py` that would move.** Edge-only changes move nothing there \
 (measured); such an item is `unverifiable` until a harness exists, and you \
 should say which harness.
+- **Scope an absence grep to Lloyd's own code.** `~/lloyd` holds vendored \
+trees — `.venvs`, `llama.cpp`, `qmd`, `node_modules`, `.git` — and a repo-wide \
+`grep -r` sweeps them in: #540's "returns zero matches" returned 740, every hit \
+vendored. Use `git grep`, or `grep -r --exclude-dir=.venvs \
+--exclude-dir=llama.cpp --exclude-dir=qmd --exclude-dir=node_modules \
+--exclude-dir=.git`, and print the scoped command in the evidence so a re-run \
+reproduces it.
 - **Check for a newer item that already covers it.** Superseded is `stale`, \
 and the evidence is the newer item's number.
 - **An item making several claims gets a verdict per claim.** The verdict \

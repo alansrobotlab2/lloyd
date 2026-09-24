@@ -33,6 +33,7 @@ input cannot fit a token ceiling; output bounded by the edit can.
 from __future__ import annotations
 
 import concurrent.futures
+import datetime
 import json
 import logging
 import re
@@ -54,6 +55,12 @@ USER_PATH = LLOYD_HOME.parent / "obsidian" / "lloyd" / "USER.md"
 CORRECTIONS_PATH = LLOYD_HOME.parent / "obsidian" / "memory" / "corrections.md"
 KNOWLEDGE_HEALTH_PATH = PIPELINE_DIR / "reports" / "knowledge-health-latest.md"
 DEBUG_DIR = PIPELINE_DIR / "research" / "_debug"
+# `R_YYYYMMDD_HHMMSS` round dirs (UTC, `common.new_round_id`); the newest one's
+# start is the floor below which the dump prune may delete anything.
+ROUNDS_DIR = PIPELINE_DIR / "research" / "rounds"
+# Newest dumps kept per prefix (#681). Per prefix, never one global count, so a
+# burst of rejections cannot push the parse-failure evidence out.
+DUMP_KEEP = 50
 
 # ── the bounded variant contract (#446) ──────────────────────────────────────
 #
@@ -214,6 +221,68 @@ def _dump_raw_on_failure(
         logger.info("Dumped failed hypothesis output to %s", path)
     except Exception as exc:
         logger.warning("Failed to dump raw output: %s", exc)
+        return
+    prune_debug_dumps(prefix)
+
+
+def _newest_round_start(rounds_dir: Path) -> float | None:
+    """Epoch start of the newest `R_YYYYMMDD_HHMMSS` round, or None."""
+    try:
+        names = sorted(p.name for p in rounds_dir.iterdir()
+                       if re.fullmatch(r"R_\d{8}_\d{6}", p.name))
+    except OSError:
+        return None
+    if not names:
+        return None
+    t = datetime.datetime.strptime(names[-1], "R_%Y%m%d_%H%M%S")
+    return t.replace(tzinfo=datetime.timezone.utc).timestamp()
+
+
+def prune_debug_dumps(prefix: str, keep: int = DUMP_KEEP,
+                      debug_dir: Path | None = None,
+                      rounds_dir: Path | None = None) -> int:
+    """Keep the newest `keep` dumps of one prefix; return how many were removed.
+
+    Nothing removed it before (#681): 192 files over 22 days. Two rules keep
+    the prune from falsifying what the pile measures — the `hypothesis_fail_*`
+    count and newest mtime are how a round proves the stream is quiet:
+
+    - a dump at or after the newest round's start is never deleted, however
+      many there are, so a prune can never manufacture a clean streak;
+    - every removal is logged with the prefix, the count removed and the
+      newest retained mtime, so the pre-prune count stays recoverable.
+
+    Best-effort like the dump itself: an unreadable dir or file is skipped.
+    """
+    d = DEBUG_DIR if debug_dir is None else debug_dir
+    try:
+        files = []
+        for p in d.glob(f"{prefix}*"):
+            try:
+                files.append((p.stat().st_mtime, p))
+            except OSError:
+                continue
+    except OSError:
+        return 0
+    if len(files) <= keep:
+        return 0
+    files.sort(key=lambda x: x[0], reverse=True)
+    floor = _newest_round_start(ROUNDS_DIR if rounds_dir is None else rounds_dir)
+    removed = 0
+    for mtime, p in files[keep:]:
+        if floor is not None and mtime >= floor:
+            continue
+        try:
+            p.unlink()
+            removed += 1
+        except OSError:
+            continue
+    if removed:
+        logger.info("pruned %d %s* debug dumps (kept %d, newest retained mtime %s)",
+                    removed, prefix, len(files) - removed,
+                    datetime.datetime.fromtimestamp(files[0][0], datetime.timezone.utc)
+                    .isoformat())
+    return removed
 
 
 def _try_parse_json(raw: str) -> tuple[dict | None, str | None]:

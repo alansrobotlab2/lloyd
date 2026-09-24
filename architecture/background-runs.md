@@ -365,14 +365,13 @@ then drop non-user rows, which with 22 of the newest 24 already background
 rendered a nearly empty panel. It now walks mtime order, skips by name, and
 stops at `_RECENT_KEPT` user rows or `_RECENT_CEILING` (400) files opened.
 
-A fifth reader of that directory has no ceiling: `mc_ui._summarize_chat`
-(`app/routers/mc_ui.py:321-343`) sorts the whole glob, opens every file because
-`is_conversation_session` sits inside the loop's `try` with no name-based skip, and
-globs a second time for `total_session_count`. It runs on every
-`mc_navigate`/`POST /api/mc/state` through `_SUMMARIZERS`, uncached, measured at
-238 ms against 1,420 files where the bounded scans cost 35-182 ms — so it is the
-one place where the interactive path still pays per background file (filed,
-#1017).
+The fifth reader is `mc_ui._summarize_chat`, the Chat tab's summary. It is
+reached only from `mc_navigate` (`post_mc_navigate` → `_summarize_tab`); the
+frontend's debounced state report never runs it. It walks mtime order, skips a
+background-named file unread like the scans above (#1228), and stops at five
+chat rows or 400 files opened, so its cost scales with the background share of
+the directory rather than its size: 5 files opened and ~5 ms against 580
+session files on 2026-09-24. `total_session_count` is a second glob, not a read.
 
 ### Post-capture and the titler
 
@@ -435,10 +434,11 @@ override with a literal reads as broken the one time somebody uses it.
 | `youtube-digest` | false | evaluates untrusted transcripts and files backlog items from them |
 | `deep-research` | false | a human reads the note before anything acts on it |
 | `arch-review` | false | reviews docs and edits the one doc it was given (`f80c9d0`) |
-| `board-steward` | **unset** | moves backlog statuses (`6d59b7c`) — so it is *observed* |
+| `board-steward` | false | moves backlog statuses (`6d59b7c`); unset until #1015, so it was observed |
 
-**All five keyed sources are off since 2026-09-12** (`97a86cc`, cut 1 of
-senses-not-supervision, pinned by `tests/test_background_inner_voice.py:250`):
+**All six are off** — five since 2026-09-12 (`97a86cc`, cut 1 of
+senses-not-supervision), `board-steward` since #1015 — pinned by
+`tests/test_background_inner_voice.py`:
 the observer's measured effect on unattended turns was negative — round 874
 abandoned at iteration 38 on an invented premise, sixteen false repetition
 fires in one day — and what it provided there is now done by the context
@@ -447,28 +447,23 @@ sessions in the Background tab.
 
 These are the sources that call `run_prompt_in_session`, and only a turn that
 runs through the chat endpoint can be observed at all. A session-backed source
-that sets no key is **observed**: `source_inner_voice`'s fallback is `True`, so
-opting *out* is the thing config.yaml has to say — which is why the "all off"
-above is a list of keys rather than a property of the sources, and why
-`board-steward`, added with no key, is being watched on primary every 15
-minutes against that measured default (filed, #1015). The tests that were
-supposed to catch it name five sources and four files by hand, so an unkeyed
-sixth passes them.
+that sets no key is **not observed**: `source_inner_voice`'s fallback is
+`False` since #1015, so opting *in* is the thing config.yaml has to say. Until
+then the fallback was `True`, and `board-steward`, added with no key, was
+watched on primary every 15 minutes against the measured default while the
+tests that should have caught it named five sources and four files by hand.
+The test now discovers the session sources from `workers/sources/*.py` and
+resolves each against the shipped config, so an unkeyed seventh fails it.
 
 `/api/workers/health` reports the key tri-state for the same reason — `null`
 means "not set", which for a direct-path source means "not observable", and a
 flat `false` would invite a knob that reads as broken. **Until 2026-09-11 the
 key was set only on those four**, which is what made the tri-state honest.
-Then `backlog-cluster` arrived (`30be051`, the nightly clustering source)
-carrying `inner_voice: false` — and that source has no agent turn at all: its
-`execute` is a `build_clusters` call in a thread, a numpy pass plus a few
-JSON calls to the secondary, as its own config comment says. So health now
-renders it `false` where `null` is the honest answer, i.e. as a source
-someone could switch observation on for, which is precisely the misreading
-the tri-state exists to prevent. The value is otherwise inert: nothing on
-that path reads `source_inner_voice`. Nothing caught it because
-`test_the_shipped_config_matches_the_intended_defaults` names the four
-individually and says nothing about a fifth.
+`backlog-cluster` arrived on 2026-09-11 (`30be051`, the nightly clustering
+source) carrying `inner_voice: false` on a source with no agent turn at all —
+its `execute` is a `build_clusters` call in a thread — so health rendered it
+`false` where `null` is the honest answer. #1015 removed the key, and with the
+fallback now `False` a `null` on a session source means off, not observed.
 
 It is UI-mutable through `data/tool_overrides.yaml` like `workers.enabled`;
 the override merge honours that one key per source, refuses to introduce a

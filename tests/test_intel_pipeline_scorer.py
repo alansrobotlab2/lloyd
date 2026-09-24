@@ -201,6 +201,22 @@ def test_call_local_llm_posts_to_the_local_chat_completions_endpoint(monkeypatch
     assert seen["timeout"] == scoring_mod.LLM_TIMEOUT_SECONDS
 
 
+def test_the_relevance_grade_is_greedy_and_seeded(monkeypatch):
+    """#1232: `RELEVANCE_FLOOR` makes this integer a keep/drop, and at
+    temperature 0.2 with no seed one item scored 8 in one run and 6 in the
+    next. The body on the wire is what decides, so the body is asserted."""
+    seen = {}
+
+    def fake_urlopen(req, timeout=None):
+        seen["body"] = json.loads(req.data.decode())
+        return FakeResponse({"choices": [{"message": {"content": '{"relevance": 5}'}}]})
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    scoring_mod.call_local_llm("grade this item")
+    assert seen["body"]["temperature"] == 0
+    assert "seed" in seen["body"] and isinstance(seen["body"]["seed"], int)
+
+
 def test_call_local_llm_raises_on_an_empty_reply(monkeypatch):
     """A silent model must not read as a quiet day — that is defect 5's shape."""
     monkeypatch.setattr(

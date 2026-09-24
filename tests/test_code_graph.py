@@ -250,6 +250,35 @@ async def test_file_argument_disambiguates(plain):
     assert CG.resolve_symbol(entry, "main", "pkg/b.py").node == "main_b"
 
 
+async def test_a_file_hint_is_a_filter_not_a_preference(plain):
+    """#725: `main` is defined in pkg/a.py and pkg/b.py. Scoped to a file that
+    holds neither, the old resolver fell back to every candidate and could
+    answer about a stranger's symbol; now it resolves to nothing and says
+    which hint missed and where the symbol does live."""
+    entry = await CG.load_graph(plain)
+    res = CG.resolve_symbol(entry, "main", "pkg/c.py")
+    assert res.node is None and res.candidates == []
+    assert res.unmatched_hint == "pkg/c.py"
+    assert sorted(res.nearest) == ["main_a", "main_b"]
+    # A symbol unique to one file, hinted at the other, is the same miss.
+    res = CG.resolve_symbol(entry, "a", "pkg/b.py")
+    assert res.node is None and res.unmatched_hint == "pkg/b.py"
+    # The hint still matches on a path boundary, and still disambiguates.
+    assert CG.resolve_symbol(entry, "main", "b.py").node == "main_b"
+    assert CG.resolve_symbol(entry, "main", "/abs/tree/pkg/a.py").node == "main_a"
+    assert CG.resolve_symbol(entry, "main", "otherpkg/b.py").unmatched_hint
+
+
+async def test_tools_say_the_symbol_is_not_in_the_hinted_file(plain):
+    for tool in ("graph_explain", "graph_affected"):
+        res = await CG.call_tool(tool, {"symbol": "main", "file": "pkg/c.py",
+                                        "root": str(plain)})
+        assert res.is_error, tool
+        payload = json.loads(res.content[0].text)
+        assert payload["error"] == "no symbol named 'main' in pkg/c.py"
+        assert any("pkg/a.py" in d for d in payload["defined_elsewhere"])
+
+
 async def test_a_path_resolves_to_the_file_node(plain):
     entry = await CG.load_graph(plain)
     assert CG.resolve_symbol(entry, "pkg/a.py").node == "mod_a"

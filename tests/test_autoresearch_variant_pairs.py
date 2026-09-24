@@ -464,8 +464,8 @@ def test_the_queue_record_carries_the_per_surface_counts_to_another_process(monk
                      attempts=1, enqueued_at="", claimed_at="", claimed_by="t",
                      completed_at=None, error=None)
 
-    # `execute` imports `run` lazily inside its body (to keep claude_agent_sdk out
-    # of boot), so the patch has to be on the module attribute it re-reads there.
+    # `execute` imports `run` lazily inside its body (to keep the round orchestrator
+    # out of boot), so the patch has to be on the module attribute it re-reads there.
     monkeypatch.setattr(rr_module, "run", fake_run, raising=True)
     out = asyncio.run(ar_source.execute(item))
 

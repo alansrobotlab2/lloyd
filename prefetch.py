@@ -30,7 +30,7 @@ from agent_mcp.skills import SKILLS_DIRS, _iter_skills, _score_skill, _query_tok
 from agent_mcp._shared import _ENTITY_STOPWORDS
 from agent_mcp.facts import _extract_entities_from_query, _get_facts_sync
 from agent_mcp.session import _load_session_index, _score_session
-from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords
+from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords, strip_qmd_snippet
 from prompt_builder import PROMPT_BUDGET_CHARS
 from app.sessions_io import ambient_clock_stamp
 
@@ -667,21 +667,28 @@ def _search_vault(query: str, focus: SessionFocus | None = None,
                                       legs=legs, lex_query=lex_query)
         if not results:
             return []
-        return [
-            {
+        out = []
+        for r in results:
+            if r.get("score", 0) < VAULT_MIN_SCORE:
+                continue
+            # qmd's hunk header and `NN:` line prefixes come off BEFORE the
+            # cap (#994) — the same strip vault_search applies — so the
+            # budget buys content, not diff formatting. The header's start
+            # line survives as a structured `line`, rendered beside `file:`.
+            snippet, line = strip_qmd_snippet(r.get("snippet", ""))
+            out.append({
                 "title": r.get("title", ""),
-                "snippet": r.get("snippet", "")[:VAULT_SNIPPET_MAX],
+                "snippet": snippet[:VAULT_SNIPPET_MAX],
                 "score": r.get("score", 0),
                 "file": r.get("file", ""),
+                "line": line,
                 # Recorded here, at the cut (#471): only this line can tell a
                 # snippet the cap actually shortened from one that merely
                 # happens to be VAULT_SNIPPET_MAX long, and the renderer needs
                 # that difference to say "this is a fragment" without lying.
-                "truncated": len(r.get("snippet", "")) > VAULT_SNIPPET_MAX,
-            }
-            for r in results
-            if r.get("score", 0) >= VAULT_MIN_SCORE
-        ]
+                "truncated": len(snippet) > VAULT_SNIPPET_MAX,
+            })
+        return out
     except Exception:
         return []  # Non-fatal
 
@@ -967,6 +974,8 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
                 snippet += " [... truncated]"
             path = _vault_rel_path(vr.get("file", ""))
             meta = f"score: {score:.2f}" + (f", file: {path}" if path else "")
+            if vr.get("line") is not None:
+                meta += f", line: {vr['line']}"
             if vr.get("carried"):
                 vault_lines.append(
                     f"- **{title}** ({meta}, semantic hit from the previous turn's query): {snippet}"

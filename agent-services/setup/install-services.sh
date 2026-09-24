@@ -32,6 +32,13 @@ set -euo pipefail
 # Anything that is not a watchdog or a graphical-session app still belongs in
 # supervisor/conf.d/.
 #
+# SYSTEM_SCOPE_UNITS are tracked here but are NOT user units, so the loop skips
+# them (#1108). nvidia-power-limit.service runs `nvidia-smi -pl`, which needs
+# root; it is installed by hand at /etc/systemd/system/ (with its script at
+# /usr/local/sbin/set-gpu-power-limit.sh, see its own header). A user-scope link
+# can never clamp anything and only makes `systemctl --user restart` look like
+# the right command during an Xid-79 investigation.
+#
 # Lingering must also be enabled or supervisord dies at logout and never starts
 # at boot:
 #   sudo loginctl enable-linger "$USER"
@@ -39,6 +46,7 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SYSTEMD_SRC="$PROJECT_DIR/systemd"
 SYSTEMD_DST="$HOME/.config/systemd/user"
+SYSTEM_SCOPE_UNITS=(nvidia-power-limit.service)
 
 echo "=== Installing Systemd Service Files ==="
 
@@ -47,6 +55,10 @@ mkdir -p "$SYSTEMD_DST"
 for f in "$SYSTEMD_SRC"/*.service "$SYSTEMD_SRC"/*.timer; do
     [ -e "$f" ] || continue
     name="$(basename "$f")"
+    if [[ " ${SYSTEM_SCOPE_UNITS[*]} " == *" $name "* ]]; then
+        echo "  $name — system scope, not linked (install to /etc/systemd/system by hand)"
+        continue
+    fi
     src="$(realpath "$f")"
     dst="$SYSTEMD_DST/$name"
 

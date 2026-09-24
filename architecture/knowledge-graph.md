@@ -15,6 +15,7 @@ tags:
 - memory
 type: reference
 updated: 2026-09-18
+status: implemented
 ---
 
 # Knowledge Graph

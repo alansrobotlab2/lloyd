@@ -41,85 +41,6 @@ def set_trajectory_dir(path: Path) -> None:
 # derivation of a value the verdict ledger joins on (#1055). Do not re-add a
 # matcher here.
 
-# ── Tool name normalization (for sequence mining) ────────────────────────────
-
-BASH_CMD_CATEGORIES = {
-    "explore": {"ls", "find", "cat", "head", "tail", "wc", "file", "stat", "du", "tree"},
-    "modify": {"sed", "awk"},
-    "git": {"git"},
-    "python": {"python3", "python", "pip", "uv"},
-    "http": {"curl", "wget"},
-    "container": {"docker", "podman"},
-    "service": {"supervisorctl", "systemctl", "journalctl"},
-    "fs": {"cd", "mkdir", "rm", "mv", "cp", "chmod", "chown", "ln", "touch"},
-}
-
-MCP_PREFIX_MAP = {
-    "mcp____vault_": "mcp:vault",
-    "mcp____fact_": "mcp:fact",
-    "mcp____backlog_": "mcp:backlog",
-    "mcp____autonomy_": "mcp:autonomy",
-    "mcp____http_": "mcp:http",
-    "mcp____browser_": "mcp:browser",
-    "mcp____email_": "mcp:email",
-    "mcp____skills_": "mcp:skills",
-    "mcp____pipeline_": "mcp:pipeline",
-    "mcp____memory_": "mcp:memory",
-    "mcp____chat_": "mcp:chat",
-    "mcp____calendar_": "mcp:calendar",
-    "mcp____discord_": "mcp:discord",
-}
-
-BUILTIN_TOOLS = {
-    "Read": "read", "Edit": "edit", "Write": "write",
-    "Glob": "glob", "Grep": "grep", "Agent": "agent",
-    "ToolSearch": "toolsearch", "Skill": "skill",
-    "WebFetch": "webfetch", "WebSearch": "websearch",
-    "TodoWrite": "todowrite", "NotebookEdit": "notebook",
-}
-
-
-def normalize_tool_name(tool: dict) -> str:
-    """
-    Produce a semantic label for a tool call.
-    Bash commands are sub-categorized by command type.
-    MCP tools are grouped by server prefix.
-    Error state is appended as :ERR.
-    """
-    name = tool.get("name", "unknown")
-    is_error = tool.get("is_error", False)
-
-    # Built-in tools
-    if name in BUILTIN_TOOLS:
-        label = BUILTIN_TOOLS[name]
-    elif name == "Bash":
-        cmd = tool.get("params_summary", {}).get("command", "")
-        first_word = cmd.split()[0] if cmd and cmd.split() else ""
-        # Strip path prefix (e.g., /usr/bin/python3 -> python3)
-        first_word = first_word.rsplit("/", 1)[-1]
-        label = "bash:other"
-        for category, commands in BASH_CMD_CATEGORIES.items():
-            if first_word in commands:
-                label = f"bash:{category}"
-                break
-    else:
-        # MCP tools
-        label = None
-        for prefix, mapped in MCP_PREFIX_MAP.items():
-            if name.startswith(prefix):
-                label = mapped
-                break
-        if label is None:
-            if name.startswith("mcp____"):
-                label = "mcp:other"
-            else:
-                label = name.lower()
-
-    if is_error:
-        label += ":ERR"
-    return label
-
-
 # ── Pattern matching ─────────────────────────────────────────────────────────
 
 # A scrubbed value that says "there was something here" and nothing else:
@@ -373,6 +294,12 @@ def slug_for(text: str) -> str:
 
 
 # ── Tool name normalization (for sequence mining) ────────────────────────────
+#
+# The one label scheme. A second, unreachable `normalize_tool_name` with its own
+# tables sat above this one until #511 — editing it changed nothing. These labels
+# are baked into the verdict ledger's `seq-*` keys (`sequence_pattern_key`), so
+# changing one re-keys every adjudication; `tests/test_mine_trajectories.py`
+# pins them.
 
 _BASH_CMD_CATEGORIES = {
     "bash:explore": {"ls", "find", "cat", "head", "tail", "wc"},
@@ -622,7 +549,24 @@ def effective_session_class(traj: dict, cache: dict) -> str:
 
 # ── Data loading ─────────────────────────────────────────────────────────────
 
-def load_trajectories(days: int = 7, agent_filter: str = "worker",
+# `--agent` value -> the `agent_id` values it selects. Every value on the right is
+# one `extract-trajectories.py::parse_session` can emit ("lloyd", or "autonomy"
+# for an `autonomy_*` session file) — `tests/test_mine_trajectories.py` pins
+# that. The default used to be `worker`, which matched nothing: no row has ever
+# carried `agent_id` worker, so the documented default mined an empty corpus
+# (#494). Unattended work is selected by session class (`--include-machine`),
+# not by this legacy field; `worker`/`autonomy` stay spellable for old command
+# lines and fail loudly on today's corpus (#998) rather than being advertised.
+AGENT_SELECTORS: dict[str, frozenset[str]] = {
+    "lloyd": frozenset({"lloyd"}),
+    "main": frozenset({"lloyd"}),
+    "autonomy": frozenset({"autonomy"}),
+    "worker": frozenset({"autonomy"}),
+}
+DEFAULT_AGENT = "all"
+
+
+def load_trajectories(days: int = 7, agent_filter: str = DEFAULT_AGENT,
                       exclude_machine: bool = True,
                       class_counts: dict | None = None,
                       window: dict | None = None) -> list[dict]:
@@ -723,18 +667,12 @@ def load_trajectories(days: int = 7, agent_filter: str = "worker",
                                 continue
                         else:
                             tally("kept", traj.get("session_class") or UNCODED_CLASS)
-                        # Apply agent filter
-                        # agent_id values from extract-trajectories.py:
-                        #   "autonomy" → worker/autonomy sessions
-                        #   "lloyd"    → interactive/main sessions
+                        # Apply agent filter (`AGENT_SELECTORS`).
                         if agent_filter != "all":
                             aid = traj.get("agent_id", "")
-                            if agent_filter in ("worker", "autonomy"):
-                                selected = aid in ("worker", "autonomy")
-                            elif agent_filter in ("main", "lloyd"):
-                                selected = aid in ("main", "lloyd")
-                            else:
-                                selected = aid == agent_filter
+                            accepted = AGENT_SELECTORS.get(agent_filter)
+                            selected = (aid in accepted if accepted is not None
+                                        else aid == agent_filter)
                             if not selected:
                                 # Counted, not swallowed. This is the selection the
                                 # documented `--agent worker` default fails on every
@@ -1609,7 +1547,6 @@ def write_candidate_file(pattern: dict, output_dir: Path, verdict_store: str | P
     examples_shown = len(pattern["examples"])
 
     if pattern["type"] == "error":
-        error_rate = pattern["total_calls"] / len(pattern["sessions"]) if pattern["sessions"] else 0
         buckets = pattern.get("merged_buckets") or [_bucket_row(pattern)]
         bucket_rows = "".join(
             f"| `{b['params_signature']}` | {b['occurrences']} | {b['sessions']} |\n"
@@ -1773,7 +1710,7 @@ This represents a candidate for skill encoding to improve efficiency and consist
 
 """
 
-        content += f"""## Suggested Skill Encoding
+        content += """## Suggested Skill Encoding
 This pattern should be encoded as a skill with:
 - Pre-condition checks for required resources
 - Standardized parameter handling
@@ -1924,7 +1861,7 @@ not reflected here; that runbook reads each file's own front matter for the verd
 
     content += "".join(body)
     
-    content += f"""
+    content += """
 
 ## Generation Commands
 
@@ -1932,11 +1869,11 @@ not reflected here; that runbook reads each file's own front matter for the verd
 # Show statistics without writing files
 python3 ~/lloyd/scripts/mine-trajectories.py --stats
 
-# Generate candidates for last 7 days (worker agent only)
-python3 ~/lloyd/scripts/mine-trajectories.py --days 7 --agent worker --threshold 2
+# Generate candidates for the last 7 days (interactive sessions; the default)
+python3 ~/lloyd/scripts/mine-trajectories.py --days 7 --threshold 2
 
-# Generate for all agents
-python3 ~/lloyd/scripts/mine-trajectories.py --days 7 --agent all --threshold 2
+# Include unattended (worker/autonomy/...) sessions too
+python3 ~/lloyd/scripts/mine-trajectories.py --days 7 --include-machine --threshold 2
 
 # Custom output directory
 python3 ~/lloyd/scripts/mine-trajectories.py --days 7 --output-dir ~/custom/output/
@@ -2103,8 +2040,9 @@ def main() -> int:
         help="Process trajectories from the last N days (default: 7)"
     )
     parser.add_argument(
-        "--agent", type=str, default="worker",
-        help="Filter by agent: worker, main, or all (default: worker)"
+        "--agent", type=str, default=DEFAULT_AGENT,
+        help="Filter on the legacy agent_id: all or lloyd (default: all). "
+             "Unattended sessions are selected by --include-machine."
     )
     parser.add_argument(
         "--threshold", type=int, default=2,

@@ -142,6 +142,41 @@ async def test_an_edit_that_breaks_something_carries_the_block(bound, tmp_path):
     assert "<diagnostics" in text and "undefined name 'bar'" in text
 
 
+async def test_diagnostics_never_stall_the_event_loop(bound, tmp_path, monkeypatch):
+    """#726: the rails ran on the event loop, so pyflakes on two large images
+    stalled every stream the aggregator serves. A slow `python_block` (a
+    stand-in for pyflakes on a 1 MB file) must cost the edit, not the loop."""
+    import asyncio
+
+    def slow_block(*a, **k):
+        _time.sleep(0.4)
+        return "<diagnostics>slow</diagnostics>"
+    monkeypatch.setattr(D, "python_block", slow_block)
+    p = tmp_path / "m.py"
+    p.write_text(CLEAN)
+    await FS.call_tool("Read", {"file_path": str(p)})
+
+    gaps: list[float] = []
+    done = asyncio.Event()
+
+    async def ticker():
+        last = _time.perf_counter()
+        while not done.is_set():
+            await asyncio.sleep(0.01)
+            now = _time.perf_counter()
+            gaps.append(now - last)
+            last = now
+
+    tick = asyncio.create_task(ticker())
+    res = await FS.call_tool("Edit", {"file_path": str(p),
+                                      "old_string": "os.getcwd()",
+                                      "new_string": "bar"})
+    done.set()
+    await tick
+    assert "<diagnostics>slow</diagnostics>" in _text(res)
+    assert max(gaps) < 0.2, f"event loop stalled {max(gaps):.3f}s during an edit"
+
+
 async def test_a_clean_edit_carries_nothing(bound, tmp_path):
     p = tmp_path / "m.py"
     p.write_text(CLEAN)

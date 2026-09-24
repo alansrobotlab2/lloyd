@@ -66,9 +66,14 @@ from app.paths import PIPELINE_DIR  # noqa: E402
 from app.kg_store import store as _kg_store  # noqa: E402
 
 PIPELINE_ROOT = PIPELINE_DIR / "memory-graph"
-CANDIDATE_LOG = PIPELINE_ROOT / f"semantic-entity-candidates-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
-JUDGMENT_LOG = PIPELINE_ROOT / f"semantic-entity-judgments-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
-PROPOSAL_LOG = PIPELINE_ROOT / f"semantic-proposals-{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+# The UTC date, like every `judged_at`/`proposed_at` written into these files.
+# A naive local date named the 09-09 run's judgments `…-2026-09-08.jsonl` on a
+# Pacific box, so the skill's dated success check failed on any run crossing
+# local midnight (#1176). The skill checks `date -u +%F` to match.
+RUN_DATE = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+CANDIDATE_LOG = PIPELINE_ROOT / f"semantic-entity-candidates-{RUN_DATE}.jsonl"
+JUDGMENT_LOG = PIPELINE_ROOT / f"semantic-entity-judgments-{RUN_DATE}.jsonl"
+PROPOSAL_LOG = PIPELINE_ROOT / f"semantic-proposals-{RUN_DATE}.jsonl"
 # The accumulated record, deduped by (canonical, variant). `semantic-proposals-
 # latest.jsonl` — the ONLY path the sweep reads — points at THIS file, not at one
 # run's dated file. This pass is propose-only, so a proposal the sweep had not

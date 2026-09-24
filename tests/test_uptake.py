@@ -1965,6 +1965,27 @@ def test_a_worktree_holding_only_the_gates_canary_session_is_not_a_transcript_st
     assert uptake._has_sessions(tmp_path) is True
 
 
+def test_a_worktree_holding_only_review_grader_sessions_falls_back(tmp_path, monkeypatch):
+    """#1375: the review rung's grader records land in the round's
+    `sessions/`, and 18 of them read as the corpus — `human_turns()` 0 and
+    five nodes red for that round only. `lloyd_root()` must still fall back."""
+    from app import paths
+
+    d = tmp_path / "sessions"
+    d.mkdir()
+    (d / "canary_1789667418_68bba5.json").write_text("{}")
+    (d / "20260922_064347_review_f8b2.json").write_text(json.dumps(
+        {"session_id": "20260922_064347_review_f8b2", "platform": "worker",
+         "source": "automod-review"}))
+    assert uptake._has_sessions(tmp_path) is False
+    monkeypatch.delenv("LLOYD_ROOT", raising=False)
+    monkeypatch.setattr(paths, "DATA_ROOT", tmp_path)
+    monkeypatch.setattr(paths, "production_data_root", lambda: tmp_path / "prod")
+    assert uptake.lloyd_root() == tmp_path / "prod"
+    (d / "20260922_070000_ab12cd.json").write_text("{}")
+    assert uptake.lloyd_root() == tmp_path
+
+
 # ------------------------------- #1195: what a `weighted_disputes` may mean --
 
 def test_a_skill_row_with_no_text_overlap_reports_no_signal_not_a_small_constant():
@@ -2453,3 +2474,35 @@ def test_the_knowledge_write_skill_reads_a_null_as_no_signal_not_zero(tmp_path):
     channels = set(uptake.PRESENCE_SOURCES)
     for src in re.findall(r"coverage\.by_presence_source/([A-Za-z0-9_:+*]+)", text):
         assert src in channels or src == "<one declared source>", (src, sorted(channels))
+
+
+def test_the_probe_stamps_the_engine_that_answered_and_refuses_a_rerouted_measurement(
+        monkeypatch):
+    """#1310: `engine` came from the `secondary` constant, so with the slot
+    retired every table said `secondary` over numbers the primary produced.
+    The resolved endpoint and model are recorded, and a reroute cannot be
+    `measured: true` or pass."""
+    import scripts.uptake_probe as probe
+    from app import secondary_models
+
+    def _block():
+        return {"metrics": {"measured": True, "precision": 1.0},
+                "holdout": {"measured": True}, "zero_shot": {"measured": True},
+                "passed": True}
+
+    monkeypatch.setattr(secondary_models, "_endpoint", lambda job: (
+        "http://127.0.0.1:8096/v1/chat/completions", "primary"))
+    out = probe.stamp_engine(_block())
+    assert out["engine"] == "primary" and out["engine_alias"] == "secondary"
+    assert out["engine_endpoint"].startswith("http://127.0.0.1:8096")
+    assert out["engine_rerouted"] is True and out["passed"] is False
+    for key in ("metrics", "holdout", "zero_shot"):
+        assert out[key]["measured"] is False, key
+        assert "not a measurement of the secondary" in out[key]["unmeasured_reason"]
+    assert out["metrics"]["precision"] == 1.0, "the number is kept, only disowned"
+
+    monkeypatch.setattr(secondary_models, "_endpoint", lambda job: (
+        "http://127.0.0.1:8091/v1/chat/completions", "secondary"))
+    out = probe.stamp_engine(_block())
+    assert out["engine"] == "secondary" and out["engine_rerouted"] is False
+    assert out["passed"] is True and out["metrics"]["measured"] is True

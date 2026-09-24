@@ -504,3 +504,44 @@ def test_live_helper_answers():
                        input='{"id":1,"method":"ping"}\n', capture_output=True,
                        text=True, timeout=20)
     assert json.loads(p.stdout.splitlines()[0])["result"]["pong"] is True
+
+
+# ── coordinate_space: both branches pinned (#1421) ───────────────────
+
+def _norm_cap():
+    # image 500x400 (scale 0.5 over a 1000x800 window)
+    return Capture("cap1", "window", 0, 0, 1000, 800, 0.5,
+                   window={"address": "0xa", "class": "code", "title": "x", "x": 0,
+                           "y": 0, "width": 1000, "height": 800},
+                   elements=[{"role": "push button", "name": "OK",
+                              "bounds": [20, 40, 40, 80]}])
+
+
+def test_capture_summary_speaks_the_configured_space(desk):
+    d, _, _ = desk
+    cap = _norm_cap()
+    # Default: no marker, bounds in screenshot pixels (bounds * scale).
+    text = d._summary(cap, mode="som", find="", notes=[], listed=10)
+    assert "coords=norm1000" not in text.splitlines()[0]
+    assert "@ (10, 20, 20, 40)" in text
+    # norm1000: marker in the header, bounds on a 0-1000 grid per axis,
+    # derived from this capture's 500x400 image.
+    d.CONFIG["desktop"]["coordinate_space"] = "norm1000"
+    text = d._summary(cap, mode="som", find="", notes=[], listed=10)
+    assert "coords=norm1000" in text.splitlines()[0]
+    assert "@ (20, 50, 40, 100)" in text
+
+
+def test_a_norm1000_click_lands_where_the_pixel_click_does(desk, lease):
+    d, state, _ = desk
+    lease.grant(5)
+    _cap(d)  # image 500x400
+    asyncio.run(d.act({"action": "click", "coordinate": [50, 40]}, "s"))
+    pixel_target = state["moves"][-1]
+    assert pixel_target == (100, 80)
+    d.CONFIG["desktop"]["coordinate_space"] = "norm1000"
+    _cap(d)
+    # 50/500 and 40/400 of the image are 100/1000 on both axes.
+    asyncio.run(d.act({"action": "click", "coordinate": [100, 100]}, "s"))
+    assert state["moves"][-1] == pixel_target
+

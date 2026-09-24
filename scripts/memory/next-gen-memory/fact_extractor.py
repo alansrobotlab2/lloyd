@@ -35,6 +35,7 @@ from app.entity_naming import gate_entity_name as _identity_gate
 from app.entity_naming import is_backlog_citation_entity as _is_citation_entity
 from app.entity_naming import record_entity_candidate as _record_candidate
 from app.atomic_io import atomic_write_text, locked_file
+from app.frontmatter import split_frontmatter
 from app.fact_ids import assign_ids as _assign_fact_ids
 from app.kg_store import StoreUnavailable, text_hash, store as _kg_store
 
@@ -396,11 +397,14 @@ class FactExtractor:
             return ""
         
         content = fact_file.read_text()
-        # Extract YAML frontmatter
+        # Extract YAML frontmatter, bounded by the closing fence LINE: a fact
+        # quoting '---' cut the substring split mid-scalar and the prompt was
+        # shown a truncated list (#1400).
         if content.startswith("---"):
-            parts = content.split("---", 2)
-            if len(parts) >= 2:
-                return parts[1].strip()
+            split = split_frontmatter(content)
+            if split is not None:
+                return split[0].strip()
+            return content[3:].strip()
         return ""
     
     def _gate_entity(self, entity: str, source_doc: str | None = None,
@@ -618,11 +622,15 @@ class FactExtractor:
             return []
         if not content.startswith("---"):
             return self._quarantine(fact_file, "no frontmatter fence")
-        parts = content.split("---", 2)
-        if len(parts) < 3:
+        # The closing fence is a whole `---` line, never the first `---`
+        # substring: a fact quoting '---' cut the YAML mid-scalar here, and the
+        # truncated list was re-dumped over the file — the fact left as a
+        # provenance-less fragment and every fact after it deleted (#1400).
+        split = split_frontmatter(content)
+        if split is None:
             return self._quarantine(fact_file, "unterminated frontmatter")
         try:
-            frontmatter = yaml.safe_load(parts[1])
+            frontmatter = yaml.safe_load(split[0])
         except Exception as e:
             return self._quarantine(fact_file, f"YAML error: {e}")
         if not isinstance(frontmatter, dict):

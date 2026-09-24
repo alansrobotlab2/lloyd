@@ -732,3 +732,51 @@ def test_run_downgrades_the_bare_suffix_pair_before_the_sweep_sees_it(
                for p in sweep.load_semantic_proposals(tmp_path)}
     assert by_pair[("Browser", "Browser Tool")]["action"] == "alias_only"
     assert by_pair[("Tool MCP", "Tool MCP Service")]["action"] == "merge"
+
+
+# ── #1176: dated output files carry the UTC date ─────────────────────────────
+
+
+def _zone_disagreeing_with_utc() -> str:
+    """Etc/GMT+12 is UTC-12 and Etc/GMT-14 is UTC+14, so at any instant at
+    least one of them sits on a different calendar date from UTC."""
+    import os
+    import time as _time
+    utc_date = _time.strftime("%Y-%m-%d", _time.gmtime())
+    for zone in ("Etc/GMT+12", "Etc/GMT-14"):
+        out = subprocess.run(
+            [sys.executable, "-c", "import time; print(time.strftime('%Y-%m-%d'))"],
+            env={**os.environ, "TZ": zone}, capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        if out != utc_date:
+            return zone
+    raise AssertionError("neither zone disagrees with UTC — tzdata missing?")
+
+
+def test_dated_paths_use_the_utc_date_under_a_disagreeing_tz():
+    import os
+    zone = _zone_disagreeing_with_utc()
+    code = (
+        "import importlib.util, json, sys, datetime\n"
+        f"sys.path.insert(0, {str(ROOT)!r})\n"
+        f"spec = importlib.util.spec_from_file_location('ser_tz', {str(SCRIPT)!r})\n"
+        "m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
+        "print(json.dumps({'utc': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%d'),\n"
+        "  'local': datetime.datetime.now().strftime('%Y-%m-%d'),\n"
+        "  'names': [m.CANDIDATE_LOG.name, m.JUDGMENT_LOG.name, m.PROPOSAL_LOG.name]}))\n"
+    )
+    res = subprocess.run([sys.executable, "-c", code], env={**os.environ, "TZ": zone},
+                         capture_output=True, text=True, cwd=str(ROOT))
+    assert res.returncode == 0, res.stderr
+    got = json.loads(res.stdout.strip().splitlines()[-1])
+    assert got["local"] != got["utc"], f"{zone} did not disagree with UTC: {got}"
+    for name in got["names"]:
+        assert name.endswith(f"-{got['utc']}.jsonl"), (zone, got)
+
+
+def test_no_dated_path_is_built_from_a_naive_now():
+    naive = [
+        (i, line) for i, line in enumerate(SCRIPT.read_text().splitlines(), 1)
+        if "datetime.now()" in line
+    ]
+    assert naive == [], f"naive datetime.now() in the script: {naive}"

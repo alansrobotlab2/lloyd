@@ -304,10 +304,24 @@ needs, no extra system package and no network access at import time. Without it
 `http_fetch` silently degrades to a whitespace-joined text dump with every link
 URL discarded.
 
-Only reach for `requirements.txt` when intentionally upgrading, then refreeze:
+**Development-only packages go in `requirements-dev.txt`** — today the
+`z3-solver` constraint solver (#1073). Install them by hand when you need them:
 
 ```bash
-.venvs/lloyd/bin/python -m pip freeze > requirements.lock   # keep the header
+.venvs/lloyd/bin/python -m pip install -r requirements-dev.txt
+```
+
+That file is never an install target anywhere else: the automod gate's candidate
+venv installs only from `requirements.lock`, else `requirements.txt`, and the
+refreeze below excludes it, so a dev package never becomes a container-rebuild
+dependency. Code using one imports it lazily.
+
+Only reach for `requirements.txt` when intentionally upgrading, then refreeze —
+**excluding every package `requirements-dev.txt` names** (the `sed` turns each
+of its package lines into a `--exclude`):
+
+```bash
+.venvs/lloyd/bin/python -m pip freeze $(sed -nE 's/^([A-Za-z0-9._-]+).*/--exclude \1/p' requirements-dev.txt) > requirements.lock   # keep the header
 ```
 
 ### `vllm-qwen3.8` — the primary inference server

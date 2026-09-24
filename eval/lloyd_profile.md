@@ -46,8 +46,11 @@ projects. It also modifies its own code through a gated loop.
 - Subagents (`Task`) run inside the aggregator process and inherit the
   calling turn's model.
 - Inner Voice: a second-model observer that reads the primary's transcript
-  and can inject text, deny a tool call (pattern-based), or stop a loop
-  (repetition guard keyed on tool-call signatures).
+  and can inject text or stop a loop (repetition guard keyed on tool-call
+  signatures). It is observation-only on tool dispatch — since v4 it cannot
+  block a tool call, and it is not a safety control. The hard gate is the
+  deterministic destructive-Bash check in `app/harness/safety.py`
+  (`check_bash_command`), which the aggregator also enforces at dispatch.
 - History is rebuilt from the session JSON every user turn and compacted
   (`load_and_compact_session`); there is no learned or summarised long-term
   compaction beyond that.
@@ -55,7 +58,12 @@ projects. It also modifies its own code through a gated loop.
 ## Memory and knowledge
 
 - The vault: an Obsidian markdown tree (`~/obsidian`) — SOUL.md, USER.md,
-  skills (`SKILL.md` per skill, ~275), knowledge notes, people, projects,
+  skills (`SKILL.md` per skill; 187 loaded on 2026-09-24, counted as
+  `len(list(agent_mcp.skills._iter_skills()))`, which drops dirs whose front
+  matter says `status: archived`; on disk the same day there were 191
+  top-level skill dirs and 352 `SKILL.md` files, the extra ones nested or
+  under `.archived/` — only the loaded count is what retrieval sees),
+  knowledge notes, people, projects,
   daily notes, autonomy task files, backlog items. Nightly jobs rewrite
   SOUL.md/USER.md/skills; that is the rewritable layer.
 - Facts layer: one markdown file per entity and category
@@ -207,7 +215,8 @@ The URLs are for a human or a shell.
 
 Prefix/KV caching across iterations; preserved reasoning in history; a
 knowledge graph with typed edges and aliases; hybrid BM25 + embedding
-retrieval; pre-turn prefetch; an observer model with tool-call veto; a gated
+retrieval; pre-turn prefetch; an observation-only observer model (Inner Voice) that
+can inject text and stop a loop; a deterministic destructive-Bash gate; a gated
 self-modification loop with automatic rollback; a task scheduler with
 dependencies and preferred hours; skills as markdown files; session
 distillation into a user model; nightly consolidation; a backlog with

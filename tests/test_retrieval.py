@@ -1323,3 +1323,40 @@ def test_the_vault_tool_surface_is_unchanged_by_the_deletion():
     got = sorted(t.name for t in tools if t.name.startswith("vault"))
     assert len(VAULT_TOOL_NAMES) == 5, "the pinned list itself is no longer five"
     assert got == VAULT_TOOL_NAMES, f"vault tool surface changed: {got}"
+
+
+def _recall_rerank_comment_lines() -> list[str]:
+    """The contiguous `#` comment lines directly above the graph_rerank read
+    inside _vault_recall."""
+    lines = inspect.getsource(vault._vault_recall).splitlines()
+    read = next(i for i, ln in enumerate(lines)
+                if re.match(r"\s*graph_rerank = bool\(params\.get\(", ln))
+    out = []
+    for ln in reversed(lines[:read]):
+        if not ln.strip().startswith("#"):
+            break
+        out.append(ln.strip())
+    return list(reversed(out))
+
+
+def test_recall_comment_does_not_claim_graph_rerank_is_default_on():
+    """#1001 clause 1. The comment above the read said "default-on as of
+    2026-05-12 ... MRR lift (+6-13%)" while the constant it reads is False —
+    measured worse on 2026-09-04. The prose must not contradict the constant,
+    and the constant must not be flipped to satisfy the prose."""
+    src = inspect.getsource(vault._vault_recall)
+    for line in src.splitlines():
+        assert "default-on" not in line
+        assert "+6-13%" not in line
+    assert vault.RECALL_GRAPH_RERANK is False
+
+
+def test_recall_comment_points_at_the_constant():
+    """#1001 clause 2. The replacement is a pointer to RECALL_GRAPH_RERANK
+    and its measurement block, not a default of its own."""
+    comment = " ".join(_recall_rerank_comment_lines())
+    assert comment, "no comment above the graph_rerank read"
+    assert "RECALL_GRAPH_RERANK" in comment
+    assert "2026-09-04" in comment
+    assert not re.search(r"default[- ]o(n|ff)\b", comment, re.IGNORECASE)
+

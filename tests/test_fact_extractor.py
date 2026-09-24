@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -421,6 +422,79 @@ def test_facts_are_indexed_as_they_are_written(extractor):
     rows = st.facts_idx.for_entity("Lloyd")
     assert len(rows) == 2
     assert rows[0]["source_doc"] == "knowledge/lloyd.md" and rows[0]["provenance"] == "EXTRACTED"
+
+
+# ── a fact that quotes the fence (#1400) ─────────────────────────────────────
+
+FENCE_FACT = ("OKF uses UTF-8 markdown files with YAML frontmatter delimited by "
+              "'---' on the first line and a closing '---' before the body.")
+CODE_FACT = "Obsidian uses inline `---` code spans to show a fence."
+
+
+def _facts_in_file(path):
+    return kg_store.parse_fact_file(path)[1]
+
+
+def test_a_fence_quoting_fact_survives_the_next_write_whole(extractor):
+    """`split("---", 2)` cut the YAML inside the quoted scalar; the truncated
+    list was re-dumped, leaving "…delimited by '" with no provenance."""
+    e = extractor
+    e.write_fact_file("OKF", "state", {"facts": [_fact(FENCE_FACT)]},
+                      source_doc="knowledge/okf.md")
+    target = e.facts_dir / "OKF" / "OKF-state.md"
+    e.write_fact_file("OKF", "state", {"facts": [_fact("OKF is versioned.")]},
+                      source_doc="knowledge/okf.md")
+    texts = [f["fact"] for f in _facts_in_file(target)]
+    assert FENCE_FACT in texts, texts
+    assert not any(t != FENCE_FACT and t.startswith("OKF uses UTF-8") for t in texts)
+
+
+def test_six_facts_with_one_fence_quote_become_seven_all_with_provenance(extractor):
+    e = extractor
+    first = [_fact(f"plain fact number {i}") for i in range(2)]
+    first += [_fact(FENCE_FACT), _fact(CODE_FACT)]
+    first += [_fact(f"later fact number {i}") for i in range(2)]
+    e.write_fact_file("OKF", "state", {"facts": first}, source_doc="knowledge/okf.md")
+    e.write_fact_file("OKF", "state", {"facts": [_fact("the seventh fact")]},
+                      source_doc="knowledge/other.md")
+    target = e.facts_dir / "OKF" / "OKF-state.md"
+    facts = _facts_in_file(target)
+    assert len(facts) == 7, [f["fact"] for f in facts]
+    for f in facts:
+        assert f.get("created_at") and f.get("source_doc"), f
+    rows = kg_store.store().facts_idx.for_entity("OKF")
+    assert len(rows) == 7
+    for r in rows:
+        assert r["created_at"] and r["source_doc"], r
+
+
+def test_the_extractors_read_agrees_with_the_stores_reader(extractor):
+    e = extractor
+    e.write_fact_file("OKF", "state", {"facts": [_fact("a"), _fact(FENCE_FACT),
+                                                 _fact(CODE_FACT), _fact("z")]})
+    target = e.facts_dir / "OKF" / "OKF-state.md"
+    ours = [f["fact"] for f in e._read_existing_facts(target)]
+    theirs = [f["fact"] for f in kg_store.parse_fact_file(target)[1]]
+    assert ours == theirs and len(ours) == 4
+
+
+def test_existing_facts_block_carries_the_whole_fence_quoting_fact(extractor):
+    e = extractor
+    e.write_fact_file("OKF", "state", {"facts": [_fact(FENCE_FACT), _fact("after it")]})
+    block = e.get_existing_facts("OKF", "state")
+    # yaml.dump may fold a long scalar; compare on whitespace-normalised text
+    assert " ".join(FENCE_FACT.split()) in " ".join(block.split())
+    assert "after it" in block
+
+
+def test_an_opening_fence_with_no_closing_fence_is_still_quarantined(extractor):
+    e = extractor
+    d = e.facts_dir / "OKF"; d.mkdir()
+    target = d / "OKF-state.md"
+    target.write_text("---\nentity: OKF\nfacts:\n- fact: 'no closing --- line'\n")
+    assert e.write_fact_file("OKF", "state", {"facts": [_fact("x")]}) is None
+    assert not target.exists()
+    assert list(d.glob("*.corrupt-*"))
 
 
 # ── concurrency ──────────────────────────────────────────────────────────────
@@ -1621,3 +1695,62 @@ def test_the_readme_documents_every_key_the_pipeline_result_line_carries():
     assert "truncated" in text and "failed=0" in text, (
         "the README does not tell a reader that failed=0 stops meaning full "
         "coverage, which is the whole point of the count")
+
+
+# ── the [N/M] progress denominator is the worked queue (#1011) ──────────────
+
+
+_PROGRESS = re.compile(r"^\[(\d+)/(\d+)\] (Processing|FAILED|ERROR):", re.M)
+
+
+def _progress(out):
+    return [(int(n), int(m), kind) for n, m, kind in _PROGRESS.findall(out)]
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_progress_denominator_excludes_hash_skipped_files(tmp_path, monkeypatch,
+                                                          capsys, workers):
+    x, ch, idx = _extraction_run(tmp_path, monkeypatch, f"prog{workers}")
+    docs = []
+    for i in range(4):
+        d = tmp_path / "docs" / f"p{i}.md"
+        d.write_text(f"note {i} holds a fact\n", encoding="utf-8")
+        docs.append(d)
+    monkeypatch.setattr(x.extractor, "extract_from_document",
+                        lambda md, c, existing_facts="", start_offset=0: _one_fact(md))
+    x._extract_all_facts(full_mode=False, workers=workers)
+    capsys.readouterr()
+
+    # Second run: two notes changed, one of which the model fails on; two skip.
+    docs[1].write_text("note 1 changed\n", encoding="utf-8")
+    docs[3].write_text("note 3 changed\n", encoding="utf-8")
+
+    def one_fails(md_file, content, existing_facts="", start_offset=0):
+        if Path(md_file).name == "p3.md":
+            raise fx.ExtractionFailed("vLLM wedged")
+        return _one_fact(md_file)
+
+    monkeypatch.setattr(x.extractor, "extract_from_document", one_fails)
+    x._extract_all_facts(full_mode=False, workers=workers)
+    out = capsys.readouterr().out
+    lines = _progress(out)
+    assert {k for _, _, k in lines} == {"Processing", "FAILED"}, out
+    assert all(m == 2 for _, m, _ in lines), out
+    # the scan size is still reported, on its own lines
+    assert "Found 4 eligible files" in out
+    assert "Skipped 2 unchanged files" in out
+    kg_store.reset()
+
+
+def test_progress_denominator_is_the_limit_capped_queue(tmp_path, monkeypatch, capsys):
+    x, ch, idx = _extraction_run(tmp_path, monkeypatch, "proglimit")
+    for i in range(5):
+        (tmp_path / "docs" / f"l{i}.md").write_text(f"note {i}\n", encoding="utf-8")
+    monkeypatch.setattr(x.extractor, "extract_from_document",
+                        lambda md, c, existing_facts="", start_offset=0: _one_fact(md))
+    x._extract_all_facts(full_mode=False, workers=1, limit=2)
+    out = capsys.readouterr().out
+    lines = _progress(out)
+    assert [(n, m) for n, m, _ in lines] == [(1, 2), (2, 2)], out
+    assert "Found 5 eligible files" in out
+    kg_store.reset()

@@ -318,10 +318,11 @@ fixed) — both are `WantedBy=graphical-session.target` (Thunderbird hosts the
 so `enable` runs them with the desktop, not via supervisord. Two units are still
 gaps rather than design: the groundskeeper and graph-backup timers exist only as
 plain untracked files under `~/.config/systemd/user/`, so a rebuild from
-`SETUP.md` loses them. The same glob also links the root-only
-`nvidia-power-limit.service` into the user manager, where it can never clamp
-anything, while the copy that does run is at `/etc/systemd/system/` with
-nothing checking it against the tracked one (#1108). And one tracked unit
+`SETUP.md` loses them. The root-only `nvidia-power-limit.service` is skipped
+by that glob (`SYSTEM_SCOPE_UNITS` in `install-services.sh`, #1108) — it used
+to be linked into the user manager, where it can never clamp anything; the copy
+that runs is a hand install at `/etc/systemd/system/`, still with nothing
+checking it against the tracked one. And one tracked unit
 sits outside the directory — `agent-services/autonomy.service`, a dead Idler
 heartbeat whose `WorkingDirectory` and venv have both been deleted for a
 year (#1110).

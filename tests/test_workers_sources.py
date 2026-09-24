@@ -254,23 +254,45 @@ def test_selection_is_oldest_first(tmp_path, monkeypatch):
     assert [x[1] for x in SD._scan(time.time(), set())] == [older, newer]
 
 
-def test_the_platform_is_read_from_the_head_of_the_file(tmp_path):
-    """Session files run to megabytes; only the prefix is read.
+def test_the_platform_is_found_in_the_head_or_past_it(tmp_path, monkeypatch):
+    """#1271: only the first 8 KB used to be read, and a session whose
+    `platform` serialised after its messages array read as a user session —
+    7 `worker` and 24 `browser` files a fortnight were mined as human chats.
+    The head is still the fast path; a miss reads the whole file's top-level
+    key. A file with no platform anywhere still reads as a user session."""
+    import os
+    monkeypatch.setattr(SD, "SESSIONS_DIR", tmp_path)
+    early = _session(tmp_path, "s", platform="worker")
+    assert SD._session_platform(early) == "worker"
 
-    Every producer writes `platform` within the first few keys. A prefix with
-    no platform in it reads as a user session, which is the same default
-    `is_user_session` applies to a session that has none.
-    """
-    p = _session(tmp_path, "s", platform="worker")
-    assert SD._session_platform(p) == "worker"
+    late = tmp_path / "20260919_120000_autocode_9f2a.json"
+    body = [{"role": "user", "content": "y" * 20000}]
+    late.write_text(json.dumps({"id": late.stem, "messages": body,
+                                "platform": "worker"}), encoding="utf-8")
+    old = time.time() - 7200
+    os.utime(late, (old, old))
+    assert late.stat().st_size > SD._PLATFORM_PREFIX_BYTES
+    assert SD._session_platform(late) == "worker"
+    assert SD._eligible(late, late.stat().st_mtime, time.time()) == \
+        (False, "not a user session")
 
-    headless = tmp_path / "headless.json"
-    headless.write_text('{"messages": [' + '{"x": "' + "y" * 20000 + '"}]}',
-                        encoding="utf-8")
-    assert SD._session_platform(headless) == ""
+    # A nested "platform" inside a message is not the session's.
+    nested = tmp_path / "nested.json"
+    nested.write_text(json.dumps({"messages": [{"meta": {"platform": "worker"}}],
+                                  "platform": "mission-control"}), encoding="utf-8")
+    assert SD._session_platform(nested) == "mission-control"
 
-    from app.sessions_io import is_user_session
-    assert is_user_session({"platform": ""}) is True
+
+def test_a_chat_with_no_platform_anywhere_is_still_eligible(tmp_path, monkeypatch):
+    monkeypatch.setattr(SD, "SESSIONS_DIR", tmp_path)
+    p = tmp_path / "20260830_182633_ive386.json"
+    p.write_text(json.dumps({"id": p.stem, "messages": [
+        {"role": "user", "content": "z" * 20000}]}), encoding="utf-8")
+    old = time.time() - 7200
+    import os
+    os.utime(p, (old, old))
+    assert SD._session_platform(p) == ""
+    assert SD._eligible(p, p.stat().st_mtime, time.time()) == (True, "")
 
 
 async def test_the_old_cursor_is_migrated_rather_than_dropped(tmp_path, monkeypatch, q):

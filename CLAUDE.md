@@ -1913,8 +1913,8 @@ survive an aggregator restart and be findable from a session id alone.
   name and reported, never silently skipped. Same for a `create` whose file
   was edited afterwards.
 - **`turn_id` and `call_id` ride in `_meta`**, like the session id and the
-  caption, because `args` is validated against each tool's inputSchema and is
-  what the repetition guard hashes. A caller with no `turn_id` gets no
+  caption, because `args` is what reaches each tool's handler and is what
+  the repetition guard hashes. A caller with no `turn_id` gets no
   ledger, which used to mean every background run: since 2026-09-10 both
   background paths mint one, so an unattended run's writes finally leave
   pre-images and are revertable — see "Background runs are recorded". A bare
@@ -2078,8 +2078,8 @@ because a helper with 62 callers produces a wall of text that gets skipped.
 Measured on this tree: `kg_store.store` (62 sites) and `RunOptions` (70) are
 both suppressed, which is the rail working, not failing.
 
-`_append_diagnostics` runs on the event loop, not in the edit's worker thread,
-so the graph half runs in a daemon thread the edit joins for `RAIL_BUDGET_S`
+`_append_diagnostics` runs off the event loop via `asyncio.to_thread` (#726),
+and its graph half runs in a daemon thread it joins for `RAIL_BUDGET_S`
 (90 ms) and then abandons. Abandoning is not waste: the thread finishes the
 210 ms load and fills a per-root cache, so the next edit in that tree gets its
 answer. `RAIL_MAX_SOURCE_BYTES` is 120 KB because the fingerprint pass costs
@@ -2114,8 +2114,9 @@ its arguments — which makes *where it is removed* the whole design:
 - **`loop._commit_tool_calls`** lifts the value onto the tool call's
   `_summary` and pops it from `_args_dict` — and *only* from there. The
   two records of a call deliberately disagree: `_args_dict` is what
-  reaches MCP, which validates against each tool's real inputSchema (a
-  leaked `summary` is a dispatch error, not a spare field), while
+  reaches MCP and the tool's handler — nothing validates `args` against the
+  inputSchema, so a leaked `summary` is not rejected — an unknown key is handed
+  to the handler (and read as a real argument by a tool that has one), while
   `arguments` is what gets replayed to the engine and is **the only
   record of this call the model will ever see again**.
   **Stripping the caption from `arguments` too is what broke the first
@@ -2191,8 +2192,8 @@ row are both read by a human later — so the caption now travels the way the
 session id and the calling turn's model already do: in the request's
 `_meta`, as `lloyd/summary`, lifted into `_task_registry.current_call_summary`
 by `agent_mcp/main.py::call_tool`. It must not be handed back through `args`
-instead: that is what the aggregator validates against each tool's real
-inputSchema, and it is what the repetition guard hashes.
+instead: that is what reaches the tool's handler unvalidated, and it is what
+the repetition guard hashes.
 `tests/test_tool_call_summaries.py` pins that Bash and Task advertise no
 second caption field, and that the caption reaches MCP through `_meta` only.
 

@@ -929,6 +929,18 @@ def test_with_no_observer_a_round_left_open_is_reaped_at_turn_end(isolated, monk
     assert "no observer to rescue it" in out[0]["reason"]
 
 
+def test_the_grace_is_zero_while_autocode_is_unobserved(monkeypatch):
+    """#1015 inverted `source_inner_voice`'s fallback to False. The grace is
+    its second reader, and must read 0 both for an explicit `false` and for no
+    key at all — inverting the fallback must not resurrect it."""
+    for cfg in ({"autocode": {"inner_voice": False}}, {"autocode": {}}, {}):
+        monkeypatch.setattr("workers.sources.get_sources_config", lambda cfg=cfg: cfg)
+        assert I._abandon_grace_seconds() == 0, cfg
+    monkeypatch.setattr("workers.sources.get_sources_config",
+                        lambda: {"autocode": {"inner_voice": True}})
+    assert I._abandon_grace_seconds() == I.ABANDON_GRACE_SECONDS
+
+
 def test_with_an_observer_the_grace_still_holds(isolated, monkeypatch, tmp_path):
     import time as _t
     write_item(isolated, 2)
@@ -3447,6 +3459,16 @@ def test_the_implement_prompt_says_abort_on_a_late_refusal_and_never_restart():
 def test_the_triage_prompt_forbids_pinning_an_invariant_the_tree_does_not_hold():
     assert "A clause pins the change, never an invariant the tree does not already hold." in M.PROMPT
     assert "byte-identical" in M.PROMPT and "#1199" in M.PROMPT
+
+
+def test_absence_greps_are_scoped_to_lloyds_own_code_in_both_prompts():
+    """#747: #540's "returns zero matches" grep returned 740, every hit in a
+    vendored tree. Triage names the trees; implement, at its length bound,
+    names the command that excludes them all."""
+    for tree in (".venvs", "llama.cpp", "qmd", "node_modules", ".git"):
+        assert f"--exclude-dir={tree}" in M.PROMPT, tree
+    assert "`git grep`" in M.PROMPT
+    assert "Absence greps: `git grep`, not `grep -r`." in I.PROMPT
 
 
 def _format_keys(template: str) -> set[str]:

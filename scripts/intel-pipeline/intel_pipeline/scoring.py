@@ -84,7 +84,11 @@ def call_local_llm(prompt: str) -> str:
             {"role": "user", "content": prompt},
         ],
         "max_tokens": 300,
-        "temperature": 0.2,
+        # Greedy and seeded (#1232): `vault_writer.RELEVANCE_FLOOR` turns this
+        # integer into a keep/drop, so a sampled grade made an item's fate
+        # depend on which run reached it first (one item scored 8, then 6).
+        "temperature": 0,
+        "seed": 0,
         # llama.cpp knob; reasoning tokens otherwise eat the whole budget
         "chat_template_kwargs": {"enable_thinking": False},
         # vLLM --scheduling-policy priority: interactive 0, autonomy 1, batch 2
