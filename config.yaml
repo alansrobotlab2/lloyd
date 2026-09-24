@@ -1660,6 +1660,14 @@ workers:
       interval_seconds: 7200
       max_inflight: 1
       max_duration_seconds: 1800
+      # Iteration ceiling for one mining turn (#896). It was a literal 8 at
+      # both call sites, and 112 of 115 all-time failures to 2026-09-18 were
+      # `stop_reason=max_turns, turns=9` against it — 217 GPU-minutes writing
+      # nothing. Raised to 12; the item's post-landing measurement is that
+      # cap deaths with nothing written stay under 25 % of ≥10 consecutive
+      # runs, read from `runs` after the landing. Absent, the code's default
+      # is 8. Carried in the queue payload, so a change reaches new items only.
+      max_turns: 12
     # Researches one registry topic per run through the deep-dive-research
     # skill, and records the outcome back on the topic. Replaces
     # `domain-research`, whose prompt never told the model to search the web:

@@ -627,7 +627,9 @@ enqueuing one item per unresolved gap fact under
 `MAX_ENQUEUE_PER_TICK` (3): **failed autonomy runs**
 (`autonomy-runs/**/run_*.md` with `status: failed`, 7-day window) and **ledger
 losers** (bench tasks the baseline scored under 0.6). **Executes** a direct turn
-on the primary (`max_turns=8`) and stages a candidate task under
+on the primary (`workers.sources.bench-mine.max_turns`, 12 since 2026-09-24;
+the code's default is 8, and the value rides the queue payload like the
+other session sources' — #896) and stages a candidate task under
 `pending-research/bench-mine/<date>/`, which a human promotes into
 `~/obsidian/lloyd/bench/`.
 

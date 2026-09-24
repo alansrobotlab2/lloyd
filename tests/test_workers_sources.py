@@ -1142,3 +1142,86 @@ def test_a_worker_session_is_marked_as_one(tmp_path, monkeypatch):
     assert data["platform"] == "worker"
     assert not is_user_session(data)
     assert data["inner_voice"] is True
+
+
+# ---------------------------------------------------------------------------
+# bench-mine: the turn budget is config, carried in the payload (#896)
+#
+# `max_turns=8` was a literal at both call sites, so no config key could move
+# it, and 112 of 115 all-time failures to 2026-09-18 were `turns=9` against it.
+# The six sibling session sources already put `int(src_cfg.get("max_turns",
+# DEFAULT))` in the payload and read it back at execute; this is that
+# convention, copied.
+# ---------------------------------------------------------------------------
+
+
+async def test_bench_mine_carries_the_configured_turn_budget_in_every_payload(
+        tmp_path, monkeypatch, q):
+    """#896 clause 1: both inputs carry the key, and no key means today's 8."""
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    _run_file(runs, "run_24_20260908_235954")
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text('{"x": 1}\n', encoding="utf-8")
+    monkeypatch.setattr(BM, "_recent_ledger_losers", lambda *a, **k: [
+        {"task_id": "bench_003", "composite_score": 0.2, "round_id": "r1"}])
+
+    await BM.enqueue_if_due(q, {"max_turns": 12})
+    items = q.list_items(source=BM.NAME)
+    assert {i.kind for i in items} == {BM.KIND_RUN, BM.KIND_LEDGER}, items
+    assert all(i.payload["max_turns"] == 12 for i in items), [i.payload for i in items]
+
+    q2 = WorkQueue(tmp_path / "workers-default.db")
+    monkeypatch.setattr(BM, "_recent_ledger_losers", lambda *a, **k: [
+        {"task_id": "bench_004", "composite_score": 0.2, "round_id": "r2"}])
+    await BM.enqueue_if_due(q2, {})
+    items = q2.list_items(source=BM.NAME)
+    assert len(items) == 2
+    assert all(i.payload["max_turns"] == BM.DEFAULT_MAX_TURNS == 8 for i in items)
+
+
+def _recording_turn(seen: list):
+    async def _turn(prompt, *a, **k):
+        seen.append(k.get("max_turns"))
+        return C.TurnResult(text="", stop_reason="max_turns", num_turns=4)
+    return _turn
+
+
+async def test_bench_mine_runs_both_paths_with_the_budget_the_item_carries(
+        tmp_path, monkeypatch, q):
+    """#896 clause 2: no literal remains at either call site."""
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    _bm_queue(monkeypatch, q)
+    p = _run_file(runs, "run_24_20260908_235954")
+    seen: list = []
+    monkeypatch.setattr(BM, "run_prompt_on_primary", _recording_turn(seen))
+
+    await BM._mine_run_failure(_item({"run_path": str(p), "run_id": "run_24_20260908_235954",
+                                      "max_turns": 3}))
+    await BM._mine_ledger_loser(_item({"loser_task_id": "bench_003", "composite_score": 0.2,
+                                       "max_turns": 3}, kind=BM.KIND_LEDGER))
+    assert seen == [3, 3], seen
+
+
+async def test_bench_mine_item_enqueued_before_the_key_runs_at_the_default(
+        tmp_path, monkeypatch, q):
+    """#896 clause 3: a config change does not strand already-queued work."""
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    _bm_queue(monkeypatch, q)
+    p = _run_file(runs, "run_24_20260908_235954")
+    seen: list = []
+    monkeypatch.setattr(BM, "run_prompt_on_primary", _recording_turn(seen))
+
+    result = await BM.execute(_item({"run_path": str(p), "run_id": "run_24_20260908_235954"}))
+    assert result["status"] == "failed", result
+    result = await BM.execute(_item({"loser_task_id": "bench_003", "composite_score": 0.2},
+                                    kind=BM.KIND_LEDGER))
+    assert result["status"] == "failed", result
+    assert seen == [BM.DEFAULT_MAX_TURNS, BM.DEFAULT_MAX_TURNS], seen
+
+
+def test_bench_mine_config_names_the_turn_budget():
+    """Human clause 1: the operator's value is in the tracked config block."""
+    root = Path(__file__).resolve().parents[1]
+    cfg = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+    src = cfg["workers"]["sources"]["bench-mine"]
+    assert int(src["max_turns"]) >= BM.DEFAULT_MAX_TURNS

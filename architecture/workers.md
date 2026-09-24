@@ -691,10 +691,12 @@ is the known self-grading failure mode, and this is where it is stopped.
   `TimeoutError`s. Exclude those two buckets from any before/after count on the
   ceiling: they are different mechanisms, and mixing them moves the number
   without moving anything. `session-distill` runs `iterations_per_step=15`
-  (`workers/sources/session_distill.py`) against `bench-mine`'s `max_turns=8`
-  (`workers/sources/bench_mine.py`) and dies identically — it reads a whole
-  transcript and runs out of iterations before it writes a note. Raising either
-  ceiling is #980/#896's decision. What #1050 changed is that the turn was never
+  (`workers/sources/session_distill.py`) against `bench-mine`'s then-literal
+  `max_turns=8` (`workers/sources/bench_mine.py`; since #896 on 2026-09-24 it is
+  `workers.sources.bench-mine.max_turns`, 12, carried in the payload, default 8)
+  and dies identically — it reads a whole
+  transcript and runs out of iterations before it writes a note. Raising
+  session-distill's ceiling is #980's decision. What #1050 changed is that the turn was never
   told: `_worker_run_options` set no `state_anchor`, so this path had the kill
   and no warning while the chat, session-backed-worker and autonomy paths all had
   the warning, and inner voice is off for these sources by design, so no observer

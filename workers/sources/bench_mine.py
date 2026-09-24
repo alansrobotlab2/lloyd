@@ -67,6 +67,14 @@ LEDGER_PATH = PIPELINE_DIR / "research" / "ledger.jsonl"
 #: Queue items per tick, per input. Two worker slots shared with the nightly
 #: chain; this source is not the reason anyone is waiting.
 MAX_ENQUEUE_PER_TICK = 3
+#: Iteration ceiling for one mining turn, when `workers.sources.bench-mine`
+#: names no `max_turns`. It was a literal at both call sites, so no config
+#: key could move it: 112 of 115 all-time failures to 2026-09-18 were
+#: `stop_reason=max_turns, turns=9` against it (#896). The default keeps
+#: today's behaviour; the operator's value lives in config.yaml, and it rides
+#: the queue payload like the six sibling sources so an item enqueued under
+#: one value runs under it.
+DEFAULT_MAX_TURNS = 8
 FAILURE_WINDOW_DAYS = 7
 
 #: `failure_kind: infra` runs died on `ConnectError: All connection attempts
@@ -288,7 +296,8 @@ async def _enqueue_ledger_losers(queue: WorkQueue, src_cfg: dict) -> None:
             source=NAME,
             kind=KIND_LEDGER,
             payload={"loser_task_id": task_id, "composite_score": row.get("composite_score"),
-                     "round_id": row.get("round_id")},
+                     "round_id": row.get("round_id"),
+                     "max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS))},
             priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
             dedup_key=dedup_key,
         )
@@ -313,7 +322,8 @@ async def _enqueue_failed_runs(queue: WorkQueue, src_cfg: dict, limit: int) -> N
             kind=KIND_RUN,
             payload={"run_id": run["run_id"], "run_path": run["run_path"],
                      "task_id": run["task_id"], "failure_kind": run["failure_kind"],
-                     "summary": run["summary"]},
+                     "summary": run["summary"],
+                     "max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS))},
             priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
             dedup_key=f"bench-mine:run:{run['run_id']}",
         )
@@ -646,6 +656,15 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     return await _mine_ledger_loser(item)
 
 
+def _turn_budget(item: QueueItem) -> int:
+    """The iteration budget this item was enqueued under.
+
+    An item queued before the key existed carries none and runs at the
+    default, so a config change never strands already-queued work.
+    """
+    return int((item.payload or {}).get("max_turns") or DEFAULT_MAX_TURNS)
+
+
 async def _mine_failure(item: QueueItem, turn, source_label: str) -> dict[str, Any]:
     logger.warning("bench-mine %s: %s", source_label, turn.failure_summary())
     _give_up_after_retries(item, turn.failure_summary())
@@ -705,7 +724,7 @@ async def _mine_run_failure(item: QueueItem) -> dict[str, Any]:
         return {"status": "failed", "summary": "bench-mine: run item carries no run_path"}
 
     turn = await run_prompt_on_primary(
-        _run_failure_prompt(run), max_turns=8, source=NAME,
+        _run_failure_prompt(run), max_turns=_turn_budget(item), source=NAME,
         title=f"mine failed run {run['run_id']}")
     if not turn.ok:
         return await _mine_failure(item, turn, run["run_id"])
@@ -726,7 +745,7 @@ async def _mine_ledger_loser(item: QueueItem) -> dict[str, Any]:
     score = payload.get("composite_score")
 
     turn = await run_prompt_on_primary(
-        _ledger_loser_prompt(loser, score), max_turns=8, source=NAME,
+        _ledger_loser_prompt(loser, score), max_turns=_turn_budget(item), source=NAME,
         title=f"mine ledger loser {loser}")
     if not turn.ok:
         return await _mine_failure(item, turn, str(loser))
