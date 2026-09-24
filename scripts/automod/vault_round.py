@@ -31,6 +31,9 @@ failure:
      purpose — a pre-existing broken file elsewhere in the vault must not
      block every round, the same delta principle as pyflakes and tsc in the
      code gate.
+     A rewritten `skills/<slug>/SKILL.md` is also scored for activation
+     against the labelled corpus (#711) — recorded on every landing, refused
+     only while `SKILL_ACTIVATION_ENFORCE` is on, which it ships off.
   4. **A failure reverts the round's paths** — tracked ones back to HEAD, new
      ones deleted. The vault is live, so "nothing lands" has to mean "nothing
      stays".
@@ -314,6 +317,44 @@ def skill_timezone_errors(paths: list[str]) -> list[str]:
     return errs
 
 
+# Log-only until ~two weeks of real consolidation runs have shown what it would
+# have refused (#711's human clause). Flipping it is a human's change.
+SKILL_ACTIVATION_ENFORCE = False
+
+
+def skill_activation_findings(paths: list[str]) -> list[dict]:
+    """#711: one row per touched `skills/<slug>/SKILL.md` — does the rewrite
+    trigger falsely more often, or push recall under the skill's floor?
+
+    The third per-skill check on the landing path after the two above, and
+    the only one that is advisory: its rule (`scripts/skill_activation.py`)
+    compares the text on disk against the vault's HEAD through the production
+    matcher over the labelled corpus, and a skill without an entry in
+    `eval/skill_activation_cases.yaml` has nothing to compare, so it is never
+    blockable. `land()` records every row; `validate()` refuses on one only
+    while `SKILL_ACTIVATION_ENFORCE` is on. Never raises.
+    """
+    slugs = sorted({p.split("/")[1] for p in paths
+                    if p.startswith("skills/") and p.endswith("/SKILL.md")
+                    and p.count("/") == 2})
+    if not slugs:
+        return []
+    try:
+        from scripts import skill_activation
+    except ImportError as exc:  # pragma: no cover - repo is always importable
+        return [{"skill": s, "has_eval": False, "would_refuse": False,
+                 "reason": f"skill_activation unavailable: {exc}"} for s in slugs]
+    rows = []
+    for slug in slugs:
+        rel = f"skills/{slug}/SKILL.md"
+        f = VAULT / rel
+        candidate = f.read_text(encoding="utf-8", errors="replace") if f.exists() else None
+        head = _git("show", f"HEAD:{rel}")
+        current = head.stdout if head.returncode == 0 else None
+        rows.append(skill_activation.gate(slug, candidate, current))
+    return rows
+
+
 def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     """(errors, buckets). Empty errors means the change may land."""
     ok, why, buckets = check_scope(paths)
@@ -336,6 +377,9 @@ def validate(paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
                       + skill_timezone_errors(paths))
     if not errors and buckets["validated"]:
         errors.extend(loader_errors(buckets["validated"]))
+    if not errors and SKILL_ACTIVATION_ENFORCE:
+        errors.extend(f"skills/{r['skill']}/SKILL.md: skill activation: {r['reason']}"
+                      for r in skill_activation_findings(paths) if r.get("would_refuse"))
     return errors, buckets
 
 
@@ -517,6 +561,10 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
         raise VaultRoundError("validation failed; the change was reverted: "
                               + "; ".join(errors[:5]))
 
+    # Recorded on every landing whatever the enforcement: the log-only phase
+    # exists to show what an enforcing gate would have refused.
+    skill_gate = skill_activation_findings(norm)
+
     review = "skipped"
     # Always says WHICH abstention it was, and is None when nothing was abstained:
     # an item-bound land that the reviewer passed must not arrive explained by a
@@ -619,10 +667,12 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
                     # caller passed no item_id. A CLI/autoresearch land has no
                     # turn and so no session; it writes no key, which is honest.
                     **({"session_id": session_id} if session_id else {}),
+                    **({"skill_gate": skill_gate} if skill_gate else {}),
                     "message": message.strip()[:200]})
     return {"ok": True, "commit": sha, "paths": norm, "validated": buckets["validated"],
             "review": review, "review_reason": review_reason,
-            "landing_clauses": landing_rows}
+            "landing_clauses": landing_rows,
+            **({"skill_gate": skill_gate} if skill_gate else {})}
 
 
 def revert_many(shas: list[str], reason: str = "rollback") -> dict:

@@ -548,16 +548,20 @@ def _get_backlog_index() -> dict[int, dict]:
 
 # ── Search helpers ────────────────────────────────────────────────────────────
 
-def _search_skills(query_tokens: set[str]) -> list[tuple[float, dict]]:
+def _search_skills(query_tokens: set[str],
+                   skills: list[dict] | None = None) -> list[tuple[float, dict]]:
     """Return scored skills sorted descending.
 
     Uses the metadata-hit-required scoring (see skills._score_skill). A skill
     with zero name/desc/tag match scores 0.0 regardless of body accidents —
     fixes #311 where generic stopword queries pulled powerpoint/youtube skills
     into graph-classifier sessions.
+
+    `skills` replaces the live inventory, so the skill-activation gate (#711)
+    can judge a candidate SKILL.md through this function rather than a copy.
     """
     scored = []
-    for skill in _get_skills_cached():
+    for skill in (_get_skills_cached() if skills is None else skills):
         score = _score_skill(skill, query_tokens, require_metadata_hit=True)
         if score >= SKILL_THRESHOLD_FIRST:
             scored.append((score, skill))

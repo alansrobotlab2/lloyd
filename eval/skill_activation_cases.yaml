@@ -1,0 +1,32 @@
+# eval/skill_activation_cases.yaml — which skills the activation eval covers (#711).
+#
+# The cases themselves are NOT here. They are derived from the labelled turns in
+# eval/skill_match_queries.yaml (#557): for each skill below, a turn labelled with
+# it is a should_trigger case and every other turn is a should-not-trigger case
+# carrying the skill that should have fired instead, or none. See
+# scripts/skill_activation.py.
+#
+# Skills were picked as the five with the most labelled turns in that set.
+# `recall_floor` is the recall the vault-landing gate will not let a rewrite of
+# that skill push it under; it was set from the first baseline run
+# (eval/run_skill_activation_eval.py), not chosen.
+#
+# `extra_records` are AUTHORED turns, not transcript turns, added only where the
+# real set covers a skill with fewer than five positives. They use the same
+# schema and join the corpus for every skill.
+
+skills:
+  # recall at the 2026-09-24 baseline (positives in brackets)
+  voice-mode: {recall_floor: 0.375}                  # 3/8
+  local-llm-gotchas: {recall_floor: 0.3333}          # 2/6
+  poisoned-worker-troubleshoot: {recall_floor: 1.0}  # 6/6
+  system-health-check: {recall_floor: 1.0}           # 5/5
+  voice-clone-sample: {recall_floor: 0.6}            # 3/5
+
+extra_records:
+- id: sac001
+  turn: "the cloned voice sounds off again. can you cut a fresh reference clip for it from a different video and play me a sample?"
+  expected_skills: [voice-clone-sample]
+  expected_empty: false
+  note: "authored 2026-09-24 for #711: the real set has four voice-clone-sample turns"
+  source: "authored (#711), not a transcript turn"
