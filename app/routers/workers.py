@@ -29,6 +29,7 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from app import mitigation_state
 from app.config import CONFIG, save_tool_overrides
 from app.paths import VAULT_ROOT, VAULT_PENDING_RESEARCH_DIR as PENDING_ROOT
 from workers.queue import get_queue
@@ -146,6 +147,9 @@ async def workers_status():
         "pool": pool.status() if pool else {"running": False},
         "depth": depth,
         "sources": sources,
+        # What each stop control was last measured to stop, and how fast
+        # (`scripts/mitigation_drill.py`, #703). Never raises.
+        "mitigation": mitigation_state.read(),
     })
 
 

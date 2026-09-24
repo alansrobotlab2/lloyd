@@ -43,16 +43,17 @@ async def test_a_no_op_pause_fails_the_surface():
     assert r["ok"] is False
 
 
-async def test_the_report_keeps_dispatch_only_out_of_the_in_flight_stops():
-    report = await D.run(None)
+async def test_the_report_keeps_dispatch_only_out_of_the_in_flight_stops(tmp_path):
+    report = await D.run(None, state_path=tmp_path / "state.json")
     assert report["ok"] is True
     assert [s["surface"] for s in report["in_flight"]] == ["session_cancel"]
     assert report["dispatch_only"] == ["pool_pause"]
 
 
-def test_a_broken_control_makes_the_drill_exit_non_zero(monkeypatch):
+def test_a_broken_control_makes_the_drill_exit_non_zero(monkeypatch, tmp_path):
     async def _broken(status=None, **kw):
-        return await _real_run(status, session_cancel=_noop_cancel)
+        return await _real_run(status, session_cancel=_noop_cancel,
+                               state_path=tmp_path / "state.json")
 
     _real_run = D.run
     monkeypatch.setattr(D, "live_status", lambda url: None)
@@ -79,3 +80,33 @@ async def test_a_refused_drill_fires_nothing(monkeypatch):
                          session_cancel=_spy, pool_pause=lambda p: fired.append(p))
     assert report["refused"] and report["surfaces"] == [] and fired == []
     assert report["ok"] is False
+
+
+async def test_a_drill_records_each_surface_for_the_status_route(tmp_path):
+    """Clause 5's writer: the latest per-surface result lands on disk, and a
+    later drill merges in rather than dropping a surface it did not re-measure."""
+    import json
+
+    from app import mitigation_state
+
+    state = tmp_path / "state" / "mitigation_drill.json"
+    await D.run(None, state_path=state)
+    written = json.loads(state.read_text())["surfaces"]
+    assert written["session_cancel"]["classification"] == "in-flight"
+    assert 0 <= written["session_cancel"]["seconds"] < 1.0
+    assert written["pool_pause"]["classification"] == "dispatch-only"
+    assert written["pool_pause"]["seconds"] is None
+    assert all(r["at"] for r in written.values())
+
+    mitigation_state.record([{"surface": "session_cancel", "classification": "no-op",
+                              "seconds": None, "ok": False}], path=state, at="later")
+    after = mitigation_state.read(path=state)
+    assert after["session_cancel"] == {"classification": "no-op", "seconds": None,
+                                       "at": "later"}
+    assert after["pool_pause"]["classification"] == "dispatch-only"
+
+
+async def test_a_refused_drill_records_nothing(tmp_path):
+    state = tmp_path / "mitigation_drill.json"
+    await D.run({"pool": {"round_hold": {"engaged": True}}}, state_path=state)
+    assert not state.exists()

@@ -226,10 +226,15 @@ async def drill_pool_pause(pause: Optional[Callable[[Any], None]] = None,
 
 # ── the drill ───────────────────────────────────────────────────────────────
 
-async def run(status: Optional[dict] = None, **overrides: Any) -> dict[str, Any]:
+async def run(status: Optional[dict] = None, *, state_path: Optional[Path] = None,
+              **overrides: Any) -> dict[str, Any]:
     """Run every surface and return the report. `overrides` replace a surface's
     control (`session_cancel=`, `pool_pause=`), which is how the tests prove a
-    no-op control fails the drill."""
+    no-op control fails the drill.
+
+    Every measured surface is merged into `app.paths.MITIGATION_DRILL_STATE`
+    (or `state_path`), which `GET /api/workers/status` reports as `mitigation`.
+    A refused drill measured nothing and writes nothing."""
     reason = refusal(status)
     if reason:
         return {"refused": reason, "surfaces": [], "ok": False}
@@ -237,6 +242,11 @@ async def run(status: Optional[dict] = None, **overrides: Any) -> dict[str, Any]
         await drill_session_cancel(overrides.get("session_cancel")),
         await drill_pool_pause(overrides.get("pool_pause")),
     ]
+    from app import mitigation_state
+    try:
+        mitigation_state.record(surfaces, path=state_path)
+    except Exception as e:  # the measurement is the report; a lost write is a note
+        print(f"mitigation drill: could not record state: {e}", file=sys.stderr)
     return {
         "refused": None,
         "surfaces": surfaces,

@@ -120,6 +120,9 @@ SCREENSHOTS_DIR = LOGS_DIR / "screenshots"
 # before every action) read, and the last capture's frame for the Desktop tab.
 DESKTOP_DIR = DATA_ROOT / "desktop"
 DESKTOP_LEASE_PATH = DESKTOP_DIR / "lease.json"
+# The mitigation drill's latest measured result per stop control (#703):
+# `scripts/mitigation_drill.py` writes it, `GET /api/workers/status` reports it.
+MITIGATION_DRILL_STATE = DATA_ROOT / "mitigation_drill.json"
 
 #: Everything `ensure_dirs()` creates, as data rather than as a literal inside the
 #: function. `LOGS_DIR` is an ancestor of `SCREENSHOTS_DIR`, so a filesystem probe

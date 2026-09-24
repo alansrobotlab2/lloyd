@@ -609,3 +609,49 @@ async def test_a_run_killed_by_a_pool_restart_is_recorded_under_its_logged_run_i
     assert logged, "the pool never logged the attempt starting"
     assert logged[0] == rows[0]["run_id"], (
         f"log named {logged[0]}, the table recorded {rows[0]['run_id']}")
+
+
+# ── GET /api/workers/status carries the mitigation block (#703) ─────────────
+
+async def _status_body(q, monkeypatch) -> dict:
+    import json
+
+    import app.routers.workers as W
+    monkeypatch.setattr(W, "get_queue", lambda: q)
+    monkeypatch.setattr(W, "get_pool", lambda: None)
+    return json.loads((await W.workers_status()).body)
+
+
+async def test_the_status_says_the_drill_never_ran_when_it_has_not(q, monkeypatch, tmp_path):
+    import app.paths as paths
+    monkeypatch.setattr(paths, "MITIGATION_DRILL_STATE", tmp_path / "absent.json")
+    body = await _status_body(q, monkeypatch)
+    assert body["mitigation"] == {"state": "never-run"}
+
+
+async def test_an_unreadable_drill_state_is_reported_not_raised(q, monkeypatch, tmp_path):
+    import app.paths as paths
+    bad = tmp_path / "mitigation_drill.json"
+    bad.write_text("{not json")
+    monkeypatch.setattr(paths, "MITIGATION_DRILL_STATE", bad)
+    body = await _status_body(q, monkeypatch)
+    assert body["mitigation"]["state"] == "never-run"
+    assert body["mitigation"]["error"]
+
+
+async def test_the_status_carries_each_surfaces_last_measured_mitigation(q, monkeypatch, tmp_path):
+    import app.paths as paths
+    from app import mitigation_state
+    state = tmp_path / "mitigation_drill.json"
+    monkeypatch.setattr(paths, "MITIGATION_DRILL_STATE", state)
+    mitigation_state.record(
+        [{"surface": "session_cancel", "classification": "in-flight", "seconds": 0.021, "ok": True},
+         {"surface": "pool_pause", "classification": "dispatch-only", "seconds": None, "ok": True}],
+        at="2026-09-24T20:00:00+00:00")
+    body = await _status_body(q, monkeypatch)
+    assert body["mitigation"] == {
+        "session_cancel": {"classification": "in-flight", "seconds": 0.021,
+                           "at": "2026-09-24T20:00:00+00:00"},
+        "pool_pause": {"classification": "dispatch-only", "seconds": None,
+                       "at": "2026-09-24T20:00:00+00:00"},
+    }
