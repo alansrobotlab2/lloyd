@@ -283,6 +283,32 @@ def _promoter_cannot_reach_the_live_backend(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _primary_engine_probe_is_not_consulted(monkeypatch):
+    """No test's claim depends on whether the real primary engine is up.
+
+    The pool's third claim gate (`workers/pool.py::_primary_hold_held`) asks
+    `127.0.0.1:8096/health` before it will let an `autocode` round claim, so left
+    live it would make every pool test's answer depend on whether the engine
+    happened to be loading its weights while the test ran — and, worse, a test
+    suite run while the engine is down would hold a source and then report it as
+    a real result. Same hazard as the two fixtures above (a live process reaching
+    into a test's verdict), and the same remedy taken from them: neutralise the
+    outside signal, do not stub the code under test.
+
+    Disabled rather than pointed at a discard port, and that distinction is the
+    whole fixture: an unreachable engine is the gate's ON state, so redirecting
+    the URL would engage the hold in every test and quietly change what each one
+    asserts. The gate's own behaviour is covered in `tests/test_round_hold.py`,
+    which re-enables it with a fake probe.
+    """
+    try:
+        from workers import pool as P
+        monkeypatch.setattr(P, "primary_hold_config", lambda: {"enabled": False})
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
 def _isolate_automod_lock(tmp_path, monkeypatch):
     """No test reads the machine's automod lock to decide anything.
 

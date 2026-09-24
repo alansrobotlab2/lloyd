@@ -44,8 +44,14 @@ def pool(monkeypatch):
                   "kv_usage": None, "held_sources": []}
     p._round_hold = {"engaged": False, "engaged_since": None, "engagements": 0,
                      "held_sources": []}
+    p._primary_hold = {"engaged": False, "engaged_since": None, "engagements": 0,
+                       "held_sources": [], "answering": None, "last_detail": None,
+                       "last_probe": 0.0, "probing": False}
     # The KV gate is a separate question; keep it out of these assertions.
     monkeypatch.setattr(P, "kv_gate_config", lambda: {"enabled": False})
+    # And so is reachability: disabled here means the decider never probes the
+    # engine, which is the other reason these tests do not need a fake HTTP.
+    monkeypatch.setattr(P, "primary_hold_config", lambda: {"enabled": False})
     # The exempt list is pinned, not read from config.yaml: on 2026-09-15
     # `autotriage` joined it there and two of these tests went red on main.
     monkeypatch.setattr(P, "round_hold_config",
@@ -131,9 +137,14 @@ def test_engagements_counts_transitions_not_polls(pool):
     assert pool._round_hold["engagements"] == 2
 
 
-def test_claim_holds_is_the_union_of_both_gates(pool, monkeypatch):
+async def test_claim_holds_is_the_union_of_all_three_gates(pool, monkeypatch):
     """One call site so a third gate has an obvious home, and so the claim
     query takes the union rather than whichever gate ran last.
+
+    The third gate is engaged here too, because the 2026-09-23 incident is
+    exactly the moment all three are read together and only one of them can
+    answer: the KV gate had no /metrics reading to work from (the engine was not
+    serving), the round hold had no round in flight, and the claims went out.
     """
     monkeypatch.setattr(P, "kv_gate_config",
                         lambda: {"enabled": True, "max_kv_usage": 0.1,
@@ -141,23 +152,28 @@ def test_claim_holds_is_the_union_of_both_gates(pool, monkeypatch):
     monkeypatch.setattr(P.WorkerPool, "_gate_reading",
                         staticmethod(lambda window: 0.99))
     _run_round(pool)
-    held = set(pool._claim_holds(REGISTRY))
+    _hold(monkeypatch, _Engine(False))
+    held = set(await pool._claim_holds(REGISTRY))
     # KV gate contributes the long-lived set...
     assert {"autotriage", "deep-research"} <= held
     # ...and the round hold contributes the short ones the KV gate ignores.
     assert "session-distill" in held
     assert "youtube-digest" in held
-    # `scheduled-task` is exempt from the round hold and not long-lived, so
-    # neither gate reaches it — which is the point of exempting it.
+    # `scheduled-task` is exempt from the round hold, not long-lived, and not a
+    # source the primary hold names — which is the point of exempting it.
     assert "scheduled-task" not in held
-    # `autocode` IS held here, by the KV gate, and that is correct and
-    # pre-existing: the gates decide what may be CLAIMED, and starting a
-    # second round under KV pressure is exactly what should not happen.
-    # `_loop_is_free` already guarantees one round; this is belt and braces.
+    # `autocode` IS held here, by the KV gate as well as by reachability, and
+    # that is correct and pre-existing: the gates decide what may be CLAIMED, and
+    # starting a second round under KV pressure is exactly what should not
+    # happen. One round at a time is `round_depth`'s job; this is belt and braces.
     assert "autocode" in held
-    # What matters for this change is that the round hold is not the thing
-    # holding it.
+    # What matters for each change is that it is not the only thing holding it:
+    # take the round hold away and `session-distill` is still held by KV, and
+    # take the KV gate away and `autocode` is still held by reachability.
     assert "autocode" not in pool._round_hold_held(REGISTRY)
+    monkeypatch.setattr(P, "kv_gate_config", lambda: {"enabled": False})
+    assert "session-distill" not in pool._kv_gate_held(REGISTRY)
+    assert await pool._primary_hold_held(REGISTRY) == ["autocode"]
 
 
 def test_status_reports_the_hold(pool):
@@ -176,6 +192,261 @@ def test_held_sources_is_a_copy_not_the_live_list(pool):
     st = pool.round_hold_status()
     st["held_sources"].append("mutated")
     assert "mutated" not in pool._round_hold["held_sources"]
+
+
+# ---------------------------------------------------------------------------
+# The third gate: is the primary engine answering at all
+# ---------------------------------------------------------------------------
+
+class _Engine:
+    """The primary's `/health`, answering whatever the test says it said.
+
+    Callable in the shape `primary_engine_answering` has — `(answering, detail)`
+    — and it counts the asks, because the whole reason the gate may exist is
+    that a claim does not wait on HTTP: an engine probed once per poll would be
+    a gate that made the pool slower in order to make it safer.
+    """
+
+    def __init__(self, answering=True, detail="HTTP 200"):
+        self.answering = answering
+        self.detail = detail
+        self.asks = 0
+        self.timeouts = []
+
+    def __call__(self, timeout=0.0):
+        self.asks += 1
+        self.timeouts.append(timeout)
+        return (self.answering, self.detail)
+
+
+def _hold(monkeypatch, engine, **cfg):
+    """Turn the gate on against `engine`, with the values production runs on.
+
+    Those values are `workers/pool.py`'s defaults, restated here rather than
+    imported: `workers.primary_hold` is read over them only if an operator puts
+    it in config.yaml, and it is not there, so pinning them is what proves the
+    defaults are the operative numbers and not a config file nobody reads.
+    """
+    conf = {"enabled": True, "sources": ["autocode"], "probe_seconds": 10,
+            "probe_timeout_s": 2.0}
+    conf.update(cfg)
+    monkeypatch.setattr(P, "primary_hold_config", lambda: conf)
+    monkeypatch.setattr(P, "primary_engine_answering", engine)
+    return engine
+
+
+async def test_the_defaults_hold_the_round_with_no_config_block(pool, monkeypatch):
+    """No `workers.primary_hold` in config.yaml means the code's defaults run.
+
+    The absence is load-bearing, not cosmetic: the promotion gate denies this
+    loop any write to config.yaml (#1430's landing reports adding the block as a
+    human path), so a hold that needed a config line to switch it on would be a
+    hold that is off — the incident it exists for would replay unchanged. The
+    numbers are pinned here so that changing a default is a decision someone
+    made, not a line that drifted.
+    """
+    monkeypatch.setattr(P, "primary_hold_config", lambda: {})
+    monkeypatch.setattr(P, "primary_engine_answering", _Engine(False))
+    assert await pool._primary_hold_held(REGISTRY) == ["autocode"]
+    st = pool.primary_hold_status()
+    assert st["enabled"] is True and st["sources"] == ["autocode"]
+    assert st["probe_seconds"] == 10.0 and st["probe_timeout_s"] == 2.0
+
+
+async def test_an_engine_that_is_not_answering_holds_the_round(pool, monkeypatch):
+    """Clause 4's decision, on the real registry shape.
+
+    The 2026-09-23 19:35 restart: the backend came back first and claimed
+    #1220 three times in 65 s against a primary still loading its 95.37 GiB
+    n-gram table. vLLM does not bind its port until the model is resident, so
+    every claim was `All connection attempts failed` with `round_id: None`, and
+    each was booked as an attempt.
+    """
+    engine = _hold(monkeypatch, _Engine(False, "no answer (connection refused or timed out)"))
+    held = await pool._primary_hold_held(REGISTRY)
+    assert held == ["autocode"]
+    assert "autocode" in await pool._claim_holds(REGISTRY)
+    st = pool.primary_hold_status()
+    assert st["engaged"] is True
+    assert st["held_sources"] == ["autocode"]
+    assert st["last_detail"] == "no answer (connection refused or timed out)"
+    assert engine.asks == 1
+
+
+async def test_an_engine_answering_200_holds_nothing(pool, monkeypatch):
+    engine = _hold(monkeypatch, _Engine(True))
+    assert await pool._primary_hold_held(REGISTRY) == []
+    assert pool.primary_hold_status()["engaged"] is False
+    assert engine.asks == 1
+
+
+async def test_the_gate_is_not_decided_on_every_poll(pool, monkeypatch):
+    """Sixty claims a minute from six slots; the engine is asked once.
+
+    The KV gate reads a background sampler for this reason and the round hold
+    caches a marker read (`_LANDING_PROBE_SECONDS`). A gate that asked the engine
+    directly would put an HTTP round trip in front of every claim — turning an
+    outage into a slower outage, on the one event loop that also serves every
+    request and streams every turn.
+    """
+    engine = _hold(monkeypatch, _Engine(False))
+    for _ in range(60):
+        assert await pool._primary_hold_held(REGISTRY) == ["autocode"]
+    assert engine.asks == 1
+
+
+async def test_the_answer_ages_out_and_the_engine_is_asked_again(pool, monkeypatch):
+    """The hold cannot latch on a stale reading: a restarted engine comes back
+    on its own, within `probe_seconds`, with nothing to clear by hand."""
+    engine = _hold(monkeypatch, _Engine(False))
+    assert await pool._primary_hold_held(REGISTRY) == ["autocode"]
+    pool._primary_hold["last_probe"] -= 11.0
+    assert await pool._primary_hold_held(REGISTRY) == ["autocode"]
+    assert engine.asks == 2
+
+
+async def test_the_hold_releases_when_the_engine_answers_again(pool, monkeypatch):
+    """Two lines in the log for an hour of outage, and `engagements` counts the
+    transitions, not the polls — the same contract as the two gates beside it."""
+    engine = _hold(monkeypatch, _Engine(False))
+    await pool._primary_hold_held(REGISTRY)
+    assert pool.primary_hold_status()["engaged"] is True
+    engine.answering, engine.detail = True, "HTTP 200"
+    pool._primary_hold["last_probe"] -= 11.0
+    assert await pool._primary_hold_held(REGISTRY) == []
+    st = pool.primary_hold_status()
+    assert st["engaged"] is False and st["engaged_since"] is None
+    assert st["engagements"] == 1, "engaged once, not once per poll"
+
+
+async def test_a_probe_that_cannot_run_is_not_an_engine_down(pool, monkeypatch):
+    """Fails open: a broken check must not become a stalled pool.
+
+    The rule the KV gate states for a missing reading — "a pressure signal that
+    failed closed would turn an unreachable /metrics into a stopped worker pool"
+    — applies with more force to the gate whose ON state is an unreachable
+    engine: if the probe itself could fail closed, any bug in this file would
+    stop the loop that fixes bugs.
+    """
+    def boom(timeout=0.0):
+        raise OSError("no socket for you")
+    _hold(monkeypatch, boom)
+    assert await pool._primary_hold_held(REGISTRY) == []
+    assert pool.primary_hold_status()["engaged"] is False
+
+
+async def test_the_kill_switch_releases_an_engaged_primary_hold(pool, monkeypatch):
+    _hold(monkeypatch, _Engine(False))
+    await pool._primary_hold_held(REGISTRY)
+    assert pool.primary_hold_status()["engaged"] is True
+    monkeypatch.setattr(P, "primary_hold_config", lambda: {"enabled": False})
+    assert await pool._primary_hold_held(REGISTRY) == []
+    assert pool.primary_hold_status()["engaged"] is False
+
+
+async def test_only_the_named_sources_are_held(pool, monkeypatch):
+    """Short jobs still claim against a down engine: they lose a cheap retry,
+    not an item's one attempt. The gate is about the job the outage cannot
+    repair, which is what `LONG_LIVED` declares."""
+    engine = _hold(monkeypatch, _Engine(False), sources=["autocode", "autotriage"])
+    held = await pool._primary_hold_held(REGISTRY)
+    assert held == ["autocode", "autotriage"]
+    assert "scheduled-task" not in held and "youtube-digest" not in held
+    # A source named in config but not long-lived in the registry is not held
+    # either: `LONG_LIVED` is the declaration that decides, not the name list.
+    engine.asks = 0
+    monkeypatch.setattr(P, "primary_hold_config",
+                        lambda: {"enabled": True, "sources": ["youtube-digest"],
+                                 "probe_seconds": 10})
+    pool._primary_hold["last_probe"] -= 11.0
+    assert await pool._primary_hold_held(REGISTRY) == []
+
+
+async def test_the_probe_asks_the_engine_and_not_the_backend(pool, monkeypatch):
+    """The endpoint is the engine's, and that choice is the whole gate.
+
+    The pool runs INSIDE `lloyd-backend`, so the backend's own `/health` is up
+    exactly when the pool is polling — asking it would have answered 200 to every
+    one of the 02:37 claims. This pins the URL the probe actually requests,
+    through the real request helper, so a future edit that "simplifies" it to the
+    local backend turns the gate into a no-op that always passes.
+    """
+    import scripts.automod.promote as PR
+    asked = []
+
+    class _R:
+        status = 200
+
+    def fake_get(url, timeout=5.0):
+        asked.append(url)
+        return 200, _R()
+
+    monkeypatch.setattr(PR, "_get", fake_get)
+    monkeypatch.setattr(P, "primary_hold_config",
+                        lambda: {"enabled": True, "sources": ["autocode"]})
+    assert await pool._primary_hold_held(REGISTRY) == []
+    assert asked == ["http://127.0.0.1:8096/health"], asked
+    assert "8080" not in asked[0], "the backend is up whenever the pool is polling"
+    assert pool.primary_hold_status()["probe_timeout_s"] == 2.0
+
+
+def test_the_http_layer_s_answer_shape_maps_to_a_hold(monkeypatch):
+    """The mapping from what `_get` reports to what the gate decides.
+
+    `promote._get` reports a refused connection and a timeout both as
+    `(None, None)` — it swallows every exception — and that tuple is the
+    load-bearing input here, because an engine still loading its weights is
+    unreachable rather than answering badly. Only the HTTP call is faked, so the
+    status-to-verdict mapping under test is the shipped one: `None` must not be
+    read as "answered, and it looks fine", which is how a wedged listener would
+    turn into 1,800 claims an hour against a primary that never came up.
+    """
+    import scripts.automod.promote as PR
+    from workers.pool import primary_engine_answering
+
+    monkeypatch.setattr(PR, "_get", lambda url, timeout=5.0: (None, None))
+    assert primary_engine_answering()[0] is False, "no answer is not an answer"
+    monkeypatch.setattr(PR, "_get", lambda url, timeout=5.0: (503, None))
+    assert primary_engine_answering()[0] is False, "an answered non-200 is not ready"
+    monkeypatch.setattr(PR, "_get", lambda url, timeout=5.0: (200, None))
+    assert primary_engine_answering()[0] is True, "vLLM's bare 200 with no body is ready"
+
+
+async def test_the_skipped_claim_stays_queued_with_its_attempt_intact(
+        pool, monkeypatch, tmp_path):
+    """The clause, across the one boundary this change crosses: gate → queue.
+
+    `claim_next` is where a row's `attempts` rises and its state leaves `queued`,
+    so skipping it must leave BOTH alone. `mark_failed` on a dead engine is the
+    other thing this could have been made to do, and it would have written the
+    same lie the ledger already carries for #1220 and #654: an item retired as
+    spent for a stack that was down.
+    """
+    from workers.queue import WorkQueue
+    import scripts.automod.state as ST
+    q = WorkQueue(tmp_path / "workers.db")
+    item_id = q.enqueue("autocode", "implement", {"item_id": 1220}, priority=10)
+    engine = _hold(monkeypatch, _Engine(False, "no answer (connection refused or timed out)"))
+    # The implement ledger, pointed somewhere that is not the live one: the claim
+    # below is the thing under test, and `autocode.execute` writes its `started`
+    # row on entry, so an empty file here is the assertion, not an assumption.
+    monkeypatch.setattr(ST, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+
+    held = await pool._claim_holds(REGISTRY)
+    assert "autocode" in held
+    assert q.claim_next("worker-0", {}, held) is None, "no claim, so no `started` row"
+    assert ST.read_events(path=ST.LEDGER_PATH) == [], "nothing recorded against the item"
+    row = q.get(item_id)
+    assert row.state == "queued" and int(row.attempts or 0) == 0, "offered again later"
+
+    # And the same row is claimable the moment the engine answers — the item was
+    # delayed, not consumed. Nothing is cleared or revived to get here: the row
+    # was never taken, so there is nothing to put back.
+    engine.answering, engine.detail = True, "HTTP 200"
+    pool._primary_hold["last_probe"] -= 11.0
+    claimed = q.claim_next("worker-0", {}, await pool._claim_holds(REGISTRY))
+    assert claimed is not None and claimed.id == item_id
+    assert int(q.get(item_id).attempts or 0) == 1, "the attempt is spent by RUNNING, once"
 
 
 # ---------------------------------------------------------------------------

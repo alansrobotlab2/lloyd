@@ -1467,6 +1467,281 @@ def test_a_finished_event_with_no_stop_reason_key_still_spends_the_attempt(isola
     assert 394 in B.implemented_ids(S.LEDGER_PATH)
 
 
+# ── #1430: an infra failure is not an attempt ─────────────────────────
+#
+# The shapes below are transcribed from the live ledger
+# (`~/.local/state/lloyd-automod/promotions.jsonl`, 2026-09-24T02:36-02:40), not
+# invented: the stack restarted at 19:35 PDT, and while the primary was still
+# loading its 95 GiB n-gram table autocode kept claiming items about once a
+# minute. Every claim died on `All connection attempts failed` with no round
+# opened, and `implement_outcomes` charged each one to the item's one unattended
+# attempt. #1220 and #654 went `spent` → draft + needs-human inside two minutes;
+# #1151 was spent the same way on 09-18 with no round ever opened.
+
+# The boot the 09-24 rows name, as both producers can name it: an epoch for the
+# `backend_boot` field, the UTC stamp for the prose `settle_orphaned_turns`
+# writes. They must resolve to the same outage.
+_BOOT_0924 = datetime.strptime("2026-09-24T02:36:49Z", "%Y-%m-%dT%H:%M:%SZ").replace(
+    tzinfo=timezone.utc).timestamp()
+_BOOT_0924_STAMP = "2026-09-24T02:36:49Z"
+
+
+def _infra_claim(item_id, *, boot=_BOOT_0924, detail="All connection attempts failed"):
+    """One `infra_failed` row exactly as `execute` writes it for a claim that
+    never reached the engine: no round, no turns, `stop_reason` null.
+
+    Built through `autocode.infra_failed_row`, the producer both writers call,
+    not hand-assembled here: a test that typed its own dict would keep passing if
+    the real row's `backend_boot` were renamed, which is the field the whole
+    collapse reads.
+    """
+    from workers.sources import autocode as I
+    S.append_event(I.infra_failed_row(
+        item_id, session_id="20260924_023821_autocode_8c2d", round_id=None,
+        num_turns=None, stop_reason=None,
+        errors=[f"{{'detail': '{detail}', 'source': 'user'}}"], boot=boot),
+        path=S.LEDGER_PATH)
+
+
+def _infra_boot_settled(item_id, *, boot_stamp=_BOOT_0924_STAMP, boot=_BOOT_0924,
+                        round_id="SM_20260924_022542", started="2026-09-24T02:20:49Z"):
+    """The `infra_failed` row a boot itself writes: `settle_orphaned_turns`
+    settling the turn it orphaned. This is row 1 of #1220's three."""
+    S.append_event({"event": "backlog_implement", "item_id": item_id,
+                    "phase": "infra_failed", "round_id": round_id,
+                    "stop_reason": "backend_restarted", "num_turns": None,
+                    "errors": [f"the backend restarted at {boot_stamp} under a turn "
+                               f"started {started}; no terminal row was written"],
+                    "backend_boot": boot}, path=S.LEDGER_PATH)
+
+
+def test_three_infra_rows_naming_one_restart_are_a_reoffer_not_an_attempt(isolated):
+    """Clause 1, replaying #1220: three rows, one boot, and the verdict must be
+    `infra`.
+
+    `implement_outcomes` incremented the shared `attempts` for `infra_failed`
+    beside `finished` (`:1994-1995` before this change) and gated the re-offer on
+    that count with `INCOMPLETE_RETRY_CAP = 1`, so the third row fell through
+    every branch to `("spent", "")`. Ledger: #1220 infra_failed 02:36:53 /
+    02:37:16 / 02:38:21 → `status_moved` 02:38:24 "its one unattended attempt is
+    spent", the claims 65 s apart and two of them with `round_id: None` because
+    no round was ever opened to spend.
+    """
+    write_item(isolated, 1220, status="in_progress")
+    _confirm(1220)
+    _infra_boot_settled(1220)
+    _infra_claim(1220)
+    _infra_claim(1220)
+
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[1220]
+    assert verdict == "infra", detail
+    assert 1220 not in B.implemented_ids(S.LEDGER_PATH)
+    assert B.select_confirmed(S.LEDGER_PATH)[0].id == 1220, "offered again"
+    # The reason a human or a later round reads has to carry the collapse it
+    # performed, or "3 infra rows" reads like 3 attempts all over again.
+    assert "3 infra row(s) = 1 outage" in detail, detail
+    assert "0 real attempt" in detail, detail
+
+
+def test_infra_rows_never_add_to_the_attempts_an_item_actually_used(isolated):
+    """Clause 2: one genuine verdict plus two infra rows must still be a
+    re-offer.
+
+    This is the sharper half of the incident, because it survives a quiet box:
+    an item that burned one real attempt and was then claimed twice during
+    someone else's restart reads as a spent item on the shared count, and the
+    item never gets the retry the loop promises for the verdict it did reach.
+    """
+    write_item(isolated, 654, status="in_progress")
+    _confirm(654)
+    S.append_event({"event": "backlog_implement", "item_id": 654, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": 654, "phase": "finished",
+                    "round_id": "SM_20260924_010000", "stop_reason": "max_turns",
+                    "num_turns": 61}, path=S.LEDGER_PATH)
+    _infra_claim(654)
+    _infra_claim(654)
+
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[654]
+    assert verdict == "infra", detail
+    assert 654 not in B.implemented_ids(S.LEDGER_PATH)
+    assert "1 real attempt" in detail, detail
+
+    # The count itself, pinned where it still bites: this item was blocked at a
+    # gate rung by a red tree it did not cause, which re-offers while the item
+    # has used at most `EXTERNAL_RETRY_CAP` (3) ATTEMPTS. Four infra rows put
+    # the shared counter at 5 and the item read `spent`; on the real-attempt
+    # count it is 1, so the external rule is the one that decides.
+    write_item(isolated, 655, status="in_progress")
+    _confirm(655)
+    for _ in range(4):
+        _infra_claim(655)
+    _blocked_round(655, "SM_20260924_011111", external=True)
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[655]
+    assert verdict == "external", detail
+    assert "blocked at the `tests` rung" in detail, detail
+
+
+def test_infra_reoffers_stop_on_their_own_outage_count(isolated):
+    """Clause 3: three DIFFERENT backend restarts park the item for a human.
+
+    Charging infra per outage is only safe if the outage count is capped too:
+    `select_confirmed` takes the OLDEST ready item, so an uncapped re-offer is
+    re-picked on every pass for as long as the cause persists and starves
+    everything behind it. Two boots re-offer; the third is an engine a person
+    has to look at.
+    """
+    write_item(isolated, 1151, status="in_progress")
+    _confirm(1151)
+    _infra_claim(1151, boot=_BOOT_0924)
+    _infra_claim(1151, boot=_BOOT_0924 + 86400)
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[1151]
+    assert verdict == "infra", detail
+    assert "2 outage" in detail, detail
+
+    _infra_claim(1151, boot=_BOOT_0924 + 2 * 86400)
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[1151]
+    assert verdict == "spent", detail
+    assert 1151 in B.implemented_ids(S.LEDGER_PATH)
+    # The park has to name the real cause. A bare `spent` is what told a human
+    # "its one unattended attempt is spent" about an item no round ever ran.
+    assert "3 distinct outage" in detail, detail
+    assert "not a verdict on the item" in detail, detail
+
+
+def test_a_row_that_names_no_boot_is_its_own_charge(isolated):
+    """The collapse must not become a way to re-offer forever. A producer that
+    never writes `backend_boot` and never names a restart gets one charge per
+    row, so the caps above still stop the churn; and a settle row that names
+    its boot only in prose still collapses with the fielded rows around it.
+    """
+    write_item(isolated, 677)
+    _confirm(677)
+    # No `backend_boot`, boot named only inside `errors` — the pre-#1430 shape —
+    # and built by `settle_orphaned_turns`' own row producer, so the shape is the
+    # writer's and not this file's: `pop` is how the reader's field is dropped
+    # while the text it wrote stays.
+    from workers.sources import autocode as I
+    row = I.infra_failed_row(
+        677, session_id=None, round_id="SM_20260924_022424", num_turns=None,
+        stop_reason="backend_restarted",
+        errors=[f"the backend restarted at {_BOOT_0924_STAMP} under a turn "
+                f"started 2026-09-24T02:22:16Z; no terminal row was written"],
+        boot=_BOOT_0924)
+    row.pop("backend_boot")
+    S.append_event(row, path=S.LEDGER_PATH)
+    # Same boot, named the new way: one outage, not two.
+    _infra_claim(677)
+    assert "2 infra row(s) = 1 outage" in B.implement_outcomes(S.LEDGER_PATH)[677][1]
+
+    # Rows that name nothing at all: each is its own charge, so the third one
+    # parks the item exactly as three distinct boots would.
+    write_item(isolated, 678)
+    _confirm(678)
+    for _ in range(3):
+        S.append_event({"event": "backlog_implement", "item_id": 678,
+                        "phase": "infra_failed", "round_id": None,
+                        "stop_reason": None, "num_turns": None,
+                        "errors": ["backend went away"]}, path=S.LEDGER_PATH)
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[678]
+    assert verdict == "spent", detail
+    assert "3 distinct outage" in detail, detail
+
+
+def test_the_two_infra_row_writers_are_read_as_one_outage(isolated, monkeypatch):
+    """The real writers, the real file, the real reader — no hand-built row.
+
+    `settle_orphaned_turns` writes the turn a boot orphaned and `execute` writes a
+    claim that never reached the engine; both run inside the backend process and
+    `implement_outcomes` reads their output minutes later out of
+    `promotions.jsonl`. So the shape they agree on is a claim about a file, not
+    about a call — and if either writer stops naming its boot the way the reader
+    reads it, one outage starts counting as two and the item is charged for a
+    restart that happened once. #1220's three rows were exactly one settle row and
+    two claim rows from a single boot.
+    """
+    import asyncio
+    from workers.sources import autocode as I
+    write_item(isolated, 677)
+    _confirm(677)
+    boot = _BOOT_0924
+
+    # Writer 1: a turn that started before the boot and never reported back.
+    S.append_event({"event": "backlog_implement", "item_id": 677, "phase": "started",
+                    "ts": boot - 600}, path=S.LEDGER_PATH)
+    monkeypatch.setattr(I, "_backend_boot_ts", lambda: boot)
+    settled = I.settle_orphaned_turns()
+    assert [r["item_id"] for r in settled] == [677]
+
+    # Writer 2, same process, same boot: a re-claim that dies at the connection.
+    async def dead_engine(prompt, **kw):
+        return {"text": "", "session_id": "sess_dead", "stop_reason": None,
+                "num_turns": None, "errors": ["All connection attempts failed"]}
+    monkeypatch.setattr(C, "run_prompt_in_session", dead_engine)
+    monkeypatch.setattr(I, "_loop_is_free", lambda: (True, ""))
+    assert asyncio.run(I.execute(_Item()))["status"] == "failed"
+
+    rows = [e for e in S.read_events(path=S.LEDGER_PATH)
+            if e.get("event") == "backlog_implement" and e.get("phase") == "infra_failed"]
+    assert len(rows) == 2, rows
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[677]
+    assert verdict == "infra", detail
+    assert "2 infra row(s) = 1 outage" in detail, detail
+    assert 677 not in B.implemented_ids(S.LEDGER_PATH)
+    assert B.select_confirmed(S.LEDGER_PATH)[0].id == 677, "still offered"
+
+
+def test_the_fifth_infra_row_from_one_boot_parks_the_item(isolated):
+    """`INFRA_ROW_CAP`, which is the only thing the collapse cannot bound.
+
+    Rows collapse by BOOT, so an item charged by one boot can otherwise re-offer
+    without limit while the backend stays up and its engine keeps dropping every
+    stream — answering `/health` is not the same as serving a turn. The 2026-09-23
+    boot charged three rows in 65 s, so rows 1-4 re-offer and the fifth parks,
+    which leaves the real incident one row of headroom and still stops a spin.
+    """
+    write_item(isolated, 679)
+    _confirm(679)
+    for _ in range(4):
+        _infra_claim(679)
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[679]
+    assert verdict == "infra", detail
+    assert "4 infra row(s) = 1 outage" in detail, detail
+
+    _infra_claim(679)
+    verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[679]
+    assert verdict == "spent", detail
+    assert "5 infra row(s) across 1 distinct outage" in detail, detail
+    assert 679 in B.implemented_ids(S.LEDGER_PATH), "the loop stops re-offering it"
+
+
+def test_an_infra_park_is_not_reported_as_a_spent_attempt(isolated):
+    """The board's `status_moved` reason is the only account a human reads.
+
+    #1220 and #654 went to `draft` with "its one unattended attempt is spent",
+    which was false both times — no round of theirs ever opened. A park on the
+    infra budget goes to the same place for the same reason (a human decides), so
+    the destination cannot tell them apart; the reason has to.
+    """
+    write_item(isolated, 680)
+    _confirm(680)
+    B.set_status(680, "in_progress", "was running")
+    for hops in (0, 1, 2):
+        _infra_claim(680, boot=_BOOT_0924 + hops * 86400)
+    # A control that really did spend its attempt: one round, refused at the gate.
+    write_item(isolated, 681)
+    _confirm(681)
+    B.set_status(681, "in_progress", "was running")
+    _blocked_round(681, "SM_681", external=False)
+
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[680][0] == "draft", want[680]
+    assert "unattended attempt is spent" not in want[680][1], want[680]
+    assert "stack being down" in want[680][1], want[680]
+    assert want[681][0] == "draft", want[681]
+    assert "unattended attempt is spent" in want[681][1], want[681]
+
+
 def test_a_reverted_promotion_gives_the_item_one_more_go(isolated):
     """Nothing joined these two facts: the promotion carries the round id and
     the rollback carries only the commit, so an unattended round that landed

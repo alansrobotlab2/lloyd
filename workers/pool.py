@@ -104,6 +104,78 @@ def round_hold_config() -> dict[str, Any]:
         return {}
 
 
+# Primary reachability hold — see `WorkerPool._primary_hold_held`.
+#
+# The two gates above ask how the engine is DOING. This one asks whether it is
+# answering at all, and it exists because of 2026-09-23 19:35: the stack
+# restarted, the backend came back first, and the pool spent the following
+# minutes claiming autocode rounds against a primary that was still loading its
+# 95.37 GiB host-RAM n-gram table. Every claim died with `All connection attempts
+# failed` and each one was booked as an attempt against the item it claimed
+# (#1220 and #654 went to draft inside two minutes; #1151 the same way on 09-18
+# with no round ever opened). vLLM does not open its port until the model is
+# resident, so "the engine is not answering /health" is not "the engine is slow"
+# — it is "a turn started now cannot run", and the pool can learn that for one
+# request, the same request a round is comfortably worth paying for.
+#
+# Claims come every second or two from every idle slot and a landing's restart
+# lasts minutes, so the answer is cached and refreshed off the event loop: a
+# claim must not wait on an HTTP call, which is also why the KV gate reads the
+# background sampler instead of the engine.
+#
+# The three values below are what production runs on. `workers.primary_hold` in
+# config.yaml (`enabled`, `sources`, `probe_seconds`, `probe_timeout_s`) is read
+# over them when a person puts it there, and it is deliberately absent from the
+# checked-in file: the gate that protects an item's attempt budget from this
+# loop's own claims should not be a thing this loop can edit to disarm it. So
+# `enabled: false` is an operator's kill switch, and adding the block is a human
+# path (#1430's landing reports it).
+_PRIMARY_PROBE_SECONDS = 10.0
+# A local /health answers in milliseconds when the engine is up. The timeout
+# bounds what a wedged listener can cost a claim — and a timeout counts as NOT
+# answering, which holds the round rather than spending anything, so the cost of
+# a low number here is a round that starts late, never an item that loses an
+# attempt.
+_PRIMARY_PROBE_TIMEOUT_S = 2.0
+DEFAULT_PRIMARY_HOLD_SOURCES: tuple[str, ...] = (ROUND_SOURCE,)
+
+
+def primary_hold_config() -> dict[str, Any]:
+    try:
+        from app.config import CONFIG
+        return dict((CONFIG.get("workers") or {}).get("primary_hold") or {})
+    except Exception:
+        return {}
+
+
+def primary_engine_answering(timeout: float = _PRIMARY_PROBE_TIMEOUT_S) -> tuple[bool, str]:
+    """Ask the primary engine's own `/health`, and report what came back.
+
+    `(answering, detail)`. Blocking — call it through `asyncio.to_thread`. Any
+    answer that is not HTTP 200 counts as not answering, including no answer:
+    `promote._get` yields `(None, None)` for a refused connection or a timeout,
+    which is the load-bearing case here, since an engine still loading its
+    weights is unreachable rather than merely unhappy.
+
+    The one answer that fails OPEN is not being able to ask the question at all.
+    A broken probe must not become a stalled pool — the same rule the KV gate
+    states for a missing reading ("a pressure signal that failed closed would
+    turn an unreachable /metrics into a stopped worker pool"). An engine that
+    answers 200 and then drops every stream is a different failure, and the
+    ledger's own per-outage cap (`INFRA_RETRY_CAP`) is what bounds that one.
+    """
+    try:
+        from scripts.automod.promote import PRIMARY_HEALTH, _get
+    except Exception as exc:  # a missing probe is not evidence the engine is down
+        return True, f"probe unavailable ({type(exc).__name__}: {exc})"
+    status, _body = _get(PRIMARY_HEALTH, timeout=timeout)
+    if status == 200:
+        return True, "HTTP 200"
+    if status is None:
+        return False, "no answer (connection refused or timed out)"
+    return False, f"HTTP {status}"
+
+
 def long_lived_sources(registry: dict[str, Any]) -> list[str]:
     """Sources that declare themselves long-lived re-admitters.
 
@@ -284,6 +356,20 @@ class WorkerPool:
             "engagements": 0,
             "held_sources": [],
         }
+        # Primary reachability hold. See `_primary_hold_held`. `answering` is the
+        # last probe's verdict (None until the first claim asks), and `last_probe`
+        # is wall-clock so the cache age reads the same in a status dump as
+        # `engaged_since` does.
+        self._primary_hold: dict[str, Any] = {
+            "engaged": False,
+            "engaged_since": None,
+            "engagements": 0,
+            "held_sources": [],
+            "answering": None,
+            "last_detail": None,
+            "last_probe": 0.0,
+            "probing": False,
+        }
 
     @property
     def worker_ids(self) -> list[str]:
@@ -394,6 +480,7 @@ class WorkerPool:
             "in_flight_count": len(self._in_flight),
             "kv_gate": self.kv_gate_status(),
             "round_hold": self.round_hold_status(),
+            "primary_hold": self.primary_hold_status(),
         }
 
     def kv_gate_status(self) -> dict[str, Any]:
@@ -514,13 +601,98 @@ class WorkerPool:
             logger.info("Round hold released")
             hold.update(engaged=False, engaged_since=None, held_sources=[])
 
-    def _claim_holds(self, registry: dict[str, Any]) -> list[str]:
+    def primary_hold_status(self) -> dict[str, Any]:
+        """What the primary reachability hold reports, and what a claim costs.
+
+        A pure read of the last decision, like `kv_gate_status` and
+        `round_hold_status`: the pool polls claims every second or two, so this
+        runs far more often than the question changes meaning, and a status call
+        that probed the engine itself would make the dashboard the reason a claim
+        waited on HTTP. `last_detail` is the probe's own words — the answer that
+        decided the hold, not a restatement of it.
+        """
+        cfg = primary_hold_config()
+        return {
+            "enabled": bool(cfg.get("enabled", True)),
+            "sources": sorted(cfg.get("sources", DEFAULT_PRIMARY_HOLD_SOURCES)),
+            "probe_seconds": float(cfg.get("probe_seconds", _PRIMARY_PROBE_SECONDS)),
+            "probe_timeout_s": float(cfg.get("probe_timeout_s", _PRIMARY_PROBE_TIMEOUT_S)),
+            **self._primary_hold,
+            "held_sources": list(self._primary_hold["held_sources"]),
+        }
+
+    async def _primary_hold_held(self, registry: dict[str, Any]) -> list[str]:
+        """Sources this claim must skip because the primary engine is not answering.
+
+        The third gate. The KV gate needs a /metrics reading to exist and the
+        round hold needs a round already in flight, so while the engine is still
+        loading both are silent and every claim goes out and dies: on
+        2026-09-23 19:35 that was three autocode claims inside 65 seconds against
+        a primary that was not listening, and the ledger booked each one as an
+        attempt on the item it claimed. `LONG_LIVED` is what decides, because a
+        re-admitting loop is the job an outage cannot repair by retrying — and a
+        source that is never claimed keeps its attempt intact, which is the point:
+        this gate protects the attempt ledger, not the engine.
+
+        The probe is cached for `probe_seconds` and refreshed off the event loop,
+        so a claim never waits on HTTP. A probe already in flight is not joined:
+        the previous answer stands while it runs, which keeps one slow health
+        endpoint from parking every idle slot at once.
+
+        Fails open on a broken probe — see `primary_engine_answering` — and logs
+        only on a transition, so an engine down for an hour is two lines.
+        """
+        cfg = primary_hold_config()
+        st = self._primary_hold
+        if bool(cfg.get("enabled", True)) and not st["probing"] and \
+                time.time() - float(st["last_probe"] or 0.0) >= \
+                float(cfg.get("probe_seconds", _PRIMARY_PROBE_SECONDS)):
+            st["probing"] = True
+            try:
+                answering, detail = await asyncio.to_thread(
+                    primary_engine_answering,
+                    float(cfg.get("probe_timeout_s", _PRIMARY_PROBE_TIMEOUT_S)))
+            except Exception as exc:  # noqa: BLE001 — a crashed probe is not engine-down
+                answering, detail = True, f"probe raised {type(exc).__name__}: {exc}"
+            finally:
+                st["probing"] = False
+                # Stamped after the wait, so the next probe is `probe_seconds`
+                # from the ANSWER and not from the request that started it: a
+                # health endpoint that takes its full timeout would otherwise be
+                # re-asked by every idle slot on every poll.
+                st["last_probe"] = time.time()
+                st["answering"], st["last_detail"] = answering, detail
+
+        engaged = bool(cfg.get("enabled", True)) and st["answering"] is False
+        held = sorted(set(long_lived_sources(registry))
+                      & set(cfg.get("sources", DEFAULT_PRIMARY_HOLD_SOURCES))) \
+            if engaged else []
+        if engaged:
+            st["held_sources"] = held
+            if not st["engaged"]:
+                st.update(engaged=True, engagements=int(st["engagements"]) + 1,
+                          engaged_since=datetime.now(timezone.utc).isoformat())
+                logger.warning("Primary hold engaged: the engine is not answering (%s) — holding %s",
+                               st["last_detail"], ", ".join(held) or "nothing")
+        elif st["engaged"]:
+            logger.info("Primary hold released: the engine answers again (%s)", st["last_detail"])
+            st.update(engaged=False, engaged_since=None, held_sources=[])
+        return held
+
+    async def _claim_holds(self, registry: dict[str, Any]) -> list[str]:
         """Every reason this claim must skip a source, unioned.
 
-        Two independent gates, and the union is what the claim query takes.
-        Kept as one call site so a third gate has an obvious home.
+        Three independent gates, and the union is what the claim query takes.
+        Kept as one call site so a third gate has an obvious home — which is the
+        home the primary reachability hold just took.
+
+        Async because the third gate asks the engine a question. The other two
+        read a background sampler and a cached marker precisely so a claim does
+        not wait on the network, and `_primary_hold_held` keeps that promise by
+        serving a cached verdict and refreshing it on a thread.
         """
-        held = set(self._kv_gate_held(registry))
+        held = set(await self._primary_hold_held(registry))
+        held |= set(self._kv_gate_held(registry))
         held |= set(self._round_hold_held(registry))
         return sorted(held)
 
@@ -688,7 +860,11 @@ class WorkerPool:
                 if src.get("max_inflight") is not None
             }
 
-            held = self._claim_holds(SOURCE_REGISTRY)
+            # Every gate that decides what may start, unioned — including the
+            # one that asks the engine whether it is answering at all, which is
+            # what stops an autocode round being claimed against a primary that
+            # is still loading and then booked as an attempt it never used.
+            held = await self._claim_holds(SOURCE_REGISTRY)
             item = await asyncio.to_thread(
                 self.queue.claim_next, worker_id, max_inflight, held)
             if not item:

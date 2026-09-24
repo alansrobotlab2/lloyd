@@ -1720,6 +1720,44 @@ REVIEW_RETRY_CAP = 2
 # A round LANDED and its own finalizer said a clause was not met. One more
 # go, told which clauses; the branch is gone with the landing.
 PARTIAL_RETRY_CAP = 1
+# An infra failure is not a verdict on the item, so it is charged to a budget of
+# its own and never to the one above. These two caps exist only to stop the
+# churn (the same oldest-item starvation as every cap here), and each is set
+# against the shape of the incident that found them — 2026-09-23 19:35, the
+# stack restarted and #1220 was claimed three times in 65 s while the primary
+# still loaded, every claim dying on `All connection attempts failed`:
+#   * `INFRA_RETRY_CAP` counts DISTINCT outages (`_infra_outage`). Two bad boots
+#     re-offer; the third is an engine a person has to look at, because on a
+#     fresh boot each time the claim was legitimately worth making and something
+#     is systematically wrong with the box.
+#   * `INFRA_ROW_CAP` counts raw rows, because the collapse below is per BOOT,
+#     and a backend process that stays up while its engine answers /health but
+#     drops every stream would otherwise produce charges forever. The 09-23
+#     incident wrote three rows under one boot, so the ceiling sits just above
+#     that — a fourth row from one boot is a different failure than the outage,
+#     and it is no longer something to re-offer blind.
+INFRA_RETRY_CAP = 1          # two outages re-offer; the third parks the item
+INFRA_ROW_CAP = 4            # rows 1-4 from one boot re-offer; the fifth parks
+# The reason `implement_outcomes` gives when the INFRA budget is what parks an
+# item. It is a constant because `desired_statuses` matches it as a prefix: that
+# function writes the board's `status_moved` reason, and the one it wrote for
+# every `spent` verdict — "its one unattended attempt is spent" — is the exact
+# sentence this item exists to stop being said about an item that never spent
+# anything. Matching prose is brittle, so both halves live here and the prefix
+# match is pinned by `test_an_infra_park_is_not_reported_as_a_spent_attempt`.
+INFRA_PARK_PREFIX = "every implement turn this item got failed on the stack being down"
+
+
+def infra_parked(detail: str) -> bool:
+    """Whether a `spent` verdict's detail is the infra park, not a spent attempt."""
+    return str(detail or "").startswith(INFRA_PARK_PREFIX)
+
+# The text `settle_orphaned_turns` writes into the row it is forced to invent
+# (`workers/sources/autocode.py`), carrying the boot stamp it read from
+# `_backend_boot_ts()`. It is the only outage identity a historical row has, so
+# the collapse reads it back out rather than asking the process that died.
+_BACKEND_RESTART_STAMP = re.compile(
+    r"backend restarted at (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)")
 
 # Stop reasons that mean the turn ran out of room rather than reaching a
 # conclusion. #446 committed 757 lines and was killed by the wall clock
@@ -1955,6 +1993,61 @@ def _never_ran(ev: dict) -> bool:
             and not ev.get("num_turns"))
 
 
+def _is_infra_row(ev: dict) -> bool:
+    """Whether one implement row says the WORLD failed rather than the round.
+
+    The same fact `workers.maintenance.classify` already answers for the queue
+    layer (`_TRANSIENT`, "A failure of the world, not of the item: worth exactly
+    one more try", whose pattern literally contains `all connection attempts
+    failed`). The implement ledger had no equivalent: it filed both shapes into
+    the one `attempts` counter, which is why one reboot spent three items.
+    """
+    phase = str(ev.get("phase") or "")
+    return phase == "infra_failed" or (phase == "finished" and _never_ran(ev))
+
+
+def _infra_outage(ev: dict) -> str:
+    """Which outage one infra row is a product of — the key that collapses them.
+
+    A backend restart is not one failure per claim, it is one failure that every
+    claim in the window reports. On 2026-09-23 19:35 the stack came back,
+    autocode re-claimed #1220 every ~65 s while the primary was still loading its
+    95 GiB table, and the three rows counted as three attempts on an item allowed
+    one. So the charge is per outage, and the outage is named by the row:
+
+      * `backend_boot` — the epoch stamp of the backend process that wrote it,
+        put there by both producers (`settle_orphaned_turns` and `execute`'s
+        dropped-stream branch). One boot, one charge;
+      * failing that, the boot stamp inside a `settle_orphaned_turns` error
+        string, so rows written before this field existed still collapse;
+      * failing that, the row's own timestamp — its OWN charge, deliberately, so
+        a writer that never names its outage can never launder an unlimited run
+        of re-offers past the caps.
+
+    Both the field and the text resolve to the SAME string (the boot rendered as
+    the UTC stamp `settle_orphaned_turns` writes), because the real incident had
+    one boot named two ways: its first row came from `settle_orphaned_turns` and
+    carries the stamp in prose, the next two came from `execute` and carry the
+    epoch field. A key that differed by producer would have counted that one
+    outage as three.
+    """
+    boot = ev.get("backend_boot")
+    if boot not in (None, ""):
+        try:
+            return f"restart:{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(float(boot)))}"
+        except (TypeError, ValueError, OverflowError, OSError):
+            pass
+    for err in (ev.get("errors") or [])[:5]:
+        m = _BACKEND_RESTART_STAMP.search(str(err))
+        if m:
+            return f"restart:{m.group(1)}"
+    # `ts` first: it is the sub-second float `append_event` stamps every row
+    # with, and `created_at` is second-precision on this writer, so three claims
+    # inside one second would otherwise collapse into a charge they did not earn.
+    stamp = ev.get("ts") or ev.get("created_at")
+    return f"row:{stamp}"
+
+
 def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
     """`{item_id: (verdict, detail)}` for every item an implement turn touched.
 
@@ -1972,6 +2065,15 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
     `n = 5` on its first new round and every cap below was already spent.
     A turn a landing drain refused before it ran is not an attempt at all
     (see `implement_history`).
+
+    `n` counts ROUNDS THAT RAN. An infra row (`_is_infra_row`) is not one, and
+    since #1430 it is not charged to `n` at all: it is charged once per outage
+    to a budget of its own, capped by `INFRA_RETRY_CAP` and `INFRA_ROW_CAP`.
+    Before that split the shared counter meant the 2026-09-23 19:35 restart —
+    three claims in 65 s against a primary that was still booting, no round ever
+    opened for any of them — was read as three attempts and spent #1220 and #654
+    outright. `settle_orphaned_turns` writes "not counted as an attempt" onto
+    the victim's own file; this is the line that makes the sentence true.
     """
     history = implement_history(ledger)
     latest: dict[int, dict] = {}
@@ -1984,6 +2086,12 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
     # alone keeps "once" true without spending it on an unrelated earlier
     # verdict (an external block, say).
     incompletes: dict[int, int] = {}
+    # Same lesson, applied to infra: the count that gates an infra re-offer is
+    # this item's OWN outage count, not the shared attempt count the branch
+    # beside it was reaching for. Keyed by `_infra_outage`, so three claims
+    # inside one boot are one charge and three boots are three.
+    outages: dict[int, set] = {}
+    infra_rows: dict[int, int] = {}
     for iid, rows in history.items():
         for d in rows:
             latest[iid] = d
@@ -1991,10 +2099,14 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
             if phase == "reopened":
                 attempts[iid] = 0
                 incompletes[iid] = 0
-            elif phase in ("finished", "infra_failed"):
+                outages[iid] = set()
+                infra_rows[iid] = 0
+            elif _is_infra_row(d):
+                outages.setdefault(iid, set()).add(_infra_outage(d))
+                infra_rows[iid] = infra_rows.get(iid, 0) + 1
+            elif phase == "finished":
                 attempts[iid] = attempts.get(iid, 0) + 1
-                if (phase == "finished"
-                        and str(d.get("stop_reason") or "") in INCOMPLETE_STOP_REASONS):
+                if str(d.get("stop_reason") or "") in INCOMPLETE_STOP_REASONS:
                     incompletes[iid] = incompletes.get(iid, 0) + 1
 
     blocked = externally_blocked_rounds(ledger)
@@ -2052,11 +2164,26 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
                         f"cherry-pick it onto live main in the new round rather than "
                         f"redoing the work")
             continue
-        if phase == "infra_failed" or (phase == "finished" and _never_ran(ev)):
-            if n <= 1 + INCOMPLETE_RETRY_CAP:
-                errs = "; ".join(str(e)[:120] for e in (ev.get("errors") or [])[:2])
-                out[iid] = ("infra", f"the turn never reported completion{': ' + errs if errs else ''}")
+        # Set when the infra budget is what parks the item, so the final
+        # fallthrough can say so: `spent` with no reason is the sentence that
+        # sent #1220 to draft as "its one unattended attempt is spent", and on
+        # an infra park it would be a lie — nothing about this item was judged.
+        park = ""
+        if _is_infra_row(ev):
+            n_out = len(outages.get(iid, ()))
+            n_rows = infra_rows.get(iid, 0)
+            errs = "; ".join(str(e)[:120] for e in (ev.get("errors") or [])[:2])
+            if n_out <= 1 + INFRA_RETRY_CAP and n_rows <= INFRA_ROW_CAP:
+                out[iid] = ("infra",
+                            f"the turn never reported completion{': ' + errs if errs else ''}"
+                            f" ({n_rows} infra row(s) = {n_out} outage(s); the item's "
+                            f"{n} real attempt(s) are untouched)")
                 continue
+            park = (f"{INFRA_PARK_PREFIX} "
+                    f"({n_rows} infra row(s) across {n_out} distinct outage(s)); that is not "
+                    f"a verdict on the item, but the re-offer is capped so a permanently down "
+                    f"engine cannot starve the queue behind it"
+                    f"{': ' + errs if errs else ''}")
         if (phase == "finished" and str(ev.get("stop_reason") or "") in INCOMPLETE_STOP_REASONS
                 and incompletes.get(iid, 0) <= INCOMPLETE_RETRY_CAP):
             out[iid] = ("incomplete",
@@ -2095,7 +2222,7 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
                         f"round {rid} was blocked at the `{g.get('rung')}` rung by a condition "
                         f"it did not cause; its work is on branch `automod/{rid}`")
             continue
-        out[iid] = ("spent", "")
+        out[iid] = ("spent", park)
     return out
 
 
@@ -3357,8 +3484,19 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
                 # it will not — the one unattended attempt is used, and a second
                 # is a human's call (`reopen_item`). `draft` is where a human
                 # looks for things that need a judgment.
-                out[iid] = ("draft", "its one unattended attempt is spent; a human decides "
-                                     "(reopen_item to grant another)", True)
+                #
+                # Unless the budget that ran out was the INFRA one. Then the
+                # item spent nothing, and the sentence written here is the only
+                # account of why it is parked — it is the line a person reads
+                # first, and it is the one that was false for #1220 and #654 on
+                # 2026-09-23, whose every implement turn failed on the stack
+                # being down. Same destination, different reason, and the
+                # reason is what they would act on.
+                if infra_parked(detail):
+                    out[iid] = ("draft", detail[:300], True)
+                else:
+                    out[iid] = ("draft", "its one unattended attempt is spent; a human decides "
+                                         "(reopen_item to grant another)", True)
             elif _awaits_triage(iid):
                 out[iid] = ("draft", "re-triaged; waiting for its second triage to confirm a contract")
             else:

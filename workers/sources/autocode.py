@@ -811,6 +811,24 @@ def _backend_boot_ts() -> float | None:
         return None
 
 
+def infra_failed_row(item_id: int, *, session_id: "str | None",
+                     round_id: "str | None", num_turns: "int | None",
+                     errors: list[str], stop_reason: "str | None" = None,
+                     boot: "float | None" = None) -> dict:
+    """One `infra_failed` ledger row, built by the only two writers of that phase.
+
+    `backend_boot` is the field `implement_outcomes` collapses claims on: every row
+    one backend boot produces is ONE charge against the item's outage budget, not a
+    charge per row. `settle_orphaned_turns` names the boot in prose inside `errors`
+    as well, and the reader reads it back out of there for the rows written before
+    this field existed, so both spellings of one boot must key alike.
+    """
+    return {"event": "backlog_implement", "item_id": item_id, "phase": "infra_failed",
+            "session_id": session_id, "round_id": round_id, "num_turns": num_turns,
+            "stop_reason": stop_reason, "errors": [str(e)[:300] for e in (errors or [])[:5]],
+            "backend_boot": boot}
+
+
 def _orphan_round(starts: list[dict], item_id: int, since_ts: float, boot_ts: float) -> str | None:
     """The round a dead turn opened: the last `round_start` between its
     `started` row and the boot, unless that round's spec binds another item.
@@ -852,11 +870,13 @@ def settle_orphaned_turns(boot_ts: float | None = None) -> list[dict]:
 
     A turn runs inside the backend process, so one whose `started` row
     predates this process's boot cannot still be running. Its row is
-    `infra_failed` — `implement_outcomes` re-offers that, capped, because a
-    crash is not a judgment on the item — carrying the round it opened, which
-    the reaper then closes under its usual guards (a detached gate or landing
-    survives a backend restart, and still protects the round). Rows written
-    after the boot are this process's own and are never touched.
+    `infra_failed` — a crash is not a judgment on the item, and
+    `implement_outcomes` charges it to the item's outage budget and never to its
+    attempt budget, which is what makes the note written below true — carrying
+    the round it opened, which the reaper then closes under its usual guards (a
+    detached gate or landing survives a backend restart, and still protects the
+    round). Rows written after the boot are this process's own and are never
+    touched.
     """
     from scripts.automod import backlog as B, state as S
     boot = _backend_boot_ts() if boot_ts is None else boot_ts
@@ -877,11 +897,12 @@ def settle_orphaned_turns(boot_ts: float | None = None) -> list[dict]:
         rid = _orphan_round(starts, iid, ts, boot)
         why = (f"the backend restarted at {stamp(boot)} under a turn started {stamp(ts)}; "
                f"no terminal row was written")
-        rec = {"event": "backlog_implement", "item_id": iid, "phase": "infra_failed",
-               "session_id": None, "round_id": rid, "num_turns": None,
-               "stop_reason": "backend_restarted", "errors": [why]}
+        rec = infra_failed_row(iid, session_id=None, round_id=rid, num_turns=None,
+                               stop_reason="backend_restarted", errors=[why], boot=boot)
         S.append_event(rec)
-        B.note_item(iid, f"implement turn lost: {why}; not counted as an attempt"
+        B.note_item(iid, f"implement turn lost: {why}; not counted as an attempt "
+                         f"(charged once to the item's outage budget, "
+                         f"backend boot {stamp(boot)})"
                          + (f" (round {rid})" if rid else ""))
         logger.warning("backlog #%s: %s (round %s)", iid, why, rid)
         settled.append(rec)
@@ -1598,11 +1619,18 @@ async def _run_and_record(item, candidate, triage, budget, started,
     # tell it from a round that ran and failed, and so `reap_abandoned_rounds`
     # (which looks for `finished`) is not handed a round that was never opened.
     if run.get("stop_reason") is None:
-        S.append_event({"event": "backlog_implement", "item_id": candidate.id,
-                        "phase": "infra_failed", "session_id": run["session_id"],
-                        "round_id": round_id,
-                        "errors": [str(e)[:300] for e in (run.get("errors") or [])[:5]],
-                        "num_turns": run.get("num_turns")})
+        # Names the outage this row is a product of, so N claims against an
+        # engine that never came up are ONE charge on the item rather than N
+        # attempts. This is the row the 2026-09-23 19:35 restart wrote three of
+        # in 65 seconds, and the reason `implement_outcomes` can now collapse
+        # them: the backend never restarted between the claims, so all three
+        # carry the same stamp. Built through `infra_failed_row`, the same
+        # producer `settle_orphaned_turns` uses, so the two spellings of a boot
+        # cannot drift apart by editing one of them.
+        S.append_event(infra_failed_row(
+            candidate.id, session_id=run["session_id"], round_id=round_id,
+            num_turns=run.get("num_turns"), errors=run.get("errors") or [],
+            boot=_backend_boot_ts()))
         logger.warning("backlog #%s: turn never completed (session %s); not an attempt",
                        candidate.id, run["session_id"])
         return {"status": "failed", "item_id": candidate.id,
