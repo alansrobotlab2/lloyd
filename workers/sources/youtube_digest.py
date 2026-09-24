@@ -19,7 +19,7 @@ whole transcript, writes the vault note, evaluates the video against
 it plug in — and files a draft backlog item when the answer is yes. Every
 step is in the session list and the Inner Voice tab.
 
-Three properties worth knowing before changing anything here:
+Four properties worth knowing before changing anything here:
 
 * **The script owns the retry, not the queue.** The pool records an in-band
   `failed` and completes the item; only a raised exception is retried. So a
@@ -36,10 +36,18 @@ Three properties worth knowing before changing anything here:
   subagents, nothing that seeds queues or touches the self-modification
   loop. `Read`/`Write` stay because the note is the job; the vault is a git
   repo, and writes outside the expected prefixes are reported.
+* **The protocol is not in this file.** `SKILL` names the vault skill —
+  `~/obsidian/skills/youtube-digest/SKILL.md` — which `build_prompt` reads at
+  prompt-build time and renders with the per-bundle `TASK_BLOCK` (#737). So a
+  change to the steps, the prose ban-list or the adoption rules is a vault
+  edit that takes effect on the next run, not a code round. What is here is
+  the placeholders and the note header, and a missing skill is a named failure
+  rather than a fallback prompt.
 
 Open-source frameworks and tools may be proposed for direct adoption or
 evaluation. Commercial products may not — the eval names the aspects worth
-recreating locally instead. That rule is Alan's, and it is in the prompt.
+recreating locally instead. That rule is Alan's, and the session is told it in
+step 3 of the skill.
 """
 
 from __future__ import annotations
@@ -57,7 +65,8 @@ from typing import Any, Optional
 from app.paths import LLOYD_HOME, VAULT_ROOT
 from workers.queue import WorkQueue, QueueItem
 from workers.sources._common import (
-    WORKER_AUTOMOD_BAN, DrainActive, TurnTimeout, run_prompt_in_session,
+    WORKER_AUTOMOD_BAN, DrainActive, TurnTimeout, build_skill_prompt,
+    run_prompt_in_session,
 )
 
 logger = logging.getLogger("lloyd-workers.youtube-digest")
@@ -143,16 +152,21 @@ class ScriptError(RuntimeError):
 
 
 # ── The prompt ───────────────────────────────────────────────────────────────
+#
+# The protocol — the numbered steps, the shared prose ban-list, the
+# write-the-note-then-read-it-back rule and the tail check — is the vault skill
+# named by `SKILL` below, loaded at prompt-build time (#737). What stays here is
+# the per-bundle data only: one `.format()` template with 22 fields, and the note
+# header, whose values nothing but this source knows. Splitting on the
+# placeholder boundary is what makes a protocol fix a vault edit rather than a
+# code round, and it leaves exactly one brace surface: this template. The skill
+# body is handed over unformatted, so a brace written there would reach the model
+# as a literal — `tests/test_youtube_digest_source.py` pins the field set, the
+# absence of unrendered fields, and that the skill stays brace-free.
 
-PROMPT = """\
-[SYSTEM: You are running the "youtube-digest" worker job. Work autonomously \
-and do not ask for confirmation.]
+SKILL = "youtube-digest"
 
-You are digesting one YouTube video for Lloyd's vault and judging whether it \
-holds anything that would improve Lloyd. Everything you need is already on \
-disk. Do not search for the video, do not fetch it, and do not look for other \
-videos.
-
+TASK_BLOCK = """\
 <video>
 channel: {channel_name} (@{channel_handle})
 title: {title}
@@ -166,17 +180,16 @@ enrichment_notes: {enrichment}
 measurements: {measurements_path} (live numbers captured at fetch time: {measurements_summary})
 </video>
 
-Work in this order:
+## Your task
 
-1. **Read the transcript in full** with Read. It is wrapped at 100 characters \
-so it pages normally; use offset/limit if one call does not return all of it. \
-Read {meta_path} too — the description often carries the links the speaker \
-only alludes to.
-
-2. **Write the vault note** to exactly this path, with Write:
+One video, one note. Write it to exactly the path below, then evaluate it for
+Lloyd and answer with the RESULT block at the end:
    {target_note}
 {existing_note_instruction}
-   Use exactly this shape — front matter keys verbatim, values filled in:
+
+Start the file with exactly this header, values filled in, and these sections in
+this order — the source recognises the note on disk by the front matter, and the
+tail check depends on `## Open Questions` coming last:
 
 ---
 segment: knowledge
@@ -212,68 +225,17 @@ Real URLs from the transcript or description; [[wiki links]] to the enrichment n
 ## Open Questions
 Unresolved questions the video raises.
 
-   Write from the transcript, not from what you already know about the topic. \
-No preamble in the file and no code fence around it.
-
-   **Prose Rules** — the shared ban-list from \
-`~/obsidian/knowledge/KNOWLEDGE_SCHEMA.md`. This note is prose a person reads, and \
-the run is graded on the note, so slop in it is a defect in the deliverable:
-   - No filler opening. Never start the note or a section with `In this video`, \
-`In today's video`, `This video provides a comprehensive overview of`, `It's worth \
-noting`, `Let's dive in`, `In conclusion`, or `Overall,`.
-   - Banned words: `delve`, `the evolving landscape`, `a testament to`, `seamless`, \
-`leverage` as a verb, `cutting-edge`, `game-changer`, `revolutionize`.
-   - No hedge stacks: `may potentially`, `could possibly`, `might perhaps`. One hedge, \
-where the speaker himself hedges, is honest and stays.
-   - Bad → good. Bad: "In this video, the speaker dives into the evolving landscape of \
-KV-cache offloading, and it's worth noting the potential benefits." Good: "KV-cache \
-offload to CPU RAM cuts prefill cost 3.1x at 32k context — measured on one RTX 4090, so \
-unreplicated."
-   - Lead with the finding, not with the act of reporting it; keep the speaker's \
-numbers with their units; write `None` in an empty section instead of padding it.
-
-3. **Evaluate it for Lloyd.** Read {profile_path} — it describes Lloyd's \
-stack, what already exists, and the standing problems. Decide whether this \
-video contains a specific technique, tool, framework, model or finding that \
-could concretely improve Lloyd, and where it would plug in. **When a claim \
-touches something Lloyd already measures, check the live number first**: Read \
-the measurements file above — vLLM counters, the dashboard's engine and \
-worker sections, and the newest retrieval-eval baseline, captured when the \
-bundle was fetched. `http_fetch` cannot reach loopback, so do not try the \
-URLs from here. A verdict that rests on "Lloyd already does this" must be \
-backed by the counter that says so.
-   - `actionable` (relevance 70-100): a specific change with a measurable \
-acceptance, feasible on two 24 GB GPUs with no cloud dependency.
-   - `worth_a_look` (40-69): promising, but needs reading before a change can \
-be named.
-   - `background` (10-39): useful context, nothing to do.
-   - `not_relevant` (0-9): off-topic for Lloyd.
-   Rules: an **open-source** framework, tool or model may be proposed for \
-direct adoption or evaluation — name the repo. A **commercial** product is \
-never adopted; name the specific aspects worth recreating locally, if any. A \
-**paper** or concept becomes a bounded experiment against an existing metric. \
-Restatements of what Lloyd already does, generic advice and hype are \
-`background` at most. Be skeptical: most videos are `background`.
-   Already tracked by this eval — compare before filing, and if the idea is \
-the same do not file, set DUPLICATE_OF instead:
+Already tracked by this eval — compare against these before filing, and if the
+idea is the same do not file, set DUPLICATE_OF instead:
 {tracked}
 
-4. **If the verdict is `actionable` and it is not a duplicate, file it** with \
-`backlog_write_task`: board `lloyd`, no `task_id`, status `draft`, tags \
-`{eval_tag}`, `{channel_key}`, plus the area tags. Name: a short imperative \
-title. Description, written as a handoff a fresh session can act on alone:
-   - **Source:** {channel_name} — "{title}" — {url} (published {published}); \
-vault note [[{note_stem}]]
-   - **Area / source kind / approach / effort**
-   - **What it is** — the technique or tool, one paragraph
-   - **Why it could improve Lloyd** — where it plugs in, which standing problem it hits
-   - **Evidence from the video** — the claims and numbers that support it
-   - **Proposed evaluation** — numbered, bounded steps
-   - **Acceptance** — the measurement that would show it worked
-   - **Risks and open questions**
-   The tool returns the new id. File at most one item for this video.
+Filing tags for step 4: `{eval_tag}`, `{channel_key}`, plus the area tags.
+Source line for the item's description:
+   **Source:** {channel_name} — "{title}" — {url} (published {published}); vault note [[{note_stem}]]
 
-5. **End your final message with exactly this block and nothing after it:**
+Profile to read for step 3: {profile_path}
+
+End your final message with exactly this block and nothing after it:
 
 RESULT: <written|kept|failed>
 NOTE: {target_note}
@@ -300,12 +262,44 @@ _EXISTING = (
 _FRESH = "   No note exists for this video yet."
 
 
-def build_prompt(meta: dict, tracked: list[dict]) -> str:
-    """Render the digest prompt for one bundle.
+class SkillProtocolMissing(RuntimeError):
+    """The vault skill carrying the digest protocol is absent or empty.
+
+    Named so the run record says "the skill is gone" instead of describing a
+    digest turn that answered with nothing to follow. There is deliberately no
+    fallback prompt: the second copy of the rules that would make a fallback
+    possible is the defect #737 was filed for, and it fails silently — the run
+    still writes a note, just to rules no one is editing any more.
+    """
+
+
+def load_skill() -> str:
+    """Read the digest protocol out of the vault skill.
+
+    The same route `workers/sources/deep_research.py` takes:
+    `autonomy._load_skill_content` resolves the slug to
+    `~/obsidian/skills/<slug>/SKILL.md`. Read per call and never cached — the
+    whole point of the move is that a vault edit changes the next run.
+    """
+    import autonomy
+
+    text = autonomy._load_skill_content(SKILL) or ""
+    if not text.strip():
+        raise SkillProtocolMissing(
+            f"skills/{SKILL}/SKILL.md is missing or empty: the digest protocol is "
+            "not in this file any more, so there is nothing to send the session")
+    return text
+
+
+def build_prompt(meta: dict, tracked: list[dict], *, skill_text: Optional[str] = None) -> str:
+    """Render the digest prompt for one bundle: the vault skill plus its task.
 
     `tracked` is the list of backlog items this eval has already filed, so a
     channel that returns to a theme every week (Discover AI and "the harness",
     say) does not file it every week.
+
+    `skill_text` is a seam for tests; production leaves it None and reads the
+    vault, which is the fact this split exists to establish.
     """
     enrichment = meta.get("enrichment") or {}
     notes = []
@@ -315,7 +309,7 @@ def build_prompt(meta: dict, tracked: list[dict]) -> str:
             notes.append(Path(p).stem)
     tracked_lines = [f"   - #{t['id']} {t['title']}" for t in tracked] or ["   - none yet"]
     target = str(meta.get("target_note") or "")
-    return PROMPT.format(
+    task_block = TASK_BLOCK.format(
         channel_name=meta.get("channel_name", ""),
         channel_handle=meta.get("channel_handle", ""),
         channel_key=meta.get("channel_key", ""),
@@ -339,6 +333,8 @@ def build_prompt(meta: dict, tracked: list[dict]) -> str:
         eval_tag=EVAL_TAG,
         areas=", ".join(AREAS),
     )
+    return build_skill_prompt(load_skill() if skill_text is None else skill_text,
+                              job=NAME, task_block=task_block)
 
 
 # ── The RESULT block ─────────────────────────────────────────────────────────
@@ -707,7 +703,17 @@ async def execute(item: QueueItem) -> dict[str, Any]:
 
     # 2. The session.
     tracked = await asyncio.to_thread(tracked_items)
-    prompt = build_prompt(meta, tracked)
+    try:
+        prompt = await asyncio.to_thread(build_prompt, meta, tracked)
+    except SkillProtocolMissing as exc:
+        # The protocol lives in the vault skill now (#737), so a deleted or
+        # emptied skill leaves this dispatch holding a bundle and no
+        # instructions. Fail by name instead: the row is not marked failed in
+        # `seen.json`, because this is the deploy's fault and not the video's,
+        # and the entry is offered again once the skill is back.
+        logger.error("youtube-digest: %s", exc)
+        return {"status": "failed", "summary": f"{channel} {video_id}: {exc}"[:500],
+                "meta": {**base_meta, "skill_missing": True}}
     vault_before = await asyncio.to_thread(_vault_dirty_paths)
     want_structured = bool(payload.get("structured_verdict", True))
     try:

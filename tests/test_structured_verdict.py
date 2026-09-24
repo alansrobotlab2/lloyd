@@ -218,7 +218,11 @@ def test_deep_research_and_youtube_digest_keep_the_block_and_its_parser():
 
     assert "max_turns" not in FINALIZABLE_STOP_REASONS
     assert "RESULT: <written|nothing_found|duplicate>" in inspect.getsource(D.execute)
-    assert "RESULT: <written|kept|failed>" in Y.PROMPT
+    # #737 moved the digest's protocol into skills/youtube-digest/SKILL.md and
+    # left only the per-bundle data in Python, so `PROMPT` no longer exists and
+    # the block the session is handed lives in `TASK_BLOCK`. Same assertion,
+    # same fact: the block is still sent, and still must be.
+    assert "RESULT: <written|kept|failed>" in Y.TASK_BLOCK
     for mod in (D, Y):
         assert "final_schema=RESULT_SCHEMA if want_structured else None" in inspect.getsource(mod.execute)
         assert '.get("structured_verdict", True)' in inspect.getsource(mod.enqueue_if_due)

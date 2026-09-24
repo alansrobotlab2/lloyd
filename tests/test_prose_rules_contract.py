@@ -314,3 +314,51 @@ async def test_the_rules_reach_the_session_that_writes_the_note(tmp_path, monkey
 
     assert calls, "execute() never dispatched a session — nothing to check"
     _assert_rules_reach_prose(calls[0]["prompt"], "the prompt dispatched by execute()")
+
+
+# ---------------------------------------------------------------------------
+# One copy (#737): the digest source no longer holds its own ban-list
+# ---------------------------------------------------------------------------
+
+#: The phrases `b6da372` hand-copied into the worker source. Spelled out here
+#: rather than derived from the schema, so the test still fails if somebody
+#: re-copies a subset back into the Python.
+_INLINED_PHRASES = ("It's worth noting", "may potentially", "delve", "the evolving landscape")
+
+
+def test_the_digest_source_carries_no_copy_of_the_ban_list():
+    """The item's own check: `grep -c "Prose Rules" workers/sources/youtube_digest.py` → 0.
+
+    Two copies was the defect #737 names. `b6da372` satisfied "the rules must
+    reach the digest session" by pasting them into the prompt, so the schema
+    could be edited all week while the digest kept writing to its copy. The
+    digest now loads the skill, which carries the rules, so the source keeps
+    none of them.
+    """
+    src = Path(Y.__file__).read_text()
+    assert "Prose Rules" not in src, (
+        "workers/sources/youtube_digest.py holds a Prose Rules section again; the "
+        "copy the session reads is skills/youtube-digest/SKILL.md")
+    for phrase in _INLINED_PHRASES:
+        assert phrase not in src, f"`{phrase}` is still hand-copied into the source"
+
+
+def test_the_digest_prompt_carries_the_skill_copy_verbatim(tmp_path):
+    """What the session is handed is the skill's text, not a paraphrase of it.
+
+    Presence and ordering are pinned above; both would pass on a second summary
+    written for the occasion. Byte equality against the skill's own section is
+    what makes the copy count one.
+    """
+    skill = (SKILLS / Y.SKILL / "SKILL.md").read_text()
+    start = skill.index("**Prose Rules**")
+    end = skill.index("Then read the note back", start)
+    rules = skill[start:end].rstrip()
+    assert len(rules) > 400, "the skill's rules section is implausibly short to compare"
+
+    prompt = Y.build_prompt(_meta(tmp_path), [])
+    assert rules in prompt, (
+        "the digest prompt does not contain skills/youtube-digest/SKILL.md's Prose "
+        "Rules section verbatim — either the skill stopped loading, or a second copy "
+        "is being rendered in its place")
+    _assert_rules_reach_prose(prompt, "the skill-sourced digest prompt")

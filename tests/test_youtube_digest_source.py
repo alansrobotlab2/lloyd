@@ -7,10 +7,16 @@ written; a `FILED:` claim is verified; a failed turn is reported to the
 script's state (which owns the retry) and a drain is not; the toolbox denies
 the shell and the automod loop; and the producer interleaves channels under a
 bounded queue depth.
+
+Since #737 the protocol itself is not in this file: `build_prompt` loads the
+vault's `youtube-digest` skill and renders it with the per-bundle `<video>`
+task block, so the last section pins the loader, the one brace-free placeholder
+surface, and the failure when the skill is gone.
 """
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -648,3 +654,143 @@ async def test_the_kill_switch_is_read_at_enqueue_time(tmp_path, monkeypatch):
     await Y.enqueue_if_due(queue, {"channels": ["discover-ai"], "structured_verdict": False})
     items = queue.list_items(source=Y.NAME)
     assert items and items[0].payload["structured_verdict"] is False
+
+
+# ---------------------------------------------------------------------------
+# The protocol is the vault skill, not this file (#737)
+# ---------------------------------------------------------------------------
+
+SKILL_DIR = Path.home() / "obsidian" / "skills" / Y.SKILL
+
+#: The per-bundle values the task block interpolates. These are the only
+#: placeholders allowed anywhere in the digest prompt: the protocol itself is
+#: loaded unformatted from the vault skill, so a token added on the vault side
+#: would reach the model as a literal `{token}` and no `.format()` would ever
+#: fill it in.
+PLACEHOLDERS = {
+    "channel_name", "channel_handle", "channel_key", "title", "video_id", "url",
+    "published", "transcript_path", "transcript_words", "transcript_lines",
+    "meta_path", "existing_note", "enrichment", "target_note", "note_stem",
+    "existing_note_instruction", "measurements_path", "measurements_summary",
+    "profile_path", "tracked", "eval_tag", "areas",
+}
+
+
+def test_the_digest_protocol_is_a_vault_skill_the_real_loader_accepts():
+    """The skill exists, loads, and holds the rules that decide a run.
+
+    `skill_load_defect` is the same check `automod_vault_land` runs over a
+    touched `skills/**` path before it commits, so passing it here is the same
+    fact the landing route asserts — front matter parses, `status` is not a
+    quarantine, the file reads. The three rules below are the ones that were
+    added to the inline prompt one incident at a time: write the note then read
+    it back, verify the tail is not cut off, and the shared prose ban-list.
+    """
+    from agent_mcp.skills import _parse_frontmatter, skill_load_defect
+
+    assert SKILL_DIR.is_dir(), f"skills/{Y.SKILL} is missing"
+    assert skill_load_defect(SKILL_DIR) is None, f"skills/{Y.SKILL} does not load"
+
+    text = (SKILL_DIR / "SKILL.md").read_text()
+    front = _parse_frontmatter(text)[0]
+    assert front.get("name") == Y.SKILL, f"front matter name is {front.get('name')!r}"
+    assert front.get("type") == "skill", f"front matter type is {front.get('type')!r}"
+    assert str(front.get("description") or "").strip(), "front matter needs a description"
+
+    lowered = text.lower()
+    assert "read the note back" in lowered, "write-then-read-back rule left the protocol"
+    assert "verify the tail" in lowered, "tail verification rule left the protocol"
+    assert "Prose Rules" in text, "the prose ban-list left the protocol"
+    for phrase in ("In this video", "delve", "may potentially"):
+        assert phrase in text, f"the ban-list must name `{phrase}` concretely"
+
+
+def test_the_protocol_reaches_the_prompt_through_the_loader_at_build_time(tmp_path, monkeypatch):
+    """`build_prompt` reads the skill by slug every time it renders.
+
+    The old shape baked the protocol into a Python string literal, so no vault
+    edit could ever change what a digest turn was told. A sentinel from a
+    stubbed loader is what proves the read happens here and now: a leftover
+    constant would satisfy every content assertion above and still be dead code.
+    """
+    seen: list[str] = []
+
+    def fake_load(slug: str):
+        seen.append(slug)
+        return "PROTOCOL FROM THE VAULT SKILL"
+
+    monkeypatch.setattr("autonomy._load_skill_content", fake_load)
+    prompt = Y.build_prompt(_meta(tmp_path), [])
+
+    assert seen == [Y.SKILL], f"expected one load of {Y.SKILL!r}, got {seen}"
+    assert "PROTOCOL FROM THE VAULT SKILL" in prompt
+    assert prompt.startswith(f'[SYSTEM: You are running the "{Y.NAME}" worker job')
+
+
+def test_the_task_block_supplies_all_22_placeholders_and_renders_them(tmp_path):
+    """Every per-bundle value is supplied, and none survives unrendered.
+
+    `build_prompt` used to `.format()` the whole protocol, which is why 467
+    runs a week depended on a vault edit never containing a stray brace. Now
+    only the task block is formatted, so the brace surface is this file's and
+    the failure mode is a `KeyError` here rather than a protocol the model
+    cannot read.
+    """
+    meta = _meta(tmp_path)
+    got = set(re.findall(r"\{(\w+)\}", Y.TASK_BLOCK))
+    assert got == PLACEHOLDERS, (
+        f"task block placeholders differ from the {len(PLACEHOLDERS)} the renderer "
+        f"supplies: missing={sorted(PLACEHOLDERS - got)} extra={sorted(got - PLACEHOLDERS)}")
+
+    prompt = Y.build_prompt(meta, [{"id": 500, "title": "Adopt WIKISKILL-style skill compilation"}])
+    for name in sorted(PLACEHOLDERS):
+        assert "{" + name + "}" not in prompt, f"{{{name}}} reached the prompt unrendered"
+    assert "{" not in prompt and "}" not in prompt, (
+        "a brace in the rendered prompt means the vault skill grew a placeholder "
+        "shaped token; the skill body is not formatted, so nothing would fill it")
+    assert meta["target_note"] in prompt and meta["transcript_path"] in prompt
+    assert "#500 Adopt WIKISKILL" in prompt and str(Y.PROFILE_PATH) in prompt
+
+
+def test_the_vault_skill_body_carries_no_placeholder(tmp_path):
+    """The other half of the brace rule, checked on the vault side.
+
+    The loader hands the skill text over unformatted, so `{anything}` here is
+    never a format field — it is a token the model reads literally. Cheaper to
+    fail this test than to fail 467 runs a week.
+    """
+    body = (SKILL_DIR / "SKILL.md").read_text()
+    assert "{" not in body and "}" not in body, (
+        f"skills/{Y.SKILL}/SKILL.md carries a brace; per-video values belong in "
+        "the task block that workers/sources/youtube_digest.py renders")
+
+
+@pytest.mark.parametrize("content", [None, "", "   \n"],
+                         ids=["absent", "empty", "whitespace"])
+async def test_a_missing_skill_fails_the_run_before_the_session(tmp_path, backlog, monkeypatch,
+                                                                content):
+    """Clause 5, at the seam: no protocol means no dispatch.
+
+    The fallback that was here before made a missing skill invisible — the run
+    quietly used a stale copy of the rules and every vault edit to the protocol
+    stopped mattering, which is the same silence this item was filed for. A
+    named failure is what turns "the skill went missing" into a run record
+    instead of a week of digests nobody can explain.
+    """
+    dispatched: list[str] = []
+    monkeypatch.setattr(Y, "_script", _Script({"ok": True, "meta": _meta(tmp_path)}))
+
+    async def fake_session(prompt, **kwargs):
+        dispatched.append(prompt)
+        return {"text": "", "session_id": "s1", "stop_reason": "stop",
+                "num_turns": 1, "errors": []}
+
+    monkeypatch.setattr(Y, "run_prompt_in_session", fake_session)
+    monkeypatch.setattr("autonomy._load_skill_content", lambda slug: content)
+
+    result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
+
+    assert dispatched == [], "a protocol-less prompt was dispatched to a session"
+    assert result["status"] == "failed"
+    assert Y.SKILL in result["summary"], f"failure must name the skill: {result['summary']}"
+    assert result["meta"].get("skill_missing") is True
