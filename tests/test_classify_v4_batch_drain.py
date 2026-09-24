@@ -472,3 +472,100 @@ def test_endpoint_down_drain_also_sweeps_once(mod, monkeypatch, tmp_path,
         f"{done_calls[0] // total} times over ({done_calls[0]} "
         f"Future.done() calls for {total} pairs)")
     assert rc == 1, "a dead endpoint must still exit non-zero"
+
+
+# ---------------------------------------------------------------------------
+# #652 — the drain must SAY how much it left behind, and say it in both
+# branches. The `left untouched` line printed `total - completed`, which is
+# structurally 0 after any stop (`completed` counts cancelled futures too),
+# and printed only under the outage guard — a SIGTERM drain, the way task
+# #74's `timeout` ends every cycle, reported nothing about its backlog.
+# ---------------------------------------------------------------------------
+
+DRAINED = re.compile(r"\[drained\] stop at \d+s; (\d+) pairs not started")
+UNTOUCHED = re.compile(r"(\d+) candidate edges left untouched this run")
+
+
+def test_sigterm_drain_reports_the_pairs_it_never_started(
+        mod, monkeypatch, tmp_path, capsys):
+    """A signal drain prints a `[drained]` line whose count is the pairs the
+    sweep cancelled — the same number the summary's `cancelled` lane
+    carries, and never the 0 that `total - completed` reads."""
+    total = 10
+    out = _setup(mod, monkeypatch, tmp_path, total)
+
+    def fake_classify(src, tgt, context, endpoint, model, timeout,
+                      skip_direction_check=False):
+        if src == "src0":
+            mod._stop.set()
+            time.sleep(0.2)
+        elif mod._stop.is_set():
+            # Hold the single worker on the pair it picked up after the
+            # signal, so the sweep on src0's iteration still finds the rest
+            # of the queue pending. An instant stub lets the worker finish
+            # all ten before the main loop wakes, and a drain that cancels
+            # nothing proves nothing about the line under test.
+            time.sleep(0.1)
+        return _verdict()
+
+    monkeypatch.setattr(mod, "classify_edge_v4", fake_classify)
+    rc, stdout, _ = _run(mod, capsys, out)
+
+    ok, fail, skipped, cancelled = _counts(stdout)
+    assert cancelled > 0, f"nothing was pending at the drain:\n{stdout}"
+    match = DRAINED.search(stdout)
+    assert match, f"a SIGTERM drain printed no `[drained]` line:\n{stdout}"
+    assert int(match.group(1)) == cancelled == total - ok, (
+        f"the drain line and the summary disagree on the backlog:\n{stdout}")
+    # The outage line belongs to the outage guard alone.
+    assert "[stopped] endpoint" not in stdout
+    assert rc == 0, f"a clean drain must still exit 0: {rc}"
+
+
+def test_run_that_was_not_stopped_prints_no_drain_line(
+        mod, monkeypatch, tmp_path, capsys):
+    out = _setup(mod, monkeypatch, tmp_path, 3)
+    monkeypatch.setattr(mod, "classify_edge_v4",
+                        lambda *a, **k: _verdict())
+    _rc, stdout, _ = _run(mod, capsys, out)
+    assert _counts(stdout)[3] == 0
+    assert not DRAINED.search(stdout), (
+        f"a run that lost nothing announced a drain:\n{stdout}")
+
+
+def test_endpoint_down_reports_the_real_untouched_count(
+        mod, monkeypatch, tmp_path, capsys):
+    """The outage branch's `left untouched` number is the cancelled count.
+
+    The first CONSECUTIVE_FAILURE_LIMIT calls fail at once; every call after
+    that waits for the guard to trip before failing, so the whole tail is
+    still queued when the sweep runs. Before the fix this line read
+    `0 candidate edges left untouched` for that shape."""
+    limit = mod.CONSECUTIVE_FAILURE_LIMIT
+    total = limit + 30
+    out = _setup(mod, monkeypatch, tmp_path, total)
+    calls = [0]
+
+    def fake_classify(src, tgt, context, endpoint, model, timeout,
+                      skip_direction_check=False):
+        calls[0] += 1
+        if calls[0] > limit:
+            mod._stop.wait(5)
+            time.sleep(0.05)
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(mod, "classify_edge_v4", fake_classify)
+    monkeypatch.setattr(mod, "_endpoint_alive", lambda *a, **k: False)
+    rc, stdout, _ = _run(mod, capsys, out)
+
+    ok, fail, skipped, cancelled = _counts(stdout)
+    assert fail >= limit and cancelled > 0, f"the guard shape is off:\n{stdout}"
+    match = UNTOUCHED.search(stdout)
+    assert match, f"the outage guard printed no untouched count:\n{stdout}"
+    assert int(match.group(1)) == cancelled, (
+        f"`left untouched` must be the cancelled count, not "
+        f"`total - completed`:\n{stdout}")
+    drained = DRAINED.search(stdout)
+    assert drained and int(drained.group(1)) == cancelled, (
+        f"the outage drain must also carry the `[drained]` line:\n{stdout}")
+    assert rc == 1

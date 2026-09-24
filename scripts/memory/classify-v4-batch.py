@@ -550,9 +550,20 @@ def main() -> int:
     print()
     print("=" * 72)
     print(_summary_line(ok, fail, skipped, cancelled, elapsed))
+    # What the run left behind is `cancelled`, never `total - completed`:
+    # `completed += 1` above fires for every future `as_completed` yields,
+    # cancelled ones included, so after any stop `completed == total` and the
+    # old expression printed 0 — run74 (2026-09-09) ended `[8622/8622]` with
+    # 28 pairs never started and reported none of them (#652). The line also
+    # has to print on a SIGTERM drain, not only under the outage guard: the
+    # drain is the common way task #74's cycle ends, and the count is what
+    # says how far behind the next run starts.
     if endpoint_down:
         print(f"[stopped] endpoint {args.endpoint} went down after {fail} failed "
-              f"calls; {total - completed} candidate edges left untouched this run")
+              f"calls; {cancelled} candidate edges left untouched this run")
+    if cancelled > 0:
+        print(f"[drained] stop at {elapsed:.0f}s; {cancelled} pairs not started "
+              "— next run resumes from the JSONL")
     if ok > 0:
         rate = ok / elapsed
         print(f"Rate: {rate:.2f} edges/s ({rate * 60:.0f}/min) "
