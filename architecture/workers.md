@@ -614,6 +614,17 @@ the pool paused for good. An automod resume lifts only its own pause, and an
 operator resume lifts both. `status().paused_by` says which is holding.
 `vaultwatch.py clear` does not resume the pool; it prints the command.
 
+**A pause stops claims, not runs.** `_worker_loop` reads the flag before
+`claim_next` and nowhere else, so a job already in `source.execute` runs to its
+end. That is the design the landing depends on — pause, then wait for what is
+in flight — not a gap; the stop for a run in flight is its turn's
+`cancel_event` (`POST /api/sessions/{id}/cancel`, the Inner Voice cancel).
+`scripts/mitigation_drill.py` (#703) fires both at a synthetic run, offline and
+in-process, and classifies each by what it measured: `session_cancel` as
+`in-flight` with seconds-to-stop, `pool_pause` as `dispatch-only`, and a
+control stubbed to a no-op as `no-op`, which exits non-zero. It refuses while
+`round_hold` is engaged.
+
 The dashboard reads the pool through `app/routers/dashboard.py::_workers`,
 off the loop via `asyncio.to_thread`; `completed` is excluded from the "open"
 counts because it dominates the depth table.
