@@ -421,7 +421,7 @@ def test_a_dotfile_clause_is_graded_met_and_not_downgraded(tmp_path, monkeypatch
     `.gitignore` of its own, so the roots are pinned empty here to keep both
     readings about the worktree."""
     monkeypatch.setattr(RV, "REVIEW_EVIDENCE_ROOTS", ())
-    (tmp_path / ".gitignore").write_text("*.db\n")
+    (tmp_path / ".gitignore").write_text("# pad\n" * 32 + "*.db\n")  # line 33 is cited, and #1254 bounds it
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_review_policy.py").write_text("x")
     obj = {"premise": "sound", "summary": "ok", "test_honesty": [],

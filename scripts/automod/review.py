@@ -1208,6 +1208,37 @@ def normalize_evidence_path(raw: str, worktree: Path,
     return ""
 
 
+def evidence_line_past_eof(path: str, line: int, worktree: Path) -> int | None:
+    """The cited file's line count when `line` points past its end, else None.
+
+    The path rail resolves a cited FILE and, until #1254, nothing bounded the
+    cited LINE: 23 `met` clauses across 15 rounds cited a line past EOF of the
+    commit being graded (`tests/integration/fixture_iv_loop_turn.py:1007` in a
+    52-line file) and every one passed as support. A line number is the same
+    claim as the path, one level finer, and is held to the same standard.
+
+    Only a file inside the worktree is counted: the worktree is the detached
+    checkout of the commit under review, so its line count IS the count at the
+    graded head, while a vault path is live and shared and a line into it is
+    not a claim about the commit. A file that cannot be read returns None: a
+    rail that cannot read its input must not invent a miss.
+    """
+    if not path or line <= 0:
+        return None
+    try:
+        root = Path(worktree).resolve()
+        target = Path(path)
+        if not target.is_absolute():
+            target = root / target
+        target = target.resolve()
+        if not target.is_relative_to(root) or not target.is_file():
+            return None
+        count = len(target.read_bytes().splitlines())
+    except (OSError, ValueError):
+        return None
+    return count if line > count else None
+
+
 _ABSENCE_MARKERS = ("(absent)", "(deleted)", "(removed)")
 
 
@@ -1400,6 +1431,8 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             verdict = "partial"
         raw_path = str(raw.get("evidence_path") or "").strip()
         path = normalize_evidence_path(raw_path, worktree)
+        line = (int(raw.get("evidence_line") or 0)
+                if str(raw.get("evidence_line") or "0").lstrip("-").isdigit() else 0)
         node = str(raw.get("test_node_id") or "").strip()
         how = str(raw.get("how_verified") or "").strip().lower()
         note = " ".join(str(raw.get("note") or "").split())
@@ -1421,6 +1454,17 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
         if raw_path and not path and not evidence_of_absence(raw_path, changed_paths):
             unresolved.append(f"evidence_path {raw_path[:120]!r} resolves to nothing in the tree "
                               f"under review")
+        # The line is the path's claim one level finer (#1254): a file that
+        # resolves passes with any number without this, 19x past EOF included.
+        # `evidence_line` describes the file the grader named FIRST; when the
+        # rail resolved a later token instead (#1252), the number belongs to
+        # another file and bounding it against this one would be a false trip.
+        tokens = _citation_tokens(raw_path)
+        eof = (evidence_line_past_eof(path, line, worktree)
+               if tokens and normalize_evidence_path(tokens[0], worktree) == path else None)
+        if eof is not None:
+            unresolved.append(f"evidence_line {line} is past EOF of {path} ({eof} lines at the "
+                              f"graded head)")
         for sha in unresolved_shas(note, repo):
             unresolved.append(f"note cites commit {sha}, which `git cat-file -t` does not resolve "
                               f"in the repo under review")
@@ -1461,6 +1505,8 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                     # downgraded here and nothing recorded the path that failed.
                     why.insert(0, "evidence_path missing or not on disk"
                                + (f" (grader wrote {raw_path[:120]!r})" if raw_path else ""))
+            elif eof is not None:
+                why.insert(0, f"evidence_line {line} past EOF ({eof} lines) of {path}")
             if how not in ("ran", "read"):
                 why.append("how_verified is not ran|read")
             if why:
@@ -1468,8 +1514,7 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                 downgraded.append(idx)
                 accepted = []
         clauses.append({"clause": idx, "verdict": verdict, "evidence_path": path,
-                        "evidence_line": int(raw.get("evidence_line") or 0)
-                        if str(raw.get("evidence_line") or "0").lstrip("-").isdigit() else 0,
+                        "evidence_line": line,
                         "test_node_id": node, "how_verified": how if how in HOW_VERIFIED else "inferred",
                         "note": note[:600],
                         # The refusal text and the failed citation now travel

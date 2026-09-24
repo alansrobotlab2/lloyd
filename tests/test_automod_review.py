@@ -134,7 +134,8 @@ def _obj(**clause):
 @pytest.fixture
 def wt(tmp_path):
     (tmp_path / "app").mkdir(); (tmp_path / "tests").mkdir()
-    (tmp_path / "app" / "x.py").write_text("def f():\n    return 1\n")
+    # Six lines, so `_obj`'s default `evidence_line` 3 is inside the file (#1254).
+    (tmp_path / "app" / "x.py").write_text("def f():\n    return 1\n\n\ndef g():\n    return 2\n")
     (tmp_path / "tests" / "test_x.py").write_text("def test_it():\n    assert 1\n")
     # A test this diff did not touch, for the existing-test shape.
     (tmp_path / "tests" / "test_old.py").write_text("def test_before():\n    assert 1\n")
@@ -470,14 +471,14 @@ def test_a_commit_cited_in_a_note_that_is_not_an_object_makes_the_review_unrelia
     r, _ = repo
     head = git(r, "rev-parse", "HEAD").stdout.strip()
     bad = _judged(r, _fin({"verdict": "partial", "test_node_id": "",
-                           "evidence_path": "app/m.py",
+                           "evidence_path": "app/m.py", "evidence_line": 1,
                            "note": "the pin exists from commit 08a4f4f0, not in this diff's tests"}),
                   1, repo=r)
     assert bad["clauses"][0]["citation_unresolved"]
     assert "08a4f4f0" in bad["clauses"][0]["citation_unresolved"][0]
     assert bad["unreliable"] and "08a4f4f0" in " ".join(bad["unreliable"])
     # Positive control through the same rail: a sha the repo really has.
-    good = _judged(r, _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/m.py",
+    good = _judged(r, _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/m.py", "evidence_line": 1,
                             "note": f"the pin landed at {head}, and the suite is green"}), 1, repo=r)
     assert good["unreliable"] == [] and "citation_unresolved" not in good["clauses"][0]
 
@@ -499,7 +500,7 @@ def test_the_sha_rail_asks_git_and_does_not_read_prose_as_a_commit(repo):
     note is the positive control that the asking works."""
     r, _ = repo
     head = git(r, "rev-parse", "HEAD").stdout.strip()
-    quiet = _judged(r, _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/m.py",
+    quiet = _judged(r, _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/m.py", "evidence_line": 1,
                              "note": f"the decode path, the beadded case, since 20260915, "
                                      f"agent_mcp/facts.py:520-540 and {head[:12]} are all "
                                      f"consistent"}), 1, repo=r)
@@ -507,7 +508,7 @@ def test_the_sha_rail_asks_git_and_does_not_read_prose_as_a_commit(repo):
     # The same note with one token the repo does not have.
     # `0f`×6 keeps the shape filter (hex, 12 chars, has both a digit and a
     # letter) and is an object no repo has.
-    loud = _judged(r, _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/m.py",
+    loud = _judged(r, _fin({"verdict": "partial", "test_node_id": "", "evidence_path": "app/m.py", "evidence_line": 1,
                             "note": quiet["clauses"][0]["note"].replace(head[:12], "0f" * 6)}),
                    1, repo=r)
     assert "0f0f0f0f0f0f" in " ".join(loud["unreliable"]), "the lookup decides, the shape only asks"
@@ -1303,6 +1304,73 @@ def test_evidence_paths_are_normalized_before_they_are_judged(wt, tmp_path):
     parsed = RV.parse_review(_obj(evidence_path="app/x.py:3,7"), worktree=wt,
                              changed_tests=["tests/test_x.py"], n_clauses=1)
     assert parsed["clauses"][0]["verdict"] == "met" and parsed["clauses"][0]["evidence_path"] == "app/x.py"
+
+
+# ── #1254: the cited line is bounded like the cited path ────────────────────
+
+def test_a_met_citing_a_line_past_eof_is_downgraded(wt):
+    """`SM_20260914_145943` cl.5 cited `fixture_iv_loop_turn.py:1007` in a
+    52-line file and passed: the path rail resolved the file and nothing read
+    the number. The clause is downgraded and the citation recorded, the way an
+    unresolvable path is."""
+    parsed = RV.parse_review(_obj(evidence_line=500), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1)
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial" and parsed["downgraded"] == [1]
+    assert c["evidence_path"] == "app/x.py" and c["evidence_line"] == 500
+    assert any("past EOF" in w and "(6 lines)" in w for w in c["downgraded"]), c
+    assert any("evidence_line 500 is past EOF of app/x.py" in u for u in c["citation_unresolved"])
+    assert "accepted" not in c
+    # Not a rail failure: the file is real, the number is wrong — the review
+    # stays actionable and the clause is simply unmet.
+    assert parsed.get("unreliable", []) == []
+
+
+def test_a_line_inside_the_file_and_the_last_line_stand(wt):
+    for line in (3, 6):
+        parsed = RV.parse_review(_obj(evidence_line=line), worktree=wt,
+                                 changed_tests=["tests/test_x.py"], n_clauses=1)
+        assert parsed["clauses"][0]["verdict"] == "met" and parsed["downgraded"] == [], line
+    # Line 0 is the schema's "no line" and is never a claim.
+    parsed = RV.parse_review(_obj(evidence_line=0), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1)
+    assert parsed["clauses"][0]["verdict"] == "met"
+
+
+def test_a_past_eof_line_is_recorded_on_a_non_met_verdict_too(wt):
+    parsed = RV.parse_review(_obj(verdict="partial", evidence_line=500), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1)
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial" and "downgraded" not in c
+    assert any("past EOF" in u for u in c["citation_unresolved"])
+
+
+def test_the_line_is_bounded_only_against_the_file_the_grader_named_first(wt):
+    """#1252 widened the path rail to later tokens; `evidence_line` still
+    describes the first one, so a citation resolved through its second token
+    is not held to a number written for another file."""
+    parsed = RV.parse_review(_obj(evidence_path="scripts/nope.py:3; tests/test_x.py:1",
+                                  evidence_line=3),
+                             worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=1)
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "met" and c["evidence_path"] == "tests/test_x.py"
+    assert "citation_unresolved" not in c
+
+
+def test_a_vault_path_outside_the_worktree_is_not_line_checked(wt, tmp_path_factory):
+    """The worktree is the commit under review; a vault file is live and
+    shared, and a line into it is not a claim about the commit."""
+    outside = tmp_path_factory.mktemp("vault") / "SOUL.md"
+    outside.write_text("one line\n")
+    parsed = RV.parse_review(_obj(evidence_path=f"{outside}:500", evidence_line=500), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1)
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "met" and c["evidence_path"] == str(outside)
+    assert "citation_unresolved" not in c
+    assert RV.evidence_line_past_eof(str(outside), 500, wt) is None
+    assert RV.evidence_line_past_eof("app/x.py", 7, wt) == 6
+    assert RV.evidence_line_past_eof("app/x.py", 6, wt) is None
+    assert RV.evidence_line_past_eof("app/nope.py", 1, wt) is None
 
 
 # ── a `landed: true` the ledger cannot see is not stored as landed ──────────

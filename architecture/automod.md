@@ -1674,7 +1674,14 @@ Three rails keep the verdict honest without trusting the model:
   line suffix, a trailing symbol or anchor, and a dead absolute prefix whose
   tail resolves in the worktree are all accepted; anything left is a genuine
   miss, and the downgrade reason records what the grader actually wrote, so a
-  rail that fires wrongly is visible rather than silent.
+  rail that fires wrongly is visible rather than silent. The cited *line* is
+  bounded too (`evidence_line_past_eof`, #1254): a file inside the worktree is
+  the commit under review, so an `evidence_line` past its end is recorded
+  under `citation_unresolved` on every verdict and downgrades a `met` — 23
+  `met` clauses across 15 rounds had cited past EOF before this and nothing
+  checked. A vault path is live and shared, so its line is not checked, and
+  neither is a path the rail resolved through a later citation token — the
+  number describes the file the grader named first.
   Three shapes stand as `met` besides a changed test, each recorded on the
   clause as `accepted` (§4.5d): a suite-level node (`tests/ -k expr`, a test
   file with no `::`) or an existing `tests/` node outside the diff, both only
