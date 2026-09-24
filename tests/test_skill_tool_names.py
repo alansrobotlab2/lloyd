@@ -898,6 +898,42 @@ def test_the_path_check_goes_red_on_a_reference_it_should_see(tmp_path, monkeypa
         f"the scanner did not isolate the one planted violation: {sorted(drift)}")
 
 
+def test_an_arrow_corrected_citation_still_names_the_phantom(tmp_path, monkeypatch):
+    """Why #1454's fix had to be the document and not the check.
+
+    The row that turned three nodes red was an autonomy brief recording a
+    corrected citation as ``eval/djev/skills.py``→``eval/djev/schemas.py:315-325``.
+    The right-hand name is real; the left-hand one has never existed in the
+    checkout (``git log --all -- eval/djev/skills.py`` is empty), and the writer
+    believed the arrow retired it. It does not: ``BACKTICKED`` takes every
+    backticked token and ``core`` cuts at the first ``:``, so a phantom wrapped in
+    a correction is scanned exactly like a live citation — which is the behaviour
+    this control pins, on the same tree that the real row was reported against.
+
+    The alternative fix was to exempt the arrow form, and that is the hole this
+    closes: a doc that merely *looks* self-correcting would then carry a
+    never-existing path into every run that reads it, which is precisely the
+    defect class #1240 opened. The remedy that stays correct is the one taken —
+    keep the true path, drop the phantom (vault commit ``bc3bd1fe``).
+    """
+    decoy = tmp_path / "autonomy" / "9998-arrow.md"
+    decoy.parent.mkdir()
+    decoy.write_text(
+        "---\nname: arrow\ntype: autonomy\n---\n"
+        "# Arrow Task\n\nLive name sets: "
+        "`eval/djev/a_phantom_before_1454.py`→`eval/djev/schemas.py:315-325`.\n",
+        encoding="utf-8")
+    # Planted ALONE, not appended to the live corpus: the assertion is an exact set,
+    # so a corpus-wide scan would let unrelated live-vault drift — a doc some other
+    # job is mid-editing — redden this node for a reason that has nothing to do with
+    # the arrow form. Same reason the skew control below replaces the corpus outright.
+    monkeypatch.setattr(sys.modules[__name__], "_doc_files",
+                        lambda: [("autonomy/9998-arrow.md", decoy)])
+    drift = _unresolved() - PATH_KNOWN_UNFIXED
+    assert drift == {"autonomy/9998-arrow.md::repo:eval/djev/a_phantom_before_1454.py"}, (
+        f"the corrected-citation form was not isolated to its phantom half: {sorted(drift)}")
+
+
 #: The two names the ignore-rule control below plants, one under each tree.
 _IGNORED_TREE = "ignored_by_the_tree"
 _TRACKED_TREE = "tracked_source"

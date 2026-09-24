@@ -26,8 +26,12 @@ already consolidated — so a run of ``quick-research`` could put
 ``type: quick-research`` back into ``knowledge/`` tomorrow. Backlog #872 retired
 the literals in the skills and in ``knowledge/KNOWLEDGE_SCHEMA.md``, so the ledger
 is empty and stays empty: ``test_no_active_skill_prescribes_a_non_canonical_
-knowledge_type`` fails on any non-canonical value a skill template names, and an
-entry added back to the ledger is itself a failure.
+knowledge_type`` fails on any non-canonical value a skill template names for a
+knowledge note — a value is judged against this vocabulary only when the block
+that carries it does not declare a different ``segment:`` (#597's daily-note
+template says ``type: note`` under ``segment: memory``, which is that surface's
+live value, not a retired one) — and an entry added back to the ledger is itself
+a failure.
 
 #872 also closed the half this file could not reach — nothing on the *write* side
 agreed with the vocabulary. Three more things are pinned here: the schema
@@ -41,6 +45,7 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -51,7 +56,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.vault import okf_taxonomy  # noqa: E402
+from scripts.vault import okf_stranded, okf_taxonomy  # noqa: E402
 from scripts.vault.okf_migrate import infer_type  # noqa: E402
 from scripts.vault.validate_okf import KNOWN_TYPES, STRICT_FM_RE  # noqa: E402
 
@@ -124,6 +129,250 @@ def _non_canonical_type_literals(body: str) -> set[str]:
             if value.strip() and value.strip() not in okf_taxonomy.CANONICAL_TYPES}
 
 
+_KEY_LINE = re.compile(r"^[ \t]*[A-Za-z0-9_-]+:")
+_SEGMENT_LINE = re.compile(r"^[ \t]*segment:[ \t]*([A-Za-z0-9_-]+)[ \t]*$", re.M)
+
+
+def _knowledge_surface_type_literals(body: str) -> set[str]:
+    """Non-canonical ``type`` literals in the blocks of a body that prescribe a
+    KNOWLEDGE note — the scan's real subject, which a whole-body scan is wider than.
+
+    A skill body carries templates for several surfaces at once. Vault commit
+    ``e7871acc`` (#597) gave the nightly capture skills a
+    ``---\\nsegment: <surface>\\ntype: note\\n---`` block — ``segment: memory`` for
+    the daily-note templates (``memory-capture``, ``heartbeat``,
+    ``periodic-memory-capture-*``, ``nightly-reflection-knowledge-write``) and
+    ``segment: agents`` for the job's own report (``nightly-reflection-signals``,
+    ``nightly-morning-briefing``, ``nightly-prompt-audit``,
+    ``nightly-behavior-test``) — and ``note`` is a live value on both those
+    surfaces (it sits in ``okf_taxonomy.OUTSIDE_KNOWLEDGE_TYPES``), not a retired
+    knowledge literal. The block that actually tripped this guard in the live
+    corpus is the signal report's own template, which declares ``segment: agents``
+    (``~/obsidian/skills/nightly-reflection-signals/SKILL.md:355``), so both
+    spellings are pinned at the unit level below — a helper that recognised only
+    the ``memory`` spelling would go red on the next report-template edit and
+    would be graded as a skill regression, which is the misdiagnosis this round
+    starts from.
+    Judging every ``type:`` line in the file against the 12 knowledge values —
+    which is what scanning the body as one string does — reported that block as
+    a knowledge violation the moment the skill mentioned a ``knowledge/`` path
+    anywhere in prose, because the only thing that gated the scan was the
+    substring ``knowledge/``.
+
+    So the body is cut into runs of consecutive top-level ``key: value`` lines —
+    one run per template block, since a fence, a blank line or a sentence ends
+    one — and a run belongs to the knowledge surface unless IT declares a
+    different ``segment:``. A block that names no segment stays in scope: an
+    unattributed retired literal is exactly what #872 renamed, so this
+    narrowing must not double as an excuse, and
+    ``test_a_type_literal_is_excused_only_by_the_block_that_declares_another_surface``
+    fails if it does.
+    """
+    out: set[str] = set()
+    run: list[str] = []
+
+    def _absorb(lines: list[str]) -> None:
+        if not lines:
+            return
+        text = "\n".join(lines)
+        declared = _SEGMENT_LINE.search(text)
+        if declared is None or declared.group(1).strip().lower() == "knowledge":
+            out.update(v.strip() for v in _TYPE_LINE.findall(text)
+                       if v.strip() and v.strip() not in okf_taxonomy.CANONICAL_TYPES)
+
+    for line in body.splitlines():
+        if _KEY_LINE.match(line):
+            run.append(line)
+        else:
+            _absorb(run)
+            run = []
+    _absorb(run)
+    return out
+
+
+def test_a_type_literal_is_excused_only_by_the_block_that_declares_another_surface():
+    """The narrowing above is attribution, not an amnesty — in both directions.
+
+    Three shapes, one per way this helper could be wrong:
+      * ``segment: memory`` + ``type: note`` → nothing. This is #597's daily-note
+        template, and ``note`` is that surface's live vocabulary.
+      * ``segment: agents`` + ``type: note`` → nothing, for the same reason. This is
+        the spelling that actually fired the guard in the live corpus
+        (``nightly-reflection-signals``' report template); pinning only the
+        ``memory`` spelling above would let a helper that special-cases one segment
+        word pass while the real skill stays misreported.
+      * ``segment: knowledge`` + ``type: note`` → ``{"note"}``. The excuse is the
+        declared segment, never the value: the SAME literal under the knowledge
+        segment is the violation the guard exists for, so a helper that skipped
+        ``OUTSIDE_KNOWLEDGE_TYPES`` by value would fail here.
+      * a bare ``type: deep-research`` with no segment → ``{"deep-research"}``,
+        the #872 shape. A block that names no surface stays in scope, so the
+        narrowing removes nothing the old scan caught that was not misattributed.
+    """
+    memory = ("mentions `knowledge/x.md` in prose.\n\n"
+              "---\nsegment: memory\ntype: note\ntags: [a]\n---\n")
+    assert _knowledge_surface_type_literals(memory) == set()
+
+    knowledge = ("---\nsegment: knowledge\ntype: note\ntags: [a]\n---\n")
+    assert _knowledge_surface_type_literals(knowledge) == {"note"}
+
+    unattributed = ("writes `knowledge/{domain}/{slug}.md`:\n\n"
+                    "```markdown\n---\ntype: deep-research\ntags: [x]\n---\n```\n")
+    assert _knowledge_surface_type_literals(unattributed) == {"deep-research"}
+
+    # And the two views of the same synthetic file agree wherever there is only
+    # one surface present: the scoped scan is the whole-body scan minus blocks
+    # that name a different segment, so on a knowledge-only body it is identical.
+    assert (_knowledge_surface_type_literals(unattributed)
+            == _non_canonical_type_literals(unattributed))
+
+
+def _allowlist_entries(text: str) -> list[str]:
+    """The entries of an allow-list file, parsed exactly as production parses it.
+
+    ``okf_stranded.load_allowlist`` skips a comment by testing the RAW line
+    (``not ln.startswith("#")``, ``scripts/vault/okf_stranded.py``) while keeping
+    ``ln.strip()`` as the value. So an *indented* ``#`` line is an entry to
+    production, and a checker that ``lstrip``s before testing comments would
+    examine a list no consumer ever builds. Callers assert against
+    ``load_allowlist`` itself to keep this from drifting.
+    """
+    return [ln.strip() for ln in text.splitlines()
+            if ln.strip() and not ln.startswith("#")]
+
+
+def _allowlist_hygiene(text: str) -> tuple[set[str], set[str]]:
+    """``(duplicates, unusable entries)`` under the parse above.
+
+    A duplicate is what ``load_allowlist``'s frozenset cannot show, and an entry
+    that is absolute, ``~``- or ``./``-rooted, or a bare directory, is one that can
+    never equal a scanned path (``iter_concept_md`` yields
+    ``p.relative_to(root).as_posix()``, never rooted, never trailing-slash).
+    """
+    entries = _allowlist_entries(text)
+    dupes = {e for e in entries if entries.count(e) > 1}
+    unusable = {e for e in entries
+                if e.startswith(("/", "./", "~/")) or e.endswith("/")}
+    return dupes, unusable
+
+
+def test_the_hygiene_parse_is_the_parse_production_uses(tmp_path):
+    """``_allowlist_entries`` may not quietly become a second reader of the file.
+
+    Driven by a fixture rather than by the shipped file, because the shipped file has
+    no indented ``#`` line: comparing the two parsers over it alone can only fail if
+    the data already contains one, so a drift in ``load_allowlist``'s own predicate
+    would be undetectable. An indented comment is the case that separates the two
+    predicates — production tests the comment against the RAW line
+    (``not ln.startswith("#")``) and keeps ``ln.strip()`` as the value, so the line
+    below is an ENTRY to production and a comment to an ``lstrip()``-first parser.
+    """
+    text = ("# header\n"
+            "knowledge/one.md\n"
+            "  # indented, so production keeps this as an entry\n"
+            "knowledge/two.md\n")
+    fixture = tmp_path / "list.txt"
+    fixture.write_text(text, encoding="utf-8")
+    mine = frozenset(_allowlist_entries(text))
+    theirs = okf_stranded.load_allowlist(fixture)
+    assert mine == theirs, (
+        f"_allowlist_entries and load_allowlist part company: "
+        f"mine-only={sorted(mine - theirs)} production-only={sorted(theirs - mine)}")
+    # Positive control on the discriminating line itself, so the equality above
+    # cannot be satisfied by both parsers quietly dropping it. Production keeps the
+    # value stripped, so the entry is the line WITHOUT its indentation — and a parser
+    # that tested the comment after lstrip() would drop the line entirely.
+    assert "# indented, so production keeps this as an entry" in theirs
+
+    shipped = okf_stranded.ALLOWLIST_PATH.read_text(encoding="utf-8")
+    assert frozenset(_allowlist_entries(shipped)) == okf_stranded.load_allowlist()
+
+
+def test_the_shipped_allowlist_has_no_duplicate_and_no_unusable_entry():
+    """The two properties of the data file that nothing else can see.
+
+    #1454 rewrote this file wholesale, so it needed a check of its own, and the
+    reason it is load-bearing got sharper in the same round: every consumer reaches
+    the file through ``load_allowlist``, which returns a frozenset — so a path
+    written twice is invisible to all of them — and an entry that is absolute,
+    ``~``-rooted, ``./``-rooted or a bare directory can never equal a scanned path
+    (``iter_concept_md`` yields ``p.relative_to(root).as_posix()``), so it excuses
+    nothing while still reading as coverage to whoever added it. The tree guard is
+    directional by design (``_assert_exemption_matches_tree``): it fails only on a
+    stranded file the list does NOT cover, and tolerates any superset, because that
+    is the direction #478's data fix moves. Both defects here are supersets, so that
+    guard passes on them green. This test is the only surface that names them.
+
+    It deliberately does NOT pin the entry count: the module docstring's own warning
+    is that a count quoted anywhere goes stale the day it runs.
+    """
+    text = okf_stranded.ALLOWLIST_PATH.read_text(encoding="utf-8")
+    dupes, unusable = _allowlist_hygiene(text)
+    assert not dupes, f"duplicated allow-list entries: {sorted(dupes)}"
+    assert not unusable, f"entries that can never match a scanned path: {sorted(unusable)}"
+
+
+def test_regenerating_the_allowlist_writes_entries_the_hygiene_checks_accept(tmp_path,
+                                                                             monkeypatch):
+    """``--write-allowlist`` is the remedy the guards above print, so the file it
+    writes is part of the contract — pinned by running the generator over a
+    fixture tree, never over the live vault, which it overwrites.
+
+    The fixture is #478's residue twice over: one note with a real leading block
+    AND a second block stranded in its body, one note with only its leading block.
+    The detector must flag exactly the first — a fixture it flags for the wrong
+    reason would let the rest of the test pass on nothing. The list the generator
+    writes must load back through ``load_allowlist`` as exactly that path, and must
+    itself satisfy the hygiene the shipped file is held to: a generator that emitted
+    a duplicate or an unmatchable path would re-poison the file on every later
+    regeneration, which is the failure #1454 arrived by another road.
+
+    And the command a reader is told to run is checked across the process boundary,
+    in the script's own ``--help`` — which is what stops these failure messages
+    citing a switch the parser never had.
+    """
+    tree = tmp_path / "vault"
+    (tree / "knowledge").mkdir(parents=True)
+    (tree / "knowledge" / "stranded.md").write_text(
+        "---\ntype: research\n---\n\n# A note\n\n**Status:** done\n\n"
+        "---\nsegment: knowledge\ntags: [x]\n\n---\n\n## Summary\n\ntext\n",
+        encoding="utf-8")
+    (tree / "knowledge" / "clean.md").write_text(
+        "---\ntype: research\n---\n\n# Clean\n\n## Summary\n\ntext\n",
+        encoding="utf-8")
+
+    assert set(okf_stranded.scan(tree)) == {"knowledge/stranded.md"}, (
+        "the fixture stopped being the shape the detector flags, so what follows "
+        "would prove nothing")
+
+    # Explicit target first, then the branch the documented command actually took:
+    # `write_allowlist` resolves its target through the module global
+    # `ALLOWLIST_PATH` at call time, which is how a test can reach the default-target
+    # branch (the only one the CLI uses, and the one that produced #1454's data
+    # change) without overwriting the shipped file.
+    out = tmp_path / "regenerated.txt"
+    assert okf_stranded.write_allowlist(tree, path=out) == 1
+    dupes, unusable = _allowlist_hygiene(out.read_text(encoding="utf-8"))
+    assert not dupes and not unusable, (
+        f"the generator produced {sorted(dupes)} {sorted(unusable)}")
+    assert okf_stranded.load_allowlist(out) == {"knowledge/stranded.md"}
+
+    default_target = tmp_path / "default-target.txt"
+    monkeypatch.setattr(okf_stranded, "ALLOWLIST_PATH", default_target)
+    assert okf_stranded.write_allowlist(tree) == 1
+    assert default_target.read_text(encoding="utf-8") == out.read_text(encoding="utf-8"), (
+        "the branch the CLI writes through and the branch a caller names produce "
+        "different files")
+    assert okf_stranded.load_allowlist() == {"knowledge/stranded.md"}, (
+        "the default-target read no longer round-trips the default-target write")
+
+    help_text = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "vault" / "okf_stranded.py"), "--help"],
+        capture_output=True, text=True, check=True).stdout
+    assert "--write-allowlist" in help_text, (
+        "the remedy the guards above print is not a flag the script offers")
+
+
 def test_the_skill_scan_acts_on_a_literal_that_would_normalize_clean():
     """The raw comparison is this round's headline defect; it must be testable.
 
@@ -146,6 +395,11 @@ def _skill_prescribed_legacy_types() -> set[str]:
     ``knowledge/`` at all. Empty since #872 renamed the four templates — measured
     across every active skill body, the strict scan finds nothing, so tightening
     it cost nothing on the rest of the tree.
+
+    The per-line judgement is surface-attributed, not whole-body: #597 gave the
+    nightly capture skills a ``segment: memory`` / ``type: note`` template, and a
+    body-wide scan read that as a knowledge violation as soon as the skill cited
+    any ``knowledge/`` path. See ``_knowledge_surface_type_literals``.
     """
     out: set[str] = set()
     if not SKILLS.is_dir():
@@ -157,7 +411,7 @@ def _skill_prescribed_legacy_types() -> set[str]:
         body = text.split("---", 2)[2] if text.startswith("---") else text
         if "knowledge/" not in body:
             continue
-        out |= _non_canonical_type_literals(body)
+        out |= _knowledge_surface_type_literals(body)
     return out
 
 
@@ -924,23 +1178,49 @@ def test_no_consumer_keeps_a_hand_maintained_count_of_the_legacy_set():
 
 def _assert_exemption_matches_tree(listed: frozenset[str],
                                   detected: set[str]) -> None:
-    """The agreement check itself, as a callable so a test can drive it with a
-    divergent pair and prove it fails. A negative test that only re-applies its
-    own monkeypatch proves monkeypatch semantics, not the check."""
+    """The agreement check: the exemption must COVER the tree, not equal it.
+
+    As a callable so a test can drive it with a divergent pair and prove it fails.
+    A negative test that only re-applies its own monkeypatch proves monkeypatch
+    semantics, not the check.
+
+    One direction is a fault and the other is the exemption doing its job:
+
+      * ``detected - listed`` — a file the detector flags that the checked-in list
+        does not exempt. This is the violation ``validate_okf.py`` fails on, and the
+        only disagreement that costs anything. Regenerating here is NOT the remedy
+        (it would exempt the regression), so the message says so.
+      * ``listed - detected`` — a listed file the tree no longer flags: #478's data
+        fix reached it. ``validate_okf.py`` calls this ``stale`` and documents it as
+        "an observation, not a fault" (:111-115), because the exemption only ever
+        excuses the stranded condition — a listed file still missing a ``type`` is a
+        violation on the unconditional frontmatter branch, so a stale entry masks
+        nothing.
+
+    #1454 is the second time the equality form went red on the safe direction alone:
+    228 ``knowledge/youtube/AI_Engineer/`` files gained real frontmatter at
+    ``053a6687`` and the list stayed stale for five weeks, and a vault job collapsed
+    fourteen more at 2026-09-24T11:36 leaving 217 listed against 203 detected. The
+    vault is a live tree with its own writers, so a checked-in snapshot cannot equal
+    it — an equality assertion there is a ratchet any vault edit can turn without
+    touching code, which is why nothing else was going to close this item.
+    """
     assert listed, "an empty exemption would make every guard's deferral dead code"
-    assert detected == listed, (
-        "the checked-in exemption and the tree disagree — regenerate with "
-        "python scripts/vault/okf_stranded.py --write-allowlist; "
-        f"only-in-list={sorted(set(listed) - detected)[:3]} "
-        f"only-in-tree={sorted(detected - set(listed))[:3]}")
+    uncovered = sorted(detected - set(listed))
+    assert not uncovered, (
+        "a file the tree flags as stranded is not on the exemption — that is the "
+        "violation the exemption exists to prevent, so fix the file's body rather "
+        "than regenerating the list over it; "
+        f"not-on-the-exemption={uncovered[:3]}")
 
 
 def test_the_exemption_set_is_the_stranded_set_and_shrinks_with_the_data_fix():
-    # The reason the exemption may exist at all: every file it defers on is a file
-    # the detector independently agrees has a block in its body. When #478's data
-    # fix collapses a file, that file leaves this set, and the guard stops
-    # deferring on it. Asserted over the live vault, so the claim cannot rot into
-    # an unread sentence — this is the machine-checked acceptance #478 lacked.
+    # The reason the exemption may exist at all: every file the tree flags has a
+    # block in its body, and every one of them is covered here. When #478's data fix
+    # collapses a file it leaves the DETECTED set while its entry stays on the list,
+    # and that asymmetry is the data fix landing — not a red tree. Asserted over the
+    # live vault, so the coverage claim cannot rot into an unread sentence; this is
+    # the machine-checked acceptance #478 lacked.
     from scripts.vault import okf_stranded
 
     _assert_exemption_matches_tree(okf_taxonomy.orphan_frontmatter_files(),
@@ -948,24 +1228,65 @@ def test_the_exemption_set_is_the_stranded_set_and_shrinks_with_the_data_fix():
 
 
 def test_the_agreement_check_fails_when_the_two_views_part_company():
-    # Drives the check above with one path dropped from the exemption, which is
-    # exactly what happens when a file is fixed and the list is not regenerated. If
-    # this test ever passes while the check looks unchanged, the check is a
-    # tautology and the clause it pins is unpinned.
+    # Drives the check above on the direction that is a fault: a file the tree flags
+    # that the exemption does not cover. Reached two ways, because the real drift has
+    # two authors — the list losing an entry it should never have dropped, and a
+    # document growing a body block after the list was written. If either raises
+    # nothing, the check is a tautology and the clause it pins is unpinned.
     from scripts.vault import okf_stranded
 
     full = okf_taxonomy.orphan_frontmatter_files()
     one = sorted(full)[0]
-    with pytest.raises(AssertionError, match="regenerate"):
+    with pytest.raises(AssertionError, match="not on the exemption"):
         _assert_exemption_matches_tree(full - {one}, set(full))
-    # And the other direction: a file the tree flags that the list never named is a
-    # NEW stranded file, which is the violation the allow-list exists to catch.
-    with pytest.raises(AssertionError, match="regenerate"):
+    with pytest.raises(AssertionError, match="not on the exemption"):
         _assert_exemption_matches_tree(
             full, set(okf_stranded.scan(okf_stranded.VAULT_ROOT))
             | {"knowledge/a-file-nobody-listed.md"})
-    # The check passing is not free either: it only holds for the real pair.
-    _assert_exemption_matches_tree(full, set(okf_stranded.scan(okf_stranded.VAULT_ROOT)))
+    # The message must not send a reader to the one command that would hide the
+    # regression instead of fixing it.
+    with pytest.raises(AssertionError) as caught:
+        _assert_exemption_matches_tree(set(), {"knowledge/anything.md"})
+    assert "regenerat" not in str(caught.value)
+
+
+def test_the_exemption_running_ahead_of_the_tree_is_the_data_fix_not_a_red_tree(tmp_path):
+    """The safe direction, pinned as its own behaviour rather than left to chance.
+
+    A listed file the tree no longer flags is #478's fix landing, and the guard must
+    stay silent on it: `validate_okf.py` documents `stale` as "an observation, not a
+    fault" (:111-115), and its frontmatter/`type` branch runs unconditionally, so the
+    stale entry excuses nothing. This is the exact state that turned main red twice
+    (five weeks stale after 053a6687, and 217-listed-against-203-detected on
+    2026-09-24T11:36), so asserting the tolerance is the acceptance, not a loosening.
+
+    Tolerated is not invisible: the same pair is handed to production's own
+    `allowlist_disagreements`, which must still name the collapsed files as
+    `resolved`. Without that, this test would be licensing a graveyard.
+    """
+    from scripts.vault import okf_stranded
+
+    tree = tmp_path / "vault"
+    (tree / "knowledge").mkdir(parents=True)
+    (tree / "knowledge" / "still-stranded.md").write_text(
+        "---\ntype: research\n---\n\n# A note\n\n**Status:** done\n\n"
+        "---\nsegment: knowledge\ntags: [x]\n\n---\n\n## Summary\n\nbody\n",
+        encoding="utf-8")
+    (tree / "knowledge" / "data-fix-landed.md").write_text(
+        "---\ntype: research\n---\n\n# Fixed\n\n**Status:** done\n\nbody\n",
+        encoding="utf-8")
+    detected = set(okf_stranded.scan(tree))
+    assert detected == {"knowledge/still-stranded.md"}
+
+    listed = frozenset(detected | {"knowledge/data-fix-landed.md"})
+    _assert_exemption_matches_tree(listed, detected)          # superset: silent
+    with pytest.raises(AssertionError, match="not on the exemption"):
+        _assert_exemption_matches_tree(listed - {"knowledge/still-stranded.md"},
+                                       detected)
+    new, resolved = okf_stranded.allowlist_disagreements(tree, allowlist=listed)
+    assert new == [] and resolved == ["knowledge/data-fix-landed.md"], (
+        "the safe direction stopped being reported, so a tolerated stale entry "
+        "would never be regenerated away")
 
 
 def test_sharing_the_set_does_not_widen_what_may_land():
