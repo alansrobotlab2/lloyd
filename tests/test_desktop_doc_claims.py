@@ -41,3 +41,23 @@ def test_doc_still_says_the_instrument_is_unbuilt():
     assert re.search(r"nothing has measured which space", s2)
     s7 = _section(doc, "7. Not built yet")
     assert "eval/desktop_grounding/" in s7 and "#1421" in s7
+
+
+def test_module_docstring_names_grim_T_as_the_window_path():
+    """#1422: the module docstring said ``grim -g`` on the layout rectangle was
+    the pixel path. That is the screen/no-toplevel-id fallback; `grab_window`
+    runs ``grim -T``, and the two differ in exactly the property the
+    architecture doc leads with (an occluded window comes out right). Read
+    as text rather than imported, so a missing ``grim`` on the test box is
+    not a reason for the claim to go unchecked.
+    """
+    import ast
+    hypr = ROOT / "agent_mcp" / "desktop" / "hypr.py"
+    doc = ast.get_docstring(ast.parse(hypr.read_text())) or ""
+    pixels = next(ln for ln in doc.splitlines() if ln.startswith("* pixels:"))
+    assert "grim -T" in pixels, pixels
+    # The fallback is still named, but never as the window path.
+    assert "grim -g" in doc and 'scope="screen"' in doc
+    # Positive control: the code does what the docstring now says.
+    src = hypr.read_text()
+    assert '["grim", "-T", stable_id' in src

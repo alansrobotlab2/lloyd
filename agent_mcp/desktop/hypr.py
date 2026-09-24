@@ -9,8 +9,13 @@ uses what the compositor itself offers:
   monitors, cursorpos) and ``hyprctl dispatch`` (focuswindow, movecursor,
   sendshortcut — the last delivers a hotkey to a window WITHOUT focusing it,
   the one true background input path Hyprland has);
-* pixels: ``grim -g`` on a window's layout rectangle, scaled by ``grim -s``
-  so the longest edge fits ``max_dimension`` (no Pillow needed);
+* pixels: ``grim -T <stable_id>`` (ext-image-copy-capture) for a window —
+  it reads the toplevel itself, which is what makes an occluded window or one
+  on another workspace capturable; ``grim -g`` over the layout rectangle only
+  for ``scope="screen"`` and for a visible window that has no toplevel id,
+  since a region grab reads whatever is on screen there, occluder included.
+  Either is scaled by ``grim -s`` so the longest edge fits ``max_dimension``
+  (no Pillow needed);
 * text and keys: ``wtype`` (virtual-keyboard protocol, to the focused window);
 * elements and accessibility actions, plus a uinput pointer for buttons and
   wheels: the helper process (``agent-services/bin/lloyd-desktop-helper.py``).
