@@ -222,9 +222,9 @@ def test_the_header_names_every_booted_variant_with_both_measurements():
     for row in rows:
         assert float(row["cold"]) >= 0.0 and float(row["warm"]) >= 0.0
         assert float(row["p50"]) > 0.0, f"{row['variant']}: no measured recall p50"
-        assert float(row["p50"]) <= 550.0, (
-            f"{row['variant']}: recall p50 {row['p50']} ms breaches the 0.55 s "
-            f"ceiling #1357 sets, so it cannot be the shipped boot")
+    # The 0.55 s ceiling is on the SHIPPED row (below), not on every booted one:
+    # a variant that boots and measures slower still has to be recorded, or the
+    # next sweep boots it again (#1361's BATCH_INVARIANT=1 at 65536 read 552.9).
 
 
 def test_the_defaults_line_and_the_script_defaults_cannot_drift_apart():
@@ -246,6 +246,10 @@ def test_the_shipped_defaults_have_a_measured_row():
         f"shipped defaults MOE_BACKEND={moe!r} BATCH_INVARIANT={inv!r} have no row in "
         f"the header's variant table, so this boot has never been measured by "
         f"scripts/djev_determinism_probe.py")
+    for row in rows:
+        assert float(row["p50"]) <= 550.0, (
+            f"{row['variant']}: recall p50 {row['p50']} ms breaches the 0.55 s "
+            f"ceiling #1357 sets, so it cannot be the shipped boot")
 
 
 def test_the_measured_incumbent_row_records_the_nondeterminism_being_bisected():

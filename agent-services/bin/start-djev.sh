@@ -114,24 +114,54 @@
 #
 #   variant                             cold nats  warm nats  recall p50 ms
 #   auto (Marlin FP4 MoE) / 0              5.0156     8.2064       510.5
+#   auto, re-measured 2026-09-24 / 0       6.8751     4.6786       521.4
+#   auto, MAX_MODEL_LEN 81920 / 1          2.4802     4.9329       547.5
+#   auto, MAX_MODEL_LEN 65536 / 1          2.4802     4.9329       552.9
+#   humming, MAX_MODEL_LEN 81920 / 0      11.7241     3.2681       533.8
+#   humming + linear humming 81920 / 0     7.6118     3.4701       531.5
+#   auto, no autotune, no act fuse / 0     9.7482     3.7832       512.7
 #
-#   That is the only row anyone has measured. The variants still unbooted —
-#   MOE_BACKEND=triton, batched_triton, triton_unfused, marlin; BATCH_INVARIANT=1
-#   (which needs MAX_MODEL_LEN under ~100k, since 131072 OOMs the KV pool, so
-#   that trial also costs production context); and the two the live boot config
-#   points at that no one has touched (enable_flashinfer_autotune,
-#   fuse_act_quant) — are owed by backlog #1361, because each boot is a ~2 min
-#   window in which the recall falls back to qmd's cross-encoder
-#   (app/qmd_health.py counts djev_fallbacks) and GPU 2 is single-tenant, and a
-#   self-modification round may not restart an engine at all. The two
-#   #1357 triage runs saw the same signature at a shorter prompt (2176 tokens,
-#   warm 2.91 / cold 11.07 nats), so the sign is not an artefact of this shape;
-#   the rows are this probe's numbers.
+#   THE SWEEP (#1361, 2026-09-24; eval/djev/kernel_bisect_2026-09-24.md). Rows
+#   from 2026-09-24 are the worst of 2 probe runs x 5 requests per regime and
+#   the worst of 2 fresh pinned recall arms (86 queries). Booted and refused:
+#   triton / batched_triton / triton_unfused are not NvFP4 MoE backends in this
+#   vLLM (map_nvfp4_backend raises "not supported for NvFP4 MoE"); emulation
+#   needs fp8e4nv, SM89+ ("not supported in this architecture"); humming loads
+#   19.02 GiB against Marlin's 17.93, so it and BATCH_INVARIANT=1 (which picks
+#   HUMMING for the MoE, the only batch-invariant NvFp4 MoE on SM86, and
+#   emulates the NvFp4 linears) top out at ~83,400 tokens: 131072 and 98304
+#   refuse, 81920 is the largest power-of-two step that boots. `marlin` is what
+#   `auto` resolves to (the boot logs it), so it is the incumbent row.
 #
-#   So the defaults below are the INCUMBENT, not a winner of a sweep. When a row
-#   prints 0.0000 in both regimes, flip both this line and the defaults;
-#   tests/test_start_djev_flags.py refuses a shipped default that has no row, so
-#   an unmeasured boot cannot become production by editing one of the two.
+#   NO ROW ABOVE CAN PRINT 0.0000, AND THAT IS THE PROBE, NOT THE KERNELS.
+#   scripts/djev_determinism_probe.py sends a bare /v1/completions with no
+#   diffusion_seed_canvas, so every read starts from torch.randint's canvas
+#   (vllm .../models/diffusion_gemma.py init_canvas) and its logprobs move with
+#   that RNG. Production never reads that way: structured_server.one_read
+#   always seeds the canvas and reads once (diffusion_read_only). Sent that
+#   shape (eval/djev/seeded_canvas_probe.py, 16 canvas positions, 3 x 5 requests per
+#   regime), the same boots read:
+#
+#       auto / 0          warm 0.0000-0.3730   cold 0.9766-2.1685 nats
+#       auto / 1          warm 0.0000          cold 0.0000        (both lengths)
+#       humming / 0       warm 0.9662-1.3152   cold 2.0001-2.8502
+#       humming + lin     warm 1.2900-1.3833   cold 1.8451-2.3929
+#       no autotune/fuse  warm 0.3820          cold 1.4908-1.8333
+#
+#   and under BATCH_INVARIANT=1 the unseeded rows repeat to four decimals across
+#   two separate boots, so even the "random" canvas replays from the engine seed:
+#   that engine is deterministic end to end. BATCH_INVARIANT=1 at
+#   MAX_MODEL_LEN 81920 is therefore the one measured configuration whose
+#   production-shaped reads repeat, at +26 ms recall p50 (547.5 vs 521.4, 2.5 ms
+#   under the 550 ceiling) and 131072 -> 81920 context.
+#
+#   So the defaults below are still the INCUMBENT. Flipping BATCH_INVARIANT here
+#   alone would boot OOM, because agent-djev.conf pins MAX_MODEL_LEN="131072";
+#   the change is both lines of that conf's environment= (BATCH_INVARIANT="1",
+#   MAX_MODEL_LEN="81920"), a production context cut that is Alan's call
+#   (#1357). tests/test_start_djev_flags.py refuses a shipped default that has
+#   no row, so an unmeasured boot cannot become production by editing one of the
+#   two.
 #
 # shipped defaults: MOE_BACKEND="" BATCH_INVARIANT="0"
 
