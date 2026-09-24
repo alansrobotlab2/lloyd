@@ -651,15 +651,21 @@ def test_the_retired_source_is_gone_from_config_and_the_registry():
     assert "deep-research" in sources.SOURCE_REGISTRY
 
 
-def test_the_promotion_default_for_the_old_staging_dir_survives():
-    """142 `domain-research` notes are still on disk under pending-research/,
-    and the Review tab promotes them by directory name."""
+def test_the_retired_source_has_no_promotion_default():
+    """The 142 `domain-research` notes that held the router entry open did not
+    survive the 2026-09-22 data wipe (absent from every `~/.lloyd-data-snapshots`
+    too), so nothing is left to promote by that name and the entry is gone from
+    the router and its frontend mirror alike (#1278). Only a live source keeps
+    a default destination."""
     import app.routers.workers as W
 
-    staged = ROOT / "_pipeline" / "vault-derived" / "pending-research" / "domain-research"
-    if staged.exists():
-        assert "domain-research" in W._DEFAULT_DEST, (
-            "removing this makes the leftover notes unpromotable")
+    assert "domain-research" not in W._DEFAULT_DEST, (
+        "a retired source's promotion default came back with nothing to promote")
+    assert "bench-mine" in W._DEFAULT_DEST
+    tsx = (ROOT / "web" / "src" / "components" / "pages" / "WorkersPage.tsx").read_text(
+        encoding="utf-8")
+    assert '"domain-research"' not in tsx, (
+        "WorkersPage.tsx's DEFAULT_DEST mirror still names the retired source")
 
 
 # ---------------------------------------------------------------------------

@@ -67,13 +67,14 @@ Bounding the file would have fixed that and left the real problems:
   whether or not the turn produced anything. 90 of its 142 notes have the body
   `(no response)`, and every one of those topics is now closed on disk. The
   source was retired with this change on 2026-09-08 and is gone from both
-  `config.yaml` and `SOURCE_REGISTRY`, but its notes are not: all 142 are still
-  staged under `~/lloyd-data/_pipeline/vault-derived/pending-research/domain-research/`
-  — `app/paths.py::VAULT_PENDING_RESEARCH_DIR`, under `LLOYD_HOME` and not in the
-  vault — unpromoted, and untriaged since 09-08 (#1278). That is why
-  `app/routers/workers.py::_DEFAULT_DEST` still maps
-  `domain-research` to `knowledge` — the source is history, the leftovers are
-  not, and deleting the entry makes them unpromotable from the Review tab.
+  `config.yaml` and `SOURCE_REGISTRY`. Its 142 notes sat staged and untriaged
+  under `pending-research/domain-research/` (`app/paths.py::
+  VAULT_PENDING_RESEARCH_DIR`, under `DATA_ROOT`) for two weeks, and that pile
+  was the only reason `app/routers/workers.py::_DEFAULT_DEST` still mapped
+  `domain-research` to `knowledge`. The pile did not survive the 2026-09-22
+  data wipe — it is in no `~/.lloyd-data-snapshots` either — so the entry and
+  its frontend mirror are gone too (#1278); the topics themselves live on as
+  rows in `research.db`, which is where their outcome was recorded anyway.
 - **Four writers, whole-file read-modify-write, no lock.** The same shape that
   produced the 2026-08-22 knowledge-graph wipe.
 

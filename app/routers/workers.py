@@ -38,8 +38,10 @@ REJECTED_ROOT = PENDING_ROOT / "_rejected"
 
 # Default promotion destination per source (relative to vault root).
 # Tuned so "just click Promote" does the right thing for the easy cases.
+# Mirrored by DEFAULT_DEST in web/src/components/pages/WorkersPage.tsx. A
+# retired source keeps no entry: `domain-research`'s stayed for the 142 notes
+# it left staged, and those did not survive the 2026-09-22 data wipe (#1278).
 _DEFAULT_DEST: dict[str, str] = {
-    "domain-research": "knowledge",
     "bench-mine": "lloyd/bench",
 }
 

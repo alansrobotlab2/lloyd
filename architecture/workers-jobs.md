@@ -677,11 +677,10 @@ longer in `SOURCE_REGISTRY`.
 | `domain-research` | retired 2026-09-08 → `deep-research` | intake |
 
 The renames all landed on 2026-09-09 and are history, not drift.
-`domain-research` is gone from config.yaml and the registry, but its 142 staged
-notes are not — they are still unpromoted under
-`_pipeline/vault-derived/pending-research/domain-research/`, which is why
-`app/routers/workers.py::_DEFAULT_DEST` still maps the name to `knowledge`.
-Deleting the entry would make them unpromotable from the Review tab.
+`domain-research` is gone from config.yaml, the registry and, since #1278,
+`app/routers/workers.py::_DEFAULT_DEST`: the 142 staged notes that kept that
+entry alive were lost with the 2026-09-22 data wipe, so there is nothing left
+under `pending-research/domain-research/` for the Review tab to promote.
 
 ---
 

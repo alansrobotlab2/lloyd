@@ -367,8 +367,8 @@ interface PendingItem {
   preview: string;
 }
 
+// Mirrors _DEFAULT_DEST in app/routers/workers.py.
 const DEFAULT_DEST: Record<string, string> = {
-  "domain-research": "knowledge",
   "bench-mine": "lloyd/bench",
 };
 

@@ -434,12 +434,14 @@ def test_four_candidates_staged_under_one_id_cannot_all_land(monkeypatch, tmp_pa
 
 def test_a_non_bench_artifact_still_lands_its_own_frontmatter(monkeypatch, tmp_path):
     """The other sources have one frontmatter block and no task to extract —
-    the staging rewrite must not reach them."""
-    src = _staged(tmp_path, "note.md", source="domain-research",
-                  staging_fm={"source": "domain-research", "confidence": 0.7,
+    the staging rewrite must not reach them. `session-distill` has no default
+    destination (the retired `domain-research`'s went with its notes, #1278),
+    so the request names one, as the Review tab does for such a source."""
+    src = _staged(tmp_path, "note.md", source="session-distill",
+                  staging_fm={"source": "session-distill", "confidence": 0.7,
                               "review_status": "pending"},
                   body="## Finding\n\nthe queue never drains\n")
-    out = _promote(_client(monkeypatch, tmp_path), src)
+    out = _promote(_client(monkeypatch, tmp_path), src, destination="knowledge")
     assert out["status"] == 200, out
 
     dest = tmp_path / "vault" / "knowledge" / "note.md"
