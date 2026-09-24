@@ -386,7 +386,9 @@ async def test_an_update_to_an_item_whose_front_matter_quotes_the_fence_succeeds
     after = anchored_fm(path)
     assert "_yaml_broken" not in after, "the write re-broke the record it just read"
     assert after["status"] == "up_next" and after["priority"] == "high"
-    assert set(after) == set(before), (
+    # `segment: backlog` is the one key a save may add: the store's invariant,
+    # restored on legacy files by #1167.
+    assert set(after) == set(before) | {"segment"}, (
         f"the re-dump changed the key set: {sorted(set(before) ^ set(after))}")
     # The one thing the update is allowed to add: the note recording the move.
     assert len(after["activity_log"]) == len(before["activity_log"]) + 1, \

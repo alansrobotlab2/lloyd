@@ -219,6 +219,44 @@ def _note_is_real(path: Path) -> bool:
         return False
 
 
+_FENCE_RE = re.compile(r"^---[ \t]*$", re.M)
+
+
+def ensure_segment(path: Path, segment: str = "knowledge") -> bool:
+    """Give the note a `segment:` key if its front matter lacks one (#1167).
+
+    The skill's note template is vault text, which the nightly skills pass can
+    rewrite, and on 2026-09-23 two notes from this source arrived without the key
+    and were repaired by hand. Disk is already where this source checks the note,
+    so the invariant is enforced there too. A pure line insertion after `type:`
+    (else after the opening fence), never a YAML round-trip: the 2026-09-03
+    `---segment:` fusion came from re-dumping front matter. The closing fence is
+    searched for across the whole file, since some notes carry long blocks. A
+    note with no front matter is left alone — inventing a block is not this
+    function's call. Returns True when it wrote.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return False
+    first = _FENCE_RE.match(text)
+    if not first:
+        return False
+    closing = _FENCE_RE.search(text, first.end() + 1)
+    if not closing:
+        return False
+    block = text[first.end() + 1:closing.start()]
+    if re.search(r"^segment:", block, re.M):
+        return False
+    type_line = re.search(r"^type:.*$", block, re.M)
+    at = first.end() + 1 + (type_line.end() + 1 if type_line else 0)
+    try:
+        path.write_text(text[:at] + f"segment: {segment}\n" + text[at:], encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
 def _vault_dirty_paths() -> set[str]:
     """Every path git currently reports as changed in the vault."""
     try:
@@ -334,6 +372,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # A note already on disk means a previous attempt produced it and died
     # before recording. Spending another turn would write a second one.
     if await asyncio.to_thread(_note_is_real, path):
+        await asyncio.to_thread(ensure_segment, path)
         row = await asyncio.to_thread(
             store.finish, int(topic_id), "written", artifact_path=str(path),
             note="recovered: the note from an earlier attempt was already on disk",
@@ -409,6 +448,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         "verdict_source": parsed["source"] if parsed else "none",
         "structured_error": str(run.get("structured_error") or ""),
     }
+    if on_disk and await asyncio.to_thread(ensure_segment, path):
+        extra["segment_added"] = True
     if strays:
         extra["unexpected_vault_writes"] = strays[:20]
 

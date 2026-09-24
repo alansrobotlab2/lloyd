@@ -564,6 +564,9 @@ async def backlog_task_update(request: Request):
     # stale read into a stale write.
     fm, body = _backlog_parse_fm(filepath)
     _reject_broken_fm(fm, filepath)
+    # The store's own invariant, restored on any save of a legacy file that lacks
+    # it (#1167). `type` is not invented here — see backlog_task_create.
+    fm.setdefault("segment", "backlog")
     board_map = _backlog_board_map()
     id_to_name = {v: k for k, v in board_map.items()}
     _, current_description = _split_body(body)
@@ -705,8 +708,8 @@ async def backlog_task_create(request: Request):
     # path leaves half of new tasks non-conformant. `type` is the one thing OKF
     # v0.1 requires of a concept file; without it the task is a violation at
     # birth and scripts/vault/validate_okf.py counts one more every time
-    # (item #518). backlog_task_update only round-trips existing keys, so this
-    # is the sole place a type can be declared, and updates never invent one.
+    # (item #518). backlog_task_update restores a missing `segment` (#1167) but
+    # never invents a `type`, so this is the sole place a type is declared.
     fm = {
         "type": "backlog",
         "segment": "backlog",

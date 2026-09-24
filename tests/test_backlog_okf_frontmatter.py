@@ -105,17 +105,31 @@ def test_update_path_does_not_lose_type(mcp_board):
     assert okf_type_of(path) == "backlog"
 
 
-def test_update_on_a_legacy_file_without_type_does_not_invent_one(mcp_board):
-    """Scope guard for the fix above: backfilling the 275 existing violations is
-    a migration decision (#585), not a side effect of an unrelated status edit.
-    An update to a file that has no type must leave it absent."""
+def test_update_on_a_legacy_file_restores_segment_but_does_not_invent_type(mcp_board):
+    """#1167 changed half of this contract on purpose. `segment: backlog` is the
+    store's invariant for every file here, and "update never invents a key" left
+    128 pre-#518 files editable for weeks without ever healing — so a save now
+    restores it. Which OKF `type` a legacy file is remains a migration decision
+    (#585), not a side effect of an unrelated status edit, so type stays absent."""
     legacy = mcp_board / "9-legacy-task.md"
     legacy.write_text("---\nstatus: draft\nboard: lloyd\n---\n\n# Legacy task\n",
                       encoding="utf-8")
     result = json.loads(BL._handle_write({"task_id": 9, "status": "in_progress"}))
     assert result.get("success"), result
     fm, _ = BL.parse_frontmatter(legacy.read_text(encoding="utf-8"))
+    assert fm.get("segment") == "backlog"
     assert "type" not in fm
+    assert fm.get("status") == "in_progress"
+
+
+def test_update_keeps_a_segment_the_file_already_has(mcp_board):
+    """Restoring is `setdefault`, never an overwrite of a value somebody chose."""
+    odd = mcp_board / "10-odd-task.md"
+    odd.write_text("---\nstatus: draft\nsegment: projects\n---\n\n# Odd task\n",
+                   encoding="utf-8")
+    assert json.loads(BL._handle_write({"task_id": 10, "priority": "high"}))["success"]
+    fm, _ = BL.parse_frontmatter(odd.read_text(encoding="utf-8"))
+    assert fm.get("segment") == "projects"
 
 
 # ── HTTP writer: POST /api/backlog/task-create ───────────────────────────────
@@ -146,3 +160,18 @@ async def test_frontend_create_route_emits_type_and_segment(http_board):
     assert okf_type_of(files[0]) == "backlog"
     fm = yaml.safe_load(STRICT_FM_RE.match(files[0].read_text()).group(1))
     assert fm.get("segment") == "backlog"
+
+
+@pytest.mark.asyncio
+async def test_frontend_update_route_restores_segment_on_a_legacy_file(http_board):
+    """The Mission Control save path is the other editor of these files (#1167)."""
+    http_board.mkdir()
+    legacy = http_board / "9-legacy-task.md"
+    legacy.write_text("---\nstatus: draft\nboard: lloyd\n---\n\n# Legacy task\n",
+                      encoding="utf-8")
+    resp = await BR.backlog_task_update(_FakeRequest({"id": 9, "priority": "high"}))
+    assert resp.status_code == 200, resp.body
+    fm = yaml.safe_load(STRICT_FM_RE.match(legacy.read_text()).group(1))
+    assert fm.get("segment") == "backlog"
+    assert "type" not in fm
+    assert fm.get("priority") == "high"

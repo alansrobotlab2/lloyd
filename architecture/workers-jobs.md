@@ -483,6 +483,9 @@ that gave up leaves behind. Three consequences:
   did not sign off, and retrying would produce a second note.
 - A note left by an attempt that died before recording is recovered on the next
   claim without spending a turn.
+- A verified note without `segment:` gets `segment: knowledge` inserted as one
+  line after `type:` (`ensure_segment`, #1167) — the skill's template is vault
+  text a skills pass can rewrite, and on 2026-09-23 two notes came out keyless.
 
 **The source picks the filename, not the model.** The skill used to say "run
 `date +%F` via bash, never guess it" — a workaround for a problem that existed

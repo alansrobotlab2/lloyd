@@ -285,6 +285,13 @@ def _handle_write(args: dict) -> str:
         task = load_task(task_id)
         if not task:
             return json.dumps({"success": False, "error": f"Task {task_id} not found"})
+        # `segment: backlog` is the store's own invariant for every file in this
+        # directory, so an update may restore it where a legacy file lacks it
+        # (#1167) — the 128 pre-#518 files were edited for weeks without healing.
+        # `type` is still not invented: which OKF type a legacy file is stays a
+        # migration decision (#585).
+        if not task.get("_yaml_broken"):
+            task.setdefault("segment", "backlog")
     else:
         # Is this finding already on the board? Advisory for a human's write;
         # for the loop's own (`spawned-by-*`) writes a strong match is merged
@@ -307,8 +314,8 @@ def _handle_write(args: dict) -> str:
         # `type`/`segment` are what make the file OKF-conformant on disk. Without
         # them every task written through this tool is a violation at birth and
         # the nightly OKF count can only climb (item #518). save_task round-trips
-        # them verbatim, and only new tasks get them — updating a legacy file
-        # still does not backfill a type it never had.
+        # them verbatim; an update restores a missing `segment` (above) but
+        # still does not backfill a type a legacy file never had.
         task = {"id": task_id, "filename": f"{task_id}-{slug}.md", "created": now,
                 "status": "draft", "priority": DEFAULT_PRIORITY, "blocked": False,
                 "assigned": False, "position": task_id * 1000,

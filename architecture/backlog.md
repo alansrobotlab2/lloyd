@@ -484,10 +484,14 @@ OKF v0.1 requires one thing of a concept document: parseable frontmatter with a
 non-empty `type` (`scripts/vault/validate_okf.py`). Neither live create path
 declared one, so every task was a violation the moment it hit disk and the
 nightly OKF count could only climb (#518). Both writers now stamp
-`type: backlog` / `segment: backlog` on create, and only on create — updating a
-legacy file still does not backfill a type it never had, because
-`backlog_task_update` and `save_task` only round-trip keys that are already
-there. `tests/test_backlog_okf_frontmatter.py` pins both writers.
+`type: backlog` / `segment: backlog` on create. An update restores a missing
+`segment: backlog` (#1167: the store's own invariant, and 128 pre-#518 files were
+edited for weeks without healing) but still does not backfill a `type` a legacy
+file never had — which OKF type it is stays a migration decision (#585).
+`tests/test_backlog_okf_frontmatter.py` pins both writers.
+`scripts/vault/segment_scan.py` counts notes lacking `segment:` per directory
+over the extractor allow-list plus `backlog/`, and exits 1 on any
+(`tests/test_okf_segment_producers.py`).
 
 ## QMD integration
 
