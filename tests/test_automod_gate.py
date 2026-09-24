@@ -1290,3 +1290,104 @@ def test_a_vet_that_could_not_run_is_recorded_as_unevaluated_not_clean(tmp_path,
     assert data["vet"]["violations"] == []
     assert "UNEVALUATED" in detail and "git ls-tree failed" in detail
     assert "clean" not in detail, "an unread change set must never read as clean"
+
+
+# ---------------------------------------------------------------------------
+# The review rung's own parse boundary: an unreadable verdict is the rail, not
+# a judgment of the diff (#1443)
+# ---------------------------------------------------------------------------
+
+# The shape a grader actually returned on SM_20260916_032218, SM_20260922_100227
+# and SM_20260924_104224: every clause graded `met`, but keyed `id`/`status`
+# instead of `clause`/`verdict`, so not one clause index was readable.
+_ALIAS_CLAUSES = [
+    {"id": 1, "status": "met", "evidence_path": "app/x.py", "evidence_line": 3,
+     "test_node_id": "tests/test_x.py::test_one", "how_verified": "ran", "note": "ran it"},
+    {"id": 2, "status": "met", "evidence_path": "app/x.py", "evidence_line": 9,
+     "test_node_id": "tests/test_x.py::test_two", "how_verified": "ran", "note": "ran it"},
+]
+
+
+class _ReviewGate(G.Gate):
+    """Enough state for `rung_review` to run against a stubbed grader."""
+
+    def __init__(self, tmp_path):
+        super().__init__("SM_UNREAD", tmp_path, "a" * 40, item_id=7)
+        self.report.changed_paths = ["app/x.py", "tests/test_x.py"]
+        self.report.rungs.append(G.RungResult("tests", True, "ok", 1.0, {"passed": 10}))
+
+
+def _stub_grader(monkeypatch, tmp_path, structured):
+    """Record the rung's ledger events and the grading turns it spent."""
+    from scripts.automod import review as RV
+    events: list[dict] = []
+    calls: list[dict] = []
+
+    def grade(**kw):
+        calls.append(kw)
+        return {"ok": True, "error": "", "session_id": "sess_r", "structured": structured,
+                "structured_error": "", "text": "", "stop_reason": "stop", "duration_s": 1.0}
+
+    monkeypatch.setattr(G.S, "append_event", lambda e, **k: events.append(e))
+    monkeypatch.setattr(G.S, "read_events", lambda limit=100: [])
+    monkeypatch.setattr(G.W, "round_dir", lambda rid: tmp_path / "round")
+    monkeypatch.setattr(RV, "item_contract", lambda iid, ledger=None: {
+        "id": iid, "title": "t", "body": "b",
+        "clauses": ["clause one holds", "clause two holds"], "path": ""})
+    monkeypatch.setattr(RV, "grade", grade)
+    monkeypatch.setattr(RV, "honesty_prechecks", lambda *a, **k: [])
+    return events, calls
+
+
+def test_clause_entries_with_no_usable_index_are_an_external_rail_failure(tmp_path, monkeypatch):
+    """Zero readable clause indexes is the rail failing, not the round refused.
+
+    The three rounds this exists for each lost one review attempt of two to it,
+    while the second reader had in fact approved every clause. An unreadable
+    verdict must land on the same side of the ledger as an unreachable grader:
+    the rung fails, the event is non-blocking, and nothing is charged.
+    """
+    obj = {"premise": "sound", "summary": "APPROVE — all four clauses met",
+           "clauses": _ALIAS_CLAUSES, "test_honesty": [], "seams_unverified": []}
+    events, calls = _stub_grader(monkeypatch, tmp_path, obj)
+
+    ok, detail, data = _ReviewGate(tmp_path).rung_review()
+    assert ok is False, "an unreadable review is never a pass"
+    assert data["external_blocker"] is True, "the rail, not the diff"
+    assert "review_retry" not in data and "review_attempt" not in data, \
+        "a rail failure must not arrive as a refusal that names an attempt"
+    ev = events[-1]
+    assert ev["event"] == "review" and ev["ok"] is False and ev["blocking"] is False, ev
+
+    # And the attempt really is not spent: refusal accounting counts graded
+    # (`ok`) events only, so a re-gate over the recorded rail failure still
+    # grades rather than reporting exhaustion.
+    monkeypatch.setattr(G.S, "read_events", lambda limit=100: list(events))
+    ok2, detail2, data2 = _ReviewGate(tmp_path).rung_review()
+    assert ok2 is False and data2["external_blocker"] is True
+    assert "abort and report" not in detail2, detail2
+    assert len(calls) == 2, "the grader is asked again, not written off"
+
+
+def test_the_unreadable_verdict_names_the_grader_keys_not_a_refusal_to_act_on(tmp_path, monkeypatch):
+    """The author reading `gate.json` has to see that nothing was graded.
+
+    "clause N partial: not addressed by the grader" beside "fix what it names"
+    is a contradiction: it sends an author to change four clauses the grader
+    never judged. The finding names the keys the grader really used instead.
+    """
+    obj = {"premise": "sound", "summary": "APPROVE", "clauses": _ALIAS_CLAUSES,
+           "test_honesty": [], "seams_unverified": []}
+    _stub_grader(monkeypatch, tmp_path, obj)
+
+    ok, detail, data = _ReviewGate(tmp_path).rung_review()
+    assert ok is False
+    assert "could not be read" in detail, detail
+    for key in ("id", "status", "evidence_path", "test_node_id", "how_verified"):
+        assert key in detail, f"the finding must name the key it found: {key} not in {detail}"
+    assert "not addressed by the grader" not in detail, detail
+    assert "fix what it names" not in detail, detail
+    # It says what broke, in terms the author cannot mistake for work.
+    assert "none carried a usable 1-based `clause` index" in detail, detail
+    assert "not a judgment of the diff" in detail, detail
+    assert data["external_blocker"] is True and data["review_session"] == "sess_r"

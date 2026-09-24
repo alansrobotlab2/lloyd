@@ -1187,6 +1187,14 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     deleted file stand as `met` (see `_node_rail`, `evidence_of_absence`).
     Each acceptance is recorded on the clause under `accepted`, the mirror
     of `downgraded`, so a waived rail is visible, not silent.
+
+    Clause entries that carry no usable 1-based `clause` index at all make the
+    whole verdict unreadable rather than unmet: the result then carries
+    `clauses_unreadable` = `{"entries": n, "keys": [...]}` naming the keys the
+    grader really used, so the rung can fail as its own rail instead of
+    refusing a diff no clause was ever graded against. One usable index is
+    enough for the key to stay absent — an abstaining clause is still a verdict
+    on the change.
     """
     if not isinstance(obj, dict):
         return None
@@ -1198,7 +1206,8 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     clauses: list[dict] = []
     downgraded: list[int] = []
     seen: set[int] = set()
-    for raw in (obj.get("clauses") or []):
+    raw_clauses = obj.get("clauses") if isinstance(obj.get("clauses"), list) else []
+    for raw in raw_clauses:
         if not isinstance(raw, dict):
             continue
         try:
@@ -1267,6 +1276,21 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                             "evidence_line": 0, "test_node_id": "", "how_verified": "inferred",
                             "note": "not addressed by the grader", "downgraded": ["not graded"]})
             downgraded.append(idx)
+    # Clause entries came back and not one of them yielded a usable 1-based
+    # index: the grader answered in another shape (`id`/`status` instead of
+    # `clause`/`verdict` — what the finalizer hands back when its decoder does
+    # not enforce the schema; SM_20260916_032218, SM_20260922_100227 and
+    # SM_20260924_104224 all lost an attempt of 2 that way). Every partial
+    # synthesized above is then a statement about the grader's keys, not about
+    # the diff, and the caller cannot see that in `clauses` alone — so record
+    # the shape here, with the key names it actually found, and let the rung
+    # decide. This is NOT the abstention case: at least one usable index keeps
+    # an unmentioned clause a verdict on the change.
+    unreadable: dict | None = None
+    if raw_clauses and not seen:
+        unreadable = {"entries": len(raw_clauses),
+                      "keys": sorted({str(k) for e in raw_clauses
+                                      if isinstance(e, dict) for k in e})[:16]}
     clauses.sort(key=lambda c: c["clause"])
     honesty = []
     for raw in (obj.get("test_honesty") or []):
@@ -1309,7 +1333,9 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             "downgraded": sorted(set(downgraded)),
             # Absent means "no amendments were shown", which is the same as ok.
             "amendments_ok": amend_ok if isinstance(amend_ok, bool) else True,
-            "amendments_note": " ".join(str(obj.get("amendments_note") or "").split())[:600]}
+            "amendments_note": " ".join(str(obj.get("amendments_note") or "").split())[:600],
+            # Absent means every clause index the grader sent was readable.
+            **({"clauses_unreadable": unreadable} if unreadable else {})}
 
 
 def _judgments(raw: dict) -> dict:

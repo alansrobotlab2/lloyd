@@ -1717,6 +1717,31 @@ class Gate:
                 "external_reason": "grader returned an unusable object",
                 "retry_after_s": 120,
                 "review_session": res.get("session_id")}
+        if parsed.get("clauses_unreadable"):
+            unread = parsed["clauses_unreadable"]
+            keys = ", ".join(unread.get("keys") or []) or "(no readable keys on any entry)"
+            S.append_event({**base_event, "ok": False, "blocking": False,
+                            "error": f"review clause entries unreadable: {unread['entries']} "
+                                     f"entries, no usable 1-based `clause` index; "
+                                     f"keys on them: {keys[:300]}"})
+            # The synthesized "not addressed by the grader" partials are a
+            # statement about the grader's key names, not about the diff. On
+            # SM_20260916_032218, SM_20260922_100227 and SM_20260924_104224
+            # refusing on them spent an attempt of two on rounds the second
+            # reader had actually approved, and told the author to change code
+            # that was already graded `met`. An unreadable verdict is the same
+            # kind of event as the unusable object above: the rail failed, so
+            # nothing is charged and nothing is named for the author to change.
+            why = (f"review verdict could not be read: {unread['entries']} clause entries "
+                   f"came back and none carried a usable 1-based `clause` index (keys found "
+                   f"on them: {keys[:300]}); no clause was graded, so this is the grading "
+                   f"rail and not a judgment of the diff — gate again; the item keeps its "
+                   f"attempt")
+            return False, why, {
+                "external_blocker": True, "external_failures": [],
+                "external_reason": "grader's clause entries carried no usable clause index",
+                "retry_after_s": 120,
+                "review_session": res.get("session_id")}
         amendments = contract.get("amendments") or []
         kind, findings = RV.decide(parsed, pre, amendments=amendments,
                                    attempt=attempt, policy=_review_policy("seams_block"),

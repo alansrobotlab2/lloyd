@@ -241,6 +241,51 @@ def test_a_clause_the_grader_did_not_mention_is_not_met(wt):
     parsed = RV.parse_review(_obj(), worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=3)
     assert [c["verdict"] for c in parsed["clauses"]] == ["met", "partial", "partial"]
     assert parsed["clauses"][1]["note"] == "not addressed by the grader"
+    # One readable index is an abstention about the CHANGE. The rung must keep
+    # refusing on it, or a grader that answers one clause of three passes by
+    # saying nothing about the other two.
+    assert "clauses_unreadable" not in parsed
+
+
+def test_clause_entries_in_another_shape_are_recorded_as_unreadable(wt):
+    """`id`/`status` instead of `clause`/`verdict`: not one index is usable.
+
+    #1443's three rounds reached this with the grader approving every clause.
+    The synthesized partials stay in the result — the caller decides what they
+    mean — but the parse boundary records that no index was readable, with the
+    key names it actually found, so a rail failure stops reading as a verdict.
+    """
+    alias = {"premise": "sound", "summary": "APPROVE", "test_honesty": [],
+             "seams_unverified": [],
+             "clauses": [{"id": i, "status": "met", "evidence_path": "app/x.py",
+                          "test_node_id": "tests/test_x.py::test_it",
+                          "how_verified": "ran", "note": "graded"} for i in (1, 2)]}
+    parsed = RV.parse_review(alias, worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=2)
+    assert [c["verdict"] for c in parsed["clauses"]] == ["partial", "partial"]
+    unread = parsed["clauses_unreadable"]
+    assert unread["entries"] == 2
+    assert unread["keys"] == ["evidence_path", "how_verified", "id", "note",
+                              "status", "test_node_id"], unread["keys"]
+
+
+def test_clause_entries_that_are_not_objects_are_still_unreadable(wt):
+    """A grader that answered `["met", "met"]` graded nothing it can be asked."""
+    parsed = RV.parse_review({"premise": "sound", "clauses": ["met", "met"]},
+                             worktree=wt, changed_tests=[], n_clauses=2)
+    assert parsed["clauses_unreadable"]["entries"] == 2
+    assert parsed["clauses_unreadable"]["keys"] == []
+
+
+def test_no_clause_entries_at_all_is_an_abstention_not_an_unreadable_shape(wt):
+    """`clauses: []` is the grader declining to grade; it refuses as it always did.
+
+    The unreadable flag exists for a verdict that cannot be read, so an empty
+    list must not borrow it — that would let an abstention skip the attempt.
+    """
+    parsed = RV.parse_review(_obj(clause=1) | {"clauses": []}, worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1)
+    assert "clauses_unreadable" not in parsed
+    assert [c["verdict"] for c in parsed["clauses"]] == ["partial"]
 
 
 def test_the_vault_shape_needs_no_test_node(wt):
@@ -375,6 +420,32 @@ def test_a_sound_premise_with_an_unmet_clause_is_a_retry_with_findings(monkeypat
     ev = events[-1]
     assert ev["event"] == "review" and ev["blocking"] and ev["kind"] == "retry"
     assert ev["clauses"][0]["verdict"] == "unmet"
+
+
+def test_a_clause_the_grader_left_out_still_refuses_at_the_rung(monkeypatch, tmp_path):
+    """One clause graded of two is a verdict on the change, not a rail failure.
+
+    The unreadable-shape rail must not widen into an amnesty: a grader that
+    answered clause 1 and said nothing about clause 2 still sends the round back
+    with an attempt charged. Only the ALL-unusable case skips the judgment.
+    """
+    (tmp_path / "app").mkdir(); (tmp_path / "app" / "x.py").write_text("1\n")
+    contract = {"id": 7, "title": "t", "body": "b", "path": "",
+                "clauses": ["clause one holds", "clause two holds"]}
+    obj = {"premise": "sound", "summary": "one of two",
+           "clauses": [{"clause": 1, "verdict": "met", "evidence_path": "app/x.py",
+                        "evidence_line": 1, "test_node_id": "tests/test_x.py::test_it",
+                        "how_verified": "ran", "note": "ran it"}],
+           "test_honesty": [], "seams_unverified": []}
+    events = _arm(monkeypatch, tmp_path, grade=_grader(obj), contract=contract)
+    ok, detail, data = _Gate(7, ["app/x.py", "tests/test_x.py"], tmp_path).rung_review()
+    assert ok is False and data["review_retry"] is True and data["review_attempt"] == 1
+    assert data.get("external_blocker") is not True, "an abstention is a judgment, not a rail"
+    assert "not addressed by the grader" in data["review_findings"]
+    assert "fix what it names" in detail
+    ev = events[-1]
+    assert ev["ok"] is True and ev["blocking"] and ev["kind"] == "retry"
+    assert [c["verdict"] for c in ev["clauses"]] == ["met", "partial"]
 
 
 def test_the_second_refusal_says_abort_and_the_third_never_asks_the_model(monkeypatch, tmp_path):
