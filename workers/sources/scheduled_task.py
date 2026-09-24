@@ -597,4 +597,11 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # adapter — not the model's output — decide which runs get scoped in.
     if "claims" in result:
         out["claims"] = result["claims"]
+    # #623: the acceptance grade is lifted into `meta` by name — `meta` is the
+    # only field `normalize_result` writes to the runs row for it
+    # (`runs.meta_json`), and naming the key here means a run_task that stops
+    # nesting it in `meta` still cannot lose it on this whitelist, which is
+    # exactly how `claims` was lost above.
+    if "acceptance_grade" in result:
+        out["meta"] = {**out["meta"], "acceptance_grade": result["acceptance_grade"]}
     return out

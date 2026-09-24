@@ -593,6 +593,22 @@ empty; #945 (umbrella #966) is the fix, and until it lands every
 `claims_checked: 0` in a report means "never measured", which is the reading the
 rule was written to force.
 
+**A declared acceptance is graded, and decides nothing yet (#623).** A task may
+carry an `acceptance:` block — `objective_checks` drawn only from
+`scripts/autoresearch/judge.py`'s `CHECK_TYPES`, plus `rubric` names — and
+`app/run_acceptance.py` grades every successful run against it with the judge's
+deterministic layer, over the run's own dispatch record (`tool_trace_authoritative`,
+hook-refused calls filed as denied), never over what its text says it did. The
+grade (`graded_pass` / `graded_fail` / `no_acceptance` / `acceptance_invalid` /
+`not_measurable` / `grader_error`) rides on the run's `meta` as
+`acceptance_grade`, so it is in the run record's front matter and in
+`runs.meta_json`; `false_completion_rate` reads the share of `success` rows
+graded `graded_fail`, per source or per task, `None` where nothing was graded.
+The status stays the literal `success`, nothing is requeued, the rubric is
+recorded as `rubric_ungraded` rather than scored (no model call), and
+`grader: false` removes the key entirely. Gating on the grade waits on a
+hand-labelled check of the grader.
+
 ## The fleet today
 
 32 task files: **31 `up_next` and one `draft`** (#85, pinned to a `model: eco`

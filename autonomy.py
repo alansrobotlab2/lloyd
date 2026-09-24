@@ -79,6 +79,7 @@ logger = logging.getLogger("lloyd-autonomy")
 
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 from app.paths import AUTONOMY_RUNS_DIR  # anchored to DATA_ROOT
+from app.run_acceptance import GRADE_KEY as _ACCEPTANCE_GRADE_KEY, DispatchTrace, grade_run
 LLOYD_HOME = Path(__file__).parent
 
 def recover_stuck_tasks() -> list:
@@ -2303,12 +2304,23 @@ def _declared_artifact_evidence(task: dict,
     return None
 
 
+def _acceptance_grade(task: dict, dispatch, final_text: str) -> Optional[dict]:
+    """The run's acceptance grade (#623), or None when the task has `grader:
+    false`. Never raises: a grading bug costs the grade, not the run record."""
+    try:
+        return grade_run(task, dispatch.as_trace(final_text))
+    except Exception as e:
+        logger.warning("Task #%s: acceptance grading failed: %s", task.get("id"), e)
+        return {"grade": "grader_error", "error": f"{type(e).__name__}: {e}"}
+
+
 async def _record_artifact_success(task: dict, task_id, run_id: str,
                                    started_at: str,
                                    started_dt: datetime.datetime, duration: float,
                                    artifact: dict, *, stop_reason, usage,
                                    num_turns, tool_errors: list,
-                                   session_id: str) -> dict:
+                                   session_id: str,
+                                   grade: Optional[dict] = None) -> dict:
     """Record a run whose terminal text was empty but whose declared deliverable
     is on disk and fresh. Single writer, so the run record, the activity line and
     the task fields can never disagree about which basis decided the status.
@@ -2331,6 +2343,8 @@ async def _record_artifact_success(task: dict, task_id, run_id: str,
             # `status_basis` at all.
             "empty": True, "status_basis": "artifact",
             "output_artifact": artifact}
+    if grade is not None:
+        meta[_ACCEPTANCE_GRADE_KEY] = grade
     _write_run_record(
         task_id=task_id, run_id=run_id, status="success",
         started_at=started_at, completed_at=completed_at,
@@ -2391,6 +2405,8 @@ async def _record_artifact_success(task: dict, task_id, run_id: str,
         "run_id": run_id, "duration_seconds": round(duration, 1),
         "response_preview": "", "meta": meta,
     }
+    if grade is not None:
+        result[_ACCEPTANCE_GRADE_KEY] = grade
     if _evidence_pilot(task_id):
         result["claims"] = _evidence_claims("")
     return result
@@ -3078,6 +3094,9 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         usage = None
         num_turns = None
         saw_tool_call = False
+        # The run's own dispatch record, for the acceptance grade (#623): what
+        # the harness dispatched, not what the final text says it did.
+        dispatch = DispatchTrace()
 
         try:
             from app.run_recorder import record_events
@@ -3088,6 +3107,8 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             )
             async with asyncio.timeout(timeout):
                 async for evt in recorded:
+                    if evt["type"] in ("tool_call", "tool_result"):
+                        dispatch.observe(evt)
                     if evt["type"] == "text_delta":
                         final_response += evt["text"]
                     elif evt["type"] == "assistant_message":
@@ -3169,7 +3190,8 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 return await _record_artifact_success(
                     task, task_id, run_id, started_at, now, duration, artifact,
                     stop_reason=stop_reason, usage=usage, num_turns=num_turns,
-                    tool_errors=tool_errors, session_id=session_id)
+                    tool_errors=tool_errors, session_id=session_id,
+                    grade=_acceptance_grade(task, dispatch, ""))
             infra = (not saw_tool_call) and duration < _INFRA_EMPTY_MAX_SECONDS
             kind = "infra" if infra else "task"
             summary = (f"empty response after {duration:.0f}s "
@@ -3229,6 +3251,11 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 # The join from a run record to the transcript of that run.
                 # Without it the two records exist and nothing connects them.
                 "session_id": session_id}
+        # Recorded beside the literal `status="success"` below, never instead of
+        # it: the grade decides nothing yet (#623, grade-only).
+        grade = _acceptance_grade(task, dispatch, terminal_text)
+        if grade is not None:
+            meta[_ACCEPTANCE_GRADE_KEY] = grade
 
         _write_run_record(
             task_id=task_id, run_id=run_id, status="success",
@@ -3274,6 +3301,8 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             "response_preview": _outcome_summary(final_response),
             "meta": meta,
         }
+        if grade is not None:
+            result[_ACCEPTANCE_GRADE_KEY] = grade
         # Out unverified on purpose: the pool runs the checks when it writes the
         # row, so nothing that happened during the run — including this model's
         # own tool calls, which could have edited the file being claimed — can
