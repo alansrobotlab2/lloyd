@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
-"""Bucket ~/.lloyd/ww_diag/scores.jsonl by client device + APM flags and
+"""Bucket the wake-miss corpus's scores.jsonl by client device + APM flags and
 print rms vs ww-score stats per bucket.
+
+The corpus is wherever this tree's data root says: `<data root>/ww_diag/`, so
+`~/lloyd-data/ww_diag/scores.jsonl` in production and `$LLOYD_DATA/ww_diag/…`
+for a round or a canary (#1444).
 
 Answers three questions for the cross-device wake-word debugging:
   1. Does rms_mean cluster differently per device? → gain disparity is real
@@ -9,7 +13,7 @@ Answers three questions for the cross-device wake-word debugging:
 
 Usage:
     python scripts/ww_diag_summary.py
-    python scripts/ww_diag_summary.py --path ~/.lloyd/ww_diag/scores.jsonl
+    python scripts/ww_diag_summary.py --path ~/lloyd-data/ww_diag/scores.jsonl
     python scripts/ww_diag_summary.py --since 2026-05-15
     python scripts/ww_diag_summary.py --min-voiced 0.1  # filter near-silence
 """
@@ -26,8 +30,17 @@ import statistics
 import sys
 from collections import defaultdict
 
+# `app.ww_diag` is who owns the corpus location — the worker that writes it and
+# the three other readers import the same module, so this script cannot point at
+# a copy of the tuning history that no longer exists (#1444). Appended, not
+# inserted: this tree's top-level modules must not shadow the stdlib for a run
+# that only wants to summarise a jsonl.
+_TREE = pathlib.Path(__file__).resolve().parents[1]
+if str(_TREE) not in sys.path:
+    sys.path.append(str(_TREE))
+from app.ww_diag import scores_path  # noqa: E402
 
-DEFAULT_PATH = pathlib.Path("~/.lloyd/ww_diag/scores.jsonl").expanduser()
+DEFAULT_PATH = scores_path()
 
 
 def classify_device(ua: str) -> str:

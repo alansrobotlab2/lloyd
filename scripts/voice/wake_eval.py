@@ -14,7 +14,8 @@ Corpora (none committed — the room audio is from the house):
                  trained on. Positives split into PREFIXED ("hey / hi / okay /
                  hello Lloyd…") and BARE ("Lloyd.", "Lloyd, …"), because a
                  prefixed-only model is not supposed to fire on the second.
-  real room      ~/.lloyd/ww_diag/utterances/*.wav minus the utterances the
+  real room      <data root>/ww_diag/utterances/*.wav (app.ww_diag; live that
+                 is ~/lloyd-data/ww_diag) minus the utterances the
                  log recorded as a wake — false accepts on the house's own audio.
   LibriSpeech    the ASR eval corpus, played as one continuous stream — false
                  accepts per hour of speech that never says "Lloyd".
@@ -34,12 +35,19 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "agent-services"))
 sys.path.insert(0, str(ROOT / "scripts" / "voice"))
+# Appended, not inserted: `app/` holds `paths.py`, `config.py` and the rest, and
+# pushing the tree to the front would shadow those for every later import.
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
 
 from replay import load_16k  # noqa: E402
 from voice.wake import WakeWordFactory  # noqa: E402
+from app.ww_diag import diag_dir  # noqa: E402
 
 TTS = Path.home() / ".cache" / "lloyd-voice-eval" / "wake-tts"
-DIAG = Path.home() / ".lloyd" / "ww_diag"
+# The room corpus the worker writes, wherever this tree's data root puts it
+# (`app.ww_diag`, #1444) — not a home-relative directory nothing snapshots.
+DIAG = diag_dir()
 LIBRI = Path.home() / ".cache" / "lloyd-voice-eval" / "librispeech_dummy_clean_validation.parquet"
 ENGINE = ROOT / "agent-services" / "models" / "openwakeword"
 BARE = {0, 4}          # "Lloyd." and "Lloyd, what time is it?"

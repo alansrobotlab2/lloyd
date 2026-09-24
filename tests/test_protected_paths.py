@@ -310,3 +310,32 @@ def test_no_other_write_lane_consults_the_deny_set():
         src = path.read_text(encoding="utf-8")
         assert "write_deny_reason" not in src, rel
         assert "PROTECTED_WRITE_ROOTS" not in src, rel
+
+
+def test_the_wake_miss_corpus_is_inside_the_delete_guard(tree):
+    """#1444: the wake-word tuning corpus used to live in a dot-directory under
+    the account home. `protected_roots()` protects the data root and its
+    top-level folders, so that copy was outside the guard added for exactly this
+    class of loss — measured directly on the live box, where an `rm -rf` over the
+    corpus at that old home-relative location returned None (allowed) while the
+    same call on the data root's `voice_profiles` was refused. The corpus now
+    resolves to `<data root>/ww_diag` through `app.ww_diag`, which is a top-level
+    folder of the root, so the guard covers it with no new entry in any list:
+    this test is proof of the consequence, not the mechanism."""
+    # The rule refuses a top-level folder that exists, so create the corpus the
+    # way the worker does before asking whether deleting it is refused.
+    (tree / "lloyd-data" / "ww_diag" / "utterances").mkdir(parents=True)
+    (tree / "lloyd-data" / "ww_diag" / "scores.jsonl").write_text("x")
+    for cmd in (f"rm -rf {tree}/lloyd-data/ww_diag",
+                "rm -rf ~/lloyd-data/ww_diag",
+                "rm -r ~/lloyd-data/ww_diag",
+                "cd ~/lloyd-data && rm -rf ww_diag"):
+        refusal = protected_paths.check_protected_delete(cmd)
+        assert refusal, f"an `rm -r` over the corpus must be refused: {cmd}"
+        assert "lloyd data" in refusal, refusal
+    # The corpus's own files are normal agent work, exactly like a specific file
+    # under `voice_profiles`: the guard refuses the wholesale shape, not the tree.
+    assert protected_paths.check_protected_delete(
+        "rm ~/lloyd-data/ww_diag/scores.jsonl") is None
+    assert protected_paths.check_protected_delete(
+        "rm ~/lloyd-data/ww_diag/utterances/abc.wav") is None

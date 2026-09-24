@@ -67,6 +67,16 @@ from voice.speakable import ClauseStream  # noqa: E402
 LOG = logging.getLogger("lloyd-agent-worker")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# The wake-miss diagnostic corpus lives under the data root, and `app.ww_diag`
+# is who owns that location — the same module the four scripts which read the
+# corpus import, so writer and readers cannot name different places (#1444).
+# Appended rather than inserted at the front: this tree holds top-level modules
+# (`autonomy.py`, `prefetch.py`, `server.py`) that would shadow a package of the
+# same name for everything else this unit imports.
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+from app.ww_diag import diag_dir as _ww_diag_dir  # noqa: E402
+
 CONFIG_PATH = REPO_ROOT / "config.yaml"
 ENV_PATH = REPO_ROOT / ".env"
 #: The backend this worker speaks for. Overridable so a second worker can run
@@ -695,7 +705,9 @@ _looks_repetitive = voice_asr.looks_repetitive
 class WakeMissCapture:
     """Diagnostic capture rig for tuning the wake-word detector.
 
-    Maintains three things, all under ~/.lloyd/ww_diag/:
+    Maintains three things, all under the corpus directory `app.ww_diag`
+    resolves — `<data root>/ww_diag/`, so in production
+    `~/lloyd-data/ww_diag/` and in a gate round that round's own data root:
       - scores.jsonl: one structured record per utterance handled — includes
         ww score, threshold, fired flag, transcript prefix, audio path. The
         ground-truth log for replay analysis.
@@ -712,17 +724,22 @@ class WakeMissCapture:
     event loop: no locks needed.
     """
 
-    DIAG_DIR = Path("~/.lloyd/ww_diag").expanduser()
-    UTTERANCES_DIR = DIAG_DIR / "utterances"
-    MISSES_DIR = DIAG_DIR / "misses"
-    SCORES_PATH = DIAG_DIR / "scores.jsonl"
-    LABELS_PATH = DIAG_DIR / "labels.jsonl"
-
     MAX_UTTERANCE_FILES = 500
     RING_SECONDS = 5.0
     MISS_RECENT_WINDOW_S = 30.0
 
-    def __init__(self) -> None:
+    def __init__(self, diag_dir: Optional[Path] = None) -> None:
+        # Resolved per instance, not at import: the corpus follows the data root
+        # (`app.ww_diag`), so a gate round that exports its own `LLOYD_DATA`
+        # writes its own corpus instead of appending through the round home's
+        # `.lloyd` symlink into the live one (#1444). `diag_dir` is the seam the
+        # offline replay scripts use to point at a corpus copy.
+        root = Path(diag_dir) if diag_dir is not None else _ww_diag_dir()
+        self.DIAG_DIR = root
+        self.UTTERANCES_DIR = root / "utterances"
+        self.MISSES_DIR = root / "misses"
+        self.SCORES_PATH = root / "scores.jsonl"
+        self.LABELS_PATH = root / "labels.jsonl"
         self.UTTERANCES_DIR.mkdir(parents=True, exist_ok=True)
         self.MISSES_DIR.mkdir(parents=True, exist_ok=True)
         # room_name -> {sr: int, buf: deque[np.ndarray int16], total: int}

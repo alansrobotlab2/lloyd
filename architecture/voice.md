@@ -1261,3 +1261,10 @@ and is history, not reference.
   the conf's `environment=` is the override; "lives only in `agent-tts.conf`"
   above describes the tree before that fix. Pinned by
   `tests/test_qwen3_tts_launcher.py` and `tests/test_voice_doc_claims.py`.
+- 2026-09-24 — #1444 landed: the wake-miss corpus is now `<data root>/ww_diag/`
+  (live: `~/lloyd-data/ww_diag/`), resolved by `app.ww_diag` for the worker that
+  writes it and for all four scripts that read it, so the hourly data snapshot
+  covers it, `protected_paths` refuses an `rm -r` over it the way it refuses one
+  over `voice_profiles`, and a gate round writes its own copy instead of
+  appending through its home's dot-directory into the live one. Pinned by
+  `tests/test_data_home.py` and `tests/test_protected_paths.py`.

@@ -15,7 +15,8 @@ hotword greedy lacks (`pick@s`, `voice.asr.prefer_biased`). Four corpora:
                insertions, and WER.
   LibriSpeech  the ASR eval corpus, clean and at 10 dB — general WER, which a
                bias toward a few names must not move.
-  real room    ~/.lloyd/ww_diag/utterances — no references, so the count is
+  real room    <data root>/ww_diag/utterances (app.ww_diag; live that is
+               ~/lloyd-data/ww_diag) — no references, so the count is
                of transcripts that CHANGE against greedy, printed for reading.
 
 Targets and distractors are Qwen3-TTS built-in voices, which the ASR model
@@ -39,14 +40,21 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "agent-services"))
 sys.path.insert(0, str(ROOT / "scripts" / "voice"))
+# Appended, not inserted: `app/` holds `paths.py`, `config.py` and the rest, and
+# pushing the tree to the front would shadow those for every later import.
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
 
 from asr_eval import add_noise, decode_audio, edit_distance, normalise, to_16k  # noqa: E402
 from replay import load_16k  # noqa: E402
 from voice import asr as voice_asr  # noqa: E402
+from app.ww_diag import diag_dir  # noqa: E402
 
 CORPUS = Path.home() / ".cache" / "lloyd-voice-eval" / "hotwords"
 LIBRI = Path.home() / ".cache" / "lloyd-voice-eval" / "librispeech_dummy_clean_validation.parquet"
-DIAG = Path.home() / ".lloyd" / "ww_diag"
+# The room corpus the worker writes, wherever this tree's data root puts it
+# (`app.ww_diag`, #1444) — not a home-relative directory nothing snapshots.
+DIAG = diag_dir()
 MODEL = ROOT / "agent-services" / "models" / "parakeet-tdt-v3"
 
 # Spoken forms a hotword may legitimately come out as.

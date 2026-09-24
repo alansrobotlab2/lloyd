@@ -19,13 +19,27 @@ ROOT = Path(__file__).resolve().parent.parent
 
 RUNTIME = (r"(?:sessions|event_logs|_pipeline|autonomy-runs|logs|usage\.db|workers\.db|"
            r"research\.db|mc-state\.json|voice_profiles|agent-services/logs|eval/baselines|"
-           r"data/tool_overrides\.yaml)")
+           r"data/tool_overrides\.yaml|ww_diag)")
+# `ww_diag` joined the list with #1444, and the enumeration alone would not have
+# caught it: the corpus was spelled as a hidden dot-directory in the account home
+# (`~/.lloyd/` plus the name), which no pattern below looked for because every
+# one of them expected the `lloyd/` segment of a path inside the code tree. So
+# the sweep needed a shape of its own. It is deliberately narrow — the account
+# home's dot-directory plus a data name, not "any dot-directory" — because
+# `~/.local/state/lloyd-*` and `~/.cache/lloyd-*` are state that lives outside
+# the root on purpose (`architecture/data-home.md`), and a pattern that alarmed
+# on those would be routed around.
+DOTDIR = re.compile(r"(?:~|\$HOME|\$\{HOME\}|%h|/home/[a-z_][a-z0-9_-]*)/\.lloyd/" + RUNTIME + r"(?![\w.-])")
 _Q = r"""["']"""
 PATTERNS = [
     # ~/lloyd/X, $HOME/lloyd/X, /home/<user>/lloyd/X, %h/lloyd/X
     re.compile(r"(?:~|\$HOME|\$\{HOME\}|%h|/home/[a-z_][a-z0-9_-]*)/lloyd/" + RUNTIME + r"(?![\w.-])"),
     # Path.home() / "lloyd" / "X"
     re.compile(r"Path\.home\(\)\s*/\s*" + _Q + r"lloyd" + _Q + r"\s*/\s*" + _Q + RUNTIME + _Q),
+    # ~/.lloyd/X — the account home's dot-directory (#1444)
+    DOTDIR,
+    # Path.home() / ".lloyd" / "X" — the same place, spelled in Python
+    re.compile(r"Path\.home\(\)\s*/\s*" + _Q + r"\.lloyd" + _Q + r"\s*/\s*" + _Q + RUNTIME + _Q),
     # LLOYD_HOME / "X", LIVE_CHECKOUT / "X", REPO / "X"
     re.compile(r"\b(?:LLOYD_HOME|LIVE_CHECKOUT|LIVE_ROOT|_LLOYD_ROOT|_LLOYD_HOME)\s*/\s*"
                + _Q + RUNTIME + _Q),
@@ -80,9 +94,21 @@ def test_the_patterns_catch_every_spelling_that_shipped():
         'stdout_logfile=/home/alansrobotlab/lloyd/logs/server.log',
         'SESSIONS="$HOME/lloyd/_pipeline/vault-derived/sessions"',
         "ExecStart=%h/lloyd/logs/x",
+        # Both spellings WakeMissCapture shipped with until #1444: the corpus in
+        # the account home's dot-directory, in a unit and in a reader. The first
+        # is built by concatenation because #1444's clause-4 grep forbids the
+        # literal in any tracked `.py`, a test's own fixture text included — the
+        # assembled string is what the pattern must still catch.
+        'DIAG_DIR = Path("~/.lloyd' + '/ww_diag").expanduser()',
+        'DIAG = Path.home() / ".lloyd" / "ww_diag"',
     ]
     for line in shipped:
         assert any(p.search(line) for p in PATTERNS), line
     for fine in ('Path.home() / "lloyd" / "scripts"', "~/lloyd/.venvs/lloyd/bin/python",
-                 "~/lloyd-data/sessions", 'LLOYD_HOME / "config.yaml"'):
+                 "~/lloyd-data/sessions", 'LLOYD_HOME / "config.yaml"',
+                 # The root's own copy of the corpus, and the state that lives
+                 # outside the root deliberately: none is a finding.
+                 'DIAG = Path("~/lloyd-data/ww_diag").expanduser()',
+                 '~/.local/state/lloyd-automod/promotions.jsonl',
+                 '~/.cache/lloyd-voice-eval/wake-tts'):
         assert not any(p.search(fine) for p in PATTERNS), fine

@@ -45,6 +45,9 @@ had in the tree, so a path `~/lloyd/X` became `~/lloyd-data/X`:
 │   └── services/             # the engines' supervisor logs (was agent-services/logs/)
 ├── eval/baselines/
 ├── voice_profiles/
+├── ww_diag/                  # wake-miss corpus (scores.jsonl, utterances/, misses/);
+│                             #   reached the root from the account home's dot-dir,
+│                             #   not from the tree, so the move missed it (#1444)
 ├── desktop/                  # the computer-use lease, created on first use
 ├── data/tool_overrides.yaml
 ├── usage.db  workers.db  research.db

@@ -15,6 +15,7 @@ databases, `_pipeline/` and logs went with the code. They moved to
 """
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -24,9 +25,11 @@ import sys
 import types
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import app.paths as paths
+from app import ww_diag
 
 ROOT = Path(__file__).resolve().parent.parent
 GUARDIAN_DIR = ROOT / "agent-services" / "guardian"
@@ -631,3 +634,153 @@ def test_the_migration_refuses_while_a_process_holds_a_source_open(tmp_path):
         holder.kill()
         holder.wait()
     assert (tree / "logs" / "server.err").exists() and not (data / ".lloyd-data-root").exists()
+
+
+# ── the wake-miss diagnostic corpus (#1444) ────────────────────────────────
+#
+# `WakeMissCapture` wrote its corpus into a dot-directory under the account home
+# instead of under the data root, and it was the one voice-produced path the
+# 2026-09-22 move could not find by rewriting tree-relative paths, because it
+# never lived in the tree. What that cost, each half reproduced by a test below:
+#
+#   * no snapshot — `scripts/backup/snapshot-data.sh` reads
+#     `${LLOYD_DATA:-…/lloyd-data}` alone, and the box's other snapshotter
+#     (snapper, one config, `SUBVOLUME="/"`) does not reach that dot-directory;
+#   * outside the delete guard — `protected_roots()` protects the data root, so
+#     `rm -r` over `<data root>/ww_diag` is refused while the same call over the
+#     home's copy was allowed (the guard test is in test_protected_paths.py);
+#   * no isolation under a gate — `scripts/automod/worktree.py:HOME_LINK_SKIP`
+#     skips `lloyd` and `lloyd-data`, so the home's dot-directory *is* symlinked
+#     into a round and candidate code appended to the live corpus. Under the root
+#     a round gets `round_data_root`, which the gate exports as `LLOYD_DATA`.
+
+
+CORPUS_READERS = [
+    ("scripts/ww_diag_summary.py", "DEFAULT_PATH", "scores.jsonl"),
+    ("scripts/voice/replay.py", "DIAG", None),
+    ("scripts/voice/wake_eval.py", "DIAG", None),
+    ("scripts/voice/hotword_eval.py", "DIAG", None),
+]
+
+
+def _import_fresh(rel: str, name: str):
+    """Import one of this tree's scripts under a name no earlier test has used,
+    so its module body re-runs against the environment the caller set up."""
+    path = ROOT / rel
+    assert path.is_file(), f"{rel} is not in the tree — the check found nothing"
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_corpus_layout_is_resolved_once_and_hangs_off_the_data_root(tmp_path, monkeypatch):
+    """`app.ww_diag` is the single expression of the layout, and the corpus is a
+    *top-level folder* of the root — which is the level `protected_roots()`
+    refuses to delete wholesale, so the guard covers it without a second list."""
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path))
+    corpus = tmp_path / ww_diag.CORPUS_DIR
+    assert ww_diag.diag_dir() == corpus
+    assert ww_diag.utterances_dir() == corpus / "utterances"
+    assert ww_diag.misses_dir() == corpus / "misses"
+    assert ww_diag.scores_path() == corpus / "scores.jsonl"
+    assert ww_diag.labels_path() == corpus / "labels.jsonl"
+    assert ww_diag.diag_dir().parent == ww_diag.data_root()
+
+
+def test_wake_miss_capture_writes_under_the_data_root_not_the_home(tmp_path, monkeypatch):
+    """Clause 1: with `LLOYD_DATA` set, constructing the rig creates the corpus
+    there, an utterance lands in it, and the home's dot-directory is never
+    created — the directory a round's home symlinks straight to the live corpus."""
+    home, data = tmp_path / "home", tmp_path / "data"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("LLOYD_DATA", str(data))
+    if str(ROOT / "agent-services") not in sys.path:
+        sys.path.append(str(ROOT / "agent-services"))
+    import livekit_worker
+
+    capture = livekit_worker.WakeMissCapture()
+    assert capture.DIAG_DIR == data / ww_diag.CORPUS_DIR
+    assert (capture.UTTERANCES_DIR).is_dir() and (capture.MISSES_DIR).is_dir()
+    assert not (home / ".lloyd").exists()
+
+    capture.record_utterance(
+        utterance_id="tst", room="lloyd-test", identity="alan", duration_s=0.5,
+        rms_mean=0.01, rms_peak=0.02, voiced_ratio=0.4, ww_ran=True,
+        ww_name="lloyd", ww_score=0.1, ww_threshold=0.4, ww_fired=False,
+        in_continuation=False, stt_text="go", stt_latency_s=0.1,
+        samples=np.zeros(8000, dtype=np.int16), sample_rate=16000)
+
+    wav = data / ww_diag.CORPUS_DIR / "utterances" / "tst.wav"
+    assert wav.is_file()
+    row = json.loads((data / ww_diag.CORPUS_DIR / "scores.jsonl").read_text().splitlines()[-1])
+    assert row["utterance_id"] == "tst" and row["ww_fired"] is False
+    assert Path(row["audio_path"]) == wav, "the record must point inside the corpus"
+    assert not (home / ".lloyd").exists(), "nothing may be created under the home"
+
+
+@pytest.mark.parametrize("rel,attr,child", CORPUS_READERS)
+def test_each_corpus_reader_names_the_data_root_corpus(rel, attr, child, tmp_path, monkeypatch):
+    """Clause 2: all four readers resolve the corpus through `app.ww_diag`, so
+    `LLOYD_DATA` moves a reader together with the writer. Each is imported fresh
+    with the variable set, because each binds the path at import."""
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path))
+    mod = _import_fresh(rel, f"corpus_reader_{Path(rel).stem}")
+    got = getattr(mod, attr)
+    want = tmp_path / ww_diag.CORPUS_DIR if child is None else tmp_path / ww_diag.CORPUS_DIR / child
+    assert got == want, f"{rel} resolves {attr} to {got}, not {want}"
+    assert "/.lloyd" not in str(got), f"{rel} still keeps a home-relative corpus path"
+
+
+#: The pre-#1444 spelling, assembled rather than written: the clause-4 grep
+#: forbids the literal in any tracked `.py`, and the sweep's own test file is a
+#: tracked `.py`. Every use of this name goes through `_home_relative_hits`, so
+#: the sweep and its positive control cannot drift into hunting different strings.
+BANNED_SPELLING = ".lloyd" + "/ww_diag"
+
+
+def _home_relative_hits(root: Path, rels: list[str]) -> list[str]:
+    """The clause-4 sweep: which of `rels` carry the pre-move spelling."""
+    return [rel for rel in rels
+            if BANNED_SPELLING in (root / rel).read_text(encoding="utf-8", errors="replace")]
+
+
+def test_no_python_file_in_the_repo_names_the_home_relative_corpus():
+    """Clause 4, run as the clause's own grep: the corpus has one location, and
+    the second spelling is what let the writer and four readers drift.
+
+    The tracked set is the repo: `git ls-files`, because the tree also carries
+    `.venvs/` and `qmd/`, and the denominator is printed beside the result — an
+    empty listing would otherwise read as a clean sweep the same way a clean
+    sweep does."""
+    listed = subprocess.run(["git", "-C", str(ROOT), "ls-files", "-z", "*.py"],
+                            capture_output=True, check=True).stdout
+    tracked = [raw.decode() for raw in listed.split(b"\0") if raw]
+    assert len(tracked) > 500, f"only {len(tracked)} tracked .py files: the check saw nothing"
+    hits = _home_relative_hits(ROOT, tracked)
+    assert hits == [], f"still naming the pre-#1444 location: {hits}"
+
+
+def test_the_home_relative_sweep_catches_the_spelling_that_shipped(tmp_path):
+    """The positive control clause 4 asks for, on the same helper the sweep above
+    runs — so the empty result it reports is a sweep that works, not a sweep
+    pointed at a string no file could ever contain.
+
+    The caught line is the exact form the worker shipped until #1444
+    (`Path("~/.lloyd` + `/ww_diag").expanduser()`), assembled here for the same
+    reason the sweep assembles its pattern: the literal is what this pair of tests
+    exists to keep out of the tree."""
+    offender = tmp_path / "worker.py"
+    offender.write_text('DIAG_DIR = Path("~/.lloyd' + '/ww_diag").expanduser()\n')
+    other = tmp_path / "fine.py"
+    other.write_text('DIAG = Path("~/lloyd-data' + "/ww_diag\").expanduser()\n")
+
+    hits = _home_relative_hits(tmp_path, ["worker.py", "fine.py"])
+    assert hits == ["worker.py"], (
+        f"the sweep matched {hits}: it neither catches the shipped spelling nor "
+        "leaves the data-root spelling alone, so the clean repo result means nothing")
+    # And the file this control lives in is itself inside the swept set: the
+    # assembly above is why that is possible.
+    assert _home_relative_hits(ROOT, ["tests/test_data_home.py"]) == []

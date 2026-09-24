@@ -404,7 +404,9 @@ async def voice_ww_miss(request: Request):
     Forwards to the LiveKit worker's localhost endpoint
     (default http://127.0.0.1:8501/ww_miss). The worker dumps its
     per-room rolling raw-audio ring + recent score records to
-    ~/.lloyd/ww_diag/misses/<ts>_<label>.{wav,json}. Use this when you
+    `<data root>/ww_diag/misses/<ts>_<label>.{wav,json}` — the corpus
+    `app.ww_diag` resolves, which on this box is
+    `~/lloyd-data/ww_diag/misses/…`. Use this when you
     just said "Hey Lloyd" and Lloyd didn't respond — capturing the audio
     that the wake word didn't fire on is the only way to debug it.
 
@@ -448,8 +450,10 @@ async def voice_ww_miss(request: Request):
 async def voice_ww_label(request: Request):
     """Attach a ground-truth label to an existing wake-word capture.
 
-    Use this after listening to ~/.lloyd/ww_diag/utterances/<id>.wav or
-    ~/.lloyd/ww_diag/misses/<ts>_<label>.wav to confirm whether the user
+    Use this after listening to `<data root>/ww_diag/utterances/<id>.wav` or
+    `<data root>/ww_diag/misses/<ts>_<label>.wav` — the corpus
+    `app.ww_diag` resolves, `~/lloyd-data/ww_diag/…` on this box — to confirm
+    whether the user
     actually said the wake word in that recording. The replay/analysis
     script in Phase 1c uses these labels to compute true detection rate
     vs false-accept rate per device class.

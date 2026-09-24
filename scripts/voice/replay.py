@@ -11,7 +11,8 @@ a measurement rather than a guess.
 Two subcommands:
 
   compare-wake   False accepts, old shape against new, on the diagnostic
-                 corpus the worker writes (~/.lloyd/ww_diag/utterances/).
+                 corpus the worker writes (`<data root>/ww_diag/utterances/`,
+                 resolved by `app.ww_diag` — `~/lloyd-data/ww_diag/…` live).
                  Old shape = reset the model, sweep a closed utterance. New
                  shape = one continuous stream. Utterances the log recorded as
                  a wake are excluded; nothing else in that corpus is one.
@@ -24,7 +25,7 @@ Two subcommands:
                  which is what a live stream looks like.
 
     python scripts/voice/replay.py compare-wake
-    python scripts/voice/replay.py run ~/.lloyd/ww_diag/misses/*.wav --asr
+    python scripts/voice/replay.py run ~/lloyd-data/ww_diag/misses/*.wav --asr
 
 2026-09-17, threshold 0.4, 496 non-wake utterances (0.17 h): the sweep false-
 accepted 6 times, the stream 0 times.
@@ -41,13 +42,22 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "agent-services"))
+# Appended, not inserted: `app/` holds `paths.py`, `config.py` and the rest, and
+# pushing the tree to the front would shadow those for every later import.
+if str(ROOT) not in sys.path:
+    sys.path.append(str(ROOT))
 
 from voice.pipeline import HearingPipeline  # noqa: E402
 from voice.resample import StreamResampler, to_int16  # noqa: E402
 from voice.vad import SileroSegmenter  # noqa: E402
 from voice.wake import FRAME_SAMPLES, WakeWordFactory  # noqa: E402
+from app.ww_diag import diag_dir  # noqa: E402
 
-DIAG = Path.home() / ".lloyd" / "ww_diag"
+#: The corpus the worker writes, wherever this tree's data root puts it
+#: (`app.ww_diag`, #1444). It used to be a home-relative directory, which no
+#: snapshot covered, no delete guard reached, and which a gate round's symlinked
+#: home pointed straight back at the live corpus.
+DIAG = diag_dir()
 MODELS = ROOT / "agent-services" / "models"
 
 
