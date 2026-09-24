@@ -653,6 +653,45 @@ def _consolidation_gate_source():
     return source[start:end]
 
 
+#: The two roots the lifted gate is redirected onto, in the order the row names them.
+GATE_ROOTS = ("MEMORY_ROOT", "SESSIONS_DIR")
+
+
+def _rewrite_gate_roots(source: str, memory_root, sessions) -> str:
+    """Point the gate's two root assignments at the fixture, whoever they point at now.
+
+    Matched on the **assignment target**, not on the literal to the right of it. The
+    first version replaced whole right-hand sides, so when vault commit `2fdd5b32`
+    (2026-09-23) moved the skill's sessions root from `~/lloyd/sessions` to
+    `~/lloyd-data/sessions`, the `.replace()` became a no-op: the extracted gate kept
+    its real paths, and one guard went red on every promotion on the board (#1426).
+    A rewrite keyed to one spelling of a path silently tests the live filesystem the
+    moment the path moves — which is the same "check reads a location the writer
+    moved" shape this row exists to catch in someone else's gate.
+
+    An assignment the source does not contain raises rather than falling through:
+    running the lifted text with one live root still in it would print a real verdict
+    about `~/obsidian`, and a row that reports a verdict it did not isolate is the
+    failure this probe was written to prevent.
+    """
+    values = {"MEMORY_ROOT": memory_root, "SESSIONS_DIR": sessions}
+    missing = []
+    for name in GATE_ROOTS:
+        pattern = re.compile(rf"^{re.escape(name)} = .*", re.MULTILINE)
+        if pattern.search(source) is None:
+            missing.append(name)
+            continue
+        source = pattern.sub(lambda m, n=name: f"{n} = Path({str(values[n])!r})",
+                             source, count=1)
+    if missing:
+        raise RowError(
+            "the Phase-0 gate no longer assigns "
+            + " and ".join(missing)
+            + " at the top level this extractor rewrites; update the extractor rather "
+            "than trusting this row")
+    return source
+
+
 def _probe_consolidation(row):
     args = row.get("args", {})
     with fixture_root("consolidation") as root:
@@ -664,15 +703,7 @@ def _probe_consolidation(row):
             (memory_root / ".consolidate-lock").write_text("1")
         elif args.get("lock") not in (None, "absent"):
             raise RowError(f"unknown lock fault {args.get('lock')!r}")
-        source = (_consolidation_gate_source()
-                  .replace('MEMORY_ROOT = Path.home() / "obsidian" / "lloyd"',
-                           f'MEMORY_ROOT = Path({str(memory_root)!r})')
-                  .replace('SESSIONS_DIR = Path.home() / "lloyd" / "sessions"',
-                           f'SESSIONS_DIR = Path({str(sessions)!r})'))
-        if "MEMORY_ROOT = Path(" not in source or "SESSIONS_DIR = Path(" not in source:
-            raise RowError("the Phase-0 gate no longer assigns MEMORY_ROOT/SESSIONS_DIR "
-                           "in the shape the extractor rewrites; update the extractor "
-                           "rather than trusting this row")
+        source = _rewrite_gate_roots(_consolidation_gate_source(), memory_root, sessions)
         script = root / "phase0.py"
         script.write_text(source)
         result = subprocess.run([sys.executable, str(script)], capture_output=True,

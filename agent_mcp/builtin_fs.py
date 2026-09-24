@@ -37,6 +37,11 @@ from agent_mcp._shared import (
     text_result,
 )
 from app.atomic_io import commit_lock, write_text_durable
+# One byte-ceiling definition for every lane that can rewrite the two loaded
+# memory files — this one, `memory_add`/`memory_replace`, `vault_write`, and the
+# vault-round validator — with the number and the wording owned by `prompt_surface`.
+# Stdlib-only, so it costs this module nothing to import (#1010).
+from app.memory_ceiling import memory_write_error
 
 logger = logging.getLogger("lloyd-builtin-fs")
 
@@ -423,6 +428,16 @@ def _write(args: dict, mut: _Mutation | None = None) -> str:
                 except OSError:
                     mut.pre_bytes = None
 
+            # #1010/#507: `lloyd/MEMORY.md` and `lloyd/USER.md` load into every
+            # user-platform system prompt and this is the lane the nightly
+            # knowledge-write job uses — the one that grew USER.md 48,068 B →
+            # 95,302 B in five days with nothing able to refuse it, because
+            # `memory_add` was the only guarded writer. A refusal returns before
+            # `_ledger_begin`, so a write that never happened enters no undo record.
+            ceiling_msg = memory_write_error(p, content)
+            if ceiling_msg:
+                return json.dumps({"error": ceiling_msg})
+
             _ledger_begin(mut, op="write" if mut.existed else "create")
 
             try:
@@ -518,6 +533,12 @@ def _edit(args: dict, mut: _Mutation | None = None) -> str:
                 replaced = 1
 
             mut.pre_bytes = pre_bytes
+            # Same ceiling as `Write`, priced on `updated` — the exact bytes about
+            # to land — and allowed to shrink an over-ceiling file, which is how a
+            # trim through this same lane stays possible after a refusal.
+            ceiling_msg = memory_write_error(p, updated)
+            if ceiling_msg:
+                return json.dumps({"error": ceiling_msg})
             _ledger_begin(mut, op="edit")
 
             try:

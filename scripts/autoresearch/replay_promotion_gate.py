@@ -103,10 +103,19 @@ def _contract_refusals(variant_dir: Path) -> list[str]:
         import prompt_surface
     except ImportError:
         return []
-    memory = variant_dir / "MEMORY.md"
+    def _text(name: str) -> str | None:
+        p = variant_dir / name
+        return p.read_text(encoding="utf-8") if p.exists() else None
+
+    # Three surfaces because `promote` now checks three, and this function's entire
+    # claim is that it runs *that* guard. A replay still reading two would print a
+    # historical verdict computed under a guard that no longer exists and present the
+    # difference as a finding — the reporting/enforcement drift #1069 is the record
+    # of, in the opposite direction.
     return list(prompt_surface.check_contract(
         soul.read_text(encoding="utf-8"),
-        memory.read_text(encoding="utf-8") if memory.exists() else None))
+        _text("MEMORY.md"),
+        _text("USER.md")))
 
 
 def replay(cfg: AutoresearchConfig, ledger_path: Path,

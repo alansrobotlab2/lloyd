@@ -792,7 +792,18 @@ def contract_refusals(overlay_dir: Path, shape_history: list[dict[str, Any]] | N
     soul = _prospective(overlay_dir, "SOUL.md")
     if soul is None:
         return ["no SOUL.md to check, in the overlay or on disk"]
-    errors = prompt_surface.check_contract(soul, _prospective(overlay_dir, "MEMORY.md"))
+    # All three loaded surfaces, not the two this call used to pass. USER.md is in
+    # `CANONICAL_PROMPTS` above and in `common._canonical_prompt_paths`, so
+    # `apply_overlay` has always been able to overwrite it and
+    # `hypothesis_generator` has always been shown its tail as a mutation target —
+    # the search could write the largest prompt file while the guard that exists
+    # because of #464 could not see it (#1010). #1008's shape is the concrete case:
+    # an overlay holding only a USER.md that copies SOUL.md reached disk.
+    errors = prompt_surface.check_contract(
+        soul,
+        _prospective(overlay_dir, "MEMORY.md"),
+        _prospective(overlay_dir, "USER.md"),
+    )
     # The ratchet compares against a series of SOUL.md candidates (`surface="SOUL.md"`
     # at the call site), so it may only be applied to an overlay that carries one. A
     # MEMORY.md-only overlay has no SOUL.md of its own, so `soul` here is the live

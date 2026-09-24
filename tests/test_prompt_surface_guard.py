@@ -340,10 +340,19 @@ def test_promote_does_not_refuse_an_overlay_that_changes_nothing(tmp_path, monke
 
 # ── writer 1: the loop's vault route ─────────────────────────────────────────
 
-def _fake_vault(tmp_path: Path, soul: str, memory: str = "# Lloyd Long-Term Memory\n") -> Path:
+def _fake_vault(tmp_path: Path, soul: str, memory: str = "# Lloyd Long-Term Memory\n",
+                user: str = "# User (Alan) — Memory & Context\n") -> Path:
+    """A fixture vault holding all three loaded prompt files.
+
+    USER.md is written by default because `vault_round.contract_errors` now reads
+    all three (#1010): a helper that omitted it would silently make every new test
+    here a test of a missing file, which `check_paths` deliberately treats as "not
+    changing that surface".
+    """
     (tmp_path / "lloyd").mkdir(parents=True, exist_ok=True)
     (tmp_path / "lloyd" / "SOUL.md").write_text(soul, encoding="utf-8")
     (tmp_path / "lloyd" / "MEMORY.md").write_text(memory, encoding="utf-8")
+    (tmp_path / "lloyd" / "USER.md").write_text(user, encoding="utf-8")
     return tmp_path
 
 
@@ -770,3 +779,250 @@ def test_the_recorded_block_labels_the_live_and_candidate_surfaces(tmp_path, mon
     assert fields["candidate_surface"] is None
     assert fields["candidate_gate_share"] is None
     assert fields["candidate_prohibition_ratio"] is None
+
+
+# ── the third surface: USER.md reaches both writers (#1010) ───────────────────
+#
+# `prompt_surface` is the enforcement point — `tests/test_prompt_surface_budget.py`
+# says so in its own header — and both writers called it with SOUL.md and MEMORY.md.
+# `lloyd/USER.md`, the largest of the three loaded prompt files, was writable by both
+# and read by neither: `vault_round.CONTRACT_PATHS` did not name it, so a diff whose
+# only change was USER.md returned `[]` before the check even ran, and
+# `promote.contract_refusals` passed two surfaces where the search could write three.
+# The search could: `common._canonical_prompt_paths` has always handed USER.md to
+# `mutation_scope.writable_paths`, and `hypothesis_generator` has always put its tail
+# in front of the model as a mutation target.
+#
+# #1008 is the same hole's other shape and its check is carried here: an overlay
+# holding only a USER.md that copied SOUL.md passed `contract_refusals` and reached
+# disk — a #464 paste wearing a different filename.
+
+OVER_CEILING_USER = "x" * (ps.USER_MD_CEILING_BYTES + 1)
+
+
+def test_the_vault_route_checks_user_md_when_a_diff_names_only_user_md(tmp_path,
+                                                                       monkeypatch):
+    """Clause 2: a USER.md-only diff reaches the check, and is refused by name and limit.
+
+    The diff is the smallest possible provocation — one file, the one the guard used
+    to ignore — so a `[]` here can only mean the scope guard never learned the name.
+    SOUL.md is a healthy fixture contract and MEMORY.md is the default stub, so
+    nothing else in the vault gives the refusal an excuse to appear.
+    """
+    from scripts.automod import vault_round as VR
+
+    monkeypatch.setattr(VR, "VAULT",
+                        _fake_vault(tmp_path, GOOD_CONTRACT, user=OVER_CEILING_USER))
+
+    errs = VR.contract_errors(["lloyd/USER.md"])
+
+    assert len(errs) == 1, errs
+    assert errs[0].startswith("prompt surface: USER.md is "), errs
+    assert f"{ps.USER_MD_CEILING_BYTES:,}-byte ceiling" in errs[0], errs
+
+
+def test_a_healthy_user_md_diff_produces_no_size_error_naming_the_file(tmp_path,
+                                                                       monkeypatch):
+    """The containment read, clause 2's negative control.
+
+    Asserted as "no error names USER.md or its limit", not as `== []`, because
+    `contract_errors` reports everything the surface checks find and a fixture can
+    legitimately trip one of the others; what must be absent is the size refusal for
+    the file this clause is about. Without this half the refusal test is satisfiable
+    by a guard that refuses any diff naming USER.md, including the one-byte-under
+    case that #507's trim is sitting in.
+    """
+    from scripts.automod import vault_round as VR
+
+    under = "x" * (ps.USER_MD_CEILING_BYTES - 1)
+    monkeypatch.setattr(VR, "VAULT",
+                        _fake_vault(tmp_path, GOOD_CONTRACT, user=under))
+
+    errs = VR.contract_errors(["lloyd/USER.md"])
+
+    assert not [e for e in errs
+                if "USER.md" in e and f"{ps.USER_MD_CEILING_BYTES:,}" in e], errs
+
+    # And the same fixture one byte over must refuse. Without this the assertion
+    # above is also satisfied by a writer that returned before reaching the check —
+    # the exact shape #1010 was filed on, where `contract_errors` short-circuited on
+    # an unrecognised path and reported clean. Same vault, same diff, one variable.
+    _fake_vault(tmp_path, GOOD_CONTRACT, user="x" * (ps.USER_MD_CEILING_BYTES + 1))
+
+    over = [e for e in VR.contract_errors(["lloyd/USER.md"])
+            if "USER.md" in e and f"{ps.USER_MD_CEILING_BYTES:,}" in e]
+    assert len(over) == 1, (
+        f"the containment read is vacuous: this fixture never reached the size "
+        f"check even when USER.md was over its ceiling — {errs + over}"
+    )
+
+
+def test_a_skill_only_diff_still_runs_no_prompt_check_with_an_oversize_user_md(
+    tmp_path, monkeypatch,
+):
+    """The scoping half, held in place while the scope widened.
+
+    `CONTRACT_PATHS` gained a third name, which is exactly the edit that could have
+    made every round in the loop pay for somebody else's oversized memory file — the
+    failure mode the `live_vault` split exists to prevent. A diff naming only a skill
+    must still short-circuit, and the oversize USER.md on disk is here to make a
+    leak visible rather than to be tested for its own sake.
+    """
+    from scripts.automod import vault_round as VR
+
+    monkeypatch.setattr(VR, "VAULT",
+                        _fake_vault(tmp_path, GOOD_CONTRACT, user=OVER_CEILING_USER))
+
+    assert VR.contract_errors(["skills/foo/SKILL.md"]) == []
+
+
+def test_the_contract_paths_are_exactly_the_files_the_prompt_loads():
+    """The guard's file list and the loader's file list are the same set.
+
+    #1010 is a drift defect with a specific shape: `prompt_builder` decided what
+    reaches the model, `vault_round` decided what gets checked, and nothing compared
+    the two — so USER.md was loaded into every user-platform turn while the writer
+    that could rewrite it was told it was not a contract file. Asserting the pair
+    equal is what keeps the next loaded surface from reopening the same hole; it
+    reads `prompt_builder` rather than a literal list, because a literal here would
+    agree with itself whatever the loader started doing.
+
+    SOUL.md appears in the guard's tuple and not in `_memory_files_for`, which is the
+    asymmetry this test encodes rather than hides: SOUL.md is the contract, loaded
+    through its own `_load_soul`, and `CONTRACT_PATHS` names it because the vault
+    route can commit it.
+    """
+    from scripts.automod import vault_round as VR
+
+    import prompt_builder as pb
+
+    loaded = {f"lloyd/{name}" for name in pb._memory_files_for("mission-control")}
+    assert set(VR.CONTRACT_PATHS) == loaded | {"lloyd/SOUL.md"}, VR.CONTRACT_PATHS
+
+
+def test_promote_refuses_an_overlay_holding_only_an_oversize_user_md(tmp_path,
+                                                                     monkeypatch):
+    """Clause 3: the search's own write path refuses the same thing, named.
+
+    #1008's carried case. The overlay holds one file, USER.md, over its ceiling, and
+    nothing else; the canonical SOUL.md is the fixture contract so the refusal can
+    only come from the size invariant, and MEMORY.md is patched to an absent path so
+    the live file — which is a real document with its own history — cannot appear in
+    the result at all. A test that let the live pair in could fail for reasons this
+    clause does not own.
+    """
+    from scripts.autoresearch import promote as P
+
+    live = tmp_path / "prompts"
+    live.mkdir()
+    (live / "SOUL.md").write_text(GOOD_CONTRACT, encoding="utf-8")
+    monkeypatch.setattr(
+        P, "CANONICAL_PROMPTS",
+        {"SOUL.md": live / "SOUL.md",
+         "MEMORY.md": live / "absent-MEMORY.md",
+         "USER.md": live / "absent-USER.md"},
+    )
+    overlay = tmp_path / "variant"
+    overlay.mkdir()
+    (overlay / "USER.md").write_text(OVER_CEILING_USER, encoding="utf-8")
+
+    errs = P.contract_refusals(overlay)
+
+    assert len(errs) == 1, errs
+    assert errs[0].startswith("USER.md is "), errs
+    assert f"{ps.USER_MD_CEILING_BYTES:,}-byte ceiling" in errs[0], errs
+
+
+def test_promote_refuses_a_user_md_that_pasted_the_contract(tmp_path, monkeypatch):
+    """#1008's substance: a USER.md that copies SOUL.md is the #464 paste again.
+
+    The paste invariant was MEMORY.md's, spelled into two hard-coded strings, which
+    is how a check with a filename in its prose came to be run on exactly one file.
+    The overlay here is under its byte ceiling on purpose: this must be the duplicate
+    contract that refuses it, not the size guard arriving late.
+    """
+    from scripts.autoresearch import promote as P
+
+    live = tmp_path / "prompts"
+    live.mkdir()
+    (live / "SOUL.md").write_text(GOOD_CONTRACT, encoding="utf-8")
+    monkeypatch.setattr(
+        P, "CANONICAL_PROMPTS",
+        {"SOUL.md": live / "SOUL.md",
+         "MEMORY.md": live / "absent-MEMORY.md",
+         "USER.md": live / "absent-USER.md"},
+    )
+    pasted = GOOD_CONTRACT[: ps.USER_MD_CEILING_BYTES - 100]
+    overlay = tmp_path / "variant"
+    overlay.mkdir()
+    (overlay / "USER.md").write_text(pasted, encoding="utf-8")
+
+    errs = P.contract_refusals(overlay)
+
+    assert any("USER.md opens with SOUL.md's H1" in e for e in errs), errs
+    assert not [e for e in errs if "byte ceiling" in e], errs
+
+
+def test_a_no_op_overlay_reports_no_size_error_for_user_md(tmp_path, monkeypatch):
+    """Clause 3's containment read: nothing changed, so nothing is refused.
+
+    "Returns `[]`" is not the assertion while #1069 is unlanded, because
+    `contract_refusals` on a no-op overlay reads the live pair and has refused for
+    reasons of its own before; what this clause owns is that no refusal names USER.md
+    or quotes its limit. All three canonical paths point into a fixture vault so the
+    result depends on the guard and not on what the nightly wrote this morning.
+    """
+    from scripts.autoresearch import promote as P
+
+    vault = _fake_vault(tmp_path, SOUL_FM, FRONT_MATTER + MEMORY_BODY)
+    monkeypatch.setattr(
+        P, "CANONICAL_PROMPTS",
+        {name: vault / "lloyd" / name for name in
+         ("SOUL.md", "MEMORY.md", "USER.md")},
+    )
+    overlay = tmp_path / "variant"
+    overlay.mkdir()
+
+    errs = P.contract_refusals(overlay)
+
+    assert not [e for e in errs
+                if "USER.md" in e and f"{ps.USER_MD_CEILING_BYTES:,}" in e], errs
+
+    # Same overlay directory, same canonical fixtures, one over-ceiling file added:
+    # it must refuse. A pure absence assertion is also the output of a guard that
+    # bailed out early (#1010's own shape — `contract_errors` returning `[]` before
+    # the check ran), so the pair is what makes this a containment read rather than
+    # a description of a code path nobody reached.
+    (overlay / "USER.md").write_text(OVER_CEILING_USER, encoding="utf-8")
+
+    over = [e for e in P.contract_refusals(overlay)
+            if "USER.md" in e and f"{ps.USER_MD_CEILING_BYTES:,}" in e]
+    assert len(over) == 1, (
+        f"the containment read is vacuous: this overlay reached the size check for "
+        f"neither an under- nor an over-ceiling USER.md — {errs + over}"
+    )
+
+
+def test_the_replay_guard_refuses_the_same_overlay_promote_would(tmp_path):
+    """The third copy of the guard reads all three surfaces, or its verdict lies.
+
+    `replay_promotion_gate._contract_refusals` exists to re-derive what `promote`
+    decided, from a variant directory that was stored months ago. If it read two
+    surfaces while `promote` read three, every historical replay would print a verdict
+    computed under a guard that no longer exists and call the difference a finding —
+    which is #1069's reporting/enforcement split in the opposite direction. Asserted
+    on behaviour rather than on a call signature, because a signature can carry a
+    third argument and still drop it on the floor.
+    """
+    from scripts.autoresearch import replay_promotion_gate as R
+
+    variant = tmp_path / "variant"
+    variant.mkdir()
+    (variant / "SOUL.md").write_text(GOOD_CONTRACT, encoding="utf-8")
+    (variant / "USER.md").write_text(OVER_CEILING_USER, encoding="utf-8")
+
+    errs = R._contract_refusals(variant)
+
+    assert len(errs) == 1, errs
+    assert errs[0].startswith("USER.md is "), errs
+    assert f"{ps.USER_MD_CEILING_BYTES:,}-byte ceiling" in errs[0], errs

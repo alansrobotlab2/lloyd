@@ -37,6 +37,10 @@ from typing import Optional
 
 from app.atomic_io import commit_lock, write_text_durable
 from app.config import service_url
+# The loaded-memory byte ceiling, shared with `memory_add`/`memory_replace` and
+# Write/Edit. Stdlib-only module, number and wording owned by `prompt_surface`
+# (#1010).
+from app.memory_ceiling import memory_write_error
 from mcp.types import Tool
 
 from agent_mcp._shared import (
@@ -1422,6 +1426,13 @@ def _vault_write(params: dict) -> dict:
         target = VAULT / path
         if not target.resolve().is_relative_to(VAULT.resolve()):
             return _err("path escapes vault root", ErrorCode.PATH_ESCAPE)
+        # The third lane onto the same two files (`memory_add`, Write/Edit, this),
+        # so it carries the same ceiling — a guard on one lane only is a guard on
+        # whichever lane the writer did not choose. Refusal, not commit: it returns
+        # before the lock, the ledger and the mkdir, like the escape check above it.
+        ceiling_msg = memory_write_error(target, content)
+        if ceiling_msg:
+            return _err(ceiling_msg, ErrorCode.INVALID_PARAM)
         target.parent.mkdir(parents=True, exist_ok=True)
         # Same lock key the memory tools and Write/Edit take: `vault_write` with
         # path `lloyd/MEMORY.md` is the same state as `memory_add`, spelled a

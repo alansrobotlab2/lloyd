@@ -15,7 +15,8 @@ So the invariants move here, and the three consumers share one definition:
 * `tests/test_prompt_surface_budget.py` imports them, and its live-vault
   group is marked `live_vault` so the gate can exclude it.
 * `scripts/automod/vault_round.py` runs `check_contract` before it commits
-  `lloyd/SOUL.md` or `lloyd/MEMORY.md`, alongside the loaders it already runs.
+  `lloyd/SOUL.md`, `lloyd/MEMORY.md` or `lloyd/USER.md`, alongside the loaders
+  it already runs.
 * `scripts/autoresearch/promote.py` runs it before `apply_overlay`, which is
   the writer that actually caused #464 and #465 — an hourly job that copied a
   generated variant over the live contract with no gate, no test and no
@@ -23,13 +24,19 @@ So the invariants move here, and the three consumers share one definition:
 
 Stdlib only, and no import of `prompt_builder`: `vault_round` executes its
 validators in a fresh interpreter and `promote` runs inside a worker, so a
-heavy or circular import here would be paid on both paths.
+heavy or circular import here would be paid on both paths. `agent_mcp/session.py`
+imports it through `app.memory_ceiling` for the same reason — that module holds
+the path arithmetic, this one holds the number, so the ceiling a tool refuses at
+and the ceiling a vault round refuses at cannot be set apart.
 
 The ceilings are growth tripwires, not descriptions of today. #377 landed the
 gate stack at 48.2% and the prohibition ratio at 19%; the ceilings sit above
-both so that a *change* trips them, rather than the file as it shipped.
+both so that a *change* trips them, rather than the file as it shipped. The
+same is true of the two byte ceilings, and one of them is deliberately above
+the live file — see `MEMORY_MD_CEILING_BYTES`.
 
-Everything here reads `body()`, not the raw file. The three loaded prompt files
+Everything here reads `body()`, not the raw file, with one exception named at
+`size_error`. The three loaded prompt files
 are Obsidian notes, so they open with a YAML `---` fence that
 `vault_round.frontmatter_error` *requires* and this module used to count: line 1
 was `---` in all three, which made the #464 guard fire on every healthy pair and
@@ -57,6 +64,53 @@ GATE_HEADS: tuple[str, ...] = (
 GATE_STACK_CEILING = 0.50
 PROHIBITION_RATIO_CEILING = 0.25
 DUPLICATE_CONTRACT_CEILING = 0.10
+
+# ── byte ceilings on the two loaded *memory* files (#1010) ──────────────────
+# The three ratios above are shape checks and they all have SOUL.md as their
+# denominator, so none of them can see size — which is the other way this surface
+# grows. `lloyd/USER.md` reached 95,302 B, 75 % of the whole system prompt, in five
+# nights of appends that nothing refused, and `lloyd/MEMORY.md` independently went
+# 4,551 B → 21,025 B in the same fortnight (#507). Nothing could refuse: on
+# 2026-09-12 `grep -n CEILING prompt_surface.py` returned three ratio constants and
+# no byte constant, and both automated prompt writers took SOUL.md and MEMORY.md
+# only, while `autoresearch/common.py::_canonical_prompt_paths` had been handing the
+# search a writable USER.md the whole time (#1010).
+#
+# Bytes, not characters: the threshold is a cost on disk and every writer here
+# writes UTF-8. Comparing `len(text)` against a byte limit passed a real 20,815-byte
+# file as 20,687 characters on this module's first draft — an 8-point difference on
+# a fixture and a silently-blind guard on a file full of em-dashes.
+#
+# SOUL.md has no ceiling and is not a memory file: its bound is the two ratios plus
+# the load-bearing markers, which is what #377 settled. A size constant here would
+# be a second, unblessed answer to a question #377 already answered.
+USER_MD_CEILING_BYTES = 16_384
+
+#: Deliberately ABOVE the live file, unlike every other ceiling in this module, and
+#: that is the whole design decision. The value this item's unlanded round proposed
+#: was 24,576 B against a live `MEMORY.md` measured at 69,849 B
+#: (`wc -c ~/obsidian/lloyd/MEMORY.md`, 2026-09-23) — a ceiling below the file it
+#: bounds is not a tripwire but a freeze: it refuses every writer that touches
+#: MEMORY.md from the moment it ships, *including* the trim it is waiting for, and
+#: freezing the nightly knowledge-write route from an unattended round is
+#: #1010's remaining human clause and not this round's call. 72 KiB leaves that
+#: measurement 3,879 B of headroom — an ordinary nightly cycle passes, the
+#: 48 KB-in-five-nights climb that filed #507 does not. Re-settle the number with
+#: the trim in the same commit, never by lowering it alone.
+#:
+#: It is also why the per-file ceilings do not bound the *total*: 16,384 + 73,728
+#: plus SOUL.md can exceed `prompt_builder.PROMPT_BUDGET_CHARS` (80,000 chars), so
+#: the sum stays bounded by the `over_budget` flag on the per-turn PROMPT_BUDGET line
+#: and these two constants bound each file's growth.
+MEMORY_MD_CEILING_BYTES = 73_728
+
+#: The loaded memory files and their ceilings, keyed by the filename each one is
+#: written as. A name absent here is not loaded into a prompt and therefore has no
+#: ceiling and no business being refused.
+MEMORY_CEILINGS: dict[str, int] = {
+    "MEMORY.md": MEMORY_MD_CEILING_BYTES,
+    "USER.md": USER_MD_CEILING_BYTES,
+}
 
 # A trim — or a promoted variant — that removes these removed behaviour, not
 # padding. Each maps to a bench task: block signal -> 010, trigger classes ->
@@ -314,7 +368,74 @@ def empty_sections(text: str) -> list[str]:
     return out
 
 
-def duplicate_contract_errors(soul_text: str, memory_text: str) -> list[str]:
+def memory_ceiling(filename: str) -> int | None:
+    """The byte ceiling for a loaded memory file by name; None if it is not one."""
+    return MEMORY_CEILINGS.get(filename)
+
+
+def size_error(filename: str, text: str) -> str | None:
+    """Why `text` is too large to *be* `filename`, or None if it fits.
+
+    The one check in this module that reads the raw text and not `body()`, and
+    deliberately so: the shape checks had to stop counting the YAML fence because
+    reading it as content put it inside their ratios (#1069), while this one measures
+    what the file *costs*, and the fence is paid for — `prompt_builder._load_memories`
+    reads the file and `.strip()`s it, it does not parse front matter, so every byte
+    of the note opens on the model. It is also the only number here a reader can
+    re-measure beside the file with `wc -c`, which a ratio cannot be.
+
+    `<=` and not `<`: the ceiling is the largest legal size, so a file of exactly
+    `USER_MD_CEILING_BYTES` is legal and one byte more is not. A guard that refuses
+    at the boundary makes the constant impossible to hold steady while trimming to
+    it, which is what #507's trim had to do.
+
+    The message names the file, the size, the ceiling and the overage, in that
+    order: it is the whole of what the caller sees (a tool error, a gate rung line),
+    and "which number moved" is the one thing a refusal may not leave the reader to
+    work out.
+    """
+    ceiling = MEMORY_CEILINGS.get(filename)
+    if ceiling is None:
+        return None
+    size = len(text.encode("utf-8"))
+    if size <= ceiling:
+        return None
+    return (
+        f"{filename} is {size:,} bytes, over its {ceiling:,}-byte ceiling "
+        f"({size - ceiling:,} B over). It loads into every user-platform system "
+        f"prompt; write the content to a knowledge note under "
+        f"~/obsidian/knowledge/ instead, or trim another entry in the same edit."
+    )
+
+
+def size_errors(surfaces: dict[str, str | None]) -> list[str]:
+    """Size refusals for each named memory surface passed. A None value = absent.
+
+    Takes the mapping rather than positional texts because the file *is* the
+    argument here: `check_contract`'s second slot is MEMORY.md by definition (the
+    #464 duplicate check has to know which file it is reading), so a size guard that
+    guessed the file from the text would be guessing, and a guard that guessed
+    wrong reports a true size in the name of the wrong file.
+
+    Size is the invariant every surface carries, because it is the one that grew:
+    `lloyd/USER.md` went 48,068 B → 95,302 B in five nights and nothing could refuse
+    an entry, because no byte constant existed to cross. The SOUL.md *shape*
+    invariants — gate share, prohibition ratio, the load-bearing markers — stay
+    SOUL.md's, since they measure the shape of the operating contract and a memory
+    file is not one. The #464 paste invariant runs for both memory surfaces, on the
+    reasoning that a preference file pasted full of the contract is the same doubled
+    prompt regardless of which file did the pasting (#1008's carried case).
+    """
+    return [
+        err
+        for name, text in surfaces.items()
+        if text is not None and (err := size_error(name, text))
+    ]
+
+
+def duplicate_contract_errors(
+    soul_text: str, memory_text: str, filename: str = "MEMORY.md"
+) -> list[str]:
     """The two #464 halves, in one place, read over `body()`.
 
     Split out of `check_contract` because the reporting copy in
@@ -323,6 +444,12 @@ def duplicate_contract_errors(soul_text: str, memory_text: str) -> list[str]:
     `9ca4fc6` corrected the read *there* and left this module comparing raw line
     1, so the reporting test passed 7/7 while every writer-side enforcement point
     was permanently red (#1069). One definition, asserted through from both sides.
+
+    `filename` names the surface being read, because the check is not MEMORY.md's
+    alone any more (#1010/#1008): USER.md sits in the same prompt and is writable by
+    the same search, so an overlay holding a USER.md that copies the contract would
+    have reached disk with only this file checked. The default keeps MEMORY.md's
+    wording byte-identical for the tests that quote it.
     """
     errors: list[str] = []
 
@@ -330,20 +457,24 @@ def duplicate_contract_errors(soul_text: str, memory_text: str) -> list[str]:
     memory_h1 = h1(memory_text)
     if memory_h1 and memory_h1 == soul_h1:
         errors.append(
-            "MEMORY.md opens with SOUL.md's H1 — the #464 operating-contract "
+            f"{filename} opens with SOUL.md's H1 — the #464 operating-contract "
             "paste is back and the contract reaches the model twice per turn"
         )
 
     dup = shared_line_share(memory_text, soul_text)
     if dup > DUPLICATE_CONTRACT_CEILING:
         errors.append(
-            f"{dup:.0%} of MEMORY.md's lines are verbatim SOUL.md lines, over the "
+            f"{dup:.0%} of {filename}'s lines are verbatim SOUL.md lines, over the "
             f"{DUPLICATE_CONTRACT_CEILING:.0%} ceiling (#464)"
         )
     return errors
 
 
-def check_contract(soul_text: str, memory_text: str | None = None) -> list[str]:
+def check_contract(
+    soul_text: str,
+    memory_text: str | None = None,
+    user_text: str | None = None,
+) -> list[str]:
     """Every invariant the identity surface has to keep. [] means it may land.
 
     Deliberately returns *all* failures rather than the first: a caller that
@@ -357,6 +488,14 @@ def check_contract(soul_text: str, memory_text: str | None = None) -> list[str]:
     Both ratios come from `contract_shape`, the same pair the per-round record and
     the cross-round ratchet read, so the number that refuses a write is the number
     a human later sees in the round report.
+
+    `memory_text` and `user_text` are the prospective contents of the two loaded
+    memory files. Each slot is bound to its own filename rather than sniffed from the
+    text, because a refusal that named the wrong file would quote a true byte count
+    about the wrong surface, and `None` means the caller is not changing that file —
+    which is how both writers scope a check to their diff (#1010). Every memory
+    surface actually passed is judged for size and for the #464 paste; the SOUL.md
+    shape checks are SOUL.md's alone.
     """
     errors: list[str] = []
 
@@ -395,19 +534,42 @@ def check_contract(soul_text: str, memory_text: str | None = None) -> list[str]:
     if empties:
         errors.append(f"headings with no content under them: {empties[:5]}")
 
-    if memory_text is not None:
-        errors.extend(duplicate_contract_errors(soul_text, memory_text))
+    # Both memory surfaces the caller actually passed, each judged against its own
+    # file's ceiling and against the contract it would sit beside. Before #1010 the
+    # two lines below read `memory_text` only, so the largest loaded prompt file
+    # reached neither check from either writer. After the SOUL.md shape checks, so a
+    # round that bloated the contract *and* overshot a memory file is told both, and
+    # can land neither.
+    for filename, text in (("MEMORY.md", memory_text), ("USER.md", user_text)):
+        if text is None:
+            continue
+        errors.extend(duplicate_contract_errors(soul_text, text, filename))
+
+    errors.extend(size_errors({"MEMORY.md": memory_text, "USER.md": user_text}))
 
     return errors
 
 
-def check_paths(soul_path, memory_path=None) -> list[str]:
-    """`check_contract` for files on disk. A missing SOUL.md is not our error."""
+def check_paths(soul_path, memory_path=None, user_path=None) -> list[str]:
+    """`check_contract` for files on disk. A missing SOUL.md is not our error.
+
+    A memory path that is absent reads as `None` — the caller is not changing that
+    surface — and not as an empty file, which would make an unrelated vault round
+    that happens not to carry a USER.md read as a 0-byte USER.md.
+    """
     from pathlib import Path
+
+    def _text(path) -> str | None:
+        if not path:
+            return None
+        p = Path(path)
+        return p.read_text(encoding="utf-8") if p.exists() else None
 
     soul = Path(soul_path)
     if not soul.exists():
         return []
-    memory = Path(memory_path) if memory_path else None
-    mem_text = memory.read_text(encoding="utf-8") if (memory and memory.exists()) else None
-    return check_contract(soul.read_text(encoding="utf-8"), mem_text)
+    return check_contract(
+        soul.read_text(encoding="utf-8"),
+        _text(memory_path),
+        _text(user_path),
+    )

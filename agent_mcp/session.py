@@ -34,6 +34,14 @@ from agent_mcp._shared import (
     _wrap,
 )
 
+# Stdlib-only and dependency-free by design (see its docstring, and the same
+# argument in `prompt_surface`): the byte ceiling has to be ONE definition shared by
+# the memory tools, `Write`/`Edit`, `vault_write`, the vault-round validator and the
+# tests. `prompt_builder` is too heavy to import into this process, and a second
+# copy of the number is how two writers end up disagreeing about what is bounded —
+# which is exactly the state #1010 was filed on.
+from app.memory_ceiling import memory_write_error
+
 # ── Constants ────────────────────────────────────────────────────────────────
 
 MEMORIES_ROOT = Path.home() / "obsidian" / "lloyd"
@@ -96,7 +104,19 @@ def _memory_add(params: dict) -> dict:
             existing = filepath.read_text(encoding="utf-8") if filepath.exists() else ""
             if existing and not existing.endswith("\n"):
                 existing += "\n"
-            write_text_durable(filepath, existing + entry + "\n")
+            updated = existing + entry + "\n"
+            # #1010/#507: the ceiling is enforced HERE, at the write site, and not
+            # only in a test that reads the live vault. `lloyd/USER.md` grew
+            # 48,068 B → 95,302 B in five days of appends and no check could refuse
+            # one, because there was no byte constant to cross; a hard-rung test on
+            # the result would have punished the next author rather than the writer
+            # (the reason `prompt_surface` exists at all). Priced on the exact bytes
+            # the line below writes, inside the lock, so the size refused is the
+            # size that would have landed and not a recomputation of it.
+            ceiling_msg = memory_write_error(filepath, updated)
+            if ceiling_msg:
+                return _err(ceiling_msg, ErrorCode.INVALID_PARAM)
+            write_text_durable(filepath, updated)
     except TimeoutError as exc:
         return _err(str(exc), ErrorCode.LOCK_TIMEOUT)
     return {"success": True, "file": file}
@@ -126,7 +146,16 @@ def _memory_replace(params: dict) -> dict:
                     "old_text not found in file",
                     _near_match_hint(content, old_text, label="old_text")),
                     ErrorCode.NO_MATCH, matched=False)
-            write_text_durable(filepath, content.replace(old_text, new_text, 1))
+            updated = content.replace(old_text, new_text, 1)
+            # A replace is an append wearing a disguise: a longer `new_text` grows
+            # the same file `memory_add` is refused for, and the trim route that has
+            # to keep working is the shrinking one — which `memory_write_error`
+            # allows even above the ceiling, so a file can always be cut back to its
+            # limit by the same tool that would refuse to grow it.
+            ceiling_msg = memory_write_error(filepath, updated)
+            if ceiling_msg:
+                return _err(ceiling_msg, ErrorCode.INVALID_PARAM)
+            write_text_durable(filepath, updated)
     except TimeoutError as exc:
         return _err(str(exc), ErrorCode.LOCK_TIMEOUT)
     return {"success": True, "file": file}

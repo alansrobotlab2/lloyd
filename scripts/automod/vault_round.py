@@ -208,7 +208,13 @@ def loader_errors(paths: list[str]) -> list[str]:
         return [f"loader produced no verdict: {(r.stdout + r.stderr).strip()[-300:]}"]
 
 
-CONTRACT_PATHS = ("lloyd/SOUL.md", "lloyd/MEMORY.md")
+#: Every loaded prompt file this route can commit. `VALIDATED_GLOBS` already
+#: classifies `lloyd/USER.md` as validated, so the round could write it; until #1010
+#: this tuple did not name it, which meant a diff whose only change was
+#: `lloyd/USER.md` — the largest of the three, the one #507 found at 95,302 B —
+#: reached no prompt-surface check at all. Naming a file here is what makes the
+#: scoping guard below run the check on it; the check itself is `prompt_surface`'s.
+CONTRACT_PATHS = ("lloyd/SOUL.md", "lloyd/MEMORY.md", "lloyd/USER.md")
 
 
 def contract_errors(paths: list[str]) -> list[str]:
@@ -221,7 +227,11 @@ def contract_errors(paths: list[str]) -> list[str]:
 
     Scoped to a diff that names one of the contract files, like every other
     check here — a pre-existing condition elsewhere in the vault must not
-    block an unrelated round.
+    block an unrelated round. The scope is by *name*, and all three files are
+    then read: a round that rewrites MEMORY.md is also the round that can push
+    the total past a ceiling by growing the file it did not touch, and a check
+    that only looked at the touched file would be measuring a document nobody
+    is about to load.
     """
     if not any(p in CONTRACT_PATHS for p in paths):
         return []
@@ -229,8 +239,11 @@ def contract_errors(paths: list[str]) -> list[str]:
         import prompt_surface
     except ImportError as exc:  # pragma: no cover - repo is always importable
         return [f"prompt_surface unavailable, cannot check the contract: {exc}"]
-    errs = prompt_surface.check_paths(VAULT / "lloyd" / "SOUL.md",
-                                      VAULT / "lloyd" / "MEMORY.md")
+    errs = prompt_surface.check_paths(
+        VAULT / "lloyd" / "SOUL.md",
+        VAULT / "lloyd" / "MEMORY.md",
+        VAULT / "lloyd" / "USER.md",
+    )
     return [f"prompt surface: {e}" for e in errs]
 
 

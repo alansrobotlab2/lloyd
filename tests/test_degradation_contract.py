@@ -444,6 +444,78 @@ def test_the_skill_gate_block_is_executed_rather_than_mirrored():
     # the last one needs a clock the row controls, which belongs to the staleness rows.
 
 
+#: A Phase-0 gate whose two roots are spelled *neither* as the extractor's first
+#: version expected nor as the skill spells them today. Vault commit `2fdd5b32`
+#: (2026-09-23) relocated `SESSIONS_DIR` from `~/lloyd/sessions` to
+#: `~/lloyd-data/sessions`, and a rewrite keyed on the old right-hand side turned into
+#: a silent no-op that left the lifted gate reading the live filesystem (#1426).
+MOVED_ROOT_GATE = '''\
+import sys
+from pathlib import Path
+MEMORY_ROOT = Path.home() / "moved-away" / "lloyd"
+SESSIONS_DIR = Path.home() / "moved-away" / "sessions"
+LOCK_FILE = MEMORY_ROOT / ".consolidate-lock"
+print("LOCK:", LOCK_FILE)
+print("SESSIONS_DIR_IS_DIR:", SESSIONS_DIR.is_dir())
+'''
+
+
+def test_the_gate_root_rewrite_follows_the_skill_whenever_a_root_moves():
+    """The pairing between this probe and the skill it lifts is pinned, not assumed.
+
+    The row above proves the *current* skill text is rewritten; it cannot prove the
+    rewrite still works after the next relocation, because it matches the skill only
+    in its present spelling. So this node hands the extractor a gate that sends both
+    roots somewhere neither the old literal nor the current one appears, runs the
+    result in a child interpreter — the same boundary the probe crosses, and the only
+    place an un-rewritten root becomes observable rather than merely present in a
+    string — and requires the child's own output to name the fixture. A rewrite that
+    missed an assignment would print `/home/.../moved-away/...` from a process that
+    was never isolated, which is precisely the report that read as a verdict while
+    measuring `~/obsidian`.
+
+    The second leg is the one that keeps the first honest: a gate the extractor
+    cannot fully redirect has to raise, not run. A partially-redirected gate prints a
+    real answer about the live vault, and the whole point of this row is that a
+    printed answer is only worth having when its inputs are the fixture's.
+    """
+    with R.fixture_root("consolidation") as root:
+        memory_root = root / "lloyd"
+        memory_root.mkdir()
+        sessions = root / "sessions"
+        sessions.mkdir()
+
+        rewritten = R._rewrite_gate_roots(MOVED_ROOT_GATE, memory_root, sessions)
+        assert 'MEMORY_ROOT = Path(' in rewritten and 'SESSIONS_DIR = Path(' in rewritten
+        assert "moved-away" not in rewritten, "the relocated literal survived the rewrite"
+        script = root / "phase0.py"
+        script.write_text(rewritten)
+        result = subprocess.run([sys.executable, str(script)], capture_output=True,
+                                text=True, timeout=30, cwd=str(root))
+        assert result.returncode == 0, result.stderr
+        output = result.stdout
+
+    lock_line = next(line for line in output.splitlines() if line.startswith("LOCK:"))
+    printed = lock_line.split("LOCK:", 1)[1].strip()
+    assert printed == str(memory_root / ".consolidate-lock"), (
+        f"the child gate reported {printed!r}, which is not the fixture's lock: the "
+        "extractor rewrote neither or only one root, so the row would be reading "
+        "~/obsidian while reporting a fault")
+    R.assert_fixture_path(memory_root / ".consolidate-lock", root)
+    assert "SESSIONS_DIR_IS_DIR: True" in output, (
+        f"the child did not see the fixture sessions directory: {output!r}")
+
+    # The negative leg: an assignment the top-level rewrite cannot reach — here one a
+    # refactor moved inside a function, which is how a skill edit would stop being
+    # liftable without changing a single path string.
+    half_redirected = ("MEMORY_ROOT = Path.home() / 'obsidian' / 'lloyd'\n"
+                       "def paths():\n"
+                       "    SESSIONS_DIR = Path.home() / 'lloyd' / 'sessions'\n"
+                       "    return SESSIONS_DIR\n")
+    with pytest.raises(R.RowError, match="SESSIONS_DIR"):
+        R._rewrite_gate_roots(half_redirected, memory_root, sessions)
+
+
 def test_the_tls_faults_come_from_a_socket_that_really_negotiates_tls():
     """The boundary runner → loopback TLS listener with a throwaway certificate.
 
