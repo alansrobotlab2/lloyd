@@ -779,14 +779,44 @@ def _regate_if_unreviewed(rid: str, finished: dict, events: list[dict]) -> dict 
 
 def _reap_round(rid: str, item_id, why: str, reaped: list[dict]) -> None:
     from scripts.automod import backlog as B, round as R, state as S
-    R.abort(rid, reason=why)
+    # `or {}`: `abort` always returns a dict, but a caller that stubs it out to
+    # `None` — which two existing tests do — must not turn a reaper that reads
+    # the close's answer into a reaper that crashes on it.
+    closed = R.abort(rid, reason=why) or {}
+    # `abort` copied whatever the LIVE checkout had uncommitted at this moment
+    # into the round's state dir and named it in its own row (round.py
+    # `preserve_live_dirt`). This row is the one an item reader sees, so the
+    # paths have to be here too: the note below otherwise points only at the
+    # branch, and an orphan live edit is not on the branch — telling a person
+    # "its work is on branch automod/x" about an edit that is not on it is how
+    # the edit stays lost.
+    dirty = [str(p) for p in (closed.get("live_dirty_paths") or [])]
     rec = {"event": "round_abandoned", "round_id": rid, "item_id": item_id,
-           "branch": f"automod/{rid}", "reason": why}
+           "branch": f"automod/{rid}", "reason": why, "live_dirty_paths": dirty}
+    for key in ("live_dirty_patch", "live_dirty_dir", "live_dirty_untracked",
+                "live_dirty_error"):
+        val = closed.get(key)
+        if val:
+            rec[key] = list(val) if key == "live_dirty_untracked" else str(val)
     S.append_event(rec)
     if item_id is not None:
-        B.note_item(int(item_id),
-                    f"automod round {rid} abandoned: {rec['reason']}. Its work is on "
-                    f"branch `automod/{rid}` in ~/lloyd.")
+        where = f"Its work is on branch `automod/{rid}` in ~/lloyd."
+        if dirty:
+            # Name a destination only when one exists to be read. A close whose
+            # copy failed has to say so rather than point at a path that was
+            # never written, which is how a reader loses an hour.
+            # An empty directory is not a copy. `preserve_live_dirt` creates
+            # `live-dirty/` before it runs `git diff`, so the dir can exist and
+            # hold nothing — pointing a person at it as where their work "went"
+            # is the same lie as `copied to None`, one step harder to find.
+            saved = closed.get("live_dirty_patch") or (
+                closed.get("live_dirty_dir") if closed.get("live_dirty_untracked") else "")
+            paths = ", ".join(f"`{p}`" for p in dirty)
+            where += (f" The live checkout also had uncommitted edits at close — {paths} — "
+                      "which are NOT on that branch; "
+                      + (f"they were copied to `{saved}`." if saved else
+                         f"they were NOT copied ({closed.get('live_dirty_error') or 'no reason recorded'})."))
+        B.note_item(int(item_id), f"automod round {rid} abandoned: {rec['reason']}. {where}")
         B.set_status(int(item_id), "up_next", "its round was abandoned; back in the pool")
     logger.warning("reaped abandoned round %s (%s)", rid, rec["reason"])
     reaped.append(rec)

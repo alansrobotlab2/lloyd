@@ -467,6 +467,106 @@ def _gate_verdict(round_id: str) -> dict:
     return {"gate_ok": report.get("ok", ""), "gate_head": report.get("head", "")}
 
 
+#: A patch over this size is not a lost edit, it is somebody rebuilding the
+#: tree; copying it into the audit trail on every close is how the audit trail
+#: stops being readable. The paths are recorded whatever the size.
+LIVE_DIRTY_PATCH_MAX_BYTES = 2 * 1024 * 1024
+
+#: How many paths ride one ledger event. `start()` has capped its
+#: `live_dirty_paths` at 20 since `649193f` made live dirt tolerated; a close
+#: row is a row in the same file and gets the same bound.
+LIVE_DIRTY_EVENT_LIMIT = 20
+
+
+def preserve_live_dirt(round_id: str, *, live_root: Path | None = None) -> dict:
+    """Copy the live checkout's uncommitted work aside, into the round's state dir.
+
+    An edit made in `~/lloyd` rather than in the round's worktree exists in
+    exactly one copy: it is not on `automod/<round_id>` (the branch `abort`
+    keeps), not in HEAD, and not in the worktree `W.remove` is about to delete.
+    Since `649193f` the loop records such dirt when it *opens* or *judges* a
+    round and refuses only on an overlap — which also removed the one moment it
+    ever noticed an orphan edit. Measured over `promotions.jsonl` on 2026-09-18:
+    45 of 277 `round_start` rows carried `live_dirty_paths`, and 0 of the 250
+    `round_aborted`/`round_abandoned` rows carried anything about it. Close is
+    the only blind moment, and in the one case observable that day
+    (`agent-services/supervisor/conf.d/agent-llm-primary.conf`, dirty on 11 of
+    12 consecutive starts) the bytes survived only because a person committed
+    them by hand at 16:08Z, after the last row naming the path.
+
+    So a close writes the work down before it closes, under
+    `~/.local/state/lloyd-automod/rounds/<round_id>/live-dirty/`, which outlives
+    both the worktree (`~/lloyd-work/<round_id>`) and the round:
+
+    - `dirty.patch` — `git diff HEAD`: every tracked modification, staged or
+      not, which is the whole of what a working tree can lose;
+    - one copy per **untracked `.py`** path, which a diff of HEAD cannot carry.
+
+    `.py` only, because that is the bound the guardian's own preservation uses
+    (`agent-services/guardian/rollback.py::preserve_evidence`) for the same
+    reason: an unbounded copy of every untracked file sweeps model outputs,
+    caches and half-written exports into the audit trail with it. Every other
+    untracked path is still *named* in `live_dirty_paths`.
+
+    **No `git stash`**, ever. The live stash stack is one global LIFO list
+    shared by every author, and on 2026-09-11 a round implementing an unrelated
+    item popped #573's recovered 136-line diff out of it. A file with a round id
+    in its path beats a stack entry nobody owns.
+
+    Returns the keys that ride the close event: `live_dirty_paths` (capped at
+    `LIVE_DIRTY_EVENT_LIMIT`), `live_dirty_dir`, `live_dirty_patch` and
+    `live_dirty_untracked`. A clean tree yields `{"live_dirty_paths": []}` and
+    writes nothing at all.
+    """
+    import shutil
+    root = Path(live_root) if live_root else LIVE_ROOT
+    paths = W.dirty_paths(root)
+    out: dict = {"live_dirty_paths": paths[:LIVE_DIRTY_EVENT_LIMIT]}
+    if not paths:
+        return out
+    dest = S.ROUNDS_DIR / round_id / "live-dirty"
+    try:
+        dest.mkdir(parents=True, exist_ok=True)
+        out["live_dirty_dir"] = str(dest)
+        diff = W.git(root, "diff", "HEAD")
+        if diff.returncode != 0:
+            # A read that failed is not a tree with no edits. Say which of the
+            # two it was rather than recording an empty patch for a dirty tree.
+            out["live_dirty_error"] = f"git diff HEAD rc={diff.returncode}"[:300]
+        elif diff.stdout.strip():
+            size = len(diff.stdout.encode("utf-8", "replace"))
+            if size > LIVE_DIRTY_PATCH_MAX_BYTES:
+                out["live_dirty_patch_skipped"] = (
+                    f"{size} bytes over the {LIVE_DIRTY_PATCH_MAX_BYTES}-byte cap")
+            else:
+                patch = dest / "dirty.patch"
+                patch.write_text(diff.stdout, encoding="utf-8")
+                out["live_dirty_patch"] = str(patch)
+        copied: list[str] = []
+        listing = W.git(root, "ls-files", "--others", "--exclude-standard")
+        if listing.returncode != 0:
+            out["live_dirty_error"] = f"git ls-files rc={listing.returncode}"[:300]
+        for rel in listing.stdout.splitlines():
+            rel = rel.strip().strip('"')
+            if not rel.endswith(".py"):
+                continue
+            try:
+                target = dest / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(root / rel, target)
+                copied.append(rel)
+            except OSError as exc:
+                # One unreadable file is recorded and the rest still come;
+                # dropping the whole preservation over it would be the same
+                # loss this function exists to end.
+                out["live_dirty_error"] = f"{rel}: {exc}"[:300]
+        if copied:
+            out["live_dirty_untracked"] = copied
+    except OSError as exc:  # noqa: BLE001 — a close must still close
+        out["live_dirty_error"] = str(exc)[:300]
+    return out
+
+
 def abort(round_id: str, reason: str = "") -> dict:
     """Close a round, branch kept. `reason` rides the event: seventeen of the
     first seventeen `round_aborted` rows carried nothing but the id.
@@ -474,12 +574,18 @@ def abort(round_id: str, reason: str = "") -> dict:
     The row also carries the gate verdict the round actually had, beside the
     caller's reason, so a narrative that contradicts the artifact is visible
     without opening `gate.json` — which by then is gone (see `_gate_verdict`).
+
+    And it carries the live checkout's uncommitted work, copied aside first
+    (see `preserve_live_dirt`). The branch is not where an orphan live edit
+    lives, so a close that kept only the branch kept nothing of it.
     """
     verdict = _gate_verdict(round_id)     # before the removal, which deletes the round dir
+    preserved = preserve_live_dirt(round_id)   # also before: the tree is nobody's once the worktree is gone
     W.remove(round_id, keep_branch=True, repo=LIVE_ROOT)
     S.append_event({"event": "round_aborted", "round_id": round_id,
-                    "reason": " ".join(str(reason or "").split())[:500], **verdict})
-    return {"aborted": round_id, "branch_kept": f"automod/{round_id}", **verdict}
+                    "reason": " ".join(str(reason or "").split())[:500],
+                    **verdict, **preserved})
+    return {"aborted": round_id, "branch_kept": f"automod/{round_id}", **verdict, **preserved}
 
 
 def _unit_drift() -> list[str]:
@@ -504,6 +610,31 @@ def _unit_drift() -> list[str]:
     return drift
 
 
+def _status_live_dirty() -> dict:
+    """`status()`'s view of the live checkout's working tree.
+
+    `unit_drift` has always been here and no key has ever described the tracked
+    files themselves, which is how an orphan edit in production stayed invisible
+    to the one tool that reports on the loop (`automod_status` reads this
+    payload; `agent_mcp/automod.py` registers it verbatim). `/health` does look
+    at the tree — `app/routers/health.py` runs `git status --porcelain` and
+    publishes `git.dirty` as a **boolean**, no paths — so the thing that reports
+    dirt reports only that there is some.
+
+    The empty list gets a positive control, because `W.dirty_paths` returns `[]`
+    both for a clean tree and for a `git status` that failed (`check=False`);
+    the two read the same, and this is the shape that has burned the loop
+    repeatedly — a check reading its own missing input. `git status` costs ~5 ms
+    here, so the confirming read runs whenever the list is empty.
+    """
+    paths = W.dirty_paths(LIVE_ROOT)
+    out: dict = {"live_dirty_paths": paths}
+    if not paths and W.git(LIVE_ROOT, "status", "--porcelain").returncode != 0:
+        out["live_dirty_error"] = ("git status could not be read; this empty list is "
+                                   "not a clean tree")
+    return out
+
+
 def status() -> dict:
     lkg = S.read_lkg()
     head = subprocess.run(["git", "-C", str(LIVE_ROOT), "rev-parse", "HEAD"],
@@ -520,6 +651,7 @@ def status() -> dict:
         "pause_remaining_s": round(S.pause_remaining(), 1),
         "rollback_request": S.read_rollback_request(),
         "unit_drift": _unit_drift(),
+        **_status_live_dirty(),
         **_status_worktrees(),
         "recent": S.read_events(limit=15),
     }

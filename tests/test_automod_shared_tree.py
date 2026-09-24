@@ -179,3 +179,142 @@ async def test_the_mcp_tool_hands_that_interpreter_to_the_agent(scratch, monkeyp
     finally:
         if rid:
             W.remove(rid, repo=scratch)
+
+
+# ---------------------------------------------------------------------------
+# A close preserves and names the live checkout's uncommitted work (#1037)
+# ---------------------------------------------------------------------------
+
+def _last_event(kind: str) -> dict:
+    rows = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == kind]
+    assert rows, f"no {kind} row was written"
+    return rows[-1]
+
+
+def test_abort_copies_the_live_uncommitted_work_into_the_round_state_dir(scratch):
+    """An edit made in the live checkout exists in ONE copy, and it is not on
+    the branch `abort` keeps: not in HEAD, not in the worktree `W.remove`
+    deletes, not in the stash (which a round must never touch). `649193f`
+    turned the blanket refusal into tolerated-and-recorded dirt and so removed
+    the only moment the loop ever noticed one — measured on 2026-09-18, 45 of
+    277 `round_start` rows carried `live_dirty_paths` and 0 of the 250 close
+    rows carried anything about it.
+
+    Preservation is a patch plus the untracked source, on disk, under a path
+    with the round id in it — never a `git stash` entry, the shared LIFO stack
+    whose top an unrelated round popped #573's diff off on 2026-09-11.
+    """
+    out = R.start("a goal", force=True)
+    rid = out["round_id"]
+    (scratch / "app" / "m.py").write_text("V = 2\n", encoding="utf-8")          # tracked edit
+    (scratch / "app" / "wip.py").write_text("ORPHAN = 1\n", encoding="utf-8")   # untracked source
+    res = R.abort(rid, reason="done here")
+
+    assert res["live_dirty_paths"] == ["app/m.py", "app/wip.py"]
+    dest = S.ROUNDS_DIR / rid / "live-dirty"
+    assert res["live_dirty_dir"] == str(dest)
+    patch = Path(res["live_dirty_patch"])
+    assert patch == dest / "dirty.patch" and patch.is_file(), "the tracked edit was not preserved"
+    assert "+V = 2" in patch.read_text(encoding="utf-8")
+    copy = dest / "app" / "wip.py"
+    assert copy.is_file() and copy.read_text(encoding="utf-8") == "ORPHAN = 1\n", \
+        "git diff HEAD cannot carry an untracked file; the copy is what does"
+    assert res["live_dirty_untracked"] == ["app/wip.py"]
+    assert "live_dirty_error" not in res
+
+    # What abort always managed is still managed, so preservation did not
+    # become the close: worktree gone, branch kept as the forensic record.
+    assert not Path(out["worktree"]).exists()
+    assert W.branch_exists(scratch, f"automod/{rid}")
+    # And the live stash stack is untouched — read it, never write it.
+    assert git(scratch, "stash", "list").stdout.strip() == "", "a close must not create a stash"
+
+
+def test_the_round_aborted_row_carries_the_paths_and_the_patch(scratch):
+    """The file is no use to a reader who cannot find it. `git status` is one
+    command away, but the ledger row is where a close is recorded, and 250
+    consecutive close rows named nothing."""
+    out = R.start("a goal", force=True)
+    (scratch / "app" / "m.py").write_text("V = 3\n", encoding="utf-8")
+    (scratch / "app" / "wip.py").write_text("ORPHAN = 1\n", encoding="utf-8")
+    res = R.abort(out["round_id"], reason="orphan edit outstanding")
+    ev = _last_event("round_aborted")
+    assert ev["live_dirty_paths"] == W.dirty_paths(scratch) == ["app/m.py", "app/wip.py"]
+    assert ev["live_dirty_patch"] == res["live_dirty_patch"]
+    assert Path(ev["live_dirty_patch"]).is_file(), "the row named a file that is not there"
+
+
+def test_the_row_caps_the_paths_at_twenty_while_the_copy_keeps_every_one(scratch):
+    """The cap is on what rides the event, matching `start`'s `live_dirty_paths`
+    bound since `649193f`. It must not quietly become a bound on what is
+    preserved, or a 25-file tree loses 5 files to a slice."""
+    out = R.start("a goal", force=True)
+    rid = out["round_id"]
+    for i in range(25):
+        (scratch / "app" / f"wip{i}.py").write_text(f"X = {i}\n", encoding="utf-8")
+    res = R.abort(rid, reason="a wide tree")
+    assert len(W.dirty_paths(scratch)) == 25
+    assert _last_event("round_aborted")["live_dirty_paths"] == res["live_dirty_paths"]
+    assert len(res["live_dirty_paths"]) == 20
+    assert len(res["live_dirty_untracked"]) == 25
+    assert (S.ROUNDS_DIR / rid / "live-dirty" / "app" / "wip24.py").is_file()
+
+
+def test_a_clean_live_tree_writes_no_patch_and_names_no_paths(scratch):
+    """The overwhelmingly common case: the close stays as quiet as it was, and
+    an empty list means empty rather than "we did not look"."""
+    out = R.start("a goal", force=True)
+    rid = out["round_id"]
+    res = R.abort(rid, reason="nothing to do")
+    assert res["live_dirty_paths"] == []
+    assert "live_dirty_patch" not in res and "live_dirty_dir" not in res
+    assert not (S.ROUNDS_DIR / rid / "live-dirty").exists(), "a clean tree wrote files anyway"
+    ev = _last_event("round_aborted")
+    assert ev["live_dirty_paths"] == [] and "live_dirty_patch" not in ev
+
+
+def test_automod_status_reports_the_live_checkouts_changed_paths(scratch):
+    """`status()` grew `unit_drift` for systemd copies and never a word about
+    the tracked files themselves, so `automod_status` — the tool a session
+    reaches for first — cannot see an orphan edit. `/health` publishes dirt as
+    a boolean and nothing else."""
+    assert R.status()["live_dirty_paths"] == []
+    (scratch / "app" / "wip.py").write_text("ORPHAN = 1\n", encoding="utf-8")
+    (scratch / "app" / "m.py").write_text("V = 4\n", encoding="utf-8")
+    assert R.status()["live_dirty_paths"] == W.dirty_paths(scratch)
+    assert R.status()["live_dirty_paths"] == ["app/m.py", "app/wip.py"]
+
+
+def test_status_says_so_when_the_live_tree_cannot_be_read(scratch, tmp_path, monkeypatch):
+    """`W.dirty_paths` returns `[]` for a clean tree AND for a `git status` that
+    failed, and the two read alike — the check-reads-its-own-missing-input
+    shape this loop has been burned by repeatedly. The empty list has to come
+    with the reason, and the way to prove the reason surfaces is a root that
+    really is not a repo, not a stub."""
+    nowhere = tmp_path / "not-a-repo"
+    nowhere.mkdir()
+    monkeypatch.setattr(R, "LIVE_ROOT", nowhere)
+    st = R.status()
+    assert st["live_dirty_paths"] == []
+    assert "could not be read" in st["live_dirty_error"]
+
+
+async def test_the_mcp_tools_carry_the_preserved_paths_across_the_wire(scratch, monkeypatch):
+    """The boundary an agent actually crosses: `automod_abort` and
+    `automod_status` run in lloyd-mcp and hand back `json.dumps` of these dicts
+    (`agent_mcp/automod.py`). A key that survives the in-process return and not
+    the serialisation is invisible to every test above, and the agent reads
+    only what arrives here."""
+    import json
+
+    import agent_mcp.automod as AM
+    monkeypatch.setattr(AM, "_enabled", lambda: True)
+    out = R.start("a goal", force=True)
+    rid = out["round_id"]
+    (scratch / "app" / "m.py").write_text("V = 5\n", encoding="utf-8")
+    before = json.loads((await AM.call_tool("automod_status", {})).content[0].text)
+    assert before["live_dirty_paths"] == ["app/m.py"]
+    aborted = json.loads((await AM.call_tool(
+        "automod_abort", {"round_id": rid, "reason": "orphan edit"})).content[0].text)
+    assert aborted["live_dirty_paths"] == ["app/m.py"]
+    assert Path(aborted["live_dirty_patch"]).is_file()

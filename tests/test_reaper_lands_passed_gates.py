@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 import yaml
@@ -35,6 +37,11 @@ from workers.sources import autocode as I
 
 HEAD = "08a059b3c2d1e4f5a6b7c8d9e0f1a2b3c4d5e6f7"
 RID = "SM_20260918_122306"
+
+#: The close under test, captured before `env` swaps in a stub. The reaper runs
+#: in the backend and `round.abort` in whichever process calls it, so the
+#: reaper-side clause can only be pinned against the real thing.
+_REAL_ABORT = R.abort
 
 
 @pytest.fixture(autouse=True)
@@ -229,3 +236,146 @@ def test_a_held_loop_runs_the_reaper_at_the_retry_cadence(env, monkeypatch):
     out = asyncio.run(I.enqueue_if_due(object(), {"interval_seconds": 900}))
     assert out is DECLINED or out == DECLINED
     assert env["spawned"], "the round sat until housekeeping's next tick"
+
+
+# ── and it says what the live checkout still held ───────────────────────────
+
+def _scratch_live(tmp_path) -> Path:
+    """A checkout standing in for `~/lloyd`. The reaper's whole blind spot is
+    that the tree it closes a round against is not its own and not the
+    worktree's, so the test needs a real second repo, not a mock."""
+    def git(repo, *args):
+        return subprocess.run(["git", "-C", str(repo), *args],
+                              capture_output=True, text=True, check=False)
+    live = tmp_path / "live"
+    (live / "app").mkdir(parents=True)
+    git(live.parent, "init", "-q", "-b", "main", str(live))
+    git(live, "config", "user.email", "t@e.com")
+    git(live, "config", "user.name", "t")
+    (live / "app" / "m.py").write_text("V = 1\n", encoding="utf-8")
+    git(live, "add", "-A")
+    git(live, "commit", "-q", "-m", "base")
+    return live
+
+
+def _abandon_note() -> str:
+    """The close's own activity line. Not the last one: `_reap_round` notes the
+    abandonment and then moves the item, and `set_status` appends its own line
+    after it."""
+    log = B._split_frontmatter(
+        next(B.BACKLOG_DIR.glob("1234-*.md")).read_text(encoding="utf-8"))[0]["activity_log"]
+    hits = [line for line in log if "abandoned:" in line]
+    assert hits, f"the close left no note; the log is {log}"
+    return hits[-1]
+
+
+def test_the_reapers_close_preserves_and_names_the_live_edits_it_leaves(env, tmp_path, monkeypatch):
+    """The reaper tells the item "Its work is on branch `automod/<rid>` in
+    ~/lloyd" — and an orphan edit in the live checkout is NOT on that branch,
+    so the one sentence meant to preserve a dead round's work points a reader
+    at the artifact that cannot contain it. Of 80 `round_abandoned` rows, zero
+    named a dirty path.
+
+    With the real `round.abort` behind it, the close now copies the work into
+    the round's state dir, puts the paths on its own row, and says them to the
+    item beside the branch — so a reader finds the file without running
+    `git status` on a tree that has moved on.
+    """
+    live = _scratch_live(tmp_path)
+    monkeypatch.setattr(R, "LIVE_ROOT", live)
+    monkeypatch.setattr(W, "LIVE_ROOT", live)
+    monkeypatch.setattr(W, "WORK_ROOT", tmp_path / "work")
+    monkeypatch.setattr(R, "abort", _REAL_ABORT)
+    (live / "app" / "m.py").write_text("V = 2\n", encoding="utf-8")            # tracked edit
+    (live / "app" / "orphan.py").write_text("ORPHAN = 1\n", encoding="utf-8")  # untracked source
+    _finished(DEFERRED)
+
+    out = I.reap_abandoned_rounds()
+    assert [(r["round_id"], r.get("verb")) for r in out] == [(RID, None)]
+    row = _events("round_abandoned")[0]
+    assert row["live_dirty_paths"] == ["app/m.py", "app/orphan.py"]
+    dest = S.ROUNDS_DIR / RID / "live-dirty"
+    assert row["live_dirty_patch"] == str(dest / "dirty.patch")
+    assert Path(row["live_dirty_patch"]).is_file(), "the row named a patch that is not on disk"
+    assert "+V = 2" in Path(row["live_dirty_patch"]).read_text(encoding="utf-8")
+    assert (dest / "app" / "orphan.py").read_text(encoding="utf-8") == "ORPHAN = 1\n"
+
+    note = _abandon_note()
+    assert "app/m.py" in note and "app/orphan.py" in note, "the note named neither path"
+    assert f"branch `automod/{RID}`" in note, "the branch is still named too"
+    assert row["live_dirty_patch"] in note, "the note did not say where the bytes went"
+
+
+def test_a_clean_live_tree_leaves_the_reapers_note_as_it_was(env, tmp_path, monkeypatch):
+    """The old sentence, unchanged, when there is nothing extra to say — this
+    must not become a note that claims preserved work on every close."""
+    live = _scratch_live(tmp_path)
+    monkeypatch.setattr(R, "LIVE_ROOT", live)
+    monkeypatch.setattr(W, "LIVE_ROOT", live)
+    monkeypatch.setattr(W, "WORK_ROOT", tmp_path / "work")
+    monkeypatch.setattr(R, "abort", _REAL_ABORT)
+    _finished(DEFERRED)
+    I.reap_abandoned_rounds()
+    row = _events("round_abandoned")[0]
+    assert row["live_dirty_paths"] == [] and "live_dirty_patch" not in row
+    note = _abandon_note()
+    assert "uncommitted edits" not in note
+    assert f"branch `automod/{RID}`" in note
+    assert not (S.ROUNDS_DIR / RID / "live-dirty").exists()
+
+
+def test_a_failed_copy_is_reported_as_failed_and_never_as_a_path(env, monkeypatch):
+    """The note names a destination only when one was written. When
+    `preserve_live_dirt` could not write — a read-only state dir, a failed
+    `git diff` — the honest sentence is that the work was NOT copied, with the
+    reason; naming a placeholder destination instead sends the reader hunting
+    for a file that never existed, which is the failure this feature exists to
+    end, restated.
+
+    The stub hands `live_dirty_patch` and `live_dirty_dir` over as empty
+    strings rather than leaving them out. `preserve_live_dirt` omits a key it
+    could not fill rather than blanking it, so the empty form is not today's
+    shape — `abort` spreads `**preserved` straight into this dict, and the
+    decoy is what pins the filter that decides what rides on. Left out, the two
+    row assertions below would only catch a reaper that invents keys; offered
+    empty, they catch one that copies keys unconditionally and then puts an
+    empty destination in the row and in the note."""
+    monkeypatch.setattr(R, "abort", lambda rid, reason="": {
+        "aborted": rid, "live_dirty_paths": ["app/lost.py"], "live_dirty_patch": "",
+        "live_dirty_dir": "", "live_dirty_error": "Read-only file system: '/state'"})
+    _finished(DEFERRED)
+    I.reap_abandoned_rounds()
+    row = _events("round_abandoned")[0]
+    assert row["live_dirty_paths"] == ["app/lost.py"]
+    assert "live_dirty_patch" not in row and "live_dirty_dir" not in row, (
+        "an empty string is not a path; the row must not carry one as a destination")
+    assert row["live_dirty_error"] == "Read-only file system: '/state'"
+    note = _abandon_note()
+    assert "`app/lost.py`" in note, "the path still has to be named even unsaved"
+    assert "NOT copied" in note and "Read-only file system" in note
+    assert "copied to" not in note, "the note named a destination that was never written"
+    assert "None" not in note, "the note named a placeholder instead of a path"
+
+
+def test_a_directory_that_holds_nothing_is_not_reported_as_where_the_work_went(
+        env, monkeypatch):
+    """`preserve_live_dirt` makes the `live-dirty/` directory before it runs
+    `git diff`, so a close can hand over a real directory and no patch: the
+    diff read failed. Pointing a person at that directory as where their edits
+    "were copied" is the same overstatement as naming a blank, and harder to
+    disprove — the path resolves, and it is empty. The directory still rides on
+    the row, because it is real and a later reader may well find files in it;
+    what is withheld is the note's claim that the work went there."""
+    monkeypatch.setattr(R, "abort", lambda rid, reason="": {
+        "aborted": rid, "live_dirty_paths": ["app/m.py"],
+        "live_dirty_dir": "/state/rounds/x/live-dirty",
+        "live_dirty_error": "git diff HEAD rc=128"})
+    _finished(DEFERRED)
+    I.reap_abandoned_rounds()
+    row = _events("round_abandoned")[0]
+    assert row["live_dirty_dir"] == "/state/rounds/x/live-dirty"
+    assert "live_dirty_patch" not in row
+    note = _abandon_note()
+    assert "`app/m.py`" in note
+    assert "copied to" not in note, "an empty directory was named as a destination"
+    assert "NOT copied" in note and "git diff HEAD rc=128" in note
