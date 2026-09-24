@@ -552,13 +552,13 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | Tool | Properties | Required | Does |
 |---|---|---|---|
 | `browser_navigate` | OW RX | `url` | Load a URL (private hosts refused, loopback allowed) |
-| `browser_snapshot` | RO OW | — | Accessibility tree of the page, with `eN` refs for the action tools |
+| `browser_snapshot` | RO OW | `full` | Accessibility tree of the page, with `eN` refs for the action tools. Each child frame gets its own `### frame <n> <url>` section; a frame that could not be read is listed with the reason (#424) |
 | `browser_click` | OW RX | `ref` | Click an element by ref |
 | `browser_scroll` | OW RX | — | Scroll the page |
 | `browser_press` | OW RX | `key` | Press a key or chord |
 | `browser_tabs` | OW RX | `action` | List, switch, open or close tabs |
 | `browser_screenshot` | RO OW | — | PNG of the page, also saved under `logs/screenshots/` |
-| `browser_evaluate` | OW RX | `script` | Run JavaScript in the page and return the result |
+| `browser_evaluate` | OW RX | `script`, `frame_index` | Run JavaScript in the page and return the result; `frame_index` runs it inside `page.frames[n]` instead of the main frame (#424) |
 | `browser_fill` | OW RX | `ref`, `value` | Set a field's value in one write that fires input/change, or key by key with `keystrokes=true` for search-as-you-type fields. Absorbed `browser_type` |
 | `browser_wait` | OW RX | `condition` | Wait for a selector, text, navigation or network idle |
 | `browser_select` | OW RX | `ref` | Pick an option in a `<select>` by value or label |

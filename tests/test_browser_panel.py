@@ -13,8 +13,13 @@ guards it names:
   * Mission Control has a Browser page wired into the ``Page`` union and
     the Layout render path.
 
-  * Guard: still 14 ``browser_*`` tools, no signature changes.
-  * Guard: the SSRF host check still refuses loopback/private targets.
+  * Guard: still 13 ``browser_*`` tools, no signature changes (13 since
+    ``browser_type`` folded into ``browser_fill(keystrokes=true)`` on 2026-09-23).
+  * Guard: the SSRF host check still refuses LAN and link-local targets (and
+    the machine's own non-loopback address) on every surface that reads a URL —
+    including the child-frame walk and ``browser_evaluate(frame_index=…)`` added
+    by backlog #424. Loopback stays deliberately allowed: the panel has to reach
+    the local UI, which is what ``test_navigate_allows_the_machine_itself`` pins.
 
 The SSE route is exercised by driving the streaming generator directly
 rather than through ``httpx.ASGITransport`` — that transport buffers the
@@ -23,6 +28,7 @@ suite instead of proving anything.
 """
 import asyncio
 import base64
+import importlib.util
 import json
 import re
 import sys
@@ -481,7 +487,11 @@ def test_the_guard_is_actually_wired_into_every_url_entry_point():
     # one that dispatches every MCP tool call.
     assert "await asyncio.to_thread(_resolve_addrs" in src, \
         "host resolution must not block the event loop"
-    for fn in ("_guard_route", "_enforce_landing", "_capture_state"):
+    # `_frame_sections` is #424's addition and `frame_index` is a new way to name
+    # a document: a frame has a host of its own, and a guard that lives on only
+    # some of the surfaces that read a URL is not a guard.
+    for fn in ("_guard_route", "_enforce_landing", "_capture_state",
+               "_frame_sections", "_browser_evaluate"):
         body = src.split(f"async def {fn}", 1)[1].split("\nasync def ", 1)[0]
         assert "_host_block_reason_async" in body, f"{fn} must use the async check"
 
@@ -1598,3 +1608,628 @@ def test_the_skill_scan_reports_who_names_the_broken_wait(tmp_path):
     assert _who("networkidle") == sorted(bodies), \
         "the prose matcher found nothing even with the word in front of it"
 
+
+
+# ── Backlog #424: child frames ─────────────────────────────────────────────────
+#
+# `browser_snapshot` and `browser_evaluate` saw the top frame only. A page whose
+# content lives in an embed produced a tree with a bare `- iframe` node, no URL,
+# no children and nothing to say about the omission, so a partial extraction was
+# reported as a complete one; a control inside a frame never became a ref at all,
+# because `page.get_by_role` is scoped to the main frame.
+#
+# All of this is pinned on a fake `page.frames`, deliberately and for the reason
+# the item names: a test that launched Chromium against a real embed would be the
+# flake, and the live page is the post-landing human check.
+
+MAIN_URL = "http://127.0.0.1:45547/outer"
+TOP_ARIA = '- webpage "Outer"\n  - heading "Outer page"\n  - button "Top button"'
+INNER_ARIA = ('- webpage "Inner"\n  - heading "HTML Iframes"\n'
+              '  - paragraph: This page is displayed in an iframe\n'
+              '  - button "Run the code"')
+
+
+class _Handle:
+    """What `_locate` hands back. Actions are recorded on the scope they reached
+    and with the arguments they were handed — the scope is what frame-scoped refs
+    change, and the arguments are what the tool call around it adds, so a test
+    that dropped the kwargs on this floor could not tell a click that carried
+    `button="right"` from one that silently lost it."""
+
+    def __init__(self, scope, role, name, exact, occurrence):
+        self.scope = scope
+        self.role = role
+        self.name = name
+        self.exact = exact
+        self.occurrence = occurrence
+
+    async def click(self, **kwargs):
+        self.scope.acted.append(("click", self, kwargs))
+
+    async def fill(self, value, **kwargs):
+        self.scope.acted.append((f"fill:{value}", self, kwargs))
+
+
+class _RoleQuery:
+    def __init__(self, scope, role, name, exact):
+        self._scope, self._role, self._name, self._exact = scope, role, name, exact
+
+    def nth(self, occurrence):
+        return _Handle(self._scope, self._role, self._name, self._exact, occurrence)
+
+
+class _Scope:
+    """Either side of the frame boundary. A url, a body aria tree, an evaluate
+    and role queries — which is the whole surface these tools touch."""
+
+    def __init__(self, url, aria, aria_error=None):
+        self.url = url
+        self._aria = aria
+        self._aria_error = aria_error
+        self.aria_calls = 0
+        self.queries: list[tuple] = []
+        self.acted: list = []
+        self.evaluated: list = []
+
+    class _BodyLocator:
+        def __init__(self, scope):
+            self._scope = scope
+
+        async def aria_snapshot(self):
+            self._scope.aria_calls += 1
+            if self._scope._aria_error is not None:
+                raise self._scope._aria_error
+            return self._scope._aria
+
+    def locator(self, selector):
+        assert selector == "body", selector
+        return _Scope._BodyLocator(self)
+
+    def get_by_role(self, role, name=None, exact=None):
+        self.queries.append((role, name, exact))
+        return _RoleQuery(self, role, name, exact)
+
+    async def evaluate(self, script):
+        self.evaluated.append(script)
+        return f"{self.url} ran {script}"
+
+    async def title(self):
+        return "Outer"
+
+    async def screenshot(self, **kwargs):
+        return b"\xff\xd8jpeg-bytes\xff\xd9"
+
+    async def goto(self, *a, **k):
+        raise AssertionError("reading a page must not navigate it")
+
+
+class _FakeFrame(_Scope):
+    """One frame: the same surface as a page, at its own url."""
+
+
+class _FramePage(_Scope):
+    """A top document plus its child frames, indexed the way Playwright indexes
+    them — `page.frames[0]` is the main frame, so the children sit at 1..n and
+    those are the numbers `browser_evaluate(frame_index=…)` has to accept.
+    """
+
+    def __init__(self, url=MAIN_URL, aria=TOP_ARIA, children=(), aria_error=None):
+        super().__init__(url, aria, aria_error)
+        self.main_frame = _FakeFrame(url, aria)
+        self.frames = [self.main_frame, *children]
+
+
+def _big_aria(marker: str, size: int = 9000) -> str:
+    line = f"- paragraph: {marker}"
+    return line + "x" * (size - len(line))
+
+
+async def test_the_snapshot_appends_each_child_frame_under_its_own_header(monkeypatch):
+    """Clause 1: words that exist only inside a frame reach the tree.
+
+    Under `### frame <n> <url>`, with the top frame's tree keeping the shape it
+    has always had — `[Page] <title> — <url>`, then its own lines, still first.
+    """
+    inner = _FakeFrame("http://127.0.0.1:45547/inner", INNER_ARIA)
+    ad = _FakeFrame("http://127.0.0.1:45547/ad", '- webpage "Ad"\n  - link "Buy now"')
+    page = _FramePage(children=[inner, ad])
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_snapshot())
+
+    assert "error" not in out, out
+    body = out["snapshot"]
+    assert body.startswith(f"[Page] Outer — {MAIN_URL}"), body[:120]
+    assert 'button "Top button" [e1]' in body
+    assert "### frame 1 http://127.0.0.1:45547/inner" in body, body
+    assert "### frame 2 http://127.0.0.1:45547/ad" in body, body
+    assert "This page is displayed in an iframe" in body, \
+        "text that exists only inside the frame is still missing from the snapshot"
+    assert body.index("Top button") < body.index("### frame 1"), \
+        "the top frame's tree has to keep its place ahead of the frames"
+    assert (inner.aria_calls, ad.aria_calls) == (1, 1)
+
+
+async def test_a_page_with_no_child_frames_is_unchanged(monkeypatch):
+    """Clause 1's other half: no iframes, no difference."""
+    page = _FramePage(children=[])
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_snapshot())
+
+    assert "### frame" not in out["snapshot"], out["snapshot"]
+    assert out["snapshot"] == f"[Page] Outer — {MAIN_URL}\n{TOP_ARIA} [e1]"
+    assert out["refs"] == 1
+
+
+async def test_a_frame_that_cannot_be_read_is_named_with_the_reason(monkeypatch):
+    """Clause 2: the ways a frame's content does not arrive are all said out loud.
+
+    A frame is never silently missing. Every child keeps its header line, and what
+    sits under it is either the tree or the reason the tree is not there.
+    """
+    broken = _FakeFrame("http://127.0.0.1:45547/broken",
+                        aria="- button \"never seen\"", aria_error=RuntimeError("frame detached"))
+    blank = _FakeFrame("http://127.0.0.1:45547/blank", aria="   ")
+    private = _FakeFrame("http://192.168.7.9/admin", aria='- button "LAN secret"')
+    page = _FramePage(children=[broken, blank, private])
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    body = json.loads(await browser_module._browser_snapshot())["snapshot"]
+
+    for header in ("### frame 1 http://127.0.0.1:45547/broken",
+                   "### frame 2 http://127.0.0.1:45547/blank",
+                   "### frame 3 http://192.168.7.9/admin"):
+        assert header in body, header
+    assert "frame detached" in body, body
+    assert "no accessible content" in body, body
+    assert 'private/internal host "192.168.7.9"' in body, body
+    assert body.count("### frame ") == 3, body
+    assert "LAN secret" not in body, \
+        "a frame on a private host is not read at all, header notwithstanding"
+    assert (broken.aria_calls, blank.aria_calls, private.aria_calls) == (1, 1, 0), \
+        "the host guard runs before the frame is read, not after"
+
+
+async def test_the_frame_budget_names_what_it_left_out(monkeypatch):
+    """Clause 2, the budget half — the interaction the item asks be budgeted.
+
+    Three frames of 9000 characters against a shared 16000-character frame
+    ceiling: the first two are cut to 8000 and report their real length, the
+    third is never read and still occupies its header line. What a reader can see
+    is never more than what was delivered.
+    """
+    big = _big_aria("big")
+    assert len(big) == 9000
+    frames = [_FakeFrame(f"http://127.0.0.1:45547/big{i}", big) for i in (1, 2, 3)]
+    page = _FramePage(children=frames)
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    body = json.loads(await browser_module._browser_snapshot())["snapshot"]
+
+    assert browser_module.MAX_SNAPSHOT_CHARS == 8000
+    assert browser_module.MAX_FRAME_CHARS_TOTAL == 16000
+    assert body.count("### frame ") == 3, body
+    assert "truncated at 8000 of 9000 chars" in body, body
+    assert "### frame 3 http://127.0.0.1:45547/big3" in body, body
+    assert "[not included:" in body and "budget" in body, body
+    assert frames[2].aria_calls == 0, "a frame with no budget left must not be read anyway"
+
+
+async def test_a_long_top_frame_does_not_cut_the_frames_below_it(monkeypatch):
+    """The truncation interaction, from the other side.
+
+    `MAX_SNAPSHOT_CHARS` applied to the joined document would start cutting frames
+    after the first, which is the same silent hole in a new place. It stayed the
+    top frame's own budget: the top tree is cut with the marker it already used,
+    and the frame still arrives whole.
+    """
+    inner = _FakeFrame("http://127.0.0.1:45547/inner", INNER_ARIA)
+    page = _FramePage(aria=_big_aria("top"), children=[inner])
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    body = json.loads(await browser_module._browser_snapshot())["snapshot"]
+
+    assert f"[...truncated at {browser_module.MAX_SNAPSHOT_CHARS} chars]" in body, body[-200:]
+    assert "### frame 1 http://127.0.0.1:45547/inner" in body
+    assert "This page is displayed in an iframe" in body
+
+
+async def test_a_ref_found_in_a_frame_resolves_inside_that_frame(monkeypatch):
+    """Clause 3: the ref carries its frame, and `_locate` resolves it there.
+
+    The ids also keep counting across frames — a second frame's `e1` would
+    otherwise overwrite the top frame's entry and hand a stale locator to the next
+    click.
+    """
+    inner = _FakeFrame("http://127.0.0.1:45547/inner", INNER_ARIA)
+    page = _FramePage(children=[inner])
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_snapshot())
+
+    assert 'button "Top button" [e1]' in out["snapshot"], out
+    assert 'button "Run the code" [e2]' in out["snapshot"], out
+    assert browser_module._ref_map["e1"].get("frame") is None, \
+        "a top-frame ref keeps resolving against page"
+    assert browser_module._ref_map["e2"]["frame"] == 1
+
+    top = await browser_module._locate(page, "e1")
+    assert top.scope is page
+    assert (top.role, top.name) == ("button", "Top button")
+    inframe = await browser_module._locate(page, "e2")
+    assert inframe.scope is inner, "the in-frame ref resolved against the top frame"
+    assert (inframe.role, inframe.name, inframe.occurrence) == ("button", "Run the code", 0)
+    assert inner.queries == [("button", "Run the code", True)]
+    assert page.queries == [("button", "Top button", True)], \
+        "the in-frame ref must not be looked up in the top document"
+
+
+async def test_clicking_an_in_frame_ref_acts_inside_the_frame(monkeypatch):
+    """Clause 3 across the tool: `browser_click` on an in-frame ref presses the
+    button in the frame, not one with the same name in the top document.
+
+    The recorded kwargs are part of the point. Resolving the ref against the right
+    frame while dropping `button` or the 10 s timeout would fix the frame bug and
+    quietly change the click, and a fake that threw the kwargs away on the way in
+    could not tell those two outcomes apart.
+    """
+    inner = _FakeFrame("http://127.0.0.1:45547/inner", INNER_ARIA)
+    page = _FramePage(children=[inner])
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    await browser_module._browser_snapshot()
+
+    out = json.loads(await browser_module._browser_click("e2", button="right"))
+
+    assert out == {"ok": True, "ref": "e2"}, out
+    assert [(kind, h.name, kw) for kind, h, kw in inner.acted] == [
+        ("click", "Run the code", {"button": "right", "timeout": 10000})
+    ], inner.acted
+    assert page.acted == [], "the click landed in the top frame"
+
+    out = json.loads(await browser_module._browser_fill("e2", "search text"))
+    assert out == {"ok": True, "ref": "e2"}, out
+    assert [(kind, h.name, kw) for kind, h, kw in inner.acted][1] == (
+        "fill:search text", "Run the code", {"timeout": 10000}), inner.acted
+
+
+async def test_a_ref_whose_frame_went_away_names_the_range_instead_of_guessing(monkeypatch):
+    """An iframe the page removed between snapshot and click leaves a ref whose
+    index addresses nothing. Falling back to the top frame would act on a document
+    nobody asked about, so the answer is the range that exists now."""
+    inner = _FakeFrame("http://127.0.0.1:45547/inner", INNER_ARIA)
+    page = _FramePage(children=[inner])
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    await browser_module._browser_snapshot()
+    page.frames = [page.main_frame]          # the embed was removed from the page
+
+    out = json.loads(await browser_module._browser_click("e2"))
+
+    assert "error" in out, out
+    assert "frame 1" in out["error"] and "0 to 0" in out["error"], out
+    assert inner.acted == [] and page.acted == []
+
+
+async def test_browser_evaluate_runs_inside_the_frame_it_is_named(monkeypatch):
+    """Clause 4: `frame_index` is the capability that was missing — a frame's own
+    JS world and any cross-origin frame, neither reachable from the top frame."""
+    inner = _FakeFrame("http://127.0.0.1:45547/inner", INNER_ARIA)
+    other = _FakeFrame("http://127.0.0.1:45547/other", '- webpage "Other"')
+    page = _FramePage(children=[inner, other])
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_evaluate("document.title", frame_index=2))
+
+    assert out["ok"] is True, out
+    assert other.evaluated == ["document.title"]
+    assert page.evaluated == [] and inner.evaluated == []
+    assert "http://127.0.0.1:45547/other ran document.title" in json.dumps(out)
+
+
+async def test_an_out_of_range_frame_index_names_the_valid_range(monkeypatch):
+    """Clause 4: the refusal has to carry the range, or the next call guesses."""
+    children = [_FakeFrame(f"http://127.0.0.1:45547/f{i}", '- webpage "f"')
+                for i in (1, 2)]
+    page = _FramePage(children=children)
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_evaluate("1+1", frame_index=7))
+
+    assert "out of range" in out["error"], out
+    # Three addressable frames — the main one plus the two children — so the
+    # range the refusal has to name is 0 to 2.
+    assert "3 frame(s)" in out["error"] and "0 to 2" in out["error"], out
+    assert page.evaluated == [] and all(f.evaluated == [] for f in children)
+
+    bad = json.loads(await browser_module._browser_evaluate("1+1", frame_index="top"))
+    assert "must be an integer" in bad["error"], bad
+    assert page.evaluated == []
+
+
+async def test_omitting_frame_index_keeps_today_top_frame_behaviour(monkeypatch):
+    """Clause 4's other half: the argument is optional and changes nothing when
+    absent — including not touching the main frame's own handle."""
+    inner = _FakeFrame("http://127.0.0.1:45547/inner", INNER_ARIA)
+    page = _FramePage(children=[inner])
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_evaluate("1+1"))
+
+    assert out["ok"] is True, out
+    assert page.evaluated == ["1+1"]
+    assert page.frames[0].evaluated == [] and page.frames[1].evaluated == []
+
+
+async def test_an_evaluate_cannot_be_pointed_at_a_private_frame(monkeypatch):
+    """`frame_index` is a new way to name a document, so it inherits the rule the
+    page-level read already carries: nothing from a private host comes back."""
+    private = _FakeFrame("http://192.168.7.9/admin", '- button "LAN secret"')
+    page = _FramePage(children=[private])
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+
+    out = json.loads(await browser_module._browser_evaluate(
+        "document.body.innerText", frame_index=1))
+
+    assert 'private/internal host "192.168.7.9"' in out["error"], out
+    assert private.evaluated == []
+
+
+async def test_the_frame_index_argument_crosses_the_mcp_seam(monkeypatch):
+    """The boundary the tool is actually called across.
+
+    A keyword the advertised schema does not show is a keyword no model can send,
+    and one the dispatcher does not unpack is a keyword that does nothing — so
+    this drives `call_tool` with the arguments dict, the form that arrives over
+    the wire, rather than the Python function.
+    """
+    inner = _FakeFrame("http://127.0.0.1:45547/inner", INNER_ARIA)
+    page = _FramePage(children=[inner])
+    monkeypatch.setattr(browser_module, "_get_page", lambda: _async(page))
+    monkeypatch.setattr(browser_module, "_schedule_state_push", lambda name: None)
+
+    tools = {t.name: t for t in await browser_module.list_tools()}
+    schema = tools["browser_evaluate"].input_schema
+    assert "frame_index" in schema["properties"], schema
+    assert schema["properties"]["frame_index"]["type"] == "integer", schema
+    assert schema["required"] == ["script"], "frame_index has to stay optional"
+
+    res = await browser_module.call_tool(
+        "browser_evaluate",
+        {"script": "document.body.innerText", "frame_index": 1})
+
+    assert res.is_error is False, res
+    assert json.loads(res.content[0].text)["ok"] is True
+    assert inner.evaluated == ["document.body.innerText"]
+    assert page.evaluated == []
+
+
+async def test_the_mission_control_frame_reports_the_frames_too(monkeypatch):
+    """Clause 1 names the Browser tab: it is fed by the same top-frame-only read,
+    and a human is the one looking at it.
+
+    Where the tab's identity ends, stated rather than left to be discovered: the
+    frame's `snapshot` carries the frame sections, so a person reads a frame's
+    content and its URL there, but the `refs` array the tab renders as `eN` labels
+    carries ref/role/name only — no frame field — so the list cannot say which
+    frame an id came from. In-frame elements also have no `x`/`y`, which is the
+    pre-existing reason the overlay reports refs without geometry. Neither is what
+    clause 1 asked the tab for; both are what the tab still does not show.
+    """
+    inner = _FakeFrame("http://127.0.0.1:45547/inner", INNER_ARIA)
+    page = _FramePage(children=[inner])
+    monkeypatch.setattr(browser_module, "_existing_page", lambda: page)
+
+    frame = await browser_module._capture_state("browser_navigate")
+
+    assert "### frame 1 http://127.0.0.1:45547/inner" in frame["snapshot"], frame["snapshot"]
+    assert "This page is displayed in an iframe" in frame["snapshot"]
+    assert 'button "Top button" [e1]' in frame["snapshot"], \
+        "the top frame's own tree still arrives in the tab"
+    # Both ids reach the tab's list, and nothing in that list names a frame. A
+    # later change that puts the frame on the payload should update this line, not
+    # trip over it.
+    assert {r["ref"] for r in frame["refs"]} == {"e1", "e2"}, frame["refs"]
+    assert not any("frame" in r for r in frame["refs"]), frame["refs"]
+
+
+# ── The real Playwright seam ──────────────────────────────────────────────────
+#
+# The nodes above drive a fake `page.frames`, which is what the item asks for: a
+# frame test that boots Chromium against a live embed is a flake, and the external
+# page stays a post-landing human check. A fake is only proof about the code that
+# reads it, though. It cannot say `Frame.locator("body").aria_snapshot()` is a real
+# coroutine that returns the frame's own tree, that `page.frames[0] is
+# page.main_frame`, that a frame's `url` is readable, or that `Frame.evaluate` runs
+# in that frame's world — four of the five things this change calls.
+#
+# So the node below runs the same functions over real Playwright objects against a
+# document that never touches the network: `set_content` with an `srcdoc` iframe
+# presents the identical frame boundary the w3schools page does, served out of the
+# process. It is guarded by the same availability check the TLS seam test uses
+# (`tests/test_gen_cert_ca_install.py:388`), so it skips where Chromium is not
+# installed rather than failing, and it bounds the whole probe with a timeout so a
+# wedged browser cannot wedge the suite.
+
+CHROMIUM = "/usr/bin/chromium"
+
+# The same document, twice: the outer one and the `srcdoc` body inside it. The
+# sentence is the one the item's own check greps for, and it exists in the frame
+# only — the outer page's markup here carries no copy of it, so a top-frame read
+# cannot pass by accident.
+FRAME_SEAM_DOC = (
+    '<!doctype html><html><body><h1>Outer page</h1>'
+    '<button>Top button</button>'
+    '<iframe width="320" height="140" srcdoc="'
+    '<!doctype html><html><body><h1>HTML Iframes</h1>'
+    '<p>This page is displayed inside a frame</p>'
+    '<button>Run the code</button></body></html>'
+    '"></iframe></body></html>'
+)
+FRAME_ONLY_SENTENCE = "This page is displayed inside a frame"
+
+
+def _chromium_arm_available() -> bool:
+    """The two things the probe needs: the binary `browser.py` names, and the
+    driver that speaks to it."""
+    return (Path(CHROMIUM).is_file()
+            and importlib.util.find_spec("playwright") is not None)
+
+
+requires_chromium = pytest.mark.skipif(
+    not _chromium_arm_available(),
+    reason="needs playwright and /usr/bin/chromium to cross the real frame seam",
+)
+
+
+async def _real_chromium_frame_probe() -> dict:
+    """Measure the frame walk against one real Chromium page."""
+    from playwright.async_api import async_playwright
+
+    pw = await async_playwright().start()
+    try:
+        browser = await pw.chromium.launch(
+            executable_path=CHROMIUM,
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox",
+                  "--disable-dev-shm-usage"],
+        )
+        try:
+            context = await browser.new_context(viewport={"width": 640, "height": 480})
+            page = await context.new_page()
+            await page.set_content(FRAME_SEAM_DOC, wait_until="domcontentloaded")
+            saved_refs = dict(browser_module._ref_map)
+            saved_page = browser_module._get_page
+            saved_landing = browser_module._enforce_landing
+            try:
+                # The two things that are not the frame boundary: the tab lookup
+                # (`_get_page` launches its own browser and is pinned by its own
+                # nodes) and the landing guard, whose own nodes are below in this
+                # file. `set_content` leaves `page.url` at `about:blank`, which the
+                # guard has no rule for, so it is neutralised rather than satisfied
+                # — everything from the aria read onwards is the shipped code.
+                async def _page():
+                    return page
+
+                browser_module._get_page = _page
+                browser_module._enforce_landing = lambda p, target=None: _async(None)
+                top_aria = await page.locator("body").aria_snapshot()
+                sections = await browser_module._frame_sections(page, {})
+                # The two tools, end to end, over the real Playwright objects.
+                snapshot_out = json.loads(await browser_module._browser_snapshot())
+                evaluate_out = json.loads(await browser_module._browser_evaluate(
+                    "document.body.innerText", frame_index=1))
+                refs = browser_module._ref_map
+                inframe_ref = next((r for r, i in refs.items() if "frame" in i), None)
+                handle = (await browser_module._locate(page, inframe_ref)
+                          if inframe_ref else None)
+                frame = browser_module._frame_at(page, 1)
+                try:
+                    browser_module._frame_at(page, 99)
+                    range_error = ""
+                except ValueError as exc:
+                    range_error = str(exc)
+                return {
+                    "frame_count": len(page.frames),
+                    "main_is_frames_zero": page.frames[0] is page.main_frame,
+                    "top_aria": top_aria,
+                    "sections": sections,
+                    "snapshot": snapshot_out.get("snapshot", ""),
+                    "snapshot_error": snapshot_out.get("error", ""),
+                    "snapshot_refs": snapshot_out.get("refs"),
+                    "evaluate": evaluate_out,
+                    "refs": dict(refs),
+                    "inframe_ref": inframe_ref,
+                    "inframe_matches": await handle.count() if handle else None,
+                    # The same role-and-name asked of the top document, which is
+                    # what `_locate` did before this change existed.
+                    "top_matches_same_query": await page.get_by_role(
+                        "button", name="Run the code", exact=True).count(),
+                    "frame_text": await frame.evaluate("document.body.innerText"),
+                    "frame_url": frame.url,
+                    "range_error": range_error,
+                }
+            finally:
+                browser_module._get_page = saved_page
+                browser_module._enforce_landing = saved_landing
+                browser_module._ref_map.clear()
+                browser_module._ref_map.update(saved_refs)
+        finally:
+            await browser.close()
+    finally:
+        await pw.stop()
+
+
+@requires_chromium
+def test_a_real_chromium_page_drives_the_two_tools_through_their_frames():
+    """The boundary this change is written against, crossed for real.
+
+    The fake-driven nodes above pin the code against a stand-in, and a stand-in
+    cannot say what Playwright actually has. Here `_browser_snapshot` and
+    `_browser_evaluate(frame_index=1)` run unchanged against a live Chromium page,
+    so what is verified is the real `page.frames` list, `page.frames[0] is
+    page.main_frame` (the identity `_frame_entries` skips on),
+    `Frame.locator("body").aria_snapshot()` returning the frame's own tree,
+    `Frame.url`, `Frame.evaluate` running in that frame's world, and
+    `Frame.get_by_role(...).nth()` resolving an in-frame ref — the last of which is
+    the load-bearing fact behind clause 3: the same role-and-name finds the button
+    once through the frame and never through the top document. The item's own check
+    is this one, with the frame's text present in the snapshot where the triage
+    recorded it absent, and the top tree as the negative control.
+    """
+    verdict = asyncio.run(asyncio.wait_for(_real_chromium_frame_probe(), timeout=90))
+
+    assert verdict["frame_count"] == 2, verdict["frame_count"]
+    assert verdict["main_is_frames_zero"], \
+        "the main frame is page.frames[0], which is what the skipped index is"
+    assert "iframe" in verdict["top_aria"]
+    assert FRAME_ONLY_SENTENCE not in verdict["top_aria"], \
+        "the top frame's own aria tree unexpectedly contains the frame's text"
+
+    # browser_snapshot, end to end: header, frame identity, and the frame's text.
+    assert verdict["snapshot_error"] == "", verdict["snapshot_error"]
+    assert f"### frame 1 {verdict['frame_url']}" in verdict["snapshot"], \
+        verdict["snapshot"]
+    assert verdict["frame_url"] == "about:srcdoc", verdict["frame_url"]
+    assert FRAME_ONLY_SENTENCE in verdict["snapshot"], verdict["snapshot"]
+    assert 'button "Top button" [e1]' in verdict["snapshot"], verdict["snapshot"]
+    assert 'button "Run the code" [e2]' in verdict["snapshot"], verdict["snapshot"]
+    assert verdict["snapshot_refs"] == 2, verdict["snapshot_refs"]
+
+    # browser_evaluate(frame_index=1), end to end, in the frame's own world.
+    assert verdict["evaluate"].get("ok") is True, verdict["evaluate"]
+    assert FRAME_ONLY_SENTENCE in json.dumps(verdict["evaluate"]), verdict["evaluate"]
+
+    assert verdict["inframe_ref"] == "e2", verdict["refs"]
+    assert verdict["refs"]["e2"]["frame"] == 1, verdict["refs"]
+    assert "frame" not in verdict["refs"]["e1"], verdict["refs"]
+    assert verdict["inframe_matches"] == 1, "the in-frame ref resolved to nothing"
+    assert verdict["top_matches_same_query"] == 0, \
+        "the top frame found the button, so the comparison proves nothing"
+
+    assert FRAME_ONLY_SENTENCE in verdict["frame_text"], verdict["frame_text"]
+    assert "0 to 1" in verdict["range_error"], verdict["range_error"]
+
+
+async def test_a_frame_whose_host_cannot_be_checked_is_not_read(monkeypatch):
+    """The one failure mode clause 2 leaves to a choice, decided closed.
+
+    A page-level read can fall back to the URL it was handed when a redirect
+    resolution misbehaves, because it has one. A frame has no such fallback — the
+    frame *is* the document — so an inconclusive host check reads as "not read",
+    with the reason in the frame's own section, and no ref is minted for content
+    nobody verified was safe to show.
+    """
+    inner = _FakeFrame("http://127.0.0.1:45547/inner", INNER_ARIA)
+    page = _FramePage(children=[inner])
+
+    async def _exploded_check(url):
+        raise OSError("resolver exploded")
+
+    monkeypatch.setattr(browser_module, "_host_block_reason_async", _exploded_check)
+    refs: dict = {}
+    body = await browser_module._frame_sections(page, refs)
+
+    assert "### frame 1 http://127.0.0.1:45547/inner" in body, body
+    assert "could not be checked" in body and "OSError" in body, body
+    assert inner.aria_calls == 0, "an unchecked host was read anyway"
+    assert refs == {}, "a ref was minted for a frame that was never read"

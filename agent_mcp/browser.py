@@ -37,6 +37,14 @@ CHROMIUM_EXECUTABLE = "/usr/bin/chromium"
 from app.config import CONFIG, service_url  # noqa: E402
 from app.paths import SCREENSHOTS_DIR  # noqa: E402  (was an absolute literal)
 MAX_SNAPSHOT_CHARS = 8000
+# Every child frame's aria tree is read within a budget of its own rather than
+# sharing the document's: `MAX_SNAPSHOT_CHARS` applied to the whole snapshot
+# would start cutting frames after the first, and a frame that vanishes from the
+# tree is the exact defect this replaces (#424). The sections still share a
+# ceiling, because a page carrying twenty ad embeds must not multiply the tool
+# result twenty-fold — whatever falls outside it keeps its header and says why
+# its body is missing, so the budget is never the reason content goes quiet.
+MAX_FRAME_CHARS_TOTAL = MAX_SNAPSHOT_CHARS * 2
 MAX_TABS = 10
 
 # Where to publish post-call browser state (Mission Control's Browser tab).
@@ -456,15 +464,31 @@ def _doc_status_for(page) -> int:
 
 # ── Accessibility tree snapshot ────────────────────────────────────────────────
 
-def _parse_aria_snapshot(text: str, ref_map: dict) -> tuple[str, int]:
+def _parse_aria_snapshot(
+    text: str,
+    ref_map: dict,
+    frame_index: int | None = None,
+    first_ref_number: int = 0,
+) -> tuple[str, int]:
     """
     Parse Playwright's aria_snapshot() YAML-like output.
     Injects ref IDs (e1, e2, ...) next to interactive elements.
-    Returns (annotated_text, ref_count).
+    Returns (annotated_text, last_ref_number).
+
+    `frame_index` tags every ref this call issues with the frame its tree came
+    from, so `_locate` can resolve it there instead of against the top frame —
+    `page.get_by_role` is scoped to the main frame, so before #424 an in-frame
+    control was unreachable however its ref was spelled. None means the main
+    frame, which is the shape every ref carried before frames existed and the
+    one the Mission Control frame's ref list still renders.
+
+    `first_ref_number` continues the numbering across calls: one snapshot hands
+    out one sequence of ids across all its frames, or the second frame's `e1`
+    would silently overwrite the top frame's.
     """
     lines = text.split("\n")
     result_lines = []
-    counter = 0
+    counter = first_ref_number
     role_name_counts: dict = {}
 
     for line in lines:
@@ -486,7 +510,10 @@ def _parse_aria_snapshot(text: str, ref_map: dict) -> tuple[str, int]:
             key = (role, name)
             occ = role_name_counts.get(key, 0)
             role_name_counts[key] = occ + 1
-            ref_map[ref_id] = {"role": role, "name": name, "occurrence": occ}
+            entry = {"role": role, "name": name, "occurrence": occ}
+            if frame_index is not None:
+                entry["frame"] = frame_index
+            ref_map[ref_id] = entry
             ref_str = f" [{ref_id}]"
 
         new_content = f"- {role}"
@@ -504,14 +531,71 @@ def _parse_aria_snapshot(text: str, ref_map: dict) -> tuple[str, int]:
     return "\n".join(result_lines), counter
 
 
+def _page_frames(page) -> list:
+    """The page's frames in the order `frame_index` addresses them.
+
+    Playwright indexes the main frame into this list at 0, so the numbering is
+    the same one the snapshot headers print and the one `browser_evaluate`
+    accepts — three surfaces, one address space.
+    """
+    try:
+        return list(page.frames)
+    except Exception:
+        return []
+
+
+def _frame_at(page, frame_index):
+    """The frame `frame_index` addresses.
+
+    Raises ValueError naming the valid range: an off-by-one against a frame list
+    one shorter than the agent assumed has to say what the range is, or the next
+    call guesses again.
+    """
+    frames = _page_frames(page)
+    try:
+        idx = int(frame_index)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"frame_index must be an integer, got {frame_index!r}"
+        ) from None
+    if not 0 <= idx < len(frames):
+        valid = f"0 to {len(frames) - 1}" if frames else "none (no frames)"
+        raise ValueError(
+            f"frame_index {frame_index} is out of range: this page has "
+            f"{len(frames)} frame(s), valid frame_index is {valid}. "
+            "Omit frame_index to evaluate in the main frame."
+        )
+    return frames[idx]
+
+
 async def _locate(page, ref_id: str):
-    """Reconstruct a Playwright locator from a ref ID."""
+    """Reconstruct a Playwright locator from a ref ID.
+
+    A ref tagged with a frame resolves inside that frame; an untagged one keeps
+    resolving against `page`, which is the main frame and every ref this tool
+    handed out before frames were walked. The frame is re-resolved by index
+    rather than cached because a frame can detach between the snapshot and the
+    click — an iframe the page removed, a cross-origin swap — and then the index
+    is stale, which has to be said instead of clicking the wrong document.
+    """
     info = _ref_map.get(ref_id)
     if not info:
         raise ValueError(
             f"Unknown ref '{ref_id}'. Call browser_snapshot to get fresh refs."
         )
-    return page.get_by_role(info["role"], name=info["name"], exact=True).nth(
+    scope = page
+    frame_index = info.get("frame")
+    if frame_index is not None:
+        frames = _page_frames(page)
+        if not 0 <= frame_index < len(frames):
+            valid = f"0 to {len(frames) - 1}" if frames else "none (no frames)"
+            raise ValueError(
+                f"Ref '{ref_id}' pointed into frame {frame_index}, which is gone; "
+                f"this page now has {len(frames)} frame(s), valid frame_index is "
+                f"{valid}. Call browser_snapshot to get fresh refs."
+            )
+        scope = frames[frame_index]
+    return scope.get_by_role(info["role"], name=info["name"], exact=True).nth(
         info["occurrence"]
     )
 
@@ -694,6 +778,101 @@ async def _browser_navigate(url: str, wait_until: str = "domcontentloaded") -> s
         return json.dumps({"error": _block_since(seq) or str(exc)})
 
 
+# ── Child frames ───────────────────────────────────────────────────────────────
+
+def _frame_entries(page) -> list[tuple[int, object]]:
+    """Every frame on the page except the main one, each with its index.
+
+    The main frame is the document the top-level tree came from, so printing it
+    again would duplicate it; its index is skipped rather than the list being
+    renumbered, because the number a header prints has to stay the number
+    `browser_evaluate(frame_index=…)` takes for that same frame.
+    """
+    main = getattr(page, "main_frame", None)
+    return [(i, f) for i, f in enumerate(_page_frames(page)) if f is not main]
+
+
+def _frame_header(index: int, url: str) -> str:
+    return f"### frame {index} {url or '(no url)'}"
+
+
+async def _frame_sections(page, ref_map: dict, first_ref_number: int = 0) -> str:
+    """Each child frame's aria tree under a `### frame <n> <url>` header.
+
+    Returns "" when the page has no child frames, so a page without an iframe
+    renders exactly as it did before this existed.
+
+    Every frame gets a header whether or not its body arrives, and a body that did
+    not arrive says which of the five reasons it did not: the host guard refused the
+    frame's host, the guard could not finish and the read was skipped for that
+    reason, the frame budget ran out, the aria read raised, or the frame reported
+    nothing. That is the point of the whole function. Before #424 the only sign a
+    frame existed was a bare `- iframe` node with no URL and no children, so
+    content that lives in an embed — an editor pane, a payment widget, a video
+    transcript — was missing from the snapshot with nothing marking the hole, and a
+    partial extraction was reported as a complete one.
+
+    Refs found inside a frame continue the numbering from `first_ref_number` and
+    are tagged with the frame, so a later `browser_click` acts inside it.
+    """
+    entries = _frame_entries(page)
+    if not entries:
+        return ""
+    out: list[str] = []
+    next_ref = first_ref_number
+    remaining = MAX_FRAME_CHARS_TOTAL
+    for index, frame in entries:
+        url = getattr(frame, "url", "") or ""
+        header = _frame_header(index, url)
+        # A frame is a document of its own and can name a host the page-level
+        # guard refused. Same rule at the same place: content from a private
+        # host stops here rather than entering the model's context.
+        # Fail closed, the opposite of the page-level read's habit:
+        # `_enforce_landing` can fall back to the URL it was handed when a redirect
+        # resolution misbehaves, and it has one. A frame has no such fallback — the
+        # frame *is* the document — so a host check that could not finish is a
+        # reason not to read, not a reason to hope.
+        try:
+            blocked = await _host_block_reason_async(url)
+        except Exception as exc:
+            out.append(
+                f"{header}\n[not read: the frame's host could not be checked "
+                f"({type(exc).__name__})]"
+            )
+            continue
+        if blocked:
+            out.append(f"{header}\n[not read: {blocked}]")
+            continue
+        if remaining <= 0:
+            out.append(
+                f"{header}\n[not included: the {MAX_FRAME_CHARS_TOTAL}-character "
+                "frame budget is spent on earlier frames]"
+            )
+            continue
+        try:
+            raw = await frame.locator("body").aria_snapshot()
+        except Exception as exc:
+            out.append(f"{header}\n[unreadable: {exc}]")
+            continue
+        if not raw or not raw.strip():
+            out.append(f"{header}\n[empty: the frame reported no accessible content]")
+            continue
+        budget = min(MAX_SNAPSHOT_CHARS, remaining)
+        annotated, next_ref = _parse_aria_snapshot(
+            raw, ref_map, frame_index=index, first_ref_number=next_ref)
+        total = len(annotated)
+        if total > budget:
+            out.append(
+                f"{header}\n{annotated[:budget]}\n"
+                f"[partly included: truncated at {budget} of {total} chars, the "
+                "rest of this frame is not shown]"
+            )
+        else:
+            out.append(f"{header}\n{annotated}")
+        remaining -= min(total, budget)
+    return "\n\n" + "\n\n".join(out)
+
+
 async def _browser_snapshot(full: bool = False) -> str:
     global _ref_map
     page = await _get_page()
@@ -708,10 +887,17 @@ async def _browser_snapshot(full: bool = False) -> str:
     except Exception as exc:
         return json.dumps({"error": f"Accessibility snapshot failed: {exc}"})
 
-    if not raw or not raw.strip():
+    if raw and raw.strip():
+        annotated, ref_count = _parse_aria_snapshot(raw, _ref_map)
+    else:
+        # An empty top frame is not a reason to report nothing: a page whose body
+        # is an iframe host has all of its content one level down, and saying
+        # "page may not have loaded" about it would be the wrong verdict.
+        annotated, ref_count = "", 0
+    frames_text = await _frame_sections(page, _ref_map, ref_count)
+    if not annotated and not frames_text:
         return json.dumps({"error": "Empty accessibility tree — page may not have loaded."})
 
-    annotated, ref_count = _parse_aria_snapshot(raw, _ref_map)
     title = await page.title()
     header = f"[Page] {title} — {page.url}"
     doc_status = _doc_status_for(page)
@@ -723,15 +909,22 @@ async def _browser_snapshot(full: bool = False) -> str:
             f"[HTTP {doc_status}] This document is an error page, "
             f"not the target content.\n{header}"
         )
-    full_text = f"{header}\n{annotated}"
+    top_text = f"{header}\n{annotated}"
 
-    if len(full_text) > MAX_SNAPSHOT_CHARS:
-        full_text = (
-            full_text[:MAX_SNAPSHOT_CHARS]
+    if len(top_text) > MAX_SNAPSHOT_CHARS:
+        # The budget belongs to the top frame, not to the whole document.
+        # Applying it to the joined text would start cutting the frames below it
+        # — the same silent omission this change exists to remove. A frame either
+        # arrives inside its own budget or is named with the reason it did not, so
+        # the result is bounded by MAX_SNAPSHOT_CHARS + MAX_FRAME_CHARS_TOTAL and
+        # never needs a second cut.
+        top_text = (
+            top_text[:MAX_SNAPSHOT_CHARS]
             + f"\n\n[...truncated at {MAX_SNAPSHOT_CHARS} chars]"
         )
+    full_text = top_text + frames_text
 
-    return json.dumps({"snapshot": full_text, "refs": ref_count})
+    return json.dumps({"snapshot": full_text, "refs": len(_ref_map)})
 
 
 async def _browser_click(ref: str, button: str = "left") -> str:
@@ -911,11 +1104,22 @@ async def _capture_state(tool_name: str) -> dict | None:
         title = ""
     snapshot = ""
     refs: dict[str, dict] = {}
+    top_refs = 0
     try:
         raw = await page.locator("body").aria_snapshot()
-        snapshot, _ = _parse_aria_snapshot(raw, refs)
+        snapshot, top_refs = _parse_aria_snapshot(raw, refs)
     except Exception as exc:
         logger.debug("browser state: aria_snapshot failed: %s", exc)
+    # The tab had the same blind spot the tool call had, and a human is the one
+    # reading it: an embed's content never reached the tree at all. The frame
+    # block carries its own reasons for anything it could not include, so a
+    # partial view says so here too.
+    try:
+        frames_text = await _frame_sections(page, refs, top_refs)
+    except Exception as exc:
+        logger.debug("browser state: frame walk failed: %s", exc)
+        frames_text = ""
+    snapshot = snapshot[:MAX_SNAPSHOT_CHARS] + frames_text
     return {
         "tool": tool_name,
         "url": page.url,
@@ -923,7 +1127,7 @@ async def _capture_state(tool_name: str) -> dict | None:
         "ts": time.time(),
         "mime": "image/jpeg",
         "screenshot_b64": base64.b64encode(shot).decode(),
-        "snapshot": snapshot[:MAX_SNAPSHOT_CHARS],
+        "snapshot": snapshot,
         "refs": [
             {"ref": rid, "role": info.get("role", ""), "name": info.get("name", "")}
             for rid, info in refs.items()
@@ -948,13 +1152,36 @@ async def _push_browser_state(tool_name: str) -> None:
         logger.debug("browser state push failed: %s", exc)
 
 
-async def _browser_evaluate(script: str) -> str:
+async def _browser_evaluate(script: str, frame_index: int | None = None) -> str:
+    """Run `script` and return its value — in a named frame if asked.
+
+    Omitting `frame_index` is unchanged: the script runs in the main frame's JS
+    world, which is where page-level state lives. Passing one runs it inside
+    `page.frames[frame_index]`, which is the capability that was missing —
+    same-origin prose can be reached from the top frame through
+    `contentDocument`, but a frame's own JS world and any cross-origin frame
+    cannot be read that way at all, and until now nothing in this tool surface
+    could address them.
+    """
     page = await _get_page()
     landed = await _enforce_landing(page)
     if landed:
         return json.dumps({"error": landed})
     try:
-        result = await asyncio.wait_for(page.evaluate(script), timeout=10.0)
+        if frame_index is None:
+            target = page
+        else:
+            frame = _frame_at(page, frame_index)
+            # The frame is a document with a host of its own: the page passed the
+            # landing guard, the frame has not necessarily.
+            try:
+                blocked = await _host_block_reason_async(frame.url or "")
+            except Exception:
+                blocked = None
+            if blocked:
+                return json.dumps({"error": blocked})
+            target = frame
+        result = await asyncio.wait_for(target.evaluate(script), timeout=10.0)
         result_json = json.dumps(result)
         if len(result_json) > 50000:
             result_json = result_json[:50000] + "...[truncated]"
@@ -962,6 +1189,10 @@ async def _browser_evaluate(script: str) -> str:
         return json.dumps({"ok": True, "result": result})
     except asyncio.TimeoutError:
         return json.dumps({"error": "Script timed out after 10 seconds"})
+    except ValueError as exc:
+        # A bad frame index or a bad type: the message already names the valid
+        # range, which is the only thing that makes the next call right.
+        return json.dumps({"error": str(exc)})
     except Exception as exc:
         return json.dumps({"error": f"Evaluate failed: {exc}"})
 
@@ -1122,7 +1353,13 @@ async def list_tools():
             "target's. "
             "Interactive elements (links, buttons, form fields) are assigned ref IDs like e1, e2, e3. "
             "Use these refs with browser_click, browser_fill, etc. "
-            "Refs are invalidated after each new snapshot or navigation."
+            "Refs are invalidated after each new snapshot or navigation. "
+            "Content inside an iframe is not folded into the top tree: each child "
+            "frame gets its own `### frame <n> <url>` section, and a ref found in "
+            "one acts inside that frame. A frame whose content could not be read "
+            "is still listed, with the reason, so a partial extraction never reads "
+            "as a complete one. Pass the `<n>` to browser_evaluate's frame_index "
+            "to run script in that frame."
         ), inputSchema={
             "type": "object",
             "properties": {
@@ -1197,11 +1434,27 @@ async def list_tools():
             "Execute JavaScript in the current page context and return the result. "
             "Useful for extracting data that isn't in the accessibility tree, "
             "checking JS state, or manipulating the DOM directly. "
-            "Timeout: 10 seconds. Return value limited to 50KB."
+            "Timeout: 10 seconds. Return value limited to 50KB. "
+            "Pass frame_index — the `<n>` from a `### frame <n> <url>` header in "
+            "browser_snapshot — to run the script inside that frame instead of the "
+            "top one. That is the only way to reach a cross-origin frame, and the "
+            "only way to reach a frame's own JS world; same-origin prose is also "
+            "readable from the top frame via contentDocument. Omitting it keeps "
+            "today's top-frame behaviour."
         ), inputSchema={
             "type": "object",
             "properties": {
                 "script": {"type": "string", "description": "JavaScript expression or function body to execute"},
+                "frame_index": {
+                    "type": "integer",
+                    "description": (
+                        "Run in page.frames[frame_index] instead of the main frame. "
+                        "The numbering is page.frames' own, which is the numbering "
+                        "the snapshot's `### frame <n> <url>` headers print; 0 is the "
+                        "main frame and has no header because its tree is the one at "
+                        "the top. Out of range is an error naming the valid range."
+                    ),
+                },
             },
             "required": ["script"],
         }),
@@ -1322,6 +1575,7 @@ async def call_tool(name: str, arguments: dict):
         "browser_screenshot": lambda: _browser_screenshot(),
         "browser_evaluate": lambda: _browser_evaluate(
             arguments.get("script", ""),
+            arguments.get("frame_index"),
         ),
         "browser_fill": lambda: _browser_fill(
             arguments.get("ref", ""),
