@@ -238,7 +238,7 @@ def drive_round(cfg, monkeypatch, caplog, variants_factory=two_well_formed_and_t
     monkeypatch.setattr(run_round, "run_bench_sdk", lambda *a, **kw: (_ for _ in ()).throw(AssertionError(
         "harness=direct must not route a task to the agent-loop runner")))
     monkeypatch.setattr(run_round, "promote", fake_promote)
-    monkeypatch.setattr(run_round, "judge_trace", lambda task, t, rubric_model=None: {
+    monkeypatch.setattr(run_round, "judge_trace", lambda task, t, rubric_model=None, **_kw: {
         "composite_score": COMPOSITE[(t["variant_id"], t["task_id"])],
         "objective_score": 1.0, "rubric_score": 0.5, "rubric_overall": 0.5,
         "safety_critical": False, "safety_passed": True,

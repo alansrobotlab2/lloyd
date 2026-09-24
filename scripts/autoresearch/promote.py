@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -37,7 +38,7 @@ from pathlib import Path
 from typing import Any
 
 from . import bench_split
-from .common import LLOYD_HOME, AutoresearchConfig, now_iso
+from .common import DEFAULT_MIN_JUDGED_FRACTION, LLOYD_HOME, AutoresearchConfig, now_iso
 
 logger = logging.getLogger("autoresearch.promote")
 
@@ -218,6 +219,43 @@ def slice_metrics(
     }
 
 
+#: The refusal key of the judged-coverage floor (#698). One definition, so a
+#: census of ledger reasons can count it by prefix.
+REFUSAL_JUDGED_FLOOR = "insufficient_judged_tasks"
+
+
+def judged_floor_refusal(cfg: AutoresearchConfig, *summaries: tuple[str, dict[str, Any]]) -> str | None:
+    """The floor under #646's exclusion: too few judged trials is no verdict.
+
+    #646 took a trial whose rubric call never answered out of every mean, and
+    #698 made that trial's composite None rather than a phantom 0.5 — both right,
+    and both shrink the denominators the gate decides on. A variant whose judge
+    answered on 3 of 11 tasks can then clear a win fraction or a mean delta on
+    the three it has. So a summary on either side of the comparison with fewer
+    than `promotion_min_judged_fraction` (8/11 by default, the item's "8 of the
+    11") of its rankable trials judged refuses, naming the count.
+
+    The denominator is `rankable_task_count`, not `task_count`: a task #416
+    already called not-rankable (no dispatch record on the direct arm — 6 of the
+    13 live tasks) is a harness fact, reported on its own, and counting it here
+    would refuse every direct-arm round for a reason that is not the judge.
+    A summary that carries no counts (a hand-built or pre-#646 one) is not
+    judged by this floor.
+    """
+    frac = float(getattr(cfg, "promotion_min_judged_fraction", DEFAULT_MIN_JUDGED_FRACTION))
+    for label, summ in summaries:
+        rankable = summ.get("rankable_task_count")
+        judged = summ.get("scored_task_count")
+        if not isinstance(rankable, int) or not isinstance(judged, int) or rankable <= 0:
+            continue
+        need = math.ceil(frac * rankable - 1e-9)
+        if judged < need:
+            excluded = ", ".join(summ.get("rubric_excluded_tasks") or []) or "none named"
+            return (f"{REFUSAL_JUDGED_FLOOR} ({label}: {judged} of {rankable} rankable "
+                    f"tasks judged, need {need} at {frac:.3f}; unjudged: {excluded})")
+    return None
+
+
 def evaluate_promotion(
     cfg: AutoresearchConfig,
     baseline_summary: dict[str, Any],
@@ -245,6 +283,11 @@ def evaluate_promotion(
     """
     if not variant_summary.get("safety_passed", False) and cfg.promotion_require_safety_pass:
         return False, "safety_regression"
+
+    floor = judged_floor_refusal(cfg, ("variant", variant_summary),
+                                 ("baseline", baseline_summary))
+    if floor:
+        return False, floor
 
     split = split or derive_split(baseline_summary, variant_summary)
     if not split.get("heldout"):

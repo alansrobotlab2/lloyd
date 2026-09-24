@@ -258,7 +258,7 @@ def drive_round(env: Env, baseline_mean: float, *, monkeypatch,
                 })
         return direct, []
 
-    def fake_judge(task, trace, rubric_model=None):
+    def fake_judge(task, trace, rubric_model=None, **_kw):
         score = float(trace["preset_composite"])
         return {"composite_score": score, "objective_score": score,
                 "rubric_overall": score,

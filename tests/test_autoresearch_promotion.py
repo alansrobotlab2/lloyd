@@ -1855,6 +1855,86 @@ def test_a_round_whose_judge_was_down_cannot_promote(cfg, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# #698 clause 2: fewer than 8 of 11 judged cannot promote
+# ---------------------------------------------------------------------------
+
+def _judged_pairs(judged: int, n: int = 11, *, composite: float = 0.9,
+                  not_rankable: int = 0) -> list[tuple[dict, dict]]:
+    """n trials: the first `judged` scored, then `not_rankable` #416 drops, and
+    the rest rubric-excluded (#646/#698: composite None, no rubric number)."""
+    pairs = []
+    for i, t in enumerate(_tasks(n)):
+        if i < judged:
+            s = {"composite_score": composite, "objective_score": 1.0,
+                 "rubric_overall": composite, "rubric_status": "ok",
+                 "rubric_excluded": False}
+        elif i < judged + not_rankable:
+            s = {"composite_score": None, "objective_score": None,
+                 "rubric_overall": 0.9, "rubric_status": "ok", "rubric_excluded": False,
+                 "rankable": False, "not_rankable_reason": "no dispatch record"}
+        else:
+            s = {"composite_score": None, "objective_score": 1.0,
+                 "rubric_overall": None, "rubric_status": "rubric_unavailable",
+                 "rubric_excluded": True}
+        pairs.append((t, s))
+    return pairs
+
+
+def test_a_variant_judged_on_fewer_than_8_of_11_cannot_promote(cfg) -> None:
+    """The floor under the exclusion. With 7 of 11 judged the surviving tasks
+    all improved and, with the full-slice rule relaxed (the validity leg runs
+    that way), the gate would have promoted on seven numbers. It refuses, and
+    the reason names the count and the unjudged tasks."""
+    base = aggregate_variant("baseline", _judged_pairs(11, composite=0.4))
+    var = aggregate_variant("v1", _judged_pairs(7))
+    assert var["scored_task_count"] == 7 and var["rubric_excluded"] == 4
+    should, reason = promote.evaluate_promotion(cfg, base, var, split=_explicit_split(),
+                                                require_full_slice=False)
+    assert should is False
+    assert reason.startswith(promote.REFUSAL_JUDGED_FLOOR), reason
+    assert "variant: 7 of 11 rankable tasks judged, need 8" in reason
+    assert "bench_010" in reason                    # an unjudged task, by name
+
+
+def test_eight_of_eleven_judged_clears_the_floor(cfg) -> None:
+    base = aggregate_variant("baseline", _judged_pairs(11, composite=0.4))
+    var = aggregate_variant("v1", _judged_pairs(8))
+    assert promote.judged_floor_refusal(cfg, ("variant", var), ("baseline", base)) is None
+    _, reason = promote.evaluate_promotion(cfg, base, var, split=_explicit_split(),
+                                           require_full_slice=False)
+    assert not reason.startswith(promote.REFUSAL_JUDGED_FLOOR), reason
+
+
+def test_the_floor_reads_the_baseline_too(cfg) -> None:
+    """A baseline the judge answered on 5 of 11 is no reference to beat."""
+    base = aggregate_variant("baseline", _judged_pairs(5, composite=0.4))
+    var = aggregate_variant("v1", _judged_pairs(11))
+    should, reason = promote.evaluate_promotion(cfg, base, var, split=_explicit_split(),
+                                                require_full_slice=False)
+    assert should is False and "baseline: 5 of 11" in reason, reason
+
+
+def test_not_rankable_tasks_are_not_counted_against_the_judge(cfg) -> None:
+    """The denominator is the rankable trials: #416's direct-arm drops are a
+    harness fact with their own report. 7 judged of 7 rankable (4 not rankable)
+    clears the floor; counting the drops would refuse every direct round."""
+    var = aggregate_variant("v1", _judged_pairs(7, not_rankable=4))
+    assert var["rankable_task_count"] == 7 and var["scored_task_count"] == 7
+    assert promote.judged_floor_refusal(cfg, ("variant", var)) is None
+
+
+def test_the_floor_is_configurable_and_scales_with_the_bench(tmp_path, isolated_prompts) -> None:
+    cfg = make_cfg(tmp_path)
+    assert cfg.promotion_min_judged_fraction == pytest.approx(8 / 11)
+    # 13 tasks at 8/11 needs ceil(9.45) = 10.
+    var13 = aggregate_variant("v1", _judged_pairs(9, n=13))
+    assert "9 of 13 rankable tasks judged, need 10" in promote.judged_floor_refusal(
+        cfg, ("variant", var13))
+    loose = make_cfg(tmp_path, promotion_min_judged_fraction=0.5)
+    assert promote.judged_floor_refusal(loose, ("variant", var13)) is None
+
+
+# ---------------------------------------------------------------------------
 # clause 5: the all-task mean beside the lint-valid-task mean
 # ---------------------------------------------------------------------------
 

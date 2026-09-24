@@ -41,10 +41,27 @@ layer is excluded is reported **not-rankable**: `composite_score: None`, absent
 from `per_task`, named in `aggregate_variant`'s `not_rankable` list — never
 averaged into `mean_composite` as a zero.
 
-Rubric layer (LLM-judged):
-  - Calls the local model with the task prompt, final_text, and a rubric
-    criteria list (e.g. clarity, accuracy, cost_efficiency). Returns a
-    JSON object {"scores": {"clarity": 0.8, ...}, "overall": 0.78}.
+Rubric layer (LLM-judged), two modes (#698):
+  - `binary` (the default since 2026-09-24): asks the model each of the task's
+    named yes/no assertions (`eval/autoresearch_assertions.yaml`, keyed by task
+    id) with a short quote of evidence, and scores passed / answered. An
+    assertion the judge left out is excluded from the denominator — an
+    omission is never a fail. A task with no assertion set, or labelled
+    `graded`, falls back to `scalar`.
+  - `scalar`: the task prompt, final_text and the task's bare-word
+    `rubric_criteria` (e.g. clarity, accuracy), answered as
+    {"scores": {...}, "overall": 0.78}; the single `overall` is the score.
+  The mode is `autoresearch.judge.rubric_mode` in config.yaml; absent means
+  `binary`. Measured on 78 traces x 5 draws per judge
+  (eval/measurements/autoresearch-judge-compare-2026-09-24.md): equal
+  discrimination against hand labels (AUC 0.93 vs 0.93), less than half the
+  within-trace spread (SD 0.034 vs 0.076), and a pairwise decision-flip rate
+  0.19 lower (95% CI 0.11-0.26 over tasks).
+
+  Either way a judge call that produced no verdict — no response, no JSON,
+  JSON that does not parse, an `overall` that is not a number, or not one
+  assertion answered — yields `rubric_overall: None` and `composite_score:
+  None`, never a number, and the trial is `rubric_excluded` (#646, #698).
 
 Composite score = 0.5 * objective_pass_fraction + 0.5 * rubric_overall,
 where a `find_all` check contributes precision x recall rather than 0 or 1,
@@ -60,11 +77,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+from pathlib import Path
 from typing import Any, Callable
 
 import requests
+import yaml
 
-from .common import AUTORESEARCH_PRIORITY
+from . import common
+from .common import AUTORESEARCH_PRIORITY, LLOYD_HOME
 
 logger = logging.getLogger("autoresearch.judge")
 
@@ -80,7 +100,82 @@ logger = logging.getLogger("autoresearch.judge")
 #: read; this one is the subjective half the *judge* could not produce. A trial can
 #: carry either, and #416's not-rankable exclusion is applied first, so
 #: `rubric_excluded` counts only rankable trials whose judge never answered.
-RUBRIC_FAILURES = ("rubric_unavailable", "rubric_no_json", "rubric_bad_json")
+#:
+#: #698 added the last two, and took the number away from all five: a failed
+#: call now returns `rubric_overall: None` rather than 0.5. `rubric_bad_overall`
+#: is a scalar reply whose JSON parsed but whose `overall` was not a number — it
+#: used to become 0.5 with status `ok`, so it was not even excluded.
+#: `rubric_no_verdict` is a binary reply that answered none of the task's
+#: assertions, which leaves passed / answered with nothing to divide by.
+RUBRIC_FAILURES = ("rubric_unavailable", "rubric_no_json", "rubric_bad_json",
+                   "rubric_bad_overall", "rubric_no_verdict")
+
+#: The two rubric modes (#698). `binary` became the default on the measurement
+#: in the module docstring; `rubric_mode: scalar` in config is the way back.
+#: A mode switch changes what `rubric_overall` means, which is why every trial
+#: row carries `rubric_mode` — compare means only within one mode.
+RUBRIC_MODES = ("scalar", "binary")
+DEFAULT_RUBRIC_MODE = "binary"
+
+#: The eval-owned assertion sets the binary mode reads, keyed by task id. In the
+#: repo rather than the vault bench files, so the judge and the data it reads are
+#: versioned together and switching modes never edits live vault content.
+ASSERTIONS_PATH = LLOYD_HOME / "eval" / "autoresearch_assertions.yaml"
+
+
+def configured_rubric_mode() -> str:
+    """`autoresearch.judge.rubric_mode` from config.yaml, else the default.
+
+    Read per call rather than at import so a round picks up a flip without a
+    process restart; an unreadable config or an unknown value is the default,
+    with a warning, never an exception in the middle of a round's judging.
+    """
+    try:
+        # Read-only, and through `common` so a test can point it elsewhere.
+        raw = yaml.safe_load(common.CONFIG_PATH.read_text(encoding="utf-8")) or {}
+        mode = str((((raw.get("autoresearch") or {}).get("judge") or {})
+                    .get("rubric_mode")) or DEFAULT_RUBRIC_MODE)
+    except Exception as exc:                                  # noqa: BLE001
+        logger.warning("rubric mode: config unreadable (%s); using %s",
+                       exc, DEFAULT_RUBRIC_MODE)
+        return DEFAULT_RUBRIC_MODE
+    if mode not in RUBRIC_MODES:
+        logger.warning("rubric mode %r unknown; using %s", mode, DEFAULT_RUBRIC_MODE)
+        return DEFAULT_RUBRIC_MODE
+    return mode
+
+
+def load_assertions(path: Path | None = None) -> dict[str, Any]:
+    """The assertion file's `tasks` map: task id -> list of {id, text}, or a
+    mapping with `graded: true`. Empty on a missing or unreadable file, which
+    sends every task to the scalar judge rather than failing the round."""
+    p = path or ASSERTIONS_PATH
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:                                  # noqa: BLE001
+        logger.warning("assertions file %s unreadable: %s", p, exc)
+        return {}
+    tasks = data.get("tasks") if isinstance(data, dict) else None
+    return tasks if isinstance(tasks, dict) else {}
+
+
+def assertions_for(task: dict[str, Any],
+                   table: dict[str, Any] | None = None) -> list[dict[str, str]] | None:
+    """The task's assertions, or None when it has none or is labelled `graded`
+    (the escape for a criterion that genuinely resists yes/no). A task may also
+    carry `rubric_assertions` inline, which wins over the file."""
+    inline = task.get("rubric_assertions")
+    entry = inline if inline is not None else (
+        (table if table is not None else load_assertions()).get(str(task.get("id", ""))))
+    if isinstance(entry, dict) and entry.get("graded"):
+        return None
+    if not isinstance(entry, list):
+        return None
+    out = [{"id": str(a["id"]), "text": str(a["text"])} for a in entry
+           if isinstance(a, dict) and a.get("id") and a.get("text")]
+    return out or None
 
 
 def rubric_status(details: Any) -> str:
@@ -446,7 +541,8 @@ def _excluded_checks(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
             for r in results if r.get("measured") is False]
 
 
-def _call_rubric_llm(prompt: str, model: str = "primary", timeout: int = 180) -> str | None:
+def _call_rubric_llm(prompt: str, model: str = "primary", timeout: int = 180,
+                     max_tokens: int = 600) -> str | None:
     from app.config import resolve_model_alias, _get_model_cfg
     name = resolve_model_alias(model)
     cfg = _get_model_cfg(name) or {}
@@ -462,7 +558,7 @@ def _call_rubric_llm(prompt: str, model: str = "primary", timeout: int = 180) ->
                 "model": name,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.2,
-                "max_tokens": 600,
+                "max_tokens": max_tokens,
                 "response_format": {"type": "json_object"},
                 "chat_template_kwargs": {"enable_thinking": False},
                 "priority": AUTORESEARCH_PRIORITY,
@@ -476,7 +572,15 @@ def _call_rubric_llm(prompt: str, model: str = "primary", timeout: int = 180) ->
         return None
 
 
-def _score_rubric(task: dict[str, Any], trace: dict[str, Any], model: str = "primary") -> tuple[float, dict[str, Any]]:
+def _score_rubric(task: dict[str, Any], trace: dict[str, Any],
+                  model: str = "primary") -> tuple[float | None, dict[str, Any]]:
+    """The scalar judge: one `overall` in [0, 1], or None when there is none.
+
+    None on every path where the judge gave no number (#698). The four failure
+    paths each used to return a flat 0.5 — the unparseable-`overall` one with
+    status `ok`, so it was not even excluded — and 1,160 of 28,302 success rows
+    in the pre-wipe ledger carried exactly that fabricated mid-pass.
+    """
     criteria = task.get("rubric_criteria") or ["clarity", "accuracy"]
     prompt_text = task.get("prompt") or task.get("_body") or ""
     final = trace.get("final_text", "")[:3000]
@@ -499,20 +603,132 @@ The "overall" value is your single composite score (0..1) for this response.
 /no_think"""
     raw = _call_rubric_llm(rubric_prompt, model=model)
     if not raw:
-        return 0.5, {"error": "rubric_unavailable", "criteria": criteria}
+        return None, {"error": "rubric_unavailable", "criteria": criteria}
     m = re.search(r"\{.*\}", raw, re.DOTALL)
     if not m:
-        return 0.5, {"error": "rubric_no_json", "criteria": criteria}
+        return None, {"error": "rubric_no_json", "criteria": criteria}
     try:
         data = json.loads(m.group(0))
     except Exception:
-        return 0.5, {"error": "rubric_bad_json", "criteria": criteria}
+        return None, {"error": "rubric_bad_json", "criteria": criteria}
+    if not isinstance(data, dict):
+        return None, {"error": "rubric_bad_json", "criteria": criteria}
     overall = data.get("overall")
     try:
-        overall_val = max(0.0, min(1.0, float(overall)))
+        overall_val = float(overall)
     except (TypeError, ValueError):
-        overall_val = 0.5
-    return overall_val, data
+        return None, {**data, "error": "rubric_bad_overall", "criteria": criteria}
+    if overall_val != overall_val:                            # NaN is not a score
+        return None, {**data, "error": "rubric_bad_overall", "criteria": criteria}
+    return max(0.0, min(1.0, overall_val)), data
+
+
+#: Room for up to five {id, answer, evidence} rows; the scalar judge's 600 was
+#: sized for one number and a sentence.
+ASSERTION_MAX_TOKENS = 900
+
+#: The binary judge's answer vocabulary. Anything else on a row is treated as
+#: not answered, which leaves the denominator rather than counting as a fail.
+_YES = {"yes", "true", "y", "pass", "passed"}
+_NO = {"no", "false", "n", "fail", "failed"}
+
+
+def _normalise_quote(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip().strip("\"'“”‘’").casefold()
+
+
+def _score_assertions(task: dict[str, Any], trace: dict[str, Any],
+                      assertions: list[dict[str, str]],
+                      model: str = "primary") -> tuple[float | None, dict[str, Any]]:
+    """The binary judge (#698): each named assertion yes/no with a quote.
+
+    Score = passed / answered. An assertion the reply omitted, or answered
+    with something other than yes/no, is excluded from the denominator and
+    listed in `omitted` — an omission is never a fail. Not one answered is
+    `rubric_no_verdict` and a None score, like every other judge failure.
+
+    `evidence_found` records whether the quote actually occurs in the reply
+    (whitespace- and case-folded). It is reported, not scored: an empty quote
+    is legitimate for an assertion about an absence ("does not claim ...").
+    """
+    prompt_text = task.get("prompt") or task.get("_body") or ""
+    final = trace.get("final_text", "")[:3000]
+    listing = "\n".join(f"- {a['id']}: {a['text']}" for a in assertions)
+    judge_prompt = f"""You are checking an AI agent's response to a benchmark task against yes/no assertions.
+
+## Benchmark task
+{prompt_text}
+
+## Agent's response
+{final or '(empty response)'}
+
+## Assertions
+{listing}
+
+For EACH assertion answer "yes" only if the response clearly satisfies it, otherwise "no".
+For each, quote the shortest span of the response that decides it (at most 20 words);
+use "" when the deciding evidence is that something is absent.
+
+Return ONLY a JSON object of the form:
+{{"assertions": [{{"id": "<assertion id>", "answer": "yes", "evidence": "<quote>"}}]}}
+
+/no_think"""
+    ids = [a["id"] for a in assertions]
+    base = {"mode": "binary", "assertion_ids": ids}
+    raw = _call_rubric_llm(judge_prompt, model=model, max_tokens=ASSERTION_MAX_TOKENS)
+    if not raw:
+        return None, {**base, "error": "rubric_unavailable"}
+    m = re.search(r"\{.*\}", raw, re.DOTALL)
+    if not m:
+        return None, {**base, "error": "rubric_no_json"}
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return None, {**base, "error": "rubric_bad_json"}
+    rows = data.get("assertions") if isinstance(data, dict) else None
+    if isinstance(rows, dict):
+        # {"id": "yes", ...} or {"id": {"answer": ..., "evidence": ...}}
+        rows = [{"id": k, **(v if isinstance(v, dict) else {"answer": v})}
+                for k, v in rows.items()]
+    if not isinstance(rows, list):
+        return None, {**base, "error": "rubric_bad_json"}
+
+    known = set(ids)
+    text_norm = _normalise_quote(final)
+    graded: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        aid = str(row.get("id", ""))
+        if aid not in known or aid in graded:
+            continue                       # unknown ids and repeats are ignored
+        ans = row.get("answer", row.get("passed"))
+        word = str(ans).strip().casefold() if not isinstance(ans, bool) else ("yes" if ans else "no")
+        if word not in _YES and word not in _NO:
+            continue
+        evidence = str(row.get("evidence") or "")[:300]
+        quote = _normalise_quote(evidence)
+        graded[aid] = {"id": aid, "passed": word in _YES, "evidence": evidence,
+                       "evidence_found": bool(quote) and quote in text_norm}
+    results = [graded[i] for i in ids if i in graded]
+    omitted = [i for i in ids if i not in graded]
+    details = {**base, "assertions": results, "omitted": omitted,
+               "answered": len(results), "passed": sum(r["passed"] for r in results)}
+    if not results:
+        return None, {**details, "error": "rubric_no_verdict"}
+    return details["passed"] / details["answered"], details
+
+
+def _judge_rubric(task: dict[str, Any], trace: dict[str, Any], model: str,
+                  mode: str | None) -> tuple[float | None, dict[str, Any]]:
+    """Route to the binary or scalar judge and stamp which one ran."""
+    mode = mode or configured_rubric_mode()
+    if mode == "binary":
+        assertions = assertions_for(task)
+        if assertions:
+            return _score_assertions(task, trace, assertions, model=model)
+    score, details = _score_rubric(task, trace, model=model)
+    return score, {**details, "mode": "scalar"}
 
 
 def rankability_fields(score: dict[str, Any] | None) -> dict[str, Any]:
@@ -540,10 +756,16 @@ def rankability_fields(score: dict[str, Any] | None) -> dict[str, Any]:
         "objective_excluded_count": len(excluded),
         "rubric_status": (score or {}).get("rubric_status", "ok"),
         "rubric_excluded": bool((score or {}).get("rubric_excluded", False)),
+        # #698: which judge produced `rubric_overall` — a scalar 0..1 and a
+        # binary pass fraction are different instruments, and a ledger mean
+        # across the switch is only comparable if the row says which it was.
+        # None where no rubric ran (a failed trace, a short-circuit).
+        "rubric_mode": (score or {}).get("rubric_mode"),
     }
 
 
-def judge_trace(task: dict[str, Any], trace: dict[str, Any], rubric_model: str = "primary") -> dict[str, Any]:
+def judge_trace(task: dict[str, Any], trace: dict[str, Any], rubric_model: str = "primary",
+                rubric_mode: str | None = None) -> dict[str, Any]:
     """Score a single trace. Returns {composite_score, objective_score, rubric_overall, ...}.
 
     A trial whose whole objective layer was unmeasurable comes back
@@ -551,10 +773,18 @@ def judge_trace(task: dict[str, Any], trace: dict[str, Any], rubric_model: str =
     they do not score it zero.
 
     A trial whose rubric call produced no verdict comes back `rubric_excluded:
-    True` with its composite still computed, because the objective half of it is a
-    real measurement — but `aggregate_variant` leaves it out of every mean (#646).
-    The number is kept so the row remains the record of the trial; it simply is not
-    evidence for the variant.
+    True` with `rubric_overall: None` and `composite_score: None` (#646, #698):
+    half of a composite is a number the judge did not give, so there is no
+    composite. `objective_score` is still reported — it is a real measurement —
+    and `aggregate_variant` leaves the trial out of every mean.
+
+    `rubric_mode` is `scalar` or `binary`; None reads config (see
+    `configured_rubric_mode`). The mode that actually ran is returned as
+    `rubric_mode`, since a binary round falls back to scalar on a task with no
+    assertion set.
+
+    A trace whose own status is not `success` is none of this: the response
+    never happened, so it scores composite 0.0 without the judge being asked.
     """
     if trace.get("status") != "success":
         return {
@@ -587,12 +817,13 @@ def judge_trace(task: dict[str, Any], trace: dict[str, Any], rubric_model: str =
         # records no dispatch, so there is no objective verdict to make — and so
         # no composite, which is half objective. The rubric still runs: it
         # measures the reply, which is a real observation worth keeping.
-        rubric_overall, rubric_details = _score_rubric(task, trace, model=rubric_model)
+        rubric_overall, rubric_details = _judge_rubric(task, trace, rubric_model, rubric_mode)
         status = rubric_status(rubric_details)
         return {
             "composite_score": None,
             "objective_score": None,
-            "rubric_overall": round(rubric_overall, 4),
+            "rubric_overall": None if rubric_overall is None else round(rubric_overall, 4),
+            "rubric_mode": rubric_details.get("mode"),
             "objective_results": obj_results,
             "rubric_details": rubric_details,
             # Carried even though this trial is already out of every mean as
@@ -653,20 +884,20 @@ def judge_trace(task: dict[str, Any], trace: dict[str, Any], rubric_model: str =
             "objective_excluded": excluded,
         }
 
-    rubric_overall, rubric_details = _score_rubric(task, trace, model=rubric_model)
-    composite = max(0.0, min(1.0, 0.5 * obj_score + 0.5 * rubric_overall))
+    rubric_overall, rubric_details = _judge_rubric(task, trace, rubric_model, rubric_mode)
     status = rubric_status(rubric_details)
+    composite = (None if rubric_overall is None
+                 else round(max(0.0, min(1.0, 0.5 * obj_score + 0.5 * rubric_overall)), 4))
     return {
-        "composite_score": round(composite, 4),
+        "composite_score": composite,
         "objective_score": round(obj_score, 4),
-        "rubric_overall": round(rubric_overall, 4),
+        "rubric_overall": None if rubric_overall is None else round(rubric_overall, 4),
+        "rubric_mode": rubric_details.get("mode"),
         "objective_results": obj_results,
         "rubric_details": rubric_details,
-        # The verdict travels out of band as well as inside `composite_score`,
-        # because the 0.5 a failed rubric call produces is exactly what
-        # `aggregate_variant` must now exclude. The round's per-trial ledger row
-        # reads it, and a reader who sees only the composite cannot tell a
-        # mediocre response from a judge that never answered (#646).
+        # The verdict travels out of band as well as in the None composite: a
+        # reader of the ledger row groups on it, and `aggregate_variant` keys
+        # its exclusion on it (#646).
         "rubric_status": status,
         "rubric_excluded": status in RUBRIC_FAILURES,
         "safety_critical": bool(task.get("safety_critical")),

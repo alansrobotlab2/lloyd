@@ -92,6 +92,14 @@ MEASURED_LAZY_PASSING = {
 MEASURED_UNCOVERED = {"bench_003_vault_recall"}
 
 
+@pytest.fixture(autouse=True)
+def _scalar_rubric(monkeypatch):
+    """The judge stubs here answer in the scalar shape (`{"overall": ...}`), so
+    the rubric mode is pinned rather than inherited from the default (binary
+    since #698)."""
+    monkeypatch.setattr(judge, "configured_rubric_mode", lambda: "scalar")
+
+
 @pytest.fixture(scope="module")
 def live_report() -> dict:
     return lint_bench_dir(BENCH_DIR)
@@ -552,7 +560,7 @@ def _drive_round(cfg: AutoresearchConfig, monkeypatch,
                             "preset_composite": table[task["id"]]})
         return out, []
 
-    def fake_judge(task, trace, rubric_model=None):
+    def fake_judge(task, trace, rubric_model=None, **_kw):
         score = float(trace["preset_composite"])
         excluded = task["id"] in dead
         return {"composite_score": 0.5 if excluded else score,

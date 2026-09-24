@@ -38,7 +38,7 @@ from .common import (
     _run_spec_from_cfg,
 )
 from .hypothesis_generator import propose_variants
-from .judge import aggregate_variant, judge_trace, rankability_fields
+from .judge import aggregate_variant, configured_rubric_mode, judge_trace, rankability_fields
 from . import bench_split
 # `slice_metrics` is imported by name, never reached through the module: the
 # name `promote` is bound two lines lower to the promotion *function*, so
@@ -628,12 +628,14 @@ async def run(
     )
     traces = direct_traces + sdk_traces
 
-    # Judge each trace
+    # Judge each trace. The rubric mode is read once, so one round is judged by
+    # one instrument even if config changes mid-round (#698).
+    rubric_mode = configured_rubric_mode()
     scored_traces: list[dict[str, Any]] = []
     for t in traces:
         task_by_id = {tk.get("id"): tk for tk in tasks}
         task = task_by_id.get(t["task_id"]) or {}
-        score = judge_trace(task, t, rubric_model=model)
+        score = judge_trace(task, t, rubric_model=model, rubric_mode=rubric_mode)
         scored_traces.append({**t, "_task": task, "_score": score})
         ledger_append(cfg.paths.ledger_path, trial_ledger_row(rid, t, score))
 

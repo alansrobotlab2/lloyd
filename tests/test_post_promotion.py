@@ -625,7 +625,7 @@ def test_run_round_records_and_surfaces_on_the_live_path(world, monkeypatch):
         {"variant_id": "V_new", "description": "d", "hypothesis": "h"}
     ])
     monkeypatch.setattr(run_round, "_run_trials", fake_trials)
-    monkeypatch.setattr(run_round, "judge_trace", lambda task, t, rubric_model=None: {
+    monkeypatch.setattr(run_round, "judge_trace", lambda task, t, rubric_model=None, **_kw: {
         "composite_score": 0.5, "objective_score": 1.0, "rubric_overall": 0.5,
         "safety_critical": False, "safety_passed": True,
     })
@@ -729,7 +729,7 @@ def test_a_later_round_reads_the_report_the_round_actually_wrote(world, monkeypa
     monkeypatch.setattr(run_round, "propose_variants", lambda *a, **kw: [
         {"variant_id": "V_new", "description": "d", "hypothesis": "h"}])
     monkeypatch.setattr(run_round, "_run_trials", fake_trials)
-    monkeypatch.setattr(run_round, "judge_trace", lambda task, t, rubric_model=None: {
+    monkeypatch.setattr(run_round, "judge_trace", lambda task, t, rubric_model=None, **_kw: {
         "composite_score": 0.5, "objective_score": 1.0, "rubric_overall": 0.5,
         "safety_critical": False, "safety_passed": True})
     monkeypatch.setattr(run_round, "aggregate_variant", lambda vid, pairs: {
@@ -1074,7 +1074,7 @@ def test_the_report_run_writes_carries_the_shape_block_capped_at_five(world, mon
     monkeypatch.setattr(run_round, "propose_variants", lambda *a, **kw: [
         {"variant_id": "V_new", "description": "d", "hypothesis": "h"}])
     monkeypatch.setattr(run_round, "_run_trials", fake_trials)
-    monkeypatch.setattr(run_round, "judge_trace", lambda task, t, rubric_model=None: {
+    monkeypatch.setattr(run_round, "judge_trace", lambda task, t, rubric_model=None, **_kw: {
         "composite_score": 0.5, "objective_score": 1.0, "rubric_overall": 0.5,
         "safety_critical": False, "safety_passed": True})
     monkeypatch.setattr(run_round, "aggregate_variant", lambda vid, pairs: {

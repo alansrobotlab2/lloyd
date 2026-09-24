@@ -27,6 +27,13 @@ CONFIG_PATH = LLOYD_HOME / "config.yaml"
 #: the key.
 DEFAULT_NOISE_FLOOR = 0.1389
 
+#: #698: the fraction of a summary's rankable trials the rubric judge must have
+#: answered before `evaluate_promotion` will read its means at all — the item's
+#: "fewer than 8 of the 11 bench tasks scored cannot promote", kept as a fraction
+#: so it scales with the bench (13 tasks on 2026-09-24). Overridable by
+#: `autoresearch.promotion.min_judged_fraction`.
+DEFAULT_MIN_JUDGED_FRACTION = 8 / 11
+
 
 @dataclass
 class AutoresearchPaths:
@@ -60,6 +67,7 @@ class AutoresearchConfig:
     # not required, so every existing `AutoresearchConfig(...)` call site —
     # including the test harnesses — keeps constructing without change.
     promotion_noise_floor: float = DEFAULT_NOISE_FLOOR
+    promotion_min_judged_fraction: float = DEFAULT_MIN_JUDGED_FRACTION
 
 
 def _expand(p: str) -> Path:
@@ -101,6 +109,8 @@ def load_config() -> AutoresearchConfig:
         tool_allowlist_consecutive_wins=int(promo.get("tool_allowlist_consecutive_wins", 2)),
         targets=list(block.get("targets") or []),
         promotion_noise_floor=float(promo.get("noise_floor", DEFAULT_NOISE_FLOOR)),
+        promotion_min_judged_fraction=float(
+            promo.get("min_judged_fraction", DEFAULT_MIN_JUDGED_FRACTION)),
     )
 
 

@@ -6,10 +6,11 @@ Why this file exists
 prompts get written into the live vault, and it had no tests. Two of its
 behaviors were measured by hand on 2026-09-05 and never asserted:
 
-  * `_score_rubric` returns a hardcoded **0.5** whenever the rubric LLM is
-    unreachable, malformed, or off-spec (judge.py:143/146/150/155). That 0.5 is
-    indistinguishable downstream from a real middle-of-the-scale score, so an
-    engine hiccup silently moves `mean_composite`.
+  * `_score_rubric` returned a hardcoded **0.5** whenever the rubric LLM was
+    unreachable, malformed, or off-spec. That 0.5 was indistinguishable
+    downstream from a real middle-of-the-scale score, so an engine hiccup
+    silently moved `mean_composite`. #646 excluded such trials; #698 removed the
+    number itself — every failure path now returns None (pinned below).
   * Safety-critical tasks short-circuit to composite 0.0 on any objective miss,
     and that is the only part of the promotion gate that behaved deterministically.
 
@@ -558,10 +559,18 @@ def test_rubric_score_is_clamped_into_unit_range(monkeypatch):
     assert s["rubric_overall"] == 1.0 and s["composite_score"] == 1.0
 
 
-def test_unparseable_rubric_overall_falls_back_to_half(monkeypatch):
-    monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: '{"overall": "great"}')
+@pytest.mark.parametrize("raw", ['{"overall": "great"}', '{"overall": null}',
+                                 '{"scores": {"clarity": 0.9}}', '{"overall": NaN}'])
+def test_unparseable_rubric_overall_is_unscored_not_half(monkeypatch, raw):
+    """#698 clause 1, the fourth failure path. A parsed reply whose `overall` is
+    not a number used to become 0.5 with status `ok` — not even excluded. It is
+    now a named failure with no number anywhere."""
+    monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: raw)
     s = judge.judge_trace({}, trace("x"))
-    assert s["rubric_overall"] == 0.5
+    assert s["rubric_overall"] is None
+    assert s["composite_score"] is None
+    assert s["rubric_status"] == "rubric_bad_overall"
+    assert s["rubric_excluded"] is True
 
 
 @pytest.mark.parametrize("raw,reason", [
@@ -569,15 +578,22 @@ def test_unparseable_rubric_overall_falls_back_to_half(monkeypatch):
     (None, "rubric_unavailable"),
     ("no json here", "rubric_no_json"),
     ("{broken json,}", "rubric_bad_json"),
+    ('{"overall": "great"}', "rubric_bad_overall"),
 ])
-def test_rubric_failures_all_return_the_same_hardcoded_half(monkeypatch, raw, reason):
-    """The four distinct rubric failure modes collapse to one undifferentiated
-    0.5 composite contribution. Deterministic to test, indistinguishable to the
-    promotion gate."""
+def test_rubric_failures_are_unscored_never_the_hardcoded_half(monkeypatch, raw, reason):
+    """#698 clause 1: every way the judge can fail to give a number — no
+    response, no JSON, malformed JSON, an unparseable `overall` — leaves the
+    trial with `rubric_overall: None` and no composite, where each used to
+    return a flat 0.5 the response never earned."""
     monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: raw)
-    s = judge.judge_trace({}, trace("x"))
-    assert s["rubric_overall"] == 0.5
+    s = judge.judge_trace({"objective_checks": [{"type": "contains", "value": "x"}]},
+                          trace("x"))
+    assert s["rubric_overall"] is None
+    assert s["composite_score"] is None
+    assert s["objective_score"] == 1.0, "the objective half is still reported"
     assert s["rubric_details"]["error"] == reason
+    assert s["rubric_excluded"] is True
+    assert 0.5 not in (s["rubric_overall"], s["composite_score"])
 
 
 def test_rubric_json_is_extracted_from_surrounding_prose(monkeypatch):
@@ -771,21 +787,28 @@ def unscored(composite, *, reason="rubric_unavailable", safety_critical=False,
 
 @pytest.mark.parametrize("reason", list(judge.RUBRIC_FAILURES))
 def test_each_rubric_failure_excludes_the_trial_without_scoring_it(monkeypatch, reason):
-    """All three ways the judge can fail to answer exclude the trial: the
-    `rubric_unavailable` path (the engine did not answer), plus a reply with no
-    JSON in it and a reply whose JSON does not parse."""
+    """Every way the judge can fail to answer excludes the trial: the engine did
+    not answer, a reply with no JSON, JSON that does not parse, a scalar
+    `overall` that is not a number (#698), and a binary reply that answered none
+    of the assertions (#698). None of them leaves a number behind."""
     bodies = {
-        "rubric_unavailable": None,
-        "rubric_no_json": "I would grade this as quite good overall.",
-        "rubric_bad_json": '{"overall": 0.9, "scores": {"clarity": 0.8,}}',
+        "rubric_unavailable": (None, "scalar"),
+        "rubric_no_json": ("I would grade this as quite good overall.", "scalar"),
+        "rubric_bad_json": ('{"overall": 0.9, "scores": {"clarity": 0.8,}}', "scalar"),
+        "rubric_bad_overall": ('{"overall": "pretty good"}', "scalar"),
+        "rubric_no_verdict": ('{"assertions": [{"id": "nope", "answer": "yes"}]}', "binary"),
     }
-    monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: bodies[reason])
-    s = judge.judge_trace({"rubric_criteria": ["clarity"]}, trace("a real answer"))
+    raw, mode = bodies[reason]
+    monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: raw)
+    task = {"rubric_criteria": ["clarity"],
+            "rubric_assertions": [{"id": "clear", "text": "The reply is clear."}]}
+    s = judge.judge_trace(task, trace("a real answer"), rubric_mode=mode)
     assert s["rubric_details"]["error"] == reason
     assert s["rubric_status"] == reason
     assert s["rubric_excluded"] is True
-    # The composite is still there — it is the record of the trial, not evidence.
-    assert s["composite_score"] == pytest.approx(0.5 * s["objective_score"] + 0.25)
+    assert s["rubric_mode"] == mode
+    # #698: no composite — half of it would be a number the judge did not give.
+    assert s["rubric_overall"] is None and s["composite_score"] is None
 
 
 def test_a_rubric_outage_excludes_every_trial_and_empties_the_mean(monkeypatch):
@@ -807,15 +830,17 @@ def test_a_rubric_outage_excludes_every_trial_and_empties_the_mean(monkeypatch):
     assert agg["rubric_excluded_tasks"] == ["t0", "t1", "t2"]
 
 
-def test_the_rubric_failure_constant_is_exactly_the_three_silences():
-    """The parametrised test below iterates `list(judge.RUBRIC_FAILURES)`, so it
-    shrinks silently if a name is ever dropped from the constant — three green
-    params where four were meant, and no test says which one vanished. This is the
-    pin that makes dropping one a failure. The three are the ways this harness has
-    seen the judge answer with nothing usable: the engine did not answer, the answer
-    held no JSON, the JSON did not parse."""
+def test_the_rubric_failure_constant_is_exactly_the_five_silences():
+    """The parametrised test above iterates `list(judge.RUBRIC_FAILURES)`, so it
+    shrinks silently if a name is ever dropped from the constant — green params
+    where more were meant, and no test says which one vanished. This is the pin
+    that makes dropping one a failure. The five are the ways this harness has seen
+    the judge answer with nothing usable: the engine did not answer, the answer
+    held no JSON, the JSON did not parse, the scalar `overall` was not a number,
+    and the binary judge answered none of its assertions (the last two #698)."""
     assert judge.RUBRIC_FAILURES == (
-        "rubric_unavailable", "rubric_no_json", "rubric_bad_json")
+        "rubric_unavailable", "rubric_no_json", "rubric_bad_json",
+        "rubric_bad_overall", "rubric_no_verdict")
 
 
 def test_a_scored_trial_still_carries_a_rubric_status(monkeypatch):
@@ -950,3 +975,157 @@ def test_a_task_without_the_flag_keeps_partial_credit(monkeypatch):
     s = judge.judge_trace(task, trace("alpha only"))
     assert s["composite_score"] == 0.55          # 0.5 * 0.5 + 0.5 * 0.6
     assert s["rubric_status"] == "ok"
+
+
+# ── #698: the binary per-assertion judge ─────────────────────────────────────
+
+_ASSERTS = [{"id": "confirms", "text": "The reply confirms it is awake."},
+            {"id": "brief", "text": "The reply is at most three sentences."},
+            {"id": "persona", "text": "The reply speaks as Lloyd."}]
+
+
+def _binary_task(**over):
+    t = {"id": "bench_x", "prompt": "Are you awake?", "rubric_criteria": ["clarity"],
+         "rubric_assertions": list(_ASSERTS)}
+    t.update(over)
+    return t
+
+
+def _reply(rows):
+    import json as _json
+    return lambda *a, **kw: _json.dumps({"assertions": rows})
+
+
+def test_binary_score_is_passed_over_answered_with_evidence(monkeypatch):
+    """Clause 4: each named assertion is graded yes/no with a quote, and the
+    score is passed / answered. The quote is kept on the row, and whether it
+    really occurs in the reply is recorded beside it."""
+    monkeypatch.setattr(judge, "_call_rubric_llm", _reply([
+        {"id": "confirms", "answer": "yes", "evidence": "Yes, I'm   awake"},
+        {"id": "brief", "answer": "yes", "evidence": "Yes, I'm awake."},
+        {"id": "persona", "answer": "no", "evidence": "an invented quote"},
+    ]))
+    s = judge.judge_trace(_binary_task(), trace("Yes, I'm awake. Lloyd here."),
+                          rubric_mode="binary")
+    assert s["rubric_mode"] == "binary" and s["rubric_status"] == "ok"
+    assert s["rubric_overall"] == pytest.approx(2 / 3, abs=1e-4)
+    assert s["composite_score"] == pytest.approx(0.5 * 1.0 + 0.5 * 2 / 3, abs=1e-4)
+    rows = {r["id"]: r for r in s["rubric_details"]["assertions"]}
+    assert rows["confirms"]["passed"] is True and rows["persona"]["passed"] is False
+    assert rows["confirms"]["evidence"] == "Yes, I'm   awake"
+    assert rows["confirms"]["evidence_found"] is True       # whitespace-folded
+    assert rows["persona"]["evidence_found"] is False       # not in the reply
+
+
+def test_an_omitted_assertion_leaves_the_denominator_and_is_never_a_fail(monkeypatch):
+    """Clause 4's second half. One yes, one omitted, one with an answer that is
+    neither yes nor no: 1 / 1, not 1 / 3. Under a fail-on-omission reading this
+    would be 0.33 — the judge's silence scored as the reply's failure."""
+    monkeypatch.setattr(judge, "_call_rubric_llm", _reply([
+        {"id": "confirms", "answer": "yes", "evidence": "awake"},
+        {"id": "brief", "answer": "maybe", "evidence": ""},
+        {"id": "unknown_id", "answer": "no", "evidence": ""},
+    ]))
+    s = judge.judge_trace(_binary_task(), trace("awake"), rubric_mode="binary")
+    d = s["rubric_details"]
+    assert s["rubric_overall"] == 1.0
+    assert d["answered"] == 1 and d["passed"] == 1
+    assert d["omitted"] == ["brief", "persona"]
+
+
+def test_the_binary_judge_accepts_booleans_and_a_keyed_object(monkeypatch):
+    monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw:
+                        '{"assertions": {"confirms": {"answer": true, "evidence": "x"},'
+                        ' "brief": "no"}}')
+    s = judge.judge_trace(_binary_task(), trace("x"), rubric_mode="binary")
+    assert s["rubric_details"]["answered"] == 2
+    assert s["rubric_overall"] == 0.5
+
+
+def test_a_binary_reply_with_no_answered_assertion_is_unscored(monkeypatch):
+    monkeypatch.setattr(judge, "_call_rubric_llm", _reply([]))
+    s = judge.judge_trace(_binary_task(), trace("x"), rubric_mode="binary")
+    assert s["rubric_status"] == "rubric_no_verdict"
+    assert s["rubric_overall"] is None and s["composite_score"] is None
+    assert s["rubric_excluded"] is True
+
+
+def test_the_binary_prompt_names_every_assertion_and_asks_for_quotes(monkeypatch):
+    seen = {}
+
+    def fake(prompt, model="primary", **kw):
+        seen["prompt"], seen["kw"] = prompt, kw
+        return '{"assertions": []}'
+    monkeypatch.setattr(judge, "_call_rubric_llm", fake)
+    judge.judge_trace(_binary_task(), trace("x"), rubric_mode="binary")
+    for a in _ASSERTS:
+        assert f"- {a['id']}: {a['text']}" in seen["prompt"]
+    assert '"evidence"' in seen["prompt"] and "/no_think" in seen["prompt"]
+    assert seen["kw"]["max_tokens"] == judge.ASSERTION_MAX_TOKENS
+
+
+def test_a_graded_task_or_one_with_no_assertions_falls_back_to_scalar(monkeypatch):
+    """The `graded` escape and a task the file does not cover both use the
+    scalar judge in binary mode, and say so on the trial."""
+    monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: '{"overall": 0.4}')
+    graded = _binary_task(rubric_assertions={"graded": True})
+    uncovered = _binary_task(id="not_in_file", rubric_assertions=None)
+    for task in (graded, uncovered):
+        s = judge.judge_trace(task, trace("x"), rubric_mode="binary")
+        assert s["rubric_mode"] == "scalar" and s["rubric_overall"] == 0.4
+
+
+def test_the_mode_is_read_from_config_and_defaults_to_binary(monkeypatch, tmp_path):
+    """Binary is the default since the 2026-09-24 measurement
+    (eval/measurements/autoresearch-judge-compare-2026-09-24.md); `scalar` in
+    config is the way back, and anything unreadable is the default."""
+    from scripts.autoresearch import common
+    assert judge.DEFAULT_RUBRIC_MODE == "binary"
+    cfgfile = tmp_path / "config.yaml"
+    monkeypatch.setattr(common, "CONFIG_PATH", cfgfile)
+    cfgfile.write_text("autoresearch: {}\n", encoding="utf-8")
+    assert judge.configured_rubric_mode() == "binary"
+    cfgfile.write_text("autoresearch:\n  judge:\n    rubric_mode: scalar\n", encoding="utf-8")
+    assert judge.configured_rubric_mode() == "scalar"
+    cfgfile.write_text("autoresearch:\n  judge:\n    rubric_mode: vibes\n", encoding="utf-8")
+    assert judge.configured_rubric_mode() == "binary"
+    cfgfile.unlink()
+    assert judge.configured_rubric_mode() == "binary"
+
+    cfgfile.write_text("autoresearch:\n  judge:\n    rubric_mode: binary\n", encoding="utf-8")
+    monkeypatch.setattr(judge, "_call_rubric_llm", _reply(
+        [{"id": "confirms", "answer": "yes", "evidence": "x"}]))
+    assert judge.judge_trace(_binary_task(), trace("x"))["rubric_mode"] == "binary"
+
+
+def test_the_repo_assertion_file_covers_the_bench_in_the_declared_shape():
+    """Clause 5, the half the repo owns: every bench task id has 2-5 named yes/no
+    assertions (or is labelled `graded`), ids unique within a task, and the file
+    loads through the same function the judge reads it with."""
+    table = judge.load_assertions()
+    expected = {f"bench_{i:03d}" for i in range(1, 18)}
+    prefixes = {tid[:9] for tid in table}
+    assert expected <= prefixes, f"missing: {sorted(expected - prefixes)}"
+    for tid, entry in table.items():
+        if isinstance(entry, dict):
+            assert entry.get("graded") is True, tid
+            continue
+        got = judge.assertions_for({"id": tid}, table)
+        assert got is not None and 2 <= len(got) <= 5, tid
+        ids = [a["id"] for a in got]
+        assert len(ids) == len(set(ids)), tid
+
+
+@pytest.mark.live_vault
+def test_every_live_bench_task_has_an_assertion_set():
+    """Clause 5 against the vault: the binary path carries every live bench task
+    the round it is switched on. A task added to ~/obsidian/lloyd/bench without
+    an entry here would silently fall back to the scalar judge."""
+    from scripts.autoresearch.common import load_bench_tasks, load_config
+    tasks = load_bench_tasks(load_config().paths.bench_dir)
+    table = judge.load_assertions()
+    missing = [t.get("id") for t in tasks
+               if judge.assertions_for(t, table) is None
+               and not (isinstance(table.get(t.get("id")), dict)
+                        and table[t.get("id")].get("graded"))]
+    assert tasks and not missing, missing

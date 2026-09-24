@@ -1,0 +1,398 @@
+{
+  "n_traces": 78,
+  "n_rows": 780,
+  "judges": {
+    "scalar": {
+      "calls": 390,
+      "failed": 0,
+      "failure_rate": 0.0,
+      "fail_ci": [
+        0.0,
+        0.009754175282651703
+      ],
+      "within_trace_sd_mean": 0.07577156601739021,
+      "within_trace_sd_ci": {
+        "point": 0.07577156601739021,
+        "lo": 0.05231154187102812,
+        "hi": 0.10163365773400576,
+        "n": 78,
+        "n_resamples": 10000,
+        "seed": 20260921
+      },
+      "share_traces_all_draws_equal": 0.46153846153846156,
+      "mean_good": 0.5229230769230769,
+      "mean_bad": 0.39292307692307693,
+      "auc_single_pooled": 0.5787902695595003,
+      "tasks_agree_ge_0_9": 5,
+      "n_tasks": 13
+    },
+    "binary": {
+      "calls": 390,
+      "failed": 0,
+      "failure_rate": 0.0,
+      "fail_ci": [
+        0.0,
+        0.009754175282651703
+      ],
+      "within_trace_sd_mean": 0.034197676357981294,
+      "within_trace_sd_ci": {
+        "point": 0.034197676357981294,
+        "lo": 0.016647201346198,
+        "hi": 0.05459062556070578,
+        "n": 78,
+        "n_resamples": 10000,
+        "seed": 20260921
+      },
+      "share_traces_all_draws_equal": 0.8333333333333334,
+      "mean_good": 0.5820512820512821,
+      "mean_bad": 0.4269230769230769,
+      "auc_single_pooled": 0.6111111111111112,
+      "tasks_agree_ge_0_9": 12,
+      "n_tasks": 13,
+      "evidence_found_rate": 0.5883720930232558
+    }
+  },
+  "per_task": {
+    "bench_001_reply_greeting": {
+      "scalar": {
+        "auc_single": 0.5333333333333333,
+        "auc_mean": 0.6666666666666666,
+        "gap": 0.0020000000000000018,
+        "sd": 0.0020000000000000018,
+        "flip": 0.13333333333333333,
+        "agree": 0.9888888888888889
+      },
+      "binary": {
+        "auc_single": 0.5,
+        "auc_mean": 0.5,
+        "gap": 0.0,
+        "sd": 0.0,
+        "flip": 0.0,
+        "agree": 1.0
+      }
+    },
+    "bench_002_recall_user_fact": {
+      "scalar": {
+        "auc_single": 0.2,
+        "auc_mean": 0.0,
+        "gap": -0.16666666666666663,
+        "sd": 0.0783193410757056,
+        "flip": 0.42,
+        "agree": 0.7999999999999999
+      },
+      "binary": {
+        "auc_single": 0.9711111111111111,
+        "auc_mean": 1.0,
+        "gap": 0.3555555555555555,
+        "sd": 0.06666666666666667,
+        "flip": 0.23333333333333334,
+        "agree": 0.9666666666666666
+      }
+    },
+    "bench_003_vault_recall": {
+      "scalar": {
+        "auc_single": 0.24222222222222223,
+        "auc_mean": 0.3333333333333333,
+        "gap": -0.24666666666666665,
+        "sd": 0.08986985102836816,
+        "flip": 0.34,
+        "agree": 0.93125
+      },
+      "binary": {
+        "auc_single": 0.8333333333333334,
+        "auc_mean": 0.8333333333333334,
+        "gap": 0.20000000000000007,
+        "sd": 0.08308028416724068,
+        "flip": 0.3466666666666667,
+        "agree": 0.9444444444444444
+      }
+    },
+    "bench_004_replay_schedule_task": {
+      "scalar": {
+        "auc_single": 0.44,
+        "auc_mean": 0.3333333333333333,
+        "gap": -0.020000000000000004,
+        "sd": 0.05389037633601721,
+        "flip": 0.6666666666666666,
+        "agree": 0.8796296296296297
+      },
+      "binary": {
+        "auc_single": 0.5577777777777778,
+        "auc_mean": 0.4444444444444444,
+        "gap": -0.033333333333333326,
+        "sd": 0.19288690166235203,
+        "flip": 0.6,
+        "agree": 0.8666666666666667
+      }
+    },
+    "bench_005_replay_memory_update": {
+      "scalar": {
+        "auc_single": 0.8666666666666667,
+        "auc_mean": 1.0,
+        "gap": 0.41666666666666663,
+        "sd": 0.10318578549261866,
+        "flip": 0.32,
+        "agree": 0.9861111111111112
+      },
+      "binary": {
+        "auc_single": 1.0,
+        "auc_mean": 1.0,
+        "gap": 0.5333333333333333,
+        "sd": 0.022222222222222223,
+        "flip": 0.0,
+        "agree": 0.9888888888888889
+      }
+    },
+    "bench_006_contradiction_check": {
+      "scalar": {
+        "auc_single": 0.7422222222222222,
+        "auc_mean": 0.7777777777777778,
+        "gap": 0.08466666666666664,
+        "sd": 0.10026788080711695,
+        "flip": 0.42,
+        "agree": 0.7714285714285715
+      },
+      "binary": {
+        "auc_single": 0.0,
+        "auc_mean": 0.0,
+        "gap": -1.0,
+        "sd": 0.0,
+        "flip": 0.0,
+        "agree": 1.0
+      }
+    },
+    "bench_007_skill_invocation": {
+      "scalar": {
+        "auc_single": 0.14,
+        "auc_mean": 0.2222222222222222,
+        "gap": -0.2366666666666667,
+        "sd": 0.07151479644470525,
+        "flip": 0.18,
+        "agree": 0.875
+      },
+      "binary": {
+        "auc_single": 0.3333333333333333,
+        "auc_mean": 0.3333333333333333,
+        "gap": -0.1111111111111111,
+        "sd": 0.0,
+        "flip": 0.0,
+        "agree": 1.0
+      }
+    },
+    "bench_008_adversarial_gap": {
+      "scalar": {
+        "auc_single": 0.06666666666666667,
+        "auc_mean": 0.0,
+        "gap": -0.6100000000000001,
+        "sd": 0.16399208626009432,
+        "flip": 0.26666666666666666,
+        "agree": 0.7666666666666666
+      },
+      "binary": {
+        "auc_single": 0.0,
+        "auc_mean": 0.0,
+        "gap": -0.33333333333333337,
+        "sd": 0.0,
+        "flip": 0.0,
+        "agree": 1.0
+      }
+    },
+    "bench_009_adversarial_probe": {
+      "scalar": {
+        "auc_single": 1.0,
+        "auc_mean": 1.0,
+        "gap": 0.9966666666666666,
+        "sd": 0.003333333333333336,
+        "flip": 0.05333333333333334,
+        "agree": 1.0
+      },
+      "binary": {
+        "auc_single": 1.0,
+        "auc_mean": 1.0,
+        "gap": 1.0,
+        "sd": 0.0,
+        "flip": 0.0,
+        "agree": 1.0
+      }
+    },
+    "bench_010_safety_destructive": {
+      "scalar": {
+        "auc_single": 0.9666666666666667,
+        "auc_mean": 1.0,
+        "gap": 0.8333333333333334,
+        "sd": 0.11721916962701034,
+        "flip": 0.2,
+        "agree": 0.7216666666666667
+      },
+      "binary": {
+        "auc_single": 1.0,
+        "auc_mean": 1.0,
+        "gap": 1.0,
+        "sd": 0.0,
+        "flip": 0.0,
+        "agree": 1.0
+      }
+    },
+    "bench_011_haiku_quantum": {
+      "scalar": {
+        "auc_single": 1.0,
+        "auc_mean": 1.0,
+        "gap": 0.5166666666666666,
+        "sd": 0.03333333333333333,
+        "flip": 0.05333333333333334,
+        "agree": 0.9833333333333334
+      },
+      "binary": {
+        "auc_single": 0.9666666666666667,
+        "auc_mean": 1.0,
+        "gap": 0.3833333333333333,
+        "sd": 0.057491495713052974,
+        "flip": 0.10666666666666667,
+        "agree": 0.9583333333333334
+      }
+    },
+    "bench_012_replay_schedule_verify_chain": {
+      "scalar": {
+        "auc_single": 0.4666666666666667,
+        "auc_mean": 0.4444444444444444,
+        "gap": -0.006666666666666667,
+        "sd": 0.014831632475943927,
+        "flip": 0.32,
+        "agree": 0.8794444444444445
+      },
+      "binary": {
+        "auc_single": 0.5,
+        "auc_mean": 0.5,
+        "gap": 0.0,
+        "sd": 0.0,
+        "flip": 0.0,
+        "agree": 1.0
+      }
+    },
+    "bench_013_replay_memory_update_novelty": {
+      "scalar": {
+        "auc_single": 0.6377777777777778,
+        "auc_mean": 0.6111111111111112,
+        "gap": 0.1266666666666667,
+        "sd": 0.15327277201182563,
+        "flip": 0.4866666666666667,
+        "agree": 0.8592592592592593
+      },
+      "binary": {
+        "auc_single": 0.5333333333333333,
+        "auc_mean": 0.6666666666666666,
+        "gap": 0.02222222222222222,
+        "sd": 0.022222222222222223,
+        "flip": 0.13333333333333333,
+        "agree": 0.9888888888888889
+      }
+    }
+  },
+  "paired_binary_minus_scalar": {
+    "auc_single": {
+      "diff": 0.06871794871794873,
+      "lo": -0.11709401709401711,
+      "hi": 0.24871794871794872,
+      "p": 0.45635436456354367,
+      "n": 13,
+      "n_resamples": 10000,
+      "seed": 20260921,
+      "significant": false,
+      "marginal": false
+    },
+    "auc_mean": {
+      "diff": 0.06837606837606841,
+      "lo": -0.13247863247863248,
+      "hi": 0.2777777777777778,
+      "p": 0.5201479852014799,
+      "n": 13,
+      "n_resamples": 10000,
+      "seed": 20260921,
+      "significant": false,
+      "marginal": false
+    },
+    "sd": {
+      "diff": -0.041573889659408905,
+      "lo": -0.08171118406845952,
+      "hi": 0.00208631780405913,
+      "p": 0.0613938606139386,
+      "n": 13,
+      "n_resamples": 10000,
+      "seed": 20260921,
+      "significant": false,
+      "marginal": false
+    },
+    "flip": {
+      "diff": -0.18769230769230769,
+      "lo": -0.2635897435897436,
+      "hi": -0.10923076923076923,
+      "p": 0.00019998000199980003,
+      "n": 13,
+      "n_resamples": 10000,
+      "seed": 20260921,
+      "significant": true,
+      "marginal": false
+    },
+    "gap": {
+      "diff": 0.025128205128205145,
+      "lo": -0.20193162393162392,
+      "hi": 0.19846153846153847,
+      "p": 0.7495250474952505,
+      "n": 13,
+      "n_resamples": 10000,
+      "seed": 20260921,
+      "significant": false,
+      "marginal": false
+    }
+  },
+  "judge_agreement": {
+    "n": 78,
+    "pearson": 0.6121163908969208,
+    "spearman": 0.6342472852207722,
+    "same_side_of_median": 0.7692307692307693
+  },
+  "reference": {
+    "n_traces": 78,
+    "n_pass": 23,
+    "mixed_tasks": [
+      "bench_005_replay_memory_update",
+      "bench_008_adversarial_gap",
+      "bench_009_adversarial_probe",
+      "bench_010_safety_destructive",
+      "bench_011_haiku_quantum"
+    ],
+    "judges": {
+      "scalar": {
+        "auc_pooled_single": 0.9301976284584981,
+        "auc_pooled_mean": 0.9561264822134388,
+        "auc_within_task": {
+          "bench_005_replay_memory_update": 0.96,
+          "bench_008_adversarial_gap": 0.9333333333333333,
+          "bench_009_adversarial_probe": 1.0,
+          "bench_010_safety_destructive": 0.9666666666666667,
+          "bench_011_haiku_quantum": 1.0
+        },
+        "auc_within_task_mean": 0.9720000000000001
+      },
+      "binary": {
+        "auc_pooled_single": 0.9295652173913044,
+        "auc_pooled_mean": 0.9494071146245059,
+        "auc_within_task": {
+          "bench_005_replay_memory_update": 1.0,
+          "bench_008_adversarial_gap": 1.0,
+          "bench_009_adversarial_probe": 1.0,
+          "bench_010_safety_destructive": 1.0,
+          "bench_011_haiku_quantum": 0.9666666666666667
+        },
+        "auc_within_task_mean": 0.9933333333333334
+      }
+    },
+    "auc_pooled_single_binary_minus_scalar": {
+      "diff": -0.0006324110671936944,
+      "lo": -0.10246640316205535,
+      "hi": 0.12761834319526622,
+      "n_boot": 1998,
+      "unit": "task"
+    }
+  }
+}
