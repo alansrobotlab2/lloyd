@@ -135,7 +135,18 @@ projects. It also modifies its own code through a gated loop.
 - Nightly retrieval eval (above), pinned corpus, paired comparison for
   automod rounds.
 - Tool-choice eval (`eval/run_tool_choice_eval.py`), prefetch eval,
-  preserved-thinking A/B.
+  preserved-thinking A/B, parallel-dispatch timing
+  (`eval/measure_parallel_dispatch.py`), counterfactual retrieval
+  perturbation (`eval/counterfactual.py`), review-rung grader calibration
+  (`eval/review_calibration/`), secondary-routing replay
+  (`eval/secondary_routing_eval.py`).
+- Instruction-density compliance (`eval/instruction_compliance_eval.py`,
+  backlog #630): how many required words an engine still carries verbatim
+  as the count grows, scored mechanically, with an N* (largest N at ≥95 %)
+  per engine. `eval/run_skill_dispatch_probe.py` reports a *predicted*
+  compliance and disclaims it — a rule that fires proves the protocol
+  reached the model, not that the model obeyed — so this is the arm that
+  measures the obeying, and until it existed no compliance arm did.
 - Guardian error-rate observation, worker run ledgers, usage store.
 
 ## Standing problems worth solving (an idea that hits one of these is more valuable)
