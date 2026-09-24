@@ -518,8 +518,9 @@ class WorkerPool:
         }
 
     def _landing_in_flight(self) -> bool:
-        """Whether a landing is running (`S.rounds_landing`), asked at most
-        every `_LANDING_PROBE_SECONDS`.
+        """Whether a landing (`S.rounds_landing`) or a land-train flush
+        (`S.flush_in_progress`) is running, asked at most every
+        `_LANDING_PROBE_SECONDS`.
 
         The hold used to end with the last round's turn — which is exactly
         when a waiting landing proceeds. On 2026-09-19 #608's landing waited
@@ -536,7 +537,9 @@ class WorkerPool:
             return value
         try:
             from scripts.automod import state as S
-            value = bool(S.rounds_landing())
+            # A land-train flush is the restart a landing used to be: what
+            # was held for it stays held until it is done.
+            value = bool(S.rounds_landing()) or bool(S.flush_in_progress())
         except Exception:  # noqa: BLE001
             value = False
         self._landing_probe = (now, value)

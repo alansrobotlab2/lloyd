@@ -230,7 +230,8 @@ LAND_LOCK_MAX_WAIT = 2 * 3600.0
 LAND_LOCK_POLL = 10.0
 
 
-def _land_lock(round_id: str, *, dry_run: bool = False) -> "S.Lock":
+def _land_lock(round_id: str, *, dry_run: bool = False,
+               wait_settle: bool = True) -> "S.Lock":
     """The automod lock for a landing, queued for rather than refused.
 
     With one round at a time a second landing could not exist. With two
@@ -240,10 +241,15 @@ def _land_lock(round_id: str, *, dry_run: bool = False) -> "S.Lock":
     observation window too: the chamber check is repeated AFTER the lock is
     taken, because the promotion this landing must not land on top of may
     have been written while it was queued.
+
+    `wait_settle=False` is a land-train merge (`P.landing_is_eager` said []):
+    it changes nothing that runs, so the promotion under observation is not
+    its to wait out, and it only queues for the lock.
     """
     deadline = time.time() + LAND_LOCK_MAX_WAIT
+    chamber = wait_settle and not dry_run and S.chamber_enabled(LIVE_ROOT)
     while True:
-        observed = S.read_current() if not dry_run and S.chamber_enabled(LIVE_ROOT) else None
+        observed = S.read_current() if chamber else None
         if observed and observed.get("state") == "observing":
             # The chamber: this round ran while the last promotion was under
             # observation. Wait for it here, outside the lock and before the
@@ -256,7 +262,7 @@ def _land_lock(round_id: str, *, dry_run: bool = False) -> "S.Lock":
                 raise
             time.sleep(LAND_LOCK_POLL)
             continue
-        now = S.read_current() if not dry_run and S.chamber_enabled(LIVE_ROOT) else None
+        now = S.read_current() if chamber else None
         if now and now.get("state") == "observing" and time.time() < deadline:
             lock.release()
             # Paced like the `LockHeld` branch. What bounds this loop is
@@ -349,6 +355,7 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
             raise RuntimeError(f"gate did not pass (failed: {failed})")
 
         wt = W.worktree_path(round_id)
+        eager: list = ["dry run"]
         if not dry_run:
             # Outside the lock, or the turn being waited for cannot open its
             # round (see `P.wait_for_rounds`). An external failure: the item
@@ -356,11 +363,16 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
             waited_from = time.time()
             # A landing that restarts nothing kills no turn, so it has no
             # sibling to wait for (`P.restart_needed`; asked again, under the
-            # lock, by `promote`).
-            restart, restart_why = P.restart_needed(
-                [str(p) for p in report.get("changed_paths") or []])
-            ok, why = (P.wait_for_rounds(P._idle_budget(None)[1]) if restart
-                       else (True, f"not waited for: {restart_why}"))
+            # lock, by `promote`). Nor does one the land train will merge and
+            # leave to the flush (`P.landing_is_eager` is []): only an eager
+            # landing restarts here.
+            changed = [str(p) for p in report.get("changed_paths") or []]
+            restart, restart_why = P.restart_needed(changed)
+            eager = P.landing_is_eager(changed, report)
+            waits = restart and bool(eager)
+            ok, why = (P.wait_for_rounds(P._idle_budget(None)[1]) if waits
+                       else (True, f"not waited for: {restart_why}" if not restart
+                             else "not waited for: the restart is deferred to the flush"))
             # On the ledger either way: on 2026-09-18 this wait let nine
             # landings into the drain beside live sibling turns and nothing
             # recorded what it had seen.
@@ -368,7 +380,8 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
                             "detail": why, "waited_s": round(time.time() - waited_from, 1)})
             if not ok:
                 P._land_failed(round_id, why, external=True, waited_rounds=True)
-        lock = _land_lock(round_id, dry_run=dry_run)
+        lock = _land_lock(round_id, dry_run=dry_run,
+                          wait_settle=dry_run or bool(eager))
         try:
             result = P.promote(round_id, wt, report["base"],
                                gate_report=report, dry_run=dry_run)
@@ -376,12 +389,16 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
             lock.release()
         if not dry_run:
             W.remove(round_id, keep_branch=False, repo=LIVE_ROOT)
-        return result
     finally:
         if not dry_run:
             S.clear_land_marker(round_id, pid=os.getpid())
         if restore_signals is not None:
             restore_signals()
+    # After the marker is gone: `flush_due` waits while any landing runs, and
+    # this one would otherwise be the landing it waits for.
+    if not dry_run and result.get("deferred"):
+        result["flush"] = maybe_flush(by=f"land {round_id}")
+    return result
 
 
 def land_detached(round_id: str, *, by: str) -> dict:
@@ -445,6 +462,45 @@ def gate_detached(round_id: str, *, by: str, skip_smoke: bool = False) -> dict:
     pid = S.spawn_detached(argv, log, cwd=LIVE_ROOT)
     S.write_gate_marker(round_id, pid=pid, head=W.head(W.worktree_path(round_id)) or "", by=by)
     return {"pid": pid, "log": str(log)}
+
+
+def flush(*, now: bool = False, by: str = "cli", reason: str = "") -> dict:
+    """`round flush [--now]`: restart once for everything the land train holds
+    and open its window (`P.flush_pending`). Waits for implement turns and for
+    idle like a landing; `--now` does neither and every turn in flight dies
+    with the restart and is re-offered."""
+    return P.flush_pending(reason or f"flush by {by}", kill_turns=now, by=by)
+
+
+def flush_detached(*, by: str, now: bool = False) -> dict:
+    """Start `round flush` in its own session: the restart it performs kills
+    whichever service called it (the implement source runs in the backend).
+    The marker is written with the child's pid before this returns, as
+    `land_detached` does, so the next look already sees a flush running."""
+    live = S.flush_in_progress()
+    if live:
+        return {"error": f"a flush is already running (pid {live.get('pid')})"}
+    log = S.STATE_DIR / "flush.log"
+    python = LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"
+    argv = [python, "-m", "scripts.automod.round", "flush", "--by", str(by)[:120]]
+    if now:
+        argv.append("--now")
+    pid = S.spawn_detached(argv, log, cwd=LIVE_ROOT)
+    S.write_flush_marker(pid=pid, by=by)
+    return {"pid": pid, "log": str(log)}
+
+
+def maybe_flush(*, by: str, rounds_in_flight: int | None = None) -> dict | None:
+    """Spawn a flush when `P.flush_due` says so. Never raises: a trigger that
+    fails leaves the train for the next one."""
+    try:
+        due, why = P.flush_due(rounds_in_flight)
+        if not due:
+            return None
+        started = flush_detached(by=f"{by}: {why}")
+        return {"why": why, **started}
+    except Exception as exc:  # noqa: BLE001
+        return {"error": f"flush trigger failed: {exc}"[:300]}
 
 
 def _gate_verdict(round_id: str) -> dict:
@@ -650,11 +706,19 @@ def status() -> dict:
         "broken": S.is_broken(),
         "pause_remaining_s": round(S.pause_remaining(), 1),
         "rollback_request": S.read_rollback_request(),
+        "pending_restart": _status_pending(),
         "unit_drift": _unit_drift(),
         **_status_live_dirty(),
         **_status_worktrees(),
         "recent": S.read_events(limit=15),
     }
+
+
+def _status_pending() -> dict:
+    try:
+        return P.pending_summary()
+    except Exception as exc:  # noqa: BLE001 — a status is never the thing that fails
+        return {"error": str(exc)[:300]}
 
 
 def _status_worktrees() -> dict:
@@ -747,6 +811,14 @@ def bless(note: str = "") -> dict:
     if S.read_current():
         raise RuntimeError("a promotion is under observation — let it settle or "
                            "abort it rather than blessing over it")
+    waiting = [e for e in S.read_pending() if e.get("restart")]
+    if waiting:
+        # Merged, not running, never judged: HEAD is not what is served, and
+        # blessing it would certify code no window has watched.
+        raise RuntimeError(
+            f"{len(waiting)} landing(s) are merged but not yet running "
+            f"({', '.join(str(e.get('commit'))[:8] for e in waiting[:4])}) — "
+            "`round flush` and let the window settle before blessing")
     lkg = S.write_lkg(head)
     detail = f"blessed by hand: {note}" if note else "blessed by hand"
     if docs_only:
@@ -888,6 +960,13 @@ def main(argv=None) -> int:
     r.add_argument("--skip-idle", action="store_true",
                    help="emergency: pause the pool but do not wait for idle; every turn in flight "
                         "dies and is re-offered (for when the idle wait itself is broken)")
+    fl = sub.add_parser("flush", help="restart once for every landing the train holds, "
+                                      "and open its observation window")
+    fl.add_argument("--now", action="store_true",
+                    help="do not wait for implement turns or idle; every turn in flight "
+                         "dies with the restart and is re-offered")
+    fl.add_argument("--by", default="cli", help="who asked, for the ledger")
+    fl.add_argument("--reason", default="")
     sc = sub.add_parser("scorecard", help="how the unattended loop is doing, from the ledger")
     sc.add_argument("--since", default="7d")
     sc.add_argument("--json", action="store_true")
@@ -944,6 +1023,9 @@ def main(argv=None) -> int:
         programs = tuple(args.only) if args.only else ("lloyd-mcp", "lloyd-backend")
         print(json.dumps(P.restart_stack(programs, reason=args.reason, force=args.force,
                                          skip_idle=args.skip_idle),
+                         indent=2, default=str))
+    elif args.cmd == "flush":
+        print(json.dumps(flush(now=args.now, by=args.by, reason=args.reason),
                          indent=2, default=str))
     elif args.cmd == "scorecard":
         from scripts.automod import scorecard as SC

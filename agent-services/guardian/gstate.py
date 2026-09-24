@@ -79,6 +79,30 @@ def read_events(ledger: Path, limit: int = 200) -> list[dict]:
 HALT_SET_EVENT = "promotion_halt_set"
 HALT_CLEAR_EVENT = "promotion_halt_clear"
 
+# What this snapshot can judge. 2: a `current.json` carrying `commits`
+# (oldest..newest, the land train's one record for several merged rounds) is
+# rolled back as a batch — reset only when `rollback_target..HEAD` is exactly
+# the batch, every commit reverted in place otherwise — and settles with one
+# `settled` row per commit. The promoter reads this line out of the STAGED copy
+# (`scripts/automod/state.py::guardian_batch_aware`) and writes no batch record
+# until it says 2: a guardian running an older snapshot would reset from the
+# newest commit to the oldest one's parent and take any foreign commit in
+# between with it. Read as text, never imported, so keep it one plain line.
+BATCH_SCHEMA = 2
+
+
+def batch_commits(record: dict | None) -> list[str]:
+    """The batch a record or request names, oldest first — `[]` for anything
+    that is not two or more distinct well-formed shas. A one-commit batch is
+    judged exactly as a record without `commits` always was."""
+    raw = (record or {}).get("commits")
+    if not isinstance(raw, list):
+        return []
+    shas = [c for c in raw if _is_sha(c)]
+    if len(shas) != len(raw) or len(shas) < 2 or len(set(shas)) != len(shas):
+        return []
+    return shas
+
 
 class AutomodState:
     def __init__(self, state_dir: Path):

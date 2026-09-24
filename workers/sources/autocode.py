@@ -1032,8 +1032,14 @@ def _loop_is_free(depth: int | None = None) -> tuple[bool, str]:
     # 17:03:34 and the other slot was claimed at 17:03:53.
     landing = _rounds_about_to_land(owned)
     if landing:
+        if landing[0] == FLUSH_HOLD:
+            return False, "a restart flush is running (the land train)"
         return False, f"round {landing[0]} passed its gate and is landing"
     return True, "free"
+
+
+#: What `_rounds_about_to_land` names while a flush holds the loop.
+FLUSH_HOLD = "(flush)"
 
 
 def _rounds_about_to_land(worktrees: list[str]) -> list[str]:
@@ -1048,9 +1054,21 @@ def _rounds_about_to_land(worktrees: list[str]) -> list[str]:
     empty from its gate's pass until it landed — up to a whole observation
     window behind the promotion before it. A round whose report cannot be
     read, or names no paths, holds as before.
+
+    The land train (`automod.landing.defer_restart`): a gated round whose
+    landing will only MERGE (`promote.landing_is_eager` is []) restarts
+    nothing now either, so it holds nobody back; an eager one (a venv,
+    `agent-services/`) still does. And while a flush is running
+    (`flush.running`, live pid) every slot is held — the flush's restart is
+    exactly the one a new turn must not start under.
     """
     from scripts.automod import state as S
     out: list[str] = []
+    try:
+        if S.flush_in_progress():
+            out.append(FLUSH_HOLD)
+    except Exception:  # noqa: BLE001 — an unreadable marker is not a flush
+        pass
     for raw in worktrees:
         # The id nearest the leaf (`<root>/SM_x/home/lloyd`): inside a gate the
         # root itself sits under the gating round's `SM_…/home`, so the first
@@ -1067,7 +1085,7 @@ def _rounds_about_to_land(worktrees: list[str]) -> list[str]:
                                 and not S.gate_in_progress(rid)):
             continue
         if isinstance(report, dict) and report.get("ok") is True and not _landing_restarts(
-                rid, str(report.get("head") or ""), report.get("changed_paths")):
+                rid, str(report.get("head") or ""), report.get("changed_paths"), report):
             continue
         out.append(rid)
     return out
@@ -1081,9 +1099,11 @@ _RESTART_VERDICTS: dict[tuple[str, str], tuple[float, bool]] = {}
 _RESTART_VERDICT_TTL = 120.0
 
 
-def _landing_restarts(rid: str, head: str, changed) -> bool:
-    """Whether landing this gated round will restart the services. Fails
-    closed: anything unreadable is a restart, and the round holds."""
+def _landing_restarts(rid: str, head: str, changed, report: dict | None = None) -> bool:
+    """Whether landing this gated round will restart the services NOW. Fails
+    closed: anything unreadable is a restart, and the round holds. On the land
+    train a landing that needs a restart but is not eager leaves it to the
+    flush, and holds nothing."""
     if not head or not isinstance(changed, list) or not changed:
         return True
     now = time.time()
@@ -1093,6 +1113,8 @@ def _landing_restarts(rid: str, head: str, changed) -> bool:
     try:
         from scripts.automod import promote as P
         restarts, _ = P.restart_needed([str(p) for p in changed], in_backend=True)
+        if restarts and not P.landing_is_eager([str(p) for p in changed], report):
+            restarts = False
     except Exception:  # noqa: BLE001
         restarts = True
     if len(_RESTART_VERDICTS) > 64:
@@ -1178,6 +1200,9 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
     if _housekeeping_due(queue, src_cfg):
         await asyncio.to_thread(_housekeeping, src_cfg)
         queue.wm_set(NAME, HOUSEKEEPING_KEY, datetime.now(timezone.utc).isoformat())
+    # The land train, before the free check: at a natural gap the flush takes
+    # it, and its marker then holds the next round (`_rounds_about_to_land`).
+    await asyncio.to_thread(_maybe_flush, queue)
     free, why = _loop_is_free()
     if not free:
         # Once per reason at INFO: at a 60 s retry the same sentence would
@@ -1247,6 +1272,32 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
     # One row per look. With a slot still empty, the next look is a retry
     # away rather than an interval — a decline in everything but name.
     return DECLINED if slot + 1 < depth else None
+
+
+def _maybe_flush(queue: WorkQueue | None = None, *, exclude_key: str | None = None) -> None:
+    """Start a land-train flush when `promote.flush_due` says so. Never raises.
+
+    Asked on every look (before the free check, so a flush wins a natural gap
+    over the next round) and at the end of every implement turn. The count of
+    implement turns in flight is this source's live slot rows, less the turn
+    asking (`exclude_key`): zero is the natural gap, where the drain is
+    cheapest. With nothing pending this reads one missing file and returns."""
+    try:
+        from scripts.automod import state as S
+        if not S.read_pending():
+            return
+        from scripts.automod import round as R
+        if queue is None:
+            from workers.queue import get_queue
+            queue = get_queue()
+        depth = round_depth()
+        live = sum(1 for i in range(depth)
+                   if _slot_key(i) != exclude_key and queue.has_live(_slot_key(i)))
+        started = R.maybe_flush(by="autocode", rounds_in_flight=live)
+        if started:
+            logger.info("autocode: land-train flush — %s", started)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("land-train flush trigger failed: %s", exc)
 
 
 def _reap_quietly() -> None:
@@ -1476,6 +1527,9 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             B.reconcile_statuses(S.LEDGER_PATH)
         except Exception as exc:
             logger.warning("reconcile_statuses after #%s failed: %s", candidate.id, exc)
+        # Beside the reaper, at turn end: this turn was the last thing a
+        # natural gap waits for. Its own slot row is still `running`.
+        _maybe_flush(exclude_key=getattr(item, "dedup_key", None))
 
 
 def _vault_commits_since(events: list[dict], item_id: int, since_ts: float,

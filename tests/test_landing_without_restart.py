@@ -326,12 +326,16 @@ def test_a_tree_that_did_not_move_is_a_failed_landing(tree, monkeypatch):
 
 
 def test_land_does_not_wait_for_sibling_turns_it_cannot_kill():
-    """`wait_for_rounds` exists so the restart kills no sibling's turn."""
+    """`wait_for_rounds` exists so the restart kills no sibling's turn. A
+    landing that restarts nothing kills none, and neither does one the land
+    train only merges (`P.landing_is_eager` is []): `waits` is both."""
     import inspect
     src = inspect.getsource(R.land)
-    assert "P.restart_needed(" in src
+    assert "P.restart_needed(" in src and "P.landing_is_eager(" in src
     assert src.index("P.restart_needed(") < src.index("P.wait_for_rounds(")
-    assert "if restart" in src[src.index("P.wait_for_rounds("):][:120]
+    assert src.index("P.landing_is_eager(") < src.index("P.wait_for_rounds(")
+    assert "waits = restart and bool(eager)" in src
+    assert "if waits" in src[src.index("P.wait_for_rounds("):][:120]
 
 
 # ── the guardian ────────────────────────────────────────────────────────────

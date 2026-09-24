@@ -380,8 +380,14 @@ class Guardian:
     def do_rollback(self, trigger: str, reason: str, *,
                     explicit_target: str | None = None,
                     explicit_commit: str | None = None,
-                    explicit_changed: list | None = None) -> bool:
+                    explicit_changed: list | None = None,
+                    explicit_commits: list | None = None) -> bool:
         current = self.state.current() or {}
+        # A request may name a whole batch (the land train's promoter undoing
+        # a flush it could not verify); its newest commit is then the blame.
+        requested_batch = gstate.batch_commits({"commits": explicit_commits})
+        if requested_batch and not gstate._is_sha(explicit_commit):
+            explicit_commit = requested_batch[-1]
         # Which commit this request BLAMES, decided once, here, before anything
         # else reads `current.json`. It is a different question from "which
         # promotion is under observation", and running the two together is what
@@ -398,6 +404,18 @@ class Guardian:
         blamed_is_observed = bool(blamed) and blamed == current.get("commit")
         changed = (list(current.get("changed_paths") or []) if blamed_is_observed
                    else list(explicit_changed or []))
+        # The batch this rollback takes off `main`, oldest first: the observed
+        # record's own `commits` when it is the one blamed, a request's when it
+        # names them, else none — and with none, everything below is exactly
+        # the single-commit rollback it always was. A request blaming ONE
+        # commit of an observed batch (the detached regression check) reverts
+        # that commit only, and the batch's window closes unjudged.
+        if blamed_is_observed:
+            batch = gstate.batch_commits(current)
+        else:
+            batch = requested_batch
+        if batch and batch[-1] != blamed:
+            batch = []
 
         if explicit_target and gstate._is_sha(explicit_target):
             target, source = explicit_target, "explicit rollback request"
@@ -438,6 +456,12 @@ class Guardian:
                 # belongs to a promotion this request never touched.
                 self.state.clear_current()
             return False
+        if batch and head:
+            # A batch commit already gone from this history is not reverted
+            # twice. What is left keeps the batch rule even if it is one
+            # commit: the record's target is the OLDEST entry's parent, so a
+            # plain reset from HEAD could reach past what is still here.
+            batch = [c for c in batch if c == head or rb.is_ancestor(self.repo, c, head)]
         if target == head:
             # Invariant 1. Nothing was promoted; this is infrastructure.
             self.alert("error", "Failure with nothing to revert",
@@ -457,13 +481,19 @@ class Guardian:
         gstate.append_event(self.state.ledger, {
             "event": "rollback_started", "trigger": trigger, "reason": reason[:1000],
             "from": head, "to": target, "stamp": stamp,
+            **({"commits": batch, "batch": len(batch)} if batch else {}),
         })
 
         for attempt in range(1, policy.ROLLBACK_MAX_ATTEMPTS + 1):
             try:
                 self._rollback_once(target, stamp, trigger, reason, current,
-                                    blamed=blamed, changed=changed)
+                                    blamed=blamed, changed=changed, batch=batch)
                 return True
+            except rb.RevertConflict as exc:
+                # Deterministic: the same commits against the same tree
+                # conflict the same way on every attempt.
+                log(f"rollback attempt {attempt} failed, not retrying: {exc}")
+                break
             except Exception as exc:
                 log(f"rollback attempt {attempt} failed: {exc}")
                 if attempt < policy.ROLLBACK_MAX_ATTEMPTS:
@@ -485,8 +515,10 @@ class Guardian:
     def _rollback_once(self, target: str, stamp: str, trigger: str, reason: str,
                        current: dict | None = None, *,
                        blamed: str | None = None,
-                       changed: list | None = None) -> None:
+                       changed: list | None = None,
+                       batch: list | None = None) -> None:
         head_before = rb.head_commit(self.repo)
+        batch = list(batch or [])
         current = current if current is not None else (self.state.current() or {})
         if blamed is None:
             blamed = current.get("commit")
@@ -506,7 +538,16 @@ class Guardian:
         # promotion under observation along with the blamed one, which is what
         # happened twice on 2026-09-21. When HEAD is not the blamed commit,
         # revert exactly that commit and leave the rest standing.
-        surgical = bool(blamed and head_before and head_before != blamed)
+        #
+        # A batch (the land train: several merged rounds, one record) resets
+        # only when HEAD is its newest commit AND `target..HEAD` is exactly the
+        # batch. Otherwise something the loop never promoted sits inside or on
+        # top of it, and every batch commit is reverted in place instead.
+        if batch:
+            surgical = not (head_before == blamed and rb.range_is_exactly(
+                self.repo, target, head_before, batch))
+        else:
+            surgical = bool(blamed and head_before and head_before != blamed)
 
         # 3. Stop the writers first — see the module docstring.
         for program in reversed(policy.RESTART_ORDER):
@@ -528,7 +569,12 @@ class Guardian:
         self._beat()
 
         # 6-8. Move the tree, verify it, undo any venv swap.
-        if surgical:
+        if surgical and batch:
+            kept = rb.commits_between(self.repo, batch[0], head_before) - len(batch) + 1
+            expected = rb.revert_commits(self.repo, batch, reason=reason)
+            log(f"reverted {len(batch)} batch commits in place → {expected[:8]}, "
+                f"keeping {max(0, kept)} commit(s) the loop did not promote")
+        elif surgical:
             kept = rb.commits_between(self.repo, blamed, head_before)
             expected = rb.revert_commit(self.repo, blamed, reason=reason)
             log(f"reverted {blamed[:8]} in place → {expected[:8]}, "
@@ -579,7 +625,15 @@ class Guardian:
         # hash alongside the SHA, so the same change re-derived under a new SHA
         # is caught too.
         bad = blamed or head_before
-        if bad:
+        if batch:
+            # Every commit the batch took off `main`, each by its own content.
+            entries = {str(e.get("commit")): e for e in (current.get("entries") or [])
+                       if isinstance(e, dict)} if observed == blamed else {}
+            for c in batch:
+                paths = (list((entries.get(c) or {}).get("changed_paths") or [])
+                         or rb.changed_paths_of(self.repo, c))
+                self.state.deny(c, tree_hash=rb.changed_tree_hash(self.repo, c, paths))
+        elif bad:
             self.state.deny(bad, tree_hash=rb.changed_tree_hash(self.repo, bad, changed))
 
         # A promotion that was under observation but NOT blamed now has no
@@ -603,7 +657,8 @@ class Guardian:
         lkg = self.state.lkg() or {}
         lkg_from = lkg.get("commit")
         repointed = bool(expected and lkg_from) and (
-            lkg_from == bad or not rb.is_ancestor(self.repo, lkg_from, expected))
+            lkg_from == bad or lkg_from in batch
+            or not rb.is_ancestor(self.repo, lkg_from, expected))
         if repointed:
             self.state.set_lkg(expected)
 
@@ -615,6 +670,9 @@ class Guardian:
             "left_unjudged": left_unjudged,
             "lkg_repointed_from": lkg_from if repointed else None,
             "head_before": head_before, "tag": tag, "stash": evidence.get("stash"),
+            # Only on a batch, so a single-commit row is the row it always was.
+            # `state.reverted_commits` counts every sha named here.
+            **({"commits": batch, "batch": len(batch)} if batch else {}),
         })
         self.quiet_until = time.time() + policy.POST_ROLLBACK_QUIET_SECONDS
         for program in self.programs:
@@ -637,6 +695,9 @@ class Guardian:
 
         route = ("Reverted in place, keeping later commits."
                  if surgical else "Reset to the pre-promotion tree.")
+        if batch:
+            route += (f" A batch of {len(batch)} landings: "
+                      + ", ".join(c[:8] for c in batch) + ".")
         # The item name on `current.json` is the OBSERVED promotion's, and a
         # request carries no title, so when this rollback blamed someone else
         # the headline has no right to that name — it falls back to the hashes
@@ -930,6 +991,8 @@ class Guardian:
             "parent": current.get("parent") or current.get("rollback_target"),
             "round_id": current.get("round_id"),
             "changed_paths": current.get("changed_paths") or [],
+            **({"commits": gstate.batch_commits(current)}
+               if gstate.batch_commits(current) else {}),
             "landed_ts": current.get("landed_ts"),
             "settled_ts": time.time(),
             "settled_at": gstate.now_iso(),
@@ -939,8 +1002,19 @@ class Guardian:
         if current.get("venv_swapped") and prev.exists():
             import shutil
             shutil.rmtree(prev, ignore_errors=True)
-        gstate.append_event(self.state.ledger, {"event": "settled", "commit": commit})
-        log(f"settled: last known good is now {commit[:8]}")
+        batch = gstate.batch_commits(current)
+        if batch and batch[-1] == commit:
+            # One row per commit, oldest first: everything that joins a
+            # landing to its settle (`backlog.close_settled_items`, the
+            # promoter's `_settled`) reads one commit per row.
+            for c in batch:
+                gstate.append_event(self.state.ledger, {
+                    "event": "settled", "commit": c, "batch": len(batch),
+                    "batch_head": commit})
+        else:
+            gstate.append_event(self.state.ledger, {"event": "settled", "commit": commit})
+        log(f"settled: last known good is now {commit[:8]}"
+            + (f" ({len(batch)} landings)" if batch else ""))
 
     # ── selftest ───────────────────────────────────────────────────────
     def maybe_selftest(self) -> None:
@@ -1062,7 +1136,8 @@ class Guardian:
                                  request.get("reason") or "(no reason given)",
                                  explicit_target=request.get("target"),
                                  explicit_commit=request.get("commit"),
-                                 explicit_changed=request.get("changed_paths"))
+                                 explicit_changed=request.get("changed_paths"),
+                                 explicit_commits=request.get("commits"))
                 return "rolling_back"
 
         current = self.state.current()

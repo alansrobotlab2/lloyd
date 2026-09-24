@@ -270,7 +270,7 @@ def _land_detached(round_id: str) -> dict:
             "It will restart the backend, which ends this turn anyway. Check "
             "automod_status on your NEXT turn: `current.state` goes landing -> "
             "observing, and the guardian settles it to last-known-good at the end of "
-            f"its observation window. Progress is logged to {log}."),
+            f"its observation window. {_land_train_note()}Progress is logged to {log}."),
     }
 
 
@@ -289,6 +289,25 @@ def _landing_minutes_note() -> str:
                 f"{round(window / 60)} minutes ({round(quiet / 60)} when nothing restarted)")
     except Exception:  # noqa: BLE001 — a note is never the landing
         return "after its idle budget the landing gives up"
+
+
+def _land_train_note() -> str:
+    """With the land train on (`automod.landing.defer_restart`), a landing that
+    needs no eager restart merges and waits in `pending_restart` for one
+    batched flush; say so at call time, because the idle/restart wording above
+    describes only the eager path."""
+    try:
+        from scripts.automod import promote as P
+        on, _why = P.restart_deferred()
+    except Exception:  # noqa: BLE001 — a note is never the landing
+        return ""
+    if not on:
+        return ""
+    return ("With the land train on, a landing that needs no restart of its own "
+            "merges without waiting for idle and is listed under "
+            "`pending_restart` in automod_status until one batched restart "
+            "(a flush) makes it live and opens the window; `current` stays "
+            "empty until then. ")
 
 
 def _background_tasks_for_session() -> list[dict]:

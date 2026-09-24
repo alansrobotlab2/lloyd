@@ -429,6 +429,11 @@ def reverted_commits(events: Iterable[dict]) -> set[str]:
     09-07) name no `head_before`, so walking them would guess. Only promoted
     commits are counted. The first cut walked the 09-06 row through a human
     commit that a later hand restore put back on `main`.
+
+    A land-train rollback (`commits` on the row, oldest first) names every
+    commit it took off `main`, by either route, and every one is counted: a
+    batch reverted in place removes all of them, not only the `commit` its row
+    leads with.
     """
     rows = list(events)
     parent_of = {str(e.get("commit")): str(e.get("parent") or "")
@@ -445,6 +450,9 @@ def reverted_commits(events: Iterable[dict]) -> set[str]:
         bad = str(e.get("commit") or "")
         if bad:
             out.add(bad)
+        batch = e.get("commits")
+        if isinstance(batch, list):
+            out.update(str(c) for c in batch if c)
         blamed, requested = requested, ""
         stop = str(e.get("restored") or "")
         if e.get("route") != "reset" or not stop or not e.get("head_before"):
@@ -471,6 +479,7 @@ def write_eval_last(payload: dict) -> None:
 
 def request_rollback(*, reason: str, trigger: str, target: str | None = None,
                      commit: str | None = None,
+                     commits: list | None = None,
                      changed_paths: list | None = None,
                      metric_floors: dict | None = None,
                      noise_floor_stale: bool | None = None) -> dict:
@@ -501,6 +510,10 @@ def request_rollback(*, reason: str, trigger: str, target: str | None = None,
         # reverted surgically: by then `current.json` is gone, and without the
         # bad commit the guardian can only reset bluntly to the target.
         "changed_paths": list(changed_paths or []),
+        # A whole batch, oldest first (the land train's flush undoing what it
+        # could not verify). The guardian treats it as one rollback blaming the
+        # newest; absent, the request is the single-commit one it always was.
+        **({"commits": list(commits)} if commits else {}),
         "metric_floors": dict(metric_floors or {}),
         "noise_floor_stale": noise_floor_stale,
         "pid": os.getpid(),
@@ -508,6 +521,7 @@ def request_rollback(*, reason: str, trigger: str, target: str | None = None,
     write_json(ROLLBACK_REQUEST_PATH, payload)
     append_event({"event": "rollback_requested", "trigger": trigger,
                   "reason": str(reason)[:1000], "target": target, "commit": commit,
+                  **({"commits": list(commits)} if commits else {}),
                   "metric_floors": dict(metric_floors or {}),
                   "noise_floor_stale": noise_floor_stale})
     return payload
@@ -887,6 +901,148 @@ def rounds_landing() -> list[str]:
         except Exception:  # noqa: BLE001 — an unreadable marker is not a landing
             continue
     return out
+
+
+# ---------------------------------------------------------------------------
+# The land train (`automod.landing.defer_restart`): merged, not yet running
+# ---------------------------------------------------------------------------
+#
+# A deferrable landing fast-forwards `main`, writes `promoted`, and appends
+# itself here instead of restarting the services and opening a window. A
+# flush (`promote.flush_pending`, `round flush`) restarts once for everything
+# listed and writes the ONE `current.json` the guardian judges, carrying
+# `commits`. Every write is made under the automod lock (a landing's or the
+# flush's), and the guardian never reads or writes this file.
+
+PENDING_PATH = STATE_DIR / "pending_restart.json"
+FLUSH_MARKER_PATH = STATE_DIR / "flush.running"
+
+
+def read_pending(path: Path | None = None) -> list[dict]:
+    """The merged-but-not-restarted landings, oldest first. `[]` when none,
+    and when the file is unreadable — a flush that cannot read it has nothing
+    it could safely claim to be observing."""
+    rec = read_json(path or PENDING_PATH)
+    entries = (rec or {}).get("entries")
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict) and e.get("commit")]
+
+
+def write_pending(entries: list[dict], path: Path | None = None) -> None:
+    target = path or PENDING_PATH
+    if not entries:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    write_verified(target, {"schema": 1, "updated_at": now_iso(), "entries": list(entries)})
+
+
+def append_pending(entry: dict, path: Path | None = None) -> list[dict]:
+    """Add or replace (by `round_id`) one entry; returns the list as written."""
+    entries = [e for e in read_pending(path)
+               if not (entry.get("round_id") and e.get("round_id") == entry.get("round_id"))]
+    entries.append(dict(entry))
+    write_pending(entries, path)
+    return entries
+
+
+def remove_pending(commits, path: Path | None = None) -> list[dict]:
+    """Drop the entries naming any of `commits`; returns what is left."""
+    gone = {str(c) for c in commits or []}
+    entries = [e for e in read_pending(path) if str(e.get("commit")) not in gone]
+    write_pending(entries, path)
+    return entries
+
+
+def write_flush_marker(*, pid: int, by: str = "") -> dict:
+    FLUSH_MARKER_PATH.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"pid": int(pid), "started_at": time.time(), "started_iso": now_iso(), "by": by or ""}
+    FLUSH_MARKER_PATH.write_text(json.dumps(rec), encoding="utf-8")
+    return rec
+
+
+def read_flush_marker() -> dict | None:
+    rec = read_json(FLUSH_MARKER_PATH)
+    return rec if isinstance(rec, dict) else None
+
+
+def clear_flush_marker(*, pid: int | None = None) -> None:
+    """Remove the marker. With `pid`, only a marker that process owns."""
+    if pid is not None:
+        rec = read_flush_marker()
+        if rec is not None and int(rec.get("pid") or 0) != int(pid):
+            return
+    try:
+        FLUSH_MARKER_PATH.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def flush_in_progress() -> dict | None:
+    """The flush marker when its process is alive, else None. Held by the
+    implement source (no new round starts under a flush) and by the worker
+    pool's round hold, exactly like a live land marker."""
+    rec = read_flush_marker()
+    if rec is None or not pid_alive(rec.get("pid") or 0):
+        return None
+    return rec
+
+
+#: The staged snapshot the guardian unit actually executes. Only it decides
+#: what a rollback can do; the repo copy is a candidate until staged.
+def guardian_bin_dir() -> Path:
+    base = os.environ.get("LLOYD_GUARDIAN_STATE",
+                          str(Path.home() / ".local" / "state" / "lloyd-guardian"))
+    return Path(base) / "bin"
+
+
+#: The `gstate.BATCH_SCHEMA` a snapshot must declare before a batch is written.
+GUARDIAN_BATCH_SCHEMA = 2
+
+
+def guardian_batch_aware(bin_dir: Path | None = None) -> bool:
+    """Whether the STAGED guardian can roll back a batch record.
+
+    Read from `~/.local/state/lloyd-guardian/bin/gstate.py` — the snapshot the
+    unit runs — as text, never imported (it is stdlib and pinned, but
+    importing it here would put its module state in the promoter's process).
+    False on anything unreadable. This is the interlock: while it is false
+    `automod.landing.defer_restart` reads as off, so the promoter never writes
+    a record the running guardian would roll back by resetting from the newest
+    commit to the oldest one's parent — over whatever foreign commit sits
+    between. A guardian change lands in the repo long before it is staged.
+    """
+    import re
+    try:
+        text = ((bin_dir or guardian_bin_dir()) / "gstate.py").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    m = re.search(r"^BATCH_SCHEMA\s*=\s*(\d+)\s*$", text, re.M)
+    return bool(m) and int(m.group(1)) >= GUARDIAN_BATCH_SCHEMA
+
+
+def batch_suspended_until(window_s: float, events: Iterable[dict] | None = None) -> float:
+    """When landings may batch again after a batch rollback: the latest
+    `rollback_succeeded` that took two or more commits off `main`, plus
+    `window_s`. 0.0 when there is none.
+
+    A batch rollback blames every landing in it, and most of them did nothing
+    wrong — every rollback this loop has performed has been a false positive.
+    Re-landing them one at a time for a while is what lets each be judged on
+    its own window again, so the next rollback, if any, names one change.
+    """
+    rows = ledger_rows() if events is None else list(events)
+    latest = 0.0
+    for e in rows:
+        if e.get("event") != "rollback_succeeded":
+            continue
+        batch = e.get("commits")
+        if isinstance(batch, list) and len(batch) >= 2:
+            latest = max(latest, float(e.get("ts") or 0))
+    return latest + float(window_s) if latest else 0.0
 
 
 def update_run_spec_base(round_id: str, base: str) -> bool:

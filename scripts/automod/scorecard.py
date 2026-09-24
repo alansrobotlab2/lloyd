@@ -445,16 +445,20 @@ def _duty_cycle(ev: list[dict], since: float, now: float) -> dict[str, Any]:
 # Row 14's idle-gap classes, first match wins. A class is a name and the
 # ledger events whose presence in (or a minute before) a gap claims it.
 GAP_CLASSES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("promotion_gap", ("promoted",)),
+    # A land-train flush (`restart_flushed`) is the restart a landing used to
+    # be, and is classed with it.
+    ("promotion_gap", ("promoted", "restart_flushed")),
     ("abort", ("round_aborted",)),
     ("restart", ("restart",)),
 )
 # The waits a landing records, as `(key, ledger event)`; each row carries
-# `waited_s`. The restart itself (drain, stop, boot, verify) writes no such
-# row, so it is reported as not measured rather than folded into a class.
+# `waited_s`. An eager landing's restart (drain, stop, boot, verify) writes no
+# such row, so it is reported as not measured rather than folded into a class;
+# a land-train flush does (`restart_flushed`, `waited_s` = its idle wait).
 LANDING_WAITS: tuple[tuple[str, str], ...] = (
     ("settle", "land_wait_settle"),
     ("rounds", "land_wait_rounds"),
+    ("flush", "restart_flushed"),
 )
 
 
@@ -469,6 +473,10 @@ def _landing_waits(ev: list[dict]) -> dict[str, Any]:
     whole 7.7 h to the window. Both rows carry `waited_s`; a landing that
     skipped a wait records it as ~0 rather than not at all, so `n` counts rows
     and `waited` counts only the ones that actually blocked.
+
+    `flush` is the land train's restart (`restart_flushed`, `waited_s` = the
+    idle wait it spent): with `automod.landing.defer_restart` on, that is where
+    the drain the other two used to precede has gone.
     """
     out: dict[str, Any] = {}
     for key, event in LANDING_WAITS:

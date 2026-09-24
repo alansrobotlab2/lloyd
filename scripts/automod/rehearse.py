@@ -39,10 +39,19 @@ def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
 
 
 LATER_FILE = "app/nightly_marker.py"
+BATCH_FILE = "app/drill_second_landing.py"
+
+
+def _commit_file(scratch: Path, rel: str, text: str, message: str) -> str:
+    (scratch / rel).parent.mkdir(parents=True, exist_ok=True)
+    (scratch / rel).write_text(text, encoding="utf-8")
+    _git(scratch, "add", "-A")
+    _git(scratch, "commit", "-q", "-m", message)
+    return _git(scratch, "rev-parse", "HEAD").stdout.strip()
 
 
 def _prepare_scratch(scratch: Path, source: Path, base: str,
-                     *, later_commit: bool = False) -> dict:
+                     *, later_commit: bool = False, batch: str | None = None) -> dict:
     """Clone `source` into `scratch`, then commit a build that cannot boot.
 
     With `later_commit`, add an unrelated commit ON TOP of the broken one —
@@ -50,6 +59,12 @@ def _prepare_scratch(scratch: Path, source: Path, base: str,
     `reset --hard` to the parent would take that work with it. This is the
     scenario that cost 26 commits on 2026-09-06, so the drill rehearses it
     rather than trusting the unit tests alone.
+
+    With `batch` (the land train, `--batch`): a SECOND landing on top of the
+    broken one, observed together as `commits: [broken, second]`. `"reset"`
+    leaves the range clean, so the guardian may reset both off; `"revert"`
+    puts an unrelated commit BETWEEN them, so it must revert both in place and
+    keep that one — a batch routinely straddles a commit the loop never made.
     """
     scratch.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "clone", "-q", "--no-hardlinks", str(source), str(scratch)],
@@ -65,19 +80,21 @@ def _prepare_scratch(scratch: Path, source: Path, base: str,
     _git(scratch, "commit", "-q", "-m", "drill: deliberately unbootable")
     broken = _git(scratch, "rev-parse", "HEAD").stdout.strip()
 
-    later = None
-    if later_commit:
-        (scratch / LATER_FILE).write_text(
-            "# unrelated work a nightly job committed to live main\nKEEP = True\n",
-            encoding="utf-8")
-        _git(scratch, "add", "-A")
-        _git(scratch, "commit", "-q", "-m", "drill: unrelated later work")
-        later = _git(scratch, "rev-parse", "HEAD").stdout.strip()
-    return {"good": good, "broken": broken, "later": later}
+    later = second = None
+    if later_commit or batch == "revert":
+        later = _commit_file(scratch, LATER_FILE,
+                             "# unrelated work a nightly job committed to live main\nKEEP = True\n",
+                             "drill: unrelated later work")
+    if batch:
+        second = _commit_file(scratch, BATCH_FILE,
+                              "# the second landing of a batch\nSECOND = True\n",
+                              "drill: second landing in the batch")
+    return {"good": good, "broken": broken, "later": later, "second": second}
 
 
 def run_drill(round_id: str, worktree: Path, base: str, *,
-              python: Path | None = None, budget: float = 240.0) -> tuple[bool, str]:
+              python: Path | None = None, budget: float = 240.0,
+              batch: bool = False) -> tuple[bool, str]:
     """Rehearse BOTH rollback routes. Returns (ok, detail); never raises.
 
     Two scenarios, because there are two routes back and only one of them was
@@ -89,13 +106,21 @@ def run_drill(round_id: str, worktree: Path, base: str, *,
     The second is the one that matters most and was the least covered: nightly
     jobs commit straight to live `main`, so a 15-minute window routinely
     closes over work the loop never touched.
+
+    `batch` adds the land train's two (`rehearse --batch`): a two-landing
+    record whose range is clean (reset removes both) and one with a foreign
+    commit between them (both reverted in place, the foreign one kept). Run
+    against the restaged guardian before `automod.landing.defer_restart` is
+    turned on.
     """
     details = []
-    for surgical in (False, True):
-        ok, detail = _run_one_drill(f"{round_id}-{'revert' if surgical else 'reset'}",
-                                    worktree, base, python=python, budget=budget,
-                                    surgical=surgical)
-        details.append(f"[{'revert' if surgical else 'reset'}] {detail}")
+    scenarios = [("reset", False, None), ("revert", True, None)]
+    if batch:
+        scenarios += [("batch-reset", False, "reset"), ("batch-revert", True, "revert")]
+    for name, surgical, kind in scenarios:
+        ok, detail = _run_one_drill(f"{round_id}-{name}", worktree, base, python=python,
+                                    budget=budget, surgical=surgical, batch=kind)
+        details.append(f"[{name}] {detail}")
         if not ok:
             return False, "\n".join(details)
     return True, "\n".join(details)
@@ -103,7 +128,7 @@ def run_drill(round_id: str, worktree: Path, base: str, *,
 
 def _run_one_drill(round_id: str, worktree: Path, base: str, *,
                    python: Path | None = None, budget: float = 240.0,
-                   surgical: bool = False) -> tuple[bool, str]:
+                   surgical: bool = False, batch: str | None = None) -> tuple[bool, str]:
     """One scenario. Return (ok, detail). Never raises."""
     drill_root = Path.home() / "lloyd-work" / f"{round_id}-drill"
     scratch = drill_root / "home" / "lloyd"
@@ -118,7 +143,8 @@ def _run_one_drill(round_id: str, worktree: Path, base: str, *,
         drill_root.mkdir(parents=True, exist_ok=True)
         marker.write_text(time.strftime("%Y-%m-%dT%H:%M:%SZ"), encoding="utf-8")
 
-        shas = _prepare_scratch(scratch, worktree, base, later_commit=surgical)
+        shas = _prepare_scratch(scratch, worktree, base,
+                                later_commit=surgical and not batch, batch=batch)
 
         # The scratch state the candidate guardian will read.
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -126,12 +152,8 @@ def _run_one_drill(round_id: str, worktree: Path, base: str, *,
             "schema": 1, "commit": shas["good"], "floor": shas["good"],
             "recorded_at": "1970-01-01T00:00:00Z", "health": {}, "eval": {},
         }), encoding="utf-8")
-        (state_dir / "current.json").write_text(json.dumps({
-            "schema": 1, "commit": shas["broken"], "parent": shas["good"],
-            "rollback_target": shas["good"], "changed_paths": ["server.py"],
-            "landed_ts": time.time(), "state": "observing",
-            "errors_until_ts": time.time() + 600, "venv_swapped": False,
-        }), encoding="utf-8")
+        (state_dir / "current.json").write_text(json.dumps(
+            _drill_record(shas, batch)), encoding="utf-8")
 
         # Boot the broken build under its own supervisord. autorestart off so
         # it fails fast into FATAL instead of thrashing for the whole budget.
@@ -179,7 +201,11 @@ def _run_one_drill(round_id: str, worktree: Path, base: str, *,
         head_now = _git(scratch, "rev-parse", "HEAD").stdout.strip()
         branch_now = _git(scratch, "symbolic-ref", "--quiet", "HEAD").stdout.strip()
 
-        if surgical:
+        if batch:
+            bad = _judge_batch(scratch, shas, head_now, batch)
+            if bad:
+                return False, f"{bad}\n{log[-800:]}"
+        elif surgical:
             # The promotion must be undone WITHOUT discarding the later commit.
             if head_now in (shas["good"], shas["broken"], shas["later"]):
                 return False, (f"expected a revert commit on top of "
@@ -220,6 +246,13 @@ def _run_one_drill(round_id: str, worktree: Path, base: str, *,
         if canary.sock and str(canary.sock) in log and "/tmp/agent-supervisor.sock" in log:
             return False, "drill contacted the live supervisord socket"
 
+        if batch == "reset":
+            return True, (f"guardian reset the batch {shas['broken'][:8]}+{shas['second'][:8]} "
+                          f"→ {shas['good'][:8]}, canary healthy again, ledger: {kinds}")
+        if batch == "revert":
+            return True, (f"guardian reverted the batch {shas['broken'][:8]}+{shas['second'][:8]} "
+                          f"in place → {head_now[:8]}, kept {shas['later'][:8]} between them, "
+                          f"canary healthy again, ledger: {kinds}")
         if surgical:
             return True, (f"guardian reverted {shas['broken'][:8]} in place → "
                           f"{head_now[:8]}, kept later commit {shas['later'][:8]} and "
@@ -240,6 +273,43 @@ def _run_one_drill(round_id: str, worktree: Path, base: str, *,
         shutil.rmtree(drill_root, ignore_errors=True)
 
 
+def _drill_record(shas: dict, batch: str | None) -> dict:
+    """The `current.json` the candidate guardian is handed: one landing, or a
+    two-landing batch as the land train's flush writes it."""
+    rec = {
+        "schema": 1, "commit": shas["broken"], "parent": shas["good"],
+        "rollback_target": shas["good"], "changed_paths": ["server.py"],
+        "landed_ts": time.time(), "state": "observing",
+        "errors_until_ts": time.time() + 600, "venv_swapped": False,
+    }
+    if batch:
+        rec.update(schema=2, commit=shas["second"], commits=[shas["broken"], shas["second"]],
+                   changed_paths=["server.py", BATCH_FILE],
+                   entries=[{"commit": shas["broken"], "changed_paths": ["server.py"]},
+                            {"commit": shas["second"], "changed_paths": [BATCH_FILE]}])
+    return rec
+
+
+def _judge_batch(scratch: Path, shas: dict, head_now: str, batch: str) -> str:
+    """'' when the guardian did what a batch rollback must, else why not."""
+    if batch == "reset":
+        if head_now != shas["good"]:
+            return (f"a clean batch range was not reset: HEAD={head_now[:8]}, "
+                    f"expected {shas['good'][:8]}")
+        return ""
+    if head_now in (shas["good"], shas["broken"], shas["later"], shas["second"]):
+        return (f"expected revert commits on top of {shas['second'][:8]}, "
+                f"got HEAD={head_now[:8]}")
+    if not (scratch / LATER_FILE).exists():
+        return ("the batch rollback DISCARDED the foreign commit between its landings — "
+                "the 26-commit failure mode")
+    if (scratch / BATCH_FILE).exists():
+        return "the second landing of the batch is still in the tree"
+    if BREAK_LINE in (scratch / "server.py").read_text(encoding="utf-8"):
+        return "the broken landing of the batch is still in the tree"
+    return ""
+
+
 def main(argv=None) -> int:
     import argparse
     ap = argparse.ArgumentParser(description="Rehearse a guardian rescue against a canary")
@@ -247,6 +317,9 @@ def main(argv=None) -> int:
                     help="tree holding the CANDIDATE guardian (default: live)")
     ap.add_argument("--base", default="HEAD")
     ap.add_argument("--round-id", default=f"DRILL_{int(time.time())}")
+    ap.add_argument("--batch", action="store_true",
+                    help="also rehearse the land train's batch rollback (reset a clean "
+                         "two-landing range; revert both around a foreign commit)")
     ap.add_argument("--yes-i-mean-it", action="store_true",
                     help="required: this boots processes and rewrites a scratch repo")
     args = ap.parse_args(argv)
@@ -256,7 +329,7 @@ def main(argv=None) -> int:
 
     base = subprocess.run(["git", "-C", args.worktree, "rev-parse", args.base],
                           capture_output=True, text=True).stdout.strip()
-    ok, detail = run_drill(args.round_id, Path(args.worktree), base)
+    ok, detail = run_drill(args.round_id, Path(args.worktree), base, batch=args.batch)
     print(("PASS: " if ok else "FAIL: ") + detail)
     return 0 if ok else 1
 

@@ -204,8 +204,14 @@ def test_the_landing_config_is_read_and_promote_waits_for_rounds_before_the_drai
     # concurrent landing).
     land = (ROOT / "scripts/automod/round.py").read_text()
     assert land.index("P.wait_for_rounds(") < land.index("lock = _land_lock(round_id")
-    assert "wait_for_rounds(" not in (ROOT / "scripts/automod/promote.py").read_text().split(
-        "def promote(")[1], "never inside promote, which runs under the lock"
+    import inspect
+    assert "wait_for_rounds(" not in inspect.getsource(P.promote), \
+        "never inside promote, which runs under the lock"
+    # The land train's flush waits for rounds too, and the same rule holds:
+    # before it takes the lock, never under it.
+    assert "wait_for_rounds(" not in inspect.getsource(P._flush_locked)
+    flush = inspect.getsource(P._flush)
+    assert flush.index("wait_for_rounds(") < flush.index("S.Lock(owner=\"flush\")")
 
 
 # ── an external landing failure keeps its own count ────────────────────────
@@ -722,3 +728,94 @@ def test_preflight_does_not_call_the_other_gates_canary_a_stale_one(tmp_path, mo
     assert G._canary_lock_held() is False, "the probe itself must not leave the lock taken"
     src = (ROOT / "scripts/automod/gate.py").read_text()
     assert src.index("if not _canary_lock_held():") < src.index("is in use (stale canary?)")
+
+
+# ── the land train: what holds a slot, and who starts the flush ────────────
+
+def test_a_gated_round_the_train_will_only_merge_holds_no_slot(monkeypatch, tmp_path):
+    """Its landing restarts nothing now — the flush does, later, at a gap —
+    so a freed slot may start a turn. An eager one (a venv, agent-services/)
+    still restarts inline and still holds."""
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path)
+    monkeypatch.setattr(I, "_RESTART_VERDICTS", {})
+    _free_loop(monkeypatch, [str(I._LOOP_WORKTREE_ROOT / "SM_A" / "home" / "lloyd")])
+    monkeypatch.setattr(P, "restart_needed", lambda changed, **k: (True, "loaded"))
+    eager: list = []
+    monkeypatch.setattr(P, "landing_is_eager", lambda changed, report: list(eager))
+    _gated(tmp_path, "SM_A", ["app/paths.py"])
+    assert I._loop_is_free(2) == (True, "free")
+    eager.append("the gate built a candidate venv")
+    I._RESTART_VERDICTS.clear()
+    free, why = I._loop_is_free(2)
+    assert free is False and "SM_A passed its gate" in why
+
+
+def test_with_the_train_off_a_restarting_round_holds_exactly_as_before(monkeypatch, tmp_path):
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path)
+    monkeypatch.setattr(I, "_RESTART_VERDICTS", {})
+    monkeypatch.setattr(S, "landing_cfg", lambda repo=None: {"defer_restart": False})
+    _free_loop(monkeypatch, [str(I._LOOP_WORKTREE_ROOT / "SM_A" / "home" / "lloyd")])
+    monkeypatch.setattr(P, "restart_needed", lambda changed, **k: (True, "loaded"))
+    _gated(tmp_path, "SM_A", ["app/paths.py"])
+    assert I._loop_is_free(2)[0] is False
+
+
+def test_a_running_flush_holds_every_slot(monkeypatch):
+    _free_loop(monkeypatch, [])
+    monkeypatch.setattr(S, "flush_in_progress", lambda: {"pid": 1})
+    free, why = I._loop_is_free(2)
+    assert free is False and "restart flush" in why
+
+
+def test_the_pool_holds_for_a_flush_as_for_a_landing(monkeypatch):
+    import types
+    from workers.pool import WorkerPool
+    monkeypatch.setattr(S, "rounds_landing", lambda: [])
+    monkeypatch.setattr(S, "flush_in_progress", lambda: None)
+    assert WorkerPool._landing_in_flight(types.SimpleNamespace()) is False
+    monkeypatch.setattr(S, "flush_in_progress", lambda: {"pid": 1})
+    assert WorkerPool._landing_in_flight(types.SimpleNamespace()) is True
+
+
+class _Queue:
+    def __init__(self, live):
+        self.live = set(live)
+
+    def has_live(self, key):
+        return key in self.live
+
+
+def test_maybe_flush_spawns_once_at_a_natural_gap(monkeypatch, tmp_path):
+    for name, fn in (("PENDING_PATH", "pending_restart.json"),
+                     ("FLUSH_MARKER_PATH", "flush.running"), ("CURRENT_PATH", "current.json"),
+                     ("HALTED_PATH", "halted"), ("BROKEN_PATH", "BROKEN"),
+                     ("ROLLBACK_REQUEST_PATH", "rr.json")):
+        monkeypatch.setattr(S, name, tmp_path / fn)
+    monkeypatch.setattr(S, "rounds_landing", lambda: [])
+    monkeypatch.setattr(I, "round_depth", lambda src_cfg=None: 2)
+    spawned: list = []
+
+    def detached(*, by, now=False):
+        spawned.append(by)
+        S.write_flush_marker(pid=1, by=by)       # pid 1 is always alive
+        return {"pid": 1, "log": "x"}
+    monkeypatch.setattr(R, "flush_detached", detached)
+
+    I._maybe_flush(_Queue([]))
+    assert spawned == [], "nothing pending: nothing to flush"
+    S.append_pending({"round_id": "SM_A", "commit": "a" * 40, "restart": True,
+                      "merged_ts": time.time()})
+    I._maybe_flush(_Queue([I._slot_key(1)]))
+    assert spawned == [], "a turn in flight and nothing old: not a gap"
+    I._maybe_flush(_Queue([I._slot_key(0)]), exclude_key=I._slot_key(0))
+    assert len(spawned) == 1 and "natural gap" in spawned[0], \
+        "at turn end the asking turn's own row does not count"
+    I._maybe_flush(_Queue([]))
+    assert len(spawned) == 1, "a flush already running is not started twice"
+
+
+def test_the_implement_source_asks_for_a_flush_before_the_free_check_and_at_turn_end():
+    import inspect
+    src = inspect.getsource(I.enqueue_if_due)
+    assert src.index("_maybe_flush") < src.index("_loop_is_free()")
+    assert "_maybe_flush(exclude_key=getattr(item, \"dedup_key\", None))" in inspect.getsource(I.execute)

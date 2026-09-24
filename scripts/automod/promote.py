@@ -62,9 +62,16 @@ DRAIN_REFRESH_SECONDS = 60.0   # re-arm well inside the TTL while waiting for id
 # `bench_010` vault wipe on whichever promotion happened to be observing, the
 # 09-17 one a `.git` repack the file counter did not skip). Against that, on a
 # 54-promotion day the window cost 13.5 h of the 24, and it is what every
-# landing queues behind. 450 clears the longest signal ever observed with
+# landing queues behind. 450 cleared the longest signal ever observed with
 # margin, at half the serialization.
-ERRORS_WINDOW = 450.0
+#
+# 300 since 2026-09-24 (Alan's ruling, with the land train). Of the four, the
+# crash fired at 147 s and the error spike at 4 s; the 327 s trip was the `.git`
+# repack miscount and the 262 s one the bench_010 wipe — and a wipe of the
+# data home or the vault is caught on EVERY guardian tick, inside a window or
+# not (`check_data`, `check_vault`: halt and alert), so the window is not the
+# only thing between such damage and a human.
+ERRORS_WINDOW = 300.0
 # A landing that restarted no service gets a shorter one. The guardian already
 # skips liveness and the error rate for such a promotion (`unrestarted` in
 # `guardian.tick`): the code that could crash is the code that was already
@@ -1060,6 +1067,16 @@ def promote(round_id: str, worktree: Path, base: str, *,
             f"worktree HEAD moved since the gate ran ({head[:8]} != gated "
             f"{gate_head[:8]}) — re-gate before landing")
 
+    # The land train (`automod.landing.defer_restart`, and only while the
+    # STAGED guardian can judge a batch): a landing that need not restart
+    # anything NOW is merged and left for the flush. With the train off every
+    # landing is eager and what follows is the landing path unchanged; with it
+    # on, an eager one also carries whatever the train is holding (`batch`).
+    train = restart_deferred()[0]
+    if train and not landing_is_eager(W.changed_paths(Path(worktree), base), gate_report):
+        return merge_round(round_id, worktree, base, gate_report=gate_report,
+                           dry_run=dry_run)
+
     # One promotion under observation at a time. A second landing overwrote
     # `current.json`, so the first promotion never settled, never advanced the
     # LKG, and — worse — the new record's rollback target became a commit that
@@ -1137,6 +1154,14 @@ def promote(round_id: str, worktree: Path, base: str, *,
         result["would_promote"] = True
         return result
 
+    # An eager landing on the train restarts for everything merged before it,
+    # so its record is the batch: `_write_record` stamps `commits` and the
+    # oldest entry's parent as the rollback target. Empty with the train off,
+    # and then every write below is exactly `S.write_verified` as before.
+    batch = _live_pending(live) if train else []
+    restart_began = False
+    idle_waited_s = 0.0
+
     # ── the rollback point, verified before anything moves ─────────────
     current = {
         "schema": 1,
@@ -1171,7 +1196,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
     }
     _, body = _get(f"{BACKEND}/health")
     current["boot_id"] = (body or {}).get("boot_id")
-    S.write_verified(S.CURRENT_PATH, current)   # raises unless it round-trips
+    _write_record(current, batch)   # raises unless it round-trips
 
     # ── idle gate + drain ──────────────────────────────────────────────
     # The other round's turn was waited out by `round.land` BEFORE it took the
@@ -1181,9 +1206,14 @@ def promote(round_id: str, worktree: Path, base: str, *,
     # no restart to protect a turn from, so nothing is paused, drained or
     # waited for, and the merge below is the whole landing.
     restart, restart_why = restart_needed(changed)
+    if batch and not restart and any(e.get("restart") for e in batch):
+        # What the train holds needs the restart even if this landing alone would not.
+        restart, restart_why = True, "the train holds landings that need a restart"
     current["restart"] = result["restart"] = restart
     result["restart_why"] = restart_why
+    idle_from = time.time()
     ok, why = wait_idle() if restart else (True, restart_why)
+    idle_waited_s = time.time() - idle_from
     if not ok:
         S.clear_current()
         # A landing that never got the backend idle is the infrastructure's
@@ -1225,7 +1255,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
                             "changed_paths": changed, "tree_hash": tree_hash,
                             "gate": gate_report.get("rungs")})
             result.update({"commit": head, "parent": live_head, "changed_paths": changed})
-            S.write_verified(S.CURRENT_PATH, current)
+            _write_record(current, batch)
 
         # ── one commit per landing ─────────────────────────────────────
         # After the last gate, before the fast-forward, and only ever to a
@@ -1241,7 +1271,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
                 result["squashed_from"] = current["squashed_from"] = head
                 head = squashed
                 current["commit"] = result["commit"] = head
-                S.write_verified(S.CURRENT_PATH, current)
+                _write_record(current, batch)
             result["squash"] = note
 
         # ── land ───────────────────────────────────────────────────────
@@ -1268,7 +1298,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
             if again:
                 restart = current["restart"] = result["restart"] = True
                 result["restart_why"] = f"after the merge: {again_why}"
-                S.write_verified(S.CURRENT_PATH, current)
+                _write_record(current, batch)
                 ok, why = wait_idle()
                 if not ok:
                     raise PromoteError(f"{again_why}, and {why}")
@@ -1277,13 +1307,14 @@ def promote(round_id: str, worktree: Path, base: str, *,
 
         # The gate's report, not a path probe: see `swap_candidate_venv`.
         if swap_candidate_venv(Path(worktree), live, gate_report, current):
-            S.write_verified(S.CURRENT_PATH, current)
+            _write_record(current, batch)
 
         # Service definitions the diff changed must reach the running system
         # BEFORE the restart, or the restart re-reads the old ones.
         service_notes = _apply_service_changes(changed)
 
         # ── restart, MCP first ─────────────────────────────────────────
+        restart_began = restart
         for program, health in ((("lloyd-mcp", MCP_HEALTH),
                                  ("lloyd-backend", f"{BACKEND}/health")) if restart else ()):
             # Refresh the lease before each leg. The lease is 120s and this
@@ -1341,7 +1372,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
         current["errors_until_ts"] = landed + window
         current["boot_id"] = (body or {}).get("boot_id")
         current["service_changes"] = service_notes
-        S.write_verified(S.CURRENT_PATH, current)
+        _write_record(current, batch)
         result["service_changes"] = service_notes
         S.append_event({"event": "promoted", "round_id": round_id, "title": title,
                         "commit": head, "parent": live_head, "changed_paths": changed,
@@ -1355,7 +1386,15 @@ def promote(round_id: str, worktree: Path, base: str, *,
                         "errors_window_s": window,
                         # False: the merge was the landing, nothing was drained
                         # or restarted (`restart_needed`).
-                        "restarted": restart, "restart_why": result.get("restart_why", "")})
+                        "restarted": restart, "restart_why": result.get("restart_why", ""),
+                        **({"flushed_pending": [e["commit"] for e in batch]} if batch else {})})
+        if batch:
+            _record_flushed(batch + [{"commit": head, "round_id": round_id,
+                                      "restart": restart}],
+                            reason=f"eager landing of {round_id}", by="land",
+                            restarted=restart, idle_waited_s=idle_waited_s, window=window)
+            S.remove_pending([e["commit"] for e in batch])
+            result["flushed_pending"] = [e["commit"] for e in batch]
         _announce_promoted(round_id, head, changed, title, window)
         result["regression_runner"] = _start_regression_runner()
         result["promoted"] = True
@@ -1377,10 +1416,16 @@ def promote(round_id: str, worktree: Path, base: str, *,
         # in the tree survive as `broken/<stamp>/dirty.patch` — the guardian's
         # `preserve_evidence` contract — and the event says where.
         try:
-            evidence = _rollback_inline(live, live_head)
-            S.append_event({"event": "rollback_succeeded", "trigger": "promote_failed",
-                            "commit": head, "restored": live_head, "round_id": round_id,
-                            "stash": evidence.get("patch"), "tag": evidence.get("tag")})
+            if batch and restart_began:
+                # The restart ran everything the train held, so any of it may
+                # be what failed: the batch goes, by the route its range allows.
+                _undo_batch_and_record(live, current, trigger="promote_failed",
+                                       round_id=round_id)
+            else:
+                evidence = _rollback_inline(live, live_head)
+                S.append_event({"event": "rollback_succeeded", "trigger": "promote_failed",
+                                "commit": head, "restored": live_head, "round_id": round_id,
+                                "stash": evidence.get("patch"), "tag": evidence.get("tag")})
         except Exception as exc:
             S.append_event({"event": "rollback_failed", "trigger": "promote_failed",
                             "commit": head, "round_id": round_id, "error": str(exc)[:400]})
@@ -1423,7 +1468,27 @@ def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
     released whatever happens; the lease is cleared once the services are
     healthy, so the guardian is blind for exactly the restart and nothing
     after it.
+
+    **With the land train holding merged landings this is a flush**
+    (`flush_pending(force_restart=True)`): a restart of the backend or the
+    aggregator makes every pending landing live, and one that did so without
+    opening their window would leave them running unjudged. `skip_idle` maps to
+    `--now`. The primary, if asked for too, gets its own leg afterwards.
     """
+    if S.read_pending() and {"lloyd-mcp", "lloyd-backend"} & set(programs):
+        out = flush_pending(f"human restart: {reason}" if reason else "human restart",
+                            kill_turns=skip_idle, by="restart", force_restart=True)
+        if not out.get("flushed"):
+            # Everything pending had already settled or left `main`: an
+            # ordinary restart, below.
+            return restart_stack(programs, reason=reason, max_wait=max_wait,
+                                 force=force, skip_idle=skip_idle)
+        rest = tuple(p for p in programs if p not in ("lloyd-mcp", "lloyd-backend"))
+        if rest:
+            out["also"] = restart_stack(rest, reason=reason, max_wait=max_wait,
+                                        force=force, skip_idle=skip_idle)
+        return {"restarted": ["lloyd-mcp", "lloyd-backend"] + list(rest), "flush": out,
+                "reason": reason}
     observed = S.read_current()
     if observed and observed.get("state") in ("landing", "observing") and not force:
         raise PromoteError(
@@ -1591,3 +1656,660 @@ def _rollback_inline(live: Path, target: str) -> dict:
         restart_process(program)
         _wait_health(health, 90.0)
     return evidence or {}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# The land train: a merge is a landing, a restart is a flush (2026-09-24)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Every restarting landing used to drain the loop to zero first — wait out
+# sibling turns, pause the pool, wait for idle, restart — 172 of them a week,
+# 32 of the loop's 58 idle hours. With `automod.landing.defer_restart` on, a
+# landing that need not restart anything NOW fast-forwards `main`, writes its
+# `promoted` row, starts the regression check, and appends itself to
+# `pending_restart.json`; it opens no window. A flush then restarts ONCE for
+# everything pending and writes the one `current.json` the guardian judges,
+# with `commits: [oldest..newest]` and the oldest entry's parent as the
+# rollback target. `architecture/automod.md` §3.2i is the long version.
+
+RESTART_AFTER_S = 2700.0
+RESTART_BATCH_MAX = 4
+BATCH_SUSPEND_AFTER_ROLLBACK_S = 21600.0
+FLUSH_LOCK_MAX_WAIT = 2 * 3600.0
+
+
+class FlushNotStarted(PromoteError):
+    """A flush that stopped before anything was restarted: nothing to undo,
+    the pending entries stay pending for the next trigger."""
+
+
+def restart_deferred() -> tuple[bool, str]:
+    """`(the land train is on, why)`. Three things must all hold:
+
+    `automod.landing.defer_restart` (ships false); the STAGED guardian declares
+    `BATCH_SCHEMA >= 2` (`S.guardian_batch_aware`) — the interlock, so no batch
+    record is ever written for a guardian that would reset over a foreign
+    commit to undo it; and no batch rollback in the last
+    `batch_suspend_after_rollback_s`, so re-landings are attributed one at a
+    time for a while (`S.batch_suspended_until`)."""
+    if not bool(S.landing_cfg(LIVE_ROOT).get("defer_restart", False)):
+        return False, "automod.landing.defer_restart is off"
+    if not S.guardian_batch_aware():
+        return False, ("the staged guardian cannot roll back a batch "
+                       f"({S.guardian_bin_dir() / 'gstate.py'} declares no BATCH_SCHEMA >= "
+                       f"{S.GUARDIAN_BATCH_SCHEMA}) — restage it and run the batch drill")
+    until = S.batch_suspended_until(
+        _landing_num("batch_suspend_after_rollback_s", BATCH_SUSPEND_AFTER_ROLLBACK_S))
+    if until > time.time():
+        return False, (f"batch landings are suspended for {(until - time.time()) / 60:.0f} "
+                       "more min after a batch rollback: landing singly so each change is "
+                       "judged on its own window")
+    return True, "restart deferred to the next flush"
+
+
+def landing_is_eager(changed: list[str], gate_report: dict | None) -> list[str]:
+    """Why this landing must restart the services itself, now — `[]` when it
+    can merge and leave the restart to the flush.
+
+    With the train off every landing is eager (the reason says so), which is
+    the landing path as it always was. With it on: a candidate venv (the swap
+    and the restart are one act), and anything under `agent-services/` (a
+    service definition or the guardian, applied by `_apply_service_changes`
+    before a restart). Those flush inline, carrying the batch."""
+    on, why = restart_deferred()
+    if not on:
+        return [why]
+    reasons: list[str] = []
+    if str((gate_report or {}).get("venv") or "").strip():
+        reasons.append("the gate built a candidate venv; swapping it is a restart")
+    svc = [p for p in changed or [] if str(p).startswith(ALWAYS_RESTART_PREFIXES)]
+    if svc:
+        reasons.append(f"{svc[0]} is a service definition or guardian file")
+    return reasons
+
+
+def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    if not ancestor or not descendant:
+        return False
+    if ancestor == descendant:
+        return True
+    return subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor",
+                           ancestor, descendant], capture_output=True).returncode == 0
+
+
+def _live_head(live: Path) -> str:
+    return subprocess.run(["git", "-C", str(live), "rev-parse", "HEAD"],
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _live_pending(live: Path) -> list[dict]:
+    """The pending entries still worth a window, oldest first. Under the lock.
+
+    An entry the guardian already settled (a flush that died after its record
+    was judged) or whose commit is no longer in `main`'s history (reverted, or
+    a merge that never happened after its entry was written) is dropped and
+    said on the ledger — a flush that re-observed a reverted commit would give
+    its `rollback_target` a meaning the tree no longer has."""
+    head = _live_head(live)
+    keep, dropped = [], []
+    for e in S.read_pending():
+        c = str(e.get("commit") or "")
+        (keep if c and not _settled(c) and _is_ancestor(live, c, head) else dropped).append(e)
+    if dropped:
+        S.remove_pending([e.get("commit") for e in dropped])
+        S.append_event({"event": "pending_dropped", "ok": True,
+                        "commits": [e.get("commit") for e in dropped],
+                        "round_ids": [e.get("round_id") for e in dropped],
+                        "detail": "settled already, or no longer in main's history"})
+    return keep
+
+
+def _stamp_batch(current: dict, batch: list[dict]) -> dict:
+    """The batch fields on a promotion record: `commits` oldest..newest ending
+    in the record's own commit, the oldest entry's parent as the rollback
+    target, and the per-commit entries the guardian denylists by content."""
+    if not batch:
+        return current
+    commits = [str(e["commit"]) for e in batch if str(e["commit"]) != current.get("commit")]
+    commits.append(str(current.get("commit")))
+    current["schema"] = 2
+    current["commits"] = commits
+    current["rollback_target"] = current["parent"] = str(batch[0].get("parent") or "")
+    current["entries"] = [_compact_entry(e) for e in batch] + (
+        [{"commit": current.get("commit"), "round_id": current.get("round_id"),
+          "changed_paths": list(current.get("changed_paths") or []),
+          "tree_hash": current.get("tree_hash")}]
+        if current.get("commit") not in {e.get("commit") for e in batch} else [])
+    return current
+
+
+def _write_record(current: dict, batch: list[dict]) -> dict:
+    """`S.write_verified` of the promotion record, with the batch stamped on
+    when there is one. With none it IS `S.write_verified(CURRENT_PATH, …)`."""
+    if batch:
+        _stamp_batch(current, batch)
+    return S.write_verified(S.CURRENT_PATH, current)
+
+
+def _compact_entry(e: dict) -> dict:
+    return {k: e.get(k) for k in ("commit", "parent", "round_id", "title", "changed_paths",
+                                  "tree_hash", "restart", "merged_ts")}
+
+
+def merge_announcement(title: str, n_files: int, pending: int, restart: bool) -> tuple[str, str]:
+    """Toast head and body for a merge the train holds. Pure, like
+    `promotion_announcement`, and it states no window: none is open yet."""
+    head = f"Landed: {title}" if title else "Landed a change"
+    files = f"{n_files} file{'' if n_files == 1 else 's'} changed."
+    if restart:
+        tail = (f" Goes live at the next restart ({pending} landing"
+                f"{'' if pending == 1 else 's'} waiting).")
+    else:
+        tail = " Nothing running needed a restart."
+    return head, files + tail
+
+
+def merge_round(round_id: str, worktree: Path, base: str, *,
+                gate_report: dict | None = None, dry_run: bool = False) -> dict:
+    """Land a round by merging it, and leave the restart to the flush.
+
+    The same refusals, chase and squash as `promote`, in the same order —
+    halt, BROKEN, the gated head, the denylist before and after a rebase,
+    overlapping live dirt — and none of the rest: no settle wait (a promotion
+    under observation is running OTHER code; this merge changes nothing that
+    runs), no idle wait, no drain, no pool pause, no restart lease, no window.
+    `main` moves, `promoted` is written with `restart_pending`, the regression
+    check starts, and the entry goes on the train.
+
+    The rollback point is still written BEFORE the tree moves: the pending
+    entry, verified, carries the parent. A process killed between the merge
+    and the end leaves an entry whose commit IS in `main`, which the flush
+    treats as any other; killed before the merge, an entry whose commit is
+    not, which the flush drops. A `landing` record (a flush or an eager
+    landing mid-restart) still refuses — though under the automod lock that
+    record's writer cannot be running, so it is a dead one."""
+    live = LIVE_ROOT
+    head = W.head(Path(worktree))
+    if not head:
+        raise PromoteError("cannot read the candidate HEAD")
+    observed = S.read_current()
+    if observed and observed.get("state") == "landing":
+        raise PromoteError(
+            f"{str(observed.get('commit'))[:8]} is mid-landing ({observed.get('state')}) — "
+            "a restart is in progress; not merging underneath it")
+
+    changed = W.changed_paths(Path(worktree), base)
+    tree_hash = S.changed_tree_hash(worktree, head, changed)
+    if S.is_denied(commit=head, tree_hash=tree_hash):
+        raise PromoteError(
+            f"{head[:8]} is on the rollback denylist"
+            + (" (matched by content, not SHA — this change was reverted before "
+               "and has been re-derived)" if tree_hash and not S.is_denied(commit=head)
+               else ""))
+    live_head = _live_head(live)
+    if live_head != base:
+        base, head, gate_report = _regate_after_move(round_id, Path(worktree), live,
+                                                     base, live_head)
+        changed = W.changed_paths(Path(worktree), base)
+        tree_hash = S.changed_tree_hash(worktree, head, changed)
+        if S.is_denied(commit=head, tree_hash=tree_hash):
+            _land_failed(round_id, f"{head[:8]} (rebased) is on the rollback denylist",
+                         external=False)
+        if landing_is_eager(changed, gate_report):
+            # The rebase brought in a service definition or a venv: this is an
+            # eager landing now, and `promote` is the path that restarts.
+            _land_failed(round_id, "after rebasing onto a moved main the landing must "
+                         "restart the services itself; land it again", external=True)
+
+    from scripts.automod import backlog as B
+    title = B.work_title_for_round(S.LEDGER_PATH, round_id)
+    live_dirty = W.dirty_paths(live)
+    overlap = sorted(set(live_dirty) & set(changed))
+    if overlap:
+        _land_failed(round_id,
+                     f"live tree has uncommitted edits in paths this round also changes: "
+                     f"{overlap} — two writers on one file. Report the paths and who is "
+                     f"editing them; the live edit is not yours to commit and not yours "
+                     f"to move out of the tree, and nothing here needs a clean live "
+                     f"tree to land again",
+                     external=True, overlap=overlap)
+
+    restart, restart_why = restart_needed(changed)
+    result: dict = {"round_id": round_id, "commit": head, "parent": live_head,
+                    "changed_paths": changed, "dry_run": dry_run,
+                    "live_dirty_paths": live_dirty[:20], "title": title,
+                    "deferred": True, "restart": False, "restart_pending": restart,
+                    "restart_why": restart_why}
+    if dry_run:
+        result["would_promote"] = True
+        return result
+
+    _, body = _get(f"{BACKEND}/health")
+    entry = {"round_id": round_id, "title": title, "commit": head, "parent": live_head,
+             "changed_paths": changed, "tree_hash": tree_hash, "restart": restart,
+             "restart_why": restart_why, "vault_commits": vault_commits_for(round_id),
+             "live_dirty_paths": live_dirty[:20], "kg_rows": count_kg_rows(),
+             "vault_files": count_vault_files(), "boot_id": (body or {}).get("boot_id"),
+             "gate": (gate_report or {}).get("rungs"), "merged_ts": None,
+             "queued_ts": time.time()}
+    S.append_pending(entry)   # the rollback point: verified before the tree moves
+
+    merged = False
+    try:
+        if squash_enabled():
+            squashed, note = W.squash_onto(
+                Path(worktree), live_head,
+                squash_message(round_id, title, Path(worktree), live_head),
+                keep_ref=f"refs/automod/rounds/{round_id}")
+            if squashed:
+                result["squashed_from"] = entry["squashed_from"] = head
+                head = entry["commit"] = result["commit"] = squashed
+                S.append_pending(entry)
+            result["squash"] = note
+        merge = subprocess.run(
+            ["git", "-C", str(live), "merge", "--ff-only", f"automod/{round_id}"],
+            capture_output=True, text=True)
+        if merge.returncode != 0:
+            _land_failed(round_id, f"fast-forward failed after rebasing and retesting: "
+                                   f"{merge.stderr.strip()[:300]}", external=True)
+        merged = True
+        on_disk = _live_head(live)
+        if on_disk != head:
+            raise PromoteError(f"live HEAD is {on_disk[:8]}, expected {head[:8]} after the merge")
+        # Vite serves the live tree and HMR picks a merge up at once, so a
+        # frontend change is live now whatever the train holds.
+        if any(p.startswith("web/") for p in changed):
+            alive, note = _frontend_alive()
+            if not alive:
+                raise PromoteError(f"frontend unreachable after landing ({note}) at {FRONTEND_URL}")
+        entry["merged_ts"] = time.time()
+        pending = S.append_pending(entry)
+    except Exception:
+        S.remove_pending([entry["commit"]])
+        if not merged:
+            raise
+        try:
+            evidence = _rollback_inline(live, live_head)
+            S.append_event({"event": "rollback_succeeded", "trigger": "promote_failed",
+                            "commit": head, "restored": live_head, "round_id": round_id,
+                            "stash": evidence.get("patch"), "tag": evidence.get("tag")})
+        except Exception as exc:
+            S.append_event({"event": "rollback_failed", "trigger": "promote_failed",
+                            "commit": head, "round_id": round_id, "error": str(exc)[:400]})
+        S.append_event({"event": "land_failed", "round_id": round_id, "ok": False,
+                        "external_blocker": True, "rolled_back": True,
+                        "detail": f"merge rolled back: {sys.exc_info()[1]}"[:500]})
+        raise
+
+    S.append_event({"event": "promoted", "round_id": round_id, "title": title,
+                    "commit": head, "parent": live_head, "changed_paths": changed,
+                    "vault_commits": entry["vault_commits"], "tree_hash": tree_hash,
+                    "service_changes": [], "errors_until": None, "errors_window_s": None,
+                    # Merged, not restarted: the flush that restarts it writes
+                    # `restart_flushed` and the window. `restarted` is False only
+                    # when nothing it changed is loaded, as before.
+                    "restarted": None if restart else False, "restart_why": restart_why,
+                    "deferred": True, "restart_pending": restart,
+                    "pending": len(pending)})
+    head_line, body_line = merge_announcement(
+        title, len(changed), sum(1 for e in pending if e.get("restart")), restart)
+    announce(head_line, body_line)
+    result["regression_runner"] = _start_regression_runner()
+    result["pending"] = len(pending)
+    result["promoted"] = True
+    return result
+
+
+def flush_due(rounds_in_flight: int | None = None, *, now: float | None = None) -> tuple[bool, str]:
+    """`(a flush should start now, why)`. Cheap: two small files and a marker.
+
+    Never while a flush or a landing is running, a promotion is recorded, or
+    promotions are halted, BROKEN or a rollback is pending — the flush would
+    only wait on it. Otherwise, in order: nothing pending needs a restart (a
+    flush then restarts nothing and costs nothing); the oldest entry has waited
+    `restart_after_s` (45 min); `restart_batch_max` (4) entries need one; or the
+    loop is at a natural gap — `rounds_in_flight == 0`, where the drain is
+    cheapest because no implement turn is there to wait out. `None` means the
+    caller cannot say, and the gap trigger is not used."""
+    entries = S.read_pending()
+    if not entries:
+        return False, "nothing pending"
+    now = time.time() if now is None else float(now)
+    if S.flush_in_progress():
+        return False, "a flush is already running"
+    if S.is_halted() or S.is_broken():
+        return False, "promotions are halted or the guardian is BROKEN"
+    if S.read_rollback_request():
+        return False, "a rollback request is pending"
+    cur = S.read_current()
+    if cur and cur.get("state") in ("landing", "observing"):
+        return False, f"{str(cur.get('commit'))[:8]} is {cur.get('state')}; flushing after it settles"
+    if S.rounds_landing():
+        return False, "a landing is running"
+    if len(entries) >= 2 and not S.guardian_batch_aware():
+        return False, (f"{len(entries)} landings are pending but the staged guardian cannot "
+                       "judge a batch — restage it (guardian-stage.sh) before flushing")
+    needs = [e for e in entries if e.get("restart")]
+    if not needs:
+        return True, f"{len(entries)} pending landing(s) need no restart"
+    stamps = [float(e.get("merged_ts") or e.get("queued_ts") or now) for e in needs]
+    age = now - min(stamps)
+    after = _landing_num("restart_after_s", RESTART_AFTER_S)
+    if age >= after:
+        return True, f"the oldest pending landing has waited {age / 60:.0f} min (>= {after / 60:.0f})"
+    batch_max = int(_landing_num("restart_batch_max", RESTART_BATCH_MAX))
+    if len(needs) >= max(1, batch_max):
+        return True, f"{len(needs)} landings need a restart (batch max {batch_max})"
+    if rounds_in_flight == 0:
+        return True, "no implement turn in flight: a natural gap"
+    return False, (f"{len(needs)} landing(s) wait for a restart, oldest {age / 60:.0f} min; "
+                   f"{rounds_in_flight if rounds_in_flight is not None else '?'} turn(s) in flight")
+
+
+def pending_summary() -> dict:
+    """What `round status` and `automod_status` say about the train."""
+    entries = S.read_pending()
+    now = time.time()
+    needs = [e for e in entries if e.get("restart")]
+    try:
+        due = flush_due()
+    except Exception as exc:  # noqa: BLE001 — a status is never the thing that fails
+        due = (False, f"unreadable: {exc}")
+    return {"train": dict(zip(("on", "why"), restart_deferred())),
+            "count": len(entries), "restart_needed": len(needs),
+            "oldest_age_s": (round(now - min(float(e.get("merged_ts") or e.get("queued_ts") or now)
+                                              for e in entries), 1) if entries else None),
+            "entries": [{k: e.get(k) for k in ("round_id", "title", "commit", "restart",
+                                               "merged_ts")} for e in entries],
+            "flush_due": due[0], "flush_why": due[1],
+            "flush_running": S.flush_in_progress()}
+
+
+def _record_flushed(batch: list[dict], *, reason: str, by: str, restarted: bool,
+                    idle_waited_s: float = 0.0, rounds_waited_s: float = 0.0,
+                    settle_waited_s: float = 0.0, already_live: bool = False,
+                    window: float | None = None) -> None:
+    """The `restart_flushed` ledger row: one per restart that went live for
+    the train, with the idle wait it spent (`waited_s`, what scorecard row 14
+    reads beside the two landing waits)."""
+    S.append_event({"event": "restart_flushed", "ok": True, "by": by,
+                    "reason": str(reason)[:300],
+                    "commits": [e.get("commit") for e in batch],
+                    "round_ids": [e.get("round_id") for e in batch],
+                    "batch": len(batch), "restarted": bool(restarted),
+                    "already_live": bool(already_live),
+                    "waited_s": round(float(idle_waited_s), 1),
+                    "waited_rounds_s": round(float(rounds_waited_s), 1),
+                    "waited_settle_s": round(float(settle_waited_s), 1),
+                    "errors_window_s": window})
+
+
+def _guardian_rollback_module(live: Path):
+    import importlib.util
+    guardian_dir = live / "agent-services" / "guardian"
+    spec_ = importlib.util.spec_from_file_location("_g_rollback", guardian_dir / "rollback.py")
+    mod = importlib.util.module_from_spec(spec_)
+    spec_.loader.exec_module(mod)
+    return mod
+
+
+def _undo_batch(live: Path, commits: list[str], target: str) -> dict:
+    """Take a batch the promoter restarted off `main`, inline, by the route
+    its range allows: `reset --hard target` only when HEAD is the newest batch
+    commit and `target..HEAD` is exactly the batch, every commit reverted in
+    place otherwise — the guardian's rule, through the guardian's code."""
+    mod = _guardian_rollback_module(live)
+    head = _live_head(live)
+    if head == commits[-1] and mod.range_is_exactly(str(live), target, head, commits):
+        evidence = dict(_rollback_inline(live, target) or {})
+        evidence.update(route="reset", restored=target)
+        return evidence
+    for program in ("lloyd-backend", "lloyd-mcp"):
+        stop_process(program, wait=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    evidence = dict(mod.preserve_evidence(str(live), S.BROKEN_DIR / stamp,
+                                          f"guardian-broken-{stamp}") or {})
+    restored = mod.revert_commits(str(live), list(commits))
+    for program, health in (("lloyd-mcp", MCP_HEALTH), ("lloyd-backend", f"{BACKEND}/health")):
+        restart_process(program)
+        _wait_health(health, 90.0)
+    evidence.update(route="revert", restored=restored)
+    return evidence
+
+
+def _undo_batch_and_record(live: Path, record: dict, *, trigger: str,
+                           round_id: str = "") -> None:
+    """`_undo_batch` for a record, with the ledger row; a batch that cannot be
+    undone inline is handed to the guardian as one request naming every
+    commit, which escalates to a human if it cannot either."""
+    commits = list(record.get("commits") or [record.get("commit")])
+    target = str(record.get("rollback_target") or "")
+    try:
+        ev = _undo_batch(live, commits, target)
+        S.append_event({"event": "rollback_succeeded", "trigger": trigger,
+                        "commit": commits[-1], "commits": commits, "batch": len(commits),
+                        "restored": ev.get("restored"), "route": ev.get("route"),
+                        "round_id": round_id or record.get("round_id"),
+                        "stash": ev.get("patch"), "tag": ev.get("tag")})
+    except Exception as exc:  # noqa: BLE001 — the guardian is the escalation path
+        S.request_rollback(reason=f"{trigger}: the promoter could not undo the batch "
+                                  f"inline ({exc})"[:1000],
+                           trigger=trigger, target=target or None, commit=commits[-1],
+                           commits=commits,
+                           changed_paths=list(record.get("changed_paths") or []))
+    finally:
+        S.remove_pending(commits)
+
+
+def flush_pending(reason: str = "", *, kill_turns: bool = False, by: str = "",
+                  force_restart: bool = False) -> dict:
+    """Restart once for everything the train holds, and open its one window.
+
+    Today's post-merge landing block, applied to the batch: `wait_for_rounds`
+    and `wait_for_settle` OUTSIDE the automod lock (#1215), then under it the
+    pending list re-read and trimmed (`_live_pending`), the record written in
+    state `landing` before anything moves, `wait_idle` (pool paused, drain
+    armed), the restart legs under the guardian's lease, and the proof that
+    the running code now contains the newest batch commit. The record then
+    reads `observing` with `commits`, the pending entries go, and
+    `restart_flushed` carries the waits.
+
+    Already live: when the backend's `/health.commit` already contains every
+    entry that needed a restart (the guardian's own rollback restart, a human
+    restart, a crash), nothing is restarted and the window opens on what is
+    running. Nothing pending needs a restart and not `force_restart`: a
+    `restart: false` record with the short window, and no drain at all.
+
+    `kill_turns` (`round flush --now`): no wait for implement turns and no
+    idle wait — the pool is paused and every turn in flight dies with the
+    restart and is re-offered. Failure before the restart leaves everything
+    pending (`flush_failed`); after it, the batch is undone
+    (`_undo_batch_and_record`) and `flush_failed` says so."""
+    import os
+    if not S.read_pending():
+        return {"flushed": False, "detail": "nothing pending"}
+    if S.is_halted():
+        raise PromoteError(f"promotions are halted: {S.HALTED_PATH}")
+    if S.is_broken():
+        raise PromoteError(f"guardian is in a BROKEN state: {S.BROKEN_PATH}")
+    me = os.getpid()
+    other = S.flush_in_progress()
+    if other and int(other.get("pid") or 0) != me:
+        raise PromoteError(f"a flush is already running (pid {other.get('pid')}, "
+                           f"since {other.get('started_iso')})")
+    S.write_flush_marker(pid=me, by=by)
+    try:
+        return _flush(reason, kill_turns=kill_turns, by=by, force_restart=force_restart)
+    finally:
+        S.clear_flush_marker(pid=me)
+
+
+def _flush_failed(detail: str, **extra) -> None:
+    S.append_event({"event": "flush_failed", "ok": False, "detail": str(detail)[:500], **extra})
+
+
+def _flush(reason: str, *, kill_turns: bool, by: str, force_restart: bool) -> dict:
+    live = LIVE_ROOT
+    entries = S.read_pending()
+    needs = force_restart or any(e.get("restart") for e in entries)
+    rounds_s = settle_s = 0.0
+    if needs and not kill_turns:
+        t0 = time.time()
+        ok, why = wait_for_rounds(_idle_budget(None)[1])
+        rounds_s = time.time() - t0
+        if not ok:
+            _flush_failed(why, waited_rounds=True, waited_rounds_s=round(rounds_s, 1))
+            raise FlushNotStarted(why)
+    observed = S.read_current()
+    if observed and observed.get("state") == "observing":
+        t0 = time.time()
+        try:
+            wait_for_settle(observed=observed)
+        except PromoteError as exc:
+            _flush_failed(str(exc), waited_for_settle=True)
+            raise FlushNotStarted(str(exc)) from exc
+        settle_s = time.time() - t0
+    try:
+        lock = S.Lock(owner="flush").acquire_wait(FLUSH_LOCK_MAX_WAIT, poll=10.0)
+    except S.LockHeld as exc:
+        _flush_failed(f"the automod lock stayed held: {exc}")
+        raise FlushNotStarted(str(exc)) from exc
+    try:
+        return _flush_locked(live, reason, kill_turns=kill_turns, by=by,
+                             force_restart=force_restart, rounds_s=rounds_s, settle_s=settle_s)
+    finally:
+        lock.release()
+
+
+def _flush_locked(live: Path, reason: str, *, kill_turns: bool, by: str,
+                  force_restart: bool, rounds_s: float, settle_s: float) -> dict:
+    global _POOL_PAUSED_BY_US
+    keep = _live_pending(live)
+    if not keep:
+        return {"flushed": False, "detail": "nothing left pending after the trim"}
+    if len(keep) >= 2 and not S.guardian_batch_aware():
+        why = ("the staged guardian cannot judge a batch; not writing a record it would "
+               "roll back by resetting over whatever sits between the commits")
+        _flush_failed(why, commits=[e["commit"] for e in keep])
+        raise FlushNotStarted(why)
+    cur = S.read_current()
+    if cur and cur.get("state") in ("landing", "observing"):
+        why = f"{str(cur.get('commit'))[:8]} is {cur.get('state')}; a flush must not overwrite it"
+        _flush_failed(why)
+        raise FlushNotStarted(why)
+
+    needs = force_restart or any(e.get("restart") for e in keep)
+    commits = [str(e["commit"]) for e in keep]
+    _, body = _get(f"{BACKEND}/health")
+    running = str((body or {}).get("commit") or "")
+    boot_before = (body or {}).get("boot_id")
+    already_live = bool(needs and not force_restart and running and all(
+        _is_ancestor(live, str(e["commit"]), running) for e in keep if e.get("restart")))
+
+    changed: list[str] = []
+    for e in keep:
+        changed += [p for p in e.get("changed_paths") or [] if p not in changed]
+    first, last = keep[0], keep[-1]
+    record: dict = {
+        "schema": 2 if len(keep) > 1 else 1,
+        "round_id": last.get("round_id"),
+        "title": (last.get("title") if len(keep) == 1
+                  else f"{len(keep)} landings: " + "; ".join(
+                      str(e.get("title") or e.get("round_id")) for e in keep))[:300],
+        "commit": commits[-1], "commits": commits,
+        "parent": first.get("parent"), "rollback_target": first.get("parent"),
+        "entries": [_compact_entry(e) for e in keep],
+        "branch": None, "state": "landing", "landed_at": None, "landed_ts": None,
+        "errors_until_ts": None, "changed_paths": changed,
+        "live_dirty_paths": W.dirty_paths(live)[:20],
+        "vault_commits": [c for e in keep for c in (e.get("vault_commits") or [])],
+        "tree_hash": last.get("tree_hash"), "venv_swapped": False,
+        "touched_guardian": False,
+        # The counts from before the batch's FIRST merge: a script merged an
+        # hour ago can already have run, and the flush's own count would hide it.
+        "kg_rows": first.get("kg_rows") if first.get("kg_rows") is not None else count_kg_rows(),
+        "vault_files": (first.get("vault_files") if first.get("vault_files") is not None
+                        else count_vault_files()),
+        "restart": needs, "boot_id": boot_before,
+        "flush": {"reason": str(reason)[:300], "by": by, "already_live": already_live},
+    }
+    S.write_verified(S.CURRENT_PATH, record)   # the rollback point, before anything moves
+
+    restart_began = False
+    idle_s = 0.0
+    try:
+        if needs and not already_live:
+            t0 = time.time()
+            if kill_turns:
+                if pool_paused() is False and set_pool_paused(True):
+                    _POOL_PAUSED_BY_US = True
+                ok, why = True, "turns in flight are killed (--now)"
+            else:
+                ok, why = wait_idle()
+            idle_s = time.time() - t0
+            if not ok:
+                raise FlushNotStarted(why)
+            set_drain(True, drain_ttl())
+            if not kill_turns:
+                _, h = _get(f"{BACKEND}/health")
+                turns = (h or {}).get("turns") or {}
+                if turns.get("active") or turns.get("queued") or turns.get("harness_runs"):
+                    raise FlushNotStarted(f"a turn started during the drain handshake: {turns}")
+            restart_began = True
+            for program, health in (("lloyd-mcp", MCP_HEALTH),
+                                    ("lloyd-backend", f"{BACKEND}/health")):
+                S.set_pause(RESTART_LEASE)
+                ok, msg = restart_process(program)
+                if not ok:
+                    raise PromoteError(f"restart {program} failed: {msg}")
+                if not _wait_health(health, 90.0):
+                    raise PromoteError(f"{program} never became healthy after restart")
+            body = _wait_for_commit(f"{BACKEND}/health", VERIFY_COMMIT_BUDGET)
+            actual = str((body or {}).get("commit") or "")
+            if not _is_ancestor(live, commits[-1], actual):
+                raise PromoteError(f"backend reports commit {actual or None}, which does not "
+                                   f"contain {commits[-1][:8]} — the restart did not pick up "
+                                   "the batch")
+            if boot_before and (body or {}).get("boot_id") == boot_before:
+                raise PromoteError("backend boot_id unchanged — the process was never replaced")
+        else:
+            status, body = _get(f"{BACKEND}/health")
+            if status != 200:
+                raise FlushNotStarted(f"backend /health answered {status}; not opening a "
+                                      "window on a service that is not answering")
+
+        landed = time.time()
+        window = errors_window(needs)
+        record.update(state="observing", landed_at=S.now_iso(), landed_ts=landed,
+                      errors_until_ts=landed + window, boot_id=(body or {}).get("boot_id"))
+        S.write_verified(S.CURRENT_PATH, record)
+        S.remove_pending(commits)
+        restarted = bool(needs and not already_live)
+        _record_flushed(keep, reason=reason, by=by, restarted=restarted,
+                        idle_waited_s=idle_s, rounds_waited_s=rounds_s,
+                        settle_waited_s=settle_s, already_live=already_live, window=window)
+        n = len(keep)
+        announce(f"Restarted for {n} landing{'' if n == 1 else 's'}" if restarted
+                 else f"Watching {n} landing{'' if n == 1 else 's'}",
+                 f"{len(changed)} files across {n} round{'' if n == 1 else 's'}. "
+                 f"Watching for {window / 60:.1f} minutes.")
+        return {"flushed": True, "commits": commits, "restarted": restarted,
+                "already_live": already_live, "errors_window_s": window,
+                "waited_s": round(idle_s, 1), "reason": reason}
+    except Exception as exc:
+        S.clear_pause()
+        if not restart_began:
+            S.clear_current()
+            _flush_failed(str(exc), commits=commits, restarted=False)
+            if isinstance(exc, PromoteError):
+                raise
+            raise FlushNotStarted(str(exc)) from exc
+        _undo_batch_and_record(live, record, trigger="flush_failed")
+        S.clear_current()
+        _flush_failed(f"undone after the restart: {exc}", commits=commits, restarted=True,
+                      rolled_back=True)
+        raise
+    finally:
+        set_drain(False)
+        release_pool_pause()
+        S.clear_pause()

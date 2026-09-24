@@ -942,3 +942,291 @@ def test_a_surgical_revert_closes_the_observation_window_unjudged(
     assert not g.state.current_path.exists(), "the window is closed"
     assert g.state.lkg()["commit"] != repo["newer"], "closing unjudged is not settling"
     assert not g.state.last_settled.exists(), "it never settled, so nothing claims it did"
+
+
+# ---------------------------------------------------------------------------
+# The land train: one record, several landings (`commits`, BATCH_SCHEMA 2)
+#
+# A flush restarts once for every merged landing the train holds and writes
+# ONE record naming them all, oldest first, with the oldest one's parent as the
+# rollback target. What a rollback of that record may take off `main` is the
+# property Alan cares about most: exactly the batch, never a commit the loop
+# did not promote — and 127 of 379 first-parent commits on `main` in the week
+# to 2026-09-24 were not promotions, so a batch routinely straddles one.
+# ---------------------------------------------------------------------------
+
+def _batch_repo(tmp_path, *, foreign=False, foreign_edits_one=False):
+    """base → ONE → [FOREIGN] → TWO. ONE and TWO are the batch; FOREIGN is a
+    nightly job's commit the loop never promoted."""
+    r = tmp_path / "lloyd"
+    (r / "app").mkdir(parents=True)
+    git(r.parent, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@example.com")
+    git(r, "config", "user.name", "t")
+    (r / ".gitignore").write_text("*.db\n.env\n.venvs/\n", encoding="utf-8")
+    (r / "app" / "base.py").write_text("BASE = 1\n", encoding="utf-8")
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "base")
+    out: dict = {"path": r, "base": git(r, "rev-parse", "HEAD").stdout.strip()}
+
+    def commit(rel, text, msg):
+        (r / "app" / rel).write_text(text, encoding="utf-8")
+        git(r, "add", "-A")
+        git(r, "commit", "-q", "-m", msg)
+        return git(r, "rev-parse", "HEAD").stdout.strip()
+
+    out["one"] = commit("one.py", "ONE = 'x'\n", "landing one")
+    if foreign:
+        out["foreign"] = (commit("one.py", "ONE = 'changed by a human'\n", "nightly: one.py")
+                          if foreign_edits_one else commit("human.py", "HUMAN = 1\n",
+                                                           "nightly: human.py"))
+    out["two"] = commit("two.py", "TWO = 'x'\n", "landing two")
+    return out
+
+
+def _observe_batch(st, repo, **over):
+    rec = {
+        "schema": 2, "state": "observing",
+        "commit": repo["two"], "commits": [repo["one"], repo["two"]],
+        "parent": repo["base"], "rollback_target": repo["base"],
+        "round_id": "SM_TWO", "title": "2 landings: one; two",
+        "changed_paths": ["app/one.py", "app/two.py"],
+        "entries": [{"commit": repo["one"], "changed_paths": ["app/one.py"]},
+                    {"commit": repo["two"], "changed_paths": ["app/two.py"]}],
+        "boot_id": "boot-1", "restart": True,
+        "errors_until_ts": time.time() + 300,
+    }
+    rec.update(over)
+    gstate.write_json_atomic(st.current_path, rec)
+
+
+def test_batch_commits_reads_only_a_real_batch():
+    a, b = "a" * 40, "b" * 40
+    assert gstate.batch_commits({"commits": [a, b]}) == [a, b]
+    assert gstate.batch_commits({"commits": [a]}) == [], "one commit is today's record"
+    assert gstate.batch_commits({}) == [] and gstate.batch_commits(None) == []
+    assert gstate.batch_commits({"commits": [a, "nope"]}) == [], "a malformed batch is none"
+    assert gstate.batch_commits({"commits": [a, a]}) == []
+    assert gstate.batch_commits({"commits": "a"}) == []
+    assert gstate.BATCH_SCHEMA == 2
+
+
+def test_range_is_exactly(tmp_path):
+    repo = _batch_repo(tmp_path)
+    r = str(repo["path"])
+    assert rb.range_is_exactly(r, repo["base"], repo["two"], [repo["one"], repo["two"]])
+    assert not rb.range_is_exactly(r, repo["base"], repo["two"], [repo["two"]])
+    assert not rb.range_is_exactly(r, repo["one"], repo["two"], [repo["one"], repo["two"]])
+    assert not rb.range_is_exactly(r, "0" * 40, repo["two"], [repo["one"], repo["two"]])
+    foreign = _batch_repo(tmp_path / "f", foreign=True)
+    assert not rb.range_is_exactly(str(foreign["path"]), foreign["base"], foreign["two"],
+                                   [foreign["one"], foreign["two"]]), "the foreign commit is in range"
+
+
+def test_a_clean_batch_range_is_reset_and_both_leave_main(tmp_path, monkeypatch):
+    repo = _batch_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe_batch(g.state, repo)
+
+    assert g.do_rollback("crash", "backend FATAL") is True
+
+    row = _row(g, "rollback_succeeded")
+    assert row["route"] == "reset" and row["commit"] == repo["two"]
+    assert row["commits"] == [repo["one"], repo["two"]] and row["batch"] == 2
+    assert rb.head_commit(str(repo["path"])) == repo["base"] == row["restored"]
+    assert not (repo["path"] / "app" / "one.py").exists()
+    assert not (repo["path"] / "app" / "two.py").exists()
+    denied = json.loads(g.state.denied.read_text(encoding="utf-8"))
+    assert set(denied["commits"]) == {repo["one"], repo["two"]}
+    assert len(denied["trees"]) == 2, "each landing is denied by its own content"
+    started = _row(g, "rollback_started")
+    assert started["commits"] == [repo["one"], repo["two"]]
+
+
+def test_a_foreign_commit_inside_the_batch_moves_it_to_a_surgical_revert(tmp_path, monkeypatch):
+    """The reason for the whole rule: reset to the oldest landing's parent
+    would take the nightly commit between them with it."""
+    repo = _batch_repo(tmp_path, foreign=True)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe_batch(g.state, repo)
+
+    assert g.do_rollback("crash", "backend FATAL") is True
+
+    row = _row(g, "rollback_succeeded")
+    head = rb.head_commit(str(repo["path"]))
+    assert row["route"] == "revert" and row["commits"] == [repo["one"], repo["two"]]
+    assert row["head_before"] == repo["two"] and row["restored"] == head
+    assert rb.is_ancestor(str(repo["path"]), repo["foreign"], head), "foreign commit kept"
+    assert (repo["path"] / "app" / "human.py").exists()
+    assert not (repo["path"] / "app" / "one.py").exists()
+    assert not (repo["path"] / "app" / "two.py").exists()
+    assert rb.head_branch(str(repo["path"])) == "refs/heads/main"
+    assert git(repo["path"], "status", "--porcelain").stdout.strip() == ""
+
+
+def test_head_moved_past_the_batch_reverts_both_and_keeps_what_came_after(tmp_path, monkeypatch):
+    repo = _batch_repo(tmp_path)
+    after = _human_commit(repo["path"], "after.py")
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe_batch(g.state, repo)
+
+    assert g.do_rollback("error_rate", "novel traceback spike") is True
+
+    row = _row(g, "rollback_succeeded")
+    assert row["route"] == "revert" and row["head_before"] == after
+    assert (repo["path"] / "app" / "after.py").exists()
+    assert not (repo["path"] / "app" / "one.py").exists()
+    assert not (repo["path"] / "app" / "two.py").exists()
+
+
+def test_a_request_blaming_one_commit_of_the_batch_reverts_that_one_only(tmp_path, monkeypatch):
+    """The detached regression check measures each landing against its own
+    parent and names one. It is not a verdict on the batch: that commit goes,
+    the rest stays, and the batch's window closes unjudged (#1358's rule)."""
+    repo = _batch_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe_batch(g.state, repo)
+
+    assert g.do_rollback("regression", "recall fell", explicit_target=repo["base"],
+                         explicit_commit=repo["one"],
+                         explicit_changed=["app/one.py"]) is True
+
+    row = _row(g, "rollback_succeeded")
+    assert row["route"] == "revert" and row["commit"] == repo["one"]
+    assert "commits" not in row, "a one-commit rollback writes the row it always did"
+    assert not (repo["path"] / "app" / "one.py").exists()
+    assert (repo["path"] / "app" / "two.py").exists()
+    assert row["left_unjudged"] == repo["two"]
+    denied = json.loads(g.state.denied.read_text(encoding="utf-8"))
+    assert denied["commits"] == [repo["one"]]
+
+
+def test_a_request_naming_a_batch_is_one_batch_rollback(tmp_path, monkeypatch):
+    """The promoter hands the guardian a batch it could not undo inline as
+    one request (`state.request_rollback(commits=…)`), through the real
+    writer, the real file and the real tick."""
+    from scripts.automod import state as S
+    repo = _batch_repo(tmp_path, foreign=True)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    monkeypatch.setattr(S, "ROLLBACK_REQUEST_PATH", g.state.dir / "rollback_request.json")
+    monkeypatch.setattr(S, "LEDGER_PATH", g.state.dir / "promotions.jsonl")
+    g.collect = lambda: {"supervisord": "running", "procs": {}, "probes": {}, "now": time.time()}
+    g.drain_logs = g.check_vault = g.check_data = g.check_memory = lambda: None
+
+    S.request_rollback(reason="flush_failed: backend never came up", trigger="flush_failed",
+                       target=repo["base"], commits=[repo["one"], repo["two"]])
+    assert g.tick() == "rolling_back"
+
+    row = _row(g, "rollback_succeeded")
+    assert row["commit"] == repo["two"] and row["commits"] == [repo["one"], repo["two"]]
+    assert row["route"] == "revert", "the foreign commit is inside the range"
+    assert (repo["path"] / "app" / "human.py").exists()
+    assert S.reverted_commits(S.read_events(limit=50)) >= {repo["one"], repo["two"]}
+
+
+def test_a_conflicting_batch_revert_puts_the_tree_back_and_escalates_once(tmp_path, monkeypatch):
+    """A foreign commit that rewrote a batch landing's lines: no automatic
+    answer is safe. The revert of TWO it already made is taken back off, the
+    tree is exactly where it was, and it is not retried."""
+    repo = _batch_repo(tmp_path, foreign=True, foreign_edits_one=True)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe_batch(g.state, repo)
+    attempts = []
+    real = rb.revert_commits
+    monkeypatch.setattr(rb, "revert_commits",
+                        lambda *a, **k: attempts.append(1) or real(*a, **k))
+
+    assert g.do_rollback("crash", "backend FATAL") is False
+
+    assert attempts == [1], "a conflict is deterministic: one attempt"
+    assert rb.head_commit(str(repo["path"])) == repo["two"], "the tree was put back"
+    assert git(repo["path"], "status", "--porcelain").stdout.strip() == ""
+    assert g.state.is_broken()
+    assert _halt_rows(g.state.ledger, "rollback_failed")
+
+
+def test_a_batch_settles_with_one_row_per_commit(tmp_path, monkeypatch):
+    repo = _batch_repo(tmp_path)
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    _observe_batch(g.state, repo, errors_until_ts=time.time() - 1)
+
+    g.maybe_settle(g.state.current())
+
+    rows = _halt_rows(g.state.ledger, "settled")
+    assert [r["commit"] for r in rows] == [repo["one"], repo["two"]]
+    assert all(r["batch"] == 2 and r["batch_head"] == repo["two"] for r in rows)
+    assert g.state.lkg()["commit"] == repo["two"]
+    assert json.loads(g.state.last_settled.read_text())["commits"] == [repo["one"], repo["two"]]
+    assert not g.state.current_path.exists()
+
+
+def test_a_record_without_commits_is_judged_exactly_as_before(tmp_path, monkeypatch):
+    """Everything a pre-train promoter wrote, and everything written while
+    `defer_restart` is off: a record naming the newest commit and an older
+    rollback target resets to it (the blunt route it always took), and the
+    rows carry no batch fields. A one-element `commits` is the same record."""
+    for over in ({"commits": None}, {"commits": ["x"]}):
+        sub = tmp_path / str(len(str(over)))
+        sub.mkdir()
+        repo = _batch_repo(sub)
+        g = _fake_guardian(sub, repo["path"], monkeypatch)
+        _settle(g.state, repo["base"])
+        rec = {"commits": [repo["two"]]} if over["commits"] else {}
+        _observe_batch(g.state, repo, entries=None, **rec)
+        cur = json.loads(g.state.current_path.read_text())
+        if not over["commits"]:
+            cur.pop("commits")
+            gstate.write_json_atomic(g.state.current_path, cur)
+
+        assert g.do_rollback("crash", "backend FATAL") is True
+
+        row = _row(g, "rollback_succeeded")
+        assert row["route"] == "reset" and row["commit"] == repo["two"]
+        assert "commits" not in row and "batch" not in row
+        assert "commits" not in _row(g, "rollback_started")
+        denied = json.loads(g.state.denied.read_text(encoding="utf-8"))
+        assert denied["commits"] == [repo["two"]]
+        _observe_batch(g.state, repo, errors_until_ts=time.time() - 1, commits=None)
+        g.maybe_settle(g.state.current())
+        assert [r["commit"] for r in _halt_rows(g.state.ledger, "settled")] == [repo["two"]]
+        assert set(_halt_rows(g.state.ledger, "settled")[0]) >= {"event", "commit"}
+        assert "batch" not in _halt_rows(g.state.ledger, "settled")[0]
+
+
+def test_reverted_commits_counts_every_commit_of_a_batch_row():
+    from scripts.automod import state as S
+    a, b, c = "a" * 40, "b" * 40, "c" * 40
+    rows = [{"event": "promoted", "commit": a, "parent": c},
+            {"event": "promoted", "commit": b, "parent": a},
+            {"event": "rollback_succeeded", "commit": b, "commits": [a, b], "route": "revert",
+             "restored": "d" * 40}]
+    assert S.reverted_commits(rows) == {a, b}
+
+
+def test_a_batch_commit_already_gone_is_not_reverted_twice(tmp_path, monkeypatch):
+    """ONE left `main` some other way (here, history rewritten under it);
+    what remains of the batch is TWO alone, still judged by the batch rule:
+    `base..HEAD` is exactly TWO, so it is reset — and ONE, which is no longer
+    here, is neither reverted nor named."""
+    repo = _batch_repo(tmp_path)
+    r = str(repo["path"])
+    g = _fake_guardian(tmp_path, repo["path"], monkeypatch)
+    _settle(g.state, repo["base"])
+    # Rewrite history so ONE is not an ancestor any more: drop it by rebase.
+    git(repo["path"], "rebase", "-q", "--onto", repo["base"], repo["one"], "main")
+    new_two = rb.head_commit(r)
+    _observe_batch(g.state, repo, commit=new_two, commits=[repo["one"], new_two])
+
+    assert g.do_rollback("crash", "backend FATAL") is True
+
+    row = _row(g, "rollback_succeeded")
+    assert row["commits"] == [new_two], "ONE is not in this history and is not touched"
+    assert row["route"] == "reset", "base..HEAD is exactly what is left"
+    assert rb.head_commit(r) == repo["base"]

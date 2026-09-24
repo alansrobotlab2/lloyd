@@ -277,7 +277,10 @@ Things worth knowing before touching any of it:
   Nightly jobs commit straight to live `main`, so an observation window can close
   over work the loop never touched, and resetting past it destroys commits
   nobody asked the guardian to judge. The route is chosen per rollback; a
-  conflicting revert escalates rather than guessing.
+  conflicting revert escalates rather than guessing. A land-train record
+  (`commits`, several landings) resets only when HEAD is its newest commit
+  AND `rollback_target..HEAD` is exactly the batch; otherwise every batch
+  commit is reverted in place and whatever sits between them is kept.
 - **A rollback restores the promotion's own `rollback_target`, not the LKG.**
   `gstate.rollback_target(current)` prefers what `current.json` recorded at
   landing time, then its `parent`, and only then the LKG pointer. The LKG is
@@ -1268,6 +1271,53 @@ waited on gates, whose review rung needed a grader turn the drain refused.
   `restart: false`, and the guardian does not blame a crash or an error spike
   on it (data damage still is). `/health.commit` stays at the boot commit
   after such a landing; `bless` accepts that difference.
+- **On the land train a landing drains nothing at all** (below): the drain
+  moved to the flush, which runs at a natural gap.
+
+### The land train: a merge is a landing, a restart is a flush
+
+Every restarting landing drained the loop to zero first (172 a week, 32 of the
+loop's 58 idle hours, all of it the drain after the last sibling ended). With
+`automod.landing.defer_restart` on, a landing that need not restart anything
+NOW only merges: `main` moves, `promoted` (`restart_pending`) is written, the
+regression check starts, and the landing goes on
+`~/.local/state/lloyd-automod/pending_restart.json` with **no window**. A flush
+(`promote.flush_pending`, `round flush [--now]`) restarts once for everything
+pending and writes the ONE `current.json` the guardian judges:
+`commits: [oldest..newest]`, the oldest entry's parent as `rollback_target`, a
+`restart: false` 120 s window when nothing pending needed a restart.
+`architecture/automod.md` §3.2i is the long version.
+
+- **Ships dark, behind an interlock.** `defer_restart: false`; and while the
+  STAGED guardian (`~/.local/state/lloyd-guardian/bin/gstate.py`) does not
+  declare `BATCH_SCHEMA = 2`, `state.guardian_batch_aware()` is false and the
+  flag reads as off — an older guardian would reset from the newest commit to
+  the oldest one's parent, over any foreign commit between. Order: land,
+  restage, `rehearse --yes-i-mean-it --batch`, then flip.
+- **Triggers** (`promote.flush_due`, asked by the implement source on every
+  look before the free check and at every turn end, and by `round land` after
+  a merge): nothing pending needs a restart; the oldest entry waited
+  `restart_after_s` (2700); `restart_batch_max` (4) need one; or a natural gap —
+  no implement turn in flight, where the drain is cheapest. Never while a
+  record is observing, a landing or flush runs, or promotions are halted.
+- **Eager landings keep today's path and carry the batch**: a candidate venv,
+  anything under `agent-services/`, or the train off (`promote.landing_is_eager`
+  names the reason). They alone wait for rounds and for a settle.
+- **The guardian judges the batch as one**: reset only on an exact range,
+  revert every commit otherwise (a conflict puts the tree back and escalates,
+  not retried); a request blaming ONE batch commit (the regression check)
+  reverts that one only and closes the window unjudged; `settled` is written
+  once per commit, so `close_settled_items` is unchanged. `state.reverted_commits`
+  counts every sha on a row's `commits`. After a batch rollback landings go
+  singly for `batch_suspend_after_rollback_s` (6 h).
+- **A flush is a landing to everything that waits on one**: `flush.running`
+  holds new rounds (`_rounds_about_to_land`) and the pool's round hold; a
+  gated round that will only merge holds no slot. `round restart` becomes a
+  flush while landings wait; `bless` refuses while restart-needed entries
+  wait; `round status` carries `pending_restart`. Already-running pending code
+  (a rollback's or a human's restart booted it) gets its window without a
+  restart. Ledger: `restart_flushed` (with the idle wait, scorecard row 14's
+  `flush`), `flush_failed`, `pending_dropped`. `tests/test_land_train.py`.
 
 ### The observation window is two numbers, and it is read from config
 
@@ -1282,7 +1332,7 @@ rollbacks in the ledger's history came from `promote_failed` and the detached
 `regression` check, neither of which needs a window.
 `architecture/automod.md` §3.2h.7a is the long version.
 
-- **450 s restarted, 120 s not** (`automod.landing.errors_window_s` /
+- **300 s restarted (450 until 2026-09-24), 120 s not** (`automod.landing.errors_window_s` /
   `.errors_window_unrestarted_s`, read by `promote.errors_window`). The
   guardian already skips liveness and the error rate for a promotion that
   replaced no process; what it still judges there is data damage, a guard weak

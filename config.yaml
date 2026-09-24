@@ -1089,7 +1089,11 @@ automod:
     # 900 until 2026-09-20, when it cost 13.5 h of a 24 h day across 54
     # promotions while every rollback it has EVER caused fired within 5.5 min
     # of the landing (4 s, 147 s, 262 s, 327 s — all four false positives or
-    # misattributions). 450 clears the longest of those with margin.
+    # misattributions). 450 cleared the longest of those with margin; 300
+    # since 2026-09-24 (Alan's ruling, with the land train below): the crash
+    # fired at 147 s and the error spike at 4 s, the 327 s trip was a .git
+    # repack miscount, and a data-home or vault wipe is caught on every
+    # guardian tick, inside a window or not.
     #
     # The unrestarted window is for a landing that replaced no process
     # (`skip_restart` above). The guardian already skips liveness and the
@@ -1103,8 +1107,24 @@ automod:
     # judge anything (the guardian ticks at 5 s and `crash` needs three failed
     # probes) yet still settles and advances the LKG, which would quietly turn
     # "last known good" into "last landed".
-    errors_window_s: 450
+    errors_window_s: 300
     errors_window_unrestarted_s: 120
+    # The land train (2026-09-24, architecture/automod.md §3.2i). On, a
+    # landing that need not restart anything NOW only merges: `main` moves,
+    # `promoted` is written, the regression check starts, and the landing goes
+    # on pending_restart.json with no window. A flush (`round flush`, or the
+    # implement source at a natural gap / after restart_after_s / at
+    # restart_batch_max) restarts ONCE for all of it and writes one record
+    # with `commits`, which the guardian rolls back as a batch. An eager
+    # landing (candidate venv, agent-services/) restarts inline and carries
+    # the batch. Read as off while the STAGED guardian lacks BATCH_SCHEMA 2
+    # (the interlock), and for batch_suspend_after_rollback_s after a batch
+    # rollback, so re-landings are judged one at a time. Ships false: flip it
+    # after the guardian is restaged and `rehearse --batch` is green.
+    defer_restart: false
+    restart_after_s: 2700
+    restart_batch_max: 4
+    batch_suspend_after_rollback_s: 21600
 
 # Write-time dedupe for backlog_write_task (agent_mcp/backlog_similar.py).
 # Every create is checked against the board: the qmd daemon's reranked vector

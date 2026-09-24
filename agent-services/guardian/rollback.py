@@ -282,6 +282,68 @@ def revert_commit(repo: str, sha: str, *, reason: str = "") -> str:
     return head
 
 
+class RevertConflict(RollbackError):
+    """A batch revert met later work it overlaps. Not retried: the same
+    commits against the same tree conflict the same way every time."""
+
+
+def range_is_exactly(repo: str, target: str, head: str, shas: list) -> bool:
+    """Whether `target..head` is exactly the commits in `shas`, no more, no less.
+
+    The land train (`automod.landing.defer_restart`) observes several merged
+    rounds under one record. `reset --hard target` removes everything between
+    `target` and HEAD, so it is the right route for a batch only when nothing
+    else sits in that range — 127 of 379 first-parent commits on `main` in the
+    week to 2026-09-24 were not promotions, so a batch routinely straddles a
+    human or nightly commit, and resetting over one is the 26-commit incident
+    again. Anything unreadable answers False, which routes to the revert.
+    """
+    if not target or not head or not shas:
+        return False
+    r = _git(repo, "rev-list", f"{target}..{head}")
+    if r.returncode != 0:
+        return False
+    listed = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+    return len(listed) == len(set(shas)) and set(listed) == set(shas)
+
+
+def changed_paths_of(repo: str, sha: str) -> list[str]:
+    """The paths one commit changed, for its denylist content hash when the
+    record carries no per-commit `entries`."""
+    r = _git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", sha, timeout=30)
+    if r.returncode != 0:
+        return []
+    return [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+
+
+def revert_commits(repo: str, shas: list, *, reason: str = "") -> str:
+    """Revert every commit in `shas` (given oldest first), newest first, in
+    place. Returns the new HEAD.
+
+    Newest first, because an older batch commit's revert can depend on the
+    newer one being gone already (two rounds touching one file). Each revert is
+    `revert_commit`, with all its checks. On the first failure the reverts this
+    call already made are taken back off — they are this guardian's own
+    commits, made seconds ago with the services stopped — so the tree is left
+    exactly where it was found, and `RevertConflict` says which commit would
+    not go. There is no safe automatic answer to overlapping later work.
+    """
+    if not shas:
+        raise RollbackError("revert_commits called with nothing to revert")
+    start = head_commit(repo)
+    made: list[str] = []
+    for sha in reversed(list(shas)):
+        try:
+            made.append(revert_commit(repo, sha, reason=reason))
+        except RollbackError as exc:
+            if made and start and head_commit(repo) == made[-1]:
+                _git(repo, "reset", "--hard", start)
+            raise RevertConflict(
+                f"batch revert stopped at {sha[:8]} after {len(made)} of {len(shas)}; "
+                f"the tree was put back at {(start or '?')[:8]}: {exc}") from exc
+    return made[-1]
+
+
 def verify_tree(repo: str, target: str, expected_branch: str = "main") -> None:
     """Confirm the tree moved AND is still on a branch, not detached.
 
