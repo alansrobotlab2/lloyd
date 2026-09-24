@@ -860,19 +860,23 @@ def test_the_pinned_valid_pool_is_empty_once_the_real_judge_scores_it(
     assert scored == set(rep["excluded_tasks"]), "the scored set is exactly the invalid one"
 
 
-def test_no_live_task_is_both_lint_valid_and_scoreable_on_the_direct_arm(
+def test_the_live_valid_pool_is_reported_at_whatever_size_it_is_today(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The same finding over the WHOLE live directory, at whatever size it is today:
-    the two means clause 5 logs are not comparable, because the lint-valid set and
-    the set the direct arm can actually score do not intersect.
+    """The same claim over the WHOLE live directory, at whatever size it is today:
+    the valid-pool leg describes exactly the tasks that are both lint-valid and
+    scored, and says so either way.
 
-    Deliberately no count of tasks, no count of valid tasks and no count of scored
-    trials here — `cfg.paths.bench_dir` is shared state that other items land tasks
-    into, and the exact-count version of this claim is the pinned test above. What
-    must stay true at any corpus size is that the valid pool is empty once scored, so
-    the valid-task leg is `None` with a reason that says so, and `means_agree` is
-    `None` rather than a fabricated agreement between a number and nothing.
+    Deliberately no count of tasks here — `cfg.paths.bench_dir` is shared state
+    that other items land tasks into, and the exact-count version of this claim is
+    the pinned test above. Until 2026-09-24 this test asserted the intersection was
+    EMPTY, and its message said to re-measure rather than relax it once a task
+    moved. #647 moved four: bench_014-017 grade by a deterministic find_all
+    verifier, so they are lint-valid AND scored on the direct arm — the first real
+    valid pool. So the assertion is now the consistency the report owes at any
+    size: below `MIN_VALID_POOL_TASKS` the leg is `None` with a reason naming the
+    true count; at or above it, the leg is computed over exactly that pool and
+    `means_agree` is a real bool, never a fabricated agreement.
     """
     monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: '{"overall": 0.5}')
     tasks, summ = _score_direct(BENCH_DIR)
@@ -883,10 +887,14 @@ def test_no_live_task_is_both_lint_valid_and_scoreable_on_the_direct_arm(
 
     scored = {p["task_id"] for p in summ["per_task"]}
     assert scored, "the direct arm scored nothing at all, which is a different failure"
-    assert scored & set(rep["valid_tasks"]) == set(), (
-        f"{sorted(scored & set(rep['valid_tasks']))} are both lint-valid and scored; "
-        "the valid pool is no longer empty, so re-measure the pinned test above")
-    assert rep["valid_task_mean"] is None
-    assert rep["promote_valid"] is None
-    assert rep["reason_valid"].startswith("valid_pool_too_small (0 scored lint-valid tasks")
-    assert rep["means_agree"] is None
+    pool = scored & set(rep["valid_tasks"])
+    if len(pool) < promote.MIN_VALID_POOL_TASKS:
+        assert rep["valid_task_mean"] is None
+        assert rep["promote_valid"] is None
+        assert rep["reason_valid"].startswith(
+            f"valid_pool_too_small ({len(pool)} scored lint-valid tasks")
+        assert rep["means_agree"] is None
+    else:
+        assert rep["valid_task_mean"]["tasks"] == len(pool)
+        assert isinstance(rep["promote_valid"], bool)
+        assert isinstance(rep["means_agree"], bool)
