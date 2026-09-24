@@ -139,3 +139,41 @@ def test_sigterm_during_the_wait_writes_a_land_failed_and_clears_the_marker(tmp_
     assert "KILLED None" in out, "the marker is gone: finally ran"
     rows = [ln for ln in (state / "promotions.jsonl").read_text().splitlines() if "land_failed" in ln]
     assert rows and '"external_blocker": true' in rows[-1] and '"killed_by_signal": 15' in rows[-1]
+
+
+# ── the record it was holding (2026-09-24) ─────────────────────────────────
+
+def _killed_mid_landing(monkeypatch, commit: str, head: str):
+    from scripts.automod import promote as P, round as R
+    monkeypatch.setattr(S, "require_enabled", lambda *a, **k: None)
+    (S.ROUNDS_DIR / "SM_D").mkdir(parents=True, exist_ok=True)
+    (S.ROUNDS_DIR / "SM_D" / "gate.json").write_text('{"ok": true, "base": "x", "rungs": []}')
+    monkeypatch.setattr(P, "wait_for_rounds", lambda *a, **k: (True, "none"))
+    monkeypatch.setattr(P, "_live_head", lambda live: head)
+    monkeypatch.setattr(P, "_is_ancestor", lambda repo, a, d: a == d)
+
+    def promote(*a, **k):
+        S.write_verified(S.CURRENT_PATH, {"schema": 1, "round_id": "SM_D",
+                                          "commit": commit, "state": "landing"})
+        raise R.LandingKilled("landing of SM_D killed by signal 15")
+    monkeypatch.setattr(P, "promote", promote)
+    with pytest.raises(R.LandingKilled):
+        R.land("SM_D")
+
+
+@pytest.fixture
+def state_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(S, "CURRENT_PATH", tmp_path / "current.json")
+    return tmp_path
+
+
+def test_a_landing_killed_before_its_merge_clears_its_landing_record(state_dir, monkeypatch):
+    _killed_mid_landing(monkeypatch, commit="a" * 40, head="b" * 40)
+    assert S.read_current() is None, "a dead landing's record blocked every later landing"
+    assert any('"current_cleared"' in ln for ln in S.LEDGER_PATH.read_text().splitlines())
+
+
+def test_a_landing_killed_after_its_merge_keeps_its_record(state_dir, monkeypatch):
+    _killed_mid_landing(monkeypatch, commit="a" * 40, head="a" * 40)
+    assert (S.read_current() or {}).get("state") == "landing", \
+        "a merged commit is the promoter's or the guardian's to judge"

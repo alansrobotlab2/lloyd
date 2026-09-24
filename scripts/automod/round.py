@@ -389,6 +389,9 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
             lock.release()
         if not dry_run:
             W.remove(round_id, keep_branch=False, repo=LIVE_ROOT)
+    except LandingKilled:
+        _clear_dead_landing_record(round_id)
+        raise
     finally:
         if not dry_run:
             S.clear_land_marker(round_id, pid=os.getpid())
@@ -399,6 +402,36 @@ def land(round_id: str, *, dry_run: bool = False, force: bool = False) -> dict:
     if not dry_run and result.get("deferred"):
         result["flush"] = maybe_flush(by=f"land {round_id}")
     return result
+
+
+def _clear_dead_landing_record(round_id: str) -> None:
+    """A landing killed by a signal takes its `landing` record down with it.
+
+    `promote` writes `current.json` in state `landing` before it waits for
+    idle, and a SIGTERM in that wait (a host reboot, a `timeout`) left it
+    there: on 2026-09-24 the reboot at 13:54Z stranded SM_20260924_132227's
+    record, and every later landing — `merge_round`, the flush, `round
+    restart` without `--force` — refused behind a landing nothing was running.
+    Cleared only when the record is this round's, still `landing`, and its
+    commit never reached live `main`; a commit that did merge is the
+    promoter's or the guardian's to judge, and its record stays."""
+    try:
+        current = S.read_current()
+        if not current or current.get("round_id") != round_id \
+                or current.get("state") != "landing":
+            return
+        commit = str(current.get("commit") or "")
+        head = P._live_head(LIVE_ROOT)
+        if commit and head and P._is_ancestor(LIVE_ROOT, commit, head):
+            return
+        S.clear_current()
+        S.append_event({"event": "current_cleared", "round_id": round_id,
+                        "commit": commit or None,
+                        "reason": "the landing was killed by a signal before its commit "
+                                  "reached main; its `landing` record would block every "
+                                  "later landing"})
+    except Exception:  # noqa: BLE001 — the land_failed row is already written
+        pass
 
 
 def land_detached(round_id: str, *, by: str) -> dict:
