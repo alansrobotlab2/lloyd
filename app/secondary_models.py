@@ -82,10 +82,25 @@ def _endpoint(job: str) -> tuple[str, str]:
     is a measured decision, not a fallback.
     """
     from app.config import resolve_model_alias, _get_model_cfg
-    name = resolve_model_alias(_engine_for(job))
+    alias = _engine_for(job)
+    name = resolve_model_alias(alias)
     cfg = _get_model_cfg(name) or {}
     base = cfg.get("base_url") or cfg.get("env", {}).get("ANTHROPIC_BASE_URL", "")
-    return f"{base.rstrip('/')}/v1/chat/completions", name
+    url = f"{base.rstrip('/')}/v1/chat/completions"
+    if name != alias:
+        # The alias rewrite above logs once per process and never names a job,
+        # so when the secondary slot was retired (2026-09-20) `voice` — a
+        # recorded `keep_secondary` in eval/secondary-routing/decisions.yaml —
+        # moved to the primary with every #551 guard green and nothing in any
+        # log saying which job had moved (#1445). Which engine it should land
+        # on is a measured decision and not this function's to make; this only
+        # stops the gap between the decision and the endpoint being silent.
+        logger.info(
+            "routed job %r: the recorded decision asks for the %r engine; "
+            "landing on %s as model %r because secondary_enabled is false",
+            job, alias, url, name,
+        )
+    return url, name
 
 
 _FACT_EXTRACTION_PROMPT = """\

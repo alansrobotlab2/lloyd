@@ -1210,3 +1210,58 @@ def test_the_instruction_that_prescribes_downstream_states_the_floor():
     block = source[at:at + 1200]
     assert "MIN_DOWNSTREAM_ENTRIES" in block, block
     assert "NO DOWNSTREAM VERDICT" in block, block
+
+
+# ── #1445: the gap between the recorded decision and the endpoint is not silent ─
+
+def _endpoint_under(monkeypatch, caplog, secondary_enabled):
+    """`_endpoint("voice")` with the slot flag pinned, every log line captured
+    fresh — the generic alias line is once per process, so its set is reset."""
+    import logging
+    from app import config as app_config
+    monkeypatch.setitem(app_config.CONFIG, "secondary_enabled", secondary_enabled)
+    monkeypatch.setattr(app_config, "_ALIAS_REWRITES_LOGGED", set(), raising=False)
+    caplog.clear()
+    # Root level: the generic line is `app.config`'s logger, the new one is
+    # `lloyd-server`'s, and both have to be seen in one capture.
+    with caplog.at_level(logging.INFO):
+        url, model = sm._endpoint("voice")
+    return url, model, [r.getMessage() for r in caplog.records]
+
+
+def test_a_kept_job_landing_on_the_primary_is_logged_by_name(monkeypatch, caplog):
+    """Clause 1. `voice` is a recorded `keep_secondary`
+    (eval/secondary-routing/decisions.yaml), and with the slot off it answers
+    from the primary — for four days after 2026-09-20 with nothing in any log
+    naming the job. One line names the job, the engine the decision chose, and
+    the URL and model reached; the generic per-alias line is still there."""
+    url, model, lines = _endpoint_under(monkeypatch, caplog, secondary_enabled=False)
+
+    named = [line for line in lines if "'voice'" in line]
+    assert len(named) == 1, lines
+    assert "'secondary'" in named[0], named[0]
+    assert url in named[0] and "'primary'" in named[0], named[0]
+    assert any("model alias 'secondary' -> 'primary'" in line for line in lines), (
+        "the generic alias rewrite line is still the once-per-process record")
+
+
+def test_the_voice_job_is_pinned_on_its_resolved_url_under_both_flag_values(
+        monkeypatch, caplog):
+    """Clause 2: the URL, not the alias. `_engine_for("voice")` says
+    `secondary` whatever the flag says, which is how the tree held a
+    `keep_secondary` decision and a primary endpoint with every guard green."""
+    url, model, lines = _endpoint_under(monkeypatch, caplog, secondary_enabled=False)
+    assert (url, model) == ("http://127.0.0.1:8096/v1/chat/completions", "primary")
+
+    url, model, lines = _endpoint_under(monkeypatch, caplog, secondary_enabled=True)
+    assert (url, model) == ("http://127.0.0.1:8091/v1/chat/completions", "secondary")
+    assert not [line for line in lines if "'voice'" in line], (
+        "with the slot on the decision and the endpoint agree; nothing to say")
+
+
+def test_the_static_guards_still_check_what_they_checked():
+    """Clause 3: the runtime view is added beside the static one, not instead
+    of it — the two #551 guards keep their subjects."""
+    assert sm._engine_for("voice") == "secondary"
+    recorded = ev.load_decisions()
+    assert ev.router_source(ev.ROUTER_PATH) == frozenset(recorded["on_primary"])
