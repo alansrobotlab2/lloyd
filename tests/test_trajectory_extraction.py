@@ -3700,6 +3700,30 @@ SESSION_STORE_MIN_FILES = 501
 #: 2-file corpus this machine has held since the 2026-09-22 wipe, which is the
 #: reading that made this a red node at base rather than a finding (#1403).
 MERGE_MULTI_SIGNATURE_KEYS_MIN = 2
+#: The fewest sessions the classifier ADMITS as human work that the store must hold
+#: before the observer control in
+#: `test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session` can be
+#: judged at all, and the number that skip reason quotes. It is a denominator rule, not
+#: a second volume claim: the control below is a share, and at N admitted sessions one
+#: conversation moves it by 1/N, so below 5 the verdict belongs to whether the observer
+#: happened to be switched on for ONE chat rather than to the classifier. It is NOT the
+#: same floor as `SESSION_STORE_MIN_FILES` above — that counts files in the store, this
+#: counts the files admitted — and `require_live_volume` states the skip so the floor
+#: and the observed human count appear in the one reason, the shape #1377 required.
+#: Measured 163 admitted on 2026-09-18 and 7 on 2026-09-24, both above it (#1448).
+ADMITTED_HUMAN_SESSIONS_MIN = 5
+#: The fewest of the admitted human sessions that must carry `inner_voice: true`, as a
+#: SHARE of the admitted set: #1143's positive control, rewritten scale-invariantly by
+#: #1448. Its bound used to be the absolute `> 20`, which was a measurement of one
+#: machine's store on one day — it started failing on 2026-09-24, the day the store
+#: regrew past `SESSION_STORE_MIN_FILES` after the 2026-09-22 wipe, with the classifier
+#: agreeing with the ruled rule on every file. What the control is for is directional
+#: and stays exactly as loud: pre-#1143 the classifier admitted only observer-OFF chats,
+#: so the share was 0 of 45, and 0 is under this bound whatever the store's size. Half,
+#: not more, because a person typing a chat with the observer off is legitimate and must
+#: not read as the corpus being dropped. Measured 152 of 163 on 2026-09-18, 7 of 7 on
+#: 2026-09-24.
+OBSERVER_ON_SHARE_MIN = 0.5
 
 
 def test_no_live_corpus_row_is_interactive_on_a_machine_platform():
@@ -3779,28 +3803,38 @@ def test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session():
     This is the check that survives the corpus being re-extracted: it is computed
     from the stored session files themselves, not from anything the extractor
     already wrote, so a classifier mutation trips it even while every corpus row is
-    class-less. Measured over the 3,000 session files on this machine on 2026-09-18
-    (the store grows daily, so treat these as a snapshot, not a threshold — the
-    assertions below are bounds): 2,219 `worker`, 578 `autonomy`, 103
-    `mission-control` with `inner_voice` true, of which 100 are chat-shaped and 3
-    carry scripted ids, 52 `browser`, 45 non-IV `mission-control` of which 34 are
-    script-shaped and 11 chat-shaped, 3 `e2e-harness`. Admitted: 163, and 152 of
-    those carry `inner_voice: true`. Before #1143 the classifier admitted only the
-    45 non-IV ones and 34 of those were scripted ids, so the corpus was mostly test
-    traffic and no human chat.
+    class-less.
+
+    Every bound below is scale-invariant, and that is #1448. The store is gitignored
+    data whose size on this machine is an accident of the day it was last written and
+    the day it was last wiped, so a bound written as a COUNT — of files, or of
+    observer-on chats — was never a property of the classifier. It was a description of
+    one snapshot, and it turned red on 2026-09-24 the day the store regrew past
+    `SESSION_STORE_MIN_FILES`, with the classifier agreeing with the ruled rule on every
+    file in it. A systematic drop is 0 of any set, which is why the observer control
+    survives as a share of the admitted set behind `ADMITTED_HUMAN_SESSIONS_MIN`; each
+    number lives on its own constant above and is never restated here as an inline
+    comparison, which is what
+    `test_the_observer_control_states_its_share_and_floors_once` checks. Snapshot of
+    this machine on 2026-09-24, a snapshot and not a threshold — the store grows daily:
+    514 files, 7 admitted (5 `mission-control`, 2 `browser`), all 7 with `inner_voice`
+    true, 0 disagreements.
     """
     from app import sessions_io
-    # Absent store -> named skip; a store that exists but is too thin to discriminate
-    # -> a named skip carrying BOTH the floor and the observed count (#1377 clause 2).
-    # Neither skip can fire over a full store whose classifier disagrees: the oracle
-    # below still runs and still fails there, which is what
-    # `test_a_full_store_with_a_disagreeing_classifier_fails_rather_than_skips` pins by
-    # putting the pre-#1143 rule back over a store above the floor.
+    # Absent store -> named skip; a store that exists but is too thin in FILES to
+    # discriminate -> a named skip carrying BOTH the floor and the observed count
+    # (#1377 clause 2); a store that is full in files but too thin in ADMITTED chats for
+    # a share to mean anything -> the same reason shape, naming the admitted floor and
+    # the observed human count (#1448 clause 2). None of the three can mask a disagreeing
+    # classifier: the loop below runs over every file, the disagreement assert is the
+    # first thing that fires, and the admitted-volume skip sits after it — pinned by
+    # `test_a_full_store_with_a_disagreeing_classifier_fails_rather_than_skips`, which
+    # puts the pre-#1143 rule back over a store above the floor and must still FAIL.
     require_live_data(LIVE_STORE, "session store")
     files = sorted(LIVE_STORE.glob("*.json"))
     require_live_volume(files, SESSION_STORE_MIN_FILES, LIVE_STORE, "session store")
     violations: list[str] = []
-    human = 0
+    admitted: list[str] = []
     human_with_observer_on = 0
     for path in files:
         try:
@@ -3827,21 +3861,30 @@ def test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session():
                               f"inner_voice={data.get('inner_voice')!r} "
                               f"-> {got}, expected {expected}")
         if got in et.HUMAN_CLASSES:
-            human += 1
+            admitted.append(path.name)
             if data.get("inner_voice"):
                 human_with_observer_on += 1
+    human = len(admitted)
     assert not violations, (
         f"classifier disagrees with the ruled rule: {violations[:5]}")
     assert 0 < human < len(files), (
         f"human={human} of {len(files)}: a store with none or all human means the "
         "oracle above cannot discriminate either direction")
     # The positive control #493 could not have: the chats typed with the observer
-    # switched on have to be IN the admitted set, or a zero here is indistinguishable
-    # from the misclassification this item exists to close.
-    assert human_with_observer_on > 20, (
-        f"only {human_with_observer_on} admitted sessions carry `inner_voice: true`;"
-        " 152 did on 2026-09-18 (100 mission-control chats + 52 extension chats),"
-        " so the human chats are being dropped again")
+    # switched on have to be IN the admitted set, or a zero there is indistinguishable
+    # from the misclassification #1143 exists to close. It is a SHARE of the admitted
+    # set, because a systematic drop is 0% of a set of any size while an absolute count
+    # is only true of the store that was measured (#1448). Below
+    # `ADMITTED_HUMAN_SESSIONS_MIN` the denominator cannot carry a share, and the skip
+    # names the floor and the observed human count — which is the state a wiped store
+    # reaches, and the state this node used to answer with a red run.
+    require_live_volume(admitted, ADMITTED_HUMAN_SESSIONS_MIN, LIVE_STORE,
+                        "admitted human sessions", noun="sessions")
+    assert human_with_observer_on / human >= OBSERVER_ON_SHARE_MIN, (
+        f"only {human_with_observer_on} of {human} admitted sessions carry "
+        f"`inner_voice: true`, under the {OBSERVER_ON_SHARE_MIN:.0%} this control "
+        "allows: chats typed with the observer switched on are dropping out of the "
+        "admitted set again")
 
 
 def test_a_row_the_store_cannot_answer_is_dropped_as_uncoded_and_says_so(
@@ -4476,6 +4519,32 @@ def synthetic_store(tmp_path, count: int, **fields) -> Path:
     return root
 
 
+def synthetic_mixed_store(tmp_path, name: str, machine: int, human: int,
+                          inner_voice: bool) -> Path:
+    """A session store of `machine` `worker`-platform files plus `human` chat-shaped
+    mission-control chats typed with the observer in state `inner_voice`.
+
+    `synthetic_store` above writes an all-human store, which cannot show a guard
+    anything about a SHARE of the admitted set: `assert 0 < human < len(files)` needs
+    both classes present, and #1448's observer control is judged over the admitted slice
+    alone. The machine files are `worker`, the one machine platform both the backend's
+    deny-list and `SESSION_CLASS` name, so the oracle's expected value agrees with the
+    classifier for every one of them and the store isolates the observer control."""
+    root = tmp_path / name
+    root.mkdir()
+    for i in range(machine):
+        data = {"platform": "worker", "inner_voice": False,
+                "session_id": f"20260920_120000_worker{i}"}
+        (root / f"{data['session_id']}.json").write_text(
+            json.dumps(data), encoding="utf-8")
+    for i in range(human):
+        data = {"platform": "mission-control", "inner_voice": inner_voice,
+                "session_id": f"20260920_120000_human{i}"}
+        (root / f"{data['session_id']}.json").write_text(
+            json.dumps(data), encoding="utf-8")
+    return root
+
+
 def synthetic_ledger(tmp_path, rows) -> Path:
     """A `_pipeline/skills/reviews/verdicts.jsonl` stand-in."""
     root = tmp_path / "reviews"
@@ -4670,6 +4739,127 @@ def test_a_full_store_with_a_disagreeing_classifier_fails_rather_than_skips(
     with pytest.raises(AssertionError) as caught:
         test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session()
     assert "classifier disagrees with the ruled rule" in str(caught.value), caught.value
+
+
+# ── #1448: the observer control on a scale a wiped store survives ─────────────
+#
+# `SESSION_STORE_MIN_FILES` did its job and the store regrew past it, which is what
+# made the guard's OTHER bound — `assert human_with_observer_on > 20`, calibrated on the
+# store of 2026-09-18 — fire in every round's `tests` rung on a classifier that agreed
+# with the ruled rule on all 514 files. Verbatim from
+# `~/.local/state/lloyd-automod/rounds/SM_20260924_114808/gate.json`: "every failure
+# reproduces at base 391f03f4 with this round's diff absent — PRE-EXISTING BREAKAGE".
+# The three nodes below pin the new control's three states from the outside, and each
+# one refuses a SKIP where a failure or a pass is owed, because a red node that became a
+# silently-skipped one would have closed this item without ever guarding anything again.
+
+
+def test_a_store_with_too_few_admitted_chats_skips_naming_floor_and_count(
+        tmp_path, monkeypatch):
+    """#1448 clause 2: full in files, too thin in admitted chats to judge a share.
+
+    `SESSION_STORE_MIN_FILES` machine files and 4 observer-on chats — above the file
+    floor, below `ADMITTED_HUMAN_SESSIONS_MIN`. That is the state a wiped-then-regrown
+    human slice legitimately reaches, so the node skips rather than reporting a verdict
+    it cannot justify, and the reason names BOTH the admitted floor and the observed
+    human count, the attribution #1377 required of the file-volume skip."""
+    thin = ADMITTED_HUMAN_SESSIONS_MIN - 1
+    redirect_live_root(monkeypatch, "store", synthetic_mixed_store(
+        tmp_path, "thin-human", SESSION_STORE_MIN_FILES, thin, inner_voice=True))
+    with pytest.raises(pytest.skip.Exception) as caught:
+        test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session()
+    reason = str(caught.value)
+    assert "admitted human sessions" in reason, (
+        f"the skip named the file floor, not the admitted-session floor, so a reader "
+        f"of a skipped run cannot tell which of the two the store missed: {reason}")
+    assert f"holds {thin} sessions" in reason, reason
+    assert f"the {ADMITTED_HUMAN_SESSIONS_MIN}-session floor" in reason, reason
+
+
+def test_a_full_store_whose_admitted_chats_all_lack_inner_voice_fails(
+        tmp_path, monkeypatch):
+    """#1448 clause 3, the purpose clause: the state #1143 was built to catch, on the
+    new scale.
+
+    A store ABOVE the file floor and above `ADMITTED_HUMAN_SESSIONS_MIN`, whose admitted
+    human chats every one carries `inner_voice: false` — the admitted set containing no
+    chat typed with the observer on, which is precisely what pre-#1143 looked like (0 of
+    45). It must FAIL. A share that skipped here would trade the guard this item exists
+    to keep for a number it can no longer reach."""
+    redirect_live_root(monkeypatch, "store", synthetic_mixed_store(
+        tmp_path, "observer-off", SESSION_STORE_MIN_FILES,
+        ADMITTED_HUMAN_SESSIONS_MIN, inner_voice=False))
+    try:
+        test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session()
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"the observer control skipped over a full store instead of failing "
+                    f"on an admitted set with no observer-on chat in it: {exc}")
+    except AssertionError as exc:
+        assert "inner_voice: true" in str(exc), (
+            f"the guard failed for a reason other than the observer control, so the "
+            f"control itself is untested here: {exc}")
+    else:
+        pytest.fail("the observer control passed a store whose admitted human chats "
+                    "all carry `inner_voice: false`")
+
+
+def test_a_full_store_with_a_live_shaped_human_slice_passes_without_skipping(
+        tmp_path, monkeypatch):
+    """#1448 clause 4: the new skip is for a store that cannot be judged, not for a
+    store that is merely the size this machine's is.
+
+    The shape measured on the live store on 2026-09-24 — above `SESSION_STORE_MIN_FILES`
+    files, 7 admitted chats, all observer-on — must RUN and PASS. It is exactly the
+    store the absolute `> 20` failed, and a guard that skipped here would have answered
+    a red promotion-blocking node by executing nothing."""
+    redirect_live_root(monkeypatch, "store", synthetic_mixed_store(
+        tmp_path, "live-shape", SESSION_STORE_MIN_FILES,
+        ADMITTED_HUMAN_SESSIONS_MIN + 2, inner_voice=True))
+    try:
+        test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session()
+    except pytest.skip.Exception as exc:
+        pytest.fail(f"the guard skipped over a full store whose admitted slice is above "
+                    f"the floor instead of passing it: {exc}")
+
+
+def test_the_observer_control_states_its_share_and_floors_once():
+    """#1448 clauses 1, 2 and 4, pinned against the guard's own source.
+
+    The three nodes beside this one pin the behaviour; this pins the SHAPE, because
+    #1448 is the failure in which a number that began as a measurement quietly became a
+    bound nobody could meet. So: the observer control compares to `OBSERVER_ON_SHARE_MIN`
+    and to no absolute count; the below-floor decision is `require_live_volume` naming
+    `ADMITTED_HUMAN_SESSIONS_MIN` rather than an inline comparison, so the skip reason and
+    the floor cannot be moved apart; the two assertions #1143 wrote are still in force
+    unreduced; and `SESSION_STORE_MIN_FILES` is still 501 — #1143's `assert len(files) >
+    500` stated as a floor — and not the count of files the store happens to hold today."""
+    src = inspect.getsource(
+        test_the_classifier_agrees_with_the_ruled_rule_over_every_live_session)
+    assert "assert not violations" in src, (
+        "the per-file classifier-vs-ruled-rule assertion is gone, so the oracle has "
+        "stopped being an oracle and every bound under it proves nothing")
+    assert "0 < human < len(files)" in src, (
+        "#1143's admitted-set guard was dropped or narrowed")
+    assert "OBSERVER_ON_SHARE_MIN" in src, (
+        "the observer control no longer compares to its share constant, so the bound "
+        "and the skip are two numbers again")
+    assert not re.search(r"human_with_observer_on\s*(?:<=?|>=?)\s*\d", src), (
+        "an absolute count of observer-on chats is the bound again: it describes the "
+        "store that was measured, and on the day that store is wiped and regrown it "
+        "fails on a classifier that never changed")
+    # The CALL form, not the bare name: the name also appears in the oracle's own
+    # docstring, so a pin that only looked for it kept passing after the floor moved
+    # back inline — the reviewer's finding on round SM_20260924_121936.
+    assert re.search(
+            r"require_live_volume\(\s*admitted\s*,\s*ADMITTED_HUMAN_SESSIONS_MIN", src), (
+        "the admitted-session floor is no longer the floor argument of a "
+        "require_live_volume call over the admitted set, so the skip reason can "
+        "disagree with the bound")
+    assert not re.search(r"human\s*<\s*\d+", src), (
+        "an inline admitted-session comparison duplicates the floor constant")
+    assert SESSION_STORE_MIN_FILES == 501, (
+        "the file floor moved: lowering it toward the observed count is how a wiped "
+        "store gets a quieter oracle instead of a named skip")
 
 
 def test_a_present_corpus_that_admits_nothing_fails_rather_than_skips(
