@@ -277,7 +277,7 @@ async def test_an_existing_session_file_is_a_conflict_not_an_overwrite(client,
     monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
     monkeypatch.setattr("secrets.token_hex", lambda n: "ab12")
     sentinel = json.dumps({"session_id": "someone-elses-run", "messages": [{"x": 1}]})
-    now = datetime.datetime.utcnow()
+    now = datetime.datetime.now()  # the mint's clock: local since #1154
     for offset in range(-1, 5):
         stamp = (now + datetime.timedelta(seconds=offset)).strftime("%Y%m%d_%H%M%S")
         (tmp_path / f"{stamp}_ivab12.json").write_text(sentinel)

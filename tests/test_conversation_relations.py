@@ -331,6 +331,37 @@ def test_landed_edges_carry_a_non_null_source_doc_from_evidence_sessions(store, 
     assert "2026-09-10" in rows[0]["source_doc"]
 
 
+def test_provenance_pointer_names_the_bucket_that_holds_the_key(cr, tmp_path, monkeypatch):
+    """#1154: `20260910_004857_iv11e2` was minted with a UTC prefix, and its
+    body timestamp (17:48 PDT on 09-09) put its trajectory in
+    `2026-09-09.jsonl`. A pointer read off the prefix named `2026-09-10.jsonl`,
+    which does not contain it."""
+    traj = tmp_path / "trajectories"
+    traj.mkdir()
+    key = "20260910_004857_iv11e2"
+    (traj / "2026-09-09.jsonl").write_text(
+        json.dumps({"session_key": "20260909_120000_abcdef"}) + "\n"
+        + json.dumps({"session_key": key, "timestamp": "2026-09-10T00:48:57Z"}) + "\n")
+    # The prefix-dated file exists and mentions the key in prose only — a
+    # substring hit that is not the row must not win.
+    (traj / "2026-09-10.jsonl").write_text(
+        json.dumps({"session_key": "20260910_090000_fedcba",
+                    "text": f"see {key}"}) + "\n")
+    monkeypatch.setattr(cr, "TRAJECTORY_DIR", traj)
+
+    ptr = cr.provenance_pointer({"evidence": {"sessions": [key]}})
+    assert ptr == f"_pipeline/trajectories/2026-09-09.jsonl#{key}"
+
+    # A local-prefixed key found under its own date stays there.
+    same = "20260909_120000_abcdef"
+    assert cr.provenance_pointer({"evidence": {"sessions": [same]}}) == \
+        f"_pipeline/trajectories/2026-09-09.jsonl#{same}"
+    # Not extracted yet: nothing holds it, so the prefix date is the best guess.
+    fresh = "20260911_080000_123456"
+    assert cr.provenance_pointer({"evidence": {"sessions": [fresh]}}) == \
+        f"_pipeline/trajectories/2026-09-11.jsonl#{fresh}"
+
+
 def test_legacy_evidence_trajectory_key_still_lands(store, cr):
     """The pre-existing landing path pinned by test_edge_readers.py stays wired."""
     props = [{"source": "a.md", "target": "b.md", "status": "approved",

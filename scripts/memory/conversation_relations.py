@@ -847,6 +847,39 @@ def auto_approve_strong(proposals: list[dict],
     return approved
 
 
+def _trajectory_bucket(key: str, prefix: str) -> str:
+    """The `YYYY-MM-DD` of the trajectory file that holds `key` (#1154).
+
+    The id prefix is a label, not a clock: one minter wrote it in UTC until
+    2026-09-24, and the bucket comes from the session body's timestamp in
+    local time (`trajectory_date_key`), so a UTC-prefixed session made after
+    17:00 local sits in the file dated the day BEFORE its prefix. The prefix
+    date and its two neighbours are the only candidates either clock can
+    produce; each is checked for the row, and the prefix date is the answer
+    only when none holds it (not extracted yet, or the file is gone).
+    """
+    try:
+        day = datetime.strptime(prefix, "%Y%m%d").date()
+    except ValueError:
+        return f"{prefix[:4]}-{prefix[4:6]}-{prefix[6:]}"
+    for offset in (0, -1, 1):
+        name = (day + timedelta(days=offset)).isoformat()
+        path = TRAJECTORY_DIR / f"{name}.jsonl"
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if key not in line:
+                        continue
+                    try:
+                        if json.loads(line).get("session_key") == key:
+                            return name
+                    except (ValueError, AttributeError):
+                        continue
+        except OSError:
+            continue
+    return day.isoformat()
+
+
 def provenance_pointer(p: dict) -> Optional[str]:
     """Resolve a proposal back to the trajectory evidence behind it.
 
@@ -863,8 +896,8 @@ def provenance_pointer(p: dict) -> Optional[str]:
         first = sessions[0]
         m = re.search(r"(\d{8})", first)
         if m:
-            d = m.group(1)
-            ptr = f"_pipeline/trajectories/{d[:4]}-{d[4:6]}-{d[6:]}.jsonl#{first}"
+            bucket = _trajectory_bucket(first, m.group(1))
+            ptr = f"_pipeline/trajectories/{bucket}.jsonl#{first}"
         else:
             ptr = f"sessions/{first}"
         if len(sessions) > 1:

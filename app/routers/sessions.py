@@ -708,10 +708,12 @@ async def create_session(request: Request):
 
     # Generate the session_id in the same shape the chat path uses:
     # YYYYMMDD_HHMMSS_<6 hex>. The "iv" prefix on the suffix makes Inner
-    # Voice sessions visually distinguishable in `ls sessions/`.
+    # Voice sessions visually distinguishable in `ls sessions/`. The prefix is
+    # LOCAL time like every other mint (#1154): this one was UTC, so one
+    # directory listing carried two clocks the prefix could not tell apart.
     import datetime as _dt
     import secrets
-    ts = _dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     suffix = "iv" + secrets.token_hex(2)
     session_id = f"{ts}_{suffix}"
 

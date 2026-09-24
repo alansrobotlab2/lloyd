@@ -103,6 +103,27 @@ def test_pacific_summer_vs_winter_offsets_both_bucket_correctly():
     assert et.trajectory_date_key(traj("s", "2026-01-04T02:00:00Z")) == "2026-01-03"
 
 
+def test_a_naive_timestamp_buckets_to_its_host_local_date():
+    """#1154: most session bodies carry a naive `created_at` written by
+    `datetime.now()`, i.e. host-local wall time. It must keep that date — read
+    as UTC, 02:00 on 09-10 would move to 19:00 on 09-09 — and it must be a
+    parsed date, not the today-fallback a missing timestamp gets."""
+    import os
+    import time
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Los_Angeles"
+    time.tzset()
+    try:
+        assert et.trajectory_date_key(traj("s", "2026-09-10T02:00:00")) == "2026-09-10"
+        assert et.trajectory_date_key(traj("s", "2026-09-09T23:59:59.5")) == "2026-09-09"
+    finally:
+        if saved is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved
+        time.tzset()
+
+
 def test_missing_timestamp_falls_back_to_today_local():
     expected = datetime.now(tz=LOCAL_TZ).strftime("%Y-%m-%d")
     assert et.trajectory_date_key(traj("s", "")) == expected

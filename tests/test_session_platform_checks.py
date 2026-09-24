@@ -256,6 +256,38 @@ def test_no_user_session_creator_mints_a_background_shaped_id():
     assert is_background_session_name(new_background_session_id("autonomy"))
 
 
+def test_no_session_id_mint_formats_its_prefix_in_utc():
+    """#1154: one minter wrote the `YYYYMMDD_HHMMSS` prefix in UTC and three in
+    local time, so the prefix could not be read as a date by anybody. Local is
+    the convention `ef294bf` chose; a UTC `strftime` of that shape anywhere a
+    session id is minted is the holdout coming back."""
+    utc_prefix = re.compile(
+        r'(utcnow\(\)|now\((tz=)?(_dt\.)?timezone\.utc\)|gmtime\(\))'
+        r'[^\n]*%Y%m%d_%H%M%S')
+    # The files that mint a session id: every `session_id = f"..."` site the
+    # scan above counts, plus `new_background_session_id`'s module. A run id
+    # (`workers/queue.py::new_run_id`) is not a session id and keeps its clock.
+    offenders = []
+    for path in _sources(_MINT_ROOTS):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if not (re.search(r'session_id\s*=\s*f["\']', text)
+                or "def new_background_session_id" in text):
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            if utc_prefix.search(line):
+                offenders.append(f"{path.relative_to(ROOT)}:{i}: {line.strip()}")
+    assert offenders == []
+    create = (ROOT / "app" / "routers" / "sessions.py").read_text()
+    assert 'ts = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")' in create
+
+
+def test_the_id_prefix_convention_is_stated_where_ids_are_minted():
+    from app.sessions_io import new_background_session_id
+    doc = (new_background_session_id.__doc__ or "").lower()
+    assert "local" in doc
+    assert "label" in doc and "not a timestamp" in doc
+
+
 async def test_the_create_endpoint_still_mints_a_three_part_id(tmp_path,
                                                               monkeypatch):
     """The shape rule, checked against the endpoint rather than its source text.
@@ -276,17 +308,38 @@ async def test_the_create_endpoint_still_mints_a_three_part_id(tmp_path,
     from app.sessions_io import is_background_session_name
 
     monkeypatch.setattr(sessions_router, "SESSIONS_DIR", tmp_path)
-    transport = httpx.ASGITransport(app=server.app, client=("127.0.0.1", 9999))
-    async with httpx.AsyncClient(transport=transport,
-                                 base_url="http://lloyd-test") as client:
-        created = await client.post("/api/sessions/create",
-                                    json={"inner_voice": True})
-        assert created.status_code == 200, created.text
-        body = created.json()
-        listed = {s["id"] for s in
-                  (await client.get("/api/sessions")).json()["sessions"]}
+    # A host zone far from UTC, so a UTC-minted prefix cannot pass as local
+    # (#1154). Set by hand rather than monkeypatch, because the zone has to be
+    # restored and re-`tzset` here, not at teardown.
+    import os as _os
+    import time as _time
+    from datetime import datetime, timedelta
+    saved_tz = _os.environ.get("TZ")
+    _os.environ["TZ"] = "America/Los_Angeles"
+    _time.tzset()
+    try:
+        before = datetime.now() - timedelta(seconds=2)
+        transport = httpx.ASGITransport(app=server.app, client=("127.0.0.1", 9999))
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://lloyd-test") as client:
+            created = await client.post("/api/sessions/create",
+                                        json={"inner_voice": True})
+            assert created.status_code == 200, created.text
+            body = created.json()
+            listed = {s["id"] for s in
+                      (await client.get("/api/sessions")).json()["sessions"]}
+        after = datetime.now() + timedelta(seconds=2)
+    finally:
+        if saved_tz is None:
+            _os.environ.pop("TZ", None)
+        else:
+            _os.environ["TZ"] = saved_tz
+        _time.tzset()
 
     session_id = body["session_key"]
+    minted = datetime.strptime(session_id[:15], "%Y%m%d_%H%M%S")
+    assert before <= minted <= after, (
+        f"prefix {session_id[:15]} is not local time ({before:%H:%M:%S}-{after:%H:%M:%S})")
     assert session_id == body["session_id"]
     assert re.fullmatch(r"\d{8}_\d{6}_iv[0-9a-f]{4}", session_id), session_id
     assert not is_background_session_name(session_id + ".json")

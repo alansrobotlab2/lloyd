@@ -255,7 +255,14 @@ def names_a_machine_platform(data: dict) -> bool:
 
 
 def new_background_session_id(slug: str) -> str:
-    """Mint a four-part background session id from a producer slug."""
+    """Mint a four-part background session id from a producer slug.
+
+    The `YYYYMMDD_HHMMSS` prefix is LOCAL time, as every session-id mint in
+    `app/` writes it (#1154), and it is a human-readable label, not a timestamp
+    source: files minted before 2026-09-10 (and `iv` chats before 2026-09-24)
+    carry a UTC prefix that nothing in the name distinguishes. Date a session
+    from its body (`created_at`), never from its id.
+    """
     import uuid as _uuid
     clean = "".join(ch for ch in str(slug or "bg") if ch.isalnum())[:12] or "bg"
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
