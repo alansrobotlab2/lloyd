@@ -2334,10 +2334,19 @@ def test_the_health_payload_keeps_every_key_today_s_consumers_read(aut, monkeypa
 
     assert old_fleet_keys <= set(h["fleet"]), (
         f"the fleet block lost {sorted(old_fleet_keys - set(h['fleet']))}")
-    assert set(h["fleet"]) - old_fleet_keys == {"oldest_input",
-                                                "window_clamped_to_hours"}, (
+    # Three keys have been let in since that snapshot, each by a named decision
+    # rather than silently: #1401's two clamp keys, and #713's
+    # `evidence_unevaluable_reason`, which is the sentence explaining a null
+    # `refuted_or_insufficient_rate`. The fleet rate stopped being its own sum
+    # (#713) precisely so it could not disagree with the artifact rollup, and a
+    # null a consumer cannot explain is the trap #1401 exists to close. Anything
+    # else this set grows by fails here naming itself, which is what the
+    # containment assertion is for.
+    assert set(h["fleet"]) - old_fleet_keys == {
+        "oldest_input", "window_clamped_to_hours",
+        "evidence_unevaluable_reason"}, (
         f"the fleet block gained {sorted(set(h['fleet']) - old_fleet_keys)} — "
-        "the clause permits the two clamp keys and nothing else")
+        "the clause permits the two clamp keys and #713's unevaluable reason")
     assert isinstance(h["fleet"]["runs"], int)
     assert isinstance(h["fleet"]["fail_rate"], float)
     assert h["fleet"]["runs"] == sum(t["runs"] for t in h["tasks"]), (

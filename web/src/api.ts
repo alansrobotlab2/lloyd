@@ -758,6 +758,72 @@ export interface AutonomyHealthTask {
   consecutive_failures: number;
   last_success: string | null;
   failure_count?: number;
+  /** The #525 evidence verifier's verdict on this task's runs. The server has
+   *  sent these since #525 and this file never declared them, which is why the
+   *  autonomy tab could not show a rising refutation rate at all (#713).
+   *  `refuted_or_insufficient_rate` is null when the window holds no checked
+   *  claim — unevaluable, which is not the number 0. `runs_without_bundle` is
+   *  the count that explains a null, and read beside `runs_with_bundle` it says
+   *  whether the rate describes the task or only a slice nobody chose. */
+  runs_with_bundle?: number;
+  runs_without_bundle?: number;
+  claims_checked?: number;
+  claims_verified?: number;
+  claims_refuted?: number;
+  claims_insufficient?: number;
+  gap_runs?: number;
+  refuted_or_insufficient_rate?: number | null;
+}
+
+/** One task's claim tally, as it appears inside an artifact entry (`per_task`)
+ *  and inside the rollup's `per_task` map (#713). Same fields as the evidence
+ *  block on `AutonomyHealthTask`, so a per-artifact number and a per-task one
+ *  are the same measurement read through two doors. */
+export interface AutonomyHealthClaimTally {
+  runs_with_bundle: number;
+  runs_without_bundle: number;
+  claims_checked: number;
+  claims_verified: number;
+  claims_refuted: number;
+  claims_insufficient: number;
+  refuted_or_insufficient_rate: number | null;
+}
+
+/** One artifact in the #713 rollup: every claim the fleet made about one
+ *  `check.path`, and which tasks made them. */
+export interface AutonomyHealthArtifactEntry {
+  path: string;
+  claims_checked: number;
+  claims_verified: number;
+  claims_refuted: number;
+  claims_insufficient: number;
+  refuted_or_insufficient: number;
+  refuted_or_insufficient_rate: number | null;
+  /** Every task that claimed something about this artifact — the pair no
+   *  per-task row can show: the job that asserted it, and the job whose run
+   *  proved it false. */
+  task_ids: string[];
+  per_task: Record<string, AutonomyHealthClaimTally>;
+}
+
+/** `health.artifacts`: refuted-or-insufficient claims grouped by the artifact
+ *  they were made about, most-misreported first (#713). */
+export interface AutonomyHealthClaimRollup {
+  entries: AutonomyHealthArtifactEntry[];
+  artifacts_checked: number;
+  artifacts_with_refutations: number;
+  runs_with_bundle: number;
+  runs_without_bundle: number;
+  claims_checked: number;
+  claims_verified: number;
+  claims_refuted: number;
+  claims_insufficient: number;
+  /** Claims whose check named no path: in every total, on no entry. */
+  claims_without_path: number;
+  refuted_or_insufficient_rate: number | null;
+  unevaluable: boolean;
+  unevaluable_reason: string | null;
+  per_task: Record<string, AutonomyHealthClaimTally>;
 }
 
 /** An `idle_tasks` row: a task file with no run row inside the requested window.
@@ -794,8 +860,24 @@ export interface AutonomyHealth {
      * two are the measurement. */
     oldest_input?: string | null;
     window_clamped_to_hours?: number | null;
+    /** Fleet-wide evidence-verifier totals (#525), undeclared until #713. */
+    claims_checked?: number;
+    claims_verified?: number;
+    claims_refuted?: number;
+    claims_insufficient?: number;
+    runs_with_bundle?: number;
+    runs_without_bundle?: number;
+    refuted_or_insufficient_rate?: number | null;
+    /** Why that rate is null, or null when it isn't (#713). A null the consumer
+     *  cannot explain is the trap #1401 exists to close, so the sentence ships
+     *  with the number. */
+    evidence_unevaluable_reason?: string | null;
   };
   tasks: AutonomyHealthTask[];
+  /** Refuted-or-insufficient claims grouped by artifact, most-misreported first
+   *  (#713). Present on every response the current server sends; optional here
+   *  so a cached pre-#713 payload cannot fail the page. */
+  artifacts?: AutonomyHealthClaimRollup;
   idle_tasks: AutonomyHealthIdleTask[];
 }
 

@@ -3244,6 +3244,214 @@ def _row_claims(row: dict) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
+# ── Cross-task / cross-artifact claim rollup (#713) ──────────────────────────
+#
+# `compute_health` answers "how is task N doing?". The corrections log asks a
+# different question — *which artifact has this fleet repeatedly misreported
+# about?* — and no per-task sum can answer it, because the refutations about one
+# artifact are scattered across the tasks that each made a claim about it. The
+# case in the item: #39 asserts something about
+# `_pipeline/reflection/signals-latest.md` that #38's run later disproves. Each
+# refutation reaches only its own task's next prompt (the `evidence_gaps:<id>`
+# watermark), so the pair never meets.
+#
+# Three rules carried over from #525, in the order they bite:
+#
+# 1. **The denominator is claims, never runs.** A `[SILENT]` run asserted
+#    nothing, so a run-level denominator would pull every rate toward zero
+#    every time a job said less. `claims_checked` here is summed from the same
+#    per-claim statuses `compute_health` counts, from the same decode, so the
+#    two can only disagree if one of them stops calling `_claim_status`.
+# 2. **`runs_without_bundle` dominates ⇒ no rate.** A window where most runs
+#    carry no bundle at all has a rate computed over a slice nobody chose, and a
+#    clean 0.000 there is the report that reads as healthy while measuring
+#    nothing. It reports `None` plus the count instead.
+# 3. **A claim with no `check.path` is counted, never dropped.** It cannot be
+#    attributed to an artifact, so it lands in `claims_without_path` beside the
+#    totals rather than silently lowering them — otherwise the rollup and the
+#    per-task sums diverge by exactly the rows that were malformed, which is the
+#    divergence the reconciliation test exists to catch.
+
+_ROLLUP_STATUSES = ("verified", "refuted", "insufficient")
+
+
+def _claim_status(claim: dict) -> str:
+    """The verifier's verdict on one stored claim, or "" when it carries none.
+
+    One extraction for both consumers (`compute_health`'s per-task tallies and
+    the artifact rollup), so a status rename cannot land in one and not the
+    other. Anything the verifier did not write — absent, misspelt, a claim that
+    is not an object — is "" and is counted by neither, exactly as #525's
+    per-task block already behaved.
+    """
+    if not isinstance(claim, dict):
+        return ""
+    status = str(claim.get("status") or "")
+    return status if status in _ROLLUP_STATUSES else ""
+
+
+def _claim_path(claim: dict) -> str:
+    """The artifact a claim is about: its check's `path`, or "" for none.
+
+    `check.path` is the group-by key because it is the thing the corrections log
+    names — a relative artifact path — and it is the only field the verifier
+    itself resolves. A missing, non-string or blank path yields "", which routes
+    the claim to `claims_without_path`.
+    """
+    check = claim.get("check")
+    if not isinstance(check, dict):
+        return ""
+    path = check.get("path")
+    return path.strip() if isinstance(path, str) and path.strip() else ""
+
+
+def _tally() -> dict:
+    """One accumulator: the four claim counts plus the bundle split.
+
+    Same key names as a `compute_health` task row, on purpose — the equality
+    this module promises is between the two of them, and names that match are a
+    comparison a reader can do by eye.
+    """
+    return {"runs_with_bundle": 0, "runs_without_bundle": 0,
+            "claims_checked": 0, "claims_verified": 0, "claims_refuted": 0,
+            "claims_insufficient": 0}
+
+
+def _tally_add(tally: dict, status: str) -> None:
+    tally[f"claims_{status}"] += 1
+    tally["claims_checked"] += 1
+
+
+def _tally_rate(tally: dict) -> Optional[float]:
+    """Refuted-or-insufficient over the claims that were CHECKED.
+
+    `None` over zero claims — the unevaluable reading, never 0.0.
+    """
+    checked = tally["claims_checked"]
+    if not checked:
+        return None
+    unverified = tally["claims_refuted"] + tally["claims_insufficient"]
+    return round(unverified / checked, 3)
+
+
+def _rollup_new() -> dict:
+    return {"paths": {}, "by_task": {}, "claims_without_path": 0}
+
+
+def _rollup_add(rollup: dict, tid: str, bundle: Optional[dict]) -> None:
+    """Fold one run row's bundle in, under both its task and its artifact.
+
+    A claim about an artifact another task also claimed about lands in that
+    entry's `task_ids` AND its `per_task` map under both ids: the entry is the
+    artifact's record, and which jobs made the claim is half of what makes it
+    worth reading.
+    """
+    task = rollup["by_task"].setdefault(tid, _tally())
+    if bundle is None:
+        task["runs_without_bundle"] += 1
+        return
+    task["runs_with_bundle"] += 1
+    for claim in bundle.get("claims") or []:
+        status = _claim_status(claim)
+        if not status:
+            continue
+        _tally_add(task, status)
+        path = _claim_path(claim)
+        if not path:
+            rollup["claims_without_path"] += 1
+            continue
+        entry = rollup["paths"].setdefault(path, {**_tally(), "task_ids": set(),
+                                                 "per_task": {}})
+        entry["task_ids"].add(tid)
+        _tally_add(entry, status)
+        _tally_add(entry["per_task"].setdefault(tid, _tally()), status)
+
+
+def _rollup_finalize(rollup: dict) -> dict:
+    """Shape the accumulated rollup: entries most-misreported first, plus the marker.
+
+    `entries` holds the artifacts carrying at least one refuted-or-insufficient
+    claim, because that is the list a reader came for; `artifacts_checked` is
+    printed beside it so an empty `entries` reads as "N artifacts, all clean"
+    and not as "the fleet asserts nothing".
+    """
+    entries = []
+    for path, e in rollup["paths"].items():
+        if not (e["claims_refuted"] + e["claims_insufficient"]):
+            continue
+        entries.append({
+            "path": path,
+            "claims_checked": e["claims_checked"],
+            "claims_verified": e["claims_verified"],
+            "claims_refuted": e["claims_refuted"],
+            "claims_insufficient": e["claims_insufficient"],
+            "refuted_or_insufficient": (e["claims_refuted"]
+                                        + e["claims_insufficient"]),
+            "refuted_or_insufficient_rate": _tally_rate(e),
+            "task_ids": sorted(e["task_ids"]),
+            "per_task": {tid: {**t, "refuted_or_insufficient_rate": _tally_rate(t)}
+                         for tid, t in sorted(e["per_task"].items())},
+        })
+    # Most-misreported first. Count before rate: three refutations out of four
+    # claims outranks one out of one, because the corrections log chases the
+    # artifact the fleet gets wrong most often, not the one with the prettiest
+    # ratio. Ties break on the claim count then the path, so the order is a
+    # function of the rows and not of dict insertion order.
+    entries.sort(key=lambda x: (-x["refuted_or_insufficient"],
+                                -x["claims_checked"], x["path"]))
+
+    totals = _tally()
+    for t in rollup["by_task"].values():
+        for k in totals:
+            totals[k] += t[k]
+    # Rule 2: the window-wide rate is a measurement only when most runs actually
+    # carried a bundle. `>` is "strictly more", so a 50/50 window still reports
+    # a rate and names its own `runs_without_bundle`.
+    unevaluable = totals["runs_without_bundle"] > totals["runs_with_bundle"]
+    return {
+        "entries": entries,
+        "artifacts_checked": len(rollup["paths"]),
+        "artifacts_with_refutations": len(entries),
+        "runs_with_bundle": totals["runs_with_bundle"],
+        "runs_without_bundle": totals["runs_without_bundle"],
+        "claims_checked": totals["claims_checked"],
+        "claims_verified": totals["claims_verified"],
+        "claims_refuted": totals["claims_refuted"],
+        "claims_insufficient": totals["claims_insufficient"],
+        "claims_without_path": rollup["claims_without_path"],
+        "refuted_or_insufficient_rate": (
+            None if unevaluable else _tally_rate(totals)),
+        "unevaluable": unevaluable,
+        "unevaluable_reason": (
+            f"{totals['runs_without_bundle']} of "
+            f"{totals['runs_with_bundle'] + totals['runs_without_bundle']} runs "
+            "in the window carry no evidence bundle"
+            if unevaluable else None),
+        "per_task": {tid: {**t, "refuted_or_insufficient_rate": _tally_rate(t)}
+                     for tid, t in sorted(rollup["by_task"].items())},
+    }
+
+
+def claim_artifact_rollup(rows: list[dict]) -> dict:
+    """Roll verified evidence claims up across tasks and by artifact path.
+
+    The window is whatever the caller passed in: production hands it the same
+    `queue.list_runs_joined("scheduled-task", since)` rows `compute_health`
+    reads, so the two agree over identical rows by construction — the row filter
+    (`skipped`), the task attribution (`_row_task_id`) and the claim extraction
+    (`_row_claims` + `_claim_status`) are all shared. `compute_health` emits this
+    same structure under its `artifacts` key; this function is that same query
+    standing on its own, for a caller that wants the artifacts and not the whole
+    fleet report.
+    """
+    rollup = _rollup_new()
+    for row in rows:
+        if row.get("status") == "skipped":
+            continue
+        _rollup_add(rollup, _row_task_id(row) or "unattributed", _row_claims(row))
+    return _rollup_finalize(rollup)
+
+
 _GAP_ROW_KEYS = ("expected_interval_seconds", "hours_since_last_run",
                  "hours_past_next_run", "gap_ratio", "never_run")
 
@@ -3323,6 +3531,12 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
         now = _utcnow()
     by_task: dict[str, dict] = {}
     task_by_id = {str(t.get("id")): t for t in tasks}
+    # #713: the cross-task artifact rollup, accumulated in THIS pass over the
+    # rows. A second pass over the same list would be a second row filter, and
+    # two filters that drift are the divergence this payload must not have: the
+    # whole reason `artifacts` is worth reading is that its per-task totals are
+    # the same numbers the `tasks` rows above carry.
+    rollup = _rollup_new()
 
     for row in rows:
         status = row.get("status")
@@ -3400,13 +3614,15 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
         # Counted from the per-claim statuses rather than trusting the bundle's
         # own rate field, so a source cannot write its own score.
         bundle = _row_claims(row)
+        _rollup_add(rollup, tid, bundle)
         if bundle is None:
             e["runs_without_bundle"] += 1
         else:
             e["runs_with_bundle"] += 1
             for claim in bundle.get("claims") or []:
-                status = (str(claim.get("status") or "")
-                          if isinstance(claim, dict) else "")
+                # One extraction, shared with the rollup, so the two tallies of
+                # the same claim cannot be counted by two different rules.
+                status = _claim_status(claim)
                 if status == "verified":
                     e["claims_verified"] += 1
                 elif status == "refuted":
@@ -3545,9 +3761,17 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
 
     total_runs = sum(t["runs"] for t in out_tasks)
     total_fail = sum(t["failures"] for t in out_tasks)
-    total_claims = sum(t["claims_checked"] for t in out_tasks)
-    total_unverified = (sum(t["claims_refuted"] for t in out_tasks)
-                        + sum(t["claims_insufficient"] for t in out_tasks))
+    # ONE read of the evidence totals. Summing them again here — as this block
+    # did until #713 — gave the payload two answers to one question: the rollup
+    # applies the unevaluable rule (a window whose runs carry no bundle reports
+    # no rate), the old sum divided whenever any claim existed, and on the real
+    # 2026-09-24 window they differed by exactly that (3 bundles / 46 bare rows:
+    # `artifacts.refuted_or_insufficient_rate: null` next to
+    # `fleet.refuted_or_insufficient_rate: 0.0`). A counting guard whose two
+    # denominators are computed twice is the failure mode this file keeps
+    # re-recording, so the fleet block now quotes the rollup instead of redoing
+    # its arithmetic.
+    artifacts = _rollup_finalize(rollup)
     return {
         "days": days,
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -3562,15 +3786,19 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
             # #525 pilot coverage next to the rate it produces. A window with a
             # low rate but most runs in `runs_without_bundle` is a window where
             # the rate describes a slice nobody chose — so the two are read
-            # together or not at all.
-            "claims_checked": total_claims,
-            "claims_verified": sum(t["claims_verified"] for t in out_tasks),
-            "claims_refuted": sum(t["claims_refuted"] for t in out_tasks),
-            "claims_insufficient": sum(t["claims_insufficient"] for t in out_tasks),
-            "runs_with_bundle": sum(t["runs_with_bundle"] for t in out_tasks),
-            "runs_without_bundle": sum(t["runs_without_bundle"] for t in out_tasks),
-            "refuted_or_insufficient_rate": (
-                round(total_unverified / total_claims, 3) if total_claims else None),
+            # together or not at all. Quoted from the rollup rather than summed a
+            # second time: see the note above the return, and `artifacts` below
+            # for the same numbers grouped by artifact. A null rate here means
+            # `artifacts.unevaluable` — over zero claims, or over a window whose
+            # runs carry no bundle.
+            "claims_checked": artifacts["claims_checked"],
+            "claims_verified": artifacts["claims_verified"],
+            "claims_refuted": artifacts["claims_refuted"],
+            "claims_insufficient": artifacts["claims_insufficient"],
+            "runs_with_bundle": artifacts["runs_with_bundle"],
+            "runs_without_bundle": artifacts["runs_without_bundle"],
+            "refuted_or_insufficient_rate": artifacts["refuted_or_insufficient_rate"],
+            "evidence_unevaluable_reason": artifacts["unevaluable_reason"],
             "active_tasks": len([t for t in tasks if str(t.get("status")) == "up_next"]),
             "failed_tasks": [str(t.get("id")) for t in tasks
                              if str(t.get("status")) == "failed"],
@@ -3584,6 +3812,12 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
             **_health_window_fields(now, days, oldest_input, bool(by_task)),
         },
         "tasks": out_tasks,
+        # #713: the artifact half of the same evidence, grouped by `check.path`
+        # over these very rows. `tasks` answers "which job is unhealthy"; this
+        # answers "which artifact does the fleet keep getting wrong", which no
+        # per-task sum can — the refutations about one path are spread over the
+        # tasks that each claimed something about it.
+        "artifacts": _rollup_finalize(rollup),
         "idle_tasks": idle,
         # Tasks more than one period past their own next_run, whatever their
         # status — the field whose absence let a `fail_rate: 0.0` stand in for

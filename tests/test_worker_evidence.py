@@ -887,3 +887,293 @@ def test_the_seeds_come_from_real_handoff_text():
     root = _seed_root_for(rel)
     assert root is not None, f"no copy of {rel} in the tree or the fixture mirror"
     assert "12,131" in (root / rel).read_text(errors="replace")
+
+
+# ── Cross-task / cross-artifact rollup (backlog #713) ────────────────────────
+#
+# `compute_health` reports evidence per task id, which cannot answer the
+# corrections-log question: *which artifact has this fleet repeatedly
+# misreported about?* The refutations about one path are spread over every task
+# that claimed something about it — #39's claim about
+# `_pipeline/reflection/signals-latest.md` and #38's disproval of it are two
+# rows in two tasks, and each refutation only ever reached its own task's next
+# prompt through the `evidence_gaps:<id>` watermark. These tests pin the rollup
+# that puts them in one entry, over the same rows the per-task sums read.
+
+def _artifact_row(task_id: str, specs, **row_kw) -> dict:
+    """One run row whose bundle asserts claims about artifact paths.
+
+    `specs` is a list of `(status, path)` pairs. Three distinct inputs, three
+    distinct meanings, which is the whole distinction #525 drew and #713 has to
+    keep: a list of claims is a run that asserted things, `[]` is a piloted run
+    whose model asserted nothing (a bundle, and an empty one), and `None` is a
+    run that carried no bundle at all — the case `runs_without_bundle` counts
+    and the unevaluable rule exists for.
+    """
+    if specs is None:
+        claims_json = None
+    else:
+        claims = [{"claim": f"{status} claim about {path}",
+                   "check": {"kind": "file_exists", "path": path},
+                   "status": status} for status, path in specs]
+        claims_json = json.dumps({
+            "claims": claims,
+            "verified": [c["claim"] for c in claims
+                         if c["status"] == "verified"],
+            "gap": [f"[{c['status']}] {c['claim']}" for c in claims
+                    if c["status"] in ("refuted", "insufficient")],
+            "counts": {"total": len(claims),
+                       "verified": sum(1 for c in claims
+                                       if c["status"] == "verified"),
+                       "refuted": sum(1 for c in claims
+                                      if c["status"] == "refuted"),
+                       "insufficient": sum(1 for c in claims
+                                           if c["status"] == "insufficient")},
+            "refuted_or_insufficient_rate": None,
+        })
+    base = {"task_id": task_id, "status": "success", "duration_seconds": 20.0,
+            "summary": "done", "response_json": "all good", "meta_json": None,
+            "claims_json": claims_json,
+            "completed_at": "2026-09-24T06:00:00+00:00"}
+    base.update(row_kw)
+    return base
+
+
+def test_the_rollup_groups_refuted_claims_by_artifact_worst_first():
+    """#713 clause 3, first half: group by `check.path`, most-misreported first."""
+    rows = [
+        _artifact_row("39", [("refuted", "_pipeline/reflection/signals-latest.md"),
+                             ("insufficient", "_pipeline/reflection/signals-latest.md"),
+                             ("verified", "_pipeline/reflection/signals-latest.md")]),
+        _artifact_row("38", [("refuted", "_pipeline/research/_debug/hypothesis_fail.txt"),
+                             ("verified", "_pipeline/research/_debug/hypothesis_fail.txt"),
+                             ("verified", "_pipeline/research/_debug/hypothesis_fail.txt")]),
+        # A clean artifact: checked, never wrong. It belongs in the denominator
+        # of "how much did we look at" and not in the list of findings.
+        _artifact_row("40", [("verified", "_pipeline/reflection/config-latest.md")]),
+    ]
+    r = autonomy.claim_artifact_rollup(rows)
+
+    assert r["artifacts_checked"] == 3, "all three paths were claimed about"
+    assert r["artifacts_with_refutations"] == 2
+    assert [e["path"] for e in r["entries"]] == [
+        "_pipeline/reflection/signals-latest.md",
+        "_pipeline/research/_debug/hypothesis_fail.txt"]
+
+    worst = r["entries"][0]
+    assert worst["claims_refuted"] == 1
+    assert worst["claims_insufficient"] == 1
+    assert worst["refuted_or_insufficient"] == 2
+    assert worst["claims_checked"] == 3
+    assert worst["refuted_or_insufficient_rate"] == pytest.approx(0.667, abs=0.01)
+
+
+def test_the_rollup_orders_by_refutation_count_not_by_ratio():
+    """Two refutations out of five claims outranks one out of one.
+
+    The list a reader came for is the artifact the fleet gets wrong most often,
+    not the one with the prettiest ratio — a 1-of-1 is usually a brand-new
+    claim, and a 2-of-5 is a pattern.
+    """
+    rows = [
+        _artifact_row("39", [("refuted", "a.md"), ("refuted", "a.md"),
+                             ("verified", "a.md"), ("verified", "a.md"),
+                             ("verified", "a.md")]),
+        _artifact_row("40", [("refuted", "b.md")]),
+    ]
+    entries = autonomy.claim_artifact_rollup(rows)["entries"]
+    assert [e["path"] for e in entries] == ["a.md", "b.md"]
+    assert entries[0]["refuted_or_insufficient_rate"] == pytest.approx(0.4, abs=0.001)
+    assert entries[1]["refuted_or_insufficient_rate"] == 1.0
+
+
+def test_an_artifact_two_tasks_claimed_about_names_both_task_ids():
+    """#713 clause 3, cross-task half — the reason the rollup exists.
+
+    #39 asserted something about `signals-latest.md`; #38's run is what would
+    later prove it false. Under the per-task watermark each refutation reaches
+    only its own task's next prompt, so the pair never meets. In the rollup one
+    entry carries both, and its `per_task` map says which half is whose.
+    """
+    rows = [
+        _artifact_row("39", [("refuted", "_pipeline/reflection/signals-latest.md")]),
+        _artifact_row("38", [("verified", "_pipeline/reflection/signals-latest.md")]),
+    ]
+    entry = autonomy.claim_artifact_rollup(rows)["entries"][0]
+
+    assert entry["path"] == "_pipeline/reflection/signals-latest.md"
+    assert entry["task_ids"] == ["38", "39"]
+    assert set(entry["per_task"]) == {"38", "39"}
+    assert entry["per_task"]["39"]["claims_refuted"] == 1
+    assert entry["per_task"]["38"]["claims_refuted"] == 0
+    assert entry["claims_checked"] == 2
+    assert entry["refuted_or_insufficient"] == 1
+
+
+def test_the_rollup_rate_divides_by_claims_and_never_by_runs():
+    """#713 clause 4, first half — #525's denominator rule, re-held one layer up.
+
+    Three piloted runs that asserted nothing sit beside the one run that made
+    two claims. All four carry a bundle, so none of them is excluded: the rate
+    is 1-of-2 claims (0.5), where a run-level denominator would report 1-of-4
+    (0.25) — which is exactly the dilution that lets a fleet look clean by
+    saying less.
+    """
+    rows = [_artifact_row("39", [("refuted", "p.md"), ("verified", "p.md")])] + [
+        _artifact_row("39", []) for _ in range(3)]
+    r = autonomy.claim_artifact_rollup(rows)
+
+    assert r["runs_with_bundle"] == 4 and r["runs_without_bundle"] == 0
+    assert r["claims_checked"] == 2
+    assert r["refuted_or_insufficient_rate"] == 0.5
+    assert r["unevaluable"] is False
+
+
+def test_a_window_mostly_without_bundles_reports_unevaluable_not_clean():
+    """#713 clause 4, second half: coverage is printed, or the rate is a lie.
+
+    Same two claims as the test above, but now three of the four runs carry no
+    bundle at all. The rate would still arithmetic out to 0.5 — over a slice
+    nobody chose — so the window reports `None` with the count that says why.
+    The artifact entry keeps its own rate: those two claims really were made and
+    really were checked, and that is a measurement even when the window-wide one
+    is not.
+    """
+    rows = [_artifact_row("39", [("refuted", "p.md"), ("verified", "p.md")])] + [
+        _artifact_row("39", None) for _ in range(3)]
+    r = autonomy.claim_artifact_rollup(rows)
+
+    assert r["unevaluable"] is True
+    assert r["refuted_or_insufficient_rate"] is None
+    assert r["runs_without_bundle"] == 3
+    assert r["unevaluable_reason"].startswith("3 of 4 runs")
+    assert r["entries"][0]["refuted_or_insufficient_rate"] == 0.5
+
+    # And `compute_health`'s fleet block says the same thing over the same rows.
+    # It used to sum the claims itself and divide whenever any existed, so the
+    # live window on 2026-09-24 — 3 bundles against 46 bare rows — printed a
+    # clean `fleet.refuted_or_insufficient_rate: 0.0` thirty characters away from
+    # `artifacts.unevaluable: true`. Two answers to one question is the shape
+    # this file keeps re-recording; the fleet block quotes the rollup now.
+    h = autonomy.compute_health(rows, [{"id": 39, "name": "Knowledge Write",
+                                        "status": "up_next"}], 7)
+    assert h["fleet"]["refuted_or_insufficient_rate"] is None
+    assert h["fleet"]["evidence_unevaluable_reason"] == r["unevaluable_reason"]
+
+
+def test_the_rollup_per_task_totals_equal_compute_healths():
+    """#713 clause 4, third half: one set of rows, one answer, two doors.
+
+    The rows are deliberately awkward — a `skipped` row, a row with no
+    `task_id`, a `claims_json` that is not JSON, and a claim whose `check` names
+    no path — because every one of those is a place where a second loop over
+    `rows` could have quietly disagreed with the first. A `skipped` row counted
+    in one of them, or a malformed bundle treated as a bundle in one and not the
+    other, is a fleet report whose two halves disagree about the same run.
+    """
+    rows = [
+        _artifact_row("39", [("refuted", "p.md"), ("verified", "q.md")]),
+        _artifact_row("38", [("verified", "p.md")]),
+        _artifact_row("38", []),
+        _artifact_row("39", None),
+        # A claim whose check names a whitespace-only path: counted, unattributable.
+        _artifact_row("39", [("refuted", "   "), ("insufficient", "p.md")]),
+        _artifact_row("38", [("verified", "p.md")], status="skipped"),
+        # No `task_id` anywhere on the row: both consumers must file it under the
+        # same synthetic id, or the unattributed refutation lands in one half and
+        # not the other.
+        _artifact_row(None, [("refuted", "p.md")]),
+    ]
+    # ... and a `claims_json` that is not JSON: an unreadable bundle is "no
+    # bundle", which both halves must count as `runs_without_bundle`.
+    broken = _artifact_row("38", None)
+    broken["claims_json"] = "{this is not json"
+    rows.append(broken)
+    tasks = [{"id": 38, "name": "Signals", "status": "up_next"},
+             {"id": 39, "name": "Knowledge Write", "status": "up_next"}]
+
+    h = autonomy.compute_health(rows, tasks, 7)
+    r = h["artifacts"]
+
+    assert r == autonomy.claim_artifact_rollup(rows), (
+        "`compute_health`'s `artifacts` and the standalone query are two "
+        "answers about one set of rows")
+    for t in h["tasks"]:
+        pt = r["per_task"][t["task_id"]]
+        for k in ("claims_checked", "claims_verified", "claims_refuted",
+                  "claims_insufficient", "runs_with_bundle",
+                  "runs_without_bundle"):
+            assert pt[k] == t[k], f"task {t['task_id']} field {k}"
+    assert (r["claims_checked"], r["claims_refuted"], r["claims_insufficient"],
+            r["runs_without_bundle"]) == (
+        h["fleet"]["claims_checked"], h["fleet"]["claims_refuted"],
+        h["fleet"]["claims_insufficient"], h["fleet"]["runs_without_bundle"])
+    # The blank-path claim is counted but unattributable: in the totals, in the
+    # per-task sums, named as `claims_without_path`, and in no entry. `q.md` was
+    # claimed once and verified, so it is a checked artifact with nothing to
+    # report — in the denominator, out of `entries`.
+    assert r["claims_without_path"] == 1
+    assert {e["path"] for e in r["entries"]} == {"p.md"}
+    assert r["artifacts_checked"] == 2 and r["artifacts_with_refutations"] == 1
+    # The `skipped` row is in neither half; the unattributed and the unparseable
+    # ones are in both, the same way.
+    assert r["per_task"]["unattributed"]["claims_refuted"] == 1
+    assert r["per_task"]["38"]["runs_with_bundle"] == 2
+    assert r["per_task"]["38"]["runs_without_bundle"] == 1
+    assert r["per_task"]["39"]["claims_checked"] == 4
+    assert r["claims_checked"] == 6 and r["claims_verified"] == 2
+    assert r["refuted_or_insufficient_rate"] == pytest.approx(0.667, abs=0.001)
+    # `p.md` is the artifact two tasks and one unattributed run all got wrong:
+    # the row the per-task views could never have assembled.
+    worst = r["entries"][0]
+    assert worst["task_ids"] == ["38", "39", "unattributed"]
+    assert worst["refuted_or_insufficient"] == 3 and worst["claims_checked"] == 4
+
+
+async def test_a_piloted_run_that_asserted_nothing_still_lands_a_bundle_row(
+        tmp_path, monkeypatch):
+    """#713 clause 2, re-pinned at the row the rollup reads.
+
+    #945 pinned `execute()` forwarding the key and `run_task` emitting `[]`, and
+    #945's own ledger test drove seven claims end to end. What nothing pinned is
+    the case this clause names: an EMPTY list through the real adapter, the real
+    `normalize_result` and the real `record_run`. `[]` must survive as a bundle
+    whose total is 0 — "this piloted run checked nothing" — and not collapse
+    into NULL, which is the different fact "this run was never checked". The
+    rollup treats those two as `runs_with_bundle` and `runs_without_bundle`
+    respectively, so the collapse would move a gap into the clean column.
+    """
+    q = WorkQueue(tmp_path / "w.db")
+    monkeypatch.setattr(evidence, "default_root", lambda: tmp_path)
+    quiet = _pilot_artifact_text().split(f"\n```{evidence.FENCE_TAG}")[0]
+    assert autonomy._evidence_claims(quiet) == []   # the split really did remove it
+    _stub_adapter(monkeypatch, final_response=quiet, pilot=True)
+    q.enqueue(source="scheduled-task", kind="run", payload={"task_id": 38})
+
+    pool = WorkerPool(q, slots=1)
+    pool._running = True
+    worker = asyncio.create_task(pool._worker_loop("worker-0"))
+    for _ in range(60):
+        await asyncio.sleep(0.1)
+        if q.list_runs(source="scheduled-task"):
+            break
+    pool._running = False
+    worker.cancel()
+    try:
+        await worker
+    except asyncio.CancelledError:
+        pass
+
+    row = q.list_runs(source="scheduled-task")[0]
+    assert row["claims_json"] is not None, (
+        "an empty claim list must not be flattened into a missing bundle")
+    bundle = json.loads(row["claims_json"])
+    assert bundle["counts"] == {"total": 0, "verified": 0, "refuted": 0,
+                                "insufficient": 0}
+    assert bundle["refuted_or_insufficient_rate"] is None
+    # Read back the way the rollup reads it: a bundle, and a bundle with no
+    # claims in it — so it lands in `runs_with_bundle`, never in the
+    # `runs_without_bundle` count that can make a window unevaluable.
+    assert autonomy._row_claims(row) is not None
+    assert autonomy.claim_artifact_rollup([row])["runs_with_bundle"] == 1
+    assert autonomy.claim_artifact_rollup([row])["runs_without_bundle"] == 0

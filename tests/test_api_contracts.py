@@ -905,6 +905,139 @@ def test_the_dead_path_allowlist_is_exactly_the_two_named_misses():
     assert set(KNOWN_DEAD_CLIENT_PATHS) <= keys
 
 
+# ── Autonomy health — the #713 artifact rollup reaches the page ──────────────
+
+def _fm_task(dirn, task_id: int, name: str) -> None:
+    """One task file, in the shape `_parse_task_file` reads."""
+    import yaml
+
+    fm = {"type": "autonomy", "segment": "autonomy", "id": task_id,
+          "name": name, "status": "up_next", "frequency": "daily"}
+    (dirn / f"{task_id}-{name.lower().replace(' ', '-')}.md").write_text(
+        f"---\n{yaml.dump(fm, default_flow_style=False)}---\n\n"
+        "## Activity Log\n\n- run completed\n", encoding="utf-8")
+
+
+def _claim(status: str, path: str) -> dict:
+    return {"claim": f"{status} claim about {path}",
+            "check": {"kind": "file_exists", "path": path},
+            "status": status, "observed": None, "detail": ""}
+
+
+@pytest.fixture
+def health_env(tmp_path, monkeypatch):
+    """The real route over a real `WorkQueue` file holding two piloted runs.
+
+    Both tasks claim about the same artifact and one of them is refuted — the
+    cross-task pair `compute_health`'s per-task rows cannot put together, which
+    is the thing the autonomy tab needs rendered. Rows are stamped at the live
+    clock so the route's own `days` window admits them without pinning time: the
+    contract under test is which keys cross the HTTP boundary, not the arithmetic
+    of the window (`test_autonomy_health_stall_api.py` pins that one).
+    """
+    import datetime as dt
+
+    import autonomy as A
+    from app.routers import autonomy as autonomy_router
+    from workers.queue import WorkQueue
+
+    dirn = tmp_path / "autonomy"
+    dirn.mkdir()
+    monkeypatch.setattr(A, "AUTONOMY_DIR", dirn)
+    monkeypatch.setattr(autonomy_router, "_AUTONOMY_DIR", dirn)
+    _fm_task(dirn, 38, "Signals")
+    _fm_task(dirn, 39, "Knowledge Write")
+    # A third task with NO run row. Without it every declared task has a run, the
+    # route's `idle_tasks` comes back empty, and the assertion below that the
+    # evidence keys are on an idle row too is a loop over nothing — the review
+    # rung caught exactly that on attempt 1, having reproduced the payload with
+    # `tasks ['38','39'], idle_tasks []`. An idle row is the interesting case for
+    # these keys, because a task that never ran is precisely where "no verdict"
+    # and "clean" are easiest to conflate (#1401's shape, one field over).
+    _fm_task(dirn, 40, "Config")
+
+    q = WorkQueue(tmp_path / "health-rollup.db")
+    now = dt.datetime.now(dt.timezone.utc).isoformat()
+    rows = [
+        ("38", [_claim("verified", "_pipeline/reflection/signals-latest.md"),
+                _claim("refuted", "_pipeline/research/_debug/hypothesis_fail.txt")]),
+        ("39", [_claim("refuted", "_pipeline/reflection/signals-latest.md"),
+                _claim("verified", "_pipeline/reflection/signals-latest.md")]),
+    ]
+    for tid, claims in rows:
+        bundle = {"claims": claims,
+                  "verified": [c["claim"] for c in claims
+                               if c["status"] == "verified"],
+                  "gap": [c["claim"] for c in claims
+                          if c["status"] != "verified"],
+                  "counts": {"total": len(claims),
+                             "verified": sum(1 for c in claims
+                                             if c["status"] == "verified"),
+                             "refuted": sum(1 for c in claims
+                                            if c["status"] == "refuted"),
+                             "insufficient": 0},
+                  "refuted_or_insufficient_rate": 0.5}
+        q.record_run(run_id=f"run-rollup-{tid}", queue_id=None,
+                     source="scheduled-task", status="success",
+                     started_at=now, completed_at=now, duration_seconds=30.0,
+                     summary="rolled up", task_id=tid,
+                     claims_json=json.dumps(bundle))
+    monkeypatch.setattr("workers.queue.get_queue", lambda: q)
+    return q
+
+
+async def test_autonomy_health_carries_the_artifact_rollup(client, health_env):
+    """/api/autonomy/health is the only door the autonomy tab has to this data.
+
+    `compute_health` is a pure function, so its `artifacts` block can exist, be
+    correct, and never reach a browser: `agent_mcp/autonomy.py` and
+    `web/src/api.ts` both read this response, so the keys have to be in the JSON.
+    `signals-latest.md` is the case that makes the rollup worth having — #38's
+    claim about it verified and #39's was refuted, and no per-task row can show
+    the pair.
+    """
+    r = await client.get("/api/autonomy/health")
+    assert r.status_code == 200
+    body = r.json()
+
+    art = body["artifacts"]
+    # api.ts AutonomyClaimRollup.
+    assert set(art) >= {"entries", "artifacts_checked",
+                        "artifacts_with_refutations", "runs_with_bundle",
+                        "runs_without_bundle", "claims_checked",
+                        "refuted_or_insufficient_rate", "unevaluable",
+                        "per_task"}
+    assert art["artifacts_checked"] == 2
+    assert art["artifacts_with_refutations"] == 2
+    entry = art["entries"][0]
+    assert entry["path"] == "_pipeline/reflection/signals-latest.md"
+    assert set(entry["task_ids"]) == {"38", "39"}
+    assert set(entry["per_task"]) == {"38", "39"}
+    assert entry["refuted_or_insufficient"] == 1
+    assert art["unevaluable"] is False
+    assert art["refuted_or_insufficient_rate"] == 0.5
+
+    # The per-task evidence fields the autonomy tab now renders beside fail/silent.
+    # Both sets are shown to be non-empty first: a `for` over an empty list passes
+    # by construction, which is how this very assertion was vacuous at attempt 1.
+    assert {t["task_id"] for t in body["tasks"]} == {"38", "39"}
+    for t in body["tasks"]:
+        assert set(t) >= {"fail_rate", "silent_rate",
+                          "refuted_or_insufficient_rate", "runs_without_bundle",
+                          "runs_with_bundle"}
+    idle = body["idle_tasks"]
+    assert [t["task_id"] for t in idle] == ["40"], (
+        "the fixture's no-run task vanished from `idle_tasks`, so the check below "
+        "would be looping over nothing again")
+    # An idle row reports null rates and zero evidence counts: it has no runs, so
+    # it has no verdict — and the key must be PRESENT with a null, not absent, or
+    # the column renders nothing and a reader cannot tell the two apart.
+    assert idle[0]["refuted_or_insufficient_rate"] is None
+    assert idle[0]["runs_without_bundle"] == 0
+    assert idle[0]["fail_rate"] is None, (
+        "#1401: a rate on a row with zero runs is the false-clean 0.0")
+
+
 def test_the_parity_check_catches_a_dead_skill_route():
     # Positive control: the retired POST would be unmatched.
     table = _route_table()

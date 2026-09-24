@@ -16,6 +16,9 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { api, type AutonomyTask, type AutonomyHealth } from "../../api";
+import {
+  evidenceCellState, fleetEvidenceState, noBundleState,
+} from "./autonomyHealth";
 import { Button } from "@/components/ui/button";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -54,6 +57,24 @@ function HealthStrip({ health, showAll, onToggle }: {
   const rows = showAll ? health.tasks : health.tasks.slice(0, 8);
   const chip = "px-2 py-1 rounded bg-slate-500/10 text-[11px] whitespace-nowrap";
   const wastePct = f.gpu_hours > 0 ? f.wasted_hours / f.gpu_hours : 0;
+  // The three states live in `autonomyHealth.ts`, where the node runner can
+  // grade them; what is left here is which colour each one wears.
+  const evidenceCell = (t: Parameters<typeof evidenceCellState>[0]) => {
+    const s = evidenceCellState(t);
+    const tone = s.kind === "rate"
+      ? (s.bad ? "text-red-400" : "text-emerald-400")
+      : s.kind === "unevaluable" ? "text-amber-500" : "text-muted-foreground";
+    const why = s.kind === "rate" ? `${t.claims_checked ?? 0} claims checked`
+      : s.kind === "unevaluable"
+        ? "Every run in the window carried no claims bundle, so no verdict is possible"
+        : "Outside the #525 evidence pilot — no claims were checked on this task";
+    return <span className={tone} title={why}>{s.text}</span>;
+  };
+  const fleetEvidence = fleetEvidenceState(health.artifacts);
+  const fleetTone: Record<string, string> = {
+    unknown: "text-amber-400", bad: "text-red-400",
+    clean: "text-emerald-400", unchecked: "",
+  };
 
   return (
     <div className="mb-3 rounded border border-slate-500/30 bg-slate-500/5 p-2">
@@ -71,6 +92,12 @@ function HealthStrip({ health, showAll, onToggle }: {
         </span>
         {f.timeout_runs > 0 && <span className={chip}>{f.timeout_runs} timeouts</span>}
         {f.empty_runs > 0 && <span className={chip}>{f.empty_runs} empty</span>}
+        {/* Four states, and the unevaluable one must not borrow the clean
+            one's colour: a window whose runs all carried no claims bundle is a
+            window with no verdict, whatever its arithmetic would say (#713). */}
+        <span className={`${chip} ${fleetTone[fleetEvidence.tone]}`}>
+          {fleetEvidence.text}
+        </span>
         {f.failed_tasks.length > 0 && (
           <span className={`${chip} text-red-400`}>
             {f.failed_tasks.length} disabled: #{f.failed_tasks.join(", #")}
@@ -96,6 +123,8 @@ function HealthStrip({ health, showAll, onToggle }: {
               <th className="font-normal pr-2 text-right">t/o</th>
               <th className="font-normal pr-2 text-right">empty</th>
               <th className="font-normal pr-2 text-right">silent</th>
+              <th className="font-normal pr-2 text-right" title="Share of this task's verified claims that came back refuted or insufficient (#713). n/a = every run in the window carried no claims bundle; — = the task is outside the #525 pilot">refute</th>
+              <th className="font-normal pr-2 text-right" title="Runs in the window that carried no claims bundle. Read beside `refute`: a rate computed over 2 of 20 runs describes a slice nobody chose">no-bundle</th>
               <th className="font-normal pr-2 text-right">GPU-h</th>
               <th className="font-normal pr-2 text-right">wasted</th>
               <th className="font-normal pr-2 text-right">consec</th>
@@ -118,6 +147,12 @@ function HealthStrip({ health, showAll, onToggle }: {
                 <td className="pr-2 text-right tabular-nums">
                   {t.silent ? `${(t.silent_rate * 100).toFixed(0)}%` : ""}
                 </td>
+                <td className="pr-2 text-right tabular-nums">{evidenceCell(t)}</td>
+                <td className={`pr-2 text-right tabular-nums ${
+                  noBundleState(t).warn ? "text-amber-500" : ""}`}
+                    title="Runs in the window with no claims bundle">
+                  {noBundleState(t).count || ""}
+                </td>
                 <td className="pr-2 text-right tabular-nums">{fmtHours(t.gpu_hours)}</td>
                 <td className={`pr-2 text-right tabular-nums ${t.wasted_hours > 1 ? "text-red-400" : ""}`}>
                   {t.wasted_hours > 0 ? fmtHours(t.wasted_hours) : ""}
@@ -130,6 +165,41 @@ function HealthStrip({ health, showAll, onToggle }: {
           </tbody>
         </table>
       </div>
+      {/* The question the per-task table structurally cannot answer: which
+          artifact does this fleet keep misreporting about? Refutations about one
+          path are spread over every task that claimed something about it, and
+          each one only ever reached its own task's next prompt (#713). Worst
+          first, naming the tasks on both sides of it. */}
+      {health.artifacts && health.artifacts.entries.length > 0 && (
+        <div className="mt-2 border-t border-slate-500/20 pt-2">
+          <div className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+            Most misreported artifacts
+          </div>
+          <div className="space-y-1">
+            {health.artifacts.entries.slice(0, showAll ? 12 : 3).map((e) => (
+              <div key={e.path} className="flex gap-2 text-[10px]">
+                <span className="font-mono truncate max-w-[22rem]" title={e.path}>
+                  {e.path}
+                </span>
+                <span className="text-red-400 tabular-nums whitespace-nowrap">
+                  {e.refuted_or_insufficient}/{e.claims_checked} claims
+                </span>
+                <span className="text-muted-foreground whitespace-nowrap">
+                  · #{e.task_ids.join(", #")}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {/* And the rollup's own unevaluable state, printed over the list rather
+          than beside a number: when most runs carried no bundle, every entry
+          above rests on the few that did. */}
+      {health.artifacts?.unevaluable && (
+        <div className="text-[10px] text-amber-500 mt-1">
+          Artifact rollup unevaluable — {health.artifacts.unevaluable_reason}
+        </div>
+      )}
     </div>
   );
 }
