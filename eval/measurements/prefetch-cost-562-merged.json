@@ -1,0 +1,3591 @@
+{
+ "label": "merged",
+ "sources": [
+  "prefetch-cost-562-a@2026-09-24T22:20:16.612025+00:00",
+  "prefetch-cost-562-b@2026-09-24T22:56:26.523265+00:00",
+  "prefetch-cost-562-noskill-fromlog@2026-09-24T16:45Z"
+ ],
+ "configs": [
+  {
+   "model": "primary",
+   "base_url": "http://127.0.0.1:8096",
+   "system_prefix_tokens": 44843,
+   "arms": [
+    "injected",
+    "suppressed",
+    "injected_aa"
+   ],
+   "max_turns": 30,
+   "timeout_s": 900.0,
+   "concurrency": 4,
+   "seed": 562,
+   "surface": "chat",
+   "priority": 1,
+   "session_prefix": "pt-eval-562-"
+  },
+  {
+   "model": "primary",
+   "base_url": "http://127.0.0.1:8096",
+   "system_prefix_tokens": 44843,
+   "arms": [
+    "injected",
+    "suppressed",
+    "injected_aa"
+   ],
+   "max_turns": 30,
+   "timeout_s": 900.0,
+   "concurrency": 4,
+   "seed": 562,
+   "surface": "chat",
+   "priority": 1,
+   "session_prefix": "pt-eval-562-"
+  },
+  {
+   "arms": [
+    "no_skill"
+   ],
+   "renderings_from": "prefetch-cost-562-a/b",
+   "max_turns": 30,
+   "timeout_s": 900,
+   "concurrency": 4,
+   "priority": 1
+  }
+ ],
+ "summary": {
+  "n_queries": 20,
+  "cost_metric": "prefill_tokens",
+  "tuning_floors": {
+   "doc_hit_rate": 0.85,
+   "ndcg10": 0.536,
+   "source": "nightly-20260909-20260909-060104.json"
+  },
+  "arms": {
+   "injected": {
+    "n": 20,
+    "errors": 0,
+    "injected_tokens_avg": 1638.25,
+    "iterations_avg": 10.7,
+    "tool_calls_avg": 15.25,
+    "prefill_tokens_avg": 28158.85,
+    "uncached_prompt_tokens_avg": 172191.0,
+    "output_tokens_avg": 5472.1,
+    "seconds_avg": 281.21,
+    "judge_score_avg": 1.85,
+    "reached_expected_rate": 0.7,
+    "completed_rate": 1.0
+   },
+   "injected_aa": {
+    "n": 20,
+    "errors": 0,
+    "injected_tokens_avg": 1638.25,
+    "iterations_avg": 10.3,
+    "tool_calls_avg": 14.55,
+    "prefill_tokens_avg": 28645.85,
+    "uncached_prompt_tokens_avg": 136814.55,
+    "output_tokens_avg": 5763.5,
+    "seconds_avg": 213.52,
+    "judge_score_avg": 1.65,
+    "reached_expected_rate": 0.65,
+    "completed_rate": 1.0
+   },
+   "no_skill": {
+    "n": 19,
+    "errors": 2,
+    "injected_tokens_avg": 318.18,
+    "iterations_avg": 10.76,
+    "tool_calls_avg": 15.71,
+    "prefill_tokens_avg": 27229.53,
+    "uncached_prompt_tokens_avg": null,
+    "output_tokens_avg": null,
+    "seconds_avg": 411.94,
+    "judge_score_avg": 1.88,
+    "reached_expected_rate": null,
+    "completed_rate": null
+   },
+   "suppressed": {
+    "n": 20,
+    "errors": 1,
+    "injected_tokens_avg": 0.0,
+    "iterations_avg": 10.32,
+    "tool_calls_avg": 14.42,
+    "prefill_tokens_avg": 24765.42,
+    "uncached_prompt_tokens_avg": 136873.21,
+    "output_tokens_avg": 4490.05,
+    "seconds_avg": 236.01,
+    "judge_score_avg": 1.47,
+    "reached_expected_rate": 0.68,
+    "completed_rate": 1.0
+   }
+  },
+  "doc_hit_queries": 6,
+  "negative_marginal_hit_count": 5,
+  "negative_marginal_hit_count_strict": 4,
+  "net_negative_count_any": 10,
+  "contrasts": {
+   "suppressed_minus_injected": {
+    "prefill_tokens": {
+     "diff": -2977.105,
+     "lo": -7895.263,
+     "hi": 1768.105,
+     "p": 0.227,
+     "n": 19,
+     "significant": false
+    },
+    "uncached_prompt_tokens": {
+     "diff": -30686.895,
+     "lo": -88240.474,
+     "hi": 18423.895,
+     "p": 0.258,
+     "n": 19,
+     "significant": false
+    },
+    "output_tokens": {
+     "diff": -858.158,
+     "lo": -1616.579,
+     "hi": -207.0,
+     "p": 0.006,
+     "n": 19,
+     "significant": true
+    },
+    "iterations": {
+     "diff": -0.474,
+     "lo": -1.737,
+     "hi": 0.789,
+     "p": 0.502,
+     "n": 19,
+     "significant": false
+    },
+    "tool_calls": {
+     "diff": -0.947,
+     "lo": -3.105,
+     "hi": 1.211,
+     "p": 0.404,
+     "n": 19,
+     "significant": false
+    },
+    "seconds": {
+     "diff": -35.968,
+     "lo": -98.068,
+     "hi": 21.368,
+     "p": 0.235,
+     "n": 19,
+     "significant": false
+    },
+    "judge_score": {
+     "diff": -0.368,
+     "lo": -0.842,
+     "hi": 0.105,
+     "p": 0.134,
+     "n": 19,
+     "significant": false
+    }
+   },
+   "no_skill_minus_injected": {
+    "prefill_tokens": {
+     "diff": -86.412,
+     "lo": -3764.941,
+     "hi": 3438.294,
+     "p": 0.966,
+     "n": 17,
+     "significant": false
+    },
+    "iterations": {
+     "diff": 0.882,
+     "lo": -1.0,
+     "hi": 2.882,
+     "p": 0.405,
+     "n": 17,
+     "significant": false
+    },
+    "tool_calls": {
+     "diff": 1.294,
+     "lo": -1.176,
+     "hi": 3.824,
+     "p": 0.342,
+     "n": 17,
+     "significant": false
+    },
+    "seconds": {
+     "diff": 160.529,
+     "lo": 80.212,
+     "hi": 240.371,
+     "p": 0.0,
+     "n": 17,
+     "significant": true
+    },
+    "judge_score": {
+     "diff": 0.059,
+     "lo": -0.176,
+     "hi": 0.353,
+     "p": 0.928,
+     "n": 17,
+     "significant": false
+    }
+   },
+   "aa_minus_injected": {
+    "prefill_tokens": {
+     "diff": 487.0,
+     "lo": -3074.45,
+     "hi": 4337.55,
+     "p": 0.804,
+     "n": 20,
+     "significant": false
+    },
+    "uncached_prompt_tokens": {
+     "diff": -35376.45,
+     "lo": -87003.05,
+     "hi": 8521.25,
+     "p": 0.126,
+     "n": 20,
+     "significant": false
+    },
+    "output_tokens": {
+     "diff": 291.4,
+     "lo": -342.3,
+     "hi": 1070.65,
+     "p": 0.437,
+     "n": 20,
+     "significant": false
+    },
+    "iterations": {
+     "diff": -0.4,
+     "lo": -2.05,
+     "hi": 1.7,
+     "p": 0.651,
+     "n": 20,
+     "significant": false
+    },
+    "tool_calls": {
+     "diff": -0.7,
+     "lo": -2.8,
+     "hi": 1.7,
+     "p": 0.538,
+     "n": 20,
+     "significant": false
+    },
+    "seconds": {
+     "diff": -67.69,
+     "lo": -114.965,
+     "hi": -22.685,
+     "p": 0.002,
+     "n": 20,
+     "significant": true
+    },
+    "judge_score": {
+     "diff": -0.2,
+     "lo": -0.55,
+     "hi": 0.15,
+     "p": 0.311,
+     "n": 20,
+     "significant": false
+    }
+   }
+  },
+  "marginal_value_per_injected_token": -1.817,
+  "aa_noise_prefill_abs_median": 4220.5,
+  "aa_noise_prefill_abs_p90": 15369.0,
+  "negative_marginal_hit_count_beyond_noise": 1
+ },
+ "records": [
+  {
+   "id": "backlog-363",
+   "query": "tell me about backlog item 363",
+   "category": "single",
+   "expect_docs": [
+    "backlog/363-implement-tgs-rag-visited-memory-orphan-entity-bri.md",
+    "knowledge/ai/tgs-rag-bidirectional-text-graph-synergy.md"
+   ],
+   "prefetch_ms": 301,
+   "sections": {
+    "skill": 6661,
+    "vault-context": 960
+   },
+   "section_tokens": {
+    "skill": 1665,
+    "vault-context": 240
+   },
+   "injected_tokens": 1911,
+   "doc_hit": false,
+   "gold_paths": [
+    "backlog/363-implement-tgs-rag-visited-memory-orphan-entity-bri.md",
+    "knowledge/ai/tgs-rag-bidirectional-text-graph-synergy.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": 2095,
+    "judge_delta": 0,
+    "negative": true,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": true
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 1,
+     "tools": [
+      "backlog_get_task"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 43.2,
+     "error": null,
+     "prefill_tokens": 11946,
+     "prompt_tokens": 103743,
+     "cache_read_tokens": 41600,
+     "uncached_prompt_tokens": 62143,
+     "output_tokens": 1252,
+     "iterations": 2,
+     "first_prompt_tokens": 46954,
+     "injected_tokens": 1911,
+     "sections": {
+      "skill": 6661,
+      "vault-context": 960
+     },
+     "judge_score": 2,
+     "judge_why": "The answer accurately synthesizes the backlog item's status, history, technical details, and closure rationale from the provided reference notes, providing a comprehensive and correct summary."
+    },
+    "suppressed": {
+     "tool_calls": 1,
+     "tools": [
+      "backlog_get_task"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 70.8,
+     "error": null,
+     "prefill_tokens": 9851,
+     "prompt_tokens": 99549,
+     "cache_read_tokens": 83200,
+     "uncached_prompt_tokens": 16349,
+     "output_tokens": 1313,
+     "iterations": 2,
+     "first_prompt_tokens": 44855,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the backlog item's status as done/superseded, accurately summarizes the technical findings (MRR improvements, graph reranking being net-negative, and the closure rationale involving task #380) which aligns with the reference notes' activity log and context."
+    },
+    "injected_aa": {
+     "tool_calls": 1,
+     "tools": [
+      "backlog_get_task"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 42.8,
+     "error": null,
+     "prefill_tokens": 11951,
+     "prompt_tokens": 103748,
+     "cache_read_tokens": 83200,
+     "uncached_prompt_tokens": 20548,
+     "output_tokens": 1258,
+     "iterations": 2,
+     "first_prompt_tokens": 46954,
+     "injected_tokens": 1911,
+     "sections": {
+      "skill": 6661,
+      "vault-context": 960
+     },
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the item's status as 'done' (matching the frontmatter) and provides a comprehensive, substantive summary of its history, phases, and closure reasons, accurately reflecting the provided notes."
+    },
+    "no_skill": {
+     "iterations": 2,
+     "tool_calls": 1,
+     "prefill_tokens": 10186,
+     "judge_score": 2,
+     "seconds": 70.6,
+     "error": null,
+     "injected_tokens": 245,
+     "sections": {
+      "vault-context": 960
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "entity-resolution-sweep",
+   "query": "what does the entity resolution sweep skill do?",
+   "category": "single",
+   "expect_docs": [
+    "skills/entity-resolution-sweep",
+    "autonomy/48-entity-resolution"
+   ],
+   "prefetch_ms": 13,
+   "sections": {
+    "skill": 6790,
+    "facts": 580,
+    "vault-context": 576
+   },
+   "section_tokens": {
+    "facts": 145,
+    "skill": 1697,
+    "vault-context": 144
+   },
+   "injected_tokens": 1993,
+   "doc_hit": true,
+   "gold_paths": [
+    "skills/entity-resolution-sweep/SKILL.md",
+    "autonomy/48-entity-resolution-sweep.md"
+   ],
+   "marginal": {
+    "doc_hit": true,
+    "delta": 779,
+    "judge_delta": 0,
+    "negative": true,
+    "negative_marginal": true,
+    "negative_marginal_strict": true,
+    "net_negative_any": true
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 2,
+     "tools": [
+      "Read",
+      "Read"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 48.4,
+     "error": null,
+     "prefill_tokens": 4601,
+     "prompt_tokens": 96415,
+     "cache_read_tokens": 83200,
+     "uncached_prompt_tokens": 13215,
+     "output_tokens": 1181,
+     "iterations": 2,
+     "first_prompt_tokens": 46971,
+     "injected_tokens": 1993,
+     "sections": {
+      "skill": 6790,
+      "facts": 580,
+      "vault-context": 576
+     },
+     "judge_score": 2,
+     "judge_why": "The answer accurately describes the skill's purpose, mechanics, tiers, guardrails, and daily task constraints, aligning perfectly with the reference notes."
+    },
+    "suppressed": {
+     "tool_calls": 2,
+     "tools": [
+      "skills_read",
+      "Read"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 95.9,
+     "error": null,
+     "prefill_tokens": 3822,
+     "prompt_tokens": 140612,
+     "cache_read_tokens": 83200,
+     "uncached_prompt_tokens": 57412,
+     "output_tokens": 939,
+     "iterations": 3,
+     "first_prompt_tokens": 44855,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The answer accurately describes the skill's purpose, mechanism, tier classification, apply semantics, and guardrails, aligning perfectly with the reference notes."
+    },
+    "injected_aa": {
+     "tool_calls": 3,
+     "tools": [
+      "Bash",
+      "Read",
+      "Read"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 52.2,
+     "error": null,
+     "prefill_tokens": 4840,
+     "prompt_tokens": 145408,
+     "cache_read_tokens": 86400,
+     "uncached_prompt_tokens": 59008,
+     "output_tokens": 1239,
+     "iterations": 3,
+     "first_prompt_tokens": 46971,
+     "injected_tokens": 1993,
+     "sections": {
+      "skill": 6790,
+      "facts": 580,
+      "vault-context": 576
+     },
+     "judge_score": 2,
+     "judge_why": "The answer accurately synthesizes the reference notes, correctly describing the skill's purpose, tier logic, semantic gate, execution steps, and guardrails without hallucinating or contradicting the source material."
+    },
+    "no_skill": {
+     "iterations": 2,
+     "tool_calls": 1,
+     "prefill_tokens": 2615,
+     "judge_score": 2,
+     "seconds": 68.6,
+     "error": null,
+     "injected_tokens": 295,
+     "sections": {
+      "facts": 580,
+      "vault-context": 576
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "inner-voice",
+   "query": "explain the inner voice architecture",
+   "category": "single",
+   "expect_docs": [
+    "lloyd/inner_voice",
+    "inner_voice"
+   ],
+   "prefetch_ms": 11,
+   "sections": {
+    "skill": 5219,
+    "facts": 701,
+    "vault-context": 645
+   },
+   "section_tokens": {
+    "facts": 175,
+    "skill": 1304,
+    "vault-context": 161
+   },
+   "injected_tokens": 1647,
+   "doc_hit": true,
+   "gold_paths": [
+    "lloyd/inner_voice/goal_completion_prompt.md",
+    "lloyd/inner_voice/goal_extraction_prompt.md"
+   ],
+   "marginal": {
+    "doc_hit": true,
+    "delta": -13504,
+    "judge_delta": 2,
+    "negative": false,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": false
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 25,
+     "tools": [
+      "vault_read",
+      "Glob",
+      "Bash",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 299.0,
+     "error": null,
+     "prefill_tokens": 33337,
+     "prompt_tokens": 979417,
+     "cache_read_tokens": 851200,
+     "uncached_prompt_tokens": 128217,
+     "output_tokens": 6760,
+     "iterations": 15,
+     "first_prompt_tokens": 46585,
+     "injected_tokens": 1647,
+     "sections": {
+      "skill": 5219,
+      "facts": 701,
+      "vault-context": 645
+     },
+     "judge_score": 2,
+     "judge_why": "The answer provides a comprehensive and accurate explanation of the inner voice architecture, covering the prompt system, guard stack, memory, goal loop, and observability, which aligns with and expands upon the provided reference notes."
+    },
+    "suppressed": {
+     "tool_calls": 19,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Read",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 335.3,
+     "error": null,
+     "prefill_tokens": 46841,
+     "prompt_tokens": 874142,
+     "cache_read_tokens": 726400,
+     "uncached_prompt_tokens": 147742,
+     "output_tokens": 6216,
+     "iterations": 13,
+     "first_prompt_tokens": 44851,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 0,
+     "judge_why": "The answer provides a detailed technical description of an 'Inner Voice' observer system with specific implementation details (async tasks, guards, database schemas) that are completely absent from the reference notes, which only describe two specific LLM prompts for goal extraction and completion."
+    },
+    "injected_aa": {
+     "tool_calls": 18,
+     "tools": [
+      "Glob",
+      "Glob",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 229.1,
+     "error": null,
+     "prefill_tokens": 36851,
+     "prompt_tokens": 730433,
+     "cache_read_tokens": 608000,
+     "uncached_prompt_tokens": 122433,
+     "output_tokens": 7215,
+     "iterations": 11,
+     "first_prompt_tokens": 46585,
+     "injected_tokens": 1647,
+     "sections": {
+      "skill": 5219,
+      "facts": 701,
+      "vault-context": 645
+     },
+     "judge_score": 2,
+     "judge_why": "The answer provides a detailed and accurate explanation of the inner voice architecture, covering key components like the observer's inputs, the goal loop, judgment logic, and failure stances, which aligns with the provided reference notes."
+    },
+    "no_skill": {
+     "iterations": 13,
+     "tool_calls": 22,
+     "prefill_tokens": 37523,
+     "judge_score": 2,
+     "seconds": 543.0,
+     "error": null,
+     "injected_tokens": 342,
+     "sections": {
+      "facts": 701,
+      "vault-context": 645
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "vault-recall",
+   "query": "what is vault_recall and how does it work?",
+   "category": "single",
+   "expect_docs": [
+    "architecture/knowledge-graph.md",
+    "knowledge/ops/tool-reference-memory-fact-vault.md"
+   ],
+   "prefetch_ms": 9,
+   "sections": {
+    "facts": 682,
+    "vault-context": 434,
+    "skill-hint": 137
+   },
+   "section_tokens": {
+    "facts": 170,
+    "skill-hint": 34,
+    "vault-context": 108
+   },
+   "injected_tokens": 319,
+   "doc_hit": false,
+   "gold_paths": [
+    "architecture/knowledge-graph.md",
+    "knowledge/ops/tool-reference-memory-fact-vault.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": 14499,
+    "judge_delta": 0,
+    "negative": true,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": true
+   },
+   "arms": {
+    "suppressed": {
+     "tool_calls": 15,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Read",
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Grep",
+      "Grep",
+      "Read",
+      "Grep",
+      "Grep",
+      "Read"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 226.1,
+     "error": null,
+     "prefill_tokens": 28232,
+     "prompt_tokens": 674047,
+     "cache_read_tokens": 579200,
+     "uncached_prompt_tokens": 94847,
+     "output_tokens": 3743,
+     "iterations": 11,
+     "first_prompt_tokens": 44856,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies vault_recall as a combined retrieval tool that merges vault search and fact retrieval, and provides extensive, accurate technical details on its implementation (parallel legs, reranking, entity expansion) that align with the reference notes' description of it as a 'br"
+    },
+    "injected": {
+     "tool_calls": 18,
+     "tools": [
+      "Grep",
+      "Glob",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Bash",
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Bash",
+      "Read",
+      "Read"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 458.6,
+     "error": null,
+     "prefill_tokens": 42731,
+     "prompt_tokens": 858031,
+     "cache_read_tokens": 678400,
+     "uncached_prompt_tokens": 179631,
+     "output_tokens": 4995,
+     "iterations": 13,
+     "first_prompt_tokens": 45219,
+     "injected_tokens": 319,
+     "sections": {
+      "facts": 682,
+      "vault-context": 434,
+      "skill-hint": 137
+     },
+     "judge_score": 2,
+     "judge_why": "The answer provides a highly detailed and accurate technical explanation of vault_recall's architecture, parallel execution, ranking mechanisms, and configuration, which aligns with and expands upon the reference notes' description of it as a combined recall tool."
+    },
+    "injected_aa": {
+     "tool_calls": 16,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 258.4,
+     "error": null,
+     "prefill_tokens": 32171,
+     "prompt_tokens": 687237,
+     "cache_read_tokens": 582400,
+     "uncached_prompt_tokens": 104837,
+     "output_tokens": 4529,
+     "iterations": 11,
+     "first_prompt_tokens": 45219,
+     "injected_tokens": 319,
+     "sections": {
+      "facts": 682,
+      "vault-context": 434,
+      "skill-hint": 137
+     },
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies vault_recall as a combined retrieval tool that queries both the vault and knowledge graph in parallel, accurately describing its function and mechanism as defined in the reference notes."
+    },
+    "no_skill": {
+     "iterations": 12,
+     "tool_calls": 14,
+     "prefill_tokens": 29750,
+     "judge_score": 2,
+     "seconds": 258.3,
+     "error": null,
+     "injected_tokens": 319,
+     "sections": {
+      "facts": 682,
+      "vault-context": 434,
+      "skill-hint": 137
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "qmd",
+   "query": "what is QMD?",
+   "category": "single",
+   "expect_docs": [
+    "qmd"
+   ],
+   "prefetch_ms": 11,
+   "sections": {
+    "skill": 3723,
+    "facts": 508
+   },
+   "section_tokens": {
+    "facts": 127,
+    "skill": 930
+   },
+   "injected_tokens": 1064,
+   "doc_hit": true,
+   "gold_paths": [
+    "autonomy/81-qmd-index-maintenance.md"
+   ],
+   "marginal": {
+    "doc_hit": true,
+    "delta": 920,
+    "judge_delta": 0,
+    "negative": true,
+    "negative_marginal": true,
+    "negative_marginal_strict": true,
+    "net_negative_any": true
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 8,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "fact_invalidate",
+      "fact_invalidate",
+      "Bash",
+      "skills_read"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 178.6,
+     "error": null,
+     "prefill_tokens": 8830,
+     "prompt_tokens": 344100,
+     "cache_read_tokens": 259200,
+     "uncached_prompt_tokens": 84900,
+     "output_tokens": 4345,
+     "iterations": 7,
+     "first_prompt_tokens": 46045,
+     "injected_tokens": 1064,
+     "sections": {
+      "skill": 3723,
+      "facts": 508
+     },
+     "judge_score": 2,
+     "judge_why": "The assistant correctly identifies QMD as the local search and embedding backend for the memory vault, accurately describing its function, components, and role in retrieval, which aligns with the reference notes' description of it as the system powering vault retrieval and requiring index maintenanc"
+    },
+    "suppressed": {
+     "tool_calls": 13,
+     "tools": [
+      "Bash",
+      "skills_search",
+      "vault_search",
+      "vault_read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 175.7,
+     "error": null,
+     "prefill_tokens": 7910,
+     "prompt_tokens": 344071,
+     "cache_read_tokens": 262400,
+     "uncached_prompt_tokens": 81671,
+     "output_tokens": 2585,
+     "iterations": 7,
+     "first_prompt_tokens": 44851,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The assistant correctly identifies QMD as 'Query Markup Documents' and provides a detailed, accurate description of its function as a hybrid search engine (BM25 + Vector + Rerank) and its role in the vault, which aligns with the reference notes' description of it as the retrieval backend with embedd"
+    },
+    "injected_aa": {
+     "tool_calls": 5,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "fact_invalidate",
+      "fact_invalidate"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 128.0,
+     "error": null,
+     "prefill_tokens": 4484,
+     "prompt_tokens": 239553,
+     "cache_read_tokens": 214400,
+     "uncached_prompt_tokens": 25153,
+     "output_tokens": 1943,
+     "iterations": 5,
+     "first_prompt_tokens": 46045,
+     "injected_tokens": 1064,
+     "sections": {
+      "skill": 3723,
+      "facts": 508
+     },
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies QMD as the local search/embedding backend for the vault, accurately describing its function, index location, and maintenance needs, which aligns with the reference notes' description of the QMD index maintenance task."
+    },
+    "no_skill": {
+     "iterations": 7,
+     "tool_calls": 9,
+     "prefill_tokens": 21389,
+     "judge_score": 2,
+     "seconds": 212.3,
+     "error": null,
+     "injected_tokens": 132,
+     "sections": {
+      "facts": 508
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "kg-maintenance-tasks",
+   "query": "which autonomy tasks maintain the knowledge graph?",
+   "category": "multi-hop",
+   "expect_docs": [
+    "autonomy/48-",
+    "autonomy/51-",
+    "autonomy/67-",
+    "autonomy/74-",
+    "autonomy/24-"
+   ],
+   "prefetch_ms": 12,
+   "sections": {
+    "skill": 6661,
+    "facts": 811,
+    "vault-context": 917
+   },
+   "section_tokens": {
+    "facts": 202,
+    "skill": 1665,
+    "vault-context": 229
+   },
+   "injected_tokens": 2103,
+   "doc_hit": false,
+   "gold_paths": [
+    "autonomy/48-entity-resolution-sweep.md",
+    "autonomy/51-conversation-relation-linking.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": 18402,
+    "judge_delta": 0,
+    "negative": true,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": true
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 9,
+     "tools": [
+      "autonomy_tasks",
+      "Bash",
+      "Bash",
+      "Bash",
+      "autonomy_health",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 252.4,
+     "error": null,
+     "prefill_tokens": 26827,
+     "prompt_tokens": 596950,
+     "cache_read_tokens": 441600,
+     "uncached_prompt_tokens": 155350,
+     "output_tokens": 4510,
+     "iterations": 10,
+     "first_prompt_tokens": 47002,
+     "injected_tokens": 2103,
+     "sections": {
+      "skill": 6661,
+      "facts": 811,
+      "vault-context": 917
+     },
+     "judge_score": 2,
+     "judge_why": "The assistant correctly identifies the specific autonomy tasks (24, 48, 51, 67, 74, and the 42/39 chain) that maintain the knowledge graph based on the provided reference notes and general system knowledge, providing a substantive and accurate breakdown."
+    },
+    "suppressed": {
+     "tool_calls": 6,
+     "tools": [
+      "autonomy_tasks",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 172.9,
+     "error": null,
+     "prefill_tokens": 8425,
+     "prompt_tokens": 339975,
+     "cache_read_tokens": 259200,
+     "uncached_prompt_tokens": 80775,
+     "output_tokens": 3262,
+     "iterations": 7,
+     "first_prompt_tokens": 44854,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the specific autonomy tasks (e.g., #48, #51, #24) that maintain the knowledge graph, accurately describing their functions and roles based on the provided reference notes."
+    },
+    "injected_aa": {
+     "tool_calls": 5,
+     "tools": [
+      "autonomy_tasks",
+      "autonomy_health",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 158.3,
+     "error": null,
+     "prefill_tokens": 22448,
+     "prompt_tokens": 305540,
+     "cache_read_tokens": 243200,
+     "uncached_prompt_tokens": 62340,
+     "output_tokens": 2882,
+     "iterations": 5,
+     "first_prompt_tokens": 47002,
+     "injected_tokens": 2103,
+     "sections": {
+      "skill": 6661,
+      "facts": 811,
+      "vault-context": 917
+     },
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the specific autonomy tasks (e.g., #48, #51, #60, #67, #74, #84) that maintain the knowledge graph, accurately describing their functions and cadences based on the provided reference notes and implied context."
+    },
+    "no_skill": {
+     "iterations": 8,
+     "tool_calls": 7,
+     "prefill_tokens": 9933,
+     "judge_score": 2,
+     "seconds": 266.3,
+     "error": null,
+     "injected_tokens": 438,
+     "sections": {
+      "facts": 811,
+      "vault-context": 917
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "lloyd-vllm-rel",
+   "query": "how does Lloyd use vLLM?",
+   "category": "multi-hop",
+   "expect_docs": [
+    "knowledge/llm-serving/vllm-models-8096.md",
+    "knowledge/lloyd-vllm-sidecar-sleep-mode.md"
+   ],
+   "prefetch_ms": 10,
+   "sections": {
+    "skill": 6983,
+    "facts": 693
+   },
+   "section_tokens": {
+    "facts": 173,
+    "skill": 1745
+   },
+   "injected_tokens": 1925,
+   "doc_hit": false,
+   "gold_paths": [
+    "knowledge/llm-serving/vllm-models-8096.md",
+    "knowledge/lloyd-vllm-sidecar-sleep-mode.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": -1015,
+    "judge_delta": 2,
+    "negative": false,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": false
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 22,
+     "tools": [
+      "Grep",
+      "vault_recall",
+      "Grep",
+      "Read",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 291.9,
+     "error": null,
+     "prefill_tokens": 30213,
+     "prompt_tokens": 831310,
+     "cache_read_tokens": 736000,
+     "uncached_prompt_tokens": 95310,
+     "output_tokens": 7051,
+     "iterations": 13,
+     "first_prompt_tokens": 46999,
+     "injected_tokens": 1925,
+     "sections": {
+      "skill": 6983,
+      "facts": 693
+     },
+     "judge_score": 2,
+     "judge_why": "The answer provides a comprehensive, technically accurate description of how Lloyd uses vLLM (as a local inference substrate with specific features like priority scheduling, prefix caching, and metrics integration), correctly identifying that the provided reference notes are stale and contradicting "
+    },
+    "suppressed": {
+     "tool_calls": 24,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 346.1,
+     "error": null,
+     "prefill_tokens": 31228,
+     "prompt_tokens": 853416,
+     "cache_read_tokens": 643200,
+     "uncached_prompt_tokens": 210216,
+     "output_tokens": 6522,
+     "iterations": 14,
+     "first_prompt_tokens": 44854,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 0,
+     "judge_why": "The answer contains significant hallucinations and contradicts the reference notes, such as claiming the secondary model is llama.cpp (notes say vLLM/Gemma), citing non-existent models (Qwen3.8-Flash-Next, DiffusionGemma) and ports (8010/8011), and ignoring the actual models and configurations descr"
+    },
+    "injected_aa": {
+     "tool_calls": 27,
+     "tools": [
+      "Grep",
+      "vault_search",
+      "Read",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "fact_get",
+      "Bash",
+      "Bash",
+      "fact_invalidate",
+      "fact_invalidate"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 345.5,
+     "error": null,
+     "prefill_tokens": 51518,
+     "prompt_tokens": 1153907,
+     "cache_read_tokens": 979200,
+     "uncached_prompt_tokens": 174707,
+     "output_tokens": 6915,
+     "iterations": 16,
+     "first_prompt_tokens": 46999,
+     "injected_tokens": 1925,
+     "sections": {
+      "skill": 6983,
+      "facts": 693
+     },
+     "judge_score": 0,
+     "judge_why": "The answer contradicts the reference notes by claiming the secondary model (port 8091) runs on llama.cpp and the primary is Qwen3.8-Flash-Next, whereas the notes state the secondary is Gemma-4-26B on vLLM and the primary is Qwen3.6-35B."
+    },
+    "no_skill": {
+     "iterations": 9,
+     "tool_calls": 15,
+     "prefill_tokens": 33142,
+     "judge_score": 2,
+     "seconds": 426.1,
+     "error": null,
+     "injected_tokens": 179,
+     "sections": {
+      "facts": 693
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "harness-tools",
+   "query": "how does the agent harness dispatch tool calls?",
+   "category": "multi-hop",
+   "expect_docs": [
+    "architecture/inner-voice.md",
+    "knowledge/ai-agents/claude-managed-agents-api-port-to-lloyd.md"
+   ],
+   "prefetch_ms": 16,
+   "sections": {
+    "skill": 6661,
+    "facts": 853,
+    "vault-context": 955
+   },
+   "section_tokens": {
+    "facts": 213,
+    "skill": 1665,
+    "vault-context": 238
+   },
+   "injected_tokens": 2123,
+   "doc_hit": false,
+   "gold_paths": [
+    "architecture/inner-voice.md",
+    "knowledge/ai-agents/claude-managed-agents-api-port-to-lloyd.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": 11867,
+    "judge_delta": 0,
+    "negative": true,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": true
+   },
+   "arms": {
+    "suppressed": {
+     "tool_calls": 22,
+     "tools": [
+      "Bash",
+      "graph_hubs",
+      "Bash",
+      "graph_explain",
+      "Bash",
+      "Read",
+      "Read",
+      "Read",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 366.4,
+     "error": null,
+     "prefill_tokens": 31641,
+     "prompt_tokens": 922227,
+     "cache_read_tokens": 825600,
+     "uncached_prompt_tokens": 96627,
+     "output_tokens": 4570,
+     "iterations": 15,
+     "first_prompt_tokens": 44855,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The answer provides a detailed and accurate technical explanation of the tool call dispatch mechanism, covering batch decisions, pre-dispatch gates, execution, and post-processing, which aligns with the architectural details implied by the reference notes."
+    },
+    "injected": {
+     "tool_calls": 25,
+     "tools": [
+      "Bash",
+      "graph_hubs",
+      "Bash",
+      "graph_explain",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Read",
+      "Read",
+      "Read",
+      "Bash",
+      "Read",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 469.1,
+     "error": null,
+     "prefill_tokens": 43508,
+     "prompt_tokens": 1114881,
+     "cache_read_tokens": 870400,
+     "uncached_prompt_tokens": 244481,
+     "output_tokens": 5293,
+     "iterations": 16,
+     "first_prompt_tokens": 47351,
+     "injected_tokens": 2123,
+     "sections": {
+      "skill": 6661,
+      "facts": 853,
+      "vault-context": 955
+     },
+     "judge_score": 2,
+     "judge_why": "The answer provides a detailed, accurate, and substantive explanation of the tool call dispatch mechanism (pre-dispatch gates, execution, parallelism) that aligns with the architectural context provided in the reference notes."
+    },
+    "injected_aa": {
+     "tool_calls": 22,
+     "tools": [
+      "Bash",
+      "graph_status",
+      "Bash",
+      "graph_hubs",
+      "Bash",
+      "Bash",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Read",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 166.0,
+     "error": null,
+     "prefill_tokens": 28139,
+     "prompt_tokens": 725037,
+     "cache_read_tokens": 582400,
+     "uncached_prompt_tokens": 142637,
+     "output_tokens": 5372,
+     "iterations": 12,
+     "first_prompt_tokens": 47351,
+     "injected_tokens": 2123,
+     "sections": {
+      "skill": 6661,
+      "facts": 853,
+      "vault-context": 955
+     },
+     "judge_score": 2,
+     "judge_why": "The answer provides a detailed, accurate, and substantive explanation of the tool call dispatch mechanism (including parallel/sequential logic, gating, execution, and error handling) that aligns with the architectural context implied by the reference notes."
+    },
+    "no_skill": {
+     "iterations": 17,
+     "tool_calls": 27,
+     "prefill_tokens": 40987,
+     "judge_score": 2,
+     "seconds": 763.0,
+     "error": null,
+     "injected_tokens": 458,
+     "sections": {
+      "facts": 853,
+      "vault-context": 955
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "nightly-reflection",
+   "query": "what skills are involved in nightly reflection?",
+   "category": "multi-hop",
+   "expect_docs": [
+    "autonomy/39-",
+    "autonomy/42-",
+    "nightly-reflection"
+   ],
+   "prefetch_ms": 10,
+   "sections": {
+    "skill": 6694,
+    "facts": 483,
+    "vault-context": 738
+   },
+   "section_tokens": {
+    "facts": 120,
+    "skill": 1673,
+    "vault-context": 184
+   },
+   "injected_tokens": 1985,
+   "doc_hit": true,
+   "gold_paths": [
+    "autonomy/39-nightly-reflection-knowledge-write.md",
+    "autonomy/42-nightly-reflection-knowledge-analysis.md"
+   ],
+   "marginal": {
+    "doc_hit": true,
+    "delta": 10005,
+    "judge_delta": 0,
+    "negative": true,
+    "negative_marginal": true,
+    "negative_marginal_strict": true,
+    "net_negative_any": true
+   },
+   "arms": {
+    "suppressed": {
+     "tool_calls": 17,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Bash",
+      "autonomy_tasks",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 359.5,
+     "error": null,
+     "prefill_tokens": 11468,
+     "prompt_tokens": 630146,
+     "cache_read_tokens": 547200,
+     "uncached_prompt_tokens": 82946,
+     "output_tokens": 4111,
+     "iterations": 12,
+     "first_prompt_tokens": 44854,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the four specific skills involved in the nightly reflection chain (signals, knowledge-analysis, knowledge-write, config) and accurately describes their roles and relationships based on the provided reference notes."
+    },
+    "injected": {
+     "tool_calls": 10,
+     "tools": [
+      "skills_search",
+      "autonomy_tasks",
+      "skills_read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 199.5,
+     "error": null,
+     "prefill_tokens": 21473,
+     "prompt_tokens": 416377,
+     "cache_read_tokens": 345600,
+     "uncached_prompt_tokens": 70777,
+     "output_tokens": 3296,
+     "iterations": 7,
+     "first_prompt_tokens": 47019,
+     "injected_tokens": 1985,
+     "sections": {
+      "skill": 6694,
+      "facts": 483,
+      "vault-context": 738
+     },
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the specific skills involved in the nightly reflection pipeline (Signals, Knowledge Analysis, Knowledge Write, Config) and accurately describes their roles and dependencies based on the reference notes."
+    },
+    "injected_aa": {
+     "tool_calls": 10,
+     "tools": [
+      "Bash",
+      "skills_search",
+      "skills_read",
+      "Bash",
+      "autonomy_tasks",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 181.6,
+     "error": null,
+     "prefill_tokens": 14135,
+     "prompt_tokens": 438383,
+     "cache_read_tokens": 390400,
+     "uncached_prompt_tokens": 47983,
+     "output_tokens": 3221,
+     "iterations": 8,
+     "first_prompt_tokens": 47019,
+     "injected_tokens": 1985,
+     "sections": {
+      "skill": 6694,
+      "facts": 483,
+      "vault-context": 738
+     },
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the specific skills involved in the nightly reflection pipeline (signals, knowledge-analysis, knowledge-write, config) and the parallel skills ladder, accurately reflecting the structure described in the reference notes."
+    },
+    "no_skill": {
+     "iterations": 8,
+     "tool_calls": 11,
+     "prefill_tokens": 16651,
+     "judge_score": 2,
+     "seconds": 244.8,
+     "error": null,
+     "injected_tokens": 311,
+     "sections": {
+      "facts": 483,
+      "vault-context": 738
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "qwen38-local-serving",
+   "query": "how do we serve a hybrid linear-attention model on a single 24GB GPU?",
+   "category": "multi-hop",
+   "expect_docs": [
+    "hybrid-gdn-qsa-inference-serving",
+    "qwen38-27b-local-24gb",
+    "qwen38-flash-next-engram"
+   ],
+   "prefetch_ms": 9,
+   "sections": {
+    "skill": 4541,
+    "facts": 670,
+    "vault-context": 951
+   },
+   "section_tokens": {
+    "facts": 167,
+    "skill": 1135,
+    "vault-context": 237
+   },
+   "injected_tokens": 1547,
+   "doc_hit": false,
+   "gold_paths": [
+    "knowledge/research/2026-09-03-hybrid-gdn-qsa-inference-serving.md",
+    "knowledge/research/2026-08-20-qwen38-27b-local-24gb.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": -14748,
+    "judge_delta": 2,
+    "negative": false,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": false
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 13,
+     "tools": [
+      "Read",
+      "Read",
+      "Bash",
+      "vault_search",
+      "Bash",
+      "Read",
+      "Bash",
+      "Grep",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 456.6,
+     "error": null,
+     "prefill_tokens": 36069,
+     "prompt_tokens": 596178,
+     "cache_read_tokens": 336000,
+     "uncached_prompt_tokens": 260178,
+     "output_tokens": 7826,
+     "iterations": 9,
+     "first_prompt_tokens": 46542,
+     "injected_tokens": 1547,
+     "sections": {
+      "skill": 4541,
+      "facts": 670,
+      "vault-context": 951
+     },
+     "judge_score": 2,
+     "judge_why": "The answer accurately synthesizes the reference notes, correctly identifying the specific model (Qwen3.8-27B), the serving stack (patched vLLM), quantization strategies (W4A16), and hybrid-specific constraints (recurrent state caching, prefix cache correctness) required to serve the model on a 24GB "
+    },
+    "suppressed": {
+     "tool_calls": 24,
+     "tools": [
+      "vault_search",
+      "skills_search",
+      "vault_read",
+      "skills_read",
+      "Bash",
+      "vault_search",
+      "vault_read",
+      "vault_read",
+      "vault_read",
+      "vault_read",
+      "Grep",
+      "vault_search",
+      "vault_read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "http_fetch",
+      "http_fetch",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": null,
+     "completed": false,
+     "reached_expected": true,
+     "seconds": 900.0,
+     "error": "timeout after 900s",
+     "prefill_tokens": 50817,
+     "prompt_tokens": 1221389,
+     "cache_read_tokens": 617600,
+     "uncached_prompt_tokens": 603789,
+     "output_tokens": 16385,
+     "iterations": 16,
+     "first_prompt_tokens": 44865,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 0,
+     "judge_why": "The assistant provided no actual answer, only a placeholder statement indicating it was reading the answer."
+    },
+    "injected_aa": {
+     "tool_calls": 12,
+     "tools": [
+      "vault_read",
+      "vault_read",
+      "Bash",
+      "vault_search",
+      "Grep",
+      "vault_read",
+      "vault_read",
+      "vault_read",
+      "http_fetch",
+      "vault_read",
+      "http_fetch",
+      "memory_read"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 333.6,
+     "error": null,
+     "prefill_tokens": 46332,
+     "prompt_tokens": 470876,
+     "cache_read_tokens": 310400,
+     "uncached_prompt_tokens": 160476,
+     "output_tokens": 8246,
+     "iterations": 7,
+     "first_prompt_tokens": 46542,
+     "injected_tokens": 1547,
+     "sections": {
+      "skill": 4541,
+      "facts": 670,
+      "vault-context": 951
+     },
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the specific model (Qwen3.8-27B) and serving strategy (hybrid layout reducing KV cache, int4 weights, specific vLLM patches) from the reference notes, providing accurate technical details on memory accounting and configuration."
+    },
+    "no_skill": {
+     "iterations": 11,
+     "tool_calls": 21,
+     "prefill_tokens": 46689,
+     "judge_score": 0,
+     "seconds": 900.0,
+     "error": "timeout after 900s",
+     "injected_tokens": 411,
+     "sections": {
+      "facts": 670,
+      "vault-context": 951
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "tgs-rag-state",
+   "query": "what's the current state of TGS-RAG research?",
+   "category": "recent",
+   "expect_docs": [
+    "tgs-rag",
+    "neuro-symbolic-rag",
+    "363-implement-tgs-rag"
+   ],
+   "prefetch_ms": 260,
+   "sections": {
+    "skill": 4884,
+    "facts": 657,
+    "vault-context": 811
+   },
+   "section_tokens": {
+    "facts": 164,
+    "skill": 1221,
+    "vault-context": 202
+   },
+   "injected_tokens": 1594,
+   "doc_hit": true,
+   "gold_paths": [
+    "backlog/363-implement-tgs-rag-visited-memory-orphan-entity-bri.md",
+    "knowledge/ai/neuro-symbolic-rag-multi-hop-2026.md"
+   ],
+   "marginal": {
+    "doc_hit": true,
+    "delta": 28589,
+    "judge_delta": 2,
+    "negative": true,
+    "negative_marginal": true,
+    "negative_marginal_strict": false,
+    "net_negative_any": false
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 29,
+     "tools": [
+      "fact_get",
+      "vault_recall",
+      "research_list",
+      "vault_read",
+      "Bash",
+      "Bash",
+      "backlog_get_task",
+      "Read",
+      "Bash",
+      "backlog_get_task",
+      "Bash",
+      "backlog_get_task",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 551.9,
+     "error": null,
+     "prefill_tokens": 76627,
+     "prompt_tokens": 1493627,
+     "cache_read_tokens": 723200,
+     "uncached_prompt_tokens": 770427,
+     "output_tokens": 12570,
+     "iterations": 15,
+     "first_prompt_tokens": 46627,
+     "injected_tokens": 1594,
+     "sections": {
+      "skill": 4884,
+      "facts": 657,
+      "vault-context": 811
+     },
+     "judge_score": 2,
+     "judge_why": "The assistant provides a highly detailed, accurate, and substantive answer that correctly synthesizes the status of TGS-RAG (closed/superseded), the timeline of events, and the current state of the codebase and knowledge graph, aligning perfectly with the reference notes and adding valuable context."
+    },
+    "suppressed": {
+     "tool_calls": 18,
+     "tools": [
+      "vault_search",
+      "fact_get",
+      "vault_read",
+      "backlog_get_task",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "research_list",
+      "Bash",
+      "http_fetch",
+      "Bash",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 276.2,
+     "error": null,
+     "prefill_tokens": 48038,
+     "prompt_tokens": 938560,
+     "cache_read_tokens": 582400,
+     "uncached_prompt_tokens": 356160,
+     "output_tokens": 6577,
+     "iterations": 12,
+     "first_prompt_tokens": 44858,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 0,
+     "judge_why": "The assistant provided no actual answer, only a preamble indicating it would look for information, failing to address the user's question about the current state of TGS-RAG research."
+    },
+    "injected_aa": {
+     "tool_calls": 22,
+     "tools": [
+      "fact_get",
+      "vault_recall",
+      "research_list",
+      "vault_read",
+      "backlog_get_task",
+      "Grep",
+      "backlog_get_task",
+      "backlog_get_task",
+      "Bash",
+      "backlog_get_task",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "http_search",
+      "http_fetch",
+      "Bash",
+      "Bash",
+      "fact_invalidate",
+      "fact_invalidate"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 298.4,
+     "error": null,
+     "prefill_tokens": 72881,
+     "prompt_tokens": 1241546,
+     "cache_read_tokens": 883200,
+     "uncached_prompt_tokens": 358346,
+     "output_tokens": 13377,
+     "iterations": 13,
+     "first_prompt_tokens": 46627,
+     "injected_tokens": 1594,
+     "sections": {
+      "skill": 4884,
+      "facts": 657,
+      "vault-context": 811
+     },
+     "judge_score": 2,
+     "judge_why": "The assistant provides a highly detailed, accurate, and substantive answer that correctly synthesizes the current state of TGS-RAG research, including the status of the external paper, the internal implementation details, experimental results, and recent infrastructure changes, all consistent with t"
+    },
+    "no_skill": {
+     "iterations": 14,
+     "tool_calls": 28,
+     "prefill_tokens": 78439,
+     "judge_score": 2,
+     "seconds": 755.6,
+     "error": null,
+     "injected_tokens": 373,
+     "sections": {
+      "facts": 657,
+      "vault-context": 811
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "graph-quality",
+   "query": "what's the noise floor in our relationship graph?",
+   "category": "recent",
+   "expect_docs": [
+    "skills/kg-mention-classifier/SKILL.md",
+    "autonomy/74-kg-mention-classifier.md"
+   ],
+   "prefetch_ms": 8,
+   "sections": {
+    "skill": 6665,
+    "vault-context": 1051
+   },
+   "section_tokens": {
+    "skill": 1666,
+    "vault-context": 262
+   },
+   "injected_tokens": 1935,
+   "doc_hit": false,
+   "gold_paths": [
+    "skills/kg-mention-classifier/SKILL.md",
+    "autonomy/74-kg-mention-classifier.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": -694,
+    "judge_delta": 0,
+    "negative": false,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": false
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 14,
+     "tools": [
+      "skills_read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "autonomy_tasks",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 269.9,
+     "error": null,
+     "prefill_tokens": 13382,
+     "prompt_tokens": 682794,
+     "cache_read_tokens": 524800,
+     "uncached_prompt_tokens": 157994,
+     "output_tokens": 6556,
+     "iterations": 13,
+     "first_prompt_tokens": 46897,
+     "injected_tokens": 1935,
+     "sections": {
+      "skill": 6665,
+      "vault-context": 1051
+     },
+     "judge_score": 2,
+     "judge_why": "The answer provides a specific, quantitative noise floor (84.4%) with detailed breakdowns and context that aligns with the reference notes' description of the 'mentions' edges as the noise floor and the classifier's role in reducing it."
+    },
+    "suppressed": {
+     "tool_calls": 19,
+     "tools": [
+      "Bash",
+      "vault_search",
+      "Bash",
+      "vault_read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "skills_read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 286.5,
+     "error": null,
+     "prefill_tokens": 14076,
+     "prompt_tokens": 819145,
+     "cache_read_tokens": 620800,
+     "uncached_prompt_tokens": 198345,
+     "output_tokens": 6934,
+     "iterations": 16,
+     "first_prompt_tokens": 44856,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The assistant provides a highly detailed, accurate, and substantive answer that correctly identifies the noise floor metrics (84.4% untyped, 92% unjudged) and contextualizes them with specific data points and structural consequences consistent with the reference notes."
+    },
+    "injected_aa": {
+     "tool_calls": 12,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "autonomy_tasks",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 190.3,
+     "error": null,
+     "prefill_tokens": 11859,
+     "prompt_tokens": 620389,
+     "cache_read_tokens": 553600,
+     "uncached_prompt_tokens": 66789,
+     "output_tokens": 6812,
+     "iterations": 12,
+     "first_prompt_tokens": 46897,
+     "injected_tokens": 1935,
+     "sections": {
+      "skill": 6665,
+      "vault-context": 1051
+     },
+     "judge_score": 2,
+     "judge_why": "The answer provides a detailed, data-driven breakdown of the noise floor (distinguishing between un-judged backlog and genuine noise) and correctly identifies the mechanism (mentions edges vs. typed edges) described in the reference notes, even though the specific live statistics are not in the stat"
+    }
+   }
+  },
+  {
+   "id": "classifier-v4",
+   "query": "how does the v4 mention classifier decide what to upgrade?",
+   "category": "technical",
+   "expect_docs": [
+    "knowledge/2026-05-04-knowledge-graph-v4-classifier-audit.md",
+    "skills/kg-mention-classifier/SKILL.md"
+   ],
+   "prefetch_ms": 9,
+   "sections": {
+    "skill": 6669,
+    "facts": 794,
+    "vault-context": 979
+   },
+   "section_tokens": {
+    "facts": 198,
+    "skill": 1667,
+    "vault-context": 244
+   },
+   "injected_tokens": 2117,
+   "doc_hit": false,
+   "gold_paths": [
+    "knowledge/2026-05-04-knowledge-graph-v4-classifier-audit.md",
+    "skills/kg-mention-classifier/SKILL.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": -943,
+    "judge_delta": 0,
+    "negative": false,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": false
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 7,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Grep",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 148.4,
+     "error": null,
+     "prefill_tokens": 25767,
+     "prompt_tokens": 363205,
+     "cache_read_tokens": 310400,
+     "uncached_prompt_tokens": 52805,
+     "output_tokens": 3638,
+     "iterations": 6,
+     "first_prompt_tokens": 47112,
+     "injected_tokens": 2117,
+     "sections": {
+      "skill": 6669,
+      "facts": 794,
+      "vault-context": 979
+     },
+     "judge_score": 2,
+     "judge_why": "The answer accurately synthesizes the decision logic from the reference notes, correctly identifying the eligibility criteria (active, mentions, extracted), the classifier's internal gates (quote verification, direction checks), and the applier's constraints (confidence threshold, protected pairs), "
+    },
+    "suppressed": {
+     "tool_calls": 7,
+     "tools": [
+      "skills_read",
+      "Grep",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 81.8,
+     "error": null,
+     "prefill_tokens": 26710,
+     "prompt_tokens": 413840,
+     "cache_read_tokens": 355200,
+     "uncached_prompt_tokens": 58640,
+     "output_tokens": 2378,
+     "iterations": 7,
+     "first_prompt_tokens": 44858,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The answer accurately synthesizes the decision logic from the reference notes, correctly identifying the eligibility filters, the specific gates (hallucination, role, direction) that determine the classifier's verdict, and the confidence threshold required for the applier to upgrade the edge."
+    },
+    "injected_aa": {
+     "tool_calls": 6,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 197.4,
+     "error": null,
+     "prefill_tokens": 34814,
+     "prompt_tokens": 322494,
+     "cache_read_tokens": 150400,
+     "uncached_prompt_tokens": 172094,
+     "output_tokens": 4102,
+     "iterations": 5,
+     "first_prompt_tokens": 47112,
+     "injected_tokens": 2117,
+     "sections": {
+      "skill": 6669,
+      "facts": 794,
+      "vault-context": 979
+     },
+     "judge_score": 2,
+     "judge_why": "The answer provides a highly detailed and accurate explanation of the v4 classifier's decision process, correctly identifying the candidate filtering, the two-stage LLM judgment with specific guardrails (quote verification, direction checks), and the final application logic (confidence threshold, de"
+    },
+    "no_skill": {
+     "iterations": 8,
+     "tool_calls": 10,
+     "prefill_tokens": 24365,
+     "judge_score": 2,
+     "seconds": 199.0,
+     "error": null,
+     "injected_tokens": 449,
+     "sections": {
+      "facts": 794,
+      "vault-context": 979
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "godnode-threshold",
+   "query": "what's the FACT_GODNODE_THRESHOLD and why does it exist?",
+   "category": "technical",
+   "expect_docs": [
+    "architecture/knowledge-graph.md",
+    "knowledge/2026-05-04-knowledge-graph-edge-audit.md"
+   ],
+   "prefetch_ms": 9,
+   "sections": {
+    "vault-context": 1124,
+    "skill-hint": 137
+   },
+   "section_tokens": {
+    "skill-hint": 34,
+    "vault-context": 281
+   },
+   "injected_tokens": 321,
+   "doc_hit": false,
+   "gold_paths": [
+    "architecture/knowledge-graph.md",
+    "knowledge/2026-05-04-knowledge-graph-edge-audit.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": 5229,
+    "judge_delta": 2,
+    "negative": true,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": false
+   },
+   "arms": {
+    "suppressed": {
+     "tool_calls": 8,
+     "tools": [
+      "Grep",
+      "Read",
+      "Read",
+      "Grep",
+      "Grep",
+      "Read",
+      "Read",
+      "Read"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 133.5,
+     "error": null,
+     "prefill_tokens": 11796,
+     "prompt_tokens": 358318,
+     "cache_read_tokens": 230400,
+     "uncached_prompt_tokens": 127918,
+     "output_tokens": 2540,
+     "iterations": 7,
+     "first_prompt_tokens": 44860,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 0,
+     "judge_why": "The reference notes do not contain the constant FACT_GODNODE_THRESHOLD, its value, or the specific code locations and performance metrics cited in the answer, making the answer unverifiable and likely hallucinated relative to the provided ground truth."
+    },
+    "injected": {
+     "tool_calls": 12,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 119.5,
+     "error": null,
+     "prefill_tokens": 17025,
+     "prompt_tokens": 444064,
+     "cache_read_tokens": 336000,
+     "uncached_prompt_tokens": 108064,
+     "output_tokens": 3356,
+     "iterations": 8,
+     "first_prompt_tokens": 45205,
+     "injected_tokens": 321,
+     "sections": {
+      "vault-context": 1124,
+      "skill-hint": 137
+     },
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the constant value (50) and provides a detailed, substantive explanation of its purpose (preventing retrieval pollution and O(n^2) contradiction scan costs) that aligns with the architectural context of the knowledge graph described in the notes."
+    },
+    "injected_aa": {
+     "tool_calls": 14,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 116.9,
+     "error": null,
+     "prefill_tokens": 13801,
+     "prompt_tokens": 539771,
+     "cache_read_tokens": 441600,
+     "uncached_prompt_tokens": 98171,
+     "output_tokens": 3810,
+     "iterations": 10,
+     "first_prompt_tokens": 45205,
+     "injected_tokens": 321,
+     "sections": {
+      "vault-context": 1124,
+      "skill-hint": 137
+     },
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the threshold value (50), its location, and provides a detailed, substantive explanation of its two primary purposes (recall filtering and contradiction scan performance) with specific historical context and metrics, which aligns with the 'ground truth' nature of the "
+    },
+    "no_skill": {
+     "iterations": 19,
+     "tool_calls": 24,
+     "prefill_tokens": 16500,
+     "judge_score": 2,
+     "seconds": 583.7,
+     "error": null,
+     "injected_tokens": 321,
+     "sections": {
+      "vault-context": 1124,
+      "skill-hint": 137
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "relationships-location",
+   "query": "where is the relationships index stored?",
+   "category": "technical",
+   "expect_docs": [
+    "architecture/knowledge-graph.md",
+    "architecture/memory.md"
+   ],
+   "prefetch_ms": 11,
+   "sections": {
+    "skill": 5898,
+    "facts": 430,
+    "vault-context": 858
+   },
+   "section_tokens": {
+    "facts": 107,
+    "skill": 1474,
+    "vault-context": 214
+   },
+   "injected_tokens": 1803,
+   "doc_hit": false,
+   "gold_paths": [
+    "architecture/knowledge-graph.md",
+    "architecture/memory.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": -16758,
+    "judge_delta": 0,
+    "negative": false,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": false
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 11,
+     "tools": [
+      "Grep",
+      "Bash",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "fact_invalidate"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 173.7,
+     "error": null,
+     "prefill_tokens": 8421,
+     "prompt_tokens": 454570,
+     "cache_read_tokens": 409600,
+     "uncached_prompt_tokens": 44970,
+     "output_tokens": 2478,
+     "iterations": 9,
+     "first_prompt_tokens": 46898,
+     "injected_tokens": 1803,
+     "sections": {
+      "skill": 5898,
+      "facts": 430,
+      "vault-context": 858
+     },
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies that the relationships index is stored in a SQLite file (kg.sqlite) within the vault-derived pipeline, accurately reflecting the ground truth that the old JSON file is retired and the SQLite store is the current source of truth."
+    },
+    "suppressed": {
+     "tool_calls": 15,
+     "tools": [
+      "Grep",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Read",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 226.5,
+     "error": null,
+     "prefill_tokens": 25179,
+     "prompt_tokens": 570034,
+     "cache_read_tokens": 460800,
+     "uncached_prompt_tokens": 109234,
+     "output_tokens": 3166,
+     "iterations": 10,
+     "first_prompt_tokens": 44853,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the current storage location (kg.sqlite) and the derived JSON indexes, accurately reflecting the migration from the old JSON files mentioned in the reference notes."
+    },
+    "injected_aa": {
+     "tool_calls": 10,
+     "tools": [
+      "Bash",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 68.4,
+     "error": null,
+     "prefill_tokens": 8565,
+     "prompt_tokens": 404344,
+     "cache_read_tokens": 320000,
+     "uncached_prompt_tokens": 84344,
+     "output_tokens": 2978,
+     "iterations": 8,
+     "first_prompt_tokens": 46898,
+     "injected_tokens": 1803,
+     "sections": {
+      "skill": 5898,
+      "facts": 430,
+      "vault-context": 858
+     },
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the three distinct relationship indexes (SQLite edges, derived JSON, and typed JSON) with their specific paths, accurately reflecting the architecture described in the notes and providing substantive detail on their current state and ownership."
+    },
+    "no_skill": {
+     "iterations": 13,
+     "tool_calls": 17,
+     "prefill_tokens": 11451,
+     "judge_score": 2,
+     "seconds": 417.9,
+     "error": null,
+     "injected_tokens": 328,
+     "sections": {
+      "facts": 430,
+      "vault-context": 858
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "memory-persistence",
+   "query": "how does Lloyd remember things across sessions?",
+   "category": "fuzzy",
+   "expect_docs": [
+    "architecture/memory.md",
+    "skills/periodic-memory-capture-lloyd/SKILL.md"
+   ],
+   "prefetch_ms": 11,
+   "sections": {
+    "skill": 6779,
+    "facts": 737,
+    "vault-context": 798
+   },
+   "section_tokens": {
+    "facts": 184,
+    "skill": 1694,
+    "vault-context": 199
+   },
+   "injected_tokens": 2085,
+   "doc_hit": false,
+   "gold_paths": [
+    "architecture/memory.md",
+    "skills/periodic-memory-capture-lloyd/SKILL.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": 7318,
+    "judge_delta": 0,
+    "negative": true,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": true
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 17,
+     "tools": [
+      "Bash",
+      "vault_search",
+      "Read",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 312.5,
+     "error": null,
+     "prefill_tokens": 26093,
+     "prompt_tokens": 678751,
+     "cache_read_tokens": 582400,
+     "uncached_prompt_tokens": 96351,
+     "output_tokens": 5044,
+     "iterations": 11,
+     "first_prompt_tokens": 47147,
+     "injected_tokens": 2085,
+     "sections": {
+      "skill": 6779,
+      "facts": 737,
+      "vault-context": 798
+     },
+     "judge_score": 2,
+     "judge_why": "The answer accurately synthesizes the three-layer memory architecture, read/write paths, and specific implementation details (like the hourly capture skill and nightly autonomy) from the reference notes, providing a comprehensive and correct explanation."
+    },
+    "suppressed": {
+     "tool_calls": 14,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 149.0,
+     "error": null,
+     "prefill_tokens": 18775,
+     "prompt_tokens": 510386,
+     "cache_read_tokens": 371200,
+     "uncached_prompt_tokens": 139186,
+     "output_tokens": 3975,
+     "iterations": 9,
+     "first_prompt_tokens": 44854,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The answer accurately describes the three-layer memory architecture, the retrieval mechanism (context injection), and the maintenance processes (nightly tasks) as detailed in the reference notes, providing a comprehensive and correct explanation."
+    },
+    "injected_aa": {
+     "tool_calls": 20,
+     "tools": [
+      "Bash",
+      "vault_search",
+      "vault_read",
+      "memory_read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 243.5,
+     "error": null,
+     "prefill_tokens": 20360,
+     "prompt_tokens": 636691,
+     "cache_read_tokens": 550400,
+     "uncached_prompt_tokens": 86291,
+     "output_tokens": 5561,
+     "iterations": 11,
+     "first_prompt_tokens": 47147,
+     "injected_tokens": 2085,
+     "sections": {
+      "skill": 6779,
+      "facts": 737,
+      "vault-context": 798
+     },
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the three-layer memory architecture (source documents, fact files, derived indexes) and the periodic capture mechanism described in the reference notes, while adding substantive detail about the runtime injection pipeline and specific implementation details."
+    },
+    "no_skill": {
+     "iterations": 13,
+     "tool_calls": 23,
+     "prefill_tokens": 23299,
+     "judge_score": 2,
+     "seconds": 620.6,
+     "error": null,
+     "injected_tokens": 389,
+     "sections": {
+      "facts": 737,
+      "vault-context": 798
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "autonomy-pipeline",
+   "query": "describe the autonomy pipeline end to end",
+   "category": "fuzzy",
+   "expect_docs": [
+    "architecture/autonomy-system.md",
+    "architecture/staged-pipeline.md"
+   ],
+   "prefetch_ms": 13,
+   "sections": {
+    "skill": 7205,
+    "facts": 488,
+    "vault-context": 807
+   },
+   "section_tokens": {
+    "facts": 122,
+    "skill": 1801,
+    "vault-context": 201
+   },
+   "injected_tokens": 2131,
+   "doc_hit": false,
+   "gold_paths": [
+    "architecture/autonomy-system.md",
+    "architecture/staged-pipeline.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": 4100,
+    "judge_delta": 0,
+    "negative": true,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": true
+   },
+   "arms": {
+    "injected": {
+     "tool_calls": 33,
+     "tools": [
+      "autonomy_tasks",
+      "autonomy_config",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "autonomy_health",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 623.7,
+     "error": null,
+     "prefill_tokens": 49355,
+     "prompt_tokens": 1715857,
+     "cache_read_tokens": 1372800,
+     "uncached_prompt_tokens": 343057,
+     "output_tokens": 10362,
+     "iterations": 24,
+     "first_prompt_tokens": 47182,
+     "injected_tokens": 2131,
+     "sections": {
+      "skill": 7205,
+      "facts": 488,
+      "vault-context": 807
+     },
+     "judge_score": 2,
+     "judge_why": "The answer provides a comprehensive, end-to-end description of the autonomy pipeline's execution stages (tick, due-ness, queue, execution, success criteria, bookkeeping, undo, meta-layer) and the active DAG, which aligns with the detailed operational reality implied by the reference notes' architect"
+    },
+    "suppressed": {
+     "tool_calls": 25,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 298.4,
+     "error": null,
+     "prefill_tokens": 45255,
+     "prompt_tokens": 1253326,
+     "cache_read_tokens": 1088000,
+     "uncached_prompt_tokens": 165326,
+     "output_tokens": 7191,
+     "iterations": 17,
+     "first_prompt_tokens": 44853,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The answer provides a comprehensive, accurate, and substantive end-to-end description of the autonomy pipeline's lifecycle (scheduling, dispatch, execution, outcome handling, and records) that aligns with the architectural principles and components described in the reference notes."
+    },
+    "injected_aa": {
+     "tool_calls": 25,
+     "tools": [
+      "autonomy_tasks",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "autonomy_health",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 436.2,
+     "error": null,
+     "prefill_tokens": 49421,
+     "prompt_tokens": 1453462,
+     "cache_read_tokens": 1184000,
+     "uncached_prompt_tokens": 269462,
+     "output_tokens": 11005,
+     "iterations": 21,
+     "first_prompt_tokens": 47182,
+     "injected_tokens": 2131,
+     "sections": {
+      "skill": 7205,
+      "facts": 488,
+      "vault-context": 807
+     },
+     "judge_score": 1,
+     "judge_why": "The answer provides a detailed and technically accurate description of the autonomy pipeline's execution flow, storage, and dependencies, but it relies heavily on specific implementation details (e.g., SQLite work queue, specific task IDs, code-level behaviors) that are not present in the provided r"
+    },
+    "no_skill": {
+     "iterations": 21,
+     "tool_calls": 30,
+     "prefill_tokens": 63960,
+     "judge_score": 0,
+     "seconds": 900.0,
+     "error": "timeout after 900s",
+     "injected_tokens": 329,
+     "sections": {
+      "facts": 488,
+      "vault-context": 807
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "robotics-projects",
+   "query": "what robotics projects have I worked on?",
+   "category": "hard",
+   "expect_docs": [
+    "GR00T",
+    "robot",
+    "robotics"
+   ],
+   "prefetch_ms": 9,
+   "sections": {
+    "facts": 288,
+    "vault-context": 786,
+    "skill-hint": 137
+   },
+   "section_tokens": {
+    "facts": 72,
+    "skill-hint": 34,
+    "vault-context": 196
+   },
+   "injected_tokens": 309,
+   "doc_hit": true,
+   "gold_paths": [
+    "knowledge/ai-research/GR00T-WholeBodyControl/architecture.md",
+    "backlog/1084-robotics-projects-still-loses-gr00t-from-the-seed-.md"
+   ],
+   "marginal": {
+    "doc_hit": true,
+    "delta": 2556,
+    "judge_delta": 0,
+    "negative": true,
+    "negative_marginal": true,
+    "negative_marginal_strict": true,
+    "net_negative_any": true
+   },
+   "arms": {
+    "suppressed": {
+     "tool_calls": 13,
+     "tools": [
+      "vault_recall",
+      "session_recall",
+      "vault_read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Bash",
+      "Grep",
+      "Read"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 240.4,
+     "error": null,
+     "prefill_tokens": 15997,
+     "prompt_tokens": 435464,
+     "cache_read_tokens": 236800,
+     "uncached_prompt_tokens": 198664,
+     "output_tokens": 2912,
+     "iterations": 8,
+     "first_prompt_tokens": 44854,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The answer correctly identifies the specific robotics projects (Alfie, Stompy, SpotZero, Bisky) and provides substantive details about their hardware, software, and status, which aligns with the context implied by the reference notes regarding GR00T and robotics work."
+    },
+    "injected": {
+     "tool_calls": 10,
+     "tools": [
+      "vault_recall",
+      "Glob",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read",
+      "Read"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 70.8,
+     "error": null,
+     "prefill_tokens": 18553,
+     "prompt_tokens": 280757,
+     "cache_read_tokens": 198400,
+     "uncached_prompt_tokens": 82357,
+     "output_tokens": 1817,
+     "iterations": 5,
+     "first_prompt_tokens": 45236,
+     "injected_tokens": 309,
+     "sections": {
+      "facts": 288,
+      "vault-context": 786,
+      "skill-hint": 137
+     },
+     "judge_score": 2,
+     "judge_why": "The assistant correctly identifies the robotics projects (Alfie, Stompy, SpotZero, Bisky) and provides substantive details about their architectures and status, which aligns with the specific project names and context (GR00T, Isaac Lab) mentioned in the reference notes."
+    },
+    "injected_aa": {
+     "tool_calls": 16,
+     "tools": [
+      "vault_recall",
+      "vault_search",
+      "vault_read",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Grep",
+      "Bash",
+      "Grep",
+      "Grep",
+      "Grep",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 191.7,
+     "error": null,
+     "prefill_tokens": 20959,
+     "prompt_tokens": 511233,
+     "cache_read_tokens": 307200,
+     "uncached_prompt_tokens": 204033,
+     "output_tokens": 3250,
+     "iterations": 9,
+     "first_prompt_tokens": 45236,
+     "injected_tokens": 309,
+     "sections": {
+      "facts": 288,
+      "vault-context": 786,
+      "skill-hint": 137
+     },
+     "judge_score": 0,
+     "judge_why": "The answer hallucinates specific project names (Alfie, Stompy, Bernie, etc.) and details that are not present in the provided reference notes, which only contain technical architecture documentation for GR00T-WholeBodyControl and a retrieval bug report."
+    },
+    "no_skill": {
+     "iterations": 8,
+     "tool_calls": 13,
+     "prefill_tokens": 15899,
+     "judge_score": 2,
+     "seconds": 231.6,
+     "error": null,
+     "injected_tokens": 309,
+     "sections": {
+      "facts": 288,
+      "vault-context": 786,
+      "skill-hint": 137
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "this-week-autonomy",
+   "query": "what changed in the autonomy system this week?",
+   "category": "hard",
+   "expect_docs": [
+    "architecture/autonomy-system.md"
+   ],
+   "prefetch_ms": 11,
+   "sections": {
+    "skill": 6658,
+    "facts": 806,
+    "vault-context": 641
+   },
+   "section_tokens": {
+    "facts": 201,
+    "skill": 1664,
+    "vault-context": 160
+   },
+   "injected_tokens": 2032,
+   "doc_hit": false,
+   "gold_paths": [
+    "architecture/autonomy-system.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": -3885,
+    "judge_delta": -2,
+    "negative": false,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": false
+   },
+   "arms": {
+    "suppressed": {
+     "tool_calls": 17,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "autonomy_health",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 321.8,
+     "error": null,
+     "prefill_tokens": 38779,
+     "prompt_tokens": 733045,
+     "cache_read_tokens": 643200,
+     "uncached_prompt_tokens": 89845,
+     "output_tokens": 8278,
+     "iterations": 11,
+     "first_prompt_tokens": 44855,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 2,
+     "judge_why": "The answer provides a comprehensive, accurate, and substantive summary of the autonomy system changes, correctly identifying key architectural shifts like acceptance grading, dependency handling, and safety measures that align with the reference notes' context."
+    },
+    "injected": {
+     "tool_calls": 14,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "autonomy_health",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 268.2,
+     "error": null,
+     "prefill_tokens": 34894,
+     "prompt_tokens": 554335,
+     "cache_read_tokens": 348800,
+     "uncached_prompt_tokens": 205535,
+     "output_tokens": 7503,
+     "iterations": 9,
+     "first_prompt_tokens": 46965,
+     "injected_tokens": 2032,
+     "sections": {
+      "skill": 6658,
+      "facts": 806,
+      "vault-context": 641
+     },
+     "judge_score": 0,
+     "judge_why": "The answer describes a fictional or hallucinated set of changes (specific commit hashes, dates in 2026, and file paths) that completely contradict the reference notes, which state the system was last updated in April 2026 and describe a different architecture (markdown-based, specific agent types) w"
+    },
+    "injected_aa": {
+     "tool_calls": 29,
+     "tools": [
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "autonomy_health",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": false,
+     "seconds": 305.5,
+     "error": null,
+     "prefill_tokens": 49768,
+     "prompt_tokens": 1945139,
+     "cache_read_tokens": 1699200,
+     "uncached_prompt_tokens": 245939,
+     "output_tokens": 13755,
+     "iterations": 24,
+     "first_prompt_tokens": 46965,
+     "injected_tokens": 2032,
+     "sections": {
+      "skill": 6658,
+      "facts": 806,
+      "vault-context": 641
+     },
+     "judge_score": 2,
+     "judge_why": "The answer provides a comprehensive, detailed, and accurate summary of the autonomy system changes, correctly identifying new capabilities, dispatch fixes, reporting improvements, and roster updates that align with the context of a complex autonomy system."
+    },
+    "no_skill": {
+     "iterations": 17,
+     "tool_calls": 26,
+     "prefill_tokens": 44602,
+     "judge_score": 2,
+     "seconds": 743.0,
+     "error": null,
+     "injected_tokens": 367,
+     "sections": {
+      "facts": 806,
+      "vault-context": 641
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  },
+  {
+   "id": "backlog-overview",
+   "query": "anything interesting in the backlog we should tackle?",
+   "category": "hard",
+   "expect_docs": [
+    "backlog/"
+   ],
+   "prefetch_ms": 7,
+   "sections": {
+    "skill": 6665,
+    "facts": 287,
+    "vault-context": 306
+   },
+   "section_tokens": {
+    "facts": 71,
+    "skill": 1666,
+    "vault-context": 76
+   },
+   "injected_tokens": 1821,
+   "doc_hit": false,
+   "gold_paths": [
+    "backlog/10-model-routing-based-on-keyword-for-now.md"
+   ],
+   "marginal": {
+    "doc_hit": false,
+    "delta": -12995,
+    "judge_delta": 1,
+    "negative": false,
+    "negative_marginal": false,
+    "negative_marginal_strict": false,
+    "net_negative_any": false
+   },
+   "arms": {
+    "suppressed": {
+     "tool_calls": 19,
+     "tools": [
+      "backlog_boards",
+      "backlog_tasks",
+      "backlog_tasks",
+      "backlog_tasks",
+      "backlog_tasks",
+      "skills_read",
+      "backlog_tasks",
+      "backlog_tasks",
+      "backlog_get_task",
+      "backlog_get_task",
+      "backlog_get_task",
+      "backlog_get_task",
+      "backlog_get_task",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 321.4,
+     "error": null,
+     "prefill_tokens": 46520,
+     "prompt_tokens": 1011888,
+     "cache_read_tokens": 723200,
+     "uncached_prompt_tokens": 288688,
+     "output_tokens": 8099,
+     "iterations": 15,
+     "first_prompt_tokens": 44855,
+     "injected_tokens": 0,
+     "sections": {},
+     "judge_score": 0,
+     "judge_why": "The answer discusses items #1437, #828, etc., which are not present in the provided reference notes (which only contain item #10), meaning the answer is hallucinated or based on information not in the ground truth."
+    },
+    "injected": {
+     "tool_calls": 25,
+     "tools": [
+      "backlog_boards",
+      "backlog_tasks",
+      "backlog_tasks",
+      "backlog_tasks",
+      "backlog_tasks",
+      "backlog_tasks",
+      "backlog_tasks",
+      "backlog_get_task",
+      "Bash",
+      "Bash",
+      "Bash",
+      "backlog_get_task",
+      "Bash",
+      "backlog_get_task",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Read",
+      "Bash",
+      "Bash",
+      "backlog_write_task"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 388.3,
+     "error": null,
+     "prefill_tokens": 33525,
+     "prompt_tokens": 1315258,
+     "cache_read_tokens": 1027200,
+     "uncached_prompt_tokens": 288058,
+     "output_tokens": 9609,
+     "iterations": 20,
+     "first_prompt_tokens": 46837,
+     "injected_tokens": 1821,
+     "sections": {
+      "skill": 6665,
+      "facts": 287,
+      "vault-context": 306
+     },
+     "judge_score": 1,
+     "judge_why": "The answer provides a detailed and plausible summary of the backlog, but it fails to mention the specific reference note provided (item #10, 'model routing based on keyword'), which is the only ground truth available for evaluation."
+    },
+    "injected_aa": {
+     "tool_calls": 18,
+     "tools": [
+      "backlog_boards",
+      "backlog_tasks",
+      "backlog_tasks",
+      "backlog_tasks",
+      "backlog_tasks",
+      "backlog_get_task",
+      "Bash",
+      "Bash",
+      "backlog_get_task",
+      "backlog_get_task",
+      "Bash",
+      "Bash",
+      "Bash",
+      "backlog_get_task",
+      "Bash",
+      "Bash",
+      "Bash",
+      "Bash"
+     ],
+     "stop_reason": "stop",
+     "completed": true,
+     "reached_expected": true,
+     "seconds": 326.6,
+     "error": null,
+     "prefill_tokens": 37620,
+     "prompt_tokens": 867500,
+     "cache_read_tokens": 636800,
+     "uncached_prompt_tokens": 230700,
+     "output_tokens": 7800,
+     "iterations": 13,
+     "first_prompt_tokens": 46837,
+     "injected_tokens": 1821,
+     "sections": {
+      "skill": 6665,
+      "facts": 287,
+      "vault-context": 306
+     },
+     "judge_score": 0,
+     "judge_why": "The assistant hallucinates a complex backlog with specific high-priority items (#1366, #435, etc.) that do not exist in the provided reference notes, which only contain a single low-priority, done item (#10)."
+    },
+    "no_skill": {
+     "iterations": 13,
+     "tool_calls": 19,
+     "prefill_tokens": 46171,
+     "judge_score": 0,
+     "seconds": 598.6,
+     "error": null,
+     "injected_tokens": 154,
+     "sections": {
+      "facts": 287,
+      "vault-context": 306
+     },
+     "note": "recovered from the run log: the process hit its outer 2700 s timeout before writing its artifact"
+    }
+   }
+  }
+ ]
+}

@@ -31,7 +31,7 @@ from agent_mcp._shared import _ENTITY_STOPWORDS
 from agent_mcp.facts import _extract_entities_from_query, _get_facts_sync
 from agent_mcp.session import _load_session_index, _score_session
 from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords, strip_qmd_snippet
-from prompt_builder import PROMPT_BUDGET_CHARS
+from prompt_builder import PROMPT_BUDGET_CHARS, prompt_token_estimate
 from app.event_log import log_event
 from app.sessions_io import ambient_clock_stamp
 
@@ -1443,6 +1443,112 @@ def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
     return context + "\n\n" + text
 
 
+# ── Per-section injected size (#562) ─────────────────────────────────────────
+#
+# The tags `_format_context` renders, plus `ide_state`, which `_prefetch_run`
+# splices in after the render. Explicit on purpose: a section not named here is
+# one whose cost nobody measures, and it is still paid for on every turn.
+CONTEXT_SECTION_TAGS = (
+    "ambient-signals", "skill", "backlog-refs", "facts",
+    "vault-context", "recent-sessions", "skill-hint", "ide_state",
+)
+
+# The lookahead, not `\b`: `\b` matches between `skill` and `-hint`, which
+# would read every `<skill-hint>` as a `<skill>`.
+_SECTION_TOKEN_RE = re.compile(
+    r"</?(" + "|".join(CONTEXT_SECTION_TAGS) + r")(?=[\s>/])[^>]*>"
+)
+
+
+def _section_spans(block: str) -> list[tuple[str, int, int]]:
+    """(section, start, end) for every OUTERMOST section of a `<context>` block.
+
+    Content inside a section belongs to it, so a SKILL.md body quoting a literal
+    `<facts>` line is charged to the skill carrying it rather than inventing a
+    facts section. A close tag cannot close a section that did not open, and a
+    section whose close never arrived runs to the end of the block — its tokens
+    were still sent.
+    """
+    spans: list[tuple[str, int, int]] = []
+    opened: tuple[str, int] | None = None
+    for match in _SECTION_TOKEN_RE.finditer(block or ""):
+        tag = match.group(1)
+        closing = block[match.start() + 1] == "/"
+        if opened is None:
+            if not closing:
+                opened = (tag, match.start())
+        elif closing and tag == opened[0]:
+            spans.append((tag, opened[1], match.end()))
+            opened = None
+    if opened is not None:
+        spans.append((opened[0], opened[1], len(block)))
+    return spans
+
+
+def injected_section_sizes(block: str) -> dict[str, int]:
+    """Characters per rendered section of a prefetch `<context>` block.
+
+    The one number the pipeline kept about the injected half of a turn was the
+    total, which cannot attribute anything: a block that is all `<skill>` and
+    one that is all `<vault-context>` need opposite fixes. Measured on the
+    rendered string, after every truncation and the `ide_state` splice, because
+    that is what was sent. The `<context>` envelope and anything outside a known
+    section (the user's own message, when the caller passes the whole rendered
+    turn) is attributed to no section.
+    """
+    sizes: dict[str, int] = {}
+    for name, start, end in _section_spans(block):
+        sizes[name] = sizes.get(name, 0) + (end - start)
+    return sizes
+
+
+def drop_sections(rendered: str, names) -> str:
+    """`rendered` with every outermost section in `names` removed.
+
+    The ablation half of the size map: the #562 cost eval renders a turn with
+    one section taken out to price that section alone, and a trim knob would
+    apply the same cut. The line a removed section occupied goes with it, and a
+    `<context>` envelope left holding nothing is removed too, so the result is
+    what `_format_context` would have produced had the section been empty.
+    """
+    drop = set(names or ())
+    if not drop or not rendered:
+        return rendered
+    out, pos = [], 0
+    for name, start, end in _section_spans(rendered):
+        if name not in drop:
+            continue
+        out.append(rendered[pos:start])
+        pos = end + 1 if rendered[end:end + 1] == "\n" else end
+    out.append(rendered[pos:])
+    result = "".join(out)
+    if result.startswith("<context>\n</context>"):
+        result = result[len("<context>\n</context>"):].lstrip("\n")
+    return result
+
+
+def split_injected(rendered: str, query: str) -> dict:
+    """Split what `prefetch_context` returned back into block + query.
+
+    `prefetch_context` hands back `context + "\\n\\n" + text`, so outside the
+    request path the only measurable thing is the pair (rendered, query). The
+    injected cost is the whole prefix, separators included. An empty block is a
+    real zero, not a missing measurement.
+    """
+    rendered, query = rendered or "", query or ""
+    prefix = ""
+    if rendered != query and rendered.endswith(query):
+        prefix = rendered[: len(rendered) - len(query)]
+    sections = injected_section_sizes(prefix)
+    return {
+        "injected_chars": len(prefix),
+        "injected_tokens": prompt_token_estimate(len(prefix)),
+        "injected_sections": sections,
+        "injected_section_tokens": {k: prompt_token_estimate(v)
+                                    for k, v in sorted(sections.items())},
+    }
+
+
 def log_turn_prompt_budget(injected: str, *, session_id: str | None = None,
                            system_prompt_chars: int | None = None) -> dict:
     """Log this turn's injected-context size against the shared prompt budget.
@@ -1453,14 +1559,19 @@ def log_turn_prompt_budget(injected: str, *, session_id: str | None = None,
     still 100 KB before the conversation starts, and until now neither half was
     ever measured. `system_prompt_chars` is optional so the two halves can be
     totalled by whoever has both.
-    """
-    from prompt_builder import prompt_token_estimate
 
+    `context_sections` (#562) splits the block by section. It is exact even
+    though the caller passes block + user message: the message sits outside
+    every section, so it is attributed to none (#817 — `context_chars` itself
+    still counts the message).
+    """
     chars = len(injected or "")
     total = chars + (system_prompt_chars or 0)
+    sections = injected_section_sizes(injected or "")
     report = {
         "context_chars": chars,
         "context_est_tokens": prompt_token_estimate(chars),
+        "context_sections": sections,
         "system_chars": system_prompt_chars or 0,
         "turn_total_chars": total,
         "turn_total_est_tokens": prompt_token_estimate(total),
@@ -1469,10 +1580,11 @@ def log_turn_prompt_budget(injected: str, *, session_id: str | None = None,
     }
     logger.info(
         "PROMPT_BUDGET session=%s context=%dc/%dt  system=%dc  turn_total=%dc/%dt"
-        "  budget=%dc  over_budget=%s",
+        "  budget=%dc  over_budget=%s  sections=%s",
         session_id or "-", chars, report["context_est_tokens"],
         report["system_chars"], total, report["turn_total_est_tokens"],
         PROMPT_BUDGET_CHARS, report["over_budget"],
+        " ".join(f"{k}={v}c" for k, v in sorted(sections.items())) or "-",
     )
     return report
 

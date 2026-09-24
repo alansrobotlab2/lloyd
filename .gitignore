@@ -58,6 +58,8 @@ __pycache__/
 !eval/vault_recall_holdout_manifest.json
 # …and the episodic-arm measurement (#675), the item's committed deliverable.
 !eval/episodic-arm/*.json
+# …and the prefetch cost eval's merged (numbers-only) artifacts (#562).
+!eval/measurements/prefetch-cost-*-merged.json
 
 # ─── Secrets ────────────────────────────────────────
 .env
