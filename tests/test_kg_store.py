@@ -575,3 +575,140 @@ def test_the_provisioning_routes_still_create_an_absent_database(tmp_path):
     assert kg_store.store() is c
     assert c.facts_idx.count() == 0
     kg_store.reset()
+
+
+# ── #1161: one relation, one spelling, at the write boundary ─────────────────
+#
+# `related_to` (5,615 active) and `related-to` (91) coexisted for a week: two
+# keys for one relation, so `active(types=)` missed the hyphenated half, the
+# same pair could sit active under both spellings at once, and retrieval
+# (`agent_mcp/retrieval.py:EDGE_TYPE_WEIGHTS`) weighted those rows at the 0.3
+# default instead of their canonical weight. The fix is the store's fold; these
+# tests are the fold and the one-off migration over rows written before it.
+
+def _legacy_row(db, source, target, typ, *, origin="conversation",
+                created_at="2026-09-18T08:38:03+00:00") -> int:
+    """A row carrying the spelling the pre-fold store really wrote.
+
+    `edges.add` now folds, so the only way to make one is the statement that
+    made the 97 live rows — a direct INSERT. That is also what proves the fold
+    sits at the write boundary and not in some reader downstream."""
+    cur = db.conn.execute(
+        "INSERT INTO edges(source, target, type, confidence, provenance,"
+        " created_at, source_doc, origin) VALUES (?,?,?,?,?,?,?,?)",
+        (source, target, typ, 0.9, "INFERRED", created_at, "knowledge/a.md", origin))
+    db.conn.commit()
+    return int(cur.lastrowid)
+
+
+def test_edge_type_is_stored_in_one_canonical_spelling(db):
+    """Clause 1: an edge submitted as `related-to` is stored as `related_to`,
+    and submitting the other spelling for the same (source, target) pair leaves
+    exactly one active row. Two active rows on one pair is the defect, and the
+    lookup that lets it happen is the one `add` does before inserting."""
+    i1 = db.edges.add(_edge("A", "B", "related-to"), origin="test")
+    assert db.edges.by_id(i1)["type"] == "related_to"
+
+    i2 = db.edges.add(_edge("A", "B", "related_to"), origin="test")
+    assert i2 == i1, "the canonical spelling must land on the row the hyphen created"
+    assert db.edges.count() == 1
+    assert [e["type"] for e in db.edges.active(source="A", target="B")] == ["related_to"]
+
+
+def test_folding_covers_case_and_spacing_as_well_as_the_hyphen(db):
+    """One relation, however it arrives, is one stored type — so a single
+    exact-match `active(types=[...])` filter sees every spelling of it."""
+    for raw in ("Depends-On", "depends on", "depends-on", " DEPENDS_ON ", "depends__on"):
+        i = db.edges.add(_edge("A", f"B:{raw}", raw), origin="test")
+        assert db.edges.by_id(i)["type"] == "depends_on", raw
+    # five pairs, five spellings of one relation, one filter that sees all five
+    assert len(db.edges.active(types=["depends_on"])) == 5
+
+
+def test_folding_is_spelling_only_and_never_merges_two_relations(db):
+    """#1161 is spelling only. Whether `conflicts_with` should have been
+    `competes_with` is #546's vocabulary question, so the fold must keep the two
+    relations distinct — a fold that aliased them would erase the identity of
+    683 real edges to fix a typo."""
+    i = db.edges.add(_edge("A", "B", "conflicts-with"), origin="test")
+    assert db.edges.by_id(i)["type"] == "conflicts_with"
+    db.edges.add(_edge("A", "B", "competes_with"), origin="test")
+    assert db.edges.count() == 2
+    assert {e["type"] for e in db.edges.active(source="A", target="B")} == {
+        "conflicts_with", "competes_with"}
+
+
+def test_normalize_types_retypes_a_legacy_row_and_records_origin_and_reason(db):
+    """Clause 2: a hyphenated row becomes a canonical row, the old row survives
+    as history rather than a deletion, and both halves say who changed them and
+    why — `origin` and a reason on the new row, `expired_reason` on the old."""
+    old = _legacy_row(db, "A", "B", "related-to")
+    report = db.edges.normalize_types()
+    assert report["candidates"] == 1
+    assert report["retyped"] == 1 and report["expired"] == 1
+
+    new = db.edges.find_active("A", "B", "related_to")
+    assert new is not None, "the canonical row is what must be active afterwards"
+    assert new["superseded_edge_id"] == old
+    assert new["origin"] == kg_store.TYPE_MIGRATION_ORIGIN
+    assert "related-to" in new["reason"]
+
+    gone = db.edges.by_id(old)
+    assert gone["expired_at"] is not None and "related-to" in gone["expired_reason"]
+    assert db.edges.count() == 1
+    assert db.edges.count(active_only=False) == 2
+
+
+def test_normalize_types_expires_a_collision_instead_of_deleting_it(db):
+    """Clause 2 in its live shape: one pair active under both spellings. Folding
+    the hyphenated row onto the canonical key expires the loser and leaves the
+    canonical row alone — nothing is deleted."""
+    hy = _legacy_row(db, "A", "B", "related-to")
+    keep = db.edges.add(_edge("A", "B", "related_to"), origin="test")
+
+    report = db.edges.normalize_types()
+    assert report["candidates"] == 1
+    assert report["expired"] == 1 and report["retyped"] == 0
+
+    lost = db.edges.by_id(hy)
+    assert lost["expired_at"] is not None
+    assert str(keep) in lost["expired_reason"]
+    assert kg_store.TYPE_MIGRATION_ORIGIN in lost["expired_reason"]
+    assert db.edges.by_id(keep)["expired_at"] is None
+    assert db.edges.count() == 1 and db.edges.count(active_only=False) == 2
+
+
+def test_normalize_types_is_idempotent(db):
+    """Clause 2: a second pass changes nothing, so the operator can re-run it on
+    the live store after a rebuild without working out whether it already ran."""
+    _legacy_row(db, "A", "B", "related-to")
+    _legacy_row(db, "C", "D", "depends-on")
+    first = db.edges.normalize_types()
+    assert first["candidates"] == 2 and first["retyped"] == 2
+
+    before = [(r["id"], r["type"], r["expired_at"]) for r in db.edges.all_rows()]
+    second = db.edges.normalize_types()
+    assert second == {"candidates": 0, "retyped": 0, "expired": 0, "dry_run": False}
+    assert [(r["id"], r["type"], r["expired_at"]) for r in db.edges.all_rows()] == before
+
+
+def test_normalize_types_dry_run_reports_without_writing(db):
+    """This runs against a live store of tens of thousands of edges, so the
+    default has to be the read-only report the operator reads first."""
+    _legacy_row(db, "A", "B", "conflicts-with")
+    report = db.edges.normalize_types(dry_run=True)
+    assert report["dry_run"] is True
+    assert report["candidates"] == 1 and report["retyped"] == 1
+    assert [t["type"] for t in db.edges.by_type()] == ["conflicts-with"], "dry run wrote"
+    assert db.edges.count(active_only=False) == 1
+
+
+def test_normalize_types_leaves_expired_rows_as_history(db):
+    """Only active rows are retyped. An expired hyphenated row is the record of
+    a relation that already stopped being true; rewriting its type would
+    falsify the very history the expiry exists to keep."""
+    old = _legacy_row(db, "A", "B", "related-to")
+    db.edges.expire(old, "superseded before the migration")
+    assert db.edges.normalize_types()["candidates"] == 0
+    assert db.edges.by_id(old)["type"] == "related-to"
+    assert db.edges.by_id(old)["expired_reason"] == "superseded before the migration"

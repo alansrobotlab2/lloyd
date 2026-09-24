@@ -1017,3 +1017,45 @@ def test_the_scheduled_task_cycle_leaves_both_indexes_readable(scratch_home, tmp
         f"after a full cycle the reader sees {sorted(kinds)}; it must see the typed "
         "relations from step 1 and the co-occurrence row from step 2 (#1148)"
     )
+
+
+# ── #1161: the store's canonical spelling arriving at a hyphenated boundary ───
+
+def test_a_canonical_spelled_proposal_still_merges_under_the_index_key(
+    ri, generator, vault, tmp_path, write_targets
+):
+    """#1161 made the conversation linker emit the store's canonical types, while
+    this index's vocabulary — and the vault frontmatter it mirrors, which is what
+    a person hand-writes as `related-to:` — stays hyphenated by convention. The
+    merge validated proposal types against `VALID_RELATION_TYPES` exactly, so the
+    day the linker's spelling changed every new proposal started skipping
+    itself: 0 merged, no error, and nothing in the index to show for it. The fold
+    belongs at this boundary, and the index keeps its own spelling."""
+    proposals = tmp_path / "pipeline" / "conversation-relation-proposals.json"
+    proposals.parent.mkdir(parents=True, exist_ok=True)
+    proposals.write_text(json.dumps({"proposals": [
+        {"source": "knowledge/a.md", "target": "knowledge/f.md",
+         "type": "related_to", "status": "approved",
+         "reason": "canonical spelling from the linker", "confidence": 0.9},
+        {"source": "knowledge/c.md", "target": "knowledge/h.md",
+         "type": "depends_on", "status": "approved",
+         "reason": "its inverse has to fold through INVERSE_RELATIONS too",
+         "confidence": 0.9},
+    ]}, indent=2))
+    generator.proposals_file = proposals
+
+    before = _digests(vault)
+    write_targets.clear()
+    result = generator.rebuild()
+
+    assert result["conversation_proposals_merged"] == 2, result
+    merged = json.loads(generator.typed_index_file.read_text())["edges"]
+    assert {(m["source"], m["target"], m["type"]) for m in merged
+            if str(m.get("origin", "")).startswith("conversation")} == {
+        ("knowledge/a.md", "knowledge/f.md", "related-to"),
+        ("knowledge/c.md", "knowledge/h.md", "depends-on"),
+        ("knowledge/h.md", "knowledge/c.md", "required-by"),
+    }, merged
+    assert _digests(vault) == before, "the merge must not rewrite a note"
+    assert write_targets == [generator.typed_index_file], (
+        "folding the type must not widen what the merge is allowed to write")

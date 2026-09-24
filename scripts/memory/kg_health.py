@@ -39,7 +39,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from app.paths import VAULT_FACTS_ROOT  # noqa: E402
-from app.kg_store import StoreUnavailable, store  # noqa: E402
+from app.kg_store import StoreUnavailable, canonical_edge_type, store  # noqa: E402
 
 
 # ── Collection ───────────────────────────────────────────────────────────────
@@ -182,8 +182,16 @@ def build_snapshot() -> dict[str, Any]:
         },
         "edges": {
             "count": len(edges),
+            # One key per relation (#1161). Counting the raw column is how the
+            # 2026-09-15 snapshot came to report `related_to` 5,046 and
+            # `related-to` 49 as two relations: the histogram overstated the
+            # vocabulary and any per-type rule read off it saw half the edges.
+            # The fold is the store's own rule, so the snapshot and the store
+            # cannot disagree about what a canonical spelling is.
             "by_type": dict(
-                collections.Counter(e.get("type") for e in edges).most_common()
+                collections.Counter(
+                    canonical_edge_type(e.get("type") or "") for e in edges
+                ).most_common()
             ),
             "by_provenance": dict(
                 collections.Counter(e.get("provenance") for e in edges).most_common()

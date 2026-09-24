@@ -95,6 +95,23 @@ INVERSE_RELATIONS = {
 VALID_RELATION_TYPES = set(INVERSE_RELATIONS.keys())
 
 
+def _proposal_type_to_index_spelling(type_: str) -> str:
+    """Fold a proposal's relation type into this index's own spelling (#1161).
+
+    Two boundaries spell the same relations two ways, on purpose. The edge store
+    normalizes to `related_to`; this index — because the vault frontmatter it
+    mirrors does — is hyphenated, and `related-to:` is the key a person
+    hand-writes in a note. #1161 made the conversation linker emit the store's
+    spelling, so without this fold the merge read proposal types against
+    `VALID_RELATION_TYPES` exactly and every new proposal silently skipped
+    itself: zero merged, no error, nothing in the index to show for the run.
+
+    Normalizing at each boundary's own edge is what keeps the index bytes and
+    the frontmatter keys unchanged.
+    """
+    return (type_ or "").strip().lower().replace("_", "-")
+
+
 # ── One file, one owner, one schema (backlog #1148) ─────────────────────────
 # Two scripts used to write the *same* path with two different schemas: this
 # module's :meth:`RelationsIndexGenerator.rebuild` wrote
@@ -348,7 +365,10 @@ class RelationsIndexGenerator:
 
             source = self._normalize_path(p.get("source", ""), "")
             target = self._normalize_path(p.get("target", ""), "")
-            rel_type = p.get("type", "")
+            # The linker that writes these proposals now speaks the edge store's
+            # canonical `related_to`; this index keeps the hyphenated convention
+            # of the frontmatter it mirrors, so fold at this boundary (#1161).
+            rel_type = _proposal_type_to_index_spelling(str(p.get("type", "")))
 
             if not source or not target or rel_type not in VALID_RELATION_TYPES:
                 continue

@@ -38,6 +38,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -453,6 +454,44 @@ _guess_kind = alias_kind
 
 # ── Edges ────────────────────────────────────────────────────────────────────
 
+_EDGE_TYPE_SEP_RE = re.compile(r"[-\s]+")
+
+#: `origin` stamped on every row `normalize_types` writes, so a migration's own
+#: rows are separable from the data it moved:
+#: `SELECT count(*) FROM edges WHERE origin='migration:edge-type-spelling'`.
+TYPE_MIGRATION_ORIGIN = "migration:edge-type-spelling"
+#: The reason text recorded on both sides of every change the migration makes —
+#: `expired_reason` on the row it retires, `reason` in the new row's `extra`.
+TYPE_MIGRATION_REASON = "#1161 edge-type spelling normalization"
+
+
+def canonical_edge_type(type_: str) -> str:
+    """The store's one spelling for an edge type: lowercase, `_` between words.
+
+    Edge types arrived two ways — the extractor and the classifier wrote
+    `related_to`, while `conversation_relations.py` declared a wholly hyphenated
+    vocabulary and persisted it verbatim — so at triage on 2026-09-18 the store
+    held 5,615 `related_to` and 91 `related-to` active rows of one relation
+    (backlog #1161; the live store was rebuilt since and its counts moved, which
+    is why no count here is written in the present tense). Every type match here is exact
+    (`find_active`, `active(types=)`), so the split silently hid the hyphenated
+    half from any filtered read, and one (source, target) pair could be active
+    under both spellings at once.
+
+    Folding happens at the write boundary, not in a reader, because a reader
+    cannot fix the dedupe lookup that let the duplicate row in.
+
+    Spelling only, never vocabulary: `conflicts-with` becomes `conflicts_with`,
+    **not** `competes_with`. Whether those two relations should be one is
+    backlog #546's question, and folding one into the other would erase the
+    identity of 683 real edges to settle it.
+    """
+    folded = _EDGE_TYPE_SEP_RE.sub("_", (type_ or "").strip().lower()).strip("_")
+    while "__" in folded:
+        folded = folded.replace("__", "_")
+    return folded
+
+
 class _Edges:
     def __init__(self, store: KGStore):
         self._s = store
@@ -490,8 +529,12 @@ class _Edges:
         if isinstance(meta, (dict, list)):
             meta = json.dumps(meta, ensure_ascii=False)
         expired_at = e.get("expired_at") or None
+        # One spelling per relation reaches the table, however the caller spelled
+        # it. The fold sits here as well as in `add` because `retype`,
+        # `rewrite_endpoint` and the legacy JSON import all insert through this
+        # same statement (#1161).
         params = (
-            e["source"], e["target"], e["type"],
+            e["source"], e["target"], canonical_edge_type(e["type"]),
             float(e.get("confidence", 0.5) or 0.0),
             e.get("provenance"), e.get("created_at") or _now(),
             expired_at, e.get("expired_reason"),
@@ -555,6 +598,17 @@ class _Edges:
         sql = "SELECT COUNT(*) FROM edges" + (" WHERE expired_at IS NULL" if active_only else "")
         return int(self._s._query(sql)[0][0])
 
+    def by_type(self, active_only: bool = True) -> list[dict]:
+        """Edge types with their counts, highest first: `[{"type", "count"}]`.
+
+        The store's side of the question #1161 was found by
+        (`type GLOB '*-*'` over active rows, grouped), and the cheap one to
+        re-run after a rebuild to prove the vocabulary is still one-spelled."""
+        sql = ("SELECT type, COUNT(*) AS count FROM edges"
+               + (" WHERE expired_at IS NULL" if active_only else "")
+               + " GROUP BY type ORDER BY count DESC, type")
+        return [dict(r) for r in self._s._query(sql)]
+
     def find_active(self, source: str, target: str, type_: str) -> Optional[dict]:
         rows = self._s._query(
             "SELECT * FROM edges WHERE source=? AND target=? AND type=? AND expired_at IS NULL",
@@ -611,8 +665,17 @@ class _Edges:
     def add(self, edge: dict, *, origin: Optional[str] = None) -> int:
         """Insert an active edge. Returns the id of the new row, or of the
         existing active (source, target, type) row when one is already there.
-        Self-loops are refused."""
-        src, tgt, typ = (edge.get("source") or "").strip(), (edge.get("target") or "").strip(), (edge.get("type") or "").strip()
+        Self-loops are refused.
+
+        `type` is stored in its canonical spelling (`canonical_edge_type`), so
+        `related-to` and `related_to` are one edge and one row — the two-active
+        rows for one pair that #1161 found is what happens when the fold comes
+        after this lookup instead of before it."""
+        src, tgt = (edge.get("source") or "").strip(), (edge.get("target") or "").strip()
+        # Fold BEFORE the dedupe lookup below: `find_active` matches `type`
+        # exactly, so looking up the hyphenated spelling would miss the
+        # canonical row and insert a second active edge for one relation.
+        typ = canonical_edge_type(edge.get("type") or "")
         if not src or not tgt or not typ:
             raise ValueError("edge needs source, target and type")
         if src == tgt:
@@ -665,6 +728,90 @@ class _Edges:
             e.setdefault("created_at", _now())
             e["expired_at"] = None
             return self._insert_raw(e, origin=origin)
+
+    def normalize_types(self, *, origin: str = TYPE_MIGRATION_ORIGIN,
+                        reason: str = TYPE_MIGRATION_REASON,
+                        dry_run: bool = False) -> dict:
+        """Retype every active edge whose stored type is not canonical (#1161).
+
+        These rows predate `canonical_edge_type`: `conversation_relations.py`
+        persisted a hyphenated vocabulary of its own, so at triage on
+        2026-09-18 97 active edges sat under `related-to`, `depends-on` and
+        `conflicts-with` — invisible to every exact-match type filter, weighted
+        at retrieval's 0.3 default instead of 0.6/1.0, and duplicated where the
+        same pair also existed under the canonical spelling. A store rebuild on
+        2026-09-23/24 re-derived the edges and the count is 0 today; this stays
+        because the rebuild is not a fix (the linker writes hyphenated rows into
+        whatever store it is pointed at) and a re-derived store can inherit rows
+        from an older export.
+
+        The rules, because this runs over a live store:
+
+          * **Active rows only.** An expired hyphenated row is the record of a
+            relation that already stopped being true; rewriting its type would
+            falsify the history the expiry exists to keep.
+          * **A collision expires, never deletes.** When the canonical spelling
+            is already active on that (source, target) pair, the hyphenated row
+            is retired with the surviving row's id named in `expired_reason`.
+          * **A retype inserts before it expires**, so the relation is never
+            absent between the two writes; the new row carries `origin`, the
+            reason, `superseded_edge_id` and the old row's `extra` payload.
+          * **Idempotent.** The second pass finds no candidate, because the fold
+            in `_insert_raw` guarantees every row this wrote is canonical.
+
+        Returns `{"candidates", "retyped", "expired", "dry_run"}`: `retyped` is
+        canonical rows inserted, `expired` rows retired — a retype does both, a
+        collision only expires.
+        """
+        candidates = [r for r in self._s._query(
+            "SELECT * FROM edges WHERE expired_at IS NULL ORDER BY id")
+            if canonical_edge_type(r["type"]) != r["type"]]
+        report: dict[str, Any] = {"candidates": len(candidates), "retyped": 0,
+                                  "expired": 0, "dry_run": dry_run}
+        if not candidates:
+            return report
+
+        def plan(row) -> tuple[str, bool]:
+            """(canonical type, does it collide with an active canonical row)"""
+            canon = canonical_edge_type(row["type"])
+            return canon, self.find_active(row["source"], row["target"], canon) is not None
+
+        if dry_run:
+            for row in candidates:
+                _, collides = plan(row)
+                report["expired" if collides else "retyped"] += 1
+            return report
+
+        with self._s.transaction():
+            for row in candidates:
+                old_id, old_type = int(row["id"]), row["type"]
+                canon, collides = plan(row)
+                if collides:
+                    clash = self.find_active(row["source"], row["target"], canon)
+                    self.expire(old_id, f"{reason}: duplicate of active edge "
+                                        f"{clash['id']} after folding {old_type!r} "
+                                        f"to {canon!r} (origin {origin})")
+                    report["expired"] += 1
+                    continue
+                moved = dict(row)
+                stored_extra = moved.pop("extra", None)
+                if stored_extra:
+                    try:
+                        moved.update(json.loads(stored_extra))
+                    except (TypeError, ValueError):
+                        pass
+                moved["type"] = canon
+                moved["superseded_edge_id"] = old_id
+                moved["reason"] = f"{reason}: {old_type!r} -> {canon!r}"
+                moved["migrated_from"] = {"edge_id": old_id, "type": old_type,
+                                          "origin": row["origin"]}
+                moved["expired_at"] = None
+                new_id = self._insert_raw(moved, origin=origin)
+                self.expire(old_id, f"{reason}: retyped as edge {new_id} "
+                                    f"({old_type!r} -> {canon!r})")
+                report["retyped"] += 1
+                report["expired"] += 1
+        return report
 
     def rewrite_endpoint(self, old_name: str, new_name: str, *, origin: str,
                          reason: Optional[str] = None) -> list[tuple[int, int]]:

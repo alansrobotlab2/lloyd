@@ -29,6 +29,7 @@ from typing import Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import PIPELINE_DIR, SESSIONS_DIR, VAULT_FACTS_ROOT_DEFAULT  # noqa: E402
+from app.kg_store import canonical_edge_type  # noqa: E402
 
 
 # ── Paths ────────────────────────────────────────────────────────────────────
@@ -79,13 +80,27 @@ AUTONOMY_WEIGHT_FACTOR = 0.3
 
 # ── Valid relation types ─────────────────────────────────────────────────────
 
+# The store's canonical spelling (#1161). This vocabulary used to be wholly
+# hyphenated — `related-to`, `depends-on`, `conflicts-with` — and landing
+# persisted it verbatim, so every conversation edge arrived in the one spelling
+# nothing else in `kg.sqlite` used: at triage on 2026-09-18, 91 `related-to`
+# rows beside 5,615 `related_to`, each weighted at retrieval's 0.3 default
+# instead of its own, and the three `depends-on` edges invisible to a
+# `direction="in"` walk because `DIRECTIONAL_EDGE_TYPES` lists `depends_on`.
+# Vault frontmatter keeps its
+# hyphenated `related-to:` convention — `relations_index.py` folds a proposal
+# back into that spelling at its own boundary — but the edge store does not.
 VALID_RELATION_TYPES = {
-    "implements", "designed-by",
-    "supersedes", "superseded-by",
-    "depends-on", "required-by",
-    "derived-from", "produces",
-    "related-to", "conflicts-with",
+    "implements", "designed_by",
+    "supersedes", "superseded_by",
+    "depends_on", "required_by",
+    "derived_from", "produces",
+    "related_to", "conflicts_with",
 }
+
+#: Stage 1's placeholder until Stage 2 classifies, and Stage 2's fallback for an
+#: answer outside the vocabulary. Was `"related-to"`.
+DEFAULT_RELATION_TYPE = "related_to"
 
 # ── Tool → vault path extraction rules ───────────────────────────────────────
 
@@ -378,12 +393,12 @@ Conversation context where both documents were accessed:
 ---
 
 Based on this context, classify the relationship. Choose exactly one type:
-- "depends-on": A requires B to function or be understood
-- "derived-from": A was created based on B
+- "depends_on": A requires B to function or be understood
+- "derived_from": A was created based on B
 - "implements": A is an implementation of what B describes
 - "supersedes": A replaces or updates B
-- "related-to": A and B are topically related but no stronger relation applies
-- "conflicts-with": A and B contain contradictory information
+- "related_to": A and B are topically related but no stronger relation applies
+- "conflicts_with": A and B contain contradictory information
 
 Also extract a one-sentence reason explaining WHY these documents are related, grounded in the conversation context.
 
@@ -587,6 +602,21 @@ def classify_relationship(doc_a: str, doc_b: str, context: str,
         print(f"  LLM error for ({doc_a}, {doc_b}): {e}", file=sys.stderr)
         return None
 
+    return parse_classification(text)
+
+
+def parse_classification(text: str) -> Optional[dict]:
+    """Turn a Stage-2 model reply into a proposal verdict, or None if it is not
+    one.
+
+    The type is folded to the store's canonical spelling *before* it is checked
+    against `VALID_RELATION_TYPES`. A model that answers `depends-on` — the
+    spelling this file used to ask for, and the one still sitting in the vault's
+    frontmatter convention — means `depends_on`; before the fold it was simply
+    out of vocabulary, so the classifier's verdict was discarded and replaced by
+    the `related_to` default. That lost the relation, not just its spelling
+    (#1161 clause 3).
+    """
     # Parse JSON from response (handle markdown fences)
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
@@ -604,9 +634,9 @@ def classify_relationship(doc_a: str, doc_b: str, context: str,
         else:
             return None
 
-    rel_type = parsed.get("type", "related-to")
+    rel_type = canonical_edge_type(str(parsed.get("type", ""))) or DEFAULT_RELATION_TYPE
     if rel_type not in VALID_RELATION_TYPES:
-        rel_type = "related-to"
+        rel_type = DEFAULT_RELATION_TYPE
 
     return {
         "type": rel_type,
@@ -954,7 +984,7 @@ def cmd_incremental():
         data["proposals"].append({
             "source": key[0],
             "target": key[1],
-            "type": "related-to",  # default until Stage 2 classifies
+            "type": DEFAULT_RELATION_TYPE,  # placeholder until Stage 2 classifies
             "reason": "",
             "confidence": min(0.7, agg["aggregate_weight"] / 2),  # capped pre-classification
             "signal_strength": signal_strength,

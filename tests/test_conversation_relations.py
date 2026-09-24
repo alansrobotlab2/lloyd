@@ -367,8 +367,10 @@ def _aged_proposal(cr, **over):
 
 
 def _conversation_edge(store):
-    edge = store.edges.find_active("knowledge/a.md", "knowledge/b.md", "related-to")
-    assert edge, "the approved proposal did not land a related-to edge"
+    # #1161 clause 1/3: the store keeps one spelling, so the row a `related-to`
+    # proposal lands is found under `related_to`.
+    edge = store.edges.find_active("knowledge/a.md", "knowledge/b.md", "related_to")
+    assert edge, "the approved proposal did not land a related_to edge"
     return edge
 
 
@@ -908,7 +910,9 @@ def test_stage2_classifies_a_skill_pair_whose_session_names_it_barely(cr, tmp_pa
         "the window that reached the model was not the one around the hit")
     landed = json.loads(props.read_text())["proposals"][0]
     assert landed["classification_source"] == "llm"
-    assert landed["type"] == "related-to"
+    # the model answered "related-to"; the fold in parse_classification is what
+    # puts the canonical spelling on the proposal (#1161 clause 3)
+    assert landed["type"] == "related_to"
 
 
 def test_stage2_posts_the_rescued_window_over_a_real_socket(cr, tmp_path, monkeypatch):
@@ -990,7 +994,9 @@ def test_stage2_posts_the_rescued_window_over_a_real_socket(cr, tmp_path, monkey
         "the window the bare-name needle rescued did not reach the wire")
     landed = json.loads(props.read_text())["proposals"][0]
     assert landed["classification_source"] == "llm"
-    assert landed["type"] == "related-to"
+    # the model answered "related-to"; the fold in parse_classification is what
+    # puts the canonical spelling on the proposal (#1161 clause 3)
+    assert landed["type"] == "related_to"
 
 
 # ── #1119: a proposal with no prose is terminal, and terminal BEFORE the cap ──
@@ -1471,6 +1477,49 @@ def test_the_approve_run_persists_the_mark_and_changes_no_landing(tmp_path):
         f"the approve run's own report must name both counts, got:\n{r.stdout}")
 
 
+def test_the_child_process_lands_the_admitted_pair_underscored(tmp_path):
+    """The one process boundary this change actually crosses: autonomy task #51
+    runs `conversation_relations.py --approve-strong` as a subprocess, so the
+    spelling that matters is the one the CHILD wrote into the sqlite file, not the
+    one the parent's in-process calls produce. The fixture proposal carries the
+    legacy `related-to` (the shape a pre-#1161 proposals file still holds), so this
+    is the fold working end to end: argparse in, SQLite out.
+
+    Reading the file back rather than the child's stdout is the point — an edge
+    that printed the canonical name while persisting the hyphen would pass any
+    stdout-only check, and this is the seam where the 91 `related-to` rows were
+    originally written.
+    """
+    kg = tmp_path / "kg.sqlite"
+    kg_store.KGStore(kg).close()          # provision the store the child writes to
+    facts = tmp_path / "facts"
+    facts.mkdir()
+    data_root = tmp_path / "data"
+    (data_root / "_pipeline").mkdir(parents=True)
+    (data_root / "_pipeline" / "conversation-relation-proposals.json").write_text(
+        json.dumps({"watermark": {}, "stats": {}, "proposals": [
+            _classified_proposal_from_file(confidence=0.95)]}), encoding="utf-8")
+    env = dict(os.environ, LLOYD_DATA=str(data_root), LLOYD_KG_DB=str(kg),
+               LLOYD_FACTS_ROOT=str(facts))
+
+    r = subprocess.run([sys.executable, str(SCRIPT), "--approve-strong"], env=env,
+                       cwd=ROOT, capture_output=True, text=True, timeout=180)
+
+    assert r.returncode == 0, r.stderr
+    child = kg_store.KGStore(kg)
+    try:
+        landed = child.edges.active(source="knowledge/a.md",
+                                    target="knowledge/b.md")
+        assert [e["type"] for e in landed] == ["related_to"], (
+            f"the child stored {landed!r} for the admitted pair; its proposal was "
+            "typed the legacy `related-to`, so the row that survives the process "
+            "boundary is the whole of clause 3")
+        assert not [e["type"] for e in child.edges.active() if "-" in e["type"]], (
+            "the child wrote an edge type containing a hyphen")
+    finally:
+        child.close()
+
+
 def test_a_proposal_classified_at_0_84_is_still_refused_the_edge(store, cr):
     """Clause 3: the visibility field must not become a back door. 0.84 is the
     real maximum of the 139-row pool, and #773's 09-11/09-12 notes push the
@@ -1523,6 +1572,94 @@ def test_marking_the_band_changes_no_landing_decision(store, cr, tmp_path):
     assert cr.land_approved_edges(unmarked) == 1
 
     assert landed_marked == _conversation_triples(second) == {
-        ("knowledge/a.md", "knowledge/b.md", "related-to")}, (
+        ("knowledge/a.md", "knowledge/b.md", "related_to")}, (
         f"marked pool landed {landed_marked}, unmarked landed "
         f"{_conversation_triples(second)}")
+
+
+# ── #1161 clause 3: what the linker emits reaches the store in one spelling ───
+#
+# This script declared a wholly hyphenated 10-type vocabulary and persisted it
+# verbatim, so every conversation edge arrived in the one spelling nothing else
+# in the store used: `related-to` 91 rows beside `related_to` 5,615, weighted at
+# retrieval's 0.3 default and invisible to a `direction="in"` walk for
+# `depends-on` not being in DIRECTIONAL_EDGE_TYPES. The vocabulary and the
+# prompt are canonical now; the store's fold is the backstop that catches a
+# legacy proposals file, which is why the first test below feeds one in.
+
+def test_a_legacy_hyphenated_proposal_lands_one_underscored_edge(store, cr):
+    """Proposals already on disk carry `related-to`. Landing one must produce a
+    `related_to` edge and not a second row under the old spelling."""
+    props = [{"source": "knowledge/a.md", "target": "knowledge/b.md",
+              "status": "approved", "type": "related-to", "confidence": 0.9,
+              "evidence": {"sessions": ["20260910_010203_abc"]}}]
+    assert cr.land_approved_edges(props) == 1
+    landed = store.edges.find_active("knowledge/a.md", "knowledge/b.md", "related_to")
+    assert landed is not None, "the folded type is what must be active"
+    assert store.edges.find_active("knowledge/a.md", "knowledge/b.md", "related-to") is None
+    assert store.edges.count() == 1, "one relation must not land as two active rows"
+
+
+def test_an_unclassified_approved_proposal_lands_a_hyphen_free_type(store, cr):
+    """An approved proposal with no `type` at all lands the landing default, which
+    today is `co_accessed`. Two assertions with two jobs: the name pins that the
+    default is an underscored one (`co_accessed` carries an underscore precisely
+    because it is a store-spelling name, not a frontmatter one), and the hyphen
+    scan is the property clause 3 actually asks for, so a future default in the
+    old spelling fails here rather than only there."""
+    props = [{"source": "knowledge/a.md", "target": "knowledge/b.md",
+              "status": "approved", "confidence": 0.9,
+              "evidence": {"sessions": ["20260910_010203_abc"]}}]
+    assert cr.land_approved_edges(props) == 1
+    types = [e["type"] for e in store.edges.active()]
+    assert types == ["co_accessed"], types
+    assert not [t for t in types if "-" in t], types
+
+
+def test_the_declared_vocabulary_and_the_stage2_prompt_are_canonical(cr):
+    """The vocabulary the parser validates against and the prompt that asks the
+    model for a type are the two places the old spelling was written down. If
+    either drifts back, the store's fold silently hides it in the data again."""
+    assert cr.VALID_RELATION_TYPES == {
+        "implements", "designed_by", "supersedes", "superseded_by",
+        "depends_on", "required_by", "derived_from", "produces",
+        "related_to", "conflicts_with"}
+    assert not [t for t in cr.VALID_RELATION_TYPES if "-" in t]
+    assert cr.DEFAULT_RELATION_TYPE == "related_to"
+    for legacy in ("related-to", "depends-on", "conflicts-with", "derived-from"):
+        assert legacy not in cr.CLASSIFY_PROMPT, legacy
+    for canonical in ("related_to", "depends_on", "conflicts_with", "derived_from"):
+        assert canonical in cr.CLASSIFY_PROMPT, canonical
+
+
+def test_a_stage2_answer_in_the_legacy_spelling_is_folded_not_defaulted(cr):
+    """A model that replies `depends-on` means `depends_on`. Before the fold that
+    answer was out-of-vocabulary, so the parser threw the classifier's verdict
+    away and substituted the `related-to` default — the relation was silently
+    lost rather than misspelled. The socket path over this parser is
+    `test_stage2_posts_the_rescued_window_over_a_real_socket`."""
+    out = cr.parse_classification(json.dumps(
+        {"type": "depends-on", "reason": "a needs b", "confidence": 0.9}))
+    assert out["type"] == "depends_on", out
+    # garbage still falls back to the declared default, not to a hyphenated name
+    junk = cr.parse_classification(json.dumps(
+        {"type": "adjacent-ish", "reason": "vibes", "confidence": 0.9}))
+    assert junk["type"] == cr.DEFAULT_RELATION_TYPE, junk
+
+
+def test_the_pre_classification_default_carries_no_hyphen(cr, vault, tmp_path, monkeypatch):
+    """Stage 1 writes proposals with a placeholder type before Stage 2 runs; that
+    placeholder was `related-to`."""
+    traj = tmp_path / "trajectories"
+    _write_traj(traj, "2026-09-11", [
+        _entry([_tool("Read", 1, {"file_path": "~/obsidian/knowledge/a.md"}),
+                _tool("Edit", 2, {"file_path": "~/obsidian/knowledge/b.md"})],
+               session_key="20260911_010101_aaa", date="2026-09-11")])
+    props = tmp_path / "proposals.json"
+    monkeypatch.setattr(cr, "TRAJECTORY_DIR", traj)
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+
+    cr.cmd_incremental()
+    written = json.loads(props.read_text())["proposals"]
+    assert written, "Stage 1 should have proposed the pair"
+    assert [p["type"] for p in written] == ["related_to"], written
