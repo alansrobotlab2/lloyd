@@ -337,6 +337,95 @@ def test_cumulative_file_is_what_latest_points_at(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #1410: a wiped accumulated record is announced, not merged into silently
+# ---------------------------------------------------------------------------
+
+
+def test_a_missing_cumulative_beside_an_earlier_dated_file_is_a_reset(tmp_path, capsys):
+    """clause 1 — the 2026-09-23 shape: the data-root move took the cumulative
+    record, the earlier run's dated file is still there, and the run reported
+    "4 total" as if that were the history."""
+    run_log, cumulative, latest = _paths(tmp_path)
+    earlier = tmp_path / "semantic-proposals-2026-09-16.jsonl"
+    earlier.write_text(json.dumps(_proposal("qwen3-tts", "qwen 3 tts")) + "\n")
+    assert not cumulative.exists()
+
+    counts = ser.emit_proposals([_proposal("intel-pipeline", "intel-pipeline config")],
+                                run_log=run_log, cumulative=cumulative, latest=latest)
+    out = capsys.readouterr().out
+    assert counts["reset"] is True and counts["reset_from"] == 0
+    assert counts["cumulative"] == 1, "the merge still happens; the run's proposals are real"
+    warn = [l for l in out.splitlines() if l.startswith("[warn]")]
+    assert len(warn) == 1, out
+    assert str(cumulative) in warn[0] and "0 rows" in warn[0]
+    assert earlier.name in warn[0]
+
+
+def test_an_emptied_cumulative_is_a_reset_too(tmp_path, capsys):
+    """Truncated to nothing is the same loss as absent."""
+    run_log, cumulative, latest = _paths(tmp_path)
+    (tmp_path / "semantic-proposals-2026-09-16.jsonl").write_text(
+        json.dumps(_proposal("qwen3-tts", "qwen 3 tts")) + "\n")
+    cumulative.write_text("")
+    counts = ser.emit_proposals([_proposal("intel-pipeline", "intel-pipeline config")],
+                                run_log=run_log, cumulative=cumulative, latest=latest)
+    assert counts["reset"] is True
+    assert "[warn]" in capsys.readouterr().out
+
+
+def test_a_first_ever_run_and_a_present_record_are_not_a_reset(tmp_path, capsys):
+    """clause 3 — the legitimate first-run state (no dated file at all) is not
+    a loss, and neither is the ordinary run N+1 with the record in place. A
+    check that fired here would be #1407's unsound proposal."""
+    run_log, cumulative, latest = _paths(tmp_path)
+    counts = ser.emit_proposals([_proposal("intel-pipeline", "intel-pipeline config")],
+                                run_log=run_log, cumulative=cumulative, latest=latest)
+    assert counts["reset"] is False and not counts.get("reset")
+    assert "[warn]" not in capsys.readouterr().out
+
+    # Run N+1: the record is present, the dated file from run N sits beside it.
+    counts = ser.emit_proposals([_proposal("qwen3-tts", "qwen 3 tts")],
+                                run_log=tmp_path / "semantic-proposals-2099-01-02.jsonl",
+                                cumulative=cumulative, latest=latest)
+    assert counts["reset"] is False
+    assert counts["cumulative"] == 2
+    assert "[warn]" not in capsys.readouterr().out
+
+
+def test_a_rerun_on_the_same_day_does_not_count_its_own_dated_file(tmp_path):
+    """The dated file this run is about to overwrite is not evidence of an
+    earlier run: a same-day re-run after a wipe with no OTHER dated file is a
+    first run as far as the signal can tell, and must not cry loss."""
+    run_log, cumulative, latest = _paths(tmp_path)
+    run_log.write_text(json.dumps(_proposal("qwen3-tts", "qwen 3 tts")) + "\n")
+    counts = ser.emit_proposals([_proposal("intel-pipeline", "intel-pipeline config")],
+                                run_log=run_log, cumulative=cumulative, latest=latest)
+    assert counts["reset"] is False
+
+
+def test_the_run_output_says_the_record_was_rebuilt_and_still_exits_zero(
+        tmp_path, monkeypatch, capsys):
+    """clause 2 — through main(): the healthy "N total in the accumulated
+    record" line is still printed, but so is the rebuild, and the exit status
+    is 0 so task #67 is not flipped to failed over a snapshot-recoverable
+    loss."""
+    (tmp_path / "semantic-proposals-2026-09-16.jsonl").write_text(
+        json.dumps(_proposal("qwen3-tts", "qwen 3 tts")) + "\n")
+    _drive_main(tmp_path, monkeypatch, [])   # asserts main() == 0
+    out = capsys.readouterr().out
+    assert "total in the accumulated record" in out
+    assert "rebuilt from zero" in out, out
+    assert "restore-data.sh" in out
+
+
+def test_the_run_output_is_quiet_about_the_record_on_a_first_run(
+        tmp_path, monkeypatch, capsys):
+    _drive_main(tmp_path, monkeypatch, [])
+    out = capsys.readouterr().out
+    assert "rebuilt from zero" not in out and "[warn]" not in out
+
+
+# ---------------------------------------------------------------------------
 # clause 10: the sweep names what it has never evaluated
 # ---------------------------------------------------------------------------
 

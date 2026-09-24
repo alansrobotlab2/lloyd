@@ -828,6 +828,25 @@ def merge_proposals(existing: dict[tuple[str, str], dict],
                   key=lambda r: (-float(r.get("confidence") or 0), _proposal_key(r)))
 
 
+def accumulated_record_lost(cumulative: Path, existing: dict, run_log: Path) -> Path | None:
+    """The one sound signal that the accumulated record was wiped (#1410).
+
+    Every run writes its dated `semantic-proposals-<date>.jsonl` beside the
+    cumulative file, so a dated file with rows next to a cumulative that is
+    absent or holds none can only mean the record was lost: the first-ever run
+    has no dated file, and a healthy record is at least as old as the newest
+    one. Judged BEFORE this run writes its own dated file, which is excluded
+    by name in case it already exists from an earlier run today — after the
+    write, a wipe and a first run look identical. Returns the dated file that
+    proves the loss, or None.
+    """
+    if cumulative.exists() and existing:
+        return None
+    dated = sorted(p for p in cumulative.parent.glob("semantic-proposals-????-??-??.jsonl")
+                   if p.name != run_log.name and p.stat().st_size > 0)
+    return dated[-1] if dated else None
+
+
 def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
                    latest: Path, now_iso: str | None = None) -> dict:
     """Write this run's file, refresh the cumulative record, point `latest` at it.
@@ -836,14 +855,29 @@ def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
     unconsumed proposal disappeared without a trace (#744). It now names the
     cumulative record, so the sweep's single loader path sees every proposal that
     is still open. Returns counts for the run report.
+
+    A cumulative record that is missing is merged into as an empty one and the
+    result is a healthy-looking total; on 2026-09-23 the data-root move had
+    taken the record with it and the run reported 4 total as if that were the
+    history (#1410). The merge still goes ahead — the run's proposals are
+    real — but `reset` in the counts and the warning are what let the run
+    report, and a human, know to restore from a snapshot rather than trust
+    the total.
     """
     now_iso = now_iso or datetime.now(timezone.utc).isoformat()
     run_log, cumulative, latest = Path(run_log), Path(cumulative), Path(latest)
     run_log.parent.mkdir(parents=True, exist_ok=True)
+    existing = load_cumulative_proposals(cumulative)
+    lost_proof = accumulated_record_lost(cumulative, existing, run_log)
+    if lost_proof is not None:
+        print(f"[warn] accumulated record {cumulative} is absent or empty while "
+              f"{lost_proof.name} holds earlier proposals — rebuilding it from "
+              f"{len(existing)} rows; restore the record from a data snapshot "
+              f"before the sweep acts on a partial one")
     with run_log.open("w") as f:
         for rec in proposals:
             f.write(json.dumps(rec) + "\n")
-    merged = merge_proposals(load_cumulative_proposals(cumulative), proposals, now_iso)
+    merged = merge_proposals(existing, proposals, now_iso)
     tmp = cumulative.with_name(cumulative.name + ".tmp")
     with tmp.open("w") as f:
         for rec in merged:
@@ -855,7 +889,8 @@ def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
         latest.symlink_to(cumulative.name)
     except OSError:
         pass
-    return {"run": len(proposals), "cumulative": len(merged)}
+    return {"run": len(proposals), "cumulative": len(merged),
+            "reset": lost_proof is not None, "reset_from": len(existing)}
 
 
 # ---------------------------------------------------------------------------
@@ -1074,6 +1109,14 @@ def main() -> int:
     print(f"[info] {counts['cumulative']} total in the accumulated record; "
           f"{PROPOSAL_LATEST.name} → {PROPOSAL_CUMULATIVE.name}, so a proposal the "
           f"sweep has not reached cannot be lost by the next run")
+    if counts.get("reset"):
+        # Not an exit status: task #67 would go `failed` for a condition a
+        # snapshot restore fixes. The run record has to say it, though — the
+        # "total" line above reads healthy at 4 and at 4,000.
+        print(f"[warn] the accumulated record was rebuilt from zero this run: that "
+              f"total is this run's {counts['run']} proposals, not the history "
+              f"(#1410). Restore {PROPOSAL_CUMULATIVE.name} from ~/.lloyd-data-snapshots "
+              f"(scripts/backup/restore-data.sh) and re-run.")
     print("[info] no changes made. The sweep reads these as review input; "
           "run `entity-resolution-sweep.py` to see them in its plan.")
     # #535's three reports, in the words the item uses, printed beside #879's
