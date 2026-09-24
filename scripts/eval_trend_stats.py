@@ -873,7 +873,11 @@ def main(argv: list[str] | None = None) -> int:
           "boundary. Later on 2026-09-21 a gold audit re-pointed 38 labels that "
           "did not answer their query and dropped 6 queries the vault cannot "
           "answer (87 -> 81 gold queries, the original 20 texts untouched): a "
-          "second re-base point, for the same reason. The 80%-power decision "
+          "second re-base point, for the same reason. On 2026-09-24 #1354 added "
+          "5 queries whose answers are the lloyd checkout's own architecture "
+          "docs (81 -> 86 gold queries), which no collection indexes yet, so "
+          "they score as document misses until one does: a third re-base "
+          "point. The 80%-power decision "
           "that used to sit behind this line is no longer open — see the n "
           "printed above.")
 

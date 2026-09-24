@@ -273,6 +273,19 @@ PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
                         "manipulation policy", [], ["NVIDIA"]),
     "eval-corpus-naming-conventions": ("artifact", "baseline artifacts",
                                        "session transcripts", [], ["naming rules"]),
+
+    # ── #1354: questions answered by the lloyd checkout's architecture docs ──
+    # No expect_entities and no sibling: one modifier or artifact swap each, the
+    # pin being the system the question is about.
+    "harness-system-prompt-frozen": ("qualifier", "never rebuild", "always rebuild",
+                                     [], ["agent loop"]),
+    "automod-gate-rungs": ("qualifier", "before it can land", "after it has landed",
+                           [], ["automod"]),
+    "recall-doc-pool-ordering": ("artifact", "candidate documents",
+                                 "candidate entities", [], ["vault recall"]),
+    "qmd-embed-model-switch": ("artifact", "embedding model", "reranking model",
+                               [], ["qmd"]),
+    "djev-rank-not-gate": ("qualifier", "fixed cutoff", "learned cutoff", [], ["djev"]),
 }
 
 

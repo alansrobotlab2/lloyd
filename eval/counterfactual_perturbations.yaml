@@ -22,6 +22,15 @@ perturbations:
   - Ambient Turns
   expected_pinned: []
   sibling_source: kg_alias_table
+- id: automod-gate-rungs
+  axis_changed: qualifier
+  old_value: before it can land
+  new_value: after it has landed
+  perturbed_query: What checks does the automod gate run on a self-modification after
+    it has landed, and which one asks whether the change did what the item asked?
+  expected_to_move: []
+  expected_pinned:
+  - automod
 - id: automod-to-entity-guard
   axis_changed: entity
   old_value: self-modification round
@@ -151,6 +160,15 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - yes-or-no
+- id: djev-rank-not-gate
+  axis_changed: qualifier
+  old_value: fixed cutoff
+  new_value: learned cutoff
+  perturbed_query: Why is djev only used to rank candidates and never trusted as a
+    yes-or-no gate with a learned cutoff?
+  expected_to_move: []
+  expected_pinned:
+  - djev
 - id: docker-volumes-uv-cache
   axis_changed: qualifier
   old_value: re-downloading
@@ -335,6 +353,15 @@ perturbations:
   - Self-mod guardian
   expected_pinned: []
   sibling_source: kg_alias_table
+- id: harness-system-prompt-frozen
+  axis_changed: qualifier
+  old_value: never rebuild
+  new_value: always rebuild
+  perturbed_query: Why does the agent loop always rebuild the system prompt in the
+    middle of a turn, and how does it update state like the todo list instead?
+  expected_to_move: []
+  expected_pinned:
+  - agent loop
 - id: harness-tools
   axis_changed: artifact
   old_value: tool calls
@@ -541,6 +568,15 @@ perturbations:
   expected_pinned:
   - QMD
   sibling_source: kg_alias_table
+- id: qmd-embed-model-switch
+  axis_changed: artifact
+  old_value: embedding model
+  new_value: reranking model
+  perturbed_query: Where is the reranking model for qmd configured, and what happens
+    to the index when you change it?
+  expected_to_move: []
+  expected_pinned:
+  - qmd
 - id: qwen38-local-serving
   axis_changed: qualifier
   old_value: 24GB
@@ -550,6 +586,15 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - Qwen3.8
+- id: recall-doc-pool-ordering
+  axis_changed: artifact
+  old_value: candidate documents
+  new_value: candidate entities
+  perturbed_query: How does vault recall build its pool of candidate entities, and
+    what orders them before the top results come back?
+  expected_to_move: []
+  expected_pinned:
+  - vault recall
 - id: regex-lookbehind-recall
   axis_changed: qualifier
   old_value: work

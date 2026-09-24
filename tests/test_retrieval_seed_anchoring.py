@@ -422,6 +422,10 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
     rather than grown, so entity names moved (21 gold labels were re-pointed in
     `eval/vault_recall_queries.yaml`) and the alias table restarted at 49 rows,
     which is why `graph-quality` is back: its `relationship graph` alias is gone.
+
+    2026-09-24 (#1354): five queries answered by the checkout's architecture docs
+    carry no gold entities, so they cannot be anchorless — the residue stays 25 and
+    only the denominator moves, 25 of 86, ceiling 0.709.
     """
     out = _run_against_the_live_corpus(_CORPUS_SCRIPT)
     assert out["anchorless_first20"] == [
@@ -442,7 +446,7 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
     ], out["anchorless"]
     ceiling = (out["n_queries"] - len(out["anchorless"])) / out["n_queries"]
     assert (len(out["anchorless"]), out["n_queries"], round(ceiling, 3)) == (
-        25, 81, 0.691
+        25, 86, 0.709
     ), f"{len(out['anchorless'])} anchorless of {out['n_queries']} queries"
 
 

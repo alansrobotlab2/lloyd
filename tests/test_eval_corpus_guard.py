@@ -38,7 +38,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from app.paths import production_data_root  # noqa: E402
+from app.paths import LLOYD_HOME, production_data_root  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 _VENV = ROOT / ".venvs" / "lloyd" / "bin" / "python"
@@ -1577,36 +1577,80 @@ def _doc_norm(s: str) -> str:
     return str(s or "").lower().replace("-", "_")
 
 
+# #1354: labels whose answer is a doc in the LLOYD CHECKOUT, not the vault.
+# `{label prefix: checkout-relative directory}`. The prefix is the name of the qmd
+# collection that would index that directory, so it is exactly the path the
+# scorer would see (`vault_recall` returns `<collection>/<rel>`). A label carrying
+# it is resolved against the checkout ONLY: the vault holds stale copies of these
+# docs (`projects/lloyd/architecture/qmd.md`, `architecture/*.md`), and a label
+# satisfied by one of those would pass this guard while pointing the metric at the
+# wrong document. The hyphen keeps the scorer anchored the same way —
+# `lloyd_architecture/` normalised is contained in no vault path — which
+# `test_a_checkout_label_is_not_satisfied_by_a_stale_vault_copy` pins.
+CHECKOUT_LABEL_ROOTS = {"lloyd-architecture/": "architecture"}
+
+
+def _walk_normed(root: Path, prefix: str = "") -> list[str]:
+    """Every path under `root` (files and dirs), `prefix` + root-relative,
+    normalised, minus any dot-prefixed component — qmd's own indexing rule."""
+    out = []
+    if not root.is_dir():
+        return out
+    for p in root.rglob("*"):
+        rel = p.relative_to(root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        out.append(_doc_norm(prefix + str(rel)))
+    return out
+
+
 def _doc_label_satisfiability_report(
         specs_path: Path = CORPUS,
-        vault_root: Path = Path.home() / "obsidian") -> dict:
-    """Walk the vault once and return which `expect_docs` labels match no path.
+        vault_root: Path = Path.home() / "obsidian",
+        checkout_root: Path = LLOYD_HOME) -> dict:
+    """Walk both roots once and return which `expect_docs` labels match no path.
 
-    `path` is every path under `vault_root` (files AND directories,
-    vault-relative), minus any path with a dot-prefixed component. That is
-    qmd's own indexing rule (`qmd/src/cli/qmd.ts`, the `parts.some(part =>
-    part.startsWith("."))` filter after the glob), so `skills/.archived/**` is
-    NOT a location the index can hold: the live index had 0 such documents on
-    2026-09-21, and the five labels this walk used to accept there could never
-    be returned. `.git/**` falls under the same rule. `walked_paths` is returned
-    so the zero is checkable in the same breath as the verdict — a denominator
-    of zero is not a pass.
+    Two named roots (#1354). A label that starts with a `CHECKOUT_LABEL_ROOTS`
+    prefix is resolved against that directory of the lloyd checkout and nowhere
+    else; every other label against the vault. `satisfied_by` records, per label,
+    which root answered it (`vault` / `checkout`), so a label that silently moves
+    between roots is visible; a label neither root holds is in `dead`.
+    `checkout_root` defaults to `app.paths.LLOYD_HOME`, the tree this suite is
+    running from — in a worktree that is the worktree, which carries the docs.
+
+    `path` is every path under a root (files AND directories, root-relative),
+    minus any path with a dot-prefixed component. That is qmd's own indexing rule
+    (`qmd/src/cli/qmd.ts`, the `parts.some(part => part.startsWith("."))` filter
+    after the glob), so `skills/.archived/**` is NOT a location the index can
+    hold: the live index had 0 such documents on 2026-09-21, and the five labels
+    this walk used to accept there could never be returned. `.git/**` falls
+    under the same rule. `walked_paths` (vault) and `walked_checkout_paths` are
+    returned so the zero is checkable in the same breath as the verdict — a
+    denominator of zero is not a pass.
     """
     specs = yaml.safe_load(specs_path.read_text())["queries"]
     labels = [(str(s.get("id")), str(d))
               for s in specs for d in (s.get("expect_docs") or [])]
-    walked, normed = 0, []
-    for p in vault_root.rglob("*"):
-        rel = p.relative_to(vault_root)
-        if any(part.startswith(".") for part in rel.parts):
-            continue
-        walked += 1
-        normed.append(_doc_norm(str(rel)))
-    dead = [{"query": qid, "label": label} for qid, label in labels
-            if not any(_doc_norm(label) in n for n in normed)]
-    return {"vault": str(vault_root), "corpus": str(specs_path),
+    vault_normed = _walk_normed(vault_root)
+    checkout_normed = [n for prefix, sub in CHECKOUT_LABEL_ROOTS.items()
+                       for n in _walk_normed(checkout_root / sub, prefix)]
+    checkout_prefixes = tuple(_doc_norm(p) for p in CHECKOUT_LABEL_ROOTS)
+    dead, satisfied_by = [], []
+    for qid, label in labels:
+        want = _doc_norm(label)
+        root, pool = (("checkout", checkout_normed)
+                      if want.startswith(checkout_prefixes)
+                      else ("vault", vault_normed))
+        if any(want in n for n in pool):
+            satisfied_by.append({"query": qid, "label": label, "root": root})
+        else:
+            dead.append({"query": qid, "label": label})
+    return {"vault": str(vault_root), "checkout": str(checkout_root),
+            "corpus": str(specs_path),
             "queries": len(specs), "labels": len(labels),
-            "walked_paths": walked, "dead": dead}
+            "walked_paths": len(vault_normed),
+            "walked_checkout_paths": len(checkout_normed),
+            "satisfied_by": satisfied_by, "dead": dead}
 
 
 def test_committed_corpus_has_no_unresolvable_document_label():
@@ -1622,10 +1666,17 @@ def test_committed_corpus_has_no_unresolvable_document_label():
         f"the walk under {rep['vault']} found {rep['walked_paths']} paths; a "
         "walk that reaches nothing reports every label as dead OR as clean "
         "depending on the comparison, and neither is a verdict (#878's shape)")
+    checkout_labels = [d for d in rep["satisfied_by"] + rep["dead"]
+                       if any(d["label"].startswith(pfx) for pfx in CHECKOUT_LABEL_ROOTS)]
+    if checkout_labels:
+        assert rep["walked_checkout_paths"] > 10, (
+            f"the corpus names {len(checkout_labels)} checkout labels but the walk "
+            f"under {rep['checkout']} found {rep['walked_checkout_paths']} paths")
     assert rep["dead"] == [], (
         f"{len(rep['dead'])} of {rep['labels']} expect_docs labels in "
-        f"{rep['corpus']} match no path under {rep['vault']} (walked "
-        f"{rep['walked_paths']} paths): "
+        f"{rep['corpus']} match no path under {rep['vault']} or "
+        f"{rep['checkout']} (walked {rep['walked_paths']} + "
+        f"{rep['walked_checkout_paths']} paths): "
         + "; ".join(f"{d['query']}: {d['label']!r}" for d in rep["dead"])
         + " — a label that cannot match is subtracted from doc_recall and "
         "ndcg@10 by every future run, so re-point it at the note the answer "
@@ -1699,6 +1750,104 @@ def test_the_document_label_guard_fails_on_an_unresolvable_label(tmp_path):
     assert _doc_label_satisfiability_report(specs_path=hyphen,
                                             vault_root=vault)["dead"] == []
 
+
+
+# #1354 clause 1: the harness, the automod gate, retrieval, qmd and djev — one
+# current checkout doc each, named by the label convention above.
+CHECKOUT_DOCS_REQUIRED = ("harness.md", "automod.md", "retrieval.md", "qmd.md", "djev.md")
+
+
+def test_the_corpus_asks_questions_the_checkout_architecture_docs_answer():
+    """>= 5 gold queries whose labels resolve to CURRENT checkout docs, and the
+    guard says the checkout — not the vault — is what satisfied each (#1354)."""
+    rep = _doc_label_satisfiability_report()
+    by_checkout = [d for d in rep["satisfied_by"] if d["root"] == "checkout"]
+    covered = {d["label"].rsplit("/", 1)[-1] for d in by_checkout}
+    assert set(CHECKOUT_DOCS_REQUIRED) <= covered, (
+        f"checkout-rooted labels cover {sorted(covered)}; #1354 needs "
+        f"{CHECKOUT_DOCS_REQUIRED}")
+    assert len({d["query"] for d in by_checkout}) >= 5, by_checkout
+    # Every checkout-prefixed label was resolved against the checkout: none was
+    # answered by the vault (the stale-copy trap).
+    for d in rep["satisfied_by"]:
+        if d["label"].startswith(tuple(CHECKOUT_LABEL_ROOTS)):
+            assert d["root"] == "checkout", d
+    # And the vault-rooted labels still say so, or the root field is decoration.
+    assert any(d["root"] == "vault" for d in rep["satisfied_by"]), rep["satisfied_by"][:3]
+
+
+def _two_root_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """A vault holding a stale `projects/lloyd/architecture/qmd.md` and a real
+    note, and a checkout whose `architecture/` holds only `harness.md`."""
+    vault = tmp_path / "vault"
+    (vault / "projects" / "lloyd" / "architecture").mkdir(parents=True)
+    (vault / "projects" / "lloyd" / "architecture" / "qmd.md").write_text("stale\n")
+    (vault / "architecture").mkdir()
+    (vault / "architecture" / "harness.md").write_text("stale too\n")
+    (vault / "knowledge").mkdir()
+    (vault / "knowledge" / "live-note.md").write_text("x\n")
+    checkout = tmp_path / "checkout"
+    (checkout / "architecture").mkdir(parents=True)
+    (checkout / "architecture" / "harness.md").write_text("current\n")
+    return vault, checkout
+
+
+def test_a_checkout_label_is_not_satisfied_by_a_stale_vault_copy(tmp_path):
+    """#1354 clause 3: a label naming a checkout doc that does not exist is dead
+    even though the vault's `projects/lloyd/architecture/` holds a same-named
+    file — a stale document must never be scored as the current one's answer."""
+    vault, checkout = _two_root_fixture(tmp_path)
+    corpus = _write_corpus(tmp_path, [
+        {"id": "gone", "query": "q", "expect_docs": ["lloyd-architecture/qmd.md"]},
+        {"id": "live", "query": "q", "expect_docs": ["lloyd-architecture/harness.md"]},
+    ])
+    rep = _doc_label_satisfiability_report(specs_path=corpus, vault_root=vault,
+                                           checkout_root=checkout)
+    assert rep["dead"] == [{"query": "gone", "label": "lloyd-architecture/qmd.md"}], rep
+    assert rep["satisfied_by"] == [
+        {"query": "live", "label": "lloyd-architecture/harness.md", "root": "checkout"}], rep
+
+    # The scorer's own rule (`_doc_pair_satisfied`: normalised substring of the
+    # returned path) is anchored by the same prefix. The stale vault copy's path,
+    # as recall would return it, does not contain the label...
+    stale_returned = _doc_norm("projects/lloyd/architecture/qmd.md")
+    assert _doc_norm("lloyd-architecture/qmd.md") not in stale_returned
+    # ...the collection's own path does...
+    assert _doc_norm("lloyd-architecture/qmd.md") in _doc_norm("lloyd-architecture/qmd.md")
+    # ...and the unanchored spelling is exactly the trap the prefix avoids.
+    assert _doc_norm("lloyd/architecture/qmd.md") in stale_returned
+
+
+def test_the_guard_names_the_root_that_satisfied_each_label_and_neither_is_dead(tmp_path):
+    """#1354 clause 2: two named roots, the answering root recorded per label, and
+    a label present under neither still reported dead."""
+    vault, checkout = _two_root_fixture(tmp_path)
+    corpus = _write_corpus(tmp_path, [
+        {"id": "v", "query": "q", "expect_docs": ["knowledge/live-note.md"]},
+        {"id": "c", "query": "q", "expect_docs": ["lloyd-architecture/harness.md"]},
+        {"id": "neither", "query": "q",
+         "expect_docs": ["knowledge/never-written.md", "lloyd-architecture/never-written.md"]},
+    ])
+    rep = _doc_label_satisfiability_report(specs_path=corpus, vault_root=vault,
+                                           checkout_root=checkout)
+    assert {(d["query"], d["root"]) for d in rep["satisfied_by"]} == {
+        ("v", "vault"), ("c", "checkout")}, rep
+    assert rep["dead"] == [
+        {"query": "neither", "label": "knowledge/never-written.md"},
+        {"query": "neither", "label": "lloyd-architecture/never-written.md"}], rep
+    assert rep["walked_paths"] >= 5 and rep["walked_checkout_paths"] == 1, rep
+
+    # A vault label is never satisfied by the checkout: `architecture/harness.md`
+    # resolves in this vault, and with the vault copy gone it is dead even though
+    # the checkout still has that file.
+    (vault / "architecture" / "harness.md").unlink()
+    (vault / "architecture").rmdir()
+    only_checkout = _write_corpus(tmp_path, [
+        {"id": "vault-label", "query": "q", "expect_docs": ["architecture/harness.md"]}],
+        name="only.yaml")
+    rep2 = _doc_label_satisfiability_report(specs_path=only_checkout, vault_root=vault,
+                                            checkout_root=checkout)
+    assert rep2["dead"] == [{"query": "vault-label", "label": "architecture/harness.md"}], rep2
 
 
 # The 20 ids the corpus opened with, in committed file order, and the SHA-256 of

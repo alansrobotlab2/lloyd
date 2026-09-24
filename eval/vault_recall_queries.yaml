@@ -918,3 +918,74 @@ queries:
     expect_docs:
       - 'backlog/733-app-paths-anchors-lloyd-home-to-the-imported-tree-.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
     notes: "A relative artifact path lands in the worktree and disappears with it."
+
+  # --- #1354: questions whose answer is a CURRENT doc in the lloyd checkout ---
+  #
+  # 2026-09-24. Every label above is vault-rooted. The five below are the first
+  # whose answer lives in `~/lloyd/architecture/` — the checkout's own docs, which
+  # no qmd collection indexes today (deploying one is #1354's human half, blocked
+  # on #1301). Written from the docs themselves, never from recall output.
+  #
+  # LABEL CONVENTION — `lloyd-architecture/<file>.md` means `architecture/<file>.md`
+  # IN THE LLOYD CHECKOUT, and nothing in the vault. The prefix is the name of the
+  # qmd collection that would index those docs, so it is exactly the path the
+  # scorer sees: `vault_recall` returns `<collection>/<relative path>`
+  # (`qmd://lloyd-architecture/harness.md` -> `lloyd-architecture/harness.md`), and
+  # `eval/run_eval.py::_doc_pair_satisfied` is a normalised substring test. The
+  # hyphen is the anchor: normalised, the label reads `lloyd_architecture/…`, which
+  # no vault path contains, so the stale copies under the vault's
+  # `projects/lloyd/architecture/` (which holds a `qmd.md`) and `architecture/`
+  # can never score as the answer. A bare `lloyd/architecture/qmd.md` label would
+  # be satisfied by `projects/lloyd/architecture/qmd.md` — that is the trap.
+  # `tests/test_eval_corpus_guard.py` resolves this prefix against the checkout
+  # only (`CHECKOUT_LABEL_ROOTS`), and records which root satisfied each label.
+  #
+  # HOW THE NIGHTLY SCORES THEM UNTIL THE COLLECTION EXISTS: as honest doc misses.
+  # The runner needs no change and does not crash — they are ordinary labels — but
+  # nothing can return them yet, so each of the five scores doc_hit 0 and
+  # doc_recall 0 until a collection named exactly `lloyd-architecture` is deployed
+  # and added to `VAULT_SEGMENTS` with `path` kept as `<collection>/<rel>`. Adding
+  # them moves the absolute doc_hit/doc_recall/ndcg means once (81 -> 86 queries):
+  # DO NOT COMPARE ABSOLUTE VALUES ACROSS THIS POINT. Paired comparisons join on
+  # ids present in both nights, so they are unaffected; the paired A/B in
+  # `workers/sources/automod_regression.py` scores both arms on this one file.
+  # They carry no expect_entities: they test the document leg, which is the gap.
+  - id: harness-system-prompt-frozen
+    query: "Why does the agent loop never rebuild the system prompt in the middle of a turn, and how does it update state like the todo list instead?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'lloyd-architecture/harness.md'  # #1354: checkout doc, §Invariants "Position 0 is frozen for the turn"
+    notes: "The position-0 rule: the prompt prefix stays KV-cached, and mid-turn state is appended via state_anchor."
+
+  - id: automod-gate-rungs
+    query: "What checks does the automod gate run on a self-modification before it can land, and which one asks whether the change did what the item asked?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'lloyd-architecture/automod.md'  # #1354: checkout doc, §4 "The gate" rung table and §4.5 the review rung
+    notes: "The rung ladder, cheapest first, fail-closed; the review rung is the one that reads the item's clauses."
+
+  - id: recall-doc-pool-ordering
+    query: "How does vault recall build its pool of candidate documents, and what orders them before the top results come back?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'lloyd-architecture/retrieval.md'  # #1354: checkout doc, §1 "The pipeline today" (fused head + floors, djev orders)
+    notes: "Global fusion head plus per-collection floors, ordered by djev, with the cross-encoder as the fallback."
+
+  - id: qmd-embed-model-switch
+    query: "Where is the embedding model for qmd configured, and what happens to the index when you change it?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'lloyd-architecture/qmd.md'  # #1354: checkout doc, §3 "Models, and the one place they are set"
+    notes: "models: in ~/.config/qmd/index.yml beats the env var; a change is a full re-embed that starts by itself."
+
+  - id: djev-rank-not-gate
+    query: "Why is djev only used to rank candidates and never trusted as a yes-or-no gate with a fixed cutoff?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'lloyd-architecture/djev.md'  # #1354: checkout doc, §7.2 "Accuracy — the reason nothing gates"
+    notes: "Listwise capacity and label_mass collapse; thresholds belong to one frozen schema, so rank with it, do not gate on it."
