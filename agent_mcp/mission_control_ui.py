@@ -50,7 +50,9 @@ async def _mc_get_state(_params: dict) -> dict:
         "tab": data.get("tab"),
         "focus": data.get("focus"),
         "focus_by_tab": data.get("focus_by_tab", {}),
-        "last_updated": data.get("last_updated"),
+        # A change-time, not a presence-time: the frontend reports on change
+        # only, so an old stamp means "unchanged since", not "browser gone".
+        "last_changed": data.get("last_changed"),
     }
 
 
@@ -139,8 +141,10 @@ async def list_tools():
                 "Use when you need to know what the user is looking at; to move their view use mc_navigate.\n\n"
                 "Report which Mission Control tab the user is currently viewing "
                 "and the work item (if any) they have focused inside it. "
-                "Returns {tab, focus, focus_by_tab, last_updated}. focus is "
-                "{kind, id, label?} when set, null otherwise."
+                "Returns {tab, focus, focus_by_tab, last_changed}. focus is "
+                "{kind, id, label?, changed_at} when set, null otherwise; "
+                "last_changed and each changed_at are when the user last "
+                "CHANGED that view, not proof the browser is still open."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),

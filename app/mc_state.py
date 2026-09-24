@@ -44,7 +44,16 @@ _state: dict[str, Any] = {
     # IDE tab mirror — frontend reports {open_folder, visible_file, open_tabs}.
     # None until the user has opened the IDE tab at least once.
     "ide": None,
-    "last_updated": None,
+    # When the frontend last reported a CHANGE — not when the mirror last
+    # proved it was still right. The only writer (useMcStateSync.ts) POSTs on
+    # a change and never on a heartbeat, so a browser left open on one tab
+    # stops stamping this while staying perfectly accurate: on 2026-09-20 it
+    # read 3 h 24 m old with the mirrored value still correct. It is not a
+    # liveness or presence signal, and an age gate on it would suppress the
+    # mirror in exactly the case it exists for. Each `focus_by_tab` entry
+    # carries its own `changed_at` for the same reason, so "which tab did the
+    # user look at most recently" is answerable per entry (#1133).
+    "last_changed": None,
 }
 
 _subscribers: set[asyncio.Queue] = set()
@@ -73,7 +82,11 @@ def _load_from_disk() -> None:
             ide = data.get("ide")
             if isinstance(ide, dict):
                 _state["ide"] = _normalize_ide(ide)
-            _state["last_updated"] = data.get("last_updated")
+            # `last_updated` is the key this file was written under before
+            # #1133; a restart over such a file must not reset the change-time.
+            _state["last_changed"] = (
+                data.get("last_changed") or data.get("last_updated")
+            )
     except Exception as e:
         logger.warning("mc_state: failed to load %s: %s", _STATE_PATH, e)
 
@@ -119,6 +132,7 @@ def _normalize_focus(focus: Any) -> Optional[dict]:
     """Coerce client-supplied focus into the canonical {kind, id, label?} shape.
 
     Returns None when the client explicitly cleared focus or sent garbage.
+    `set_state` adds `changed_at`; a client-sent one is dropped here on purpose.
     """
     if not isinstance(focus, dict):
         return None
@@ -141,7 +155,7 @@ async def get_state() -> dict:
             "focus": focus_for_tab,
             "focus_by_tab": dict(_state["focus_by_tab"]),
             "ide": dict(_state["ide"]) if _state.get("ide") else None,
-            "last_updated": _state["last_updated"],
+            "last_changed": _state["last_changed"],
         }
 
 
@@ -154,19 +168,6 @@ def get_ide_snapshot() -> Optional[dict]:
     """
     ide = _state.get("ide")
     return dict(ide) if isinstance(ide, dict) else None
-
-
-def get_focus_snapshot() -> dict:
-    """Synchronous snapshot of the tab + per-tab focus map.
-
-    Same trade as `get_ide_snapshot`: read without the lock so sync call
-    sites (the dashboard aggregator runs its disk reads in a thread) can
-    use it. Worst case is a one-poll-stale tab name.
-    """
-    return {
-        "tab": _state.get("tab", ""),
-        "focus_by_tab": dict(_state.get("focus_by_tab") or {}),
-    }
 
 
 _SENTINEL = object()
@@ -186,11 +187,13 @@ async def set_state(tab: Optional[str], focus: Any, ide: Any = _SENTINEL) -> dic
                 raise ValueError(f"unknown tab: {tab!r}")
             _state["tab"] = tab
 
+        now = _now()
         active = _state["tab"]
         normalized = _normalize_focus(focus)
         if normalized is None:
             _state["focus_by_tab"].pop(active, None)
         else:
+            normalized["changed_at"] = now
             _state["focus_by_tab"][active] = normalized
 
         prev_folder = (_state.get("ide") or {}).get("open_folder") if _state.get("ide") else None
@@ -211,14 +214,14 @@ async def set_state(tab: Optional[str], focus: Any, ide: Any = _SENTINEL) -> dic
             except Exception as e:
                 logger.warning("mc_state: file_watcher.bind failed: %s", e)
 
-        _state["last_updated"] = _now()
+        _state["last_changed"] = now
         _persist()
 
         return {
             "tab": _state["tab"],
             "focus": _state["focus_by_tab"].get(_state["tab"]),
             "ide": dict(_state["ide"]) if _state.get("ide") else None,
-            "last_updated": _state["last_updated"],
+            "last_changed": _state["last_changed"],
         }
 
 
