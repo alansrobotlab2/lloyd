@@ -2715,8 +2715,10 @@ def test_desired_statuses_covers_every_branch(isolated):
     # offered again (external)
     write_item(isolated, 713); _confirm(713); B.set_status(713, "in_progress", "was running")
     _blocked_round(713, "SM_713", external=True)
-    # spent
-    write_item(isolated, 714); _confirm(714); B.set_status(714, "in_progress", "was running")
+    # spent, and its one re-triage already used: a person's
+    write_item(isolated, 714)
+    S.append_event({"event": "backlog_retriage", "item_id": 714, "ts": 1.0}, path=S.LEDGER_PATH)
+    _confirm(714); B.set_status(714, "in_progress", "was running")
     _blocked_round(714, "SM_714", external=False)
     # confirmed, waiting, but parked in draft by nobody in particular
     write_item(isolated, 715); _confirm(715); B.set_status(715, "draft", "parked")
@@ -2860,8 +2862,10 @@ def test_the_needs_human_tag_rides_the_status_move_both_ways(isolated):
     """A spent item in `draft` looks like one of 250 unread drafts; the tag is
     the difference. It goes on with the move to draft and comes off when a
     reopen takes the item back into the pool."""
-    write_item(isolated, 730); _confirm(730); B.set_status(730, "in_progress", "running")
-    _blocked_round(730, "SM_730", external=False)                 # spent
+    write_item(isolated, 730)
+    S.append_event({"event": "backlog_retriage", "item_id": 730, "ts": 1.0}, path=S.LEDGER_PATH)
+    _confirm(730); B.set_status(730, "in_progress", "running")
+    _blocked_round(730, "SM_730", external=False)                 # spent, second life used
     moved = B.reconcile_statuses(S.LEDGER_PATH, None)
     assert [(m["from"], m["to"]) for m in moved] == [("in_progress", "draft")]
     fm = B._split_frontmatter(next(isolated.glob("730-*.md")).read_text())[0]
@@ -2950,13 +2954,16 @@ def test_the_reconciler_never_lifts_a_grouped_member_to_up_next(isolated):
     assert B.select_confirmed(S.LEDGER_PATH) is None or B.select_confirmed(S.LEDGER_PATH)[0].id != 2
 
 
-def test_a_spent_umbrella_parks_needs_human_and_members_stay_folded(isolated):
+def test_a_spent_umbrella_waits_for_its_unfold_and_members_stay_folded(isolated):
+    """A spent umbrella is always unfolded by housekeeping
+    (`unfold_spent_umbrellas`), so the reconciler parks it without telling a
+    person: the tag would only come off again at the next pass."""
     _umbrella(isolated, 50, [2, 5])
     _confirm(50)
     _blocked_round(50, "SM_50", external=False)
     B.reconcile_statuses(S.LEDGER_PATH)
     fm = _fm(next(isolated.glob("50-*.md")))
-    assert fm["status"] == "draft" and B.NEEDS_HUMAN_TAG in fm["tags"]
+    assert fm["status"] == "draft" and B.NEEDS_HUMAN_TAG not in fm["tags"]
     assert _fm(next(isolated.glob("2-*.md")))["group"] == 50
 
 
@@ -3064,6 +3071,152 @@ def test_an_item_whose_landing_is_in_flight_is_never_retriaged(isolated, monkeyp
     assert B.retriage_spent_items(S.LEDGER_PATH) == [], "its worktree is still there"
     monkeypatch.setattr(W, "worktree_path", lambda rid: tmp_path / "gone")
     assert [r["item_id"] for r in B.retriage_spent_items(S.LEDGER_PATH)] == [940]
+
+
+# ── No needs-human hand-off while the round is alive or a re-triage is owed ──
+#
+# The #904 measure over the live ledger (2026-09-24): of 103 needs-human
+# hand-offs in a week, most were undone within the hour — by the loop's own
+# re-triage (the turn-end reconcile parked items housekeeping re-triaged
+# minutes later: #1240, 38 s), or by the reaper moving an item back to
+# `up_next` once the round the reconciler had called spent was actually over
+# (#1143 was parked at 02:46Z on 09-18 while its gate was on the tests rung).
+
+def _second_spend(item_id, round_id):
+    """An item whose one re-triage is used and whose next attempt is spent too."""
+    S.append_event({"event": "backlog_retriage", "item_id": item_id, "ts": 1.0}, path=S.LEDGER_PATH)
+    _spent_after_review(item_id, round_id=round_id)
+
+
+@pytest.mark.parametrize("alive", ["gate", "land", "current", "worktree", "started"])
+def test_no_hand_off_while_the_round_is_alive(isolated, monkeypatch, tmp_path, alive):
+    """`items_with_unfinished_rounds` is what retriage and the umbrella unfold
+    already skip; the reconciler's spent park reads the same set. Pinned on a
+    SECOND spend, where a person really is next, so only the liveness guard
+    can be what keeps the tag off."""
+    import os
+    from scripts.automod import worktree as W
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path / "rounds")
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    monkeypatch.setattr(W, "worktree_path", lambda rid: tmp_path / "gone")
+    write_item(isolated, 950)
+    _second_spend(950, "SM_ALIVE")
+    B.set_status(950, "in_progress", "its round is running")
+    if alive == "gate":
+        monkeypatch.setattr(S, "gate_in_progress", lambda rid: rid == "SM_ALIVE")
+    elif alive == "land":
+        S.write_land_marker("SM_ALIVE", pid=os.getpid())
+    elif alive == "current":
+        monkeypatch.setattr(S, "read_current", lambda: {"round_id": "SM_ALIVE", "state": "landing"})
+    elif alive == "worktree":
+        (tmp_path / "wt").mkdir()
+        monkeypatch.setattr(W, "worktree_path", lambda rid: tmp_path / "wt")
+    else:  # a second turn opened on the item after the finished row
+        S.append_event({"event": "backlog_implement", "item_id": 950, "phase": "started"},
+                       path=S.LEDGER_PATH)
+    assert 950 in B.items_with_unfinished_rounds(S.LEDGER_PATH)
+    want = B.desired_statuses(S.LEDGER_PATH)[950]
+    assert want[0] == "in_progress" and len(want) == 2, want
+    assert B.reconcile_statuses(S.LEDGER_PATH) == [], "already in_progress: nothing moves"
+    assert B.NEEDS_HUMAN_TAG not in B.item_by_id(950).tags
+    assert not [e for e in S.read_events(path=S.LEDGER_PATH)
+                if e.get("event") == "status_moved" and e.get("to") == "draft"]
+
+    # The round ends: now, and only now, a person is handed the item.
+    S.clear_land_marker("SM_ALIVE")
+    monkeypatch.setattr(S, "gate_in_progress", lambda rid: False)
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    monkeypatch.setattr(W, "worktree_path", lambda rid: tmp_path / "gone")
+    if alive == "started":
+        S.append_event({"event": "backlog_implement", "item_id": 950, "phase": "finished",
+                        "round_id": "SM_ALIVE", "stop_reason": "stop"}, path=S.LEDGER_PATH)
+    moved = B.reconcile_statuses(S.LEDGER_PATH)
+    assert [(m["from"], m["to"]) for m in moved] == [("in_progress", "draft")]
+    assert B.NEEDS_HUMAN_TAG in B.item_by_id(950).tags
+
+
+def test_a_hand_off_while_the_round_is_alive_is_taken_back(isolated, monkeypatch, tmp_path):
+    """An item the old rule already parked `draft` + needs-human under a live
+    gate goes back to `in_progress` and loses the tag."""
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    write_item(isolated, 951)
+    _second_spend(951, "SM_G")
+    B.set_status(951, "draft", "old rule", add_tags=(B.NEEDS_HUMAN_TAG,))
+    monkeypatch.setattr(S, "gate_in_progress", lambda rid: rid == "SM_G")
+    moved = B.reconcile_statuses(S.LEDGER_PATH)
+    assert [(m["from"], m["to"]) for m in moved] == [("draft", "in_progress")]
+    assert B.NEEDS_HUMAN_TAG not in B.item_by_id(951).tags
+
+
+def test_no_hand_off_while_the_re_triage_is_owed(isolated, monkeypatch):
+    """The turn-end reconcile runs without the re-triage pass beside it, so a
+    first spend used to be parked needs-human and re-triaged at the next
+    housekeeping pass. `second_life_owed` — the rule the review-disagreement
+    announcement already reads — keeps the tag off until the second life is
+    used; the second spend is a person's, as before."""
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    write_item(isolated, 952)
+    _spent_after_review(952, round_id="SM_1")
+    B.set_status(952, "in_progress", "its turn was running")
+    assert B.second_life_owed(B.item_by_id(952), S.LEDGER_PATH)
+    moved = B.reconcile_statuses(S.LEDGER_PATH)        # what `execute` runs at turn end
+    assert [(m["from"], m["to"]) for m in moved] == [("in_progress", "draft")]
+    item = B.item_by_id(952)
+    assert B.NEEDS_HUMAN_TAG not in item.tags
+    assert "second life" in B._split_frontmatter(item.path.read_text())[0]["activity_log"][-1]
+    # Housekeeping takes it from there, and nothing had to be taken back.
+    assert [r["item_id"] for r in B.retriage_spent_items(S.LEDGER_PATH)] == [952]
+    assert B.reconcile_statuses(S.LEDGER_PATH) == []
+    # A second confirmation and a second spend: now a person decides.
+    _spent_after_review(952, round_id="SM_2")
+    assert not B.second_life_owed(B.item_by_id(952), S.LEDGER_PATH)
+    B.reconcile_statuses(S.LEDGER_PATH)
+    assert B.NEEDS_HUMAN_TAG in B.item_by_id(952).tags
+    hand_offs = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "status_moved"
+                 and "a human decides" in (e.get("reason") or "")]
+    assert len(hand_offs) == 1, "exactly one hand-off, and it stuck"
+
+
+def test_a_spend_waiting_on_an_open_blocker_is_still_handed_off(isolated, monkeypatch):
+    """Re-triage waits for an open deferral target, and what it waits on is
+    often a person's: #1342 and #731 deferred to each other on 2026-09-21 and
+    Alan closed both from the needs-human pile. Holding the tag there would
+    park them untagged for good, so a deferral keeps today's hand-off; the
+    re-triage still follows once the blocker closes."""
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    write_item(isolated, 954)
+    write_item(isolated, 955, name="Its blocker")
+    _confirm(954)
+    S.append_event({"event": "backlog_implement", "item_id": 954, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": 954, "phase": "finished",
+                    "round_id": None, "stop_reason": "stop",
+                    "outcome": {"landed": False, "acceptance": "deferred", "deferred_to": [955]}},
+                   path=S.LEDGER_PATH)
+    assert B.implement_outcomes(S.LEDGER_PATH)[954][0] == "spent"
+    assert B.retriage_spent_items(S.LEDGER_PATH) == [], "waits for #955"
+    B.reconcile_statuses(S.LEDGER_PATH)
+    assert B.NEEDS_HUMAN_TAG in B.item_by_id(954).tags
+    B.set_status(955, "done", "the blocker landed")
+    assert [r["item_id"] for r in B.retriage_spent_items(S.LEDGER_PATH)] == [954]
+    assert B.NEEDS_HUMAN_TAG not in B.item_by_id(954).tags
+
+
+def test_with_retriage_off_a_first_spend_is_a_persons_at_once(isolated, monkeypatch):
+    """`retriage_spent: false` means no second life is coming, so waiting for
+    one would strand the item. Housekeeping and the turn-end reconcile both
+    pass the switch."""
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    write_item(isolated, 953)
+    _spent_after_review(953)
+    B.reconcile_statuses(S.LEDGER_PATH, retriage_enabled=False)
+    assert B.NEEDS_HUMAN_TAG in B.item_by_id(953).tags
+    seen = {}
+    _housekeeping_counter(monkeypatch)
+    monkeypatch.setattr(B, "reconcile_statuses", lambda ledger, **kw: seen.update(kw) or [])
+    monkeypatch.setattr(B, "release_held_confirmations", lambda *a, **k: [])
+    I._housekeeping({"retriage_spent": False})
+    assert seen.get("retriage_enabled") is False
 
 
 def test_a_marked_item_never_goes_to_up_next_before_its_second_triage(isolated):
@@ -3515,6 +3668,8 @@ def test_an_item_whose_landing_is_mid_drain_stays_in_progress(isolated, monkeypa
     # old reading (spent, a human decides) is the right one again.
     monkeypatch.setattr(S, "land_in_progress", lambda rid: None)
     status, why, *rest = B.desired_statuses(S.LEDGER_PATH)[1199]
+    assert status == "draft" and rest == [], "its re-triage is owed before a person is"
+    status, why, *rest = B.desired_statuses(S.LEDGER_PATH, retriage_enabled=False)[1199]
     assert status == "draft" and rest == [True]
     # The promotion recorded: under observation, and still in progress.
     monkeypatch.setattr(S, "land_in_progress", lambda rid: None)

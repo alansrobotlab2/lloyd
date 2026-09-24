@@ -847,8 +847,10 @@ def test_an_unsound_premise_spends_the_attempt(isolated):
                     "review_summary": "false"}, path=S.LEDGER_PATH)
     assert B.implement_outcomes(S.LEDGER_PATH)[549][0] == "spent"
     assert "SM_u" in B.review_unsound_rounds(S.LEDGER_PATH)
-    want = B.desired_statuses(S.LEDGER_PATH, None)[549]
+    want = B.desired_statuses(S.LEDGER_PATH, None, retriage_enabled=False)[549]
     assert want[0] == "draft" and want[2] is True
+    want = B.desired_statuses(S.LEDGER_PATH, None)[549]
+    assert want[0] == "draft" and len(want) == 2, "its one re-triage comes before a person"
 
 
 def test_fresh_confirmations_are_picked_before_re_offers(isolated):

@@ -1369,7 +1369,8 @@ def _housekeeping(src_cfg: dict) -> None:
         # of truth: every poll, anything the two disagree on moves. This is
         # also what migrated the board on 2026-09-09.
         for r in B.reconcile_statuses(S.LEDGER_PATH,
-                                      enabled=bool(src_cfg.get("status_pipeline", True))):
+                                      enabled=bool(src_cfg.get("status_pipeline", True)),
+                                      retriage_enabled=bool(src_cfg.get("retriage_spent", True))):
             logger.info("backlog #%s: %s → %s", r["item_id"], r["from"], r["to"])
     except Exception as exc:
         logger.warning("reconcile_statuses failed: %s", exc)
@@ -1429,14 +1430,13 @@ def _second_life_owed(candidate) -> bool:
     """Whether housekeeping, not a person, handles this spend next: an
     umbrella is always unfolded (`backlog.unfold_spent_umbrellas`); any
     other item is re-triaged while `retriage_spent` is on and it has not had
-    its one re-triage."""
+    its one re-triage. `backlog.second_life_owed` is the definition; the
+    reconciler's spent park reads it too."""
     from scripts.automod import backlog as B, state as S
     try:
-        if B.is_umbrella(candidate):
-            return True
-        if not bool(_source_cfg(NAME).get("retriage_spent", True)):
-            return False
-        return B.retriage_counts(S.LEDGER_PATH).get(int(candidate.id), 0) < B.RETRIAGE_CAP
+        return B.second_life_owed(
+            candidate, S.LEDGER_PATH,
+            retriage_enabled=bool(_source_cfg(NAME).get("retriage_spent", True)))
     except Exception:  # noqa: BLE001 — when unsure, tell the human
         return False
 
@@ -1535,7 +1535,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         except Exception as exc:
             logger.warning("close_settled_items after #%s failed: %s", candidate.id, exc)
         try:
-            B.reconcile_statuses(S.LEDGER_PATH)
+            B.reconcile_statuses(S.LEDGER_PATH, retriage_enabled=bool(
+                _source_cfg(NAME).get("retriage_spent", True)))
         except Exception as exc:
             logger.warning("reconcile_statuses after #%s failed: %s", candidate.id, exc)
         # Beside the reaper, at turn end: this turn was the last thing a

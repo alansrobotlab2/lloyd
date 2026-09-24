@@ -1062,6 +1062,11 @@ idle between rounds (61.6 h) than running them (48.3 h).
   is not announced "needs you" while the re-triage (or, for an umbrella, the
   unfold) is owed. Switch `workers.sources.autocode.retriage_spent`. ~35 items a week
   went to `needs-human`, and 42 of the 67 a person reopened later landed.
+  **The reconciler's spent park reads the same two rules** (2026-09-24): an
+  item `items_with_unfinished_rounds` names stays `in_progress`, and one whose
+  second life is owed (`backlog.second_life_owed`, not waiting on an open
+  deferral target) goes to `draft` untagged. 95 of a week's 103 hand-offs had
+  been undone, median 13 min; replayed, 72 are withheld and none that stuck.
 
 The verdict's `SURFACE:` picks the implementer's route. `code` and `frontend`
 run a worktree round through the gate — `web/src/**` is in scope since the

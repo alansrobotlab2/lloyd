@@ -937,7 +937,8 @@ def board_pass() -> dict:
     reopened = B.reopen_reverted_landings(S.LEDGER_PATH)
     unfolded = B.unfold_spent_umbrellas(S.LEDGER_PATH)
     retriaged = B.retriage_spent_items(S.LEDGER_PATH, enabled=bool(auto.get("retriage_spent", True)))
-    moved = B.reconcile_statuses(S.LEDGER_PATH, enabled=bool(auto.get("status_pipeline", True)))
+    moved = B.reconcile_statuses(S.LEDGER_PATH, enabled=bool(auto.get("status_pipeline", True)),
+                                 retriage_enabled=bool(auto.get("retriage_spent", True)))
     released = B.release_held_confirmations(
         S.LEDGER_PATH, floor=int(tri.get("implement_pool_floor", B.IMPLEMENT_POOL_FLOOR)),
         enabled=bool(tri.get("hold_confirmations", True)))

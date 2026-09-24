@@ -3414,7 +3414,8 @@ def _apply_status(path: Path, status: str, why: str, *,
 
 
 def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS,
-                     *, open_round_items: set[int] = frozenset()) -> dict[int, tuple]:
+                     *, open_round_items: set[int] = frozenset(),
+                     retriage_enabled: bool = True) -> dict[int, tuple]:
     """`{item_id: (status, why[, needs_human])}` — what the ledger says each
     open item's status should be. Only items the loop has an opinion about
     appear. The optional third element marks a spent attempt: the tag goes on
@@ -3424,6 +3425,8 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     run against the same table, and so a test can read the table without a
     board. `open_round_items` is the set with a round in flight right now —
     the reconciler passes it, the migration passes what it can see.
+    `retriage_enabled` is `workers.sources.autocode.retriage_spent`: with it
+    off, a spend is a person's at once, as before the second life existed.
     """
     confirmed = confirmed_verdicts(ledger)
     held = held_confirmations(ledger)
@@ -3474,6 +3477,11 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     landed_outcome: dict[int, dict] = {}
     for d in _ledger_events(ledger, "item_landed"):
         landed_outcome[int(d["item_id"])] = d
+    # Read only when a spent item is met: they touch the round state on disk.
+    unfinished: set[int] | None = None
+    retriages: dict[int, int] = {}
+    history: dict[int, list[dict]] = {}
+    open_ids: set[int] = set()
     out: dict[int, tuple[str, str]] = {}
     for item in open_items(boards):
         iid = item.id
@@ -3552,7 +3560,47 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
                 # 2026-09-23, whose every implement turn failed on the stack
                 # being down. Same destination, different reason, and the
                 # reason is what they would act on.
-                if infra_parked(detail):
+                #
+                # Two guards come first, both the definitions the second-life
+                # passes already use (2026-09-24). Of 103 needs-human hand-offs
+                # in the week before, 95 were undone, median 13 minutes later,
+                # and a read-only replay of this rule over the ledger withholds
+                # 72 of them (37 under a live round, 35 ahead of an owed second
+                # life) and none of the 8 that stuck. The reconciler parked
+                # items whose round was still alive —
+                # gate running, landing waiting, worktree open (#1143 at
+                # 02:46Z on 09-18, eight minutes before its tests rung) — and
+                # the reaper then moved them back without a ledger row; and
+                # the turn-end reconcile, which runs without the re-triage
+                # pass beside it, parked items that housekeeping re-triaged
+                # minutes later (#1240, 38 s). `spent` is not over, and a
+                # person told "needs you" ahead of the loop's own second life
+                # learns to ignore the tag.
+                #
+                # A deferral to an item still open is NOT owed now: re-triage
+                # waits for it (`_open_deferral_targets`), and what it waits on
+                # is often a person's — a `human_paths` blocker, or a cycle
+                # (#1342 and #731 deferred to each other on 09-21, and both
+                # hand-offs were closed by Alan's review). Those keep the tag.
+                if unfinished is None:
+                    history = implement_history(ledger)
+                    unfinished = items_with_unfinished_rounds(ledger, history=history)
+                    retriages = retriage_counts(ledger)
+                    open_ids = {i.id for i in open_items(None)}
+                if iid in unfinished:
+                    out[iid] = ("in_progress", "its round is not over (a gate, landing, worktree "
+                                               "or observation is still live), whatever spent reads")
+                elif second_life_owed(item, ledger, retriage_enabled=retriage_enabled,
+                                      counts=retriages) and (
+                        is_umbrella(item)
+                        or not _open_deferral_targets(history.get(iid) or [], iid, open_ids)):
+                    # The infra park keeps its own account (see below); only the
+                    # verdict on who acts next changes.
+                    head = detail[:200] if infra_parked(detail) else \
+                        "its one unattended attempt is spent"
+                    out[iid] = ("draft", head + "; the loop's own second life (re-triage, or "
+                                                "the umbrella's unfold) is owed before a person is")
+                elif infra_parked(detail):
                     out[iid] = ("draft", detail[:300], True)
                 else:
                     out[iid] = ("draft", "its one unattended attempt is spent; a human decides "
@@ -3618,8 +3666,11 @@ def rescue_off_vocabulary(ledger: Path,
 
 
 def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
-                       open_round_items: set[int] = frozenset(), enabled: bool = True) -> list[dict]:
-    """Write the desired statuses that differ. Idempotent; returns what moved."""
+                       open_round_items: set[int] = frozenset(), enabled: bool = True,
+                       retriage_enabled: bool = True) -> list[dict]:
+    """Write the desired statuses that differ. Idempotent; returns what moved.
+    `retriage_enabled` is `desired_statuses`' — pass the `retriage_spent`
+    switch, or a spend waits for a re-triage that is never coming."""
     if not enabled:
         return []
     from scripts.automod import state as S
@@ -3634,7 +3685,8 @@ def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BO
     # is the release, and the pass below must not move it back.
     release_held_confirmations(ledger, boards, hand_moves_only=True)
     current = {i.id: i.status for i in open_items(boards)}
-    for iid, want in desired_statuses(ledger, boards, open_round_items=open_round_items).items():
+    for iid, want in desired_statuses(ledger, boards, open_round_items=open_round_items,
+                                      retriage_enabled=retriage_enabled).items():
         status, why = want[0], want[1]
         needs_human = bool(want[2]) if len(want) > 2 else False
         if current.get(iid) == status:
@@ -5063,6 +5115,27 @@ def retriage_counts(ledger: Path) -> dict[int, int]:
         i = int(d["item_id"])
         counts[i] = counts.get(i, 0) + 1
     return counts
+
+
+def second_life_owed(item: Item, ledger: Path, *, retriage_enabled: bool = True,
+                     counts: dict[int, int] | None = None) -> bool:
+    """Whether housekeeping, not a person, handles this item's spend next: an
+    umbrella is always unfolded (`unfold_spent_umbrellas`); any other item is
+    re-triaged (`retriage_spent_items`) while `retriage_spent` is on and it has
+    not had its `RETRIAGE_CAP` re-triages. A deferral still waiting on an open
+    blocker is owed too — later, not never.
+
+    The one definition for both readers that must not tell a person "needs
+    you" ahead of the loop's own second life: the review-disagreement
+    announcement (`autocode._escalate_review_disagreement`) and the
+    reconciler's spent park (`desired_statuses`).
+    """
+    if is_umbrella(item):
+        return True
+    if not retriage_enabled:
+        return False
+    counts = retriage_counts(ledger) if counts is None else counts
+    return counts.get(int(item.id), 0) < RETRIAGE_CAP
 
 
 def last_retriage(ledger: Path, item_id: int) -> dict | None:
