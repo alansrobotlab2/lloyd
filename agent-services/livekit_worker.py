@@ -49,6 +49,7 @@ from typing import Callable, Optional
 import numpy as np
 import re
 import tts_shaping
+import tts_text
 import yaml
 from livekit import api as lkapi
 from livekit import rtc
@@ -212,6 +213,10 @@ class TTSStreamer:
         self.speed = float(tts_cfg.get("speed", 1.0))
         self.sample_rate = int(tts_cfg.get("sample_rate", 24000))
         self.tail_silence_ms = int(tts_cfg.get("tail_silence_ms", 250))
+        # Spoken-form expansion (`tts_text.for_speech`: qmd -> "Q M D", emails,
+        # phones, dates, ratios, paths). Off until the round-trip corpus
+        # (eval/tts_fidelity_eval.py) measures it against the live voice (#1165).
+        self.normalise_text = bool(tts_cfg.get("normalise_text", False))
         # Output shaping — restores the presence band the 12 Hz vocoder drops,
         # and applies `speed`, which the server's *streaming* path silently
         # ignores. See agent-services/tts_shaping.py for both measurements.
@@ -262,10 +267,16 @@ class TTSStreamer:
             )
 
     async def speak(self, text: str) -> None:
-        """Queue an utterance for synthesis + playback."""
+        """Queue an utterance for synthesis + playback.
+
+        Every spoken path ends here — streamed clauses, the poller's summary,
+        fillers — so this is where `for_speech` sits: nothing reaches the
+        vocoder around it."""
         text = (text or "").strip()
         if not text:
             return
+        if self.normalise_text:
+            text = tts_text.for_speech(text)
         await self.ensure_published()
         await self._queue.put((self.generation, text))
 

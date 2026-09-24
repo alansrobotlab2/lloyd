@@ -1,0 +1,79 @@
+# Spoken-word fidelity corpus for the cloned voice (#1165).
+#
+# Read by eval/run_tts_fidelity_eval.py: each item is synthesised as
+# `clone:dave_cullen` (k samples), transcribed by Parakeet greedy with no
+# hotword list, and scored on its `targets` — the words the listener must hear.
+# A target is one word or phrase; `|` separates spoken forms that all count
+# ("qmd|q m d"). Targets are compared after the scorer spells digits out, so
+# write them in words.
+#
+# `control` is the benign arm: ordinary sentences with no proper nouns and no
+# digits. If the rater fails those, the rater is the finding, not the voice.
+# `for_speech` must return every control sentence byte-identical
+# (tests/test_tts_text_for_speech.py).
+#
+# Names are only those already in ~/obsidian/hotwords.md; add nothing new here.
+items:
+  # ── personal names (~/obsidian/hotwords.md) ──────────────────────────────
+  - {id: name-alan, bucket: names, text: "Alan's meeting moved to three o'clock.", targets: [alan]}
+  - {id: name-lisa, bucket: names, text: "Tell Lisa I'll be home by six.", targets: [lisa]}
+  - {id: name-emilio, bucket: names, text: "Remind me to pick up Emilio after practice.", targets: [emilio]}
+  - {id: name-alfie, bucket: names, text: "Did Alfie eat his breakfast?", targets: [alfie]}
+  - {id: name-lloyd, bucket: names, text: "Lloyd is listening now.", targets: [lloyd]}
+  - {id: name-stompy, bucket: names, text: "Stompy's left leg servo is making noise.", targets: ["stompy|stompys|stompy's"]}
+  - {id: name-gracie, bucket: names, text: "Gracie needs to go to the vet on Friday.", targets: [gracie]}
+  - {id: name-groot, bucket: names, text: "The gr00t model finished training.", targets: [groot]}
+
+  # ── technical proper nouns ───────────────────────────────────────────────
+  - {id: tech-qmd, bucket: technical, text: "The qmd daemon is answering again.", targets: ["qmd|q m d"]}
+  - {id: tech-vllm, bucket: technical, text: "The vLLM engine restarted cleanly.", targets: ["vllm|v l l m"]}
+  - {id: tech-tailscale, bucket: technical, text: "Tailscale says the laptop is offline.", targets: ["tailscale|tail scale"]}
+  - {id: tech-supervisord, bucket: technical, text: "Everything runs under supervisord now.", targets: ["supervisord|supervisor d|supervisor dee"]}
+  - {id: tech-livekit, bucket: technical, text: "The LiveKit server is up.", targets: ["livekit|live kit"]}
+  - {id: tech-openwakeword, bucket: technical, text: "openWakeWord heard the name twice.", targets: ["openwakeword|open wake word"]}
+  - {id: tech-fastapi, bucket: technical, text: "The backend is a FastAPI app.", targets: ["fastapi|fast api|fast a p i"]}
+  - {id: tech-mission-control, bucket: technical, text: "Open Mission Control on the big screen.", targets: ["mission control"]}
+  - {id: tech-inner-voice, bucket: technical, text: "Inner Voice flagged that turn.", targets: ["inner voice"]}
+  - {id: tech-autocode, bucket: technical, text: "The autocode loop landed two rounds.", targets: ["autocode|auto code"]}
+
+  # ── the cloned voice's source name ───────────────────────────────────────
+  - {id: voice-source-1, bucket: voice_source, text: "This voice was cloned from Dave Cullen.", targets: [dave, "cullen|cullen's"]}
+  - {id: voice-source-2, bucket: voice_source, text: "Dave Cullen recorded the reference clip.", targets: [dave, cullen]}
+
+  # ── hard spoken forms ────────────────────────────────────────────────────
+  - {id: email-1, bucket: email, text: "Send it to alan@example.com please.", targets: [alan, "at", example, "dot com|com"]}
+  - {id: email-2, bucket: email, text: "The alerts go to lloyd.alerts@example.org now.", targets: [lloyd, alerts, "at", example, "org"]}
+  - {id: phone-1, bucket: phone, text: "Call the shop at 555-867-5309.", targets: ["five five five", "eight six seven", "five three oh nine|five three zero nine|fifty three oh nine"]}
+  - {id: phone-2, bucket: phone, text: "Their number is (415) 555-0100.", targets: ["four one five|four fifteen", "five five five", "zero one zero zero|oh one hundred|zero one hundred|oh one oh oh"]}
+  - {id: date-1, bucket: date, text: "It landed on 2026-09-15.", targets: [september, "fifteenth|fifteen", "twenty twenty six|two thousand twenty six"]}
+  - {id: date-2, bucket: date, text: "The window closes on 2026-10-01.", targets: [october, "first|one", "twenty twenty six|two thousand twenty six"]}
+  - {id: ratio-1, bucket: ratio, text: "The new build is 3.1x faster.", targets: ["three point one", "times|x"]}
+  - {id: ratio-2, bucket: ratio, text: "Prefill got 10x cheaper overnight.", targets: [ten, "times|x"]}
+  - {id: count-1, bucket: count, text: "The prompt is ~23.6k tokens long.", targets: ["twenty three point six", "thousand|k"]}
+  - {id: count-2, bucket: count, text: "There are ~40 items left on the board.", targets: [forty]}
+  - {id: path-1, bucket: path, text: "I saved it to ~/obsidian/knowledge/foo.md for you.", targets: [obsidian, knowledge, foo, "dot md|md"]}
+  - {id: path-2, bucket: path, text: "The setting lives in ~/lloyd/config.yaml today.", targets: [lloyd, config, "dot yaml|yaml|yamel"]}
+  - {id: dash-1, bucket: punctuation, text: "The restart worked — the engine came back in two minutes.", targets: [restart, engine, minutes]}
+  - {id: dash-2, bucket: punctuation, text: "One thing failed — the sync — and it is fixed now.", targets: [failed, sync, fixed]}
+  - id: bullet-1
+    bucket: bullet_reply
+    text: "Three things changed overnight:\n- the qmd index was rebuilt\n- two rounds landed\n- the backlog shrank by a dozen items"
+    targets: ["qmd|q m d", index, rebuilt, landed, backlog, dozen]
+
+  # ── benign control: no proper nouns, no digits ───────────────────────────
+  - {id: control-01, bucket: control, text: "The kettle is boiling in the kitchen.", targets: [kettle, boiling, kitchen]}
+  - {id: control-02, bucket: control, text: "Please close the window before you leave.", targets: [close, window, leave]}
+  - {id: control-03, bucket: control, text: "The weather looks clear for the rest of the day.", targets: [weather, clear, rest]}
+  - {id: control-04, bucket: control, text: "I finished reading the report this morning.", targets: [finished, reading, report, morning]}
+  - {id: control-05, bucket: control, text: "The dog is asleep on the couch.", targets: [dog, asleep, couch]}
+  - {id: control-06, bucket: control, text: "Remember to water the plants tonight.", targets: [remember, water, plants, tonight]}
+  - {id: control-07, bucket: control, text: "The meeting ran long, so dinner will be late.", targets: [meeting, dinner, late]}
+  - {id: control-08, bucket: control, text: "Your package arrived at the front door.", targets: [package, arrived, front, door]}
+  - {id: control-09, bucket: control, text: "The music in the garden is too loud.", targets: [music, garden, loud]}
+  - {id: control-10, bucket: control, text: "I turned off the lights upstairs.", targets: [turned, lights, upstairs]}
+  - {id: control-11, bucket: control, text: "The bread needs another few minutes in the oven.", targets: [bread, minutes, oven]}
+  - {id: control-12, bucket: control, text: "Everything is quiet and nothing needs your attention.", targets: [quiet, nothing, attention]}
+  - {id: control-13, bucket: control, text: "The printer is out of paper again.", targets: [printer, paper, again]}
+  - {id: control-14, bucket: control, text: "It might rain later, so take a jacket.", targets: [rain, later, jacket]}
+  - {id: control-15, bucket: control, text: "The laundry is dry and folded on the bed.", targets: [laundry, dry, folded, bed]}
+  - {id: control-16, bucket: control, text: "I will remind you again after lunch.", targets: [remind, again, lunch]}
