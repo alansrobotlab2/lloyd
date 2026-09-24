@@ -2709,3 +2709,133 @@ def test_a_spent_budget_refuses_the_unasked_and_keeps_the_asked_junk(redirect_pa
     assert _knowledge_sections(redirect_paths) == 2
     out = capsys.readouterr().out
     assert "Held 2 item(s) the stage-2 model was never asked about" in out, out
+
+
+# --- #1155: YouTube descriptions reach the gate, and the gate says what it dropped
+
+# The live feed's shape (`GET .../feeds/videos.xml?channel_id=...` on
+# 2026-09-17): the description sits under <media:group>, there is no
+# <atom:summary>, and some entries carry an empty <media:description/>.
+def _live_shaped_atom(entries):
+    """`entries`: (video id, description or None-for-an-empty-element)."""
+    body = "".join(
+        f"<entry><id>yt:video:{v}</id><title>Video {v}</title>"
+        f"<published>2026-09-19T00:00:00Z</published>"
+        f'<link rel="alternate" href="https://youtu.be/{v}"/>'
+        f"<media:group><media:title>Video {v}</media:title>"
+        + (f"<media:description>{d}</media:description>" if d is not None
+           else "<media:description/>")
+        + "</media:group></entry>"
+        for v, d in entries)
+    return (f'<?xml version="1.0" encoding="UTF-8"?>'
+            f'<feed {_ATOM_NS}><title>channel</title>{body}</feed>')
+
+
+LIVE_DESCRIPTION = "00:00 - Exciting News / 45:44 - Practical Business with vllm"
+
+
+def test_a_live_shaped_entry_yields_its_nested_description(monkeypatch):
+    """Clause 1: `media:group/media:description` is read; the direct-child
+    lookup answered None on every live entry and `atom:summary` does not
+    exist in a YouTube feed, so `description` fell through to "" for 329 of
+    329 September rows."""
+    monkeypatch.setattr(yt_mod, "_http_get", lambda url, headers=None, timeout=None:
+                        _live_shaped_atom([("abc", LIVE_DESCRIPTION)]))
+
+    videos, fetched = yt_mod.fetch_channel_rss("UCnested")
+
+    assert fetched is True
+    assert [v["description"] for v in videos] == [LIVE_DESCRIPTION]
+
+
+def test_a_flat_description_and_atom_summary_still_read(monkeypatch):
+    """Clause 1's parenthesis: the fallbacks that were there stay there."""
+    monkeypatch.setattr(yt_mod, "_http_get", lambda url, headers=None, timeout=None:
+                        _atom_body(["flat"]))
+    videos, _ = yt_mod.fetch_channel_rss("UCflat")
+    assert videos[0]["description"] == "desc flat"
+
+    summary_only = (f'<?xml version="1.0" encoding="UTF-8"?><feed {_ATOM_NS}>'
+                    f"<entry><id>yt:video:s</id><title>S</title>"
+                    f"<summary>from atom summary</summary></entry></feed>")
+    monkeypatch.setattr(yt_mod, "_http_get", lambda url, headers=None, timeout=None:
+                        summary_only)
+    videos, _ = yt_mod.fetch_channel_rss("UCsummary")
+    assert videos[0]["description"] == "from atom summary"
+
+
+def test_an_empty_nested_description_is_an_empty_summary_not_an_error(
+        redirect_paths, monkeypatch):
+    """Clause 2: 3 of the 15 live entries carry <media:description/>; they
+    still parse, and the scan turns them into `FeedItem.summary == ""` beside
+    a sibling whose description is delivered (and clipped at 500 chars)."""
+    long_desc = "x" * 700
+    monkeypatch.setattr(yt_mod, "_http_get", lambda url, headers=None, timeout=None:
+                        _live_shaped_atom([("full", long_desc), ("bare", None)]))
+    monkeypatch.setattr(yt_mod, "sleep", lambda s: None)
+    monkeypatch.setattr(yt_mod, "load_youtube_channels_config",
+                        lambda: _channels("UCmixed"))
+
+    items, coverage = yt_mod.scan_youtube_channels()
+
+    by_id = {i.id.rsplit(":", 1)[-1]: i for i in items}
+    assert set(by_id) == {"full", "bare"}
+    assert by_id["bare"].summary == ""
+    assert by_id["full"].summary == "x" * 500
+    assert (coverage.fetched, coverage.attempted) == (1, 1)
+
+
+def test_the_gate_keeps_a_video_whose_description_matches_and_drops_the_same_title_bare(
+        redirect_paths):
+    """Clause 3: the summary reaches `stage1_filter`. Same title both times —
+    one the description says `vllm`, the other carries nothing — and only the
+    first survives, so a description-only match is no longer terminal."""
+    profile = _profile(redirect_paths)
+    described = _item("d", title="Tuesday stream", summary="we go through the new vllm release")
+    bare = _item("b", title="Tuesday stream", summary="")
+
+    kept = scoring_mod.stage1_filter([described, bare], profile)
+
+    assert [i.id for i in kept] == ["d"]
+
+
+def test_the_stage1_line_names_every_dropped_title(redirect_paths, capsys):
+    """Clause 4: the count stays, and the titles follow it."""
+    profile = _profile(redirect_paths)
+    items = [_item("hit", title="vllm thing", summary="vllm"),
+             _item("m1", title="Intelligence is Everywhere", summary=""),
+             _item("m2", title="Best local music generator", summary=""),
+             _item("m3", title="GPT 6 builds 3D worlds", summary="")]
+
+    scoring_mod.run_scoring_pipeline(items, profile, llm_call=RecordingLLM(5))
+
+    out = capsys.readouterr().out
+    assert "Stage 1 kept 1 of 4 items (3 matched no interest keyword)" in out, out
+    for title in ("Intelligence is Everywhere", "Best local music generator",
+                  "GPT 6 builds 3D worlds"):
+        assert f"  dropped: {title}" in out, out
+    assert "dropped: vllm thing" not in out
+    assert "more)" not in out, "no fold line when everything fit"
+
+
+def test_the_drop_list_folds_past_twenty_and_is_absent_when_nothing_dropped(
+        redirect_paths, capsys):
+    """Clause 4's two edges: the first 20 are named and the rest counted; a run
+    that dropped nothing prints no drop list at all."""
+    profile = _profile(redirect_paths)
+    misses = [_item(f"m{i}", title=f"Unrelated video {i:02d}", summary="")
+              for i in range(25)]
+    scoring_mod.run_scoring_pipeline(
+        [_item("hit", title="vllm thing", summary="vllm")] + misses,
+        profile, llm_call=RecordingLLM(5))
+    out = capsys.readouterr().out
+    named = [line for line in out.splitlines() if line.startswith("  dropped: ")]
+    assert named == [f"  dropped: Unrelated video {i:02d}" for i in range(20)], named
+    assert "  (+5 more)" in out, out
+
+    scoring_mod.run_scoring_pipeline(
+        [_item("hit", title="vllm thing", summary="vllm")],
+        profile, llm_call=RecordingLLM(5))
+    out = capsys.readouterr().out
+    assert "dropped" not in out, out
+    assert "Stage 1" not in out, out

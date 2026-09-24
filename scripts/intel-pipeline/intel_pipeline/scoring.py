@@ -37,6 +37,11 @@ LLM_KEYWORD_THRESHOLD = 0.3
 LLM_MAX_CALLS = 40
 LLM_TIMEOUT_SECONDS = 90
 
+# Dropped titles the stage-1 line names before folding the rest into a count.
+# A day's raw file holds ~25-100 rows, so an unbounded list would be most of
+# the run log; twenty is enough to read a bad-recall day for what it is.
+STAGE1_DROP_LIST_MAX = 20
+
 # Same endpoint and payload conventions as scripts/youtube_channel_monitor.py
 # and scripts/memory/next-gen-memory/fact_extractor.py — stdlib urllib, model
 # "primary", thinking suppressed. Deliberately not a new client: this package is
@@ -390,10 +395,20 @@ def run_scoring_pipeline(
     
     # Stage 1: Filter
     filtered = stage1_filter(items, profile)
-    dropped = len(items) - len(filtered)
-    if dropped:
+    kept_ids = {id(item) for item in filtered}
+    dropped_items = [item for item in items if id(item) not in kept_ids]
+    if dropped_items:
         print(f"Stage 1 kept {len(filtered)} of {len(items)} items "
-              f"({dropped} matched no interest keyword)")
+              f"({len(dropped_items)} matched no interest keyword)")
+        # By title, because a count cannot be read for recall: on 2026-09-15
+        # the gate kept 2 of 27, three plainly on-interest videos went with the
+        # 25, and the run log held nothing a reader could disagree with — a
+        # bad-recall day and a quiet day printed the same line (#1155).
+        for item in dropped_items[:STAGE1_DROP_LIST_MAX]:
+            print(f"  dropped: {item.title}")
+        more = len(dropped_items) - STAGE1_DROP_LIST_MAX
+        if more > 0:
+            print(f"  (+{more} more)")
     
     # Stage 2: Score
     scored = stage2_score(filtered, profile, llm_call=llm_call, max_llm_calls=cap)

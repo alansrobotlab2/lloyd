@@ -231,7 +231,15 @@ def _parse_feed_entries(content: str) -> List[Dict]:
         title = entry.find("atom:title", namespaces)
         published = entry.find("atom:published", namespaces)
         summary = entry.find("atom:summary", namespaces)
+        # YouTube nests the description under <media:group>, so the direct
+        # child lookup answers None on every live entry, and YouTube feeds carry
+        # no <atom:summary> at all — so from this file's first commit
+        # (2026-04-05) to 2026-09-24 no video ever had a summary, and stage 1
+        # judged every one on its title alone (#1155: 329 of 329 September rows
+        # empty). The direct lookup stays first for a feed that flattens it.
         media_desc = entry.find("media:description", namespaces)
+        if media_desc is None:
+            media_desc = entry.find("media:group/media:description", namespaces)
         link = entry.find("atom:link", namespaces)
 
         if entry_id is None or title is None:
