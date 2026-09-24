@@ -276,6 +276,22 @@ _INFRA_EXC_NAMES = frozenset({
     "ConnectError", "ConnectTimeout", "ReadError", "ReadTimeout", "PoolTimeout",
     "RemoteProtocolError", "ConnectionRefusedError", "ConnectionResetError",
 })
+# Consecutive infra-classified failures one task may collect inside one declared
+# period before it rests until the start of its next one (#1085). `1d1bbb6`
+# established that an infra failure must not spend the retry budget "so an
+# outage can't disable the whole fleet", and shipped only that half: with no
+# ceiling the same classification re-dispatched one task every
+# `_FAILURE_BACKOFF_BASE` seconds forever, with no `status: failed` resting
+# state and no alert (the disable alert is gated on `disabled and alert`). This
+# bounds the per-task loop WITHOUT reclassifying infra as task — the ceiling
+# counts dispatches, the budget still counts only task failures, so an outage
+# rests a task for one period instead of retiring 30 schedules.
+_INFRA_CEILING = 5
+# The hold string. `hold_reason` is what the board's `blocked` field, the
+# dispatch loop's "Holding #" line and the next-run stall alert all print, so
+# this must be distinguishable from "failure cooldown", which reads as
+# "retrying shortly" and is precisely the false reassurance #1085 is about.
+_INFRA_CEILING_HOLD = "infra ceiling"
 
 
 def _failure_cooldown_seconds(task: dict) -> float:
@@ -445,6 +461,104 @@ def _in_failure_cooldown(task: dict, now: datetime.datetime) -> bool:
     if last_run and last_attempt <= last_run:
         return False  # most recent attempt succeeded
     return (now - last_attempt).total_seconds() < _failure_cooldown_seconds(task)
+
+
+# ── The infra ceiling (#1085) ────────────────────────────────────────────────
+# Two persisted fields carry this state, both in the task file's front matter:
+#
+#   `infra_failure_count` — consecutive infra failures, cleared on a success, on
+#       crossing the ceiling, and whenever failures arrive a whole period apart.
+#   `infra_rest_until`    — the instant the ceiling's rest ends. Its presence in
+#       the future IS the hold; there is no third flag.
+#
+# The counter is deliberately separate from `failure_count`. Ingesting infra into
+# that budget would give an outage the fleet-wide disable `1d1bbb6` exists to
+# prevent — and `tests/test_autonomy_scheduler.py` pins both of those
+# properties (`test_fast_empty_response_is_infra_and_does_not_escalate`,
+# `test_connection_error_is_infra`), so the separation is not merely stylistic.
+
+
+def _infra_failure_count(task: dict) -> int:
+    """Consecutive infra-classified failures recorded on this task file."""
+    try:
+        return max(0, int(task.get("infra_failure_count") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _infra_ceil_window_seconds(task: dict) -> float:
+    """One declared period, for both counting the ceiling and resting on it.
+
+    The task's own `frequency`/`runs_per_day` period, falling back to the 6 h
+    retry ceiling for a frequency this module cannot parse (`6x-daily`, a cron
+    expression): such a task is never due anyway — `_is_task_due` stops at "no
+    frequency" — so the fallback only ever applies to a run someone invoked by
+    hand, and it must still be a bound rather than nothing.
+    """
+    return _frequency_interval_seconds(task) or float(_FAILURE_BACKOFF_CAP_SECONDS)
+
+
+def _next_infra_failure_count(task: dict, now: datetime.datetime) -> int:
+    """This infra failure, counted: the running total, or 1 to start a new window.
+
+    "N consecutive infra failures INSIDE ONE DECLARED PERIOD" is two conditions,
+    and the success path only gives the first one. Failures a whole period apart
+    do not accumulate: a server that hiccups once a week for five weeks is five
+    separate hiccups, not a ceiling crossing, and resting a weekly task for a
+    week on that evidence would be the outage-shaped punishment #1085 is careful
+    not to inflict.
+    """
+    prev = _parse_iso(task.get("last_attempt"))
+    if prev is None:
+        return 1
+    return (_infra_failure_count(task) + 1
+            if (now - prev).total_seconds() <= _infra_ceil_window_seconds(task)
+            else 1)
+
+
+def _in_infra_rest(task: dict, now: datetime.datetime) -> bool:
+    """True while a task is resting on the infra ceiling (#1085)."""
+    until = _parse_iso(task.get("infra_rest_until"))
+    return until is not None and now < until
+
+
+def _infra_rest_reason(task: dict) -> str:
+    """The board's sentence for a ceilinged task, with its resume time."""
+    until = _parse_iso(task.get("infra_rest_until"))
+    return (f"{_INFRA_CEILING_HOLD} ({_INFRA_CEILING} consecutive infra "
+            f"failures), resting until {until.isoformat() if until else 'unknown'}")
+
+
+def _infra_rest_seconds(task: dict) -> float:
+    """How long a ceilinged task rests: until its next declared period starts.
+
+    Two shapes, because a period is declared two ways. A task with
+    `preferred_hours` (or an hour in `scheduled_at`, which
+    `_effective_preferred_hours` also reads) rests the LATER of its raw period and
+    the wait to the next hour IN that window — the window can only lengthen a rest
+    onto an allowed hour, never shorten the period below itself. Where the window
+    is the longer of the two the resume lands inside it, which is the case that
+    matters: resting a windowed job until an hour outside its window leaves the
+    board showing `outside hours` for a task the ceiling is holding, and the hour
+    the window reopens is a fact of `preferred_hours` and the crossing hour, not of
+    the minute the clock happens to read. Where the raw period is longer — a daily
+    job whose window reopens in two hours — the resume is outside the window and
+    `_is_preferred_hour` holds it the extra minutes, so the hold's NAME changes
+    mid-rest. That is the shape the auto-rearm already has; the alternative is two
+    timestamps, one for the due gate and one for `next_run`, which is what puts the
+    board and the stall alarms telling different stories about one task. A
+    windowless task rests its raw period, which is the number that matters: the
+    flat 600 s cooldown already covered the sub-hour case, and a `weekly` task
+    resting 604800 s instead of 600 s is the whole of this fix's worth.
+    """
+    period = _infra_ceil_window_seconds(task)
+    hours = _effective_preferred_hours(task)
+    if hours:
+        window = set(hours)
+        now_hour = _local_hour()
+        ahead = next((k for k in range(1, 25) if (now_hour + k) % 24 in window), 24)
+        return max(period, ahead * 3600.0)
+    return period
 
 
 # ── The run-summary seam (#642) ───────────────────────────────────────────────
@@ -1173,6 +1287,13 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
         # little slack when a window is in force.
         if elapsed < interval - _due_slack_seconds(task):
             return False
+    # The infra ceiling (#1085), ABOVE the retry cooldown on purpose: a task
+    # that just crossed it is inside both, and the cooldown would win the
+    # explanation while being the weaker claim — 600 s against a whole period.
+    # `hold_reason` answers this same predicate at the same instant, in this
+    # same position, which is the #870 rule: one definition of due-ness.
+    if _in_infra_rest(task, now):
+        return False
     # A failed run keeps last_run untouched, so without this gate the task is
     # due again on the next tick — the retry storm.
     if _in_failure_cooldown(task, now):
@@ -1250,6 +1371,8 @@ def hold_reason(task: dict, all_tasks: list[dict], *,
         return "no frequency"
     if now is None:
         now = _utcnow()
+    if _in_infra_rest(task, now):
+        return _infra_rest_reason(task)
     if _in_failure_cooldown(task, now):
         return "failure cooldown"
     if not _is_dependency_met(task, all_tasks, now=now):
@@ -1869,6 +1992,17 @@ async def _record_artifact_success(task: dict, task_id, run_id: str,
     _update_task_field(task_id, status="up_next", last_run=completed_at,
                        last_attempt=completed_at, updated=completed_at,
                        failure_count=0,
+                       # Clause 2 of #1085 is about a SUCCESSFUL RUN, and a run
+                       # has two shipped writers — this one, and the
+                       # text-confirmed write in `run_task` that already clears the
+                       # pair. Clearing on one path is not clearing: an
+                       # artifact-backed success leaves the count standing, and
+                       # because every success stamps `last_attempt` to its own
+                       # completion, the next infra failure is inside the counting
+                       # window by construction — so a 4 carried across a clean
+                       # stretch rests the task a whole period on one later
+                       # hiccup, which is a ceiling punishing a healthy task.
+                       infra_failure_count=0, infra_rest_until=None,
                        **({"next_run": next_run_iso} if next_run_iso else {}))
     _append_activity_log(
         task_id,
@@ -2077,6 +2211,11 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
     hiccuped (fast empty response, connection error); it gets a flat cooldown
     and never counts toward the retry budget, so an outage can't disable the
     whole fleet — on 2026-09-01 every task returned empty for 11 hours straight.
+    The infra path is bounded separately (#1085): `_INFRA_CEILING` consecutive
+    infra failures inside one declared period rest the task until its next
+    period starts, alert once, and clear themselves then. Never reclassify an
+    infra failure as `task` to make it consume the budget — that is the
+    fleet-wide disable this split exists to prevent.
     """
     now = datetime.datetime.now(datetime.timezone.utc)
     completed_at = now.isoformat()
@@ -2107,8 +2246,40 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
             fields["status"] = "failed"
             disabled = True
 
+    # #1085: the ceiling on the infra path. `kind == "task"` above owns the
+    # retry budget and `status: failed`; nothing here may touch either, because
+    # "an outage must not disable the fleet" is the property `1d1bbb6` was
+    # written for. What the infra path gets instead is its own persisted
+    # counter and, at the ceiling, a rest of one declared period — a bound on
+    # how often this task may re-dispatch, which the flat 600 s cooldown never
+    # was (`_in_failure_cooldown` recomputes `n = max(1, 0) = 1` for a task
+    # whose budget was never spent, so it re-answers the same 600 s forever).
+    infra_ceiling_crossed = False
+    if kind == "infra":
+        infra_n = _next_infra_failure_count(task, now)
+        if infra_n >= _INFRA_CEILING:
+            infra_ceiling_crossed = True
+            fields["infra_rest_until"] = (now + datetime.timedelta(
+                seconds=_infra_rest_seconds(task))).isoformat()
+            # Spent. The rest is the state now; a counter left reading 5 would
+            # put the next single hiccup one step from a second rest, and clause
+            # 4 is a self-resuming task, not a permanently twitchy one.
+            infra_n = 0
+        elif _parse_iso(task.get("infra_rest_until")) and not _in_infra_rest(task, now):
+            # An already-expired rest is dropped, so the file never carries a
+            # resume time that `next_run` contradicts. An UNEXPIRED one is left
+            # exactly as found: a run invoked by hand while the task is resting
+            # must not lift the rest.
+            fields["infra_rest_until"] = None
+        fields["infra_failure_count"] = infra_n
+
     if disabled:
         fields["next_run"] = None
+    elif infra_ceiling_crossed:
+        # ONE timestamp for both surfaces: the hold reads `infra_rest_until` and
+        # the stall alarms read `next_run`, so two values here would be two
+        # stories about when this task comes back.
+        fields["next_run"] = fields["infra_rest_until"]
     else:
         cooldown = (_failure_cooldown_seconds({**task, **fields}) if kind == "task"
                     else float(_FAILURE_BACKOFF_BASE))
@@ -2119,6 +2290,11 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
     if disabled:
         note += (f" — DISABLED after {failures} consecutive failures; "
                  f"set status back to up_next to re-enable")
+    if infra_ceiling_crossed:
+        note += (f" — INFRA CEILING: {_INFRA_CEILING} consecutive infra failures in one "
+                 f"declared period, resting until {fields['infra_rest_until']}. Resumes "
+                 f"by itself then; the retry budget is untouched, so nobody has to "
+                 f"re-enable it")
     _append_activity_log(task_id, note)
 
     # The sub-30s streak gets one line in today's daily note (#1209), written
@@ -2154,6 +2330,37 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
             )
         except Exception as e:
             logger.warning("Alert dispatch failed for task #%s: %s", task_id, e)
+
+    # Exactly one message per crossing, from the same seam as the disable alert
+    # the infra path could never reach (`disabled` is only ever True for
+    # `kind == "task"`, which is why a 600 s loop ran silently for three weeks).
+    # One, not one-per-failure-afterwards: the counter is zeroed by the crossing
+    # and nothing dispatches during the rest, so the next message here is the
+    # next crossing. `alert` gates it with the same flag the disable uses.
+    #
+    # The cadence that buys, stated so nobody mistakes it for silence. A crossing
+    # needs 5 failures and consecutive dispatches are at least
+    # `_FAILURE_BACKOFF_BASE` apart (both `next_run` and `_in_failure_cooldown`
+    # floor there), so two crossings for one task cannot come closer than
+    # 4 x 600 s of failures plus the rest between them — about one message an
+    # hour even for the loudest possible talker, an `every 15 min` task whose
+    # rest is only its own 900 s period, and far less for anything slower. The
+    # whole infra corpus on this box is 8 records across 5 days, so the observed
+    # rate is orders under that bound.
+    if infra_ceiling_crossed and alert:
+        try:
+            from app.discord_notify import discord_alert
+            await discord_alert(
+                f"Autonomy task #{task_id} ({task.get('name')}) hit the infra "
+                f"ceiling: {_INFRA_CEILING} consecutive infra-classified failures "
+                f"inside one declared period. Resting until "
+                f"{fields['infra_rest_until']}, and resuming by itself then — its "
+                f"retry budget is untouched ({failures}/{max_retries}), because an "
+                f"outage must not disable a schedule. Last: {_failure_summary(summary)}"
+            )
+        except Exception as e:
+            logger.warning("Infra-ceiling alert dispatch failed for task #%s: %s",
+                           task_id, e)
 
     logger.error("Task #%s failed (%s, %d/%d): %s", task_id, kind, failures,
                  max_retries, _failure_summary(summary))
@@ -2627,6 +2834,10 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         _update_task_field(task_id, status="up_next", last_run=completed_at,
                            last_attempt=completed_at,
                            updated=completed_at, failure_count=0,
+                           # Clause 2 of #1085: one success ends a run of hiccups
+                           # outright, so a server that stubs one turn an hour for
+                           # a week never accumulates to a ceiling.
+                           infra_failure_count=0, infra_rest_until=None,
                            **({"next_run": next_run_iso} if next_run_iso else {}))
         if silent_failures:
             _append_activity_log(

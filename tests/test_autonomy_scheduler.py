@@ -562,6 +562,409 @@ async def test_connection_error_is_infra(aut, monkeypatch):
     assert int(read_task(aut, 1).get("failure_count") or 0) == 0
 
 
+# ── The infra ceiling (#1085) ────────────────────────────────────────────────
+# `1d1bbb6` shipped half of a rule: an infra-classified failure must not spend
+# the retry budget, "so an outage can't disable the whole fleet". The other half
+# — a ceiling on how often one task may retry on that classification — never
+# shipped: `_record_failure` incremented `failure_count` only under
+# `if kind == "task":`, so `status` stayed `up_next` and `next_run` was
+# `last_attempt + 600 s` (the flat `_FAILURE_BACKOFF_BASE`) with nothing ever
+# bounding it. The re-dispatch is in the records, not hypothetical:
+# `autonomy-runs/52/run_52_20260906_182032.md` completed 18:20:37Z and task #52
+# started again at 18:32:09Z — 92 s past the flat cooldown — and that chain, and
+# #58's beside it, ended only because the server recovered. The queue cannot cap
+# it either: `scheduled_task` reports a failed run in-band, so each re-dispatch
+# is a fresh row with `attempts: 0` and `workers/pool.py`'s `max_attempts` is
+# never consulted. The only re-gate was `_in_failure_cooldown`, which recomputes
+# `n = max(1, 0) = 1` for a task whose budget was never touched.
+#
+# The five clauses below are the item's acceptance clauses, one test each, plus
+# the queue-source seam the hold has to cross to mean anything.
+
+
+async def _infra_failure(aut, monkeypatch, task_id):
+    """One real `run_task` whose turn is a fast empty response: `infra`."""
+    monkeypatch.setattr("app.harness.run_query", fake_run_query([RESULT]))
+    result = await aut.run_task(task_id)
+    assert result["failure_kind"] == "infra", result
+    return result
+
+
+async def test_each_infra_failure_moves_the_ceiling_counter_and_never_the_budget(
+        aut, monkeypatch):
+    """Clause 1: the counter is a NEW field, persisted, and the retry budget is
+    untouched — the property `1d1bbb6` exists to keep.
+
+    Counting infra into `failure_count` would break
+    `test_fast_empty_response_is_infra_and_does_not_escalate` and re-put every
+    task on the box within one outage's reach of `status: failed`, which is the
+    fleet-wide disable that commit was written to prevent.
+    """
+    write_task(aut, 1, frequency="hourly")
+
+    counts = []
+    for _ in range(4):
+        await _infra_failure(aut, monkeypatch, 1)
+        t = read_task(aut, 1)
+        counts.append(int(t["infra_failure_count"]))
+        assert int(t.get("failure_count") or 0) == 0, (
+            "an infra failure must not spend the retry budget")
+        assert t["status"] == "up_next", "nor may it retire the schedule"
+
+    assert counts == [1, 2, 3, 4], counts
+    assert "infra_failure_count: 4" in aut._find_task_file(1).read_text(), (
+        "the counter lives in the task FILE, so it survives a backend restart; "
+        "a process-memory counter resets to 0 on every deploy and bounds nothing")
+
+
+async def test_infra_failures_a_whole_declared_period_apart_restart_the_count(
+        aut, monkeypatch):
+    """Clause 1's SECOND condition. "5 consecutive infra failures inside one
+    declared period" is two rules, and a success only ever clears the first:
+    `_next_infra_failure_count` restarts the window when the previous attempt is
+    further back than the task's own period.
+
+    Without that branch a server that hiccups once a week for five weeks is a
+    ceiling crossing, and resting a `weekly` task for a whole week on five
+    unrelated hiccups is the outage-shaped punishment `1d1bbb6` exists to
+    prevent. The success path cannot cover this branch: between hiccups there ARE
+    no successful runs to clear anything, only time.
+
+    Task 2 is the control — the same five failures with the window INTACT do
+    cross — so a green here cannot come from a counter that never counts.
+    """
+    write_task(aut, 1, frequency="hourly")
+    for _ in range(4):
+        await _infra_failure(aut, monkeypatch, 1)
+    assert int(read_task(aut, 1)["infra_failure_count"]) == 4
+
+    # The 5th failure lands two hours after the 4th on an HOURLY task: beyond one
+    # declared period, so it opens a new window instead of crossing. `run_task`
+    # parses the task file at its own start, so this rewind is the `last_attempt`
+    # `_next_infra_failure_count` actually reads.
+    aut._update_task_field(1, last_attempt=(
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=2)).isoformat())
+    await _infra_failure(aut, monkeypatch, 1)
+
+    t = read_task(aut, 1)
+    assert int(t["infra_failure_count"]) == 1, (
+        "this failure is the FIRST of a new period, not the fifth of a stale one")
+    assert not t.get("infra_rest_until"), (
+        "five hiccups spread across five periods rest nothing")
+    assert int(t.get("failure_count") or 0) == 0
+
+    write_task(aut, 2, frequency="hourly")
+    for _ in range(5):
+        await _infra_failure(aut, monkeypatch, 2)
+    t2 = read_task(aut, 2)
+    assert t2.get("infra_rest_until"), (
+        "the SAME five failures inside one declared period do cross the ceiling")
+    assert int(t2["infra_failure_count"]) == 0, "crossing zeroes the counter"
+
+
+async def test_the_connection_error_route_reaches_the_ceiling_too(
+        aut, monkeypatch):
+    """Clauses 1 and 3 over the OTHER infra route, the wide one.
+
+    An exception whose type name is in `_INFRA_EXC_NAMES` is classified infra with
+    no duration or work bound at all — the item's own triage cites
+    `run_52_20260906_183209.md`, an 824-second run with `tool_errors: 6` booked as
+    infra purely on `RemoteProtocolError`. Every other ceiling test in this file
+    drives the fast-empty-response route, so the classification half that can fire
+    after thirteen minutes of real work was never taken to the ceiling. Both routes
+    converge on one `_record_failure`; a counter wired to only one of them leaves
+    the wider one uncapped, which is the same defect this item is about — a ceiling
+    that exists only on the narrow path."""
+    def boom(messages, options):
+        raise __import__("httpx").ConnectError("all connection attempts failed")
+
+    write_task(aut, 1, frequency="hourly")
+    monkeypatch.setattr("app.harness.run_query", boom)
+    counts = []
+    for _ in range(4):
+        result = await aut.run_task(1)
+        assert result["failure_kind"] == "infra", result
+        counts.append(int(read_task(aut, 1)["infra_failure_count"]))
+
+    assert counts == [1, 2, 3, 4], counts
+    # Below the ceiling the ONLY hold is the old flat 600 s cooldown — the very
+    # behaviour this item exists to bound, so it is asserted here rather than
+    # glossed: clause 3 is a claim about which hold a reader sees, and "not yet
+    # the ceiling" only means something if something else is holding it.
+    assert aut.hold_reason(read_task(aut, 1), []) == "failure cooldown"
+    await aut.run_task(1)
+
+    t = read_task(aut, 1)
+    assert t.get("infra_rest_until"), (
+        "a lost socket is an infra failure like any other and lands on the same "
+        "counter; the long run that dies on the wire is the case that must be "
+        "bounded, not reclassified")
+    assert int(t["infra_failure_count"]) == 0, "crossing zeroes the counter"
+    assert aut._is_task_due(t, []) is False
+    assert "infra ceiling" in aut.hold_reason(t, []), (
+        "the fifth connection error did not reach the ceiling, so this route is "
+        "not sharing the counter with the empty-response route")
+    assert int(t.get("failure_count") or 0) == 0, (
+        "and it still spends no part of the retry budget")
+
+
+
+async def test_a_successful_run_clears_the_infra_counter(aut, monkeypatch):
+    """Clause 2: one success zeroes it, so a server that hiccups once an hour
+    for a week never accumulates to a ceiling."""
+    write_task(aut, 1, frequency="hourly")
+    for _ in range(3):
+        await _infra_failure(aut, monkeypatch, 1)
+    assert int(read_task(aut, 1)["infra_failure_count"]) == 3
+
+    monkeypatch.setattr("app.harness.run_query", fake_run_query([TEXT, RESULT]))
+    result = await aut.run_task(1)
+    assert result["success"] is True
+
+    t = read_task(aut, 1)
+    assert int(t.get("infra_failure_count") or 0) == 0
+    assert not t.get("infra_rest_until"), "a cleared counter takes its rest with it"
+
+
+async def test_the_fifth_infra_failure_holds_the_task_and_names_the_ceiling(
+        aut, monkeypatch):
+    """Clause 3: after 5 consecutive infra failures the task is not due, and the
+    reason a person sees is the infra ceiling, not the 600 s cooldown.
+
+    The synthetic pair at the bottom is what makes this fail when it should: the
+    SAME task one failure short of the ceiling, past its cooldown, is due with
+    no hold. Without that half, a hold gate that simply held everything would
+    pass.
+    """
+    write_task(aut, 1, frequency="hourly")
+    for _ in range(5):
+        await _infra_failure(aut, monkeypatch, 1)
+
+    now = dt.datetime.now(dt.timezone.utc)
+    # Rewind the attempt stamp to 20 min before `now`. This is the state that
+    # matters: the flat 600 s cooldown (900 s at failure_count 0 on an hourly
+    # task) has EXPIRED, so from here on the ceiling is the only thing that can
+    # be holding the task — which is exactly the instant the old code
+    # re-dispatched. Asserting at the crossing instant instead would pass on the
+    # cooldown alone.
+    aut._update_task_field(1, last_attempt=(now - dt.timedelta(minutes=20)).isoformat())
+    t = read_task(aut, 1)
+    assert not aut._in_failure_cooldown(t, now), (
+        "the cooldown must be served, or this test proves nothing about the ceiling")
+    assert aut._is_task_due(t, [], now=now) is False
+    reason = aut.hold_reason(t, [], now=now)
+    assert reason and "infra ceiling" in reason, reason
+    assert reason != "failure cooldown", (
+        "the flat 600 s cooldown is still true of this task and is the WRONG "
+        "explanation: it reads as 'retrying shortly', which is the lie #1085 is about")
+    assert t["status"] == "up_next"
+    assert int(t.get("failure_count") or 0) == 0
+
+    # Non-vacuity: 4 failures, cooldown served, nothing holds it.
+    open_case = {"id": 9, "status": "up_next", "frequency": "hourly",
+                 "skill_name": "some-skill", "last_run": (now - dt.timedelta(hours=2)).isoformat(),
+                 "last_attempt": (now - dt.timedelta(minutes=20)).isoformat(),
+                 "infra_failure_count": 4}
+    assert aut._is_task_due(open_case, [], now=now) is True
+    assert aut.hold_reason(open_case, [], now=now) is None
+
+    held = dict(open_case, infra_rest_until=(now + dt.timedelta(hours=1)).isoformat())
+    assert aut._is_task_due(held, [], now=now) is False
+    assert "infra ceiling" in aut.hold_reason(held, [], now=now)
+
+    # Both holds live at one instant — the only state that can see which gate is
+    # consulted FIRST. Everything above runs after the cooldown was served, so
+    # with `hold_reason`'s two gates swapped (`autonomy.py:1374-1377`) the string
+    # a person reads would silently become "failure cooldown" and every assertion
+    # above would still pass. Here the cooldown is genuinely live as well, so the
+    # reason is a choice between two explanations that are both TRUE of the task,
+    # and the ceiling must win: 900 s reads as "retrying shortly" about a task
+    # held for a whole declared period, which is the false reassurance this item
+    # exists to remove.
+    both_holds = dict(held, last_attempt=(now - dt.timedelta(minutes=2)).isoformat())
+    assert aut._in_failure_cooldown(both_holds, now) is True, (
+        "the retry cooldown must be live in this fixture, or the ordering is "
+        "not being exercised and this block asserts nothing")
+    assert "infra ceiling" in aut.hold_reason(both_holds, [], now=now), (
+        "the retry cooldown won the explanation. `_is_task_due` refuses the task "
+        "either way, so the ORDER of these two gates is observable only here")
+
+
+async def test_the_infra_rest_ends_at_the_next_declared_period_and_self_resumes(
+        aut, monkeypatch):
+    """Clause 4: the rest is bounded by the task's own declared period, and the
+    task comes back with no human editing the file.
+
+    The windowed half below is the same clause on a task that declares
+    `preferred_hours`, where "the next declared period" is the next window hour,
+    not the raw frequency — resting an hourly job 10 minutes is not a rest, and
+    resting a windowed job until an hour outside its window leaves the board
+    showing `outside hours` for a task the ceiling is actually holding.
+    """
+    write_task(aut, 1, frequency="hourly")
+    for _ in range(5):
+        await _infra_failure(aut, monkeypatch, 1)
+
+    t = read_task(aut, 1)
+    rested_at = aut._parse_iso(t["last_attempt"])
+    rest_until = aut._parse_iso(t["next_run"])
+    assert rest_until == aut._parse_iso(t["infra_rest_until"]), (
+        "`next_run` and the hold must be ONE timestamp, or the stall alarm and "
+        "the scheduler report two different resume times")
+    assert 3540 < (rest_until - rested_at).total_seconds() < 3660, (
+        "hourly, so the rest is one declared period")
+
+    resumed = read_task(aut, 1)
+    assert int(resumed["infra_failure_count"]) == 0, (
+        "a task that resumes still carrying its ceiling count is one hiccup "
+        "from resting again, which is not a bounded rest")
+    assert aut._is_task_due(resumed, [], now=rest_until) is True
+    assert aut.hold_reason(resumed, [], now=rest_until) is None
+
+    # The windowed shape: hourly, but only allowed to run about three hours from
+    # now. Nothing here pins a clock — not the hour the run happens in, and not
+    # `_local_hour` either, because pinning the hour the CODE reads while the
+    # crossing lands at some other real hour manufactures exactly the straddle
+    # bug it was meant to avoid. `ahead` is derived in the test from the crossing
+    # stamp the run itself left in the file, so the two arithmetic claims below
+    # hold on any clock, at 03:00 and at 15:00 and across an hour boundary.
+    window_hour = (dt.datetime.now().hour + 3) % 24
+    write_task(aut, 2, frequency="hourly", preferred_hours=[window_hour])
+    for _ in range(5):
+        await _infra_failure(aut, monkeypatch, 2)
+    t2 = read_task(aut, 2)
+    crossed2 = aut._parse_iso(t2["last_attempt"]).astimezone()
+    resume2 = aut._parse_iso(t2["next_run"])
+    ahead = ((window_hour - crossed2.hour) % 24) or 24
+    assert ahead >= 2, (
+        f"fixture bug, not a code finding: the window has to sit beyond one raw "
+        f"period or the test cannot tell the window from the period ({ahead} h)")
+    window_rest = (resume2 - aut._parse_iso(t2["last_attempt"])).total_seconds()
+    assert window_rest == max(3600.0, ahead * 3600.0), (
+        "the rest is the wait to the window's hour, not the raw hourly period — "
+        "a period-only rest would wake the task outside its own window")
+    assert resume2.astimezone().hour == window_hour, (
+        "the resume instant lands INSIDE the declared window, which is the whole "
+        "reason `_infra_rest_seconds` consults the window and not just the period")
+    # At the resume instant the local hour IS the window hour; `_local_hour` reads
+    # the wall clock, so the due check needs that hour, not the suite's.
+    monkeypatch.setattr(aut, "_local_hour", lambda: window_hour)
+    assert aut._is_task_due(read_task(aut, 2), [], now=resume2) is True
+
+
+async def test_crossing_the_infra_ceiling_alerts_once_and_never_sets_failed(
+        aut, monkeypatch):
+    """Clause 5: one alert on the crossing, and `status: failed` is unreachable
+    from an infra failure — even at `max_retries: 1`, where one TASK failure
+    would have disabled on the first try.
+
+    Eight failures, not five: the alert is exactly one message per crossing, so
+    the three after the ceiling must not post a second one.
+    """
+    alerts: list[tuple[str, str]] = []
+
+    async def fake_alert(message, title=""):
+        alerts.append((title, message))
+
+    monkeypatch.setattr("app.discord_notify.discord_alert", fake_alert,
+                        raising=False)
+    write_task(aut, 1, frequency="hourly", max_retries=1)
+    for _ in range(8):
+        await _infra_failure(aut, monkeypatch, 1)
+
+    assert len(alerts) == 1, f"one crossing, one alert: {alerts}"
+    assert "infra" in alerts[0][1].lower(), alerts[0]
+    t = read_task(aut, 1)
+    assert t["status"] == "up_next", "no infra failure reaches status: failed"
+    assert int(t.get("failure_count") or 0) == 0
+
+
+async def test_a_task_at_the_infra_ceiling_is_not_enqueued_by_the_queue_source(
+        aut, monkeypatch, tmp_path):
+    """The hold across the boundary it has to hold at: the pool's own tick.
+
+    `_is_task_due` is a predicate; the thing that stops burning GPU is
+    `workers.sources.scheduled_task.enqueue_if_due` declining to write a queue
+    row. This drives the real coroutine over the isolated task dir and reads the
+    queue DB back, the same way `test_one_queue_tick_rearms_a_retired_task`
+    pins the rearm. Task 2 is the discriminating half: one failure short of the
+    ceiling, past its cooldown, it IS enqueued on the same tick — so a green
+    here cannot come from a source that enqueues nothing.
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    write_task(aut, 1, frequency="hourly")
+    for _ in range(5):
+        await _infra_failure(aut, monkeypatch, 1)
+    # Rewind the attempt stamp so the flat cooldown has expired while the rest
+    # has not. Enqueued at the crossing instant, task 1 would be held by the
+    # cooldown alone and this test would pass on code that has no ceiling.
+    aut._update_task_field(1, last_attempt=_iso(minutes=20))
+    assert not aut._in_failure_cooldown(read_task(aut, 1),
+                                        dt.datetime.now(dt.timezone.utc))
+    # Same shape, one failure short, cooldown already served.
+    write_task(aut, 2, frequency="hourly", last_attempt=_iso(minutes=20),
+               infra_failure_count=4)
+    # The stall scan's positive control. "No alert" and "the scan never ran" are
+    # the same observation, and this file's own history says which one to
+    # exclude: #1121 found the next-run alarm reporting zero stalls while #68 sat
+    # ~50 cycles past its own `next_run`. #3 is `paused` five periods behind,
+    # the exact status-plus-staleness shape that widening was for — `paused` so
+    # it is never due and so never joins the queue set that task 1 and 2 are
+    # being judged on.
+    write_task(aut, 3, frequency="hourly", status="paused",
+               next_run=_iso(hours=5), last_run=_iso(hours=6))
+
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(st, "_state", {**st._state,
+                                       "unparseable_scan_at": _scan_not_due(),
+                                       "stall_streak": st._STALL_ALARM_TICKS,
+                                       "nextrun_streak": st._STALL_NEXTRUN_TICKS,
+                                       "stall_alerted_at": None,
+                                       "nextrun_alerted_at": None})
+    alerts: list[str] = []
+
+    async def _record_alert(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _record_alert)
+
+    q = WorkQueue(tmp_path / "ceiling.db")
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+
+    enqueued = {int(i.payload["task_id"]) for i in
+                q.list_items(source="scheduled-task", limit=500)
+                if i.state == "queued" and i.payload.get("task_id") is not None}
+    assert 1 not in enqueued, "the ceilinged task must not reach the queue"
+    assert 2 in enqueued, enqueued
+    # The reason the stall scan below cannot see this task: its `next_run` is the
+    # resume instant, so it is in the FUTURE for the whole rest. Stamp the hold
+    # instant here instead and the scan is blind only until a period elapses,
+    # which is a bug no tick on this tick can observe — so pin the stamp itself.
+    assert dt.datetime.now(dt.timezone.utc) < dt.datetime.fromisoformat(
+        read_task(aut, 1)["next_run"]), "a resting task's next_run must be its resume"
+    # A ceiling is not a stall — and the control is what makes that sayable. The
+    # scan runs over the same board in the same tick, so #3 reads as stalled
+    # while task 1, whose `next_run` is the resume instant, must not. A bare
+    # `alerts == []` would have passed just as happily on a scan that found
+    # nothing at all, which is the exact failure #1121 was filed for.
+    stalled_ids = {int(e["id"]) for e in st._next_run_stalled(q)}
+    assert 3 in stalled_ids, (
+        "positive control broken: the next-run scan did not flag the task that "
+        "really is five periods past `next_run`, so anything this test goes on "
+        "to say about task 1 is an observation of a scan that never ran")
+    assert 1 not in stalled_ids, (
+        "a task resting on the ceiling reads as stalled. Its `next_run` is the "
+        "resume instant for exactly this reason — the hold and the stall alarm "
+        "have to read one timestamp, or every resting task posts an alert")
+    joined = "\n".join(alerts)
+    assert "#3 (" in joined, (
+        f"the control was flagged but nothing was posted, so the alert seam is "
+        f"untested: {alerts}")
+    assert "(task1)" not in joined, f"a resting task is resting, not stalled: {alerts}"
+
+
 # ── Cancellation and timeout interaction with the pool ───────────────────────
 
 async def test_cancellation_writes_a_run_record_and_reraises(aut, monkeypatch):
@@ -2085,6 +2488,37 @@ async def test_an_empty_terminal_run_with_a_fresh_artifact_advances_last_run(
     last_run = dt.datetime.fromisoformat(task["last_run"])
     nxt = dt.datetime.fromisoformat(task["next_run"])
     assert (nxt - last_run).total_seconds() == pytest.approx(86400, abs=2)
+
+
+async def test_an_artifact_backed_success_clears_the_infra_ceiling_state_too(
+        aut, monkeypatch, tmp_path):
+    """#1085 clause 2, second writer: this path resets the retry budget on its
+    own, so it has to clear the infra pair on its own.
+
+    `run_task`'s text-confirmed write is not the only thing that lands a success.
+    A run with no terminal text and a fresh declared artifact writes the same
+    `status: up_next, failure_count: 0` from the artifact branch and never reaches
+    that write, so a counter seeded here would survive a period of clean running.
+    Seeded at 4 rather than 0 for the reason the test above seeds 2: 4 -> 0 is a
+    fact about this writer, while 0 -> 0 passes with the clear deleted.
+
+    And the leftover state is not inert. Every success stamps `last_attempt` to
+    its own completion, which is inside the counting window by construction, so a
+    count of 4 carried across a clean stretch makes the NEXT single infra failure
+    the fifth in-window one — the task rests for a whole declared period on one
+    hiccup, which is the opposite of what the ceiling is for.
+    """
+    art = tmp_path / "artifacts" / "nightly-note.md"
+    await _run_empty_terminal(aut, monkeypatch, tmp_path, task_id=41,
+                              declared=art, artifact=art, nbytes=4096,
+                              infra_failure_count=4)
+
+    task = read_task(aut, 41)
+    assert task["status"] == "up_next"
+    assert int(task["infra_failure_count"]) == 0, (
+        "the consecutive-infra counter survived a successful run, leaving the "
+        "task one infra hiccup away from a rest it has not earned")
+    assert not task.get("infra_rest_until")
 
 
 async def test_the_artifact_backed_record_names_its_evidence_and_the_text_path_does_not(

@@ -262,7 +262,14 @@ def test_every_summary_writer_in_autonomy_calls_a_helper_not_a_slice():
     failure path head-slices an error string through the SAME constant."""
     src = (_REPO / "autonomy.py").read_text(encoding="utf-8")
     assert src.count("_outcome_summary(final_response)") == 2   # record + preview
-    assert src.count("_failure_summary(summary)") == 3          # record, alert, log
+    # Four since #1085, and the fourth is a new CALLER of the existing helper,
+    # not a new way to build a summary: the infra-ceiling alert. What makes this
+    # test bite is that the number is EXACT, not that it only ever falls — it went
+    # UP when the ceiling alert arrived, and goes up or down whenever a call site
+    # appears or disappears, so a new writer has to be named here rather than slip
+    # past a `>=`. The anti-slice half is the assertion below: a writer that went
+    # back to a literal slice still fails on `"summary[:RUN_SUMMARY_CAP]"`.
+    assert src.count("_failure_summary(summary)") == 4  # record, disable alert, log, ceiling alert
     assert "summary[:RUN_SUMMARY_CAP]" in src
 
 

@@ -94,6 +94,17 @@ def _parse_task_file(path: Path) -> dict | None:
             "runs_per_day": frontmatter.get("runs_per_day"),
             "run_count": frontmatter.get("run_count"),
             "failure_count": frontmatter.get("failure_count", 0),
+            # #1085. Worth more here than a complete listing: every
+            # `autonomy_get_task` / `autonomy_tasks` answer comes through THIS
+            # projection, and the file itself is not reachable across the process
+            # boundary to check. A ceilinged task therefore came back as a
+            # `status: up_next` row with no hold and no counter — a task that
+            # appears never to have failed, to the one reader a human or another
+            # agent consults to ask why it has been silent. `_write_task_file`
+            # starts from the file's PRIOR frontmatter, so carrying them in does
+            # not make this module a writer of them.
+            "infra_failure_count": frontmatter.get("infra_failure_count", 0),
+            "infra_rest_until": _to_iso(frontmatter.get("infra_rest_until")),
             "max_retries": frontmatter.get("max_retries", 3),
             "notify_on_complete": frontmatter.get("notify_on_complete", True),
             "preferred_hours": frontmatter.get("preferred_hours", []),

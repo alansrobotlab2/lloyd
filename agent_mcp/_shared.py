@@ -425,6 +425,13 @@ AUTONOMY_TASK_FIELDS: tuple[str, ...] = (
     # files, so a degraded file should present them too rather than blanks.
     "skill_path", "pipeline", "pipeline_mode", "notify_on_complete",
     "cron_id", "run_count", "tags", "type", "created", "updated", "title",
+    # #1085's infra-ceiling state, dispatch-critical in the same sense
+    # `failure_count` is: `infra_rest_until` IS the hold (`_in_infra_rest` is a
+    # due-gate), so a file that recovered without it would come back dispatching
+    # on the very outage that just rested it, and the counter beside it is what
+    # makes the next crossing countable at all. Outside the "original 25" group
+    # above, which is that list verbatim.
+    "infra_failure_count", "infra_rest_until",
     # `grants` is the ONE field here whose loss fails OPEN. Every other name
     # degrades a schedule or a label; a recovered record missing `grants` reads
     # as a task that declares no authority, so (a) its legitimate tier-2 call is

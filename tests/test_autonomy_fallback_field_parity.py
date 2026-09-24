@@ -33,6 +33,7 @@ that holds, and the only one worth pinning, is that the readers agree.
 
 from __future__ import annotations
 
+import datetime
 import sys
 from pathlib import Path
 
@@ -234,3 +235,155 @@ def test_a_file_with_no_frontmatter_block_is_still_dropped_by_every_reader(tmp_p
     assert SCHED._parse_task_file(note) is None
     assert MCP._parse_task_file(note) is None
     assert ROUTER._autonomy_parse(note) is None
+
+
+def test_the_infra_ceiling_hold_survives_a_degraded_task_file(tmp_path):
+    """#1085's two fields are in the shared list because they are dispatch-
+    critical in the same sense `failure_count` is, and this is the test that says
+    which of them is the dangerous one.
+
+    `infra_rest_until` IS the hold: `_in_infra_rest` is a due-gate, so a task file
+    that recovered without it comes back with no rest recorded and dispatches on
+    the very outage that just bounded it. `infra_failure_count` is the softer
+    half — losing it only restarts the count from 1, so the ceiling is reached
+    one failure late. Both belong in the fallback layer; the last thing this list
+    should be asked to carry is state that, when dropped, makes a hold invisible.
+
+    The positive control is the same `_yaml_broken` flag the twelve-diverging
+    fields use: without it this assertion could be satisfied by a plain YAML parse
+    and would prove nothing about the field list.
+    """
+    until = "2026-09-23T09:00:00+00:00"
+    broken = tmp_path / "12-broken-infra.md"
+    broken.write_text(
+        "---\nid: 12\nname: nightly: infra ceiling holder\nstatus: up_next\n"
+        f"frequency: daily\ninfra_failure_count: 5\ninfra_rest_until: '{until}'\n"
+        "skill_name: some-skill\n---\n\n# body\n\n## Activity Log\n",
+        encoding="utf-8")
+
+    task = SCHED._parse_task_file(broken)
+    assert task is not None and task.get("_yaml_broken") is True, (
+        "the fixture must degrade to the regex fallback, or nothing here tests "
+        "the field list")
+    assert task.get("infra_rest_until") == until
+    assert int(task["infra_failure_count"]) == 5
+    # The recovered record still holds, six minutes before it ends.
+    assert SCHED._in_infra_rest(
+        task, datetime.datetime.fromisoformat("2026-09-23T08:54:00+00:00"))
+
+
+# ── #1085 review finding: the two PROJECTIONS dropped the ceiling ────────────
+#
+# The clause above is about the fallback field list, which only runs on a
+# YAML-broken file. Both other readers then project a HAND-WRITTEN key subset on
+# the healthy path, and that subset is what every consumer actually sees:
+# `agent_mcp/autonomy._parse_task_file` is the MCP tool's answer in another
+# process, and `app/routers/autonomy._autonomy_parse` is the row behind
+# `GET /api/autonomy/tasks` — whose list handler calls `autonomy.hold_reason` on
+# ITS OWN projection two statements later. A subset without `infra_rest_until`
+# therefore answered "nothing is holding this task" for a task the scheduler was
+# refusing for a whole declared period, on the one surface a human reads to find
+# out why a task stopped running. Same shape as the #1014 bug this file exists
+# for, one layer up: readers disagreeing in the direction that looks healthy.
+
+
+# The rest must still be running when the board answers, so the stamp is
+# generated from the clock rather than hard-coded: a literal date here would
+# expire, and an expired rest makes `hold_reason` correctly answer `None` and the
+# test would then be pinning nothing.
+REST_UNTIL = (datetime.datetime.now(datetime.timezone.utc)
+              + datetime.timedelta(hours=3)).replace(microsecond=0)
+
+
+def _ceilinged_file_text() -> str:
+    crossed = REST_UNTIL - datetime.timedelta(hours=1)
+    return (
+        "---\n"
+        "id: 12\n"
+        "name: Infra ceiling holder\n"
+        "status: up_next\n"
+        "frequency: hourly\n"
+        f"last_run: '{(crossed - datetime.timedelta(hours=1)).isoformat()}'\n"
+        f"last_attempt: '{crossed.isoformat()}'\n"
+        "failure_count: 0\n"
+        # `hold_reason`'s FIRST gate is `no skill`, which pre-empts every hold
+        # below it — a skill-less fixture would report "no skill" and prove
+        # nothing about the ceiling.
+        "skill_name: some-skill\n"
+        "infra_failure_count: 5\n"
+        f"infra_rest_until: '{REST_UNTIL.isoformat()}'\n"
+        "---\n\n# body\n")
+
+
+@pytest.fixture
+def ceilinged_dir(tmp_path, monkeypatch):
+    dirn = tmp_path / "autonomy"
+    dirn.mkdir()
+    (dirn / "12-ceiling-holder.md").write_text(_ceilinged_file_text(), encoding="utf-8")
+    monkeypatch.setattr(SCHED, "AUTONOMY_DIR", dirn)
+    monkeypatch.setattr(ROUTER, "_AUTONOMY_DIR", dirn)
+    monkeypatch.setattr(MCP, "AUTONOMY_DIR", dirn)
+    return dirn
+
+
+def test_all_three_readers_answer_the_hold_on_a_healthy_file(ceilinged_dir):
+    """The scheduler, the MCP tool and the board must give the same answer for
+    the same bytes. Compared through the scheduler's own `_parse_iso` because the
+    two projections serialise a YAML timestamp their own way; what has to agree is
+    WHEN THE REST ENDS, not the string spelling of it."""
+    path = ceilinged_dir / "12-ceiling-holder.md"
+    until = REST_UNTIL
+    readers = {
+        "scheduler": SCHED._parse_task_file(path),
+        "mcp": MCP._parse_task_file(path),
+        "board": ROUTER._autonomy_parse(path),
+    }
+    for label, task in readers.items():
+        assert task is not None, f"{label} dropped the task entirely"
+        assert SCHED._parse_iso(task.get("infra_rest_until")) == until, (
+            f"{label} cannot see the infra rest, so it reports a ceilinged task "
+            f"as free to run: {task.get('infra_rest_until')!r}")
+        assert int(task.get("infra_failure_count") or 0) == 5, (
+            f"{label} cannot see the ceiling counter")
+
+
+def test_the_board_row_reports_the_infra_ceiling_as_the_hold(ceilinged_dir):
+    """The seam in one assertion: `GET /api/autonomy/tasks` must not present a
+    ceilinged task as unheld. Before the projection carried the field this route
+    called `hold_reason` on a dict with no `infra_rest_until`, so the board's
+    `blocked` was the answer to a question about an incomplete record."""
+    import asyncio
+    import json
+
+    response = asyncio.run(ROUTER.autonomy_tasks())
+    rows = json.loads(response.body)["tasks"]
+    row = next(r for r in rows if r["id"] == 12)
+    assert row["blocked"] is not None, (
+        "the board reported a task resting on the infra ceiling as not held at "
+        "all — the field that sets the hold never reached `hold_reason`")
+    assert "infra ceiling" in row["blocked"], (
+        f"wrong hold on the board: {row['blocked']!r}")
+
+
+def test_the_board_hold_assertion_bites_on_an_incomplete_projection(ceilinged_dir,
+                                                                   monkeypatch):
+    """Positive control for the test above, and the reason it is not enough to
+    assert a non-`None` hold: a projection that drops the field must make THIS
+    fail, or the pair proves nothing about which keys are load-bearing."""
+    real = ROUTER._autonomy_parse
+
+    def without_ceiling(path):
+        task = real(path)
+        if task is not None:
+            task.pop("infra_rest_until", None)
+        return task
+
+    monkeypatch.setattr(ROUTER, "_autonomy_parse", without_ceiling)
+    import asyncio
+    import json
+
+    rows = json.loads(asyncio.run(ROUTER.autonomy_tasks()).body)["tasks"]
+    row = next(r for r in rows if r["id"] == 12)
+    assert "infra ceiling" not in (row["blocked"] or ""), (
+        "the hold survived an incomplete projection, so the board test above "
+        "was not sensitive to the field at all")

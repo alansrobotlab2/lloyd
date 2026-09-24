@@ -114,6 +114,17 @@ def _autonomy_parse(path: Path) -> dict | None:
             "max_retries": fm.get("max_retries", 3),
             "failure_count": fm.get("failure_count") or 0,
             "last_attempt": _to_iso(fm.get("last_attempt")),
+            # #1085's infra ceiling. These two are not decoration on the row: the
+            # list handler below feeds THIS dict to `autonomy.hold_reason`, whose
+            # `_in_infra_rest` reads `infra_rest_until` — so a projection that
+            # omitted it answered "nothing is holding this task" for a task the
+            # scheduler was refusing for a whole declared period. The board is the
+            # surface a human reads during a `weekly` rest, and a row that looks
+            # due while the fleet holds is the #1014 failure shape (board and
+            # scheduler disagreeing in the direction that looks healthy) wearing a
+            # new field.
+            "infra_failure_count": fm.get("infra_failure_count") or 0,
+            "infra_rest_until": _to_iso(fm.get("infra_rest_until")),
             "stale_bypass_hours": fm.get("stale_bypass_hours"),
             "expected_error_patterns": fm.get("expected_error_patterns") or [],
             "preferred_hours": fm.get("preferred_hours") or None,
