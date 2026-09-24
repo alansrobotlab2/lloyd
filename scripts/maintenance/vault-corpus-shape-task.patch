@@ -1,0 +1,95 @@
+diff --git a/autonomy/90-corpus-shape-trend.md b/autonomy/90-corpus-shape-trend.md
+new file mode 100644
+index 0000000..f73aa1d
+--- /dev/null
++++ b/autonomy/90-corpus-shape-trend.md
+@@ -0,0 +1,51 @@
++---
++agent_id: memory
++category: technical
++description: 'Weekly-trend shape of four nightly-written corpora (#761): `cd ~/lloyd
++  && python3 scripts/maintenance/corpus_shape.py --quiet`. It measures daily-note
++  `## ` sections, USER.md/MEMORY.md entries, recently modified SKILL.md bodies and
++  trajectory rows (n, length mean/p95, distinct-key ratio, duplicate rate,
++  self-reference rate), appends one new dated `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json`
++  and diffs it against the previous one. Exit 0 with no output = nothing moved:
++  report exactly `corpus shape: no finding` and stop. Exit 2 = a metric moved past
++  its provisional threshold or a sentence newly recurs across items: put the printed
++  lines in your report VERBATIM and end with the literal text `exit code 2`. Read-only:
++  never edit, delete or re-run to overwrite a corpus-shape file, and never fix the
++  corpora from this task.'
++expected_error_patterns: []
++failure_count: 0
++frequency: daily
++id: 90
++max_retries: 3
++model: primary
++name: Corpus shape trend
++notify_on_complete: false
++preemptible: true
++preferred_hours:
++- 3
++- 4
++priority: low
++runs_per_day: 1
++segment: autonomy
++skill_name: corpus-shape-trend
++status: up_next
++tags:
++- autonomy
++- metrics
++- memory
++timeout_seconds: 300
++title: Corpus shape trend
++type: autonomy
++---
++
++> **This body is documentation and the machine-written activity log — not an instruction channel.** It is not delivered to the worker: `_build_task_prompt` (`~/lloyd/autonomy.py`) renders only the `skill_name` SKILL.md and the front-matter `description`, so a step that lives only below this line reaches no run.
++
++# Corpus shape trend
++
++Backlog #761 (split from #543). Per-write scoring cannot see an artifact that is
++fine alone and wrong because it recurs; this series is the aggregate counterpart.
++The script is the only writer of `corpus-shape-*.json` and opens each with
++O_EXCL, so no run can diff against a file it wrote itself.
++
++The thresholds in `scripts/maintenance/corpus_shape.py` are provisional until a
++week of series exists (a human clause on #761).
+diff --git a/skills/corpus-shape-trend/SKILL.md b/skills/corpus-shape-trend/SKILL.md
+new file mode 100644
+index 0000000..d066b9e
+--- /dev/null
++++ b/skills/corpus-shape-trend/SKILL.md
+@@ -0,0 +1,32 @@
++---
++name: corpus-shape-trend
++segment: skills
++description: Run scripts/maintenance/corpus_shape.py --quiet and report only a non-zero
++  finding verbatim. Use for the corpus shape trend autonomy task (#90, backlog #761).
++tags:
++- metrics
++- memory
++- skills
++status: active
++category: autonomy
++type: skill
++timestamp: '2026-09-24T00:00:00'
++---
++# Corpus shape trend
++
++## Do
++
++1. `cd ~/lloyd && python3 scripts/maintenance/corpus_shape.py --quiet`
++2. Exit 0 and no output: report `corpus shape: no finding`. Nothing else.
++3. Exit 2: copy every printed line into the report **verbatim**, then end with the
++   literal text `exit code 2`. That token is how a finding reaches a person
++   (`autonomy.py` `_detect_silent_failures`); paraphrase it and the finding reads as a
++   green run. Never write the token on a clean night.
++4. Any other exit: report the traceback's last line; that is a broken script, not a
++   finding.
++
++## Never
++
++- Re-run to "refresh" a result, or edit, move or delete a `corpus-shape-*.json`. Each
++  run appends a new file; the previous one is what the next run diffs against.
++- Fix a corpus from this task. A recurring sentence is named for a person to judge.
