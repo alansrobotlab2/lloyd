@@ -815,7 +815,7 @@ async def _cli(tasks: list[dict[str, Any]], model: str, timeout: int,
         # arms are not always both rankable, so the delta needs the two numbers,
         # not just the two dicts. Absent contribution beats a TypeError that
         # loses the whole A/B report.
-        direct_score = (entry["direct"].get("composite") or {})
+        direct_score = ((entry.get("direct") or {}).get("composite") or {})
         if (compare and score and sdk_score
                 and isinstance(sdk_score.get("composite_score"), (int, float))
                 and isinstance(direct_score.get("composite_score"), (int, float))):
