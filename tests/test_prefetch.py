@@ -895,6 +895,49 @@ def test_ambient_envelope_carries_the_server_measured_clock(tmp_path, monkeypatc
     assert _stamp(turn.enqueued_at) in text, text
 
 
+# ── #1013: the ambient summary is capped where the block is rendered ─────────
+
+def _ambient_block(out: str) -> str:
+    start = out.index("<ambient-signals>")
+    end = out.index("</ambient-signals>") + len("</ambient-signals>")
+    return out[start:end]
+
+
+def _drain_one_summary(monkeypatch, sid: str, summary: str) -> str:
+    from app.sessions_io import AmbientPrefetchEntry, enqueue_ambient_prefetch
+    monkeypatch.setattr(prefetch, "_search_vault", _fake_vault(hybrid_delay=0.0))
+    enqueue_ambient_prefetch(sid, AmbientPrefetchEntry(
+        source="cron:x", summary=summary, content="c" * 900, enqueued_at=0.0))
+    return prefetch.prefetch_context("ok", session_id=sid, plan_mode=False)
+
+
+def test_oversized_ambient_summary_is_bounded_at_the_render_site(quiet_workers, monkeypatch):
+    """Clause 1+2: a 5,000-char summary reaches the model as at most
+    AMBIENT_SUMMARY_MAX chars plus the marker plus the block's fixed prose —
+    the envelope is measured from a well-behaved entry, so the bound is on the
+    summary alone and does not depend on restating the prose here."""
+    big = "s" * 5000
+    out = _drain_one_summary(monkeypatch, "test-ambient-big", big)
+    block = _ambient_block(out)
+    assert big not in block
+    assert "s" * prefetch.AMBIENT_SUMMARY_MAX + " [... truncated]" in block
+    envelope = len(_ambient_block(_drain_one_summary(monkeypatch, "test-ambient-env", "x")))
+    assert len(block) <= envelope - 1 + prefetch.AMBIENT_SUMMARY_MAX + len(" [... truncated]"), len(block)
+    # Clause 4: the content cap beside it is untouched — 800 chars and "…".
+    assert "c" * 800 + "…" in block and "c" * 801 not in block
+
+
+def test_well_behaved_ambient_summary_renders_unchanged(quiet_workers, monkeypatch):
+    """Clause 3: a summary under the cap is rendered byte-for-byte — real
+    traffic (every persisted summary is under 50 chars) must not shift."""
+    summary = ("summary " * 15)[:120]
+    assert len(summary) == 120 < prefetch.AMBIENT_SUMMARY_MAX
+    out = _drain_one_summary(monkeypatch, "test-ambient-120", summary)
+    block = _ambient_block(out)
+    assert f"- **[cron:x]** {summary}\n" in block
+    assert "truncated" not in block
+
+
 # ── #1024: the ambient fact leg must not answer about other items ────────────
 
 def _class_row_facts_tree(tmp_path, monkeypatch, *, with_specific=True):

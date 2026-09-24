@@ -70,6 +70,13 @@ PREFETCH_BUDGET_MS = 300
 # Vault search settings
 VAULT_MAX_RESULTS = 5           # top N vault documents to inject
 VAULT_SNIPPET_MAX = 500         # chars per vault snippet
+# The ambient summary is rendered verbatim into <ambient-signals>, and it was
+# the one injected field with no byte cap (#1013): the schema asks producers
+# for "<120 chars ideal", which is advice, not a bound. Capped at the RENDER
+# site, not the enqueue site, because peek_ambient_prefetch serves the stored
+# entry to the debug endpoint and truncating storage would hide the real
+# payload there. ~5x the longest summary ever persisted (49 chars).
+AMBIENT_SUMMARY_MAX = 240       # chars per ambient summary line
 VAULT_MIN_SCORE = 0.5           # minimum relevance score (0.3 was too noisy)
 VAULT_MIN_QUERY_LEN = 25        # skip vault search for short/vague messages
 # Collections the prefetch vault leg searches. facts and skills have
@@ -912,7 +919,10 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
             # there is nothing to show — no stamp is better than a fabricated
             # one. The producer's summary may still contain a date it made up;
             # this line is the reference a reader checks it against.
-            line = f"- **[{entry.source}]** {entry.summary}"
+            summary = entry.summary[:AMBIENT_SUMMARY_MAX]
+            if len(entry.summary) > AMBIENT_SUMMARY_MAX:
+                summary += " [... truncated]"
+            line = f"- **[{entry.source}]** {summary}"
             stamp = ambient_clock_stamp(entry.enqueued_at)
             if stamp:
                 line += f"\n  _server clock when queued: {stamp}_"
