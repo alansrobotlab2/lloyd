@@ -356,6 +356,10 @@ class WorkerPool:
             "engaged_since": None,
             "engagements": 0,
             "held_sources": [],
+            # Per exempt source: how many times `exempt_bound` turned it from
+            # claimable to held while a round was in flight (#1101).
+            "exempt_refused": {},
+            "bound_held": [],
         }
         # Primary reachability hold. See `_primary_hold_held`. `answering` is the
         # last probe's verdict (None until the first claim asks), and `last_probe`
@@ -514,8 +518,11 @@ class WorkerPool:
         return {
             "enabled": bool(cfg.get("enabled", True)),
             "exempt": list(cfg.get("exempt", DEFAULT_ROUND_HOLD_EXEMPT)),
+            "exempt_bound": cfg.get("exempt_bound") or None,
             **self._round_hold,
             "held_sources": list(self._round_hold["held_sources"]),
+            "exempt_refused": dict(self._round_hold.get("exempt_refused") or {}),
+            "bound_held": list(self._round_hold.get("bound_held") or []),
         }
 
     def _landing_in_flight(self) -> bool:
@@ -583,7 +590,9 @@ class WorkerPool:
             self._release_round_hold()
             return []
         exempt = set(cfg.get("exempt", DEFAULT_ROUND_HOLD_EXEMPT)) | {ROUND_SOURCE}
-        held = sorted(name for name in registry if name not in exempt)
+        bound_held = self._exempt_bound_held(cfg, exempt, registry)
+        held = sorted({name for name in registry if name not in exempt}
+                      | set(bound_held))
         hold = self._round_hold
         if not hold["engaged"]:
             hold.update(
@@ -599,8 +608,62 @@ class WorkerPool:
             hold["held_sources"] = held
         return held
 
+    def _exempt_bound_held(self, cfg: dict[str, Any], exempt: set[str],
+                           registry: dict[str, Any]) -> list[str]:
+        """Exempt sources the optional `exempt_bound` takes back while a round runs.
+
+        The exemption is a set-membership test, so an exempt source claims
+        beside a round however long it runs or however full the engine is
+        (#1101: exempt co-tenants were 32% of a round's cold re-prefill). The
+        pool has no duration knowledge at claim time, so the bound is computed
+        only from what the claim already sees:
+
+        - `max_exempt_inflight: N` — held while N or more exempt-source jobs
+          are already in flight beside the round (from `_in_flight`);
+        - `kv_median_above: F` — held while the KV gate's own reading
+          (`_gate_reading`, the median over its window) is above F. A missing
+          reading does not trip it: fail open, like the KV gate.
+
+        Either condition holds the covered sources (`sources`, default every
+        exempt source). Admission only — nothing already running is touched.
+        **No key, no bound**: without `exempt_bound` this returns [] and the
+        hold is exactly the membership test it was. Its value is a human's
+        call (config.yaml is not the loop's to edit).
+        """
+        hold = self._round_hold
+        bound = cfg.get("exempt_bound")
+        tripped: list[str] = []
+        if isinstance(bound, dict) and bound:
+            covered = set(bound.get("sources") or exempt) & exempt
+            covered.discard(ROUND_SOURCE)
+            over = False
+            cap = bound.get("max_exempt_inflight")
+            if cap is not None:
+                n = sum(1 for v in self._in_flight.values()
+                        if (s := str(v.get("source") or "")) in exempt
+                        and s != ROUND_SOURCE)
+                over = n >= int(cap)
+            limit = bound.get("kv_median_above")
+            if not over and limit is not None:
+                window = float(kv_gate_config().get(
+                    "window_seconds", DEFAULT_KV_GATE_WINDOW_S))
+                kv = self._gate_reading(window)
+                over = kv is not None and kv > float(limit)
+            if over:
+                tripped = sorted(name for name in registry if name in covered)
+        before = set(hold.get("bound_held") or [])
+        refused = hold.setdefault("exempt_refused", {})
+        for name in tripped:
+            if name not in before:
+                refused[name] = refused.get(name, 0) + 1
+                logger.info("Round hold: %s refused beside the round (exempt_bound)",
+                            name)
+        hold["bound_held"] = tripped
+        return tripped
+
     def _release_round_hold(self) -> None:
         hold = self._round_hold
+        hold["bound_held"] = []
         if hold["engaged"]:
             logger.info("Round hold released")
             hold.update(engaged=False, engaged_since=None, held_sources=[])

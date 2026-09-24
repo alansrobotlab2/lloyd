@@ -195,6 +195,122 @@ def test_held_sources_is_a_copy_not_the_live_list(pool):
 
 
 # ---------------------------------------------------------------------------
+# #1101: an optional bound on the exemption
+# ---------------------------------------------------------------------------
+
+EXEMPT = ["scheduled-task", "autotriage"]
+
+
+def _bound(monkeypatch, **bound):
+    monkeypatch.setattr(P, "round_hold_config",
+                        lambda: {"enabled": True, "exempt": EXEMPT,
+                                 "exempt_bound": bound})
+
+
+def _kv(monkeypatch, value):
+    monkeypatch.setattr(P.WorkerPool, "_gate_reading",
+                        staticmethod(lambda window: value))
+
+
+def test_no_bound_key_never_holds_an_exempt_source(pool, monkeypatch):
+    """Clause 2: today's config has no `exempt_bound`, and then nothing in the
+    exempt list is ever held — however many exempt jobs are in flight and
+    however full the engine reads."""
+    monkeypatch.setattr(P, "round_hold_config",
+                        lambda: {"enabled": True, "exempt": EXEMPT})
+    _kv(monkeypatch, 0.99)
+    _run_round(pool)
+    pool._in_flight[2] = {"source": "scheduled-task", "kind": "run"}
+    pool._in_flight[3] = {"source": "autotriage", "kind": "run"}
+    held = pool._round_hold_held(REGISTRY)
+    assert not set(held) & set(EXEMPT)
+    st = pool.round_hold_status()
+    assert st["exempt_bound"] is None
+    assert st["exempt_refused"] == {}
+
+
+def test_inflight_bound_holds_a_covered_exempt_source(pool, monkeypatch):
+    """Clause 1, in-flight leg: one exempt co-tenant already beside the round
+    and `max_exempt_inflight: 1` refuses the next, only for covered sources."""
+    _bound(monkeypatch, sources=["scheduled-task"], max_exempt_inflight=1)
+    _run_round(pool)
+    assert "scheduled-task" not in pool._round_hold_held(REGISTRY)
+    pool._in_flight[2] = {"source": "autotriage", "kind": "run"}
+    held = pool._round_hold_held(REGISTRY)
+    assert "scheduled-task" in held
+    assert "autotriage" not in held        # exempt, but not covered by the bound
+    assert "autocode" not in held          # the round never holds itself
+
+
+def test_kv_bound_holds_on_the_gate_reading(pool, monkeypatch):
+    """Clause 1, KV leg: the reading is `_gate_reading`'s median, and a missing
+    reading fails open."""
+    _bound(monkeypatch, kv_median_above=0.5)
+    _run_round(pool)
+    _kv(monkeypatch, 0.7)
+    assert set(EXEMPT) <= set(pool._round_hold_held(REGISTRY))
+    _kv(monkeypatch, None)
+    assert not set(pool._round_hold_held(REGISTRY)) & set(EXEMPT)
+
+
+def test_the_bound_flips_and_clears_without_touching_the_rest(pool, monkeypatch):
+    """Clause 3: claimable → held → claimable as the KV crosses and clears; the
+    non-exempt held set is the same throughout and the KV gate's own state is
+    not written by the round hold's read of it."""
+    _bound(monkeypatch, sources=["scheduled-task"], kv_median_above=0.5)
+    _run_round(pool)
+    kv_before = dict(pool._kv_gate)
+
+    _kv(monkeypatch, 0.2)
+    base = set(pool._round_hold_held(REGISTRY))
+    assert "scheduled-task" not in base
+    _kv(monkeypatch, 0.8)
+    crossed = set(pool._round_hold_held(REGISTRY))
+    assert crossed == base | {"scheduled-task"}
+    _kv(monkeypatch, 0.3)
+    cleared = set(pool._round_hold_held(REGISTRY))
+    assert cleared == base
+
+    assert pool._kv_gate == kv_before
+    assert pool.kv_gate_status()["engaged"] is False
+    assert pool.kv_gate_status()["held_sources"] == []
+
+
+def test_refusals_are_counted_per_source(pool, monkeypatch):
+    """Clause 4: `exempt_refused` counts each refusal (a claimable→held turn),
+    per source, not every claim poll that repeats it."""
+    _bound(monkeypatch, kv_median_above=0.5)
+    _run_round(pool)
+    _kv(monkeypatch, 0.9)
+    for _ in range(5):
+        pool._round_hold_held(REGISTRY)
+    st = pool.round_hold_status()
+    assert st["exempt_refused"] == {"autotriage": 1, "scheduled-task": 1}
+    assert st["bound_held"] == ["autotriage", "scheduled-task"]
+    assert st["exempt_bound"] == {"kv_median_above": 0.5}
+
+    _kv(monkeypatch, 0.1)
+    pool._round_hold_held(REGISTRY)
+    _kv(monkeypatch, 0.9)
+    pool._round_hold_held(REGISTRY)
+    assert pool.round_hold_status()["exempt_refused"] == {
+        "autotriage": 2, "scheduled-task": 2}
+    # The round leaving clears what is held, and keeps the count.
+    pool._in_flight.clear()
+    assert pool._round_hold_held(REGISTRY) == []
+    st = pool.round_hold_status()
+    assert st["bound_held"] == []
+    assert st["exempt_refused"]["scheduled-task"] == 2
+
+
+def test_the_bound_is_idle_without_a_round(pool, monkeypatch):
+    _bound(monkeypatch, max_exempt_inflight=0, kv_median_above=0.0)
+    _kv(monkeypatch, 0.9)
+    assert pool._round_hold_held(REGISTRY) == []
+    assert pool.round_hold_status()["exempt_refused"] == {}
+
+
+# ---------------------------------------------------------------------------
 # The third gate: is the primary engine answering at all
 # ---------------------------------------------------------------------------
 
