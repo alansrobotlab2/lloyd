@@ -21,7 +21,7 @@ import yaml
 from mcp.types import Tool
 
 from agent_mcp._shared import (
-    AUTONOMY_TASK_FIELDS, parse_frontmatter_text, text_result)
+    AUTONOMY_TASK_FIELDS, parse_frontmatter_text, text_result, with_body_contract)
 
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 
@@ -216,7 +216,11 @@ def _write_task_file(task_dict: dict) -> Path:
     }
     frontmatter.update({k: v for k, v in updates.items() if v is not None})
     frontmatter = {k: v for k, v in frontmatter.items() if v is not None}
-    body = task_dict.get("body", "")
+    # The stamp lives here, in the one writer both the create and the update path
+    # pass through, rather than in the create branch's `"body": ""`: the pin reads
+    # the live task directory, so it has to hold for whatever reaches disk, not
+    # only for the one call site that happens to look like a creation.
+    body = with_body_contract(task_dict.get("body", ""))
     content = f"---\n{yaml.dump(frontmatter, default_flow_style=False, allow_unicode=True)}---\n\n{body}"
     path.write_text(content, encoding="utf-8")
     return path

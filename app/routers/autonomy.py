@@ -12,7 +12,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from app.discord_notify import _discord_notify_task_complete
-from agent_mcp._shared import AUTONOMY_TASK_FIELDS, parse_frontmatter_text
+from agent_mcp._shared import (
+    AUTONOMY_TASK_FIELDS, parse_frontmatter_text, with_body_contract)
 
 
 router = APIRouter()
@@ -211,7 +212,11 @@ def _autonomy_write_file(task_dict: dict) -> Path:
             fm[key] = task_dict[key]
     if "type" not in fm:
         fm["type"] = "autonomy"
-    body = task_dict.get("body", "")
+    # Stamped in the writer, not in the create branch, for the reason named in
+    # `agent_mcp/autonomy._write_task_file`: this is the second of the two routes
+    # that can put a task file on disk (the Mission Control autonomy page writes
+    # through here), and the pin reads the directory, not the call site.
+    body = with_body_contract(task_dict.get("body", ""))
     content = f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True)}---\n\n{body}"
     path.write_text(content, encoding="utf-8")
     return path

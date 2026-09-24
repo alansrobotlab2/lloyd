@@ -443,6 +443,50 @@ AUTONOMY_TASK_FIELDS: tuple[str, ...] = (
     "grants",
 )
 
+#: Backlog #951: an autonomy task file's markdown body is documentation plus the
+#: machine-written activity log — it is NOT an instruction channel.
+#: `_build_task_prompt` (`autonomy.py`) renders the task's `skill_name` SKILL.md
+#: and its front-matter `description` and never reads the body below, so a step
+#: that lives only there reaches no run. That is not hypothetical: #47 carried a
+#: `Fact Store Consolidation` phase ordering the run to call tools its prompt
+#: never named (#463), and every body-only instruction in the task dir has been
+#: dead text since the first task file was written. The convention was already
+#: the system's (`86ae9da` moved #86's whole procedure into its `description`);
+#: what was missing was that no file said so and nothing kept it true. This line
+#: is the saying, `with_body_contract` below is the keeping, and
+#: `tests/test_research_doc_claims.py` is the pinning — including the check that
+#: the built prompt really does exclude the body, which is what makes the
+#: sentence on 33 files a verifiable claim instead of a hope.
+#:
+#: The wording is load-bearing twice: the pin compares each body's first line to
+#: this string, and `not delivered to the worker` is the phrase a human greps for
+#: over `~/obsidian/autonomy/`. Changing it here moves the vault copy in the same
+#: commit, or the pin goes red on 33 files.
+TASK_BODY_CONTRACT = (
+    "> **This body is documentation and the machine-written activity log — not an "
+    "instruction channel.** It is not delivered to the worker: `_build_task_prompt` "
+    "(`~/lloyd/autonomy.py`) renders only the `skill_name` SKILL.md and the front-matter "
+    "`description`, so a step that lives only below this line reaches no run."
+)
+
+
+def with_body_contract(body: str) -> str:
+    """Return `body` opening with `TASK_BODY_CONTRACT` — unchanged if it already does.
+
+    Both task-file writers call this on whatever body they are about to put on
+    disk, because a convention asserted over every task file is only true while a
+    new file cannot arrive without it: the create paths (`agent_mcp.autonomy
+    ._handle_write` and `POST /api/autonomy/task-write`) both start from an empty
+    body, and the pin in `tests/test_research_doc_claims.py` reads the live task
+    directory, so an unstamped create is a red suite at base for the next round
+    that touches it. Idempotent by design — the scheduler's own front-matter
+    writers re-emit a body they read back and must not double-stamp it.
+    """
+    text = body or ""
+    if TASK_BODY_CONTRACT in text:
+        return text
+    return f"\n{TASK_BODY_CONTRACT}\n\n{text.lstrip(chr(10))}"
+
 
 def _recover_block_field(fm_text: str, field: str):
     """Recover a block *sequence* that the loose scalar regex cannot see, or None.
