@@ -15,6 +15,22 @@ pair, so one pair carries one typed relation. The JSON version could leave
 two active rows for a pair when the classifier had seen it twice — nine such
 pairs were live on 2026-09-03.
 
+That sweep is provenance-blind, so the pass — not `retype` — is where the
+"never re-type human or inferred intent" guard rail is enforced (#1453). A pair
+carrying an active edge whose provenance is neither the extractor's (`EXTRACTED`
+`mentions`, the row this pass re-types) nor a prior classifier verdict
+(`EXTRACTED_CLASSIFIER*`, this pass's own earlier output) is planned as
+`protected_pair` and written zero times. `STATED` arrives through `fact_relate`
+and `INFERRED` through `conversation_relations` (`co_accessed`) and
+`link_stranded_entities`; none of them may be expelled as collateral to promote
+a derived row. Measured on a copy of the live store on 2026-09-24: 29,620 pairs
+hold an un-judged eligible `mentions` edge, and the store holds no active edge
+outside `EXTRACTED`/`EXTRACTED_CLASSIFIER_V4` at all — so the lane plans 0 today
+and the guarded state is one `fact_relate` away, not live. A pair carrying a
+live classifier verdict of the SAME type is planned `already_typed` rather than
+`protected_pair`, even if a human edge is somehow also present: that lane
+retires only the redundant `mentions` row, so it expels nothing either.
+
 One apply pass is NOT the fixed point (#1257). A record's eligibility is read
 against the index built before the pass: when a pair holds an active eligible
 `mentions` edge in BOTH directions and the input carries one orientation's
@@ -57,6 +73,14 @@ DEFAULT_MIN_CONF = 0.6
 # Anything else (`STATED`, `INFERRED`, prior `EXTRACTED_CLASSIFIER*` outputs)
 # represents human or prior-classifier intent we shouldn't override here.
 ELIGIBLE_PROVENANCES = frozenset({"EXTRACTED"})
+
+# The classifier family: this pass's own output, whatever prompt version wrote
+# it, and the same rule `_build_live_typed_index` already applies. A co-resident
+# edge carrying one of these is meant to be superseded by the next verdict; one
+# carrying anything else is not (#1453). Measured on a copy of the live store on
+# 2026-09-24, every active classifier row is spelled `EXTRACTED_CLASSIFIER_V4`;
+# the prefix is kept because the older spelling is what an earlier prompt wrote.
+CLASSIFIER_PROVENANCE_PREFIX = "EXTRACTED_CLASSIFIER"
 
 # Apply passes per invocation. Two reach the fixed point on every store
 # measured so far (the reversed-fold case above needs exactly one more pass
@@ -144,6 +168,35 @@ def _build_live_typed_index(edges: list[dict]) -> dict[tuple[str, str], dict]:
     return idx
 
 
+def _build_protected_pairs(edges: list[dict]) -> set[tuple[str, str]]:
+    """(source, target) pairs carrying an active edge this pass may not expel.
+
+    `retype` expires EVERY other active edge on the pair whatever its
+    provenance, so the "never re-type `STATED`/`INFERRED`" guard rail has to be
+    applied here, before a retype is issued, and not inside `retype` — #925
+    keeps its one-active-relation-per-pair invariant, and
+    `tests/test_kg_store.py::test_retype_keeps_history_and_collapses_the_pair`
+    asserts that a co-resident `STATED` row *is* expired when a retype happens
+    at all (#1453). A `STATED` row came from a person calling `fact_relate`; an
+    `INFERRED` one from `conversation_relations` (`co_accessed`) or
+    `link_stranded_entities`.
+
+    Rows this pass is allowed to consume are not blockers: the eligible
+    `mentions` edge it is re-typing (the extractor's raw material, retired by
+    the retype on purpose), and a prior `EXTRACTED_CLASSIFIER*` verdict, which
+    is this pass's own earlier output and reaches its own lanes — `already_typed`
+    when the type matches, an upgrade that supersedes it when it does not."""
+    protected: set[tuple[str, str]] = set()
+    for e in edges:
+        prov = e.get("provenance") or ""
+        if prov.startswith(CLASSIFIER_PROVENANCE_PREFIX):
+            continue
+        if e.get("type") == "mentions" and prov in ELIGIBLE_PROVENANCES:
+            continue
+        protected.add((e.get("source", ""), e.get("target", "")))
+    return protected
+
+
 def _plan(st: KGStore, records: list[dict], min_confidence: float, now: str,
           ) -> tuple[list[dict], dict, Counter, Counter, list[tuple[int, str]]]:
     """One pass's plan against the store AS IT IS NOW.
@@ -154,9 +207,15 @@ def _plan(st: KGStore, records: list[dict], min_confidence: float, now: str,
     active = st.edges.active()
     active_mentions = _build_active_mentions_index(active)
     live_typed = _build_live_typed_index(active)
+    protected_pairs = _build_protected_pairs(active)
     print(f"[info] {st.edges.count(active_only=False)} total edges, {len(active)} active, "
           f"{len(active_mentions)} eligible active mentions edges "
           f"(type=mentions, provenance in {sorted(ELIGIBLE_PROVENANCES)})")
+    # The denominator beside any `protected_pair` count below: how many pairs in
+    # the whole store hold an edge this pass may not expel, so a `0` lane is
+    # readable as "nothing to guard" rather than "the guard is not running".
+    print(f"[info] {len(protected_pairs)} active pair(s) carry a non-classifier edge "
+          f"(provenance outside {CLASSIFIER_PROVENANCE_PREFIX}*)")
 
     stats = {
         "total_records": len(records),
@@ -165,6 +224,7 @@ def _plan(st: KGStore, records: list[dict], min_confidence: float, now: str,
         "no_eligible_edge": 0,
         "duplicate_pair": 0,
         "already_typed": 0,
+        "protected_pair": 0,
         "upgrades": 0,
     }
     seen_pairs: set[tuple[str, str]] = set()
@@ -237,6 +297,19 @@ def _plan(st: KGStore, records: list[dict], min_confidence: float, now: str,
                 # No live edge at all
                 stats["no_eligible_edge"] += 1
                 continue
+
+        if key in protected_pairs:
+            # The pair holds an edge this pass did not write. Issuing the
+            # retype would expel it as collateral (`reason: … pair re-typed as
+            # X`), which is the guard rail this lane exists for, and #925 keeps
+            # the one-active-relation-per-pair invariant that produces that
+            # sweep — so the pair is left exactly as found and reported instead
+            # of silently dropped: it would otherwise read as `upgrades` today
+            # and as `no_eligible_edge` after the damage was done (#1453).
+            # The extractor already refuses to mint a `mentions` row beside
+            # such an edge (#1246); this is the write-path half of that stance.
+            stats["protected_pair"] += 1
+            continue
 
         typed = live_typed.get(key)
         if typed is not None and typed.get("type") == canonical_edge_type(new_type):
