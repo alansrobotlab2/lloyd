@@ -577,11 +577,60 @@ def _definition(entity: str) -> str:
         return load_fact_snippets(entity, 300)
 
 
+# The definition line comes from `<entity>-overview.md`, which the nightly
+# extractor rewrites; keyed on the raw text, 0 of 40 verdicts written on
+# 2026-09-23 still matched their key a day later (#728). Case, spacing and the
+# long tail of the line are what the rewrite churns, so the key sees none of
+# them; a substantively different definition still moves it.
+DEFINITION_KEY_CHARS = 200
+
+
+def canonical_definition(text: str) -> str:
+    """The part of a definition the verdict-cache key is allowed to see."""
+    return " ".join((text or "").lower().split())[:DEFINITION_KEY_CHARS]
+
+
+def definition_hash(text: str) -> str:
+    """Short hash of the canonical definition, stored on the verdict record so
+    a later miss can say which side's definition moved."""
+    return hashlib.sha256(canonical_definition(text).encode("utf-8")).hexdigest()[:8]
+
+
 def _cache_key(a: str, b: str, da: str, db: str) -> str:
-    """Pair + definition hash. Re-judged only when a definition changes."""
+    """Pair + canonical definitions. Re-judged only when a definition changes."""
     lo, hi = sorted((a, b))
     da, db = (da, db) if lo == a else (db, da)
+    da, db = canonical_definition(da), canonical_definition(db)
     return hashlib.sha256(f"{lo}\x00{hi}\x00{da}\x00{db}".encode("utf-8")).hexdigest()[:32]
+
+
+def verdicts_by_pair(cache: dict[str, dict]) -> dict[frozenset, dict]:
+    """The newest record per name pair, whatever its key — what a key miss is
+    attributed against."""
+    by_pair: dict[frozenset, dict] = {}
+    for rec in cache.values():
+        if rec.get("a") and rec.get("b"):
+            by_pair[frozenset((rec["a"], rec["b"]))] = rec
+    return by_pair
+
+
+def attribute_miss(prior: dict | None, a: str, b: str, hash_a: str, hash_b: str) -> str:
+    """Why a pair is being judged again.
+
+    `new_pair` — never judged; `pre_728_record` — judged under the raw-text
+    key, which carried no hashes; otherwise which definition(s) changed.
+    A `reworded` verdict cannot arise: a rewording the canonical form absorbs
+    is a cache hit, so it never reaches this function.
+    """
+    if prior is None:
+        return "new_pair"
+    prior_hashes = {prior.get("a"): prior.get("def_a"), prior.get("b"): prior.get("def_b")}
+    if not (prior_hashes.get(a) and prior_hashes.get(b)):
+        return "pre_728_record"
+    changed = [name for name, now in ((a, hash_a), (b, hash_b)) if prior_hashes[name] != now]
+    if len(changed) == 2:
+        return "both_changed"
+    return "a_changed" if changed == [a] else "b_changed"
 
 
 def load_verdict_cache(path: Path = VERDICT_CACHE) -> dict[str, dict]:
@@ -1090,11 +1139,14 @@ def main() -> int:
         verdict_counts = Counter()
         if cache is None:
             cache = load_verdict_cache()
+        miss_reasons = Counter()
+        by_pair = verdicts_by_pair(cache)
         for i, pair in enumerate(candidates, 1):
             t0 = time.perf_counter()
             # The key selection computed, when it computed one — re-deriving it
             # would read both definitions again for every pair.
             key = pair.pop("_cache_key", None)
+            da = db = None
             if key is None:
                 da, db = _definition(pair["a"]), _definition(pair["b"])
                 key = _cache_key(pair["a"], pair["b"], da, db)
@@ -1105,6 +1157,13 @@ def main() -> int:
                                   "cached": True})
                 verdict_counts[cached.get("verdict", "?")] += 1
                 continue
+            if da is None:
+                # Selection keyed this pair; the miss attribution needs the
+                # definitions themselves (memoised, so this is not a re-read).
+                da, db = _definition(pair["a"]), _definition(pair["b"])
+            hash_a, hash_b = definition_hash(da), definition_hash(db)
+            miss_reasons[attribute_miss(by_pair.get(frozenset((pair["a"], pair["b"]))),
+                                        pair["a"], pair["b"], hash_a, hash_b)] += 1
             j = judge_pair(pair, args.endpoint, args.model, args.timeout)
             dt_ms = (time.perf_counter() - t0) * 1000
             if j is None or "error" in j:
@@ -1112,6 +1171,7 @@ def main() -> int:
                 print(f"  [{i}/{len(candidates)}] ERROR  {pair['a']!r} vs {pair['b']!r}: {j}")
                 continue
             append_verdict({"key": key, "a": pair["a"], "b": pair["b"],
+                            "def_a": hash_a, "def_b": hash_b,
                             "judged_at": datetime.now(timezone.utc).isoformat(), **j})
             cache[key] = j
             verdict = j["verdict"]
@@ -1136,6 +1196,9 @@ def main() -> int:
         print(f"\n[info] judgments → {JUDGMENT_LOG}")
         print(f"[info] elapsed: {time.perf_counter() - t_start:.1f}s")
         print(f"[info] verdicts: {dict(verdict_counts)}  ({cache_hits} from cache)")
+        # A miss on a pair judged before is the cache decaying, and the report
+        # says on which side the definition moved (#728).
+        print(f"[info] cache misses by reason: {dict(miss_reasons)}")
         # After the appends, outside the loader: one row per pair from here on.
         compact = compact_verdict_cache()
         if compact["backup"] is not None:

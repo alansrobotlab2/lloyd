@@ -543,8 +543,11 @@ QWEN_PAIR = {"qwen3-tts-voice", "qwen3-tts-voice cloning"}
 
 
 def _drive_main(tmp_path, monkeypatch, argv, confidence=0.93,
-                entities=None, neighbors=None):
-    """Run the real main() against tmp_path. Returns the pairs it judged."""
+                entities=None, neighbors=None, written=None, definition=None):
+    """Run the real main() against tmp_path. Returns the pairs it judged.
+
+    `written` collects the verdict records main would have appended;
+    `definition` stands in for the facts-tree definition lookup."""
     monkeypatch.setattr(ser, "PIPELINE_ROOT", tmp_path)
     monkeypatch.setattr(ser, "CANDIDATE_LOG", tmp_path / "semantic-entity-candidates-2099-01-01.jsonl")
     monkeypatch.setattr(ser, "JUDGMENT_LOG", tmp_path / "judgments.jsonl")
@@ -564,8 +567,9 @@ def _drive_main(tmp_path, monkeypatch, argv, confidence=0.93,
     monkeypatch.setattr(ser, "get_store", lambda: None, raising=False)
     monkeypatch.setattr(ser, "count_facts", lambda entity: 0)
     monkeypatch.setattr(ser, "load_verdict_cache", lambda *a, **k: {})
-    monkeypatch.setattr(ser, "append_verdict", lambda rec, *a, **k: None)
-    monkeypatch.setattr(ser, "_definition", lambda entity: "a definition")
+    monkeypatch.setattr(ser, "append_verdict",
+                        lambda rec, *a, **k: None if written is None else written.append(rec))
+    monkeypatch.setattr(ser, "_definition", definition or (lambda entity: "a definition"))
     judged = []
 
     def fake_judge(pair, endpoint, model, timeout):
@@ -576,6 +580,70 @@ def _drive_main(tmp_path, monkeypatch, argv, confidence=0.93,
     monkeypatch.setattr(sys, "argv", ["semantic-entity-resolution.py", *argv])
     assert ser.main() == 0
     return judged
+
+
+# ---------------------------------------------------------------------------
+# #728: the verdict-cache key survives the nightly rewrite of the definition
+# ---------------------------------------------------------------------------
+
+DEF_B = "The CLI for driving Claude from a terminal."
+# Longer than the key's cap, so the tail past it is a real region of the line.
+BASE = ("Claude Code is Anthropic's agentic coding tool, run from the shell; "
+        "it edits files, runs commands and drives the harness in this repo. ") * 3
+assert len(" ".join(BASE.split())) > ser.DEFINITION_KEY_CHARS
+
+
+def test_cache_key_ignores_case_whitespace_and_the_tail_past_the_cap():
+    base = BASE
+    reworded = ("  claude code IS anthropic's\n\tagentic   coding tool, run from the shell; "
+                + BASE.split("; ", 1)[1].upper() + "x" * 400)
+    assert ser.canonical_definition(base) == ser.canonical_definition(reworded)
+    assert (ser._cache_key("Claude Code", "Claude", base, DEF_B)
+            == ser._cache_key("Claude Code", "Claude", reworded, DEF_B))
+    # Symmetric in the pair, with each definition following its own name.
+    assert (ser._cache_key("Claude", "Claude Code", DEF_B, base)
+            == ser._cache_key("Claude Code", "Claude", base, DEF_B))
+
+
+def test_cache_key_still_moves_on_a_substantively_different_definition():
+    base = BASE
+    other = "Claude Code is a VS Code extension for reviewing pull requests. " * 3
+    assert (ser._cache_key("Claude Code", "Claude", base, DEF_B)
+            != ser._cache_key("Claude Code", "Claude", other, DEF_B))
+    # A change past the cap is invisible to the key on purpose: the tail is
+    # what the extractor churns, and the hash says so too.
+    assert ser.definition_hash(base + " " + "y" * 300) == ser.definition_hash(base)
+
+
+def test_a_miss_is_attributed_to_the_side_whose_definition_moved():
+    ha, hb = ser.definition_hash("a"), ser.definition_hash("b")
+    prior = {"a": "X", "b": "Y", "def_a": ha, "def_b": hb, "verdict": "same"}
+    assert ser.attribute_miss(None, "X", "Y", ha, hb) == "new_pair"
+    assert ser.attribute_miss(prior, "X", "Y", "deadbeef", hb) == "a_changed"
+    assert ser.attribute_miss(prior, "X", "Y", ha, "deadbeef") == "b_changed"
+    assert ser.attribute_miss(prior, "X", "Y", "deadbeef", "cafebabe") == "both_changed"
+    # The label names the pair's own side; the prior's columns are matched by
+    # name, so a record stored the other way round still attributes X's move.
+    assert ser.attribute_miss(prior, "Y", "X", hb, "deadbeef") == "b_changed"
+    assert ser.attribute_miss(prior, "Y", "X", "deadbeef", ha) == "a_changed"
+    legacy = {"a": "X", "b": "Y", "key": "raw-text-key", "verdict": "same"}
+    assert ser.attribute_miss(legacy, "X", "Y", ha, hb) == "pre_728_record"
+
+
+def test_a_written_verdict_carries_both_definition_hashes(tmp_path, monkeypatch, capsys):
+    """The record stores the hashes main keyed on, so the next run's miss on
+    this pair can name the side that moved; and the run report counts the
+    reasons."""
+    written = []
+    judged = _drive_main(tmp_path, monkeypatch, [], written=written,
+                         definition=lambda entity: f"def of {entity}")
+    assert judged == [INTEL_PAIR]
+    assert "cache misses by reason: {'new_pair': 1}" in capsys.readouterr().out
+    (rec,) = written
+    assert rec["def_a"] == ser.definition_hash(f"def of {rec['a']}")
+    assert rec["def_b"] == ser.definition_hash(f"def of {rec['b']}")
+    assert rec["key"] == ser._cache_key(rec["a"], rec["b"], f"def of {rec['a']}", f"def of {rec['b']}")
+    assert ser.verdicts_by_pair({rec["key"]: rec})[frozenset((rec["b"], rec["a"]))] is rec
 
 
 def test_run_writes_a_clean_pool_judges_only_above_the_floor_and_reports_it(
