@@ -92,6 +92,47 @@ def token_ledger_fields(trace: dict[str, Any]) -> dict[str, Any]:
     return {key: trace.get(key) for key in TOKEN_KEYS}
 
 
+#: Today's single-call completion cap. A strategy arm's ceiling is sized as a
+#: multiple of it (#1132), so it is named rather than restated.
+DEFAULT_MAX_TOKENS = 1500
+
+
+def chat_completion(
+    model: str,
+    messages: list[dict[str, Any]],
+    *,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    timeout_seconds: int = 180,
+) -> tuple[str, dict[str, Any] | None]:
+    """One chat completion at bench settings: ``(content, usage)``.
+
+    The one request shape every direct trial sends, so a multi-call strategy
+    arm (`strategy_arms`) spends its calls exactly the way `execute` does and
+    the only difference between arms is what the tokens are asked to do.
+    Raises on transport and HTTP errors; the caller decides what a failure
+    means for its trace.
+    """
+    endpoint = _endpoint_for(model)
+    model_name = _resolved_model_name(model)
+    resp = requests.post(
+        f"{endpoint}/v1/chat/completions",
+        headers={"Authorization": "Bearer no-key-required"},
+        json={
+            "model": model_name,
+            "messages": messages,
+            "temperature": 0.3,
+            "max_tokens": max_tokens,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "priority": AUTORESEARCH_PRIORITY,
+        },
+        timeout=timeout_seconds,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    content = data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+    return content, data.get("usage")
+
+
 def _run_one_sync(
     task: dict[str, Any],
     variant_id: str,
@@ -121,28 +162,16 @@ def _run_one_sync(
     try:
         system_prompt = build_system_prompt(overlay_dir=overlay_dir)
         user_prompt = task.get("prompt") or task.get("_body") or ""
-        endpoint = _endpoint_for(model)
-        model_name = _resolved_model_name(model)
-        resp = requests.post(
-            f"{endpoint}/v1/chat/completions",
-            headers={"Authorization": "Bearer no-key-required"},
-            json={
-                "model": model_name,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "temperature": 0.3,
-                "max_tokens": 1500,
-                "chat_template_kwargs": {"enable_thinking": False},
-                "priority": AUTORESEARCH_PRIORITY,
-            },
-            timeout=timeout_seconds,
+        content, usage = chat_completion(
+            model,
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=DEFAULT_MAX_TOKENS,
+            timeout_seconds=timeout_seconds,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        add_usage(trace, data.get("usage"))
-        content = data.get("choices", [{}])[0].get("message", {}).get("content", "") or ""
+        add_usage(trace, usage)
         trace["final_text"] = content[-8000:]
     except requests.Timeout:
         trace["status"] = "timeout"
