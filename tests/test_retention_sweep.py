@@ -1273,3 +1273,214 @@ def test_the_skill_table_names_the_constant_and_split_the_code_uses(rs):
         f"the skill omits the spill store the script sweeps: {list(rows)}")
     assert "SPILL_MAX_AGE_DAYS" in spill_row, spill_row
     assert f">{rs.SPILL_MAX_AGE_DAYS}d" in spill_row, spill_row
+
+
+# ---------------------------------------------------------------------------
+# The seventh rung: the activity logs in the vault's `autonomy/*.md` (#845).
+#
+# The cap kept the last ACTIVITY_LOG_MAX_ENTRIES entry bullets and reported a
+# healthy prune, but it built that list from `- ` bullets only, so a line the
+# writer had leaked into the file was in neither set: not an entry the cap could
+# count, not a line any branch removed. `autonomy/24-data-pipeline.md` carried 359
+# of them through every weekly sweep of that exact file while its own marker
+# counted 6,841 entries pruned. So the rung now removes both shapes, and counts
+# them apart, because a report of "6,841 entries pruned" about a file that shed
+# junk points at failure loops that never happened.
+# ---------------------------------------------------------------------------
+
+#: A non-entry line of exactly the kind a multi-line note leaks: continuation text
+#: at column 0, so not a bullet. This is the string the live corpus is full of.
+BARE_JUNK = "Error output: Check stderr output for details"
+#: The other leak shape: a nested bullet, which is a bullet under Markdown's rules
+#: and under `lstrip()` — the reading that made the junk unremovable.
+INDENTED_JUNK = " - 2026-09-20T07:55Z: nested continuation of one note"
+
+
+def _entry(n: int) -> str:
+    """Entry `n` of a synthetic log, shaped as `autonomy.append_activity_line` writes it.
+
+    Stamped one minute apart and strictly increasing, so "the window kept the
+    newest entries" is a check rather than a coincidence of duplicated text, and so
+    no two seeds are equal and the collapse at the append site cannot fire inside
+    these files.
+    """
+    hh, mm = divmod(n, 60)
+    stamp = f"2026-09-20T{hh:02d}:{mm:02d}:00Z"
+    return f"- {stamp}: Run run_24_20260920_{hh:02d}{mm:02d}00 — success (61s)"
+
+
+def _activity_task(entries: int, *, bare_after: int = 0, bare_between: int = 0,
+                   indented_between: int = 0, prior_marker: str = "") -> str:
+    """A task body: `## Activity Log` with `entries` bullets, interleaved with the
+    junk a note carrying newlines leaves behind.
+
+    `prior_marker` is the line an earlier sweep wrote. Its counts are history the
+    new marker carries forward, not something this sweep re-derives.
+    """
+    head = ["---", "id: 24", "name: Data pipeline", "status: up_next", "---", "",
+            "# Data pipeline", "",
+            "Overview prose, above the heading, that no sweep may touch.", "",
+            "## Activity Log", ""]
+    if prior_marker:
+        head.append(prior_marker)
+    lines = []
+    for n in range(entries):
+        lines.append(_entry(n))
+        lines.extend([BARE_JUNK] * bare_between)
+        lines.extend([INDENTED_JUNK] * indented_between)
+    lines.extend([BARE_JUNK] * bare_after)
+    return "\n".join(head + lines) + "\n"
+
+
+def _activity_region(path: Path) -> list[str]:
+    """Every non-blank line after `## Activity Log`, verbatim.
+
+    The same reading the fleet check uses (`awk NR>heading`, drop blank, drop
+    `/^- /`), because that expression is the one that has to fall to zero across
+    the live vault — a test that read the file by some other rule could pass on a
+    shape the real sweep leaves standing.
+    """
+    lines = path.read_text(encoding="utf-8").split("\n")
+    start = next(i for i, ln in enumerate(lines)
+                 if ln.strip().lower() == "## activity log")
+    return [ln for ln in lines[start + 1:] if ln.strip()]
+
+
+def _seed(rs, body: str, name: str = "24-data-pipeline.md") -> Path:
+    path = rs.AUTONOMY_TASKS_DIR / name
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_a_sweep_removes_activity_lines_the_entry_cap_cannot_count(rs):
+    """Clause 1: one `--apply` sweep removes every non-blank line under the heading
+    that is neither an entry bullet nor the prune marker.
+
+    The seed is deliberately *under* the cap — 3 entries, 7 junk lines — because
+    that is where the old rung failed loudest: it computed `excess` from entry
+    bullets, found none, and `continue`d before reaching anything that removed a
+    line, so a file whose only defect was junk was counted clean and left standing.
+    Junk has to go whether or not there is also something to prune.
+    """
+    path = _seed(rs, _activity_task(3, bare_after=4, indented_between=1))
+    seeded = _activity_region(path)
+    assert len(seeded) == 3 + 4 + 3, f"the seed lost its junk: {len(seeded)}"
+    assert len([ln for ln in seeded if not ln.startswith("- ")]) == 7
+
+    files, pruned, dropped = rs.sweep_activity_logs(apply=True)
+
+    assert files == 1, "a file with junk and nothing to prune was skipped"
+    after = _activity_region(path)
+    assert [ln for ln in after if not ln.startswith("- ")] == [], (
+        f"non-entry lines survived the sweep: "
+        f"{[ln for ln in after if not ln.startswith('- ')]}")
+    # Removing the leak must not remove the log: every real entry survives, in
+    # order, and the prose above the heading was never in scope.
+    assert [ln for ln in after if ln.startswith("- ") and not ln.startswith("- …")] \
+        == [ln for ln in seeded if ln.startswith("- ")]
+    assert "Overview prose, above the heading" in path.read_text(encoding="utf-8")
+    # The two counts stay apart, and here nothing was pruned: reporting 7
+    # "entries" for a file that ran 3 times is the misreport the marker carries.
+    assert pruned == 0, f"junk counted as pruned entries: {pruned}"
+    assert dropped == 7, f"non-entry lines removed: {dropped}"
+
+
+def test_an_activity_log_cannot_exceed_its_cap_by_lines_the_cap_ignores(rs):
+    """Clause 2: after the sweep, the non-blank lines following the heading are at
+    most `ACTIVITY_LOG_MAX_ENTRIES + 1` — the retained entries plus one marker.
+
+    Seeded over the cap *and* seeded with junk, which is the state that made the
+    bound a lie: 200 retained entries plus 260 leaked lines is more than twice
+    `ACTIVITY_LOG_MAX_ENTRIES`, on a file whose marker said "keeping last 200".
+    """
+    limit = rs.ACTIVITY_LOG_MAX_ENTRIES
+    seeded_junk = (limit + 40) + 20
+    path = _seed(rs, _activity_task(limit + 40, bare_after=20, bare_between=1))
+    before = _activity_region(path)
+    assert len(before) == (limit + 40) + seeded_junk
+    assert len(before) > limit + 1, f"the seed is not over the bound: {len(before)}"
+
+    files, pruned, dropped = rs.sweep_activity_logs(apply=True)
+
+    after = _activity_region(path)
+    assert files == 1
+    assert len(after) <= limit + 1, (
+        f"{len(after)} non-blank lines under the heading against a declared bound "
+        f"of {limit} entries plus one marker")
+    assert pruned == 40, f"entries past the cap: {pruned}"
+    assert dropped == seeded_junk, f"non-entry lines removed: {dropped}"
+    # And the window is the NEWEST entries: keeping the first 200 would satisfy
+    # the size bound while throwing away the point of a rolling log.
+    kept = [ln for ln in after if ln.startswith("- ") and not ln.startswith("- …")]
+    assert kept == [_entry(n) for n in range(40, limit + 40)], kept[:3]
+    assert kept[-1] == _entry(limit + 39)
+
+
+def test_the_prune_marker_counts_pruned_entries_and_removed_lines_apart(rs):
+    """The marker must not report junk as runs, and it stays one line.
+
+    Guidance in the acceptance, pinned anyway, because the marker is the number a
+    human reads and it is what made the old report unreadable. The marker carries
+    the lifetime totals — what the cap has ever removed, and what has ever been
+    recognised as leaked — which is why the fold must round-trip through the suffix
+    form rather than drop it and restart at this run's number. The return carries
+    what *this* run removed, which is what gets printed beside the other rungs and
+    compared against last week's. One marker line, so the bound in clause 2 stays
+    `MAX + 1`.
+    """
+    limit = rs.ACTIVITY_LOG_MAX_ENTRIES
+    prior = (f"- … 6764 older entries pruned by retention sweep "
+             f"(keeping last {limit}); non-entry lines removed: 12")
+    path = _seed(rs, _activity_task(limit + 10, bare_after=5, prior_marker=prior))
+
+    files, pruned, dropped = rs.sweep_activity_logs(apply=True)
+
+    markers = [ln for ln in _activity_region(path) if ln.startswith("- …")]
+    assert files == 1
+    assert len(markers) == 1, f"markers were not folded into one: {markers}"
+    assert markers[0] == (
+        f"- … {6764 + 10} older entries pruned by retention sweep "
+        f"(keeping last {limit}); non-entry lines removed: {12 + 5}"), markers[0]
+    assert (pruned, dropped) == (10, 5), (
+        f"the rung must report what this run removed, not the folded history: "
+        f"{(pruned, dropped)}")
+
+
+def test_the_activity_rung_reports_both_numbers_in_dry_run_without_writing(rs):
+    """Dry run is what an operator approves `--apply` from, on both halves.
+
+    The bound and the junk rule are new behaviour on a job the operator has run
+    weekly for months, so the part that must not change is the promise: the same
+    numbers, the file untouched, both shapes named — a dry run that printed only
+    the entry count would leave the junk's size unknown before it was deleted.
+    """
+    path = _seed(rs, _activity_task(3, bare_after=4))
+
+    files, pruned, dropped = rs.sweep_activity_logs(apply=False)
+
+    assert (files, pruned, dropped) == (1, 0, 4), "the dry run counted something else"
+    assert path.read_text(encoding="utf-8") == (
+        _activity_task(3, bare_after=4)), "a dry run wrote the file"
+
+
+def test_a_section_below_the_activity_log_is_not_swept(rs):
+    """The region the junk rule reads is bounded at the next heading.
+
+    Every live task file happens to end with its Activity Log, so "remove to
+    end of file" reads as harmless today. It is not: a file that grows one
+    section below its log would have that section's prose deleted as leaked note
+    text, by a rung whose stated job is to remove only lines the cap cannot count.
+    """
+    body = _activity_task(2, bare_after=3) + (
+        "\n## Notes\n\nA paragraph of real notes below the log.\n\n"
+        "- a bullet in that section\n")
+    path = _seed(rs, body)
+
+    files, pruned, dropped = rs.sweep_activity_logs(apply=True)
+
+    text = path.read_text(encoding="utf-8")
+    assert files == 1
+    assert dropped == 3, f"the sweep reached past the next heading: {dropped}"
+    assert "A paragraph of real notes below the log." in text
+    assert "- a bullet in that section" in text
+    assert BARE_JUNK not in text

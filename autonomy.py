@@ -189,18 +189,145 @@ def _update_task_field(task_id, **fields) -> None:
     path.write_text(new_content, encoding="utf-8")
 
 
+# ── Activity Log entry shape ────────────────────────────────────────────────
+# One note is one physical line, and a note repeated back-to-back is one counted
+# entry. Both rules exist because the retention sweep bounds an Activity Log by
+# counting *entry bullets* — lines beginning `- ` at column 0 — so a line that is
+# not a bullet is content the cap never counts. It used to be content the sweep
+# never removed either, which is how `autonomy/24-data-pipeline.md` came to carry
+# 359 bare lines through every weekly sweep of that exact file while its own
+# marker counted 6,841 entries pruned (#845). The sweep removes such lines now;
+# these two rules are why it should never have to. The bare lines got here because
+# a run summary is markdown prose and the failure note truncates it by characters
+# (`f"Run … FAILED …: {summary[:280]}"`), so one failed run could write thirty.
+ACTIVITY_LOG_HEADING = "## Activity Log"
+#: Fold for a note's continuation lines. Visible in the log, greppable, and it
+#: cannot re-introduce a line break the way the raw newline it replaces would.
+ACTIVITY_NOTE_FOLD = " | "
+#: What a collapsed entry ends with: `… ×3`. Read back on the next occurrence
+#: so the counter increments instead of a second line appearing.
+ACTIVITY_REPEAT_RE = re.compile(r"\s*×(\d+)\s*$")
+#: The stamp of a note's own run id (`run_<task>_<YYYYMMDD>_<HHMMSS>`, built in
+#: `run_task`), which a failure note embeds twice — once as the run, once
+#: inside `[full: autonomy-runs/<task>/<run>.md]`.
+_RUN_STAMP_RE = re.compile(r"\d{8}_\d{6}")
+#: Any human-readable instant: the per-entry UTC stamp, an ISO timestamp in a
+#: summary, or a bare date.
+_ENTRY_STAMP_RE = re.compile(r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?"
+                             r"(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?")
+#: Only a failed run earns the counter. Two successes are two facts about the
+#: schedule, not one fact twice: collapsing a pair would delete the earlier
+#: run's timestamp from the only per-task history anyone reads, and a loop of
+#: identical successes is the silent-failure signal the log exists to show.
+_REPEAT_COLLAPSE_MARK = "FAILED"
+
+
+def fold_activity_note(note) -> str:
+    """The note's text, on exactly one line.
+
+    Every newline inside the note becomes `ACTIVITY_NOTE_FOLD` and empty
+    segments are dropped, so a multi-line summary contributes continuation text
+    to its own entry instead of bare lines the entry cap cannot count.
+    """
+    text = str(note or "").replace("\r\n", "\n").replace("\r", "\n")
+    return ACTIVITY_NOTE_FOLD.join(seg.strip() for seg in text.split("\n") if seg.strip())
+
+
+def _activity_entry_key(line: str) -> str:
+    """What identifies an entry, minus everything that varies from run to run.
+
+    Byte-equality is unusable here: every entry begins with a per-call stamp and
+    every failure note carries a unique run id, so two notes from one failure
+    loop are never byte-equal and a guard keyed on the raw line could never fire.
+    Stripping the `×N` a previous collapse wrote is what lets the N+1-th
+    occurrence match the first one.
+    """
+    text = ACTIVITY_REPEAT_RE.sub("", line.strip())
+    if text.startswith("- "):
+        text = text[2:]
+    text = _RUN_STAMP_RE.sub("<stamp>", text)
+    text = _ENTRY_STAMP_RE.sub("<ts>", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _activity_repeat_count(line: str) -> int:
+    """How many occurrences the entry already stands for (1 if never collapsed)."""
+    m = ACTIVITY_REPEAT_RE.search(line.strip())
+    return int(m.group(1)) if m else 1
+
+
+def _last_activity_entry(lines: list[str], start: int) -> int:
+    """Index of the last entry bullet in the log region from `start`; -1 if none.
+
+    An entry is `- ` at column 0 and the prune marker is `- …` — the same two
+    spellings `scripts/groundskeeper/retention-sweep.py` counts with, deliberately:
+    the cap and the writer have to agree on what an entry is, or the writer adds
+    lines to a window the cap is not counting. An indented bullet is therefore not
+    an entry here either — it is leaked continuation text, and the sweep removes
+    it, so counting a run onto it would be counting onto a line about to vanish.
+
+    The region stops at the next heading so a file that ever grows a section
+    below its log cannot have that section's bullets read as entries.
+    """
+    last = -1
+    for i in range(start, len(lines)):
+        if lines[i].lstrip().startswith("#"):
+            break
+        if lines[i].startswith("- ") and not lines[i].startswith("- …"):
+            last = i
+    return last
+
+
+def append_activity_line(body: str, note: str, now_str: str) -> str:
+    """Record one note as one entry under a body's `## Activity Log` heading.
+
+    One physical line, always: a note carrying newlines has its continuation
+    text folded into that entry (`fold_activity_note`), because a bare line is
+    content the retention cap does not count and therefore never removes.
+
+    A back-to-back repeat of the entry already last in the log does not get a
+    second line. A task failing in a loop used to fill the entire retained
+    window with one error string, so the log — the only per-task history a human
+    or a later run reads — carried no information at all. The existing entry is
+    re-stamped with this occurrence and gains a `×N` count instead, and the
+    match ignores the two things that always differ between two runs: the stamp
+    and the run id. Only a note reporting `FAILED` collapses; a note whose text
+    differs once those are normalised still appends, so a real change of state
+    is never swallowed by the counter.
+
+    This is the one implementation of the shape. `_append_activity_log` hands it
+    the whole file for the scheduler; the MCP tool and the HTTP route call it
+    directly with a body they hold in memory, so both non-scheduler writers
+    serialise the file themselves and still write exactly once. Creates the
+    heading when the body has none.
+    """
+    folded = fold_activity_note(note)
+    new_line = f"- {now_str}: {folded}"
+    lines = (body or "").split("\n")
+    start = next((i for i, ln in enumerate(lines)
+                  if ln.strip().lower() == ACTIVITY_LOG_HEADING.lower()), None)
+    if start is None:
+        return (body or "").rstrip() + f"\n\n{ACTIVITY_LOG_HEADING}\n\n{new_line}\n"
+    idx = _last_activity_entry(lines, start + 1)
+    if (idx >= 0 and _REPEAT_COLLAPSE_MARK in folded
+            and _activity_entry_key(lines[idx]) == _activity_entry_key(new_line)):
+        lines[idx] = f"{new_line} ×{_activity_repeat_count(lines[idx]) + 1}"
+        return "\n".join(lines)
+    return (body or "").rstrip() + f"\n{new_line}\n"
+
+
 def _append_activity_log(task_id, note: str) -> None:
+    """Append one note to the task file's Activity Log.
+
+    Reads the file, applies `append_activity_line` — one line per note, a
+    repeated failure counted on the line it already occupies — writes once.
+    """
     path = _find_task_file(task_id)
     if not path:
         return
     content = path.read_text(encoding="utf-8")
     now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    log_line = f"\n- {now_str}: {note}\n"
-    if "## Activity Log" in content:
-        content = content.rstrip() + log_line
-    else:
-        content = content.rstrip() + "\n\n## Activity Log\n" + log_line
-    path.write_text(content, encoding="utf-8")
+    path.write_text(append_activity_line(content, note, now_str), encoding="utf-8")
 
 
 # ── Status changes that stop a task dispatching ───────────────────────────────
@@ -236,19 +363,11 @@ def status_change_note(old_status, new_status) -> Optional[str]:
     return note
 
 
-def append_activity_line(body: str, note: str, now_str: str) -> str:
-    """Append one `- <ts>: <note>` line to a body's `## Activity Log` heading.
-
-    The same shape `_append_activity_log` writes for the scheduler, for callers
-    that hold the body in memory instead of the file: both non-scheduler writers
-    serialise the whole task file themselves, so they append here and still write
-    exactly once. Creates the heading when the body has none.
-    """
-    text = body or ""
-    log_line = f"\n- {now_str}: {note}\n"
-    if "## Activity Log" in text:
-        return text.rstrip() + log_line
-    return text.rstrip() + "\n\n## Activity Log\n" + log_line
+# `append_activity_line` moved up beside `_append_activity_log` (above, in this
+# file): the scheduler's writer and the two body-in-memory callers —
+# `agent_mcp/autonomy.py` and `app/routers/autonomy.py` — are one shape, and two
+# copies of it is how a multi-line note could fold on one surface and spill bare
+# lines on the other.
 
 
 # ── Failure backoff ───────────────────────────────────────────────────────────

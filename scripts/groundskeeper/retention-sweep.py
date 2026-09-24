@@ -59,8 +59,11 @@ without the marker the sweep refuses and exits 2 rather than fall back — else
 `<tree>/.lloyd-data` for any other checkout. So a sandbox's or a round's
 `--apply` reaches only that tree's own data (#1415). The run prints the root it
 resolved, in dry run and in `--apply` alike, above the numbers it describes. One
-rung writes outside the data root: truncating the activity logs in the vault's
-`autonomy/*.md`, which `LLOYD_VAULT_ROOT` points at a copy.
+rung writes outside the data root: bounding the activity logs in the vault's
+`autonomy/*.md`, which `LLOYD_VAULT_ROOT` points at a copy. The bound is two rules,
+not one — the last `ACTIVITY_LOG_MAX_ENTRIES` entry bullets are kept and every other
+non-blank line under the heading is removed, because a line the entry cap does not
+count is a line the cap could never remove (#845).
 
 Usage:
     retention-sweep.py            # dry run — report only
@@ -378,13 +381,41 @@ def sweep_autonomy_runs(apply: bool, now: float) -> tuple[int, int]:
     return count, freed
 
 
-def sweep_activity_logs(apply: bool) -> tuple[int, int]:
-    """Truncate '## Activity Log' sections in autonomy task files to the
-    last ACTIVITY_LOG_MAX_ENTRIES entries. Returns (files_touched,
-    lines_removed)."""
-    files = removed = 0
+#: An Activity Log entry is a bullet at column 0 (`autonomy.append_activity_line`
+#: writes `- <ts>: <note>`, one physical line). An indented bullet is the leaked
+#: continuation of a multi-line note, not an entry, so it is junk like any other
+#: non-bullet — which is why this test is `startswith` and not `lstrip().startswith`:
+#: the lstrip form was half of why the junk could not be removed (#845).
+ENTRY_BULLET_PREFIX = "- "
+#: The one line the sweep itself writes. `- …` is a bullet, so a check that
+#: counts non-bullets as junk has to name it, and `prior`/`prior_lines` below are
+#: parsed back out of it.
+PRUNE_MARKER_PREFIX = "- …"
+
+
+def sweep_activity_logs(apply: bool) -> tuple[int, int, int]:
+    """Bound '## Activity Log' sections: the last ACTIVITY_LOG_MAX_ENTRIES
+    entries, and nothing else.
+
+    Returns (files_touched, entries_pruned, non_entry_lines_removed).
+
+    Two shapes are removed here, and they are counted apart in the marker because
+    they mean different things. Entries past the cap are the log doing what a
+    rolling window should; a non-bullet line under the heading is a note that
+    wrote its own continuation lines into the file, and it is the reason the cap
+    never worked. `sweep_activity_logs` used to build its entry list from
+    `lstrip().startswith("- ")`, so a bare line was in neither set: not an entry
+    the cap could count, not a line any branch removed. It therefore survived
+    every sweep forever, and the file grew past its declared bound while the
+    marker reported a healthy prune — `24-data-pipeline.md` stood at 359 such
+    lines for a year while its own marker counted 6,841 entries pruned, and every
+    one of those sweeps ran on that exact file. So: non-blank lines that are
+    neither entries nor the prune marker go, and a file shedding 359 junk lines
+    reports 359 lines, not 359 runs.
+    """
+    files = pruned = dropped = 0
     if not AUTONOMY_TASKS_DIR.exists():
-        return 0, 0
+        return 0, 0, 0
     for path in sorted(AUTONOMY_TASKS_DIR.glob("[0-9]*.md")):
         try:
             lines = path.read_text(encoding="utf-8").split("\n")
@@ -396,33 +427,54 @@ def sweep_activity_logs(apply: bool) -> tuple[int, int]:
                          if ln.strip().lower() == "## activity log") + 1
         except StopIteration:
             continue
-        entries = [i for i in range(start, len(lines))
-                   if lines[i].lstrip().startswith("- ")
-                   and not lines[i].lstrip().startswith("- …")]
+        # The log ends at the next heading, so the section bound is what decides
+        # which lines are junk. Swept to end-of-file instead, a task file that
+        # ever grows a section below its log would have that section's prose
+        # deleted as though it were leaked note text.
+        end = next((i for i in range(start, len(lines))
+                    if lines[i].lstrip().startswith("#")), len(lines))
+        entries = [i for i in range(start, end)
+                   if lines[i].startswith(ENTRY_BULLET_PREFIX)
+                   and not lines[i].startswith(PRUNE_MARKER_PREFIX)]
+        junk = [i for i in range(start, end)
+                if lines[i].strip()
+                and not lines[i].startswith(ENTRY_BULLET_PREFIX)]
         excess = entries[:-ACTIVITY_LOG_MAX_ENTRIES] \
             if len(entries) > ACTIVITY_LOG_MAX_ENTRIES else []
-        if not excess:
-            continue
         # fold any prior marker lines into the new one
-        prior = n_markers = 0
-        for i in range(start, len(lines)):
-            stripped = lines[i].lstrip()
-            if stripped.startswith("- …"):
-                m = re.search(r"(\d+) older entries", stripped)
+        prior = prior_lines = n_markers = 0
+        for i in range(start, end):
+            if lines[i].startswith(PRUNE_MARKER_PREFIX):
+                m = re.search(r"(\d+) older entries", lines[i])
                 prior += int(m.group(1)) if m else 0
+                m = re.search(r"non-entry lines removed: (\d+)", lines[i])
+                prior_lines += int(m.group(1)) if m else 0
                 n_markers += 1
-                excess.append(i)
-        drop = set(excess)
+        if not excess and not junk:
+            continue
+        drop = set(excess) | set(junk) | {i for i in range(start, end)
+                                         if lines[i].startswith(PRUNE_MARKER_PREFIX)}
         kept = [ln for i, ln in enumerate(lines) if i not in drop]
-        marker = (f"- … {len(drop) - n_markers + prior} older entries "
+        marker = (f"{PRUNE_MARKER_PREFIX} {prior + len(excess)} older entries "
                   f"pruned by retention sweep "
                   f"(keeping last {ACTIVITY_LOG_MAX_ENTRIES})")
+        if prior_lines + len(junk):
+            # Counted apart, because "358 older entries pruned" about a file that
+            # ran 200 times and shed 358 junk lines is a number pointing at a
+            # failure loop that never happened. Suffixed form, not `N lines`, so
+            # the line reads the same at 1 as at 359.
+            marker += f"; non-entry lines removed: {prior_lines + len(junk)}"
         kept.insert(start, marker)
         if apply:
             path.write_text("\n".join(kept), encoding="utf-8")
         files += 1
-        removed += len(drop) - n_markers
-    return files, removed
+        # What *this* run removed. The marker above carries the folded history, so
+        # returning those counts too would report a year of accumulated prunes as
+        # today's work — the old rung reported this-run-only, and the printed
+        # number is what an operator compares against last week's.
+        pruned += len(excess)
+        dropped += len(junk)
+    return files, pruned, dropped
 
 
 def sweep_candidates(apply: bool, now: float) -> tuple[int, int]:
@@ -684,7 +736,7 @@ def main() -> int:
     logs_n, logs_b = sweep_task_logs(args.apply, now)
     sess_n, sess_b = sweep_sessions(args.apply, now)
     runs_n, runs_b = sweep_autonomy_runs(args.apply, now)
-    act_f, act_l = sweep_activity_logs(args.apply)
+    act_f, act_e, act_l = sweep_activity_logs(args.apply)
     cand_n, cand_b = sweep_candidates(args.apply, now)
     scr_n, scr_b = sweep_transcript_scratch(args.apply, now)
     spill_n, spill_b = sweep_session_spills(args.apply, now)
@@ -698,8 +750,12 @@ def main() -> int:
           f"{'saved' if args.apply else 'candidate'}")
     print(f"  autonomy runs >{RUN_RECORD_MAX_AGE_DAYS}d: "
           f"{runs_n} deleted, {runs_b / 1024 / 1024:.1f} MiB freed")
+    # The two numbers are the two shapes the sweep removes, and one line carrying
+    # their sum is how a prune of 359 leaked note lines came to be reported as 359
+    # runs pruned. Same line in both modes, like every other rung here.
     print(f"  activity logs: {act_f} task files truncated, "
-          f"{act_l} entries pruned (keep last {ACTIVITY_LOG_MAX_ENTRIES})")
+          f"{act_e} entries pruned, {act_l} non-entry lines removed "
+          f"(keep last {ACTIVITY_LOG_MAX_ENTRIES})")
     print(f"  skill candidates >{CANDIDATE_MAX_AGE_DAYS}d processed: "
           f"{cand_n} deleted, {cand_b / 1024:.0f} KiB freed")
     print(f"  transcript scratch >{TRANSCRIPT_MAX_AGE_DAYS}d: "
