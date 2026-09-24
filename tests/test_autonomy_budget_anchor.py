@@ -280,3 +280,63 @@ async def test_the_composed_anchor_survives_the_seam_the_loop_calls_it_through(c
 
     late = await options.state_anchor(54)      # exactly 90% of 60
     assert len(late) == 1 and "Iteration 54 of 60" in late[0]["content"]
+
+
+# ------------------------------------------------ the anchor-firing ledger (#769)
+
+
+def _turn_through_the_loop(monkeypatch, anchor, iterations: int):
+    """Drive the real `run_query` for `iterations` tool iterations with `anchor`
+    wired, and return the `harness.anchor_fired` records it wrote."""
+    import asyncio
+    from app import event_log
+    from app.harness.loop import run_query
+    from app.harness.options import RunOptions
+    from app.harness.tests.test_state_anchor import TC, _FakePool, _Script
+
+    records: list[dict] = []
+
+    def _capture(session_id, event, data=None, *, turn_id=None, **_kw):
+        if event == "harness.anchor_fired":
+            records.append({"session_id": session_id, "turn_id": turn_id, **data})
+        return 0
+
+    async def _pool(_options):
+        return _FakePool()
+
+    monkeypatch.setattr(event_log, "log_event", _capture)
+    monkeypatch.setattr("app.harness.loop._build_pool", _pool)
+    monkeypatch.setattr("app.harness.loop.stream_chat",
+                        _Script([("x", TC)] * (iterations - 1) + [("done", [])]))
+    opts = RunOptions(model="primary", session_id="20260924_010000_autonomy_ab12",
+                      turn_id="t-1", max_turns=iterations + 5,
+                      tool_search_enabled=False, state_anchor=anchor)
+
+    async def _drain():
+        return [e async for e in run_query([{"role": "user", "content": "go"}], opts)]
+
+    asyncio.run(_drain())
+    return records
+
+
+def test_the_task_anchor_records_each_fire_on_the_autonomy_path(monkeypatch):
+    """`run_task` calls `run_query` directly, not through the chat router, so
+    the record has to be written where both paths meet: the loop."""
+    anchor = autonomy._build_task_anchor(0, 8)     # 75% of 8 = 6, 90% = 7.2 → 8
+    records = _turn_through_the_loop(monkeypatch, anchor, 8)
+    assert [(r["anchor"], r["level"], r["iteration"]) for r in records] == [
+        ("iteration_budget", 75, 6), ("iteration_budget", 90, 8)]
+    assert all(r["session_id"] == "20260924_010000_autonomy_ab12"
+               and r["turn_id"] == "t-1" for r in records)
+
+
+def test_the_chat_state_anchor_records_each_fire_too(monkeypatch):
+    """The session-backed worker path builds its anchor in
+    `messages._build_state_anchor`; the same loop records it."""
+    from app.routers import messages as M
+
+    monkeypatch.setattr(M, "_load_session_todos", lambda sid: [])
+    anchor = M._build_state_anchor("20260924_010000_autocode_ab12", max_turns=8)
+    records = _turn_through_the_loop(monkeypatch, anchor, 8)
+    assert [(r["anchor"], r["level"], r["iteration"]) for r in records] == [
+        ("iteration_budget", 75, 6), ("iteration_budget", 90, 8)]

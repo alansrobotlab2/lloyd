@@ -267,6 +267,8 @@ def _build_state_anchor(session_id: str, max_turns: int = 0,
     """
     from app.config import CONFIG
     from app.deadline_anchor import (
+        ANCHOR_TAG,
+        anchor_enabled,
         build_deadline_anchor,
         build_iteration_anchor,
         compose_state_anchors,
@@ -327,7 +329,8 @@ def _build_state_anchor(session_id: str, max_turns: int = 0,
                 f"Stop reading. Commit what is on disk now. If an automod "
                 f"round is open, call automod_gate and then automod_land or "
                 f"automod_abort. Then finish with a short report — two or "
-                f"three sentences.</context>")})
+                f"three sentences.</context>"),
+                ANCHOR_TAG: {"kind": "context", "level": "critical"}})
         elif frac >= ctx_warn and "warn" not in ctx_fired:
             ctx_fired.add("warn")
             out.append({"role": "user", "content": (
@@ -338,7 +341,8 @@ def _build_state_anchor(session_id: str, max_turns: int = 0,
                 f"Stop reading whole files: use Grep, or Read with an offset "
                 f"and a limit. Prefer small Edits over whole-file Writes.\n"
                 f"If your change is written and tested, commit and gate it "
-                f"now rather than after one more check.</context>")})
+                f"now rather than after one more check.</context>"),
+                ANCHOR_TAG: {"kind": "context", "level": "warn"}})
         return out
 
     # The same composer autonomy uses, and the same order: the turn cap's two
@@ -352,7 +356,9 @@ def _build_state_anchor(session_id: str, max_turns: int = 0,
         return out + await todo_anchor(iteration)
 
     async def todo_anchor(iteration: int) -> list[dict[str, Any]]:
-        if interval <= 0:
+        # `interval <= 0` also silences it, but a named flag
+        # (`harness.todo_anchor.enabled`) is what an ablation flips (#769).
+        if interval <= 0 or not anchor_enabled("todo_anchor"):
             return []
         todos = _load_session_todos(session_id)
         # Order matters (the list is the model's own sequence), so this is
@@ -388,7 +394,8 @@ def _build_state_anchor(session_id: str, max_turns: int = 0,
             "the turn leaving done work marked pending."
         )
         lines.append("</active_todos>")
-        return [{"role": "user", "content": "\n".join(lines)}]
+        return [{"role": "user", "content": "\n".join(lines),
+                 ANCHOR_TAG: {"kind": "todo", "level": interval}}]
 
     return anchor
 

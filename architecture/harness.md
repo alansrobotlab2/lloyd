@@ -157,9 +157,16 @@ change ledger, which is where to look for it.
 `todo_anchor_interval_iterations`, `preserve_thinking_iterations`,
 `tool_search`, `parallel_tool_calls`, `finalizer`, `thinking_trace`,
 `background_recording`, `prefix_miss`, `tool_call_summaries`, `edit_gates`,
-`edit_diagnostics`, `change_ledger`, `effect_ledger`. The *state* anchor has
-no config key — it is a `RunOptions` callback the router builds per turn;
-only the todo anchor's interval is configured.
+`edit_diagnostics`, `change_ledger`, `effect_ledger`. The *state* anchor is a
+`RunOptions` callback the router (or `autonomy._build_task_anchor`) builds per
+turn; each of its parts has an off switch read at the moment it would speak —
+`budget_anchor.enabled` (both budget clocks, `app/deadline_anchor.py`),
+`todo_anchor.enabled`, `context_anchor.enabled` — and an absent key means on
+(#769; only `context_anchor` is in config.yaml today). Anchor messages are not
+persisted, so the loop records each one it appends as a `harness.anchor_fired`
+event in `event_logs/<session_id>.events.jsonl`, naming the anchor, its level,
+the iteration and the turn: `grep -h '"harness.anchor_fired"'
+event_logs/*.events.jsonl` counts them.
 `compaction:` owns the between-turn and in-turn compaction walls.
 `subagents:` owns the `Task` profiles.
 

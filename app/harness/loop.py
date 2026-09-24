@@ -20,6 +20,7 @@ import time
 import uuid
 from typing import Any, AsyncIterator
 
+from app.deadline_anchor import ANCHOR_TAG
 from app.harness import events
 from app.harness.client import stream_chat
 from app.harness.context_meter import ContextMeter, context_window_for
@@ -311,7 +312,8 @@ async def run_query(
             # Per-iteration state re-anchor (todos / plan / goal). Appended,
             # never merged into the system prompt: position 0 must stay
             # byte-stable or every iteration re-prefills the whole context.
-            # These are NOT persisted — see RunOptions.state_anchor.
+            # These are NOT persisted — see RunOptions.state_anchor — so the
+            # event each one writes here is the only record that it fired.
             if options.state_anchor is not None:
                 try:
                     anchors = await options.state_anchor(num_turns)
@@ -319,6 +321,14 @@ async def run_query(
                     logger.warning("loop: state_anchor raised: %s", exc)
                     anchors = []
                 if anchors:
+                    tags = [
+                        m.pop(ANCHOR_TAG, None) if isinstance(m, dict) else None
+                        for m in anchors
+                    ]
+                    _record_anchor_fires(
+                        tags, session_id, getattr(options, "turn_id", "") or "",
+                        num_turns,
+                    )
                     chat_messages.extend(anchors)
                     meter.observe_append(chat_messages)
                     logger.info(
@@ -1145,6 +1155,39 @@ def _log_harness_event(
         event_log.log_event(session_id, event, data, turn_id=turn_id)
     except Exception as exc:  # noqa: BLE001
         logger.debug("loop: could not log %s: %s", event, exc)
+
+
+def _record_anchor_fires(
+    tags: list[Any], session_id: str, turn_id: str, iteration: int,
+) -> None:
+    """One `harness.anchor_fired` event per anchor message appended (#769).
+
+    `tags` are the `ANCHOR_TAG` values the builders in `app.deadline_anchor`
+    and `app/routers/messages.py` attach; a caller's own untagged anchor is
+    recorded as `unnamed` rather than skipped, so a count of events is a count
+    of appended anchor messages. Never raises: a record that cannot be written
+    costs the record, not the warning or the turn.
+    """
+    if not session_id:
+        return
+    for tag in tags:
+        try:
+            tag = tag if isinstance(tag, dict) else {}
+            from app import event_log
+
+            event_log.log_event(
+                session_id, "harness.anchor_fired",
+                {
+                    "anchor": str(tag.get("kind") or "unnamed"),
+                    "level": tag.get("level"),
+                    "iteration": iteration,
+                    "session_id": session_id,
+                    "turn_id": turn_id,
+                },
+                turn_id=turn_id or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("loop: could not record anchor fire: %s", exc)
 
 
 def _relief_target(options: Any, meter: Any) -> int:

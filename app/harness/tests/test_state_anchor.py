@@ -158,3 +158,79 @@ def test_no_anchor_configured_is_a_no_op(monkeypatch):
                       tool_search_enabled=False)
     asyncio.run(_drain(messages, opts))
     assert len(script.captured_messages) == 2
+
+
+# --------------------------------------------------------------- the ledger (#769)
+#
+# Anchors are not persisted, so before #769 nothing anywhere said one had
+# fired: not the session JSON, not the event log, not a log line naming which.
+
+
+def _run_recorded(monkeypatch, script, anchor, *, sink=None):
+    """Run a turn with a session and a turn id, capturing `harness.anchor_fired`."""
+    from app import event_log
+
+    records: list[dict[str, Any]] = []
+
+    def _capture(session_id, event, data=None, *, turn_id=None, **_kw):
+        if event == "harness.anchor_fired":
+            records.append({"session_id": session_id, "turn_id": turn_id,
+                            "event": event, "data": data})
+        return 0
+
+    monkeypatch.setattr(event_log, "log_event", sink or _capture)
+    _patch_pool(monkeypatch)
+    monkeypatch.setattr("app.harness.loop.stream_chat", script)
+    opts = RunOptions(
+        model="primary", session_id="ledger-sess", turn_id="turn-7",
+        tool_search_enabled=False, state_anchor=anchor,
+    )
+    events = asyncio.run(_drain([{"role": "user", "content": "go"}], opts))
+    return records, script.captured_messages, events
+
+
+def test_each_appended_anchor_writes_one_record_naming_it(monkeypatch):
+    from app.deadline_anchor import ANCHOR_TAG, build_iteration_anchor
+
+    budget = build_iteration_anchor(4)       # 75% of 4 at iteration 3, 90% at 4
+
+    async def anchor(iteration: int) -> list[dict[str, Any]]:
+        out = await budget(iteration)
+        if iteration == 2:
+            out.append({"role": "user", "content": "<active_todos>x</active_todos>",
+                        ANCHOR_TAG: {"kind": "todo", "level": 10}})
+            out.append({"role": "user", "content": "a caller's own, untagged"})
+        return out
+
+    script = _Script([("a", TC), ("b", TC), ("c", TC), ("done", [])])
+    records, captured, _ = _run_recorded(monkeypatch, script, anchor)
+
+    got = [(r["data"]["anchor"], r["data"]["level"], r["data"]["iteration"])
+           for r in records]
+    assert got == [("todo", 10, 2), ("unnamed", None, 2),
+                   ("iteration_budget", 75, 3), ("iteration_budget", 90, 4)], got
+    for r in records:
+        assert r["event"] == "harness.anchor_fired"
+        assert r["session_id"] == "ledger-sess" == r["data"]["session_id"]
+        assert r["turn_id"] == "turn-7" == r["data"]["turn_id"]
+    # The tag is the harness's, never the engine's: it is gone from every request.
+    assert not any(ANCHOR_TAG in m for msgs in captured for m in msgs)
+
+
+def test_a_raising_sink_neither_drops_the_anchor_nor_ends_the_turn(monkeypatch):
+    def _broken(*_a, **_kw):
+        raise OSError("event log disk full")
+
+    async def anchor(iteration: int) -> list[dict[str, Any]]:
+        from app.deadline_anchor import ANCHOR_TAG
+        if iteration == 1:
+            return [{"role": "user", "content": "<budget>REMINDER</budget>",
+                     ANCHOR_TAG: {"kind": "iteration_budget", "level": 75}}]
+        return []
+
+    script = _Script([("a", TC), ("b", TC), ("done", [])])
+    _, captured, events = _run_recorded(monkeypatch, script, anchor, sink=_broken)
+
+    assert len(captured) == 3, "the loop kept going past the failed record"
+    assert any("REMINDER" in str(m.get("content")) for m in captured[0])
+    assert events[-1]["type"] == "result"

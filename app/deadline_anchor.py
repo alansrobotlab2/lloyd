@@ -23,15 +23,45 @@ that passed two anchors would be a caller with two chances to drift.
 
 The reason this is a module rather than a private helper in each caller: two
 copies of "how close is the budget" drift, and the one that drifts is the one
-nobody is watching. That is true of the wording as much as the arithmetic — the
-chat path's `<budget>Iteration N of M` bytes are a measurement surface, and
-#769's anchor-firing ledger has to match on them.
+nobody is watching. That is true of the wording as much as the arithmetic.
+
+Every anchor message also carries an `ANCHOR_TAG` naming which anchor fired and
+at what level. `app/harness/loop.py` pops it before the message reaches
+history and writes one `harness.anchor_fired` event per message (#769). That is
+the only record an anchor ever fired — anchors are not persisted — and it is
+structural rather than a match on the wording, which could not tell the
+wall-clock `<budget>` from the iteration `<budget>`.
 """
 
 from __future__ import annotations
 
 import time
 from typing import Any, Awaitable, Callable
+
+# Key on an anchor message naming which anchor produced it, e.g.
+# `{"kind": "iteration_budget", "level": 75}`. Private to the harness: the loop
+# pops it before the message is appended, so it never reaches an engine, a
+# transcript or the replayed history.
+ANCHOR_TAG = "_anchor"
+
+
+def anchor_enabled(name: str) -> bool:
+    """Is `harness.<name>.enabled` on? Absent means on, as it always was.
+
+    Read at each emission decision rather than once at build time, so the
+    flag is the same kind of switch `harness.context_anchor.enabled` is, and a
+    config that cannot be read never silences a warning.
+    """
+    try:
+        from app.config import CONFIG
+
+        cfg = (CONFIG.get("harness") or {}).get(name)
+        if isinstance(cfg, dict):
+            return bool(cfg.get("enabled", True))
+    except Exception:  # noqa: BLE001
+        pass
+    return True
+
 
 # Two levels, because they ask for different things. Each fires once: a
 # warning re-sent every iteration is one the model learns to skip.
@@ -60,6 +90,8 @@ def build_deadline_anchor(
     fired: set[float] = set()
 
     async def anchor(iteration: int) -> list[dict[str, Any]]:
+        if not anchor_enabled("budget_anchor"):
+            return []
         elapsed = time.monotonic() - started
         out: list[dict[str, Any]] = []
         for frac in BUDGET_WARN_FRACTIONS:
@@ -67,6 +99,7 @@ def build_deadline_anchor(
                 continue
             fired.add(frac)
             left = max(0, int(timeout_s - elapsed))
+            tag = {"kind": "deadline_budget", "level": round(frac * 100)}
             if frac >= 0.90:
                 out.append({"role": "user", "content": (
                     f"<budget>{left}s of this {what}'s {int(timeout_s)}s budget remain. "
@@ -74,13 +107,13 @@ def build_deadline_anchor(
                     "already have. A run cut off at the budget is recorded as a "
                     "failure and reports nothing, however much work it did — an "
                     "incomplete answer is worth far more than none. Say what you "
-                    "found and what you did not get to.</budget>")})
+                    "found and what you did not get to.</budget>"), ANCHOR_TAG: tag})
             else:
                 out.append({"role": "user", "content": (
                     f"<budget>{left}s of this {what}'s {int(timeout_s)}s budget remain. "
                     "Finish this run's own deliverable first; do not open new "
                     "lines of investigation. If the work is already done, report "
-                    "now rather than verifying further.</budget>")})
+                    "now rather than verifying further.</budget>"), ANCHOR_TAG: tag})
         return out
 
     return anchor
@@ -89,7 +122,7 @@ def build_deadline_anchor(
 # The two iteration levels, in whole percent so the crossing test is integer
 # arithmetic: `iteration * 100 < pct * max_turns` cannot round. 75 and 90 are
 # the chat path's long-standing pair (#278), and the wording below is its
-# wording, unchanged — #769 counts firings by matching these bytes.
+# wording, unchanged.
 ITERATION_WARN_PERCENTAGES = (75, 90)
 
 
@@ -114,6 +147,9 @@ def build_iteration_anchor(
     fired: set[int] = set()
 
     async def anchor(iteration: int) -> list[dict[str, Any]]:
+        # One flag for both budget clocks: `harness.budget_anchor.enabled`.
+        if not anchor_enabled("budget_anchor"):
+            return []
         out: list[dict[str, Any]] = []
         for pct in ITERATION_WARN_PERCENTAGES:
             if pct in fired or iteration * 100 < pct * max_turns:
@@ -125,7 +161,8 @@ def build_iteration_anchor(
                 "remain before this turn is stopped. A turn cut off at the budget "
                 "ends with no report and lands nothing. If an automod round is open, "
                 "gate and land it now (automod_gate, then automod_land) or abort it; "
-                "otherwise finish — say what is done and what is not.</budget>")})
+                "otherwise finish — say what is done and what is not.</budget>"),
+                ANCHOR_TAG: {"kind": "iteration_budget", "level": pct}})
         return out
 
     return anchor

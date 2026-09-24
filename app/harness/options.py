@@ -140,7 +140,10 @@ class RunOptions:
     # in, or [] for "nothing to say". Unlike `notification_drain` these
     # are ephemeral scaffolding and must NOT be persisted to the session
     # JSON — they describe state as of this iteration and would be stale
-    # (and duplicated) on the next turn's reconstruction.
+    # (and duplicated) on the next turn's reconstruction. What IS recorded
+    # is that one fired: a message carrying `app.deadline_anchor.ANCHOR_TAG`
+    # has the tag popped by the loop and written as a `harness.anchor_fired`
+    # event in the session's event log (#769).
     #
     # Motivating case: session 20260905_151355_iv5174 called TodoWrite at
     # iteration 6 of 52 and never again. The `<active_todos>` block was
