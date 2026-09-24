@@ -75,6 +75,28 @@ DENIED_PATH = STATE_DIR / "denied.json"
 # Which tests already fail at a given base commit, as the `tests` rung's base
 # probe measured them (see `read_red_set`).
 RED_SET_PATH = STATE_DIR / "red_set.json"
+
+
+def canary_trace_path() -> Path:
+    """The last `canary_smoke` rung's structural trace (#828).
+
+    Its own file, never a key in `last_known_good.json`: the guardian is that
+    file's only writer, and this one is written by the gate on every passing
+    smoke. Resolved at call time from `STATE_DIR`, so a test (or a gate run
+    under another state dir) that repoints the module is honoured."""
+    return STATE_DIR / "canary_trace.json"
+
+
+def read_canary_trace(path: Path | None = None) -> dict | None:
+    """The previous smoke's trace record, or None when none was ever written
+    or it is unreadable — a missing baseline is "nothing to compare", never
+    a failure."""
+    rec = read_json(path or canary_trace_path())
+    return rec if isinstance(rec, dict) else None
+
+
+def write_canary_trace(record: dict, path: Path | None = None) -> None:
+    write_json(path or canary_trace_path(), record)
 BROKEN_DIR = STATE_DIR / "broken"
 ROUNDS_DIR = STATE_DIR / "rounds"
 

@@ -25,6 +25,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from pathlib import Path
 
 
@@ -142,6 +143,101 @@ def run(*, backend: str, sessions_dir: Path, timeout: float = 150.0,
     # promotions fail at the whim of sampling. Recorded for the round log only.
     report["ok"] = not report["errors"]
     return report
+
+
+# ── the structural trace (#828) ────────────────────────────────────────────
+# The turn above already records every SSE event name, the turn count and the
+# response length; until #828 the gate kept none of it, so nothing could say
+# whether THIS build's turn looks like the last one's. What follows is data
+# only: no function here returns a verdict, and nothing here may fail a rung.
+# Whether (and at which floor) agreement should ever gate is a human call,
+# made after reading measured same-build numbers.
+
+# The rung-data keys that make up a trace; a reused rung strips them.
+TRACE_KEYS = ("events", "event_count", "turns", "response_chars")
+
+
+def trace_of(report: dict) -> dict:
+    """The four structural features of one smoke report."""
+    events = [str(e) for e in (report.get("events") or [])]
+    return {"events": events, "event_count": len(events),
+            "turns": report.get("turns"),
+            "response_chars": report.get("response_chars")}
+
+
+def _collapse(events: list[str]) -> list[str]:
+    """Runs of one event name folded to one entry. Token streaming makes the
+    raw list's length follow sampling (one `text_delta` per chunk), so the
+    collapsed shape is reported beside strict equality."""
+    out: list[str] = []
+    for e in events:
+        if not out or out[-1] != e:
+            out.append(e)
+    return out
+
+
+def _num(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+
+def _scalar(candidate, baseline) -> dict:
+    c, b = _num(candidate), _num(baseline)
+    return {"candidate": c, "baseline": b,
+            "delta": (c - b) if c is not None and b is not None else None}
+
+
+def compare_traces(candidate: dict, baseline: dict | None) -> dict:
+    """Per-feature agreement between two traces, as data.
+
+    `events`: strict equality of the ordered list, equality of its collapsed
+    shape, and the multiset difference both ways (`missing` = in the baseline
+    and not the candidate, `extra` = the reverse). `event_count`, `turns`,
+    `response_chars`: candidate, baseline, delta. With no baseline every
+    comparison is None and `has_baseline` is False. Deliberately no `ok`,
+    `pass` or `verdict` key."""
+    cand = candidate or {}
+    ce = [str(e) for e in (cand.get("events") or [])]
+    if not (isinstance(baseline, dict) and isinstance(baseline.get("events"), list)):
+        return {
+            "has_baseline": False,
+            "events": {"equal": None, "shape_equal": None, "missing": {}, "extra": {}},
+            "event_count": _scalar(len(ce), None),
+            "turns": _scalar(cand.get("turns"), None),
+            "response_chars": _scalar(cand.get("response_chars"), None),
+        }
+    be = [str(e) for e in baseline["events"]]
+    cc, bc = Counter(ce), Counter(be)
+    return {
+        "has_baseline": True,
+        "events": {"equal": ce == be,
+                   "shape_equal": _collapse(ce) == _collapse(be),
+                   "missing": dict(sorted((bc - cc).items())),
+                   "extra": dict(sorted((cc - bc).items()))},
+        "event_count": _scalar(len(ce), len(be)),
+        "turns": _scalar(cand.get("turns"), baseline.get("turns")),
+        "response_chars": _scalar(cand.get("response_chars"),
+                                  baseline.get("response_chars")),
+    }
+
+
+def format_comparison(cmp: dict) -> str:
+    """One line naming each feature's number, for the rung's detail."""
+    def yn(v):
+        return "n/a" if v is None else ("yes" if v else "no")
+
+    def scalar(key):
+        f = cmp.get(key) or {}
+        d = f.get("delta")
+        return f"{key} {f.get('candidate')} ({'no baseline' if d is None else f'delta {d:+d}'})"
+
+    ev = cmp.get("events") or {}
+    diff = [f"-{n} {k}" for k, n in (ev.get("missing") or {}).items()]
+    diff += [f"+{n} {k}" for k, n in (ev.get("extra") or {}).items()]
+    events = f"events equal={yn(ev.get('equal'))} shape_equal={yn(ev.get('shape_equal'))}"
+    if diff:
+        events += f" [{', '.join(diff[:6])}{', ...' if len(diff) > 6 else ''}]"
+    return "; ".join([events, scalar("event_count"), scalar("turns"),
+                      scalar("response_chars")])
 
 
 def main(argv=None) -> int:

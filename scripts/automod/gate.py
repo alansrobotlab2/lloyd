@@ -66,6 +66,7 @@ from pathlib import Path
 
 from app import lint_findings
 from scripts.automod import canary as C
+from scripts.automod import canary_smoke as CS
 from scripts.automod import spec, state as S, testpaths as TP, vet as V, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -750,6 +751,13 @@ class Gate:
         if reused is not None:
             data, why = reused
             data = {**data, "reused": True}
+            if name == "canary_smoke":
+                # No turn ran: the cached trace describes an older commit, and
+                # carrying it forward would read as this build's (#828).
+                data = {k: v for k, v in data.items()
+                        if k not in CS.TRACE_KEYS
+                        and k not in ("trace_diff", "trace_baseline")}
+                data.update(has_trace=False, no_trace_reason="reused")
             res = RungResult(name, True, f"REUSED ({why})", 0.0, data)
             self.report.rungs.append(res)
             if not self._quiet_skip(name, data):
@@ -2195,15 +2203,50 @@ class Gate:
             # — but it is recorded as a skip so the promotion record shows the
             # check did not happen, and `promoted` events can be filtered on it.
             return True, f"SKIPPED (engine unreachable: {self._smoke_skip_reason})", {
-                "skipped": True, "reason": self._smoke_skip_reason}
+                "skipped": True, "reason": self._smoke_skip_reason,
+                "has_trace": False, "no_trace_reason": "skipped"}
         rep = self._canary.smoke(timeout=240)
+        # The turn's structural trace rides in the rung data whether or not
+        # the four assertions held (#828). It is observation only: nothing
+        # below may turn a trace difference into a failure.
+        trace = CS.trace_of(rep)
         if not rep["ok"]:
             return False, "; ".join(rep["errors"])[:900], {
-                k: rep.get(k) for k in ("tool_called", "tool_result_ok", "done")}
+                **{k: rep.get(k) for k in ("tool_called", "tool_result_ok", "done")},
+                **trace, "has_trace": True}
+        diff, baseline = self._canary_trace_diff(trace, rep)
+        against = (f"vs {baseline.get('round_id') or '?'}" if diff["has_baseline"]
+                   else "no previous trace")
         return True, (f"real turn in {rep['duration_s']}s; Bash dispatched, "
-                      f"sentinel round-tripped"), {
-            "duration_s": rep["duration_s"], "turns": rep.get("turns"),
-            "sentinel_in_response": rep.get("sentinel_in_response")}
+                      f"sentinel round-tripped; trace {against}: "
+                      f"{CS.format_comparison(diff)}"), {
+            "duration_s": rep["duration_s"],
+            "sentinel_in_response": rep.get("sentinel_in_response"),
+            **trace, "has_trace": True, "trace_diff": diff,
+            "trace_baseline": {k: baseline.get(k) for k in
+                               ("round_id", "head", "recorded_at")} if baseline else None}
+
+    def _canary_trace_diff(self, trace: dict, rep: dict) -> tuple[dict, dict | None]:
+        """Compare against the previous passing smoke's trace, then store this one.
+
+        The baseline lives in its own state file (`S.canary_trace_path()`),
+        never in `last_known_good.json` — the guardian is that file's only
+        writer. Wholly guarded: a trace that cannot be read or written costs
+        the comparison, never the rung."""
+        previous = None
+        try:
+            previous = S.read_canary_trace()
+        except Exception as exc:  # noqa: BLE001 — observation is not the gate
+            print(f"[warn] could not read the canary trace baseline: {exc}")
+        diff = CS.compare_traces(trace, (previous or {}).get("trace"))
+        try:
+            S.write_canary_trace({
+                "round_id": self.round_id, "head": self.report.head,
+                "recorded_at": S.now_iso(),
+                "trace": {**trace, "duration_s": rep.get("duration_s")}})
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] could not write the canary trace baseline: {exc}")
+        return diff, previous
 
     def rung_drill(self):
         if not spec.requires_drill(self.report.changed_paths):

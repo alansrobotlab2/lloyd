@@ -126,3 +126,136 @@ def test_the_mcp_tool_description_states_the_refusal():
     """The model reads this string, and it is the only place the rule is stated to it."""
     src = (ROOT / "agent_mcp" / "automod.py").read_text(encoding="utf-8")
     assert "Honoured" in src and "unreachable" in src
+
+
+# ── the smoke's structural trace (#828) ───────────────────────────────────
+
+def _smoke_report(events, turns=2, chars=40, ok=True):
+    return {"ok": ok, "errors": [] if ok else ["boom"], "events": list(events),
+            "turns": turns, "response_chars": chars, "duration_s": 6.1,
+            "tool_called": True, "tool_result_ok": True, "done": True,
+            "sentinel_in_response": True}
+
+
+_EVENTS = ["session", "thinking_delta", "thinking_delta", "tool_start",
+           "tool_complete", "text_delta", "text_delta", "done"]
+
+
+class _FakeCanary:
+    def __init__(self, report):
+        self.report = report
+
+    def smoke(self, timeout=150.0):
+        return self.report
+
+
+def _gate_with_smoke(monkeypatch, tmp_path, report):
+    monkeypatch.setattr(G.S, "STATE_DIR", tmp_path)
+    g = _StubGate()
+    g._canary = _FakeCanary(report)
+    return g
+
+
+def test_a_run_smoke_records_the_structural_trace(monkeypatch, tmp_path):
+    g = _gate_with_smoke(monkeypatch, tmp_path, _smoke_report(_EVENTS, turns=2, chars=40))
+    ok, detail, data = g.rung_canary_smoke()
+    assert ok is True
+    assert data["events"] == _EVENTS
+    assert data["event_count"] == len(_EVENTS)
+    assert data["turns"] == 2
+    assert data["response_chars"] == 40
+    assert data["has_trace"] is True
+
+
+def test_a_failed_smoke_still_records_its_trace(monkeypatch, tmp_path):
+    g = _gate_with_smoke(monkeypatch, tmp_path, _smoke_report(_EVENTS[:3], ok=False))
+    ok, _, data = g.rung_canary_smoke()
+    assert ok is False
+    assert data["events"] == _EVENTS[:3] and data["event_count"] == 3
+    assert data["has_trace"] is True
+    # A failing run is not a baseline anything should be compared against.
+    assert not (tmp_path / "canary_trace.json").exists()
+
+
+def test_a_skipped_smoke_says_it_produced_no_trace(monkeypatch):
+    monkeypatch.setattr(G, "engine_reachable", lambda root, timeout=4.0: (False, "refused"))
+    g = _StubGate(skip_smoke=True)
+    monkeypatch.setattr(g, "_rung", lambda name, fn: True)
+    g.run()
+    _, _, data = g.rung_canary_smoke()
+    assert data["has_trace"] is False and data["no_trace_reason"] == "skipped"
+    assert "events" not in data and "response_chars" not in data
+
+
+def test_a_reused_smoke_says_it_produced_no_trace(monkeypatch):
+    monkeypatch.setattr(G.S, "append_event", lambda e: None)
+    g = _StubGate()
+    cached = {"duration_s": 6.0, "events": _EVENTS, "event_count": 8, "turns": 2,
+              "response_chars": 40, "has_trace": True, "trace_diff": {"x": 1},
+              "trace_baseline": {"round_id": "SM_OLD"}}
+    monkeypatch.setattr(g, "_reuse", lambda name: (dict(cached), "only tests and docs"))
+
+    def _must_not_run():
+        raise AssertionError("a reused rung must not run")
+    assert g._rung("canary_smoke", _must_not_run) is True
+    data = g.report.rungs[-1].data
+    assert data["reused"] is True
+    assert data["has_trace"] is False and data["no_trace_reason"] == "reused"
+    for key in ("events", "event_count", "turns", "response_chars",
+                "trace_diff", "trace_baseline"):
+        assert key not in data, key
+
+
+def test_a_differing_trace_passes_and_the_detail_names_each_number(monkeypatch, tmp_path):
+    """Clause 4: the four assertions held, so the rung passes however the
+    trace moved; the detail carries numbers, not a bare pass."""
+    G.S.write_canary_trace({"round_id": "SM_PREV", "head": "abc",
+                            "trace": {"events": _EVENTS[:4], "event_count": 4,
+                                      "turns": 3, "response_chars": 55}},
+                           path=tmp_path / "canary_trace.json")
+    g = _gate_with_smoke(monkeypatch, tmp_path, _smoke_report(_EVENTS, turns=2, chars=40))
+    ok, detail, data = g.rung_canary_smoke()
+    assert ok is True
+    assert "vs SM_PREV" in detail
+    assert "events equal=no" in detail
+    assert "event_count 8 (delta +4)" in detail
+    assert "turns 2 (delta -1)" in detail
+    assert "response_chars 40 (delta -15)" in detail
+    assert data["trace_diff"]["events"]["equal"] is False
+    assert data["trace_baseline"]["round_id"] == "SM_PREV"
+
+
+def test_a_baseline_missing_tool_start_is_an_events_mismatch(monkeypatch, tmp_path):
+    no_tool = [e for e in _EVENTS if e != "tool_start"]
+    G.S.write_canary_trace({"round_id": "SM_PREV",
+                            "trace": {"events": no_tool, "event_count": len(no_tool),
+                                      "turns": 2, "response_chars": 40}},
+                           path=tmp_path / "canary_trace.json")
+    g = _gate_with_smoke(monkeypatch, tmp_path, _smoke_report(_EVENTS))
+    ok, detail, data = g.rung_canary_smoke()
+    assert ok is True
+    ev = data["trace_diff"]["events"]
+    assert ev["equal"] is False
+    assert ev["extra"] == {"tool_start": 1} and ev["missing"] == {}
+    assert "+1 tool_start" in detail
+
+
+def test_no_previous_trace_says_so_and_still_passes(monkeypatch, tmp_path):
+    g = _gate_with_smoke(monkeypatch, tmp_path, _smoke_report(_EVENTS))
+    ok, detail, data = g.rung_canary_smoke()
+    assert ok is True
+    assert "no previous trace" in detail
+    assert "event_count 8 (no baseline)" in detail
+    assert data["trace_diff"]["has_baseline"] is False
+    assert data["trace_baseline"] is None
+
+
+def test_an_unwritable_baseline_costs_the_comparison_not_the_rung(monkeypatch, tmp_path):
+    g = _gate_with_smoke(monkeypatch, tmp_path, _smoke_report(_EVENTS))
+
+    def boom(*a, **k):
+        raise OSError("read-only")
+    monkeypatch.setattr(G.S, "read_canary_trace", boom)
+    monkeypatch.setattr(G.S, "write_canary_trace", boom)
+    ok, _, data = g.rung_canary_smoke()
+    assert ok is True and data["has_trace"] is True
