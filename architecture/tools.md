@@ -545,7 +545,7 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `backlog_boards` | RO | — | Boards with task counts |
 | `backlog_tasks` | RO | — | List items by status, board, tag, blocked or assigned |
 | `backlog_get_task` | RO | `task_id` | One item in full: front matter and body |
-| `backlog_write_task` | FX | — | Create or update an item. A create runs write-time dedupe and may merge into an existing item |
+| `backlog_write_task` | FX | — | Create or update an item. A create runs write-time dedupe and may merge into an open item, or be refused over a closed one |
 
 #### `browser` (13)
 

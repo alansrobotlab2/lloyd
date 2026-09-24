@@ -37,6 +37,8 @@ import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
+import yaml
+
 from app.backlog_status import OPEN_STATUSES
 
 DEDUPE_LOG = Path.home() / ".local" / "state" / "lloyd-automod" / "dedupe.jsonl"
@@ -235,7 +237,8 @@ def similar_items(name: str, description: str, board: str | None = None, *,
                   semantic=None) -> list[dict]:
     """Open-or-closed items that look like this one, best first. Each row:
     `{id, title, status, score, lexical, shared, created, source}` where
-    `source` is `both`, `lex` or `vec`."""
+    `source` is `both`, `lex` or `vec`; a closed row adds `verdict` and
+    `closure_reason` (`closure_of`)."""
     cfg = cfg or dedupe_config()
     semantic = semantic or semantic_candidates
     text = candidate_text(name, description)
@@ -264,7 +267,58 @@ def similar_items(name: str, description: str, board: str | None = None, *,
                      "score": r["score"], "source": "vec"}
     out = sorted(rows.values(), key=lambda r: (r["score"], r["lexical"], r["shared"]), reverse=True)
     n = int(limit if limit is not None else cfg["limit"])
-    return out[:n]
+    out = out[:n]
+    # A closed neighbour with nothing beside its status reads as "someone
+    # already did this" whatever actually closed it — #420 was closed `done`
+    # and its defect re-found by two nightlies (#1051). Read only for the
+    # rows returned, so the full front-matter parse is ≤ `limit` files.
+    for r in out:
+        if r.get("status") not in OPEN_STATUSES:
+            r.update(closure_of(backlog_dir, r["id"]))
+    return out
+
+
+_VERDICT_LINE_RE = re.compile(r"autotriage: \*\*([a-z_]+)\*\*\.?\s*(.*)", re.S)
+_CLOSURE_REASON_CHARS = 240
+NO_VERDICT = "unrecorded"
+
+
+def closure_of(backlog_dir: Path, item_id: int) -> dict:
+    """`{verdict, closure_reason}` for a closed item, from what its closers
+    wrote: `duplicate_of` (group triage and the sweep), `autotriage_retired`
+    and the `autotriage: **<verdict>**. <evidence>` activity line
+    (`scripts/automod/backlog.py::record_verdict`). Most closed items carry
+    none of them — a landing, expiry or a human close — and say so as
+    `NO_VERDICT` rather than have a verdict inferred for them."""
+    fm: dict = {}
+    try:
+        for path in backlog_dir.glob(f"{int(item_id)}[-_]*.md"):
+            text = path.read_text(encoding="utf-8", errors="replace")[:_FM_LIMIT_BYTES]
+            end = _FM_END_RE.search(text, 3) if text.startswith("---") else None
+            if end is not None:
+                loaded = yaml.safe_load(text[3:end.start()])
+                fm = loaded if isinstance(loaded, dict) else {}
+            break
+    except Exception:  # noqa: BLE001 — fail open: the row stays, unexplained
+        fm = {}
+    line_verdict, line_reason = "", ""
+    for entry in reversed(list(fm.get("activity_log") or [])):
+        m = _VERDICT_LINE_RE.search(str(entry))
+        if m:
+            line_verdict = m.group(1)
+            line_reason = m.group(2).split(" Check: ")[0].strip()
+            break
+    dup = fm.get("duplicate_of")
+    if dup:
+        verdict, reason = "duplicate_of", f"duplicate of #{dup}"
+        if line_reason:
+            reason += f": {line_reason}"
+    elif fm.get("autotriage_retired") or line_verdict:
+        verdict = str(fm.get("autotriage_retired") or line_verdict)
+        reason = line_reason or f"retired by autotriage as {verdict}"
+    else:
+        verdict, reason = NO_VERDICT, "closed, no recorded verdict"
+    return {"verdict": verdict, "closure_reason": " ".join(reason.split())[:_CLOSURE_REASON_CHARS]}
 
 
 def merge_target(similar: list[dict], *, cfg: dict | None = None,
@@ -279,11 +333,24 @@ def merge_target(similar: list[dict], *, cfg: dict | None = None,
     window — the same session filing the same finding twice, before qmd has
     seen the first copy. The reranker score alone never merges.
     """
+    return _best_match(similar, cfg=cfg, now=now, open_rows=True)
+
+
+def closed_match(similar: list[dict], *, cfg: dict | None = None,
+                 now: float | None = None) -> dict | None:
+    """The closed item a spawn-tagged write would have merged into had it been
+    open — the same two rules. The caller refuses that create rather than
+    append to a finished item or file a silent twin of it (#1051)."""
+    return _best_match(similar, cfg=cfg, now=now, open_rows=False)
+
+
+def _best_match(similar: list[dict], *, cfg: dict | None, now: float | None,
+                open_rows: bool) -> dict | None:
     cfg = cfg or dedupe_config()
     now = time.time() if now is None else now
     best: dict | None = None
     for r in similar:
-        if r.get("status") not in OPEN_STATUSES:
+        if (r.get("status") in OPEN_STATUSES) != open_rows:
             continue
         lex_ok = float(r.get("lexical") or 0) >= float(cfg["lexical_min"])
         rule_a = float(r.get("score") or 0) >= float(cfg["threshold"]) and lex_ok

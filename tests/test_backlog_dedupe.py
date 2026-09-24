@@ -164,11 +164,12 @@ def test_the_reranker_score_alone_cannot_merge(board, monkeypatch):
     assert out["similar"] and out["similar"][0]["lexical"] < 0.4
 
 
-def test_a_closed_match_is_advisory_not_a_target(board, monkeypatch):
+def test_a_closed_match_is_never_a_merge_target(board, monkeypatch):
     write(board, 10, *EXISTING, status="done")
     _vec(monkeypatch, [{"id": 10, "score": 0.9}])
     out = _write(_spawn(*SAME))
-    assert out["created"] is True and out["similar"][0]["status"] == "done"
+    assert "merged_into" not in out and out["similar"][0]["status"] == "done"
+    assert "Merged finding" not in next(board.glob("10-*.md")).read_text()
 
 
 def test_a_second_spawn_in_one_run_merges_lexically_before_qmd_has_seen_it(board, monkeypatch):
@@ -251,8 +252,9 @@ def test_a_closed_item_with_long_frontmatter_reads_closed_and_is_not_a_target(bo
     assert _frontmatter_bytes(path) > 2048
     _vec(monkeypatch, [{"id": 10, "score": 0.9}])
     out = _write(_spawn(*SAME))
-    assert out["created"] is True and "merged_into" not in out
+    assert out["created"] is False and "merged_into" not in out
     assert out["similar"][0]["id"] == 10 and out["similar"][0]["status"] == "done"
+    assert "Merged finding" not in path.read_text()
 
 
 def test_a_long_frontmatter_item_reports_its_heading_and_created(board, monkeypatch):
@@ -345,3 +347,107 @@ def test_an_update_is_untouched_by_dedupe(board, monkeypatch):
     _vec(monkeypatch, [{"id": 10, "score": 0.9}])
     out = _write({"task_id": 10, "description": "more", "description_mode": "append"})
     assert out["success"] and out["created"] is False and "similar" not in out
+
+
+# ── #1051: a closed match explains itself, and a spawn does not re-file it ──
+
+RETIRED_LOG = LONG_LOG + [
+    "**2026-09-18T10:00:00.000000** — autotriage: **already_done**. `agent_mcp/http_tools.py:254` "
+    "now returns the upstream body with the status. Check: `grep -n body agent_mcp/http_tools.py`"]
+
+
+def _closed(board, item_id=10, **fm_extra):
+    path = write(board, item_id, *EXISTING, status="done", activity_log=RETIRED_LOG)
+    if fm_extra:
+        text = path.read_text(encoding="utf-8")
+        extra = yaml.dump(fm_extra, default_flow_style=False)
+        path.write_text(text.replace("---\n", "---\n" + extra, 1), encoding="utf-8")
+    assert _frontmatter_bytes(path) > 2048
+    return path
+
+
+def test_a_closed_row_carries_its_verdict_and_reason(board, monkeypatch):
+    """Clause 3: `autotriage_retired` and the activity line's evidence, read
+    through a front matter past the old window; `Check:` is the verifier's
+    command, not the reason."""
+    _closed(board, autotriage_retired="already_done")
+    _vec(monkeypatch, [{"id": 10, "score": 0.5}])
+    row = _write(_spawn(*SAME))["similar"][0]
+    assert row["id"] == 10 and row["status"] == "done"
+    assert row["verdict"] == "already_done"
+    assert row["closure_reason"].startswith("`agent_mcp/http_tools.py:254` now returns")
+    assert "Check:" not in row["closure_reason"]
+
+
+def test_a_duplicate_close_names_its_survivor(board, monkeypatch):
+    _closed(board, duplicate_of=7)
+    _vec(monkeypatch, [{"id": 10, "score": 0.5}])
+    row = _write(_spawn(*SAME))["similar"][0]
+    assert row["verdict"] == "duplicate_of" and row["closure_reason"].startswith("duplicate of #7")
+
+
+def test_a_close_with_no_recorded_verdict_says_so(board, monkeypatch):
+    """Most `done` items were closed by a landing, expiry or a person and
+    carry no verdict word: the row says that instead of guessing."""
+    write(board, 10, *EXISTING, status="done", activity_log=LONG_LOG)
+    _vec(monkeypatch, [{"id": 10, "score": 0.5}])
+    row = _write(_spawn(*SAME))["similar"][0]
+    assert row["verdict"] == SIM.NO_VERDICT and row["closure_reason"] == "closed, no recorded verdict"
+
+
+def test_an_open_row_carries_no_closure_fields(board, monkeypatch):
+    write(board, 10, *EXISTING)
+    _vec(monkeypatch, [{"id": 10, "score": 0.5}])
+    row = _write(_spawn(*SAME))["similar"][0]
+    assert "verdict" not in row and "closure_reason" not in row
+
+
+def test_a_spawn_matching_a_closed_item_is_refused_and_told_why(board, monkeypatch, tmp_path):
+    """Clause 4: no file is written, and the result names the id, verdict,
+    reason and the override — without a leading `error` key, which
+    `text_result` would turn into a tool failure."""
+    path = _closed(board, autotriage_retired="already_done")
+    before = path.read_text(encoding="utf-8")
+    _vec(monkeypatch, [{"id": 10, "score": 0.9}])
+    raw = BL._handle_write(_spawn(*SAME))
+    out = json.loads(raw)
+    assert out["refused"] is True and out["created"] is False and "task_id" not in out
+    assert out["closed_match"]["id"] == 10 and out["closed_match"]["verdict"] == "already_done"
+    assert out["closed_match"]["closure_reason"].startswith("`agent_mcp/http_tools.py:254`")
+    assert "force: true" in out["message"] and "#10" in out["message"]
+    assert "error" not in out
+    assert [p.name for p in board.glob("*.md")] == [path.name]
+    assert path.read_text(encoding="utf-8") == before
+    rows = [json.loads(l) for l in (tmp_path / "dedupe.jsonl").read_text().splitlines()]
+    assert rows[-1]["action"] == "refused_closed" and rows[-1]["match"] == 10
+
+
+def test_force_creates_past_a_closed_match_and_names_it(board, monkeypatch):
+    """Clause 5."""
+    _closed(board, autotriage_retired="already_done")
+    _vec(monkeypatch, [{"id": 10, "score": 0.9}])
+    out = _write(_spawn(*SAME, force=True))
+    assert out["created"] is True and out["task_id"] == 11
+    assert out["overrode_closed"]["id"] == 10 and out["overrode_closed"]["verdict"] == "already_done"
+    assert "#10" in out["message"]
+    assert len(list(board.glob("*.md"))) == 2
+
+
+def test_a_human_write_or_a_weak_closed_match_is_only_advised(board, monkeypatch):
+    """The refusal applies the merge rules to the loop's writes only: a
+    person's create and a closed neighbour below rule A both create."""
+    _closed(board, autotriage_retired="already_done")
+    _vec(monkeypatch, [{"id": 10, "score": 0.9}])
+    human = _write({"name": SAME[0], "description": SAME[1], "board": "lloyd"})
+    assert human["created"] is True and "overrode_closed" not in human
+    _vec(monkeypatch, [{"id": 10, "score": 0.5}])
+    weak = _write(_spawn(SAME[0] + " again", SAME[1]))
+    assert weak["created"] is True and "overrode_closed" not in weak
+
+
+def test_an_open_match_still_merges_ahead_of_a_closed_one(board, monkeypatch):
+    _closed(board, autotriage_retired="already_done")
+    write(board, 12, *EXISTING)
+    _vec(monkeypatch, [{"id": 10, "score": 0.9}, {"id": 12, "score": 0.9}])
+    out = _write(_spawn(*SAME))
+    assert out["merged_into"] == 12

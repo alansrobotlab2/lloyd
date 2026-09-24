@@ -405,6 +405,20 @@ merge or not, is logged to `~/.local/state/lloyd-automod/dedupe.jsonl` so the
 threshold can be tuned from data rather than from the three points measured
 when it landed.
 
+**Both rules judge open items only, and a closed match is refused, not merged
+or re-filed** (#1051). Appending to a `done` item hides the finding from every
+reader that treats it as finished, and creating beside it re-files what the
+close already settled: #420 took merged findings on two consecutive nights
+after it closed. A spawn-tagged create whose best rule-A/B match is closed
+writes nothing and returns `refused: true` with `closed_match` — the id, its
+`verdict` and `closure_reason` — and `force: true` creates anyway, naming the
+item it went past as `overrode_closed`. Every closed row in `similar` carries
+the same two fields, read from `duplicate_of`, `autotriage_retired` and the
+last `autotriage: **<verdict>**.` activity line; a close none of them explains
+(a landing, expiry, a person) reads `unrecorded` / "closed, no recorded
+verdict". An open match still merges ahead of a closed one, and observation
+mode (`merge: false`) refuses nothing.
+
 **It fails open everywhere.** A daemon that is down, a malformed row, a missing
 config block, an unwritable merge target — each costs the advisory list or the
 merge, never the write; the finding must land somewhere.
