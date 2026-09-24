@@ -303,7 +303,6 @@ each. Stop the hands before moving the floor.
 | `lloyd-guardian.service` | user service, `WatchdogSec=90` | the automod rollback watchdog over `lloyd-mc:lloyd-backend` and `lloyd-mc:lloyd-mcp` (not the frontend): stdlib-only, runs `/usr/bin/python3` from a pinned snapshot staged by `guardian-stage.sh`; deliberately not under supervisord ([[automod]]) |
 | `lloyd-guardian-nag.timer` | user timer, every 15 min | re-announces an unresolved BROKEN state through `nag.py` → the same `Notifier` |
 | `lloyd-qmd-cleanup.timer` | user timer, 04:45 | qmd orphaned-vector cleanup |
-| `lloyd-groundskeeper-survey.timer` | user timer, 02:30 | `scripts/groundskeeper/groundskeeper-survey.py` — the vault-health scan ([[autonomy-jobs]], #36) |
 | `lloyd-graph-backup.timer` | user timer, 05:30 | `scripts/backup/backup-graph.sh` — the knowledge-graph store |
 | `lloyd-data-snapshot.timer` | user timer, hourly | `scripts/backup/snapshot-data.sh` — read-only btrfs snapshot of `~/lloyd-data` into `~/.lloyd-data-snapshots` ([[data-home]]) |
 | `lloyd-data-snapshot-prune.timer` | **system** timer, daily, root | `/usr/local/sbin/prune-data-snapshots.sh` — 48 hourly + 14 daily. Root because the user cannot delete a read-only snapshot, which is the point; installed by hand (`SETUP.md`), so it lives in `agent-services/systemd/system/` and is not symlinked |

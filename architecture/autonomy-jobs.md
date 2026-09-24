@@ -709,6 +709,14 @@ visible as a gap.
 
 ### #36 and the groundskeeper queue
 
+> **Retired 2026-09-23 (#1012, Alan's ruling).** The nightly survey, its queue
+> writer (`queue_io.py`), the weekly summary and both consumers
+> (`process-groundskeeper-queue.py`, `batch-process-orphans.py`) are deleted,
+> the `lloyd-groundskeeper-survey` timer and service are removed, and #36 is
+> archived. In the queue's whole history, 30,990 of 30,990 recorded actions
+> were skips of one false-positive class, and nothing repaired an item. The
+> section below is the record of why; git history has the code.
+
 The survey is the only vault-health number this machine produces, and it is
 **a measurement with no consumer**.
 
