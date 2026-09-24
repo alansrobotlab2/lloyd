@@ -403,6 +403,36 @@ def test_extractor_emits_edges_for_named_entities(extractor):
     assert "vLLM" in edge["evidence"]
 
 
+def test_extractor_leaves_a_pair_the_classifier_already_typed_alone(extractor):
+    """#1246 clause 1. `edges.add` dedupes on the exact (source, target, type),
+    so a `mentions` row beside an active `uses` was accepted, and the next
+    nightly apply re-typed the pair to the type it already carried — 165 such
+    pairs on 2026-09-20, every one a no-op retype. The typed verdict stays,
+    the extractor adds nothing beside it, and it counts what it skipped."""
+    st = kg_store.store()
+    e = extractor
+    for name in ("Lloyd", "vLLM", "Isaac Lab"):
+        st.entities.register(name)
+        (e.facts_dir / name).mkdir(exist_ok=True)
+    typed_id = st.edges.add({
+        "source": "Lloyd", "target": "vLLM", "type": "uses", "confidence": 0.9,
+        "provenance": "EXTRACTED_CLASSIFIER_V4"}, origin="classifier")
+
+    e.write_fact_file(
+        "Lloyd", "relationship",
+        {"facts": [_fact("Lloyd serves models through vLLM and trains in Isaac Lab",
+                         category="relationship")]},
+        source_doc="knowledge/lloyd.md",
+    )
+
+    on_pair = st.edges.active(source="Lloyd", target="vLLM")
+    assert [(x["id"], x["type"]) for x in on_pair] == [(typed_id, "uses")], (
+        f"the typed pair gained a row: {on_pair}")
+    # Clause 2's other half in the same run: the untyped pair still gets its edge.
+    assert st.edges.find_active("Lloyd", "Isaac Lab", "mentions") is not None
+    assert e.link_stats == {"mentions_linked": 1, "mentions_skipped_typed": 1}
+
+
 def test_edge_emission_skips_self_and_dedupes(extractor):
     st = kg_store.store()
     e = extractor
@@ -1753,4 +1783,44 @@ def test_progress_denominator_is_the_limit_capped_queue(tmp_path, monkeypatch, c
     lines = _progress(out)
     assert [(n, m) for n, m, _ in lines] == [(1, 2), (2, 2)], out
     assert "Found 5 eligible files" in out
+    kg_store.reset()
+
+
+# ── #1246 clause 3: the skip count reaches the nightly run summary ───────────
+
+def test_the_nightly_summary_prints_the_typed_pairs_the_extractor_skipped(
+        tmp_path, monkeypatch):
+    """The guard is only worth having if a reader can see it doing work: one
+    line in the nightly log carries the count, and the grep-able
+    PIPELINE_RESULT line keeps its key names untouched."""
+    x, ch, idx = _extraction_run(tmp_path, monkeypatch, "skiplog")
+    x.log_file = tmp_path / "nightly-extraction.log"
+    st = kg_store.store()
+    for name in ("Lloyd", "vLLM"):
+        st.entities.register(name)
+    st.edges.add({"source": "Lloyd", "target": "vLLM", "type": "uses",
+                  "confidence": 0.9, "provenance": "EXTRACTED_CLASSIFIER_V4"},
+                 origin="classifier")
+    (tmp_path / "docs" / "lloyd.md").write_text("Lloyd serves models through vLLM\n")
+
+    def typed_pair(md_file, content, existing_facts="", start_offset=0):
+        return {"entity": "Lloyd", "category": "relationship",
+                "facts": [{"fact": "Lloyd serves models through vLLM",
+                           "confidence": 0.9, "category": "relationship"}]}
+
+    monkeypatch.setattr(x.extractor, "extract_from_document", typed_pair)
+    monkeypatch.setattr(x.rel_generator, "rebuild", lambda: {"total_relationships": 0})
+    monkeypatch.setattr(x, "_regenerate_entity_overviews", lambda: 0)
+
+    result = x.run_full_extraction(full_mode=True)
+
+    assert result["success"] and result["files_processed"] == 1, result
+    log = x.log_file.read_text()
+    assert "Linked 0 mentions edges; 1 skipped on pairs the classifier had already typed" in log, log
+    assert st.edges.active(source="Lloyd", target="vLLM")[0]["type"] == "uses"
+    src = (ROOT / NE_PATH).read_text()
+    line = src[src.index('f"PIPELINE_RESULT '):]
+    line = line[:line.index('status=')]
+    assert all(k in line for k in ("files_processed=", "facts=", "failed=", "truncated=")), line
+    assert "mentions" not in line
     kg_store.reset()

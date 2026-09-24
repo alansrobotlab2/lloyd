@@ -223,6 +223,10 @@ class NightlyExtraction:
             failed_files = getattr(self, "last_failed_files", 0)
             truncated_files = list(getattr(self, "last_truncated_files", []))
             log_lines.append(f"  → Processed {files_processed} files, extracted {facts_extracted} new facts")
+            links = self.extractor.link_stats
+            log_lines.append(f"  → Linked {links['mentions_linked']} mentions edges; "
+                             f"{links['mentions_skipped_typed']} skipped on pairs the "
+                             f"classifier had already typed")
             if failed_files:
                 log_lines.append(f"  ⚠ {failed_files} file(s) failed extraction and were NOT hashed; "
                                  f"they will be retried next run")

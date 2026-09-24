@@ -198,7 +198,11 @@ fact_extractor.write_fact_file
         ├──▶ facts_idx.update_file()              the index (see below)
         └──▶ edges.add(type="mentions", …)        THE GROWTH PATH
                  one per other known entity the fact names,
-                 carrying source_doc and the fact text as evidence
+                 carrying source_doc and the fact text as evidence —
+                 unless the pair already holds an active typed edge,
+                 which keeps its verdict (#1246; the skip count is in
+                 the nightly log, and apply counts a record for such
+                 a pair as `already_typed` instead of re-typing it)
         │
         ▼
 classify-v4-batch.py + apply-classifications-v4.py  (#74, daily)

@@ -47,7 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from app.paths import PIPELINE_DIR, VAULT_KG_DB
-from app.kg_store import KGStore
+from app.kg_store import KGStore, canonical_edge_type
 
 CLASSIFIED_DIR = PIPELINE_DIR / "memory-graph"
 DEFAULT_GLOB = "classified-v4*.jsonl"
@@ -126,8 +126,26 @@ def _build_active_mentions_index(edges: list[dict]) -> dict[tuple[str, str], int
     return idx
 
 
+def _build_live_typed_index(edges: list[dict]) -> dict[tuple[str, str], dict]:
+    """(source, target) → the active edge a prior classifier apply typed it as.
+
+    The extractor used to mint a fresh `mentions` row on a pair whose typed
+    verdict was already live (#1246), and that row put the pair back through
+    `retype`, which expired the live typed edge and inserted the same type
+    again — 3-29% of each apply's output. A record whose `new_type` matches
+    this edge is not an upgrade."""
+    idx: dict[tuple[str, str], dict] = {}
+    for e in edges:
+        if e.get("type") == "mentions":
+            continue
+        if not (e.get("provenance") or "").startswith("EXTRACTED_CLASSIFIER"):
+            continue
+        idx[(e.get("source", ""), e.get("target", ""))] = e
+    return idx
+
+
 def _plan(st: KGStore, records: list[dict], min_confidence: float, now: str,
-          ) -> tuple[list[dict], dict, Counter, Counter]:
+          ) -> tuple[list[dict], dict, Counter, Counter, list[tuple[int, str]]]:
     """One pass's plan against the store AS IT IS NOW.
 
     Re-read on every pass, which is the whole fix: the index this builds is
@@ -135,6 +153,7 @@ def _plan(st: KGStore, records: list[dict], min_confidence: float, now: str,
     """
     active = st.edges.active()
     active_mentions = _build_active_mentions_index(active)
+    live_typed = _build_live_typed_index(active)
     print(f"[info] {st.edges.count(active_only=False)} total edges, {len(active)} active, "
           f"{len(active_mentions)} eligible active mentions edges "
           f"(type=mentions, provenance in {sorted(ELIGIBLE_PROVENANCES)})")
@@ -145,12 +164,18 @@ def _plan(st: KGStore, records: list[dict], min_confidence: float, now: str,
         "still_mentions": 0,
         "no_eligible_edge": 0,
         "duplicate_pair": 0,
+        "already_typed": 0,
         "upgrades": 0,
     }
     seen_pairs: set[tuple[str, str]] = set()
     transitions: Counter = Counter()
     new_type_counts: Counter = Counter()
     changes: list[dict] = []
+    # Redundant `mentions` rows beside a live typed edge of the same type: no
+    # retype (the verdict is already live), but not left standing either —
+    # `retype`'s one-active-relation-per-pair invariant is deliberate, and a
+    # pair with both rows would be counted here again on every run.
+    redundant: list[tuple[int, str]] = []
 
     for rec in records:
         new_type = rec.get("new_type")
@@ -213,6 +238,12 @@ def _plan(st: KGStore, records: list[dict], min_confidence: float, now: str,
                 stats["no_eligible_edge"] += 1
                 continue
 
+        typed = live_typed.get(key)
+        if typed is not None and typed.get("type") == canonical_edge_type(new_type):
+            stats["already_typed"] += 1
+            redundant.append((active_mentions[key], typed["type"]))
+            continue
+
         if key in seen_pairs:
             # Two records for one pair after the reversed-key fold. The first
             # already consumed the edge; a second retype would expire the
@@ -240,7 +271,7 @@ def _plan(st: KGStore, records: list[dict], min_confidence: float, now: str,
             "tgt_type_hint": rec.get("tgt_type_hint"),
             "prompt_version": rec.get("prompt_version", "v4"),
         })
-    return changes, stats, transitions, new_type_counts
+    return changes, stats, transitions, new_type_counts, redundant
 
 
 def _print_plan(pass_no: int, stats: dict, transitions: Counter,
@@ -260,7 +291,8 @@ def _print_plan(pass_no: int, stats: dict, transitions: Counter,
         print(f"  {c:>5}  {t}")
 
 
-def _apply(st: KGStore, changes: list[dict], now: str) -> None:
+def _apply(st: KGStore, changes: list[dict], now: str,
+           redundant: list[tuple[int, str]] = ()) -> None:
     # One transaction for the whole pass: 3,902 retypes either all land or
     # none do.
     with st.transaction():
@@ -288,6 +320,8 @@ def _apply(st: KGStore, changes: list[dict], now: str) -> None:
                 origin="classifier",
                 reason=f"v4 reclassified mentions → {ch['new_type']}",
             )
+        for edge_id, typ in redundant:
+            st.edges.expire(edge_id, f"v4 already typed as {typ}: redundant mentions row")
 
 
 def main() -> int:
@@ -315,7 +349,7 @@ def main() -> int:
     backup: Path | None = None
 
     for pass_no in range(1, MAX_PASSES + 1):
-        changes, stats, transitions, new_type_counts = _plan(
+        changes, stats, transitions, new_type_counts, redundant = _plan(
             st, records, args.min_confidence, now)
         _print_plan(pass_no, stats, transitions, new_type_counts)
         per_pass.append(len(changes))
@@ -331,7 +365,7 @@ def main() -> int:
             st.close()
             return 0
 
-        if not changes:
+        if not changes and not redundant:
             break
 
         if backup is None:
@@ -341,8 +375,9 @@ def main() -> int:
             backup = st.backup(backup_dir / f"kg-v4-{ts}.sqlite")
             print(f"\n[info] backup written → {backup}")
 
-        _apply(st, changes, now)
-        print(f"[info] pass {pass_no}: applied {len(changes)} retypes; store now {st.stats()}")
+        _apply(st, changes, now, redundant)
+        print(f"[info] pass {pass_no}: applied {len(changes)} retypes and retired "
+              f"{len(redundant)} redundant mentions rows; store now {st.stats()}")
     else:
         # The cap pass wrote, so the residual is whatever a fresh plan says —
         # counted, never applied: the next nightly run takes it.

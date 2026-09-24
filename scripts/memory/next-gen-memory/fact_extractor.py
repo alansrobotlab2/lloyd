@@ -203,6 +203,12 @@ class FactExtractor:
     def __init__(self, model_port: int = 8096):
         self.model_port = model_port
         self.facts_dir = FACTS_DIR
+        # What `_index_and_link` did this process, for the nightly run summary:
+        # `mentions_linked` is edges it asked the store for, and
+        # `mentions_skipped_typed` the pairs it left alone because a classifier
+        # verdict was already live on them (#1246). Neither is a PIPELINE_RESULT
+        # key; the grep-able line keeps its shape.
+        self.link_stats = {"mentions_linked": 0, "mentions_skipped_typed": 0}
     
     def _chunk_content(self, content: str, start: int = 0) -> list:
         """Window ONE pass over a document.
@@ -685,7 +691,19 @@ class FactExtractor:
                     for target in _known_entities(text, 12):
                         if target == subject:
                             continue
+                        # A pair the v4 classifier has already typed keeps its
+                        # verdict. `edges.add` dedupes on the exact
+                        # (source, target, type), so a `mentions` row beside an
+                        # active `uses` was accepted, and the next nightly apply
+                        # re-typed the pair to the type it already carried —
+                        # 165 such pairs on 2026-09-20, 3-29% of each apply's
+                        # output a no-op retype (#1246).
+                        if any(r["type"] != "mentions"
+                               for r in st.edges.active(source=subject, target=target)):
+                            self.link_stats["mentions_skipped_typed"] += 1
+                            continue
                         try:
+                            self.link_stats["mentions_linked"] += 1
                             st.edges.add({
                                 "source": subject, "target": target, "type": "mentions",
                                 "confidence": float(f.get("confidence", 0.8) or 0.8),
