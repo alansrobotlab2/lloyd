@@ -478,3 +478,25 @@ def test_the_rung_that_decides_a_dependent_is_the_rung_that_decides_a_run(aut):
     assert 1 not in _due_ids(aut), (
         "`failed` started dispatching: the asymmetry this test documents is the "
         "reason that exclusion lives in _is_task_due and not in the filter")
+
+
+# ── #815: the 86400 s fallback is defensive-only, and this is its window ─────
+
+
+def test_an_unparseable_frequency_dependent_is_judged_on_a_12h_half_window(aut):
+    """`_is_dependency_met` reads `_frequency_interval_seconds(task) or 86400.0`.
+    Both production callers exclude a None interval before the gate —
+    `_is_task_due` returns False, `hold_reason` says "no frequency" — so the
+    day-long fallback decides only a direct call. Pinned so the branch is
+    documented by a number rather than modelled as free: a dependent whose
+    frequency resolves to nothing accepts a 10 h-old upstream and rejects a
+    13 h-old one (both inside the 36 h stale-bypass window)."""
+    up, dep = _chain(aut, dep_over={"frequency": "every-90min"})
+    assert aut._frequency_interval_seconds(dep) is None
+    fresh = {**up, "last_run": _age(hours=10)}
+    stale = {**up, "last_run": _age(hours=13)}
+    assert aut._is_dependency_met(dep, [fresh, dep], now=PIN) is True
+    assert aut._is_dependency_met(dep, [stale, dep], now=PIN) is False
+    # ...and neither caller ever asks: the interval gate comes first.
+    assert aut._is_task_due(dep, [fresh, dep], now=PIN) is False
+    assert aut.hold_reason(dep, [fresh, dep], now=PIN) == "no frequency"

@@ -41,6 +41,16 @@ from pathlib import Path
 
 import yaml
 
+# The scheduler's own frequency vocabulary (#815): a `frequency:` outside it
+# with no `runs_per_day` resolves to no interval and never dispatches, silently
+# until 2026-09-24. Imported rather than restated so the linter cannot drift
+# from the map it lints against. `None` means the check could not run.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+try:
+    from autonomy import FREQUENCY_INTERVALS  # noqa: E402
+except Exception:  # noqa: BLE001 — a linter with no scheduler beside it
+    FREQUENCY_INTERVALS = None
+
 DEFAULT_DIR = Path.home() / "obsidian" / "autonomy"
 # Mirrors the slug branch of autonomy._load_skill_content (:894), which is the
 # only skills root that path consults. --skills-dir overrides it.
@@ -221,6 +231,24 @@ def main() -> int:
                 warnings.append(
                     f"{p.name}: model '{model}' is not a models: key or alias in "
                     f"{config_path} (known: {', '.join(sorted(known_models))})"
+                )
+        frequency = _clean(fm.get("frequency")).lower()
+        rpd = _clean(fm.get("runs_per_day"))
+        if frequency and not _is_nullish(frequency) and (not rpd or _is_nullish(rpd)):
+            # `runs_per_day` is read first by the scheduler, so a task carrying
+            # it dispatches whatever `frequency` says; without it the string
+            # must be one the map knows or the task is parked with no signal.
+            if FREQUENCY_INTERVALS is None:
+                warnings.append(
+                    f"{p.name}: frequency '{frequency}' unchecked — the scheduler's "
+                    "FREQUENCY_INTERVALS could not be imported"
+                )
+            elif frequency not in FREQUENCY_INTERVALS:
+                warnings.append(
+                    f"{p.name}: frequency '{frequency}' is not one of "
+                    f"{', '.join(sorted(FREQUENCY_INTERVALS))} and there is no "
+                    "runs_per_day — the scheduler resolves no interval and will "
+                    "never dispatch it"
                 )
         dep = fm.get("depends_on")
         dep_id = _clean(dep)

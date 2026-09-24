@@ -1081,6 +1081,18 @@ def _parse_iso(s) -> Optional[datetime.datetime]:
         return None
 
 
+#: The `frequency:` vocabulary the scheduler reads, in seconds. ONE definition
+#: (#815): `_frequency_interval_seconds` answers from it, `_is_task_due` warns
+#: from it, and `scripts/autonomy/validate_tasks.py` imports it to lint a
+#: task file — so a consumer enumerates the recognised intervals instead of
+#: inventing one. Anything outside it resolves to no interval, which is *not
+#: due, ever*; `runs_per_day` is consulted first and is why #24's
+#: `frequency: 6x-daily` dispatches at all.
+FREQUENCY_INTERVALS: dict[str, float] = {
+    "hourly": 3600.0, "every-15min": 900.0, "daily": 86400.0, "weekly": 604800.0,
+}
+
+
 def _frequency_interval_seconds(task: dict) -> Optional[float]:
     freq = str(task.get("frequency", "")).strip().lower()
     rpd = task.get("runs_per_day")
@@ -1091,8 +1103,7 @@ def _frequency_interval_seconds(task: dict) -> Optional[float]:
                 return 86400.0 / rpd_f
         except (TypeError, ValueError):
             pass
-    freq_map = {"hourly": 3600, "every-15min": 900, "daily": 86400, "weekly": 604800}
-    return freq_map.get(freq)
+    return FREQUENCY_INTERVALS.get(freq)
 
 
 def next_run_gap(task: dict,
@@ -1161,6 +1172,11 @@ def next_run_gap(task: dict,
 
 
 _no_skill_warned: set[str] = set()
+# Same once-per-process shape, for the interval gate below: a `frequency:`
+# outside FREQUENCY_INTERVALS with no `runs_per_day` used to return False in
+# silence (#815) — the no-skill path warned, this one did not, and dropping
+# #24's `runs_per_day: 6` would have parked a nightly pipeline unannounced.
+_no_frequency_warned: set[str] = set()
 
 
 #: The `status:` `_write_run_record` gives a run that finished its work. Written
@@ -1453,6 +1469,12 @@ def _is_dependency_met(task: dict, all_tasks: list[dict], *,
     # nightly pipelines settle into a stable inverted order where downstream
     # tasks always consume day-old upstream artifacts (observed June 2026:
     # reflection ran 39→38/40→42, trajectory ran 57 before 56).
+    # `or 86400.0` is defensive only. Both production callers exclude a None
+    # interval before reaching this gate — `_is_task_due` returns False (and
+    # warns once) and `hold_reason` returns "no frequency" — so a task whose
+    # frequency is outside FREQUENCY_INTERVALS meets this line only by a direct
+    # call, where it is judged against a day's 12 h half-window rather than
+    # crashing (#815; tests/test_autonomy_dependency_fail_closed.py pins it).
     interval = _frequency_interval_seconds(task) or 86400.0
     if (now - dep_last_run).total_seconds() > interval / 2:
         return _dependency_bypassed(task, dep_task, dep_last_run, now)
@@ -1526,6 +1548,14 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
         return False
     interval = _frequency_interval_seconds(task)
     if interval is None:
+        task_id = str(task.get("id", "?"))
+        if task_id not in _no_frequency_warned:
+            _no_frequency_warned.add(task_id)
+            logger.warning(
+                "Task #%s (%s) has frequency %r and no runs_per_day — not in "
+                "%s, so it will NEVER run until one is set",
+                task_id, task.get("name"), task.get("frequency"),
+                sorted(FREQUENCY_INTERVALS))
         return False
     last_run = _parse_iso(task.get("last_run"))
     if last_run:

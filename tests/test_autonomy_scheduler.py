@@ -4029,3 +4029,49 @@ async def test_the_unparseable_alert_follows_transitions_not_scans(
         f"does not re-arm the alert is the retraction asymmetry, and the second "
         f"outage is the one that never gets reported")
     assert path.name in alerts[2] and "unparseable" in alerts[2], alerts[2]
+
+
+# ---------------------------------------------------------------------------
+# #815: the frequency domain is one constant, and a task outside it says so
+# ---------------------------------------------------------------------------
+
+
+def test_frequency_domain_is_one_module_constant():
+    """`FREQUENCY_INTERVALS` is what `_frequency_interval_seconds` answers from,
+    so a consumer (the linter, a solver model) enumerates it instead of
+    restating the four words — the inline `freq_map` it replaced was the
+    second private copy of that vocabulary."""
+    assert set(autonomy.FREQUENCY_INTERVALS) == {"hourly", "every-15min", "daily", "weekly"}
+    for word, seconds in autonomy.FREQUENCY_INTERVALS.items():
+        assert autonomy._frequency_interval_seconds({"frequency": word}) == seconds
+        assert autonomy._frequency_interval_seconds({"frequency": word.upper()}) == seconds
+    assert autonomy._frequency_interval_seconds({"frequency": "every-90min"}) is None
+    assert autonomy._frequency_interval_seconds({"frequency": "6x-daily"}) is None
+    # runs_per_day is read first, which is the only reason #24 dispatches.
+    assert autonomy._frequency_interval_seconds(
+        {"frequency": "6x-daily", "runs_per_day": 6}) == 14400.0
+    src = inspect.getsource(autonomy._frequency_interval_seconds)
+    assert "FREQUENCY_INTERVALS" in src and "freq_map" not in src
+
+
+def test_an_up_next_task_outside_the_domain_warns_once_per_process(
+        aut, monkeypatch, caplog):
+    """Mirrors the no-skill warning: before #815 this path returned False in
+    silence, so deleting #24's `runs_per_day` would have parked a nightly
+    pipeline with nothing in the log."""
+    monkeypatch.setattr(autonomy, "_no_frequency_warned", set())
+    task = {"id": "24", "name": "data-pipeline", "status": "up_next",
+            "skill_name": "some-skill", "frequency": "6x-daily"}
+    caplog.set_level("WARNING", logger="lloyd-autonomy")
+    assert autonomy._is_task_due(task, [task]) is False
+    assert autonomy._is_task_due(task, [task]) is False
+    lines = [r.getMessage() for r in caplog.records if "6x-daily" in r.getMessage()]
+    assert len(lines) == 1, lines
+    assert "#24" in lines[0] and "runs_per_day" in lines[0] and "NEVER run" in lines[0]
+    assert "every-15min" in lines[0], "the warning names the recognised domain"
+    # The same task with runs_per_day resolves an interval and never warns.
+    caplog.clear()
+    monkeypatch.setattr(autonomy, "_no_frequency_warned", set())
+    assert autonomy._frequency_interval_seconds({**task, "runs_per_day": 6}) == 14400.0
+    autonomy._is_task_due({**task, "runs_per_day": 6}, [task])
+    assert not [r for r in caplog.records if "6x-daily" in r.getMessage()]
