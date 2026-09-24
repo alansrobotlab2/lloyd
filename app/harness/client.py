@@ -4,11 +4,19 @@ Streams `/v1/chat/completions` with `stream=True` and yields raw OpenAI
 chunk dicts. Tool-call delta accumulation, hook dispatch, and
 loop control happen in `loop.py` — this module just owns the wire.
 
-Why httpx and not openai-python: we already depend on httpx (used by
-inner_voice/critic.py against the same vLLM endpoint), and the parser
-fragility documented in start-35b-nvfp4.sh means we want raw SSE-line
-inspection for forensic logging on parse failures. The openai SDK
-abstracts that away.
+Why httpx and not openai-python: httpx is already the dependency of
+`app/inner_voice/observer.py`, which talks to the same engines, and the
+parser fragility documented in start-35b-nvfp4.sh means we want raw
+SSE-line inspection for forensic logging on parse failures. The openai
+SDK abstracts that away.
+
+`stream_chat` is the agent loop's request site, not the only place a
+completion request leaves the process — an instrument or an ablation
+aimed only here misses the rest. `app/harness/finalizer.py` posts its own
+non-streaming completion after a turn (`tool_choice: "none"`, and a second
+request in the other payload spelling when the first is refused);
+`workers/sources/_common.py` and `app/routers/voice.py` hold their own
+clients too.
 """
 
 from __future__ import annotations
