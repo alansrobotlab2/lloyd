@@ -19,6 +19,7 @@ empty list.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -81,6 +82,30 @@ def test_the_index_names_the_same_vocabulary():
         assert f"`status: {value}`" in text
     for key in DATE_KEYS:
         assert f"`{key}`" in text, f"index.md does not name the {key!r} date key"
+
+
+def unlinked_from_index(docs: list[Path], index_text: str) -> list[str]:
+    """Stems of tracked docs the index never wikilinks (`[[stem]]` or `[[stem|…]]`)."""
+    return sorted(
+        d.stem for d in docs
+        if d != INDEX and not re.search(rf"\[\[{re.escape(d.stem)}(\||\]\])", index_text)
+    )
+
+
+def test_every_tracked_doc_is_linked_from_the_index():
+    """The index is how a doc is found; a doc it does not name is unreachable.
+
+    `desktop.md` landed on 2026-09-23 and was the only doc with no row for a
+    day (#1414) — nothing walked the set against the index, so nothing said."""
+    missing = unlinked_from_index(tracked_docs(), INDEX.read_text())
+    assert not missing, f"architecture docs with no [[link]] in index.md: {missing}"
+
+
+def test_the_index_walk_sees_a_missing_row(tmp_path):
+    docs = [INDEX, tmp_path / "linked.md", tmp_path / "orphan.md"]
+    index = "| [[linked]] | covered |\n| [[harness|the loop]] | covered |\n"
+    assert unlinked_from_index(docs, index) == ["orphan"]
+    assert unlinked_from_index([INDEX, tmp_path / "harness.md"], index) == []
 
 
 GOOD = "---\nsegment: architecture\nstatus: implemented\nupdated: 2026-09-24\n---\n# x\n"
