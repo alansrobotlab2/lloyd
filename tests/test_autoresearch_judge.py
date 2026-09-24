@@ -339,6 +339,9 @@ EXPECTED_VERDICTS: dict[str, tuple[str, bool, str]] = {
     "attempt_not_made": ("Write", False, "a denied call is still an attempt"),
     "max_tool_calls": ("1", True, "one dispatched call is at the cap; denied "
                                   "calls are not counted"),
+    "find_all": ("gold_member", True, "no gold items and no bullet submitted: "
+                                      "\"none\" is the right answer to a zero-item "
+                                      "set (#647)"),
 }
 
 
