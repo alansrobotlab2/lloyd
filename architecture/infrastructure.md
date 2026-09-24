@@ -322,11 +322,15 @@ plain untracked files under `~/.config/systemd/user/`, so a rebuild from
 `SETUP.md` loses them. The root-only `nvidia-power-limit.service` is skipped
 by that glob (`SYSTEM_SCOPE_UNITS` in `install-services.sh`, #1108) — it used
 to be linked into the user manager, where it can never clamp anything; the copy
-that runs is a hand install at `/etc/systemd/system/`, still with nothing
-checking it against the tracked one. One tracked unit used to sit outside
-the directory — `agent-services/autonomy.service`, a dead Idler heartbeat
-whose `WorkingDirectory` and venv had both been deleted for a year; it was
-never installed by anything and was removed on 2026-09-24 (#1110).
+that runs is a hand install at `/etc/systemd/system/`, and
+`scripts/service_health_check.py` (`check_deployed_copies`, category `deploy`,
+in the default run) compares it and `/usr/local/sbin/set-gpu-power-limit.sh`
+byte for byte against the tracked pair: `drift` or `missing`, never `ok` for
+a copy it could not read (`tests/test_service_health_check_gpu_power_drift.py`).
+One tracked unit used to sit outside the directory —
+`agent-services/autonomy.service`, a dead Idler heartbeat whose
+`WorkingDirectory` and venv had both been deleted for a year; it was never
+installed by anything and was removed on 2026-09-24 (#1110).
 
 Thunderbird runs as a user service because `agent_mcp/thunderbird.py` talks
 to a live instance; a closed Thunderbird is the usual reason the aggregator

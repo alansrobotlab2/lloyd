@@ -6,10 +6,12 @@ Returns structured status for LLM, MCP, and other Lloyd services.
 """
 
 import argparse
+import hashlib
 import json
 import socket
 import subprocess
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 SUPervisor_CONF = "/home/alansrobotlab/lloyd/agent-services/supervisor/supervisord.conf"
@@ -62,12 +64,78 @@ def _switched_off() -> set:
         return set()
 
 
+# The GPU power clamp runs as root, so its unit and script are not symlinked
+# from the tree like every other unit: they are deployed by a hand `install`
+# to root-owned paths (the unit's own header carries the two commands). Twice
+# in one week (`bb0dbca` 09-11, `36ba27e` 09-17) the tracked copy was edited
+# and the deployed one re-installed by hand the same minute, and had the second
+# step been forgotten nothing would have said so — the next boot would simply
+# have clamped the old watts. This is the gate (#1108): each tracked file
+# against the copy that actually runs, reported beside the services.
+_TREE = Path(__file__).resolve().parent.parent
+DEPLOY_CATEGORY = "deploy"
+DEPLOYED_COPIES = (
+    (_TREE / "agent-services" / "systemd" / "nvidia-power-limit.service",
+     Path("/etc/systemd/system/nvidia-power-limit.service")),
+    (_TREE / "agent-services" / "bin" / "set-gpu-power-limit.sh",
+     Path("/usr/local/sbin/set-gpu-power-limit.sh")),
+)
+
 CATEGORIES = {
     "llm": ["agent-llm-primary", "agent-llm-secondary", "agent-djev"],
     "lloyd": ["lloyd-backend", "lloyd-frontend", "lloyd-mcp"],
     "retrieval": ["agent-qmd-daemon"],
+    # No supervisor program behind it: `main` answers this category from
+    # `check_deployed_copies` instead.
+    DEPLOY_CATEGORY: [],
     "all": list(SERVICES.keys()),
 }
+
+
+def _sha256(path: Path) -> Optional[str]:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def check_deployed_copies(pairs=DEPLOYED_COPIES) -> list:
+    """Compare each tracked file against its root-owned deployed copy.
+
+    One result per pair, in the shape `check_service` returns, so the two
+    formatters and the category summary carry it without a special case. The
+    status is `ok` only when both files read and their bytes match, `drift`
+    when they differ, and `missing` when either cannot be read — each naming
+    the pair. An unreadable deployed copy is never `ok`: a check that read
+    nothing verified nothing, and a green line from it would be exactly the
+    false comfort the check exists to remove.
+    """
+    results = []
+    for tracked, deployed in pairs:
+        tracked, deployed = Path(tracked), Path(deployed)
+        want, have = _sha256(tracked), _sha256(deployed)
+        if want is None:
+            status = f"missing: tracked copy {tracked} is unreadable"
+        elif have is None:
+            status = (f"missing: {deployed} is unreadable or not installed "
+                      f"(tracked copy: {tracked})")
+        elif want != have:
+            status = (f"drift: {deployed} differs from tracked {tracked} "
+                      f"— reinstall it from the tree")
+        else:
+            status = f"ok: {deployed} matches {tracked}"
+        healthy = status.startswith("ok:")
+        results.append({
+            "name": f"deployed:{deployed.name}",
+            "status": status,
+            "healthy": healthy,
+            "exit_code": 0 if healthy else 1,
+            "output": status,
+            "category": DEPLOY_CATEGORY,
+            "tracked": str(tracked),
+            "deployed": str(deployed),
+        })
+    return results
 
 
 def _probe_targets(host: str, port: int) -> list:
@@ -279,6 +347,10 @@ def main():
     for name in service_names:
         if name in SERVICES:
             results.append(check_service(name, SERVICES[name]))
+    # The deployed-copy pairs ride with the full check and with their own
+    # category; a `--services` ask names supervisor programs and gets only those.
+    if not args.services and args.category in (None, DEPLOY_CATEGORY):
+        results.extend(check_deployed_copies())
 
     # Calculate summary
     summary = {}
