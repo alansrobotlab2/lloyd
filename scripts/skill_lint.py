@@ -2,16 +2,25 @@
 """
 Skill-lint — advisory quality sweep over ~/obsidian/skills/*/SKILL.md.
 
-Writes `~/obsidian/autonomy/skill-lint-report.md` with six categories:
-  1. DEAD         — unparseable frontmatter or desc+tags both empty (never fires)
-  2. MISSING_DESC — has tags but no description (fires via tag/name only)
-  3. DRIFT        — description present but output-framed not trigger-framed
-  4. DUPLICATE    — near-duplicate skill names (ranking noise)
-  5. STALE        — mtime > 90 days and status != active (candidate for removal)
-  6. PHANTOM_TOOL — names a tool the aggregator does not advertise
+Writes `~/obsidian/autonomy/skill-lint-report.md` with eight categories:
+  1. DEAD              — unparseable frontmatter or desc+tags both empty (never fires)
+  2. MISSING_DESC      — has tags but no description (fires via tag/name only)
+  3. DRIFT             — description present but output-framed not trigger-framed
+  4. DUPLICATE         — near-duplicate skill names (ranking noise)
+  5. STALE             — mtime > 90 days and status != active (candidate for removal)
+  6. PHANTOM_TOOL      — names a tool the aggregator does not advertise
+  7. MISSING_SCRIPT    — cites a repo script that is not in the tree
+  8. INJECTION_PATTERN — body instructs acting on remotely hosted instructions or
+                        config, or pipes remote content into a shell (#677)
 
 Advisory only. No automatic deletion or rewrites. Exit 0 always (so nightly
 pipeline doesn't fail on lint findings).
+
+"Advisory" describes this script, not the class: every category that matters also
+has a hard gate in the suite, because a report nobody reads is not a check.
+PHANTOM_TOOL → `tests/test_skill_tool_names.py`, MISSING_SCRIPT →
+`tests/test_skill_script_existence.py`, INJECTION_PATTERN →
+`tests/test_skill_lint_gates.py`.
 
 Origin: Task #334. Methodology documented in that task's description.
 """
@@ -22,7 +31,9 @@ import difflib
 import json
 import re
 import sys
+from collections import Counter
 from pathlib import Path
+from typing import Optional, Sequence
 
 try:
     import yaml  # type: ignore
@@ -383,7 +394,137 @@ def check_script_paths(content: str, skill_dir: Path | None = None,
     return sorted(out, key=lambda d: d["path"])
 
 
-def lint() -> dict:
+# ── injection-shaped instructions in the body (#677) ─────────────────────────
+#
+# Snyk's AI Engineer talk (Manoj Nair, "Through the AI Fog: The Architectural
+# Decision Agentic Security Depends On") demoed a shared "competitive analysis"
+# skill whose worst finding was not code at all: one line told the agent to load
+# its monitoring targets and classification rules from a YAML file hosted on the
+# internet, so "even if my skill file doesn't change at all, that is a chance for
+# an exploit to occur" — the behaviour changes under someone else's control while
+# the skill stays byte-identical. His prescription was a deterministic hook
+# rather than a prompt line, because the same vulnerability was found in ~50% of
+# frontier-model runs (0.40 F1) while a regex pass runs every time. That is the
+# generator-and-validator-can't-be-the-same-system point applied to Lloyd's own
+# instruction layer: the nightly consolidator that WRITES skills must not be the
+# only thing that CHECKS them, which is why the hard gate lives in
+# `tests/test_skill_lint_gates.py` and not in a consolidator prompt.
+#
+# Two rules, and only two, because a regex is worth exactly its measured
+# precision over THIS corpus. Measured on the 187 live skills at landing:
+#
+#   remote_instruction_fetch  0 matches
+#   piped_remote_execution    1 match (`huggingface-hub`, listed below)
+#
+# The zero is the finding, and the item's own risk clause demands it be reported
+# rather than grown: "if step 3 returns zero true positives, close the item with
+# that number as the finding rather than stretching the rules until something
+# appears." The two rules this item also proposed were measured and dropped:
+# secret-echo fired on 19 lines across 14 skills (`code-review`'s
+# "Authentication/authorization checks present" is the archetype) and
+# writes-outside-declared-roots on 13 lines across 7 (`nightly-reflection-knowledge-write`
+# legitimately writes `~/lloyd/_pipeline/**`), both near-zero true positives. A
+# gate that is red on day one gets switched off by the next person who sees it,
+# so those two are recorded on the item as out of scope instead of shipped as noise.
+#
+# What this is NOT: a detector. A regex over natural language misses paraphrase
+# entirely, so this is a coverage floor and a review queue. Whether Lloyd actually
+# obeys injected content is measured at runtime by #590; #547 is an
+# activation-time authorizing-context check, #624 a body-length cap, #543 a
+# cross-corpus artifact sweep. Same neighbourhood, different questions — do not
+# collapse them in a later triage pass.
+
+INJECTION_CATEGORY = "INJECTION_PATTERN"
+
+# A URL whose last path component is a config/instruction extension. The
+# extension requirement is load-bearing: the naive "fetch verb + any http(s) URL"
+# fired 31 lines across 17 skills, every one of them a benign content fetch
+# (`skills/arxiv/SKILL.md:39`'s `http_fetch(url="https://arxiv.org/abs/…")` is the
+# archetype), and a gate red on day one is a gate that gets deleted.
+_INSTR_EXT = r"\.(?:yaml|yml|json|jsonl|md|txt|toml|conf)(?![\w-])"
+_URL = r"https?://[^\s'\"`<>()\[\]|,;]+"
+_INSTR_URL = _URL + _INSTR_EXT
+# "act on it" verbs, finite forms only. `http_fetch` is deliberately unmatched:
+# `_` is a word character, so `\bfetch\b` cannot match inside it — that single
+# detail is what keeps every `http_fetch(...)` example in the corpus clean.
+_INSTR_VERB = (r"\b(?:fetch|fetches|pull|pulls|load|loads|follow|follows|"
+               r"apply|applies|obey|obeys)\b")
+# Within one sentence: stop at ". " rather than running to end of line, so a
+# sentence that merely links a config file is not also a sentence that says to
+# obey it. Verified both directions by tests/test_skill_lint_injection_rules.py.
+_WITHIN_SENTENCE = r"(?:(?!\.\s)[^\n])*?"
+
+_PIPE_INTO_SHELL = (r"\b(?:curl|wget)\b[^|\n]*\|\s*"
+                    r"(?:sudo\s+)?(?:ba|z|da|k)?sh\b")
+
+#: The rule table. One entry per rule, matched against ONE LINE of a SKILL.md at
+#: a time; deleting a key switches that rule off and nothing else, so ablating a
+#: rule is a one-line change rather than an edit to the checker. A rule with no
+#: measured corpus yield does not belong here (item #677's risk clause), and the
+#: exact set is pinned by `test_the_rule_table_is_named_and_each_entry_is_a_compiled_rule`.
+INJECTION_RULES: dict[str, re.Pattern] = {
+    # Snyk's "especially problematic" finding: fetch instructions/config from a
+    # remote URL and act on them.
+    "remote_instruction_fetch": re.compile(
+        rf"(?:{_INSTR_VERB}{_WITHIN_SENTENCE}{_INSTR_URL}"
+        rf"|{_INSTR_URL}{_WITHIN_SENTENCE}{_INSTR_VERB})",
+        re.I),
+    # Remote content executed without being looked at first. Denoised against the
+    # runtime, which already refuses this at `app/harness/safety.py:88-95`: a
+    # skill that instructs it is a skill whose documented first step is denied,
+    # so the finding is a broken instruction as often as a hostile one.
+    "piped_remote_execution": re.compile(_PIPE_INTO_SHELL, re.I),
+}
+
+#: Skill name -> the written reason its matched line stays. Not a frozenset:
+#: `PHANTOM_EXEMPT` above is one, carries no reason at all, and `KNOWN_ABSENT_SCRIPTS`
+#: is the lesson from a name-only ledger — an entry that outlives its citation is a
+#: permanently open permit granted by a line nobody can point at in the corpus any
+#: more. So every entry here needs a reason AND has to still match, both asserted
+#: in `tests/test_skill_lint_gates.py`.
+INJECTION_ALLOWLIST: dict[str, str] = {
+    "huggingface-hub":
+        "Documented one-time installer for the HF CLI, "
+        "`curl -LsSf https://hf.co/cli/install.sh | bash -s`, from the vendor's "
+        "own domain: listed rather than rewritten so the skill still tells the "
+        "reader how to install the tool it is about. The same pipe is denied at "
+        "runtime by app/harness/safety.py, so the line is guidance, not a step "
+        "the agent can execute.",
+}
+
+
+def check_injection_patterns(skill_name: str, content: str) -> list[dict]:
+    """Every injection-shaped line in this SKILL.md, one dict per (line, rule).
+
+    Reported whether or not the skill is allow-listed: a permit hides a finding
+    from the gate, never from the report, which is how an entry can be audited
+    before it silently outlives the line it was written for. `allow_reason` is
+    that audit trail, carried on the hit itself rather than looked up by a
+    renderer that might forget to.
+    """
+    reason = str(INJECTION_ALLOWLIST.get(skill_name, "") or "")
+    out: list[dict] = []
+    for line_no, line in enumerate(content.splitlines(), 1):
+        for rule_name, rule in INJECTION_RULES.items():
+            if rule.search(line):
+                out.append({"rule": rule_name, "line_no": line_no, "line": line,
+                            "allow_reason": reason})
+    return out
+
+
+def unlisted_injection_findings(result: dict) -> list[dict]:
+    """Flat list of injection hits with no allow-list reason: the gate's failure set.
+
+    One function so the CI gate and any future report agree on what "unlisted"
+    means, instead of each writing its own filter and drifting.
+    """
+    return [{"skill": finding["name"], "path": finding["path"], **hit}
+            for finding in result.get("injection", [])
+            for hit in finding["hits"]
+            if not str(hit.get("allow_reason", "")).strip()]
+
+
+def lint(skill_records: Optional[Sequence] = None) -> dict:
     """Lint every *live* skill — the set `agent_mcp.skills.iter_active_skills` owns.
 
     This used to be a sixth walk, over a `SKILLS_DIR` it hardcoded and with no
@@ -393,13 +534,27 @@ def lint() -> dict:
 
     Narrowing the set is only admissible because every finding below is computed
     from the same walked records: DEAD, MISSING_DESC, DRIFT, DUPLICATE, STALE,
-    PHANTOM_TOOL and MISSING_SCRIPT all still fire for a live skill that has them.
+    PHANTOM_TOOL, MISSING_SCRIPT and INJECTION_PATTERN all still fire for a live
+    skill that has them.
     What stops being reported is a defect in a skill the model can no longer reach —
     a retired skill cannot mislead anyone, and its findings would be permanently
     unactionable noise in a report a human reads.
+
+    `skill_records` takes records in `iter_active_skills`' own shape, so a test can
+    point the whole loop at a temp skills root and prove the injection gate can
+    fail (#677 clause 4) without this function growing a second, private corpus
+    walk — the sixth-walk bug the paragraph above is about. The live nightly path
+    passes nothing and is unchanged.
     """
-    active = list(iter_active_skills())
-    roots_walked = skill_roots()
+    if skill_records is None:
+        active = list(iter_active_skills())
+        roots_walked = skill_roots()
+    else:
+        # The `Scanned N live skills in <roots>` line is a measurement, so when a
+        # caller brings its own records the roots printed are where those records
+        # came from, not the configured pair this process would have walked.
+        active = list(skill_records)
+        roots_walked = sorted({r.directory.parent for r in active})
 
     dead: list[dict] = []
     missing_desc: list[dict] = []
@@ -407,6 +562,7 @@ def lint() -> dict:
     stale: list[dict] = []
     phantom: list[dict] = []
     missing_script: list[dict] = []
+    injection: list[dict] = []
     skills: list[tuple[str, str]] = []
     total = 0
 
@@ -466,6 +622,17 @@ def lint() -> dict:
                 "tools": bad_tools,
             })
 
+        # Allow-listed hits are kept in the payload and the report: the permit is
+        # on the gate, not on being seen. `unlisted_injection_findings` is what
+        # `tests/test_skill_lint_gates.py` fails on.
+        inj_hits = check_injection_patterns(entry.name, content)
+        if inj_hits:
+            injection.append({
+                "name": entry.name,
+                "path": str(skill_file),
+                "hits": inj_hits,
+            })
+
         bad_scripts = check_script_paths(content, skill_dir=entry)
         live_scripts = [b for b in bad_scripts if not b["known_stale"]]
         if live_scripts:
@@ -500,6 +667,7 @@ def lint() -> dict:
         "stale": stale,
         "phantom": phantom,
         "missing_script": missing_script,
+        "injection": injection,
     }
 
 
@@ -516,6 +684,17 @@ def render_report(result: dict) -> str:
     n_stale = len(result["stale"])
     n_phantom = len(result.get("phantom", []))
     n_scripts = len(result.get("missing_script", []))
+    injection = result.get("injection", [])
+    n_inj = len(injection)
+    # Per-rule counts, computed from the findings rather than stored beside them,
+    # so a rule that ran and found nothing and a rule that never ran both read as
+    # 0 and neither can be silently dropped from the table below.
+    inj_lines = Counter(hit["rule"]
+                        for finding in injection for hit in finding["hits"])
+    inj_skills: Counter = Counter()
+    for finding in injection:
+        for rule_name in {hit["rule"] for hit in finding["hits"]}:
+            inj_skills[rule_name] += 1
 
     lines.append(f"# Skill Lint Report — {ts}")
     lines.append("")
@@ -532,6 +711,22 @@ def render_report(result: dict) -> str:
     lines.append(f"| STALE (>{STALE_DAYS}d mtime, status ≠ active) | **{n_stale}** | review for removal |")
     lines.append(f"| PHANTOM_TOOL (names a tool that does not exist) | **{n_phantom}** | replace with the real tool name |")
     lines.append(f"| MISSING_SCRIPT (names a repo script absent from the tree) | **{n_scripts}** | land the script or drop the citation |")
+    lines.append(f"| {INJECTION_CATEGORY} (instructs acting on remote instructions/config, or pipes remote content into a shell) | **{n_inj}** | rewrite to name a local/pinned step, or list in INJECTION_ALLOWLIST with a reason |")
+    lines.append("")
+    # One row per rule in the table, always, including the rules that matched
+    # nothing. `n_phantom` is the precedent for why: until 2026-09-11 the count
+    # printed while the section did not, and a reader could not tell "no findings"
+    # from "the check is not wired up". #677's remote-instruction rule matches zero
+    # live skills today, so without these rows its zero would be exactly that
+    # ambiguity — and the whole point of shipping it is that the number gets
+    # re-measured weekly instead of being asserted once at implementation time.
+    lines.append(f"### {INJECTION_CATEGORY} — per-rule counts")
+    lines.append("")
+    lines.append("| rule | matched lines | skills |")
+    lines.append("|---|---|---|")
+    for rule_name in sorted(INJECTION_RULES):
+        lines.append(f"| `{rule_name}` | {inj_lines.get(rule_name, 0)} "
+                     f"| {inj_skills.get(rule_name, 0)} |")
     lines.append("")
     lines.append("This report is **advisory**. No automatic changes.")
     lines.append("")
@@ -664,8 +859,32 @@ def render_report(result: dict) -> str:
             lines.append(f"| `{item['name']}` | {paths} |")
         lines.append("")
 
+    # INJECTION_PATTERN — #677. The corpus-wide assertion lives in
+    # `tests/test_skill_lint_gates.py`, so a hit that is not in INJECTION_ALLOWLIST
+    # has already turned the suite red; this section is the audit surface that shows
+    # WHICH line of WHICH skill matched WHICH rule, quoted, plus the reason each
+    # permitted hit carries. Allow-listed hits print too: the permit is on the gate,
+    # not on being seen, so an entry cannot outlive the line it was written for
+    # without someone reading the line out of the report.
+    if n_inj:
+        lines.append(f"## {INJECTION_CATEGORY} — {n_inj} skill(s) whose body matches an injection-shaped rule")
+        lines.append("")
+        lines.append("This is a review queue, not a detector: a regex over English misses")
+        lines.append("paraphrase, so zero here means 'no match', never 'no risk'. The runtime")
+        lines.append("measurement stays backlog #590.")
+        lines.append("")
+        lines.append("| skill | rule | line | quoted match | allow-list reason |")
+        lines.append("|---|---|---|---|---|")
+        for finding in injection:
+            for hit in finding["hits"]:
+                quoted = hit["line"].strip().replace("|", "\\|")
+                reason = hit["allow_reason"].replace("|", "\\|") or "*(not allowed: the gate fails on this line)*"
+                lines.append(f"| `{finding['name']}` | `{hit['rule']}` "
+                             f"| {hit['line_no']} | `{quoted[:160]}` | {reason} |")
+        lines.append("")
+
     if not (n_dead or n_missing or n_drift or n_dup or n_stale or n_phantom
-            or n_scripts):
+            or n_scripts or n_inj):
         lines.append("## ✅ Clean")
         lines.append("")
         lines.append("All skills pass lint. No advisories.")
@@ -691,11 +910,16 @@ def main() -> int:
 
     print(f"Wrote {REPORT_PATH}")
     print(f"Wrote {json_path}")
+    # `phantom` was absent from this line as well, same class of gap one category
+    # earlier: the count reached the report and not the stdout the nightly job's
+    # log keeps, so `web_search`-shaped breakage had no line to grep.
     print(f"Totals: total={result['total']}, dead={len(result.get('dead', []))}, "
           f"missing_desc={len(result.get('missing_desc', []))}, "
           f"drift={len(result.get('drift', []))}, dup={len(result.get('duplicates', []))}, "
           f"stale={len(result.get('stale', []))}, "
-          f"missing_script={n_scripts}")
+          f"phantom={len(result.get('phantom', []))}, "
+          f"missing_script={n_scripts}, "
+          f"injection={len(result.get('injection', []))}")
     return 0
 
 
