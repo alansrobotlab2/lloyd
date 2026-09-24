@@ -45,6 +45,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import re
 import sqlite3
 from typing import Optional
 
@@ -107,6 +108,35 @@ def parse_acceptance(task: dict) -> Optional[dict]:
     return {"checks": checks, "rubric": [str(r) for r in rubric], "invalid": invalid}
 
 
+def acceptance_problems(task: dict) -> list[str]:
+    """Why a declared block would not grade what it says, for the task linter.
+
+    `parse_acceptance` drops a bad entry into `invalid`, which grades the run
+    `acceptance_invalid` — visible, but only once the task has run. Two defects
+    it cannot see at all: a `regex` that does not compile, which the judge
+    grades False on every run (`_match_check` catches `re.error`), so the task
+    reads as a permanent false completion; and a `find_all`, whose `gold_items`,
+    verifier and dedupe key `parse_acceptance` does not carry, so it would be
+    graded against an empty gold set.
+    """
+    spec = parse_acceptance(task)
+    if spec is None:
+        return []
+    problems = [f"acceptance entry is not a judge check: {bad}" for bad in spec["invalid"]]
+    if not spec["checks"] and not spec["invalid"]:
+        problems.append("acceptance declares no objective_checks")
+    for c in spec["checks"]:
+        if c["type"] == "regex":
+            try:
+                re.compile(str(c["value"]))
+            except re.error as e:
+                problems.append(f"acceptance regex {c['value']!r} does not compile: {e}")
+        elif c["type"] == "find_all":
+            problems.append("acceptance find_all is not supported on a run grade "
+                            "(its gold_items/verifier are not carried)")
+    return problems
+
+
 class DispatchTrace:
     """The run's tool use, read off the harness event stream.
 
@@ -157,6 +187,47 @@ class DispatchTrace:
                 "denied_calls": list(self.denied_calls),
                 "tool_trace_authoritative": True,
                 "trace_error": self.error}
+
+
+def _block_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(str(b.get("text", "")) if isinstance(b, dict) else str(b)
+                       for b in content)
+    return ""
+
+
+def trace_from_transcript(messages: list[dict]) -> dict:
+    """A finished run's dispatch trace, rebuilt from its session transcript.
+
+    For grading runs that happened before their task declared a block (or before
+    this module existed): every background run writes its transcript
+    (`app/run_recorder.py`), and the transcript keeps each tool call on its
+    assistant message and each result as a `tool` message — the same two events
+    `DispatchTrace` reads live, replayed in order. The final text is the last
+    non-empty assistant text, which is what `run_task` grades as `terminal_text`.
+    """
+    dispatch = DispatchTrace()
+    names: dict[str, str] = {}
+    terminal = ""
+    for m in messages:
+        role = m.get("role")
+        if role == "assistant":
+            for tc in m.get("tool_calls") or []:
+                cid = tc.get("call_id") or tc.get("id") or ""
+                name = (tc.get("function") or {}).get("name", "")
+                names[cid] = name
+                dispatch.observe({"type": "tool_call", "call_id": cid, "name": name})
+            text = _block_text(m.get("content")).strip()
+            if text:
+                terminal = text
+        elif role == "tool":
+            cid = m.get("tool_call_id") or ""
+            dispatch.observe({"type": "tool_result", "call_id": cid,
+                              "name": names.get(cid, ""),
+                              "content": _block_text(m.get("content"))})
+    return dispatch.as_trace(terminal)
 
 
 def grade_run(task: dict, trace: dict) -> Optional[dict]:

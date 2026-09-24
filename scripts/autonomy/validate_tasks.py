@@ -50,6 +50,11 @@ try:
     from autonomy import FREQUENCY_INTERVALS  # noqa: E402
 except Exception:  # noqa: BLE001 — a linter with no scheduler beside it
     FREQUENCY_INTERVALS = None
+# The grader's own reading of an `acceptance:` block (#623), for the same reason.
+try:
+    from app.run_acceptance import acceptance_problems  # noqa: E402
+except Exception:  # noqa: BLE001
+    acceptance_problems = None
 
 DEFAULT_DIR = Path.home() / "obsidian" / "autonomy"
 # Mirrors the slug branch of autonomy._load_skill_content (:894), which is the
@@ -250,6 +255,14 @@ def main() -> int:
                     "runs_per_day — the scheduler resolves no interval and will "
                     "never dispatch it"
                 )
+        # A declared `acceptance:` block (#623) is graded on every run; one that
+        # cannot grade what it says (a regex that does not compile reads as a
+        # false completion forever) is caught here, before the first run.
+        if acceptance_problems is None and fm.get("acceptance"):
+            warnings.append(f"{p.name}: acceptance unchecked — app.run_acceptance "
+                            "could not be imported")
+        elif acceptance_problems is not None:
+            warnings.extend(f"{p.name}: {msg}" for msg in acceptance_problems(fm))
         dep = fm.get("depends_on")
         dep_id = _clean(dep)
         if dep and not _is_nullish(dep_id):
