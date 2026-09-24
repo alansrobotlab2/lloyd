@@ -71,7 +71,8 @@ OUTPUT — AND WHY IT IS NOT `eval/baselines/`
 --------------------------------------------
 The run's own artifact goes to `app.paths.EVAL_BASELINES_DIR`, which resolves
 under the data root (`~/lloyd-data/eval/baselines/`), the destination
-`eval/run_eval.py:1135` and `run_prefetch_eval.py:212` use. It cannot go to a
+`eval/run_eval.py:1135` and the artifact write in `run_prefetch_eval.py`'s
+`_run_cli()` use. It cannot go to a
 path in the repo called `eval/baselines/`: `.gitignore:100` ignores exactly
 that directory (`git check-ignore -v eval/baselines/x.json` names the rule), so
 the "committed baseline JSON" #630's acceptance asks for would be an

@@ -26,6 +26,8 @@ import asyncio
 import inspect
 import json
 import sqlite3
+import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -265,6 +267,66 @@ async def test_a_suppression_is_logged_with_the_arguments_that_produced_it(
 
     lines = [r.getMessage() for r in caplog.records if "suppressed duplicate" in r.getMessage()]
     assert lines and "someone@example.com" in lines[-1]
+
+
+async def test_a_module_imported_earlier_cannot_blind_this_capture(
+        monkeypatch, ledger, caplog):
+    """#824: the suppression line must survive another module's import.
+
+    `eval/run_prefetch_eval.py` ran `logging.disable(logging.CRITICAL)` at import
+    time. That writes `Logger.manager.disable` — process-global, never restored,
+    and consulted before any handler runs — so one import anywhere in the process
+    made every `caplog` record below CRITICAL unobtainable, this one included. The
+    eval script now scopes its quiet to its own import and run, so importing it is
+    inert here.
+
+    `caplog` deliberately WITHOUT `at_level`, unlike the test above:
+    `_pytest/logging.py` `set_level` → `_force_enable_logging` calls
+    `logging.disable(max(level - 10, NOTSET))` when the logger is not enabled for
+    `level`, which un-disables precisely enough for that one test to capture again
+    and then restores the previous disable in `_finalize`. That papers over exactly
+    this bug — it is what `404250f0` did for this one test, and why the pair #824
+    named reads green at its own commit. A bare `caplog` is the shape of the
+    capture sites that carry no such immunity (29 files use `caplog` at base
+    `ed12261e`, 63 read lines, 3 files with no `at_level`/`set_level` anywhere),
+    and it can only be trusted if an unrelated import leaves logging enabled.
+    """
+    effects: list = []
+    _register(monkeypatch, FakeWriter(effects))
+
+    prev_disable = logging.Logger.manager.disable
+    sys.modules.pop("eval.run_prefetch_eval", None)
+    pkg = sys.modules.get("eval")
+    if pkg is not None:
+        pkg.__dict__.pop("run_prefetch_eval", None)  # else the parent's attr answers it
+    try:
+        from eval import run_prefetch_eval  # the import IS the fixture
+
+        assert Path(run_prefetch_eval.__file__).resolve() == (
+            Path(__file__).resolve().parent.parent
+            / "eval" / "run_prefetch_eval.py"), (
+            "`eval.run_prefetch_eval` resolved to "
+            f"{run_prefetch_eval.__file__}, not this repo's script")
+        assert logging.Logger.manager.disable == logging.NOTSET, (
+            "importing the prefetch eval disabled logging for the whole process "
+            f"(manager.disable={logging.Logger.manager.disable})")
+
+        emitter = logging.getLogger("lloyd-mcp")
+        monkeypatch.setattr(emitter, "propagate", True)
+        monkeypatch.setattr(emitter, "disabled", False)
+        monkeypatch.setattr(emitter, "level", logging.WARNING)
+
+        for _ in range(2):
+            await M.call_tool("fake_writer", dict(ARGS), META)
+
+        assert len(effects) == 1, (
+            "the duplicate was not suppressed, so an empty `caplog` would mean "
+            "the code path never ran rather than that the log was lost")
+        lines = [r.getMessage() for r in caplog.records
+                 if "suppressed duplicate" in r.getMessage()]
+        assert lines and "someone@example.com" in lines[-1]
+    finally:
+        logging.disable(prev_disable)
 
 
 async def test_no_scope_means_no_ledger(ledger):

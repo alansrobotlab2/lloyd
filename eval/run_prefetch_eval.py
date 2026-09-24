@@ -37,12 +37,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import statistics
 import sys
 import time
 from collections import defaultdict
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -52,9 +54,43 @@ HERE = Path(__file__).resolve().parent
 LLOYD_HOME = HERE.parent
 sys.path.insert(0, str(LLOYD_HOME))
 
-logging.disable(logging.CRITICAL)
 
-import prefetch  # noqa: E402
+@contextlib.contextmanager
+def _quiet_logging(level: int = logging.CRITICAL) -> Iterator[None]:
+    """Silence records below `level` for the duration of the block, then put the
+    process's previous disable level back exactly as it was — including when the
+    block raises.
+
+    Its predecessor did the same silencing with a bare
+    `logging.disable(logging.CRITICAL)` at import time, whose only purpose was to
+    hush the `import prefetch` on the next line; it arrived in `f5789b71`
+    (2026-09-03, a prefetch perf/efficacy commit) and nothing ever restored it.
+    `logging.disable` writes `Logger.manager.disable` — process-global, consulted
+    before any handler runs — so one import of this script made every later
+    `caplog` assertion in the same pytest process come back empty. Measured at
+    `ed12261e` (and it moves, so re-measure rather than cite this): 29 files under
+    `tests/` use `caplog` and 63 lines read `caplog.records`/`.text`/`.messages`.
+    26 of those 29 files happen to call `caplog.at_level`/`set_level`, which is
+    pytest's own per-test un-disable, so the 3 that never do are exposed outright
+    and every assertion outside such a test is exposed in the other 26 — among
+    them
+    `tests/test_tool_effects.py::test_a_suppression_is_logged_with_the_arguments_that_produced_it`
+    (#824). The script is entitled to be quiet during its own import and its own
+    run; it has no claim on whoever imports it next, so the quiet is scoped.
+
+    The requested level is taken as `max(prev, level)` so entering this block can
+    only make logging quieter, never louder than a caller deliberately asked for.
+    """
+    prev = logging.Logger.manager.disable
+    logging.disable(max(prev, level))
+    try:
+        yield
+    finally:
+        logging.disable(prev)
+
+
+with _quiet_logging():
+    import prefetch  # noqa: E402
 
 
 def _norm(s: str) -> str:
@@ -185,6 +221,21 @@ def print_table(records: list[dict], summary: dict) -> None:
 
 
 def main() -> int:
+    """Run the eval, quietly, and leave the process's logging as it was (#824).
+
+    The eval is quiet by default: `prefetch` logs at INFO/DEBUG from the legs this
+    script calls in a loop, and 20 queries of it is noise around one table. What
+    the old import-time `logging.disable(logging.CRITICAL)` got wrong was not the
+    silencing, it was the scope — it stayed disabled for whoever ran next. Here
+    the quiet covers the run only, and `logging.Logger.manager.disable` is back at
+    its pre-call value by the time `main()` hands back, whether it returned a
+    status or raised on the way out.
+    """
+    with _quiet_logging():
+        return _run_cli()
+
+
+def _run_cli() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--queries", default=str(HERE / "vault_recall_queries.yaml"))
     ap.add_argument("--label", default="prefetch-baseline")
