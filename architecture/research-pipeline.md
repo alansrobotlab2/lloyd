@@ -186,10 +186,14 @@ passes its `run_id` into `execute`, so the queue id is the link.
   is what closes most of that gap, and it is a prompt, not a guarantee.
 - **A `queued` topic is never expired automatically.** `stats()` reports
   `stale_queued` past 60 days (`STALE_QUEUED_DAYS`); retiring one stays a
-  human's decision. That threshold is also loose enough to hide the ordinary
-  state: at 40 queued against a `daily_max` of 3, the head can sit for nearly
-  two weeks with `stale_queued: 0`, and nothing compares `queued` to
-  `MAX_QUEUED` (#1277).
+  human's decision. That threshold is loose enough to hide the ordinary
+  state — at 40 queued against a `daily_max` of 3, the head sits for nearly
+  two weeks with `stale_queued: 0` — so since 2026-09-24 the same payload
+  also carries `max_queued`, `queued_fraction`, `at_cap` and `head_age_days`
+  (#1277), which is what lets the generator's "at its cap → stop" rule fire
+  from `research_stats` instead of from a refusal. Whether the cap should
+  derive from `daily_max`, and what to do with the priority-55/60 cohort
+  `next()` never reaches, are still open rulings on that item.
 - **The generator is still an autonomy task**, so it inherits that path's
   timeout semantics rather than the pool's — #65 at `timeout_seconds: 1500`,
   under `scheduled-task`'s 3600 s pool cap so the task's own timer is the one

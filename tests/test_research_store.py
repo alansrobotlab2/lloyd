@@ -326,6 +326,46 @@ def test_stale_queued_topics_are_reported_not_deleted(s):
 
 
 # ---------------------------------------------------------------------------
+# Saturation is in the payload (#1277)
+# ---------------------------------------------------------------------------
+
+
+def test_stats_names_the_cap_it_is_measured_against(s):
+    """`queued: 40` and `queued: 12` were the same shape to a reader that did
+    not already know `MAX_QUEUED` out of band; the generator learned the cap
+    by being refused at proposal #4."""
+    for i in range(12):
+        s.propose(f"distinct research topic number {i} about serving")
+    stats = s.stats()
+    assert stats["max_queued"] == R.MAX_QUEUED
+    assert stats["queued_fraction"] == round(12 / R.MAX_QUEUED, 3)
+    assert stats["at_cap"] is False
+
+    for i in range(12, R.MAX_QUEUED):
+        s.propose(f"distinct research topic number {i} about serving")
+    stats = s.stats()
+    assert stats["queued"] == R.MAX_QUEUED
+    assert stats["queued_fraction"] == 1.0
+    assert stats["at_cap"] is True, "a full queue must say so before propose refuses"
+
+
+def test_stats_reports_the_heads_wait_well_inside_the_stale_gate(s):
+    """An 11-day-old head is the ordinary saturated state at a 3-a-day drain,
+    and `stale_queued`'s 60-day gate reports 0 for it. The wait in days is a
+    separate field beside it, not a lower threshold."""
+    assert s.stats()["head_age_days"] is None, "an empty queue has no head"
+    head = s.propose("the topic at the head of the queue")["id"]
+    s.propose("a newer topic behind it")
+    eleven_days = (datetime.now(timezone.utc) - timedelta(days=11)).isoformat()
+    with s._connect() as conn:
+        conn.execute("UPDATE topics SET proposed_at=? WHERE id=?", (eleven_days, head))
+    stats = s.stats()
+    assert 10.9 <= stats["head_age_days"] <= 11.1
+    assert stats["stale_queued"] == 0
+    assert stats["oldest_queued_at"] == eleven_days
+
+
+# ---------------------------------------------------------------------------
 # The `written` disk gate (#1276)
 # ---------------------------------------------------------------------------
 

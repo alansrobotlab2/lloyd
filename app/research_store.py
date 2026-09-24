@@ -577,9 +577,21 @@ class ResearchStore:
             return [dict(r) for r in rows]
 
     def stats(self) -> dict:
-        today = datetime.now(timezone.utc).date().isoformat()
-        stale = (datetime.now(timezone.utc)
-                 - timedelta(days=STALE_QUEUED_DAYS)).isoformat()
+        """Registry health, saturation included.
+
+        `queued` alone cannot say whether the queue is full — `MAX_QUEUED` is
+        a module constant the tool payload never carried — and `stale_queued`
+        is gated at `STALE_QUEUED_DAYS`, loose enough that a head waiting two
+        weeks of a three-a-day drain reads as 0 (#1277). So the payload also
+        names the cap it is measured against (`max_queued`, `queued_fraction`,
+        `at_cap`) and the head's wait in days (`head_age_days`), derived from
+        the store's own state, so a proposer can stop before `propose` refuses
+        it. `stale_queued` keeps its own meaning: an individually ancient topic
+        reported for human retirement.
+        """
+        now = datetime.now(timezone.utc)
+        today = now.date().isoformat()
+        stale = (now - timedelta(days=STALE_QUEUED_DAYS)).isoformat()
         with self._connect() as conn:
             by_status = {r["status"]: r["n"] for r in conn.execute(
                 "SELECT status, COUNT(*) AS n FROM topics GROUP BY status").fetchall()}
@@ -600,13 +612,24 @@ class ResearchStore:
                 "SELECT domain, COUNT(*) AS n FROM topics "
                 "WHERE status NOT IN ('archived') GROUP BY domain "
                 "ORDER BY n DESC LIMIT 10").fetchall()}
+        queued = by_status.get("queued", 0)
+        head_age_days = None
+        if oldest:
+            head = datetime.fromisoformat(oldest)
+            if head.tzinfo is None:
+                head = head.replace(tzinfo=timezone.utc)
+            head_age_days = max(0.0, round((now - head).total_seconds() / 86400, 1))
         return {
             "by_status": by_status,
             "total": sum(by_status.values()),
-            "queued": by_status.get("queued", 0),
+            "queued": queued,
+            "max_queued": MAX_QUEUED,
+            "queued_fraction": round(queued / MAX_QUEUED, 3),
+            "at_cap": queued >= MAX_QUEUED,
             "researching": by_status.get("researching", 0),
             "done_today": done_today,
             "oldest_queued_at": oldest,
+            "head_age_days": head_age_days,
             "stale_queued": stale_n,
             "last_written": dict(last_written) if last_written else None,
             "domains": top_domains,

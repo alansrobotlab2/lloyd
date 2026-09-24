@@ -299,6 +299,18 @@ async def test_stats_answers_without_arguments(registry):
     assert payload["queued"] == 1 and payload["done_today"] == 0
 
 
+async def test_stats_carries_the_saturation_fields_a_proposer_stops_on(registry):
+    """The skill's rule is "if `research_stats` says the queue is at its cap,
+    propose nothing" (#1277); the payload has to be able to say it."""
+    for i in range(R.MAX_QUEUED):
+        registry.propose(f"distinct research topic number {i} about serving")
+    _, payload = await call("research_stats")
+    assert payload["at_cap"] is True
+    assert payload["max_queued"] == R.MAX_QUEUED
+    assert payload["queued_fraction"] == 1.0
+    assert payload["head_age_days"] is not None and payload["head_age_days"] >= 0
+
+
 # ---------------------------------------------------------------------------
 # Failure posture
 # ---------------------------------------------------------------------------
