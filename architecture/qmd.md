@@ -197,7 +197,12 @@ also sends the raw query without `_qmd_sanitize`. #302.
 - **Task #81** (`scripts/maintenance/qmd_index_maintenance.py`): orphan prune,
   embedding backfill, template↔live drift report. It no longer stops the daemon
   (it did on 8 of 8 runs, for one to four documents the watcher would have
-  embedded anyway).
+  embedded anyway). It also reports vec0 occupancy (live rows over allocated
+  slots, from the sqlite-vec shadow tables) with a `need_capacity` verdict the
+  orphan ratio cannot give, and the footprint as main + `-wal` + `-shm` (#844).
+  Neither cleanup nor VACUUM reclaims a dead vec0 slot; the verdict is report-only,
+  and the rebuild it points at is a hand side-copy-and-swap like the 09-21
+  model switch.
 - **A rerank that could not run says so.** No VRAM for a ranking context used to
   be an HTTP 200 with fusion-order results; `meta.reranked` is false, the daemon
   counts it, and `app/qmd_health.py` logs and announces it.

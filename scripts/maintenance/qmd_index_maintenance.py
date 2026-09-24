@@ -50,6 +50,26 @@ SAFETY CONTRACT — this runs unattended:
     passed. "Unhealthy" means the daemon answered no HTTP request on
     DAEMON_PROBE_URL within NOOP_HEALTH_RETRIES tries -- a listening-but-wedged
     daemon still reads healthy, and this job's probe does not claim otherwise.
+  * Every run measures vec0 capacity (#844) -- allocated slots against live
+    vector rows, read from the sqlite-vec shadow tables -- and reports a
+    `need_capacity` verdict that fires independently of both orphan triggers.
+    The orphan ratio cannot see this axis: sqlite-vec allocates fixed chunks and
+    neither `qmd cleanup` nor VACUUM reclaims or reuses a dead slot, so on
+    2026-09-18 an index at 7.2% orphans was 12.8% occupied (293 chunks, 766 MiB
+    dead, 78% of the file). The verdict is a report entry, never an action and
+    never an exit code.
+  * The vec0 REBUILD IS RULED OUT as an action of this job. Measured by the one
+    rebuild that has happened: the 2026-09-21 embedding-model switch rebuilt a
+    side copy of the index and swapped it in, which re-embedded the corpus
+    (tens of thousands of vectors, far past this job's EMBED_PENDING_MAX_RATIO
+    guard) and left 56 chunks at 56% occupancy, 481 MB against 1.25 GB before.
+    Dropping `vectors_vec` in place would leave retrieval with no vector leg for
+    that whole re-embed, beside a daemon that no longer stops. So a fired
+    capacity verdict means "do a side-copy rebuild by hand"; the reason rides in
+    every report as `vec0_rebuild`.
+  * The reported footprint is main + -wal + -shm. On 2026-09-20 and 09-21 the
+    WAL stood at 100% of the main file, uncheckpointed, and a main-only size
+    under-reported the index by half.
   * Every run also compares the tracked qmd collection template with the config
     the daemon actually reads, and records it as `config_drift` in the dated
     report (#1298). Drift is a report entry and never an exit code: the job that
@@ -140,6 +160,18 @@ ORPHAN_ABS_TRIGGER = 2_000
 # indistinguishable at query time. That is the state being protected, not the
 # hour of GPU.
 EMBED_PENDING_MAX_RATIO = 0.25
+# vec0 capacity verdict (#844). Occupancy is live vector rows over allocated
+# slots; the dead-MiB floor plays ORPHAN_ABS_TRIGGER's part, so a small index
+# does not trip on a ratio over a few chunks. At the 2026-09-18 shape (12.8%,
+# 766 MiB dead) both are far past; after the 09-21 rebuild (56%) neither is.
+CAPACITY_OCCUPANCY_TRIGGER = 0.25
+CAPACITY_DEAD_MIB_FLOOR = 256
+VEC0_REBUILD_RULED_OUT = (
+    "ruled out as an unattended action: the one measured rebuild (2026-09-21 "
+    "model switch) was a side copy re-embedded in full and swapped in, 1.25 GB "
+    "-> 481 MB, 56% occupancy after; an in-place drop would leave the serving "
+    "daemon with no vector leg for the whole re-embed. A fired need_capacity "
+    "means rebuild a side copy and swap it, by hand.")
 
 QMD_ENV = {
     "HOME": str(Path.home()),
@@ -167,9 +199,63 @@ def supervisor(action: str, timeout: int = 120) -> tuple[int, str]:
     return _sh([str(SUPERVISORCTL), "-c", str(SUPERVISOR_CONF), action, SERVICE], timeout)
 
 
+def index_footprint(index: Path) -> dict:
+    """Bytes of the main file, its -wal and its -shm, and their total.
+
+    The WAL is part of what the index costs on disk; a size read off the main
+    file alone printed 1254 MB on 2026-09-20 against a real 2.5 GB.
+    """
+    parts = {}
+    for key, path in (("main", index),
+                      ("wal", index.with_name(index.name + "-wal")),
+                      ("shm", index.with_name(index.name + "-shm"))):
+        parts[key] = path.stat().st_size if path.exists() else 0
+    return {"total": sum(parts.values()), **parts}
+
+
+def vec0_capacity(con: sqlite3.Connection, table: str = "vectors_vec") -> dict:
+    """Allocated slots, live rows, occupancy and dead MiB of a vec0 table.
+
+    Read from sqlite-vec's plain shadow tables, so it needs no extension:
+    `<t>_chunks.size` is each chunk's slot count, `<t>_rowids` holds one row per
+    live vector, and `<t>_vector_chunks00.vectors` is the chunk storage itself.
+    Dead bytes are the allocated bytes times the dead share of slots -- every
+    chunk blob is sized for its full slot count whether or not a slot is live.
+    An index without the shadow tables reports an error here, never raises.
+    """
+    try:
+        slots = con.execute(f"select coalesce(sum(size), 0) from {table}_chunks").fetchone()[0]
+        chunks = con.execute(f"select count(*) from {table}_chunks").fetchone()[0]
+        live = con.execute(f"select count(*) from {table}_rowids").fetchone()[0]
+        alloc = con.execute(
+            f"select coalesce(sum(length(vectors)), 0) from {table}_vector_chunks00"
+        ).fetchone()[0]
+    except sqlite3.Error as e:
+        return {"error": repr(e)}
+    occupancy = live / slots if slots else None
+    dead_bytes = alloc * (1 - occupancy) if occupancy is not None else 0
+    return {
+        "chunks": chunks,
+        "allocated_slots": slots,
+        "live_rows": live,
+        "occupancy": round(occupancy, 4) if occupancy is not None else None,
+        "allocated_mib": round(alloc / 2**20, 1),
+        "dead_mib": round(dead_bytes / 2**20, 1),
+    }
+
+
+def capacity_verdict(vec0: dict | None) -> bool:
+    """True when vec0 is mostly dead slots, whatever the orphan ratio says."""
+    if not vec0 or vec0.get("occupancy") is None:
+        return False
+    return (vec0["occupancy"] < CAPACITY_OCCUPANCY_TRIGGER
+            and vec0.get("dead_mib", 0) >= CAPACITY_DEAD_MIB_FLOOR)
+
+
 def inspect_index() -> dict:
     """Read orphan counts straight from SQLite (read-only, daemon can be up)."""
-    out: dict = {"index_bytes": INDEX.stat().st_size if INDEX.exists() else 0}
+    fp = index_footprint(INDEX)
+    out: dict = {"index_bytes": fp["total"], "footprint": fp}
     if not INDEX.exists():
         out["error"] = "index missing"
         return out
@@ -182,6 +268,7 @@ def inspect_index() -> dict:
             "left join content c on v.hash = c.hash where c.hash is null"
         )
         out["documents"] = q("select count(*) from documents")
+        out["vec0"] = vec0_capacity(con)
         con.close()
     except Exception as e:  # noqa: BLE001
         out["error"] = repr(e)
@@ -485,6 +572,9 @@ def main() -> int:
             f"(max {guard['max_pending']:,}); configured embed model "
             f"{guard['configured_embed_model']}")
     report["need_prune"], report["need_embed"] = need_prune, need_embed
+    # Reported, never acted on: see VEC0_REBUILD_RULED_OUT.
+    report["need_capacity"] = capacity_verdict(before.get("vec0"))
+    report["vec0_rebuild"] = VEC0_REBUILD_RULED_OUT
 
     if args.dry_run or not (need_prune or need_embed):
         if args.dry_run:
@@ -561,6 +651,18 @@ def _emit(r: dict, as_json: bool) -> None:
     print(f"  orphaned          {b.get('vectors_orphaned', 0):,} "
           f"({100*b.get('orphan_ratio', 0):.1f}%)"
           + (f"  →  {a.get('vectors_orphaned', 0):,}" if a else ""))
+    fp = b.get("footprint")
+    if fp:
+        print(f"                    main {mb(fp['main'])} + wal {mb(fp['wal'])}"
+              f" + shm {mb(fp['shm'])}")
+    v = b.get("vec0") or {}
+    if v.get("occupancy") is not None:
+        print(f"  vec0 occupancy    {100*v['occupancy']:.1f} %  "
+              f"({v['live_rows']:,} live of {v['allocated_slots']:,} slots, "
+              f"{v['dead_mib']:,.0f} MiB dead)"
+              f"   capacity verdict {r.get('need_capacity')}")
+    elif v.get("error"):
+        print(f"  vec0 occupancy    not measured: {v['error']}")
     print(f"  pending embeds    {r.get('pending_embeddings')}")
     g = r.get("embed_guard")
     if g:

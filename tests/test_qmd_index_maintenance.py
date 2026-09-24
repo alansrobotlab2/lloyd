@@ -532,3 +532,120 @@ def test_an_ordinary_backfill_still_runs_exactly_one_embed(monkeypatch, tmp_path
     embeds = calls.qmd("embed")
     assert len(embeds) == 1, f"expected exactly one qmd embed, got {calls.cmds}"
     assert "embed" in embeds[0]
+
+
+# --- #844: vec0 capacity and the whole-footprint size ------------------------
+# The orphan ratio cannot see dead vec0 slots: sqlite-vec allocates fixed-size
+# chunks and neither `qmd cleanup` nor VACUUM reclaims or reuses a dead slot. On
+# 2026-09-18 an index at 7.2% orphans was 12.8% occupied with 766 MiB dead. The
+# fixture below is a real SQLite file with sqlite-vec's shadow-table layout
+# (plain tables, readable without the extension), never the live index.
+
+def _vec0_index(path: Path, *, chunks: int, chunk_slots: int, live: int,
+                vec_bytes: int = 16, orphaned: int = 0) -> Path:
+    import sqlite3
+    con = sqlite3.connect(path)
+    con.executescript("""
+        create table content(hash text primary key);
+        create table content_vectors(hash text, seq int);
+        create table documents(id integer primary key, hash text);
+        create table vectors_vec_chunks(chunk_id integer primary key, size integer,
+                                        validity blob, rowids blob);
+        create table vectors_vec_rowids(rowid integer primary key, id text,
+                                        chunk_id integer, chunk_offset integer);
+        create table vectors_vec_vector_chunks00(rowid integer primary key, vectors blob);
+    """)
+    for c in range(chunks):
+        con.execute("insert into vectors_vec_chunks values (?,?,?,?)",
+                    (c + 1, chunk_slots, b"\0" * (chunk_slots // 8), b""))
+        con.execute("insert into vectors_vec_vector_chunks00 values (?, zeroblob(?))",
+                    (c + 1, chunk_slots * vec_bytes))
+    for i in range(live):
+        con.execute("insert into vectors_vec_rowids values (?,?,?,?)",
+                    (i + 1, f"h{i}_0", i // chunk_slots + 1, i % chunk_slots))
+        con.execute("insert into content values (?)", (f"h{i}",))
+        con.execute("insert into content_vectors values (?, 0)", (f"h{i}",))
+    for i in range(orphaned):
+        con.execute("insert into content_vectors values (?, 0)", (f"gone{i}",))
+    con.commit()
+    con.close()
+    return path
+
+
+def test_inspect_index_reads_vec0_capacity_from_the_shadow_tables(monkeypatch, tmp_path, capsys):
+    idx = _vec0_index(tmp_path / "index.sqlite", chunks=4, chunk_slots=64, live=32)
+    monkeypatch.setattr(m, "INDEX", idx)
+    v = m.inspect_index()["vec0"]
+    assert v["chunks"] == 4 and v["allocated_slots"] == 256 and v["live_rows"] == 32
+    assert v["occupancy"] == 0.125
+    # 4 chunks x 64 slots x 16 B = 16 KiB allocated, 7/8 of it dead.
+    assert v["dead_mib"] == round(4 * 64 * 16 * 7 / 8 / 2**20, 1)
+    assert v["allocated_mib"] == round(4 * 64 * 16 / 2**20, 1)
+    m._emit({"before": m.inspect_index(), "actions": [], "need_capacity": False}, False)
+    assert "vec0 occupancy    12.5 %" in capsys.readouterr().out
+
+
+def test_an_index_without_vec0_tables_reports_an_error_and_does_not_raise(monkeypatch, tmp_path):
+    import sqlite3
+    idx = tmp_path / "index.sqlite"
+    con = sqlite3.connect(idx)
+    con.executescript("create table content(hash text); create table content_vectors(hash text);"
+                      "create table documents(id int);")
+    con.close()
+    monkeypatch.setattr(m, "INDEX", idx)
+    out = m.inspect_index()
+    assert "error" in out["vec0"] and "error" not in out
+    assert m.capacity_verdict(out["vec0"]) is False
+
+
+#: The 2026-09-18 index, as the triage measured it: 293 chunks of 1,024 slots at
+#: 3,072 B, 38,454 live rows, 2,777 of 38,446 vectors orphaned.
+SEPT_18_SHAPE = {
+    "index_bytes": 1_188_237_312, "documents": 16_000,
+    "vectors_total": 38_446, "vectors_orphaned": 2_777,
+    "vectors_live": 35_669, "orphan_ratio": 0.0722,
+    "vec0": {"chunks": 293, "allocated_slots": 300_032, "live_rows": 38_454,
+             "occupancy": 0.1282, "allocated_mib": 879.0, "dead_mib": 766.3},
+}
+
+
+def test_the_capacity_verdict_fires_on_the_sept_18_shape_while_prune_does_not(
+        monkeypatch, tmp_path):
+    """Reachability, in the style of test_orphan_prune_is_reachable_on_ratio_alone:
+    at the index shape that motivated #844 the orphan triggers say nothing to do,
+    and the capacity verdict has to say otherwise on its own."""
+    t, l = _pair(tmp_path)
+    monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
+    monkeypatch.setattr(m, "LIVE_CONFIG", l)
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    monkeypatch.setattr(m, "inspect_index", lambda: dict(SEPT_18_SHAPE))
+    monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
+    monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
+    monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py"])
+    assert m.main() == 0
+    report = json.loads(next((tmp_path / "reflection").glob("*.json")).read_text())
+    assert report["need_prune"] is False
+    assert report["need_capacity"] is True
+    # Reported, never acted on: the no-op branch ran and says why rebuild is not its job.
+    assert report["actions"] == ["none — nothing to do"]
+    assert "ruled out" in report["vec0_rebuild"] and "side copy" in report["vec0_rebuild"]
+
+
+def test_the_capacity_verdict_stays_quiet_after_the_sept_21_rebuild():
+    # 56 chunks x 1,024 slots, 32,147 live: the side-copy rebuild's result.
+    assert m.capacity_verdict({"occupancy": 0.561, "dead_mib": 98.4}) is False
+    # A small index that is mostly empty is not worth a rebuild either.
+    assert m.capacity_verdict({"occupancy": 0.05, "dead_mib": 10.0}) is False
+    assert m.capacity_verdict({"occupancy": 0.20, "dead_mib": 300.0}) is True
+
+
+def test_the_footprint_counts_the_wal_and_shm(monkeypatch, tmp_path):
+    idx = _vec0_index(tmp_path / "index.sqlite", chunks=1, chunk_slots=8, live=2)
+    main_size = idx.stat().st_size
+    (tmp_path / "index.sqlite-wal").write_bytes(b"w" * 5000)
+    (tmp_path / "index.sqlite-shm").write_bytes(b"s" * 300)
+    monkeypatch.setattr(m, "INDEX", idx)
+    out = m.inspect_index()
+    assert out["index_bytes"] == main_size + 5300 > main_size
+    assert out["footprint"] == {"total": main_size + 5300, "main": main_size,
+                                "wal": 5000, "shm": 300}
