@@ -288,6 +288,13 @@ display:
 # (app/session_titles.py). They are what the chat history, the dashboard's
 # agent panel, the Inner Voice picker and the chat header render instead of
 # a timestamp id. Off means those surfaces fall back to the preview text.
+# memory_add stamps each MEMORY.md entry with its UTC write date, "- (YYYY-MM-DD) …",
+# so the date travels with the line through a consolidation rewrite (#622:
+# after a reordering rewrite the model acted on the stale value 25/59 and 21/59
+# times; with stamps 0/60). Read by agent_mcp/session.py; lloyd-mcp restart.
+memory_tools:
+  date_stamp_entries: true
+
 session_titles:
   enabled: true
 # Code graph (agent_mcp/code_graph.py). Structural navigation over

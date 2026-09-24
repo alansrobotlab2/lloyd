@@ -229,6 +229,22 @@ def _no_voice_alerts_in_tests(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _memory_entries_unstamped_in_tests(monkeypatch):
+    """`memory_tools.date_stamp_entries` is on in production (#622), and
+    `memory_add` then prefixes each entry with its write date. The writer-lane
+    and characterization tests assert entries byte for byte, so they run on the
+    code default (off); the tests that exercise the stamp set it themselves.
+    """
+    try:
+        from app import config
+    except Exception:
+        return
+    monkeypatch.setitem(config.CONFIG, "memory_tools",
+                        {**(config.CONFIG.get("memory_tools") or {}),
+                         "date_stamp_entries": False})
+
+
+@pytest.fixture(autouse=True)
 def _no_desktop_or_journal_alerts_in_tests(monkeypatch):
     """The other two channels that reach the room from a test process.
 
