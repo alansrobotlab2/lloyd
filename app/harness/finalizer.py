@@ -21,6 +21,22 @@ yields plain content with no tool parser attached, `response_format.type ==
 "json_schema"` maps to the guided decoder, and the grammar applies after
 `</think>` (`enable_in_reasoning` is False), so thinking can stay on.
 
+Why thinking is not switched off here (#1431)
+---------------------------------------------
+It is tempting: a restatement spends ~250 reasoning tokens for a ~120-token
+object. But the thinking knob falls under the same rule as `tools`. The
+primary's template (Qwen3.8-Flash-Next `chat_template.jinja:45-60`) opens the
+system message with "Reasoning effort is set to xhigh..." whenever thinking
+is on and drops that sentence under `chat_template_kwargs.enable_thinking:
+false`, which is also what vLLM turns a top-level `reasoning_effort: "none"`
+into (`ChatCompletionRequest.build_chat_params`). Either spelling diverges
+the rendered prompt at character 19 and re-prefills the whole turn (the
+1.19 s -> 25 s cost in `eval/measurements/finalizer-2026-09-08.md`) to save
+a few hundred decode tokens. So no thinking knob is sent by default, and
+`_usage` keeps `reasoning_tokens` so the tax stays a measured number. A knob
+that leaves the template alone (vLLM's sampling-side `thinking_token_budget`)
+is the one to try, against the live engine, before changing this.
+
 Skipped unless the turn actually ended
 --------------------------------------
 Forcing a verdict out of a turn that died at `max_turns` recreates exactly
@@ -212,6 +228,13 @@ def _usage(raw: dict) -> dict[str, int]:
     details = raw.get("prompt_tokens_details") or {}
     if isinstance(details.get("cached_tokens"), int):
         out["cached_tokens"] = details["cached_tokens"]
+    # The share of `output_tokens` spent inside <think> (#1431). A restatement
+    # is the least creative request the engine serves and still inherits the
+    # turn's reasoning mode; until this was kept, no surface could say what
+    # that costs per source.
+    completion = raw.get("completion_tokens_details") or {}
+    if isinstance(completion.get("reasoning_tokens"), int):
+        out["reasoning_tokens"] = completion["reasoning_tokens"]
     return out
 
 

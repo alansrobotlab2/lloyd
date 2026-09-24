@@ -358,3 +358,80 @@ async def test_the_finalizers_own_output_tokens_get_their_own_key():
     assert total["output_tokens"] == 310
     assert total["finalizer_output_tokens"] == 300
     assert total["finalizer_input_tokens"] == 600
+
+
+# ── #1431: the reasoning tax is measured, and no thinking knob is sent ──────
+
+_THINKING_KEYS = ("reasoning_effort", "chat_template_kwargs", "enable_thinking",
+                  "thinking_token_budget")
+
+
+async def test_the_engines_reasoning_tokens_survive_the_usage_mapping(_client):
+    _client.responses = [_ok('{"verdict": "confirmed"}', usage={
+        "prompt_tokens": 3791, "completion_tokens": 431, "total_tokens": 4222,
+        "completion_tokens_details": {"reasoning_tokens": 252}})]
+    parsed, error, usage = await _run()
+    assert parsed == {"verdict": "confirmed"} and error == ""
+    assert usage["reasoning_tokens"] == 252
+    assert usage["output_tokens"] == 431
+
+
+async def test_an_engine_that_reports_no_details_gets_no_reasoning_key(_client):
+    """Absent is not zero: llama.cpp and older vLLM builds omit the block."""
+    _client.responses = [_ok('{"verdict": "confirmed"}', usage={
+        "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})]
+    _, _, usage = await _run()
+    assert "reasoning_tokens" not in usage
+
+
+async def test_the_loop_reports_finalizer_reasoning_beside_its_output(monkeypatch):
+    """Its own key, and never folded into output_tokens a second time: the
+    reasoning tokens are already inside completion_tokens."""
+    from app.harness import loop as L
+    from app.harness.options import RunOptions
+
+    async def fake(**kw):
+        return {"verdict": "confirmed"}, "", {
+            "output_tokens": 431, "total_tokens": 4222, "input_tokens": 3791,
+            "reasoning_tokens": 252}
+    monkeypatch.setattr("app.harness.finalizer.run_finalizer", fake)
+
+    total = {"output_tokens": 1000, "total_tokens": 5000}
+    await L._maybe_finalize(
+        options=RunOptions(model="primary", final_schema=SCHEMA),
+        stop_reason="stop", chat_messages=[], tools=None, total_usage=total)
+    assert total["finalizer_reasoning_tokens"] == 252
+    assert total["finalizer_output_tokens"] == 431
+    assert total["output_tokens"] == 1431
+
+
+def test_the_worker_run_carries_the_finalizer_reasoning_tokens():
+    """Loop usage -> done frame -> the worker's per-run dict, so a source can
+    report its own reasoning tax. Source files, not live attributes: see
+    tests/test_structured_verdict.py on `_run_turn` being replaced by a stub."""
+    from pathlib import Path
+    from app.routers import messages as M
+    from workers.sources import _common
+
+    router = Path(M.__file__).read_text()
+    assert '.get("finalizer_reasoning_tokens"))' in router
+    assert "done_payload['finalizer_reasoning_tokens']" in router
+    worker = Path(_common.__file__).read_text()
+    assert '"finalizer_reasoning_tokens": None' in worker
+    assert 'out["finalizer_reasoning_tokens"] = data.get(' in worker
+
+
+async def test_the_finalizer_sends_no_thinking_knob_in_either_spelling(_client):
+    """The cache pin behind #1431's trade-off. On the primary's template both
+    `reasoning_effort: "none"` and `chat_template_kwargs.enable_thinking:
+    false` remove the system message's opening "Reasoning effort is set to
+    xhigh" sentence, so the rendered prompt diverges at character 19 and the
+    whole turn re-prefills (finalizer.py docstring). Changing this needs a
+    knob measured against the live engine not to touch the prefix."""
+    _client.responses = [_Resp(400, text="unknown response_format"),
+                         _ok('{"verdict": "confirmed"}')]
+    await _run()
+    assert len(_client.posted) == 2
+    for body in _client.posted:
+        for key in _THINKING_KEYS:
+            assert key not in body, key

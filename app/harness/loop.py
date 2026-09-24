@@ -1003,6 +1003,9 @@ async def _maybe_finalize(
             priority=options.priority,
             cancel_event=options.cancel_event,
             session_id=options.session_id,
+            # No extra_body, and no no-thinking default (#1431): on the
+            # primary either spelling rewrites the system message's first
+            # sentence and re-prefills the turn. finalizer.py's docstring.
         )
     except asyncio.CancelledError:
         raise
@@ -1035,6 +1038,12 @@ async def _maybe_finalize(
         total_usage["finalizer_input_tokens"] = (
             total_usage.get("finalizer_input_tokens", 0)
             + int(usage["input_tokens"]))
+    # The reasoning share of that output (#1431). A subset of
+    # finalizer_output_tokens, so it is reported beside it, never folded again.
+    if usage.get("reasoning_tokens"):
+        total_usage["finalizer_reasoning_tokens"] = (
+            total_usage.get("finalizer_reasoning_tokens", 0)
+            + int(usage["reasoning_tokens"]))
     return parsed, error
 
 

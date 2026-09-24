@@ -839,7 +839,8 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
 
     out: dict = {"text": "", "session_id": session_id, "stop_reason": None,
                  "num_turns": None, "errors": [], "structured": None,
-                 "structured_error": "", "finalizer_tokens": None}
+                 "structured_error": "", "finalizer_tokens": None,
+                 "finalizer_reasoning_tokens": None}
 
     async def _stream() -> None:
         # Generous per-read timeout: a long tool call legitimately produces no
@@ -866,6 +867,8 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                         out["structured"] = data.get("structured")
                         out["structured_error"] = str(data.get("structured_error") or "")
                         out["finalizer_tokens"] = data.get("finalizer_output_tokens")
+                        out["finalizer_reasoning_tokens"] = data.get(
+                            "finalizer_reasoning_tokens")
                         break
 
     try:
