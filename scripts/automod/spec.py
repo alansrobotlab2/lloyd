@@ -76,6 +76,12 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     # and this path was unlisted, so no round could have landed it — the same
     # defect #1242 fixed for `prompt_surface.py` above, found the same way.
     "SETUP.md",
+    # #1449 / #1444 (2026-09-24): the wake-miss corpus writer, and only that
+    # file — never a directory glob. `agent-services/**` would admit every
+    # launcher and conf a round may not touch (the 2026-09-21 agent-llm-primary
+    # restart is what those rails exist for); tests/test_automod_spec.py's
+    # #1376 section pins that a widening here must name its path verbatim.
+    "agent-services/livekit_worker.py",
     "web/src/**",
     "web/index.html",
     "web/public/**",

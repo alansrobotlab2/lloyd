@@ -396,7 +396,9 @@ def test_frontend_tooling_outside_src_is_unlisted_not_allowed():
 # allowed prefix `scripts/**`, and `grep -rn "automod/spec" --include=*.py .`
 # finds no rail against editing it outside `tests/` and `spec.py` itself. So a
 # round may not make that edit, and this section does not make it either. What
-# it owns is the *shape* the edit has to take: rails aimed at the class of bad
+# it owns is the *shape* the edit has to take (the edit itself was made by hand
+# on 2026-09-24 under #1449, once #1444's round was refused at rung 0 for the
+# same path): rails aimed at the class of bad
 # widening (a directory glob) rather than at one name, a simulation that proves
 # those rails can fail, a second simulation that runs every one of them against
 # the single named entry the item asks for, and a check that the verdicts they
@@ -636,7 +638,12 @@ def test_a_blanket_agent_services_glob_would_trip_each_rail(monkeypatch):
         f"{expected} that are unlisted today plus the {len(AGENT_SERVICES_GLOB_PROBES)} "
         f"probes — the helper and the corpus no longer agree, so the rail is "
         f"guarding a set it cannot see")
-    assert "agent-services/livekit_worker.py" in violations
+    # The grant landed by hand on 2026-09-24 (#1449, for #1444), so under the
+    # blanket edit the worker is the one admission that is *named*: it must not
+    # read as a violation, or the rail would be refusing the widening it was
+    # written to shape. Before the grant this line asserted the opposite.
+    assert "agent-services/livekit_worker.py" in spec.ALLOWED_GLOBS
+    assert "agent-services/livekit_worker.py" not in violations
     assert "agent-services/models/wakeword/hey_lloyd.onnx" in violations
     assert spec.classify("scripts/automod/spec.py") == "protected"
     assert spec.classify("agent-services/guardian/guardian.py") == "protected"
