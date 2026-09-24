@@ -489,7 +489,8 @@ def above_floor_remaining(above_floor_total: int | None, selected: int,
 
 
 def run_summary(newly_judged: int, from_cache: int, above_floor_total: int | None,
-                selected: int, min_score: float, cached_skipped: int = 0) -> str:
+                selected: int, min_score: float, cached_skipped: int = 0,
+                compact: dict | None = None) -> str:
     """One line: judged newly, judged free from cache, and eligible pairs left.
 
     Without the third number a run read as an unbounded backlog over a
@@ -498,12 +499,17 @@ def run_summary(newly_judged: int, from_cache: int, above_floor_total: int | Non
     `cached_skipped` is the count of pairs selection passed over as already
     judged, or as a pair the pool named twice (#535): they are served from cache,
     so `from_cache` includes them, and they are not backlog, so the remainder
-    subtracts them.
+    subtracts them. `compact` is `compact_verdict_cache`'s result, so the
+    store's real size is on the same line as the cache hit rate it explains
+    (#746); `None` on a replay, which judges nothing and compacts nothing.
     """
     remaining = above_floor_remaining(above_floor_total, selected, cached_skipped)
-    return (f"[summary] newly_judged={newly_judged} from_cache={from_cache} "
+    line = (f"[summary] newly_judged={newly_judged} from_cache={from_cache} "
             f"above_floor_remaining={'unknown' if remaining is None else remaining} "
             f"(min_score={min_score})")
+    if compact is not None:
+        line += f" compact: kept {compact['kept']} dropped {compact['dropped']}"
+    return line
 
 
 def report_selection(above_floor_total: int, selected: int, cached_skipped: int,
@@ -599,6 +605,77 @@ def append_verdict(rec: dict, path: Path = VERDICT_CACHE) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec) + "\n")
+
+
+def _sweep_prune_old_backups():
+    """The sweep's `prune_old_backups`, loaded on demand (hyphenated filename).
+
+    One definition of the `.bak` discipline, not a second copy of it. Loaded
+    only when a compaction has written a backup, so the weekly run does not
+    import the sweep (and its store) just to judge pairs.
+    """
+    path = Path(__file__).resolve().parent / "entity-resolution-sweep.py"
+    spec = importlib.util.spec_from_file_location("entity_resolution_sweep", str(path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.prune_old_backups
+
+
+def compact_verdict_cache(path: Path = VERDICT_CACHE, keep: int = 5) -> dict:
+    """Rewrite the verdict cache keeping the newest row per unordered pair (#746).
+
+    `append_verdict` only ever appends and `load_verdict_cache` reads the whole
+    file, so since #535 made the slice advance the store grew by up to
+    `--limit` rows a week with nothing giving space back — and a pair whose
+    definition changed was appended again under a new key while the row under
+    the old key stayed forever. The file is append-only, so file order is
+    judgment order and the LAST row for a pair is the newest; the kept rows are
+    written back in their original order, which keeps that true across
+    compactions.
+
+    Keyed on the pair, never on the definition hash: #728 (a key that hashes
+    rewritten prose) is open, and a compaction that dropped rows whose
+    recomputed key no longer matched would delete verdicts that are only stale
+    because of that churn. A row that no key can ever hit again is dropped only
+    when a newer verdict for the same pair exists. Called once at the end of a
+    real run, never from the read path — a loader must not rewrite its input.
+
+    A rewrite copies the file to `<name>.<stamp>.bak` first and prunes to
+    `keep` backups the way the sweep does; nothing to drop means nothing is
+    rewritten and no backup is taken. Returns ``{"kept", "dropped", "backup"}``.
+    """
+    if not path.exists():
+        return {"kept": 0, "dropped": 0, "backup": None}
+    rows: list[tuple[str, dict]] = []
+    unreadable = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            unreadable += 1
+            continue
+        if not (isinstance(rec, dict) and rec.get("key") and rec.get("a") and rec.get("b")):
+            unreadable += 1
+            continue
+        rows.append((line, rec))
+    newest: dict[frozenset, int] = {}
+    for i, (_line, rec) in enumerate(rows):
+        newest[frozenset((rec["a"], rec["b"]))] = i
+    survivors = set(newest.values())
+    dropped = (len(rows) - len(survivors)) + unreadable
+    if dropped == 0:
+        return {"kept": len(rows), "dropped": 0, "backup": None}
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = path.with_name(f"{path.name}.{stamp}.bak")
+    shutil.copy2(path, backup)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("".join(line + "\n" for i, (line, _rec) in enumerate(rows)
+                           if i in survivors), encoding="utf-8")
+    tmp.replace(path)
+    _sweep_prune_old_backups()(path, keep=keep)
+    return {"kept": len(survivors), "dropped": dropped, "backup": backup}
 
 
 def judge_pair(pair: dict, endpoint: str, model: str, timeout: int) -> dict | None:
@@ -1007,6 +1084,7 @@ def main() -> int:
 
     # Judgment loop (skipped in replay mode)
     t_start = time.perf_counter()
+    compact: dict | None = None
     if not args.replay:
         judgments = []
         verdict_counts = Counter()
@@ -1058,6 +1136,11 @@ def main() -> int:
         print(f"\n[info] judgments → {JUDGMENT_LOG}")
         print(f"[info] elapsed: {time.perf_counter() - t_start:.1f}s")
         print(f"[info] verdicts: {dict(verdict_counts)}  ({cache_hits} from cache)")
+        # After the appends, outside the loader: one row per pair from here on.
+        compact = compact_verdict_cache()
+        if compact["backup"] is not None:
+            print(f"[info] verdict cache compacted: kept {compact['kept']} "
+                  f"dropped {compact['dropped']} (backup {compact['backup'].name})")
 
     # Apply plan — split by confidence AND guard rails.
     # A merge-threshold pair is only truly merged if merge_allowed() passes;
@@ -1136,7 +1219,8 @@ def main() -> int:
           f"in-loop) remaining-above-floor="
           f"{'unknown' if remaining is None else remaining}")
     print(run_summary(newly_judged, cache_hits + cached_skipped, above_floor_total,
-                      len(candidates), args.min_score, cached_skipped))
+                      len(candidates), args.min_score, cached_skipped,
+                      compact=compact))
     return 0
 
 

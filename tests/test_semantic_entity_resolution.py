@@ -951,3 +951,105 @@ def test_definition_resolves_through_the_gate_not_the_fallback(monkeypatch, tmp_
     got = ser._definition(entity)
     assert got == definition
     assert got != ser.load_fact_snippets(entity, 300)
+
+
+# #746: the verdict cache gives space back — newest row per pair, never by key
+# ---------------------------------------------------------------------------
+
+
+def _verdict(a, b, key, judged_at, verdict="distinct"):
+    return {"key": key, "a": a, "b": b, "judged_at": judged_at,
+            "verdict": verdict, "confidence": 0.9, "reason": "r"}
+
+
+def _write_rows(path, rows):
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+
+def test_compaction_keeps_the_newest_row_per_pair_and_backs_up_first(tmp_path):
+    """Two rows for one pair under two keys (the pair re-judged after a
+    definition rewrite, the second time with the names reversed) plus one
+    singleton: the older row is dropped, both pairs stay loadable, and the
+    original file is beside it as a `.bak` before anything was rewritten."""
+    cache = tmp_path / "semantic-verdicts-pairs.jsonl"
+    rows = [_verdict("Claude", "Claude Code", "k-old", "2026-09-09T01:00:00+00:00", "same"),
+            _verdict("qwen3-tts", "Qwen3 TTS", "k-single", "2026-09-09T01:01:00+00:00"),
+            _verdict("Claude Code", "Claude", "k-new", "2026-09-16T01:00:00+00:00", "related")]
+    _write_rows(cache, rows)
+
+    out = ser.compact_verdict_cache(cache, keep=5)
+
+    assert (out["kept"], out["dropped"]) == (2, 1), out
+    loaded = ser.load_verdict_cache(cache)
+    assert set(loaded) == {"k-single", "k-new"}, "the newest row per pair survives"
+    assert loaded["k-new"]["verdict"] == "related"
+    baks = list(tmp_path.glob("semantic-verdicts-pairs.jsonl*.bak"))
+    assert [out["backup"]] == baks
+    assert [json.loads(l) for l in baks[0].read_text().splitlines()] == rows, \
+        "the backup is the file as it was before the rewrite"
+    # Kept rows keep their order, so a later compaction still reads file order
+    # as judgment order.
+    assert [json.loads(l)["key"] for l in cache.read_text().splitlines()] == ["k-single", "k-new"]
+
+
+def test_compaction_never_recomputes_a_key(tmp_path, monkeypatch):
+    """#728 is open: a key hashes rewritten prose, so a row's key going stale is
+    not evidence its verdict is dead. Compaction must not consult the
+    definitions at all — pinned by making that consultation raise."""
+    cache = tmp_path / "semantic-verdicts-pairs.jsonl"
+    _write_rows(cache, [_verdict("a", "b", "k1", "2026-09-09T00:00:00+00:00"),
+                        _verdict("a", "b", "k2", "2026-09-10T00:00:00+00:00"),
+                        _verdict("c", "d", "k3", "2026-09-10T00:00:00+00:00")])
+
+    def _boom(*_a, **_k):
+        raise AssertionError("compaction consulted a definition")
+
+    monkeypatch.setattr(ser, "_definition", _boom)
+    monkeypatch.setattr(ser, "_cache_key", _boom)
+    out = ser.compact_verdict_cache(cache)
+    assert (out["kept"], out["dropped"]) == (2, 1)
+    assert set(ser.load_verdict_cache(cache)) == {"k2", "k3"}
+
+
+def test_a_compaction_with_nothing_to_drop_rewrites_nothing(tmp_path):
+    cache = tmp_path / "semantic-verdicts-pairs.jsonl"
+    _write_rows(cache, [_verdict("a", "b", "k1", "2026-09-09T00:00:00+00:00")])
+    before = cache.stat().st_mtime_ns
+    out = ser.compact_verdict_cache(cache)
+    assert out == {"kept": 1, "dropped": 0, "backup": None}
+    assert cache.stat().st_mtime_ns == before
+    assert list(tmp_path.glob("*.bak")) == []
+    assert ser.compact_verdict_cache(tmp_path / "absent.jsonl") == {
+        "kept": 0, "dropped": 0, "backup": None}
+
+
+def test_compaction_backups_are_pruned_to_keep(tmp_path, monkeypatch):
+    """The sweep's `.bak` discipline: 246 files in 8 days is how backups used
+    to accumulate there, so a weekly compaction must not restart that."""
+    cache = tmp_path / "semantic-verdicts-pairs.jsonl"
+    stamps = iter(range(100))
+    real_datetime = ser.datetime
+
+    class _Clock:
+        """Distinct second per call, so seven backups get seven names."""
+        @staticmethod
+        def now(_tz=None):
+            return real_datetime(2026, 9, 1, 0, 0, next(stamps), tzinfo=ser.timezone.utc)
+
+    monkeypatch.setattr(ser, "datetime", _Clock)
+    for i in range(7):
+        ser.append_verdict(_verdict("a", "b", f"k{i}", f"2026-09-0{i + 1}T00:00:00+00:00"), cache)
+        ser.append_verdict(_verdict("a", "b", f"k{i}x", f"2026-09-0{i + 1}T01:00:00+00:00"), cache)
+        out = ser.compact_verdict_cache(cache, keep=3)
+        assert out["dropped"] >= 1
+    assert len(list(tmp_path.glob("semantic-verdicts-pairs.jsonl*.bak"))) == 3
+
+
+def test_summary_line_carries_the_compaction():
+    line = ser.run_summary(newly_judged=5, from_cache=1, above_floor_total=10,
+                           selected=6, min_score=4.0,
+                           compact={"kept": 40, "dropped": 3, "backup": None})
+    assert "compact: kept 40 dropped 3" in line
+    assert line.count("\n") == 0
+    assert "compact" not in ser.run_summary(1, 0, None, 1, 4.0), \
+        "a replay judges nothing and reports no compaction"
