@@ -770,6 +770,57 @@ def test_the_no_spam_fixture_is_live():
         "case has quietly become a positive one")
 
 
+def test_the_supervisord_restart_alert_carries_evidence_to_the_ledger(tmp_path, monkeypatch):
+    """Clause 4 of #1178, the supervisord half. Every `supervisord was
+    unreachable` row in the ledger carried `evidence: ""`, so the 2026-09-15
+    oomd kill of the whole unit (620 processes) and a slow socket left the same
+    record. The site must hand `notify.alert(evidence=)` what it saw — the
+    streak, the probe's own error string and the restart's rc — and the row
+    must carry it. Run through the real Notifier with external channels off so
+    the assertion is on the ledger file, not on a stub's kwargs; `systemctl` is
+    intercepted, because the real call would restart production's supervisor."""
+    import subprocess
+    import types
+
+    import gstate
+    import guardian as G
+    import policy
+
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "s"),
+        guardian_state=str(tmp_path / "g"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0, no_external_alerts=True,
+    )
+    g = G.Guardian(args)
+    for quiet in ("drain_logs", "check_vault", "check_data", "check_memory"):
+        monkeypatch.setattr(g, quiet, lambda: None)
+    monkeypatch.setattr(g, "collect", lambda: {
+        "now": NOW, "supervisord": "unreachable", "procs": {}, "probes": {},
+        "supervisord_error": "[Errno 111] Connection refused (/tmp/agent-supervisor.sock)"})
+    ran: list = []
+
+    def _fake_run(argv, **kw):
+        ran.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(G.subprocess, "run", _fake_run)
+    g.sup_down_streak = policy.SUPERVISORD_DOWN_STREAK - 1
+
+    assert g.tick() == "infra_down"
+    assert ran == [["systemctl", "--user", "restart", policy.SUPERVISORD_UNIT]]
+
+    rows = [r for r in gstate.read_events(g.state.ledger)
+            if r.get("event") == "alert" and r.get("title") == SUPERVISORD_RESTART[0]]
+    assert len(rows) == 1, rows
+    evidence = rows[0]["evidence"]
+    assert evidence, "the ledger row still carries no evidence"
+    assert "Connection refused" in evidence, evidence
+    assert f"{policy.SUPERVISORD_DOWN_STREAK} consecutive ticks" in evidence, evidence
+    assert "rc=0" in evidence, evidence
+    assert rows[0]["body"] == SUPERVISORD_RESTART[1], "the body is the no-spam fixture; evidence rides beside it"
+
+
 def test_needs_human_flag_routes_an_alert_that_never_says_so(tmp_path):
     """Clause 3. The family has three members and only two say the words.
     "Guardian self-test failed" — fired 2026-09-10T13:26:58Z and

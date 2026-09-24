@@ -320,6 +320,32 @@ def test_a_candidate_whose_vault_tripwire_no_longer_trips_is_still_refused(tmp_p
         "a broken candidate must leave the existing snapshot installed"
 
 
+def test_a_refusal_names_the_check_that_failed(tmp_path):
+    """Clause 2 of #1178: the journal line that used to be the ONLY record of a
+    declined candidate named nothing. Both refusals of 2026-09-10/09-15 read
+    `REFUSING: candidate guardian failed selftest` and which check failed was
+    unknowable, because the script piped the selftest's `[FAIL]` lines to
+    /dev/null. Same broken candidate as the tripwire test above; here the
+    assertion is that stderr carries the check's own name ahead of REFUSING.
+    """
+    env, home = _machine(tmp_path)
+    candidate = _candidate(tmp_path)
+    with (candidate / "vaultwatch.py").open("a", encoding="utf-8") as f:
+        f.write("\n\n# BROKEN CANDIDATE (test injection): a wipe reads as ordinary churn.\n"
+                "def evaluate(history, current, **kw):\n"
+                "    return False\n")
+    proc = subprocess.run(["bash", str(_stage_script(tmp_path, candidate))],
+                          env=env, capture_output=True, text=True)
+    assert proc.returncode != 0
+    lines = proc.stderr.splitlines()
+    named = [ln for ln in lines if "[FAIL] vault tripwire judges and measures" in ln]
+    assert named, f"the refusal names no check:\n{proc.stderr}"
+    refusing = [i for i, ln in enumerate(lines) if "REFUSING" in ln]
+    assert refusing and lines.index(named[0]) < refusing[0], \
+        "the check name must reach the journal before the REFUSING line"
+    assert not list(_snapshot_dir(home).glob("*.py"))
+
+
 def test_the_stage_script_gates_on_the_staging_profile_and_nothing_else():
     """The single line that decides promotion asks for `--profile staging`.
 

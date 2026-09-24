@@ -1082,13 +1082,32 @@ class Guardian:
             if self.sup_down_streak >= policy.SUPERVISORD_DOWN_STREAK:
                 # Invariant 2: never a code trigger.
                 log("supervisord unreachable — restarting the unit, NOT rolling back code")
-                subprocess.run(
+                res = subprocess.run(
                     ["systemctl", "--user", "restart", policy.SUPERVISORD_UNIT],
                     capture_output=True, timeout=60, check=False,
                 )
+                # The body says what was done; the evidence says what was seen.
+                # Until #1178 every row for this title carried `evidence: ""`,
+                # so the 2026-09-15 oomd kill of the whole unit read the same
+                # as a slow socket. The probe error is the socket's own words
+                # and the restart rc says whether the remedy took.
+                # getattr, not attribute access: evidence is a nicety, and an
+                # alert that raised here would cost the restart's own report.
+                stderr = (getattr(res, "stderr", None) or b"")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", "replace")
+                stderr = str(stderr).strip()
+                evidence = (
+                    f"- unreachable for {self.sup_down_streak} consecutive ticks "
+                    f"(threshold {policy.SUPERVISORD_DOWN_STREAK}, tick {self.interval:g}s)\n"
+                    f"- last probe error: {snap.get('supervisord_error') or '(none recorded)'}\n"
+                    f"- systemctl --user restart {policy.SUPERVISORD_UNIT}: rc={getattr(res, 'returncode', '?')}"
+                    + (f" stderr={stderr[:300]}" if stderr else "")
+                )
                 self.alert("error", "supervisord was unreachable",
                            "Restarted agent-supervisord.service. No code was reverted — "
-                           "an unreachable supervisor is infrastructure, not a bad promotion.")
+                           "an unreachable supervisor is infrastructure, not a bad promotion.",
+                           evidence=evidence)
                 self.sup_down_streak = 0
             return "infra_down"
         self.sup_down_streak = 0

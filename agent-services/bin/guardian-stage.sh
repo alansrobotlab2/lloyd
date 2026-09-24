@@ -50,7 +50,14 @@ fi
 # 2. Does it still pass the self-check that a cold boot is able to pass? See
 #    the header: the stack-dependent checks are excluded here and judged by the
 #    running guardian's daily run instead.
-if ! ( cd "$STAGE" && /usr/bin/python3 selftest.py --profile staging >/dev/null 2>&1 ); then
+#    The verdict lines are kept and the failing checks go to the journal ahead
+#    of the refusal: a REFUSING line that named no check is why neither
+#    refusal of 2026-09-10/09-15 could be diagnosed afterwards (#1178). A run
+#    that died before printing a verdict is shown by its last lines instead.
+if ! selftest_out="$(cd "$STAGE" && /usr/bin/python3 selftest.py --profile staging 2>&1)"; then
+    detail="$(printf '%s\n' "$selftest_out" | grep -E '^ *\[FAIL\]' \
+              || printf '%s\n' "$selftest_out" | tail -n 5)"
+    while IFS= read -r line; do log "selftest: $line"; done <<< "$detail"
     log "REFUSING: candidate guardian failed its stack-independent selftest — keeping existing snapshot"
     exit 1
 fi
