@@ -55,6 +55,7 @@ from datetime import datetime
 from typing import Any, AsyncIterator
 
 from app import event_log as _event_log
+from app import compaction_record as _compaction_record
 from app import prefix_miss as _prefix_miss
 from app.sessions_io import _append_messages
 from app.transcript_entries import (
@@ -114,6 +115,17 @@ class _RunRecorder:
         # (app/prefix_miss.py) — one definition, two writers.
         self.miss = _prefix_miss.TurnMissTracker.for_turn(
             session_id, turn_id, label=source)
+        # Which context policy rewrote this run's history (#1078). Registered
+        # here rather than at the relief site because this object is the one
+        # that writes the run's usage row, and the loop finds records by
+        # `options.session_id` — which for a background run is this same
+        # `session_id`. These are the runs that actually burn the ladder
+        # (deep-research, autotriage, boardsteward), so a field wired only on
+        # the chat path would leave the mechanism's real traffic unrecorded.
+        # Turn-start compaction is deliberately absent: a background run builds
+        # its own message list and never calls `load_and_compact_session`, so
+        # there is no decision to record, and NULL for that half is the truth.
+        self.compaction = _compaction_record.start_turn(session_id, turn_id)
 
     # -- helpers ---------------------------------------------------------
     async def _append(self, entries: list[dict]) -> None:
@@ -158,6 +170,10 @@ class _RunRecorder:
                 num_turns=stats.get("num_turns"),
                 reprefill_tokens=stats.get("reprefill_tokens"),
                 prefix_misses=stats.get("prefix_misses"),
+                # Which relief passes this run's own loop booked against its
+                # session id (#1078). Read at insert time, so passes that land
+                # after the `result` event are in the row too.
+                compaction=self.compaction,
             )
         except Exception as exc:      # noqa: BLE001 — accounting is not the run
             logger.warning("run_recorder: usage row failed for %s: %s",

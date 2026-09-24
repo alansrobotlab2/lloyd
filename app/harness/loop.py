@@ -1125,19 +1125,24 @@ def _merge_usage(acc: dict[str, int], chunk: dict[str, Any]) -> dict[str, int]:
 
 def _log_harness_event(
     session_id: str, event: str, data: dict[str, Any],
+    *, turn_id: str | None = None,
 ) -> None:
     """Append one event to the session's event log, or give up quietly.
 
     Lazy and guarded: `app.harness` is importable without a full app
     bootstrap (bench scripts and `app/harness/tests` rely on that), and a
     turn must never die because its diagnostics could not be written.
+
+    `turn_id` is optional because most callers here have only ever had a
+    session; the relief record passes the run's own, so one firing can be
+    attributed to the turn that needed it (#1078).
     """
     if not session_id:
         return
     try:
         from app import event_log
 
-        event_log.log_event(session_id, event, data)
+        event_log.log_event(session_id, event, data, turn_id=turn_id)
     except Exception as exc:  # noqa: BLE001
         logger.debug("loop: could not log %s: %s", event, exc)
 
@@ -1463,7 +1468,59 @@ def _relieve_context(
             "(rungs tried: %s)%s",
             reason, after, target, ", ".join(report["rungs"]) or "none", tail,
         )
+    _record_relief_pass(options, report, iteration=iteration)
     return report
+
+
+def _record_relief_pass(
+    options: Any,
+    report: dict[str, Any],
+    *,
+    iteration: int = 0,
+) -> None:
+    """Publish one relief pass that ran at least one rung (#1078).
+
+    Two places, and both live here rather than at the ladder's four call sites
+    so a new caller cannot forget one: the overflow-recovery, pre-request and
+    terminal-inject paths own no `report` variable of their own, and before this
+    function none of them could be attributed at all. The line above this call
+    named the rungs and the tokens and no session — 7,253 of them in a 5.6-day
+    window, 0 with a session on them — which is why the count has to come from
+    an event, not from the log.
+
+    * **The event** is the record that carries the session id, and it is the only
+      one that survives a turn which never reaches its usage row (killed by the
+      deadline, or a `run_query` caller that books nothing).
+    * **The note** hands the pass to the turn's compaction record, which whoever
+      writes the usage row reads back. Missed here, the pass is absent from the
+      column with no other trace — which is exactly what NULL is reserved for,
+      so a silent skip would lie about a measured turn.
+    """
+    session_id = getattr(options, "session_id", "") or ""
+    if not report.get("rungs") or not session_id:
+        return
+
+    data: dict[str, Any] = {
+        "reason": report.get("reason", ""),
+        "rungs": list(report.get("rungs") or ()),
+        "freed_tokens": int(report.get("freed_tokens") or 0),
+        "iteration": iteration,
+    }
+    for key in ("used_before", "used_after", "target", "passes", "rearm"):
+        value = report.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            data[key] = value
+
+    _log_harness_event(
+        session_id, "harness.context_relief", data,
+        turn_id=getattr(options, "turn_id", "") or None,
+    )
+    try:
+        from app import compaction_record
+
+        compaction_record.note_relief(session_id, report)
+    except Exception as exc:  # noqa: BLE001 — never lose a turn over accounting
+        logger.debug("loop: relief pass not booked on the usage record: %s", exc)
 
 
 def _intra_turn_microcompact(

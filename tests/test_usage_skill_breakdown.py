@@ -523,29 +523,14 @@ def _pristine_messages_module(monkeypatch):
     fail these tests for a reason that has nothing to do with this change, and
     quietly skipping the stub would make them vacuous.
 
-    The copy is loaded from the same file, so it executes the same statements.
-    Nothing is shared that could leak into the app: walking the module's AST shows
-    its only top-level effects are `router = APIRouter()` and a logger, so the copy
-    registers routes on its own unused router and keeps its own session-queue dict.
+    The mechanism lives in `tests/_messages_copy.py` now, shared with
+    `tests/test_compaction_record.py`, which drives the same router for #1078. The
+    review of that round refused on exactly this point: the copy's `__globals__`
+    subtlety is the thing a test gets wrong silently, and it existed twice.
     """
-    import importlib.util
-    import inspect as _inspect
-    import sys
+    from tests._messages_copy import load_messages_copy
 
-    import app.routers.messages as msg
-
-    name = "messages_under_skill_test"
-    path = _inspect.getsourcefile(msg)
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    # Registered while executing: the module's own `from app...` imports are fine,
-    # and a dataclass or pydantic model defined inside needs the name resolvable.
-    monkeypatch.setitem(sys.modules, name, mod)
-    spec.loader.exec_module(mod)
-    assert mod._run_turn.__code__.co_name == "_run_turn", (
-        "the copy's `_run_turn` is not the router's own function"
-    )
-    return mod
+    return load_messages_copy(monkeypatch, name="messages_under_skill_test")
 
 
 async def _drive_run_turn(tmp_path, monkeypatch, *, prefetched, events,

@@ -121,6 +121,17 @@ def _init_schema(conn: sqlite3.Connection):
     # rows out rather than reading them as a skill that cost nothing.
     if "skills" not in usage_cols:
         conn.execute("ALTER TABLE usage ADD COLUMN skills TEXT")
+    # The context-policy dimension (#1078): a JSON object naming which
+    # mechanism rewrote this turn's history and how much it freed. Additive on
+    # the same path as the skill column for the same reason — the live store is
+    # the dashboard's only history, so a recreated table would discard it.
+    # NULL here means UNMEASURED: a row from before this column, or a turn
+    # whose writer never reached either mechanism. It is never the value of "a
+    # mechanism fired and removed nothing" — that is a record whose
+    # `tokens_freed` is 0, which `app/compaction_record.py` guarantees by
+    # returning a record for any pass that ran a rung.
+    if "compaction" not in usage_cols:
+        conn.execute("ALTER TABLE usage ADD COLUMN compaction TEXT")
 
 
 def _skills_column(
@@ -159,6 +170,52 @@ def _skills_column(
     return json.dumps(entries, sort_keys=True)
 
 
+def _compaction_column(compaction: Any) -> Optional[str]:
+    """Normalise a turn's context-policy record into the stored JSON, or None.
+
+    Accepts what `app/compaction_record.py` hands over — a `TurnCompaction`
+    (asked for its `to_record()`), a plain mapping, or None — and stores None
+    as NULL, meaning *unmeasured*. An empty mapping is NULL too, because an
+    empty record is what "measured nothing" looks like once built; a mechanism
+    that fired and freed nothing is a non-empty record with a zero in it, which
+    is stored, not dropped.
+
+    Nothing here raises, for the reason `record_usage`'s callers give: the
+    insert sits inside a `try` whose failure drops the token row with it, so
+    accounting that can throw is accounting that costs a turn its usage. The
+    one real failure mode — a value JSON cannot encode — is contained by
+    `default=str`, which can only fail on an object whose own `str()` throws.
+    """
+    to_record = getattr(compaction, "to_record", None)
+    if callable(to_record):
+        try:
+            compaction = to_record()
+        except Exception:  # noqa: BLE001 — never lose the token row over this
+            return None
+    if not compaction:
+        return None
+    if isinstance(compaction, str):
+        # A caller that already serialised its record still lands, rather than
+        # being stored as a JSON string of a string no reader would parse. But
+        # the column's contract is an OBJECT, so only an object passes: `"[]"`
+        # is valid JSON and would otherwise be stored as a record that every
+        # reader's `.get("mechanisms")` reads as empty — a shape that looks
+        # measured and is not.
+        try:
+            parsed = json.loads(compaction)
+        except ValueError:
+            return None
+        if not isinstance(parsed, dict) or not parsed:
+            return None
+        return compaction
+    if not isinstance(compaction, Mapping):
+        return None
+    try:
+        return json.dumps(dict(compaction), sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return None
+
+
 def record_usage(
     session_id: str,
     model: str,
@@ -173,6 +230,7 @@ def record_usage(
     reprefill_tokens: Optional[int] = None,
     prefix_misses: Optional[int] = None,
     skills: Optional[Sequence[Mapping[str, Any]]] = None,
+    compaction: Any = None,
 ):
     """Insert a single usage record.
 
@@ -184,6 +242,12 @@ def record_usage(
     output of `app.harness.skill_dispatch.skill_deliveries` over the text the
     turn was prompted with (#783). Nothing here decides which skills were
     delivered; the store only records what the turn's own writer saw.
+
+    `compaction` is the turn's context-policy record (#1078): which of Lloyd's
+    mechanisms rewrote the history this turn was prompted with, and how many
+    tokens each removed. Like the two dimensions above, nothing here decides
+    what fired — it stores what the turn's own writer saw, and NULL means that
+    writer measured nothing.
     """
     conn = _conn()
     conn.execute(
@@ -191,12 +255,13 @@ def record_usage(
            (session_id, model, input_tokens, output_tokens,
             cache_create, cache_read, cost_usd,
             duration_ms, duration_api_ms, num_turns,
-            reprefill_tokens, prefix_misses, skills)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            reprefill_tokens, prefix_misses, skills, compaction)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (session_id, model, input_tokens, output_tokens,
          cache_create, cache_read, cost_usd,
          duration_ms, duration_api_ms, num_turns,
-         reprefill_tokens, prefix_misses, _skills_column(skills)),
+         reprefill_tokens, prefix_misses, _skills_column(skills),
+         _compaction_column(compaction)),
     )
     conn.commit()
 

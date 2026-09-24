@@ -656,6 +656,319 @@ def test_context_pressure_notice_stops_offering_read_to_a_turn_that_cannot_use_i
         "the wording a turn that owns Read depends on moved")
 
 
+# ---------------------------------------------------------------------------
+# Which mechanism fired, recorded per turn (#1078)
+# ---------------------------------------------------------------------------
+#
+# Until this section, the only trace of the turn-start stack was one `logger.info`
+# line inside `if truncated or summarized or microcompacted:` — so the two
+# questions the item names were both unanswerable. A reader of
+# `logs/server.err*` could not tell "the summarize layer ran and declined" from
+# "the turn never reached it", and 9 days of logs with `summarized=True`
+# appearing 0 times could not say whether `compaction.mode: summarize` was dead
+# configuration or alive and simply not needed.
+
+
+def _big_history(turns: int = 50, chars: int = 4_000) -> list[dict]:
+    """A conversation over the compaction threshold without touching the LLM."""
+    msgs: list[dict] = []
+    for _ in range(turns):
+        msgs.append(_mk("user", chars))
+        msgs.append(_mk("assistant", chars))
+    return msgs
+
+
+def _events_for(tmp_dir, session_stem: str) -> list[dict]:
+    """This session's rows, read from the directory the CALLER points at.
+
+    Every caller reaches here after `_stub(event_log, "EVENT_LOGS_DIR", ...)` to
+    that same path, so reading the module attribute would give the same answer —
+    but then the argument would name one path while the code read another, which
+    is how a helper ends up asserting about a directory no test wrote to. Reading
+    the argument means a caller that forgets its stub gets an empty list and a
+    failing assertion, not a file someone else's test happened to leave behind.
+    """
+    path = Path(tmp_dir) / f"{session_stem}.events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in
+            path.read_text().splitlines() if line.strip()]
+
+
+def _turn_start_events(tmp_dir, session_stem: str) -> list[dict]:
+    return [e for e in _events_for(tmp_dir, session_stem)
+            if e["event"] == "compaction.turn_start"]
+
+
+def _record(out: dict) -> dict:
+    """The record this turn's writers would store — one shared projection."""
+    from app.compaction_record import turn_start_record
+
+    record = turn_start_record(out)
+    assert record is not None, (
+        "the stack ran on this history, so it must produce a record; None is "
+        "reserved for a turn that never reached it"
+    )
+    return record
+
+
+def test_a_truncating_turn_records_the_layer_that_acted_with_its_numbers():
+    """The clause's first half: which of microcompact/summarize/truncate acted,
+    and tokens before and after. `tokens_after` is the truncated estimate, so
+    the pair is the real amount removed rather than a rung count — the number
+    #600's gate needs to say a mechanism actually moved the history.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "s.json"
+        _write_session(p, _big_history())
+        out = _run(load_and_compact_session(
+            p, model="qwen-unknown", mode_override="truncate"))
+
+    record = _record(out)
+    assert out["truncated"] is True
+    assert record["mechanisms"] == ["truncate"], record["mechanisms"]
+    assert record["tokens_before"] == out["tokens_before"]
+    assert record["tokens_after"] == out["tokens_after"]
+    assert record["tokens_freed"] == out["tokens_before"] - out["tokens_after"]
+    assert record["tokens_freed"] > 0
+    assert record["ran"] is True
+
+
+def test_a_summarize_pass_that_ran_and_declined_is_not_recorded_as_unreached():
+    """The clause's second half, and the item's central distinction.
+
+    The summarize layer was entered, called the summary model, got nothing back,
+    and the turn fell through to truncate. `summarized` is False — which is the
+    same flag value a turn under the threshold carries — so the flag alone cannot
+    answer "did the layer have its chance". `summarize_attempted` and
+    `summarize_outcome` can, and they are why `summarized=True` appearing zero
+    times in a log window stopped being evidence of anything.
+    """
+    import app.compaction_llm as llm_mod
+    import tempfile
+
+    async def _empty_summary(*args, **kwargs):
+        return ""
+
+    undo = _stub(llm_mod, "summarize_history", _empty_summary)
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "s.json"
+            _write_session(p, _big_history())
+            out = _run(load_and_compact_session(
+                p, model="qwen-unknown", mode_override="summarize"))
+    finally:
+        undo()
+
+    record = _record(out)
+    assert out["summarized"] is False
+    assert record["summarize_attempted"] is True
+    assert record["summarize_outcome"] == "empty_summary"
+    # Declining to summarize is not the same as the layer not running, and the
+    # history was still rewritten — by the fallback, which is named.
+    assert record["mechanisms"] == ["truncate"]
+
+
+def test_a_summarize_layer_that_could_not_be_imported_is_its_own_outcome():
+    """The one branch of this layer that ever logged anything
+    (`compaction.summarize_fallback`) said "failed to import, falling back to
+    truncate". That is a third reason for `summarized: False`, and it now has a
+    name in the record instead of a log line that rotates away.
+    """
+    import sys
+    import tempfile
+
+    saved = sys.modules.get("app.compaction_llm")
+    sys.modules["app.compaction_llm"] = None  # makes `from ... import` raise
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "s.json"
+            _write_session(p, _big_history())
+            out = _run(load_and_compact_session(
+                p, model="qwen-unknown", mode_override="summarize"))
+    finally:
+        if saved is None:
+            sys.modules.pop("app.compaction_llm", None)
+        else:
+            sys.modules["app.compaction_llm"] = saved
+
+    record = _record(out)
+    assert record["summarize_attempted"] is True
+    assert record["summarize_outcome"] == "import_failed"
+    assert out["truncated"] is True, "the fallback is what saved this turn"
+
+
+def test_a_history_under_the_threshold_records_under_threshold_not_an_absence():
+    """`summarize_attempted` False with `under_threshold` is a measurement: the
+    stack ran, read the size, and left the history alone. A turn that never
+    called this function produces no record at all (`turn_start_record(None)` is
+    None), which is what keeps NULL meaning unmeasured.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "s.json"
+        _write_session(p, [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        out = _run(load_and_compact_session(p, model="qwen"))
+
+    record = _record(out)
+    assert record["mechanisms"] == []
+    assert record["summarize_attempted"] is False
+    assert record["summarize_outcome"] == "under_threshold"
+    assert record["tokens_before"] == record["tokens_after"]
+
+
+def test_a_truncate_mode_turn_records_the_mode_as_the_reason_it_skipped():
+    """Under `mode: truncate` the summarize layer is skipped by configuration.
+    That reads identically to "under threshold" in every flag the old record
+    carried, and it is the answer to the dead-configuration question itself: if
+    every row says `mode_truncate`, the summarize mode is not running.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d) / "s.json"
+        _write_session(p, _big_history())
+        out = _run(load_and_compact_session(
+            p, model="qwen-unknown", mode_override="truncate"))
+
+    record = _record(out)
+    assert record["summarize_attempted"] is False
+    assert record["summarize_outcome"] == "mode_truncate"
+
+
+def test_ran_and_declined_is_a_different_answer_from_never_reached():
+    """The two turns this clause separates, side by side in one assertion,
+    through the object that actually reaches the database.
+    """
+    from app.compaction_record import TurnCompaction
+
+    declined = TurnCompaction(session_id="s", turn_id="t")
+    declined.note_turn_start({
+        "tokens_before": 5_000, "tokens_after": 5_000,
+        "summarize_attempted": False, "summarize_outcome": "under_threshold",
+    })
+    never_reached = TurnCompaction(session_id="s", turn_id="t")
+
+    assert declined.to_record()["turn_start"]["summarize_outcome"] == \
+        "under_threshold"
+    assert never_reached.to_record() is None, (
+        "a turn whose writers never called the stack stores NULL, not a decline"
+    )
+
+
+def test_a_rewrite_emits_one_event_carrying_the_session_id():
+    """The event half of the record, and the half that survives a rotation.
+
+    The session id is the session file's stem, which is what makes the join
+    possible: the relief ladder's 7,253 summary lines in the retained window
+    carried none, and `grep "context relief" | grep -cE "session="` returned 0 of
+    7,253 — attribution had to come from a new record, not from the log.
+    """
+    from app import event_log
+
+    stem = "20260924_070000_mission-control_a1b2"
+    with tempfile.TemporaryDirectory() as ev, tempfile.TemporaryDirectory() as d:
+        undo = _stub(event_log, "EVENT_LOGS_DIR", Path(ev))
+        try:
+            p = Path(d) / f"{stem}.json"
+            _write_session(p, _big_history())
+            out = _run(load_and_compact_session(
+                p, model="qwen-unknown", mode_override="truncate"))
+            events = _turn_start_events(Path(ev), stem)
+        finally:
+            undo()
+
+    assert len(events) == 1, f"expected exactly one event, got {events}"
+    assert events[0]["session_id"] == stem
+    assert events[0]["data"]["mechanisms"] == ["truncate"]
+    assert events[0]["data"]["tokens_freed"] == \
+        out["tokens_before"] - out["tokens_after"]
+
+
+def test_a_declined_turn_start_emits_no_event():
+    """Events are rewrites; decisions are the usage column.
+
+    The two stores answer different questions and must not be summed: a count of
+    rows with a non-NULL `compaction` counts turns the stack saw, and a
+    per-session event count counts rewrites. An event on every turn would make
+    the second number the first, and the ladder's firing rate would disappear
+    into turn volume.
+    """
+    from app import event_log
+
+    stem = "20260924_070000_mission-control_c3d4"
+    with tempfile.TemporaryDirectory() as ev, tempfile.TemporaryDirectory() as d:
+        undo = _stub(event_log, "EVENT_LOGS_DIR", Path(ev))
+        try:
+            p = Path(d) / f"{stem}.json"
+            _write_session(p, [{"role": "user", "content": "hi"}])
+            _run(load_and_compact_session(p, model="qwen"))
+            events = _events_for(Path(ev), stem)
+        finally:
+            undo()
+
+    assert events == [], f"a turn that rewrote nothing must emit nothing: {events}"
+
+
+def test_a_microcompact_only_rewrite_below_the_summarize_threshold_still_emits():
+    """Why the retained window held 7,253 relief passes and 0 `[compaction]`
+    lines: the pre-pass runs ahead of the threshold check (`token_budget=None`
+    below the trigger, but the pass itself is unconditional), so a turn can be
+    rewritten while the summarize layer is never entered. A record keyed on the
+    summarize layer's decision would miss every one of those, and the mechanism
+    that fires most would be the one mechanism not recorded.
+    """
+    from app import event_log
+    import app.harness.microcompact as mc_mod
+
+    def _clear_one_third(messages, **kwargs):
+        return list(messages), 3
+
+    stem = "20260924_070000_mission-control_e5f6"
+    with tempfile.TemporaryDirectory() as ev, tempfile.TemporaryDirectory() as d:
+        undo_ev = _stub(event_log, "EVENT_LOGS_DIR", Path(ev))
+        undo_mc = _stub(mc_mod, "microcompact", _clear_one_third)
+        try:
+            p = Path(d) / f"{stem}.json"
+            _write_session(p, [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello"},
+            ])
+            out = _run(load_and_compact_session(p, model="qwen"))
+            events = _turn_start_events(Path(ev), stem)
+        finally:
+            undo_mc()
+            undo_ev()
+
+    assert out["microcompacted"] == 3
+    record = _record(out)
+    assert record["mechanisms"] == ["microcompact"]
+    assert record["summarize_attempted"] is False, (
+        "this turn never reached the summarize layer, and the event exists anyway"
+    )
+    assert len(events) == 1, events
+    assert events[0]["data"]["mechanisms"] == ["microcompact"]
+
+
+def _stub(module, name, replacement):
+    """setattr-with-restore, for the tests in this file that cannot take a
+    `monkeypatch` fixture because they are also listed in `_TESTS` and run under
+    `python -m tests.test_compaction`.
+    """
+    saved = getattr(module, name)
+
+    def _undo():
+        setattr(module, name, saved)
+    setattr(module, name, replacement)
+    return _undo
+
+
 _TESTS = [
     test_estimate_tokens_returns_int,
     test_estimate_tokens_empty_string,
@@ -685,6 +998,15 @@ _TESTS = [
     test_spill_notice_stops_offering_read_to_a_turn_that_cannot_use_it,
     test_the_spill_notice_is_unchanged_for_a_turn_that_has_read,
     test_context_pressure_notice_stops_offering_read_to_a_turn_that_cannot_use_it,
+    test_a_truncating_turn_records_the_layer_that_acted_with_its_numbers,
+    test_a_summarize_pass_that_ran_and_declined_is_not_recorded_as_unreached,
+    test_a_summarize_layer_that_could_not_be_imported_is_its_own_outcome,
+    test_a_history_under_the_threshold_records_under_threshold_not_an_absence,
+    test_a_truncate_mode_turn_records_the_mode_as_the_reason_it_skipped,
+    test_ran_and_declined_is_a_different_answer_from_never_reached,
+    test_a_rewrite_emits_one_event_carrying_the_session_id,
+    test_a_declined_turn_start_emits_no_event,
+    test_a_microcompact_only_rewrite_below_the_summarize_threshold_still_emits,
 ]
 
 

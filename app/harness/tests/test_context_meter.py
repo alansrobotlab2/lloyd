@@ -477,3 +477,224 @@ def test_relief_target_tracks_the_configured_microcompact_target():
     m = ContextMeter(262_144)
     opts = _opts(intra_turn_microcompact_target_fraction=0.52)
     assert _relief_target(opts, m) == int(m.threshold * 0.52)
+
+
+# ---------------------------------------------------------------------------
+# A relief pass leaves a record that says which session it freed (#1078)
+# ---------------------------------------------------------------------------
+#
+# The item's own measurement: the ladder emitted 7,253 `loop: context relief
+# (...) freed ~N tokens ... via <rungs>` lines across the retained log window and
+# `grep "context relief" | grep -cE "session="` matched 0 of them. The numbers
+# existed and belonged to nobody — not to a session, not to a turn — so "how many
+# relief passes did THIS run need" was unanswerable from any store, and grepping
+# could not have answered it either. These tests pin the record that replaced that
+# silence, including the pass the log line does not cover.
+
+
+def _relief_events(events_dir, session_id: str) -> list[dict]:
+    path = events_dir / f"{session_id}.events.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in
+            path.read_text().splitlines() if line.strip()]
+
+
+def _reasoning_msgs(n: int = 12) -> list[dict]:
+    """A history with something the ladder can actually take back.
+
+    Twelve preserved reasoning blocks is the shape the neighbouring relief tests
+    use: `reasoning` is rung 2's material, and a plain text history gives the
+    ladder nothing to run, which would test the emitter's absence rather than its
+    contents.
+    """
+    return [
+        {"role": "assistant", "content": f"m{i}", "reasoning": "R" * 40_000,
+         "reasoning_content": "R" * 40_000}
+        for i in range(n)
+    ]
+
+
+def test_a_relief_pass_emits_one_event_with_rungs_tokens_and_session(
+    tmp_path, monkeypatch,
+):
+    """Clause 2: one record naming the rungs that ran, the tokens freed, and the
+    session. `freed_tokens` is the half the log line already had; `session_id` is
+    the half it did not, and it is the only thing that makes a per-session count
+    answerable from `event_logs/<session>.events.jsonl`.
+    """
+    from app import event_log
+    from app.harness.loop import _relieve_context
+
+    monkeypatch.setattr(event_log, "EVENT_LOGS_DIR", tmp_path)
+    msgs = _reasoning_msgs()
+    meter = _pressured(msgs)
+    opts = _opts(session_id="s1078_emit")
+    opts.turn_id = "run-1078"
+    report = _relieve_context(
+        msgs, options=opts, meter=meter, reason="intra_turn",
+    )
+
+    events = _relief_events(tmp_path, "s1078_emit")
+    assert len(events) == 1, f"expected exactly one event, got {events}"
+    event, data = events[0], events[0]["data"]
+    assert event["session_id"] == "s1078_emit"
+    assert event["event"] == "harness.context_relief"
+    assert data["rungs"] == report["rungs"], (
+        "the event names the rungs the caller sees, not a re-derivation of them"
+    )
+    assert "tool_results" in data["rungs"]
+    assert data["freed_tokens"] == report["freed_tokens"]
+    assert data["used_before"] == report["used_before"]
+    assert data["used_after"] == report["used_after"]
+    assert data["used_before"] - data["used_after"] == data["freed_tokens"]
+    assert data["reason"] == "intra_turn"
+    assert event["turn_id"] == "run-1078", (
+        "the run's own turn id travels on the event, so a firing is attributable "
+        "to the turn that needed it and not only to the session that contained it"
+    )
+
+
+def test_the_firing_is_countable_per_session_from_the_event_log(
+    tmp_path, monkeypatch,
+):
+    """The clause's actual claim: a per-session count, from the non-rotating
+    store. Two sessions, two passes and one; each file's count is that session's
+    own number, which is the question the anonymous log lines could not answer —
+    summing a log that never named an owner cannot produce a per-session figure.
+    """
+    from app import event_log
+    from app.harness.loop import _relieve_context
+
+    monkeypatch.setattr(event_log, "EVENT_LOGS_DIR", tmp_path)
+    for session_id, times in (("s1078_busy", 2), ("s1078_quiet", 1)):
+        msgs = _reasoning_msgs()
+        meter = _pressured(msgs)
+        for _ in range(times):
+            _relieve_context(
+                msgs, options=_opts(session_id=session_id), meter=meter,
+                reason="intra_turn",
+            )
+
+    busy = _relief_events(tmp_path, "s1078_busy")
+    quiet = _relief_events(tmp_path, "s1078_quiet")
+    assert len(busy) == 2, busy
+    assert len(quiet) == 1, quiet
+    assert all(e["event"] == "harness.context_relief" for e in busy + quiet)
+
+
+def test_a_pass_that_ran_a_rung_and_freed_nothing_is_still_recorded(
+    tmp_path, monkeypatch,
+):
+    """The one case a grep-shaped record would lose.
+
+    `freed_tokens == 0` with a rung that ran is the symptom "the ladder engaged
+    and could not reach its target" — distinct from "the ladder never engaged",
+    which is a statement about configuration. The log line is behind
+    `if report["rungs"] and report["freed_tokens"]:`, so it prints nothing here;
+    the record is what keeps the two apart, and it is why NULL stays reserved for
+    "did not look".
+    """
+    from app import compaction_record, event_log
+    from app.harness.loop import _relieve_context
+
+    monkeypatch.setattr(event_log, "EVENT_LOGS_DIR", tmp_path)
+    # The writer opens the turn first, as `messages.py` / `run_recorder` do; the
+    # loop then books its pass into it without ever meeting this object.
+    turn = compaction_record.start_turn("s1078_zero")
+    msgs = _reasoning_msgs()
+    meter = _pressured(msgs)
+    # Every rung kept at "keep everything", so each one runs and none of them
+    # takes anything back: rung 1 appends `tool_results` on the strength of
+    # having been attempted, which is what makes rungs non-empty at zero freed.
+    opts = _opts(session_id="s1078_zero",
+                 preserve_thinking_iterations=12,
+                 context_relief_reasoning_keep_under_pressure=12)
+    report = _relieve_context(msgs, options=opts, meter=meter, reason="probe")
+    assert report["rungs"], "this pass has to have run a rung to be the case we mean"
+    assert report["freed_tokens"] == 0, (
+        f"expected a rung that freed nothing, got {report['freed_tokens']}"
+    )
+
+    events = _relief_events(tmp_path, "s1078_zero")
+    assert len(events) == 1, (
+        "a pass that ran a rung emits even at zero freed; suppressing it is what "
+        "would make the symptom undiagnosable"
+    )
+    assert events[0]["data"]["freed_tokens"] == 0
+
+    assert compaction_record.current("s1078_zero") is turn
+    stored = turn.to_record()
+    assert stored is not None, "NULL here would read as unmeasured, and this fired"
+    assert stored["relief_tokens_freed"] == 0
+    assert stored["relief_passes"] == 1
+    assert stored["mechanisms"] == ["relief:probe"], (
+        "the turn's mechanism list is non-empty even though the prompt did not "
+        "move — named per reason, so a census of firings per reason is a count "
+        "of rows, not a sum of entries"
+    )
+
+
+def test_a_pass_for_an_ownerless_run_emits_nothing_and_raises_nothing(
+    tmp_path, monkeypatch,
+):
+    """`session_id=""` is what a `run_query` caller that passes no id looks like,
+    and `event_log.log_event` requires one. The pass must not raise — a turn that
+    dies inside its own relief path is strictly worse than one that runs a little
+    over budget — and the report must still come back with its numbers, because
+    that report is what a caller hands to a record. Eval turns are the population
+    this leaves unattributed, and that half is gated on #818, not here.
+    """
+    from app import compaction_record, event_log
+    from app.harness.loop import _relieve_context
+
+    monkeypatch.setattr(event_log, "EVENT_LOGS_DIR", tmp_path)
+    msgs = _reasoning_msgs()
+    meter = _pressured(msgs)
+    assert compaction_record.current("") is None
+
+    report = _relieve_context(
+        msgs, options=_opts(session_id=""), meter=meter, reason="overflow")
+
+    assert report["freed_tokens"] > 0
+    assert list(tmp_path.iterdir()) == [], "no file, and no crash trying"
+
+
+def test_the_event_and_the_usage_record_cannot_disagree_about_a_pass(
+    tmp_path, monkeypatch,
+):
+    """One seam, two stores.
+
+    The ladder's rung strings go into the event AND, through the same `report`,
+    into the usage row's mechanism list. If the two were built separately a
+    reader joining "sessions that fired" against "sessions whose row names a
+    mechanism" would find a contradiction that is an artefact of the code. Both
+    are now projections of the one report, so this asserts they agree.
+    """
+    from app import compaction_record, event_log
+    from app.harness.loop import _relieve_context
+
+    monkeypatch.setattr(event_log, "EVENT_LOGS_DIR", tmp_path)
+    # The writer registers the turn first — that is `messages.py:_run_turn`,
+    # `messages.py:post_message` or `run_recorder._RunRecorder.__init__` in
+    # production — and then the loop, which has never seen that object, books its
+    # pass into it by `options.session_id` alone.
+    turn = compaction_record.start_turn("s1078_join", "run-join")
+    msgs = _reasoning_msgs()
+    meter = _pressured(msgs)
+    report = _relieve_context(
+        msgs, options=_opts(session_id="s1078_join"), meter=meter,
+        reason="intra_turn")
+
+    event = _relief_events(tmp_path, "s1078_join")[0]
+    assert event["data"]["rungs"] == report["rungs"]
+    assert event["data"]["freed_tokens"] == report["freed_tokens"]
+
+    stored = turn.to_record()
+    assert stored is not None
+    assert stored["relief_passes"] == 1, (
+        "the loop booked it exactly once, with no call from this writer — a "
+        "second note for the same report would double-count the pass"
+    )
+    assert stored["relief_tokens_freed"] == report["freed_tokens"]
+    assert stored["relief"][0]["rungs"] == event["data"]["rungs"]

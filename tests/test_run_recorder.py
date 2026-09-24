@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 
 import pytest
 
@@ -53,6 +54,234 @@ def _events(store_dir):
     assert files, "no event log written"
     return [json.loads(line) for line in
             files[0].read_text().splitlines() if line.strip()]
+
+
+# ── The recorder itself ────────────────────────────────────────────────
+# ── Which context policy fired, on the run's OWN usage row (#1078) ─────
+#
+# The item's own finding: the sessions that actually burn the relief ladder are
+# the unattended ones — `20260918_175255_deepresearch_*`, `*_autotriage_*`,
+# `*_boardsteward_*` — and they reach `usage_store` through this module, not
+# through `messages.py`. A field wired only on the chat path would have recorded
+# the mechanism's traffic everywhere except where it fires. These tests drive the
+# real relief path and read the real row back.
+
+
+@pytest.fixture
+def usage_db(tmp_path, monkeypatch):
+    """An isolated `usage.db`. The recorder writes one on every run, and this
+    file's existing tests never asserted on it, so nothing isolated it before."""
+    import usage_store
+
+    monkeypatch.setattr(usage_store, "DB_PATH", tmp_path / "usage.db")
+    return tmp_path / "usage.db"
+
+
+def _usage_row(db, session_id: str) -> dict:
+    import usage_store
+
+    usage_store._conn().commit()
+    rows = list(sqlite3.connect(db).execute(
+        "SELECT compaction FROM usage WHERE session_id = ?", (session_id,)))
+    assert len(rows) == 1, f"expected one usage row, got {len(rows)}"
+    return json.loads(rows[0][0]) if rows[0][0] is not None else None
+
+
+def _relieve_midrun(session_id: str, *, turn_id: str = "run-threaded",
+                    reason: str = "intra_turn") -> dict:
+    """Relieve one pressured history the way the loop does, mid-stream.
+
+    Not a hand-built report: `_relieve_context` is the emitter, so the record
+    under test was produced by the code that produces relief in production — and
+    it is called from *inside* the event feed, so it happens while the run is
+    open, which is when a pass actually happens.
+
+    `turn_id` is set on the options the way both real background callers set it —
+    `autonomy.py:2886` passes `turn_id=run_id` into `RunOptions`, and
+    `workers/sources/_common.py:482` assigns `options.turn_id = run_id` — because
+    the emit site reads the turn off `options`, not off the recorder. An earlier
+    copy of this helper left it unset and then asserted the event carried no turn,
+    which pinned a shape production never produces.
+    """
+    from app.harness.context_meter import ContextMeter
+    from app.harness.loop import _relieve_context
+    from app.harness.options import RunOptions
+
+    msgs = [
+        {"role": "assistant", "content": f"m{i}", "reasoning": "R" * 40_000,
+         "reasoning_content": "R" * 40_000}
+        for i in range(12)
+    ]
+    meter = ContextMeter(262_144)
+    meter.observe_usage({"input_tokens": int(262_144 * 0.95)}, len(msgs))
+    meter.observe_append(msgs)
+    opts = RunOptions(model="primary", session_id=session_id,
+                      tool_search_enabled=False)
+    opts.turn_id = turn_id
+    return _relieve_context(msgs, options=opts, meter=meter, reason=reason)
+
+
+def test_an_unattended_run_that_relieves_context_records_it_on_its_own_row(
+    store, usage_db,
+):
+    """Clause 4. The relief happens inside the stream, exactly as it does in a
+    live worker turn, and the run's usage row carries the rung, the tokens freed
+    and the reason — written by `run_recorder`, without `messages.py` anywhere in
+    the path.
+    """
+    sid = "20260924_080000_worker_c0mp"
+    captured: dict = {}
+
+    async def _feed():
+        yield {"type": "thinking_delta", "text": "working"}
+        captured.update(_relieve_midrun(sid))
+        yield {"type": "text_delta", "text": "done"}
+        yield {"type": "result", "stop_reason": "stop", "num_turns": 2,
+               "usage": {"input_tokens": 400_000, "output_tokens": 20}}
+
+    from app.run_recorder import record_events
+    from app.sessions_io import create_session
+
+    create_session(sid, platform="worker", model="primary", title="t",
+                   source="deep-research")
+
+    async def _go():
+        async for _ in record_events(_feed(), session_id=sid, turn_id="run1",
+                                     prompt="p", model="primary",
+                                     source="deep-research"):
+            pass
+
+    asyncio.run(_go())
+
+    record = _usage_row(usage_db, sid)
+    assert record is not None, (
+        "the run relieved context, so its row is non-NULL; NULL here means the "
+        "loop's pass never reached this writer, which is the defect #1078 names"
+    )
+    assert record["relief_passes"] == 1, record
+    assert record["relief_tokens_freed"] == captured["freed_tokens"]
+    assert record["relief"][0]["rungs"] == captured["rungs"]
+    assert record["relief"][0]["reason"] == "intra_turn"
+    assert record["mechanisms"] == ["relief:intra_turn"]
+
+
+def test_the_relief_event_for_an_unattended_run_names_its_session(
+    store, usage_db,
+):
+    """Both stores, same run.
+
+    The event log is the record that survives a run killed before its `result`
+    event — the interesting way an autonomy task ends — and it is the only place
+    a killed run's relief passes exist at all. A row and an event that disagree
+    would make the two numbers that should corroborate each other a bug report.
+    """
+    sid = "20260924_080000_worker_c1nt"
+    run_id = "run2"
+
+    async def _feed():
+        yield {"type": "text_delta", "text": "x"}
+        # Same id on both sides, which is what production does: the caller that
+        # hands `turn_id` to `record_events` is the one that put it on the
+        # RunOptions the relief pass then reads (`autonomy.py:2886`,
+        # `workers/sources/_common.py:482`).
+        _relieve_midrun(sid, turn_id=run_id, reason="overflow")
+        yield {"type": "result", "stop_reason": "stop", "num_turns": 1,
+               "usage": {"input_tokens": 400_000}}
+
+    from app.run_recorder import record_events
+    from app.sessions_io import create_session
+
+    create_session(sid, platform="worker", model="primary", title="t",
+                   source="autotriage")
+
+    async def _go():
+        async for _ in record_events(_feed(), session_id=sid, turn_id=run_id,
+                                     prompt="p", model="primary",
+                                     source="autotriage"):
+            pass
+
+    asyncio.run(_go())
+
+    reliefs = [e for e in _events(store)
+               if e["event"] == "harness.context_relief"]
+    assert len(reliefs) == 1, reliefs
+    assert reliefs[0]["session_id"] == sid, (
+        "the item's narrower defect: 7,253 relief lines with no session on any of "
+        "them, so a firing could not be attributed to anything"
+    )
+    assert reliefs[0]["turn_id"] == run_id, (
+        "the event names the session but not the run, so a worker session with "
+        "several runs cannot tell which one burned the ladder; the recorder "
+        "doesn't invent this — it comes from the caller's RunOptions, which both "
+        "production callers set"
+    )
+
+    record = _usage_row(usage_db, sid)
+    assert record["relief_passes"] == len(reliefs), (
+        "one firing, two stores, one number"
+    )
+
+
+def test_an_unattended_run_that_never_relieves_stores_no_record(
+    store, usage_db,
+):
+    """NULL on this writer means what it means on the chat one: nothing was
+    measured, not nothing fired. An autonomy run that never touches the ladder
+    must not read as a run whose ladder was disabled — and must not be dropped
+    from the row count that answers "how many turns did the stack see".
+    """
+    sid = "20260924_080000_worker_c2lm"
+    _drive([
+        {"type": "text_delta", "text": "quiet"},
+        {"type": "result", "stop_reason": "stop", "num_turns": 1,
+         "usage": {"input_tokens": 1_000}},
+    ], session_id=sid)
+
+    assert _usage_row(usage_db, sid) is None
+    reliefs = [e for e in _events(store)
+               if e["event"] == "harness.context_relief"]
+    assert reliefs == []
+
+
+def test_the_record_survives_a_killed_run_through_the_event_log(
+    store, usage_db,
+):
+    """The half the usage column structurally cannot cover.
+
+    A run killed at its deadline never emits `result`, so `_record_usage` never
+    runs and no row exists to populate — the recorder's own docstring names this
+    as why it writes incrementally. The event was already written when the pass
+    ran, so the firing is still attributable. This is the reason the change is
+    two stores and not one.
+    """
+    sid = "20260924_080000_worker_c3ll"
+
+    async def _feed():
+        yield {"type": "text_delta", "text": "x"}
+        _relieve_midrun(sid, reason="intra_turn")
+        # No `result` event: the run died at its timeout mid-stream.
+        return
+
+    from app.run_recorder import record_events
+    from app.sessions_io import create_session
+
+    create_session(sid, platform="worker", model="primary", title="t",
+                   source="deep-research")
+
+    async def _go():
+        async for _ in record_events(_feed(), session_id=sid, turn_id="run3",
+                                     prompt="p", model="primary",
+                                     source="deep-research"):
+            pass
+
+    asyncio.run(_go())
+
+    reliefs = [e for e in _events(store)
+               if e["event"] == "harness.context_relief"]
+    assert len(reliefs) == 1, (
+        "the pass fired and is recorded even though the run never wrote a row"
+    )
+    assert reliefs[0]["data"]["freed_tokens"] > 0
 
 
 # ── The recorder itself ────────────────────────────────────────────────

@@ -336,6 +336,36 @@ def _compaction_cfg() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _record_turn_start(session_id: str, result: dict[str, Any]) -> None:
+    """Emit one event per turn-start REWRITE (#1078).
+
+    Emitted exactly when the caller's `[compaction]` log line is emitted — same
+    condition, mechanisms non-empty — so the two can be checked against each
+    other and a reader who finds one and not the other has found a bug. Events
+    are for rewrites only; the decision to leave a history alone is recorded on
+    the turn's usage row instead, because "did this path run at all" is a
+    question answered by counting rows, and every chat turn writes one.
+
+    The session id is the session file's stem, which is why this is emitted here
+    rather than by the caller: `app/routers/voice.py` calls this function on a
+    turn that books no usage row at all, and the event log is the one store where
+    a voice turn's rewrite still lands with an owner. The manual `/compact` route
+    does NOT reach here — `_slash_compact_sse` builds its own history and calls
+    `summarize_history` directly — so a manual compaction lands in neither store,
+    a gap this change does not close.
+    """
+    from app.compaction_record import turn_start_record
+
+    try:
+        record = turn_start_record(result)
+        if not record["mechanisms"]:
+            return
+        from app.event_log import log_event
+        log_event(session_id, "compaction.turn_start", record)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("compaction: turn_start event write failed: %s", e)
+
+
 async def load_and_compact_session(
     session_path: Path | str,
     model: str = "",
@@ -374,6 +404,12 @@ async def load_and_compact_session(
       - restored_files: int, count of files re-injected post-summary
       - context_window: int, the model's configured window
       - threshold:      int, the compaction threshold in use
+      - summarize_attempted: bool, True if the summarize layer was reached
+        (history over threshold and ``mode == "summarize"``), regardless of
+        whether it summarized
+      - summarize_outcome: str, one of ``no_history``, ``under_threshold``,
+        ``mode_truncate``, ``import_failed``, ``no_older_block``,
+        ``empty_summary``, ``summarized`` — which of those paths this turn took
 
     On any error (missing file, malformed JSON), returns an empty result
     with ``history=[]`` and logs a warning. Summarization failures are
@@ -383,6 +419,12 @@ async def load_and_compact_session(
     context_window = get_context_window(model)
     threshold = truncation_threshold(context_window)
 
+    # `summarize_attempted` / `summarize_outcome` are the fields that make the
+    # dead-configuration question decidable (#1078). Until now the only trace of
+    # this stack was one log line emitted on a rewrite, so "the summarize layer
+    # ran and declined" and "the turn-start path was never reached" printed
+    # exactly the same nothing. `no_history` is the value for a stack that ran
+    # against an unreadable or empty session: reached, and nothing to do.
     empty: dict[str, Any] = {
         "history": [],
         "tokens_before": 0,
@@ -393,6 +435,8 @@ async def load_and_compact_session(
         "restored_files": 0,
         "context_window": context_window,
         "threshold": threshold,
+        "summarize_attempted": False,
+        "summarize_outcome": "no_history",
     }
 
     try:
@@ -464,7 +508,18 @@ async def load_and_compact_session(
 
     # ---- Layer A: LLM summarization -----------------------------------
     mode = (mode_override or cfg.get("mode") or "summarize").lower()
+    # Four outcomes are possible for the whole layer, and each is stored rather
+    # than inferred: `under_threshold` (never entered), `mode_truncate` (never
+    # entered, because configuration says not to), `import_failed` /
+    # `no_older_block` / `empty_summary` / `summarized` (entered). Only the last
+    # one has ever left a trace. `summarize_attempted` is the entered-set, so a
+    # reader can count "turns where the summarize layer had its chance" without
+    # knowing this function's branch names.
+    summarize_attempted = False
+    summarize_outcome = "under_threshold"
     if cur_tokens > threshold and mode == "summarize":
+        summarize_attempted = True
+        summarize_outcome = "import_failed"
         try:
             from app.compaction_llm import (
                 restore_recent_files,
@@ -478,6 +533,11 @@ async def load_and_compact_session(
         if summarize_history is not None:
             keep_recent_turns = int(cfg.get("keep_recent_turns", 5))
             older, recent = _split_for_summary(convo, keep_recent_turns)
+            # Pre-seeded for the branch about to be taken, overwritten only on
+            # the way out that actually summarized: a falsy summary and an
+            # unsplittable history are two different reasons for
+            # `summarized: False`, and both used to be silent.
+            summarize_outcome = "no_older_block" if not older else "empty_summary"
             if older:
                 summary = await summarize_history(
                     older,
@@ -485,6 +545,7 @@ async def load_and_compact_session(
                 )
                 if summary:
                     summarized = True
+                    summarize_outcome = "summarized"
                     summary_msg = {
                         "role": "assistant",
                         "content": [
@@ -515,6 +576,11 @@ async def load_and_compact_session(
                     new_convo.extend(recent)
                     convo = new_convo
                     cur_tokens = estimate_conversation_tokens(convo, system_prompt)
+    elif cur_tokens > threshold:
+        # Over the wall and the configuration says drop-oldest: the summarize
+        # layer was not reached because of a setting, which is a different
+        # finding from not reaching it because there was nothing to do.
+        summarize_outcome = "mode_truncate"
 
     # ---- Layer (fallback): truncation ---------------------------------
     truncated_msgs, dropped = truncate_conversation(
@@ -545,7 +611,7 @@ async def load_and_compact_session(
         except Exception as e:  # noqa: BLE001
             logger.warning("compaction: event_log write failed: %s", e)
 
-    return {
+    result: dict[str, Any] = {
         "history": truncated_msgs,
         "tokens_before": tokens_before,
         "tokens_after": tokens_after,
@@ -555,7 +621,11 @@ async def load_and_compact_session(
         "restored_files": restored_count,
         "context_window": context_window,
         "threshold": threshold,
+        "summarize_attempted": summarize_attempted,
+        "summarize_outcome": summarize_outcome,
     }
+    _record_turn_start(path.stem, result)
+    return result
 
 
 __all__ = [

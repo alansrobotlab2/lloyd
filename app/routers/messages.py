@@ -64,6 +64,7 @@ from prompt_builder import build_system_prompt
 from prefetch import prefetch_context_async, log_turn_prompt_budget
 from app.compaction import load_and_compact_session
 from app import event_log as _event_log  # Inner Voice — agent-side event capture
+from app import compaction_record as _compaction_record  # which context policy fired
 from app import prefix_miss as _prefix_miss
 from app import sessions_io
 
@@ -853,6 +854,14 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     def _miss_log(name: str, data: dict) -> None:
         _event_log.log_event(session_id, name, data, turn_id=turn.turn_id)
 
+    # Which context policy rewrote this turn's history (app/compaction_record.py).
+    # Registered before the compaction stack runs and before `run_query`, because
+    # the relief ladder books its passes from inside the harness loop, which has
+    # no way to reach this function's locals — it finds this object by
+    # `options.session_id`. `to_record()` is read at insert time, so a pass that
+    # lands after the result event is still in it.
+    compaction_turn = _compaction_record.start_turn(session_id, turn.turn_id)
+
     # Persist the user message up-front so transcripts stay coherent even
     # if the SDK crashes before emitting anything. Tag ambient-sourced
     # turns so the UI can render them differently from real user input.
@@ -892,6 +901,10 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         # orders a call this turn's policy refuses (#1066).
         disallowed_tools=list(options.disallowed_tools or []),
     )
+    # Booked whether or not it rewrote anything: the decision is the datum that
+    # makes `compaction.mode: summarize` decidable, and a history that was left
+    # alone has to read as "the stack ran and declined", not as no record at all.
+    compaction_turn.note_turn_start(comp)
     if comp["truncated"] or comp.get("summarized") or comp.get("microcompacted"):
         logger.info(
             "[compaction] %s: %d→%d tokens "
@@ -1301,6 +1314,10 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         # The parser is the one the IV guard uses, so the usage
                         # row and the guard cannot disagree about the turn.
                         skills=skill_deliveries(prefetched_text),
+                        # #1078: read at insert time, so a relief pass that
+                        # landed after this event is still in the row. None of
+                        # the three chat writers decides what fired.
+                        compaction=compaction_turn,
                     )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")
@@ -1561,6 +1578,12 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                             # (#783), and a half-finished turn is the turn a
                             # per-skill cost would otherwise understate.
                             skills=skill_deliveries(prefetched_text),
+                            # A turn that died under context pressure is the
+                            # turn whose relief record matters most (#1078):
+                            # the overflow branch relieves without latching and
+                            # then re-raises, so without this the ladder's most
+                            # interesting pass would be the one left unbooked.
+                            compaction=compaction_turn,
                             **miss_tracker.summary(),
                         )
                 except Exception as ue:
@@ -2363,6 +2386,11 @@ async def post_message(request: Request):
     options.state_anchor = _build_state_anchor(
         session_id, context_meter=options.context_meter)
 
+    # Which context policy rewrote this turn's history (#1078). This path calls
+    # `run_query` directly rather than through `_run_turn`, so it registers its
+    # own record — the relief ladder finds it by `options.session_id`, which is
+    # the same `RunOptions` field both chat paths set.
+    compaction_turn = _compaction_record.start_turn(session_id)
     comp = await load_and_compact_session(
         meta_path, model=model,
         # The deny list travels to the compaction stack because the markers it
@@ -2371,6 +2399,7 @@ async def post_message(request: Request):
         # orders a call this turn's policy refuses (#1066).
         disallowed_tools=list(options.disallowed_tools or []),
     )
+    compaction_turn.note_turn_start(comp)
     if comp["truncated"] or comp.get("summarized") or comp.get("microcompacted"):
         logger.info(
             "[compaction] %s: %d→%d tokens "
@@ -2452,6 +2481,11 @@ async def post_message(request: Request):
                         # per-skill cost is not a number only one of the two
                         # chat paths can produce (#783).
                         skills=skill_deliveries(prefetched_text),
+                        # The same dimension the streaming path writes (#1078).
+                        # This is the route a worker's loopback turn takes, so
+                        # leaving it unwired would leave the runs that fire the
+                        # relief ladder hardest unrecorded.
+                        compaction=compaction_turn,
                     )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")
