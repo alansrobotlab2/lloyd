@@ -9,7 +9,10 @@ This module provides the task-file CRUD + `run_task()` that the
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import datetime
+import functools
 import json
 import re
 import subprocess
@@ -745,6 +748,11 @@ def _write_run_record(task_id: int, run_id: str, status: str,
     for k, v in (extra or {}).items():
         if v is not None:
             fm[k] = v
+    # Inside `run_task` only: a record written for a run nobody dispatched here
+    # (a recovery sweep) names no trigger rather than a wrong one.
+    for k, v in (_ACTIVE_RUN.get() or {}).items():
+        if v is not None:
+            fm.setdefault(k, v)
     content = f"---\n{yaml.dump(fm, default_flow_style=False)}---\n\n{body}"
     path = runs_dir / f"{run_id}.md"
     path.write_text(content, encoding="utf-8")
@@ -1354,6 +1362,66 @@ def _warn_never_ran_bypass(dependent: dict, dep_task: dict,
         dependent.get("id"), dep_task.get("id"), bypass_hours)
 
 
+_missing_artifact_bypass_warned: dict = {}
+
+
+def _upstream_artifact_on_disk(dep_task: dict,
+                               dep_last_run: Optional[datetime.datetime],
+                               now: datetime.datetime) -> Optional[str]:
+    """The upstream's declared `output_artifact` as it stands on disk, for a bypass.
+
+    Returns None when the upstream declares no artifact (there is nothing to
+    require, and the bypass stays a pure elapsed-time rule), the path found when
+    one candidate exists at `_ARTIFACT_MIN_BYTES` or more, and "" when the
+    upstream declares an artifact and none of its candidates is there.
+
+    Candidates are the `{date}` spellings `_artifact_candidates` resolves, taken
+    at the upstream's last completion AND at that minus its `timeout_seconds`,
+    because the template is dated by the run's START and `last_run` is its END —
+    a run that crosses local midnight names yesterday. There is no mtime test,
+    unlike `_declared_artifact_evidence`: a bypass forwards on stale input by
+    design, so the question here is only whether the input exists at all. An
+    upstream that never ran is resolved at `now`.
+    """
+    declared = str(dep_task.get("output_artifact") or "").strip()
+    if not declared:
+        return None
+    if dep_last_run is None:
+        anchors = [now]
+    else:
+        try:
+            span = float(dep_task.get("timeout_seconds") or 1800)
+        except (TypeError, ValueError):
+            span = 1800.0
+        anchors = [dep_last_run, dep_last_run - datetime.timedelta(seconds=span)]
+    seen: set = set()
+    for anchor in anchors:
+        for path in _artifact_candidates(declared, anchor):
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                if path.stat().st_size >= _ARTIFACT_MIN_BYTES:
+                    return str(path)
+            except OSError:
+                continue
+    return ""
+
+
+def _warn_missing_artifact_bypass(dependent: dict, dep_task: dict) -> None:
+    """Once per (dependent, upstream) episode: a bypass refused for want of input."""
+    key = (str(dependent.get("id", "")), str(dep_task.get("id", "")))
+    if _missing_artifact_bypass_warned.get(key):
+        return
+    _missing_artifact_bypass_warned[key] = True
+    logger.warning(
+        "Task #%s is HELD past its stale_bypass_hours: upstream #%s declares "
+        "output_artifact %r and no candidate for its last run (%s) is on disk. "
+        "Fail-forward means running on stale input, not on none (#1437).",
+        dependent.get("id"), dep_task.get("id"), dep_task.get("output_artifact"),
+        dep_task.get("last_run") or "never")
+
+
 def _dependency_bypassed(dependent: dict, dep_task: dict,
                          dep_last_run: Optional[datetime.datetime],
                          now: datetime.datetime) -> bool:
@@ -1386,6 +1454,16 @@ def _dependency_bypassed(dependent: dict, dep_task: dict,
     The upstream being `in_progress` holds the dependent from BOTH branches, and
     the check sits above them on purpose: an upstream running its first-ever run
     is an artifact in progress, not a missing one.
+
+    AND THE INPUT MUST EXIST (#1437). A window measures a timestamp; what the
+    dependent consumes is a file. On 2026-09-24 #39 was released 50.7 h past
+    #42's last run onto a `knowledge-handoff-{date}.md` that was on disk under
+    no spelling, so it could only take its no-artifact path and spend the cycle.
+    When the upstream declares `output_artifact`, a bypass now also needs one of
+    its candidates on disk (`_upstream_artifact_on_disk`); without it the
+    dependent is held and a warning names the missing file. An upstream that
+    declares nothing keeps the elapsed-time rule alone, which is every case #814
+    and #870 pinned.
     """
     try:
         bypass_hours = float(dependent.get("stale_bypass_hours") or 0)
@@ -1395,12 +1473,18 @@ def _dependency_bypassed(dependent: dict, dep_task: dict,
         return False
     if str(dep_task.get("status", "")).strip() == "in_progress":
         return False
+    key = (str(dependent.get("id", "")), str(dep_task.get("id", "")))
+    if dep_last_run is not None:
+        _never_ran_bypass_warned.pop(key, None)
+        if (now - dep_last_run).total_seconds() <= bypass_hours * 3600:
+            return False
+    if _upstream_artifact_on_disk(dep_task, dep_last_run, now) == "":
+        _warn_missing_artifact_bypass(dependent, dep_task)
+        return False
+    _missing_artifact_bypass_warned.pop(key, None)
     if dep_last_run is None:
         _warn_never_ran_bypass(dependent, dep_task, bypass_hours)
-        return True
-    key = (str(dependent.get("id", "")), str(dep_task.get("id", "")))
-    _never_ran_bypass_warned.pop(key, None)
-    return (now - dep_last_run).total_seconds() > bypass_hours * 3600
+    return True
 
 
 def _is_dependency_met(task: dict, all_tasks: list[dict], *,
@@ -2666,6 +2750,44 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
     return failed
 
 
+# Who asked for a run, stamped on its run record as `trigger` (#1437). On
+# 2026-09-23 #38 and #56 ran at 14:25-14:31Z, outside their windows, and that
+# slip pinned both nightly chains for two cycles — yet 0 of 43 run records
+# carried any field saying who dispatched them, so the event the damage traces
+# to could not be attributed. Callers name themselves with `run_trigger(...)`;
+# a call that does not is recorded `direct`. `in_window` says whether the local
+# hour sat inside the task's `preferred_hours` when the run started (absent for
+# a task with no window): an out-of-window run is the one that re-anchors
+# `last_run` and moves the chain, so it is the one worth finding.
+RUN_TRIGGER: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "autonomy_run_trigger", default=None)
+_ACTIVE_RUN: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "autonomy_active_run", default=None)
+
+
+@contextlib.contextmanager
+def run_trigger(name: str):
+    """`with run_trigger("scheduler"): await run_task(...)` — names the caller."""
+    token = RUN_TRIGGER.set(name)
+    try:
+        yield
+    finally:
+        RUN_TRIGGER.reset(token)
+
+
+def _records_trigger(fn):
+    """Scope the run's trigger to exactly one `run_task` call."""
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        token = _ACTIVE_RUN.set({"trigger": RUN_TRIGGER.get() or "direct"})
+        try:
+            return await fn(*args, **kwargs)
+        finally:
+            _ACTIVE_RUN.reset(token)
+    return wrapper
+
+
+@_records_trigger
 async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     """Execute a single autonomy task via Claude Agent SDK."""
     path = _find_task_file(task_id)
@@ -2675,6 +2797,9 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
     task = _parse_task_file(path)
     if not task:
         return {"success": False, "error": f"Failed to parse task #{task_id}"}
+    active = _ACTIVE_RUN.get()
+    if active is not None and _effective_preferred_hours(task):
+        active["in_window"] = _is_preferred_hour(task)
 
     skill_name = str(task.get("skill_name", "") or "").strip()
     # Backward compat: if skill_name is empty but skill_path exists (old format), use it

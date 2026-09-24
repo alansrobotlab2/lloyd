@@ -246,7 +246,18 @@ the field was set on the reflection chain and described in this document as
 letting a dependent run with stale input, and **nothing read it**.
 `_dependency_bypassed` does now. It bypasses only while the upstream is not
 `in_progress`, so a merely-late upstream is still waited for, and an upstream
-that has never succeeded is bypassable. The chains on disk today:
+that has never succeeded is bypassable. Since #1437 a bypass also needs the
+upstream's declared `output_artifact` on disk (`_upstream_artifact_on_disk`: a
+`{date}` candidate for its last run, dated by completion or by start, at least
+512 bytes; no mtime test, since stale input is the point): fail-forward means
+stale input, not none, and on 2026-09-24 #39 was released 50.7 h past #42 onto a
+handoff that existed under no spelling. Held that way, it logs one warning per
+episode naming the missing file; an upstream that declares no artifact keeps the
+elapsed-time rule alone. Every run record also carries `trigger` (`scheduler`,
+`api`, `mcp`, or `direct` for an unnamed caller, set with `run_trigger(...)`)
+and, for a windowed task, `in_window` — the out-of-window runs of #38/#56 on
+2026-09-23 that pinned both chains were attributable to nobody. The chains on
+disk today:
 
 | task | depends on | bypass |
 |---|---|---|

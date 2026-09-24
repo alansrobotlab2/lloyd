@@ -703,8 +703,9 @@ async def _handle_run(params: dict) -> str:
         from app.paths import LLOYD_HOME as lloyd_home
         if str(lloyd_home) not in sys.path:
             sys.path.insert(0, str(lloyd_home))
-        from autonomy import run_task
-        result = await run_task(task_id)
+        from autonomy import run_task, run_trigger
+        with run_trigger("mcp"):
+            result = await run_task(task_id)
         return json.dumps(result)
     except ImportError as e:
         return json.dumps({"error": f"autonomy scheduler module not available: {e}"})

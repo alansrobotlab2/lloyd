@@ -30,12 +30,13 @@ from app.paths import AUTONOMY_RUNS_DIR as _AUTONOMY_RUNS_DIR
 async def autonomy_run(request: Request):
     """Run a task immediately. Bypasses due-checks, but not the in-progress guard."""
     try:
-        from autonomy import run_task
+        from autonomy import run_task, run_trigger
         data = await request.json()
         task_id = data.get("task_id")
         if not task_id:
             raise HTTPException(status_code=400, detail="task_id required")
-        result = await run_task(int(task_id))
+        with run_trigger("api"):
+            result = await run_task(int(task_id))
         if result.get("skipped"):
             # A run is already in flight for this task.
             raise HTTPException(status_code=409, detail=result.get("error", "already running"))

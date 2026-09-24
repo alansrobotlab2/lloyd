@@ -519,7 +519,7 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
 
 
 async def execute(item: QueueItem) -> dict[str, Any]:
-    from autonomy import run_task
+    from autonomy import run_task, run_trigger
     from app.discord_notify import _discord_notify_task_complete
     from autonomy import _find_task_file, _parse_task_file
 
@@ -549,7 +549,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         max_dur = int(get_sources_config().get(NAME, {}).get("max_duration_seconds", 1800))
     except Exception:
         max_dur = 1800
-    result = await run_task(int(task_id), max_duration=max_dur)
+    with run_trigger("scheduler"):
+        result = await run_task(int(task_id), max_duration=max_dur)
 
     preview = (result.get("response_preview") or "")
     if result.get("success") and preview and "[SILENT]" not in preview:
