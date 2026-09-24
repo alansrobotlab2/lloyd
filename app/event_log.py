@@ -10,13 +10,15 @@ Storage layout:
     <DATA_ROOT>/event_logs/blobs/<sha256>.txt          # large fields by hash
 
 Why:
-    SQLite tables (`inner_voice_critiques`, `inner_voice_interventions`)
-    capture decision summaries — what fired, what severity, what action.
-    They discard prompts, raw responses, intermediate parse failures, and
-    the causal chain between critique → intervention → outcome. The event
-    log is the authoritative substrate for forensic analysis. Ships in
-    Stage 0, before the critic is even wired up, so we have baseline data
-    from session 1.
+    The SQLite table `inner_voice_observations` (usage.db, `usage_store.py`)
+    captures decision summaries — what triggered, what action, what reason,
+    at what cost. It discards prompts, raw responses, intermediate parse
+    failures, and the causal chain between observation → lever → outcome.
+    The event log is the authoritative substrate for forensic analysis.
+    Shipped in Stage 0, before the critic was even wired up, so there is
+    baseline data from session 1. (The v3 `inner_voice_critiques` /
+    `inner_voice_interventions` tables that once held the summaries are
+    dropped at schema init; only the event log kept that era's detail.)
 
 Design constraints:
     - Append-only writes. Never `vault_write`-style truncate.
@@ -134,11 +136,11 @@ def log_event(
         }
 
     Returns the 0-indexed line number where this event landed, computed
-    under the same per-session lock as the append. Stage 2+ persists this
-    offset on `inner_voice_critiques` rows so SQLite can pivot back to the
-    raw event for click-to-detail UI. Returns None on any error (caught and
-    logged) — historical callers ignore the return value, so this remains
-    backward-compatible.
+    under the same per-session lock as the append, so a caller that wants to
+    pivot from a row back to the raw event can keep the offset — nothing
+    does today; `inner_voice_observations` stores no event offset. Returns
+    None on any error (caught and logged) — historical callers ignore the
+    return value, so this remains backward-compatible.
 
     Failures are caught and logged at WARNING — this is best-effort
     telemetry; we never want a misformed event to break the chat path.
