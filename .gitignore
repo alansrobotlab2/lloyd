@@ -52,6 +52,7 @@ __pycache__/
 # …and the djev name-prior probe's dated reports (#1452), committed so a
 # djev-gating proposal can cite a measured flip rate.
 !eval/djev/name_prior_*.json
+!eval/canary_trace_samples.json
 
 # ─── Secrets ────────────────────────────────────────
 .env

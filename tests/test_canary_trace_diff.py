@@ -7,8 +7,9 @@ turn looked like the last one's. These tests pin the two halves that make it
 comparable: the baseline file the gate writes and reads back, and the pure
 comparison, which reports per-feature agreement and never a verdict.
 
-Clause 5 (>=10 same-build live samples committed as an artifact) needs a live
-canary and is not covered here.
+Clause 5 is the committed artifact `eval/canary_trace_samples.json`: ten
+repeats of the canary turn against one canary build (a real `Canary` booted
+from one commit, the gate's own `smoke()`), read by the last test here.
 """
 from __future__ import annotations
 
@@ -151,3 +152,22 @@ def test_an_unreadable_baseline_reads_as_none(monkeypatch, tmp_path):
     assert S.read_canary_trace() is None
     (tmp_path / "canary_trace.json").write_text("[1, 2]", encoding="utf-8")
     assert S.read_canary_trace() is None
+
+
+def test_same_build_samples_are_committed_with_their_four_features():
+    """Clause 5: >=10 repeats against one build, each carrying the four
+    structural features and its duration, at a path git does not ignore."""
+    import json
+    import subprocess
+    path = ROOT / "eval" / "canary_trace_samples.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    samples = data["samples"]
+    assert len(samples) >= 10
+    assert data["build"] and len(data["build"]) == 40
+    for s in samples:
+        assert set(CS.TRACE_KEYS) <= set(s), s.keys()
+        assert isinstance(s["events"], list) and s["event_count"] == len(s["events"])
+        assert isinstance(s["duration_s"], (int, float))
+    ignored = subprocess.run(["git", "-C", str(ROOT), "check-ignore", "-q",
+                              "eval/canary_trace_samples.json"])
+    assert ignored.returncode == 1, "the samples must not be gitignored"
