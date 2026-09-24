@@ -47,6 +47,76 @@ router = APIRouter()
 logger = logging.getLogger("lloyd-server")
 
 
+def _meta_session_ids(meta: object) -> list[str]:
+    """Union of the two session keys a run's parsed meta blob can carry."""
+    ids: list[str] = []
+    if not isinstance(meta, dict):
+        return ids
+    for key in ("session_ids", "session_id"):
+        value = meta.get(key)
+        candidates = value if isinstance(value, (list, tuple)) else [value]
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                sid = candidate.strip()
+                if sid not in ids:
+                    ids.append(sid)
+    return ids
+
+
+def run_session_ids(run: object) -> list[str]:
+    """The transcripts one run produced, parsed out of its `meta_json` blob.
+
+    Two writers own the two keys. The pool binds `sessions_io.current_run_sessions`
+    around each claimed job and writes the collected list on the normal, timeout
+    and exception branches (`workers/pool.py`); a source stamps its own singular
+    `session_id` into the same blob (`workers/sources/arch_review.py`,
+    `workers/sources/autocode.py`). The field is their union because neither
+    writer knows about the other, and it is de-duplicated because the two usually
+    name one session: in the live table every row carrying both keys had the
+    singular key naming an id the collected list already held, so a naive
+    concatenation would offer the same transcript twice per row.
+
+    Collected list first in the result — that is the order the pool recorded, and
+    the singular key only ever appends an id the list never held.
+
+    `[]` is the answer for an absent column, an unparseable blob, a JSON value
+    that is not an object, and an object naming nothing. That is not a fallback:
+    some sources record no transcript by design — `architecture/background-runs.md`
+    §12 lists them — and a run that dies before its first `create_session` names
+    none. An empty list is their normal value, and every consumer renders it as
+    "no transcript".
+
+    No row count is quoted here, on purpose. The `runs` table is pruned at 30 days
+    (`workers/maintenance.py`), so any number written into this docstring is stale
+    before the next person reads it — one moved twice inside the round that added
+    this field. Re-measure instead, against the real file: read-only sqlite over
+    the DB at `workers.db_path` — under `LLOYD_DATA`, not beside the checkout —
+    grouping `run_session_ids(row)` by `source`.
+    """
+    raw = run.get("meta_json") if isinstance(run, dict) else None
+    if isinstance(raw, str):
+        raw = raw.strip()
+        if not raw:
+            return []
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return []
+    return _meta_session_ids(raw)
+
+
+def _row_with_session_ids(run: object) -> object:
+    """A copy of a `list_runs` row with the join lifted into its own field.
+
+    A copy because `list_runs` is shared with `app/routers/dashboard.py` and
+    `agent_mcp/autoresearch.py`, which never asked for the key; stamping it into
+    the row they were handed would put a UI field in two unrelated readers.
+    """
+    if not isinstance(run, dict):
+        return run
+    return {**run, "session_ids": run_session_ids(run)}
+
+
 @router.get("/api/workers/status")
 async def workers_status():
     try:
@@ -143,6 +213,10 @@ async def workers_health(days: int = 7, runs: int = 10):
                     None, partial(q.list_runs, source=name, limit=runs))
             except Exception:
                 recent = []
+            # The Sources panel is where a human asks "what did this run
+            # actually do", so the join leaves this endpoint already parsed —
+            # see `run_session_ids` for why both meta keys are needed.
+            recent = [_row_with_session_ids(r) for r in recent]
         out.append({
             "name": name,
             "configured": name in sources_cfg,
@@ -193,7 +267,7 @@ async def workers_runs(source: str = "", task_id: str = "", limit: int = 50):
         task_id=task_id or None,
         limit=min(max(1, limit), 500),
     )
-    return JSONResponse({"runs": runs})
+    return JSONResponse({"runs": [_row_with_session_ids(r) for r in runs]})
 
 
 @router.post("/api/workers/enqueue")

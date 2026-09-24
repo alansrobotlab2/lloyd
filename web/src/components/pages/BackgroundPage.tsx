@@ -17,7 +17,9 @@
  *   • Sources — per-source config, queue depth, outcome rollup and recent
  *     runs. `/api/workers/status` reports only what a source is *allowed* to
  *     do; a source failing every run looked exactly like one succeeding at
- *     every run.
+ *     every run. Each recent run row also names the transcripts it produced —
+ *     the ids the pool wrote into `meta_json` — and opens them here, in the
+ *     same reader the Runs panel uses.
  *
  * Both degrade to an empty state on a failed fetch rather than throwing. A
  * page about what went wrong unattended must not be the second thing to
@@ -27,13 +29,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Moon, RefreshCw, Bot, Clock, CheckCircle2, XCircle, MinusCircle,
-  BrainCircuit, Activity,
+  BrainCircuit, Activity, FileText,
 } from 'lucide-react'
 import { useMcUi, useReportMcFocus, usePendingFocusFor } from '../../contexts/McUiContext'
 import { api, type BackgroundSession, type WorkerSourceHealth } from '../../api'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
+import { runTranscriptIds, transcriptLabel } from '@/lib/runSessions'
 import { cn } from '@/lib/utils'
 
 const POLL_MS = 10_000
@@ -170,7 +173,9 @@ const STATUS_ICON: Record<string, React.ComponentType<{ className?: string }>> =
   skipped: MinusCircle,
 }
 
-function SourceCard({ source }: { source: WorkerSourceHealth }) {
+function SourceCard({
+  source, onOpen,
+}: { source: WorkerSourceHealth; onOpen: (id: string) => void }) {
   const h = source.health
   const queued = Object.values(source.depth || {}).reduce((a, b) => a + b, 0)
   return (
@@ -221,6 +226,7 @@ function SourceCard({ source }: { source: WorkerSourceHealth }) {
         <div className="space-y-0.5 border-t border-border px-3 py-2">
           {source.recent.map(run => {
             const Icon = STATUS_ICON[run.status] ?? Clock
+            const transcripts = runTranscriptIds(run)
             return (
               <div key={run.run_id} className="flex items-center gap-2 text-[10px]">
                 <Icon className={cn(
@@ -232,6 +238,26 @@ function SourceCard({ source }: { source: WorkerSourceHealth }) {
                 <span className="min-w-0 flex-1 truncate text-muted-foreground">
                   {run.summary || run.run_id}
                 </span>
+                {/* The join the pool writes into `meta_json`, read back out.
+                    One control per transcript the run produced — a job can mint
+                    more than one — opening in the same reader the Runs tab uses.
+                    No control for a row that names no transcript, which is the
+                    honest shape rather than a gap: `architecture/background-runs.md`
+                    §12 lists the sources that record none by design, and a run
+                    that dies before its first `create_session` names none. */}
+                {transcripts.map(sid => (
+                  <button
+                    key={sid}
+                    onClick={() => onOpen(sid)}
+                    title={`Open transcript ${sid}`}
+                    className="flex flex-shrink-0 items-center gap-1 rounded px-1
+                               text-muted-foreground hover:bg-accent/60
+                               hover:text-foreground"
+                  >
+                    <FileText className="h-2.5 w-2.5" />
+                    {transcriptLabel(sid)}
+                  </button>
+                ))}
                 <span className="flex-shrink-0 text-muted-foreground/70">
                   {Math.round(run.duration_seconds || 0)}s
                 </span>
@@ -247,7 +273,7 @@ function SourceCard({ source }: { source: WorkerSourceHealth }) {
   )
 }
 
-function SourcesPanel() {
+function SourcesPanel({ onOpen }: { onOpen: (id: string) => void }) {
   const [sources, setSources] = useState<WorkerSourceHealth[]>([])
   const [error, setError] = useState<string | null>(null)
 
@@ -276,7 +302,7 @@ function SourcesPanel() {
   }
   return (
     <div className="space-y-3">
-      {sources.map(s => <SourceCard key={s.name} source={s} />)}
+      {sources.map(s => <SourceCard key={s.name} source={s} onOpen={onOpen} />)}
       {sources.length === 0 && (
         <div className="rounded border border-border p-4 text-xs text-muted-foreground">
           No worker sources configured.
@@ -339,7 +365,7 @@ export default function BackgroundPage() {
           <RunsPanel onOpen={openInReader} />
         </TabsContent>
         <TabsContent value="sources" className="min-h-0 flex-1 overflow-auto p-4">
-          <SourcesPanel />
+          <SourcesPanel onOpen={openInReader} />
         </TabsContent>
       </Tabs>
     </div>

@@ -293,6 +293,12 @@ export interface WorkerSourceHealth {
     summary: string
     task_id?: string | null
     meta_json?: string
+    // The transcripts this run produced, parsed by the endpoint out of
+    // `meta_json` — the union of the collected list the pool binds and a
+    // session-backed source's singular `session_id`. `[]` means the run created
+    // no session at all. Read it through `runTranscriptIds`, which also covers a
+    // payload that predates the field.
+    session_ids?: string[]
   }>
 }
 

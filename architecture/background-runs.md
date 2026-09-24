@@ -197,8 +197,26 @@ Four records per run, and each can reach the others.
   `sessions_io.current_run_sessions` around the job — beside `current_scope`
   and `current_effect_scope` — and `create_session` appends to it. Collected,
   not returned by the source: "the handler remembered to pass it back" is not
-  a property worth depending on eleven times. The pool writes it on the
-  timeout and exception branches too.
+  a property worth depending on eleven times. The pool writes it on the timeout
+  and exception branches too, and a session-backed source stamps a singular
+  `session_id` into the same blob, so a reader must union the two keys or show
+  nothing for the sources that only ever write one.
+  **Where a human follows it: Background tab → Sources → a run row → the Inner
+  Voice reader.** `app/routers/workers.py::run_session_ids` does that union and
+  ships it as a top-level `session_ids` array on every row of
+  `/api/workers/runs` and every `recent` row of `/api/workers/health`;
+  `web/src/lib/runSessions.ts::runTranscriptIds` renders one control per
+  transcript on the row, and activating one opens the session through the same
+  `setPendingFocus` + `setCurrentTab` pair §11's Runs bullet uses, so a session
+  the reader's own list has never seen still opens. An empty array is the honest
+  answer, not a gap: §12 lists the sources that record no transcript by design —
+  `automod-regression`, `autoresearch` among them — and a run that dies before
+  `create_session` names none, so those rows render no control.
+  The write half long predates the read half — until 2026-09-24 nothing parsed
+  either key, and this bullet's claim that one record of a run names the
+  transcripts it produced could only be followed by hand-typing an id into the
+  reader. `tests/test_workers_router.py` pins the endpoint's field and
+  `web/src/lib/runSessions.test.ts` the derivation plus the page's wiring to it.
 - **Transcript → run.** The event log's `turn_id` is the autonomy `run_id`
   (`run_<task>_<utc stamp>`) or a fresh 12-hex id for a direct-path worker.
 - **Change ledger.** Both direct paths now set `RunOptions.session_id` and
@@ -573,7 +591,11 @@ volume a list would be a wall of near-identical titles in the model's context.
   outcomes, so a source failing every run looked exactly like one succeeding
   at every run. `fail_rate` is `null` over zero runs, never 0.0 — "0% failing"
   for a source that has never run is the reading this panel exists to
-  prevent. Each section degrades independently on a failed fetch.
+  prevent. Each of those runs also carries one control per transcript it
+  produced — the ids §7 joins, parsed by the endpoint rather than left inside
+  `meta_json` — opening that session in the same reader the Runs bullet uses; a
+  source that mints no session renders no control. Each section degrades
+  independently on a failed fetch.
 
 **The tab is a recent view, not an archive.** The page requests the newest
 150 background sessions and the endpoint builds 150 rows, newest first, from the
@@ -632,11 +654,12 @@ transcripts stay on disk for 30 days, openable by id.
 | `workers/queue.py` | `run_rollup_by_source` |
 | `app/routers/messages.py` | `_authority_scope_for`, `_ban_grant_minting`, the shared builders |
 | `app/routers/sessions.py` | `/api/sessions` fast path, `/api/background/sessions` |
-| `app/routers/workers.py` | `/api/workers/health` |
+| `app/routers/workers.py` | `/api/workers/health`, `/api/workers/runs`, `run_session_ids` (the §7 join, parsed) |
 | `app/post_capture.py`, `app/paths.py` | `sessions-background/` export |
 | `app/config.py` | `workers.sources.<name>.inner_voice` override merge |
 | `scripts/groundskeeper/retention-sweep.py` | 30/90-day archive |
 | `web/src/components/pages/BackgroundPage.tsx` | the tab |
+| `web/src/lib/runSessions.ts` | a run row's openable transcripts, and their label |
 
 ## Tests
 
@@ -649,3 +672,5 @@ transcripts stay on disk for 30 days, openable by id.
 | `tests/test_session_platform_checks.py` | no hand-rolled platform check, retention agrees, the id creators |
 | `tests/test_dashboard_sections.py` | background runs do not starve the recent panel |
 | `tests/test_api_contracts.py` | `/api/background/sessions`, `/api/workers/health`, the two listings are complements, created sessions are chat-shaped |
+| `tests/test_workers_router.py` | the §7 join as a parsed `session_ids` field on `/api/workers/runs` and on `recent` in `/api/workers/health`: both meta keys unioned, one entry per transcript, `[]` for a row that names none — plus the Sources row's markup (one control per transcript, opening the mapped id), and this page's own §7 bullet naming the surface a human walks |
+| `web/src/lib/runSessions.test.ts` | the Sources panel's derivation, and that the page threads its own reader callback to the run rows (the click itself is human-only: no renderer in this vitest config) |

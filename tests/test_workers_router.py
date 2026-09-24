@@ -18,6 +18,7 @@ the frontend calls it yet. `workers.enabled` now travels the same route.
 from __future__ import annotations
 
 import inspect
+import re
 from pathlib import Path
 
 import yaml
@@ -466,3 +467,337 @@ def test_a_bench_it_cannot_read_is_not_reported_as_a_free_landing(monkeypatch,
     assert "bench" in out["detail"]
     assert not (tmp_path / "vault" / "lloyd" / "bench").exists()
     assert src.exists()
+
+
+# ---------------------------------------------------------------------------
+# #1016 — the run-to-transcript join in `runs.meta_json` was write-only.
+#
+# `workers/pool.py` binds `current_run_sessions` around each claimed job and
+# writes the collected list into the run's meta blob on the normal, timeout and
+# exception branches; a session-backed source additionally stamps a singular
+# `session_id` into the same blob. Both keys reached a human only as one opaque
+# string inside `meta_json` — `list_runs` is `SELECT *` and the two endpoints
+# pass the row straight through — so the Background tab could not name, let
+# alone open, the transcript a run produced. `architecture/background-runs.md`
+# §7's "one record of a run names the transcripts it produced" was resting on
+# the write half alone.
+#
+# These go through the real seam: an HTTP request in, the serialised JSON body
+# out, over a queue whose rows carry the meta blobs the pool actually writes.
+# ---------------------------------------------------------------------------
+
+META_COLLECTED = '{"session_ids": ["20260918_161828_autonomy_fcb5"]}'
+META_SINGULAR = '{"session_id": "20260918_161828_autonomy_fcb5"}'
+
+
+class _JoinQueue:
+    """The three queue methods the two endpoints call, over fixed run rows.
+
+    `depth_by_source` names the one source on purpose: `/api/workers/health`
+    builds its source list from config ∪ rollup ∪ depth, so this is what puts a
+    source in the response without editing the tracked `config.yaml`.
+    """
+
+    def __init__(self, rows):
+        self.rows = rows
+        # Every call, so a test can pin what the endpoint *asked* for — see
+        # `list_runs`.
+        self.calls = []
+
+    def run_rollup_by_source(self, since_iso):
+        return {}
+
+    def depth_by_source(self):
+        return {"scheduled-task": {"queued": 0}}
+
+    def list_runs(self, source=None, task_id=None, limit=100):
+        """Filters and clips the way the real one does (`SELECT * FROM runs` with
+        a WHERE on `source`/`task_id` and a LIMIT), and records the call.
+
+        A fake that returned every row whatever the arguments would let the
+        endpoint attribute another source's runs to this one, or fetch at a limit
+        nobody asked for, and still read green — the join would be exercised for
+        real while the query behind it was not.
+        """
+        self.calls.append({"source": source, "task_id": task_id, "limit": limit})
+        out = [dict(r) for r in self.rows
+               if (source is None or r.get("source") == source)
+               and (task_id is None or r.get("task_id") == task_id)]
+        return out[:max(1, int(limit))]
+
+
+def _run_rows(*metas, source="scheduled-task"):
+    """Rows shaped as `list_runs` returns them, all from one `source` — pass a
+    different one to put another source's runs in the same table."""
+    return [{
+        "run_id": f"run_{source}_20260924_00000{i}_aa{i}",
+        "source": source,
+        "task_id": "24",
+        "status": "success",
+        "started_at": "2026-09-24T00:00:00+00:00",
+        "completed_at": "2026-09-24T00:01:00+00:00",
+        "duration_seconds": 60.0,
+        "summary": "done",
+        "meta_json": m,
+    } for i, m in enumerate(metas)]
+
+
+def _join_client(monkeypatch, tmp_path, rows):
+    client = _client(monkeypatch, tmp_path)
+    queue = _JoinQueue(rows)
+    monkeypatch.setattr(router, "get_queue", lambda: queue)
+    # What the endpoint asked the queue for, once the response is in hand.
+    client.join_queue = queue
+    return client
+
+
+def test_a_runs_row_names_the_transcripts_it_produced(monkeypatch, tmp_path):
+    """The union of the two meta keys, in the order the run recorded them.
+
+    Two writers own the two keys — the pool binds the collected list, a source
+    stamps its own `session_id` (`workers/sources/arch_review.py`,
+    `autocode.py`) — and neither knows about the other, so the field is the union.
+    Both keys are seeded here because a union of two literals is the only way to
+    see that the order is the recorded one and not alphabetical by key; how many
+    live rows carry both is never quoted, because the table is pruned (see
+    `run_session_ids`).
+    """
+    client = _join_client(monkeypatch, tmp_path,
+                          _run_rows('{"session_ids": ["a"], "session_id": "b"}'))
+
+    row = client.get("/api/workers/runs").json()["runs"][0]
+
+    assert row["session_ids"] == ["a", "b"]
+    assert row["meta_json"] == '{"session_ids": ["a"], "session_id": "b"}', (
+        "the raw blob still ships — api.ts declares it and dropping it from a "
+        "row is a contract break on its own")
+
+
+def test_the_health_recent_rows_carry_the_same_join(monkeypatch, tmp_path):
+    """`/api/workers/health` builds `recent` from the same rows, so the Sources
+    panel gets the field from the endpoint it actually polls — and from that
+    source's own rows at the limit the caller asked for, not whatever the table
+    happens to hold: another source's run in the same table must not reach this
+    card, whose whole purpose is naming one source's recent runs.
+    """
+    client = _join_client(monkeypatch, tmp_path,
+                          _run_rows(META_COLLECTED, META_SINGULAR)
+                          + _run_rows(META_COLLECTED, source="bench-mine"))
+
+    body = client.get("/api/workers/health?days=7&runs=5").json()
+    src = next(s for s in body["sources"] if s["name"] == "scheduled-task")
+
+    assert [r["session_ids"] for r in src["recent"]] == [
+        ["20260918_161828_autonomy_fcb5"],
+        ["20260918_161828_autonomy_fcb5"],
+    ], "a source whose rows only carry the singular key must still link, and "       "only its own two rows may appear"
+    assert {"source": "scheduled-task", "task_id": None, "limit": 5} \
+        in client.join_queue.calls, (
+        "the card must ask for its own source at the requested limit; a fetch "
+        "with no source would have returned three rows and read as one more "
+        "transcript this job never produced")
+
+
+def test_a_row_naming_no_session_yields_an_empty_list_not_an_error(
+        monkeypatch, tmp_path):
+    """Six ways a row can name no transcript, and none of them is an exception.
+
+    A Sources panel that 500s, or a row whose key is missing so the renderer
+    has to null-check, is worse than an honest empty list. `architecture/
+    background-runs.md` §12 lists the sources that record no transcript by design
+    — `automod-regression`, `autoresearch` among them — so the empty case is
+    those rows' normal shape, not the defect.
+    """
+    client = _join_client(monkeypatch, tmp_path, _run_rows(
+        None,                      # column NULL
+        "not json",                # truncated write
+        "{}",                      # blob with neither key
+        '{"session_ids": []}',     # collected list stayed empty
+        '{"session_id": ""}',      # a source that stamped nothing
+        "[1, 2]",                  # valid JSON, not an object
+    ))
+
+    runs = client.get("/api/workers/runs").json()["runs"]
+
+    assert [r["session_ids"] for r in runs] == [[] for _ in range(6)], (
+        "every one of the six must serialise as [], the value the renderer "
+        "renders as no control")
+
+
+def test_one_entry_per_transcript_even_when_both_keys_name_it(
+        monkeypatch, tmp_path):
+    """De-duplicated, and still one entry per distinct id."""
+    client = _join_client(monkeypatch, tmp_path, _run_rows(
+        '{"session_ids": ["x", "x"], "session_id": "x"}',
+        '{"session_id": "second", "session_ids": ["first"]}',
+    ))
+
+    runs = client.get("/api/workers/runs").json()["runs"]
+
+    assert [r["session_ids"] for r in runs] == [["x"], ["first", "second"]], (
+        "the collected list leads, because it is what the pool bound; the "
+        "singular key only appends ids the list never held")
+
+
+PAGE_TSX = ROOT / "web/src/components/pages/BackgroundPage.tsx"
+RUN_SESSIONS_TS = ROOT / "web/src/lib/runSessions.ts"
+RUN_SESSIONS_SPEC = ROOT / "web/src/lib/runSessions.test.ts"
+ARCH_PAGE = ROOT / "architecture/background-runs.md"
+
+
+def test_the_background_tab_reads_the_join_through_a_pure_module():
+    """The derivation stays reachable by a test, and its vitest sibling still
+    asserts rather than merely describes.
+
+    `web/src/lib/runSessions.ts` holds a run row's transcript list rather than
+    deriving it inside `BackgroundPage.tsx` for one reason: this project's
+    `web/vitest.config.ts` runs `environment: "node"` with no renderer, so logic
+    living in a component has no test node, and the dependency that would change
+    that (`web/package.json`) is human-only. The rule that keeps the derivation
+    testable is therefore structural, and this node — beside the endpoint's own
+    tests, which is where a regression in the join would be noticed — is what
+    enforces it: the module imports nothing, and its vitest sibling is a set of
+    cases each of which actually asserts something.
+
+    Checked case by case rather than by the spec containing the right *words*: a
+    spec whose assertions had been hollowed out kept every identifier in its
+    comments and would satisfy a substring pin, which is precisely the hole the
+    first version of this guard had. A case with no `expect(` in its own body is
+    caught here, and the page's own markup is caught by
+    `test_the_run_row_in_the_sources_panel_renders_one_control_per_transcript`.
+    """
+    module = RUN_SESSIONS_TS.read_text(encoding="utf-8")
+    spec = RUN_SESSIONS_SPEC.read_text(encoding="utf-8")
+
+    imports = [ln.strip() for ln in module.splitlines()
+               if ln.strip().startswith("import ")]
+    assert imports == [], (
+        f"`runSessions.ts` would no longer be renderable by a node-environment "
+        f"vitest suite: {imports}")
+    assert "export function runTranscriptIds" in module, (
+        "the module no longer exports the derivation the page calls")
+    # The spec reads the page as text through Vite's raw import — the only
+    # form that type-checks here, since `web/tsconfig.json` has no node types
+    # and `web/package.json` is human-only.
+    assert "?raw'" in spec, (
+        "`runSessions.test.ts` no longer reads the page as raw text, so the "
+        "page's wiring to this module is unpinned from the vitest side")
+
+    bodies = spec.split("  it(")[1:]
+    assert len(bodies) >= 8, (
+        f"the vitest sibling has decayed to {len(bodies)} cases; the join's "
+        "render half has no other CI-reachable pin")
+    silent = [b.splitlines()[0].strip().rstrip(",") for b in bodies
+              if "expect(" not in b]
+    assert not silent, f"these cases describe without asserting: {silent}"
+    map_case = [b for b in bodies if "transcripts.map(" in b]
+    assert map_case, (
+        "no case reads the per-entry control's markup, so a page rendering only "
+        "the first transcript would pass")
+    # Backslashes stripped: in the spec that call site lives inside a regex
+    # literal, where the parens are escaped.
+    assert "expect(" in map_case[0], "the per-entry case asserts nothing"
+    assert "onOpen(sid)" in map_case[0].replace("\\", ""), (
+        "the per-entry case no longer pins that the control opens the mapped id")
+
+
+def test_the_run_row_in_the_sources_panel_renders_one_control_per_transcript():
+    """Clause 2's render half, asserted against the page itself.
+
+    Duplicating the vitest assertions here is the point, not an oversight: the
+    gate resolves a clause's test node inside a pytest file, and the React render
+    cannot be asserted in this suite (`environment: "node"`, no jsdom,
+    `web/package.json` human-only). So the page's markup is read as text and the
+    same structural facts are pinned from CI-reachable Python. A page that
+    regressed — dropping the panel's callback, or rendering one transcript out of
+    the list — fails here even if the vitest spec were deleted outright.
+    """
+    page = PAGE_TSX.read_text(encoding="utf-8")
+
+    assert re.search(
+        r"import\s*\{[^}]*runTranscriptIds[^}]*\}\s*from\s*'@/lib/runSessions'",
+        page), "the page must derive the list through the pure module, not inline it"
+    assert re.search(r"<SourcesPanel\b[^>]*onOpen=\{openInReader\}", page), (
+        "the Sources panel is no longer handed the page's transcript-opening "
+        "callback, so a run row has nothing to activate")
+    assert re.search(r"<SourceCard\b[^>]*onOpen=\{onOpen\}", page), (
+        "the callback no longer reaches the card that renders the run rows")
+    assert "const transcripts = runTranscriptIds(run)" in page, (
+        "the row list must come from the run, not from a field the row already shows")
+
+    assert re.search(r"\{transcripts\.map\(sid =>", page), (
+        "the controls are no longer mapped straight over the derived list, so a "
+        "run that produced two transcripts could offer one")
+    # Every shortcut that renders a prefix of the list while still mapping: the
+    # first round of this guard caught `transcripts[0]` and would have passed
+    # `transcripts.slice(0, 1).map(...)`, which drops the same transcripts.
+    assert not re.search(
+        r"transcripts\s*\[\d|transcripts\.(slice|at|filter|shift|pop|find)\b", page), (
+        "the derived list is being narrowed before it is rendered; one control "
+        "per *entry* is the clause, one per entry of a prefix is not")
+    map_at = page.find("transcripts.map(sid => (")
+    assert map_at > -1
+    end = page.find("<span", map_at)
+    region = page[map_at:end if end > -1 else len(page)]
+    assert region.count("<button") == 1, (
+        f"expected exactly one control per entry, found {region.count('<button')}")
+    assert "key={sid}" in region, "the control must be keyed by the mapped id"
+    assert "onClick={() => onOpen(sid)}" in region, (
+        "the control must open the id this iteration mapped, not a fixed one")
+    assert not re.search(r"transcripts\[\d", page), (
+        "indexing the list is the shortcut that would pass a loose grep for "
+        "`onOpen` while dropping every transcript after the first")
+
+
+def test_the_architecture_page_names_the_surface_that_follows_the_join():
+    """§7's "Worker run row → transcripts" bullet must name where a human
+    actually follows the join — asserted as text, because the sentence is the
+    artifact (the precedent for a text pin on this page is
+    `tests/test_trajectory_extraction.py::test_the_architecture_page_attributes_browser_sessions_to_the_extension`).
+
+    Clause 3 exists because the bullet claimed "one record of a run names the
+    transcripts it produced" while the mechanism behind it was write-only: the
+    only way to follow it was to hand-type an id into the reader. So what must
+    not come back is the *absence of a surface* — the bullet naming the panel,
+    the row, the reader, and the two functions that carry the value between them.
+    """
+    assert ARCH_PAGE.is_file(), f"missing {ARCH_PAGE}"
+    text = " ".join(ARCH_PAGE.read_text(encoding="utf-8").split())
+    # Positive control: a page whose §7 went missing would otherwise make the
+    # block lookup below a pass on nothing.
+    assert "## 7. Joins" in text, "`background-runs.md` no longer has a §7 to pin"
+
+    blocks = [b for b in text.split("- **")
+              if b.startswith("Worker run row → transcripts")]
+    assert len(blocks) == 1, f"expected exactly one join bullet, found {len(blocks)}"
+    block = blocks[0]
+
+    assert re.search(r"Background tab →.*?→ (?:the )?Inner Voice reader", block), (
+        f"the bullet no longer names the path a human walks: {block[:300]}")
+    for surface in ("Background tab", "Sources", "run row", "Inner Voice reader"):
+        assert surface in block, f"the surface `{surface}` dropped out of §7"
+    assert "run_session_ids" in block and "runTranscriptIds" in block, (
+        "the bullet must name the endpoint function that parses the field and "
+        "the module that renders it, not just the panels")
+    assert "session_ids" in block and "/api/workers/runs" in block, (
+        "the join has to be named as the parsed field the endpoint ships")
+    assert "meta_json" in block, (
+        "the blob the join still lives in must stay named, or the reader cannot "
+        "find it in SQL either")
+    # Fix shape (b) — "say it is forensics-only and stop claiming a surface" —
+    # must not come back as the bullet's present tense. The history sentence
+    # naming what following the join used to cost stays: it is true and it is
+    # past tense, which is what the two greps above cannot tell apart.
+    assert "post-hoc sql" not in block.lower(), (
+        "the bullet is back to describing the join as forensics-only, which is "
+        "the write-only state this item was filed against")
+
+
+def test_the_join_helper_is_pure_over_the_row_it_is_given():
+    """No mutation: `list_runs` hands the same dict shape to the dashboard and
+    to `agent_mcp/autoresearch.py`, and a helper that stamped its own key into
+    those dicts would leak the field into callers that never asked for it."""
+    row = {"run_id": "r", "meta_json": META_COLLECTED}
+
+    assert router.run_session_ids(row) == ["20260918_161828_autonomy_fcb5"]
+    assert set(row) == {"run_id", "meta_json"}
