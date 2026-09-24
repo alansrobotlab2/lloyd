@@ -490,9 +490,9 @@ parser, so the dashboard's own rate baseline is undisturbed.
   `e20fdba0` took it to 5 and `e0098082` to 6 on the rule "autocode rounds +
   triages + 1" (four rounds today), which `tests/test_loop_depth.py` pins — so
   the slot count is no longer the bound on how many long-lived contexts are
-  resident at once. The KV gate above is. That trade is deliberate and it is
-  unmeasured: §10's acceptance bar is still written for slots = 2, and nobody
-  has re-read the counter since the raise.
+  resident at once. The KV gate above is. That trade is deliberate; §10 carries
+  the bar re-stated for this shape and the first day counted at it
+  (2026-09-23): KV sat well under the gate and the misses came anyway.
 - **The compaction wall** moved from 0.8/0.6 to 0.72/0.52 of the 210k
   threshold — trigger ≈168k → 151k, target ≈126k → 109k. The target moved with
   the trigger so the band stays 0.2 wide: every compaction rewrites the middle
@@ -691,40 +691,73 @@ has still not been run as of 2026-09-11.
 
 ## 10. Still open
 
-- **One normal day** with Alan chatting: success is zero
-  iterations ≥ 100k with < 90% reuse after iteration 2, KV p50 well under the
-  gate, and no two-request window under 15 tok/s that is not a cold admission.
-  The first day of counted data does not clear that bar. It was written for
-  slots = 2 (§6.3), so it cannot be applied to a day since 2026-09-17 as
-  written — it needs re-stating for the current fleet shape first.
-- **What the counter says so far** (2026-09-11 22:30 UTC, 24 h): 410 turns,
-  368 measured, **53 turns carrying 135 misses and 20.4M re-prefilled
-  tokens**, worst turn 2.70M; 138 `brain1.prefix_miss` events across 49
-  sessions and 28 announcements. By session kind: autocode 87 (13.8M), chat 21
-  (3.3M), review 13 (1.7M), autonomy 12 (1.4M), autotriage 1, deep-research 1.
-  The announcements name **fully cold re-admissions deep into a round** —
-  iteration 54 re-prefilling 196k of 196k at 0% cached, iteration 99
-  re-prefilling 187k of 187k — which is the 09-09 shape, not a first-iteration
-  admission. This establishes that the mechanism still fires on the FP8 build;
-  it does **not** establish what a chat felt while it happened, because nothing
-  here measured neighbour latency. That is the missing half of the acceptance
-  above. The baseline to compare against is §6.1's: 194 misses and 20.6M
-  tokens over *two* days.
-- **Whether that is still eviction is the open question.** One spot reading of
-  `engine_pressure`'s ring — KV p50 0.49 / p90 0.58 / max 0.59 against the
-  gate's 0.60 — has the residents sitting just under the gate while misses
-  accrue. One reading on a three-minute-old backend is a hint, not a day.
-- **If misses show up at low KV pressure**, eviction was not the cause and the
-  draft-group limitation is — upstream. Name the function, not the line:
-  `_warn_if_unannotated_eagle_mamba` in vLLM's `v1/core/kv_cache_utils.py`.
-  Three builds, three offsets, which is exactly why the rule is to name the
-  function: in the **production** venv at `dff1bde` the def is 2190 and its
+- **The acceptance bar, for the fleet as it runs today** — `workers.slots` 6
+  and `workers.sources.autocode.max_inflight` 4, so four long-lived rounds
+  resident beside triage, the scheduled tasks and a chat. One normal day at
+  that shape with Alan chatting passes when (a) no chat turn carries a prefix
+  miss, (b) the fleet's misses and re-prefilled tokens per day are at or under
+  §6.1's per-day baseline, (c) KV p50 is under the gate
+  (`workers.kv_gate.max_kv_usage`, 0.60), and (d) no two-request window runs
+  under 15 tok/s that is not a cold admission. The bar written for slots = 2
+  asked for *zero* misses after iteration 2; with four rounds each idle for
+  minutes between iterations (below) that cannot hold on one pool, so the
+  re-stated bar asks for what a person feels (a, d) and a budget for the rest
+  (b). Clearing it needs a day of real chat, which the window below is not.
+- **The counted reading: 2026-09-23 00:00 → 2026-09-24 00:00 UTC** (one full
+  day, slots 6, four rounds, the 844,969-token FP8 pool), from `usage.db`, the
+  `brain1.prefix_miss` events and the engine's status lines, derived by
+  `scripts/vllm_prefix_miss_window.py` over the extract committed as
+  `tests/fixtures/vllm_prefix_miss_2026-09-23.json`: **219 turns, 219
+  measured, 65 turns carrying 172 misses and 16,084,128 re-prefilled tokens**,
+  worst turn 601,503. By session kind: autocode 158 misses (14.5M), then
+  deep-research 4, arch-review 3, youtube-digest 3, review 3, autonomy 1.
+  Chat 0 — but only 4 of the 219 turns were chat, so (a) was not tested and
+  this is not the normal day the bar asks for. 197 miss iterations logged, 85
+  of them fully cold (nothing cached) and 112 partial.
+- **Against §6.1, per day:** §6.1's baseline is 194 misses and 20.6M tokens
+  over *two* days (09-08/09) — 97 misses and 10.3M tokens a day. This window
+  is 172 and 16.1M in *one* day, about 1.8x the misses and 1.6x the tokens a
+  day of the stall that §6 exists for; (b) fails. The definitions differ at
+  the edge (§6.1 counted ≥ 50k uncached, the counter counts < 50% cached, both
+  at ≥ 100k), which does not close a 1.8x gap. The 2026-09-11 spot reading
+  this page used to quote (135 misses, 20.4M, 24 h) and the 09-19..21 days
+  read off the old database by #1339's triage are history now: `usage.db`
+  starts at 2026-09-22 20:17 UTC, after the 09-22 wipe, and cannot re-derive
+  them.
+- **Where a KV history can come from.** Not `engine_pressure`: its ring is
+  300 s (`DEFAULT_WINDOW_S`, `engine_pressure.window_seconds`) in the backend's
+  memory, emptied by every restart. The engine's own status line is the only
+  record — `Running: N reqs, Waiting: N reqs, GPU KV cache usage: NN.N%`
+  every 10 s while it has work, in `logs/services/agent-llm-primary.log*`,
+  stamped in local time with no year — and rotation keeps about two days of
+  it. Over the window, 5,761 such lines: **KV p50 0.26 / p90 0.55 / max
+  0.83**, three requests running at the median. Idle intervals print no line,
+  so the true p50 is lower still. (c) passes.
+- **Eviction, but not by pressure at the gate.** Each miss joined to the lines
+  in its *gap* — from the previous iteration's last proposed tool call, when
+  its request ended and its blocks went back to the free queue, to the miss
+  iteration's request: gap p50 240 s; KV peak in the gap **p50 0.544 / p90
+  0.713**, max 0.795; 54 of 197 at or over the 0.60 gate, **none over 0.90**.
+  The pool never came close to full, so this is not the 09-09 shape. What the
+  gaps do show is churn: vLLM's free queue is LRU, and in **117 of 197**
+  gaps the engine computed at least as many tokens as the free pool held at
+  the gap's tightest, which is enough to have reclaimed a paused prefix at
+  moderate KV. That is eviction the KV gate cannot see — it judges occupancy,
+  and the cost here is gap length times fleet throughput. The other 80 misses
+  had no such churn and are not explained by eviction; they are the
+  candidates for the branch below. Whether to chase that upstream or accept
+  the loss is Alan's call, not a round's.
+- **The unannotated draft group.** `_warn_if_unannotated_eagle_mamba` in
+  vLLM's `v1/core/kv_cache_utils.py` — name the function, not the line: in
+  the **production** venv at `dff1bde` the def is 2190 and its
   `logger.warning` 2215; the 2133/2166 this page used to quote is the
-  `-0910` revert target's copy, and the `kv_cache_utils.py:1871` in older notes
-  is the *worker* build's.
-  With no group annotated as the drafter's, every group — all four Mamba
-  groups included — is treated as a draft group, and "prefix-cache reuse
-  across requests will be disabled".
+  `-0910` revert target's copy, and the `kv_cache_utils.py:1871` in older
+  notes is the *worker* build's. It fires on every production boot, and in
+  this build it says only "Speculative decoding (method=mtp) is enabled but no
+  KV cache group could be identified as the draft model's" — the older
+  builds' "prefix-cache reuse across requests will be disabled" is not in
+  its text. Reuse across requests is not off wholesale here: 112 of the
+  window's 197 misses still read part of their prompt from cache.
 - **YaRN's tool-choice effect is unsettled** (§4). Its short-prompt,
   long-context, retrieval, memory and prefill costs were measured on
   2026-09-21 and are nil or acceptable; 35 tool-choice queries leaned 95 vs
