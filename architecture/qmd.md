@@ -38,10 +38,11 @@ every measured change — is `architecture/retrieval.md`.
 
 What the fork adds over upstream, newest first. `WORKLOG.md` covers the 09-07
 and 09-19 work in §6–7 and the two 2026-09-21 changes (fork commits `fa71e57`
-and `db52729`) in §8:
+and `db52729`) in §8, and the 2026-09-24 cache fix (`d01b049`) in §9:
 
 | change | what it does | since |
 |---|---|---|
+| a re-index keeps `llm_cache` (#1366) | `qmd update`, `qmd collection add` and SDK `update()` no longer empty the rerank cache; keys are content-addressed, the prune to 1,000 newest bounds it | 2026-09-24 |
 | `update` counts pending against the configured model | the hint printed pending against the built-in default, so a non-default embed model read every hash as unembedded — 10,745 of them — on every watcher cycle | 2026-09-21 |
 | `lexMode: "or"` | a lex search ORs its terms; AND stays the default | 2026-09-21 |
 | `collectionFloor` map | under global fusion, each named collection's best N per search join the candidates | 2026-09-19 |
@@ -71,12 +72,15 @@ supervisord program agent-qmd-daemon
   `(hash, seq)` and carries the `model` + `embed_fingerprint` that decide what
   still counts as pending — §3), `llm_cache` (cached rerank scores and query
   expansions, pruned to the 1,000 newest) and `store_config` (the config hash it
-  last synced). The cache's *practical* lifetime is far shorter than 1,000
-  entries: `update()` clears it whole before it re-indexes
-  (`qmd/src/index.ts::update → clearCache`), so with the watcher running it is
-  emptied about once a minute — and both cache keys are content-addressed on
-  `{query, model, chunk}`, so nothing about a re-index makes an entry stale
-  (#1366).
+  last synced). Scores survive a re-index: both cache keys are
+  content-addressed (rerank on `{query, model, chunk}`, expansion on
+  `{query, model}`), so a changed document simply gets new keys and its old
+  score ages out, and since fork `d01b049` (#1366) neither `qmd update`, `qmd
+  collection add` nor the SDK `update()` empties the table — upstream wiped it
+  on every re-index, so a score lived one watcher cycle. The bound is the prune
+  to the 1,000 newest inside `setCachedResult` (it fires on ~1% of writes, so
+  the table can run a little past 1,000); the explicit clears are `qmd cleanup`
+  (§5) and `store.clearCache()`.
 - **What gets indexed.** Every `*.md` under a collection's path, **except any
   path with a dot-prefixed component** (`skills/.archived/**` is never indexed).
   Front matter is NOT stripped: it is in the FTS body and in chunk 0's embedding.
@@ -191,7 +195,9 @@ also sends the raw query without `_qmd_sanitize`. #302.
 - **Nightly cleanup** (`lloyd-qmd-cleanup.timer`, 04:45): `qmd cleanup` prunes
   orphaned vectors, drops inactive document records and orphaned content hashes,
   **empties `llm_cache`** and vacuums — the unit's own log for 2026-09-22 reads
-  3,932 chunks, 48 documents, 24 hashes and 58 cached responses. Unpruned, the
+  3,932 chunks, 48 documents, 24 hashes and 58 cached responses. This is now the
+  only routine emptying of the cache (a re-index keeps it since #1366, §2), so
+  rerank scores live up to a day, pruned to the 1,000 newest in between. Unpruned, the
   vectors once reached 99.5% of rows and a 24 GB index, and they displace real
   results.
 - **Task #81** (`scripts/maintenance/qmd_index_maintenance.py`): orphan prune,
@@ -230,9 +236,11 @@ re-titled copy) are served by patching `snapshot()` — the pattern
   refresh it is ~165 ms for a small change.
 - **Measurement traps**: a TTS restart runs a ~4 min compile that pins GPU 0 and
   makes qmd read 4× slow; an eval pin on GPU 0 does the same to production;
-  repeated query text is answered from the rerank cache in ~0.2 s — but only
-  inside one watcher cycle, because every `update` empties the cache (§2), so a
-  re-run that straddled a vault write is not the hit it looks like.
+  repeated query text is answered from the rerank cache in ~0.1–0.25 s (a fresh
+  cross-encoder recall of the same shape: ~7 s cold, ~4 s rerank), and since
+  #1366 that hit survives watcher cycles until the nightly cleanup (§2, §5) — so
+  a "warm" number is a cache hit unless the query text is new, however many
+  vault writes came between.
 
 ## 8. Files
 
@@ -256,7 +264,8 @@ re-titled copy) are served by patching `snapshot()` — the pattern
   it has one now, `EMBED_PENDING_MAX_RATIO` in §3 (#1367);
   `update()` empties `llm_cache` whole on every watcher cycle, so the cache both
   §2's retention and §7's measurement trap rely on is empty in practice — 0 rows
-  after 13 h and 83 reranked documents (#1366); and `_qmd_post` is not the one
+  after 13 h and 83 reranked documents (#1366; fixed 2026-09-24 in fork
+  `d01b049`: a re-index keeps the cache, pruned to the 1,000 newest); and `_qmd_post` is not the one
   door, because `app/routers/memory.py` and `agent_mcp/backlog_similar.py` open
   their own sockets and read only `results` — their rerank fallbacks go uncounted
   and `memory_search` sends an unsanitized query (#302). Corrected too: the
