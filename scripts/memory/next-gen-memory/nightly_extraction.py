@@ -134,10 +134,15 @@ class NightlyExtraction:
     # classifier and successive resolution sweeps. There was no backup: this
     # tree is gitignored and nothing else copies it. Tasks #48, #67, #69 and
     # #74 have been blocked ever since.
+    #
+    # `entity-aliases.json` is not in this set on purpose (#956): since the
+    # 2026-09 migration the alias map is derived from kg.sqlite
+    # (`app.kg_store`), and #474 pinned the legacy export as a snapshot, so
+    # protecting and backing up a copy asserted an irreplaceability it no
+    # longer has and multiplied a frozen file into every pre-clean backup.
     PROTECTED_NAMES = frozenset({
         "entity-registry.json",
         "_relationships.json",
-        "entity-aliases.json",
     })
     PROTECTED_DIRS = frozenset({"templates", "memory-graph"})
 
@@ -155,7 +160,7 @@ class NightlyExtraction:
         stamp = datetime.now().strftime("%Y%m%dT%H%M%SZ")
         dest = _STATE_PIPELINE / "backups" / f"pre-clean-{stamp}"
         saved = []
-        for name in ("_relationships.json", "entity-aliases.json"):
+        for name in ("_relationships.json",):
             src = FACTS_DIR / name
             if src.is_file():
                 dest.mkdir(parents=True, exist_ok=True)
