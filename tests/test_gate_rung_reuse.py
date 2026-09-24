@@ -41,6 +41,9 @@ class _Gate:
                 json.dumps(cached))
 
     # bind the real methods
+    _quiet_skip = G.Gate._quiet_skip
+    QUIET_SKIP_RUNGS = G.Gate.QUIET_SKIP_RUNGS
+    EVENT_ID_CAP = G.Gate.EVENT_ID_CAP
     _reuse = G.Gate._reuse
     _reuse_inner = G.Gate._reuse_inner
     _reuse_rule = staticmethod(G.Gate._reuse_rule)

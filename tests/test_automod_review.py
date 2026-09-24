@@ -200,6 +200,51 @@ def test_an_existing_test_outside_the_diff_stands_when_it_was_run(wt):
     assert _met(wt, test_node_id="tests/test_old.py", how_verified="ran")["verdict"] == "met"
 
 
+# ── a test that fails at base too is not evidence for this diff ──────────────
+
+@pytest.mark.parametrize("node, how", [
+    ("tests/test_old.py::test_before", "ran"),     # the failing node itself
+    ("tests/test_old.py::test_before", "read"),
+    ("tests/test_old.py", "ran"),                  # a file-level run of its file
+    ("tests/test_old.py::test_other", "ran"),      # a sibling in the same red file
+])
+def test_a_met_on_a_node_that_fails_at_base_does_not_stand(wt, node, how):
+    """Since 2026-09-24 the tests rung passes over failures that reproduce at
+    the round's base. A clause resting on one was verified by nothing: the
+    rung passed over it, not through it — whatever `how` says."""
+    parsed = RV.parse_review(_obj(test_node_id=node, how_verified=how), worktree=wt,
+                             changed_tests=["tests/test_x.py"], n_clauses=1,
+                             tests_passed=True, changed_paths=["app/x.py", "tests/test_x.py"],
+                             pre_existing_failures={"tests/test_old.py::test_before"})
+    c = parsed["clauses"][0]
+    assert c["verdict"] == "partial", c
+    assert any("fails at base" in w for w in c["downgraded"]), c
+    # The counterfactual: without the list, the same citation stands (ran) —
+    # so the list, not something else, is what refused it.
+    if how == "ran":
+        assert _met(wt, test_node_id=node, how_verified="ran")["verdict"] == "met"
+
+
+def test_a_changed_test_beside_an_unrelated_red_file_still_stands(wt):
+    """Only a citation INTO the red set is refused; the diff's own test holds."""
+    parsed = RV.parse_review(_obj(), worktree=wt, changed_tests=["tests/test_x.py"], n_clauses=1,
+                             tests_passed=True, changed_paths=["app/x.py", "tests/test_x.py"],
+                             pre_existing_failures={"tests/test_old.py::test_before"})
+    assert parsed["clauses"][0]["verdict"] == "met"
+
+
+def test_the_grader_is_told_which_failures_predate_the_round(tmp_path):
+    contract = {"id": 1, "title": "t", "body": "b", "clauses": ["c"]}
+    kw = dict(contract=contract, diff="", diff_truncated=False, changed_tests=[],
+              test_counts={"passed": 5}, worktree=tmp_path, run_tests=tmp_path / "rt")
+    plain = RV.build_prompt(**kw)
+    told = RV.build_prompt(**kw, pre_existing_failures=["tests/test_uptake.py::test_a"])
+    assert "fail here AND at the round's base" not in plain
+    assert "tests/test_uptake.py::test_a" in told and "at most `partial`" in told
+    # With nothing pre-existing the prompt is byte-identical to before.
+    assert plain == RV.build_prompt(**kw, pre_existing_failures=[])
+
+
 @pytest.mark.parametrize("node", ["tests/test_gone.py::test_x", "tests/test_gone.py",
                                   "app/x.py::f", "pytest -k autoresearch"])
 def test_a_node_that_is_not_a_real_tests_path_is_partial(wt, node):

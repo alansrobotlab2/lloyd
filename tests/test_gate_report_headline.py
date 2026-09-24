@@ -144,12 +144,31 @@ def test_an_unsound_premise_and_a_grader_that_could_not_run_are_told_apart():
 
 def test_an_external_blocker_keeps_its_instruction_and_gets_a_verdict():
     rep = _refused(1)
-    rep["rungs"][-1] = {"name": "tests", "ok": False, "detail": "pytest failed … PRE-EXISTING",
+    rep["rungs"][-1] = {"name": "preflight", "ok": False, "detail": "live tree is dirty",
                         "data": {"external_blocker": True, "retry_after_s": 90,
-                                 "external_reason": "pre-existing breakage on main"}}
+                                 "external_reason": "uncommitted live edits"}}
     out = _finished("SM_E", rep)
-    assert out["verdict"].startswith("NOT JUDGED") and "tests rung" in out["verdict"]
+    assert out["verdict"].startswith("NOT JUDGED") and "preflight rung" in out["verdict"]
     assert "Wait 90s" in out["next"] and "Do NOT abort" in out["next"] and out["retry_after_s"] == 90
+
+
+def test_pre_existing_failures_ride_a_pass_as_a_note_naming_their_owner():
+    """A tests rung that passed over failures predating the round says whose
+    they are, so the round does not spend its clock fixing the tree."""
+    rep = copy.deepcopy(PASSED)
+    ids = ["tests/test_uptake.py::test_a", "tests/test_uptake.py::test_b"]
+    rep["rungs"][1]["data"] = {"pre_existing_failures": ids, "red_tree_item": 1501}
+    out = _finished("SM_P", rep)
+    assert out["verdict"].startswith("PASSED")
+    pre = out["notes_that_did_not_block"]["pre_existing_failures"]
+    assert pre["ids"] == ids
+    assert "tracked by item #1501" in pre["note"] and "do not fix them in this round" in pre["note"]
+    # Without advisories the note still appears, with its own explanation.
+    rep["rungs"][2]["data"]["advisory_seams"] = []
+    rep["rungs"][2]["data"]["advisory_findings"] = []
+    out = _finished("SM_P2", rep)
+    assert out["notes_that_did_not_block"]["pre_existing_failures"]["ids"] == ids
+    assert "did not block" in out["notes_that_did_not_block"]["what"]
 
 
 def test_another_rungs_failure_names_the_rung():

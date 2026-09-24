@@ -518,16 +518,28 @@ graded here. Do not mark a clause partial or unmet for their absence.
 """
 
 
+def _pre_existing_block(pre_existing: list[str] | None) -> str:
+    if not pre_existing:
+        return ""
+    shown = ", ".join(pre_existing[:20]) + (f", +{len(pre_existing) - 20} more"
+                                            if len(pre_existing) > 20 else "")
+    return (f"These tests fail here AND at the round's base with the diff absent, so "
+            f"they are not this diff's and the tests rung passed over them: {shown}. "
+            f"A clause leaning on one of them is at most `partial`.\n")
+
+
 def build_prompt(*, contract: dict, diff: str, diff_truncated: bool,
                  changed_tests: list[str], test_counts: dict,
                  worktree: Path, run_tests: Path,
-                 prior_reviews: list[dict] | None = None) -> str:
+                 prior_reviews: list[dict] | None = None,
+                 pre_existing_failures: list[str] | None = None) -> str:
     clauses = "\n".join(f"{i}. {c}" for i, c in enumerate(contract["clauses"], 1))
     counts = ", ".join(f"{k}={v}" for k, v in test_counts.items()
                        if k in ("passed", "failed", "skipped", "collected")) or "unknown"
     amendments = _amendments_block(list(contract.get("amendments") or []))
     human = _human_clauses_block(list(contract.get("human_clauses") or []))
     prior = _prior_reviews_block(prior_reviews or [])
+    pre = _pre_existing_block(list(pre_existing_failures or []))
     return prior + f"""\
 You are reviewing a change another session made to this codebase, against the \
 backlog item it claims to implement. You have NOT seen that session's report, \
@@ -550,7 +562,7 @@ because the default root is the live tree, not this change.
 </diff>
 
 Test files this diff changed or added: {', '.join(changed_tests) or 'none'}.
-The full suite already ran on this worktree: {counts}. To run a test yourself, \
+The full suite already ran on this worktree: {counts}. {pre}To run a test yourself, \
 the ONLY way is:
 
     {run_tests} <pytest node id or file>
@@ -729,7 +741,8 @@ def grade(*, round_id: str, worktree: Path, base: str, contract: dict,
           scratch_dir: Path, backend: str | None = None, sessions_dir: Path | None = None,
           timeout: float = REVIEW_TIMEOUT_S, model: str = "primary",
           max_turns: int = REVIEW_MAX_TURNS,
-          prior_reviews: list[dict] | None = None) -> dict:
+          prior_reviews: list[dict] | None = None,
+          pre_existing_failures: list[str] | None = None) -> dict:
     """One grading turn on the live backend, for a code round. Never raises.
 
     Returns `{ok, error, session_id, structured, structured_error, text,
@@ -743,7 +756,8 @@ def grade(*, round_id: str, worktree: Path, base: str, contract: dict,
     prompt = build_prompt(contract=contract, diff=diff, diff_truncated=truncated,
                           prior_reviews=prior_reviews,
                           changed_tests=changed_tests, test_counts=test_counts,
-                          worktree=worktree, run_tests=run_tests)
+                          worktree=worktree, run_tests=run_tests,
+                          pre_existing_failures=pre_existing_failures)
     return run_grader(prompt=prompt, item_id=contract["id"], round_id=round_id,
                       backend=backend, sessions_dir=sessions_dir, timeout=timeout,
                       model=model, max_turns=max_turns)
@@ -1264,8 +1278,23 @@ def _test_file_cited(node: str) -> str:
     return ""
 
 
+def _cites_pre_existing(node: str, pre_existing) -> bool:
+    """Whether a `test_node_id` leans on a test that already fails at the
+    round's base: the node itself, or any node in a file that holds one (a
+    file-level run of that file is red whatever this diff does). The `tests`
+    rung passes on such failures since 2026-09-24 — they are not this diff's —
+    so a clause resting on one has been verified by nothing."""
+    if not node or not pre_existing:
+        return False
+    pre = {str(n) for n in pre_existing}
+    files = {n.split("::", 1)[0] for n in pre}
+    cited = node.strip()
+    file_part = _trim_citation_prefix((cited.split("::", 1)[0].strip().split() or [""])[0])
+    return cited in pre or file_part in pre or file_part in files
+
+
 def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
-               tests_passed: bool) -> tuple[bool, str]:
+               tests_passed: bool, pre_existing=frozenset()) -> tuple[bool, str]:
     """`(holds, accepted_reason)` for a `met` clause's `test_node_id`.
 
     A node in a test file this diff changed holds, as it always has. Two more
@@ -1283,8 +1312,14 @@ def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
 
     The path must be under `tests/` and exist: those are what the tests rung
     ran. `read` is not enough for either — nothing was measured.
+
+    A node in `pre_existing` — or in a file that holds one — never holds,
+    whatever `how` says: it fails at base with the diff absent, and the tests
+    rung passed over it, not through it.
     """
     if not node:
+        return False, ""
+    if _cites_pre_existing(node, pre_existing):
         return False, ""
     file_part = node.split("::", 1)[0].strip()
     if file_part in changed:
@@ -1304,7 +1339,8 @@ def _node_rail(node: str, *, worktree: Path, changed: set[str], how: str,
 def parse_review(obj, *, worktree: Path, changed_tests: list[str],
                  n_clauses: int, require_tests: bool = True,
                  tests_passed: bool = False, changed_paths=(),
-                 repo: Path | None = None, added_tests: int = 0) -> dict | None:
+                 repo: Path | None = None, added_tests: int = 0,
+                 pre_existing_failures=frozenset()) -> dict | None:
     """The grader's object, validated, with `met` downgraded where the
     evidence does not hold up. None if unusable. `require_tests=False` is
     the vault shape: prose has no pytest node to point at.
@@ -1331,6 +1367,10 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
     judged the diff, whichever verdict its finalizer's schema printed.
     Citations are validated on EVERY verdict, not only `met` (see
     `unresolved_shas`).
+
+    `pre_existing_failures` is the tests rung's list of node ids that fail at
+    base too: a `met` whose node is one of them, or sits in a file with one, is
+    downgraded to `partial` (`_cites_pre_existing`).
     """
     if not isinstance(obj, dict):
         return None
@@ -1401,8 +1441,12 @@ def parse_review(obj, *, worktree: Path, changed_tests: list[str],
             node_holds, reason = True, ""
             if require_tests:
                 node_holds, reason = _node_rail(node, worktree=worktree, changed=changed,
-                                                how=how, tests_passed=tests_passed)
-                if not node_holds:
+                                                how=how, tests_passed=tests_passed,
+                                                pre_existing=pre_existing_failures)
+                if not node_holds and _cites_pre_existing(node, pre_existing_failures):
+                    why.append("test_node_id cites a test that fails at base too "
+                               "(pre-existing, not this diff's)")
+                elif not node_holds:
                     why.append("test_node_id not in a test file this diff changed")
                 elif reason:
                     accepted.append(reason)

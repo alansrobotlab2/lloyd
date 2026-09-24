@@ -1760,7 +1760,9 @@ def human_only_ids(ledger: Path) -> dict[int, str]:
 # Each re-offer is capped, because `select_confirmed` takes the OLDEST ready
 # item: an uncapped re-offer is re-picked every round for as long as the cause
 # persists, starving everything behind it.
-EXTERNAL_RETRY_CAP = 3       # a red tree surviving four rounds is an incident
+# (`external` no longer includes a red tree: since 2026-09-24 the `tests` rung
+# passes on failures that predate the round and files a `red-tree` item.)
+EXTERNAL_RETRY_CAP = 3       # a blocker surviving four rounds is an incident
 INCOMPLETE_RETRY_CAP = 1     # triage's rule: it comes back once
 ROLLED_BACK_RETRY_CAP = 1    # the work is gone with the branch; one redo
 # The review rung found the premise sound and the implementation or tests
@@ -1910,13 +1912,19 @@ def gate_passed_unlanded_rounds(ledger: Path) -> set[str]:
 def externally_blocked_rounds(ledger: Path) -> set[str]:
     """Rounds whose final gate attempt failed on a condition they did not cause.
 
-    Two rungs set the flag, and every case is about something other than the
-    diff: `tests` when every failure reproduces at the round's base, or when the
-    ones that did not reproduce pass a repeat run and are flaky (#1196 — one
-    sample used to blame a flickering test on whichever round tripped it, and
-    spend that item's attempt); `preflight` when the live tree is dirty or HEAD
-    has moved under it. An empty diff ("no changes to promote") is a preflight
-    failure that IS the round's own, and deliberately does not carry the flag.
+    Every case is about something other than the diff: `preflight` when the
+    live tree is dirty or HEAD has moved under it, `review` when the grader
+    could not be reached, and a `land_failed` the promoter or `round.py` marks
+    external. An empty diff ("no changes to promote") is a preflight failure
+    that IS the round's own, and deliberately does not carry the flag.
+
+    The `tests` rung no longer sets it (2026-09-24). A red tree used to fail the
+    rung with the flag, re-offer the item and kill the round — 157 rounds in a
+    week, 21 of which ever landed. Now a failure that reproduces at base, or
+    passes a repeat run (#1196), PASSES the rung with `pre_existing_failures` /
+    `flaky_node_ids` recorded and a `red-tree` item filed, so the red-tree
+    `external` verdict disappears by construction. Old ledger rows still carry
+    the flag on a `tests` event and are read exactly as before.
     """
     return {rid for rid, ev in _last_gate_per_round(ledger).items()
             if not ev.get("ok") and ev.get("external_blocker")}
@@ -1925,7 +1933,9 @@ def externally_blocked_rounds(ledger: Path) -> set[str]:
 def _external_budget_left(ledger: Path, item_id: int, round_id: str, attempts: int) -> bool:
     """Whether an externally blocked round may still be re-offered.
 
-    A red tree is capped on the item's attempts, as it always was. A landing
+    A gate-side block (a dirty or moved live tree, an unreachable grader; a
+    red tree in rows written before 2026-09-24, when the `tests` rung still
+    flagged one) is capped on the item's attempts, as it always was. A landing
     that failed AFTER the gate passed is capped on its own count instead:
     #1204 (2026-09-17) passed nine rungs on its fifth attempt — three earlier
     ones refused by a skip-marker precheck, one lost to a backend restart —
@@ -2103,7 +2113,9 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
 
     `verdict` is one of `spent`, `reopened`, `external`, `incomplete`,
     `infra`, `rolled_back`, `review_retry`, `partial` — where everything but
-    `spent` means the item is offered again. Exposed rather than folded into
+    `spent` means the item is offered again. `external` never comes from a red
+    tree in a new row: the `tests` rung passes on pre-existing failures since
+    2026-09-24 (see `externally_blocked_rounds`). Exposed rather than folded into
     `implemented_ids` because the reason is worth putting in front of the
     next round: a re-offer whose branch still exists, or whose work was
     reverted, is not a fresh start.
@@ -5588,3 +5600,319 @@ def unfold_oversized_umbrellas(ledger: Path, boards: tuple[str, ...] | None = DE
                         "oversized": True, "clauses": n, "auto": True}, path=ledger)
         out.append({**row, "released": res["released"]})
     return out
+
+
+# ---------------------------------------------------------------------------
+# The red tree heals itself (2026-09-24)
+#
+# A `tests` failure that reproduces at the round's base is not the round's, and
+# since 2026-09-24 the rung PASSES on it (`gate.rung_tests`). Passing alone
+# would leave the tree red forever — nothing in the loop fixed a red tree, it
+# only refused to land on one, and episodes lasted up to 59 h. So the gate also
+# files the breakage as ONE `high`, pre-confirmed item tagged `red-tree`, which
+# `select_confirmed` takes next, and closes it itself on the first full green
+# run at a base that descends from the one it was filed at (most red trees are
+# healed by a hand commit, and a `high` item left open would spend a round
+# proving nothing).
+#
+# `red-tree` is deliberately not a `spawned-by-*` tag: expiry and the write-time
+# merge rule must leave it alone, and it is not quarantined.
+# ---------------------------------------------------------------------------
+
+RED_TREE_TAG = "red-tree"
+RED_TREE_BOARD = "lloyd"
+# A red-tree item closed this recently whose node set covers a new report is
+# not refiled: a round cut from a base older than the heal still sees the
+# failure, and refiling it would reopen work that is already done.
+RED_TREE_COOLDOWN_S = 24 * 3600
+# The gate's `-m` expression (gate.TESTS_MARK_EXPR), restated rather than
+# imported: this module is loaded by the backend and must not import the gate.
+_RED_TREE_MARK_EXPR = "not live_vault and not fault_injection"
+_RED_TREE_NO_ESCAPE = ("no test is skipped, xfailed, deleted or marked `live_vault` to get "
+                       "there — the fix makes the named tests pass")
+
+
+def new_item(name: str, body: str = "", *, priority: str = DEFAULT_PRIORITY,
+             tags: list[str] | tuple[str, ...] = (), status: str = "draft",
+             board: str = RED_TREE_BOARD, backlog_dir: Path | None = None) -> Item:
+    """Create a backlog item file and return it loaded — the Python writer this
+    module never had.
+
+    Front matter mirrors `app/routers/backlog.py::backlog_task_create` (the OKF
+    `type`, `segment`, `position = id * 1000`, naive-local `created`), and the id
+    is `max + 1` on disk. The file is created with `O_EXCL`, so two writers that
+    allocate the same id do not overwrite each other: the loser takes the next.
+    """
+    root = backlog_dir or BACKLOG_DIR
+    root.mkdir(parents=True, exist_ok=True)
+    if status not in PIPELINE_STATUSES:
+        raise ValueError(f"unknown status {status!r}")
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:50] or "item"
+    for _ in range(20):
+        top = 0
+        for p in root.glob("*.md"):
+            m = re.match(r"^(\d+)[-_]", p.name)
+            if m:
+                top = max(top, int(m.group(1)))
+        item_id = top + 1
+        now = datetime.now().isoformat()
+        fm = {"type": "backlog", "segment": "backlog", "status": status,
+              "priority": _level(priority, PRIORITY_LEVELS) or DEFAULT_PRIORITY,
+              "board": board, "blocked": False, "assigned": False,
+              "position": item_id * 1000, "created": now, "updated": now}
+        if tags:
+            fm["tags"] = normalize_tags(list(tags))
+        text = (f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
+                f"---\n# {name}" + (f"\n\n{body.strip()}\n" if body.strip() else "\n"))
+        path = root / f"{item_id}-{slug}.md"
+        try:
+            with open(path, "x", encoding="utf-8") as f:
+                f.write(text)
+        except FileExistsError:
+            continue
+        item = load_item(path)
+        if item is None:  # pragma: no cover — we just wrote it
+            raise RuntimeError(f"new_item could not read back {path}")
+        return item
+    raise RuntimeError("new_item: could not allocate an id after 20 tries")
+
+
+def _red_tree_file(node: str) -> str:
+    return str(node).split("::", 1)[0]
+
+
+def _red_tree_clauses(nodes: list[str]) -> list[str]:
+    """One clause per failing file, then the no-escape clause — at most
+    `MAX_CLAUSES` in all, the files past the budget folded into the last file
+    clause so every node stays in the contract."""
+    by_file: dict[str, list[str]] = {}
+    for n in sorted(set(nodes)):
+        by_file.setdefault(_red_tree_file(n), []).append(n)
+    files = sorted(by_file)
+    room = MAX_CLAUSES - 1
+    head, rest = (files, []) if len(files) <= room else (files[:room - 1], files[room - 1:])
+
+    def names(ns: list[str]) -> str:
+        short = [n.split("::", 1)[1] if "::" in n else "(collection)" for n in ns]
+        shown = ", ".join(short[:8])
+        return shown + (f", +{len(short) - 8} more" if len(short) > 8 else "")
+
+    out = [f'`pytest -m "{_RED_TREE_MARK_EXPR}" {f}` exits 0; it failed at nodes: {names(by_file[f])}'
+           for f in head]
+    if rest:
+        out.append(f'`pytest -m "{_RED_TREE_MARK_EXPR}" {" ".join(rest)}` exits 0; '
+                   f"{sum(len(by_file[f]) for f in rest)} node(s) failed across these files")
+    out.append(_RED_TREE_NO_ESCAPE)
+    return [c[:CLAUSE_MAX_CHARS] for c in out]
+
+
+def _red_tree_body(base: str, nodes: list[str], round_id: str) -> str:
+    return (f"The live tree is red: these tests fail at base `{base}` with no round's "
+            f"diff present. Found by the `tests` rung of round {round_id}, whose base "
+            f"probe reproduced every one of them. The gate now PASSES rounds on these "
+            f"failures (they are not the round's) — so nothing else will fix them.\n\n"
+            + "\n".join(f"- `{n}`" for n in sorted(set(nodes))[:50])
+            + (f"\n- … +{len(set(nodes)) - 50} more" if len(set(nodes)) > 50 else "")
+            + "\n\nThe gate closes this item itself on the first full green run at a "
+              "base that descends from the one above.")
+
+
+def _red_tree_fm(item: Item) -> dict:
+    try:
+        fm, _ = _split_frontmatter(item.path.read_text(encoding="utf-8"))
+    except OSError:
+        return {}
+    return fm
+
+
+def open_red_tree_items(boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
+                        backlog_dir: Path | None = None) -> list[Item]:
+    """Open `red-tree` items, newest first. `done` is not open."""
+    return sorted((i for i in open_items(boards, backlog_dir=backlog_dir)
+                   if RED_TREE_TAG in i.tags), key=lambda i: -i.id)
+
+
+def _is_ancestor(live_root: Path | None, older: str, newer: str) -> bool:
+    """`git merge-base --is-ancestor older newer`. False when git cannot say."""
+    import subprocess
+    if not older or not newer:
+        return False
+    if older == newer:
+        return True
+    if live_root is None:
+        from app.paths import LLOYD_HOME
+        live_root = LLOYD_HOME
+    try:
+        r = subprocess.run(["git", "-C", str(live_root), "merge-base", "--is-ancestor",
+                            older, newer], capture_output=True, timeout=10)
+    except Exception:  # noqa: BLE001 — no git, no claim
+        return False
+    return r.returncode == 0
+
+
+def _closed_recently(fm: dict, now: float, window: float) -> bool:
+    raw = str(fm.get("completed") or fm.get("updated") or "")
+    if not raw:
+        return False
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)   # this loop's closers stamp naive UTC
+    return now - dt.timestamp() <= window
+
+
+def file_red_tree_item(base: str, node_ids, round_id: str, changed_paths=(), *,
+                       ledger: Path | None = None, live_root: Path | None = None,
+                       boards: tuple[str, ...] | None = DEFAULT_BOARDS,
+                       backlog_dir: Path | None = None,
+                       now: float | None = None) -> dict | None:
+    """File (or update) the one open `red-tree` item for failures that predate
+    the round. Returns `{"item_id", "action"}` or None when nothing was written.
+
+    * Nodes in the round's own diff are dropped: a round that edits a red test
+      file owns it (the gate's touched-file rule), so it is not the tree's.
+    * An open red-tree item on the SAME base gains the new nodes (a clause per
+      new file) — action `merged`; a subset is a no-op. On a base that DESCENDS
+      from the item's, the item is rewritten for the new base — `replaced`. A
+      report from an older base than the item's is a no-op: the item already
+      describes a newer tree.
+    * With none open, a `red-tree` item closed within `RED_TREE_COOLDOWN_S`
+      whose nodes cover the report suppresses it.
+    * Else a new item: priority `high`, tag `red-tree`, confirmed through
+      `record_verdict` exactly as a group triage's umbrella is, with an
+      `auto: true, red_tree: true` triage row — `created`.
+
+    Every write is a `red_tree_filed` ledger row. Callers wrap this in
+    try/except: a filing failure is never the gate's verdict.
+    """
+    from scripts.automod import state as S
+    ledger = ledger or S.LEDGER_PATH
+    now = time.time() if now is None else now
+    changed = {str(p) for p in (changed_paths or ())}
+    nodes = sorted({str(n) for n in (node_ids or ()) if _red_tree_file(n) not in changed})
+    if not base or not nodes:
+        return None
+
+    def _event(item_id: int, action: str, item_nodes: list[str]) -> None:
+        S.append_event({"event": "red_tree_filed", "item_id": int(item_id), "base": base,
+                        "node_ids": sorted(item_nodes)[:50], "round_id": round_id,
+                        "action": action}, path=ledger)
+
+    for item in open_red_tree_items(boards, backlog_dir=backlog_dir):
+        fm = _red_tree_fm(item)
+        old_base = str(fm.get("red_tree_base") or "")
+        old_nodes = [str(n) for n in (fm.get("red_tree_nodes") or [])]
+        if old_base == base:
+            if set(nodes) <= set(old_nodes):
+                return None
+            union = sorted(set(old_nodes) | set(nodes))
+            action = "merged"
+            new_base = base
+        elif _is_ancestor(live_root, old_base, base):
+            union = nodes
+            action = "replaced"
+            new_base = base
+        elif old_base and _is_ancestor(live_root, base, old_base):
+            return None           # an older view of a tree the item already describes
+        else:
+            if set(nodes) <= set(old_nodes):
+                return None
+            union = sorted(set(old_nodes) | set(nodes))
+            action = "merged"
+            new_base = old_base or base
+        clauses, _dropped = cap_new_clauses(_red_tree_clauses(union))
+        update_frontmatter(item.path, {"red_tree_base": new_base, "red_tree_nodes": union,
+                                       "acceptance_clauses": clauses},
+                           activity=(f"red tree {action} by round {round_id}: base "
+                                     f"{new_base[:12]}, {len(union)} failing node(s)"))
+        _event(item.id, action, union)
+        return {"item_id": item.id, "action": action}
+
+    for item in all_items(boards, backlog_dir=backlog_dir):
+        if RED_TREE_TAG not in item.tags or item.status in OPEN_STATUSES:
+            continue
+        fm = _red_tree_fm(item)
+        covered = {str(n) for n in (fm.get("red_tree_nodes") or [])}
+        if not (set(nodes) <= covered and _closed_recently(fm, now, RED_TREE_COOLDOWN_S)):
+            continue
+        # Suppressed only as an OLDER view of the healed tree. A report at the
+        # heal's own base (or a newer one) says the heal was wrong — the green
+        # run that closed it carried a diff that fixed the test, and that diff
+        # never landed — so it is filed again.
+        healed = str(fm.get("red_tree_healed_base") or fm.get(LANDED_MARKER) or "")
+        if not healed or (healed != base and _is_ancestor(live_root, base, healed)):
+            return None
+
+    files = sorted({_red_tree_file(n) for n in nodes})
+    name = f"main is red: {len(nodes)} failing test(s) in {len(files)} file(s) at {base[:8]}"
+    item = new_item(name, _red_tree_body(base, nodes, round_id), priority="high",
+                    tags=(RED_TREE_TAG,), status="draft", board=RED_TREE_BOARD,
+                    backlog_dir=backlog_dir)
+    update_frontmatter(item.path, {"red_tree_base": base, "red_tree_nodes": nodes,
+                                   "red_tree_round": round_id})
+    item = load_item(item.path) or item
+    clauses, dropped = cap_new_clauses(_red_tree_clauses(nodes))
+    acceptance = (f"Every test listed on the item passes at live HEAD under the gate's "
+                  f"selection (-m \"{_RED_TREE_MARK_EXPR}\"), with no test skipped, xfailed, "
+                  f"deleted or excluded to get there.")
+    evidence = (f"filed by the gate: round {round_id}'s `tests` rung reproduced "
+                f"{len(nodes)} failure(s) at base {base[:12]} with its diff absent")
+    record_verdict(item, "confirmed", evidence, acceptance=acceptance,
+                   acceptance_clauses=clauses, dropped_clauses=dropped)
+    S.append_event({"event": "backlog_triage", "item_id": item.id, "verdict": "confirmed",
+                    "held": False, "surface": "code", "check": "",
+                    "evidence": evidence, "acceptance": acceptance,
+                    "acceptance_clauses": clauses, "clauses_dropped": len(dropped),
+                    "spawned": [], "closed": False, "auto": True, "red_tree": True,
+                    "round_id": round_id, "verdict_source": "gate"}, path=ledger)
+    _event(item.id, "created", nodes)
+    return {"item_id": item.id, "action": "created"}
+
+
+def close_healed_red_tree(base: str, round_id: str, live_root: Path | None = None, *,
+                          touched=(), ledger: Path | None = None,
+                          boards: tuple[str, ...] | None = DEFAULT_BOARDS,
+                          backlog_dir: Path | None = None) -> list[int]:
+    """Close every open `red-tree` item a full green run at `base` proves healed.
+
+    Healed means the item's `red_tree_base` is an ancestor of (or equal to)
+    `base`: the tree the item described has since become a tree whose whole
+    suite passes. A green run at an OLDER or unrelated base proves nothing
+    about the item's tree and closes nothing. Closed through `record_verdict`'s
+    `already_done`, with a `red_tree_closed` ledger row. Returns the closed ids.
+
+    A round whose own diff `touched` one of the item's failing files is the
+    round fixing it: its green run is the fix, not the heal, and its landing
+    closes the item through `close_settled_items`. That skip is the common
+    case; a fix made in non-test code still closes here, and if it never
+    lands the next report at this base files the item again (see the
+    cooldown in `file_red_tree_item`).
+    """
+    from scripts.automod import state as S
+    ledger = ledger or S.LEDGER_PATH
+    touched_files = {str(p) for p in (touched or ())}
+    closed: list[int] = []
+    for item in open_red_tree_items(boards, backlog_dir=backlog_dir):
+        fm = _red_tree_fm(item)
+        item_base = str(fm.get("red_tree_base") or "")
+        if not item_base or not _is_ancestor(live_root, item_base, base):
+            continue
+        if {_red_tree_file(n) for n in (fm.get("red_tree_nodes") or [])} & touched_files:
+            continue
+        update_frontmatter(item.path, {"red_tree_healed_base": base})
+        item = load_item(item.path) or item
+        evidence = (f"healed: round {round_id}'s `tests` rung ran the full suite green at "
+                    f"base {base[:12]}, which descends from {item_base[:12]} where this "
+                    f"item's tests failed")
+        if record_verdict(item, "already_done", evidence, close=True) is None:
+            continue
+        S.append_event({"event": "backlog_triage", "item_id": item.id,
+                        "verdict": "already_done", "closed": True, "auto": True,
+                        "red_tree": True, "evidence": evidence, "spawned": [],
+                        "round_id": round_id}, path=ledger)
+        S.append_event({"event": "red_tree_closed", "item_id": item.id, "base": base,
+                        "round_id": round_id}, path=ledger)
+        closed.append(item.id)
+    return closed

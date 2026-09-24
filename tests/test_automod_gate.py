@@ -155,6 +155,49 @@ def test_the_report_serializes_for_the_round_log(monkeypatch):
     assert set(d) >= {"round_id", "base", "head", "ok", "rungs", "changed_paths"}
 
 
+def test_a_tests_pass_carries_its_pre_existing_failures_onto_the_ledger(monkeypatch):
+    """The event, not only `gate.json`: the scorecard counts red-tree passes
+    and the next round is told which ids are not its own, long after the round
+    dir is gone. Lists are capped; `external_blocker` is not written."""
+    events: list[dict] = []
+    monkeypatch.setattr(G.S, "append_event", lambda e, *a, **k: events.append(e))
+    ids = [f"tests/test_x.py::t{i}" for i in range(60)]
+    outcomes = dict(ALL_PASS)
+    outcomes["tests"] = (True, "tests pass on this diff", {
+        "pre_existing_failures": ids, "flaky_node_ids": ["tests/test_y.py::f"],
+        "red_tree_item": 1500})
+    assert _StubGate(outcomes).run().ok
+    ev = next(e for e in events if e["rung"] == "tests")
+    assert ev["pre_existing_failures"] == ids[:50]
+    assert ev["flaky_node_ids"] == ["tests/test_y.py::f"]
+    assert ev["red_tree_item"] == 1500
+    assert "external_blocker" not in ev
+
+
+def test_a_skipped_optional_rung_writes_no_ledger_row_but_stays_in_the_report(monkeypatch):
+    """~1,900 zero-second rows a week said only "not this round". `gate.json`
+    keeps every rung; the ledger keeps what something reads — and `drill` is
+    always written, skipped or not, because a full pass is keyed on it
+    (`backlog._last_gate_per_round`, `gate_passed_unlanded_rounds`)."""
+    events: list[dict] = []
+    monkeypatch.setattr(G.S, "append_event", lambda e, *a, **k: events.append(e))
+    outcomes = dict(ALL_PASS)
+    for name in ("frontend", "prompt_surface", "venv", "canary_smoke", "drill", "review"):
+        outcomes[name] = (True, "skipped", {"skipped": True})
+    report = _StubGate(outcomes).run()
+    assert report.ok and [r.name for r in report.rungs] == list(RUNGS)
+    written = [e["rung"] for e in events]
+    for quiet in ("frontend", "prompt_surface", "venv", "canary_smoke"):
+        assert quiet not in written, quiet
+    assert "drill" in written and next(e for e in events if e["rung"] == "drill")["skipped"] is True
+    assert "review" in written, "only the four optional rungs go quiet"
+    # A rung that RAN is written as always.
+    outcomes["frontend"] = (True, "tsc delta 0, vite build ok", {})
+    events.clear()
+    _StubGate(outcomes).run()
+    assert "frontend" in [e["rung"] for e in events]
+
+
 # ---------------------------------------------------------------------------
 # Preflight guards against a real repo
 # ---------------------------------------------------------------------------
@@ -175,6 +218,24 @@ def live_repo(tmp_path):
     git(r, "add", "-A")
     git(r, "commit", "-q", "-m", "base")
     return r
+
+
+@pytest.fixture(autouse=True)
+def _private_red_set(tmp_path, monkeypatch):
+    """Each test its own per-base red set. Two throwaway repos committed in the
+    same second by the same author have the same base sha, and a red set one
+    test recorded would skip another's base probe."""
+    monkeypatch.setattr(G.S, "RED_SET_PATH", tmp_path / "red_set.json")
+
+
+def _small_floors(monkeypatch):
+    """The whole-suite floors, scaled to a two-test throwaway repo. A pass
+    with pre-existing failures goes through the same floors as a green one;
+    these tests are about attribution, so the floors are lowered, not
+    skipped (`test_a_pass_over_pre_existing_failures_still_meets_the_floors`
+    is the one that leaves them at production values)."""
+    monkeypatch.setattr(G, "PYTEST_MIN_COLLECTED", 1)
+    monkeypatch.setattr(G, "PYTEST_MIN_PASSED", 1)
 
 
 def _gate_for(live, worktree, base, monkeypatch):
@@ -488,29 +549,97 @@ def test_no_node_ids_is_not_an_exemption(tmp_path):
     assert failed == set() and "no node ids" in note
 
 
-def test_rung_tests_reports_pre_existing_breakage_as_an_external_blocker(tmp_path, monkeypatch):
-    """End to end through the real rung: a tree that was already red, plus a
-    round that changed something unrelated. The rung still FAILS — landing onto
-    a red tree would hand the guardian's observation window a broken baseline —
-    but it says whose fault it is, and `backlog.implemented_ids` reads that."""
+def _round_over_red_tree(tmp_path, monkeypatch, name, *, edit=("unrelated.py", "X = 1\n")):
     repo, base = _repo_with_failing_test(tmp_path)
     monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
-    wt = tmp_path / "work" / "SM_T" / "home" / "lloyd"
+    wt = tmp_path / "work" / name / "home" / "lloyd"
     wt.parent.mkdir(parents=True)
-    git(repo, "worktree", "add", "-q", "-b", "automod/SM_T", str(wt), base)
-    (wt / "unrelated.py").write_text("X = 1\n", encoding="utf-8")
+    git(repo, "worktree", "add", "-q", "-b", f"automod/{name}", str(wt), base)
+    (wt / edit[0]).write_text(edit[1], encoding="utf-8")
     git(wt, "add", "-A")
-    git(wt, "commit", "-q", "-m", "an unrelated change")
-
+    git(wt, "commit", "-q", "-m", "a change")
     g = _gate_for(repo, wt, base, monkeypatch)
     g.python = Path(sys.executable)
-    ok, detail, data = g.rung_tests()
+    return g, repo, wt, base
 
-    assert ok is False, "a red tree is still not a tree to land onto"
-    assert data.get("external_blocker") is True
-    assert data["external_failures"] == ["tests/test_pre.py::test_already_broken"]
-    assert "PRE-EXISTING BREAKAGE" in detail
-    git(repo, "worktree", "remove", "--force", str(wt))
+
+def test_rung_tests_passes_over_pre_existing_breakage_and_records_it(tmp_path, monkeypatch):
+    """End to end through the real rung: a tree that was already red, plus a
+    round that changed something unrelated. The rung PASSES — the failure is
+    not this diff's, and refusing it killed 157 rounds in a week — and records
+    whose failure it is. No `external_blocker`: the item's attempt is not in
+    question, because the round is not stopped."""
+    _small_floors(monkeypatch)
+    g, repo, wt, base = _round_over_red_tree(tmp_path, monkeypatch, "SM_T")
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+
+    assert ok is True, detail
+    assert data["pre_existing_failures"] == ["tests/test_pre.py::test_already_broken"]
+    assert "external_blocker" not in data and "external_failures" not in data
+    assert "PRE-EXISTING" in detail and base[:8] in detail
+    assert data["base_probe"].startswith("probed "), data["base_probe"]
+    assert data["red_set_cached"] is False
+    assert data["failed"] == 1, "the failure is counted, not excised"
+    # A throwaway repo is not the production tree: no board write.
+    assert "red_tree_item" not in data
+
+
+def test_a_pass_over_pre_existing_failures_still_meets_the_floors(tmp_path, monkeypatch):
+    """The pass tail is shared: a red-tree pass is held to the collected /
+    passed / skipped floors a green run is. Two tests collected is a suite
+    that was deleted, whoever's the failure is."""
+    g, repo, wt, _base = _round_over_red_tree(tmp_path, monkeypatch, "SM_FL")
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    assert ok is False and "tests collected" in detail, detail
+    assert data["pre_existing_failures"] == ["tests/test_pre.py::test_already_broken"]
+
+
+def test_a_red_test_file_the_round_touches_is_the_rounds(tmp_path, monkeypatch):
+    """The touched-file rule: a round that edits a red test file and leaves it
+    red owns it, even though the same node also fails at base. The base probe
+    is not even asked about it."""
+    _small_floors(monkeypatch)
+    src = ("def test_already_broken():\n    assert False\n\n"
+           "def test_fine():\n    assert True  # touched by the round\n")
+    g, repo, wt, _base = _round_over_red_tree(tmp_path, monkeypatch, "SM_TCH",
+                                              edit=("tests/test_pre.py", src))
+    probed: list = []
+    real = G._failures_at_base
+    monkeypatch.setattr(G, "_failures_at_base",
+                        lambda *a, **k: probed.append(list(a[3])) or real(*a, **k))
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    assert ok is False, detail
+    assert data["new_failures"] == ["tests/test_pre.py::test_already_broken"]
+    assert data["touched_failures"] == ["tests/test_pre.py::test_already_broken"]
+    assert "pre_existing_failures" not in data
+    assert probed == [], "a node in the round's own file is never probed"
+
+
+def test_an_inconclusive_base_probe_grants_nothing(tmp_path, monkeypatch):
+    """Fail closed: a probe that could not run says nothing about whose
+    failure this is — not even when every node then passes a repeat run."""
+    _small_floors(monkeypatch)
+    g, repo, wt, _base = _round_over_red_tree(tmp_path, monkeypatch, "SM_INC")
+    monkeypatch.setattr(G, "_failures_at_base", lambda *a, **k: (
+        set(), "baseline probe INCONCLUSIVE at base x — pytest produced no summary"))
+    monkeypatch.setattr(G, "_reconfirm_candidate_failures",
+                        lambda python, root, ids, **k: (list(ids), "all passed a repeat"))
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    assert ok is False and "failing closed" in detail, detail
+    assert "pre_existing_failures" not in data
+    assert G.S.read_red_set(g.base) is None, "an inconclusive probe is never cached"
 
 
 def test_rung_tests_blames_the_round_for_a_failure_it_introduced(tmp_path, monkeypatch):
@@ -535,6 +664,10 @@ def test_rung_tests_blames_the_round_for_a_failure_it_introduced(tmp_path, monke
     assert not data.get("external_blocker"), "one new failure is the round's own"
     assert data["new_failures"] == ["tests/test_mine.py::test_i_broke_this"]
     assert "are new in this round" in detail
+    # The mixed case still says which failures are NOT the round's, so the
+    # author does not spend the fix cycle on them.
+    assert data["pre_existing_failures"] == ["tests/test_pre.py::test_already_broken"]
+    assert "not yours" in detail
     git(repo, "worktree", "remove", "--force", str(wt))
 
 
@@ -606,6 +739,7 @@ def _counted_gate(tmp_path, monkeypatch, *, add_broken: bool):
     never execute the flake that exists at base.
     """
     repo, base = _counted_repo(tmp_path)
+    _small_floors(monkeypatch)
     counter = tmp_path / "runs"
     monkeypatch.setattr(G, "_gate_cfg",
                         lambda key, default: 1 if key == "test_workers" else default)
@@ -633,37 +767,36 @@ def _counted_gate(tmp_path, monkeypatch, *, add_broken: bool):
 def test_a_failure_that_passes_its_repeat_runs_is_flaky_not_the_rounds(tmp_path, monkeypatch):
     """The #1196 case. One suite run saw the failure, the base probe saw a pass,
     and the round that happened to trip it used to be blamed and spend its
-    attempt."""
+    attempt. Since 2026-09-24 a flake is not a reason to stop the round at all:
+    the rung passes and names it."""
     g, counter, repo, wt = _counted_gate(tmp_path, monkeypatch, add_broken=False)
     try:
         ok, detail, data = g.rung_tests()
     finally:
         git(repo, "worktree", "remove", "--force", str(wt))
-    assert ok is False, "a red tree is not landable, flake or no flake"
-    assert data.get("external_blocker") is True, "one sample is not this round's fault"
+    assert ok is True, detail
+    assert "external_blocker" not in data
     assert data["retried_node_ids"] == [FLAKY_NODE]
     assert data["flaky_node_ids"] == [FLAKY_NODE]
-    assert data["external_failures"] == [FLAKY_NODE]
-    assert "flaky" in detail.lower(), detail
+    assert "FLAKY" in detail, detail
     assert "are new in this round" not in detail, detail
     # suite run + base probe + ONE repeat, then the node left the batch
     assert int((Path(str(counter) + ".first")).read_text()) == 3, detail
 
 
-def test_a_flaky_attribution_never_passes_the_rung(tmp_path, monkeypatch):
-    """The exemption is attribution and attempt-spending only. No skip, no
-    xfail, no node dropped from the run: the rung's own counts still say the
-    suite ran everything and came back red."""
+def test_a_flaky_pass_still_counts_the_failure(tmp_path, monkeypatch):
+    """The pass is attribution, not excision. No skip, no xfail, no node
+    dropped from the run: the rung's own counts still say the suite ran
+    everything and one test came back red."""
     g, _counter, repo, wt = _counted_gate(tmp_path, monkeypatch, add_broken=False)
     try:
         ok, detail, data = g.rung_tests()
     finally:
         git(repo, "worktree", "remove", "--force", str(wt))
-    assert ok is False
+    assert ok is True
     assert data["failed"] == 1, "the failure is still counted, not excised"
     assert data["collected"] == 2, "the flaky node was run, not skipped out of it"
     assert data["tests_skipped"] == 0 and data["xfailed"] == 0
-    assert "Blocking the promotion" in detail, detail
 
 
 def test_a_failure_that_fails_every_repeat_run_is_still_the_rounds(tmp_path, monkeypatch):
@@ -868,36 +1001,41 @@ def test_named_ids_are_whole_and_capped():
     assert G._name_ids(ids[:2]) == "tests/test_x.py::test_0, tests/test_x.py::test_1"
 
 
-def test_a_test_the_round_added_does_not_hide_the_pre_existing_ones(tmp_path, monkeypatch):
-    """Regression, found building this: probing by node id is wrong. Handed a
-    node id that does not exist at base — a test the round just wrote, in a file
-    that already existed — pytest exits `ERROR: not found:` and runs NOTHING, so
-    the pre-existing failure beside it never reports and a red tree reads as
-    green. The probe runs whole files for exactly this reason."""
+def test_a_test_the_round_added_does_not_hide_the_pre_existing_ones(tmp_path):
+    """Regression, found building the base probe: probing by node id is wrong.
+    Handed a node id that does not exist at base — a test the round just
+    wrote, in a file that already existed — pytest exits `ERROR: not found:`
+    and runs NOTHING, so the pre-existing failure beside it never reports and
+    a red tree reads as green. The probe runs whole files for exactly this
+    reason. (Through the rung a red file the round edits is now the round's
+    own and never probed — `test_a_red_test_file_the_round_touches_is_the_rounds`
+    — so this is pinned on the probe itself.)"""
     repo, base = _repo_with_failing_test(tmp_path)
-    monkeypatch.setattr(G.W, "WORK_ROOT", tmp_path / "work")
-    wt = tmp_path / "work" / "SM_T3" / "home" / "lloyd"
-    wt.parent.mkdir(parents=True)
-    git(repo, "worktree", "add", "-q", "-b", "automod/SM_T3", str(wt), base)
-    # A new failing test appended to the SAME file that is already red.
-    (wt / "tests" / "test_pre.py").write_text(
-        "def test_already_broken():\n    assert False\n\n"
-        "def test_fine():\n    assert True\n\n"
-        "def test_added_by_this_round():\n    assert False\n", encoding="utf-8")
-    git(wt, "add", "-A")
-    git(wt, "commit", "-q", "-m", "adds a failing test to an already-red file")
+    failed, note = G._failures_at_base(
+        Path(sys.executable), repo, base,
+        ["tests/test_pre.py::test_added_by_this_round",
+         "tests/test_pre.py::test_already_broken"], tmp_path / "scratch")
+    assert failed == {"tests/test_pre.py::test_already_broken"}, note
 
-    g = _gate_for(repo, wt, base, monkeypatch)
-    g.python = Path(sys.executable)
-    ok, detail, data = g.rung_tests()
 
+def test_a_round_that_adds_a_failure_to_a_red_file_owns_both(tmp_path, monkeypatch):
+    """The same shape through the rung: the file is in the round's diff, so
+    both of its failures are the round's."""
+    _small_floors(monkeypatch)
+    src = ("def test_already_broken():\n    assert False\n\n"
+           "def test_fine():\n    assert True\n\n"
+           "def test_added_by_this_round():\n    assert False\n")
+    g, repo, wt, _base = _round_over_red_tree(tmp_path, monkeypatch, "SM_T3",
+                                              edit=("tests/test_pre.py", src))
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
     assert ok is False
     assert not data.get("external_blocker"), "the round added a failure of its own"
-    assert data["new_failures"] == ["tests/test_pre.py::test_added_by_this_round"]
-    # The pre-existing one was still seen — that is what a node-id probe lost.
-    assert "tests/test_pre.py::test_already_broken" in data["failed_node_ids"]
-    assert "1 of 2 failures are new" in detail
-    git(repo, "worktree", "remove", "--force", str(wt))
+    assert set(data["new_failures"]) == {"tests/test_pre.py::test_added_by_this_round",
+                                         "tests/test_pre.py::test_already_broken"}
+    assert "all 2 failure(s) are new" in detail
 
 
 def test_a_probe_that_could_not_run_says_so_instead_of_reporting_zero(tmp_path):

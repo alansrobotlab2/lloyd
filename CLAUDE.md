@@ -306,26 +306,24 @@ Errors are read from `~/lloyd-data/logs/server.err`, never `server.log` — `bas
 writes to stderr, so `server.log` is uvicorn's access log and holds zero
 error-shaped lines.
 
-- **A failing `tests` rung says the tree is red, not that the round made it
-  red.** On 2026-09-08 three rounds aborted here on the same three failures
-  no diff under test had written — two asserting the wall clock against a
-  23→07 quiet-hours window (so they failed exactly when the unattended loop
-  runs), one asserting that a deliberately untracked file had been checked
-  out (so it failed in every worktree). `8138f1c` fixed them at 16:39 UTC,
-  after all three, and nothing went back: `implemented_ids` counts any
-  finished round as the item's one attempt, so #361, #370 and #376 were
-  consumed by someone else's breakage. Each of those rounds had *proved* it
-  predated them — in prose, in a report read once. `rung_tests` now re-runs
-  the failing **files** at the round's base in a throwaway worktree and
-  records `external_blocker: true` when every failure reproduces there. The
-  rung still fails, because landing onto a red tree opens the guardian's
-  observation window against a broken baseline; what changes is that the
-  item keeps its attempt. Probing by *file* is load-bearing — handed a node
-  id the round just added, pytest exits `ERROR: not found:` and runs
-  nothing, so one new test would hide every pre-existing failure beside it.
-  Fails closed everywhere (a probe that cannot run blames the round), capped
-  at `EXTERNAL_RETRY_CAP` re-offers so a permanently red tree cannot starve
-  the board, and granted by the `tests` rung only.
+- **A red tree is not the round's, so the `tests` rung passes over it.**
+  `rung_tests` re-runs the failing **files** at the round's base in a
+  throwaway worktree (by file: a node id the round added makes pytest run
+  nothing). Every failure reproducing there, or passing a repeat run
+  (flaky), **passes** the rung with `pre_existing_failures` /
+  `flaky_node_ids` on the gate event and a `notes_that_did_not_block` line in
+  the report. Until 2026-09-24 it failed with `external_blocker` on the
+  theory that the guardian would judge the landing against a broken
+  baseline; the guardian never runs pytest, and 157 rounds a week died on
+  trees they did not break (21 landed). Three rails: a failing node in a file
+  the round's diff touches is the round's even if it fails at base; one new
+  failure fails the rung (the mixed case still names what is not theirs); an
+  INCONCLUSIVE probe grants nothing. The probe's answer is cached per base
+  sha (`red_set.json`, `automod.gate.red_set_max_age_s`), and the breakage is
+  filed as one `high`, pre-confirmed `red-tree` item the next round takes
+  (`backlog.file_red_tree_item`, `automod.gate.file_red_tree`), closed by the
+  first full green run at a descendant base. The review grader is told the
+  ids and a `met` citing one does not stand. `architecture/automod.md` §4.2b.
 - **The gate has a second reader.** Eight rungs asked whether a change
   *broke* something and none asked whether it did what the item said; #544
   landed through all eight with one of five acceptance clauses skipped, half

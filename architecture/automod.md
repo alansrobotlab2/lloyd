@@ -1496,6 +1496,15 @@ same serial `tests` rung took 430-600 s and `review` a median 401 s
 2026-09-18 (§4.2f), and the prompt and the gate tool read the current figure
 off the ledger rather than from this table.
 
+Every rung is in `gate.json`; not every rung is on the ledger. Since
+2026-09-24 a **skipped** `frontend`, `prompt_surface`, `venv` or
+`canary_smoke` writes no `gate` row (`Gate.QUIET_SKIP_RUNGS`) — ~1,900
+zero-second rows a week that said only "not this round", read by nothing.
+`drill` is always written, skipped or not, because
+`backlog._last_gate_per_round` and `gate_passed_unlanded_rounds` key a full
+pass on an ok `drill` row; a failed skip (none exists today) would still be
+written.
+
 Two rungs carry most of the weight.
 
 **static** runs `python -c "import server, agent_mcp.main"`. An import-time
@@ -1608,6 +1617,13 @@ counts, and **before `venv`**, so a refusal saves the build, the boot, the
 smoke and the drill (and because `canary_smoke` must immediately precede
 `drill`). It is skipped, and recorded as skipped, only for a round with no
 item bound — a human's round has no contract to grade against.
+
+A green `tests` rung is not always a green tree since 2026-09-24: the rung
+passes over failures that reproduce at the round's base (§4.2b). The grader is
+told their ids ("fail here and at base; not this diff's; a clause leaning on
+one is at most `partial`"), and `parse_review` enforces it — a `met` whose
+`test_node_id` is one of them, or sits in a file that holds one, is
+downgraded, whatever `how_verified` says (`_cites_pre_existing`).
 
 **Termination.** Three bounds end the author/grader loop: two graded
 refusals of distinct commits per round (a grader timeout and a duplicate
@@ -1876,20 +1892,72 @@ filed #479 saying the gate was unlandable for every round, #376's ended "the
 branch is ready as-is". All of it in prose, in reports that are read once.
 
 So on a failure the rung re-runs the failing **files** at the round's base, in
-a throwaway worktree, and classifies:
+a throwaway worktree, and classifies each failing node:
 
-- every failure reproduces at base → `external_blocker: true`
-- any failure is new → the round's own, and the detail names which
+- in a file the round's own diff touches → **the round's**, even if it also
+  fails at base (the touched-file rule: a round that edits a red test file
+  and leaves it red owns it; such nodes are not even probed)
+- reproduces at base → **pre-existing**
+- does not reproduce, but passes a repeat run with the diff present (§4.2f,
+  #1196) → **flaky**
+- anything else → **new**, the round's own, and the detail names it
 
-The rung still **fails** either way. A red tree is not a tree to land onto:
-the promotion's observation window would open against a broken baseline, and
-§8 is built on the assumption that errors after a landing are about the
-landing. Blocking was always right; spending the item was not.
-`backlog.implemented_ids` reads the flag off the ledger event — not off
-`gate.json`, which lives in the round dir and is deleted with the worktree —
-and does not count such a round as the attempt.
+**Since 2026-09-24 the rung passes when nothing is new.** Every failure
+pre-existing or flaky → `ok`, with `pre_existing_failures`, `flaky_node_ids`,
+`base_probe`, `red_set_cached` and `red_tree_item` in the rung data, the lists
+copied onto the gate event (capped at 50 ids), and the report headline's
+`notes_that_did_not_block.pre_existing_failures` telling the round who owns
+them. The pass goes through the same tail as a green run (`_tests_pass`), so
+the collected / passed / skipped floors and the removed-files check still
+apply. One new failure fails the rung as before, and the mixed case still
+records `pre_existing_failures` so the author does not spend the fix cycle
+on them. An INCONCLUSIVE probe grants nothing.
 
-Three things that decide whether it works:
+It used to **fail** with `external_blocker: true`, on the theory that a red
+tree would open the promotion's observation window against a broken baseline.
+The guardian never runs pytest, and 85 of the week's 257 landings restarted
+nothing; what the refusal did was kill rounds. In the week to 2026-09-24 the
+rung failed 284 of 895 runs, 221 of them pre-existing; 157 rounds hit it and
+21 ever landed; red episodes ran up to 59 h (`tests/test_uptake.py`) across 39
+distinct red bases, and nothing in the loop fixed the tree — it only refused
+to land on it. The `tests` rung no longer writes `external_blocker`, so the
+red-tree `external` verdict in `implement_outcomes` disappears by construction;
+`preflight`, `review`, `land_failed` and `round.py` still write it, and
+historical `tests` rows are read as before.
+
+**The probe's answer is cached per base** (`state.read_red_set` /
+`write_red_set`, `red_set.json` in the state dir, newest 8 bases). Before
+probing, the rung asks whether every failing id is already recorded as failing
+at this exact base sha, fresher than `automod.gate.red_set_max_age_s` (6 h);
+if so the probe is skipped and `red_set_cached` says so. A conclusive probe
+merges its answer in; an INCONCLUSIVE one writes nothing; a full green run
+records `[]` for its base. The set is only consulted for nodes that failed at
+HEAD, so a stale entry can skip a probe, never hide a failure; a preflight
+rebase is a new base and a new entry. `tests/test_gate_red_set.py`.
+
+**The tree heals itself** (`backlog.file_red_tree_item`,
+`automod.gate.file_red_tree`). A conclusive pre-existing set is filed as one
+open item tagged `red-tree` — priority `high`, confirmed at birth through
+`record_verdict` with one clause per failing file plus "no test skipped,
+xfailed, deleted or marked `live_vault` to get there", and an `auto: true,
+red_tree: true` triage row — so `select_confirmed` takes it next and the depth
+gate never holds it. `red-tree` is not a `spawned-by-*` tag: expiry and the
+write-time merge leave it alone. A report on the same base unions into the open
+item (a clause per new file), a report on a descendant base replaces it, an
+older view is ignored, and the round's own files are never filed. A full green
+run at a base descending from the item's closes it `already_done`
+(`close_healed_red_tree`) — most red trees are healed by a hand commit, and a
+`high` item left open would spend a round proving nothing — unless the round's
+diff touched the item's files, in which case that round is the fix and its
+landing closes it. A closed item suppresses re-filing for 24 h only for an
+*older* view of the healed tree: the same failure reproducing at the heal's own
+base means the green run's diff fixed it and never landed, and it is filed
+again. Ledger rows: `red_tree_filed` (`action`: created / merged / replaced)
+and `red_tree_closed`. Filing is try/except inside the rung — never the gate's
+verdict — and happens only when the gate judges the production tree, so a test
+Gate over a throwaway repo cannot reach the board. `tests/test_backlog_red_tree.py`.
+
+Things that decide whether it works:
 
 - **It probes files, not node ids.** Handed a node id that does not exist at
   base — a test the round just wrote — pytest exits `ERROR: not found:` and
@@ -1897,18 +1965,14 @@ Three things that decide whether it works:
   it and a red tree would read as green. Found while building this; pinned by
   `test_a_test_the_round_added_does_not_hide_the_pre_existing_ones`.
 - **It fails closed in every direction.** A worktree that will not create, a
-  probe that times out, an unparseable summary — all return "nothing
-  reproduces", which blames the round. Being wrong that way costs the status
-  quo; being wrong the other way lands a change nobody checked.
-- **The exemption is capped** (`EXTERNAL_RETRY_CAP`, 3). `select_confirmed`
-  takes the oldest ready item, so an item re-offered without bound would be
-  re-picked every round for as long as the tree stayed red, starving
-  everything behind it. A tree red across four rounds is an incident nobody is
-  handling, not a blip worth retrying.
-
-Only the `tests` rung grants it. `preflight` failing on a dirty live tree is
-also not the round's fault, but it is cheap and re-runnable, and widening an
-exemption is how it becomes an open door.
+  probe that times out, an unparseable summary — all are INCONCLUSIVE, which
+  passes nothing and caches nothing. Being wrong that way costs a round;
+  being wrong the other way lands a change nobody checked.
+- **The grader is told** (§4.5): the review prompt lists the pre-existing ids,
+  and `parse_review(pre_existing_failures=…)` never lets a `met` stand on a
+  node in the set or in a file that holds one, whatever `how_verified` says.
+  The residual risk is a `met` on a different changed-test node while the
+  clause really depends on a red unchanged test — the same residual as before.
 
 ### 4.2c A round that never reached a verdict has not spent the item
 
@@ -1949,7 +2013,9 @@ everything behind it.
   path also recognises the old shape, so history heals without a backfill —
   but only an **explicit null**, never a missing key, so a writer whose shape
   we do not know falls through to `spent`.
-- **`external`** — §4.2b, now including preflight's two live-tree refusals.
+- **`external`** — preflight's two live-tree refusals, an unreachable review
+  grader and an external `land_failed`. A red tree was the first case (§4.2b)
+  until 2026-09-24, when the `tests` rung started passing over one instead.
 - **`rolled_back`** — the round landed and the guardian reverted it. Nothing
   joined those two facts before: the promotion carries the round id, the
   rollback carries only the commit. Every rollback this loop has performed has

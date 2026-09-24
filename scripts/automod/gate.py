@@ -23,7 +23,10 @@ cost 3 seconds, not a full canary boot.
                           workers (~600 s serial) + a collected-count floor.
                           A failure under load is re-run serially before it
                           is believed; a real one re-probes the failing files
-                          at the round's base to say whose breakage it is
+                          at the round's base to say whose breakage it is, and
+                          a failure that is not the round's (pre-existing or
+                          flaky, in a file the diff did not touch) PASSES the
+                          rung, recorded and filed as a `red-tree` item
   4 review      60-180s   a second reader: a fresh session on the LIVE
                           backend grades the diff against the item's
                           acceptance clauses (scripts/automod/review.py).
@@ -249,9 +252,11 @@ def _parse_pytest_summary(text: str) -> dict:
 #
 # So the rung asks a second question when it fails: do these exact tests
 # already fail at the base this round branched from, where the diff under test
-# is absent? Blocking the promotion is still right — landing onto a red tree
-# would give the guardian's observation window a broken baseline. Consuming the
-# backlog item is what was wrong.
+# is absent? Until 2026-09-24 a yes still blocked the promotion ("landing onto
+# a red tree would give the guardian's observation window a broken baseline").
+# It does not: the guardian never runs pytest. A yes now PASSES the rung with
+# the ids recorded and the breakage filed as a `red-tree` item (see
+# `Gate._tests_failed`); what a red tree cost was 157 rounds a week.
 EXTERNAL_PROBE_TIMEOUT = 600.0
 
 # The `-m` expression every pytest invocation in this module carries, in one place because the
@@ -485,6 +490,21 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
         shutil.rmtree(wt, ignore_errors=True)
 
 
+def _probe_conclusive(note: str) -> bool:
+    """Whether `_failures_at_base` actually answered. Every non-answer — a
+    worktree that would not create, a timeout, a crash, a pytest that produced
+    no summary — returns an empty set too, and only its note tells them apart.
+    A non-answer grants nothing (the `tests` rung fails closed on it) and is
+    never written into the red set."""
+    n = str(note or "")
+    return n.startswith("probed ") or n == "none of the failing files exist at base"
+
+
+# How long a per-base red set (`state.read_red_set`) stands in for the base
+# probe. `automod.gate.red_set_max_age_s` overrides it.
+RED_SET_MAX_AGE_S = 6 * 3600
+
+
 def _gate_cfg(key: str, default):
     """`automod.gate.<key>` from config, or the default. Never raises."""
     try:
@@ -692,6 +712,20 @@ class Gate:
         return None
 
     # ── driver ─────────────────────────────────────────────────────────
+    # How many node ids a gate ledger event carries per list.
+    EVENT_ID_CAP = 50
+    # Rungs whose SKIP writes no ledger row (`gate.json` still lists them).
+    # A skipped `frontend`, `prompt_surface`, `venv` or `canary_smoke` is the
+    # common case — ~1,900 zero-second rows a week that say only "not this
+    # round" — and nothing reads them: `backlog._last_gate_per_round` keys a
+    # failed run on its failing rung and a full pass on an ok `drill` row, so
+    # `drill` is never on this list, skipped or not.
+    QUIET_SKIP_RUNGS = frozenset({"frontend", "prompt_surface", "venv", "canary_smoke"})
+
+    def _quiet_skip(self, name: str, data: dict, ok: bool = True) -> bool:
+        return (ok and name in self.QUIET_SKIP_RUNGS
+                and (data or {}).get("skipped") is True)
+
     def _rung(self, name: str, fn) -> bool:
         started = time.time()
         reused = self._reuse(name)
@@ -700,9 +734,10 @@ class Gate:
             data = {**data, "reused": True}
             res = RungResult(name, True, f"REUSED ({why})", 0.0, data)
             self.report.rungs.append(res)
-            S.append_event({"event": "gate", "round_id": self.round_id, "rung": name,
-                            "ok": True, "detail": res.detail, "reused": True,
-                            "skipped": data.get("skipped") is True, "seconds": 0.0})
+            if not self._quiet_skip(name, data):
+                S.append_event({"event": "gate", "round_id": self.round_id, "rung": name,
+                                "ok": True, "detail": res.detail, "reused": True,
+                                "skipped": data.get("skipped") is True, "seconds": 0.0})
             print(f"[PASS] {name} (0.0s) {res.detail}")
             return True
         try:
@@ -727,6 +762,15 @@ class Gate:
         if (res.data or {}).get("external_blocker"):
             event["external_blocker"] = True
             event["external_failures"] = (res.data or {}).get("external_failures", [])
+        # Whose failures a `tests` pass (or a mixed failure) carried, for the
+        # same reason: the scorecard counts red-tree passes, and the next round
+        # is told which ids are not its own, long after `gate.json` is gone.
+        for key in ("pre_existing_failures", "flaky_node_ids"):
+            ids = (res.data or {}).get(key)
+            if ids:
+                event[key] = list(ids)[:self.EVENT_ID_CAP]
+        if (res.data or {}).get("red_tree_item"):
+            event["red_tree_item"] = res.data["red_tree_item"]
         # The review rung's two verdicts ride the event for the same reason:
         # `backlog.implement_outcomes` reads them long after the round dir is
         # gone, and the findings are what the next round is told.
@@ -750,7 +794,8 @@ class Gate:
                             "counts": v.get("counts") or {},
                             "labels": v.get("labels") or [],
                             "totals": v.get("totals") or {}}
-        S.append_event(event)
+        if not self._quiet_skip(name, res.data or {}, ok):
+            S.append_event(event)
         if ok:
             self._reuse_save(name, res.data)
         print(f"[{'PASS' if ok else 'FAIL'}] {name} ({res.seconds:.1f}s) {res.detail[:160]}")
@@ -1366,103 +1411,31 @@ class Gate:
         only = only if only is not None else self._tests_delta_only()
         r, text, counts = self._run_suite(only)
         if r.returncode != 0:
-            tail = "\n".join(text.strip().splitlines()[-15:])
-            node_ids = _failed_node_ids(text)
-            base_failed, probe_note = _failures_at_base(
-                self.python, self.live, self.base, node_ids,
-                W.round_dir(self.round_id), self._child_env(isolate_home=True))
-            external, new = _classify_test_failure(node_ids, base_failed)
-            # One run is one sample. The base probe above is a single
-            # invocation, so a node that flickers clears it often enough to
-            # matter and lands in `new` — attributed to whichever round happened
-            # to trip it, which then spent its one attempt on the item. Ask
-            # those nodes again before the wording commits to that. Nodes the
-            # base probe DID reproduce never come here: their attribution
-            # already exists, and re-running them spends minutes to repeat it.
-            flaky: list[str] = []
-            flaky_note = ""
-            # Node ids only. An id with no `::` is a file pytest could not even
-            # collect: repeating it re-runs a whole file to ask one question, and
-            # an import or syntax error is deterministic far more often than an
-            # assertion is. Such a failure stays the round's on the first sample.
-            to_reconfirm = [n for n in new if "::" in n]
-            if to_reconfirm:
-                flaky, flaky_note = _reconfirm_candidate_failures(
-                    self.python, self.worktree, to_reconfirm,
-                    repeats=int(_gate_cfg("test_repeat_runs", REPEAT_RUNS) or 0),
-                    env=self._child_env(isolate_home=True))
-            data = {**counts, "failed_node_ids": node_ids,
-                    "base_probe": probe_note, "home": self.home_isolation}
-            if flaky:
-                # What was actually asked again, not everything that failed: a
-                # node the base probe reproduced was never in the repeat batch.
-                data["retried_node_ids"] = list(to_reconfirm)
-                data["flaky_node_ids"] = list(flaky)
-                new = [n for n in new if n not in flaky]
-            if external:
-                # The rung still fails: a red tree is not a tree to land onto,
-                # and the guardian would judge the promotion against a broken
-                # baseline. What changes is that this does not spend the
-                # backlog item's one attempt — see `backlog.implemented_ids`.
-                data["external_blocker"] = True
-                data["external_failures"] = node_ids
-                return False, (f"pytest failed ({counts}), but every failure "
-                               f"reproduces at base {self.base[:8]} with this "
-                               f"round's diff absent — PRE-EXISTING BREAKAGE, "
-                               f"not caused by this change: {node_ids}. "
-                               f"{probe_note}. Blocking the promotion; the item "
-                               f"keeps its attempt."), data
-            if flaky and not new:
-                # Every failure is now explained by something other than this
-                # diff: it either reproduces at base, or it passed a repeat run.
-                # The rung still fails — a red tree is not a tree to land onto —
-                # but the item keeps its attempt, which is the whole point: the
-                # cost of a flake used to fall on whichever round tripped it.
-                data["external_blocker"] = True
-                data["external_failures"] = node_ids
-                data["external_reason"] = "a test that flickers, not this change"
-                data["retry_after_s"] = 120
-                return False, (f"pytest failed ({counts}), but "
-                               f"{len(flaky)} failure(s) the base probe did not "
-                               f"reproduce PASSED a repeat run — FLAKY, not caused "
-                               f"by this change: {_name_ids(flaky)}. {probe_note}. "
-                               f"{flaky_note}. Blocking the promotion; the item "
-                               f"keeps its attempt."), data
-            if flaky:
-                # Some failures flickered and some did not: the round still owns
-                # the ones that failed every repeat, so no exemption and the
-                # attempt is spent as it always was. Only the flaky ones come out
-                # of the count, so the number the round reads is the number it
-                # caused.
-                data["new_failures"] = new
-                return False, (f"pytest failed ({counts}): {len(new)} of "
-                               f"{len(node_ids)} failures are new in this round "
-                               f"({_name_ids(new)}); {len(flaky)} passed a repeat run "
-                               f"and are FLAKY ({_name_ids(flaky)}). {probe_note}. "
-                               f"{flaky_note}\n{tail[-600:]}"), data
-            if node_ids and base_failed:
-                data["new_failures"] = new
-                return False, (f"pytest failed ({counts}): {len(new)} of "
-                               f"{len(node_ids)} failures are new in this round "
-                               f"({_name_ids(new)}); the rest predate it. {probe_note}\n"
-                               f"{tail[-600:]}"), data
-            # Nothing reproduces at base: every failure is this round's. Say so
-            # in the same field the mixed case uses, so a reader of the report
-            # never has to infer the delta from its absence — and name the
-            # failures in the detail itself, ahead of the pytest tail. On
-            # 2026-09-13 this branch returned only `tail[-900:]`, which began
-            # mid-name ("e.py::test_global_scan…"); the full list rode in `data`,
-            # and the tool result carrying it back was cut before `data`. Round
-            # SM_20260913_165927 (#472) never saw its twelve real failures,
-            # invented a test file that exists nowhere, and filed blocker #1093
-            # against the gate for it.
-            data["new_failures"] = new
-            if node_ids:
-                return False, (f"pytest failed ({counts}): all {len(node_ids)} failure(s) are "
-                               f"new in this round ({_name_ids(node_ids)}). {probe_note}\n"
-                               f"{tail[-600:]}"), data
-            return False, f"pytest failed ({counts}): {tail[-900:]}\n{probe_note}", data
+            return self._tests_failed(text, counts, only)
+        ok, detail, data = self._tests_pass(counts, only, {})
+        if ok and not only:
+            # A full green run: the proof the red-tree bookkeeping waits for.
+            # Both halves are wholly guarded — a cache or a backlog write is
+            # never the gate's verdict.
+            try:
+                S.write_red_set(self.base, [], by=self.round_id, merge=False)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[warn] could not record the green red set: {exc}")
+            healed = self._close_healed_red_tree()
+            if healed:
+                data["red_tree_closed"] = healed
+        return ok, detail, data
 
+    def _tests_pass(self, counts: dict, only: list[str] | None, extra: dict):
+        """The pass tail of the `tests` rung, shared by a green run and a run
+        whose every failure is pre-existing or flaky — so a pass on a red tree
+        is held to exactly the floors a green one is.
+
+        `extra` rides onto the data (and the detail's lead, via
+        `extra["_lead"]`, which is popped): the pre-existing and flaky ids.
+        """
+        extra = dict(extra or {})
+        lead = str(extra.pop("_lead", "") or "")
         if only:
             # A partial run answers a narrower question, so the whole-suite
             # floors below do not apply — they would fail every partial run
@@ -1470,17 +1443,18 @@ class Gate:
             removed = [p for p in self.report.changed_paths
                        if p.startswith("tests/") and not (self.worktree / p).exists()]
             if removed:
-                return False, (f"test files removed by this round: {removed}"), counts
-            return True, (f"pytest (partial, {len(only)} changed test file(s) since the "
+                return False, (f"test files removed by this round: {removed}"), {**counts, **extra}
+            return True, (lead + f"pytest (partial, {len(only)} changed test file(s) since the "
                           f"last full run): {counts['passed']} passed, "
                           f"{counts['tests_skipped']} skipped"), {
-                              **counts, "partial": True, "only": list(only)}
+                              **counts, **extra, "partial": True, "only": list(only)}
 
         # Non-negotiable under auto-landing: `pytest -q` exits 0 if the round
         # simply deleted the test that was failing.
         if counts["collected"] < PYTEST_MIN_COLLECTED:
             return False, (f"only {counts['collected']} tests collected "
-                           f"(floor {PYTEST_MIN_COLLECTED}) — did the round delete tests?"), counts
+                           f"(floor {PYTEST_MIN_COLLECTED}) — did the round delete tests?"), {
+                               **counts, **extra}
         # ...and it exits 0 just as happily having collected everything and RUN
         # nothing. A collected-count floor alone is satisfied by a suite that
         # skipped itself wholesale, which is a one-line conftest change away.
@@ -1488,25 +1462,223 @@ class Gate:
             return False, (f"only {counts['passed']} tests passed "
                            f"(floor {PYTEST_MIN_PASSED}) of {counts['collected']} "
                            f"collected, {counts['tests_skipped']} skipped — the suite "
-                           "was collected but not run"), counts
+                           "was collected but not run"), {**counts, **extra}
         if counts["tests_skipped"] > PYTEST_MAX_SKIPPED:
             return False, (f"{counts['tests_skipped']} tests skipped "
                            f"(limit {PYTEST_MAX_SKIPPED}) — a round that skips its way "
-                           "to green is not a round that passed"), counts
+                           "to green is not a round that passed"), {**counts, **extra}
         removed = [p for p in self.report.changed_paths
                    if p.startswith("tests/") and not (self.worktree / p).exists()]
         if removed:
-            return False, f"test files removed: {removed}", counts
+            return False, f"test files removed: {removed}", {**counts, **extra}
         flinched = counts.get("parallel_only_failures") or []
         # On the pass too, not only on the failure branches: the one reading that
         # says whether the suite ran redirected is worth nothing if it is absent
         # from every report where nothing went wrong.
         counts["home"] = self.home_isolation
-        return True, (f"{counts['passed']} passed, {counts['xfailed']} xfailed, "
+        return True, (lead + f"{counts['passed']} passed, {counts['xfailed']} xfailed, "
                       f"{counts['tests_skipped']} skipped"
                       + (f" ({counts['workers']} workers)" if counts.get("workers", 1) > 1 else "")
                       + (f"; {len(flinched)} failed only under parallel load and passed "
-                         f"serially: {_name_ids(flinched)}" if flinched else "")), counts
+                         f"serially: {_name_ids(flinched)}" if flinched else "")), {**counts, **extra}
+
+    def _touched_paths(self) -> set[str]:
+        """The round's own diff. `preflight` records it; a direct call of the
+        rung (no preflight) reads it from git. Empty when neither can say."""
+        if self.report.changed_paths:
+            return set(self.report.changed_paths)
+        try:
+            return set(W.changed_paths(self.worktree, self.base))
+        except Exception:  # noqa: BLE001
+            return set()
+
+    def _base_failures(self, probe_ids: list[str]) -> tuple[set[str], str, bool, bool]:
+        """`(base_failed, note, conclusive, cached)` for `probe_ids`.
+
+        The per-base red set answers first (`state.read_red_set`, fresh within
+        `automod.gate.red_set_max_age_s`): when every id is already known to
+        fail at this exact base, the throwaway-worktree probe is skipped. It
+        applies only to nodes that failed at HEAD, so a stale entry can skip a
+        probe, never hide a failure. A conclusive probe is merged back in; an
+        INCONCLUSIVE one writes nothing.
+        """
+        if not probe_ids:
+            return set(), "no failures outside the round's own files to probe", True, False
+        try:
+            entry = S.read_red_set(self.base, float(_gate_cfg("red_set_max_age_s", RED_SET_MAX_AGE_S)))
+        except Exception:  # noqa: BLE001 — a cache is not the gate
+            entry = None
+        if entry and set(probe_ids) <= set(entry["nodes"]):
+            return (set(probe_ids),
+                    f"red set cached for base {self.base[:8]} (recorded by {entry.get('by') or '?'}, "
+                    f"{int(time.time() - entry['ts'])}s ago): all {len(probe_ids)} already failing; "
+                    f"probe skipped", True, True)
+        base_failed, note = _failures_at_base(
+            self.python, self.live, self.base, probe_ids,
+            W.round_dir(self.round_id), self._child_env(isolate_home=True))
+        conclusive = _probe_conclusive(note)
+        if conclusive:
+            try:
+                S.write_red_set(self.base, sorted(base_failed), by=self.round_id, merge=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[warn] could not record the red set: {exc}")
+        return base_failed, note, conclusive, False
+
+    def _files_red_tree(self) -> bool:
+        """Whether this gate may write the red-tree item: the switch is on and
+        the gate is judging against the production tree. A test that builds a
+        Gate over a throwaway repo must never reach the real board."""
+        if not _gate_cfg("file_red_tree", True):
+            return False
+        try:
+            return Path(self.live).resolve() == LIVE_ROOT.resolve()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _file_red_tree(self, pre_existing: list[str]) -> int | None:
+        if not pre_existing or not self._files_red_tree():
+            return None
+        try:
+            from scripts.automod import backlog as B
+            res = B.file_red_tree_item(self.base, pre_existing, self.round_id,
+                                       sorted(self._touched_paths()), live_root=self.live)
+            if res:
+                return int(res["item_id"])
+            # Nothing written (already covered): name the open item anyway, so
+            # the round is told who owns these failures.
+            items = B.open_red_tree_items()
+            return items[0].id if items else None
+        except Exception as exc:  # noqa: BLE001 — a filing failure is never the gate
+            print(f"[warn] could not file the red-tree item: {exc}")
+            return None
+
+    def _close_healed_red_tree(self) -> list[int]:
+        if not self._files_red_tree():
+            return []
+        try:
+            from scripts.automod import backlog as B
+            return B.close_healed_red_tree(self.base, self.round_id, self.live,
+                                           touched=sorted(self._touched_paths()))
+        except Exception as exc:  # noqa: BLE001
+            print(f"[warn] could not close a healed red-tree item: {exc}")
+            return []
+
+    def _tests_failed(self, text: str, counts: dict, only: list[str] | None):
+        """Judge a red run: whose failures are these?
+
+        Since 2026-09-24 the rung PASSES when every failure is somebody
+        else's — reproduced at the round's base with the diff absent, or
+        passing a repeat run (flaky, #1196) — and records them
+        (`pre_existing_failures`, `flaky_node_ids`) plus the `red-tree` item
+        that now owns them. It used to fail with `external_blocker`: a red tree
+        "is not a tree to land onto, the guardian would judge the promotion
+        against a broken baseline". The guardian never runs pytest, and 85 of
+        257 landings that week restarted nothing; what the refusal actually did
+        was kill 157 rounds in a week, 21 of which ever landed.
+
+        Three rules keep that from becoming a way round the gate:
+          * a failing node in a file the round's own diff touches is the
+            round's, even if it also fails at base — a round that edits a red
+            test file and leaves it red owns it;
+          * one new failure fails the rung, however many old ones sit beside
+            it (the mixed case still records which ones are not the round's);
+          * an INCONCLUSIVE base probe grants nothing — fail closed.
+        """
+        tail = "\n".join(text.strip().splitlines()[-15:])
+        node_ids = _failed_node_ids(text)
+        touched = self._touched_paths()
+        own = [n for n in node_ids if n.split("::", 1)[0] in touched]
+        probe_ids = [n for n in node_ids if n not in own]
+        base_failed, probe_note, conclusive, cached = self._base_failures(probe_ids)
+        pre_existing = [n for n in probe_ids if n in base_failed]
+        _external, new = _classify_test_failure(probe_ids, base_failed)
+        new = own + new
+        # One run is one sample. The base probe above is a single invocation,
+        # so a node that flickers clears it often enough to matter and lands
+        # in `new`. Ask those nodes again before the wording commits to that.
+        # Nodes the base probe DID reproduce never come here: their attribution
+        # already exists, and re-running them spends minutes to repeat it.
+        flaky: list[str] = []
+        flaky_note = ""
+        # Node ids only. An id with no `::` is a file pytest could not even
+        # collect: repeating it re-runs a whole file to ask one question, and
+        # an import or syntax error is deterministic far more often than an
+        # assertion is. Such a failure stays the round's on the first sample.
+        to_reconfirm = [n for n in new if "::" in n]
+        if to_reconfirm:
+            flaky, flaky_note = _reconfirm_candidate_failures(
+                self.python, self.worktree, to_reconfirm,
+                repeats=int(_gate_cfg("test_repeat_runs", REPEAT_RUNS) or 0),
+                env=self._child_env(isolate_home=True))
+        data = {**counts, "failed_node_ids": node_ids,
+                "base_probe": probe_note, "home": self.home_isolation,
+                "red_set_cached": cached}
+        if own:
+            data["touched_failures"] = own
+        if pre_existing:
+            data["pre_existing_failures"] = pre_existing
+        if flaky:
+            # What was actually asked again, not everything that failed: a
+            # node the base probe reproduced was never in the repeat batch.
+            data["retried_node_ids"] = list(to_reconfirm)
+            data["flaky_node_ids"] = list(flaky)
+            new = [n for n in new if n not in flaky]
+        red_item = self._file_red_tree(pre_existing) if (pre_existing and conclusive) else None
+        if red_item:
+            data["red_tree_item"] = red_item
+
+        if node_ids and not new and conclusive:
+            parts = []
+            if pre_existing:
+                parts.append(f"{len(pre_existing)} failure(s) PRE-EXISTING at base "
+                             f"{self.base[:8]} (reproduced with this round's diff absent; "
+                             f"not this change's"
+                             + (f", tracked by item #{red_item}" if red_item else "")
+                             + f"): {_name_ids(pre_existing)}")
+            if flaky:
+                parts.append(f"{len(flaky)} FLAKY (passed a repeat run): {_name_ids(flaky)}")
+            lead = ("tests pass on this diff — " + "; ".join(parts) + f". {probe_note}"
+                    + (f". {flaky_note}" if flaky_note else "") + ". ")
+            return self._tests_pass(counts, only, {**{k: v for k, v in data.items()
+                                                      if k not in counts},
+                                                   "_lead": lead})
+        if not conclusive and node_ids and not new:
+            return False, (f"pytest failed ({counts}): every failure outside the round's own "
+                           f"files was unexplained, and the base probe could not say whose "
+                           f"they are — failing closed. {probe_note}. {flaky_note}\n"
+                           f"{tail[-600:]}"), data
+        if flaky:
+            # Some failures flickered and some did not: the round still owns
+            # the ones that failed every repeat. Only the flaky ones come out of
+            # the count, so the number the round reads is the number it caused.
+            data["new_failures"] = new
+            return False, (f"pytest failed ({counts}): {len(new)} of "
+                           f"{len(node_ids)} failures are new in this round "
+                           f"({_name_ids(new)}); {len(flaky)} passed a repeat run "
+                           f"and are FLAKY ({_name_ids(flaky)}). {probe_note}. "
+                           f"{flaky_note}\n{tail[-600:]}"), data
+        if node_ids and pre_existing:
+            data["new_failures"] = new
+            return False, (f"pytest failed ({counts}): {len(new)} of "
+                           f"{len(node_ids)} failures are new in this round "
+                           f"({_name_ids(new)}); the rest predate it "
+                           f"({_name_ids(pre_existing)} — not yours"
+                           + (f", tracked by item #{red_item}" if red_item else "")
+                           + f"). {probe_note}\n{tail[-600:]}"), data
+        # Nothing reproduces at base: every failure is this round's. Say so
+        # in the same field the mixed case uses, so a reader of the report
+        # never has to infer the delta from its absence — and name the
+        # failures in the detail itself, ahead of the pytest tail. On
+        # 2026-09-13 this branch returned only `tail[-900:]`, which began
+        # mid-name; round SM_20260913_165927 (#472) never saw its twelve real
+        # failures, invented a test file that exists nowhere, and filed
+        # blocker #1093 against the gate for it.
+        data["new_failures"] = new
+        if node_ids:
+            return False, (f"pytest failed ({counts}): all {len(node_ids)} failure(s) are "
+                           f"new in this round ({_name_ids(node_ids)}). {probe_note}\n"
+                           f"{tail[-600:]}"), data
+        return False, f"pytest failed ({counts}): {tail[-900:]}\n{probe_note}", data
 
     def rung_review(self):
         """A second reader grades the diff against the item's clauses.
@@ -1653,6 +1825,9 @@ class Gate:
         pre = RV.honesty_prechecks(self.worktree, self.base, changed,
                                    n_clauses=len(contract["clauses"]))
         test_counts = next((r.data for r in self.report.rungs if r.name == "tests"), {}) or {}
+        # Failures the tests rung passed over because they predate the round:
+        # the grader is told, and a `met` that leans on one does not stand.
+        pre_existing_failures = [str(n) for n in (test_counts.get("pre_existing_failures") or [])]
         started = time.time()
         snapshot, snap_note = self._review_snapshot(head)
         grade_root = snapshot or self.worktree
@@ -1679,7 +1854,8 @@ class Gate:
                            # The item's recent reviews across rounds, so the
                            # grader judges repeats itself (`same_as_prior`)
                            # rather than the ledger inferring them by head.
-                           prior_reviews=item_history)
+                           prior_reviews=item_history,
+                           pre_existing_failures=pre_existing_failures)
             base_event.update({"session_id": res.get("session_id"),
                                "seconds": round(time.time() - started, 1),
                                # Waits the grader sat out because another
@@ -1710,7 +1886,8 @@ class Gate:
                                      # deterministic answer to "this diff adds
                                      # no test".
                                      repo=self.live,
-                                     added_tests=RV.def_test_delta(grade_root, self.base, changed))
+                                     added_tests=RV.def_test_delta(grade_root, self.base, changed),
+                                     pre_existing_failures=set(pre_existing_failures))
         finally:
             self._drop_snapshot(snapshot)
         tree_note = (f" (citations validated against {head[:8] or 'the working tree'} "

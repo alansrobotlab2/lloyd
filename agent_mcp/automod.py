@@ -484,6 +484,20 @@ def _with_headline(rep: dict) -> dict:
                               "the gate has already recorded them on the item, and they are "
                               "not a reason to edit, re-gate or abort."),
                      "seams": seams, "findings": findings}
+        # A tests rung that passed over failures predating the round: say whose
+        # they are, so the round does not spend itself fixing the tree.
+        tests = next((r for r in rungs if r.get("name") == "tests"), None) or {}
+        tdata = tests.get("data") if isinstance(tests.get("data"), dict) else {}
+        pre_ids = list(tdata.get("pre_existing_failures") or [])
+        if pre_ids:
+            owner = tdata.get("red_tree_item")
+            notes = notes or {"what": ("Notes on a change the gate PASSED. They did not block "
+                                       "and are not a reason to edit, re-gate or abort.")}
+            notes["pre_existing_failures"] = {
+                "ids": pre_ids[:50],
+                "note": ((f"tracked by item #{owner}" if owner else "tracked on the board as a "
+                          "red-tree item") + " — these fail at base too; do not fix them in "
+                         "this round")}
     elif rep.get("next"):
         verdict = (f"NOT JUDGED — the {failed.get('name') if failed else '?'} rung failed for a "
                    f"reason outside your diff")

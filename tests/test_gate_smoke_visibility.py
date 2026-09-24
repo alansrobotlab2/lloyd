@@ -81,7 +81,12 @@ def test_an_unreachable_engine_keeps_the_skip(monkeypatch):
 
 
 def test_the_ledger_event_carries_the_skip(monkeypatch):
-    """`promoted` events must be filterable on it without parsing the detail string."""
+    """`promoted` events must be filterable on it without parsing the detail string.
+
+    Since 2026-09-24 a skipped `canary_smoke` or `venv` writes no ledger row
+    at all (`Gate.QUIET_SKIP_RUNGS`; the report still lists it, which is where
+    the smoke skip's visibility lives). `drill` is always written, so it is
+    the rung that carries the flag here."""
     events = []
     monkeypatch.setattr(G.S, "append_event", lambda e: events.append(e))
     g = _StubGate()
@@ -93,9 +98,12 @@ def test_the_ledger_event_carries_the_skip(monkeypatch):
                               {"passed": 2132, "tests_skipped": 3,
                                "collected": 2135}))
     g._rung("venv", lambda: (True, "requirements unchanged", {"skipped": True}))
-    assert events[0]["skipped"] is True
-    assert events[1]["skipped"] is False, "a skipped TEST is not a skipped rung"
-    assert events[2]["skipped"] is True
+    g._rung("drill", lambda: (True, "no protected paths", {"skipped": True}))
+    assert [e["rung"] for e in events] == ["tests", "drill"]
+    assert events[0]["skipped"] is False, "a skipped TEST is not a skipped rung"
+    assert events[1]["skipped"] is True
+    assert [r.name for r in g.report.rungs] == ["canary_smoke", "tests", "venv", "drill"]
+    assert g.report.rungs[0].data["skipped"] is True, "the report keeps the skip"
 
 
 def test_engine_reachable_reads_the_configured_endpoint(tmp_path):

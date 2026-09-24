@@ -1040,10 +1040,16 @@ def test_a_landing_owns_its_marker_and_a_dry_run_leaves_it_alone(monkeypatch, tm
 # A round killed by breakage it did not write keeps the item's attempt
 # ===========================================================================
 
-def _blocked_round(item_id, round_id, *, external=True, rung="tests",
+def _blocked_round(item_id, round_id, *, external=True, rung="preflight",
                    stop_reason="stop"):
     """One implement attempt that ended at the gate, and the gate rung that
     ended it.
+
+    `preflight` by default: since 2026-09-24 the `tests` rung passes on
+    failures that predate the round instead of flagging them external, so a
+    dirty or moved live tree is today's shape of an external block. A
+    historical `tests` row carrying the flag is still read the same way
+    (`test_a_historical_red_tree_row_still_keeps_the_attempt`).
 
     `stop_reason` is written because the real producer always writes it: a
     turn that reached the gate and reported back has one, and an event without
@@ -1078,6 +1084,17 @@ def test_a_round_blocked_by_pre_existing_breakage_does_not_spend_the_attempt(iso
     assert pair is not None and pair[0].id == 361, (
         "an item whose round was killed by breakage it did not write must come back"
     )
+
+
+def test_a_historical_red_tree_row_still_keeps_the_attempt(isolated):
+    """Ledger rows written before the tests rung stopped flagging a red tree
+    are read exactly as they were: the backlog logic did not change, only
+    what the gate writes."""
+    write_item(isolated, 369)
+    _confirm(369)
+    _blocked_round(369, "SM_HIST", rung="tests")
+    assert "SM_HIST" in B.externally_blocked_rounds(S.LEDGER_PATH)
+    assert 369 not in B.implemented_ids(S.LEDGER_PATH)
 
 
 def test_a_round_that_really_failed_still_spends_the_attempt(isolated):
@@ -1589,7 +1606,7 @@ def test_infra_rows_never_add_to_the_attempts_an_item_actually_used(isolated):
     _blocked_round(655, "SM_20260924_011111", external=True)
     verdict, detail = B.implement_outcomes(S.LEDGER_PATH)[655]
     assert verdict == "external", detail
-    assert "blocked at the `tests` rung" in detail, detail
+    assert "blocked at the `preflight` rung" in detail, detail
 
 
 def test_infra_reoffers_stop_on_their_own_outage_count(isolated):

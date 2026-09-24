@@ -72,6 +72,9 @@ PAUSE_PATH = STATE_DIR / "pause"
 HALTED_PATH = STATE_DIR / "promotions-halted"
 BROKEN_PATH = STATE_DIR / "BROKEN"
 DENIED_PATH = STATE_DIR / "denied.json"
+# Which tests already fail at a given base commit, as the `tests` rung's base
+# probe measured them (see `read_red_set`).
+RED_SET_PATH = STATE_DIR / "red_set.json"
 BROKEN_DIR = STATE_DIR / "broken"
 ROUNDS_DIR = STATE_DIR / "rounds"
 
@@ -635,6 +638,69 @@ def deny(commit: str, tree_hash: str | None = None) -> None:
 def is_denied(commit: str | None = None, tree_hash: str | None = None) -> bool:
     d = read_denied()
     return bool((commit and commit in d["commits"]) or (tree_hash and tree_hash in d["trees"]))
+
+
+# ---------------------------------------------------------------------------
+# Per-base red set: what already fails at a base commit
+# ---------------------------------------------------------------------------
+
+# How many base commits the red set remembers. A base is a live-`main` sha, and
+# a round only ever gates against the one it was cut from or rebased onto, so
+# the newest few cover every open round with room to spare.
+RED_SET_KEEP = 8
+
+
+def read_red_set(base: str, max_age_s: float | None = None) -> dict | None:
+    """The recorded red set for exactly `base`, or None.
+
+    `{"nodes": [...], "by": round_id, "ts": epoch}`. `nodes` may be empty: that
+    is a measurement too (a full green run at that base). None when there is no
+    entry, the file is unreadable, or the entry is older than `max_age_s`.
+
+    Keyed by the exact base sha, so a preflight rebase is a new entry. The set is
+    only ever consulted for nodes that failed at HEAD — a stale or wrong entry
+    can at worst skip a probe for a node it names, never hide a failure.
+    """
+    if not base:
+        return None
+    d = read_json(RED_SET_PATH) or {}
+    entry = (d.get("bases") or {}).get(base)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        ts = float(entry.get("ts") or 0)
+    except (TypeError, ValueError):
+        return None
+    if max_age_s is not None and time.time() - ts > float(max_age_s):
+        return None
+    nodes = entry.get("nodes")
+    if not isinstance(nodes, list):
+        return None
+    return {"nodes": [str(n) for n in nodes], "by": entry.get("by"), "ts": ts}
+
+
+def write_red_set(base: str, nodes: Iterable[str], by: str = "",
+                  merge: bool = True) -> None:
+    """Record which tests fail at `base`, keeping the newest `RED_SET_KEEP` bases.
+
+    `merge=True` unions `nodes` into what is already recorded for that base (a
+    probe asked about some files, not the whole suite). `merge=False` replaces
+    it — a full green run at `base` proves the set is empty. Written atomically
+    but unlocked: two gates racing can lose one entry, which costs a probe.
+    A caller treats any exception here as "no cache".
+    """
+    if not base:
+        return
+    d = read_json(RED_SET_PATH) or {}
+    bases = d.get("bases") if isinstance(d.get("bases"), dict) else {}
+    prev = bases.get(base) if isinstance(bases.get(base), dict) else {}
+    merged = set(str(n) for n in nodes)
+    if merge:
+        merged |= set(str(n) for n in (prev.get("nodes") or []))
+    bases[base] = {"nodes": sorted(merged), "by": by, "ts": time.time()}
+    newest = sorted(bases.items(), key=lambda kv: float((kv[1] or {}).get("ts") or 0),
+                    reverse=True)[:RED_SET_KEEP]
+    write_json(RED_SET_PATH, {"bases": dict(newest)})
 
 
 def changed_tree_hash(repo, commit: str, paths: list[str]) -> str | None:

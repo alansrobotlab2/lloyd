@@ -1034,6 +1034,16 @@ automod:
     # serial, saying so, whenever xdist is not importable in the gate's venv.
     # Read by each gate process at start: no restart needed.
     test_workers: 8
+    # A `tests` failure that reproduces at the round's base PASSES the rung
+    # (recorded as `pre_existing_failures`) — 157 rounds a week died on a red
+    # tree they did not break. The base probe's answer is cached per base sha
+    # for this long (state dir `red_set.json`), so the next round on that base
+    # skips the probe.
+    red_set_max_age_s: 21600
+    # ...and the breakage is filed as one `high`, pre-confirmed `red-tree`
+    # item that the next round takes, closed by the gate on the first full
+    # green run at a descendant base. false = pass and record, file nothing.
+    file_red_tree: true
   # The review rung's policy knobs. The rung refused 86% of the rounds it
   # graded over 2026-09-11 and the two largest contributors were both
   # findings that are real and usually unfixable INSIDE the round.
