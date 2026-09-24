@@ -109,7 +109,27 @@ def _read(path: Path, tail: int | None = None) -> str:
     return text
 
 
+def _is_number(value: Any) -> bool:
+    """True for a value the evidence blocks can render with `:.2f`.
+
+    `bool` is excluded on purpose: `isinstance(True, int)` holds, so a score
+    field holding a JSON boolean would pass a bare numeric check and print as
+    `1.00`. #860.
+    """
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def _recent_ledger_losers(ledger_path: Path, limit: int = 10) -> list[dict[str, Any]]:
+    """Recent rejected variants: a row saying it was not promoted, with a score.
+
+    Only an `event: "decision"` row written since #860/#794 can match: the
+    decision row used to carry the verdict and no score, and the per-trial rows
+    carry a score with `promoted: None`, so neither shape satisfied both halves
+    and the block this feeds was the cold-start fallback on every prompt.
+    `run_round.decision_ledger_row` now writes the score, the hypothesis and the
+    target surface onto the decision row, so the history rides on the ledger and
+    never needs a per-prompt join over `variants_dir`.
+    """
     if not ledger_path.exists():
         return []
     losers: list[dict[str, Any]] = []
@@ -122,7 +142,7 @@ def _recent_ledger_losers(ledger_path: Path, limit: int = 10) -> list[dict[str, 
             entry = json.loads(line)
         except Exception:
             continue
-        if entry.get("promoted") is False and entry.get("composite_score") is not None:
+        if entry.get("promoted") is False and _is_number(entry.get("composite_score")):
             losers.append(entry)
             if len(losers) >= limit:
                 break
@@ -146,6 +166,14 @@ def _recent_baseline_failures(
     them from the pool a variant is allowed to aim at. AutoDesign keeps its dev
     set out of the optimizer for exactly this reason — a named failing task is a
     target, and a task the proposer was shown is a task it will be scored on.
+
+    A row with no numeric score is not failure evidence and is filtered here,
+    not formatted defensively at the render (#860/#785). The safety branch used
+    to admit one on its own — a safety-critical trial that errored before
+    scoring, or a #416 unrankable row, is exactly that shape — and the render
+    formats `composite` with `:.2f`, so one such row raised `TypeError` inside
+    the prompt build and lost the whole variant. `_recent_ledger_losers` has
+    always required a score; the asymmetry was the defect.
     """
     exclude = exclude or set()
     if exclude and not isinstance(exclude, set):
@@ -172,11 +200,11 @@ def _recent_baseline_failures(
         if tid in exclude:
             continue
         composite = entry.get("composite_score")
-        safety_pass = entry.get("safety_passed")
-        safety_crit = entry.get("safety_critical")
+        if not _is_number(composite):
+            continue
         is_fail = (
-            (isinstance(composite, (int, float)) and composite < 0.5)
-            or (safety_crit and safety_pass is False)
+            composite < 0.5
+            or (entry.get("safety_critical") and entry.get("safety_passed") is False)
         )
         if not is_fail:
             continue
@@ -401,10 +429,15 @@ def _build_single_variant_prompt(
     ) or "(no baseline failures logged yet — pick an area where Lloyd could be more robust)"
 
     ledger_losers = _recent_ledger_losers(cfg.paths.ledger_path, limit=4)
+    # #860/#794: a loser earns a line only if it can be described — a target
+    # surface and the idea that lost (the reader already guarantees the score).
+    # A row from before the decision row carried them, or from another writer,
+    # would print `target=None` to the model: noise dressed as memory.
     losers_summary = "\n".join(
-        f"- target={e.get('target_surface')}, score={e.get('composite_score'):.2f}, "
-        f"hypothesis={e.get('hypothesis', '')[:100]}"
+        f"- target={e['target_surface']}, score={e['composite_score']:.2f}, "
+        f"hypothesis={str(e['hypothesis'])[:100]}"
         for e in ledger_losers
+        if e.get("target_surface") and str(e.get("hypothesis") or "").strip()
     ) or "(no recent variant losers — this is a cold start)"
 
     # If caller hinted a specific file, tell the model to target that file.

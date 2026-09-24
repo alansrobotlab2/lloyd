@@ -31,6 +31,12 @@ from pathlib import Path
 import pytest
 
 from scripts.autoresearch import hypothesis_generator as hg
+from tests.test_autoresearch_variant_pairs import canonical, cfg
+
+# The #860 seam test drives a real round through `test_autoresearch_variant_pairs`'s
+# `drive_round`, which needs that module's two fixtures; pytest resolves them by
+# name, so the import is the registration.
+ROUND_FIXTURES = (canonical, cfg)
 
 # Captured at import, before the autouse fixture redirects DEBUG_DIR.
 LIVE_DEBUG_DIR = hg.DEBUG_DIR
@@ -799,6 +805,182 @@ def test_failures_are_capped(tmp_path):
         line(variant_id="BASELINE_1", task_id=f"t{i}", composite_score=0.1) for i in range(30)
     ) + "\n", encoding="utf-8")
     assert len(hg._recent_baseline_failures(p, limit=4)) == 4
+
+
+# ── #860/#785 — a scoreless row never reaches the `:.2f` render ──────────────
+
+def test_a_null_composite_safety_failure_does_not_crash_the_prompt(fake_surfaces, tmp_path):
+    """Clauses 1 and 2, on the reader and the render the proposer actually runs.
+
+    A `BASELINE_*` row with `safety_critical: true`, `safety_passed: false` and
+    `composite_score: null` — a safety trial that errored before scoring — used to
+    pass the safety branch and reach `composite={...:.2f}`, which raised
+    `TypeError: unsupported format string passed to NoneType.__format__` and lost
+    the whole variant. The row is written at `cfg.paths.ledger_path`, the path the
+    prompt builder reads, beside one real failure so the test proves the block was
+    built and populated rather than merely skipped.
+    """
+    cfg = _cfg(tmp_path)
+    cfg.paths.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.paths.ledger_path.write_text("\n".join([
+        line(variant_id="BASELINE_1", task_id="bench_real", task_category="c",
+             composite_score=0.25, safety_critical=False, safety_passed=True),
+        line(variant_id="BASELINE_1", task_id="bench_null", task_category="safety",
+             composite_score=None, safety_critical=True, safety_passed=False),
+    ]) + "\n", encoding="utf-8")
+
+    fails = hg._recent_baseline_failures(cfg.paths.ledger_path)
+    assert [e["task_id"] for e in fails] == ["bench_real"], "filtered, not formatted"
+
+    prompt = hg._build_single_variant_prompt(cfg, ["prompts"], target_file_hint="SOUL.md")
+    block = prompt.split("## Recent baseline bench FAILURES")[1] \
+        .split("## Recent losing variants")[0]
+    assert "task=bench_real" in block and "composite=0.25" in block
+    assert "bench_null" not in block and "None" not in block.split("safety_crit=")[0]
+
+
+def test_a_row_without_a_numeric_score_is_never_returned(tmp_path):
+    """Clause 2 over the filter's whole domain. `True` is in it because
+    `isinstance(True, int)` holds, so a boolean score would pass a bare numeric
+    check and print as `1.00`."""
+    rows = [
+        line(variant_id="BASELINE_1", task_id="t_none", composite_score=None,
+             safety_critical=True, safety_passed=False),
+        line(variant_id="BASELINE_1", task_id="t_absent",
+             safety_critical=True, safety_passed=False),
+        line(variant_id="BASELINE_1", task_id="t_str", composite_score="0.1",
+             safety_critical=True, safety_passed=False),
+        line(variant_id="BASELINE_1", task_id="t_bool", composite_score=True,
+             safety_critical=True, safety_passed=False),
+        line(variant_id="BASELINE_1", task_id="t_real", composite_score=0.2),
+    ]
+    p = tmp_path / "l.jsonl"
+    p.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    assert [e["task_id"] for e in hg._recent_baseline_failures(p)] == ["t_real"]
+    for e in hg._recent_baseline_failures(p):
+        assert isinstance(e["composite_score"], float)
+
+
+# ── #860/#794 — the loser block reads what the decision row now writes ──────
+
+def test_the_decision_row_carries_the_loser_evidence_when_given_the_variant():
+    """Clause 4 at the writer. The trio is conditional on the variant so the
+    seven-key floor `tests/test_autoresearch_frontier_selection.py` pins still
+    holds for a caller that passes none; `run()` always passes one."""
+    from scripts.autoresearch import run_round
+
+    decision = {"variant_id": "V_x", "should_promote": False, "reason": "held",
+                "mean_composite": 0.37}
+    variant = {"variant_id": "V_x", "target_surface": "prompts",
+               "description": "d", "hypothesis": "h" * 900}
+    row = run_round.decision_ledger_row("R_1", decision, None, variant)
+    assert set(run_round.LOSER_EVIDENCE_KEYS) <= set(row)
+    assert row["composite_score"] == 0.37 and row["target_surface"] == "prompts"
+    assert row["hypothesis"] == "h" * run_round.HYPOTHESIS_MAX_CHARS
+    assert row["promoted"] is False
+
+    only_desc = run_round.decision_ledger_row(
+        "R_1", decision, None, {"target_surface": "prompts", "description": "only this"})
+    assert only_desc["hypothesis"] == "only this", "a variant may state only its change"
+
+    bare = run_round.decision_ledger_row("R_1", decision, None)
+    assert not set(run_round.LOSER_EVIDENCE_KEYS) & set(bare)
+
+    boolean = run_round.decision_ledger_row(
+        "R_1", {**decision, "mean_composite": True}, None, variant)
+    assert boolean["composite_score"] is None
+
+
+def test_a_row_that_cannot_be_described_renders_no_line(fake_surfaces, tmp_path):
+    """Clause 6 on the rows that predate the fields: a legacy decision row (a
+    verdict, no score) never reaches the render, and a scored row with no
+    hypothesis or target surface is dropped at the render rather than printed as
+    `target=None`."""
+    cfg = _cfg(tmp_path)
+    cfg.paths.ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    cfg.paths.ledger_path.write_text("\n".join([
+        line(round_id="R_old", event="decision", variant_id="V_old",
+             should_promote=False, reason="held", promoted=False),
+        line(round_id="R_other", event="decision", variant_id="V_undescribable",
+             promoted=False, composite_score=0.22),
+    ]) + "\n", encoding="utf-8")
+
+    assert [e["variant_id"] for e in hg._recent_ledger_losers(cfg.paths.ledger_path)] == [
+        "V_undescribable"]
+    prompt = hg._build_single_variant_prompt(cfg, ["prompts"], target_file_hint="SOUL.md")
+    block = prompt.split("## Recent losing variants")[1].split("## Safety constraint")[0]
+    assert "(no recent variant losers — this is a cold start)" in block
+    assert "None" not in block
+
+
+def test_the_round_that_decides_feeds_the_prompt_that_reads_next(
+        cfg, canonical, fake_surfaces, monkeypatch, caplog):
+    """Clauses 3, 4, 5, 6 and 7 across the write/read seam, with `run()` executing.
+
+    `drive_round` (from `test_autoresearch_variant_pairs`) runs the real round —
+    materialize, gate, report, ledger append — with only the model calls and the
+    vault write stubbed. Three survivors: `V_a` promotes, `V_b` and `V_c` are held
+    by the real gate. The next proposer then reads `cfg.paths.ledger_path`, the
+    ledger that round wrote, and must list both losers and not the winner.
+    """
+    import shutil
+
+    from scripts.autoresearch import promotion_fp_rate as fp
+    from tests import test_autoresearch_variant_pairs as vp
+
+    # V_c: flat on the targeted task, worse on the veto task — refused.
+    monkeypatch.setitem(vp.COMPOSITE, ("V_c", "bench_a"), 0.40)
+    monkeypatch.setitem(vp.COMPOSITE, ("V_c", "bench_b"), 0.30)
+
+    def three_survivors():
+        return [vp.anchored("V_a", "Never open with an apology.", "Open with the answer."),
+                vp.anchored("V_b", "A single unique note.", "A clearer note.", path="MEMORY.md"),
+                vp.anchored("V_c", "Never open with an apology.", "Apologise less.")]
+
+    result, _ = vp.drive_round(cfg, monkeypatch, caplog, variants_factory=three_survivors)
+    assert result["promoted"]["variant_id"] == "V_a"
+
+    # Clause 4, on the bytes run() appended.
+    decided = {r["variant_id"]: r for r in vp.rows_of(cfg.paths.ledger_path)
+               if r.get("event") == "decision"}
+    assert set(decided) == {"V_a", "V_b", "V_c"}
+    for vid in ("V_b", "V_c"):
+        assert decided[vid]["promoted"] is False
+        assert decided[vid]["hypothesis"] == f"{vid} hypothesis"
+        assert decided[vid]["target_surface"] == "prompts"
+        assert hg._is_number(decided[vid]["composite_score"])
+    assert decided["V_a"]["promoted"] is True
+
+    # Clause 3: >= 1 row per rejected decision, the promoted one excluded.
+    losers = hg._recent_ledger_losers(cfg.paths.ledger_path, limit=4)
+    assert [e["variant_id"] for e in losers] == ["V_c", "V_b"]
+    assert all(e["hypothesis"] and hg._is_number(e["composite_score"]) for e in losers)
+
+    # Clauses 5 and 6: both rejected hypotheses in the next prompt, no `None`, and
+    # the winner is not listed as something to avoid.
+    def loser_block() -> str:
+        prompt = hg._build_single_variant_prompt(cfg, ["prompts"], target_file_hint="SOUL.md")
+        return prompt.split("## Recent losing variants")[1].split("## Safety constraint")[0]
+
+    block = loser_block()
+    assert "V_b hypothesis" in block and "V_c hypothesis" in block
+    assert "V_a hypothesis" not in block
+    assert "None" not in block and block.count("- target=prompts, score=") == 2
+
+    # Clause 7: the block reads the ledger, never `variants_dir`. Decoy the
+    # variant.json files the real materialize wrote, then delete the directory:
+    # the block must not change either time.
+    for vid in ("V_b", "V_c"):
+        meta = cfg.paths.variants_dir / vid / "variant.json"
+        assert meta.exists()
+        meta.write_text(json.dumps({"variant_id": vid, "target_surface": "prompts",
+                                    "hypothesis": f"DECOY {vid}"}), encoding="utf-8")
+    assert loser_block() == block
+    shutil.rmtree(cfg.paths.variants_dir)
+    assert loser_block() == block
+
+    # The other ledger readers do not mistake the scored decision row for a trial.
+    assert not any(r.get("event") for r in fp.per_task_rows(cfg.paths.ledger_path))
 
 
 # ── _read / _dump_raw_on_failure ─────────────────────────────────────────────

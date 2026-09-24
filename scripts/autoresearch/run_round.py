@@ -423,15 +423,33 @@ def trial_ledger_row(round_id: str, trace: dict[str, Any],
     }
 
 
+#: What `decision_ledger_row` adds when it is handed the variant (#860/#794): the
+#: loss memory the proposer reads back through `_recent_ledger_losers`.
+LOSER_EVIDENCE_KEYS = ("composite_score", "hypothesis", "target_surface")
+
+#: The ledger keeps the idea, not an essay; the prompt shows the first 100 chars.
+HYPOTHESIS_MAX_CHARS = 300
+
+
 def decision_ledger_row(round_id: str, decision: dict[str, Any],
-                        promoted_variant_id: str | None) -> dict[str, Any]:
+                        promoted_variant_id: str | None,
+                        variant: dict[str, Any] | None = None) -> dict[str, Any]:
     """The `decision` row for one variant, as the ledger sees it.
 
-    Seven keys, always, and the eight conditional #646 validity keys on top when the
-    bench lint ran. `reason` is the predicate's own prose verbatim —
+    Seven keys, always; the eight conditional #646 validity keys on top when the
+    bench lint ran; and `LOSER_EVIDENCE_KEYS` when `variant` is given, which `run()`
+    always does. `reason` is the predicate's own prose verbatim —
     `replay_frontier_selection.py` counts the strict-win leg by matching
     `promote.REFUSAL_WIN_FRACTION` against its prefix, so flattening, prefixing or
     rewording it here would silently move that census' denominator.
+
+    #860/#794: the evidence trio is written at decision time because nothing else
+    records it where the proposer can read it — hypothesis text otherwise lives only
+    in `variants_dir/<id>/variant.json`, on a gitignored `_pipeline/`. The score is
+    the variant's all-task mean. `hypothesis` falls back to `description`, since a
+    variant may state only what it changed. Other ledger readers are unaffected:
+    `promotion_fp_rate.per_task_rows` and `replay_frontier_selection` skip any row
+    with an `event`, and the replay gate and bench_mine need a `task_id`.
     """
     validity = decision.get("validity") or {}
     row = {
@@ -456,6 +474,13 @@ def decision_ledger_row(round_id: str, decision: dict[str, Any],
             row[key] = validity[key]
     if validity:
         row["bench_validity"] = validity
+    if variant is not None:
+        mean = decision.get("mean_composite")
+        row["composite_score"] = (mean if isinstance(mean, (int, float))
+                                  and not isinstance(mean, bool) else None)
+        row["hypothesis"] = str(variant.get("hypothesis") or variant.get("description")
+                                or "")[:HYPOTHESIS_MAX_CHARS]
+        row["target_surface"] = variant.get("target_surface") or None
     return row
 
 
@@ -788,9 +813,11 @@ async def run(
 
     # Patch ledger with final promotion decisions (cheap second pass — append another entry)
     promoted_vid = promotion_result["variant_id"] if promotion_result and not dry_run else None
+    variants_by_id = {v.get("variant_id"): v for v in variants}
     for d in decisions:
         ledger_append(cfg.paths.ledger_path,
-                      decision_ledger_row(rid, d, promoted_vid))
+                      decision_ledger_row(rid, d, promoted_vid,
+                                          variants_by_id.get(d["variant_id"], {})))
 
     return {
         "round_id": rid,
