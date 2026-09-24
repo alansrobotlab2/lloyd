@@ -336,6 +336,14 @@ app.include_router(_automod_router.router)
 app.include_router(_browser_router.router)
 app.include_router(_desktop_router.router)
 
+# The runtime-state directories, created before anything in this process can
+# write to them (#712). `app.paths` no longer mkdirs at import, so the boot that
+# owns the writers has to do it — and it has to be registered AHEAD of the ticker
+# and the pool, both of which write (a run record, a queued task) on their first
+# tick. Starlette runs `on_startup` hooks in registration order.
+from app import paths as _paths  # noqa: E402
+app.on_event("startup")(_paths.ensure_dirs)
+
 app.on_event("startup")(_autonomy_router.start_autonomy_ticker)
 app.on_event("startup")(_workers_router.start_worker_pool)
 app.on_event("shutdown")(shutdown_cleanup)

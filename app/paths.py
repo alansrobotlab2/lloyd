@@ -83,7 +83,13 @@ DATA_ROOT = resolve_data_root(env=os.environ.get("LLOYD_DATA"), lloyd_home=LLOYD
 IS_PRODUCTION_DATA = DATA_ROOT == PRODUCTION_DATA_ROOT
 
 SESSIONS_DIR = DATA_ROOT / "sessions"
-SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+# Importing this module creates NOTHING under `DATA_ROOT` (#712). Until now
+# `SESSIONS_DIR.mkdir(...)` ran here, so merely *collecting* the test suite laid
+# directories into the tree it was collected from — a gate's full-suite rung
+# imports the round's own checkout, so a container appeared in a tree no code
+# had run in, and a reader that asked whether the container existed took that for
+# a populated store. Creation moved to `ensure_dirs()` below, which every process
+# that writes calls at boot.
 EVENT_LOGS_DIR = DATA_ROOT / "event_logs"
 USAGE_DB = DATA_ROOT / "usage.db"
 WORKERS_DB = DATA_ROOT / "workers.db"
@@ -114,6 +120,42 @@ SCREENSHOTS_DIR = LOGS_DIR / "screenshots"
 # before every action) read, and the last capture's frame for the Desktop tab.
 DESKTOP_DIR = DATA_ROOT / "desktop"
 DESKTOP_LEASE_PATH = DESKTOP_DIR / "lease.json"
+
+#: Everything `ensure_dirs()` creates, as data rather than as a literal inside the
+#: function. `LOGS_DIR` is an ancestor of `SCREENSHOTS_DIR`, so a filesystem probe
+#: cannot tell "created `logs`" from "`mkdir -p` made it on the way to
+#: `logs/screenshots`" — this tuple is the claim that IS checkable per name, and
+#: `tests/test_paths_ensure_dirs.py` compares it against the five constants the
+#: writers actually use.
+RUNTIME_STATE_DIRS: tuple[Path, ...] = (SESSIONS_DIR, AUTONOMY_RUNS_DIR, TASKS_DIR,
+                                        LOGS_DIR, SCREENSHOTS_DIR)
+
+
+def ensure_dirs() -> None:
+    """Create the runtime-state directories this module's writers need.
+
+    Every process that writes calls this: `server.py` registers it as a startup
+    hook ahead of the autonomy ticker and the worker pool, and
+    `agent_mcp/main.py` calls it in its own lifespan. It used to be an
+    import-time `SESSIONS_DIR.mkdir(...)`, and that one line is why merely
+    *collecting* the test suite wrote directories into a tree it had no business
+    creating anything in — see the note above `SESSIONS_DIR`. The `LLOYD_HOME`
+    anchoring above is untouched on purpose: a canary still resolves every name
+    here inside its own tree; only the side effect moved.
+
+    Idempotent, so it is safe on every boot and from any test. Several of these
+    writers cover themselves anyway (`_task_registry` makes `TASKS_DIR` when a
+    task registers, `autonomy._write_run_record` makes each per-task runs dir,
+    `sessions_io.create_session` makes `SESSIONS_DIR`); they are listed here too
+    so the directories exist at a known moment rather than at whichever writer
+    happened to run first.
+
+    What it creates is `RUNTIME_STATE_DIRS` above, not a literal here, so "these
+    are the five" is checkable against the constants the writers use rather than
+    against a copy of them inside this function.
+    """
+    for directory in RUNTIME_STATE_DIRS:
+        directory.mkdir(parents=True, exist_ok=True)
 
 # The fact tree (one dir per entity, markdown fact files). LLOYD_FACTS_ROOT
 # lets a rebuild extract into a fresh tree without touching the live one.

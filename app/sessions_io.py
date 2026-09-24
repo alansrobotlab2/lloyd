@@ -1132,6 +1132,11 @@ async def _save_session_meta(session_id: str, model: str, preview: str = "",
                 # sessions where this is True. Stage 0 always False.
                 "inner_voice": False,
             }
+        # This is the writer that mints a transcript, and it can be the first one
+        # in a process: `app.paths` no longer creates `SESSIONS_DIR` at import
+        # (#712), so cover it here the way `create_session` already does rather
+        # than relying on something else in the boot having run first.
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         atomic_write_text(meta_path, json.dumps(data, indent=2))
 
 

@@ -88,6 +88,10 @@ from agent_mcp import (
 )
 # #544: the effect-scope contextvar the harness loop reads at dispatch. Bound
 # here around each dispatch so a `Task` subagent's nested loop inherits it.
+# `app_paths`, not `paths`: the `/changes/revert` route below binds a local named
+# `paths` for the request body's list of files, and a module-level name that can be
+# shadowed in the same file is a name a later reader gets wrong.
+from app import paths as app_paths
 from app.harness import policy as harness_policy
 from app.harness.safety import check_bash_command, desktop_refusal
 
@@ -865,6 +869,12 @@ async def changes_revert(request):
 
 @asynccontextmanager
 async def lifespan(app):
+    # The runtime-state directories this process writes into (#712). The
+    # aggregator is a separate process from the backend, so the backend's startup
+    # hook cannot cover it, and `app.paths` no longer creates anything at import:
+    # this is the moment the sessions dir and the change ledger exist. Ahead of
+    # the ledger prune below for the same reason.
+    app_paths.ensure_dirs()
     await discord_bot.start_bot_task()
     # Seed the tsc baseline a little after boot. Without a baseline the
     # first run attributes every pre-existing error in the tree to whoever
