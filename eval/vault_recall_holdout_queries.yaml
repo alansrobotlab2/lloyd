@@ -1,0 +1,220 @@
+# HOLDOUT leg of the retrieval eval (#1412). NOT a tuning set.
+#
+# Why this file exists: the 86 queries in `vault_recall_queries.yaml` (the `dev`
+# leg) are read by the nightly, by every trend claim and by the post-landing paired
+# check every promotion passes. After enough rounds of "change retrieval, score it on
+# these questions, keep the winner" those questions are training signal, and a change
+# that flatters them clears the check. Error bars and pairing bound noise; only a set
+# nothing was ever tuned against bounds overfitting (RRSI / MedRSI, 2026-09-21/22).
+#
+# THE RESERVE RULE — what makes this file worth having:
+#   * Only the holdout leg of the post-landing paired check
+#     (`workers/sources/automod_regression.py::_run_holdout_leg`) scores it, and it
+#     records AGGREGATES: per-metric deltas, never per-query rows, never an id.
+#   * `eval/run_eval.py` refuses this corpus unless `LLOYD_EVAL_HOLDOUT_LEG=1` is set,
+#     and refuses a `nightly*` label under it, so no nightly artifact, trend report or
+#     skill that globs `nightly-*.json` can ever carry a holdout row.
+#   * Do not read per-query results of this file while working on retrieval, do not
+#     copy its questions into the dev set, and do not re-label a query because of how
+#     the retriever scored it. `tests/test_retrieval_holdout_split.py` pins the code
+#     side; the human side is this paragraph.
+#   * The reserved ids and a `split_hash` over them live in
+#     `vault_recall_holdout_manifest.json` (`python -m eval.retrieval_holdout write`).
+#     Verification RECOMPUTES the hash (never trusts it) and compares the file's ids and
+#     content with it, so an edit after results were seen is a red test, not a quiet
+#     re-pick. Retiring this tranche into dev and authoring a fresh one is the only
+#     sanctioned way to change it.
+#
+# Schema: identical to the dev file (id / query / category / expect_entities /
+# expect_docs / notes), so the same `run_eval.py` scores it with no branch.
+#
+# How the labels were made (2026-09-24). Each question was written from a vault note
+# read end to end, for a topic the dev set does not ask about, and phrased without the
+# note's filename words where the category is fuzzy or hard. Every `expect_docs` label
+# is a path a correct answer would cite, checked by reading the note — one label caught
+# in that audit: the 2026-05 mTLS remote-access note is SUPERSEDED by
+# `architecture/tailscale.md` (mTLS dropped 2026-06-14), so the remote-access question
+# asks what decides access today and expects the superseding note first. Every
+# `expect_entities` name was checked to be contained in a row of the rebuilt entity
+# store (2026-09-23 rebuild, 11,837 rows) by the scorer's own `_norm` containment; a
+# topic with no specific entity row carries `[]` rather than a generic stand-in.
+# All labels were fixed BEFORE the first retrieval run on this file, and none was
+# changed after it — a label read off what the retriever returns manufactures a pass.
+
+queries:
+  # --- single ---
+  - id: session-transcript-aging
+    query: "How long does a conversation transcript stay uncompressed before the weekly cleanup compresses it, and is it ever deleted?"
+    category: single
+    expect_entities: ["Groundskeeper"]
+    expect_docs: ["skills/retention-sweep/SKILL.md", "autonomy/79-retention-sweep.md"]
+    notes: "90 days of inactivity, gzip, never delete."
+
+  - id: remote-access-boundary
+    query: "How do I reach Lloyd with voice working from my phone on cellular, and what decides whether a device is allowed in?"
+    category: single
+    expect_entities: ["Tailscale"]
+    expect_docs: ["architecture/tailscale.md", "architecture/tailscale-mtls-remote-access.md"]
+    notes: "Tailscale membership is the boundary today; the mTLS design is the superseded predecessor (UDP rules out HTTPS tunnels)."
+
+  - id: vault-format-conformance
+    query: "What does the weekly vault format conformance check look for, and is it allowed to repair what it finds?"
+    category: single
+    expect_entities: ["OKF"]
+    expect_docs: ["skills/okf-conformance-check/SKILL.md", "autonomy/80-okf-conformance-check.md"]
+
+  - id: context-injected-before-each-call
+    query: "What context gets put in front of each model call automatically, without the agent calling a tool for it?"
+    category: single
+    expect_entities: ["Context Injection"]
+    expect_docs: ["architecture/subliminal.md"]
+
+  - id: todo-list-at-turn-end
+    query: "What should happen to my todo list before I end a long turn that is about to hit the iteration cap?"
+    category: single
+    expect_entities: []
+    expect_docs: ["skills/turn-end-todo-bookkeeping/SKILL.md"]
+
+  - id: upstream-release-watch
+    query: "Which upstream projects does the documentation digester watch, and where does it write what changed?"
+    category: single
+    expect_entities: ["Documentation Digester"]
+    expect_docs: ["autonomy/53-documentation-digester.md", "skills/documentation-digester/SKILL.md"]
+
+  # --- multi-hop ---
+  - id: deliverable-written-run-failed
+    query: "Why did the knowledge-analysis job not run after the signals job wrote its full report, and what does the dependency check actually look at?"
+    category: multi-hop
+    expect_entities: ["Autonomy Scheduler"]
+    expect_docs: ["knowledge/software/autonomy-empty-run-status-gate-stall.md"]
+    notes: "Run status is decided by terminal text alone; the gate reads last_run only."
+
+  - id: task-file-status-vs-live
+    query: "Why can the status line in a task file disagree with what the scheduler is doing, and where do I read the live state instead?"
+    category: multi-hop
+    expect_entities: []
+    expect_docs: ["knowledge/software/task-file-status-echoed-by-tool-roundtrip.md", "knowledge/software/autonomy-dispatch-hold-reason.md"]
+
+  - id: rollback-filed-three-times
+    query: "Why did one rollback incident file the same backlog item three times when create-time deduplication already exists?"
+    category: multi-hop
+    expect_entities: ["Guardian", "Backlog"]
+    expect_docs: ["knowledge/software/backlog-create-dedup-route-asymmetry.md"]
+    notes: "Dedup lives on the MCP tool path; the guardian files through the HTTP route, which has none."
+
+  - id: requeued-work-repoisons
+    query: "When I requeue poisoned work items by hand, why do they get poisoned again or sit there looking ignored by the pool?"
+    category: multi-hop
+    expect_entities: []
+    expect_docs: ["skills/poisoned-worker-troubleshoot/SKILL.md"]
+    notes: "attempts not zeroed -> re-poison on next claim; not_before left in place -> deferral backoff."
+
+  - id: scan-to-urgent-signal
+    query: "How does the intelligence pipeline get from scanning sources to deciding which items are worth writing into the vault?"
+    category: multi-hop
+    expect_entities: ["Intelligence Pipeline"]
+    expect_docs: ["autonomy/30-intelligence-pipeline-scan-score.md", "skills/intelligence-pipeline/SKILL.md", "architecture/intelligence-pipeline.md"]
+
+  # --- technical ---
+  - id: gpu-power-limit-reboot
+    query: "Why does the power limit I set with nvidia-smi reset after a reboot, and how do I make it stick?"
+    category: technical
+    expect_entities: []
+    expect_docs: ["architecture/gpu-power-limit-persist.md"]
+
+  - id: frontmatter-fence-fusion
+    query: "Why does inserting a line right after a regex match on the front matter fence produce the dashes and the key fused on one line?"
+    category: technical
+    expect_entities: []
+    expect_docs: ["knowledge/software/frontmatter-fence-fusion-mechanism.md"]
+    notes: "$ is zero-width: m.end() is the offset of the newline, not after it."
+
+  - id: sqlite-concurrent-writers
+    query: "Which SQLite settings matter most when several agent processes write the same database, and why does the write-ahead log keep growing?"
+    category: technical
+    expect_entities: ["SQLite"]
+    expect_docs: ["knowledge/software/sqlite-wal-tuning.md"]
+
+  - id: probe-exit-127-python-path
+    query: "An ad-hoc probe fails with exit code 127 on a python interpreter path under the lloyd checkout; what is usually wrong?"
+    category: technical
+    expect_entities: []
+    expect_docs: ["skills/probe-interpreter-mismatch/SKILL.md"]
+
+  - id: mcp-stdio-env-whitelist
+    query: "Which environment variables does an MCP stdio server inherit from its parent by default?"
+    category: technical
+    expect_entities: ["MCP"]
+    expect_docs: ["knowledge/mcp-stdio-env-inheritance.md"]
+
+  # --- fuzzy ---
+  - id: draft-but-already-scheduled
+    query: "a backlog item says draft but it is actually already scheduled under something bigger"
+    category: fuzzy
+    expect_entities: ["Backlog"]
+    expect_docs: ["knowledge/software/backlog-umbrella-grouping-hides-schedulability.md"]
+
+  - id: scratch-script-breaks-re
+    query: "my throwaway script in tmp crashes inside the re module and the traceback ends in my own file"
+    category: fuzzy
+    expect_entities: []
+    expect_docs: ["skills/scratch-script-stdlib-shadowing/SKILL.md"]
+
+  - id: check-the-pointer-before-citing
+    query: "the rule about opening a PR number or a model detail yourself before writing it into a note"
+    category: fuzzy
+    expect_entities: []
+    expect_docs: ["skills/cited-identifier-verification/SKILL.md"]
+
+  - id: web-ui-serves-old-code
+    query: "the web UI keeps showing old code even after restarting everything"
+    category: fuzzy
+    expect_entities: ["Vite"]
+    expect_docs: ["skills/vite-hmr-cache-clear/SKILL.md"]
+
+  # --- hard ---
+  - id: backups-stopped-service-running
+    query: "the vault stopped getting backed up off the box for days while the sync service still said it was running, what was going on"
+    category: hard
+    expect_entities: ["Obsidian Sync"]
+    expect_docs: ["knowledge/software/obsidian-headless-sync-quota-silent-failure.md"]
+    notes: "Remote vault over quota; the headless client has no prune."
+
+  - id: needs-human-alert-after-planned-restart
+    query: "the watchdog said a service stopped without an intentional stop and needs a human, but I had restarted it on purpose, what explains that"
+    category: hard
+    expect_entities: ["Guardian"]
+    expect_docs: ["knowledge/software/guardian-pause-lease-expiry-alert-signature.md"]
+    notes: "120-second restart lease expiring while the backend was still down."
+
+  - id: carried-sentence-false-for-days
+    query: "a sentence copied forward in every handoff turned out to have been false for days, what rule came out of that"
+    category: hard
+    expect_entities: []
+    expect_docs: ["knowledge/software/landed-claim-provenance.md"]
+
+  # --- recent ---
+  - id: pre-0923-baselines-recoverable
+    query: "Can the nightly retrieval baselines from before September 23 be recovered?"
+    category: recent
+    expect_entities: ["Nightly Retrieval Eval"]
+    expect_docs: ["knowledge/software/eval-baseline-history-loss-2026-09-22.md"]
+    notes: "Closed as unrecoverable."
+
+  - id: tests-rung-false-preexisting
+    query: "Why did the gate's tests rung call failures pre-existing when they only failed under the redirected home directory?"
+    category: recent
+    expect_entities: ["automod tests rung"]
+    expect_docs: ["knowledge/software/gate-round-home-red-tests.md"]
+
+  - id: eval-seeds-narrower-than-production
+    query: "Why did the nightly eval score its entity metrics on fewer seeds than production recall uses?"
+    category: recent
+    expect_entities: ["Nightly Retrieval Eval"]
+    expect_docs: ["knowledge/software/eval-seed-width-drift.md"]
+
+  - id: secondary-routing-eval-parked
+    query: "Why is the nightly engine routing comparison parked, and what would its numbers mean if it ran now?"
+    category: recent
+    expect_entities: ["Secondary Routing Eval"]
+    expect_docs: ["autonomy/85-secondary-routing-eval.md", "skills/secondary-routing-eval/SKILL.md"]

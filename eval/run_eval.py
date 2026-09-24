@@ -77,6 +77,12 @@ try:
 except ImportError:  # pragma: no cover - script-dir invocation
     import stats as evstats
 
+# The holdout leg's reserve rule (#1412). Same dual spelling as the two above.
+try:
+    from eval import retrieval_holdout as holdout
+except ImportError:  # pragma: no cover - script-dir invocation
+    import retrieval_holdout as holdout
+
 # The DOCUMENT half of the corpus this run scores (#1374). Owned by its own
 # stdlib module because `scripts/eval_trend_stats.py` has to read the same key
 # with the same meaning: the writer and the reader disagreeing about what an
@@ -1250,6 +1256,14 @@ def main() -> int:
     spec_file = Path(args.queries)
     spec = yaml.safe_load(spec_file.read_text())
     queries = spec.get("queries") or []
+    # #1412: a corpus carrying reserved holdout ids is scored only by the paired
+    # check's holdout leg, and never under a label the nightly readers glob. The
+    # refusal names counts and the label, never an id.
+    refused = holdout.refusal(queries, args.label, os.environ, LLOYD_HOME)
+    if refused:
+        print(f"[fatal] {refused}", file=sys.stderr)
+        return 2
+    leg = "holdout" if holdout.is_holdout_corpus(queries, LLOYD_HOME) else "dev"
     print(f"[info] loaded {len(queries)} queries from {spec_file}")
 
     try:
@@ -1384,6 +1398,9 @@ def main() -> int:
 
     out = {
         "label": args.label,
+        # Which leg of the retrieval eval this run scored (#1412). `holdout` records
+        # live only in the paired check's scratch data roots.
+        "leg": leg,
         "notes": args.notes,
         "ran_at": datetime.now(timezone.utc).isoformat(),
         "limit": args.limit,

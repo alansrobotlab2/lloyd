@@ -1408,3 +1408,141 @@ def test_a_rollback_request_carries_the_floor_it_claimed(monkeypatch, tmp_path):
         "the justification sits behind the list it justifies, where truncation eats it"
     assert "noise_floor_stale=False" in reason
     assert out["summary"].count("floor=") >= 1
+
+
+# ---------------------------------------------------------------------------
+# #1412 — the holdout leg: delta_dev, delta_holdout, overfit_suspected
+# ---------------------------------------------------------------------------
+
+N_DEV, N_HOLD = 86, 27
+
+
+def _four_arms(dev_base, dev_cur, hold_base, hold_cur, *, calls=None):
+    """`_run_arm` keyed on label AND leg, so each of the four arms is its own."""
+    def run(_tree, label, _env, timeout=900.0, *, leg="dev"):
+        if calls is not None:
+            calls.append((label, leg))
+        if leg == "holdout":
+            return hold_base if label == R.HOLDOUT_LABEL_BASELINE else hold_cur
+        return dev_base if "lkg" in label else dev_cur
+    return run
+
+
+def _holdout_env(monkeypatch, tmp_path):
+    import scripts.automod.state as S
+    events, rollback = [], []
+    noise = tmp_path / "noise.json"
+    noise.write_text(json.dumps(ZERO_NOISE))
+    monkeypatch.setattr(R, "NOISE_PATH", noise)
+    monkeypatch.setattr(S, "read_current", lambda: _observing())
+    monkeypatch.setattr(S, "read_events", lambda **k: [])
+    monkeypatch.setattr(S, "append_event", lambda ev, **k: events.append(ev))
+    monkeypatch.setattr(S, "write_eval_last", lambda payload: None)
+    monkeypatch.setattr(S, "request_rollback", lambda **kw: rollback.append(kw) or kw)
+    monkeypatch.delenv(R.HOLDOUT_LEG_SWITCH_ENV, raising=False)
+    _pin_ok(monkeypatch)
+    return events, rollback
+
+
+def _check(events):
+    return next(e for e in events if e.get("event") == "regression_check")
+
+
+def test_a_dev_only_gain_is_overfit_suspected_and_never_reads_as_no_regression(monkeypatch, tmp_path):
+    """Clause 5: gained on dev past its floor, lost on holdout past its floor."""
+    events, rollback = _holdout_env(monkeypatch, tmp_path)
+    calls: list = []
+    monkeypatch.setattr(R, "_run_arm", _four_arms(
+        _arm(N_DEV, [], n_queries=N_DEV), _arm(N_DEV, [], n_queries=N_DEV, ndcg10=0.70),
+        _arm(N_HOLD, [], n_queries=N_HOLD), _arm(N_HOLD, [], n_queries=N_HOLD, ndcg10=0.50), calls=calls))
+    out = R._execute_blocking()
+
+    assert out["regressed"] is False and not rollback, "the flag must never request a rollback"
+    assert out["overfit_suspected"] is True
+    assert out["summary"].startswith("OVERFIT SUSPECTED"), out["summary"]
+    assert "no regression after" not in out["summary"]
+    assert "ndcg10" in out["summary"]
+    check = _check(events)
+    assert check["overfit_suspected"] is True and check["reasons"] == []
+    assert check["delta_dev"]["ndcg10"] == pytest.approx(0.10)
+    assert check["delta_holdout"]["ndcg10"] == pytest.approx(-0.10)
+    assert check["transfer_gap"]["ndcg10"] == pytest.approx(0.20)
+    assert check["holdout"]["status"] == "measured"
+    assert check["holdout"]["overfit_metrics"] == ["ndcg10"]
+    assert check["holdout"]["n_holdout"] == N_HOLD
+    assert check["holdout"]["split_hash"], "the record names the split it measured"
+    # Human clause 4's shape: both legs scored on both trees, holdout after dev.
+    assert ("holdout-paired-lkg", "holdout") in calls and ("holdout-check", "holdout") in calls
+    assert [leg for _, leg in calls] == ["dev", "dev", "holdout", "holdout"]
+
+
+def test_a_gain_that_transfers_is_a_plain_no_regression(monkeypatch, tmp_path):
+    events, _ = _holdout_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(R, "_run_arm", _four_arms(
+        _arm(N_DEV, [], n_queries=N_DEV), _arm(N_DEV, [], n_queries=N_DEV, ndcg10=0.70),
+        _arm(N_HOLD, [], n_queries=N_HOLD), _arm(N_HOLD, [], n_queries=N_HOLD, ndcg10=0.68)))
+    out = R._execute_blocking()
+    assert out["overfit_suspected"] is False
+    assert out["summary"].startswith("no regression after"), out["summary"]
+    check = _check(events)
+    assert check["delta_holdout"]["ndcg10"] == pytest.approx(0.08)
+    assert check["transfer_gap"]["ndcg10"] == pytest.approx(0.02)
+
+
+def test_a_holdout_loss_inside_its_floor_is_not_flagged(monkeypatch, tmp_path):
+    """One question's worth at n=27 is ~0.038: a smaller loss is the leg's own grain."""
+    _holdout_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(R, "_run_arm", _four_arms(
+        _arm(N_DEV, [], n_queries=N_DEV), _arm(N_DEV, [], n_queries=N_DEV, ndcg10=0.70),
+        _arm(N_HOLD, [], n_queries=N_HOLD), _arm(N_HOLD, [], n_queries=N_HOLD, ndcg10=0.57)))
+    out = R._execute_blocking()
+    assert out["overfit_suspected"] is False, out["summary"]
+
+
+def test_the_flag_leaves_the_rollback_decision_exactly_as_it_was(monkeypatch, tmp_path):
+    """A real dev regression rolls back with the same reasons whether or not the
+    holdout leg ran and whatever it said."""
+    bad = _arm(N_DEV, [], n_queries=N_DEV, entity_hit_rate=0.1, ndcg10=0.70)
+
+    def run(disabled: bool):
+        events, rollback = _holdout_env(monkeypatch, tmp_path)
+        if disabled:
+            monkeypatch.setenv(R.HOLDOUT_LEG_SWITCH_ENV, "0")
+        monkeypatch.setattr(R, "_run_arm", _four_arms(
+            _arm(N_DEV, [], n_queries=N_DEV), dict(bad), _arm(N_HOLD, [], n_queries=N_HOLD), _arm(N_HOLD, [], n_queries=N_HOLD, ndcg10=0.4)))
+        return R._execute_blocking(), rollback, _check(events)
+
+    with_leg, rb_with, check_with = run(False)
+    without, rb_without, check_without = run(True)
+    assert with_leg["regressed"] is True and without["regressed"] is True
+    assert with_leg["reasons"] == without["reasons"]
+    assert [r["target"] for r in rb_with] == [r["target"] for r in rb_without] == ["a" * 40]
+    assert check_with["overfit_suspected"] is True
+    assert check_without["holdout"]["status"] == "disabled"
+    assert check_without["overfit_suspected"] is False
+
+
+def test_an_unmeasured_holdout_arm_is_a_count_never_an_id(monkeypatch, tmp_path):
+    events, _ = _holdout_env(monkeypatch, tmp_path)
+    reserved_probe = "reserved-probe-id"
+    monkeypatch.setattr(R, "_run_arm", _four_arms(
+        _arm(N_DEV, [], n_queries=N_DEV), _arm(N_DEV, [], n_queries=N_DEV, ndcg10=0.70),
+        _arm(N_HOLD, [], n_queries=N_HOLD), _arm(N_HOLD, [reserved_probe], n_queries=N_HOLD, ndcg10=0.50)))
+    out = R._execute_blocking()
+    check = _check(events)
+    assert check["holdout"]["status"] == "unmeasured"
+    assert check["overfit_suspected"] is False and out["overfit_suspected"] is False
+    assert reserved_probe not in json.dumps(check), "a holdout id reached the ledger"
+    assert "1 of 27" in check["holdout"]["reason"]
+    assert check["delta_holdout"] is None and check["delta_dev"]["ndcg10"] == pytest.approx(0.10)
+
+
+def test_a_refused_manifest_does_not_run_the_holdout_leg(monkeypatch, tmp_path):
+    events, _ = _holdout_env(monkeypatch, tmp_path)
+    calls: list = []
+    monkeypatch.setattr(R.retrieval_holdout, "load_manifest", lambda root=None: None)
+    monkeypatch.setattr(R, "_run_arm", _four_arms(
+        _arm(N_DEV, [], n_queries=N_DEV), _arm(N_DEV, [], n_queries=N_DEV), _arm(N_HOLD, [], n_queries=N_HOLD), _arm(N_HOLD, [], n_queries=N_HOLD), calls=calls))
+    R._execute_blocking()
+    assert [leg for _, leg in calls] == ["dev", "dev"]
+    assert _check(events)["holdout"]["status"] == "unmeasured"

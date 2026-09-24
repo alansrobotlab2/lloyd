@@ -3099,6 +3099,51 @@ draws djev independently instead of replaying the anchor's answers.
 - `tests/test_automod_regression.py` (the check) and `tests/test_djev_replay.py`
   (the client) pin it.
 
+#### 8.1c The holdout leg: a gain only the dev questions see (#1412, 2026-09-24)
+
+Every retrieval change is selected against the same 86 dev questions (the
+nightly, the trend audit, this check), so after enough rounds those questions
+are training signal: pairing and floors bound noise, not overfitting. A second,
+disjoint tranche of 27 hand-authored questions
+(`eval/vault_recall_holdout_queries.yaml`) is scored by this check only.
+
+- **Same pin, same trees, after the dev arms.** `_run_holdout_leg` runs a
+  baseline and a current arm over the holdout file inside the dev arms' pinned
+  corpus and replay file (arms `baseline_holdout` / `current_holdout`, labels
+  that share no substring with the dev ones, because `_load_run` globs).
+  ~2 × 27 recalls, ~20 s per arm on today's stack.
+- **The record.** `regression_check` carries `delta_dev`, `delta_holdout` and
+  `transfer_gap` per armed metric, each paired against the promotion's own
+  parent, and `overfit_suspected`. A metric that gained on dev past the dev
+  floor while losing on holdout past the holdout floor (`effective_floor` at
+  each leg's own n; at n=27 the resolution term is ~0.038, one question) sets
+  the flag, and the summary reads `OVERFIT SUSPECTED …` instead of `no
+  regression`. **The flag never enters `reasons`**: the rollback decision is
+  byte-for-byte what it was (pinned), and every rollback this check ever made
+  was a false positive, so a new detector reports before it acts.
+- **Reserved, not just split.** `eval/retrieval_holdout.py` writes the reserved
+  ids and a `split_hash` to `eval/vault_recall_holdout_manifest.json`;
+  verification recomputes it and compares the file's ids and content, and a
+  refused manifest means the leg does not run. `run_eval.py` refuses the
+  holdout corpus without `LLOYD_EVAL_HOLDOUT_LEG=1` (an env var, because the
+  baseline arm runs the parent's `run_eval.py`) and under a `nightly*` label.
+  Everything the leg records is a count or an aggregate — a failed holdout
+  arm logs its return code, not its output — and the corpus guards report the
+  holdout file by count. `tests/test_retrieval_holdout_split.py` pins that no
+  other tracked file names the file or carries a reserved id.
+- **Latency is exempt by construction.** `latency_over_budget` reads the dev
+  arm only; the holdout arm's average is recorded report-only on the holdout
+  block, so the paired-check ceiling needs no re-derivation for it.
+- **Not in the nightly, on purpose.** The nightly writes per-query rows into
+  `~/lloyd-data/eval/baselines/`, which its skill and the trend audit read; a
+  holdout row there is the leak the leg exists to prevent. The transfer gap is
+  a property of a *change*, and the nightly measures a state.
+- **Its first reading** (`eval/measurements/retrieval-holdout-2026-09-24.md`):
+  the holdout tranche is easier on the document leg than dev (doc hit 0.963
+  vs 0.651), so it has little headroom to show a doc gain and plenty to show a
+  loss — which is the direction the predicate reads. Kill switch:
+  `LLOYD_AUTOMOD_HOLDOUT_LEG=0`.
+
 ## 9. Incident: the false-positive rollback, 2026-09-06
 
 Worth recording in full, because it is the failure mode this design is most

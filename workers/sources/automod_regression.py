@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from app.djev import REPLAY_FAILURES, replay_env, replay_stats
+from eval import retrieval_holdout
 from scripts.automod.evalpin import PinError, PinnedCorpus
 from workers.queue import WorkQueue, QueueItem
 
@@ -72,6 +73,13 @@ EVAL_QMD_TIMEOUT_S = 60
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 # Both arms score THESE questions, whichever commit's code is running.
 LIVE_QUERIES = LIVE_ROOT / "eval" / "vault_recall_queries.yaml"
+# The holdout leg's questions (#1412), resolved from the LIVE tree for the same
+# reason: a candidate round must not be able to swap its own holdout file in. Only
+# `_run_arm(leg="holdout")` passes this path, and only `_run_holdout_leg` asks for it.
+LIVE_HOLDOUT_QUERIES = LIVE_ROOT / "eval" / retrieval_holdout.HOLDOUT_FILENAME
+# Kill switch for the holdout leg ("0" = off). The leg never changes a rollback
+# decision, so the switch exists for its cost (two ~27-query arms per check).
+HOLDOUT_LEG_SWITCH_ENV = "LLOYD_AUTOMOD_HOLDOUT_LEG"
 
 # Deliberately NOT under eval/baselines/. That directory holds eval RUN
 # RECORDS, and `tests/test_eval_scorer.py` globs `*.json` there and asserts
@@ -800,7 +808,8 @@ def floors_line(evidence: dict, noise_floor_stale: bool) -> str:
     return "; ".join(parts)
 
 
-def _run_arm(tree: Path, label: str, env: dict, timeout: float = 900.0) -> dict | None:
+def _run_arm(tree: Path, label: str, env: dict, timeout: float = 900.0, *,
+             leg: str = "dev") -> dict | None:
     """Run the eval from `tree`, scoring the LIVE queries against a pinned corpus.
 
     Three things are held identical across the two arms so that the only
@@ -814,8 +823,21 @@ def _run_arm(tree: Path, label: str, env: dict, timeout: float = 900.0) -> dict 
       eval set would otherwise ask the two arms different questions and score
       the difference as a code regression, which is how a change to the
       MEASUREMENT gets attributed to the thing being measured.
+
+    `leg` picks the question file and nothing else: `dev` is `LIVE_QUERIES`,
+    `holdout` is `LIVE_HOLDOUT_QUERIES` plus the one env switch `run_eval` requires
+    before it scores a reserved corpus (#1412). A caller cannot hand in a path, so
+    no other arm can reach the holdout file by accident.
     """
     from app import paths
+
+    if leg == "holdout":
+        queries = LIVE_HOLDOUT_QUERIES
+        env = {**env, retrieval_holdout.HOLDOUT_LEG_ENV: "1"}
+    elif leg == "dev":
+        queries = LIVE_QUERIES
+    else:
+        raise ValueError(f"unknown eval leg {leg!r}")
     from app.paths import VAULT_FACTS_ROOT, VAULT_KG_DB
 
     # The run record lands in the arm's own data root: this process's for the
@@ -833,12 +855,17 @@ def _run_arm(tree: Path, label: str, env: dict, timeout: float = 900.0) -> dict 
         [str(LIVE_ROOT / ".venvs" / "lloyd" / "bin" / "python"),
          str(tree / "eval" / "run_eval.py"),
          "--label", label,
-         "--queries", str(LIVE_QUERIES)],
+         "--queries", str(queries)],
         cwd=str(tree), env=env, capture_output=True, text=True,
         timeout=timeout, check=False,
     )
     if r.returncode != 0:
-        logger.error("eval arm %s failed: %s", label, (r.stdout + r.stderr)[-500:])
+        if leg == "holdout":
+            # The runner prints per-query ids and failures, and regression.log is
+            # read by people and by jobs: the holdout leg logs the fact, not the tail.
+            logger.error("eval arm %s (holdout leg) failed, rc=%s", label, r.returncode)
+        else:
+            logger.error("eval arm %s failed: %s", label, (r.stdout + r.stderr)[-500:])
         return None
     # A commit older than the data root writes its record inside its tree.
     return (_load_run(data_root / "eval" / "baselines", label)
@@ -1432,6 +1459,152 @@ def _would_regress(current: dict | None, baseline: dict | None, noise: dict,
         return False
 
 
+# The holdout leg's arms (#1412): their own djev replay names, anchored on the
+# holdout baseline, and labels that share no substring with the dev arms' — the
+# loader globs `*{label}*.json`, so `automod-check-holdout` would be read back as
+# the dev arm `automod-check`.
+ARM_BASELINE_HOLDOUT, ARM_CURRENT_HOLDOUT = "baseline_holdout", "current_holdout"
+HOLDOUT_LABEL_BASELINE, HOLDOUT_LABEL_CURRENT = "holdout-paired-lkg", "holdout-check"
+
+
+def holdout_leg_enabled() -> bool:
+    return os.environ.get(HOLDOUT_LEG_SWITCH_ENV, "1") != "0"
+
+
+def _run_holdout_leg(baseline_tree: Path, current_tree: Path, env: dict,
+                     replay_db: Path) -> dict:
+    """Score the reserved holdout questions on both trees, inside the dev arms' pin.
+
+    Same pinned corpus, same grep root, same replay file as the dev comparison, so
+    the only thing that differs from the dev leg is the questions. Never raises and
+    never names a query: whatever goes wrong is a `status` and a count, because this
+    dict reaches the ledger.
+    """
+    if not holdout_leg_enabled():
+        return {"status": "disabled", "reason": f"{HOLDOUT_LEG_SWITCH_ENV}=0"}
+    manifest = retrieval_holdout.load_manifest(LIVE_ROOT)
+    if not manifest:
+        # Absent or edited after its hash: the stricter side is not to run it.
+        return {"status": "unmeasured",
+                "reason": "holdout manifest absent or refused by its split_hash"}
+    out = {"status": "ran", "split_hash": manifest.get("split_hash"),
+           "n_reserved": manifest.get("n")}
+    try:
+        out["baseline"] = _run_arm(
+            baseline_tree, HOLDOUT_LABEL_BASELINE,
+            _replayed(env, replay_db, ARM_BASELINE_HOLDOUT, ARM_BASELINE_HOLDOUT),
+            leg="holdout")
+        out["current"] = _run_arm(
+            current_tree, HOLDOUT_LABEL_CURRENT,
+            _replayed(env, replay_db, ARM_CURRENT_HOLDOUT, ARM_BASELINE_HOLDOUT),
+            leg="holdout")
+    except Exception as exc:  # noqa: BLE001 — the dev verdict must not depend on this leg
+        return {"status": "unmeasured", "reason": f"holdout arm raised {type(exc).__name__}",
+                "split_hash": out["split_hash"], "n_reserved": out["n_reserved"]}
+    return out
+
+
+def _holdout_arm_problem(arm: dict | None) -> str | None:
+    """Why a holdout arm is not a measurement — as counts, never ids."""
+    if not arm:
+        return "arm failed"
+    if arm.get("corpus_ok") is False:
+        return "arm scored an empty corpus"
+    if all_queries_empty(arm) or unanswered_doc_queries(arm):
+        return (f"{len(arm.get('empty_doc_queries') or [])} of {arm.get('n_records')} "
+                "queries got no documents")
+    if empty_fact_leg(arm):
+        return "fact leg read nothing"
+    return None
+
+
+def holdout_verdict(dev_current: dict, dev_baseline: dict, leg: dict,
+                    noise: dict | None, ranker: dict,
+                    floor_stale: bool = False) -> dict:
+    """`delta_dev`, `delta_holdout`, `transfer_gap` and `overfit_suspected`. Pure.
+
+    Both deltas are paired against the promotion's own parent under one pin, per
+    armed metric. The predicate is #549's strict form, on each leg's own effective
+    floor (`max(3σ, 1/n + 0.001)`, the floor `evaluate` grades with): a metric that
+    GAINED on dev past the dev floor while LOSING on holdout past the holdout floor
+    is `overfit_suspected`. At n≈27 the holdout resolution floor is ~0.038, so only
+    a loss of about one question's worth or more can trip it — the holdout leg is
+    small by construction and must not flag a single noisy flip.
+
+    The flag is a REPORT. It never enters `reasons`, so it cannot request a
+    rollback; what it changes is the check's summary, which stops reading as a plain
+    "no regression" (clause 5).
+    """
+    dev_floor_noise = _floor_for(noise, ranker_reading(ranker, ARM_CURRENT))
+    n_dev = query_count(dev_current.get("overall"), dev_baseline.get("overall"))
+    delta_dev: dict[str, float] = {}
+    dev_floors: dict[str, float] = {}
+    for key in ARMED_METRICS:
+        a, b = (dev_current.get("overall") or {}).get(key), (dev_baseline.get("overall") or {}).get(key)
+        if a is None or b is None:
+            continue
+        delta_dev[key] = float(a) - float(b)
+        dev_floors[key] = effective_floor(dev_floor_noise, key, n_dev)["floor"]
+    out: dict[str, Any] = {"status": leg.get("status"), "delta_dev": delta_dev,
+                           "delta_holdout": None, "transfer_gap": None,
+                           "overfit_suspected": False, "overfit_metrics": [],
+                           "split_hash": leg.get("split_hash"),
+                           "n_reserved": leg.get("n_reserved"),
+                           "floor_stale": bool(floor_stale)}
+    if leg.get("status") != "ran":
+        out["reason"] = leg.get("reason")
+        return out
+    base, cur = leg.get("baseline"), leg.get("current")
+    for name, arm in (("baseline", base), ("current", cur)):
+        problem = _holdout_arm_problem(arm)
+        if problem:
+            out.update(status="unmeasured", reason=f"holdout {name} {problem}")
+            return out
+    for arm_name in (ARM_BASELINE_HOLDOUT, ARM_CURRENT_HOLDOUT):
+        failed = sum(v for k, v in (ranker.get(arm_name) or {}).items()
+                     if k in REPLAY_FAILURES and v)
+        if failed:
+            out.update(status="unmeasured",
+                       reason=f"djev did not answer {failed} rank request(s) in {arm_name}")
+            return out
+    reading = ranker_reading(ranker, ARM_CURRENT_HOLDOUT)
+    hold_noise = _floor_for(noise, reading)
+    n_hold = query_count(cur.get("overall"), base.get("overall"))
+    delta_holdout: dict[str, float] = {}
+    floors: dict[str, dict] = {}
+    overfit: list[str] = []
+    for key in ARMED_METRICS:
+        a, b = (cur.get("overall") or {}).get(key), (base.get("overall") or {}).get(key)
+        if a is None or b is None:
+            continue
+        dh = float(a) - float(b)
+        delta_holdout[key] = dh
+        fh = effective_floor(hold_noise, key, n_hold)["floor"]
+        floors[key] = {"dev": dev_floors.get(key), "holdout": fh}
+        dd = delta_dev.get(key)
+        if dd is not None and dd > dev_floors[key] and dh < -fh:
+            overfit.append(key)
+    out.update(status="measured", delta_holdout=delta_holdout,
+               transfer_gap={k: delta_dev[k] - delta_holdout[k]
+                             for k in delta_holdout if k in delta_dev},
+               floors=floors, n_holdout=n_hold, ranker_reading=reading,
+               overfit_suspected=bool(overfit), overfit_metrics=overfit,
+               # Report-only and deliberately NOT read by `over_budget`: the paired
+               # latency ceiling was priced on the dev arm (#1412 human clause 3).
+               latency_ms_avg=(cur.get("overall") or {}).get("latency_ms_avg"))
+    return out
+
+
+def overfit_line(verdict: dict) -> str:
+    """One clause per flagged metric, for the summary a person reads."""
+    parts = []
+    for key in verdict.get("overfit_metrics") or []:
+        f = (verdict.get("floors") or {}).get(key) or {}
+        parts.append(f"{key} dev {verdict['delta_dev'][key]:+.4f} (floor {f.get('dev') or 0:.4f}) / "
+                     f"holdout {verdict['delta_holdout'][key]:+.4f} (floor {f.get('holdout') or 0:.4f})")
+    return "; ".join(parts)
+
+
 def all_queries_empty(arm: dict) -> bool:
     """Every question of the arm came back with no document at all."""
     total = int(arm.get("n_records") or 0)
@@ -1516,6 +1689,7 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
     baseline = current = confirm = None
     confirm_ran = False
     ranker: dict = {}
+    holdout_leg: dict = {"status": "unmeasured", "reason": "dev arms did not both run"}
     try:
         with PinnedCorpus(work) as pin:
             # Before anything is timed against it: the first query loads the
@@ -1560,6 +1734,10 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                         # so the second look is an independent draw of the ranker.
                         confirm = _run_arm(cur, "automod-check-confirm",
                                            _replayed(env, replay_db, ARM_CONFIRM))
+                    # #1412: the never-read holdout questions, same pin, same
+                    # trees, after every dev arm so none of them waits on it.
+                    if baseline and current:
+                        holdout_leg = _run_holdout_leg(wt, cur, env, replay_db)
                     ranker = replay_stats(replay_db)
             pin.discard()
     except PinError as exc:
@@ -1754,6 +1932,19 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
     fact_side_src = reasons + unconfirmed if stale_floor else reasons
     fact_side = [r for r in fact_side_src if r.split() and r.split()[0] in FACT_LAYER_METRICS]
 
+    # #1412: did the change gain only on the questions every promotion is selected
+    # against? Computed after the dev verdict is final and never fed back into it.
+    try:
+        holdout = holdout_verdict(current, baseline, holdout_leg, noise, ranker,
+                                  floor_stale=stale_floor)
+    except Exception as exc:  # noqa: BLE001 — a report must never cost the dev verdict
+        holdout = {"status": "unmeasured", "reason": f"holdout verdict raised {type(exc).__name__}",
+                   "overfit_suspected": False}
+    overfit = bool(holdout.get("overfit_suspected"))
+    if overfit:
+        logger.warning("overfit suspected after %s: gained on dev, lost on holdout — %s "
+                       "(reported, not a rollback reason)", commit[:8], overfit_line(holdout))
+
     # The latency verdict, on the same absolute ceiling `evaluate` reports inside
     # its detail. Written into both records a later reader consults — the ledger
     # event and `eval_last.json`, which the guardian folds into the LKG record —
@@ -1790,6 +1981,13 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
                     # the first one reported: reproduced, or not.
                     "confirmed_by": confirmed_by if regressed else [],
                     "unconfirmed_reasons": unconfirmed,
+                    # #1412, each paired against this promotion's own parent.
+                    "delta_dev": holdout.get("delta_dev"),
+                    "delta_holdout": holdout.get("delta_holdout"),
+                    "transfer_gap": holdout.get("transfer_gap"),
+                    "overfit_suspected": overfit,
+                    "holdout": {k: v for k, v in holdout.items()
+                                if k not in ("delta_dev", "delta_holdout", "transfer_gap")},
                     "detail": detail, "commit": commit})
     if not regressed:
         # A withheld verdict must not read as a clean bill. #1352's shape was an
@@ -1802,15 +2000,23 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
         elif unconfirmed:
             summary = (f"no regression after {commit[:8]}: reported delta(s) refused "
                        f"on the second pass")
+        elif overfit:
+            # Clause 5 of #1412: a dev-only gain must not read as a clean bill.
+            summary = (f"OVERFIT SUSPECTED after {commit[:8]} vs {baseline_commit[:8]}: "
+                       f"no dev regression, but gained on dev and lost on holdout — "
+                       f"{overfit_line(holdout)}; report-only, no rollback requested")
         else:
             summary = (f"no regression after {commit[:8]} vs "
                        f"{baseline_commit[:8]} ({len(ARMED_METRICS)} armed metrics)")
+        if overfit and (no_verdict or unconfirmed):
+            summary += f"; OVERFIT SUSPECTED: {overfit_line(holdout)}"
         # Deliberately no `reason` key: `_execute_blocking` writes that field with
         # the QUEUE's routing decision, and a check-level string here would be
         # silently overwritten before anything read it.
         return {"status": "success", "regressed": False, "stage": stage,
                 "summary": summary,
                 "unconfirmed_reasons": unconfirmed,
+                "overfit_suspected": overfit, "holdout_status": holdout.get("status"),
                 "detail": detail, "noise_floor_stale": stale_floor}
 
     logger.error("retrieval-quality regression after %s: %s", commit[:8],
@@ -1840,6 +2046,7 @@ def check_promotion(subject: dict, stage: str) -> dict[str, Any]:
             "summary": f"REGRESSION after {commit[:8]}: " + reason,
             "fact_side_reasons": fact_side, "metric_floors": evidence,
             "noise_floor_stale": stale_floor,
+            "overfit_suspected": overfit, "holdout_status": holdout.get("status"),
             "rollback_requested_to": baseline_commit}
 
 

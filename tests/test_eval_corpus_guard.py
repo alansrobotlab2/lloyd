@@ -2089,3 +2089,75 @@ def test_the_written_baseline_never_claims_graph_parity_it_lacks(
             "production's default")
     finally:
         _cleanup(label)
+
+
+# ---------------------------------------------------------------------------
+# #1412: the HOLDOUT leg goes through the same two guards, reported as counts
+# ---------------------------------------------------------------------------
+# The holdout corpus is only worth having while no job reads its per-query rows,
+# and a guard failure message is a per-query row: it lands in pytest output, in the
+# gate's rung report and in a round's transcript. So the holdout file is checked by
+# the SAME report functions as the dev file (one definition of "satisfiable"), and
+# asserted through a message that carries the counts and never a query id.
+
+HOLDOUT_CORPUS = ROOT / "eval" / "vault_recall_holdout_queries.yaml"
+HOLDOUT_MIN_QUERIES = 20
+
+
+def _assert_holdout_satisfiable_by_count(report: dict, what: str, total_key: str) -> None:
+    # An explicit raise, not `assert not dead`: pytest's assertion rewriting prints
+    # the operand, and the operand is the list of reserved ids.
+    dead = report["dead"]
+    if dead:
+        raise AssertionError(
+        f"{len(dead)} of {report[total_key]} {what} across {report['queries']} holdout "
+        f"queries of {report['corpus']} cannot be satisfied — re-point or delete them "
+        "WITHOUT reading the retriever's output for these queries, then rewrite the "
+        "manifest (`python -m eval.retrieval_holdout write`). Ids are withheld on "
+        "purpose: this file is the reserved holdout leg (#1412).")
+
+
+def test_the_holdout_corpus_has_the_dev_schema_and_disjoint_ids():
+    holdout = yaml.safe_load(HOLDOUT_CORPUS.read_text())["queries"]
+    dev = yaml.safe_load(CORPUS.read_text())["queries"]
+    assert len(holdout) >= HOLDOUT_MIN_QUERIES, len(holdout)
+    for spec in holdout:
+        assert {"id", "query", "category", "expect_entities", "expect_docs"} <= set(spec), (
+            "a holdout query is missing a dev-schema key")
+        assert isinstance(spec["expect_entities"], list) and isinstance(spec["expect_docs"], list)
+        assert spec["expect_docs"], "every holdout query names at least one document"
+    ids = [str(s["id"]) for s in holdout]
+    assert len(set(ids)) == len(ids)
+    overlap = set(ids) & {str(s["id"]) for s in dev}
+    assert not overlap, f"{len(overlap)} holdout id(s) also sit in the dev corpus"
+
+
+def test_every_holdout_entity_expectation_is_satisfiable_reported_as_a_count():
+    report = _entity_satisfiability_report(HOLDOUT_CORPUS)
+    assert report["queries"] >= HOLDOUT_MIN_QUERIES, report["queries"]
+    assert report["expectations"] >= 10, report["expectations"]   # the loop read them
+    _assert_holdout_satisfiable_by_count(report, "`expect_entities` entries", "expectations")
+
+
+def test_every_holdout_document_label_is_satisfiable_reported_as_a_count():
+    rep = _doc_label_satisfiability_report(specs_path=HOLDOUT_CORPUS)
+    assert rep["labels"] >= HOLDOUT_MIN_QUERIES and rep["walked_paths"] > 100, (
+        rep["labels"], rep["walked_paths"])
+    _assert_holdout_satisfiable_by_count(rep, "`expect_docs` labels", "labels")
+
+
+def test_the_holdout_guard_fails_on_a_dead_expectation_and_names_no_id(tmp_path):
+    """Non-vacuity, and the leak shape: the failure is real and carries no id."""
+    corpus = tmp_path / "holdout.yaml"
+    corpus.write_text(yaml.safe_dump({"queries": [
+        {"id": "reserved-probe-alpha", "query": "q", "category": "single",
+         "expect_entities": ["Backlog Item #363"], "expect_docs": ["lloyd"]},
+        {"id": "reserved-probe-beta", "query": "q", "category": "single",
+         "expect_entities": ["Knowledge Graph"], "expect_docs": ["lloyd"]}]}))
+    report = _entity_satisfiability_report(corpus, getter=_named_store(["Knowledge Graph"]))
+    assert report["expectations"] == 2 and len(report["dead"]) == 1, report
+    with pytest.raises(AssertionError) as exc:
+        _assert_holdout_satisfiable_by_count(report, "`expect_entities` entries", "expectations")
+    msg = str(exc.value)
+    assert "1 of 2" in msg, msg
+    assert "reserved-probe" not in msg and "Backlog Item #363" not in msg, msg
