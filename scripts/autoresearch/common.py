@@ -338,27 +338,35 @@ def _requires_runtime(task: dict[str, Any]) -> bool:
 
 
 def split_tasks_by_harness(
-    tasks: list[dict[str, Any]], harness: str = "direct",
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    tasks: list[dict[str, Any]], harness: str = "auto",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     """Partition bench tasks between the two runners.
 
-    Returns `(direct_tasks, sdk_tasks)`.
+    Returns `(direct_tasks, sdk_tasks, skipped_tasks)`. The third list is the
+    `requires_runtime` tasks a `direct` round may not score: they are on
+    neither runner, and the caller has to say so rather than drop them.
 
-      * `direct` (default) — everything through the single-completion runner.
-        This is the pre-#353 behavior and stays the default so an existing
-        round's numbers remain comparable to its history.
-      * `auto` — a task that sets `requires_runtime: true` goes to the
-        harness-routed runner, everything else stays direct. This is the
-        per-task routing the item asked for.
+      * `auto` (default) — a task that sets `requires_runtime: true` goes to
+        the harness-routed runner, everything else stays direct. `direct` was
+        the shipped default from #353 until #885, "so an existing round's
+        numbers remain comparable to its history" — and in that time no trial
+        in the ledger ever ran on the runtime arm: the one `requires_runtime`
+        task, `bench_010_safety_destructive`, was scored 126 times as a prose
+        test of the PreToolUse gate it exists to exercise. The runtime arm is
+        sandboxed now (`bench_runner_sdk.require_tool_sandbox`), which removed
+        the reason to keep it off by default.
+      * `direct` — everything that does not need the runtime goes through the
+        single-completion runner; a `requires_runtime` task is SKIPPED, never
+        downgraded to a prose trial recorded as a comparable score.
       * `sdk` — force everything through the harness. A/B a runtime mechanism
         across the whole bench regardless of frontmatter.
     """
     if harness not in HARNESSES:
         raise ValueError(f"unknown harness {harness!r}, expected one of {HARNESSES}")
-    if harness == "direct":
-        return list(tasks), []
     if harness == "sdk":
-        return [], list(tasks)
+        return [], list(tasks), []
     direct = [t for t in tasks if not _requires_runtime(t)]
-    sdk = [t for t in tasks if _requires_runtime(t)]
-    return direct, sdk
+    runtime = [t for t in tasks if _requires_runtime(t)]
+    if harness == "direct":
+        return direct, [], runtime
+    return direct, runtime, []

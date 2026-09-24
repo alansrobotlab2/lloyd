@@ -143,3 +143,69 @@ def test_a_round_whose_checks_are_all_measurable_prints_no_coverage_section(roun
     report = (round_env.paths.rounds_dir / f"{result['round_id']}.md").read_text(
         encoding="utf-8")
     assert "## Objective coverage" not in report
+
+
+# ── #885: a requires_runtime task is routed by default, or skipped and named ──
+
+def _write_runtime_task(cfg) -> None:
+    """`bench_r1`: sorts after the two replay tasks and inside `bench_limit=3`."""
+    (cfg.paths.bench_dir / "bench_r1.md").write_text(
+        "---\nid: bench_r1\ncategory: replay\nsafety_critical: false\n"
+        "requires_runtime: true\nprompt: do the thing\n"
+        "objective_checks:\n  - type: contains\n    value: done\n---\n\nProse body.\n",
+        encoding="utf-8")
+
+
+def test_a_direct_round_skips_the_runtime_task_and_says_so(round_env, monkeypatch):
+    """#885 clauses 2 and 3, end to end: under an explicit `direct` the
+    runtime task reaches neither runner nor the ledger, and the report names
+    it as skipped with the reason — `tasks on the harness runner: 0` can no
+    longer sit beside a scored safety task."""
+    _write_runtime_task(round_env)
+    handed: list[str] = []
+    real_fake = run_round._run_trials
+
+    async def spy(cfg_, variant_pairs, tasks, model, harness, max_parallel):
+        handed.extend(t["id"] for t in tasks)
+        return await real_fake(cfg_, variant_pairs, tasks, model, harness, max_parallel)
+
+    monkeypatch.setattr(run_round, "_run_trials", spy)
+    result = asyncio.run(run_round.run(targets=["prompts"], bench_limit=3, harness="direct"))
+    assert "error" not in result, result
+    assert result["requires_runtime_skipped"] == ["bench_r1"]
+    assert "bench_r1" not in handed and set(handed) == {"bench_a1", "bench_a2"}
+    assert {r["task_id"] for r in _rows(round_env, result["round_id"])} == {"bench_a1", "bench_a2"}
+    report = (round_env.paths.rounds_dir / f"{result['round_id']}.md").read_text(encoding="utf-8")
+    assert "- tasks on the harness runner: 0\n" in report
+    assert ("- requires_runtime tasks skipped under harness=direct: 1 (bench_r1) "
+            "— not scored, no ledger row") in report, report
+
+
+def test_the_default_round_names_the_task_on_the_runtime_arm(round_env, monkeypatch):
+    """#885 clauses 1 and 3: invoked the way the worker source invokes it (no
+    `harness`), the runtime task goes to the sdk arm, its ledger row says so,
+    and the report names it there with nothing skipped."""
+    from scripts.autoresearch.common import split_tasks_by_harness
+    _write_runtime_task(round_env)
+
+    async def routed(cfg_, variant_pairs, tasks, model, harness, max_parallel):
+        direct, sdk, skipped = split_tasks_by_harness(tasks, harness)
+        assert skipped == []
+
+        def trace(t, arm):
+            return {"variant_id": variant_pairs[0][0], "task_id": t["id"], "status": "success",
+                    "task_category": t.get("category"), "turns": 1, "harness": arm,
+                    "final_text": "I called vault_recall and the answer is done.",
+                    "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0,
+                    "tool_trace_authoritative": arm == "sdk"}
+        return [trace(t, "direct") for t in direct], [trace(t, "sdk") for t in sdk]
+
+    monkeypatch.setattr(run_round, "_run_trials", routed)
+    result = asyncio.run(run_round.run(targets=["prompts"], bench_limit=3))
+    assert "error" not in result, result
+    assert result["harness"] == "auto" and result["requires_runtime_skipped"] == []
+    rows = {r["task_id"]: r for r in _rows(round_env, result["round_id"])}
+    assert rows["bench_r1"]["harness"] == "sdk" and rows["bench_a2"]["harness"] == "direct"
+    report = (round_env.paths.rounds_dir / f"{result['round_id']}.md").read_text(encoding="utf-8")
+    assert "- tasks on the harness runner: 1 (bench_r1)\n" in report, report
+    assert "- requires_runtime tasks skipped under harness=auto: 0\n" in report, report

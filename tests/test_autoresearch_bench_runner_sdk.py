@@ -408,17 +408,32 @@ def _runtime_task(tid: str, **over):
 def test_split_routes_only_flagged_tasks_to_the_harness():
     tasks = [_runtime_task("a", requires_runtime=True), _runtime_task("b"),
              _runtime_task("c", requires_runtime="true")]
-    direct, sdk = split_tasks_by_harness(tasks, "auto")
+    direct, sdk, skipped = split_tasks_by_harness(tasks, "auto")
     assert [t["id"] for t in direct] == ["b"]
     assert [t["id"] for t in sdk] == ["a", "c"]
+    assert skipped == []
 
 
-def test_split_default_is_direct_only_and_sdk_forces_all():
+def test_split_default_routes_the_runtime_task_to_the_harness():
+    """#885 clause 1: with no harness argument — the way both live callers
+    call `run()` — `bench_010` lands on the runtime arm. `direct` was the
+    default from #353 to #885 and in that time the ledger never held one
+    `harness: sdk` row; the one safety task was 126 prose trials."""
+    direct, sdk, skipped = split_tasks_by_harness([_task(), _runtime_task("b")])
+    assert [t["id"] for t in sdk] == ["bench_010_safety_destructive"]
+    assert [t["id"] for t in direct] == ["b"] and skipped == []
+
+
+def test_split_under_explicit_direct_skips_the_runtime_task_and_sdk_forces_all():
+    """#885 clause 2: an explicit `direct` round does not score a
+    `requires_runtime` task — it is on neither runner and named as skipped,
+    never downgraded to a prose trial recorded as a comparable score."""
     tasks = [_runtime_task("a", requires_runtime=True), _runtime_task("b")]
-    direct, sdk = split_tasks_by_harness(tasks, "direct")
-    assert [t["id"] for t in direct] == ["a", "b"] and sdk == []
-    direct, sdk = split_tasks_by_harness(tasks, "sdk")
-    assert direct == [] and [t["id"] for t in sdk] == ["a", "b"]
+    direct, sdk, skipped = split_tasks_by_harness(tasks, "direct")
+    assert [t["id"] for t in direct] == ["b"] and sdk == []
+    assert [t["id"] for t in skipped] == ["a"]
+    direct, sdk, skipped = split_tasks_by_harness(tasks, "sdk")
+    assert direct == [] and [t["id"] for t in sdk] == ["a", "b"] and skipped == []
 
 
 def test_split_rejects_an_unknown_mode():
@@ -426,10 +441,17 @@ def test_split_rejects_an_unknown_mode():
         split_tasks_by_harness([], "yolo")
 
 
-def test_harness_flag_exists_and_defaults_to_direct():
+def test_harness_flag_exists_and_defaults_to_auto_like_run_itself():
+    """#885 clause 1: the CLI default, `run()`'s default and the split's
+    default are one value, so a round invoked any of the three ways routes
+    the same."""
+    import inspect
+    from scripts.autoresearch.run_round import run as run_round_run
     args = build_parser().parse_args([])
-    assert args.harness == "direct"
-    assert build_parser().parse_args(["--harness", "auto"]).harness == "auto"
+    assert args.harness == "auto"
+    assert inspect.signature(run_round_run).parameters["harness"].default == "auto"
+    assert inspect.signature(split_tasks_by_harness).parameters["harness"].default == "auto"
+    assert build_parser().parse_args(["--harness", "direct"]).harness == "direct"
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--harness", "not-a-runner"])
 

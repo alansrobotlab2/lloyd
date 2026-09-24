@@ -323,8 +323,9 @@ async def _run_trials(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run the (variant × task) matrix, split by harness routing.
 
-    Returns `(direct_traces, sdk_traces)`. The second list is empty for the
-    default `--harness direct`, so today's rounds are byte-for-byte unchanged.
+    Returns `(direct_traces, sdk_traces)`. `run()` has already taken the
+    `requires_runtime` tasks a `direct` round skips out of `tasks`, so the
+    third element of the split is empty here.
 
     Both runners are awaited sequentially rather than concurrently: they share
     the primary vLLM slot, and the direct runner's cap of 3 exists precisely
@@ -332,7 +333,7 @@ async def _run_trials(
     Overlapping an agent-loop workload on top of it would push both past their
     timeouts.
     """
-    direct_tasks, sdk_tasks = split_tasks_by_harness(tasks, harness)
+    direct_tasks, sdk_tasks, _skipped = split_tasks_by_harness(tasks, harness)
     direct_traces: list[dict[str, Any]] = []
     sdk_traces: list[dict[str, Any]] = []
 
@@ -493,7 +494,7 @@ async def run(
     model: str | None = None,
     bench_limit: int | None = None,
     max_parallel: int = 4,
-    harness: str = "direct",
+    harness: str = "auto",
 ) -> dict[str, Any]:
     cfg = load_config()
     cfg.paths.ensure()
@@ -555,6 +556,19 @@ async def run(
                     bench_limit, len(all_tasks), len(tasks))
 
     logger.info("loaded %d bench tasks", len(tasks))
+
+    # A `direct` round may not score a `requires_runtime` task (#885): scored on
+    # the single-completion runner it is a prose test recorded as a comparable
+    # score, which is how `bench_010_safety_destructive` spent 126 trials never
+    # once reaching the PreToolUse gate it exists to exercise. Taken out here,
+    # before `_run_trials` and before the judge, so no trace and no ledger row
+    # exist for it; the report and the result name it below.
+    _direct, _sdk, skipped_runtime = split_tasks_by_harness(tasks, harness)
+    skipped_runtime_ids = sorted(t["id"] for t in skipped_runtime)
+    if skipped_runtime:
+        logger.warning("harness=%s: %d requires_runtime task(s) skipped, not scored: %s",
+                       harness, len(skipped_runtime), ", ".join(skipped_runtime_ids))
+        tasks = [t for t in tasks if t.get("id") not in set(skipped_runtime_ids)]
 
     try:
         split = record_split(cfg, all_tasks, rid)
@@ -692,6 +706,9 @@ async def run(
         f"- tasks: {len(tasks)}",
         f"- tasks on the harness runner: {len(sdk_task_ids)}"
         + (f" ({', '.join(sdk_task_ids)})" if sdk_task_ids else ""),
+        f"- requires_runtime tasks skipped under harness={harness}: {len(skipped_runtime_ids)}"
+        + (f" ({', '.join(skipped_runtime_ids)}) — not scored, no ledger row"
+           if skipped_runtime_ids else ""),
         f"- variants proposed: {len(variants)}",
         # #680: the aggregate said "2 dropped", which cannot distinguish "the
         # model invented spans" from "half this round's variants aimed at a file
@@ -799,6 +816,7 @@ async def run(
         "dry_run": dry_run,
         "harness": harness,
         "tasks_on_harness_runner": len(sdk_task_ids),
+        "requires_runtime_skipped": skipped_runtime_ids,
     }
 
 
@@ -812,13 +830,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bench-limit", type=int, default=None)
     parser.add_argument("--max-parallel", type=int, default=4)
     parser.add_argument(
-        "--harness", choices=list(HARNESSES), default="direct",
-        help="Which bench runner scores the tasks. 'direct' (default) is the "
-             "single-turn vLLM completion — unchanged history. 'auto' routes a "
+        "--harness", choices=list(HARNESSES), default="auto",
+        help="Which bench runner scores the tasks. 'auto' (default) routes a "
              "task to the in-process agent loop when its frontmatter sets "
              "requires_runtime: true, so PreToolUse hooks and any other runtime "
-             "mechanism are actually live for that trial. 'sdk' forces the "
-             "agent-loop path for every task.",
+             "mechanism are actually live for that trial, and everything else "
+             "through the single-turn vLLM completion. 'direct' keeps every "
+             "task on the single-turn runner and SKIPS a requires_runtime task "
+             "rather than scoring it as prose. 'sdk' forces the agent-loop path "
+             "for every task.",
     )
     parser.add_argument("--log-level", default="INFO")
     return parser

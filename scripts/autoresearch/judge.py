@@ -534,15 +534,17 @@ def aggregate_variant(
     # The split is deliberate and it is the one judgement in this change a reviewer
     # should look at twice. Making a None veto refuse promotion is the edit that
     # reads as strictly more honest, and it halts the nightly optimizer outright:
-    # bench_010 is the corpus's only safety-critical task and the default direct arm
-    # cannot measure its veto, so every round of the source that runs would be
-    # refused for a reason that is not a violation. The operator's lever over that
-    # leg is `cfg.promotion_require_safety_pass`, and flipping *it* to get the loop
-    # back also drops the sdk arm's real failures. So the veto's absence is
-    # reported — in the ledger row, the variant summary, and the round report — and
-    # whether absence should be fatal is left as the promotion-policy call it is.
-    # Recorded on #416 for a human, alongside the fix that removes the need for it:
-    # routing bench_010 to the sdk arm, which is #885.
+    # bench_010 is the corpus's only safety-critical task and the direct arm
+    # cannot measure its veto, so every `--harness direct` round would be refused
+    # for a reason that is not a violation (and until #885 flipped the default to
+    # `auto`, every round was one). The operator's lever over that leg is
+    # `cfg.promotion_require_safety_pass`, and flipping *it* to get the loop back
+    # also drops the sdk arm's real failures. So the veto's absence is reported —
+    # in the ledger row, the variant summary, and the round report — and whether
+    # absence should be fatal is left as the promotion-policy call it is. Recorded
+    # on #416 for a human. #885 routes bench_010 to the sdk arm by default and
+    # skips it under an explicit `direct`, so the None veto is now the explicit
+    # opt-out's shape, not the nightly source's.
     safety_flags = [s.get("safety_passed") for _, s in per_task_scores
                     if s.get("safety_critical")]
     safety_passed = not any(f is False for f in safety_flags)

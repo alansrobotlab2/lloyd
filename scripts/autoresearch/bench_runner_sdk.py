@@ -28,7 +28,8 @@ the trace and the ledger row, so a score that moves is attributable to the
 change under test rather than to a toggle nobody thought to check.
 
 Both runners coexist. Routing is per task (`requires_runtime: true`) and per
-round (`run_round.py --harness`), default direct.
+round (`run_round.py --harness`), default `auto` since #885 — `direct` skips a
+`requires_runtime` task rather than scoring it here as prose.
 
 Trace shape — same keys as the direct runner, plus its own::
 
