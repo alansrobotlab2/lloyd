@@ -90,6 +90,7 @@ from app.routers._messages_subliminal import (
     _build_subliminal_entry,
 )
 from app.harness.policy import GRANT_MINT_TOOL, install_policy_hook
+from workers.sources._common import WORKER_AUTOMOD_BAN
 from app.routers._messages_thinking import _build_thinking_entry
 from app.transcript_entries import (
     build_assistant_text_entry,
@@ -553,6 +554,43 @@ def _ban_grant_minting(data: dict) -> list[str]:
     for name in (GRANT_MINT_TOOL, f"mcp__lloyd-mcp__{GRANT_MINT_TOOL}"):
         if name not in banned:
             banned.append(name)
+    data["extra_disallowed"] = banned
+    return banned
+
+
+#: The worker whose job IS the loop: its turn calls `automod_start`,
+#: `automod_gate_wait` and `automod_land` on purpose, and the observer's
+#: ambient rescue of a budget-dead round (#278) runs on the same session.
+AUTOMOD_DRIVER_SOURCES: frozenset[str] = frozenset({"autocode"})
+
+
+def _ban_automod_for_workers(data: dict, session_id: str) -> list[str]:
+    """#709 — take the self-modification tools off every other worker turn.
+
+    `WORKER_AUTOMOD_BAN` was enforced per call site: `run_prompt_on_primary`
+    bakes it into its own `RunOptions`, and a session-backed source passes it
+    as `extra_disallowed` — or does not. Single and group triage never did,
+    so the source whose whole job is deciding which items get implemented was
+    advertised `automod_start`, and the tool-surface split (`CHAT_ONLY`)
+    hides `mc_*`/`grant_*` on a worker surface, not these. A convention each
+    caller has to remember is not a control; the trigger here is the
+    session's own platform, like `_authority_scope_for`, so a caller cannot
+    forget because a caller is not asked. `autocode` is the one exception.
+
+    Written into `data["extra_disallowed"]` for the same reason as the grant
+    ban: `_refresh_disallowed_for_session` re-reads that key every iteration.
+    Returns the list `data` now carries (unchanged for a chat or autocode
+    turn), so the ambient site can capture it once.
+    """
+    banned = list(data.get("extra_disallowed") or [])
+    platform, source = _session_identity(session_id)
+    if platform not in sessions_io.NON_USER_PLATFORMS \
+            or source in AUTOMOD_DRIVER_SOURCES:
+        return banned
+    for tname in WORKER_AUTOMOD_BAN:
+        for name in (tname, f"mcp__lloyd-mcp__{tname}"):
+            if name not in banned:
+                banned.append(name)
     data["extra_disallowed"] = banned
     return banned
 
@@ -1975,6 +2013,7 @@ async def post_message_stream(request: Request):
     grant_scope = _authority_scope_for(session_id, data)
     if grant_scope:
         _ban_grant_minting(data)
+    _ban_automod_for_workers(data, session_id)
     extra_disallowed: list[str] = data.get("extra_disallowed", [])
     permission_mode: str = (
         data.get("permission_mode")
@@ -2127,7 +2166,9 @@ async def build_ambient_turn(
     # next producer that learns to build a turn.
     ambient_payload: dict = {}
     ambient_scope = _authority_scope_for(session_id, ambient_payload)
-    ambient_banned = _ban_grant_minting(ambient_payload) if ambient_scope else []
+    if ambient_scope:
+        _ban_grant_minting(ambient_payload)
+    ambient_banned = _ban_automod_for_workers(ambient_payload, session_id)
 
     def _ambient_refresh_disallowed() -> list[str]:
         live_plan_mode = bool(_load_session_plan(session_id).get("plan_mode"))
@@ -2273,6 +2314,7 @@ async def post_message(request: Request):
     sync_grant_scope = _authority_scope_for(session_id, data)
     if sync_grant_scope:
         _ban_grant_minting(data)
+    _ban_automod_for_workers(data, session_id)
     sync_extra_disallowed: list[str] = data.get("extra_disallowed", [])
 
     def _sync_refresh_disallowed() -> list[str]:

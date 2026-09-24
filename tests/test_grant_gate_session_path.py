@@ -276,3 +276,70 @@ def test_the_same_registry_set_also_arms_the_outbound_content_gate():
     assert find_unarmed_dispatch_paths() == [], find_unarmed_dispatch_paths()
     assert stale_gate_arm_points() == [], stale_gate_arm_points()
     assert len(GATE_ARM_POINTS) == 9, GATE_ARM_POINTS
+
+
+# ── The automod ban, by platform (#709) ────────────────────────────────
+
+from workers.sources._common import WORKER_AUTOMOD_BAN  # noqa: E402
+
+
+def _automod_names():
+    return {n for t in WORKER_AUTOMOD_BAN for n in (t, f"mcp__lloyd-mcp__{t}")}
+
+
+def test_a_worker_session_with_an_empty_body_has_automod_banned(sessions):
+    """Single and group triage pass no `extra_disallowed`. The ban has to
+    come from the session's platform, or the source that decides what gets
+    implemented is advertised `automod_start`."""
+    _session(sessions, "w1", platform="worker", source="autotriage")
+    data: dict = {}
+    banned = M._ban_automod_for_workers(data, "w1")
+    assert _automod_names() <= set(banned)
+    # Written back into the body: that is what the per-iteration refresher
+    # reads, so a ban only in the returned list would come off at once.
+    assert _automod_names() <= set(data["extra_disallowed"])
+
+
+def test_an_autonomy_session_is_banned_too(sessions):
+    _session(sessions, "a1", platform="autonomy", source="nightly-x")
+    assert _automod_names() <= set(M._ban_automod_for_workers({}, "a1"))
+
+
+def test_the_autocode_worker_keeps_the_loop_tools(sessions):
+    """The one worker whose job is the loop — its turn calls automod_start,
+    automod_gate_wait and automod_land on purpose."""
+    _session(sessions, "c1", platform="worker", source="autocode")
+    data: dict = {}
+    assert M._ban_automod_for_workers(data, "c1") == []
+    assert "extra_disallowed" not in data
+    assert "autocode" in M.AUTOMOD_DRIVER_SOURCES
+
+
+def test_a_mission_control_session_is_not_banned(sessions):
+    _session(sessions, "m1", platform="mission-control")
+    data = {"extra_disallowed": ["Task"]}
+    assert M._ban_automod_for_workers(data, "m1") == ["Task"]
+    assert data["extra_disallowed"] == ["Task"]
+
+
+def test_a_missing_session_file_reads_as_a_chat(sessions):
+    """A brand-new chat's file is written after the endpoint reads it."""
+    assert M._ban_automod_for_workers({}, "never-written") == []
+
+
+def test_the_automod_ban_is_idempotent_and_keeps_the_callers_list(sessions):
+    _session(sessions, "w2", platform="worker", source="deep-research")
+    data = {"extra_disallowed": ["http_request", "automod_land"]}
+    M._ban_automod_for_workers(data, "w2")
+    M._ban_automod_for_workers(data, "w2")
+    assert data["extra_disallowed"].count("automod_land") == 1
+    assert "http_request" in data["extra_disallowed"]
+
+
+def test_every_site_that_bans_minting_also_bans_automod():
+    """Same pin-count idiom as the grant gate: the three router sites that
+    build a turn's disallowed list each apply the platform ban, so "the other
+    endpoint is the ungated one" cannot come back one tool over."""
+    text = open(M.__file__).read()
+    assert text.count("_ban_grant_minting(") == 4  # def + 3 sites
+    assert text.count("_ban_automod_for_workers(") == 4  # def + 3 sites

@@ -742,15 +742,18 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     Raises `DrainActive` if a landing has the backend draining; the caller
     should skip this run rather than count it.
 
-    **`extra_disallowed` is the only tool control this path has**, and until a
-    caller passes it there was none. `run_prompt_on_primary` bakes the automod
-    ban into its own `RunOptions`; this path posts to `/api/message/stream`,
-    which builds `disallowed_tools` from config plus whatever the body names
-    (`app/routers/messages.py::_refresh_disallowed_for_session`). Nothing in
-    that endpoint reads `platform`, so a worker session is handed exactly the
-    toolbox a chat gets. That is tolerable for backlog triage, which reads only
-    this repo, and not for a research turn that fetches arbitrary web pages
-    into its context.
+    **`extra_disallowed` is the caller's tool control on this path**, on top
+    of what the endpoint applies by the session's own platform. This path
+    posts to `/api/message/stream`, which builds `disallowed_tools` from
+    config plus whatever the body names
+    (`app/routers/messages.py::_refresh_disallowed_for_session`). Until #709
+    nothing in that endpoint read `platform`, so a worker session that passed
+    nothing was handed exactly the toolbox a chat gets, `automod_start`
+    included — and single and group triage passed nothing. The endpoint now
+    unions `WORKER_AUTOMOD_BAN` for every non-user platform except the
+    `autocode` source (`messages._ban_automod_for_workers`); a source's own
+    deny list is what keeps a research turn that fetches arbitrary web pages
+    away from the rest of the write surface.
 
     **The budget is wall-clock, and it has to be smaller than the pool's.**
     `timeout_seconds` used to be handed straight to `httpx.Timeout`, where it

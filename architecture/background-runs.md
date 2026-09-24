@@ -546,6 +546,15 @@ installs:
   body's `extra_disallowed` because `_refresh_disallowed_for_session` re-reads
   that key on every harness iteration. Enforced twice on purpose: not
   advertised, and denied by the hook if a local model emits the name anyway.
+- **The automod tools come off every other worker turn the same way**
+  (#709, `messages._ban_automod_for_workers`). `WORKER_AUTOMOD_BAN` used to
+  be a per-call-site convention — `run_prompt_on_primary` baked it in, a
+  session-backed source passed it as `extra_disallowed` or forgot to, and
+  single and group triage forgot — so the source that decides which items get
+  implemented was advertised `automod_start`. Now the endpoint unions the ban
+  for any `NON_USER_PLATFORMS` session whose `source` is not in
+  `AUTOMOD_DRIVER_SOURCES` (`autocode`, whose turn drives the loop on
+  purpose), at the same three sites as the grant ban.
 - **All three registry-building sites arm it** — the stream endpoint, the
   synchronous one, and `build_ambient_turn`, where it cannot fire today
   because `/inject` refuses a non-user session with 409. "The other endpoint
