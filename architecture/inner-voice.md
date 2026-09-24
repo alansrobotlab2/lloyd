@@ -1577,6 +1577,17 @@ Baseline over the v4 window: 21 injects, 14 landed, 7 stranded (0.67 landed
 rate); 15 signed-off turns checked, 0 followed by a correction. Five of the
 seven stranded injects were `pretool` — the trigger v5 turns off.
 
+`scripts/iv_outcome_score.py` (#833) is the outcome side the proxies lack. It
+joins the same table to `event_logs/*.events.jsonl` on (session_id, turn_id) —
+`related_tool` is a tool name, never a call id — and labels each turn from the
+event log alone: `brain1.result_message.data.stop_reason` by default,
+`--label tool_error` for an `Error`/`Traceback` tool result. Per class
+(`inject[model]`, `inject[guard]` via `iv_grade._is_deterministic`, `cancel`,
+`ambient`, `clarify`) it prints n / TP / FP / precision / recall / lift over the
+base rate and the FN pool (bad turns with no intervention); a class under 30
+scored rows gets counts only. A `cancel` mostly causes its own `cancelled`, so
+its TP is partly self-inflicted; the keep / record-only ruling stays a human's.
+
 ## Verification
 
 - `tests/integration/test_observer.py` — tool-call extraction, lever dispatch
@@ -1773,6 +1784,8 @@ which is whether the intervention improved the outcome. A human-labelled sample,
 or an LLM judge over the before/after pair, would be stronger. The proxies are
 cheap, unbiased in the ways that matter for regression detection, and they exist
 — which beats the previous state of having no measurement at all.
+`scripts/iv_outcome_score.py` adds an outcome label from the event log (see
+"Measuring itself"), still correlational rather than counterfactual.
 
 ### Subagents get safety but not an observer
 
