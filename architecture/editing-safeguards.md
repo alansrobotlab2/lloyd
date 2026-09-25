@@ -118,6 +118,16 @@ before assuming a layer can be turned off — or that it is installed.
   `fail_closed`, `tool_use_id`). The aggregator's own dispatch check is
   unaffected.
 
+- **A `Task` child inherits its parent's authority, not a fresh one** (review
+  2026-09-24, D4). The child's registry is built in the aggregator, so the
+  grant gate reaches it only through `_meta`: `lloyd/grant_scope` re-arms
+  `install_policy_hook` in the child, and `lloyd/disallowed_tools` carries the
+  parent's live deny list (plan mode, worker bans, `grant_create`), unioned
+  with `app.tool_bans.WORKER_AUTOMOD_BAN` in both spellings. A chat parent
+  sends no scope and its child stays ungated, like the chat route. Before
+  this a worker's subagent could call every tier-2 tool unasked.
+  `tests/test_task_subagent_authority.py`.
+
 ## The code graph
 
 `agent_mcp/code_graph.py` answers "who calls this" and "what breaks if I

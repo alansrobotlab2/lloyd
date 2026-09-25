@@ -176,10 +176,18 @@ def test_worker_turns_cannot_drive_the_loop():
 
 
 def test_subagents_cannot_drive_the_loop():
-    """A Task runs inside the aggregator a landing restarts."""
+    """A Task runs inside the aggregator a landing restarts.
+
+    It reads the workers' shared ban (`app/tool_bans.py`) rather than a private
+    copy, which had fallen four names behind (review 2026-09-24, D4); the ban's
+    own contents are pinned by `test_worker_turns_cannot_drive_the_loop`.
+    """
+    from app.tool_bans import WORKER_AUTOMOD_BAN
     src = (ROOT / "agent_mcp" / "builtin_task.py").read_text()
+    assert "for name in WORKER_AUTOMOD_BAN" in src, (
+        "builtin_task no longer disallows the shared automod ban")
     for tool in ("automod_start", "automod_land", "automod_rollback"):
-        assert tool in src, f"{tool} is not disallowed for subagents"
+        assert tool in WORKER_AUTOMOD_BAN
 
 
 def test_the_drain_endpoint_is_loopback_only():

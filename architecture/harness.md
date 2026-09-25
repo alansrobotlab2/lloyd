@@ -512,3 +512,18 @@ were. Now:
 Verify on live traffic:
 `sqlite3 ~/lloyd-data/usage.db "select stop_reason,count(*) from usage where ts>datetime('now','-1 day') group by 1"`
 and `grep -h '"harness\.' ~/lloyd-data/event_logs/*.events.jsonl | jq -r .event | sort | uniq -c`.
+
+### D4 — a Task child inherits the grant gate and the deny list
+
+The loop stamps two more `_meta` keys on a call: `lloyd/grant_scope` (the
+option `RunOptions.grant_scope`, which the router and `autonomy.run_task` set
+beside their `install_policy_hook(scope=…)`; else `policy.current_scope` only
+where the pool bound it — its default `"worker"` is never read, or every chat
+Task would be gated) and, on `Task` calls only, `lloyd/disallowed_tools` (the
+iteration's refreshed deny list). `agent_mcp/main.call_tool` lifts them into
+`builtin_task.current_parent_grant_scope` / `current_parent_disallowed` (and
+binds `policy.current_scope` when a scope came in) around the dispatch;
+`_task` unions the parent's list and `app.tool_bans.WORKER_AUTOMOD_BAN` in
+both spellings into the child's deny list and installs the policy hook when a
+scope is present. `tests/test_task_subagent_authority.py`;
+[[editing-safeguards]] has the gate map.

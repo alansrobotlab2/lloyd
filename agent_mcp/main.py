@@ -238,6 +238,11 @@ META_EFFECT_SCOPE = "lloyd/effect_scope"
 # The calling turn's tool surface, inherited by a Task subagent. Must match
 # app.harness.mcp_pool.META_SURFACE.
 META_SURFACE = "lloyd/surface"
+# The calling turn's #534 grant scope and its live deny list, inherited by a
+# Task subagent (review 2026-09-24, D4). Must match
+# app.harness.mcp_pool.META_GRANT_SCOPE / META_DISALLOWED.
+META_GRANT_SCOPE = "lloyd/grant_scope"
+META_DISALLOWED = "lloyd/disallowed_tools"
 
 # OpenAI's spec caps tool names at 64 chars. Enforced here at registration
 # so a bad name fails loudly on the first list_tools() instead of
@@ -602,6 +607,23 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
     # new task id, and an identical write from parent and child is the same
     # effect.
     etok = harness_policy.current_effect_scope.set(effect_scope)
+    # D4: the parent's grant scope and deny list, for a Task child. A child's
+    # hooks and options are built inside this dispatch, so contextvars bound
+    # here are what `builtin_task` reads. `current_scope` is bound too (only
+    # when a scope came in — its default stays the restrictive "worker"), so
+    # the child's outbound content gate reads the parent's scope rather than
+    # the default.
+    parent_grant_scope = meta.get(META_GRANT_SCOPE, "") if isinstance(meta, dict) else ""
+    if not isinstance(parent_grant_scope, str):
+        parent_grant_scope = ""
+    parent_disallowed = meta.get(META_DISALLOWED, ()) if isinstance(meta, dict) else ()
+    if not isinstance(parent_disallowed, (list, tuple)):
+        parent_disallowed = ()
+    gstok = builtin_task.current_parent_grant_scope.set(parent_grant_scope)
+    dtok = builtin_task.current_parent_disallowed.set(
+        tuple(str(n) for n in parent_disallowed if isinstance(n, str) and n))
+    pstok = (harness_policy.current_scope.set(parent_grant_scope)
+             if parent_grant_scope else None)
     sbtok = _tool_sandbox.current_sandboxed.set(sandboxed)
     try:
         # #544 — exactly-once EFFECT, not exactly-once scheduling. The retry
@@ -667,6 +689,10 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
         builtin_task.current_parent_base_url.reset(btok)
         builtin_task.current_parent_surface.reset(surtok)
         harness_policy.current_effect_scope.reset(etok)
+        builtin_task.current_parent_grant_scope.reset(gstok)
+        builtin_task.current_parent_disallowed.reset(dtok)
+        if pstok is not None:
+            harness_policy.current_scope.reset(pstok)
         _tool_sandbox.current_sandboxed.reset(sbtok)
 
 

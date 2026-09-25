@@ -54,6 +54,19 @@ current_parent_base_url: contextvars.ContextVar[str] = contextvars.ContextVar(
 current_parent_surface: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_parent_surface", default=""
 )
+# The calling turn's #534 grant scope (`lloyd/grant_scope`) and the deny list
+# in force for the iteration that called Task (`lloyd/disallowed_tools`),
+# bound by `agent_mcp.main.call_tool` like the three above. Before these a
+# worker turn's subagent ran with no grant gate at all and with none of the
+# parent's per-turn bans — the child could call what the parent was refused
+# (review 2026-09-24, D4). An empty scope means a chat parent: no gate, the
+# same as the chat route.
+current_parent_grant_scope: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "current_parent_grant_scope", default=""
+)
+current_parent_disallowed: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "current_parent_disallowed", default=()
+)
 
 
 def current_caller_scope() -> CallerScope:
@@ -227,7 +240,9 @@ async def _task(args: dict[str, Any]) -> str:
     from app.harness.loop import run_query
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from app.harness.options import RunOptions
+    from app.harness.policy import install_policy_hook
     from app.harness.safety import install_default_safety_hook
+    from app.tool_bans import WORKER_AUTOMOD_BAN
     from app.harness.skill_dispatch import install_skill_dispatch_hook
 
     # Resolve model and base_url.
@@ -266,6 +281,13 @@ async def _task(args: dict[str, Any]) -> str:
     for name in profile["disallowed_tools"]:
         if name not in disallowed:
             disallowed.append(name)
+    # ...and whatever the PARENT could not call this iteration (plan mode, a
+    # worker's per-turn bans, `grant_create` on a gated turn). A child is the
+    # parent's delegate; handing it a tool the parent was refused is a way
+    # round every ban the router arms.
+    for name in current_parent_disallowed.get(()):
+        if name not in disallowed:
+            disallowed.append(name)
     # Subagent always disallows Task to prevent infinite recursion.
     if "Task" not in disallowed:
         disallowed.append("Task")
@@ -276,11 +298,12 @@ async def _task(args: dict[str, Any]) -> str:
     # code on production. Landing from inside a Task would also restart the
     # aggregator the Task is running in. Same reasoning as the Task recursion
     # cap: the constraint belongs here, not in a prompt.
-    for name in ("automod_start", "automod_gate", "automod_land",
-                 "automod_abort", "automod_rollback"):
-        if name not in disallowed:
-            disallowed.append(name)
-            disallowed.append(f"mcp__lloyd-mcp__{name}")
+    # The list is the workers' shared one (`app/tool_bans.py`): this used to
+    # be a private five-name copy that had fallen four names behind it.
+    for name in WORKER_AUTOMOD_BAN:
+        for spelling in (name, f"mcp__lloyd-mcp__{name}"):
+            if spelling not in disallowed:
+                disallowed.append(spelling)
 
     # Subagents ran with `hooks=None`, which meant the harness's default
     # destructive-Bash gate never installed inside a Task — the one place
@@ -300,6 +323,14 @@ async def _task(args: dict[str, Any]) -> str:
     # turn-start skills at all (the prompt is the raw `subagents.<type>`
     # profile), so `already_injected` is empty by construction (#750).
     install_skill_dispatch_hook(task_hooks)
+    # The #534 grant gate, when the parent turn ran under one. It is a
+    # PreToolUse hook, so it exists only where a registry installs it, and
+    # this registry is the child's (a deny beats a deliver in either order).
+    # A chat parent carries no scope and gets no gate — the same rule as the
+    # chat route (`app/routers/messages.py`).
+    grant_scope = current_parent_grant_scope.get("")
+    if grant_scope:
+        install_policy_hook(task_hooks, scope=grant_scope)
 
     # Per-invocation session id so each subagent run gets its own
     # tool_search LoadedToolSet — different disallowed_tools profiles
@@ -333,6 +364,8 @@ async def _task(args: dict[str, Any]) -> str:
         mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
         session_id=sub_session_id,
         surface=current_parent_surface.get(""),
+        # Carried on so the child's own calls stamp it into `_meta` too.
+        grant_scope=grant_scope,
         cancel_event=cancel_evt,
         # A subagent is an agent loop like any other and has the same
         # redundant-reasoning problem the main loop does — more so, since

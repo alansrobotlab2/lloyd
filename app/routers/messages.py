@@ -2194,6 +2194,9 @@ async def post_message_stream(request: Request):
         options.final_schema = final_schema
         options.final_schema_prompt = str(data.get("final_schema_prompt") or "")
     options.effect_scope = _effect_scope_for(session_id, data)
+    # D4: the scope the policy hook above was armed with, so a Task child this
+    # turn spawns re-arms the same gate. "" for a chat turn, like the hook.
+    options.grant_scope = grant_scope
     options.surface = _tool_surface(turn_platform)
 
     # SEAM(http), receiving side: the worker pool posts `"platform": "worker"` in
@@ -2325,6 +2328,7 @@ async def build_ambient_turn(
         session_id=session_id,
         surface=_tool_surface(_session_identity(session_id)[0]),
         priority=0,
+        grant_scope=ambient_scope,  # D4: what a Task child inherits
         **_get_harness_kwargs(),
     )
 
@@ -2483,6 +2487,7 @@ async def post_message(request: Request):
         surface=_tool_surface(_session_identity(session_id)[0]),
         priority=sync_llm_priority,
         effect_scope=_effect_scope_for(session_id, data),
+        grant_scope=sync_grant_scope,  # D4: what a Task child inherits
         **_get_harness_kwargs(),
     )
     # This path calls run_query directly rather than going through

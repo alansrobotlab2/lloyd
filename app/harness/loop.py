@@ -13,6 +13,7 @@ endpoint in `app.routers.messages._run_turn`.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import re
@@ -41,7 +42,9 @@ from app.harness.tool_result_spill import (
 from app.harness.events import NormalizedEvent
 from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS, MCPPool, get_or_open_pool
 from app.harness.options import RunOptions
-from app.harness.policy import current_effect_scope, normalize_tool_name
+from app.harness.policy import (
+    current_effect_scope, current_scope, normalize_tool_name,
+)
 from app.harness.telemetry import log_harness_event
 from app.harness.tool_schema import (
     add_summary_param,
@@ -821,6 +824,7 @@ async def run_query(
                             return await _execute_tool_call(
                                 tc=call, pool=pool, options=options,
                                 session_id=session_id,
+                                runtime_disallowed=current_disallowed,
                             )
                         except asyncio.CancelledError:
                             raise
@@ -2347,6 +2351,7 @@ async def _dispatch_one_tool_call(
         return early
     return await _execute_tool_call(
         tc=tc, pool=pool, options=options, session_id=session_id,
+        runtime_disallowed=runtime_disallowed,
     )
 
 
@@ -2536,12 +2541,23 @@ async def _pre_dispatch(
     return None
 
 
+def _bound_grant_scope() -> str:
+    """`policy.current_scope` if this task bound it, else "" (D4)."""
+    try:
+        if current_scope in contextvars.copy_context():
+            return current_scope.get() or ""
+    except Exception:          # pragma: no cover — never block a dispatch
+        pass
+    return ""
+
+
 async def _execute_tool_call(
     *,
     tc: dict[str, Any],
     pool: MCPPool,
     options: RunOptions,
     session_id: str,
+    runtime_disallowed: set[str] | None = None,
 ) -> NormalizedEvent:
     """The MCP call and everything after it. Safe to run concurrently.
 
@@ -2606,6 +2622,19 @@ async def _execute_tool_call(
                              or current_effect_scope.get()),
             # So a Task subagent this call spawns runs on the same surface.
             "surface": getattr(options, "surface", "") or "",
+            # D4: the authority gate and the deny list a Task child inherits.
+            # The option first (the router sets it beside its policy hook);
+            # then the pool's contextvar, but only where something BOUND it —
+            # its default is "worker", and reading that on a chat turn would
+            # gate every chat Task child.
+            "grant_scope": (getattr(options, "grant_scope", "")
+                            or _bound_grant_scope()),
+            # This iteration's set (plan mode, surface refresh), not the
+            # turn-start list. Only Task reads it, so only Task carries it.
+            "disallowed_tools": (
+                sorted(runtime_disallowed if runtime_disallowed is not None
+                       else (options.disallowed_tools or []))
+                if hook_name == "Task" else ()),
         }
         if cancel_event is None:
             result = await pool.call_tool(name, dispatch_args, **call_kw)

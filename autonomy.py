@@ -3281,6 +3281,10 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             # the only path that had none.
             session_id=session_id,
             turn_id=run_id,
+            # D4: the scope `task_hooks` was armed with, so a Task child
+            # re-arms the same gate. Explicit because the manual and HTTP
+            # entry points run outside the pool's `current_scope`.
+            grant_scope=grant_scope,
             **_get_harness_kwargs(),
         )
 

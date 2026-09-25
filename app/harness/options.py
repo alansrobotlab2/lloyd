@@ -120,6 +120,14 @@ class RunOptions:
     # it never replays or refuses under that prefix.
     effect_scope: str = ""
 
+    # #534: the authority scope this turn borrows (`worker:<source>`,
+    # `autonomy-task:<id>`), set beside every `install_policy_hook(scope=…)`.
+    # The loop forwards it in `_meta` so a `Task` child re-arms the same grant
+    # gate (review 2026-09-24, D4) — the aggregator has no other way to know.
+    # Empty means no gate (a chat turn), unless the pool bound
+    # `policy.current_scope` in this task, which the loop falls back to.
+    grant_scope: str = ""
+
     # Background-task notification drain. When set, the loop calls this
     # at the top of each iteration; the callable returns a list of
     # OpenAI-format messages (typically role: "user" with a

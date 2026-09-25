@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Any
+from typing import Any, Sequence
 
 from mcp import ClientSession, MCPError
 from mcp.client.sse import sse_client
@@ -121,6 +121,12 @@ META_EFFECT_SCOPE = "lloyd/effect_scope"
 # The calling turn's tool surface ("chat"/"worker"), so a Task subagent runs on
 # the same one. Must match agent_mcp.main.META_SURFACE.
 META_SURFACE = "lloyd/surface"
+# The calling turn's #534 grant scope and its live deny list, so a `Task`
+# child runs under the same authority gate and cannot call what its parent
+# could not (review 2026-09-24, D4). Must match agent_mcp.main.META_GRANT_SCOPE
+# / META_DISALLOWED.
+META_GRANT_SCOPE = "lloyd/grant_scope"
+META_DISALLOWED = "lloyd/disallowed_tools"
 
 # Ceiling on a single tools/call round trip. Sits above the Bash tool's own
 # 600s hard cap so a legitimately long command finishes on its own terms and
@@ -474,6 +480,8 @@ class MCPPool:
         call_id: str = "",
         effect_scope: str = "",
         surface: str = "",
+        grant_scope: str = "",
+        disallowed_tools: Sequence[str] = (),
         timeout_seconds: float | None = None,
     ) -> dict[str, Any]:
         """Dispatch a tool call to the right server.
@@ -498,6 +506,10 @@ class MCPPool:
         ledger keys on it so a retried attempt cannot fire the same side
         effect twice. Empty means no ledger for this call — an interactive
         turn, or any caller that is not a retryable queue item.
+
+        `grant_scope` and `disallowed_tools` are what a `Task` child inherits:
+        the authority scope the calling turn's grant gate checks, and the deny
+        list in force for this iteration. Both are omitted when empty.
         """
         if not self._opened:
             await self.open()
@@ -542,6 +554,10 @@ class MCPPool:
             meta[META_EFFECT_SCOPE] = effect_scope
         if surface:
             meta[META_SURFACE] = surface
+        if grant_scope:
+            meta[META_GRANT_SCOPE] = grant_scope
+        if disallowed_tools:
+            meta[META_DISALLOWED] = list(disallowed_tools)
         budget = timeout_seconds if timeout_seconds is not None else CALL_TIMEOUT_SECONDS
 
         try:
