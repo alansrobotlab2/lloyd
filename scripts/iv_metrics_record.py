@@ -528,6 +528,78 @@ def announce_breach(row: dict) -> bool:
         return False
 
 
+# The outcome score (#833, IV plan R3) rides the nightly once a week. It had
+# never produced a verdict: `iv_outcome_score.py` landed and nothing ran it.
+OUTCOME_SCORE_EVERY_DAYS = 7
+
+
+def _last_outcome_score_at(path: Path) -> datetime.datetime | None:
+    """`recorded_at` of the newest row carrying an `outcome_score`, if any."""
+    if not path.exists():
+        return None
+    last = None
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if '"outcome_score"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            stamp = row.get("recorded_at")
+            if isinstance(stamp, str) and row.get("outcome_score"):
+                try:
+                    last = datetime.datetime.fromisoformat(stamp)
+                except ValueError:
+                    continue
+    return last
+
+
+def outcome_score_due(path: Path, now: datetime.datetime | None = None,
+                      every_days: int = OUTCOME_SCORE_EVERY_DAYS) -> bool:
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    last = _last_outcome_score_at(path)
+    if last is None:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=datetime.timezone.utc)
+    return (now - last) >= datetime.timedelta(days=every_days)
+
+
+def weekly_outcome_score(days: int = OUTCOME_SCORE_EVERY_DAYS) -> dict:
+    """Run `iv_outcome_score.py --json` over the last week, as a CHILD process.
+
+    A subprocess rather than an import so this file keeps its rule — it opens no
+    database — and the scorer keeps its own: usage.db opened read-only. The
+    bound is local wall clock, like every other bound in this series (#835).
+    A failure is recorded as `{"error": …}`, never as a missing week.
+    """
+    import subprocess
+
+    since = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime(
+        "%Y-%m-%dT%H:%M:%S")
+    script = Path(__file__).resolve().parent / "iv_outcome_score.py"
+    try:
+        done = subprocess.run(
+            [sys.executable, str(script), "--json", "--since", since],
+            capture_output=True, text=True, timeout=300,
+        )
+        rep = json.loads(done.stdout)
+    except Exception as exc:  # noqa: BLE001 — the row still lands
+        return {"since": since, "error": f"{type(exc).__name__}: {exc}"[:300]}
+    return {
+        "since": since,
+        "label": rep.get("label"),
+        "turns_labelled": rep.get("turns_labelled"),
+        "bad_turns": rep.get("bad_turns"),
+        "base_rate": rep.get("base_rate"),
+        "fn_pool": rep.get("fn_pool"),
+        "classes": {k: {f: v.get(f) for f in ("n", "tp", "fp", "precision",
+                                                "recall", "lift")}
+                    for k, v in (rep.get("classes") or {}).items()},
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--hours", type=float, default=None,
@@ -540,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="rows the median is taken over")
     ap.add_argument("--out", default=str(PIPELINE_DIR / "reflection" / "iv-metrics.jsonl"),
                     help="series file to append one row to")
+    ap.add_argument("--no-outcome-score", action="store_true",
+                    help="skip the weekly iv_outcome_score attachment even when due")
     args = ap.parse_args(argv)
 
     raw = sys.stdin.read()
@@ -581,6 +655,8 @@ def main(argv: list[str] | None = None) -> int:
     rates, malformed, was_breaching = _prior_series(out, args.window_rows)
     row = _row(report, window_hours=args.hours, threshold=threshold,
                threshold_source=source, window_rows=args.window_rows)
+    if not args.no_outcome_score and outcome_score_due(out):
+        row["outcome_score"] = weekly_outcome_score()
     # Annotate before the append: `breach` and `malformed_prior_rows` have to be
     # IN the stored row, or reconstructing why a night alerted means re-running
     # the median against a file that has since grown.
@@ -589,6 +665,14 @@ def main(argv: list[str] | None = None) -> int:
         fh.write(json.dumps(row, sort_keys=True) + "\n")
 
     print(verdict)
+    oc = row.get("outcome_score")
+    if oc:
+        if oc.get("error"):
+            print(f"iv-metrics: weekly outcome score failed: {oc['error']}")
+        else:
+            print(f"iv-metrics: weekly outcome score since {oc['since']}: "
+                  f"{oc.get('turns_labelled')} turns labelled, base rate "
+                  f"{oc.get('base_rate')}, classes {sorted(oc.get('classes') or {})}")
     if breach:
         # Returned for anyone running this by hand or in a pipeline that checks it.
         # NOT the alert: the nightly arrives through an agent's Bash tool, so this is

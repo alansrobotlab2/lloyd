@@ -67,6 +67,14 @@ from scripts.iv_grade import (  # noqa: E402
 )
 
 MIN_RATED = 30
+# Test-suite output written into the LIVE event-log directory before conftest
+# isolated it. These six files hold 580 of the 583 `observer_injected` events
+# on disk (counted 2026-09-24), so an all-time run that joined them would be
+# scoring the suite's fixtures. Excluded from every run; `--include-test-sessions`
+# puts them back for anyone auditing that claim.
+TEST_SESSION_IDS = frozenset({
+    "test_sess", "guard_sess", "loop_sess", "v52_sess", "loop_replay", "goal_test_sess",
+})
 GOOD_STOPS = frozenset({"stop", "end_turn"})
 LABELS = ("stop_reason", "tool_error")
 _ERROR_PREFIXES = ("Error", "Traceback")
@@ -204,6 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--db", type=Path, default=USAGE_DB, help="usage.db (opened read-only)")
     ap.add_argument("--event-logs", type=Path, default=EVENT_LOGS_DIR)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--include-test-sessions", action="store_true",
+                    help="keep the six test-suite session ids (see TEST_SESSION_IDS)")
     args = ap.parse_args(argv)
 
     if not args.db.exists():
@@ -222,6 +232,8 @@ def main(argv: list[str] | None = None) -> int:
         rows = _rows(conn, clause, params)
     finally:
         conn.close()
+    if not args.include_test_sessions:
+        rows = [r for r in rows if r["session_id"] not in TEST_SESSION_IDS]
 
     keys = {(r["session_id"], r["turn_id"]) for r in rows}
     report = score(rows, turn_outcomes(args.event_logs, keys), args.label)

@@ -1583,6 +1583,35 @@ running with the flag. See [Prefix-cache reporting](#configuration).
 
 ## Measuring itself
 
+**The measurement loop (IV plan R3, 2026-09-24).** Four pieces, because the
+only numbers this module had were proxies it computed about itself:
+
+- **An on/off A/B on the chat path** (`app/inner_voice/ab.py`,
+  `inner_voice.ab`, ships off). A new chat created inside the window is
+  assigned an arm by a hash of its id and the experiment name, and created
+  with the matching `inner_voice` / `inner_voice_evaluate_user_turns` flags
+  plus `inner_voice_ab: {experiment, arm}` — so every reader of "is IV on
+  here" already honours it. Sessions created with explicit flags (the IV
+  tab, `/goal`) and worker sessions are never enrolled.
+  `scripts/iv_ab_report.py` compares the arms on the event log only — bad
+  stop rate, tool-error rate, the correction proxy (with z against the other
+  arm), median iterations and duration; a session whose flags were changed
+  by hand is `crossed_over` and left out. This is the acceptance test for
+  the concept.
+- **A human label on each intervention**: thumbs on `ObservationBubble` for
+  inject/cancel/ambient/clarify rows, `POST
+  /api/inner_voice/observations/{id}/verdict`, columns `verdict` /
+  `verdict_at`.
+- **A tracked corpus**, `eval/iv/` (`scripts/iv_corpus.py`): `seed` wrote
+  the 270 `[INNER VOICE]` lines recovered after the 09-22 wipe (242
+  repetition, 26 model-written, 2 cancels; 20 of the 26 carry the 09-24 hand
+  reading), `export` appends thumbed rows from usage.db to `labelled.jsonl`.
+- **The outcome score, weekly**: `iv_metrics_record.py` attaches
+  `outcome_score` (a child `iv_outcome_score.py --json` over the last 7
+  days) to the nightly row once a week. The scorer leaves out the six
+  test-suite sessions whose event logs hold 580 of the 583
+  `observer_injected` events on disk (`--include-test-sessions` to audit).
+
 `scripts/iv_grade.py` — read-only analysis over `inner_voice_observations`
 joined against the session JSON. Nothing in the chat path depends on it, and
 that is deliberate: the observer watches the primary, it does not get watched

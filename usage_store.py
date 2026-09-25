@@ -86,7 +86,9 @@ def _init_schema(conn: sqlite3.Connection):
             model TEXT,
             error TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            safeguard TEXT                        -- deterministic rule that decided; NULL = the model (#770)
+            safeguard TEXT,                       -- deterministic rule that decided; NULL = the model (#770)
+            verdict TEXT,                         -- a human's label: 'up' | 'down' | NULL (unlabelled)
+            verdict_at TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_iv_obs_session ON inner_voice_observations(session_id);
         CREATE INDEX IF NOT EXISTS idx_iv_obs_turn    ON inner_voice_observations(turn_id);
@@ -106,6 +108,15 @@ def _init_schema(conn: sqlite3.Connection):
     # back to its prose regex for exactly those. A backfill is a human call.
     if "safeguard" not in existing_cols:
         conn.execute("ALTER TABLE inner_voice_observations ADD COLUMN safeguard TEXT")
+    # A human's thumbs on one intervention (IV plan R3). The proxies iv_grade
+    # reports are the observer's own evidence; this is the one label nobody
+    # else can write. `scripts/iv_label_export.py` copies labelled rows into
+    # the tracked corpus under `eval/iv/`, because this table lives in
+    # gitignored runtime data and the 2026-09-22 wipe took everything before it.
+    if "verdict" not in existing_cols:
+        conn.execute("ALTER TABLE inner_voice_observations ADD COLUMN verdict TEXT")
+    if "verdict_at" not in existing_cols:
+        conn.execute("ALTER TABLE inner_voice_observations ADD COLUMN verdict_at TEXT")
     usage_cols = {row["name"] for row in conn.execute("PRAGMA table_info(usage)").fetchall()}
     for col in ("reprefill_tokens", "prefix_misses"):
         if col not in usage_cols:
@@ -779,12 +790,32 @@ def list_inner_voice_observations(
                    reason, content, related_tool,
                    input_tokens, output_tokens, cache_read, cache_create,
                    latency_ms, model, error,
-                   created_at, safeguard
+                   created_at, safeguard, verdict, verdict_at
             FROM inner_voice_observations{where_sql}
             ORDER BY id DESC LIMIT ?""",
         params + [limit],
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+IV_VERDICTS = ("up", "down")
+
+
+def set_inner_voice_observation_verdict(obs_id: int, verdict: Optional[str]) -> bool:
+    """Label one observation `up`/`down`, or clear it with None.
+
+    Returns False when no row has that id. Anything else is refused by the
+    caller before it gets here; a verdict outside the pair raises.
+    """
+    if verdict is not None and verdict not in IV_VERDICTS:
+        raise ValueError(f"verdict must be one of {IV_VERDICTS} or None")
+    conn = _conn()
+    cur = conn.execute(
+        "UPDATE inner_voice_observations SET verdict = ?, verdict_at = ? WHERE id = ?",
+        (verdict, datetime.now().isoformat() if verdict else None, int(obs_id)),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 def count_inner_voice_observations_by_action(

@@ -1167,6 +1167,16 @@ async def _save_session_meta(session_id: str, model: str, preview: str = "",
                 # sessions where this is True. Stage 0 always False.
                 "inner_voice": False,
             }
+            # The IV on/off A/B (IV plan R3): a new chat inside the window
+            # gets its arm here, as the same flags every reader already
+            # consults. A worker session and a session created with explicit
+            # flags (it has a file by now) are never assigned.
+            if data["platform"] == "mission-control":
+                try:
+                    from app.inner_voice.ab import assignment as _iv_ab
+                    data.update(_iv_ab(session_id) or {})
+                except Exception:  # noqa: BLE001 — an experiment never blocks a chat
+                    pass
         # This is the writer that mints a transcript, and it can be the first one
         # in a process: `app.paths` no longer creates `SESSIONS_DIR` at import
         # (#712), so cover it here the way `create_session` already does rather

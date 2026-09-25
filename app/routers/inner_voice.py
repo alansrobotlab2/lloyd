@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Body, HTTPException, Query
 
 import usage_store
 from app import event_log
@@ -95,6 +95,25 @@ async def list_observations(
         return {"observations": [], "count": 0, "error": str(e)}
 
 
+@router.post("/observations/{obs_id}/verdict")
+async def set_observation_verdict(
+    obs_id: int, payload: dict[str, Any] = Body(...),
+) -> dict[str, Any]:
+    """A human's thumbs on one observation: `{"verdict": "up"|"down"|null}`.
+
+    The only label in the IV series that the observer did not write about
+    itself (IV plan R3). `null` clears it. Labelled rows are exported to the
+    tracked corpus by `scripts/iv_label_export.py`.
+    """
+    verdict = payload.get("verdict")
+    if verdict not in (*usage_store.IV_VERDICTS, None):
+        raise HTTPException(status_code=400,
+                            detail="verdict must be 'up', 'down' or null")
+    if not usage_store.set_inner_voice_observation_verdict(obs_id, verdict):
+        raise HTTPException(status_code=404, detail="no such observation")
+    return {"id": obs_id, "verdict": verdict}
+
+
 # ---------------------------------------------------------------------------
 # State — current observer status for one session
 # ---------------------------------------------------------------------------
@@ -113,6 +132,7 @@ async def get_state(
     """
     inner_voice_enabled = False
     evaluate_user_turns = False
+    ab_arm: dict[str, Any] | None = None
     if session_id:
         meta_path = SESSIONS_DIR / f"{session_id}.json"
         if meta_path.exists():
@@ -122,6 +142,7 @@ async def get_state(
                 evaluate_user_turns = bool(
                     data.get("inner_voice_evaluate_user_turns", False)
                 )
+                ab_arm = data.get("inner_voice_ab") or None
             except Exception:
                 pass
 
@@ -178,6 +199,8 @@ async def get_state(
         "session_id": session_id,
         "inner_voice_enabled": inner_voice_enabled,
         "evaluate_user_turns": evaluate_user_turns,
+        # The IV on/off A/B arm this chat was assigned, if any (IV plan R3).
+        "ab_arm": ab_arm,
         "observations_count_by_action": counts,
         "last_observation_at": last_at,
         "latest_goal_card": latest_goal_card,

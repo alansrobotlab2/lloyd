@@ -1,4 +1,6 @@
 import { useState } from 'react'
+import { ThumbsDown, ThumbsUp } from 'lucide-react'
+import { api } from '../api'
 import type { InnerVoiceObservation, InnerVoiceObservationTrigger } from '../api'
 import { actionStyle, ACTION_STYLES, TRIGGER_LABEL, parseObservationTime } from './innerVoiceStyles'
 import { cn } from '@/lib/utils'
@@ -17,6 +19,48 @@ function effectiveStyle(obs: InnerVoiceObservation) {
     return { ...ACTION_STYLES.acknowledge_complete, label: 'approve: turn complete' }
   }
   return actionStyle(obs.action)
+}
+
+/** Rows a human label means something on: the levers that changed the turn.
+ * A noop is the observer staying quiet, and a thumbs on thousands of those
+ * would bury the few that matter. */
+export function isLabelable(action: string): boolean {
+  return action === 'inject' || action === 'cancel' || action === 'ambient' || action === 'clarify'
+}
+
+/** Clicking the thumb that is already set clears it. */
+export function nextVerdict(
+  current: 'up' | 'down' | null | undefined,
+  clicked: 'up' | 'down',
+): 'up' | 'down' | null {
+  return current === clicked ? null : clicked
+}
+
+function VerdictThumbs({ obs }: { obs: InnerVoiceObservation }) {
+  const [verdict, setVerdict] = useState<'up' | 'down' | null>(obs.verdict ?? null)
+  const [busy, setBusy] = useState(false)
+  const click = (v: 'up' | 'down') => {
+    if (busy) return
+    const next = nextVerdict(verdict, v)
+    const prev = verdict
+    setVerdict(next)
+    setBusy(true)
+    api.innerVoiceSetVerdict(obs.id, next)
+      .catch(() => setVerdict(prev))
+      .finally(() => setBusy(false))
+  }
+  return (
+    <span className="inline-flex items-center gap-1" title="Did this intervention help?">
+      <button type="button" aria-label="helped" onClick={() => click('up')}
+        className={cn('p-0.5 rounded hover:bg-muted', verdict === 'up' ? 'text-emerald-600' : 'text-muted-foreground/60')}>
+        <ThumbsUp className="w-3 h-3" />
+      </button>
+      <button type="button" aria-label="did not help" onClick={() => click('down')}
+        className={cn('p-0.5 rounded hover:bg-muted', verdict === 'down' ? 'text-destructive' : 'text-muted-foreground/60')}>
+        <ThumbsDown className="w-3 h-3" />
+      </button>
+    </span>
+  )
 }
 
 export default function ObservationBubble({ obs }: { obs: InnerVoiceObservation }) {
@@ -82,6 +126,10 @@ export default function ObservationBubble({ obs }: { obs: InnerVoiceObservation 
           <span>time: {(obs.latency_ms / 1000).toFixed(1)}s</span>
         )}
         <span className="text-muted-foreground/60">#{obs.sequence_in_turn}</span>
+        {obs.safeguard && obs.safeguard !== 'fast_path' && (
+          <span className="text-muted-foreground/60">guard: {obs.safeguard}</span>
+        )}
+        {isLabelable(obs.action) && <VerdictThumbs obs={obs} />}
       </div>
     </div>
   )

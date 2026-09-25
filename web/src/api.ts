@@ -211,6 +211,11 @@ export interface InnerVoiceObservation {
   model: string | null
   error: string | null
   created_at: string
+  /** The deterministic rule that decided; null = the model (#770). */
+  safeguard?: string | null
+  /** A human's thumbs on this row (IV plan R3); null = unlabelled. */
+  verdict?: 'up' | 'down' | null
+  verdict_at?: string | null
 }
 
 export interface InnerVoiceGoalCard {
@@ -1620,6 +1625,19 @@ export const api = {
     p.set('limit', String(limit))
     return fetch(`${API_BASE}/inner_voice/observations?${p}`).then(r => r.json())
   },
+
+  innerVoiceSetVerdict: (
+    obsId: number,
+    verdict: 'up' | 'down' | null,
+  ): Promise<{ id: number; verdict: 'up' | 'down' | null }> =>
+    fetch(`${API_BASE}/inner_voice/observations/${obsId}/verdict`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verdict }),
+    }).then(r => {
+      if (!r.ok) throw new Error(`verdict failed: ${r.status}`)
+      return r.json()
+    }),
 
   innerVoiceEventLog: (
     sessionId: string,
