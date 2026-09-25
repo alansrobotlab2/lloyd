@@ -420,6 +420,37 @@ def _entry_body(item: ScoredItem) -> str:
     return "(No description)"
 
 
+# ── a body that is nothing but trailers (backlog #1509) ──────────────────────
+#
+# `clean_body` keeps what a commit message says beyond its subject line, and a
+# message whose only other line is `Co-authored-by: Name <mail>` clears the
+# 40-character floor on the trailer alone. On 2026-09-25 that published
+# `knowledge/tools/openclaw/updates.md` → `### refactor(llm-core): …` whose whole
+# body was one `Co-authored-by:` line — noise a reader cannot tell from a note.
+# Such an item is not written at all, and the run summary counts it.
+_TRAILER_LINE_RE = re.compile(
+    r"^\s*(?:co-authored-by|signed-off-by|reviewed-by|acked-by|tested-by|"
+    r"reported-by|suggested-by|helped-by|cc|change-id)\s*:.*$",
+    re.IGNORECASE)
+
+
+def is_trailer_only(body: str) -> bool:
+    """True when every non-blank line of `body` is a git trailer, and there is one."""
+    lines = [line for line in (body or "").splitlines() if line.strip()]
+    return bool(lines) and all(_TRAILER_LINE_RE.match(line) for line in lines)
+
+
+def lacks_body(item: ScoredItem) -> bool:
+    """True when the entry this item would render carries no prose at all.
+
+    A video that already has a note renders a pointer, which is a body; every
+    other item is judged on what `_entry_body` would write.
+    """
+    if resolve_video_note(item) is not None:
+        return False
+    return is_trailer_only(_entry_body(item))
+
+
 def _note_pointer(item: ScoredItem, note: Path, digest_path: Path) -> str:
     """The body for a video that already has a note: a pointer, never a stub.
 
@@ -521,6 +552,10 @@ def write_item_to_vault(item: ScoredItem, profile: dict) -> bool:
     
     # Format content - just the entry, not the full file
     body = _note_pointer(item, note, vault_path) if note else _entry_body(item)
+    # The batch filter counts these; this is the other public route in (#1509).
+    if not note and is_trailer_only(body):
+        print(f"  Skipping (no body — trailer only): {item.url}")
+        return False
     body_block = f"{body}\n\n" if body else ""
 
     content = f"""## {today}
@@ -623,6 +658,14 @@ def write_all_to_vault(date_str: Optional[str] = None) -> int:
               f"(vault_writer.MAX_ITEM_AGE_DAYS): oldest {oldest} d — the item's own "
               f"publish date, not the day the scanner found it")
 
+    # A body that is only a `Co-authored-by:`-style trailer says nothing (#1509):
+    # refuse it here, where the drop is counted, rather than let it land silently.
+    bodied = [item for item in fresh if not lacks_body(item)]
+    no_body = len(fresh) - len(bodied)
+    if no_body:
+        print(f"Held {no_body} item(s) whose body is only git trailers "
+              f"(vault_writer.is_trailer_only)")
+
     # Load written state
     written_state = load_written_state()
     
@@ -631,7 +674,7 @@ def write_all_to_vault(date_str: Optional[str] = None) -> int:
     
     # Write items
     written_count = 0
-    for item in fresh:
+    for item in bodied:
         if is_written(item.id, written_state):
             print(f"  Skipping (already written): {item.id}")
             continue
@@ -648,7 +691,8 @@ def write_all_to_vault(date_str: Optional[str] = None) -> int:
     
     print(f"\n=== Vault Write Complete ===")
     print(f"Wrote {written_count} items to vault")
-    
+    print(f"skipped (no body): {no_body}")
+
     return written_count
 
 

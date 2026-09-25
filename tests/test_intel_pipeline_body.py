@@ -227,3 +227,69 @@ def test_writing_template_bodied_items_to_a_redirected_vault_adds_no_template_ph
         assert f"vllm scheduler change {n}" in text, proc.stdout[-2000:]
     assert text.count(PHRASE) == 0
     assert text.count("None — the upstream body is an unfilled PR template") == 3
+
+
+# ── #1509 — a body that is only a git trailer is not written ─────────────────
+
+TRAILER_TITLE = "refactor(llm-core): consolidate tool argument validation tests (#158254)"
+TRAILER_BODY = TRAILER_TITLE + "\n\nCo-authored-by: Vincent Koc <vincentkoc@ieee.org>"
+
+
+def test_the_incident_body_renders_as_a_trailer_only():
+    """The 2026-09-25 openclaw entry: the trailer alone clears clean_body's floor."""
+    rendered = vw_mod._entry_body(_item(TRAILER_TITLE, TRAILER_BODY))
+    assert rendered == "Co-authored-by: Vincent Koc <vincentkoc@ieee.org>"
+    assert vw_mod.is_trailer_only(rendered)
+    assert vw_mod.lacks_body(_item(TRAILER_TITLE, TRAILER_BODY))
+
+
+def test_prose_with_a_trailer_is_a_body():
+    assert vw_mod.is_trailer_only("Co-Authored-By: A <a@x>\nSigned-off-by: B <b@x>")
+    assert not vw_mod.is_trailer_only(
+        "Moves the validation tests under llm-core.\n\nCo-authored-by: A <a@x>")
+    assert not vw_mod.is_trailer_only("")
+    rest = "The connector held a block reference after the request was aborted."
+    assert not vw_mod.lacks_body(
+        _item(TRAILER_TITLE, f"{TRAILER_TITLE}\n\n{rest}\n\nCo-authored-by: A <a@x>"))
+
+
+def _redirect_vault(tmp_path, monkeypatch):
+    vault = tmp_path / "obsidian"
+    (vault / "knowledge").mkdir(parents=True)
+    feeds = tmp_path / "feeds"
+    feeds.mkdir()
+    monkeypatch.setattr(vw_mod, "KNOWLEDGE_DIR", vault / "knowledge")
+    monkeypatch.setattr(vw_mod, "VAULT_ROOT", vault)
+    monkeypatch.setattr(vw_mod, "SCORED_FEEDS_DIR", feeds)
+    monkeypatch.setattr(vw_mod, "VAULT_WRITTEN_STATE", tmp_path / "written.json")
+    monkeypatch.setattr(vw_mod, "load_profile", lambda: {})
+    monkeypatch.setattr(vw_mod, "state_loss_detected", lambda *a, **k: False)
+    target = vault / "knowledge" / "tools" / "openclaw" / "updates.md"
+    monkeypatch.setattr(vw_mod, "determine_vault_path", lambda i, p: target)
+    return feeds, target
+
+
+def test_the_direct_route_refuses_a_trailer_only_body(tmp_path, monkeypatch):
+    _feeds, target = _redirect_vault(tmp_path, monkeypatch)
+    assert vw_mod.write_item_to_vault(_item(TRAILER_TITLE, TRAILER_BODY), {}) is False
+    assert not target.exists()
+
+
+def test_the_batch_counts_skipped_no_body(tmp_path, monkeypatch, capsys):
+    feeds, target = _redirect_vault(tmp_path, monkeypatch)
+    day = "2026-09-25"
+    good = _item("Add a scheduler knob",
+                 "Adds a knob that bounds how many requests the scheduler admits "
+                 "per step.", item_id="2")
+    rows = [_item(TRAILER_TITLE, TRAILER_BODY, item_id="1").to_dict(), good.to_dict()]
+    (feeds / f"intel-{day}.jsonl").write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    assert vw_mod.write_all_to_vault(day) == 1
+    out = capsys.readouterr().out
+    assert "skipped (no body): 1" in out
+    text = target.read_text(encoding="utf-8")
+    assert "Add a scheduler knob" in text
+    assert TRAILER_TITLE not in text and "Co-authored-by" not in text
+    # Not marked written: the drop is a refusal, not a publication.
+    assert json.loads((tmp_path / "written.json").read_text())["written"] == [good.id]
