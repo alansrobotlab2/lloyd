@@ -57,7 +57,7 @@ from app.harness.tool_schema import (
     build_tool_list,
     pop_summary,
 )
-from app.harness import tool_search_cache
+from app.harness import rpc_policy, tool_search_cache
 from app.harness.tool_search import (
     LoadedToolSet,
     TOOLSEARCH_TOOL_NAME,
@@ -2987,6 +2987,14 @@ async def _execute_tool_call(
                        else (options.disallowed_tools or []))
                 if hook_name == "Task" else ()),
         }
+        # P9: what a `lloyd_rpc` call from inside THIS shell may not use —
+        # this iteration's set plus the fixed deny list. Bash calls only, and
+        # only while the feature is on, so every other call's `_meta` is
+        # byte-for-byte what it was.
+        if hook_name == "Bash" and rpc_policy.enabled():
+            call_kw["rpc_deny"] = rpc_policy.bash_deny(
+                runtime_disallowed if runtime_disallowed is not None
+                else (options.disallowed_tools or []))
         if cancel_event is None:
             result = await pool.call_tool(name, dispatch_args, **call_kw)
         else:

@@ -1,0 +1,50 @@
+# P9 (lloyd_rpc) measurement tasks, run by eval/run_rpc_eval.py.
+#
+# Three read-only jobs of the shape rpc exists for: many similar reads whose
+# results the model would otherwise page through one tool call at a time. Each
+# carries an objective check the runner scores from disk, never from a model
+# grader: `ground_truth` names a function in the runner that computes the
+# expected set when the trial starts (the board and the vault move), and
+# `min_recall` is the share of it the final answer must name.
+#
+# Decision (plan section 3.5, P9): promote if prompt_tokens_sum drops >= 30% on
+# >= 2 of 3 tasks, with the on arm's pass rate not below off - A/A variance and
+# zero Bash timeouts on the on arm.
+tasks:
+  - id: rpc_backlog_board_pass
+    category: board-pass
+    prompt: |
+      Take the 20 most recently created OPEN backlog items on the lloyd board
+      (status draft, up_next or in_progress). For each one report, in a
+      markdown table: its id as #N, its status, its priority, and whether its
+      front matter carries acceptance_clauses (yes/no). Read only; change
+      nothing. End with the table and one line saying how many have clauses.
+    objective_checks:
+      ground_truth: newest_open_backlog_ids
+      count: 20
+      min_recall: 0.9
+
+  - id: rpc_grep_read_synthesis
+    category: code-synthesis
+    prompt: |
+      In the Lloyd code tree (the Home named in your platform notes), find every
+      module directly under agent_mcp/ that defines `async def call_tool`. Read
+      each one and report, per module path, the tool names its call_tool
+      dispatches on and whether it returns a CallToolResult or a bare content
+      list. Read only; change nothing. Name every module by its path
+      (agent_mcp/<name>.py).
+    objective_checks:
+      ground_truth: agent_mcp_call_tool_modules
+      min_recall: 0.9
+
+  - id: rpc_vault_frontmatter_reconcile
+    category: vault-reconcile
+    prompt: |
+      Check the scheduled tasks under ~/obsidian/autonomy/: for every task file
+      whose front matter status is up_next, confirm its `skill:` names a
+      directory that exists under ~/obsidian/skills/. Report every up_next task
+      whose skill is missing or does not resolve, by file name, and say how
+      many up_next tasks you checked. Read only; change nothing.
+    objective_checks:
+      ground_truth: unresolved_autonomy_skills
+      min_recall: 1.0

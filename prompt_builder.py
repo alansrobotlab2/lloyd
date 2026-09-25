@@ -516,6 +516,12 @@ def build_system_prompt(
     )
     parts.append(code_graph)
 
+    # P9: only while `harness.rpc.enabled` — off, the prompt is byte for byte
+    # what it was. A constant paragraph (the path is LLOYD_HOME's), so turning
+    # it on costs one re-prefill, not one per turn.
+    if rpc_hint_enabled():
+        parts.append(_rpc_hint())
+
     turn_discipline = (
         "Turn discipline: never end a turn on an unfulfilled announcement. If you "
         "say \"Let me …\", \"I'll …\", \"Now I'll …\", or end a sentence on a colon "
@@ -900,6 +906,35 @@ def _skills_index_settings() -> dict:
         if isinstance(val, int) and not isinstance(val, bool) and val > 0:
             out[key] = val
     return out
+
+
+def rpc_hint_enabled() -> bool:
+    """`harness.rpc.enabled` (P9); False on any failure, today's prompt."""
+    try:
+        from app.harness.rpc_policy import enabled
+    except Exception:  # noqa: BLE001
+        return False
+    return enabled()
+
+
+def _rpc_hint() -> str:
+    client = f"{LLOYD_HOME}/agent-services/bin/lloyd_rpc"
+    lib = f"{LLOYD_HOME}/agent-services/rpc"
+    return (
+        "Programmatic tool calls: inside a Bash command you can call Lloyd's "
+        "read-only tools from code and print only what you need, instead of one "
+        "tool call per item. Command line: "
+        f"`{client} call Read '{{\"file_path\": \"/abs/path\"}}'` prints the "
+        f"result (exit 1 on a tool error). Python: `sys.path.insert(0, \"{lib}\"); "
+        "import lloyd_rpc`, then `lloyd_rpc.call(\"Grep\", pattern=..., path=...)` "
+        "returns the text and `lloyd_rpc.map(\"Read\", [{...}, ...], concurrency=4)` "
+        "returns a list in order, an exception in place of each failure. Only "
+        "read-only tools are available (Bash, Task, writes and anything this turn "
+        "may not call are refused), every call must finish inside the Bash call's "
+        "own timeout, and the Bash result ends with a one-line count of the calls "
+        "made. Reach for it for many similar reads — twenty backlog items, ten "
+        "files, a vault-wide frontmatter check — not for one or two."
+    )
 
 
 def skills_push_enabled() -> bool:

@@ -1114,3 +1114,64 @@ Pin: `tests/test_workers_router.py::test_the_sync_message_route_is_gone`.
   `test_the_old_per_call_dispatcher_is_gone`), the P13.0 replay tests, and
   `tests/test_tool_choice_eval_cost.py` (the yield-before-dispatch citation now
   names `_dispatch_batch`).
+
+### P9 — programmatic tool calling, `lloyd_rpc` (v1 read-only; build half, ships off)
+
+- **What.** A `Bash` command may call Lloyd's read-only tools itself and print
+  only what it needs, so twenty backlog reads cost one engine round trip, not
+  twenty. Client: `agent-services/rpc/lloyd_rpc.py` (stdlib; `call`, `map`
+  with `concurrency`), `agent-services/bin/lloyd_rpc` on the command line.
+  Policy: `app/harness/rpc_policy.py`. Server state: `agent_mcp/_rpc.py`.
+- **The turn decides.** `harness.rpc.enabled` (false) is read where the turn
+  runs: the loop stamps `lloyd/rpc_deny` on **Bash calls only** (this
+  iteration's disallowed set + `FIXED_DENY`: `Bash`, `Task`, `ToolSearch`,
+  `automod_*`, `desktop_*`, `_*`), and `prompt_builder` adds one
+  `harness_hints` paragraph. Off, the prompt and every call's `_meta` are byte
+  for byte what they were. The aggregator serves exactly the Bash calls that
+  carry the stamp (`rpc_policy.override` lets an eval arm switch it per
+  context with no restart).
+- **The env** (`builtin_bash._bash`, both spawn branches): `LLOYD_SESSION_ID`,
+  `LLOYD_TURN_ID`, `LLOYD_PARENT_CALL_ID`, `LLOYD_EFFECT_SCOPE`,
+  `LLOYD_SURFACE`, `LLOYD_RPC_DENY`, `LLOYD_RPC_DEADLINE` (now + timeout − 5 s;
+  a background child gets the 600 s foreground ceiling), `LLOYD_RPC_DEPTH=1`,
+  `LLOYD_RPC_URL`, `LLOYD_RPC_TOKEN_FILE` = the aggregator's own credential
+  file, only when it is a 0600 regular file of this uid. **A sandboxed
+  (bench/eval) session gets none of it**, and bwrap now unsets
+  `LLOYD_MCP_TOKEN*` and every `LLOYD_RPC_*` and binds `/dev/null` over the
+  token file, so a trial cannot read the secret at all.
+- **Server-authoritative.** Spawning a stamped Bash registers a *parent* (id,
+  session, turn, scope, surface, deny list, deadline). `main.call_tool` sends
+  any request carrying `lloyd/rpc_parent_call_id` through `_rpc_call`: refused
+  — above the effect-ledger claim — for an unknown/finished/expired parent,
+  depth ≠ 1, a name on the PARENT's recorded deny list (never the script's
+  copy), or a tool outside `READ_ONLY`; otherwise re-entered as an ordinary
+  call with the parent's `_meta`, so the sandbox, desktop, sessionless-write
+  and effect-ledger gates see the parent's session, and a nested `Read`
+  satisfies the read-before-edit gate for that session.
+  `harness.rpc.allow_mutating` is read and ignored (logged) in v1: a nested
+  call skips every harness PreToolUse hook — grant gate, Inner Voice, the
+  repetition guard — and read-only tools are the class none of them decides.
+  Egress still goes through `egress.guard` inside the tool, under the parent's
+  scope. Not containment against code already running as this uid (the
+  `aggregator_auth` limit, unchanged): the property is that the honest path
+  opens no way around a gate.
+- **Record.** Each nested call → `harness.rpc_call {parent_call_id, tool,
+  args_digest, ms, is_error[, refused]}` in the parent session's event log;
+  the Bash result ends with `[lloyd_rpc: 12 calls — Read×10 Grep×2, 0 errors,
+  3.1 s]`. Nothing enters `chat_messages`; nested rows in the chat timeline
+  keyed on `parent_call_id` are a UI follow-on.
+- **Measure** (`eval/run_rpc_eval.py`, `eval/rpc_tasks.yaml`: board pass over
+  20 items, grep+read over the `agent_mcp/` modules, autonomy frontmatter
+  reconciliation; arms `off`/`off_rep`/`on`, 5 reps, objective checks from
+  disk). Promote if `prompt_tokens_sum` drops ≥ 30% on ≥ 2 of 3 tasks, the on
+  pass rate is not below off − A/A, and the on arm has zero Bash timeouts.
+  **It runs live, unsandboxed Bash** — a sandboxed session cannot have rpc by
+  construction — so it refuses without `--live-bash`; bounded by fixed
+  read-only prompts, a read-only-plus-Bash hook, the safety hook and
+  background-id dispatch guards. Not run yet; that exception is Alan's call.
+- Pins: `tests/test_lloyd_rpc.py` (env from bound meta; unstamped gets none;
+  sandboxed gets none and bwrap hides the credential; parent-denied, mutating,
+  recursion, expired refused above the ledger; a script cannot shorten the
+  deny list; calls logged with the parent id; trailer; rpc Read then Edit
+  passes the gate; client deadline refusal; loop stamps Bash only; prompt
+  bytewise off; a real shell through the real client and aggregator app).

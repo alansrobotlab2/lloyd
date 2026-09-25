@@ -1837,6 +1837,8 @@ Ships **off**. Soak checklist before flipping it: `mcp_pool:` warnings,
 `[iv.observer] inject` placement in transcripts, and
 `harness.empty_terminal_iteration` counts.
 
+**`lloyd_rpc` (P9, ships off, `harness.rpc.enabled`)** lets a stamped Bash call make read-only tool calls from its shell; the aggregator admits them against the parent Bash call it recorded (never the script's env), above the effect ledger, and a sandboxed session gets no env and cannot read the credential. `architecture/harness.md` §P9.
+
 ## Tools
 
 Every tool lives inside an MCP server — built-ins (Bash/Read/Write/Edit/Grep/Glob/Task) live inside the lloyd-mcp aggregator. Tool enable/disable state:

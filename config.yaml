@@ -736,6 +736,15 @@ harness:
     mode: shadow
   injection_probe:
     mode: shadow
+  # P9, programmatic tool calling (app/harness/rpc_policy.py). enabled: a Bash
+  # child gets LLOYD_RPC_* env and may call read-only tools through
+  # agent-services/bin/lloyd_rpc; the harness_hints paragraph appears only
+  # while on (off = today's prompt, byte for byte). Never for bench/eval
+  # sessions. allow_mutating stays false: v1 ignores true (nested calls skip
+  # the grant gate). Off until eval/run_rpc_eval.py measures it.
+  rpc:
+    enabled: false
+    allow_mutating: false
   tool_search:
     enabled: false
     threshold_tools: 30

@@ -37,7 +37,7 @@ from typing import Any
 
 from mcp.types import Tool
 
-from agent_mcp import _bash_edit_diagnostics, _task_registry, _tool_sandbox
+from agent_mcp import _bash_edit_diagnostics, _rpc, _task_registry, _tool_sandbox
 from agent_mcp._shared import get_bound_session, text_result
 
 logger = logging.getLogger("lloyd-builtin-bash")
@@ -153,7 +153,19 @@ async def _bash(args: dict[str, Any]) -> str:
         if sandboxed:  # `main.call_tool` refuses this first; never rely on it
             _bash_failed.set(True)
             return json.dumps({"error": "background Bash is not available in a read-only session"})
-        return await _spawn_background(command, _background_label(args), cwd)
+        # P9: a background child may use lloyd_rpc too, bounded by the
+        # foreground ceiling; its parent is retired by its deadline, and it
+        # gets no trailer — its result is returned before it has run.
+        env, _parent = _rpc.bash_env(sandboxed=False, timeout_s=0.0, background=True)
+        return await _spawn_background(command, _background_label(args), cwd, env=env)
+
+    # P9: `lloyd_rpc` env for the shell, only when the loop stamped this call
+    # (`harness.rpc.enabled` for the turn) and never for a sandboxed session (which inherits the environment exactly as
+    # before and has the credential unset inside bwrap besides). The parent is
+    # handed to `call_tool` for the trailer and retired there.
+    rpc_env, rpc_parent = _rpc.bash_env(sandboxed=sandboxed, timeout_s=timeout_s,
+                                        background=False)
+    _rpc.current_parent.set(rpc_parent)
 
     try:
         # start_new_session=True puts the shell (and everything it
@@ -191,6 +203,7 @@ async def _bash(args: dict[str, Any]) -> str:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                env=rpc_env,
                 start_new_session=True,
             )
     except Exception as exc:
@@ -278,7 +291,8 @@ def _background_label(args: dict) -> str:
     return (_task_registry.current_call_summary.get() or "").strip()
 
 
-async def _spawn_background(command: str, description: str, cwd: str | None = None) -> str:
+async def _spawn_background(command: str, description: str, cwd: str | None = None,
+                            env: dict[str, str] | None = None) -> str:
     """Spawn the command detached, log to disk, return task descriptor.
 
     The subprocess inherits its own stdout/stderr (the open file fd we
@@ -297,6 +311,7 @@ async def _spawn_background(command: str, description: str, cwd: str | None = No
             stdout=log_fd,
             stderr=asyncio.subprocess.STDOUT,
             cwd=cwd or os.getcwd(),
+            env=env,
             close_fds=True,
         )
     except Exception as exc:
@@ -418,14 +433,26 @@ async def list_tools():
 async def call_tool(name: str, arguments: dict):
     if name == "Bash":
         token = _bash_failed.set(False)
+        ptok = _rpc.current_parent.set(None)
         try:
             text = await _bash(arguments)
+            # P9: one line saying how many tool calls this shell made through
+            # lloyd_rpc, after the output (so a JSON error payload is sniffed
+            # before it, below, via the explicit flag). Nothing when none.
+            trailer = _rpc.finish(_rpc.current_parent.get())
+            _rpc.current_parent.set(None)
+            if trailer:
+                text = f"{text}\n{trailer}"
             # `None` lets text_result sniff the payload — that catches the
             # early-return JSON errors (bad cwd, missing command, spawn
             # failure). The flag only has to cover what sniffing can't see:
             # a non-zero exit, whose payload is raw command output.
             return text_result(text, is_error=True if _bash_failed.get() else None)
         finally:
+            # A cancelled Bash still retires its parent, so a script the
+            # process-group kill missed cannot keep calling in.
+            _rpc.finish(_rpc.current_parent.get())
+            _rpc.current_parent.reset(ptok)
             _bash_failed.reset(token)
     elif name == "_BackgroundTaskDrain":
         text = await _bg_task_drain(arguments)

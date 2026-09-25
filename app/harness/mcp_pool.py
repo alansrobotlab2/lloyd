@@ -131,6 +131,9 @@ META_SURFACE = "lloyd/surface"
 # / META_DISALLOWED.
 META_GRANT_SCOPE = "lloyd/grant_scope"
 META_DISALLOWED = "lloyd/disallowed_tools"
+# P9: on a Bash call only, what a `lloyd_rpc` call from inside that shell may
+# not use (app/harness/rpc_policy.py). Must match rpc_policy.META_RPC_DENY.
+META_RPC_DENY = "lloyd/rpc_deny"
 
 # Ceiling on a single tools/call round trip. Sits above the Bash tool's own
 # 600s hard cap so a legitimately long command finishes on its own terms and
@@ -770,6 +773,7 @@ class MCPPool:
         grant_scope: str = "",
         disallowed_tools: Sequence[str] = (),
         timeout_seconds: float | None = None,
+        rpc_deny: Sequence[str] = (),
     ) -> dict[str, Any]:
         """Dispatch a tool call to the right server.
 
@@ -797,6 +801,10 @@ class MCPPool:
         `grant_scope` and `disallowed_tools` are what a `Task` child inherits:
         the authority scope the calling turn's grant gate checks, and the deny
         list in force for this iteration. Both are omitted when empty.
+
+        `rpc_deny` (P9) rides on a Bash call only, and only while
+        `harness.rpc.enabled`: what a `lloyd_rpc` call from inside that shell
+        may not use.
         """
         if not self._opened:
             await self.open()
@@ -845,6 +853,8 @@ class MCPPool:
             meta[META_GRANT_SCOPE] = grant_scope
         if disallowed_tools:
             meta[META_DISALLOWED] = list(disallowed_tools)
+        if rpc_deny:
+            meta[META_RPC_DENY] = list(rpc_deny)
         # A caller's explicit budget wins; otherwise the tool's own declared
         # one (P12), which is never above the ceiling.
         budget = timeout_seconds if timeout_seconds is not None else self.timeout_for(bare)

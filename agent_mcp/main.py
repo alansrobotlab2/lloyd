@@ -52,6 +52,7 @@ from starlette.routing import Route
 from agent_mcp import (
     _change_ledger,
     _injection_probe,
+    _rpc,
     _subagent_registry,
     aggregator_auth,
     _task_registry,
@@ -94,6 +95,7 @@ from agent_mcp import (
 # shadowed in the same file is a name a later reader gets wrong.
 from app import paths as app_paths
 from app.harness import policy as harness_policy
+from app.harness import rpc_policy
 from app.harness.safety import check_bash_command, desktop_refusal
 
 logger = logging.getLogger("lloyd-mcp")
@@ -121,6 +123,8 @@ def _resolve_port() -> int:
 
 
 PORT = _resolve_port()
+# P9: a Bash child's `LLOYD_RPC_URL` names the port this process listens on.
+_rpc.set_server_port(PORT)
 
 # memory.py was split into facts/vault/session in #340 PR 5. The legacy
 # memory module remains as a backward-compat re-export shim for callers
@@ -476,6 +480,14 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
             isError=True,
         )
 
+    # P9: a nested call from `lloyd_rpc` inside a Bash call. Admitted (or
+    # refused) against the parent Bash call the server recorded, then re-entered
+    # as an ordinary call under the parent's session — so it passes every gate
+    # below, and the refusal sits above the effect ledger's claim like the
+    # others: a call never allowed to run is never ledgered `unknown`.
+    if isinstance(meta, dict) and rpc_policy.META_RPC_PARENT_CALL_ID in meta:
+        return await _rpc_call(name, arguments, meta)
+
     sid = _bound_session_id(arguments, meta)
     # Strip the legacy argument form before the per-tool handler validates,
     # so module schemas never have to advertise an internal field.
@@ -625,6 +637,12 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
     pstok = (harness_policy.current_scope.set(parent_grant_scope)
              if parent_grant_scope else None)
     sbtok = _tool_sandbox.current_sandboxed.set(sandboxed)
+    # P9: the deny list the loop stamped on a Bash call, recorded on the rpc
+    # parent `builtin_bash` registers. Only Bash reads it.
+    rpc_deny = meta.get(rpc_policy.META_RPC_DENY) if isinstance(meta, dict) else None
+    rdtok = _rpc.current_rpc_deny.set(
+        tuple(str(n) for n in rpc_deny if isinstance(n, str) and n)
+        if isinstance(rpc_deny, (list, tuple)) else None)
     try:
         # #544 — exactly-once EFFECT, not exactly-once scheduling. The retry
         # that makes this necessary is the pool's: a job cancelled at
@@ -694,6 +712,37 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
         if pstok is not None:
             harness_policy.current_scope.reset(pstok)
         _tool_sandbox.current_sandboxed.reset(sbtok)
+        _rpc.current_rpc_deny.reset(rdtok)
+
+
+async def _rpc_call(name: str, arguments: dict, meta: dict):
+    """One `lloyd_rpc` call: admit it, dispatch it as the parent, record it.
+
+    The script's own `_meta` is used only to find the parent. Everything the
+    call is dispatched with — session, turn, effect scope, surface — comes from
+    the parent the server recorded when the Bash call spawned
+    (`_rpc.Parent.child_meta`), so a script cannot claim another session or a
+    shorter deny list by rewriting its environment.
+    """
+    parent, why = _rpc.admit(name, meta)
+    if why:
+        logger.warning("lloyd_rpc: refused %s (parent %r): %s", name,
+                       meta.get(rpc_policy.META_RPC_PARENT_CALL_ID), why)
+        _rpc.record(parent, name=name, arguments=arguments, ms=0.0,
+                    is_error=True, refused=why)
+        return _refused_call(name, f"lloyd_rpc: {why}")
+    started = _time.perf_counter()
+    is_error = True
+    try:
+        result = await call_tool(name, arguments,
+                                 parent.child_meta(_rpc.next_call_id(parent)))
+        is_error = (_result_is_error(result) if isinstance(result, CallToolResult)
+                    else False)
+        return result
+    finally:
+        _rpc.record(parent, name=name, arguments=arguments,
+                    ms=(_time.perf_counter() - started) * 1000.0,
+                    is_error=is_error)
 
 
 def _refused_call(name: str, reason: str) -> CallToolResult:

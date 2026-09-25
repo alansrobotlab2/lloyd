@@ -128,6 +128,26 @@ def _host_socket_paths(source: str = "/proc/net/unix") -> list[str]:
     return out
 
 
+def _credential_env() -> tuple[str, ...]:
+    from agent_mcp import aggregator_auth
+    from app.harness import rpc_policy
+    return (aggregator_auth.TOKEN_ENV, aggregator_auth.TOKEN_FILE_ENV,
+            *rpc_policy.ENV_NAMES)
+
+
+_CREDENTIAL_ENV: tuple[str, ...] = _credential_env()
+
+
+def _credential_paths() -> list[str]:
+    """The aggregator token file, when it exists (a bind needs a target)."""
+    try:
+        from agent_mcp import aggregator_auth
+        path = str(aggregator_auth.token_path())
+    except Exception:  # noqa: BLE001
+        return []
+    return [path] if os.path.isfile(path) else []
+
+
 def bwrap_argv(command: str, cwd: str | None) -> list[str]:
     bwrap = bwrap_path() or "bwrap"
     argv = [bwrap, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]
@@ -135,6 +155,14 @@ def bwrap_argv(command: str, cwd: str | None) -> list[str]:
         argv += ["--tmpfs", d]
     for sock in _host_socket_paths():
         argv += ["--ro-bind-try", "/dev/null", sock]
+    # The aggregator credential (#1053) and the lloyd_rpc variables (P9) do not
+    # reach a trial: the token file is covered, the variables are unset. A
+    # sandbox has no network to use the secret on, and still has no business
+    # reading it.
+    for secret in _credential_paths():
+        argv += ["--ro-bind", "/dev/null", secret]
+    for name in _CREDENTIAL_ENV:
+        argv += ["--unsetenv", name]
     start = cwd or os.getcwd()
     if start.startswith(tuple(d + "/" for d in _TMPFS_DIRS)) or start in _TMPFS_DIRS \
             or not os.path.isdir(start):
