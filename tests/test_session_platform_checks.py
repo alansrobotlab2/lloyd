@@ -223,8 +223,9 @@ def test_no_user_session_creator_mints_a_background_shaped_id():
     from app.sessions_io import (is_background_session_name,
                                  new_background_session_id)
 
-    # Every `session_id = f"..."` mint in the packages this file sweeps. Three
-    # today: two in the chat router, one in POST /api/sessions/create. A fourth is a
+    # Every `session_id = f"..."` mint in the packages this file sweeps. Two
+    # today: one in the chat router (the sync `POST /api/message` was the
+    # second, deleted by P13.6), one in POST /api/sessions/create. A third is a
     # new creator, and it has to be looked at before it is allowed.
     mints = []
     for path in _sources(_MINT_ROOTS):
@@ -232,13 +233,13 @@ def test_no_user_session_creator_mints_a_background_shaped_id():
         for i, line in enumerate(text.splitlines(), 1):
             if re.search(r'session_id\s*=\s*f["\']', line):
                 mints.append(f"{path.relative_to(ROOT)}:{i}")
-    assert len(mints) == 3, mints
+    assert len(mints) == 2, mints
 
     # The chat path: `<ts>_<6 hex>`, three parts.
     router = (ROOT / "app" / "routers" / "messages.py").read_text()
     chat_mint = ('session_id = f"{datetime.now():%Y%m%d_%H%M%S}_'
                  '{uuid.uuid4().hex[:6]}"')
-    assert router.count(chat_mint) == 2
+    assert router.count(chat_mint) == 1
     assert not is_background_session_name(
         f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}")
 

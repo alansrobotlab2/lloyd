@@ -346,7 +346,10 @@ def test_build_flush_turn(tmp_path, monkeypatch, flush_on):
 
     msg = load_messages_copy(monkeypatch, name="messages_under_flush_build")
     monkeypatch.setattr(msg, "SESSIONS_DIR", tmp_path)
-    monkeypatch.setattr(msg, "build_system_prompt", lambda **k: "SYS")
+    # The prompt is built by the shared options builder (P13.4), which the
+    # copy's `build_flush_turn` calls into.
+    from app.routers import turn_options
+    monkeypatch.setattr(turn_options, "build_system_prompt", lambda **k: "SYS")
     (tmp_path / f"{SESSION_ID}.json").write_text(
         json.dumps({"messages": [], "model": "primary"}))
     tid = MF.new_turn_id()

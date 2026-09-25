@@ -211,4 +211,7 @@ def test_both_recorders_pass_the_measured_cache_numbers():
     src = (Path(__file__).resolve().parent.parent
            / "app" / "routers" / "messages.py").read_text(encoding="utf-8")
     assert "cache_read=0," not in src, "a record_usage call still hardcodes the cache"
-    assert src.count("cache_read=cache_read_tokens") == 2
+    # One per recorder in the router: the streaming turn's. The sync
+    # `POST /api/message` was the second and is deleted (P13.6); the third
+    # writer is `app/run_recorder.py`.
+    assert src.count("cache_read=cache_read_tokens") == 1

@@ -550,8 +550,8 @@ not a broken completion and proceeds as it always did. Config
 `RunOptions` defaults (they do not splat `_get_harness_kwargs`).
 
 Every consumer that accumulates `text_delta` trims on `iteration_retry` with
-`events.trim_discarded` — the chat router and `run_recorder` (X2), plus the
-sync `POST /api/message`, `autonomy.run_task`, `_common.run_prompt_on_primary`,
+`events.trim_discarded` — the chat router and `run_recorder` (X2), plus
+`autonomy.run_task`, `_common.run_prompt_on_primary`,
 the IDE query, `bench_runner_sdk`, `replay_run_state`, and the Discord bot on
 the router's `retry` SSE frame. The IDE's streaming completion cannot take
 text back off the wire, so a retry after text ends it. The observer takes its
@@ -990,3 +990,78 @@ tool shape) was 24/24 `error`, and fixed it would still have compared nothing.
   not the whole uncompacted session, which at these sizes is past the window
   exactly as the warm-up was. That head is ~40% of the rows, so depth 0.5 is
   a fact that arrived after the flush (`flush.planted_in_history`).
+
+### P13.4 — one options builder (`app/routers/turn_options.py`)
+
+- **What it replaced.** Four hand-built turn sites — `post_message_stream`,
+  `build_ambient_turn`, `build_flush_turn` (P3) and `voice._voice_turn_setup`
+  — plus the sync route (P13.6) each built their own `RunOptions`, system
+  prompt and hook registry. `SessionSnapshot.load` reads the session's small
+  fields once; `build_turn_options(snapshot, body, kind)` returns a `TurnBuild`
+  (options, system prompt, hooks, turn tail). Every kind difference is a named
+  branch: voice keeps its chat-shaped prompt (no platform, no goal), its
+  `extra_body`, no surface and no grant gate; flush keeps memory tools only,
+  tool search off, no refresher and no tail; the stream kind alone gets the
+  context meter, final schema, effect scope and action review, and skill
+  dispatch through `arm_skill_dispatch` after the prefetch.
+- **Unchanged, measured.** `tests/fixtures/turn_options_head.json` was recorded
+  on base 8ac6f4a8 by `tests/test_turn_options.py` (every `RunOptions` field,
+  the system prompt's arguments, the turn tail, hooks in order, the refreshed
+  deny list) for 4 kinds x 5 session shapes; the table test holds the builder
+  to it. One base artifact was corrected before recording: voice's refresher
+  read `app.paths.SESSIONS_DIR` while the rest read the router's, so the first
+  recording took plan mode from the wrong directory in a test (same directory
+  in production).
+- **Parses per POST.** Counted on base: 9 reads of the session JSON for a chat
+  POST, 11 for a worker POST, then the meta save. Now 1
+  (`SessionSnapshot.aload`, off the loop) plus the save. The gate helpers
+  (`_authority_scope_for`, `_ban_automod_for_workers`, `_effect_scope_for`,
+  `_final_schema_for`) take the snapshot's identity instead of reading.
+- Roster: `GATE_ARM_POINTS` names `turn_options.py` in place of `messages.py`
+  and `voice.py` (12 → 11 entries; the D2e evals stay armed and listed). Pins moved: `tests/test_grant_gate_session_path.py`,
+  `tests/test_outbound_content_gate.py`, `tests/unit/test_skill_dispatch.py`,
+  `tests/test_action_review.py`, `tests/test_tool_effects.py`.
+
+### P13.5 — session writes off the loop; cached small-field reads
+
+- `sessions_io.mutate_session` and `_save_session_meta` run read → `fn` →
+  dump (`indent=2` kept) → atomic write in `asyncio.to_thread`, with the
+  per-session lock held by the awaiting coroutine. `fn` therefore runs off the
+  loop thread and must not touch asyncio objects.
+- `sessions_io.read_session_fields(path)` parses the small fields (model,
+  platform, source, todos, plan, goal, Inner Voice flags, user-turn count) at
+  most once per file version, keyed by `(ino, mtime_ns, ctime_ns, size)`. A file
+  younger than 50 ms when read is parsed but not cached (git's racily-clean
+  rule; file times tick at the kernel's coarse clock). `_load_session_todos`,
+  `_load_session_plan`, `_load_session_goal` and the per-iteration plan-mode
+  refresher read through it and return deep copies.
+- **Measured** (`eval/measure_session_io_stalls.py`: 1.11 MB synthetic
+  session, watchdog waking every 1 ms, a wake-up more than 10 ms late counted
+  as a stall; 3 runs each, load average ~35):
+
+  | workload | base 8ac6f4a8 | P13.5 |
+  |---|---|---|
+  | 40 appends | 40 stalls every run, max 16–25 ms | 0 stalls, max 6–8 ms |
+  | 10 stream POSTs | 10 stalls >25 ms every run, max 104–119 ms | 0–2 stalls, max 8–14 ms |
+  | 60 plan-mode refreshes | 0–4 stalls, max 6–12 ms, 0.57–0.62 s wall | 0 stalls, max 4 ms, 0.33 s wall |
+
+  What is left is GIL time: `json.loads` holds the GIL for its whole ~4 ms on
+  this file, so a parse in a worker thread still delays the loop by that much.
+  `json.dumps` with `indent` is the pure-Python encoder and yields. An
+  append-only `<sid>.msgs.jsonl` journal (no full rewrite per row) is the next
+  lever and its own item.
+- Pins: `tests/test_turn_options.py` (one parse per POST, racy-fresh files not
+  cached, a cached reader cannot poison the cache, a rewritten file is re-read).
+
+### P13.6 — `POST /api/message` deleted
+
+Callers searched before deleting: the whole repo, `web/src`,
+`agent-services/`, `scripts/`, `workers/`, and the vault's skills (only
+archived skills from the pre-harness Hermes days name it). No caller: the
+one reference was `api.sendMessage` in `web/src/api.ts`, defined and never
+called (nor in the built chrome extension), removed with the route
+(`tests/test_api_contracts.py` checks every client path is a route). Removed
+with it: its usage-row writer (two writers remain in `messages.py`, both in
+`_run_turn`), its chat-id mint, and the tests that drove it
+(`tests/test_compaction_record.py::test_a_loopback_post_lands_the_same_record`).
+Pin: `tests/test_workers_router.py::test_the_sync_message_route_is_gone`.

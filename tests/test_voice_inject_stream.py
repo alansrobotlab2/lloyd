@@ -47,15 +47,18 @@ def harness(tmp_path, monkeypatch):
 
     monkeypatch.setattr(voice, "enqueue_turn", fake_enqueue)
     monkeypatch.setattr(voice, "prefetch_context_async", fake_prefetch)
-    monkeypatch.setattr(voice, "build_system_prompt", lambda **kw: "SYS")
     monkeypatch.setattr(voice, "_save_session_meta", noop)
     monkeypatch.setattr(voice, "set_last_user_session", lambda s: None)
-    monkeypatch.setattr(voice, "_get_mcp_servers", lambda: {})
-    monkeypatch.setattr(voice, "_get_disallowed_tools", lambda **kw: [])
-    monkeypatch.setattr(voice, "_get_harness_kwargs", lambda: {})
-    monkeypatch.setattr(voice, "_resolve_model_name", lambda m: "primary")
-    monkeypatch.setattr(voice, "_get_model_env", lambda m: {})
     monkeypatch.setattr(voice, "SESSIONS_DIR", tmp_path)
+    # The spoken turn's options come from the shared builder (P13.4), so its
+    # inputs are faked where the builder looks them up.
+    from app.routers import turn_options
+    monkeypatch.setattr(turn_options, "build_system_prompt", lambda **kw: "SYS")
+    monkeypatch.setattr(turn_options, "_get_mcp_servers", lambda: {})
+    monkeypatch.setattr(turn_options, "_get_disallowed_tools", lambda **kw: [])
+    monkeypatch.setattr(turn_options, "_get_harness_kwargs", lambda: {})
+    monkeypatch.setattr(turn_options, "_resolve_model_name", lambda m: "primary")
+    monkeypatch.setattr(turn_options, "_get_model_env", lambda m: {})
 
     def client(voice_turn=None):
         monkeypatch.setattr(voice, "CONFIG",

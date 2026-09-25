@@ -933,15 +933,6 @@ export interface ActiveProc {
 const API_BASE = (import.meta.env.VITE_API_BASE as string | undefined) || '/api'
 
 export const api = {
-  async sendMessage(text: string, clientId: string, sessionId?: string): Promise<ApiResponse> {
-    const response = await fetch(`${API_BASE}/message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text, client_id: clientId, session_id: sessionId }),
-    })
-    return response.json()
-  },
-
   streamMessage(
     text: string,
     clientId: string,

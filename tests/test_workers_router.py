@@ -803,3 +803,27 @@ def test_the_join_helper_is_pure_over_the_row_it_is_given():
 
     assert router.run_session_ids(row) == ["20260918_161828_autonomy_fcb5"]
     assert set(row) == {"run_id", "meta_json"}
+
+
+def test_the_sync_message_route_is_gone():
+    """P13.6: `POST /api/message` — the synchronous one-shot chat route — had no
+    caller anywhere (web/src, agent-services/, scripts/, workers, the tests
+    other than its own pins), bypassed the session queue, and was the one turn
+    path whose options, hooks and usage row every change had to be threaded
+    through a fourth time. Deleted; the streaming route is the one chat path, a
+    worker's loopback turn included. Asserted on the mounted router, so a route
+    re-added under another function name is caught too."""
+    from app.routers import messages
+
+    methods = {(r.path, m) for r in messages.router.routes
+               for m in getattr(r, "methods", set())}
+    assert ("/api/message/stream", "POST") in methods  # positive control
+    assert not any(path == "/api/message" for path, _m in methods), methods
+    assert not hasattr(messages, "post_message")
+    web = ROOT / "web" / "src"
+    # The client builds paths as `${API_BASE}/message`; `api.sendMessage` was
+    # defined there with no caller and went with the route.
+    pattern = re.compile(r"""["'`]/api/message["'`?]|\$\{API_BASE\}/message[`?]""")
+    callers = [p for p in web.rglob("*.ts*") if pattern.search(p.read_text(errors="replace"))]
+    assert callers == [], callers
+    assert pattern.search("fetch(`${API_BASE}/message`, {")  # the pattern bites

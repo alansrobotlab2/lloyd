@@ -427,10 +427,11 @@ def _skill_argument(call) -> str:
 
 
 def test_every_chat_turn_usage_write_site_names_the_skill_deliveries():
-    """`_run_turn` and `post_message` are the two chat paths that write a usage
-    row, and each must hand its turn's prefetched text to the parser. The count
-    is pinned too: a new `record_usage` call added in either function without
-    `skills=` fails here, as does dropping it from one of the three.
+    """`_run_turn` is the chat path that writes a usage row (the sync
+    `post_message` was the second and is deleted, P13.6), and it must hand its
+    turn's prefetched text to the parser. The count is pinned too: a new
+    `record_usage` call added without `skills=` fails here, as does dropping it
+    from one of the two.
 
     What this test can prove and what it cannot are both worth stating: it grades
     the call's shape — that the argument is present, spelled so, and not inside a
@@ -458,7 +459,8 @@ def test_every_chat_turn_usage_write_site_names_the_skill_deliveries():
     )
 
     total_calls = 0
-    for name in ("_run_turn", "post_message"):
+    assert "post_message" not in functions, "the sync route is back (P13.6)"
+    for name in ("_run_turn",):
         assert name in functions, f"{name} is gone from the router — test is stale"
         # The turn's prefetched text must be bound in the function that writes the
         # row: each writer reads a local, so a rename or a moved assignment makes
@@ -486,9 +488,9 @@ def test_every_chat_turn_usage_write_site_names_the_skill_deliveries():
                 f"skill deliveries (skills={_skill_argument(call)!r})"
             )
         total_calls += len(calls)
-    assert total_calls == 3, (
-        f"expected the 3 known chat-turn write sites (two in _run_turn: the "
-        f"result path and the error path; one in post_message), found "
+    assert total_calls == 2, (
+        f"expected the 2 known chat-turn write sites (two in _run_turn: the "
+        f"result path and the error path), found "
         f"{total_calls} — update this test and #783 together"
     )
 

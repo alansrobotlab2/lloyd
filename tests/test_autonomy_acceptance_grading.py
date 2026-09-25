@@ -193,9 +193,13 @@ async def _through_the_pool(q: WorkQueue) -> dict:
     pool = WorkerPool(q, slots=1)
     pool._running = True
     worker = asyncio.create_task(pool._worker_loop("worker-0"))
+    # Wait for the item to settle, not just for the run row: the pool writes
+    # the run before it marks the item, and cancelling in between left it
+    # `running` under load (flaky on live main, ~1 in 6).
     for _ in range(100):
         await asyncio.sleep(0.05)
-        if q.list_runs(source="scheduled-task"):
+        if q.list_runs(source="scheduled-task") and not q.list_items(
+                state="running", source="scheduled-task"):
             break
     pool._running = False
     worker.cancel()

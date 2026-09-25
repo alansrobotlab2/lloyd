@@ -509,31 +509,40 @@ def test_stream_route_installs_the_deliverer():
     (`workers/sources/_common.py:run_prompt_in_session` → /api/message/stream).
     Hooking only the interactive path would cover the half that already behaves
     best — the note in #536 is explicit that this must land where workers see it.
+
+    P13.4: the route arms it through `turn_options.arm_skill_dispatch`, after
+    the prefetch, which is the one install in the router package.
     """
-    from app.routers import messages
+    from app.routers import messages, turn_options
 
     src = inspect.getsource(messages.post_message_stream)
-    assert "install_skill_dispatch_hook(" in src
-    assert "already_injected=injected_skill_names(" in src
+    assert "arm_skill_dispatch(build, prefetched_text)" in src
+    arm = inspect.getsource(turn_options.arm_skill_dispatch)
+    assert "install_skill_dispatch_hook(" in arm
+    assert "already_injected=injected_skill_names(" in arm
     print("test_stream_route_installs_the_deliverer: OK")
 
 
 def test_the_routes_without_the_deliverer_say_why(monkeypatch):
-    """#750: the stream route is the ONE install in `messages.py`; the two
-    registries built without it (`build_ambient_turn`, the sync
-    `post_message`) each carry the reason at the site, so the exclusion cannot
-    rot into an oversight. The Task subagent route is pinned in
-    tests/test_task_subagent_skill_dispatch.py."""
-    from app.routers import messages
+    """#750: the stream kind is the ONE install; the ambient builder carries
+    the reason at its site, so the exclusion cannot rot into an oversight, and
+    `arm_skill_dispatch` refuses every kind but `stream` (the sync
+    `post_message` that also went without is deleted, P13.6). The Task subagent
+    route is pinned in tests/test_task_subagent_skill_dispatch.py."""
+    from app.harness import HookRegistry, RunOptions
+    from app.routers import messages, turn_options
 
-    text = inspect.getsource(messages)
-    assert text.count("install_skill_dispatch_hook(") == 1
-    for route in (messages.build_ambient_turn, messages.post_message):
-        src = inspect.getsource(route)
-        assert "install_default_safety_hook(iv_hooks)" in src
-        assert "install_skill_dispatch_hook(" not in src
-        after_gate = src[src.index("install_default_safety_hook(iv_hooks)"):]
-        assert "No skill deliverer here, on purpose (#750)" in after_gate, route.__name__
+    assert "install_skill_dispatch_hook(" not in inspect.getsource(messages)
+    assert inspect.getsource(turn_options).count("install_skill_dispatch_hook(") == 1
+    src = inspect.getsource(messages.build_ambient_turn)
+    assert "arm_skill_dispatch(" not in src
+    assert "No skill deliverer here, on purpose (#750)" in src
+    for kind in ("ambient", "flush", "voice"):
+        hooks = HookRegistry()
+        build = turn_options.TurnBuild(kind=kind, model="m", options=RunOptions(model="m"),
+                                       system_prompt="", hooks=hooks)
+        turn_options.arm_skill_dispatch(build, "<context></context>")
+        assert hooks._pre == [], kind
     print("test_the_routes_without_the_deliverer_say_why: OK")
 
 

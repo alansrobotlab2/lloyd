@@ -114,8 +114,8 @@ would read as "call something to load these"; what actually happens is surface
 2.
 
 `include_skills_index` defaults to `True` and every production caller takes the
-default (`app/routers/messages.py:1850`, `:2036`, `:2181`,
-`app/routers/voice.py:222`, `autonomy.py:1605`). The `False` branch is for tests
+default (`app/routers/turn_options.py::build_turn_options`, the one builder
+for chat, ambient, flush and voice turns since P13.4, and `autonomy.py:1605`). The `False` branch is for tests
 that assert on the rest of the prompt.
 
 **A quarantined skill is excluded from the index, and that is not cosmetic.**
@@ -209,17 +209,17 @@ renders it, in the same shape as the synthetic `ToolSearch` result above it.
 deliver as provisional and keeps going (`hooks.py:133`, `:146-148`), so a catastrophic
 `Bash` is blocked rather than answered with a protocol card by a deliverer that
 happened to register first. `install_skill_dispatch_hook` is still called after
-`install_default_safety_hook` (`app/routers/messages.py:1929`) — not because
+`install_default_safety_hook` (`app/routers/turn_options.py::arm_skill_dispatch`) — not because
 order decides the outcome, but so the walk reads in the order that matters.
 The Task subagent path installs it the same way, beside its safety hook in
 `agent_mcp/builtin_task.py`, under the same flag and with nothing
 `already_injected` because a subagent gets no turn-start skills (#750). The
-two routes without it say why at the site: `build_ambient_turn` is a short
-decide-and-stop turn that would pay the round-trip for nothing, and the sync
-`post_message` has no caller in the tree.
+chat route arms it through `turn_options.arm_skill_dispatch`, which installs
+for the `stream` kind only (P13.4); `build_ambient_turn` says why at the site —
+a short decide-and-stop turn that would pay the round-trip for nothing. The
+sync `post_message`, the other route without it, is deleted (P13.6).
 `tests/test_task_subagent_skill_dispatch.py` pins the subagent install and
-`tests/unit/test_skill_dispatch.py` the one-install-plus-two-exclusions shape
-of `messages.py`.
+`tests/unit/test_skill_dispatch.py` the one-install shape of the builder.
 
 Three rules ship (`:112`), ordered so the specific protocol precedes the
 general one that also describes it:

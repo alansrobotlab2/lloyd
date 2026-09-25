@@ -245,13 +245,25 @@ def test_the_worker_turn_payload_carries_the_pool_bound_scope():
     assert '"grant_scope": current_scope.get()' in text
 
 
+def _builder_text() -> str:
+    from pathlib import Path
+    return (Path(M.__file__).with_name("turn_options.py")).read_text(encoding="utf-8")
+
+
 def test_every_registry_the_router_builds_arms_the_gate():
-    """Three endpoints build a turn's hooks. "The other endpoint is the
-    ungated one" is the exact shape of the bug this closes, so the count is
-    pinned rather than trusted."""
-    text = open(M.__file__).read()
-    assert text.count("install_default_safety_hook(iv_hooks)") == 3
-    assert text.count("install_policy_hook(iv_hooks, scope=") == 3
+    """"The other endpoint is the ungated one" is the exact shape of the bug
+    this closes, so the count is pinned rather than trusted. Since P13.4 every
+    chat, ambient, flush and voice turn is built by `turn_options.
+    build_turn_options`: one registry, armed once, and the router builds none
+    of its own. Which kinds carry the grant gate is pinned by behaviour in
+    `tests/test_turn_options.py` (voice deliberately does not)."""
+    router = open(M.__file__).read()
+    assert "HookRegistry()" not in router.split("async def _run_turn", 1)[0]
+    assert "RunOptions(" not in router
+    text = _builder_text()
+    assert text.count("hooks = HookRegistry()") == 1
+    assert text.count("install_default_safety_hook(hooks)") == 1
+    assert text.count("install_policy_hook(hooks, scope=grant_scope)") == 1
 
 
 def test_the_same_registry_set_also_arms_the_outbound_content_gate():
@@ -266,16 +278,16 @@ def test_the_same_registry_set_also_arms_the_outbound_content_gate():
     """
     from pathlib import Path
     repo = Path(__file__).resolve().parents[1]
-    text = (repo / "app" / "routers" / "messages.py").read_text(encoding="utf-8")
-    assert text.count("install_default_safety_hook(iv_hooks)") == 3
-    assert text.count("install_policy_hook(iv_hooks, scope=") == 3
+    text = _builder_text()
+    assert text.count("install_default_safety_hook(hooks)") == 1
+    assert text.count("install_policy_hook(hooks, scope=grant_scope)") == 1
 
     from app.harness.outbound_content import (
         GATE_ARM_POINTS, find_unarmed_dispatch_paths, stale_gate_arm_points,
     )
     assert find_unarmed_dispatch_paths() == [], find_unarmed_dispatch_paths()
     assert stale_gate_arm_points() == [], stale_gate_arm_points()
-    assert len(GATE_ARM_POINTS) == 12, GATE_ARM_POINTS
+    assert len(GATE_ARM_POINTS) == 11, GATE_ARM_POINTS  # 12 until P13.4
 
 
 # ── The automod ban, by platform (#709) ────────────────────────────────
@@ -337,10 +349,14 @@ def test_the_automod_ban_is_idempotent_and_keeps_the_callers_list(sessions):
 
 
 def test_every_site_that_bans_minting_also_bans_automod():
-    """Same pin-count idiom as the grant gate: the three router sites that
-    build a turn's disallowed list each apply the platform ban, so "the other
-    endpoint is the ungated one" cannot come back one tool over. Four sites
-    since P3's memory-flush turn, which applies both."""
+    """Same pin-count idiom as the grant gate: the one builder that builds a
+    turn's disallowed list applies the platform ban wherever it applies the
+    mint ban, so "the other endpoint is the ungated one" cannot come back one
+    tool over. The router keeps only the definitions (P13.4; until then four
+    router sites, P3's flush among them)."""
     text = open(M.__file__).read()
-    assert text.count("_ban_grant_minting(") == 5  # def + 4 sites
-    assert text.count("_ban_automod_for_workers(") == 5  # def + 4 sites
+    assert text.count("_ban_grant_minting(") == 1  # def
+    assert text.count("_ban_automod_for_workers(") == 1  # def
+    builder = _builder_text()
+    assert builder.count("_m._ban_grant_minting(body)") == 1
+    assert builder.count("_m._ban_automod_for_workers(body, session_id, identity=identity)") == 1

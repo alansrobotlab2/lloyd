@@ -608,11 +608,12 @@ def test_the_router_hands_a_scope_only_to_a_non_user_session(tmp_path, monkeypat
     assert R._effect_scope_for("worker", {}) == ""
     assert "NON_USER_PLATFORMS" in inspect.getsource(R._effect_scope_for)
 
-    # Both RunOptions builders that serve a payload set it; the loop prefers
-    # the option over the contextvar. Read the file, not the live attribute
-    # (see test_structured_verdict for why).
-    src = Path(R.__file__).read_text()
-    assert src.count("_effect_scope_for(session_id, data)") == 2
+    # The one RunOptions builder that serves a payload sets it, on the stream
+    # kind (P13.4; the sync route that was the second builder is deleted); the
+    # loop prefers the option over the contextvar. Read the file, not the live
+    # attribute (see test_structured_verdict for why).
+    src = Path(R.__file__).with_name("turn_options.py").read_text()
+    assert src.count("_m._effect_scope_for(session_id, body, identity=identity)") == 1
     loop_src = Path(policy.__file__).with_name("loop.py").read_text()
     assert 'getattr(options, "effect_scope", "")' in loop_src
 

@@ -495,11 +495,12 @@ def test_turn_start_record_of_a_missing_result_is_untouched():
 
 
 # ===========================================================================
-# The chat path: a streamed turn and a loopback post both land the record
+# The chat path: a streamed turn lands the record (a worker's loopback turn
+# is a streamed turn; the sync `post_message` is deleted, P13.6)
 # ===========================================================================
 #
-# Everything above tests a mechanism and a store. This section drives the two
-# production functions that own the `usage` row for every interactive turn,
+# Everything above tests a mechanism and a store. This section drives the
+# production function that owns the `usage` row for every interactive turn,
 # because the seam #1078 is about is the one between them: a relief pass that
 # happens deep inside `app/harness/loop.py` has to surface on a row that
 # `app/routers/messages.py` writes, and the two never call each other. A unit
@@ -572,8 +573,8 @@ def _wired(monkeypatch, *, boom: bool = False, **over):
     relief pass fired from inside `run_query` so it lands mid-turn.
 
     Yields `captured`, whose `"module"` key is the copy — the driver takes
-    `_run_turn`/`post_message` from it, because those are the only function objects
-    whose globals are the dict the fakes were written into.
+    `_run_turn` from it, because that is the only function object whose globals
+    are the dict the fakes were written into.
 
     `boom=True` makes the harness emit one real assistant turn and then raise,
     which is the shape of a turn that died under context pressure: the overflow
@@ -582,13 +583,11 @@ def _wired(monkeypatch, *, boom: bool = False, **over):
     """
     from app.sessions_io import create_session
 
-    # The turn's session has to exist on disk: `post_message` reads its metadata
-    # before it compacts anything. It lands in conftest's scratch data root
-    # (`LLOYD_DATA` points the whole suite off `~/lloyd-data`), so no fixture is
-    # needed to keep this off the machine's real sessions.
-    # `create_session` and `post_message` both resolve through
-    # `app.paths.SESSIONS_DIR`, which conftest points at a scratch data root for
-    # the whole suite, so the session this creates cannot touch the machine's.
+    # The turn's session lands in conftest's scratch data root (`LLOYD_DATA`
+    # points the whole suite off `~/lloyd-data`): `create_session` resolves
+    # through `app.paths.SESSIONS_DIR`, which conftest points at a scratch data
+    # root for the whole suite, so the session this creates cannot touch the
+    # machine's.
     create_session(SESSION_ID, platform="mission-control", model="primary",
                    title="t", source="test")
 
@@ -648,7 +647,6 @@ def _wired(monkeypatch, *, boom: bool = False, **over):
             ("run_query", _fake_run_query),
             ("_post_session_capture", AsyncMock()),
             ("_maybe_extract_focus", AsyncMock()),
-            ("build_system_prompt", lambda *a, **k: "SYS"),
             ("prefetch_context_async", _fake_prefetch),
             ("_append_messages", AsyncMock()),
             ("set_last_user_session", MagicMock()),
@@ -693,7 +691,7 @@ def _drive_run_turn(msg, tmp_path, *, overflow: bool = False) -> None:
     The previous round recorded this as impossible — "`_run_turn` cannot be
     driven to its own `run_query` from a test in this tree" — and left the two
     inserts it owns to an AST guard. That is not what happens: driven like this,
-    through the same `_wired()` the loopback test uses, the turn consumes the
+    through `_wired()`, the turn consumes the
     fake generator, runs its relief pass inside it, and writes its row. What
     the earlier attempt had was an `asyncio.Event` built by a *closed* loop
     (`asyncio.run(asyncio.Event())`) handed to the queue before the running one
@@ -785,29 +783,6 @@ def _row(store, session_id: str):
         "SELECT compaction FROM usage WHERE session_id = ?", (session_id,)))
     assert len(rows) == 1, f"expected one usage row, got {len(rows)}"
     return json.loads(rows[0][0]) if rows[0][0] is not None else None
-
-
-class _Req:
-    """The only thing `post_message` reads off the FastAPI request."""
-
-    async def json(self):
-        return {"text": "hi", "session_id": "s"}
-
-
-def test_a_loopback_post_lands_the_same_record(store, monkeypatch):
-    """`post_message`, the third writer and the route a worker's loopback turn
-    takes — the one whose absence would leave the heaviest ladder users
-    unrecorded, since a worker posts to itself rather than streaming.
-    """
-    with _wired(monkeypatch) as wired:
-        asyncio.run(wired["module"].post_message(_Req()))
-    record = _row(store, "s")
-    assert record is not None, (
-        "the loopback path must write the same dimension the streamed path does, "
-        "or the two are not comparable for the run that fires the ladder hardest"
-    )
-    assert record["relief_passes"] == 1
-    assert record["turn_start"]["summarize_attempted"] is False
 
 
 def test_a_streamed_turn_lands_the_same_record(store, monkeypatch, tmp_path):
@@ -937,10 +912,11 @@ def _opts_with_session(session_id: str):
 
 
 def test_every_chat_insert_site_carries_the_field():
-    """All three `record_usage` calls in `messages.py` pass the field, by AST.
+    """Both `record_usage` calls in `messages.py` pass the field, by AST.
 
-    Execution above covers `_run_turn`'s result and error arms and `post_message`;
-    this pins the shape so a fourth insert, or a refactor that drops the kwarg
+    Execution above covers `_run_turn`'s result and error arms (the sync
+    `post_message`, the third writer, is deleted — P13.6); this pins the shape
+    so a third insert, or a refactor that drops the kwarg
     from one of them, fails here rather than silently storing NULL forever — the
     same guard shape `tests/test_usage_skill_breakdown.py` uses for the skill
     dimension, for the same reason: a missing kwarg at one writer is invisible in
@@ -959,8 +935,8 @@ def test_every_chat_insert_site_carries_the_field():
         and getattr(node.func.value, "id", "") == "usage_store"
         and getattr(node.func, "attr", "") == "record_usage"
     ]
-    assert len(calls) == 3, (
-        f"expected the three chat writers, found {len(calls)} — if a fourth was "
+    assert len(calls) == 2, (
+        f"expected the two chat writers, found {len(calls)} — if a third was "
         f"added, this guard and the route it sits on both need reading"
     )
     for call in calls:

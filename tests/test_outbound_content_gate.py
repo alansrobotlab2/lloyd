@@ -657,8 +657,10 @@ def test_the_gate_is_armed_at_its_pinned_number_of_arm_points():
     2026-09-24: three more live evals (#562's prefetch cost, #588's decision
     replay, #600's compaction recall) build turns from the production kwargs;
     the first two armed without joining the roster, the third armed nothing.
+    Eleven since P13.4: the chat router's builds and the voice build became
+    one builder, `app/routers/turn_options.py`, so two roster entries became one.
     """
-    assert len(OC.GATE_ARM_POINTS) == 12, OC.GATE_ARM_POINTS
+    assert len(OC.GATE_ARM_POINTS) == 11, OC.GATE_ARM_POINTS
     assert OC.stale_gate_arm_points() == [], \
         f"stale arm points: {OC.stale_gate_arm_points()}"
     # Two denominators from two sources: the syntax finds every dispatch build in
@@ -792,13 +794,28 @@ def test_the_voice_prewarm_shares_the_turn_registry():
     The finder cannot see that the two consumers share one dict (it reads the
     build site, not the dict), so if a later edit builds a second set of options
     for the prewarm the finder reads green and a prewarm dispatch runs ungated —
-    which is what this pins.
+    which is what this pins. Since P13.4 the build site is the shared builder:
+    voice.py builds no `RunOptions` of its own, `_voice_turn_setup` makes the one
+    `build_turn_options` call both consumers read, and the builder's single
+    build passes the registry it armed.
     """
+    import inspect
+    import app.routers.voice as voice_router
+
     tree = OC._parse("app/routers/voice.py", REPO / "app/routers/voice.py")
     assert tree is not None, "voice.py does not parse"
-    builds = OC._turn_builders("app/routers/voice.py", tree)
+    assert OC._turn_builders("app/routers/voice.py", tree) == []
+    src = inspect.getsource(voice_router._voice_turn_setup)
+    assert src.count("build_turn_options(") == 1
+    assert src.count("build_turn_options(snapshot, {}, \"voice\")") == 1
+    for fn in ("voice_inject", "_prewarm"):
+        assert "_voice_turn_setup(session_id)" in inspect.getsource(
+            getattr(voice_router, fn)), fn
+
+    rel = "app/routers/turn_options.py"
+    builds = OC._turn_builders(rel, OC._parse(rel, REPO / rel))
     assert len(builds) == 1, [b.line for b in builds]
-    assert builds[0].has_hooks_kwarg, "voice.py builds options with no hooks again"
+    assert builds[0].has_hooks_kwarg, "the builder builds options with no hooks"
 
 
 def test_the_finder_reads_a_builder_that_never_mentions_a_registry(tmp_path):
@@ -967,11 +984,13 @@ def test_the_unarmed_paths_on_the_real_tree_are_the_unreachable_ones():
     here while measuring nothing — so the counts are pinned against the tree.
     """
     builds = OC.all_turn_builds()
-    assert len(builds) == 17, len(builds)
+    # 17 until P13.4 folded the router's four builds (the sync route's among
+    # them) and voice's one into the one shared builder.
+    assert len(builds) == 13, len(builds)
     unreachable = sorted({b.file for b in builds if not b.sender_reachable})
     assert unreachable == ["app/routers/ide.py"], unreachable
     assert OC.sender_unreachable_dispatch_files() == unreachable
-    assert len(OC.dispatch_registry_sites()) == 15, OC.dispatch_registry_sites()
+    assert len(OC.dispatch_registry_sites()) == 11, OC.dispatch_registry_sites()
     assert len(OC.GATE_ARM_POINTS) == len(
         set(OC.dispatch_registry_sites_files()) | {OC.FLOOR_MODULE})
 
@@ -990,7 +1009,7 @@ def test_a_stale_entry_is_caught_even_when_the_grep_still_hits(tmp_path):
     (base / "app" / "harness" / "safety.py").write_text(
         "def install_default_safety_hook(h):\n"
         "    pass  # the gate call was removed here\n")
-    (base / "app" / "routers" / "messages.py").write_text(
+    (base / "app" / "routers" / "turn_options.py").write_text(
         "from app.harness.hooks import HookRegistry\n"
         "hooks = HookRegistry()\n"
         "def a():\n"
@@ -998,13 +1017,13 @@ def test_a_stale_entry_is_caught_even_when_the_grep_still_hits(tmp_path):
     # Every other arm point gets a real installer call first, so the expected set
     # is exactly the two defects and not 'every file this fixture never wrote'.
     for rel in OC.GATE_ARM_POINTS:
-        if rel in (OC.FLOOR_MODULE, "app/routers/messages.py"):
+        if rel in (OC.FLOOR_MODULE, "app/routers/turn_options.py"):
             continue
         arm = base / rel
         arm.parent.mkdir(parents=True, exist_ok=True)
         arm.write_text("install_default_safety_hook(hooks)\n")
     assert OC.stale_gate_arm_points(base) == [
-        OC.FLOOR_MODULE, "app/routers/messages.py"], OC.stale_gate_arm_points(base)
+        OC.FLOOR_MODULE, "app/routers/turn_options.py"], OC.stale_gate_arm_points(base)
 
 
 def test_the_floor_installer_alones_cannot_be_a_third_convention(tmp_path):

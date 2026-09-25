@@ -1,0 +1,2134 @@
+{
+ "ambient/autocode": {
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0",
+    "grant_create",
+    "mcp__lloyd-mcp__grant_create"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0",
+     "grant_create",
+     "mcp__lloyd-mcp__grant_create"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {},
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "worker:autocode",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     },
+     {
+      "args": {
+       "scope": "worker:autocode"
+      },
+      "fail_closed": true,
+      "matcher": null,
+      "name": "policy"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 0,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_autocode",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "worker",
+   "system_prompt": "SYS{\"goal\": {}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"platform\": \"worker\", \"session_id\": \"20260924_120000_autocode\", \"todos\": []}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "dedup_key": "dk",
+   "meta_path": "20260924_120000_autocode.json",
+   "model": "R(primary)",
+   "prefetched_text": "<ambient priority=\"urgent\" source=\"calendar\" session_id=\"20260924_120000_autocode\" server_clock=\"CLOCK\">\nsignal text\n</ambient>\n\nThe server clock when this was queued was **CLOCK** \u2014 that is a measured reading from this machine, not a date the producer wrote. Treat it as the current day: anything the signal above says about \"today\", a date, or a window has to agree with it or be reported as unverified (#1197).\nThis is a background signal from `calendar`. You were not asked a question \u2014 surface this now if the user should know. If it is not worth interrupting them, call `ambient_decide(session_id=\"20260924_120000_autocode\", surface=false, reasoning=\"...\")` and stop. If it is worth surfacing, reply briefly and naturally \u2014 the user will see your message as a normal assistant turn.||TAIL[[], {}, {}, \"NOTE(worker)\"]",
+   "priority": "urgent",
+   "producer_source": "calendar",
+   "summary": "sum",
+   "text": "signal text"
+  }
+ },
+ "ambient/chat": {
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {},
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 0,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_chat",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "chat",
+   "system_prompt": "SYS{\"goal\": {}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"platform\": \"mission-control\", \"session_id\": \"20260924_120000_chat\", \"todos\": [{\"content\": \"t1\", \"status\": \"pending\"}]}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "dedup_key": "dk",
+   "meta_path": "20260924_120000_chat.json",
+   "model": "R(primary)",
+   "prefetched_text": "<ambient priority=\"urgent\" source=\"calendar\" session_id=\"20260924_120000_chat\" server_clock=\"CLOCK\">\nsignal text\n</ambient>\n\nThe server clock when this was queued was **CLOCK** \u2014 that is a measured reading from this machine, not a date the producer wrote. Treat it as the current day: anything the signal above says about \"today\", a date, or a window has to agree with it or be reported as unverified (#1197).\nThis is a background signal from `calendar`. You were not asked a question \u2014 surface this now if the user should know. If it is not worth interrupting them, call `ambient_decide(session_id=\"20260924_120000_chat\", surface=false, reasoning=\"...\")` and stop. If it is worth surfacing, reply briefly and naturally \u2014 the user will see your message as a normal assistant turn.||TAIL[[{\"content\": \"t1\", \"status\": \"pending\"}], {}, {}, \"NOTE(mission-control)\"]",
+   "priority": "urgent",
+   "producer_source": "calendar",
+   "summary": "sum",
+   "text": "signal text"
+  }
+ },
+ "ambient/chat_plan": {
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(secondary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0",
+    "PLAN_BLOCK"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0",
+     "PLAN_BLOCK"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(secondary)"
+   },
+   "extra_body": {},
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(secondary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 0,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_chat_plan",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "chat",
+   "system_prompt": "SYS{\"goal\": {\"text\": \"ship it\"}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {\"plan_md_path\": \"/p.md\", \"plan_mode\": true}, \"platform\": \"mission-control\", \"session_id\": \"20260924_120000_chat_plan\", \"todos\": [{\"content\": \"t2\", \"status\": \"in_progress\"}]}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "dedup_key": "dk",
+   "meta_path": "20260924_120000_chat_plan.json",
+   "model": "R(secondary)",
+   "prefetched_text": "<ambient priority=\"urgent\" source=\"calendar\" session_id=\"20260924_120000_chat_plan\" server_clock=\"CLOCK\">\nsignal text\n</ambient>\n\nThe server clock when this was queued was **CLOCK** \u2014 that is a measured reading from this machine, not a date the producer wrote. Treat it as the current day: anything the signal above says about \"today\", a date, or a window has to agree with it or be reported as unverified (#1197).\nThis is a background signal from `calendar`. You were not asked a question \u2014 surface this now if the user should know. If it is not worth interrupting them, call `ambient_decide(session_id=\"20260924_120000_chat_plan\", surface=false, reasoning=\"...\")` and stop. If it is worth surfacing, reply briefly and naturally \u2014 the user will see your message as a normal assistant turn.||TAIL[[{\"content\": \"t2\", \"status\": \"in_progress\"}], {\"plan_md_path\": \"/p.md\", \"plan_mode\": true}, {\"text\": \"ship it\"}, \"NOTE(mission-control)\"]",
+   "priority": "urgent",
+   "producer_source": "calendar",
+   "summary": "sum",
+   "text": "signal text"
+  }
+ },
+ "ambient/new": "404",
+ "ambient/worker": {
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0",
+    "grant_create",
+    "mcp__lloyd-mcp__grant_create",
+    "automod_start",
+    "mcp__lloyd-mcp__automod_start",
+    "automod_gate",
+    "mcp__lloyd-mcp__automod_gate",
+    "automod_gate_wait",
+    "mcp__lloyd-mcp__automod_gate_wait",
+    "automod_land",
+    "mcp__lloyd-mcp__automod_land",
+    "automod_abort",
+    "mcp__lloyd-mcp__automod_abort",
+    "automod_amend_clause",
+    "mcp__lloyd-mcp__automod_amend_clause",
+    "automod_rollback",
+    "mcp__lloyd-mcp__automod_rollback",
+    "automod_vault_land",
+    "mcp__lloyd-mcp__automod_vault_land",
+    "automod_vault_revert",
+    "mcp__lloyd-mcp__automod_vault_revert"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0",
+     "grant_create",
+     "mcp__lloyd-mcp__grant_create",
+     "automod_start",
+     "mcp__lloyd-mcp__automod_start",
+     "automod_gate",
+     "mcp__lloyd-mcp__automod_gate",
+     "automod_gate_wait",
+     "mcp__lloyd-mcp__automod_gate_wait",
+     "automod_land",
+     "mcp__lloyd-mcp__automod_land",
+     "automod_abort",
+     "mcp__lloyd-mcp__automod_abort",
+     "automod_amend_clause",
+     "mcp__lloyd-mcp__automod_amend_clause",
+     "automod_rollback",
+     "mcp__lloyd-mcp__automod_rollback",
+     "automod_vault_land",
+     "mcp__lloyd-mcp__automod_vault_land",
+     "automod_vault_revert",
+     "mcp__lloyd-mcp__automod_vault_revert"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {},
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "worker:autotriage",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     },
+     {
+      "args": {
+       "scope": "worker:autotriage"
+      },
+      "fail_closed": true,
+      "matcher": null,
+      "name": "policy"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 0,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_worker",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "worker",
+   "system_prompt": "SYS{\"goal\": {}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"platform\": \"worker\", \"session_id\": \"20260924_120000_worker\", \"todos\": []}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "dedup_key": "dk",
+   "meta_path": "20260924_120000_worker.json",
+   "model": "R(primary)",
+   "prefetched_text": "<ambient priority=\"urgent\" source=\"calendar\" session_id=\"20260924_120000_worker\" server_clock=\"CLOCK\">\nsignal text\n</ambient>\n\nThe server clock when this was queued was **CLOCK** \u2014 that is a measured reading from this machine, not a date the producer wrote. Treat it as the current day: anything the signal above says about \"today\", a date, or a window has to agree with it or be reported as unverified (#1197).\nThis is a background signal from `calendar`. You were not asked a question \u2014 surface this now if the user should know. If it is not worth interrupting them, call `ambient_decide(session_id=\"20260924_120000_worker\", surface=false, reasoning=\"...\")` and stop. If it is worth surfacing, reply briefly and naturally \u2014 the user will see your message as a normal assistant turn.||TAIL[[], {}, {}, \"NOTE(worker)\"]",
+   "priority": "urgent",
+   "producer_source": "calendar",
+   "summary": "sum",
+   "text": "signal text"
+  }
+ },
+ "flush/autocode": {
+  "options": {
+   "allowed_tools": [
+    "memory_add"
+   ],
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0",
+    "grant_create",
+    "mcp__lloyd-mcp__grant_create"
+   ],
+   "disallowed_tools_refresh": null,
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {},
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "worker:autocode",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     },
+     {
+      "args": {
+       "scope": "worker:autocode"
+      },
+      "fail_closed": true,
+      "matcher": null,
+      "name": "policy"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 4,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 1,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_autocode",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "worker",
+   "system_prompt": "SYS{\"goal\": {}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"platform\": \"worker\", \"session_id\": \"20260924_120000_autocode\", \"todos\": []}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": false,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "dedup_key": "memory_flush",
+   "meta_path": "20260924_120000_autocode.json",
+   "model": "R(primary)",
+   "prefetched_text": "This conversation is about to reach its context limit, and its older turns will then be summarised. Before that happens, save what is worth keeping.\n\nRead memory first (`memory_read`) so you do not duplicate an entry. Then persist anything durable from this conversation that memory does not already hold:\n- a ruling or correction the user gave you \u2192 `memory_add` with type `feedback`;\n- a fact about the user \u2192 `memory_add` to USER.md with type `user`;\n- a decision, an open commitment or working state that outlives this chat \u2192 `memory_add` with type `project`;\n- where something lives (a path, a URL, a doc) \u2192 `memory_add` with type `reference`;\n- a fact about a named entity (a person, a project, a system) \u2192 `fact_add`.\n\nOne entry per fact, one sentence each. Skip anything already saved, anything true only of this moment, and anything you are unsure of. If nothing needs saving, save nothing.\n\nDo not address the user and do not continue the conversation. End with exactly one line naming what you saved (or `Saved nothing.`).",
+   "priority": "notable",
+   "producer_source": "memory_flush",
+   "summary": "memory flush before compaction",
+   "text": "This conversation is about to reach its context limit, and its older turns will then be summarised. Before that happens, save what is worth keeping.\n\nRead memory first (`memory_read`) so you do not duplicate an entry. Then persist anything durable from this conversation that memory does not already hold:\n- a ruling or correction the user gave you \u2192 `memory_add` with type `feedback`;\n- a fact about the user \u2192 `memory_add` to USER.md with type `user`;\n- a decision, an open commitment or working state that outlives this chat \u2192 `memory_add` with type `project`;\n- where something lives (a path, a URL, a doc) \u2192 `memory_add` with type `reference`;\n- a fact about a named entity (a person, a project, a system) \u2192 `fact_add`.\n\nOne entry per fact, one sentence each. Skip anything already saved, anything true only of this moment, and anything you are unsure of. If nothing needs saving, save nothing.\n\nDo not address the user and do not continue the conversation. End with exactly one line naming what you saved (or `Saved nothing.`)."
+  }
+ },
+ "flush/chat": {
+  "options": {
+   "allowed_tools": [
+    "memory_add"
+   ],
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0"
+   ],
+   "disallowed_tools_refresh": null,
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {},
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 4,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 1,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_chat",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "chat",
+   "system_prompt": "SYS{\"goal\": {}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"platform\": \"mission-control\", \"session_id\": \"20260924_120000_chat\", \"todos\": [{\"content\": \"t1\", \"status\": \"pending\"}]}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": false,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "dedup_key": "memory_flush",
+   "meta_path": "20260924_120000_chat.json",
+   "model": "R(primary)",
+   "prefetched_text": "This conversation is about to reach its context limit, and its older turns will then be summarised. Before that happens, save what is worth keeping.\n\nRead memory first (`memory_read`) so you do not duplicate an entry. Then persist anything durable from this conversation that memory does not already hold:\n- a ruling or correction the user gave you \u2192 `memory_add` with type `feedback`;\n- a fact about the user \u2192 `memory_add` to USER.md with type `user`;\n- a decision, an open commitment or working state that outlives this chat \u2192 `memory_add` with type `project`;\n- where something lives (a path, a URL, a doc) \u2192 `memory_add` with type `reference`;\n- a fact about a named entity (a person, a project, a system) \u2192 `fact_add`.\n\nOne entry per fact, one sentence each. Skip anything already saved, anything true only of this moment, and anything you are unsure of. If nothing needs saving, save nothing.\n\nDo not address the user and do not continue the conversation. End with exactly one line naming what you saved (or `Saved nothing.`).",
+   "priority": "notable",
+   "producer_source": "memory_flush",
+   "summary": "memory flush before compaction",
+   "text": "This conversation is about to reach its context limit, and its older turns will then be summarised. Before that happens, save what is worth keeping.\n\nRead memory first (`memory_read`) so you do not duplicate an entry. Then persist anything durable from this conversation that memory does not already hold:\n- a ruling or correction the user gave you \u2192 `memory_add` with type `feedback`;\n- a fact about the user \u2192 `memory_add` to USER.md with type `user`;\n- a decision, an open commitment or working state that outlives this chat \u2192 `memory_add` with type `project`;\n- where something lives (a path, a URL, a doc) \u2192 `memory_add` with type `reference`;\n- a fact about a named entity (a person, a project, a system) \u2192 `fact_add`.\n\nOne entry per fact, one sentence each. Skip anything already saved, anything true only of this moment, and anything you are unsure of. If nothing needs saving, save nothing.\n\nDo not address the user and do not continue the conversation. End with exactly one line naming what you saved (or `Saved nothing.`)."
+  }
+ },
+ "flush/chat_plan": {
+  "options": {
+   "allowed_tools": [
+    "memory_add"
+   ],
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(secondary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0",
+    "PLAN_BLOCK"
+   ],
+   "disallowed_tools_refresh": null,
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(secondary)"
+   },
+   "extra_body": {},
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 4,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(secondary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 1,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_chat_plan",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "chat",
+   "system_prompt": "SYS{\"goal\": {\"text\": \"ship it\"}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {\"plan_md_path\": \"/p.md\", \"plan_mode\": true}, \"platform\": \"mission-control\", \"session_id\": \"20260924_120000_chat_plan\", \"todos\": [{\"content\": \"t2\", \"status\": \"in_progress\"}]}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": false,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "dedup_key": "memory_flush",
+   "meta_path": "20260924_120000_chat_plan.json",
+   "model": "R(secondary)",
+   "prefetched_text": "This conversation is about to reach its context limit, and its older turns will then be summarised. Before that happens, save what is worth keeping.\n\nRead memory first (`memory_read`) so you do not duplicate an entry. Then persist anything durable from this conversation that memory does not already hold:\n- a ruling or correction the user gave you \u2192 `memory_add` with type `feedback`;\n- a fact about the user \u2192 `memory_add` to USER.md with type `user`;\n- a decision, an open commitment or working state that outlives this chat \u2192 `memory_add` with type `project`;\n- where something lives (a path, a URL, a doc) \u2192 `memory_add` with type `reference`;\n- a fact about a named entity (a person, a project, a system) \u2192 `fact_add`.\n\nOne entry per fact, one sentence each. Skip anything already saved, anything true only of this moment, and anything you are unsure of. If nothing needs saving, save nothing.\n\nDo not address the user and do not continue the conversation. End with exactly one line naming what you saved (or `Saved nothing.`).",
+   "priority": "notable",
+   "producer_source": "memory_flush",
+   "summary": "memory flush before compaction",
+   "text": "This conversation is about to reach its context limit, and its older turns will then be summarised. Before that happens, save what is worth keeping.\n\nRead memory first (`memory_read`) so you do not duplicate an entry. Then persist anything durable from this conversation that memory does not already hold:\n- a ruling or correction the user gave you \u2192 `memory_add` with type `feedback`;\n- a fact about the user \u2192 `memory_add` to USER.md with type `user`;\n- a decision, an open commitment or working state that outlives this chat \u2192 `memory_add` with type `project`;\n- where something lives (a path, a URL, a doc) \u2192 `memory_add` with type `reference`;\n- a fact about a named entity (a person, a project, a system) \u2192 `fact_add`.\n\nOne entry per fact, one sentence each. Skip anything already saved, anything true only of this moment, and anything you are unsure of. If nothing needs saving, save nothing.\n\nDo not address the user and do not continue the conversation. End with exactly one line naming what you saved (or `Saved nothing.`)."
+  }
+ },
+ "flush/new": "404",
+ "flush/worker": {
+  "options": {
+   "allowed_tools": [
+    "memory_add"
+   ],
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0",
+    "grant_create",
+    "mcp__lloyd-mcp__grant_create",
+    "automod_start",
+    "mcp__lloyd-mcp__automod_start",
+    "automod_gate",
+    "mcp__lloyd-mcp__automod_gate",
+    "automod_gate_wait",
+    "mcp__lloyd-mcp__automod_gate_wait",
+    "automod_land",
+    "mcp__lloyd-mcp__automod_land",
+    "automod_abort",
+    "mcp__lloyd-mcp__automod_abort",
+    "automod_amend_clause",
+    "mcp__lloyd-mcp__automod_amend_clause",
+    "automod_rollback",
+    "mcp__lloyd-mcp__automod_rollback",
+    "automod_vault_land",
+    "mcp__lloyd-mcp__automod_vault_land",
+    "automod_vault_revert",
+    "mcp__lloyd-mcp__automod_vault_revert"
+   ],
+   "disallowed_tools_refresh": null,
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {},
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "worker:autotriage",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     },
+     {
+      "args": {
+       "scope": "worker:autotriage"
+      },
+      "fail_closed": true,
+      "matcher": null,
+      "name": "policy"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 4,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 1,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_worker",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "worker",
+   "system_prompt": "SYS{\"goal\": {}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"platform\": \"worker\", \"session_id\": \"20260924_120000_worker\", \"todos\": []}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": false,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "dedup_key": "memory_flush",
+   "meta_path": "20260924_120000_worker.json",
+   "model": "R(primary)",
+   "prefetched_text": "This conversation is about to reach its context limit, and its older turns will then be summarised. Before that happens, save what is worth keeping.\n\nRead memory first (`memory_read`) so you do not duplicate an entry. Then persist anything durable from this conversation that memory does not already hold:\n- a ruling or correction the user gave you \u2192 `memory_add` with type `feedback`;\n- a fact about the user \u2192 `memory_add` to USER.md with type `user`;\n- a decision, an open commitment or working state that outlives this chat \u2192 `memory_add` with type `project`;\n- where something lives (a path, a URL, a doc) \u2192 `memory_add` with type `reference`;\n- a fact about a named entity (a person, a project, a system) \u2192 `fact_add`.\n\nOne entry per fact, one sentence each. Skip anything already saved, anything true only of this moment, and anything you are unsure of. If nothing needs saving, save nothing.\n\nDo not address the user and do not continue the conversation. End with exactly one line naming what you saved (or `Saved nothing.`).",
+   "priority": "notable",
+   "producer_source": "memory_flush",
+   "summary": "memory flush before compaction",
+   "text": "This conversation is about to reach its context limit, and its older turns will then be summarised. Before that happens, save what is worth keeping.\n\nRead memory first (`memory_read`) so you do not duplicate an entry. Then persist anything durable from this conversation that memory does not already hold:\n- a ruling or correction the user gave you \u2192 `memory_add` with type `feedback`;\n- a fact about the user \u2192 `memory_add` to USER.md with type `user`;\n- a decision, an open commitment or working state that outlives this chat \u2192 `memory_add` with type `project`;\n- where something lives (a path, a URL, a doc) \u2192 `memory_add` with type `reference`;\n- a fact about a named entity (a person, a project, a system) \u2192 `fact_add`.\n\nOne entry per fact, one sentence each. Skip anything already saved, anything true only of this moment, and anything you are unsure of. If nothing needs saving, save nothing.\n\nDo not address the user and do not continue the conversation. End with exactly one line naming what you saved (or `Saved nothing.`)."
+  }
+ },
+ "stream/autocode": {
+  "body_extra_disallowed": [
+   "grant_create",
+   "mcp__lloyd-mcp__grant_create"
+  ],
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": {
+    "window": 1010
+   },
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0",
+    "grant_create",
+    "mcp__lloyd-mcp__grant_create"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0",
+     "grant_create",
+     "mcp__lloyd-mcp__grant_create"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "item:autocode:3",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {},
+   "final_schema": {
+    "type": "object"
+   },
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "autonomy-task:9",
+   "history": [],
+   "hooks": {
+    "on_event": [
+     {
+      "args": {
+       "session_id": "20260924_120000_autocode",
+       "source": "autocode",
+       "user_prompt": "implement #2"
+      },
+      "name": "action_review"
+     }
+    ],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     },
+     {
+      "args": {
+       "scope": "autonomy-task:9"
+      },
+      "fail_closed": true,
+      "matcher": null,
+      "name": "policy"
+     },
+     {
+      "args": {
+       "already_injected": []
+      },
+      "fail_closed": false,
+      "matcher": null,
+      "name": "skill_dispatch"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 0,
+   "request_timeout_s": 600.0,
+   "session_id": "",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "worker",
+   "system_prompt": "SYS{\"goal\": {}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"platform\": \"worker\", \"session_id\": \"20260924_120000_autocode\", \"todos\": []}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "deadline_seconds": 0.0,
+   "meta_path": "20260924_120000_autocode.json",
+   "model": "R(primary)",
+   "prefetched_text": "VR:PF[implement #2|plan_mode=False]||TAIL[[], {}, {}, \"NOTE(worker)\"]",
+   "text": "implement #2"
+  }
+ },
+ "stream/chat": {
+  "body_extra_disallowed": null,
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": {
+    "window": 1010
+   },
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {},
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     },
+     {
+      "args": {
+       "already_injected": []
+      },
+      "fail_closed": false,
+      "matcher": null,
+      "name": "skill_dispatch"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 0,
+   "request_timeout_s": 600.0,
+   "session_id": "",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "chat",
+   "system_prompt": "SYS{\"goal\": {}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"platform\": \"mission-control\", \"session_id\": \"20260924_120000_chat\", \"todos\": [{\"content\": \"t1\", \"status\": \"pending\"}]}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "deadline_seconds": 0.0,
+   "meta_path": "20260924_120000_chat.json",
+   "model": "R(primary)",
+   "prefetched_text": "<system-reminder>This session has 20 turns. If any important decisions, preferences, system changes, or facts from earlier in this conversation haven't been captured yet, consider calling memory_add or fact_add now before context compaction loses them.</system-reminder>\n\nVR:PF[hello there|plan_mode=False]||TAIL[[{\"content\": \"t1\", \"status\": \"pending\"}], {}, {}, \"NOTE(mission-control)\"]",
+   "text": "hello there"
+  }
+ },
+ "stream/chat_plan": {
+  "body_extra_disallowed": [
+   "X"
+  ],
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(override-model)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": {
+    "window": 1017
+   },
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0",
+    "PLAN_BLOCK",
+    "X"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0",
+     "PLAN_BLOCK",
+     "X"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(override-model)"
+   },
+   "extra_body": {},
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     },
+     {
+      "args": {
+       "already_injected": []
+      },
+      "fail_closed": false,
+      "matcher": null,
+      "name": "skill_dispatch"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(override-model)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "default",
+   "preserve_thinking_iterations": 3,
+   "priority": 2,
+   "request_timeout_s": 600.0,
+   "session_id": "",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "chat",
+   "system_prompt": "SYS{\"goal\": {\"text\": \"ship it\"}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {\"plan_md_path\": \"/p.md\", \"plan_mode\": true}, \"platform\": \"mission-control\", \"session_id\": \"20260924_120000_chat_plan\", \"todos\": [{\"content\": \"t2\", \"status\": \"in_progress\"}]}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "deadline_seconds": 0.0,
+   "meta_path": "20260924_120000_chat_plan.json",
+   "model": "R(override-model)",
+   "prefetched_text": "VR:PF[plan it|plan_mode=True]||TAIL[[{\"content\": \"t2\", \"status\": \"in_progress\"}], {\"plan_md_path\": \"/p.md\", \"plan_mode\": true}, {\"text\": \"ship it\"}, \"NOTE(mission-control)\"]",
+   "text": "plan it"
+  }
+ },
+ "stream/new": {
+  "body_extra_disallowed": null,
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": {
+    "window": 1010
+   },
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {},
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     },
+     {
+      "args": {
+       "already_injected": []
+      },
+      "fail_closed": false,
+      "matcher": null,
+      "name": "skill_dispatch"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 0,
+   "request_timeout_s": 600.0,
+   "session_id": "",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "chat",
+   "system_prompt": "SYS{\"goal\": {}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"platform\": \"mission-control\", \"session_id\": \"20260924_120000_new\", \"todos\": []}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "deadline_seconds": 0.0,
+   "meta_path": "20260924_120000_new.json",
+   "model": "R(primary)",
+   "prefetched_text": "VR:PF[first message|plan_mode=False]||TAIL[[], {}, {}, \"NOTE(mission-control)\"]",
+   "text": "first message"
+  }
+ },
+ "stream/worker": {
+  "body_extra_disallowed": [
+   "http_request",
+   "grant_create",
+   "mcp__lloyd-mcp__grant_create",
+   "automod_start",
+   "mcp__lloyd-mcp__automod_start",
+   "automod_gate",
+   "mcp__lloyd-mcp__automod_gate",
+   "automod_gate_wait",
+   "mcp__lloyd-mcp__automod_gate_wait",
+   "automod_land",
+   "mcp__lloyd-mcp__automod_land",
+   "automod_abort",
+   "mcp__lloyd-mcp__automod_abort",
+   "automod_amend_clause",
+   "mcp__lloyd-mcp__automod_amend_clause",
+   "automod_rollback",
+   "mcp__lloyd-mcp__automod_rollback",
+   "automod_vault_land",
+   "mcp__lloyd-mcp__automod_vault_land",
+   "automod_vault_revert",
+   "mcp__lloyd-mcp__automod_vault_revert"
+  ],
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": {
+    "window": 1010
+   },
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0",
+    "http_request",
+    "grant_create",
+    "mcp__lloyd-mcp__grant_create",
+    "automod_start",
+    "mcp__lloyd-mcp__automod_start",
+    "automod_gate",
+    "mcp__lloyd-mcp__automod_gate",
+    "automod_gate_wait",
+    "mcp__lloyd-mcp__automod_gate_wait",
+    "automod_land",
+    "mcp__lloyd-mcp__automod_land",
+    "automod_abort",
+    "mcp__lloyd-mcp__automod_abort",
+    "automod_amend_clause",
+    "mcp__lloyd-mcp__automod_amend_clause",
+    "automod_rollback",
+    "mcp__lloyd-mcp__automod_rollback",
+    "automod_vault_land",
+    "mcp__lloyd-mcp__automod_vault_land",
+    "automod_vault_revert",
+    "mcp__lloyd-mcp__automod_vault_revert"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0",
+     "http_request",
+     "grant_create",
+     "mcp__lloyd-mcp__grant_create",
+     "automod_start",
+     "mcp__lloyd-mcp__automod_start",
+     "automod_gate",
+     "mcp__lloyd-mcp__automod_gate",
+     "automod_gate_wait",
+     "mcp__lloyd-mcp__automod_gate_wait",
+     "automod_land",
+     "mcp__lloyd-mcp__automod_land",
+     "automod_abort",
+     "mcp__lloyd-mcp__automod_abort",
+     "automod_amend_clause",
+     "mcp__lloyd-mcp__automod_amend_clause",
+     "automod_rollback",
+     "mcp__lloyd-mcp__automod_rollback",
+     "automod_vault_land",
+     "mcp__lloyd-mcp__automod_vault_land",
+     "automod_vault_revert",
+     "mcp__lloyd-mcp__automod_vault_revert"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "item:autotriage:7",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {},
+   "final_schema": {
+    "type": "object"
+   },
+   "final_schema_prompt": "restate",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "worker:autotriage",
+   "history": [],
+   "hooks": {
+    "on_event": [
+     {
+      "args": {
+       "session_id": "20260924_120000_worker",
+       "source": "autotriage",
+       "user_prompt": "triage #1"
+      },
+      "name": "action_review"
+     }
+    ],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     },
+     {
+      "args": {
+       "scope": "worker:autotriage"
+      },
+      "fail_closed": true,
+      "matcher": null,
+      "name": "policy"
+     },
+     {
+      "args": {
+       "already_injected": []
+      },
+      "fail_closed": false,
+      "matcher": null,
+      "name": "skill_dispatch"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 200,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 1,
+   "request_timeout_s": 600.0,
+   "session_id": "",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "worker",
+   "system_prompt": "SYS{\"goal\": {}, \"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"platform\": \"worker\", \"session_id\": \"20260924_120000_worker\", \"todos\": []}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "deadline_seconds": 900.0,
+   "meta_path": "20260924_120000_worker.json",
+   "model": "R(primary)",
+   "prefetched_text": "VR:PF[triage #1|plan_mode=False]||TAIL[[], {}, {}, \"NOTE(worker)\"]",
+   "text": "triage #1"
+  }
+ },
+ "voice/autocode": {
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {
+    "voice": true
+   },
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 0,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_autocode",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "",
+   "system_prompt": "SYS{\"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"session_id\": \"20260924_120000_autocode\", \"todos\": []}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "meta_path": "20260924_120000_autocode.json",
+   "model": "R(primary)",
+   "plan_mode": false,
+   "turn_tail": "TAIL[[], {}, null, \"NOTE()\"]"
+  }
+ },
+ "voice/chat": {
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {
+    "voice": true
+   },
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 0,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_chat",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "",
+   "system_prompt": "SYS{\"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"session_id\": \"20260924_120000_chat\", \"todos\": [{\"content\": \"t1\", \"status\": \"pending\"}]}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "meta_path": "20260924_120000_chat.json",
+   "model": "R(primary)",
+   "plan_mode": false,
+   "turn_tail": "TAIL[[{\"content\": \"t1\", \"status\": \"pending\"}], {}, null, \"NOTE()\"]"
+  }
+ },
+ "voice/chat_plan": {
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(secondary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0",
+    "PLAN_BLOCK"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0",
+     "PLAN_BLOCK"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(secondary)"
+   },
+   "extra_body": {
+    "voice": true
+   },
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(secondary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 0,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_chat_plan",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "",
+   "system_prompt": "SYS{\"memories_text\": \"FROZEN-MEM\", \"plan\": {\"plan_md_path\": \"/p.md\", \"plan_mode\": true}, \"session_id\": \"20260924_120000_chat_plan\", \"todos\": [{\"content\": \"t2\", \"status\": \"in_progress\"}]}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "meta_path": "20260924_120000_chat_plan.json",
+   "model": "R(secondary)",
+   "plan_mode": true,
+   "turn_tail": "TAIL[[{\"content\": \"t2\", \"status\": \"in_progress\"}], {\"plan_md_path\": \"/p.md\", \"plan_mode\": true}, null, \"NOTE()\"]"
+  }
+ },
+ "voice/new": {
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {
+    "voice": true
+   },
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 0,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_new",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "",
+   "system_prompt": "SYS{\"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"session_id\": \"20260924_120000_new\", \"todos\": []}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "meta_path": "20260924_120000_new.json",
+   "model": "R(primary)",
+   "plan_mode": false,
+   "turn_tail": "TAIL[[], {}, null, \"NOTE()\"]"
+  }
+ },
+ "voice/worker": {
+  "options": {
+   "allowed_tools": null,
+   "api_key": "no-key-required",
+   "base_url": "http://engine/R(primary)",
+   "cancel_event": null,
+   "chat_messages_handle": null,
+   "context_meter": null,
+   "context_relief_enabled": true,
+   "context_relief_min_completion_tokens": 6000,
+   "context_relief_reasoning_keep_under_pressure": 2,
+   "context_relief_send_max_tokens_reservation": false,
+   "context_relief_shrink_arguments": true,
+   "context_relief_shrink_arguments_min_chars": 2000,
+   "context_relief_shrink_arguments_tools": [
+    "Write",
+    "Edit"
+   ],
+   "context_relief_terminal_floor_tokens": 12000,
+   "disallowed_tools": [
+    "D0"
+   ],
+   "disallowed_tools_refresh": {
+    "refreshed": [
+     "D0"
+    ]
+   },
+   "echo_guard_mode": "nudge",
+   "effect_scope": "",
+   "effort": null,
+   "env": {
+    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
+   },
+   "extra_body": {
+    "voice": true
+   },
+   "final_schema": null,
+   "final_schema_prompt": "",
+   "finalizer_max_tokens": 8192,
+   "finalizer_timeout_s": 180.0,
+   "grant_scope": "",
+   "history": [],
+   "hooks": {
+    "on_event": [],
+    "post": [],
+    "post_failure": [],
+    "pre": [
+     {
+      "args": {},
+      "fail_closed": true,
+      "matcher": null,
+      "name": "safety"
+     }
+    ]
+   },
+   "intra_turn_microcompact_enabled": true,
+   "intra_turn_microcompact_keep_recent": 15,
+   "intra_turn_microcompact_min_chars": 2000,
+   "intra_turn_microcompact_non_compactable": null,
+   "intra_turn_microcompact_target_fraction": 0.6,
+   "intra_turn_microcompact_threshold": 15,
+   "intra_turn_microcompact_trigger_fraction": 0.8,
+   "max_turns": 60,
+   "max_turns_wrapup": false,
+   "max_turns_wrapup_base_urls": [],
+   "mcp_servers": {
+    "lloyd-mcp": {
+     "url": "u"
+    }
+   },
+   "model": "R(primary)",
+   "notification_drain": null,
+   "parallel_safe_task_profiles": [],
+   "parallel_tool_calls_enabled": false,
+   "parallel_tool_calls_max_concurrency": 4,
+   "permission_mode": "bypassPermissions",
+   "preserve_thinking_iterations": 3,
+   "priority": 0,
+   "request_timeout_s": 600.0,
+   "session_id": "20260924_120000_worker",
+   "state_anchor": null,
+   "stream_chunk_timeout_s": 0.0,
+   "stream_retry_backoff_s": 2.0,
+   "stream_retry_max": 1,
+   "surface": "",
+   "system_prompt": "SYS{\"memories_text\": \"FROZEN-MEM\", \"plan\": {}, \"session_id\": \"20260924_120000_worker\", \"todos\": []}",
+   "thinking": null,
+   "tool_call_summaries": true,
+   "tool_search_baseline": [],
+   "tool_search_enabled": true,
+   "tool_search_max_results_cap": 20,
+   "tool_search_max_results_default": 5,
+   "tool_search_threshold_tools": 30,
+   "turn_id": "",
+   "visible_tools_capture": null
+  },
+  "payload": {
+   "meta_path": "20260924_120000_worker.json",
+   "model": "R(primary)",
+   "plan_mode": false,
+   "turn_tail": "TAIL[[], {}, null, \"NOTE()\"]"
+  }
+ }
+}

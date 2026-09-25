@@ -170,10 +170,17 @@ def test_installed_for_worker_turns_only():
 
 
 def test_the_stream_route_installs_it_through_the_helper():
+    """P13.4: the stream route builds its turn through `build_turn_options`,
+    whose `stream` branch is the one caller of the helper. That it lands on
+    exactly the stream kind, for a worker session, is pinned behaviourally by
+    `tests/test_turn_options.py` (the recorded `on_event` hooks per kind)."""
     import inspect
-    from app.routers import messages
-    src = inspect.getsource(messages.post_message_stream)
+    from app.routers import messages, turn_options
+    assert 'build_turn_options(snapshot, data, "stream"' in \
+        inspect.getsource(messages.post_message_stream)
+    src = inspect.getsource(turn_options.build_turn_options)
     assert "_install_action_review(" in src
+    assert src.count("_install_action_review(") == 1
 
 
 def test_the_seam_has_a_frozen_schema_and_ships_ungated():

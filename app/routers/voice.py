@@ -26,11 +26,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.config import (
     CONFIG,
-    _get_model_env,
     _model_base_url,
-    _resolve_model_name,
 )
-from app.harness import HookRegistry, RunOptions, install_default_safety_hook
 from app.paths import SESSIONS_DIR, VOICE_PROFILES_DIR
 from app.sessions_io import (
     SessionTurn,
@@ -38,8 +35,6 @@ from app.sessions_io import (
     enqueue_turn,
     set_last_user_session,
 )
-from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_harness_kwargs
-from prompt_builder import build_system_prompt
 from prefetch import prefetch_context_async
 
 
@@ -249,76 +244,18 @@ def _voice_turn_setup(session_id: str) -> dict:
     set up" would drift, and the first sign would be a prewarm that silently
     warms a prefix nobody uses.
     """
-    import json
+    from app.routers.turn_options import SessionSnapshot, build_turn_options
 
-    model = ""
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
-    existing: dict = {}
-    if meta_path.exists():
-        try:
-            existing = json.loads(meta_path.read_text())
-            model = existing.get("model", "") or ""
-        except Exception:
-            pass
-
-    if not model:
-        model = CONFIG.get("model", {}).get("default", "")
-    model = _resolve_model_name(model)
-    model_env = _get_model_env(model)
-
-    voice_plan = existing.get("plan") or {}
-    voice_plan_mode = bool(voice_plan.get("plan_mode"))
-    # P1: the frozen memory snapshot and the state/delta tail, as the chat
-    # path builds them. Both no-ops by default.
-    from app import memory_snapshot, prompt_layout
-
-    frozen_mem, memory_note = memory_snapshot.frozen_memories(session_id)
-    system_prompt = build_system_prompt(
-        session_id=session_id,
-        todos=existing.get("todos") or [], plan=voice_plan,
-        **prompt_layout.mem_kwargs(frozen_mem),
-    )
-    turn_tail = prompt_layout.turn_tail(
-        existing.get("todos") or [], voice_plan, None, memory_note)
-
-    def _voice_refresh_disallowed() -> list[str]:
-        from app.paths import SESSIONS_DIR as _SD
-        try:
-            d = json.loads((_SD / f"{session_id}.json").read_text())
-            live = bool((d.get("plan") or {}).get("plan_mode"))
-        except Exception:
-            live = False
-        return _get_disallowed_tools(plan_mode=live)
-
-    # #1136. A spoken turn has the same tool surface a chat turn has — the same
-    # MCP servers, hence the same tier-2 senders — and until this line it had no
-    # PreToolUse hook of any kind: the options were built with no `hooks`
-    # argument, `RunOptions.hooks` defaults to None, and the SessionTurn ran them
-    # verbatim. The cross-file finder added in this same round is what saw it; a
-    # per-file grep asks "does this file install hooks", and a file that installs
-    # nothing is never asked. The registry is built here so the turn and its
-    # prewarm (`_prewarm` reuses this dict) arm identically.
-    turn_hooks = HookRegistry()
-    install_default_safety_hook(turn_hooks)
-
-    options = RunOptions(
-        model=model,
-        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
-        system_prompt=system_prompt,
-        max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
-        permission_mode=CONFIG.get("agent", {}).get(
-            "permission_mode", "bypassPermissions"
-        ),
-        mcp_servers=_get_mcp_servers(),
-        disallowed_tools=_get_disallowed_tools(plan_mode=voice_plan_mode),
-        disallowed_tools_refresh=_voice_refresh_disallowed,
-        env=model_env,
-        session_id=session_id,
-        priority=0,
-        extra_body=_voice_extra_body(),
-        hooks=turn_hooks,
-        **_get_harness_kwargs(),
-    )
+    # #1136: a spoken turn has the same tool surface a chat turn has — the
+    # same MCP servers, hence the same tier-2 senders — so it carries the
+    # safety floor (and the content gate inside it). The builder's `voice`
+    # branch is the one definition; the prewarm reuses this dict, so the turn
+    # and its prewarm arm identically and send the byte-identical prefix.
+    snapshot = SessionSnapshot.load(session_id, SESSIONS_DIR)
+    build = build_turn_options(snapshot, {}, "voice")
+    model, options, turn_tail = build.model, build.options, build.turn_tail
+    meta_path = snapshot.path
+    voice_plan_mode = snapshot.plan_mode
     return {"model": model, "meta_path": meta_path, "options": options,
             "plan_mode": voice_plan_mode, "turn_tail": turn_tail}
 

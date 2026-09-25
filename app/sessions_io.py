@@ -18,6 +18,7 @@ import asyncio
 import contextvars
 import json
 import logging
+import threading
 import time as _time
 from collections import deque
 from dataclasses import dataclass, field
@@ -1088,19 +1089,112 @@ async def mutate_session(session_id: str, fn, *, path: Path | None = None) -> bo
     Expensive work (LLM calls, etc.) must happen OUTSIDE this helper;
     only apply the result via a small `fn` callback.
 
+    **The read, `fn`, the dump and the write run in a worker thread** (P13.5),
+    with the lock held by the awaiting coroutine across it — so the ordering
+    guarantee is unchanged and the event loop keeps serving every other session
+    while a multi-megabyte transcript is parsed and re-serialised. Measured on a
+    1.1 MB session (`eval/measure_session_io_stalls.py`, architecture/harness.md
+    "P13.5"): every append stalled the loop past 10 ms before (max 16-25 ms),
+    none after (max 6-8 ms, the GIL-held `json.loads`). So `fn` runs
+    off the loop thread: it may mutate `data` and the variables of its own
+    closure, and must not touch asyncio objects (an Event, a Queue, the loop).
+    `indent=2` is kept; the format is its own measurable item.
+
     `path` names the file when it is not `SESSIONS_DIR/<id>.json` — the
     compaction record (D2) is saved beside whatever file the turn-start stack
     was handed, which in an eval or a test is not the live directory. The
     lock is still keyed by `session_id`.
     """
     meta_path = Path(path) if path is not None else SESSIONS_DIR / f"{session_id}.json"
-    async with _get_file_lock(session_id):
+
+    def _rmw() -> bool:
         if not meta_path.exists():
             return False
         data = json.loads(meta_path.read_text())
         fn(data)
         atomic_write_text(meta_path, json.dumps(data, indent=2))
         return True
+
+    async with _get_file_lock(session_id):
+        return await asyncio.to_thread(_rmw)
+
+
+#: `read_session_fields` cache: path -> (stat key, fields). Bounded: one
+#: entry per session touched, oldest dropped past the cap. Only files that were
+#: already older than `_FIELDS_RACY_NS` when they were read are cached — git's
+#: "racily clean" rule: file times tick at the kernel's coarse clock (a jiffy),
+#: so a same-size in-place rewrite inside that tick would carry an identical
+#: key; a file that had been quiet for 50 ms when it was read cannot be
+#: rewritten later with the time it already has.
+_FIELDS_CACHE: dict[str, tuple[tuple, dict]] = {}
+_FIELDS_CACHE_MAX = 256
+#: Readers run on the loop and in `asyncio.to_thread` workers alike.
+_FIELDS_LOCK = threading.Lock()
+_FIELDS_RACY_NS = 50_000_000
+
+
+def _session_fields_of(data: dict) -> dict:
+    """The small, per-turn fields of a parsed session — everything a turn's
+    options are built from, and nothing that grows with the transcript."""
+    return {
+        "exists": True,
+        "model": data.get("model", "") or "",
+        "platform": data.get("platform") or "",
+        "source": data.get("source") or "",
+        "todos": data.get("todos") or [],
+        "plan": data.get("plan") or {},
+        "goal": data.get("goal") or {},
+        "inner_voice": bool(data.get("inner_voice", False)),
+        "inner_voice_evaluate_user_turns":
+            bool(data.get("inner_voice_evaluate_user_turns", False)),
+        # Real user turns only — ambient producer rows and background-task
+        # notifications are also role="user" but carry a non-user source.
+        "user_turns": sum(
+            1 for m in data.get("messages", [])
+            if m.get("role") == "user" and (m.get("source") or "user") == "user"),
+    }
+
+
+def read_session_fields(path: Path) -> dict | None:
+    """The session's small fields (`_session_fields_of`), parsed at most once
+    per version of the file (P13.4/P13.5).
+
+    Keyed by `(st_ino, st_mtime_ns, st_ctime_ns, st_size)`: every writer goes
+    through `atomic_write_text`, which renames a fresh file into place, so a
+    write changes the inode as well as the times; and a file younger than
+    `_FIELDS_RACY_NS` is parsed but never cached, so even an in-place rewrite
+    inside one clock tick cannot be answered from a stale entry. The per-iteration
+    plan-mode refresher and the todo anchor read through this, and on a long
+    session each of those used to re-parse the whole transcript.
+
+    Returns None when the file does not exist, and raises what `json.loads`
+    raises on a malformed file, like the reads it replaces — callers keep
+    their own fallbacks. Returns a deep copy, so a caller mutating what it got
+    cannot poison the cache.
+    """
+    import copy
+    import os
+
+    read_start_ns = _time.time_ns()
+    try:
+        st = os.stat(path)
+    except FileNotFoundError:
+        return None
+    key = (st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+    cache_key = str(path)
+    with _FIELDS_LOCK:
+        hit = _FIELDS_CACHE.get(cache_key)
+        if hit is not None and hit[0] == key:
+            return copy.deepcopy(hit[1])
+    fields = _session_fields_of(json.loads(Path(path).read_text()))
+    if read_start_ns - max(st.st_mtime_ns, st.st_ctime_ns) < _FIELDS_RACY_NS:
+        return fields  # racily fresh: parsed, not cached
+    with _FIELDS_LOCK:
+        _FIELDS_CACHE.pop(cache_key, None)
+        _FIELDS_CACHE[cache_key] = (key, fields)
+        while len(_FIELDS_CACHE) > _FIELDS_CACHE_MAX:
+            _FIELDS_CACHE.pop(next(iter(_FIELDS_CACHE)))
+    return copy.deepcopy(fields)
 
 
 async def _save_session_meta(session_id: str, model: str, preview: str = "",
@@ -1125,7 +1219,7 @@ async def _save_session_meta(session_id: str, model: str, preview: str = "",
     (`scripts/automod/review.py:write_session` stamps the same word for the
     same reason). The slug from the name is recorded as `source` so the
     Background tab can group it. Nothing in the tree creates a *user* session
-    with a four-part id — the three chat mints are pinned to three parts in
+    with a four-part id — the two chat mints are pinned to three parts in
     `tests/test_session_platform_checks.py` — so this branch cannot hide a
     conversation; if that ever stops being true, that test fails first.
 
@@ -1140,7 +1234,8 @@ async def _save_session_meta(session_id: str, model: str, preview: str = "",
     now = session_now_iso()
     background_shaped = is_background_session_name(session_id)
     requested = platform if platform in NON_USER_PLATFORMS else None
-    async with _get_file_lock(session_id):
+
+    def _write() -> None:
         if meta_path.exists():
             data = json.loads(meta_path.read_text())
             data["last_active"] = now
@@ -1183,6 +1278,11 @@ async def _save_session_meta(session_id: str, model: str, preview: str = "",
         # than relying on something else in the boot having run first.
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         atomic_write_text(meta_path, json.dumps(data, indent=2))
+
+    # Off the loop, like `mutate_session` (P13.5): the parse and dump of a
+    # long transcript used to stall every other session for tens of ms per POST.
+    async with _get_file_lock(session_id):
+        await asyncio.to_thread(_write)
 
 
 async def _append_messages(session_id: str, new_messages: list[dict]):

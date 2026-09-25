@@ -779,8 +779,7 @@ def is_exempt(scope: str, exempt: Mapping[str, str] | None = None) -> str | None
 GATE_ARM_POINTS: tuple[str, ...] = (
     "app/harness/safety.py",                       # the floor every turn takes
     "agent_mcp/builtin_task.py",                   # Task subagent turns
-    "app/routers/messages.py",                     # the 3 chat/ambient dispatch sites
-    "app/routers/voice.py",                        # spoken turns
+    "app/routers/turn_options.py",                 # every chat/ambient/flush/voice turn (P13.4)
     "autonomy.py",                                 # autonomy task turns
     "workers/sources/_common.py",                  # every worker slot (worker + task)
     "scripts/autoresearch/bench_runner_sdk.py",    # the scored bench path

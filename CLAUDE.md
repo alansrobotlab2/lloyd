@@ -3113,7 +3113,7 @@ literal, because a seventh reader written next month is how this comes back.
   against ~14 chats, measured over the week to 2026-09-10. `/api/sessions` and
   `_scan_recent_sessions` skip a four-part id *unread*, which is safe only
   while nothing that creates a user session mints one;
-  `tests/test_session_platform_checks.py` pins the three mints. The Background
+  `tests/test_session_platform_checks.py` pins the two mints. The Background
   listing parses every four-part file and judges it by `platform`. Eight
   `…_autonomy_…` sessions from the sandbox experiment at 2026-09-09 15:38 are
   four-part and labelled `mission-control`, so they appear in neither.

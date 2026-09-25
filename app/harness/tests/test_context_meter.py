@@ -781,8 +781,8 @@ def test_the_event_and_the_usage_record_cannot_disagree_about_a_pass(
     from app.harness.loop import _relieve_context
 
     monkeypatch.setattr(event_log, "EVENT_LOGS_DIR", tmp_path)
-    # The writer registers the turn first — that is `messages.py:_run_turn`,
-    # `messages.py:post_message` or `run_recorder._RunRecorder.__init__` in
+    # The writer registers the turn first — that is `messages.py:_run_turn`
+    # or `run_recorder._RunRecorder.__init__` in
     # production — and then the loop, which has never seen that object, books its
     # pass into it by `options.session_id` alone.
     turn = compaction_record.start_turn("s1078_join", "run-join")

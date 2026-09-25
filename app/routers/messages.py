@@ -1,4 +1,4 @@
-"""Chat endpoints — SSE streaming and synchronous one-shot.
+"""Chat endpoints — SSE streaming (the synchronous one-shot is deleted, P13.6).
 
 `POST /api/message/stream` enqueues a user turn onto the session's queue
 and returns a StreamingResponse that subscribes to the turn's event
@@ -21,26 +21,21 @@ from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 import usage_store
 from app.config import (
     CONFIG,
-    _get_model_env,
     _model_base_url,
-    _resolve_model_name,
 )
 from app.harness import (
     run_query,
     RunOptions,
     HookRegistry,
-    install_default_safety_hook,
-    install_skill_dispatch_hook,
 )
-from app.harness.context_meter import ContextMeter, context_window_for
 from app.harness.events import trim_discarded
 from app.harness.turn_guards import install_turn_guards
-from app.harness.skill_dispatch import injected_skill_names, skill_deliveries
+from app.harness.skill_dispatch import skill_deliveries
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
     SessionTurn,
@@ -55,19 +50,17 @@ from app.sessions_io import (
     set_last_user_session,
     take_ambient_decision,
     ambient_clock_stamp,
+    read_session_fields,
     set_turn_activity,
     tool_activity_detail,
 )
-from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_harness_kwargs
 from app.post_capture import _post_session_capture, _maybe_extract_focus
 from app.session_titles import maybe_title_session
-from prompt_builder import build_system_prompt
 from prefetch import prefetch_context_async, log_turn_prompt_budget
 from app.compaction import load_and_compact_session
 from app import event_log as _event_log  # Inner Voice — agent-side event capture
 from app import compaction_record as _compaction_record  # which context policy fired
 from app import prefix_miss as _prefix_miss
-from app import memory_snapshot as _memory_snapshot
 from app import prompt_layout as _prompt_layout
 from app import turn_usage
 from app import sessions_io
@@ -95,10 +88,15 @@ from app.routers._messages_subliminal import (
     _detect_subliminal_sources,
     _build_subliminal_entry,
 )
-from app.harness.policy import GRANT_MINT_TOOL, install_policy_hook
+from app.harness.policy import GRANT_MINT_TOOL
 from app.tool_bans import WORKER_AUTOMOD_BAN
 from app.harness.action_review import install_action_review_hook
 from app.routers._messages_thinking import _build_thinking_entry
+from app.routers.turn_options import (
+    SessionSnapshot,
+    arm_skill_dispatch,
+    build_turn_options,
+)
 from app.transcript_entries import (
     build_assistant_text_entry,
     build_tool_call,
@@ -107,10 +105,8 @@ from app.transcript_entries import (
     shape_tool_result_for_transcript,
 )
 from app.routers._messages_inner_voice import (
-    _session_inner_voice_enabled,
     _session_iv_evaluate_user_turns_enabled,
     _iv_should_fire_on_turn,
-    _inner_voice_hooks_dict,
     attach_observer_for_turn,
     close_observer,
 )
@@ -205,14 +201,15 @@ def _load_session_todos(session_id: str) -> list[dict]:
     or the session simply has no todos. The empty case is the common case
     for a fresh session — `build_system_prompt(todos=[])` then renders no
     `<active_todos>` block, so the cache stays warm.
+
+    Read through `sessions_io.read_session_fields` (P13.5): parsed once per
+    version of the file, so the todo anchor's re-reads inside a long turn cost
+    a `stat` until something writes the session.
     """
     if not session_id:
         return []
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
-    if not meta_path.exists():
-        return []
     try:
-        return json.loads(meta_path.read_text()).get("todos") or []
+        return (read_session_fields(SESSIONS_DIR / f"{session_id}.json") or {}).get("todos") or []
     except Exception:
         return []
 
@@ -412,14 +409,12 @@ def _load_session_plan(session_id: str) -> dict:
     Shape mirrors what `agent_mcp/builtin_plan.py` writes:
     `{plan_mode: bool, plan_md_path: str, stages: list, created_at, ...}`.
     Returns `{}` when the session doesn't exist or has no plan field.
+    Cached per file version, like `_load_session_todos`.
     """
     if not session_id:
         return {}
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
-    if not meta_path.exists():
-        return {}
     try:
-        return json.loads(meta_path.read_text()).get("plan") or {}
+        return (read_session_fields(SESSIONS_DIR / f"{session_id}.json") or {}).get("plan") or {}
     except Exception:
         return {}
 
@@ -432,15 +427,12 @@ def _load_session_goal(session_id: str) -> dict:
     doesn't exist or has no goal field. The system prompt renders an
     achieved goal as a closed banner; the observer's persistent_goal
     plumbing filters achieved goals to None so they don't trigger the
-    completion loop again.
+    completion loop again. Cached per file version, like `_load_session_todos`.
     """
     if not session_id:
         return {}
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
-    if not meta_path.exists():
-        return {}
     try:
-        return json.loads(meta_path.read_text()).get("goal") or {}
+        return (read_session_fields(SESSIONS_DIR / f"{session_id}.json") or {}).get("goal") or {}
     except Exception:
         return {}
 
@@ -529,7 +521,8 @@ def _install_action_review(hooks: HookRegistry, *, platform: str, text: str,
                                       session_id=session_id)
 
 
-def _authority_scope_for(session_id: str, data: dict) -> str:
+def _authority_scope_for(session_id: str, data: dict, *,
+                         identity: tuple[str, str] | None = None) -> str:
     """#534 — gate tier-2/3 tools on a live grant, for a non-user turn.
 
     The gate is a PreToolUse hook installed by whoever builds the
@@ -557,8 +550,11 @@ def _authority_scope_for(session_id: str, data: dict) -> str:
     caller installs — the ban has to reach the request body before the
     endpoint reads its disallowed list off it, and the hook goes onto a
     registry that does not exist yet at that point.
+
+    `identity` is the `(platform, source)` a caller already read
+    (`turn_options.SessionSnapshot.identity`); None reads the file.
     """
-    platform, source = _session_identity(session_id)
+    platform, source = identity or _session_identity(session_id)
     scope = str(data.get("grant_scope") or "").strip()
     if not scope and platform not in sessions_io.NON_USER_PLATFORMS:
         return ""
@@ -593,7 +589,8 @@ def _ban_grant_minting(data: dict) -> list[str]:
 AUTOMOD_DRIVER_SOURCES: frozenset[str] = frozenset({"autocode"})
 
 
-def _ban_automod_for_workers(data: dict, session_id: str) -> list[str]:
+def _ban_automod_for_workers(data: dict, session_id: str, *,
+                             identity: tuple[str, str] | None = None) -> list[str]:
     """#709 — take the self-modification tools off every other worker turn.
 
     `WORKER_AUTOMOD_BAN` was enforced per call site: `run_prompt_on_primary`
@@ -609,10 +606,11 @@ def _ban_automod_for_workers(data: dict, session_id: str) -> list[str]:
     Written into `data["extra_disallowed"]` for the same reason as the grant
     ban: `_refresh_disallowed_for_session` re-reads that key every iteration.
     Returns the list `data` now carries (unchanged for a chat or autocode
-    turn), so the ambient site can capture it once.
+    turn), so the ambient site can capture it once. `identity` as for
+    `_authority_scope_for`.
     """
     banned = list(data.get("extra_disallowed") or [])
-    platform, source = _session_identity(session_id)
+    platform, source = identity or _session_identity(session_id)
     if platform not in sessions_io.NON_USER_PLATFORMS \
             or source in AUTOMOD_DRIVER_SOURCES:
         return banned
@@ -624,7 +622,8 @@ def _ban_automod_for_workers(data: dict, session_id: str) -> list[str]:
     return banned
 
 
-def _final_schema_for(session_id: str, data: dict) -> dict | None:
+def _final_schema_for(session_id: str, data: dict, *,
+                      platform: str | None = None) -> dict | None:
     """The JSON schema a caller wants the finished turn restated under.
 
     Gated on the session's platform, not on who is asking. A structured
@@ -634,15 +633,19 @@ def _final_schema_for(session_id: str, data: dict) -> dict | None:
     guided-decoding grammar in front of a human conversation.
     `sessions_io.NON_USER_PLATFORMS` is the one definition of "nobody reads
     this session" and it is reused here rather than restated.
+
+    `platform` is the file's own value when the caller already read it (""
+    when unset); None reads the file, and an unreadable one is a chat.
     """
     schema = data.get("final_schema")
     if not isinstance(schema, dict) or not schema:
         return None
-    try:
-        meta_path = SESSIONS_DIR / f"{session_id}.json"
-        platform = (json.loads(meta_path.read_text()).get("platform") or "")
-    except Exception:
-        return None
+    if platform is None:
+        try:
+            meta_path = SESSIONS_DIR / f"{session_id}.json"
+            platform = (json.loads(meta_path.read_text()).get("platform") or "")
+        except Exception:
+            return None
     if platform not in sessions_io.NON_USER_PLATFORMS:
         logger.warning(
             "final_schema ignored for session %s: platform %r is user-facing",
@@ -651,7 +654,8 @@ def _final_schema_for(session_id: str, data: dict) -> dict | None:
     return schema
 
 
-def _effect_scope_for(session_id: str, data: dict) -> str:
+def _effect_scope_for(session_id: str, data: dict, *,
+                      identity: tuple[str, str] | None = None) -> str:
     """#544 — the queue item this turn runs for, from the payload.
 
     `policy.current_effect_scope` is bound by the worker pool in its own task
@@ -666,7 +670,7 @@ def _effect_scope_for(session_id: str, data: dict) -> str:
     scope = str(data.get("effect_scope") or "").strip()
     if not scope:
         return ""
-    platform, _source = _session_identity(session_id)
+    platform, _source = identity or _session_identity(session_id)
     if platform not in sessions_io.NON_USER_PLATFORMS:
         logger.warning(
             "effect_scope ignored for session %s: platform %r is user-facing",
@@ -2109,60 +2113,22 @@ async def post_message_stream(request: Request):
         return StreamingResponse(_turn_sse_generator(turn), media_type="text/event-stream")
     # ------------------------------------------------------------------
 
-    model = model_override or ""
-    if session_id:
-        meta_path = SESSIONS_DIR / f"{session_id}.json"
-        if meta_path.exists():
-            session_data = json.loads(meta_path.read_text())
-            if not model:
-                model = session_data.get("model", "")
-
-    if not model:
-        model = CONFIG.get("model", {}).get("default", "")
-
-    model = _resolve_model_name(model)
-    model_env = _get_model_env(model)
-
     if not session_id:
         session_id = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
 
     t0 = time.perf_counter()
 
-    # Plan A + B — load todo + plan state once and reuse for both system
-    # prompt and disallowed_tools. plan_mode gates the actuator-tool
-    # block (see app/mcp_discovery.py::PLAN_MODE_BLOCKED_TOOLS), refreshed
-    # per harness iteration via `disallowed_tools_refresh` so an
-    # ExitPlanMode commit unblocks writes within the same turn.
-    session_todos = _load_session_todos(session_id)
-    session_plan = _load_session_plan(session_id)
-    session_goal = _load_session_goal(session_id)
-    plan_mode_active = bool(session_plan.get("plan_mode"))
-
-    def _refresh_disallowed_for_session() -> list[str]:
-        """Per-iteration refresher closure. Reads session.plan from disk
-        and returns the live disallowed list (static config + plan_mode
-        actuator block when applicable + extra_disallowed from caller).
-        """
-        live_plan_mode = bool(_load_session_plan(session_id).get("plan_mode"))
-        return _get_disallowed_tools(plan_mode=live_plan_mode) + (
-            data.get("extra_disallowed") or []
-        )
-
-    # The session's own platform decides the prompt surface: a worker turn
-    # does not carry USER.md. The session file exists before the loopback
-    # POST that runs a worker turn, so this resolves correctly for them; a
-    # brand-new chat reads as `mission-control` and keeps everything.
-    turn_platform, _turn_source = _session_identity(session_id)
-    # P1: a frozen memory snapshot (`harness.prompt_layout.freeze_memory`) and
-    # the state/delta tail the user message carries. Both no-ops by default.
-    frozen_mem, memory_note = _memory_snapshot.frozen_memories(session_id, turn_platform)
-    system_prompt = build_system_prompt(
-        todos=session_todos, plan=session_plan, goal=session_goal,
-        session_id=session_id, platform=turn_platform,
-        **_prompt_layout.mem_kwargs(frozen_mem),
-    )
-    turn_tail = _prompt_layout.turn_tail(
-        session_todos, session_plan, session_goal, memory_note)
+    # P13.4: the session file is read once (`SessionSnapshot`), and the turn's
+    # options, system prompt and hooks come from the one builder every turn kind
+    # shares. Todos, plan and goal ride the system prompt and the turn tail;
+    # plan_mode gates the actuator-tool block (see
+    # app/mcp_discovery.py::PLAN_MODE_BLOCKED_TOOLS), refreshed per harness
+    # iteration so an ExitPlanMode commit unblocks writes within the same turn.
+    # The session's own platform decides the prompt surface: a worker turn does
+    # not carry USER.md, and a brand-new chat reads as `mission-control`.
+    snapshot = await SessionSnapshot.aload(session_id, SESSIONS_DIR)
+    build = build_turn_options(snapshot, data, "stream", text=text)
+    model, options, system_prompt = build.model, build.options, build.system_prompt
     t_prompt = time.perf_counter()
 
     # Off the event loop: the search phase blocks for up to
@@ -2171,14 +2137,14 @@ async def post_message_stream(request: Request):
     # full budget on every user message. plan_mode is passed through so
     # prefetch doesn't re-read the session JSON we just loaded.
     prefetched_text = await prefetch_context_async(
-        text, session_id=session_id, plan_mode=plan_mode_active,
+        text, session_id=session_id, plan_mode=snapshot.plan_mode,
     )
     # A voice room is open on this session: the worker speaks this typed
     # turn's reply as it streams (app/voice_tap.py), so the model is told so,
     # in the prompt's tail like the spoken turn's own reminder.
     from app.routers.voice import voice_room_prefix
     prefetched_text = voice_room_prefix(session_id) + prefetched_text
-    prefetched_text = _prompt_layout.append_turn_tail(prefetched_text, turn_tail)
+    prefetched_text = _prompt_layout.append_turn_tail(prefetched_text, build.turn_tail)
     t_prefetch = time.perf_counter()
     # One PROMPT_BUDGET line per turn: the system half is logged by
     # build_system_prompt above, this adds the injected half and the total
@@ -2200,18 +2166,7 @@ async def post_message_stream(request: Request):
     record_context_skills(session_id, prefetched_text or "")
 
     meta_path = SESSIONS_DIR / f"{session_id}.json"
-    session_turn_count = 0
-    if meta_path.exists():
-        try:
-            existing = json.loads(meta_path.read_text())
-            # Real user turns only — ambient producer rows and background-task
-            # notifications are also role="user" but carry a non-user source.
-            session_turn_count = sum(
-                1 for m in existing.get("messages", [])
-                if m.get("role") == "user" and (m.get("source") or "user") == "user"
-            )
-        except Exception:
-            pass
+    session_turn_count = snapshot.user_turns
 
     # Memory preservation nudge: every 20 turns, remind agent to capture durable context
     if session_turn_count > 0 and session_turn_count % 20 == 0:
@@ -2224,68 +2179,10 @@ async def post_message_stream(request: Request):
         )
         prefetched_text = nudge + prefetched_text
 
-    grant_scope = _authority_scope_for(session_id, data)
-    if grant_scope:
-        _ban_grant_minting(data)
-    _ban_automod_for_workers(data, session_id)
-    extra_disallowed: list[str] = data.get("extra_disallowed", [])
-    permission_mode: str = (
-        data.get("permission_mode")
-        or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
-    )
-    # vLLM scheduling priority. 0 = interactive (default), higher yields.
-    # The self-mod canary smoke turn sends 1 so a real user's chat preempts it.
-    llm_priority: int = _clamp_priority(data.get("priority", 0))
-
-    iv_enabled = _session_inner_voice_enabled(session_id)
-    iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
-    install_default_safety_hook(iv_hooks)
-    if grant_scope:
-        install_policy_hook(iv_hooks, scope=grant_scope)
     # #536 — dispatch-time skill delivery, default-off
-    # (`harness.skill_dispatch.enabled`). Installed AFTER the safety hook: a
-    # deny beats a deliver regardless of order, but the walk should read in the
-    # order that matters. `already_injected` is the turn-start set the prefetch
-    # already put in this turn's <context>, so the same body cannot land twice.
-    # One install site covers the workers too, because every worker source posts
-    # through this route (`workers/sources/_common.py:run_prompt_in_session`).
-    install_skill_dispatch_hook(
-        iv_hooks, already_injected=injected_skill_names(prefetched_text),
-    )
-    _install_action_review(iv_hooks, platform=turn_platform, text=text,
-                           source=_turn_source, session_id=session_id)
-
-    options = RunOptions(
-        model=model,
-        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
-        system_prompt=system_prompt,
-        max_turns=_turn_budget(data, platform=turn_platform),
-        permission_mode=permission_mode,
-        mcp_servers=_get_mcp_servers(),
-        disallowed_tools=_get_disallowed_tools(plan_mode=plan_mode_active) + extra_disallowed,
-        disallowed_tools_refresh=_refresh_disallowed_for_session,
-        env=model_env,
-        hooks=iv_hooks,
-        priority=llm_priority,
-        # cancel_event and session_id wired in _run_turn at run time
-        **_get_harness_kwargs(),
-    )
-    # One meter, three readers: the loop relieves against it, the
-    # `<context>` anchor reports it to the model, and the Inner Voice
-    # observer stops nudging a turn that has no room to act on a nudge.
-    # Built here because only this level can hand the same object to all
-    # three — the loop builds a private one when this is None, which still
-    # gets relief but no anchor.
-    options.context_meter = ContextMeter(context_window_for(model))
-    final_schema = _final_schema_for(session_id, data)
-    if final_schema is not None:
-        options.final_schema = final_schema
-        options.final_schema_prompt = str(data.get("final_schema_prompt") or "")
-    options.effect_scope = _effect_scope_for(session_id, data)
-    # D4: the scope the policy hook above was armed with, so a Task child this
-    # turn spawns re-arms the same gate. "" for a chat turn, like the hook.
-    options.grant_scope = grant_scope
-    options.surface = _tool_surface(turn_platform)
+    # (`harness.skill_dispatch.enabled`), armed now that the prefetch has said
+    # which skill bodies this turn's <context> already carries.
+    arm_skill_dispatch(build, prefetched_text)
 
     # SEAM(http), receiving side: the worker pool posts `"platform": "worker"` in
     # this body (`workers/sources/_common.py:736`), the web UI posts nothing, and
@@ -2365,65 +2262,19 @@ async def build_ambient_turn(
     if not meta_path.exists():
         raise HTTPException(status_code=404, detail="Session not found")
 
-    existing = json.loads(meta_path.read_text())
-    model = _resolve_model_name(existing.get("model", "") or CONFIG.get("model", {}).get("default", ""))
-    model_env = _get_model_env(model)
-
-    plan = existing.get("plan") or {}
-    goal = existing.get("goal") or {}
-    plan_mode_active = bool(plan.get("plan_mode"))
-    ambient_platform = _session_identity(session_id)[0]
-    frozen_mem, memory_note = _memory_snapshot.frozen_memories(session_id, ambient_platform)
-    system_prompt = build_system_prompt(
-        todos=existing.get("todos") or [], plan=plan, goal=goal,
-        session_id=session_id, platform=ambient_platform,
-        **_prompt_layout.mem_kwargs(frozen_mem),
-    )
-    ambient_tail = _prompt_layout.turn_tail(
-        existing.get("todos") or [], plan, goal, memory_note)
-
-    # An ambient injection carries no request body, so the gate can only be
-    # armed by the session's own platform — which is right, and today never
-    # fires, because `/inject` refuses a non-user session with 409. Armed here
-    # anyway: "the other endpoint is the ungated one" is the shape of the bug
-    # this workstream exists to close, and it must not be reintroduced by the
-    # next producer that learns to build a turn.
-    ambient_payload: dict = {}
-    ambient_scope = _authority_scope_for(session_id, ambient_payload)
-    if ambient_scope:
-        _ban_grant_minting(ambient_payload)
-    ambient_banned = _ban_automod_for_workers(ambient_payload, session_id)
-
-    def _ambient_refresh_disallowed() -> list[str]:
-        live_plan_mode = bool(_load_session_plan(session_id).get("plan_mode"))
-        return _get_disallowed_tools(plan_mode=live_plan_mode) + ambient_banned
-
-    iv_enabled = _session_inner_voice_enabled(session_id)
-    iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
-    install_default_safety_hook(iv_hooks)
-    if ambient_scope:
-        install_policy_hook(iv_hooks, scope=ambient_scope)
+    # An ambient injection carries no request body, so the authority gate can
+    # only be armed by the session's own platform — which is right, and today
+    # never fires, because `/inject` refuses a non-user session with 409. Armed
+    # anyway (inside the builder): "the other endpoint is the ungated one" is
+    # the shape of the bug this workstream exists to close, and it must not be
+    # reintroduced by the next producer that learns to build a turn.
     # No skill deliverer here, on purpose (#750): an ambient turn is a short
     # decide-and-stop, and a held call costs it a whole extra round-trip
-    # (~2.7 s TTFT) for a protocol the producer's payload already framed.
-
-    options = RunOptions(
-        model=model,
-        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
-        system_prompt=system_prompt,
-        max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
-        permission_mode=CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions"),
-        mcp_servers=_get_mcp_servers(),
-        disallowed_tools=_get_disallowed_tools(plan_mode=plan_mode_active) + ambient_banned,
-        disallowed_tools_refresh=_ambient_refresh_disallowed,
-        env=model_env,
-        hooks=iv_hooks,
-        session_id=session_id,
-        surface=_tool_surface(_session_identity(session_id)[0]),
-        priority=0,
-        grant_scope=ambient_scope,  # D4: what a Task child inherits
-        **_get_harness_kwargs(),
-    )
+    # (~2.7 s TTFT) for a protocol the producer's payload already framed —
+    # `arm_skill_dispatch` is never called for it.
+    snapshot = await SessionSnapshot.aload(session_id, SESSIONS_DIR)
+    build = build_turn_options(snapshot, {}, "ambient")
+    model, options, ambient_tail = build.model, build.options, build.turn_tail
 
     # Envelope the raw producer text so the agent sees framing + knows it
     # can opt out. The session_id is pre-filled so the agent can just copy
@@ -2505,53 +2356,15 @@ async def build_flush_turn(session_id: str, turn_id: str = "") -> SessionTurn:
     meta_path = SESSIONS_DIR / f"{session_id}.json"
     if not meta_path.exists():
         raise HTTPException(status_code=404, detail="Session not found")
-    cfg = _mf.flush_cfg()
-    existing = json.loads(meta_path.read_text())
-    model = _resolve_model_name(existing.get("model", "") or CONFIG.get("model", {}).get("default", ""))
-    model_env = _get_model_env(model)
-    plan = existing.get("plan") or {}
-    goal = existing.get("goal") or {}
     # The session's own system prompt, so the turn renders the same prefix
     # the chat does and re-uses its KV cache instead of re-prefilling. P1:
     # the same frozen memory snapshot the chat renders, but no turn tail —
     # a flush needs neither the session state nor the memory delta, and
-    # the tail sits after the prefix either way.
-    flush_platform = _session_identity(session_id)[0]
-    frozen_mem, _memory_note = _memory_snapshot.frozen_memories(session_id, flush_platform)
-    system_prompt = build_system_prompt(
-        todos=existing.get("todos") or [], plan=plan, goal=goal,
-        session_id=session_id, platform=flush_platform,
-        **_prompt_layout.mem_kwargs(frozen_mem),
-    )
-    flush_payload: dict = {}
-    flush_scope = _authority_scope_for(session_id, flush_payload)
-    if flush_scope:
-        _ban_grant_minting(flush_payload)
-    flush_banned = _ban_automod_for_workers(flush_payload, session_id)
-    hooks = HookRegistry()
-    install_default_safety_hook(hooks)
-    if flush_scope:
-        install_policy_hook(hooks, scope=flush_scope)
-
-    harness_kwargs = dict(_get_harness_kwargs())
-    harness_kwargs["tool_search_enabled"] = False
-    options = RunOptions(
-        model=model,
-        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
-        system_prompt=system_prompt,
-        max_turns=int(cfg.get("max_turns") or 6),
-        permission_mode=CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions"),
-        mcp_servers=_get_mcp_servers(),
-        disallowed_tools=_get_disallowed_tools(plan_mode=bool(plan.get("plan_mode"))) + flush_banned,
-        allowed_tools=list(cfg.get("tools") or _mf.DEFAULT_TOOLS),
-        env=model_env,
-        hooks=hooks,
-        session_id=session_id,
-        surface=_tool_surface(_session_identity(session_id)[0]),
-        priority=1,
-        grant_scope=flush_scope,
-        **harness_kwargs,
-    )
+    # the tail sits after the prefix either way. The grant gate is armed by
+    # the session's platform, as on every other kind.
+    snapshot = await SessionSnapshot.aload(session_id, SESSIONS_DIR)
+    build = build_turn_options(snapshot, {}, "flush")
+    model, options = build.model, build.options
     text = _mf.FLUSH_PROMPT
     payload: dict[str, Any] = {
         "text": text,
@@ -2611,241 +2424,3 @@ async def enqueue_ambient(session_id: str, turn: SessionTurn) -> dict[str, Any]:
         turn,
         consumer_factory=lambda: _session_consumer(session_id),
     )
-
-
-@router.post("/api/message")
-async def post_message(request: Request):
-    """Synchronous message endpoint — collects full response then returns.
-
-    Not routed through the session queue (task #296 Phase 1 covers the
-    streaming path only). Concurrent sync POSTs to the same session
-    still race the SDK subprocess; callers should prefer /stream.
-    """
-    data = await request.json()
-    text = data.get("text", "").strip()
-    session_id = data.get("session_id", "")
-    model_override = data.get("model", "")
-
-    if not text:
-        raise HTTPException(status_code=400, detail="Message text required")
-
-    model = model_override or ""
-    if session_id:
-        meta_path = SESSIONS_DIR / f"{session_id}.json"
-        if meta_path.exists():
-            session_data = json.loads(meta_path.read_text())
-            if not model:
-                model = session_data.get("model", "")
-
-    if not model:
-        model = CONFIG.get("model", {}).get("default", "")
-
-    model = _resolve_model_name(model)
-    model_env = _get_model_env(model)
-
-    if not session_id:
-        session_id = f"{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
-
-    sync_session_plan = _load_session_plan(session_id)
-    sync_plan_mode_active = bool(sync_session_plan.get("plan_mode"))
-    sync_todos = _load_session_todos(session_id)
-    sync_platform = _session_identity(session_id)[0]
-    frozen_mem, memory_note = _memory_snapshot.frozen_memories(session_id, sync_platform)
-    system_prompt = build_system_prompt(
-        todos=sync_todos, plan=sync_session_plan,
-        session_id=session_id, platform=sync_platform,
-        **_prompt_layout.mem_kwargs(frozen_mem),
-    )
-    prefetched_text = await prefetch_context_async(
-        text, session_id=session_id, plan_mode=sync_plan_mode_active,
-    )
-    prefetched_text = _prompt_layout.append_turn_tail(
-        prefetched_text,
-        _prompt_layout.turn_tail(sync_todos, sync_session_plan, None, memory_note))
-
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
-
-    sync_grant_scope = _authority_scope_for(session_id, data)
-    if sync_grant_scope:
-        _ban_grant_minting(data)
-    _ban_automod_for_workers(data, session_id)
-    sync_extra_disallowed: list[str] = data.get("extra_disallowed", [])
-
-    def _sync_refresh_disallowed() -> list[str]:
-        live_plan_mode = bool(_load_session_plan(session_id).get("plan_mode"))
-        return _get_disallowed_tools(plan_mode=live_plan_mode) + sync_extra_disallowed
-    sync_permission_mode: str = (
-        data.get("permission_mode")
-        or CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions")
-    )
-
-    sync_llm_priority: int = _clamp_priority(data.get("priority", 0))
-
-    iv_enabled = _session_inner_voice_enabled(session_id)
-    iv_hooks = _inner_voice_hooks_dict(session_id) if iv_enabled else HookRegistry()
-    install_default_safety_hook(iv_hooks)
-    if sync_grant_scope:
-        install_policy_hook(iv_hooks, scope=sync_grant_scope)
-    install_turn_guards(
-        iv_hooks, session_id=session_id,
-        platform=_session_identity(session_id)[0],
-    )
-    # No skill deliverer here, on purpose (#750): nothing in the tree calls
-    # the sync route — every real turn posts to /api/message/stream — so an
-    # install would be dead code and, the day it is not, a delivery no
-    # prefetch dedupes.
-
-    options = RunOptions(
-        model=model,
-        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
-        system_prompt=system_prompt,
-        max_turns=CONFIG.get("agent", {}).get("max_turns", 60),
-        permission_mode=sync_permission_mode,
-        mcp_servers=_get_mcp_servers(),
-        disallowed_tools=_get_disallowed_tools(plan_mode=sync_plan_mode_active) + sync_extra_disallowed,
-        disallowed_tools_refresh=_sync_refresh_disallowed,
-        env=model_env,
-        hooks=iv_hooks,
-        session_id=session_id,
-        surface=_tool_surface(_session_identity(session_id)[0]),
-        priority=sync_llm_priority,
-        effect_scope=_effect_scope_for(session_id, data),
-        grant_scope=sync_grant_scope,  # D4: what a Task child inherits
-        **_get_harness_kwargs(),
-    )
-    # This path calls run_query directly rather than going through
-    # _run_turn, so it wires its own meter and anchor.
-    options.context_meter = ContextMeter(context_window_for(model))
-    options.state_anchor = _build_state_anchor(
-        session_id, context_meter=options.context_meter)
-
-    # Which context policy rewrote this turn's history (#1078). This path calls
-    # `run_query` directly rather than through `_run_turn`, so it registers its
-    # own record — the relief ladder finds it by `options.session_id`, which is
-    # the same `RunOptions` field both chat paths set.
-    compaction_turn = _compaction_record.start_turn(session_id)
-    comp = await load_and_compact_session(
-        meta_path, model=model,
-        # The deny list travels to the compaction stack because the markers it
-        # rewrites are read back by this turn: a worker session's own earlier
-        # spill notices are in its history, and one that points at `Read`
-        # orders a call this turn's policy refuses (#1066).
-        disallowed_tools=list(options.disallowed_tools or []),
-    )
-    compaction_turn.note_turn_start(comp)
-    if comp["truncated"] or comp.get("summarized") or comp.get("microcompacted"):
-        logger.info(
-            "[compaction] %s: %d→%d tokens "
-            "(microcompacted=%d, summarized=%s, restored=%d, truncated=%s)",
-            session_id,
-            comp["tokens_before"],
-            comp["tokens_after"],
-            comp.get("microcompacted", 0),
-            comp.get("summarized", False),
-            comp.get("restored_files", 0),
-            comp["truncated"],
-        )
-    messages = await _prepare_messages_for_harness(comp["history"], model=model)
-    if messages and messages[-1].get("role") == "user":
-        messages = messages[:-1]
-    messages.append({"role": "user", "content": prefetched_text})
-
-    # SEAM(http), receiving side: the worker pool posts `"platform": "worker"` in
-    # this body (`workers/sources/_common.py:736`), the web UI posts nothing, and
-    # this line is the only route either has into the session's `platform` when no
-    # file exists yet — `_save_session_meta` is the lone writer that has to guess.
-    # Before #1064 it guessed `mission-control` for every shape, which is how a
-    # four-part worker turn whose create had raised landed in the user's chat
-    # history and in the corpus qmd embeds. Crossing verified by
-    # test_session_platform_checks.py::
-    # test_the_worker_s_loopback_post_arrives_with_its_platform.
-    await _save_session_meta(session_id, model, preview=text,
-                             platform=data.get("platform"))
-
-    try:
-        full_response = ""
-        turn_stats: dict | None = None
-        # Same miss accounting as the streaming path (app/prefix_miss.py):
-        # this endpoint is the third writer of a usage row.
-        miss_tracker = _prefix_miss.TurnMissTracker.for_turn(session_id)
-        turn_telemetry = turn_usage.TurnTelemetry()  # P11, as the streaming path
-
-        def _miss_log(name: str, data: dict) -> None:
-            _event_log.log_event(session_id, name, data)
-
-        async for evt in run_query(messages, options):
-            turn_telemetry.note(evt)
-            if evt["type"] == "text_delta":
-                full_response += evt["text"]
-            elif evt["type"] == "iteration_retry":
-                full_response, _ = trim_discarded(full_response, "", evt)
-            elif evt["type"] == "assistant_message":
-                _prefix_miss.record_iteration(
-                    miss_tracker, int(evt.get("iteration") or 0),
-                    evt.get("usage") or {},
-                    duration_ms=int(evt.get("duration_ms") or 0), log=_miss_log,
-                    ttft_ms=evt.get("ttft_ms"))
-            elif evt["type"] == "result":
-                usage = evt.get("usage") or {}
-                # Third writer of a usage row — streaming chat, the background
-                # recorder, and this non-streaming endpoint — through the same
-                # mapper, so the bounded-pair rule holds on every path into
-                # usage.db and not only the two anyone remembered (#859).
-                usage_row = turn_usage.turn_usage_row(usage)
-                input_tokens = usage_row["input_tokens"]
-                output_tokens = usage.get("output_tokens") or usage.get("completion_tokens", 0)
-                cache_read_tokens = usage_row["cache_read"]
-                cache_create_tokens = usage.get("cache_create", 0) or 0
-                turn_stats = {
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "cache_create": cache_create_tokens,
-                    "cache_read": cache_read_tokens,
-                    "prompt_tokens_sum": usage_row["prompt_tokens_sum"],
-                    "cache_read_sum": usage_row["cache_read_sum"],
-                    "cost_usd": 0.0,
-                    "duration_ms": evt.get("duration_ms"),
-                    "num_turns": evt.get("num_turns"),
-                    "model": model,
-                    **_prefix_miss.finish(miss_tracker, log=_miss_log),
-                }
-                try:
-                    usage_store.record_usage(
-                        session_id=session_id,
-                        model=model,
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        cache_create=cache_create_tokens,
-                        cache_read=cache_read_tokens,
-                        cost_usd=0.0,
-                        duration_ms=evt.get("duration_ms"),
-                        num_turns=evt.get("num_turns"),
-                        reprefill_tokens=turn_stats["reprefill_tokens"],
-                        prefix_misses=turn_stats["prefix_misses"],
-                        # The same dimension the streaming path writes, so a
-                        # per-skill cost is not a number only one of the two
-                        # chat paths can produce (#783).
-                        skills=skill_deliveries(prefetched_text),
-                        # The same dimension the streaming path writes (#1078).
-                        # This is the route a worker's loopback turn takes, so
-                        # leaving it unwired would leave the runs that fire the
-                        # relief ladder hardest unrecorded.
-                        compaction=compaction_turn,
-                        **turn_telemetry.row(),
-                    )
-                except Exception as ue:
-                    logger.warning(f"Failed to record usage: {ue}")
-
-        if full_response:
-            await _append_messages(session_id, [{
-                "id": uuid.uuid4().hex[:8],
-                "role": "assistant",
-                "content": [{"type": "text", "text": full_response}],
-                "timestamp": datetime.now().isoformat(),
-            }])
-
-        return JSONResponse({"success": True, "response": full_response, "session_id": session_id, "stats": turn_stats})
-
-    except Exception as e:
-        logger.error(f"Message error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))

@@ -139,16 +139,20 @@ async def _drive_handler(messages, *, session_id: str, monkeypatch,
     """
     import app.routers.automod as automod
 
+    from app.routers import turn_options
+
     monkeypatch.setattr(messages, "prefetch_context_async",
                         _returned(PREFETCH_SENTINEL))
-    monkeypatch.setattr(messages, "build_system_prompt",
+    # The system prompt and the RunOptions inputs are built by the one options
+    # builder the route calls (P13.4), so they are faked where it looks them up.
+    monkeypatch.setattr(turn_options, "build_system_prompt",
                         lambda *a, **k: "SEAM SYSTEM PROMPT")
     monkeypatch.setattr(messages, "_save_session_meta", _returned(None))
     monkeypatch.setattr(messages, "enqueue_turn", _capture(enqueued))
     monkeypatch.setattr(messages, "set_last_user_session", lambda sid: None)
-    monkeypatch.setattr(messages, "_get_mcp_servers", lambda: {})
-    monkeypatch.setattr(messages, "_get_disallowed_tools", lambda *a, **k: [])
-    monkeypatch.setattr(messages, "_get_harness_kwargs", lambda: {})
+    monkeypatch.setattr(turn_options, "_get_mcp_servers", lambda: {})
+    monkeypatch.setattr(turn_options, "_get_disallowed_tools", lambda *a, **k: [])
+    monkeypatch.setattr(turn_options, "_get_harness_kwargs", lambda: {})
     monkeypatch.setattr(automod, "drain_active", lambda: False)
 
     await messages.post_message_stream(_Request(
