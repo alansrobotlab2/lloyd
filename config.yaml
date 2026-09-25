@@ -547,7 +547,8 @@ harness:
   # replay_injected_context: replay past user turns with their injected
   # prefix/tail re-joined (behaviour choice, not a cache one).
   prompt_layout:
-    session_state: system_head
+    # system_tail since 2026-09-25 (P1 rollout step 1, Alan). Next: user_tail A/B.
+    session_state: system_tail
     freeze_memory: false
     replay_injected_context: false
   context_anchor:
