@@ -319,3 +319,27 @@ domain results no longer go straight to truncation. Deleting the key (or
 and left alone by size. `_execute_tool_call` now `maybe_spill`s error results
 too; the empty-result marker stays success-only. `/compact` still uses the
 allow-list.
+
+### P7 — the context-rot curve sets the compaction trigger
+
+`compaction.microcompact.trigger_fraction` (0.72 of the 210,144-token
+truncation threshold, ~151k) was a KV cost knob with no quality measurement
+behind it. `eval/run_context_rot_eval.py` measures where the primary's recall
+falls with prompt length: {50k…240k} × depth {0.1…0.9} × {single, multi3,
+distract4} × 3 seeds = 225 requests per shape, `repo` (the admission bench's
+`corpus()`) and `session` (the compaction eval's `build_session`), needles
+the compaction eval's codename and "current port" with the old port and
+sibling ports salted as distractors. Thinking off, 64 tokens, temperature 0,
+priority 1; cold (nonce at position 0) and warm TTFT; `wait_idle` before every
+request; the pool paused via `POST /api/workers/pause` and resumed in a
+`finally` only if the run paused it. `--dry-run` sends nothing.
+
+`--decide` computes `L*` (the largest length such that every grid length up
+to it keeps distractor accuracy ≥ 0.9·A(50k) with no depth under 0.8·A(50k);
+the worse shape decides) and the recommendation: keep 0.72/0.52 at
+`L* ≥ 151k`, else `trigger = floor(L*/210,144·20)/20`, `target = trigger − 0.20`,
+priced against 14 days of `usage.db` (read-only) as extra compactions × cold
+TTFT over engine-busy seconds (< 5% to adopt, after the compaction recall eval
+and a 3-day soak). Report: `eval/measurements/context-rot-<date>.md|json`.
+Re-run whenever `models.primary.expect_model` changes.
+`tests/test_context_rot_eval.py`.
