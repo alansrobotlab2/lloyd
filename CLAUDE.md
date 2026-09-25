@@ -45,7 +45,12 @@ down, but no promotion to revert" through every alert channel, toast and
 voice included — and it kills whatever worker job is mid-flight, whose
 connection errors then land in someone's observation window. It refuses
 while a promotion is under observation (`--force` overrides) and records a
-`restart` event on the ledger with the reason.
+`restart` event on the ledger with the reason. A leg it stopped is always
+started again — Ctrl-C between the stop and the start is held until the
+program is back (2026-09-24, when one interrupt left the backend STOPPED) —
+any failure is a `restart_failed` row naming what was `left_stopped`, and
+the idle wait refuses at once on a backend supervisord holds stopped (start
+it, or `--skip-idle`) instead of waiting out its budget.
 
 **The primary engine goes through it too** (`--only agent-llm-primary`,
 since 2026-09-15). Its leg stops the engine, waits for `MemAvailable` to

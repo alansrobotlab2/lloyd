@@ -20,6 +20,7 @@ full window.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import subprocess
@@ -439,6 +440,22 @@ def wait_idle(max_wait: float | None = None, *, drain: bool = True,
                         sorted({str(j.get("source")) for j in jobs}))
         else:
             quiet = 0
+            # A backend supervisord holds stopped can never go idle: the
+            # second `round restart` of 2026-09-24 sat in this loop on the
+            # backend the first one had left STOPPED until a human started it
+            # by hand. Asked only when /health did not answer at all, so a
+            # busy event loop is never the question, and supervisord's own
+            # state decides — an unreachable supervisord keeps the old wait.
+            state = _program_state("lloyd-backend") if status is None else None
+            if state in _DEAD_STATES:
+                if drain:
+                    set_drain(False)
+                release_pool_pause()
+                return False, (
+                    f"lloyd-backend is {state} in supervisord — a backend that is not "
+                    f"running never goes idle, so there is nothing to wait for. Start it: "
+                    f"{supervisorctl_hint('start', 'lloyd-backend')} — or restart over it "
+                    f"with `round restart --skip-idle`")
         time.sleep(IDLE_POLL_SECONDS)
     if drain:
         set_drain(False)
@@ -1322,7 +1339,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
             # so a single lease taken before the merge could expire mid-restart
             # and hand the guardian its own deploy to judge.
             S.set_pause(RESTART_LEASE)
-            ok, msg = restart_process(program)
+            ok, msg = _restart_program(program)
             if not ok:
                 raise PromoteError(f"restart {program} failed: {msg}")
             if not _wait_health(health, 90.0):
@@ -1447,6 +1464,135 @@ def promote(round_id: str, worktree: Path, base: str, *,
         S.clear_pause()
 
 
+# supervisord states in which nothing serves and nothing will until somebody
+# starts the program. BACKOFF is not here: supervisord is still retrying it.
+_DEAD_STATES = frozenset({"STOPPED", "EXITED", "FATAL"})
+START_AGAIN_BUDGET = 30.0
+
+
+class RestartInterrupted(PromoteError):
+    """A signal arrived while a program was between its stop and its start.
+    Raised only once the program has been started again."""
+
+
+def _program_state(program: str) -> str | None:
+    """supervisord's statename for `program`, upper-cased; None when it cannot say."""
+    try:
+        return str(process_info(program).get("statename") or "").upper() or None
+    except Exception:
+        return None
+
+
+def supervisorctl_hint(verb: str, program: str) -> str:
+    """The exact command a human pastes, group-qualified the way supervisord
+    wants it (`lloyd-mc:lloyd-backend`) — the bare name is `BAD_NAME` there."""
+    name = f"lloyd-mc:{program}" if program in ("lloyd-backend", "lloyd-mcp",
+                                               "lloyd-frontend") else program
+    return f"{SUPERVISORCTL} -c {SUPERVISORD_CONF} {verb} {name}"
+
+
+def _start_again(program: str, budget: float = START_AGAIN_BUDGET) -> tuple[bool, str]:
+    """Start `program` if supervisord holds it stopped, and wait for it to be
+    RUNNING or STARTING. Never raises: this runs on the way out of a failure."""
+    try:
+        state = _program_state(program)
+        if state in ("RUNNING", "STARTING"):
+            return True, f"{program} is {state}"
+        ok, msg = start_process(program, wait=False)
+        if not ok:
+            return False, f"start {program}: {msg}"
+        deadline = time.monotonic() + budget
+        while True:
+            state = _program_state(program)
+            if state in ("RUNNING", "STARTING"):
+                return True, f"{program} started again ({state})"
+            if state == "FATAL" or time.monotonic() >= deadline:
+                return False, f"{program} is {state or 'unreadable'} after a start"
+            time.sleep(0.5)
+    except BaseException as exc:   # a second Ctrl-C here must not hide the first
+        return False, f"start {program} interrupted: {type(exc).__name__}"
+
+
+class _SignalsHeld:
+    """Hold SIGINT/SIGTERM/SIGHUP while a program is between stop and start.
+
+    `restart_process` is stop-then-start, two RPCs, and nothing in between is
+    atomic. On 2026-09-24 23:39Z a `round restart --only lloyd-backend` left
+    the backend STOPPED: supervisord logged the stop and never a start, and
+    the lease was cleared within a second — so Python unwound through
+    `restart_stack`'s `finally` (a hard kill would have left the lease), and
+    `start_process` catches every `Exception`, so only a `BaseException`
+    (a Ctrl-C's `KeyboardInterrupt`) can have skipped the start. With these
+    held the leg finishes — the program is started again — and the signal is
+    then raised as `RestartInterrupted`. Main thread only; elsewhere
+    `signal.signal` refuses and the leg's `except BaseException` is the net.
+    """
+
+    SIGNALS = ("SIGINT", "SIGTERM", "SIGHUP")
+
+    def __init__(self, program: str):
+        self.program = program
+        self.received: list[int] = []
+        self._previous: dict = {}
+
+    def _handler(self, signum, frame):
+        self.received.append(int(signum))
+        print(f"round restart: signal {int(signum)} received while {self.program} is being "
+              f"restarted; it takes effect once {self.program} is started again",
+              file=sys.stderr, flush=True)
+
+    def __enter__(self):
+        import signal
+        try:
+            for name in self.SIGNALS:
+                sig = getattr(signal, name)
+                self._previous[sig] = signal.signal(sig, self._handler)
+        except ValueError:            # not the main thread
+            self._restore()
+        return self
+
+    def _restore(self):
+        import signal
+        for sig, old in self._previous.items():
+            try:
+                signal.signal(sig, signal.SIG_DFL if old is None else old)
+            except ValueError:
+                pass
+        self._previous = {}
+
+    def __exit__(self, *exc):
+        self._restore()
+        return False
+
+
+def _restart_program(program: str, *, hold_signals: bool = False) -> tuple[bool, str]:
+    """`restart_process`, and a program it stopped is never left stopped.
+
+    Any exit — a failed or timed-out start, an exception, an interrupt — ends
+    with one more `start` attempt when supervisord holds the program stopped.
+    A start that works after a failed one is a success with a note; one that
+    does not says so with the command to run by hand.
+    """
+    held = _SignalsHeld(program) if hold_signals else None
+    with held or contextlib.nullcontext():
+        try:
+            ok, msg = restart_process(program)
+        except BaseException:
+            _start_again(program)
+            raise
+        if not ok:
+            again_ok, again = _start_again(program)
+            if again_ok:
+                ok, msg = True, f"{msg}; {again}"
+            else:
+                msg = (f"{msg}; {again} — {program} may be left stopped: "
+                       f"{supervisorctl_hint('start', program)}")
+    if held and held.received:
+        raise RestartInterrupted(f"interrupted by signal {held.received[0]} during the "
+                                 f"restart of {program} ({msg}); stopped after that leg")
+    return ok, msg
+
+
 def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
                   reason: str = "", max_wait: float = IDLE_MAX_WAIT,
                   force: bool = False, skip_idle: bool = False) -> dict:
@@ -1516,16 +1662,24 @@ def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
         ok, why = wait_idle(max_wait)   # pauses the pool, arms the drain, waits for quiet
     if not ok:
         S.clear_pause()          # wait_idle already released the pool and the drain
+        S.append_event({"event": "restart_failed", "stage": "idle", "programs": list(programs),
+                        "by": "human", "reason": reason[:300], "error": why[:400],
+                        "left_stopped": [p for p in programs
+                                         if _program_state(p) in _DEAD_STATES]})
         raise PromoteError(why)
     started = time.time()
     done: list[str] = []
+    leg = None
     try:
         for program in programs:
+            leg = program
             S.set_pause(RESTART_LEASE)   # refreshed per leg, as the promoter does
             if program == PRIMARY_PROGRAM:
+                # Never started again on a failure: below the RAM abort line
+                # leaving the engine stopped is the leg's deliberate answer.
                 ok, msg = _restart_primary()
             else:
-                ok, msg = restart_process(program)
+                ok, msg = _restart_program(program, hold_signals=True)
             if not ok:
                 raise PromoteError(f"restart {program} failed: {msg}")
             if not _wait_health(health_for[program], budget_for.get(program, 90.0)):
@@ -1535,6 +1689,28 @@ def restart_stack(programs: tuple[str, ...] = ("lloyd-mcp", "lloyd-backend"), *,
                         "reason": reason[:300], "seconds": round(time.time() - started, 1)})
         return {"restarted": done, "seconds": round(time.time() - started, 1),
                 "idle": why, "reason": reason}
+    except BaseException as exc:
+        # The 2026-09-24 23:39Z restart wrote nothing: the ledger heard of a
+        # restart only when one succeeded, so the stopped backend read as a
+        # crash nobody had asked for. Every other exit says what it left down.
+        left = [p for p in programs if _program_state(p) in _DEAD_STATES]
+        try:
+            S.append_event({"event": "restart_failed", "stage": "restart",
+                            "programs": list(programs), "restarted": list(done),
+                            "failed_at": leg, "by": "human", "reason": reason[:300],
+                            "error": (str(exc) or type(exc).__name__)[:400],
+                            "left_stopped": left,
+                            "seconds": round(time.time() - started, 1)})
+        except Exception:
+            pass
+        if left:
+            print("round restart: LEFT STOPPED: " + ", ".join(left) + "\n  start with: "
+                  + "\n  start with: ".join(supervisorctl_hint("start", p) for p in left),
+                  file=sys.stderr, flush=True)
+            if isinstance(exc, PromoteError):
+                raise PromoteError(f"{exc} — left stopped: {', '.join(left)}; "
+                                   f"{supervisorctl_hint('start', left[0])}") from exc
+        raise
     finally:
         set_drain(False)
         release_pool_pause()
@@ -2263,7 +2439,7 @@ def _flush_locked(live: Path, reason: str, *, kill_turns: bool, by: str,
             for program, health in (("lloyd-mcp", MCP_HEALTH),
                                     ("lloyd-backend", f"{BACKEND}/health")):
                 S.set_pause(RESTART_LEASE)
-                ok, msg = restart_process(program)
+                ok, msg = _restart_program(program)
                 if not ok:
                     raise PromoteError(f"restart {program} failed: {msg}")
                 if not _wait_health(health, 90.0):

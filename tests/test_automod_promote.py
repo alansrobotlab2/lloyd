@@ -496,6 +496,9 @@ def _restart_harness(monkeypatch, *, idle=(True, "idle for 3 consecutive polls")
     monkeypatch.setattr(P, "_wait_health", lambda url, budget: log.append(("health", url)) or health)
     monkeypatch.setattr(P, "set_drain", lambda on, ttl=180.0: log.append(("drain", on)))
     monkeypatch.setattr(P, "release_pool_pause", lambda: log.append(("release_pool",)))
+    # The failure paths ask supervisord what they left down; never the live one.
+    monkeypatch.setattr(P, "process_info", lambda name: {"statename": "RUNNING"})
+    monkeypatch.setattr(P, "start_process", lambda name, wait=False: (True, "already running"))
     return log
 
 
@@ -656,6 +659,178 @@ def test_restart_skip_idle_pauses_the_pool_and_restarts_over_whatever_runs(monke
     assert ("wait_idle",) not in log and ("pause_pool", True) in log
     assert out["restarted"] == ["lloyd-backend"] and out["idle"] == "idle wait skipped"
     assert log[-3:] == [("drain", False), ("release_pool",), ("clear_pause",)]
+
+
+# ---------------------------------------------------------------------------
+# A restart never leaves a service stopped (2026-09-24 23:39Z)
+# ---------------------------------------------------------------------------
+#
+# `round restart --only lloyd-backend` left the backend STOPPED: supervisord
+# logged `stopped: lloyd-backend` at 16:39:41.8 and no spawn after it, the
+# guardian saw STOPPED with no lease at 16:39:42 (so the CLI had unwound
+# through `restart_stack`'s finally, which a hard kill would not have), and the
+# ledger had no row. `restart_process` is stop-then-start and `start_process`
+# swallows every Exception, so only a BaseException between the two RPCs — a
+# Ctrl-C in the terminal — can skip the start. These run the REAL
+# `restart_process` against a fake supervisord.
+
+class _FakeSupervisord:
+    def __init__(self, *, start_faults: int = 0, on_stop=None):
+        self.state = {"lloyd-backend": "RUNNING", "lloyd-mcp": "RUNNING"}
+        self.calls: list = []
+        self.start_faults = start_faults
+        self.on_stop = on_stop
+
+    @staticmethod
+    def _bare(name):
+        return name.split(":", 1)[-1]
+
+    def getAllProcessInfo(self):
+        return [{"name": n, "group": "lloyd-mc", "statename": st} for n, st in self.state.items()]
+
+    def getProcessInfo(self, name):
+        return {"name": self._bare(name), "statename": self.state[self._bare(name)], "pid": 0}
+
+    def stopProcess(self, name, wait=True):
+        self.calls.append(("stop", self._bare(name)))
+        self.state[self._bare(name)] = "STOPPED"
+        if self.on_stop:
+            self.on_stop(self)
+        return True
+
+    def startProcess(self, name, wait=True):
+        import xmlrpc.client
+        self.calls.append(("start", self._bare(name)))
+        if self.start_faults:
+            self.start_faults -= 1
+            raise xmlrpc.client.Fault(50, "SPAWN_ERROR: lloyd-mc:lloyd-backend")
+        self.state[self._bare(name)] = "RUNNING"
+        return True
+
+
+@pytest.fixture
+def fake_sup(monkeypatch):
+    from app import supervisor_client as SC
+
+    def install(**kw):
+        sup = _FakeSupervisord(**kw)
+        monkeypatch.setattr(SC, "_supervisor_proxy", lambda: type("P", (), {"supervisor": sup})())
+        return sup
+    # The real client under the names promote imported, speaking to the fake.
+    monkeypatch.setattr(P, "restart_process", SC.restart_process)
+    monkeypatch.setattr(P, "process_info", SC.process_info)
+    monkeypatch.setattr(P, "start_process", SC.start_process)
+    monkeypatch.setattr(P.S, "read_current", lambda: None)
+    monkeypatch.setattr(P, "wait_idle", lambda max_wait=900.0, **k: (True, "idle"))
+    monkeypatch.setattr(P, "_wait_health", lambda url, budget: True)
+    monkeypatch.setattr(P, "set_drain", lambda on, ttl=180.0: True)
+    monkeypatch.setattr(P, "release_pool_pause", lambda: None)
+    monkeypatch.setattr(P, "START_AGAIN_BUDGET", 2.0)
+    return install
+
+
+def _ledger(event):
+    return [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == event]
+
+
+def test_an_interrupt_between_stop_and_start_still_starts_the_backend(fake_sup):
+    """The incident, reproduced: the interrupt lands after the stop RPC and
+    before the start. The old code left the backend STOPPED and wrote nothing."""
+    def interrupt_on_next_poll(sup):
+        real = sup.getProcessInfo
+
+        def once(name):
+            sup.getProcessInfo = real
+            raise KeyboardInterrupt
+        sup.getProcessInfo = once
+    sup = fake_sup(on_stop=interrupt_on_next_poll)
+    with pytest.raises(KeyboardInterrupt):
+        P.restart_stack(("lloyd-backend",), reason="hand sweep 3")
+    assert sup.state["lloyd-backend"] == "RUNNING", "the backend was started again"
+    assert sup.calls == [("stop", "lloyd-backend"), ("start", "lloyd-backend")]
+    row = _ledger("restart_failed")[-1]
+    assert row["failed_at"] == "lloyd-backend" and row["left_stopped"] == []
+    assert row["reason"] == "hand sweep 3" and row["error"] == "KeyboardInterrupt"
+    assert not _ledger("restart")
+
+
+def test_a_signal_during_the_leg_is_held_until_the_backend_is_back(fake_sup):
+    """With the signals held, a real SIGINT in the stop->start window does not
+    interrupt anything: the leg finishes, then the restart stops and says why."""
+    import os
+    import signal
+
+    sup = fake_sup(on_stop=lambda s: os.kill(os.getpid(), signal.SIGINT))
+    before = signal.getsignal(signal.SIGINT)
+    with pytest.raises(P.RestartInterrupted, match="signal 2"):
+        P.restart_stack(("lloyd-backend",), reason="r")
+    assert sup.state["lloyd-backend"] == "RUNNING"
+    assert sup.calls == [("stop", "lloyd-backend"), ("start", "lloyd-backend")]
+    assert signal.getsignal(signal.SIGINT) is before, "the handler is put back"
+    assert _ledger("restart_failed")[-1]["left_stopped"] == []
+
+
+def test_a_start_that_fails_once_is_retried_and_the_restart_stands(fake_sup):
+    sup = fake_sup(start_faults=1)
+    out = P.restart_stack(("lloyd-backend",), reason="r")
+    assert out["restarted"] == ["lloyd-backend"] and sup.state["lloyd-backend"] == "RUNNING"
+    assert [c for c in sup.calls if c[0] == "start"] == [("start", "lloyd-backend")] * 2
+    assert _ledger("restart") and not _ledger("restart_failed")
+
+
+def test_a_backend_that_cannot_be_started_is_reported_loudly_and_on_the_ledger(fake_sup, capsys):
+    sup = fake_sup(start_faults=99)
+    with pytest.raises(P.PromoteError) as err:
+        P.restart_stack(("lloyd-backend",), reason="r")
+    msg = str(err.value)
+    assert "left stopped" in msg and "start lloyd-mc:lloyd-backend" in msg
+    assert "LEFT STOPPED: lloyd-backend" in capsys.readouterr().err
+    row = _ledger("restart_failed")[-1]
+    assert row["left_stopped"] == ["lloyd-backend"] and row["stage"] == "restart"
+    assert sup.state["lloyd-backend"] == "STOPPED"
+
+
+def test_an_idle_refusal_is_a_ledger_row_naming_what_is_down(monkeypatch):
+    log = _restart_harness(monkeypatch, idle=(False, "lloyd-backend is STOPPED in supervisord"))
+    monkeypatch.setattr(P, "process_info", lambda name: {
+        "statename": "STOPPED" if name == "lloyd-backend" else "RUNNING"})
+    with pytest.raises(P.PromoteError):
+        P.restart_stack(reason="hand sweep 4")
+    row = _ledger("restart_failed")[-1]
+    assert row["stage"] == "idle" and row["left_stopped"] == ["lloyd-backend"]
+    assert ("clear_pause",) in log
+
+
+def test_the_idle_wait_refuses_at_once_on_a_backend_supervisord_holds_stopped(monkeypatch):
+    """The second restart of 2026-09-24 waited on a dead backend until a human
+    started it; a stopped backend never goes idle."""
+    calls = _pool_spies(monkeypatch, paused_now=None)   # the status read fails too
+    polls = {"n": 0}
+
+    def get(url, timeout=5.0):
+        polls["n"] += 1
+        return None, None                      # refused: nothing is listening
+    monkeypatch.setattr(P, "_get", get)
+    monkeypatch.setattr(P, "process_info", lambda name: {"statename": "STOPPED"})
+    ok, why = P.wait_idle(max_wait=900)
+    assert not ok and "STOPPED" in why
+    assert "start lloyd-mc:lloyd-backend" in why and "--skip-idle" in why
+    assert polls["n"] == 1, "refused on the first unanswered poll, not after the budget"
+    assert calls == []
+
+
+def test_an_unanswered_health_on_a_running_backend_is_still_waited_on(monkeypatch):
+    """A busy event loop times out /health too; only supervisord's own STOPPED
+    ends the wait early, and an unreachable supervisord keeps the old wait."""
+    _pool_spies(monkeypatch, paused_now=True)
+    monkeypatch.setattr(P, "_get", lambda url, timeout=5.0: (None, None))
+
+    def unreachable(name):
+        raise RuntimeError("socket gone")
+    for info in (lambda name: {"statename": "RUNNING"}, unreachable):
+        monkeypatch.setattr(P, "process_info", info)
+        ok, why = P.wait_idle(max_wait=0.05)
+        assert not ok and "never went idle" in why
 
 
 # ---------------------------------------------------------------------------
