@@ -9,8 +9,8 @@ and named Bash + curl as the recovery path.
 
 Nothing is executed. `run_query` yields the `tool_call` event *before*
 dispatching it — `app/harness/loop.py` builds `tc_evt = events.tool_call(...)`
-and `yield`s it a line later, and only then awaits
-`_dispatch_one_tool_call`; grep `events.tool_call` for the site (backlog #748
+and `yield`s it a line later, and only then runs `_pre_dispatch` and
+`_execute_tool_call` (`_dispatch_batch`); grep `events.tool_call` for the site (backlog #748
 fixed a version of this comment that pointed at the context-overflow recovery
 block). Closing the generator at the first tool call therefore means no shell
 command runs and no URL is fetched. One model turn per prompt.
@@ -105,7 +105,7 @@ async def _first_tool_call(prompt: str, options, timeout: float) -> dict:
     """Run one turn and return the first tool call, without dispatching it.
 
     Breaking out of the async generator closes it before
-    `_dispatch_one_tool_call` is awaited, so the tool never runs.
+    `_execute_tool_call` is awaited, so the tool never runs.
 
     The loop yields `assistant_message` — carrying THAT iteration's usage —
     before it yields the `tool_call`, so the cost of the completion that

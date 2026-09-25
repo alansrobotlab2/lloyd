@@ -13,12 +13,14 @@ endpoint in `app.routers.messages._run_turn`.
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextvars
 import json
 import logging
 import re
 import time
 import uuid
+from contextlib import aclosing
 from typing import Any, AsyncIterator
 
 import httpx
@@ -49,6 +51,7 @@ from app.harness.policy import (
     current_effect_scope, current_scope, normalize_tool_name,
 )
 from app.harness.telemetry import log_harness_event
+from app.harness.turn_state import Iteration, TurnState
 from app.harness.tool_schema import (
     add_summary_param,
     build_tool_list,
@@ -251,12 +254,20 @@ async def run_query(
 
     `messages` is an OpenAI-style message list — typically built by
     `app.compaction.load_and_compact_session(...)` plus the current
-    user turn. The harness does NOT prepend the system prompt; do that
-    in the caller (so options.system_prompt can stay informational).
+    user turn. The harness prepends `options.system_prompt` as the system
+    message unless the list already carries one (position 0, inserted once).
 
     Cancellation: if `options.cancel_event` is set during streaming, the
     httpx context exits cleanly and the loop emits a final `result`
     event with `stop_reason="cancelled"`.
+
+    The turn is a sequence of phases over one `TurnState` (P13.2):
+    `_open_turn` once, then per iteration `_prelude` → `_stream_iteration`
+    → (`_end_without_tools` | `_dispatch_batch` → `_after_batch`), and
+    `_close_turn` once. Each phase that yields events is an async generator
+    this function re-yields through `aclosing`, so a consumer that closes the
+    turn mid-phase closes the phase too (the batch's outstanding tool calls
+    are cancelled at once, not when the garbage collector gets to them).
     """
     started_at = time.perf_counter()
 
@@ -302,851 +313,884 @@ async def run_query(
     # land with "backend never went idle within 900s" until the next restart.
     try:
         _run_started()
-        # The surface's hidden tools join the disallowed set here, for what is
-        # advertised, and in every iteration's dispatch set below, including a
-        # plan-mode refresher's, which would otherwise rebuild it without them.
-        surface_hidden = _surface_hidden(options)
-        surface_hidden |= _allow_list_hidden(options, pool.discovered)
-        catalog = build_tool_list(list(pool.discovered),
-                                  set(options.disallowed_tools) | surface_hidden)
-        # Every advertised tool grows one extra string parameter the model
-        # fills in with a phrase describing what the call is doing, which
-        # the transcript renders beside the tool name. `summary_tools` is
-        # the set that actually received it — a tool with a real `summary`
-        # parameter of its own (session_inject_context) keeps it, and its value must
-        # reach MCP untouched.
-        if options.tool_call_summaries:
-            summary_tools = add_summary_param(catalog)
-            summary_tools.add(TOOLSEARCH_TOOL_NAME)
-        else:
-            summary_tools = set()
-        # A turn with no tools is not a degraded turn, it is a broken one,
-        # and it fails in the least legible way available: `stream_chat`
-        # omits `tools` from the request when the list is empty, vLLM
-        # therefore never engages its tool parser, and the model — which
-        # can still read its whole toolbox in the system prompt — reasons
-        # its way to "call Bash" and then has no channel to do it on. What
-        # comes out is an empty message, or the tool call written as prose,
-        # or invented tool *output*. Nothing in the stream says "no tools";
-        # it reads as the model having forgotten how to use them.
-        #
-        # `pool.discovered` empty means discovery, not config, is at fault:
-        # disabling all 130 tools via `disallowed_tools` would still leave
-        # `discovered` populated. Fail loudly so the turn surfaces an error
-        # instead of silently hallucinating for half an hour (2026-09-06).
-        if not any(tools for _srv, tools in pool.discovered):
-            raise ToolDiscoveryError(
-                "MCP pool advertised no tools — refusing to run a toolless "
-                "turn (the model would narrate tool calls instead of making "
-                "them). Check the lloyd-mcp aggregator on :8500.",
-                servers=sorted(options.mcp_servers or {}),
-            )
-        # Record the tool universe so plan mode can derive its gate from
-        # tool annotations rather than a hardcoded name list. Uses the
-        # unfiltered discovery, not `catalog` — a tool disabled in config
-        # still exists and must stay gated if it is ever re-enabled.
-        try:
-            from app.mcp_discovery import record_tool_universe
-
-            record_tool_universe(
-                t["name"] for _srv, tools in pool.discovered for t in tools
-            )
-        except Exception as exc:  # never let bookkeeping break a turn
-            logger.debug("loop: record_tool_universe skipped: %s", exc)
-        loaded_set = await _resolve_loaded_tool_set(
-            options, catalog, summaries=options.tool_call_summaries,
-        )
-        if loaded_set.enabled:
-            _inject_catalog_reminder(chat_messages, loaded_set)
-
-        session_id = options.session_id or uuid.uuid4().hex
-        yield events.system(session_id=session_id, model=options.model)
-
-        accumulated_text = ""
-        # Two distinct usage trackers:
-        #   iteration_usage — populated freshly each loop pass; reflects
-        #     ONE chat-completion's tokens. Emitted on assistant_message
-        #     so the UI can attach per-row stats.
-        #   total_usage — cross-iteration aggregate. `input_tokens` and
-        #     `cache_read` are a PEAK pair and `*_sum` the summed pair, so
-        #     either ratio is a real fraction; other counters are summed.
-        #     Reported on the final `result` event so usage_store/UI see the
-        #     whole turn — see `_accumulate_iteration_usage`.
-        total_usage: dict[str, int] = {}
-        last_iteration_usage: dict[str, int] = {}
-        # Caption bookkeeping — see `_CAPTION_NUDGE` and events.result.
-        caption_total = 0
-        caption_present = 0
-        caption_nudged = False
-        # One relief pass per crossing of the target instead of one per
-        # iteration (#800). Per turn: the turn owns the message list and the
-        # engine's cached prefix for it, and a new turn invalidates both
-        # anyway. This latch gates ONLY the per-iteration call — while it is
-        # closed the prompt can still climb, and it does so into the
-        # pre-request rung (headroom under `context_relief_min_completion_
-        # tokens`), the terminal-inject guard, and the context-overflow
-        # recovery, all of which run the whole ladder with no latch and are
-        # what keep a latched turn from dying at the wall.
-        relief_latch = _ReliefLatch()
-        num_turns = 0
-        stop_reason = "stop"
-        context_overflow_recoveries = 0
-        # One multimodal rejection latches image attachment off for the rest of
-        # THIS run (#1419). The engine's 400 is per request; a desktop turn
-        # takes more than one capture, and `_tool_history_message` attaches
-        # `_image_refs` to every later result whose ref is route "native" — so
-        # the next screenshot put an image back on the wire and the next 400
-        # found the one-retry-per-turn counter spent, which re-raised out of
-        # `run_query` and ended the turn. One bit, flipped by the first
-        # rejection, is what makes the retry the last refusal this turn sees.
-        images_latched = False
-        max_context_overflow_recoveries = 2
-        echo_guard_reprompts = 0
-        # Broken-stream retries spent this turn (D7), and whether the
-        # iteration in hand ended on one that could not be retried.
-        stream_retries = 0
-        broken_stream = False
-        # P6: the `tool_choice` the NEXT request carries when it is not
-        # "auto" (the echo guard's "required"); consumed by that request.
-        forced_tool_choice: str | None = None
-        # P6b: "" -> "requested" (wrap-up message appended, the toolless
-        # request is owed) -> "done". A retry of the wrap-up request (context
-        # overflow) re-enters as "requested" and does not append again.
-        wrapup_state = ""
-        # Initialised before the loop: a turn that breaks on its first check
-        # (cancelled, max_turns=0) never assigns it, and the finalizer below
-        # runs on every exit path.
-        last_visible_tools: list[dict[str, Any]] = []
+        st = await _open_turn(options, chat_messages, meter, pool, started_at)
+        yield events.system(session_id=st.session_id, model=options.model)
 
         # Preserved-thinking window, enforced HERE at turn entry and nowhere
         # else (backlog #520). See `_cap_history_reasoning`.
-        keep_reasoning = int(
-            getattr(options, "preserve_thinking_iterations", 0) or 0
-        )
-        _cap_history_reasoning(chat_messages, keep=keep_reasoning)
-
-        # The iteration whose head (notification drain + state anchor) has
-        # already run. The overflow and multimodal retries `num_turns -= 1;
-        # continue`, which re-enters the head with the SAME iteration number;
-        # running it again appended a second copy of the anchor (and re-fired
-        # its once-per-level bookkeeping) onto a prompt that was being retried
-        # precisely because it was too big (D9).
-        prelude_done_for = 0
+        _cap_history_reasoning(chat_messages, keep=st.keep_reasoning)
 
         while True:
-            num_turns += 1
-            if num_turns > options.max_turns:
-                stop_reason = "max_turns"
-                if (
-                    wrapup_state == ""
-                    and _wrapup_applies(options)
-                    and not (options.cancel_event is not None
-                             and options.cancel_event.is_set())
-                ):
-                    wrapup_state = "requested"
-                    chat_messages.append({
-                        "role": "user",
-                        "content": _MAX_TURNS_WRAPUP_PROMPT.format(
-                            n=options.max_turns),
-                    })
-                    meter.observe_append(chat_messages)
-                    logger.info(
-                        "loop: max_turns=%d reached — one toolless wrap-up "
-                        "request (session=%s)", options.max_turns, session_id,
-                    )
-                elif wrapup_state != "requested":
-                    break
-                # No drain, no anchor on the wrap-up request: the budget
-                # anchor would repeat what the wrap-up message already says.
-                prelude_done_for = num_turns
-
-            if options.cancel_event is not None and options.cancel_event.is_set():
-                stop_reason = "cancelled"
+            it = await _prelude(st)
+            if it is None:
+                break
+            async with aclosing(_stream_iteration(st, it)) as phase:
+                async for evt in phase:
+                    yield evt
+            if it.flow == "continue":
+                continue
+            if it.flow == "break":
                 break
 
-            # Background-task completion drain. Splices any pending
-            # <task_notification> messages into chat_messages so the
-            # model sees them on this iteration. The callback also
-            # persists them into the session JSON so reconstruction on
-            # subsequent turns stays consistent.
-            prelude_due = prelude_done_for != num_turns
-            prelude_done_for = num_turns
-            if prelude_due and options.notification_drain is not None:
-                try:
-                    drained = await options.notification_drain()
-                except Exception as exc:
-                    logger.warning("loop: notification_drain raised: %s", exc)
-                    drained = []
-                if drained:
-                    chat_messages.extend(drained)
-                    meter.observe_append(chat_messages)
-                    logger.info(
-                        "loop: drained %d background-task notification(s)", len(drained),
-                    )
-
-            # Per-iteration state re-anchor (todos / plan / goal). Appended,
-            # never merged into the system prompt: position 0 must stay
-            # byte-stable or every iteration re-prefills the whole context.
-            # These are NOT persisted — see RunOptions.state_anchor — so the
-            # event each one writes here is the only record that it fired.
-            if prelude_due and options.state_anchor is not None:
-                try:
-                    anchors = await options.state_anchor(num_turns)
-                except Exception as exc:
-                    logger.warning("loop: state_anchor raised: %s", exc)
-                    anchors = []
-                if anchors:
-                    tags = [
-                        m.pop(ANCHOR_TAG, None) if isinstance(m, dict) else None
-                        for m in anchors
-                    ]
-                    _record_anchor_fires(
-                        tags, session_id, getattr(options, "turn_id", "") or "",
-                        num_turns,
-                    )
-                    chat_messages.extend(anchors)
-                    meter.observe_append(chat_messages)
-                    logger.info(
-                        "loop: state anchor re-injected %d message(s) (iter=%d)",
-                        len(anchors), num_turns,
-                    )
-
-            # Plan B — per-iteration disallowed-tools refresh. When the
-            # caller wired a refresher (typically a closure over session
-            # state), the harness re-evaluates the disallowed list on
-            # every iteration. This is what lets ExitPlanMode flipping
-            # plan_mode=false take effect mid-turn instead of waiting
-            # for a fresh user turn to rebuild options.
-            if options.disallowed_tools_refresh is not None:
-                try:
-                    current_disallowed: set[str] = set(
-                        options.disallowed_tools_refresh() or []
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "loop: disallowed_tools_refresh raised: %s", exc,
-                    )
-                    current_disallowed = set(options.disallowed_tools or [])
-            else:
-                current_disallowed = set(options.disallowed_tools or [])
-            current_disallowed |= surface_hidden
-
-            iteration_started_at = time.perf_counter()
-            iteration_usage: dict[str, int] = {}
-            assistant_text = ""
-            thinking_text = ""
-            # Wall time spent producing reasoning: first chunk to last.
-            # Deliberately not the iteration's own clock — that also
-            # covers prefill (which can be minutes on a cold 262k prompt)
-            # and the answer generated after thinking ends.
-            thinking_started_at: float | None = None
-            thinking_last_at: float = 0.0
-            tool_calls_acc: dict[int, dict[str, Any]] = {}
-            finish_reason: str | None = None
-
-            # Held so the finalizer can send the IDENTICAL array. Qwen's
-            # template renders `tools` inside the system message, so a
-            # different (or absent) list changes the rendered prompt from the
-            # first token and vLLM re-prefills the whole conversation.
-            last_visible_tools = loaded_set.visible_tools(
-                extra_disallowed=current_disallowed)
-            # Same reason, one caller further out: a state-patch re-ask issued
-            # after the segment ends is outside this function and cannot
-            # rebuild the array (#529, RunOptions.visible_tools_capture).
-            # Slice assignment keeps the caller's list the one it handed over.
-            if options.visible_tools_capture is not None:
-                options.visible_tools_capture[:] = last_visible_tools
-
-            # Pre-request floor. A request sent with less room than the
-            # completion needs comes back truncated mid-tool-call, and the
-            # model's own next move is to re-send it — which is how 875's
-            # completions shrank 3147 -> 1760 -> 1175 tokens against the
-            # same heredoc. Relieve first, so the request has somewhere to
-            # write.
-            min_completion = int(
-                getattr(options, "context_relief_min_completion_tokens", 6_000)
-            )
-            if (
-                getattr(options, "context_relief_enabled", True)
-                and meter.measured
-                and meter.headroom < min_completion
-            ):
-                _relieve_context(
-                    chat_messages,
-                    options=options,
-                    meter=meter,
-                    reason="pre_request",
-                    keep_recent=int(getattr(
-                        options, "intra_turn_microcompact_keep_recent", 15)),
-                    iteration=num_turns,
-                )
-
-            request_msgs_len = len(chat_messages)
-            # P11: the request's own clock starts here, after the pre-request
-            # relief above, so a relief pass never reads as a slow prefill.
-            # `duration_ms` keeps covering the whole iteration.
-            request_started_at = time.perf_counter()
-            first_chunk_at: float | None = None
-            # P6: a stream retry or an overflow recovery re-sends with the
-            # same choice; it is consumed once the request completes, below.
-            request_tool_choice = (
-                "none" if wrapup_state == "requested"
-                else (forced_tool_choice or "auto"))
-            try:
-                async for chunk in stream_chat(
-                    base_url=options.base_url,
-                    model=options.model,
-                    messages=chat_messages,
-                    tools=last_visible_tools,
-                    extra_body=options.extra_body,
-                    cancel_event=options.cancel_event,
-                    timeout_s=options.request_timeout_s,
-                    api_key=options.api_key,
-                    priority=options.priority,
-                    chunk_timeout_s=getattr(
-                        options, "stream_chunk_timeout_s", 0.0
-                    ),
-                    # #581: which turn and which iteration this line describes.
-                    # `num_turns` is the same value `_log` and
-                    # `prefix_miss.record_iteration` already use for the
-                    # iteration index, so a manifest line and that module's
-                    # per-iteration cache series name the same iteration.
-                    session_id=options.session_id,
-                    iteration=num_turns,
-                    tool_choice=request_tool_choice,
-                ):
-                    # Usage chunk arrives as the last event when
-                    # stream_options.include_usage=True. vLLM emits it
-                    # with choices=[]. Fold into per-iteration only;
-                    # cross-iteration total is computed once we know
-                    # this iteration is final (after the stream loop).
-                    if first_chunk_at is None:
-                        first_chunk_at = time.perf_counter()
-                    if usage := chunk.get("usage"):
-                        iteration_usage = _merge_usage(iteration_usage, usage)
-
-                    choices = chunk.get("choices") or []
-                    if not choices:
-                        continue
-                    choice = choices[0]
-                    delta = choice.get("delta") or {}
-
-                    if (txt := delta.get("content")) is not None:
-                        if txt:
-                            assistant_text += txt
-                            yield events.text_delta(txt)
-
-                    # vLLM's qwen3 reasoning parser emitted reasoning under
-                    # `reasoning_content` through ~0.22; 0.23+ renamed the
-                    # streaming/message field to `reasoning`. Accept both so the
-                    # thinking panel keeps working across vLLM versions.
-                    rc = delta.get("reasoning_content")
-                    if rc is None:
-                        rc = delta.get("reasoning")
-                    if rc:
-                        now = time.perf_counter()
-                        if thinking_started_at is None:
-                            thinking_started_at = now
-                        thinking_last_at = now
-                        thinking_text += rc
-                        yield events.thinking_delta(rc)
-
-                    for tc_delta in delta.get("tool_calls") or []:
-                        _accumulate_tool_call(tool_calls_acc, tc_delta)
-
-                    if fr := choice.get("finish_reason"):
-                        finish_reason = fr
-            except _BROKEN_STREAM_ERRORS as exc:
-                # One handler for every way a stream breaks (D7). A 4xx is the
-                # request's own fault and goes up as before.
-                if _is_client_error(exc):
-                    raise
-                if isinstance(exc, ParseError):
-                    logger.warning("loop: parse error mid-stream — %s", exc)
-                    yield events.stream_raw(exc.raw, error=str(exc))
-                reason = _stream_error_reason(exc)
-                cancelled = (options.cancel_event is not None
-                             and options.cancel_event.is_set())
-                if isinstance(exc, ParseError) and finish_reason and not cancelled:
-                    # The finish frame already arrived: only a trailing line
-                    # (the usage chunk) was lost, and the completion is whole.
-                    pass
-                elif (not tool_calls_acc and not cancelled
-                        and stream_retries < int(getattr(
-                            options, "stream_retry_max", 0) or 0)):
-                    # Nothing was dispatched and no tool call had begun, so
-                    # the same request is safe to send again. The deltas it
-                    # already streamed are taken back by every consumer.
-                    stream_retries += 1
-                    logger.warning(
-                        "loop: broken stream (%s: %s) at iter=%d — retry %d",
-                        reason, exc, num_turns, stream_retries,
-                    )
-                    yield events.iteration_retry(
-                        reason=reason, attempt=stream_retries,
-                        discarded_text_chars=len(assistant_text),
-                        discarded_thinking_chars=len(thinking_text),
-                    )
-                    log_harness_event(session_id, "harness.stream_retried", {
-                        "reason": reason, "error": str(exc)[:300],
-                        "attempt": stream_retries, "iteration": num_turns,
-                        "discarded_text_chars": len(assistant_text),
-                        "discarded_thinking_chars": len(thinking_text),
-                    }, turn_id=getattr(options, "turn_id", "") or None)
-                    await _retry_backoff(
-                        float(getattr(options, "stream_retry_backoff_s", 0) or 0),
-                        options.cancel_event,
-                    )
-                    num_turns -= 1   # the same iteration, requested again
+            if not it.tool_calls_committed:
+                async with aclosing(_end_without_tools(st, it)) as phase:
+                    async for evt in phase:
+                        yield evt
+                if it.flow == "continue":
                     continue
-                elif isinstance(exc, ParseError):
-                    # Not retryable: end the turn on what streamed as text, and
-                    # dispatch none of the half-parsed tool calls.
-                    broken_stream = True
-                    finish_reason = "stream_error"
-                else:
-                    raise
-            except ContextOverflowError as exc:
-                # vLLM rejected the prompt for exceeding context. Recovery:
-                # truncate the largest tool result(s) in chat_messages,
-                # append a synthetic tool note explaining the truncation,
-                # and let the loop retry the same turn. Bounded by
-                # ``max_context_overflow_recoveries`` to avoid an infinite
-                # loop if truncation can't free enough budget.
-                if context_overflow_recoveries >= max_context_overflow_recoveries:
-                    logger.error(
-                        "loop: context overflow after %d recovery attempts — giving up",
-                        context_overflow_recoveries,
-                    )
-                    raise
-                context_overflow_recoveries += 1
-                # The engine told us the real size of the prompt it just
-                # rejected, which is a better anchor than anything the
-                # meter has: adopt it, then aim below the compaction wall.
-                requested = int(getattr(exc, "requested_input_tokens", 0) or 0)
-                if requested > 0:
-                    meter.observe_usage(
-                        {"input_tokens": requested}, request_msgs_len,
-                    )
-                    meter.observe_append(chat_messages)
-                overflow_target = _relief_target(options, meter)
-                report = _relieve_context(
-                    chat_messages,
-                    options=options,
-                    meter=meter,
-                    reason="overflow",
-                    target=overflow_target,
-                    keep_recent=int(getattr(
-                        options, "intra_turn_microcompact_keep_recent", 15)),
-                    iteration=num_turns,
-                )
-                logger.warning(
-                    "loop: context overflow (requested=%s tokens), recovery #%d: "
-                    "freed ~%d tokens via %s",
-                    exc.requested_input_tokens,
-                    context_overflow_recoveries,
-                    report.get("freed_tokens", 0),
-                    ", ".join(report.get("rungs") or []) or "nothing",
-                )
-                # P11: one event per recovery, the countable twin of the
-                # stream_raw below (which is for the transcript's forensics).
-                _log_harness_event(
-                    session_id, "harness.overflow_recovered",
-                    {
-                        "attempt": context_overflow_recoveries,
-                        "iteration": num_turns,
-                        "requested_input_tokens": exc.requested_input_tokens,
-                        "freed_tokens": report.get("freed_tokens", 0),
-                        "rungs": list(report.get("rungs") or []),
-                    },
-                    turn_id=getattr(options, "turn_id", "") or None,
-                )
-                yield events.stream_raw(
-                    "",
-                    error=(
-                        f"context_overflow_recovery: attempt={context_overflow_recoveries}, "
-                        f"rungs={','.join(report.get('rungs') or []) or 'none'}, "
-                        f"freed_tokens={report.get('freed_tokens', 0)}, "
-                        f"requested_input_tokens={exc.requested_input_tokens}"
-                    ),
-                )
-                num_turns -= 1   # don't count the recovered attempt against max_turns
-                continue
-            except MultimodalRejectedError as exc:
-                # The engine was sent a screenshot it cannot take — a slot
-                # whose `supports_vision` claims more than it serves. Strip
-                # every image from the turn and retry; the tool text
-                # (element lists, paths) still carries the work. Stripping the
-                # messages is only half of it: the next capture would attach
-                # refs again through the very code that produced this one, so
-                # the flip latches attachment off as well (#1419).
-                if images_latched:
-                    # Attachment is already off and the engine still saw an
-                    # image, so this is a part the strip cannot reach — a
-                    # caller-supplied image, not a tool ref. Retrying would
-                    # answer a 400 with the same 400, so this stays the one
-                    # case that ends the turn.
-                    raise
-                images_latched = True
-                from app.harness.tool_images import strip_all_image_refs
-                n = strip_all_image_refs(chat_messages)
-                # `exc` carries the engine's 400 body, and it goes in the line
-                # because `looks_like_multimodal_rejection` is a substring test:
-                # any 400 mentioning "image" on a payload that carries refs is
-                # classified as a vision refusal, and once the latch makes that
-                # non-fatal the body is the only trace a misclassification left.
-                logger.error(
-                    "loop: %s — stripped images from %d message(s) and retrying; "
-                    "image parts stay off for the rest of this turn; set "
-                    "models.%s.supports_vision: false",
-                    exc, n, options.model,
-                )
-                yield events.stream_raw("", error=f"multimodal_rejected: {exc}")
-                num_turns -= 1
-                continue
-
-            if options.cancel_event is not None and options.cancel_event.is_set():
-                stop_reason = "cancelled"
-                accumulated_text += assistant_text
                 break
 
-            if thinking_text:
-                thinking_ms = (
-                    int((thinking_last_at - thinking_started_at) * 1000)
-                    if thinking_started_at is not None
-                    else 0
-                )
-                yield events.thinking_done(thinking_text, duration_ms=thinking_ms)
+            async with aclosing(_dispatch_batch(st, it)) as phase:
+                async for evt in phase:
+                    yield evt
+            _after_batch(st, it)
 
-            forced_tool_choice = None   # P6: the request that used it is in
-            tool_calls_committed = [] if broken_stream else _commit_tool_calls(
-                tool_calls_acc, summary_tools=summary_tools,
-                finish_reason=finish_reason or "",
-            )
-            if wrapup_state == "requested" and tool_calls_committed:
-                # The engine was told "none"; a call that arrives anyway is
-                # never dispatched, and never reaches history or the events,
-                # where it would be a tool call with no result.
-                logger.warning(
-                    "loop: wrap-up request returned %d tool call(s) despite "
-                    "tool_choice=none — dropped (session=%s)",
-                    len(tool_calls_committed), session_id,
-                )
-                tool_calls_committed = []
+        async with aclosing(_close_turn(st)) as phase:
+            async for evt in phase:
+                yield evt
+    finally:
+        # Pool is shared across turns — see comment above _build_pool call.
+        _run_finished()
 
-            iteration_ended_at = time.perf_counter()
-            iteration_duration_ms = int((iteration_ended_at - iteration_started_at) * 1000)
-            ttft_ms, request_ms, cache_ratio = _request_timing(
-                request_started_at, first_chunk_at, iteration_ended_at,
-                iteration_usage,
-            )
-            last_iteration_usage = iteration_usage
-            total_usage = _accumulate_iteration_usage(total_usage, iteration_usage)
-            # The engine just reported the real size of the prompt it
-            # processed. `request_msgs_len` is the list length as that
-            # request went out, so everything appended from here is
-            # attributed to the meter's estimate rather than double-counted.
-            meter.observe_usage(iteration_usage, request_msgs_len)
+
+# ---------------------------------------------------------------------------
+# The phases of one turn (P13.2)
+# ---------------------------------------------------------------------------
+#
+# Each phase reads and writes the turn's `TurnState` and the iteration's
+# `Iteration` (app/harness/turn_state.py) — the locals `run_query` used to
+# hold, moved and not re-derived. A phase that decides how the loop goes on
+# says so in `it.flow`: "continue" is the old `continue`, "break" the old
+# `break`, "" falls through to the next phase.
+
+
+async def _open_turn(
+    options: RunOptions,
+    chat_messages: list[dict[str, Any]],
+    meter: ContextMeter,
+    pool: MCPPool,
+    started_at: float,
+) -> TurnState:
+    """Build the catalog, refuse a toolless turn, and name the session."""
+    # The surface's hidden tools join the disallowed set here, for what is
+    # advertised, and in every iteration's dispatch set below, including a
+    # plan-mode refresher's, which would otherwise rebuild it without them.
+    surface_hidden = _surface_hidden(options)
+    surface_hidden |= _allow_list_hidden(options, pool.discovered)
+    catalog = build_tool_list(list(pool.discovered),
+                              set(options.disallowed_tools) | surface_hidden)
+    # Every advertised tool grows one extra string parameter the model
+    # fills in with a phrase describing what the call is doing, which
+    # the transcript renders beside the tool name. `summary_tools` is
+    # the set that actually received it — a tool with a real `summary`
+    # parameter of its own (session_inject_context) keeps it, and its value must
+    # reach MCP untouched.
+    if options.tool_call_summaries:
+        summary_tools = add_summary_param(catalog)
+        summary_tools.add(TOOLSEARCH_TOOL_NAME)
+    else:
+        summary_tools = set()
+    # A turn with no tools is not a degraded turn, it is a broken one,
+    # and it fails in the least legible way available: `stream_chat`
+    # omits `tools` from the request when the list is empty, vLLM
+    # therefore never engages its tool parser, and the model — which
+    # can still read its whole toolbox in the system prompt — reasons
+    # its way to "call Bash" and then has no channel to do it on. What
+    # comes out is an empty message, or the tool call written as prose,
+    # or invented tool *output*. Nothing in the stream says "no tools";
+    # it reads as the model having forgotten how to use them.
+    #
+    # `pool.discovered` empty means discovery, not config, is at fault:
+    # disabling all 130 tools via `disallowed_tools` would still leave
+    # `discovered` populated. Fail loudly so the turn surfaces an error
+    # instead of silently hallucinating for half an hour (2026-09-06).
+    if not any(tools for _srv, tools in pool.discovered):
+        raise ToolDiscoveryError(
+            "MCP pool advertised no tools — refusing to run a toolless "
+            "turn (the model would narrate tool calls instead of making "
+            "them). Check the lloyd-mcp aggregator on :8500.",
+            servers=sorted(options.mcp_servers or {}),
+        )
+    # Record the tool universe so plan mode can derive its gate from
+    # tool annotations rather than a hardcoded name list. Uses the
+    # unfiltered discovery, not `catalog` — a tool disabled in config
+    # still exists and must stay gated if it is ever re-enabled.
+    try:
+        from app.mcp_discovery import record_tool_universe
+
+        record_tool_universe(
+            t["name"] for _srv, tools in pool.discovered for t in tools
+        )
+    except Exception as exc:  # never let bookkeeping break a turn
+        logger.debug("loop: record_tool_universe skipped: %s", exc)
+    loaded_set = await _resolve_loaded_tool_set(
+        options, catalog, summaries=options.tool_call_summaries,
+    )
+    if loaded_set.enabled:
+        _inject_catalog_reminder(chat_messages, loaded_set)
+
+    return TurnState(
+        options=options,
+        chat_messages=chat_messages,
+        meter=meter,
+        pool=pool,
+        started_at=started_at,
+        session_id=options.session_id or uuid.uuid4().hex,
+        surface_hidden=surface_hidden,
+        summary_tools=summary_tools,
+        loaded_set=loaded_set,
+        keep_reasoning=int(
+            getattr(options, "preserve_thinking_iterations", 0) or 0
+        ),
+        # One relief pass per crossing of the target instead of one per
+        # iteration (#800). Per turn: the turn owns the message list and
+        # the engine's cached prefix for it, and a new turn invalidates
+        # both anyway. This latch gates ONLY the per-iteration call —
+        # while it is closed the prompt can still climb, and it does so
+        # into the pre-request rung (headroom under
+        # `context_relief_min_completion_tokens`), the terminal-inject
+        # guard, and the context-overflow recovery, all of which run the
+        # whole ladder with no latch and are what keep a latched turn
+        # from dying at the wall.
+        relief_latch=_ReliefLatch(),
+    )
+
+
+async def _prelude(st: TurnState) -> Iteration | None:
+    """The head of an iteration, before its request. None ends the turn.
+
+    Counts the iteration, applies the `max_turns` budget (and its one
+    toolless wrap-up request), honours Stop, splices drained notifications
+    and the state anchor (once per iteration number, D9), refreshes the
+    disallowed set, and runs the pre-request relief floor.
+    """
+    options = st.options
+    chat_messages = st.chat_messages
+    meter = st.meter
+
+    st.num_turns += 1
+    if st.num_turns > options.max_turns:
+        st.stop_reason = "max_turns"
+        if (
+            st.wrapup_state == ""
+            and _wrapup_applies(options)
+            and not (options.cancel_event is not None
+                     and options.cancel_event.is_set())
+        ):
+            st.wrapup_state = "requested"
+            chat_messages.append({
+                "role": "user",
+                "content": _MAX_TURNS_WRAPUP_PROMPT.format(
+                    n=options.max_turns),
+            })
             meter.observe_append(chat_messages)
-            asst_evt = events.assistant_message(
-                text=assistant_text,
-                tool_calls=tool_calls_committed,
-                thinking=thinking_text,
-                usage=iteration_usage,
-                duration_ms=iteration_duration_ms,
-                iteration=num_turns,
-                finish_reason=finish_reason or "stop",
-                context=meter.snapshot() if meter.measured else None,
-                ttft_ms=ttft_ms,
-                request_ms=request_ms,
-                cache_ratio=cache_ratio,
+            logger.info(
+                "loop: max_turns=%d reached — one toolless wrap-up "
+                "request (session=%s)", options.max_turns, st.session_id,
             )
-            yield asst_evt
-            accumulated_text += assistant_text
+        elif st.wrapup_state != "requested":
+            return None
+        # No drain, no anchor on the wrap-up request: the budget
+        # anchor would repeat what the wrap-up message already says.
+        st.prelude_done_for = st.num_turns
 
-            # Append this iteration's assistant turn to history BEFORE firing
-            # the hook.
-            #
-            # The observer's `inject` lever appends to this same list, so
-            # firing first put the nudge at index n and the assistant text it
-            # was reacting to at n+1:
-            #
-            #   user:      "[INNER VOICE] You ended the turn by announcing…"
-            #   assistant: "Let me check the logs:"   <- what the inject is about
-            #
-            # The nudge preceded its referent and the request the model then
-            # generated from ended on its own assistant turn rather than on a
-            # user message. That is the stall-rescue path — the dominant
-            # failure the observer exists for — and the persisted session
-            # kept the same shape. The echo-guard re-prompt below always
-            # appended after the assistant message and got this right.
-            # Append-only from here on: `keep_reasoning` decides whether THIS
-            # message carries its reasoning, but nothing already appended —
-            # and therefore already prefilled and cached by the engine — is
-            # ever edited again. The window is applied at turn entry.
-            chat_messages.append(_assistant_message_for_history(
-                text=assistant_text, tool_calls=tool_calls_committed,
-                reasoning=thinking_text if keep_reasoning > 0 else "",
-            ))
+    if options.cancel_event is not None and options.cancel_event.is_set():
+        st.stop_reason = "cancelled"
+        return None
 
-            # Snapshot chat_messages length before firing OnEvent. The
-            # observer may append a user message ("inject" lever); if it
-            # does AND the model is otherwise about to terminate this turn
-            # (no tool calls), we continue the loop so the inject takes
-            # effect on the next iteration instead of being lost.
-            chat_msgs_len_before_hook = len(chat_messages)
-            if options.hooks is not None:
-                await options.hooks.fire_on_event(asst_evt)
-            observer_injected = len(chat_messages) > chat_msgs_len_before_hook
-
-            if wrapup_state == "requested":
-                # The one toolless answer is in; nothing continues past it,
-                # an observer inject included. `stop_reason` is still
-                # "max_turns", so INCOMPLETE and the finalizer skip hold.
-                wrapup_state = "done"
-                break
-
-            if not tool_calls_committed:
-                if broken_stream:
-                    stop_reason = "stream_error"
-                    break
-                if observer_injected:
-                    # Observer injected a system message. Continue the loop
-                    # so the model gets to read it and respond — but only if
-                    # there is room to respond IN.
-                    #
-                    # On 2026-09-11 round 875 reached this branch with the
-                    # window already full: the loop continued, the next
-                    # completion was capped at `window - prompt`, the model
-                    # re-sent the same cut-off heredoc, and vLLM eventually
-                    # 400'd. An inject the model cannot answer is worse than
-                    # no inject — it spends the last iteration the turn had.
-                    meter.observe_append(chat_messages)
-                    floor = int(getattr(
-                        options, "context_relief_terminal_floor_tokens", 12_000))
-                    if meter.measured and meter.headroom < floor:
-                        _relieve_context(
-                            chat_messages,
-                            options=options,
-                            meter=meter,
-                            reason="terminal_inject",
-                            keep_recent=int(getattr(
-                                options, "intra_turn_microcompact_keep_recent", 15)),
-                            iteration=num_turns,
-                        )
-                    if meter.measured and meter.headroom < floor:
-                        logger.warning(
-                            "loop: dropping terminal inject — headroom %d < floor %d "
-                            "(iter=%d); ending turn as context_exhausted",
-                            meter.headroom, floor, num_turns,
-                        )
-                        _log_harness_event(
-                            session_id,
-                            "harness.terminal_inject_dropped_for_context",
-                            {
-                                "headroom": meter.headroom,
-                                "floor": floor,
-                                "iteration": num_turns,
-                                "used": meter.used,
-                                "context_window": meter.window,
-                            },
-                        )
-                        stop_reason = "context_exhausted"
-                        accumulated_text += ""
-                        break
-                    logger.info(
-                        "loop: observer injected on terminal iteration — continuing loop",
-                    )
-                    continue
-                # Echo guard — the model printed a shell command in a fenced
-                # block but called no tool. If Bash is available and we haven't
-                # already nudged this turn, append a user-role nudge and loop
-                # once more so it can actually call the tool (or confirm it was
-                # only showing the command). A user message is used rather than
-                # a second system message because vLLM chat templates reject a
-                # non-leading system role.
-                if (
-                    getattr(options, "echo_guard_enabled", True)
-                    and echo_guard_reprompts < _MAX_ECHO_GUARD_REPROMPTS
-                    and _looks_like_unexecuted_command(assistant_text)
-                    and "Bash" not in current_disallowed
-                ):
-                    echo_guard_reprompts += 1
-                    if getattr(options, "echo_guard_mode", "nudge") == "tool_choice":
-                        # P6a: discard the attempt and re-send the request
-                        # byte-identical but for `tool_choice: "required"`.
-                        # `observer_injected` is False here (that branch
-                        # continued above), so the last message is this
-                        # iteration's assistant turn.
-                        chat_messages.pop()
-                        meter.observe_append(chat_messages)
-                        if assistant_text:
-                            accumulated_text = accumulated_text[
-                                : len(accumulated_text) - len(assistant_text)]
-                        yield events.iteration_retry(
-                            reason="echo_guard",
-                            attempt=echo_guard_reprompts,
-                            discarded_text_chars=len(assistant_text),
-                            discarded_thinking_chars=len(thinking_text),
-                        )
-                        forced_tool_choice = "required"
-                        logger.info(
-                            "loop: echo-guard reissue #%d with tool_choice="
-                            "required (iter=%d)", echo_guard_reprompts, num_turns,
-                        )
-                        num_turns -= 1
-                        continue
-                    chat_messages.append({"role": "user", "content": _ECHO_GUARD_NUDGE})
-                    logger.info(
-                        "loop: echo-guard re-prompt #%d — assistant emitted a shell "
-                        "fence with no tool call (iter=%d)",
-                        echo_guard_reprompts, num_turns,
-                    )
-                    continue
-                stop_reason = finish_reason or "stop"
-                break
-
-            # Dispatch each tool call; accumulate results so we can
-            # append them to history before looping back.
-            #
-            # Where this batch's messages begin. A hook can append to
-            # `chat_messages` while the batch is still running — Inner
-            # Voice's pretool inject does exactly that — and an append that
-            # lands between two tool messages leaves
-            # `assistant(tool_calls) → user → tool`, which is not a shape
-            # any engine accepts. `_reorder_batch_messages` below puts the
-            # slice back in wire order once the batch is done.
-            #
-            # Taken from BEFORE the assistant_message hook fired, not from
-            # here: an observer inject appended during `fire_on_event(asst_evt)`
-            # sits between `assistant(tool_calls)` and this batch's tool
-            # messages, and a base taken after it would leave the inject
-            # outside the slice the reorder may move (review 2026-09-24, D8).
-            batch_base = chat_msgs_len_before_hook
-
-            # P8: a batch of fresh Task calls to parallel-safe profiles
-            # overlaps even with general dispatch off. Each child still gets
-            # its own `_meta` grant scope and deny list from `_execute_tool_call`
-            # (D4), exactly as it would sequentially.
-            _safe_tasks = frozenset(
-                getattr(options, "parallel_safe_task_profiles", None) or ())
-            run_parallel = (
-                len(tool_calls_committed) > 1
-                and _batch_is_read_only(tool_calls_committed,
-                                        _read_only_names(pool), _safe_tasks)
-                and (getattr(options, "parallel_tool_calls_enabled", False)
-                     or _is_task_fanout(tool_calls_committed, _safe_tasks))
+    # Background-task completion drain. Splices any pending
+    # <task_notification> messages into chat_messages so the
+    # model sees them on this iteration. The callback also
+    # persists them into the session JSON so reconstruction on
+    # subsequent turns stays consistent.
+    prelude_due = st.prelude_done_for != st.num_turns
+    st.prelude_done_for = st.num_turns
+    if prelude_due and options.notification_drain is not None:
+        try:
+            drained = await options.notification_drain()
+        except Exception as exc:
+            logger.warning("loop: notification_drain raised: %s", exc)
+            drained = []
+        if drained:
+            chat_messages.extend(drained)
+            meter.observe_append(chat_messages)
+            logger.info(
+                "loop: drained %d background-task notification(s)", len(drained),
             )
 
-            if run_parallel:
-                # Phase 1, wire order: announce every call and run the gates
-                # that must stay ordered (ToolSearch's mark_loaded mutates the
-                # shared LoadedToolSet; a hook deny is a decision the model
-                # must see in the order it made the calls).
-                early: dict[str, NormalizedEvent] = {}
-                for tc in tool_calls_committed:
-                    tc_evt = events.tool_call(
-                        call_id=tc["id"],
-                        name=tc["function"]["name"],
-                        args_json=tc["function"]["arguments"],
-                        args_dict=tc["_args_dict"],
-                        summary=tc.get("_summary", ""),
-                    )
-                    yield tc_evt
-                    if options.hooks is not None:
-                        await options.hooks.fire_on_event(tc_evt)
-                    pre = await _pre_dispatch(
-                        tc=tc, options=options, session_id=session_id,
-                        loaded_set=loaded_set,
-                        runtime_disallowed=current_disallowed,
-                        meter=meter,
-                    )
-                    if pre is not None:
-                        early[tc["id"]] = pre
+    # Per-iteration state re-anchor (todos / plan / goal). Appended,
+    # never merged into the system prompt: position 0 must stay
+    # byte-stable or every iteration re-prefills the whole context.
+    # These are NOT persisted — see RunOptions.state_anchor — so the
+    # event each one writes here is the only record that it fired.
+    if prelude_due and options.state_anchor is not None:
+        try:
+            anchors = await options.state_anchor(st.num_turns)
+        except Exception as exc:
+            logger.warning("loop: state_anchor raised: %s", exc)
+            anchors = []
+        if anchors:
+            tags = [
+                m.pop(ANCHOR_TAG, None) if isinstance(m, dict) else None
+                for m in anchors
+            ]
+            _record_anchor_fires(
+                tags, st.session_id, getattr(options, "turn_id", "") or "",
+                st.num_turns,
+            )
+            chat_messages.extend(anchors)
+            meter.observe_append(chat_messages)
+            logger.info(
+                "loop: state anchor re-injected %d message(s) (iter=%d)",
+                len(anchors), st.num_turns,
+            )
 
-                caption_total, caption_present, caption_nudged, nudge_id = \
-                    _account_captions(tool_calls_committed, summary_tools,
-                                      caption_total, caption_present,
-                                      caption_nudged, session_id, num_turns)
+    # Plan B — per-iteration disallowed-tools refresh. When the
+    # caller wired a refresher (typically a closure over session
+    # state), the harness re-evaluates the disallowed list on
+    # every iteration. This is what lets ExitPlanMode flipping
+    # plan_mode=false take effect mid-turn instead of waiting
+    # for a fresh user turn to rebuild options.
+    if options.disallowed_tools_refresh is not None:
+        try:
+            current_disallowed: set[str] = set(
+                options.disallowed_tools_refresh() or []
+            )
+        except Exception as exc:
+            logger.warning(
+                "loop: disallowed_tools_refresh raised: %s", exc,
+            )
+            current_disallowed = set(options.disallowed_tools or [])
+    else:
+        current_disallowed = set(options.disallowed_tools or [])
+    current_disallowed |= st.surface_hidden
 
-                pending = [tc for tc in tool_calls_committed
-                           if tc["id"] not in early]
-                results: dict[str, NormalizedEvent] = dict(early)
+    it = Iteration(started_at=time.perf_counter(),
+                   current_disallowed=current_disallowed)
 
-                # Phase 2: overlap the MCP calls. No TaskGroup — it cancels
-                # siblings on the first exception, and one tool failing is a
-                # tool_result, not a reason to abandon the batch.
-                sem = asyncio.Semaphore(
-                    max(1, int(getattr(
-                        options, "parallel_tool_calls_max_concurrency", 4))))
+    # Held so the finalizer can send the IDENTICAL array. Qwen's
+    # template renders `tools` inside the system message, so a
+    # different (or absent) list changes the rendered prompt from the
+    # first token and vLLM re-prefills the whole conversation.
+    st.last_visible_tools = st.loaded_set.visible_tools(
+        extra_disallowed=current_disallowed)
+    # Same reason, one caller further out: a state-patch re-ask issued
+    # after the segment ends is outside this function and cannot
+    # rebuild the array (#529, RunOptions.visible_tools_capture).
+    # Slice assignment keeps the caller's list the one it handed over.
+    if options.visible_tools_capture is not None:
+        options.visible_tools_capture[:] = st.last_visible_tools
 
-                async def _run_one(call: dict[str, Any]) -> NormalizedEvent:
-                    async with sem:
-                        try:
-                            return await _execute_tool_call(
-                                tc=call, pool=pool, options=options,
-                                session_id=session_id,
-                                runtime_disallowed=current_disallowed,
-                            )
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as exc:      # pragma: no cover
-                            logger.exception(
-                                "loop: parallel dispatch failed on %s",
-                                call["function"]["name"])
-                            return events.tool_result(
-                                call_id=call["id"],
-                                name=call["function"]["name"],
-                                content=f"Tool dispatch failed: {exc}",
-                                is_error=True,
-                                error_class="dispatch_failed",
-                            )
+    # Pre-request floor. A request sent with less room than the
+    # completion needs comes back truncated mid-tool-call, and the
+    # model's own next move is to re-send it — which is how 875's
+    # completions shrank 3147 -> 1760 -> 1175 tokens against the
+    # same heredoc. Relieve first, so the request has somewhere to
+    # write.
+    min_completion = int(
+        getattr(options, "context_relief_min_completion_tokens", 6_000)
+    )
+    if (
+        getattr(options, "context_relief_enabled", True)
+        and meter.measured
+        and meter.headroom < min_completion
+    ):
+        _relieve_context(
+            chat_messages,
+            options=options,
+            meter=meter,
+            reason="pre_request",
+            keep_recent=int(getattr(
+                options, "intra_turn_microcompact_keep_recent", 15)),
+            iteration=st.num_turns,
+        )
+    return it
 
-                tasks = [asyncio.create_task(_run_one(tc)) for tc in pending]
-                try:
-                    for evt_id in early:
-                        out = early[evt_id]
-                        if evt_id == nudge_id:
-                            out = _with_caption_nudge(out)
-                        yield out
-                        if options.hooks is not None:
-                            await options.hooks.fire_on_event(out)
-                    # Yielded as they land: the frontend and messages.py key
-                    # on call_id, so completion order costs nothing there and
-                    # buys the user seeing the first answer sooner.
-                    for fut in asyncio.as_completed(tasks):
-                        result_evt = await fut
-                        results[result_evt["call_id"]] = result_evt
-                        if result_evt["call_id"] == nudge_id:
-                            result_evt = _with_caption_nudge(result_evt)
-                            results[result_evt["call_id"]] = result_evt
-                        yield result_evt
-                        if options.hooks is not None:
-                            await options.hooks.fire_on_event(result_evt)
-                finally:
-                    # The consumer can close this generator mid-batch (a Stop
-                    # click, a disconnect). Leaving these running would keep
-                    # dispatching tools for a turn nobody is reading.
-                    for t in tasks:
-                        if not t.done():
-                            t.cancel()
 
-                # Phase 3: history in WIRE order regardless of who finished
-                # first, so the replayed conversation matches the assistant
-                # message's own tool_calls array.
-                for tc in tool_calls_committed:
-                    evt = results.get(tc["id"])
-                    if evt is None:
-                        continue
-                    chat_messages.append(_tool_history_message(
-                        tc["id"], evt, allow_images=not images_latched))
-                _reorder_batch_messages(chat_messages, batch_base)
-                _cap_images(chat_messages, batch_base)
-                tool_calls_committed_done = True
-            else:
-                tool_calls_committed_done = False
+async def _stream_iteration(st: TurnState, it: Iteration):
+    """One request: stream it, recover a broken or rejected one, and commit.
 
-            for tc in ([] if tool_calls_committed_done else tool_calls_committed):
+    Ends with the iteration's `assistant_message` yielded, appended to
+    history and handed to the hooks. Sets `it.flow` to "continue" for a
+    retry of the same iteration (D7 stream retry, context-overflow and
+    multimodal recovery) and to "break" on Stop or once the wrap-up answer
+    is in.
+    """
+    options = st.options
+    chat_messages = st.chat_messages
+    meter = st.meter
+    session_id = st.session_id
+
+    it.request_msgs_len = len(chat_messages)
+    # P11: the request's own clock starts here, after the pre-request
+    # relief above, so a relief pass never reads as a slow prefill.
+    # `duration_ms` keeps covering the whole iteration.
+    it.request_started_at = time.perf_counter()
+    it.first_chunk_at = None
+    # P6: a stream retry or an overflow recovery re-sends with the
+    # same choice; it is consumed once the request completes, below.
+    it.request_tool_choice = (
+        "none" if st.wrapup_state == "requested"
+        else (st.forced_tool_choice or "auto"))
+    try:
+        async for chunk in stream_chat(
+            base_url=options.base_url,
+            model=options.model,
+            messages=chat_messages,
+            tools=st.last_visible_tools,
+            extra_body=options.extra_body,
+            cancel_event=options.cancel_event,
+            timeout_s=options.request_timeout_s,
+            api_key=options.api_key,
+            priority=options.priority,
+            chunk_timeout_s=getattr(
+                options, "stream_chunk_timeout_s", 0.0
+            ),
+            # #581: which turn and which iteration this line describes.
+            # `num_turns` is the same value `_log` and
+            # `prefix_miss.record_iteration` already use for the
+            # iteration index, so a manifest line and that module's
+            # per-iteration cache series name the same iteration.
+            session_id=options.session_id,
+            iteration=st.num_turns,
+            tool_choice=it.request_tool_choice,
+        ):
+            # Usage chunk arrives as the last event when
+            # stream_options.include_usage=True. vLLM emits it
+            # with choices=[]. Fold into per-iteration only;
+            # cross-iteration total is computed once we know
+            # this iteration is final (after the stream loop).
+            if it.first_chunk_at is None:
+                it.first_chunk_at = time.perf_counter()
+            if usage := chunk.get("usage"):
+                it.iteration_usage = _merge_usage(it.iteration_usage, usage)
+
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            choice = choices[0]
+            delta = choice.get("delta") or {}
+
+            if (txt := delta.get("content")) is not None:
+                if txt:
+                    it.assistant_text += txt
+                    yield events.text_delta(txt)
+
+            # vLLM's qwen3 reasoning parser emitted reasoning under
+            # `reasoning_content` through ~0.22; 0.23+ renamed the
+            # streaming/message field to `reasoning`. Accept both so the
+            # thinking panel keeps working across vLLM versions.
+            rc = delta.get("reasoning_content")
+            if rc is None:
+                rc = delta.get("reasoning")
+            if rc:
+                now = time.perf_counter()
+                if it.thinking_started_at is None:
+                    it.thinking_started_at = now
+                it.thinking_last_at = now
+                it.thinking_text += rc
+                yield events.thinking_delta(rc)
+
+            for tc_delta in delta.get("tool_calls") or []:
+                _accumulate_tool_call(it.tool_calls_acc, tc_delta)
+
+            if fr := choice.get("finish_reason"):
+                it.finish_reason = fr
+    except _BROKEN_STREAM_ERRORS as exc:
+        # One handler for every way a stream breaks (D7). A 4xx is the
+        # request's own fault and goes up as before.
+        if _is_client_error(exc):
+            raise
+        if isinstance(exc, ParseError):
+            logger.warning("loop: parse error mid-stream — %s", exc)
+            yield events.stream_raw(exc.raw, error=str(exc))
+        reason = _stream_error_reason(exc)
+        cancelled = (options.cancel_event is not None
+                     and options.cancel_event.is_set())
+        if isinstance(exc, ParseError) and it.finish_reason and not cancelled:
+            # The finish frame already arrived: only a trailing line
+            # (the usage chunk) was lost, and the completion is whole.
+            pass
+        elif (not it.tool_calls_acc and not cancelled
+                and st.stream_retries < int(getattr(
+                    options, "stream_retry_max", 0) or 0)):
+            # Nothing was dispatched and no tool call had begun, so
+            # the same request is safe to send again. The deltas it
+            # already streamed are taken back by every consumer.
+            st.stream_retries += 1
+            logger.warning(
+                "loop: broken stream (%s: %s) at iter=%d — retry %d",
+                reason, exc, st.num_turns, st.stream_retries,
+            )
+            yield events.iteration_retry(
+                reason=reason, attempt=st.stream_retries,
+                discarded_text_chars=len(it.assistant_text),
+                discarded_thinking_chars=len(it.thinking_text),
+            )
+            log_harness_event(session_id, "harness.stream_retried", {
+                "reason": reason, "error": str(exc)[:300],
+                "attempt": st.stream_retries, "iteration": st.num_turns,
+                "discarded_text_chars": len(it.assistant_text),
+                "discarded_thinking_chars": len(it.thinking_text),
+            }, turn_id=getattr(options, "turn_id", "") or None)
+            await _retry_backoff(
+                float(getattr(options, "stream_retry_backoff_s", 0) or 0),
+                options.cancel_event,
+            )
+            st.num_turns -= 1   # the same iteration, requested again
+            it.flow = "continue"
+            return
+        elif isinstance(exc, ParseError):
+            # Not retryable: end the turn on what streamed as text, and
+            # dispatch none of the half-parsed tool calls.
+            st.broken_stream = True
+            it.finish_reason = "stream_error"
+        else:
+            raise
+    except ContextOverflowError as exc:
+        # vLLM rejected the prompt for exceeding context. Recovery:
+        # truncate the largest tool result(s) in chat_messages,
+        # append a synthetic tool note explaining the truncation,
+        # and let the loop retry the same turn. Bounded by
+        # ``max_context_overflow_recoveries`` to avoid an infinite
+        # loop if truncation can't free enough budget.
+        if st.context_overflow_recoveries >= st.max_context_overflow_recoveries:
+            logger.error(
+                "loop: context overflow after %d recovery attempts — giving up",
+                st.context_overflow_recoveries,
+            )
+            raise
+        st.context_overflow_recoveries += 1
+        # The engine told us the real size of the prompt it just
+        # rejected, which is a better anchor than anything the
+        # meter has: adopt it, then aim below the compaction wall.
+        requested = int(getattr(exc, "requested_input_tokens", 0) or 0)
+        if requested > 0:
+            meter.observe_usage(
+                {"input_tokens": requested}, it.request_msgs_len,
+            )
+            meter.observe_append(chat_messages)
+        overflow_target = _relief_target(options, meter)
+        report = _relieve_context(
+            chat_messages,
+            options=options,
+            meter=meter,
+            reason="overflow",
+            target=overflow_target,
+            keep_recent=int(getattr(
+                options, "intra_turn_microcompact_keep_recent", 15)),
+            iteration=st.num_turns,
+        )
+        logger.warning(
+            "loop: context overflow (requested=%s tokens), recovery #%d: "
+            "freed ~%d tokens via %s",
+            exc.requested_input_tokens,
+            st.context_overflow_recoveries,
+            report.get("freed_tokens", 0),
+            ", ".join(report.get("rungs") or []) or "nothing",
+        )
+        # P11: one event per recovery, the countable twin of the
+        # stream_raw below (which is for the transcript's forensics).
+        _log_harness_event(
+            session_id, "harness.overflow_recovered",
+            {
+                "attempt": st.context_overflow_recoveries,
+                "iteration": st.num_turns,
+                "requested_input_tokens": exc.requested_input_tokens,
+                "freed_tokens": report.get("freed_tokens", 0),
+                "rungs": list(report.get("rungs") or []),
+            },
+            turn_id=getattr(options, "turn_id", "") or None,
+        )
+        yield events.stream_raw(
+            "",
+            error=(
+                f"context_overflow_recovery: attempt={st.context_overflow_recoveries}, "
+                f"rungs={','.join(report.get('rungs') or []) or 'none'}, "
+                f"freed_tokens={report.get('freed_tokens', 0)}, "
+                f"requested_input_tokens={exc.requested_input_tokens}"
+            ),
+        )
+        st.num_turns -= 1   # don't count the recovered attempt against max_turns
+        it.flow = "continue"
+        return
+    except MultimodalRejectedError as exc:
+        # The engine was sent a screenshot it cannot take — a slot
+        # whose `supports_vision` claims more than it serves. Strip
+        # every image from the turn and retry; the tool text
+        # (element lists, paths) still carries the work. Stripping the
+        # messages is only half of it: the next capture would attach
+        # refs again through the very code that produced this one, so
+        # the flip latches attachment off as well (#1419).
+        if st.images_latched:
+            # Attachment is already off and the engine still saw an
+            # image, so this is a part the strip cannot reach — a
+            # caller-supplied image, not a tool ref. Retrying would
+            # answer a 400 with the same 400, so this stays the one
+            # case that ends the turn.
+            raise
+        st.images_latched = True
+        from app.harness.tool_images import strip_all_image_refs
+        n = strip_all_image_refs(chat_messages)
+        # `exc` carries the engine's 400 body, and it goes in the line
+        # because `looks_like_multimodal_rejection` is a substring test:
+        # any 400 mentioning "image" on a payload that carries refs is
+        # classified as a vision refusal, and once the latch makes that
+        # non-fatal the body is the only trace a misclassification left.
+        logger.error(
+            "loop: %s — stripped images from %d message(s) and retrying; "
+            "image parts stay off for the rest of this turn; set "
+            "models.%s.supports_vision: false",
+            exc, n, options.model,
+        )
+        yield events.stream_raw("", error=f"multimodal_rejected: {exc}")
+        st.num_turns -= 1
+        it.flow = "continue"
+        return
+
+    if options.cancel_event is not None and options.cancel_event.is_set():
+        st.stop_reason = "cancelled"
+        st.accumulated_text += it.assistant_text
+        it.flow = "break"
+        return
+
+    if it.thinking_text:
+        thinking_ms = (
+            int((it.thinking_last_at - it.thinking_started_at) * 1000)
+            if it.thinking_started_at is not None
+            else 0
+        )
+        yield events.thinking_done(it.thinking_text, duration_ms=thinking_ms)
+
+    st.forced_tool_choice = None   # P6: the request that used it is in
+    it.tool_calls_committed = [] if st.broken_stream else _commit_tool_calls(
+        it.tool_calls_acc, summary_tools=st.summary_tools,
+        finish_reason=it.finish_reason or "",
+    )
+    if st.wrapup_state == "requested" and it.tool_calls_committed:
+        # The engine was told "none"; a call that arrives anyway is
+        # never dispatched, and never reaches history or the events,
+        # where it would be a tool call with no result.
+        logger.warning(
+            "loop: wrap-up request returned %d tool call(s) despite "
+            "tool_choice=none — dropped (session=%s)",
+            len(it.tool_calls_committed), session_id,
+        )
+        it.tool_calls_committed = []
+
+    iteration_ended_at = time.perf_counter()
+    iteration_duration_ms = int((iteration_ended_at - it.started_at) * 1000)
+    ttft_ms, request_ms, cache_ratio = _request_timing(
+        it.request_started_at, it.first_chunk_at, iteration_ended_at,
+        it.iteration_usage,
+    )
+    st.last_iteration_usage = it.iteration_usage
+    st.total_usage = _accumulate_iteration_usage(st.total_usage, it.iteration_usage)
+    # The engine just reported the real size of the prompt it
+    # processed. `request_msgs_len` is the list length as that
+    # request went out, so everything appended from here is
+    # attributed to the meter's estimate rather than double-counted.
+    meter.observe_usage(it.iteration_usage, it.request_msgs_len)
+    meter.observe_append(chat_messages)
+    asst_evt = events.assistant_message(
+        text=it.assistant_text,
+        tool_calls=it.tool_calls_committed,
+        thinking=it.thinking_text,
+        usage=it.iteration_usage,
+        duration_ms=iteration_duration_ms,
+        iteration=st.num_turns,
+        finish_reason=it.finish_reason or "stop",
+        context=meter.snapshot() if meter.measured else None,
+        ttft_ms=ttft_ms,
+        request_ms=request_ms,
+        cache_ratio=cache_ratio,
+    )
+    yield asst_evt
+    st.accumulated_text += it.assistant_text
+
+    # Append this iteration's assistant turn to history BEFORE firing
+    # the hook.
+    #
+    # The observer's `inject` lever appends to this same list, so
+    # firing first put the nudge at index n and the assistant text it
+    # was reacting to at n+1:
+    #
+    #   user:      "[INNER VOICE] You ended the turn by announcing…"
+    #   assistant: "Let me check the logs:"   <- what the inject is about
+    #
+    # The nudge preceded its referent and the request the model then
+    # generated from ended on its own assistant turn rather than on a
+    # user message. That is the stall-rescue path — the dominant
+    # failure the observer exists for — and the persisted session
+    # kept the same shape. The echo-guard re-prompt below always
+    # appended after the assistant message and got this right.
+    # Append-only from here on: `keep_reasoning` decides whether THIS
+    # message carries its reasoning, but nothing already appended —
+    # and therefore already prefilled and cached by the engine — is
+    # ever edited again. The window is applied at turn entry.
+    chat_messages.append(_assistant_message_for_history(
+        text=it.assistant_text, tool_calls=it.tool_calls_committed,
+        reasoning=it.thinking_text if st.keep_reasoning > 0 else "",
+    ))
+
+    # Snapshot chat_messages length before firing OnEvent. The
+    # observer may append a user message ("inject" lever); if it
+    # does AND the model is otherwise about to terminate this turn
+    # (no tool calls), we continue the loop so the inject takes
+    # effect on the next iteration instead of being lost.
+    #
+    # It is also where this iteration's batch begins. A hook can append
+    # to `chat_messages` while the batch is still running — Inner
+    # Voice's pretool inject does exactly that — and an append that
+    # lands between two tool messages leaves
+    # `assistant(tool_calls) → user → tool`, which is not a shape any
+    # engine accepts. `_reorder_batch_messages` puts the slice back in
+    # wire order once the batch is done. Taken from BEFORE the
+    # assistant_message hook fired, not after it: an observer inject
+    # appended during `fire_on_event(asst_evt)` sits between
+    # `assistant(tool_calls)` and this batch's tool messages, and a base
+    # taken after it would leave the inject outside the slice the
+    # reorder may move (review 2026-09-24, D8).
+    it.batch_base = len(chat_messages)
+    if options.hooks is not None:
+        await options.hooks.fire_on_event(asst_evt)
+    it.observer_injected = len(chat_messages) > it.batch_base
+
+    if st.wrapup_state == "requested":
+        # The one toolless answer is in; nothing continues past it,
+        # an observer inject included. `stop_reason` is still
+        # "max_turns", so INCOMPLETE and the finalizer skip hold.
+        st.wrapup_state = "done"
+        it.flow = "break"
+
+
+async def _end_without_tools(st: TurnState, it: Iteration):
+    """An iteration that made no tool call: end the turn, or go once more.
+
+    Goes on ("continue") for an observer inject there is room to answer,
+    and for the echo guard's one re-prompt; otherwise records why the turn
+    ended and sets "break".
+    """
+    options = st.options
+    chat_messages = st.chat_messages
+    meter = st.meter
+
+    if st.broken_stream:
+        st.stop_reason = "stream_error"
+        it.flow = "break"
+        return
+    if it.observer_injected:
+        # Observer injected a system message. Continue the loop
+        # so the model gets to read it and respond — but only if
+        # there is room to respond IN.
+        #
+        # On 2026-09-11 round 875 reached this branch with the
+        # window already full: the loop continued, the next
+        # completion was capped at `window - prompt`, the model
+        # re-sent the same cut-off heredoc, and vLLM eventually
+        # 400'd. An inject the model cannot answer is worse than
+        # no inject — it spends the last iteration the turn had.
+        meter.observe_append(chat_messages)
+        floor = int(getattr(
+            options, "context_relief_terminal_floor_tokens", 12_000))
+        if meter.measured and meter.headroom < floor:
+            _relieve_context(
+                chat_messages,
+                options=options,
+                meter=meter,
+                reason="terminal_inject",
+                keep_recent=int(getattr(
+                    options, "intra_turn_microcompact_keep_recent", 15)),
+                iteration=st.num_turns,
+            )
+        if meter.measured and meter.headroom < floor:
+            logger.warning(
+                "loop: dropping terminal inject — headroom %d < floor %d "
+                "(iter=%d); ending turn as context_exhausted",
+                meter.headroom, floor, st.num_turns,
+            )
+            _log_harness_event(
+                st.session_id,
+                "harness.terminal_inject_dropped_for_context",
+                {
+                    "headroom": meter.headroom,
+                    "floor": floor,
+                    "iteration": st.num_turns,
+                    "used": meter.used,
+                    "context_window": meter.window,
+                },
+            )
+            st.stop_reason = "context_exhausted"
+            st.accumulated_text += ""
+            it.flow = "break"
+            return
+        logger.info(
+            "loop: observer injected on terminal iteration — continuing loop",
+        )
+        it.flow = "continue"
+        return
+    # Echo guard — the model printed a shell command in a fenced
+    # block but called no tool. If Bash is available and we haven't
+    # already nudged this turn, append a user-role nudge and loop
+    # once more so it can actually call the tool (or confirm it was
+    # only showing the command). A user message is used rather than
+    # a second system message because vLLM chat templates reject a
+    # non-leading system role.
+    if (
+        getattr(options, "echo_guard_enabled", True)
+        and st.echo_guard_reprompts < _MAX_ECHO_GUARD_REPROMPTS
+        and _looks_like_unexecuted_command(it.assistant_text)
+        and "Bash" not in it.current_disallowed
+    ):
+        st.echo_guard_reprompts += 1
+        if getattr(options, "echo_guard_mode", "nudge") == "tool_choice":
+            # P6a: discard the attempt and re-send the request
+            # byte-identical but for `tool_choice: "required"`.
+            # `observer_injected` is False here (that branch
+            # continued above), so the last message is this
+            # iteration's assistant turn.
+            chat_messages.pop()
+            meter.observe_append(chat_messages)
+            if it.assistant_text:
+                st.accumulated_text = st.accumulated_text[
+                    : len(st.accumulated_text) - len(it.assistant_text)]
+            yield events.iteration_retry(
+                reason="echo_guard",
+                attempt=st.echo_guard_reprompts,
+                discarded_text_chars=len(it.assistant_text),
+                discarded_thinking_chars=len(it.thinking_text),
+            )
+            st.forced_tool_choice = "required"
+            logger.info(
+                "loop: echo-guard reissue #%d with tool_choice="
+                "required (iter=%d)", st.echo_guard_reprompts, st.num_turns,
+            )
+            st.num_turns -= 1
+            it.flow = "continue"
+            return
+        chat_messages.append({"role": "user", "content": _ECHO_GUARD_NUDGE})
+        logger.info(
+            "loop: echo-guard re-prompt #%d — assistant emitted a shell "
+            "fence with no tool call (iter=%d)",
+            st.echo_guard_reprompts, st.num_turns,
+        )
+        it.flow = "continue"
+        return
+    st.stop_reason = it.finish_reason or "stop"
+    it.flow = "break"
+
+
+async def _dispatch_batch(st: TurnState, it: Iteration):
+    """Dispatch this iteration's tool calls and append their results (P13.3).
+
+    One path for every batch; only its concurrency differs — the parallel
+    maximum for a batch that qualifies (read-only, flag on or a P8 Task
+    fan-out), 1 for everything else. At 1 it is the sequential dispatch
+    exactly, which is what nearly every production turn runs:
+
+      - **Admission is lazy and in wire order.** A call is announced
+        (`tool_call` + OnEvent) and put through `_pre_dispatch` only when a
+        slot is free, so at 1 the stream is `call₁, result₁, call₂,
+        result₂` and `_pre_dispatch(call₂)` — a hook deny, an Inner Voice
+        pretool inject — runs after `result₁` is in history, as it always
+        has. An early result (parse error, disabled, ToolSearch, a deny)
+        holds its slot until it is yielded. Within one admission round no
+        call starts executing until every admitted call has been through
+        `_pre_dispatch`: `mark_loaded` mutates the shared LoadedToolSet and
+        a deny is a decision the model must see in the order it made the
+        calls.
+      - **At 1 the MCP call is awaited in this task**, not in a child task:
+        an exception from `_execute_tool_call` ends the turn as it did, and
+        nothing it binds in a contextvar is lost to a copied context. Above
+        1 each call runs in its own task, an unexpected raise becomes a
+        `dispatch_failed` result (one tool failing is not a reason to
+        abandon its siblings — and no TaskGroup, which would cancel them),
+        and results are yielded as they land: the frontend and messages.py
+        key on call_id.
+      - **Captions are a wire-order pass** before the batch starts
+        (`_account_captions`): the ratchet is about the first miss, not the
+        first result back.
+      - **History is written in wire order**, a contiguous prefix at a time
+        as results land — at 1 that is right after each result, which is
+        what lets the next call's pre-dispatch see it. The batch's slice is
+        then put back in shape (`_reorder_batch_messages`) and the image cap
+        applied, as before.
+
+    The one difference from the old two-path code is on formerly-parallel
+    batches wider than the semaphore: a call is announced when it is
+    admitted rather than all up front. Closing the generator mid-batch (a
+    Stop click, a disconnect) cancels every call still running.
+    """
+    options = st.options
+    chat_messages = st.chat_messages
+    pool = st.pool
+    session_id = st.session_id
+    calls = it.tool_calls_committed
+
+    # P8: a batch of fresh Task calls to parallel-safe profiles
+    # overlaps even with general dispatch off. Each child still gets
+    # its own `_meta` grant scope and deny list from `_execute_tool_call`
+    # (D4), exactly as it would sequentially.
+    _safe_tasks = frozenset(
+        getattr(options, "parallel_safe_task_profiles", None) or ())
+    run_parallel = (
+        len(calls) > 1
+        and _batch_is_read_only(calls, _read_only_names(pool), _safe_tasks)
+        and (getattr(options, "parallel_tool_calls_enabled", False)
+             or _is_task_fanout(calls, _safe_tasks))
+    )
+    concurrency = (
+        max(1, int(getattr(options, "parallel_tool_calls_max_concurrency", 4)))
+        if run_parallel else 1
+    )
+
+    (st.caption_total, st.caption_present, st.caption_nudged,
+     nudge_id) = _account_captions(
+        calls, st.summary_tools, st.caption_total, st.caption_present,
+        st.caption_nudged, session_id, st.num_turns)
+    # By position, not id: the nudge belongs to the first miss itself.
+    nudge_at = next(
+        (i for i, tc in enumerate(calls)
+         if nudge_id and tc["id"] == nudge_id
+         and tc["function"]["name"] in st.summary_tools
+         and not tc.get("_summary")),
+        None,
+    )
+
+    async def _run_contained(idx: int) -> tuple[int, NormalizedEvent]:
+        call = calls[idx]
+        try:
+            return idx, await _execute_tool_call(
+                tc=call, pool=pool, options=options, session_id=session_id,
+                runtime_disallowed=it.current_disallowed,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # pragma: no cover
+            logger.exception(
+                "loop: parallel dispatch failed on %s", call["function"]["name"])
+            return idx, events.tool_result(
+                call_id=call["id"], name=call["function"]["name"],
+                content=f"Tool dispatch failed: {exc}", is_error=True,
+                error_class="dispatch_failed",
+            )
+
+    results: dict[int, NormalizedEvent] = {}
+    # Results in hand, not yet yielded: early ones in wire order, then
+    # executed ones in the order they landed.
+    ready: collections.deque[tuple[int, NormalizedEvent]] = collections.deque()
+    running: set[asyncio.Task] = set()
+    landed: collections.deque[asyncio.Task] = collections.deque()
+    next_call = 0      # the next call to admit, in wire order
+    written = 0        # calls whose result is in history, a wire-order prefix
+    try:
+        while next_call < len(calls) or ready or running:
+            # Admission: announce and pre-dispatch as many as the slots allow.
+            admitted: list[int] = []
+            while (next_call < len(calls)
+                   and len(running) + len(ready) + len(admitted) < concurrency):
+                idx, tc = next_call, calls[next_call]
+                next_call += 1
                 tc_evt = events.tool_call(
                     call_id=tc["id"],
                     name=tc["function"]["name"],
@@ -1157,120 +1201,135 @@ async def run_query(
                 yield tc_evt
                 if options.hooks is not None:
                     await options.hooks.fire_on_event(tc_evt)
-
-                result_evt = await _dispatch_one_tool_call(
-                    tc=tc,
-                    pool=pool,
-                    options=options,
-                    session_id=session_id,
-                    loaded_set=loaded_set,
-                    runtime_disallowed=current_disallowed,
-                    meter=meter,
+                pre = await _pre_dispatch(
+                    tc=tc, options=options, session_id=session_id,
+                    loaded_set=st.loaded_set,
+                    runtime_disallowed=it.current_disallowed,
+                    meter=st.meter,
                 )
+                if pre is not None:
+                    ready.append((idx, pre))
+                else:
+                    admitted.append(idx)
+            for idx in admitted:
+                if concurrency == 1:
+                    ready.append((idx, await _execute_tool_call(
+                        tc=calls[idx], pool=pool, options=options,
+                        session_id=session_id,
+                        runtime_disallowed=it.current_disallowed,
+                    )))
+                else:
+                    task = asyncio.create_task(_run_contained(idx))
+                    task.add_done_callback(landed.append)
+                    running.add(task)
 
-                # The caption ratchet. Only tools whose schema actually asked
-                # for a `summary` are counted; `session_inject_context` has a
-                # real one of its own and is not in `summary_tools`.
-                if tc["function"]["name"] in summary_tools:
-                    caption_total += 1
-                    if tc.get("_summary"):
-                        caption_present += 1
-                    elif not caption_nudged:
-                        # Once per turn, on the FIRST miss, because the first
-                        # miss is what decides the session: `arguments` is
-                        # replayed as history, so an uncaptioned call becomes
-                        # the model's own most recent example of calling that
-                        # tool. Session 20260907_184351_ivec8d shows the whole
-                        # arc — 5/5 captioned on first use of each tool, 0/31
-                        # after. Correcting it at call two is cheap; at call
-                        # thirty the example has been reinforced thirty times.
-                        caption_nudged = True
-                        result_evt = _with_caption_nudge(result_evt)
-                        logger.info(
-                            "loop: %s dispatched with no summary — nudged once "
-                            "(session=%s, iteration=%d)",
-                            tc["function"]["name"], session_id, num_turns,
-                        )
-                yield result_evt
-                if options.hooks is not None:
-                    await options.hooks.fire_on_event(result_evt)
+            # Hand out one result, then admit again.
+            if ready:
+                idx, result_evt = ready.popleft()
+            else:
+                if not landed:
+                    await asyncio.wait(running, return_when=asyncio.FIRST_COMPLETED)
+                task = landed.popleft()
+                running.discard(task)
+                idx, result_evt = task.result()
+            if idx == nudge_at:
+                result_evt = _with_caption_nudge(result_evt)
+            results[idx] = result_evt
+            yield result_evt
+            if options.hooks is not None:
+                await options.hooks.fire_on_event(result_evt)
 
+            while written < len(calls) and written in results:
                 chat_messages.append(_tool_history_message(
-                    tc["id"], result_evt, allow_images=not images_latched))
-
-            if not tool_calls_committed_done:
-                _reorder_batch_messages(chat_messages, batch_base)
-                _cap_images(chat_messages, batch_base)
-
-            # Mid-turn microcompaction. After this iteration's tool calls
-            # land, clear stale tool results IF the prompt is actually
-            # pressing on the context window. Mutates `chat_messages` in
-            # place so the observer's chat_messages_handle stays pointing
-            # at the same list.
-            #
-            # The tool-count threshold is a cheap pre-check only. Until
-            # 2026-09-05 it was the entire trigger, so a turn that ran 70
-            # tool calls at 40% of its context window was held to 5 inline
-            # results the whole way, and everything it had read was gone.
-            meter.observe_append(chat_messages)
-            if (
-                tool_calls_committed
-                and getattr(options, "intra_turn_microcompact_enabled", True)
-            ):
-                threshold = getattr(options, "intra_turn_microcompact_threshold", 15)
-                keep = getattr(options, "intra_turn_microcompact_keep_recent", 15)
-                tool_count = sum(1 for m in chat_messages if m.get("role") == "tool")
-                if tool_count >= threshold:
-                    # The tool-count threshold stays a cheap pre-check; the
-                    # ladder's own rungs each decide whether they are needed.
-                    # `relief_latch` is what makes that "needed" mean a
-                    # crossing rather than a standing state: the ladder re-
-                    # enters only once the prompt has regrown to the
-                    # intra-turn trigger (see `_ReliefLatch`).
-                    _relieve_context(
-                        chat_messages,
-                        options=options,
-                        meter=meter,
-                        reason="intra_turn",
-                        keep_recent=keep,
-                        tool_count=tool_count,
-                        iteration=num_turns,
-                        latch=relief_latch,
-                    )
-
-        structured, structured_error = await _maybe_finalize(
-            options=options,
-            stop_reason=stop_reason,
-            chat_messages=chat_messages,
-            tools=last_visible_tools,
-            total_usage=total_usage,
-        )
-
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        if caption_total:
-            logger.info(
-                "loop: tool captions %d/%d (%d%%) session=%s",
-                caption_present, caption_total,
-                round(100 * caption_present / caption_total), session_id,
-            )
-        result_done_evt = events.result(
-            stop_reason=stop_reason,
-            usage=total_usage,
-            num_turns=num_turns,
-            duration_ms=duration_ms,
-            response_text=accumulated_text,
-            tool_calls_total=caption_total,
-            tool_calls_captioned=caption_present,
-            structured=structured,
-            structured_error=structured_error,
-            wrapped_up=wrapup_state == "done",
-        )
-        yield result_done_evt
-        if options.hooks is not None:
-            await options.hooks.fire_on_event(result_done_evt)
+                    calls[written]["id"], results[written],
+                    allow_images=not st.images_latched))
+                written += 1
     finally:
-        # Pool is shared across turns — see comment above _build_pool call.
-        _run_finished()
+        # The consumer can close this generator mid-batch (a Stop click, a
+        # disconnect). Leaving these running would keep dispatching tools
+        # for a turn nobody is reading.
+        for task in running:
+            if not task.done():
+                task.cancel()
+
+    _reorder_batch_messages(chat_messages, it.batch_base)
+    _cap_images(chat_messages, it.batch_base)
+
+
+def _after_batch(st: TurnState, it: Iteration) -> None:
+    """Mid-turn microcompaction, once this iteration's results have landed.
+
+    Clears stale tool results IF the prompt is actually pressing on the
+    context window. Mutates `chat_messages` in place so the observer's
+    chat_messages_handle stays pointing at the same list.
+
+    The tool-count threshold is a cheap pre-check only. Until 2026-09-05 it
+    was the entire trigger, so a turn that ran 70 tool calls at 40% of its
+    context window was held to 5 inline results the whole way, and
+    everything it had read was gone.
+    """
+    options = st.options
+    chat_messages = st.chat_messages
+    st.meter.observe_append(chat_messages)
+    if (
+        it.tool_calls_committed
+        and getattr(options, "intra_turn_microcompact_enabled", True)
+    ):
+        threshold = getattr(options, "intra_turn_microcompact_threshold", 15)
+        keep = getattr(options, "intra_turn_microcompact_keep_recent", 15)
+        tool_count = sum(1 for m in chat_messages if m.get("role") == "tool")
+        if tool_count >= threshold:
+            # The tool-count threshold stays a cheap pre-check; the
+            # ladder's own rungs each decide whether they are needed.
+            # `relief_latch` is what makes that "needed" mean a
+            # crossing rather than a standing state: the ladder re-
+            # enters only once the prompt has regrown to the
+            # intra-turn trigger (see `_ReliefLatch`).
+            _relieve_context(
+                chat_messages,
+                options=options,
+                meter=st.meter,
+                reason="intra_turn",
+                keep_recent=keep,
+                tool_count=tool_count,
+                iteration=st.num_turns,
+                latch=st.relief_latch,
+            )
+
+
+async def _close_turn(st: TurnState):
+    """The finalizer, if one was asked for, then the turn's `result`."""
+    options = st.options
+    structured, structured_error = await _maybe_finalize(
+        options=options,
+        stop_reason=st.stop_reason,
+        chat_messages=st.chat_messages,
+        tools=st.last_visible_tools,
+        total_usage=st.total_usage,
+    )
+
+    duration_ms = int((time.perf_counter() - st.started_at) * 1000)
+    if st.caption_total:
+        logger.info(
+            "loop: tool captions %d/%d (%d%%) session=%s",
+            st.caption_present, st.caption_total,
+            round(100 * st.caption_present / st.caption_total), st.session_id,
+        )
+    result_done_evt = events.result(
+        stop_reason=st.stop_reason,
+        usage=st.total_usage,
+        num_turns=st.num_turns,
+        duration_ms=duration_ms,
+        response_text=st.accumulated_text,
+        tool_calls_total=st.caption_total,
+        tool_calls_captioned=st.caption_present,
+        structured=structured,
+        structured_error=structured_error,
+        wrapped_up=st.wrapup_state == "done",
+    )
+    yield result_done_evt
+    if options.hooks is not None:
+        await options.hooks.fire_on_event(result_done_evt)
 
 
 async def _maybe_finalize(
@@ -2635,43 +2694,6 @@ def _reorder_batch_messages(chat_messages: list[dict[str, Any]], base: int) -> N
         return
     del chat_messages[base:]
     chat_messages.extend(tools + others)
-
-
-async def _dispatch_one_tool_call(
-    *,
-    tc: dict[str, Any],
-    pool: MCPPool,
-    options: RunOptions,
-    session_id: str,
-    loaded_set: LoadedToolSet,
-    runtime_disallowed: set[str] | None = None,
-    meter: Any | None = None,
-) -> NormalizedEvent:
-    """Run hooks → MCP dispatch → hooks for a single tool call.
-
-    Composed of two halves, and the split is the point: `_pre_dispatch`
-    decides whether the call happens at all (parse error, disabled tool,
-    ToolSearch intercept, hook deny) and must run in wire order for every
-    call in a batch; `_execute_tool_call` is the part that can safely run
-    concurrently with its siblings. Behaviour here is unchanged — this
-    function still does both, in order, for one call.
-
-    `runtime_disallowed` (Plan B) — the loop's per-iteration disallowed
-    set, computed via `options.disallowed_tools_refresh` if set. When
-    None, falls back to `options.disallowed_tools` (the static turn-start
-    list). Either way, this is the gate that blocks dispatch.
-    """
-    early = await _pre_dispatch(
-        tc=tc, options=options, session_id=session_id,
-        loaded_set=loaded_set, runtime_disallowed=runtime_disallowed,
-        meter=meter,
-    )
-    if early is not None:
-        return early
-    return await _execute_tool_call(
-        tc=tc, pool=pool, options=options, session_id=session_id,
-        runtime_disallowed=runtime_disallowed,
-    )
 
 
 def _parse_failure_text(args_dict: dict[str, Any], *, meter: Any | None = None) -> str:

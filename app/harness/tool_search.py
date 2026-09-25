@@ -12,7 +12,7 @@ Flow:
   2. The model sees a separate ``role: system`` reminder listing every tool's
      advertised name + one-line description (no schemas).
   3. When the model calls ``ToolSearch(query=...)``, the harness intercepts
-     in ``_dispatch_one_tool_call`` (no MCP round-trip), runs ``search_tools``,
+     in ``_pre_dispatch`` (no MCP round-trip), runs ``search_tools``,
      marks the matches as loaded, and returns a ``<functions>`` block whose
      format mirrors the schema dump at the top of Claude Code's prompt.
   4. Next iteration's ``visible_tools()`` includes the newly loaded names, so
@@ -78,7 +78,7 @@ TOOLSEARCH_OPENAI_TOOL: dict[str, Any] = {
     },
 }
 
-# ToolSearch is intercepted in ``_dispatch_one_tool_call`` and never reaches
+# ToolSearch is intercepted in ``_pre_dispatch`` and never reaches
 # MCP, but it is still a tool call the user watches go by, so it carries the
 # same display `summary` parameter as everything else. Kept as a second
 # pre-built constant rather than injected in ``visible_tools()`` so the

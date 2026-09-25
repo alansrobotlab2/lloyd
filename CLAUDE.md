@@ -1805,7 +1805,7 @@ A server that sets no hints qualifies nothing, which is that file's contract.
 `Bash(cat …)` serialises its batch: classifying shell commands as read-only is
 the guessing game the safety hook deliberately refuses to play.
 
-Three phases, and each one exists for a reason:
+Since P13.3 this is ONE path for every batch (`loop._dispatch_batch`), concurrency 1 unless the batch qualifies; at 1 it is the old sequential loop exactly (`architecture/harness.md` §P13.1-3). Three phases, and each one exists for a reason:
 
 - **Phase 1 runs in wire order and stays sequential.** `_pre_dispatch` covers
   the parse error, the disabled-tool gate, the ToolSearch intercept (which

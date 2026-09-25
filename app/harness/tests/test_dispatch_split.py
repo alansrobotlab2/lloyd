@@ -182,45 +182,94 @@ async def test_execute_runs_the_call_and_post_processes(monkeypatch):
     assert _Pool.kw["session_id"] == "s"
 
 
-async def test_dispatch_one_still_composes_both_halves():
+# The two halves compose on the one dispatch path (P13.3). These drove
+# `_dispatch_one_tool_call`, which the single path in `_dispatch_batch`
+# replaced; they now drive the real `run_query` on the replay seams.
+
+from app.harness.tests import _replay as R  # noqa: E402
+
+
+def _seq_opts(**kw):
+    return RunOptions(model="m", max_turns=4, tool_search_enabled=False, **kw)
+
+
+async def test_dispatch_still_composes_both_halves(monkeypatch):
     calls = []
+    orig_pre, orig_exec = L._pre_dispatch, L._execute_tool_call
 
-    async def fake_pre(**kw):
-        calls.append("pre")
-        return None
+    async def spy_pre(**kw):
+        calls.append(("pre", kw["tc"]["id"]))
+        return await orig_pre(**kw)
 
-    async def fake_exec(**kw):
-        calls.append("exec")
-        return {"type": "tool_result", "call_id": "c1", "name": "Read",
-                "content": "ok", "is_error": False}
+    async def spy_exec(**kw):
+        calls.append(("exec", kw["tc"]["id"]))
+        return await orig_exec(**kw)
 
-    import app.harness.loop as M
-    orig_pre, orig_exec = M._pre_dispatch, M._execute_tool_call
-    M._pre_dispatch, M._execute_tool_call = fake_pre, fake_exec
-    try:
-        evt = await M._dispatch_one_tool_call(
-            tc=_tc(), pool=None, options=RunOptions(model="m"),
-            session_id="s", loaded_set=_loaded_set())
-    finally:
-        M._pre_dispatch, M._execute_tool_call = orig_pre, orig_exec
-    assert calls == ["pre", "exec"] and evt["content"] == "ok"
+    monkeypatch.setattr(L, "_pre_dispatch", spy_pre)
+    monkeypatch.setattr(L, "_execute_tool_call", spy_exec)
+    R.install(monkeypatch, R.ReplayEngine([
+        R.Step(tool_calls=[R.tool_call("c1", "Read", "a")]),
+        R.Step(text="done")]), R.ReplayPool(answers={"c1": "ok"}))
+    out = await R.drive(_seq_opts())
+    assert calls == [("pre", "c1"), ("exec", "c1")]
+    assert R.of_type(out, "tool_result")[0]["content"] == "ok"
 
 
-async def test_an_early_result_short_circuits_the_dispatch():
+async def test_an_early_result_short_circuits_the_dispatch(monkeypatch):
     async def never(**kw):
         raise AssertionError("must not dispatch after an early result")
 
-    import app.harness.loop as M
-    orig = M._execute_tool_call
-    M._execute_tool_call = never
-    try:
-        evt = await M._dispatch_one_tool_call(
-            tc=_tc("Bash"), pool=None, options=RunOptions(model="m"),
-            session_id="s", loaded_set=_loaded_set(),
-            runtime_disallowed={"Bash"})
-    finally:
-        M._execute_tool_call = orig
-    assert evt["is_error"]
+    monkeypatch.setattr(L, "_execute_tool_call", never)
+    R.install(monkeypatch, R.ReplayEngine([
+        R.Step(tool_calls=[R.tool_call("c1", "Bash", "a", command="ls")]),
+        R.Step(text="done")]), R.ReplayPool())
+    out = await R.drive(_seq_opts(disallowed_tools=["Bash"]))
+    res = R.of_type(out, "tool_result")
+    assert len(res) == 1 and res[0]["is_error"]
+    assert res[0]["error_class"] == "disabled"
+
+
+async def test_a_sequential_batch_pre_dispatches_each_call_after_the_last_result(
+        monkeypatch):
+    """The one ordering property the single path must keep from the old
+    sequential loop: at concurrency 1 a PreToolUse hook for call 2 runs after
+    call 1's result is yielded AND in history, so a deny or an Inner Voice
+    inject for call 2 is decided knowing what call 1 returned."""
+    from app.harness.hooks import HookRegistry
+
+    handle: list[dict] = []
+    seen: dict[str, list] = {}
+    order: list[str] = []
+    hooks = HookRegistry()
+
+    async def pre(input_dict, tool_use_id, _ctx):
+        order.append(f"pre:{tool_use_id}")
+        seen[tool_use_id] = [m.get("tool_call_id") for m in handle
+                             if m.get("role") == "tool"]
+        return {}
+
+    async def on_event(evt):
+        if evt["type"] in ("tool_call", "tool_result"):
+            order.append(f'{evt["type"]}:{evt["call_id"]}')
+
+    hooks.add_pre_tool_use(None, pre)
+    hooks.add_on_event(on_event)
+    pool = R.ReplayPool()
+    R.install(monkeypatch, R.ReplayEngine([
+        R.Step(tool_calls=[R.tool_call("c1", "Read", "a"),
+                           R.tool_call("c2", "Bash", "b", command="ls")]),
+        R.Step(text="done")]), pool)
+    await R.drive(_seq_opts(hooks=hooks, chat_messages_handle=handle,
+                            parallel_tool_calls_enabled=True))
+    assert order == ["tool_call:c1", "pre:c1", "tool_result:c1",
+                     "tool_call:c2", "pre:c2", "tool_result:c2"]
+    assert seen == {"c1": [], "c2": ["c1"]}
+    assert pool.max_inflight == 1
+
+
+def test_the_old_per_call_dispatcher_is_gone():
+    """One dispatch path: the sequential special case was deleted (P13.3)."""
+    assert not hasattr(L, "_dispatch_one_tool_call")
 
 
 # ── annotations reach the pool ──────────────────────────────────────────────

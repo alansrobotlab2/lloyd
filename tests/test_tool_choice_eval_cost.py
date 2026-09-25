@@ -74,7 +74,7 @@ def test_the_cited_range_contains_the_yield_that_precedes_dispatch():
             f"loop.py:{start}-{end} is cited as the yield-before-dispatch site but "
             f"contains no `events.tool_call` — it starts with: "
             f"{lines[start - 1].strip()[:70]!r}")
-        assert "_dispatch_one_tool_call" in cited, (
+        assert "_execute_tool_call(" in cited, (
             f"loop.py:{start}-{end} must contain the dispatch the yield precedes, "
             "or 'yields before dispatch' is not what the range shows")
 
@@ -86,7 +86,7 @@ def test_the_yield_really_does_precede_the_dispatch_in_that_range():
         cited = lines[start - 1:end]
         yield_at = _first_line_containing(cited, "yield tc_evt",
                                           f"loop.py:{start}-{end}")
-        dispatch_at = _first_line_containing(cited, "_dispatch_one_tool_call(",
+        dispatch_at = _first_line_containing(cited, "_execute_tool_call(",
                                              f"loop.py:{start}-{end}")
         assert yield_at < dispatch_at, (
             f"in the cited range the dispatch at +{dispatch_at} comes before the "
@@ -115,7 +115,7 @@ def _first_line_containing(lines: list[str], needle: str, where: str) -> int:
 # the parallel read-only batch) by driving the real `run_query` on the replay
 # seams (`app/harness/tests/_replay.py`) and breaking at the first `tool_call`,
 # exactly as the eval does. They used to scan `run_query`'s source for the order
-# of `yield tc_evt` and `_dispatch_one_tool_call(` (P13.0 replaced that): a
+# of `yield tc_evt` and the old `_dispatch_one_tool_call(` (P13.0 replaced that): a
 # source scan certifies text, and the eval's safety is a behaviour.
 
 _EMIT_PATHS = {

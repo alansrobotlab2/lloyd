@@ -31,7 +31,7 @@ from app.paths import TASKS_DIR  # anchored to DATA_ROOT
 
 
 # Session correlation. Set by the harness wrapper before each MCP
-# tool dispatch (see app.harness.loop._dispatch_one_tool_call) so the
+# tool dispatch (see app.harness.loop._execute_tool_call) so the
 # Bash tool can stamp spawned tasks with the originating session.
 current_session_id: contextvars.ContextVar[str] = contextvars.ContextVar(
     "current_session_id", default=""

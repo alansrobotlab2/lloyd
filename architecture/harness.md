@@ -22,6 +22,7 @@ tissue; this doc is the map.
 | Module | Owns |
 |---|---|
 | `loop.py` | the iteration loop: stream → parse → tool dispatch → append → repeat; history shaping (`_assistant_message_for_history`, `_commit_tool_calls`, `_prune_reasoning`) |
+| `turn_state.py` | `TurnState` (the turn's locals) and `Iteration` (one pass's) — the state `run_query`'s phases share (P13.1) |
 | `client.py` | the httpx SSE stream to `/v1/chat/completions`; `read=None`, so stalls are bounded by `stream_chunk_timeout_s`, never time-to-first-byte |
 | `options.py` | `RunOptions` — every knob a caller can set; the router and the worker sources build one per turn |
 | `events.py` | the `NormalizedEvent` constructors: `system`, `text_delta`, `thinking_delta`, `thinking_done`, `tool_call`, `tool_result`, `assistant_message`, `result`, `stream_raw` |
@@ -201,7 +202,7 @@ something in the second one first.
   recoveries `num_turns -= 1; continue`, which re-entered the loop head with
   the same iteration number, so the notification drain and the state anchor
   ran again and a second copy of the anchor was appended onto a prompt being
-  retried *because* it was too big. `prelude_done_for` in `run_query` records
+  retried *because* it was too big. `TurnState.prelude_done_for` records
   the iteration whose head already ran. `test_state_anchor.py` pins `[1, 2]`.
 - **Cancelling the dispatcher cancels the MCP call.** `asyncio.wait` does not
   cancel what it waits on; `_execute_tool_call` now cancels `tool_task` on any
@@ -1065,3 +1066,51 @@ with it: its usage-row writer (two writers remain in `messages.py`, both in
 `_run_turn`), its chat-id mint, and the tests that drove it
 (`tests/test_compaction_record.py::test_a_loopback_post_lands_the_same_record`).
 Pin: `tests/test_workers_router.py::test_the_sync_message_route_is_gone`.
+
+### P13.1-3 — `run_query` in phases; one dispatch path
+
+- **State.** `app/harness/turn_state.py`: `TurnState` holds what `run_query`
+  kept as ~30 locals across iterations, `Iteration` what it re-initialised per
+  pass. A pure move — same names, same initial values, same reset points.
+- **Phases.** `run_query` (~80 lines) is `_open_turn` → per iteration
+  `_prelude` (max_turns + wrap-up, Stop, drain, anchor, disallowed refresh,
+  pre-request relief) → `_stream_iteration` (request, D7/overflow/multimodal
+  recovery, commit, `assistant_message`, history, hook) →
+  `_end_without_tools` (observer inject, echo guard, stop reason) or
+  `_dispatch_batch` → `_after_batch` (microcompact) → `_close_turn`
+  (finalizer, `result`). A phase says how the loop goes on in `it.flow`
+  (`continue` / `break` / fall through). Phases that yield are re-yielded
+  through `contextlib.aclosing`, so closing the turn mid-batch still cancels
+  the batch's outstanding calls at once.
+- **One dispatch path.** `_dispatch_batch` runs every batch; concurrency is
+  `parallel_tool_calls_max_concurrency` when the batch qualifies (read-only
+  and the flag on, or a P8 Task fan-out), else 1. Calls are admitted lazily in
+  wire order — announced, OnEvent fired, `_pre_dispatch`ed — only when a slot
+  is free, and an early result holds its slot until yielded, so at 1 the
+  stream is `call₁, result₁, call₂, result₂` and a hook for call₂ runs with
+  result₁ already in history, exactly as the deleted sequential loop did. At 1
+  the MCP call is awaited in the turn's own task (an unexpected raise still
+  ends the turn; no contextvar is lost to a copied context); above 1 each call
+  is a task, a raise becomes `dispatch_failed`, results are yielded as they
+  land. Captions are one wire-order pass (`_account_captions`); history is
+  appended as a wire-order prefix as results land, then
+  `_reorder_batch_messages` and the image cap run once. `_dispatch_one_tool_call`
+  is gone.
+- **What changed on purpose, both on formerly-parallel batches only** (the
+  flag ships off, so production reaches them only through P8 fan-out): a
+  batch wider than the semaphore announces a call when it is admitted, not
+  all up front; and a caption nudge that lands on an early result (a denied or
+  parse-error call) now reaches history too, as it always did sequentially —
+  the old parallel path yielded the nudged event but wrote the un-nudged one.
+- **Proof.** `eval/run_harness_replay_diff.py` replays persisted sessions
+  through base and HEAD with scripted engine and pool seams and diffs events,
+  final history, the session event log and a hook trace; 200 sessions / 236
+  turns / 2 arms: zero diffs after steps 1+2, and after step 3 zero in history,
+  event log and the `seq` arm, 2 whitelisted interleaves in `par` (both
+  batches of 4-5 calls against concurrency 3). A/A clean both times.
+  `eval/measurements/harness-replay-diff-2026-09-24.md`.
+- Pins: `app/harness/tests/test_dispatch_split.py`
+  (`test_a_sequential_batch_pre_dispatches_each_call_after_the_last_result`,
+  `test_the_old_per_call_dispatcher_is_gone`), the P13.0 replay tests, and
+  `tests/test_tool_choice_eval_cost.py` (the yield-before-dispatch citation now
+  names `_dispatch_batch`).
