@@ -67,7 +67,7 @@ from app.transcript_entries import (
     build_tool_call_entry,
     build_tool_result_entry,
     build_user_entry,
-    truncate_tool_result,
+    shape_tool_result_for_transcript,
 )
 
 logger = logging.getLogger("lloyd-server")
@@ -97,8 +97,12 @@ class _RunRecorder:
     """
 
     def __init__(self, session_id: str, turn_id: str, *, model: str = "",
-                 source: str = "") -> None:
+                 source: str = "",
+                 disallowed_tools: list[str] | None = None) -> None:
         self.session_id = session_id
+        # The run's deny list, so a spilled result's pointer offers only a
+        # recovery this session can take (#1066, D1).
+        self.disallowed_tools = list(disallowed_tools or [])
         self.turn_id = turn_id
         self.model = model
         self.source = source
@@ -276,7 +280,11 @@ class _RunRecorder:
 
         elif etype == "tool_result":
             call_id = evt.get("call_id", "")
-            result = truncate_tool_result(str(evt.get("content", "") or ""))
+            # D1: the same pointer-not-cut shaping the chat path applies.
+            result = shape_tool_result_for_transcript(
+                str(evt.get("content", "") or ""), call_id=call_id,
+                session_id=self.session_id, tool_name=evt.get("name", ""),
+                disallowed_tools=self.disallowed_tools)
             self.results_by_id[call_id] = result
             received: dict = {
                 "tool_call_id": call_id, "result": result,
@@ -284,9 +292,9 @@ class _RunRecorder:
                 "is_error": bool(evt.get("is_error", False)),
             }
             # Omitted rather than zeroed: `result` above is already
-            # truncated, so a run whose event predates the field has no
-            # true size to report, and a `0` in this log would be read as
-            # one (#1052).
+            # shaped (cut, or a pointer), so a run whose event predates the
+            # field has no true size to report, and a `0` in this log would
+            # be read as one (#1052).
             if evt.get("raw_chars") is not None:
                 received["raw_chars"] = int(evt["raw_chars"])
             self._log("brain1.tool_result_received", received)
@@ -407,7 +415,9 @@ class _RunRecorder:
 
 async def record_events(events: AsyncIterator[dict], *, session_id: str,
                         turn_id: str, prompt: str = "", model: str = "",
-                        source: str = "") -> AsyncIterator[dict]:
+                        source: str = "",
+                        disallowed_tools: list[str] | None = None,
+                        ) -> AsyncIterator[dict]:
     """Persist a background run's events and re-yield every one unchanged.
 
     Drop-in around an existing `run_query(...)` loop:
@@ -427,7 +437,8 @@ async def record_events(events: AsyncIterator[dict], *, session_id: str,
             yield evt
         return
 
-    rec = _RunRecorder(session_id, turn_id, model=model, source=source)
+    rec = _RunRecorder(session_id, turn_id, model=model, source=source,
+                       disallowed_tools=disallowed_tools)
     await rec.open(prompt)
     reason = "end-of-stream"
     try:

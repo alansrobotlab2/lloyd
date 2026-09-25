@@ -373,15 +373,17 @@ def test_reasoning_is_persisted_under_the_role_that_hides_it(store):
 
 
 def test_the_paired_tool_row_carries_the_size_from_before_the_shaping(store):
-    """`result_chars` is measured on the truncated text, so it saturates at
-    2,014 and a spilled 80 KB answer is indistinguishable from a 2 KB one
-    (#1052). `raw_chars` is what the harness knew before it spilled, and it
-    rides on the event; the recorder's job is to persist it unchanged and
+    """`result_chars` is measured on the stored text — here the live spill's
+    `<persisted-output>` block — so a spilled 80 KB answer reads as a ~3 KB
+    row (#1052). `raw_chars` is what the harness knew before it spilled, and
+    it rides on the event; the recorder's job is to persist it unchanged and
     leave `result_chars` meaning what it always meant. The dispatch half —
     where that number is captured — is pinned in
-    `tests/test_tool_result_raw_chars.py`."""
-    from app.transcript_entries import TOOL_RESULT_MAX_CHARS
+    `tests/test_tool_result_raw_chars.py`.
 
+    Since D1 (review 2026-09-24) the block is stored whole rather than cut
+    at 2 KB: the cut used to slice off its recovery sentence and closing
+    tag, which is the part that says how to get the rest back."""
     preview = "<persisted-output> Output too large " + "z" * 3_000
     _drive([
         {"type": "tool_call", "call_id": "c1", "name": "Grep",
@@ -392,11 +394,9 @@ def test_the_paired_tool_row_carries_the_size_from_before_the_shaping(store):
     ])
     row = next(m for m in _session(store)["messages"] if m["role"] == "tool")
     assert row["stats"]["raw_chars"] == 81_600
-    assert row["stats"]["result_chars"] == \
-        TOOL_RESULT_MAX_CHARS + len("...(truncated)")
+    assert row["stats"]["result_chars"] == len(preview)
     assert row["stats"]["result_chars"] < row["stats"]["raw_chars"]
-    assert row["content"][0]["text"] == preview[:TOOL_RESULT_MAX_CHARS] \
-        + "...(truncated)"
+    assert row["content"][0]["text"] == preview
 
 
 def test_an_unpaired_tool_row_omits_raw_chars_rather_than_guessing(store):

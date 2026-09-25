@@ -482,7 +482,10 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20, *,
     async for evt in record_events(run_query(messages, options),
                                    session_id=session_id, turn_id=run_id,
                                    prompt=prompt, model="primary",
-                                   source=source):
+                                   source=source,
+                                   disallowed_tools=list(getattr(
+                                       options, "disallowed_tools", None)
+                                       or [])):
         if evt["type"] == "text_delta":
             chunks.append(evt.get("text", ""))
         elif evt["type"] == "result":

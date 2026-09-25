@@ -472,6 +472,74 @@ def test_microcompact_preserves_the_spill_path_it_promises_to_keep():
     assert "xxxx" not in first, "preview should be dropped"
 
 
+# ---------------------------------------------------------------------------
+# D1 (review 2026-09-24): transcript rows are pointers, and the turn-start
+# stack reads them
+# ---------------------------------------------------------------------------
+
+
+def _pointer_session(tmp_path, monkeypatch, n: int, chars: int = 5_000):
+    """A session JSON whose `n` Read results were written by the real
+    transcript shaping, so each over-2k row is a `<persisted-output>`
+    pointer at a file in the (scratch) spill dir."""
+    from app import transcript_entries as te
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR", tmp_path)
+    sid = "20260924_120000_d1"
+    fulls: list[str] = []
+    rows: list[dict] = [te.build_user_entry("read these", timestamp="T")]
+    for i in range(n):
+        cid = f"call_{i:03d}"
+        full = "".join(f"file {i} line {j}\n" for j in range(chars // 16))
+        fulls.append(full)
+        tc = te.build_tool_call(cid, "Read", json.dumps({"file_path": f"/f{i}.py"}))
+        rows.append(te.build_tool_call_entry(tc, timestamp="T"))
+        shaped = te.shape_tool_result_for_transcript(
+            full, call_id=cid, session_id=sid, tool_name="Read")
+        rows.append(te.build_tool_result_entry(cid, shaped, timestamp="T"))
+    rows.append(te.build_user_entry("now what?", timestamp="T"))
+    p = tmp_path / f"{sid}.json"
+    _write_session(p, rows)
+    return p, sid, fulls
+
+
+def test_turn_start_history_carries_the_pointer_and_the_file_holds_the_full_result(
+        tmp_path, monkeypatch):
+    from app.harness.tool_result_spill import PERSISTED_OUTPUT_TAG
+    p, sid, fulls = _pointer_session(tmp_path, monkeypatch, 1, chars=20_000)
+    out = _run(load_and_compact_session(p, model="qwen"))
+    tools = [m for m in out["history"] if m.get("role") == "tool"]
+    assert len(tools) == 1
+    text = _marker_text(tools[0])
+    assert text.startswith(PERSISTED_OUTPUT_TAG), text[:200]
+    path = tmp_path / f"{sid}.tool-results" / "call_000.txt"
+    assert f"Full output saved to: {path}" in text
+    assert "file 0 line 0" in text, "the preview rides along while it is recent"
+    # The part the old 2 KB cut threw away is on disk, whole.
+    assert path.read_text() == fulls[0]
+    assert fulls[0][-40:] not in text
+
+
+def test_old_pointer_rows_shrink_to_their_header_and_recent_ones_keep_the_preview(
+        tmp_path, monkeypatch):
+    """No pressure at all: the spill-aware pass drops an old pointer's preview
+    because nothing is lost — the path is kept — and never touches the
+    `keep_recent_tools` window."""
+    p, sid, _ = _pointer_session(tmp_path, monkeypatch, 20)
+    out = _run(load_and_compact_session(p, model="qwen", mode_override="truncate"))
+    tools = [_marker_text(m) for m in out["history"] if m.get("role") == "tool"]
+    assert len(tools) == 20
+    old, recent = tools[:5], tools[5:]          # keep_recent_tools = 15
+    for i, text in enumerate(old):
+        assert f"{sid}.tool-results/call_{i:03d}.txt" in text, text
+        assert "preview dropped" in text
+        assert f"file {i} line 0" not in text
+        assert len(text) < 400
+    for i, text in enumerate(recent, start=5):
+        assert f"file {i} line 0" in text
+        assert f"{sid}.tool-results/call_{i:03d}.txt" in text
+    assert out["microcompacted"] == 5
+
+
 def test_microcompact_legacy_count_rule_still_available():
     """Direct callers that pass no budget keep the old behavior."""
     from app.harness.microcompact import microcompact

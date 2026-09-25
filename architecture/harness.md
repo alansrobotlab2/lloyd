@@ -422,3 +422,39 @@ lives index-for-index in `_pre_fail_closed`. Pins:
   double counting. `hooks.py`'s docstrings name the four events that do fire
   (`assistant_message`, `tool_call`, `tool_result`, `result`).
   `tests/test_observer_accumulated_text.py`.
+
+### D1 — transcript rows are pointers, not 2k cuts
+
+A tool result over `TOOL_RESULT_MAX_CHARS` (2,000) used to be stored as its
+first 2 KB and nothing else, and the next turn's history is rebuilt from that
+row — so a 20 KB `Read` the model saw whole in turn N was 2 KB with no way back
+in turn N+1. `transcript_entries.shape_tool_result_for_transcript` now runs
+`maybe_spill` at that threshold: the full text goes to
+`<sid>.tool-results/<call_id>.{txt,json}` and the row carries the
+`<persisted-output>` block (path, 2 KB preview, a recovery sentence built
+from the writing turn's deny list). Both writers call it (`messages.py`'s
+`tool_result` branch, `run_recorder`), and `build_tool_result_entry` reads
+the path back off the block into `stats.persisted_path` (omitted otherwise).
+A block the live turn already spilled at 50k is stored whole — the old cut
+sliced off its recovery sentence. No session id, a failed write, or
+`compaction.transcript_spill.enabled: false` all give the old cut.
+
+- **No file-name collision.** The live spill fires only at 50k, and then this
+  function sees its block and writes nothing; below 50k the only other writer
+  of `<call_id>.<ext>` is microcompact's `persist_for_compaction`, with the
+  same content and so the same extension. Screenshots are `<call>.img<n>.<ext>`.
+- **Microcompact already handles it.** The turn-start pass drops an old
+  pointer's preview to its header (path kept) for compactable tools older
+  than `keep_recent_tools`, with no pressure needed; the recent window keeps
+  its preview. `tests/test_compaction.py` drives it through
+  `load_and_compact_session`. MCP-domain results are outside that list and
+  keep their preview (D10's scope).
+- **Readers.** `GET /api/sessions/{sid}/tool-results/{name}` already serves
+  the files (`txt`/`json` media types). The chat renders the block verbatim in
+  the collapsed tool bubble's `<pre>` (legible; the path is not a link yet).
+  The two vault exporters show `tool_result_preview` (preview, not tag line
+  and absolute path) in their 300 chars; `session_recall` indexes only
+  user/assistant rows. `DELETE /api/sessions/{id}` now removes the spill
+  directory too; `sweep_session_spills` ages the rest.
+- `tests/test_transcript_entries.py` pins the four shaping cases, the switch,
+  the delete and the two writers agreeing on a 10k pointer.

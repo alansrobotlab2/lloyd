@@ -34,6 +34,9 @@ every historical session on disk predates them and must keep reading the same:
     `TOOL_RESULT_MAX_CHARS + len("...(truncated)")`. A path holding only the
     truncated string cannot recover it, so absence is the answer it gives,
     never `0` and never the cap.
+  * `persisted_path` on a tool result's stats is present only when the row
+    is a `<persisted-output>` pointer (D1, review 2026-09-24): the full
+    result is in that file and `result_chars` measures the pointer.
   * `turn_id` on a user, tool-call or tool-result row is omitted when the
     writer does not know it. It names the turn that wrote the row, so a
     reader can group a turn's rows without inferring the boundary from
@@ -45,9 +48,13 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-#: A tool result longer than this is truncated before it reaches the
-#: transcript. The full text went to the model; this is the human-facing
-#: record and a 300 kB `Read` result in it helps nobody.
+#: A tool result longer than this does not go into the transcript inline.
+#: The full text went to the model in the turn that made the call; the
+#: transcript is also what the NEXT turn's history is rebuilt from, so since
+#: review 2026-09-24 (D1) a longer result is written to the session's spill
+#: directory and the row carries `maybe_spill`'s `<persisted-output>` pointer
+#: (path + preview) instead of a bare 2 KB cut. `truncate_tool_result` is the
+#: old cut, kept for the kill switch and for a spill that failed to write.
 TOOL_RESULT_MAX_CHARS = 2000
 
 
@@ -55,6 +62,108 @@ def truncate_tool_result(text: str) -> str:
     if len(text) > TOOL_RESULT_MAX_CHARS:
         return text[:TOOL_RESULT_MAX_CHARS] + "...(truncated)"
     return text
+
+
+def transcript_spill_enabled() -> bool:
+    """`compaction.transcript_spill.enabled`, defaulting to on.
+
+    Read per call, like `run_recorder.recording_enabled`, so flipping the
+    switch reaches the next row written rather than the next boot.
+    """
+    try:
+        from app.config import CONFIG
+        block = ((CONFIG.get("compaction") or {}).get("transcript_spill")
+                 or {})
+        return bool(block.get("enabled", True))
+    except Exception:
+        return True
+
+
+def shape_tool_result_for_transcript(
+    content: Any,
+    *,
+    call_id: str,
+    session_id: str,
+    tool_name: str = "",
+    disallowed_tools=None,
+) -> str:
+    """The text a tool-result row stores: a pointer when it is long (D1).
+
+    Four cases, in order:
+
+      * already a `<persisted-output>` block — the live turn spilled it at
+        50k and the block names the file; kept whole, never cut at 2k, which
+        used to slice the path's recovery sentence off the end.
+      * no session, or the switch off — the old 2 KB cut.
+      * over `TOOL_RESULT_MAX_CHARS` — written to
+        `<sid>.tool-results/<call_id>.{txt,json}` by the same `maybe_spill`
+        the loop uses, at this lower threshold, so the transcript pointer and
+        the live-turn pointer are one vocabulary (X5) and microcompact already
+        knows how to shrink it to its header without losing the path.
+      * the write failed — `maybe_spill` hands back the original, and the
+        row falls back to the old cut rather than storing 40 kB inline.
+
+    Same file name as a live spill of the same call is harmless by
+    construction: the live spill fires only at 50k, and then this function
+    sees its block and writes nothing; below 50k nothing else has written the
+    call's file except microcompact's `persist_for_compaction`, which writes
+    the same content under the same name.
+
+    `disallowed_tools` is the writing turn's deny list, so the block's
+    recovery sentence offers only what that session can do (#1066).
+    """
+    from app.harness.tool_result_spill import PERSISTED_OUTPUT_TAG, maybe_spill
+
+    text = content if isinstance(content, str) else str(content or "")
+    if text.startswith(PERSISTED_OUTPUT_TAG):
+        return text
+    if not session_id or not call_id or not transcript_spill_enabled():
+        return truncate_tool_result(text)
+    try:
+        out = maybe_spill(text, tool_name=tool_name, tool_use_id=call_id,
+                          session_id=session_id,
+                          threshold=TOOL_RESULT_MAX_CHARS,
+                          disallowed_tools=list(disallowed_tools or []))
+    except Exception:  # noqa: BLE001 — the row matters more than the file
+        out = text
+    return out if out is not text else truncate_tool_result(text)
+
+
+def persisted_path_of(text: str) -> str:
+    """The file a `<persisted-output>` block points at, or `""`.
+
+    Read off the block rather than passed alongside it, so the reconstruct-
+    from-log paths (which hold only the shaped string) record it too.
+    """
+    from app.harness.tool_result_spill import PERSISTED_OUTPUT_TAG
+    if not isinstance(text, str) or not text.startswith(PERSISTED_OUTPUT_TAG):
+        return ""
+    head = text[:2048]
+    marker = "Full output saved to: "
+    i = head.find(marker)
+    if i == -1:
+        return ""
+    return head[i + len(marker):].split("\n", 1)[0].strip()
+
+
+def tool_result_preview(text: str) -> str:
+    """A tool result's text for a human-facing excerpt.
+
+    For a pointer block that is the preview, prefixed with a short
+    `[full result on disk]` tag, not the tag line and the absolute path —
+    the vault exporters keep 300 chars of a result, and a path eats half of
+    them. Anything else comes back unchanged.
+    """
+    path = persisted_path_of(text)
+    if not path:
+        return text
+    marker = "Preview ("
+    i = text.find(marker)
+    body = ""
+    if i != -1:
+        nl = text.find("\n", i)
+        body = text[nl + 1:] if nl != -1 else ""
+    return f"[full result on disk] {body}".rstrip()
 
 
 def new_entry_id() -> str:
@@ -161,7 +270,8 @@ def build_tool_result_entry(call_id: str, result: str, *, timestamp: str,
                             raw_chars: int | None = None,
                             images: list[dict] | None = None,
                             turn_id: str = "") -> dict:
-    """The `role="tool"` row. `result` is already truncated.
+    """The `role="tool"` row. `result` is already shaped
+    (`shape_tool_result_for_transcript`).
 
     `raw_chars` is the length the tool's answer had before the harness
     shaped it, and only the two eager paths have it — pass nothing on a
@@ -169,6 +279,11 @@ def build_tool_result_entry(call_id: str, result: str, *, timestamp: str,
     text (#1052).
     """
     stats: dict[str, Any] = {"result_chars": len(result)}
+    # D1: where the full result lives when the row is a pointer. Omitted
+    # otherwise, so a row that holds its whole result reads as before.
+    persisted = persisted_path_of(result)
+    if persisted:
+        stats["persisted_path"] = persisted
     if raw_chars is not None:
         stats["raw_chars"] = int(raw_chars)
     if is_error is not None:

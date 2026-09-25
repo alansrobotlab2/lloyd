@@ -591,7 +591,11 @@ def _export_session_markdown(session_id: str, data: dict) -> Optional[Path]:
                 lines.append(f"lloyd: {display}")
 
         elif role == "tool":
-            result_text = text.strip()[:300] if text else "(empty)"
+            # A D1 pointer row keeps its preview here, not its tag line and
+            # absolute path — 300 chars is all a result gets.
+            from app.transcript_entries import tool_result_preview
+            result_text = (tool_result_preview(text).strip()[:300]
+                           if text else "(empty)")
             is_error = msg.get("is_error", False)
             status = "ERROR" if is_error else "OK"
             lines.append(f"  → [{status}] {result_text}")

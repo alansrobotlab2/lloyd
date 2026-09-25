@@ -3360,6 +3360,8 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 run_query(messages, options),
                 session_id=session_id, turn_id=run_id, prompt=prompt,
                 model=task_model, source="autonomy",
+                disallowed_tools=list(
+                    getattr(options, "disallowed_tools", None) or []),
             )
             async with asyncio.timeout(timeout):
                 async for evt in recorded:

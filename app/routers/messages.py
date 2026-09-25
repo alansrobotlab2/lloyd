@@ -102,7 +102,7 @@ from app.transcript_entries import (
     build_tool_call,
     build_tool_call_entry,
     build_tool_result_entry,
-    truncate_tool_result,
+    shape_tool_result_for_transcript,
 )
 from app.routers._messages_inner_voice import (
     _session_inner_voice_enabled,
@@ -795,7 +795,7 @@ def _tool_pair(call: dict, *, result_str: str, timestamp: str,
     cannot drift between the streaming path and the paths that rebuild from
     the call log. `evt` is the harness event when there is one; the cancel
     and error paths have only `tool_results_log` and pass nothing, which is
-    what omits `raw_chars` on their rows — the log holds the truncated text,
+    what omits `raw_chars` on their rows — the log holds the shaped text,
     so the size the model saw is unknown there, and an invented `0` or the
     2014 cap would both read as a measurement (#1052). Same reasoning as
     `run_recorder._unpersisted_pairs`, which does this for background runs.
@@ -1310,7 +1310,15 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
 
             elif etype == "tool_result":
                 call_id = evt["call_id"]
-                result_str = truncate_tool_result(evt.get("content", ""))
+                # D1: a long result becomes a `<persisted-output>` pointer to
+                # a file holding all of it, not a 2 KB cut — this row is what
+                # the next turn's history is rebuilt from. The shaped string is
+                # what every downstream record keeps (the call log the cancel
+                # and error paths rebuild from, the SSE frame, the event log).
+                result_str = shape_tool_result_for_transcript(
+                    evt.get("content", ""), call_id=call_id,
+                    session_id=session_id, tool_name=evt.get("name", ""),
+                    disallowed_tools=list(options.disallowed_tools or []))
                 tool_results_log.append({"call_id": call_id, "result": result_str})
                 set_turn_activity(session_id, "working")
                 _complete = {
@@ -1476,7 +1484,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         persisted_tool_ids.add(cid)
                         # No `evt`: this row is rebuilt from
                         # `tool_results_log`, which holds only the
-                        # truncated text, so `raw_chars` is unknown here.
+                        # shaped text (cut or pointer), so `raw_chars` is
+                        # unknown here.
                         tail.extend(_tool_pair(
                             tc, result_str=results_by_id.get(cid, ""),
                             timestamp=end_ts,

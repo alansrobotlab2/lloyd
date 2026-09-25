@@ -212,8 +212,12 @@ def test_the_recorder_and_the_chat_path_stamp_the_same_row_identically(
 
     evt = asyncio.run(_dispatch(BIG))
     recorded = _recorded_tool_row(store, evt)
+    # The router's own shaping call (D1), with the recorder's session id.
     chat = _tool_pair(_call_row(),
-                      result_str=te.truncate_tool_result(evt["content"]),
+                      result_str=te.shape_tool_result_for_transcript(
+                          evt["content"], call_id="c1",
+                          session_id="20260922_100622_worker_cccc",
+                          tool_name="Bash"),
                       timestamp="T", iteration_stats={}, evt=evt)[1]
 
     assert recorded["stats"]["raw_chars"] == len(BIG)

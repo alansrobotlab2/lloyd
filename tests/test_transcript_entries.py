@@ -63,6 +63,110 @@ def test_a_long_tool_result_is_truncated_with_a_marker():
     assert te.truncate_tool_result("short") == "short"
 
 
+# ── D1: a long result is a pointer, not a 2 KB cut ─────────────────────
+
+SID = "20260910_120000_test_aaaa"
+
+
+@pytest.fixture
+def spill_dir(tmp_path, monkeypatch):
+    """Point the spill module at a scratch sessions dir; return the session's
+    `<sid>.tool-results/` directory there."""
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR", tmp_path)
+    return tmp_path / f"{SID}.tool-results"
+
+
+def _body(n: int) -> str:
+    return "".join(f"line {i:05d} of the file\n" for i in range(n))
+
+
+def test_a_result_over_the_cap_is_spilled_and_the_row_points_at_the_file(spill_dir):
+    from app.harness.tool_result_spill import PERSISTED_OUTPUT_TAG
+    full = _body(800)                      # ~18 kB: over 2k, under the 50k live spill
+    out = te.shape_tool_result_for_transcript(
+        full, call_id="c1", session_id=SID, tool_name="Read")
+    assert out.startswith(PERSISTED_OUTPUT_TAG)
+    path = spill_dir / "c1.txt"
+    assert path.read_text() == full, "the file must hold the whole result"
+    assert f"Full output saved to: {path}" in out
+    assert "Read the full file with the Read tool" in out
+    # The row names the file, and `result_chars` measures the pointer.
+    row = te.build_tool_result_entry("c1", out, timestamp="T")
+    assert row["stats"]["persisted_path"] == str(path)
+    assert row["stats"]["result_chars"] == len(out) < len(full)
+    assert len(out) < te.TOOL_RESULT_MAX_CHARS + 600
+
+
+def test_a_result_under_the_cap_is_stored_verbatim(spill_dir):
+    short = "x" * te.TOOL_RESULT_MAX_CHARS
+    assert te.shape_tool_result_for_transcript(
+        short, call_id="c1", session_id=SID) == short
+    assert not spill_dir.exists(), "nothing to point at, so nothing written"
+    assert "persisted_path" not in te.build_tool_result_entry(
+        "c1", short, timestamp="T")["stats"]
+
+
+def test_an_already_spilled_block_is_stored_whole_not_cut_at_2k(spill_dir):
+    from app.harness.tool_result_spill import maybe_spill
+    block = maybe_spill("y" * 60_000, tool_name="Grep", tool_use_id="c1",
+                        session_id=SID)
+    assert len(block) > te.TOOL_RESULT_MAX_CHARS + 14   # the old cut would bite
+    out = te.shape_tool_result_for_transcript(
+        block, call_id="c1", session_id=SID, tool_name="Grep")
+    assert out == block
+    assert out.rstrip().endswith("</persisted-output>")
+    assert te.persisted_path_of(out) == str(spill_dir / "c1.txt")
+
+
+def test_a_failed_spill_falls_back_to_the_old_truncation(tmp_path, monkeypatch):
+    # A sessions "dir" that is a file: mkdir under it fails, maybe_spill
+    # hands the original back, and the row gets the old cut — never 18 kB.
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("")
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR", blocker)
+    full = _body(800)
+    out = te.shape_tool_result_for_transcript(full, call_id="c1", session_id=SID)
+    assert out == te.truncate_tool_result(full)
+    assert "persisted_path" not in te.build_tool_result_entry(
+        "c1", out, timestamp="T")["stats"]
+
+
+def test_the_switch_off_and_no_session_both_mean_the_old_cut(spill_dir, monkeypatch):
+    full = _body(800)
+    assert te.shape_tool_result_for_transcript(
+        full, call_id="c1", session_id="") == te.truncate_tool_result(full)
+    from app.config import CONFIG
+    monkeypatch.setitem(CONFIG, "compaction", {
+        **(CONFIG.get("compaction") or {}),
+        "transcript_spill": {"enabled": False}})
+    assert te.shape_tool_result_for_transcript(
+        full, call_id="c1", session_id=SID) == te.truncate_tool_result(full)
+    assert not spill_dir.exists()
+
+
+def test_the_vault_excerpt_of_a_pointer_is_its_preview_not_its_path(spill_dir):
+    out = te.shape_tool_result_for_transcript(
+        _body(800), call_id="c1", session_id=SID)
+    excerpt = te.tool_result_preview(out)
+    assert excerpt.startswith("[full result on disk] line 00000 of the file")
+    assert str(spill_dir) not in excerpt[:300]
+    assert te.tool_result_preview("plain") == "plain"
+
+
+def test_deleting_a_session_removes_its_spill_dir(spill_dir, tmp_path, monkeypatch):
+    import app.routers.sessions as sess_mod
+    monkeypatch.setattr(sess_mod, "SESSIONS_DIR", tmp_path)
+    (tmp_path / f"{SID}.json").write_text('{"messages": []}')
+    te.shape_tool_result_for_transcript(_body(800), call_id="c1", session_id=SID)
+    assert spill_dir.is_dir()
+    body = json.loads(asyncio.run(sess_mod.delete_session(SID)).body)
+    assert body["deleted"] is True and body["spills_removed"] is True
+    assert not spill_dir.exists()
+    # A name that is not a plain file name never reaches rmtree.
+    body = json.loads(asyncio.run(sess_mod.delete_session("..")).body)
+    assert body["spills_removed"] is False
+
+
 # ── The two writers agree ──────────────────────────────────────────────
 
 def _events():
@@ -82,6 +186,12 @@ def _events():
         # agree with the other one, so agreeing would prove nothing (#1052).
         {"type": "tool_result", "call_id": "c1", "name": "Bash",
          "content": "a\nb", "is_error": False, "raw_chars": 81_234},
+        # D1: a second call whose 10k result both writers must turn into the
+        # same pointer at the same file.
+        {"type": "tool_call", "call_id": "c2", "name": "Read",
+         "args_json": '{"file_path": "/f.py"}', "summary": "Reading f.py"},
+        {"type": "tool_result", "call_id": "c2", "name": "Read",
+         "content": "z\n" * 5_000, "is_error": False, "raw_chars": 10_000},
         # A discarded attempt (X2): both writers must take it back off the
         # final answer, or the row reads "ThreeTwo files.".
         {"type": "thinking_delta", "text": "hmm"},
@@ -159,7 +269,9 @@ def _chat_entries(events: list[dict]) -> list[dict]:
             # this file exists to catch. The router's reconstruct-from-log
             # branch is the `evt=None` call below, in the error path.
             from app.routers.messages import _tool_pair
-            result = te.truncate_tool_result(evt["content"])
+            result = te.shape_tool_result_for_transcript(
+                evt["content"], call_id=evt["call_id"], session_id=SID,
+                tool_name=evt["name"])
             tc = next(c for c in calls if c["call_id"] == evt["call_id"])
             persisted.add(evt["call_id"])
             written.extend(_tool_pair(tc, result_str=result, timestamp="T",
@@ -194,6 +306,7 @@ def recorder_sessions(tmp_path, monkeypatch):
     """Point the recorder's session store at a scratch directory."""
     import app.sessions_io as sio
     monkeypatch.setattr(sio, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR", tmp_path)
     monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", tmp_path / "events")
     monkeypatch.setattr("app.event_log.BLOBS_DIR", tmp_path / "events" / "blobs")
     return tmp_path
@@ -235,6 +348,11 @@ def test_both_writers_produce_identical_entries(recorder_sessions):
                or e.get("thinking", {}).get("turn_id") == "turn1"
                for e in recorded), recorded
     assert recorded[-1]["content"][0]["text"] == "Two files."
+    # D1: the 10k result is a pointer on both sides, at the one file.
+    pointer = next(e for e in recorded if e.get("tool_call_id") == "c2")
+    path = recorder_sessions / "20260910_120000_test_aaaa.tool-results" / "c2.txt"
+    assert pointer["stats"]["persisted_path"] == str(path)
+    assert path.read_text() == "z\n" * 5_000
 
 
 def test_rows_carry_the_turn_that_wrote_them_and_omit_it_when_unknown():

@@ -405,7 +405,9 @@ async def _consume(messages: list[dict[str, Any]], options: Any, trace: dict[str
                            turn_id=trace.get("trial_id") or options.session_id,
                            prompt=prompt if isinstance(prompt, str) else "",
                            model=getattr(options, "model", "") or "",
-                           source="bench")
+                           source="bench",
+                           disallowed_tools=list(getattr(
+                               options, "disallowed_tools", None) or []))
     async for evt in events:
         etype = evt.get("type")
 

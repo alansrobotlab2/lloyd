@@ -395,7 +395,9 @@ compaction:
     # files; the old default of 5 was below the point of usefulness.
     keep_recent_tools: 15
     # Clearing a result smaller than this saves fewer tokens than the
-    # marker replacing it costs.
+    # marker replacing it costs. Since D1 (transcript_spill below) a stored
+    # result over 2k is a ~2.3k <persisted-output> pointer; this pass drops
+    # an old pointer's preview down to its header and keeps the path.
     min_chars_to_clear: 2000
     # Legacy; no longer a trigger. app.compaction passes the budget
     # instead and disables the count rule outright.
@@ -419,6 +421,13 @@ compaction:
     - ExitPlanMode
     - SetGoal
     - ClearGoal
+
+  # D1 (review 2026-09-24): a tool result over 2,000 chars is written to
+  # <sid>.tool-results/<call_id>.{txt,json} and its transcript row carries a
+  # <persisted-output> pointer (path + 2 KB preview), so the next turn's
+  # history can Read it back. false = the old 2 KB cut with no pointer.
+  transcript_spill:
+    enabled: true
   restore:
     enabled: true
     budget_tokens: 50000

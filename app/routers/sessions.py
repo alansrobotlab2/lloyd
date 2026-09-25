@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import time
 
@@ -37,6 +38,7 @@ from app.sessions_io import (
 
 
 router = APIRouter()
+logger = logging.getLogger("lloyd-server")
 
 
 def _last_active_ts(path, data: dict) -> float:
@@ -978,7 +980,25 @@ async def delete_session(session_id: str):
         removed = True
     except FileNotFoundError:
         pass
-    return JSONResponse({"deleted": removed, "session_id": session_id})
+    # The spill directory goes with the transcript that points into it. Since
+    # D1 (review 2026-09-24) every tool result over 2 KB lives there, and the
+    # next session at this id would otherwise inherit files named by call ids
+    # it never made. Only a plain name whose directory sits directly in
+    # SESSIONS_DIR is removed — this is an rmtree reachable over HTTP.
+    spills_removed = False
+    if _SPILL_NAME.match(session_id) and ".." not in session_id:
+        spill_dir = SESSIONS_DIR / f"{session_id}.tool-results"
+        try:
+            if spill_dir.is_dir() and not spill_dir.is_symlink() \
+                    and spill_dir.resolve().parent == SESSIONS_DIR.resolve():
+                import shutil
+                shutil.rmtree(spill_dir)
+                spills_removed = True
+        except OSError as exc:
+            logger.warning("delete_session: spill dir for %s not removed: %s",
+                           session_id, exc)
+    return JSONResponse({"deleted": removed, "session_id": session_id,
+                         "spills_removed": spills_removed})
 
 
 @router.post("/api/sessions/{session_id}/cancel")
