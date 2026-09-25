@@ -984,6 +984,14 @@ the flag is the last step, after all of these hold:
   shadow switched off while a gated call is in flight;
 - the eval result in the commit message that flips it.
 
+The measurement half of that list is `eval/djev/calibration_ladder.py`
+(#1479): batch calibration, Platt on a fitting split, then split-conformal
+acceptance at error rate `alpha`, reporting the error among accepted rows and
+the abstain rate on a held-out split. It refuses under 200 human labels. The
+dedupe seam's 240 unlabelled pairs, drawn from its own non-fixture shadow rows,
+are at `~/lloyd-data/eval/djev/dedupe-labels-1479.jsonl`; a person fills
+`label` with `same`, `different` or `unsure`.
+
 ### 9.5 Switches
 
 | To turn off | Do |
