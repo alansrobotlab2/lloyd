@@ -1137,6 +1137,91 @@ move only with production traffic.
   answers per request (§8.2), and never takes djev down while a regression
   check holds `regression.lock`.
 
+## 13. Research pass 2026-09-24 — where else djev can earn its card
+
+A one-day survey (three web sweeps, every local claim measured on the box) of
+what else this engine could do for recall, retrieval statistics and the
+primary's load. The ranked proposals are backlog #1467–#1479; this section
+keeps the findings that should not be re-derived.
+
+**What the tree said first.**
+
+- `vault_recall` was called 24 times in 7 days of sessions, all from worker and
+  autonomy platforms, none from a chat; p50 ~0.58 s. Recall *speed* is not a
+  lever anyone feels. Quality is: doc_hit 0.65 / MRR 0.33 on the nightly.
+- **djev was ranking rows of which ~40 of 160 characters were document text.**
+  `_djev_doc_text` handed it `title + qmd snippet`, and the snippet carries
+  qmd's diff header (`2: @@ -1,4 @@ (0 before, 153 after)`) and an `N: ` prefix
+  on every line. `strip_qmd_snippet` (#994) existed in the same module for
+  `vault_search` and the prefetch injection and was never wired into the djev
+  row. Measured on a pin, 86 queries, paired, BI=1 (#1467):
+
+  | arm | MRR | Δ MRR [95%] | better/worse | NDCG@10 | Δ NDCG [95%] | latency |
+  |---|---|---|---|---|---|---|
+  | base | 0.319 | — | — | 0.357 | — | 663 ms |
+  | base, repeat | 0.328 | +0.009 [−0.001, +0.027] | 2/1 | 0.363 | +0.006 | 662 ms |
+  | **strip, 160 chars** | **0.364** | **+0.044 [−0.003, +0.093]** | **16/7** | **0.393** | **+0.036 [+0.001, +0.075]** | **559 ms** |
+  | strip, 240 | 0.330 | +0.010 | 15/9 | 0.365 | +0.008 | 655 ms |
+  | strip, 320 | 0.323 | +0.003 | 12/14 | 0.356 | −0.000 | 737 ms |
+
+  doc_hit and doc_recall are identical between base and strip-160: a pure
+  reorder. Wider rows give the gain back, as #1336 found. The row is shorter
+  after the strip, so the read is faster, not slower.
+- The primary's load is agent turns (557 turns, 62M input tokens in 7 d), not
+  micro-decisions: Inner Voice made 296 observer calls in the week, two of them
+  non-noop. The one large decision workload is task #74's mention classifier:
+  26,090 never-judged `mentions` edges, two primary calls each (#1472).
+- `/v1/raw/chat/completions` generates text at ~140 tok/s, output prefixed with
+  a literal `thought\n`. Every ex-secondary job (voice rewrite, titles, capture
+  summary, fact extraction) routes to the primary since `secondary_enabled:
+  false` (#1476).
+- Unused request features: `depends_on`, `ask_if`, `alone`, `think`,
+  `chunk_rows` + `chunk_prompt: shared` + `sequential`, `ask`. `MAX_SEQS=1`
+  makes every parallel-chunk ranking design unaffordable. The vendored
+  djev-spark is at 1444f3e (2026-09-19); upstream merged constrained-vocab reads
+  (vllm#58216) on 2026-09-24 (#1477).
+- The facts leg is ordered by token overlap (`fact_score`), never by djev (#1470).
+- On 81–86 paired queries the minimum detectable effect is about +0.09 MRR /
+  +0.12 doc_hit at 80% power. Most recall ideas promise +0.02–0.06. Growing the
+  gold set from real recalls is the precondition (#1471), and djev must never
+  judge the set djev is scored on (Clarke & Dietz, arXiv 2412.17156).
+
+**From the literature, what fits the rules in §12.**
+
+- DiffuRank (arXiv 2602.12528) is `rank` with a binary label per slot instead of
+  four; matches RankZephyr at a third of the latency (#1468).
+- FIRST (2406.15657) reads a whole top-heavy ranking from one position's logits
+  over single-token identifiers; on djev that is one `choice` row beside the 32
+  score rows, promote-only, de-biased by a content-free CapCal read
+  (2604.10150) (#1469).
+- REALM pivots (2508.18379) and RefRank (2506.11452): the same anchor rows in
+  every chunk make chunks comparable; JointRank (2506.22262) and TourRank need
+  `MAX_SEQS` > 1 (#1474).
+- Cyclic permutation is the one label-free order-bias fix that also raised
+  accuracy; two-stage prompting and per-option scoring made it worse
+  (2608.11947). Per-slot yes/no on a diffusion canvas is order-invariant; an
+  all-masked multi-slot readout collapses onto the first slot (2608.14649).
+- Ordinal 3–5-way labels flip; binary and listwise are stable, and PriDe /
+  contextual calibration do not fix label-order bias (2608.08869).
+- A gate becomes trustworthy through conformal singleton-set acceptance on
+  ≥200 labels (Conformal Cascade, 2607.25018), after batch calibration
+  (2309.17249) and Platt; only the tails are reliable (TH-Score, 2508.06225).
+  That is the ladder §9.4 asks for and no schema has walked (#1479).
+- AgentDiet (2509.23586): a cheap side model ordering tool results by
+  droppability cut agent input tokens 40–60% at ±2 pts (#1473).
+- Entity resolution: select-from-a-block beats pairwise by 5–15 F1 (COLING
+  2025); Alper (2605.25814) spends the model only on boundary pairs (#1478).
+- Title-chain chunk prefixes on a markdown KB: MRR@5 0.374 → 0.463 with no LLM
+  (2608.00824); complete-list fusion (2608.07152); a tuned convex α beats RRF
+  from a handful of labels (2210.11934). All fork work (#1475).
+
+**Not filed, on purpose.** Per-turn tool shortlisting (the catalog sits in the
+KV-cached position-0 prefix; a per-turn subset makes every prefix unique). An
+Inner Voice pre-screen (296 calls a week). Rewrite selection (oracle ceiling
++3 nDCG, 2603.13301). Interleaving (no traffic). Late chunking (Qwen3-Embedding
+is causal, last-token pooled). Attention-based in-context reranking (ICLR 2025)
+fits a bidirectional model but needs attention read out of the vLLM patch.
+
 ## Review log
 
 - **2026-09-21 — #1324 closed, and the entry below is superseded on this
