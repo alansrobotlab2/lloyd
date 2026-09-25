@@ -119,6 +119,8 @@ ada.zip
 # table (#548/#1173) is the one committable artifact; its runs/ sidecars stay out.
 eval/baselines/*
 !eval/baselines/skill-ab-*.md
+# #600's compaction-recall baseline is the committed artifact of that eval.
+!eval/baselines/compaction-recall-*.json
 
 # scratch output some tools drop in the repo root
 /tmp/
