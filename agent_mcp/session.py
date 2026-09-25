@@ -6,7 +6,9 @@ Tools:
     memory_read, memory_add, memory_replace, memory_remove, session_recall
     (5 tools)
 
-Memory files: ~/obsidian/lloyd/MEMORY.md, ~/obsidian/lloyd/USER.md
+Memory files: ~/obsidian/lloyd/MEMORY.md, ~/obsidian/lloyd/USER.md, and topic
+files ~/obsidian/lloyd/memory/<slug>.md named `topics/<slug>` (review
+2026-09-24, P4: pulled by memory_read, never rendered into a prompt)
 Session transcripts: ~/lloyd-data/sessions/*.json
 
 Split out of agent_mcp/memory.py as part of Task #340 PR 5. Owns:
@@ -40,7 +42,14 @@ from agent_mcp._shared import (
 # tests. `prompt_builder` is too heavy to import into this process, and a second
 # copy of the number is how two writers end up disagreeing about what is bounded —
 # which is exactly the state #1010 was filed on.
-from app.memory_ceiling import memory_write_error
+from app.memory_ceiling import (
+    TOPIC_SLUG_RE,
+    TOPICS_SUBDIR,
+    memory_write_error,
+    topic_path,
+    topic_slug,
+)
+from prompt_surface import ENTRY_TYPES
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -73,13 +82,43 @@ def _check_injection(text: str) -> Optional[str]:
     return None
 
 
+_INVALID_FILE = ("Invalid file. Must be MEMORY.md, USER.md, or topics/<slug> "
+                 "(slug: 1-48 of a-z, 0-9, '-')")
+
+
+def _resolve_file(file: str) -> Optional[Path]:
+    """The path a memory tool's `file` names, or None when it names nothing legal.
+
+    MEMORY.md and USER.md by name; `topics/<slug>` → `<root>/memory/<slug>.md`
+    (review 2026-09-24, P4). The slug grammar in `app.memory_ceiling` is the whole
+    traversal defence: `topics/../SOUL`, `topics/a/b` and `topics/X` all fail it.
+    """
+    if file in MEMORY_FILES:
+        return MEMORIES_ROOT / file
+    slug = topic_slug(file)
+    return topic_path(MEMORIES_ROOT, slug) if slug else None
+
+
+def _topic_names() -> list[str]:
+    tdir = MEMORIES_ROOT / TOPICS_SUBDIR
+    if not tdir.is_dir():
+        return []
+    return sorted(f"topics/{p.stem}" for p in tdir.glob("*.md")
+                  if TOPIC_SLUG_RE.fullmatch(p.stem))
+
+
 def _memory_read(params: dict) -> dict:
     file = params.get("file", "MEMORY.md").strip()
-    if file not in MEMORY_FILES:
-        return _err(f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}", ErrorCode.INVALID_PARAM)
-    filepath = MEMORIES_ROOT / file
+    filepath = _resolve_file(file)
+    if filepath is None:
+        return _err(_INVALID_FILE, ErrorCode.INVALID_PARAM)
     if not filepath.exists():
-        return {"content": "", "file": file}
+        if file in MEMORY_FILES:
+            return {"content": "", "file": file}
+        # A dangling index link is the one miss worth answering with the list: the
+        # model followed a `→ topics/<slug>` line, and the names that do exist are
+        # the cheapest way back to the right one.
+        return {"content": "", "file": file, "exists": False, "topics": _topic_names()}
     return {"content": filepath.read_text(encoding="utf-8"), "file": file}
 
 
@@ -113,20 +152,74 @@ def _date_stamped(entry: str) -> str:
     return entry[:m.end()] + stamp + entry[m.end():] if m else stamp + entry
 
 
+def _typed_entries_enabled() -> bool:
+    """`memory_tools.typed_entries` in config.yaml (code default off).
+
+    Review 2026-09-24, P4: an entry carries its kind — `user`, `feedback`,
+    `project`, `reference` — so a consolidation pass can tell Alan's rulings (the
+    lines an index must never lose) from working state it may move into a topic
+    file. Off here for the same reason as the date stamp: the writer-lane tests
+    assert entries byte for byte.
+    """
+    try:
+        from app.config import CONFIG
+        return bool((CONFIG.get("memory_tools") or {}).get("typed_entries", False))
+    except Exception:
+        return False
+
+
+_BULLET_RE = re.compile(r"(\s*(?:[-*+]|\d+\.)\s+)")
+_TYPE_TAG_RE = re.compile(r"\[(" + "|".join(ENTRY_TYPES) + r")\]\s+")
+_DATE_TAG_RE = re.compile(r"\(\d{4}-\d{2}-\d{2}\)\s+")
+
+
+def _default_entry_type(file: str) -> str:
+    """USER.md holds who Alan is; everything else defaults to working state."""
+    return "user" if file == "USER.md" else "project"
+
+
+def _typed_entry(entry: str, etype: str, *, stamp: bool) -> str:
+    """`text` -> `- [feedback] (2026-09-24) text`.
+
+    A bullet is added when the entry has none — the typed form is a top-level
+    bullet by definition, which is also what keeps it one `app.uptake` entry
+    (`_MEMORY_DOC_RE`). A tag or date the writer already wrote is kept, never
+    doubled: a model that copies an index line's shape into its entry should not
+    get `[project] [project]`.
+    """
+    m = _BULLET_RE.match(entry)
+    head, rest = (entry[:m.end()], entry[m.end():]) if m else ("- ", entry)
+    tag = _TYPE_TAG_RE.match(rest)
+    if tag:
+        prefix, rest = rest[:tag.end()], rest[tag.end():]
+    else:
+        prefix = f"[{etype}] "
+    if stamp and not _DATE_TAG_RE.match(rest):
+        rest = f"({_entry_date().isoformat()}) " + rest
+    return head + prefix + rest
+
+
 def _memory_add(params: dict) -> dict:
     file = params.get("file", "MEMORY.md").strip()
     entry = params.get("entry", "").strip()
-    if entry and _date_stamp_enabled():
-        entry = _date_stamped(entry)
-    if file not in MEMORY_FILES:
-        return _err(f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}", ErrorCode.INVALID_PARAM)
+    etype = str(params.get("type") or "").strip().lower() or _default_entry_type(file)
+    if etype not in ENTRY_TYPES:
+        return _err(f"Invalid type {etype!r}. Must be one of: {', '.join(ENTRY_TYPES)}",
+                    ErrorCode.INVALID_PARAM)
+    if entry:
+        if _typed_entries_enabled():
+            entry = _typed_entry(entry, etype, stamp=_date_stamp_enabled())
+        elif _date_stamp_enabled():
+            entry = _date_stamped(entry)
+    filepath = _resolve_file(file)
+    if filepath is None:
+        return _err(_INVALID_FILE, ErrorCode.INVALID_PARAM)
     if not entry:
         return _err("entry is required", ErrorCode.MISSING_PARAM)
     injection_msg = _check_injection(entry)
     if injection_msg:
         return _err(injection_msg, ErrorCode.INJECTION)
-    MEMORIES_ROOT.mkdir(parents=True, exist_ok=True)
-    filepath = MEMORIES_ROOT / file
+    filepath.parent.mkdir(parents=True, exist_ok=True)
     try:
         # The read belongs inside the lock. Locking only the write turns a lost
         # update into a slightly later lost update, and MEMORY.md/USER.md have
@@ -134,6 +227,10 @@ def _memory_add(params: dict) -> dict:
         # nightly knowledge-write job uses), and vault_write.
         with commit_lock(filepath):
             existing = filepath.read_text(encoding="utf-8") if filepath.exists() else ""
+            if not existing and file not in MEMORY_FILES:
+                # A new topic opens with its name, so a `memory_read` of it
+                # says what it is before the first entry does.
+                existing = f"# {file}\n\n"
             if existing and not existing.endswith("\n"):
                 existing += "\n"
             updated = existing + entry + "\n"
@@ -158,14 +255,14 @@ def _memory_replace(params: dict) -> dict:
     file = params.get("file", "MEMORY.md").strip()
     old_text = params.get("old_text", "")
     new_text = params.get("new_text", "")
-    if file not in MEMORY_FILES:
-        return _err(f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}", ErrorCode.INVALID_PARAM)
+    filepath = _resolve_file(file)
+    if filepath is None:
+        return _err(_INVALID_FILE, ErrorCode.INVALID_PARAM)
     if not old_text:
         return _err("old_text is required", ErrorCode.MISSING_PARAM)
     injection_msg = _check_injection(new_text)
     if injection_msg:
         return _err(injection_msg, ErrorCode.INJECTION)
-    filepath = MEMORIES_ROOT / file
     try:
         with commit_lock(filepath):
             if not filepath.exists():
@@ -196,11 +293,11 @@ def _memory_replace(params: dict) -> dict:
 def _memory_remove(params: dict) -> dict:
     file = params.get("file", "MEMORY.md").strip()
     entry = params.get("entry", "").strip()
-    if file not in MEMORY_FILES:
-        return _err(f"Invalid file. Must be one of: {', '.join(sorted(MEMORY_FILES))}", ErrorCode.INVALID_PARAM)
+    filepath = _resolve_file(file)
+    if filepath is None:
+        return _err(_INVALID_FILE, ErrorCode.INVALID_PARAM)
     if not entry:
         return _err("entry is required", ErrorCode.MISSING_PARAM)
-    filepath = MEMORIES_ROOT / file
     try:
         with commit_lock(filepath):
             if not filepath.exists():
@@ -491,16 +588,26 @@ def _session_recall(params: dict) -> dict:
 
 # ── MCP registration ─────────────────────────────────────────────────────────
 
+# No `enum` since P4: `topics/<slug>` is open-ended. The pattern states the same
+# grammar `_resolve_file` enforces; the handler is what refuses.
+_FILE_PATTERN = r"^(MEMORY\.md|USER\.md|topics/[a-z0-9-]{1,48}(\.md)?)$"
+_FILE_PARAM = {"type": "string", "pattern": _FILE_PATTERN,
+               "description": "MEMORY.md for durable working notes, USER.md for facts "
+                              "about the user, topics/<slug> for a topic file's detail "
+                              "(default MEMORY.md)"}
+_FILE_PARAM_READ = {**_FILE_PARAM, "description": "Which file to read: MEMORY.md, "
+                    "USER.md, or topics/<slug> (default MEMORY.md)"}
+
 async def list_tools():
     return [
-        Tool(name="memory_read", description="Use to check what is already remembered before memory_add; to search past chats use session_recall. Read the cross-session memory files. MEMORY.md holds durable working notes; USER.md holds standing facts about the user. Returns the whole file.", inputSchema={
-            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"], "description": "Which file to read"}}, "required": []}),
+        Tool(name="memory_read", description="Use to check what is already remembered before memory_add; to search past chats use session_recall. Read the cross-session memory files. MEMORY.md holds durable working notes; USER.md holds standing facts about the user; topics/<slug> is a topic file an index line points at (`→ topics/<slug>`), holding the detail that line summarises. Returns the whole file.", inputSchema={
+            "type": "object", "properties": {"file": _FILE_PARAM_READ}, "required": []}),
         Tool(name="memory_add", description="Use to record a durable note or user fact; to change an existing entry use memory_replace instead. Append one entry to a cross-session memory file. Appends only — use memory_replace to change an existing line and memory_remove to drop one.", inputSchema={
-            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"], "description": "MEMORY.md for durable working notes, USER.md for facts about the user (default MEMORY.md)"}, "entry": {"type": "string", "description": "Text to append"}}, "required": ["entry"]}),
+            "type": "object", "properties": {"file": _FILE_PARAM, "entry": {"type": "string", "description": "Text to append"}, "type": {"type": "string", "enum": list(ENTRY_TYPES), "description": "What kind of entry: feedback (a ruling or correction from the user), user (a fact about the user), project (working state; default for MEMORY.md and topics), reference (where something lives). Default user for USER.md."}}, "required": ["entry"]}),
         Tool(name="memory_replace", description="Replace text in a cross-session memory file by substring match. Fails if old_text is absent, so a stale edit is reported rather than silently skipped.", inputSchema={
-            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"], "description": "MEMORY.md for durable working notes, USER.md for facts about the user (default MEMORY.md)"}, "old_text": {"type": "string", "description": "Existing text to find (substring, must appear exactly once)"}, "new_text": {"type": "string", "description": "Replacement text"}}, "required": ["old_text", "new_text"]}),
-        Tool(name="memory_remove", description="Use to drop a memory entry that is wrong or obsolete; to correct it in place use memory_replace. Remove an entry from MEMORY.md or USER.md (substring match).", inputSchema={
-            "type": "object", "properties": {"file": {"type": "string", "enum": ["MEMORY.md", "USER.md"], "description": "MEMORY.md for durable working notes, USER.md for facts about the user (default MEMORY.md)"}, "entry": {"type": "string", "description": "Text to remove"}}, "required": ["entry"]}),
+            "type": "object", "properties": {"file": _FILE_PARAM, "old_text": {"type": "string", "description": "Existing text to find (substring, must appear exactly once)"}, "new_text": {"type": "string", "description": "Replacement text"}}, "required": ["old_text", "new_text"]}),
+        Tool(name="memory_remove", description="Use to drop a memory entry that is wrong or obsolete; to correct it in place use memory_replace. Remove an entry from MEMORY.md, USER.md or a topics/<slug> file (substring match).", inputSchema={
+            "type": "object", "properties": {"file": _FILE_PARAM, "entry": {"type": "string", "description": "Text to remove"}}, "required": ["entry"]}),
         Tool(name="session_recall", description="Search recent session transcripts for topics, decisions, or discussions from past sessions. Use for cross-session context like 'what did we work on today?' or 'what was decided about X?'", inputSchema={
             "type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "days": {"type": "integer", "description": "Days back to search (default: 7)"}, "limit": {"type": "integer", "description": "Max results (default: 5)"}}, "required": ["query"]}),
     ]

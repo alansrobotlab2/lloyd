@@ -598,11 +598,12 @@ def _load_memories(
     """
     parts = []
     for filename in files:
-        content = None
+        raw = None
         if overlay and (overlay / filename).exists():
-            content = (overlay / filename).read_text(encoding="utf-8").strip()
+            raw = (overlay / filename).read_text(encoding="utf-8")
         elif (_CANON_MEMORIES_DIR / filename).exists():
-            content = (_CANON_MEMORIES_DIR / filename).read_text(encoding="utf-8").strip()
+            raw = (_CANON_MEMORIES_DIR / filename).read_text(encoding="utf-8")
+        content = raw.strip() if raw is not None else None
         if not content:
             continue
         if soul:
@@ -621,8 +622,126 @@ def _load_memories(
                         "nothing left to inject", filename,
                     )
                     continue
+        content = _bound_memory_render(filename, raw, content)
         parts.append(f"## {filename}\n{content}")
     return "\n\n".join(parts) if parts else None
+
+
+# ---------------------------------------------------------------------------
+# Render-time overflow (review 2026-09-24, P4).
+#
+# The write-time ceiling (`app.memory_ceiling`) refuses every tool that would
+# grow a loaded memory file past `prompt_surface.MEMORY_CEILINGS`, but a file can
+# still arrive over it: a Bash heredoc (outside every tool handler by design), a
+# vault sync, or the ceiling itself being lowered under a file that has not been
+# consolidated yet — which is exactly the deploy step P4 ends in. This is what
+# the prompt does with such a file.
+#
+# `memory.render_overflow` in config.yaml:
+#   render_all  — inject the whole file, as before this existed (logged once a
+#                 day). The DEFAULT until `eval/run_memory_index_ab.py` promotes
+#                 the index, so production prompts stay byte-identical.
+#   annotate    — cut at the last entry boundary under the ceiling and append a
+#                 `<memory_overflow>` marker naming the file and the dropped
+#                 bytes, so the model knows the tail exists and how to read it;
+#                 `logger.error` and one guardian `announce()` a day per file.
+#
+# No second number: the limit is the file's own `prompt_surface` ceiling, the
+# one every writer is refused at (#1010's defect was two of them).
+# ---------------------------------------------------------------------------
+_OVERFLOW_MODES = ("annotate", "render_all")
+_overflow_noted: dict[tuple[str, str], str] = {}  # (filename, mode) -> ISO date noted
+
+
+def _render_overflow_mode() -> str:
+    try:
+        from app.config import CONFIG
+
+        mode = str((CONFIG.get("memory") or {}).get("render_overflow", "render_all"))
+    except Exception:  # noqa: BLE001 — an unreadable config keeps today's prompt
+        return "render_all"
+    return mode if mode in _OVERFLOW_MODES else "render_all"
+
+
+def _is_entry_start(line: str, prev: str) -> bool:
+    """A line a cut may fall before: a heading, a top-level bullet, a paragraph."""
+    return (line.startswith(("#", "- ", "* ")) or not prev.strip()) and bool(line.strip())
+
+
+def _cut_at_entry_boundary(content: str, limit_bytes: int) -> tuple[str, int]:
+    """(kept, dropped_bytes): the longest entry-aligned prefix within `limit_bytes`.
+
+    Never mid-entry — half a ruling reads as a different ruling — so the kept text
+    ends where the next heading, bullet or paragraph would have begun. A first
+    entry larger than the whole limit keeps nothing rather than a fragment.
+    """
+    total = len(content.encode("utf-8"))
+    if total <= limit_bytes:
+        return content, 0
+    lines = content.split("\n")
+    kept_upto, size = 0, 0
+    for i, line in enumerate(lines):
+        if i and _is_entry_start(line, lines[i - 1]):
+            if size <= limit_bytes:
+                kept_upto = i
+            else:
+                break
+        size += len(line.encode("utf-8")) + 1
+    kept = "\n".join(lines[:kept_upto]).rstrip()
+    return kept, total - len(kept.encode("utf-8"))
+
+
+def _overflow_marker(filename: str, dropped: int) -> str:
+    return (f'<memory_overflow file="{filename}" dropped_bytes="{dropped}">'
+            f"{filename} is over its prompt ceiling; the entries after this point were "
+            f'not loaded. memory_read(file="{filename}") returns the whole file.'
+            f"</memory_overflow>")
+
+
+def _overflow_announce(title: str, body: str) -> None:
+    try:
+        from app.prefix_miss import _announce
+
+        _announce(title, body, False)
+    except Exception as exc:  # noqa: BLE001 — the alert, never the prompt
+        logger.warning("PROMPT_BUDGET could not announce memory overflow: %r", exc)
+
+
+def _note_overflow_once(filename: str, mode: str) -> bool:
+    today = datetime.date.today().isoformat()
+    if _overflow_noted.get((filename, mode)) == today:
+        return False
+    _overflow_noted[(filename, mode)] = today
+    return True
+
+
+def _bound_memory_render(filename: str, raw: str, content: str) -> str:
+    """`content`, or its entry-aligned cut plus a marker when the file is over."""
+    from prompt_surface import memory_ceiling
+
+    ceiling = memory_ceiling(filename)
+    size = len(raw.encode("utf-8"))
+    if ceiling is None or size <= ceiling:
+        return content
+    mode = _render_overflow_mode()
+    if mode == "render_all":
+        if _note_overflow_once(filename, mode):
+            logger.warning(
+                "PROMPT_BUDGET %s is %d bytes, over its %d-byte ceiling; rendered whole "
+                "(memory.render_overflow: render_all)", filename, size, ceiling)
+        return content
+    kept, dropped = _cut_at_entry_boundary(content, ceiling)
+    logger.error(
+        "PROMPT_BUDGET %s is %d bytes, over its %d-byte ceiling; rendered %d and "
+        "dropped %d at an entry boundary (memory.render_overflow: annotate)",
+        filename, size, ceiling, len(kept.encode("utf-8")), dropped)
+    if _note_overflow_once(filename, mode):
+        _overflow_announce(
+            f"Lloyd memory: {filename} over its ceiling",
+            f"{filename} is {size:,} B against a {ceiling:,} B ceiling; the prompt "
+            f"dropped {dropped:,} B of entries. Consolidate it "
+            f"(scripts/memory/validate_memory_index.py names what is wrong).")
+    return (kept + "\n\n" if kept else "") + _overflow_marker(filename, dropped)
 
 
 # True when a skill's frontmatter `status:` pulls it from circulation.

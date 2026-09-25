@@ -104,6 +104,40 @@ USER_MD_CEILING_BYTES = 16_384
 #: and these two constants bound each file's growth.
 MEMORY_MD_CEILING_BYTES = 73_728
 
+#: The ceiling MEMORY.md takes once it is an index (review 2026-09-24, P4): typed
+#: one-line entries, detail in `lloyd/memory/<slug>.md` topic files pulled by
+#: `memory_read(file="topics/<slug>")`. 25,600 B ≈ 6.4k tokens, against the ~18k
+#: the 73 KB file costs every user turn today.
+#:
+#: NOT live. Lowering `MEMORY_MD_CEILING_BYTES` is the deploy step, gated on
+#: `eval/run_memory_index_ab.py` promoting the indexed arm, and it is ONE edit:
+#: `MEMORY_MD_CEILING_BYTES = MEMORY_MD_INDEX_CEILING_BYTES`, landed in the same
+#: change that writes the consolidated index (`scripts/memory/
+#: consolidate_memory_index.py`) into the vault — never alone, because a ceiling
+#: below the live file is a freeze (the paragraph above). Until then this number is
+#: read only by the consolidator (its target) and the index validator (its
+#: `--ceiling` default for an overlay), so nothing that runs in production moves.
+MEMORY_MD_INDEX_CEILING_BYTES = 25_600
+
+#: The four entry types a memory line carries (review 2026-09-24, P4), written by
+#: `memory_add(type=…)` as `- [feedback] (2026-09-24) text`. `feedback` is Alan's
+#: rulings and corrections — the lines an index must never lose; `user` is who he
+#: is; `project` is working state; `reference` is where something lives.
+ENTRY_TYPES: tuple[str, ...] = ("user", "feedback", "project", "reference")
+
+#: A top-level bullet that carries a type tag. Anchored like `app.uptake`'s entry
+#: grammar (`^[-*] ?(.{12,})$`), so a typed line is still one uptake entry.
+TYPED_ENTRY_RE = re.compile(r"^[-*] \[(" + "|".join(ENTRY_TYPES) + r")\] ")
+
+#: A top-level bullet with or without a type — what "untyped lines" is counted over.
+_TOP_LEVEL_BULLET_RE = re.compile(r"^[-*] ?\S")
+
+
+def untyped_entry_count(text: str) -> int:
+    """Top-level bullets in `body(text)` that carry no `[type]` tag."""
+    return sum(1 for ln in body(text).split("\n")
+               if _TOP_LEVEL_BULLET_RE.match(ln) and not TYPED_ENTRY_RE.match(ln))
+
 #: The loaded memory files and their ceilings, keyed by the filename each one is
 #: written as. A name absent here is not loaded into a prompt and therefore has no
 #: ceiling and no business being refused.
@@ -405,7 +439,31 @@ def size_error(filename: str, text: str) -> str | None:
         f"({size - ceiling:,} B over). It loads into every user-platform system "
         f"prompt; write the content to a knowledge note under "
         f"~/obsidian/knowledge/ instead, or trim another entry in the same edit."
+        + consolidation_hint(text)
     )
+
+
+def consolidation_hint(text: str) -> str:
+    """Where the bytes are, appended to a size refusal (review 2026-09-24, P4).
+
+    A refusal that only says "too big" sends the writer to guess what to cut, and
+    the guess is usually the entry it was trying to add. The three largest `## `
+    sections by bytes and the count of untyped top-level entries are the two
+    numbers a consolidation starts from. Names no file: the refusal it rides on
+    already did, and a hint that named one could name the wrong one.
+    """
+    secs = sorted(sections(text), key=lambda s: s[1], reverse=True)[:3]
+    parts: list[str] = []
+    if secs:
+        parts.append("largest sections: " + "; ".join(
+            f"'{h[:60]}' {b:,} B" for h, b in secs))
+    untyped = untyped_entry_count(text)
+    if untyped:
+        parts.append(f"{untyped} top-level entries carry no [type] tag")
+    if not parts:
+        return ""
+    return (" Consolidate — " + "; ".join(parts) + ". Move detail into a topic file "
+            "(memory_add file=\"topics/<slug>\") and keep one typed index line.")
 
 
 def size_errors(surfaces: dict[str, str | None]) -> list[str]:

@@ -234,6 +234,7 @@ def _memory_entries_unstamped_in_tests(monkeypatch):
     `memory_add` then prefixes each entry with its write date. The writer-lane
     and characterization tests assert entries byte for byte, so they run on the
     code default (off); the tests that exercise the stamp set it themselves.
+    `typed_entries` (review 2026-09-24 P4) is held off for the same reason.
     """
     try:
         from app import config
@@ -241,7 +242,7 @@ def _memory_entries_unstamped_in_tests(monkeypatch):
         return
     monkeypatch.setitem(config.CONFIG, "memory_tools",
                         {**(config.CONFIG.get("memory_tools") or {}),
-                         "date_stamp_entries": False})
+                         "date_stamp_entries": False, "typed_entries": False})
 
 
 @pytest.fixture(autouse=True)

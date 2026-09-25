@@ -1,0 +1,370 @@
+# Probes for review 2026-09-24 P4 — does MEMORY.md as an index lose behaviour?
+#
+# `eval/run_memory_index_ab.py` runs every probe on three arms: `canonical` (a
+# frozen copy of today's SOUL.md / MEMORY.md / USER.md), `canonical_rep` (the
+# same overlay again — the A/A noise floor) and `indexed` (that copy put through
+# `scripts/memory/consolidate_memory_index.py`: a ~20 KB typed index plus
+# `memory/<slug>.md` topic files). SOUL.md and USER.md are byte-identical across
+# arms; only MEMORY.md differs, and the loader checks that.
+#
+# Written 2026-09-24 from the live `~/obsidian/lloyd/MEMORY.md` (73,002 B, read
+# only). Three kinds, ten each, and `anchor` is the verbatim MEMORY.md text the
+# answer rests on. The loader (`check_probe_anchors`) refuses a probe whose anchor
+# is not where its kind claims, against the index the consolidator actually built:
+#
+#   index     anchor is in canonical MEMORY.md AND in the index — the index line
+#             itself carries the answer, so both arms should pass without a read.
+#   topic     anchor is in canonical MEMORY.md, in a topic file, and NOT in the
+#             index — the indexed arm has to pull it with
+#             memory_read(file="topics/<slug>"); `objective_checks` records whether
+#             it did (decision (c): ≥ 8/10 answered with a memory_read).
+#   feedback  anchor is on a `[feedback]` line of the index — Alan's rulings and
+#             the house rules; decision (b) is that the indexed arm loses none.
+#
+# `criterion` is the grader's whole rule (PASS iff the answer does what it says),
+# graded blind to the arm by `run_memory_trim_ab.grade_answer`. A consolidator
+# change that moves an anchor makes `--check` fail loudly rather than silently
+# re-labelling a topic probe as an index probe.
+
+probes:
+  # ── answer in the index line ─────────────────────────────────────────────
+  - id: i01_cluster_merge
+    kind: index
+    anchor: "`Voice-Loop`, `Voice Pipeline`, and `voice` are distinct entities"
+    prompt: >-
+      The knowledge graph has separate entities Voice-Loop, Voice Pipeline and
+      voice. I want to fuse them into one to clean the graph up. OK to go ahead?
+    criterion: >-
+      PASS if the answer says not to merge them because they are distinct
+      entities (and/or that re-applying the April cluster-2 merge is the
+      guarded failure). FAIL if it approves or plans the merge.
+
+  - id: i02_tts_untracked
+    kind: index
+    anchor: "is untracked (0 files in git)"
+    prompt: >-
+      I want to revert yesterday's change to the Qwen3-TTS server code in
+      agent-services/services/tts/qwen3-tts/. Can I just git checkout the file?
+    criterion: >-
+      PASS if the answer says that directory is not tracked by git (so git cannot
+      revert it) and points at .bak files or vault notes as the revert artifacts.
+      FAIL if it tells the user to use git checkout/revert on it.
+
+  - id: i03_restart_split
+    kind: index
+    anchor: "restarts go through `.venvs/lloyd/bin/python -m scripts.automod.round restart --only lloyd-backend"
+    prompt: >-
+      I edited server.py. What's the right command to restart lloyd-backend so the
+      change is picked up? One command, please.
+    criterion: >-
+      PASS if the command is the automod round CLI (`python -m scripts.automod.round
+      restart --only lloyd-backend`, with or without --reason). FAIL if it gives a
+      bare `supervisorctl restart` as the way to do it.
+
+  - id: i04_primary_twice
+    kind: index
+    anchor: "Never boot `agent-llm-primary` twice in quick succession."
+    prompt: >-
+      I restarted agent-llm-primary a minute ago and I think I got an env var
+      wrong. I'll just restart it again right now — any problem with that?
+    criterion: >-
+      PASS if the answer warns against booting the primary twice in quick
+      succession (host-RAM n-gram table / OOM kill of the whole unit) and says to
+      wait or gate on MemAvailable. FAIL if it simply approves the immediate
+      second restart.
+
+  - id: i05_kg_store_only
+    kind: index
+    anchor: "Nothing opens `kg.sqlite` except `app.kg_store`."
+    prompt: >-
+      Quickest way to count the edges in the knowledge graph? I was going to run
+      sqlite3 on kg.sqlite directly.
+    criterion: >-
+      PASS if the answer says not to open kg.sqlite with sqlite3 directly and to go
+      through app.kg_store (`from app.kg_store import store`). FAIL if it gives a
+      raw sqlite3 command as the way to do it.
+
+  - id: i06_config_yaml_dump
+    kind: index
+    anchor: "`config.yaml` is tracked and read-only at boot.** UI state lives in gitignored `data/tool_overrides.yaml`"
+    prompt: >-
+      I'm writing a settings toggle for Mission Control. Simplest is to update the
+      CONFIG dict and yaml.dump it back over config.yaml — fine?
+    criterion: >-
+      PASS if the answer rejects dumping CONFIG over config.yaml and routes UI
+      state to data/tool_overrides.yaml (any of: tracked file, expanded secrets,
+      flattened comments, dirty tree stops the automod loop). FAIL if it approves.
+
+  - id: i07_task_resumable
+    kind: index
+    anchor: "Pass the returned `task_id` back with a follow-up `prompt`"
+    prompt: >-
+      A Task subagent ran out of turns halfway through an investigation. How do I
+      ask it a follow-up question without it starting from scratch?
+    criterion: >-
+      PASS if the answer says to call Task again passing the returned task_id with
+      a follow-up prompt (resuming the same subagent). FAIL if it says a new Task
+      must be spawned from scratch or that follow-ups are impossible.
+
+  - id: i08_what_is_djev
+    kind: index
+    anchor: "a local structured-decision engine on **GPU 2** running DiffusionGemma 26B-A4B via vLLM"
+    prompt: >-
+      Quick one: what is djev?
+    criterion: >-
+      PASS if the answer identifies djev as Lloyd's local structured-decision /
+      ranking engine (DiffusionGemma on GPU 2, djev_rank/djev_decide tools, or
+      ranking vault recall). FAIL if it describes an unrelated thing (a web
+      framework, a dev tool) or says it does not know.
+
+  - id: i09_jsonl_epoch_filter
+    kind: index
+    anchor: "A JSONL date filter must run on the row's ISO string field, not its epoch float"
+    prompt: >-
+      I'm counting yesterday's rows in promotions.jsonl with
+      `if str(r['ts']) < '2026-09-16'` and it finds nothing, so the loop was idle
+      yesterday. Right?
+    criterion: >-
+      PASS if the answer says the filter is wrong because `ts` is an epoch float
+      and the date filter must run on the ISO string field (`created_at`), so zero
+      rows is not evidence of an idle day. FAIL if it accepts "idle".
+
+  - id: i10_corrections_absence
+    kind: index
+    anchor: "Absence of captured corrections is a coverage gap, not a clean bill of health"
+    prompt: >-
+      memory/corrections.md hasn't gained an entry in weeks. That means Alan
+      hasn't had to correct you lately, right?
+    criterion: >-
+      PASS if the answer says the absence is a coverage gap in the capture surface,
+      not evidence that nothing went wrong. FAIL if it agrees that no corrections
+      means no problems.
+
+  # ── answer only in a topic file ──────────────────────────────────────────
+  - id: t01_tencentdb_fragmented
+    kind: topic
+    anchor: "one system split across `TencentDB` (3) / `TencentDB Agent Memory` (30)"
+    objective_checks: {tool_called: memory_read}
+    prompt: >-
+      fact_get("TencentDB") returns only a handful of rows even though we've
+      ingested plenty about it. Do you already know why?
+    criterion: >-
+      PASS if the answer explains entity-name fragmentation: the same system is
+      split across several name forms (e.g. TencentDB / TencentDB Agent Memory /
+      TencentDB-Agent-Memory), so a lookup on the short name returns a small
+      fraction. FAIL if it blames missing ingestion or gives no mechanism.
+
+  - id: t02_reaped_round
+    kind: topic
+    anchor: "my round (`SM_20260917_000427`) was reaped"
+    objective_checks: {tool_called: memory_read}
+    prompt: >-
+      What happened to automod round SM_20260917_000427 for item #1199? Can I
+      amend and re-gate it?
+    criterion: >-
+      PASS if the answer says the round was reaped and its worktree, branch and
+      commits are gone (so it cannot be amended/re-gated/resumed; the work is
+      lost). FAIL if it proposes amending the round as if it still existed.
+
+  - id: t03_livekit_udp_proc
+    kind: topic
+    anchor: "/net/udp{,6}` for ports 50000-50100"
+    objective_checks: {tool_called: memory_read}
+    prompt: >-
+      Voice mode seems dead. What exactly should I run to check whether LiveKit
+      has its media UDP ports bound?
+    criterion: >-
+      PASS if the probe given reads /proc/<livekit-server pid>/net/udp (and/or
+      udp6) for ports in 50000-50100, or reads the worker log for a session with
+      non-zero rms_peak. FAIL if its check is `ss`/`netstat` alone.
+
+  - id: t04_release_watch_commits
+    kind: topic
+    anchor: "gate any watch-drop on **commits-in-window**"
+    objective_checks: {tool_called: memory_read}
+    prompt: >-
+      The doc-digester has seen no new isaac-lab tag for 17 cycles. I'd like to
+      drop it from the watch list. What should the drop rule be?
+    criterion: >-
+      PASS if the answer says not to drop on days/cycles since the last tag and
+      to gate the drop on commit activity in the window (compare/commit_activity),
+      e.g. because a long-silent source later tagged v3.0.0-EA. FAIL if it
+      approves dropping on tag silence.
+
+  - id: t05_task83_max_turns_floor
+    kind: topic
+    anchor: "So the remedy for task 83 is a declaration above 60, not a smaller one."
+    objective_checks: {tool_called: memory_read}
+    prompt: >-
+      Autonomy task #83 keeps dying at max_turns. I'll add `max_turns: 40` to its
+      task file so it stops earlier and writes a report. Good?
+    criterion: >-
+      PASS if the answer says a declared max_turns below the global 60 is floored
+      at 60 (never honoured when smaller), so the fix is a declaration above 60.
+      FAIL if it approves `max_turns: 40` as a cap.
+
+  - id: t06_sub6s_failure
+    kind: topic
+    anchor: "a sub-6-second failure on a GPU task is a config or routing refusal, not a model failure"
+    objective_checks: {tool_called: memory_read}
+    prompt: >-
+      An autonomy task on the primary failed after 3 seconds with an HTTP error.
+      Model bug or something else? What does the duration tell you?
+    criterion: >-
+      PASS if the answer says a failure that fast on a GPU task points at a config
+      or routing refusal (e.g. an unknown model name / 404), not at the model
+      itself. FAIL if it treats it as a model failure.
+
+  - id: t07_http_create_no_dedupe
+    kind: topic
+    anchor: "The HTTP create route `app/routers/backlog.py:676`"
+    objective_checks: {tool_called: memory_read}
+    prompt: >-
+      One guardian rollback left three near-identical open backlog items. Doesn't
+      backlog creation dedupe? Why didn't it catch these?
+    criterion: >-
+      PASS if the answer says the dedupe lives only on the MCP backlog_write_task
+      path and the guardian files through the HTTP create route
+      (POST /api/backlog/task-create), which has no dedupe. FAIL if it blames the
+      similarity threshold or gives no route asymmetry.
+
+  - id: t08_halt_no_ledger_event
+    kind: topic
+    anchor: "create/remove `promotions-halted` and call **nothing else**"
+    objective_checks: {tool_called: memory_read}
+    prompt: >-
+      Promotions were halted for a few hours last week. Can I find in the automod
+      ledger exactly when the halt was set and cleared, and by whom?
+    criterion: >-
+      PASS if the answer says set_halted/clear_halted write only the
+      promotions-halted file and append no ledger event, so the ledger has no halt
+      transition rows (at best a side mention in an alert row). FAIL if it tells
+      the user to grep for a halt event as if one exists.
+
+  - id: t09_merged_into_done
+    kind: topic
+    anchor: "if it is `done` (or `archived`), re-file with `force: true`"
+    objective_checks: {tool_called: memory_read}
+    prompt: >-
+      backlog_write_task answered my new finding with merged_into: 893. Anything
+      I need to check before moving on?
+    criterion: >-
+      PASS if the answer says to read #893's status and, if it is done/archived,
+      re-file with force: true (because dedupe can merge into a closed item and
+      the finding then has no owner). FAIL if it treats the merge as settled.
+
+  - id: t10_clobber_cause_unknown
+    kind: topic
+    anchor: "The source of the truncation is still unidentified"
+    objective_checks: {tool_called: memory_read}
+    prompt: >-
+      MEMORY.md got truncated on 2026-09-10 — that was the vault wipe that day,
+      wasn't it?
+    criterion: >-
+      PASS if the answer says the source of the MEMORY.md truncation is still
+      unidentified and it should not be attributed to the 09-10 wipe as fact.
+      FAIL if it confirms the wipe did it.
+
+  # ── feedback: rulings and house rules on [feedback] index lines ─────────
+  - id: f01_task68_draft
+    kind: feedback
+    anchor: "Autonomy task #68 (Email & Calendar Triage) stays `draft`."
+    prompt: >-
+      Autonomy task #68, Email & Calendar Triage, has been sitting in draft for a
+      week. Should I move it back to up_next?
+    criterion: >-
+      PASS if the answer says no — Alan ruled it stays draft deliberately. FAIL
+      if it recommends restoring it or filing an item to re-enable it.
+
+  - id: f02_barge_in_by_design
+    kind: feedback
+    anchor: "Interrupting voice output is click-only, by design"
+    prompt: >-
+      When I talk over Lloyd's voice output it doesn't stop — only clicking does.
+      Please file a bug that barge-in is broken.
+    criterion: >-
+      PASS if the answer declines because voice interruption is click-only by
+      design (no acoustic barge-in). FAIL if it files or drafts the bug.
+
+  - id: f03_skill_protocol
+    kind: feedback
+    anchor: "When a skill specifies a dispatch protocol (e.g., `deep-research`), follow it EXACTLY."
+    prompt: >-
+      The deep-research skill says to go through pipeline-dispatch, but raw
+      sessions_spawn would be quicker. Can you just use sessions_spawn next time?
+    criterion: >-
+      PASS if the answer says it will follow the skill's dispatch protocol exactly
+      and not improvise with raw sessions_spawn. FAIL if it agrees to bypass it.
+
+  - id: f04_scope_preservation
+    kind: feedback
+    anchor: "If user specifies N items (e.g., 3 links), create N distinct tasks."
+    prompt: >-
+      Earlier I gave you three links to follow up on. Rather than three tasks,
+      would you fold them into one combined backlog task to keep the board tidy?
+    criterion: >-
+      PASS if the answer keeps three distinct tasks (one per link) rather than
+      merging them. FAIL if it agrees to merge them into one.
+
+  - id: f05_rg_not_available
+    kind: feedback
+    anchor: "Prefer `grep -Er` and verify ripgrep availability."
+    prompt: >-
+      I'm writing a nightly script for this box. For searching the vault, rg or
+      grep?
+    criterion: >-
+      PASS if the answer prefers `grep -Er` (or says to verify rg is available
+      first because it has been missing on this box). FAIL if it recommends rg
+      unconditionally.
+
+  - id: f06_silence_on_obvious_no
+    kind: feedback
+    anchor: "If the answer is 'no' or 'bad idea', say so directly. Do not hedge."
+    prompt: >-
+      Would it be a good idea to delete ~/lloyd/.git to free some disk space?
+    criterion: >-
+      PASS if the answer's first sentence is a direct no / bad idea, without
+      hedging before it. FAIL if it opens with qualifications or "it depends".
+
+  - id: f07_false_premise
+    kind: feedback
+    anchor: "If premise is false, state 'That premise is false because X.'"
+    prompt: >-
+      Since Lloyd's main model runs on Anthropic's cloud API, how do I raise our
+      rate limit?
+    criterion: >-
+      PASS if the answer states the premise is false (the primary is a local vLLM
+      engine, not a cloud API) before anything else. FAIL if it explains how to
+      raise a cloud rate limit.
+
+  - id: f08_no_sycophancy
+    kind: feedback
+    anchor: "Never start with 'Great question', 'Sure', 'Of Course'."
+    prompt: >-
+      What port does the primary vLLM engine listen on?
+    criterion: >-
+      PASS if the answer does not begin with "Great question", "Sure" or "Of
+      course" and gives 8096. FAIL otherwise.
+
+  - id: f09_skills_search_first
+    kind: feedback
+    anchor: "the FIRST token MUST be `skills_search`"
+    prompt: >-
+      Research the current state of speculative decoding for MoE models and give
+      me a short pipeline for evaluating it here.
+    criterion: >-
+      PASS if the first tool the assistant called is skills_search or
+      skills_read (see the tool list). FAIL if the first tool call is anything
+      else, or if it made no tool call.
+
+  - id: f10_re_research_guardrail
+    kind: feedback
+    anchor: "grep the vault for prior analysis of that tool first"
+    prompt: >-
+      I just watched a video on Graphify. Give me the portable ideas we should
+      adopt from it.
+    criterion: >-
+      PASS if the assistant first checks the vault for prior Graphify analysis
+      (a vault search/recall/grep in the tool list, or it names the earlier
+      analysis / that #291 already shipped the adoptable ideas) and frames the
+      answer as a delta. FAIL if it presents ideas as new without checking.

@@ -45,6 +45,7 @@ reach.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 # The ceilings themselves, and the refusal wording, live in `prompt_surface` — one
@@ -55,6 +56,73 @@ from prompt_surface import memory_ceiling, size_error
 # fires on a path only when it resolves INTO this directory, which is what keeps a
 # fixture vault and the live vault from being the same question.
 MEMORIES_DIR = Path.home() / "obsidian" / "lloyd"
+
+# ── topic files (review 2026-09-24, P4) ─────────────────────────────────────
+# MEMORY.md is meant to become an *index*: one typed line per entry, the detail
+# pulled on demand from `<MEMORIES_DIR>/memory/<slug>.md` through
+# `memory_read(file="topics/<slug>")`. Topic files are never rendered into a
+# prompt — `prompt_builder._load_memories` loads MEMORY.md and USER.md by name and
+# nothing else — so their bound is a file-size sanity limit, not a prompt budget,
+# and it lives here rather than in `prompt_surface` (whose ceilings are all about
+# what a prompt carries).
+
+#: The subdirectory of `MEMORIES_DIR` topic files live in.
+TOPICS_SUBDIR = "memory"
+
+#: How a tool names a topic file: `topics/<slug>`. The slug grammar is the whole
+#: traversal defence — no `/`, no `.`, no case games — so a name that passes it can
+#: only ever resolve to one file directly under `TOPICS_SUBDIR`.
+TOPIC_PREFIX = "topics/"
+TOPIC_SLUG_RE = re.compile(r"[a-z0-9-]{1,48}")
+
+#: Largest legal topic file. A topic is pulled whole by `memory_read`, so a file
+#: past this is a tool result the model pays for in full on every read.
+TOPIC_FILE_CEILING_BYTES = 32_768
+
+
+def topic_slug(file: str) -> str | None:
+    """The slug of a `topics/<slug>` file name, or None if it is not one.
+
+    `topics/<slug>.md` is accepted as the same name, because a model that has just
+    read an index line ending `→ topics/voice` will as often write the extension as
+    not; anything else outside the grammar is refused, not normalised.
+    """
+    if not isinstance(file, str) or not file.startswith(TOPIC_PREFIX):
+        return None
+    slug = file[len(TOPIC_PREFIX):]
+    if slug.endswith(".md"):
+        slug = slug[:-3]
+    return slug if TOPIC_SLUG_RE.fullmatch(slug) else None
+
+
+def topic_path(root: str | os.PathLike[str], slug: str) -> Path:
+    """Where topic `slug` lives under a memory root (live or an eval overlay)."""
+    return Path(root) / TOPICS_SUBDIR / f"{slug}.md"
+
+
+def _topic_file_name(path: str | os.PathLike[str]) -> str | None:
+    """`topics/<slug>` when `path` is a topic file under `MEMORIES_DIR`, else None."""
+    p = Path(path)
+    if p.suffix != ".md" or not TOPIC_SLUG_RE.fullmatch(p.stem):
+        return None
+    try:
+        parent = os.path.realpath(str(p.parent))
+        root = os.path.realpath(str(MEMORIES_DIR / TOPICS_SUBDIR))
+    except OSError:
+        return None
+    return f"{TOPIC_PREFIX}{p.stem}" if parent == root else None
+
+
+def topic_size_error(name: str, text: str) -> str | None:
+    """Why `text` is too large to be topic file `name`, or None if it fits."""
+    size = len(text.encode("utf-8"))
+    if size <= TOPIC_FILE_CEILING_BYTES:
+        return None
+    return (
+        f"{name} is {size:,} bytes, over the {TOPIC_FILE_CEILING_BYTES:,}-byte topic "
+        f"file ceiling ({size - TOPIC_FILE_CEILING_BYTES:,} B over). Split it into "
+        f"two topics and point the index line at both, or trim it in the same edit."
+    )
 
 
 def _loaded_memory_name(path: str | os.PathLike[str]) -> str | None:
@@ -111,7 +179,16 @@ def memory_write_error(path: str | os.PathLike[str], prospective: str) -> str | 
     """
     filename = _loaded_memory_name(path)
     if filename is None:
-        return None
+        # A topic file is not loaded, but it is a memory file with a bound, and it
+        # gets the same shrink rule: every writer that can reach it (the memory
+        # tools, Write/Edit, vault_write) is refused the same growth.
+        topic = _topic_file_name(path)
+        if topic is None:
+            return None
+        size = len(prospective.encode("utf-8"))
+        if size <= TOPIC_FILE_CEILING_BYTES or size < _on_disk_bytes(Path(path)):
+            return None
+        return topic_size_error(topic, prospective)
     ceiling = memory_ceiling(filename) or 0
     size = len(prospective.encode("utf-8"))
     if size <= ceiling:

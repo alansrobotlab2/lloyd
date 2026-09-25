@@ -641,3 +641,49 @@ run past the truncation threshold).
   stdio reports none. `pool.stats()` (catalog size/age, refreshes, failures,
   handshake count/avg/max) is on `/health/deep` under `mcp.pools`.
   `tests/test_mcp_pool_discovery_refresh.py`.
+
+### P4 — bounded, typed long-term memory (build half; deploy gated on the eval)
+
+`lloyd/MEMORY.md` is 73,002 B against a 73,728 B ceiling and ~18k tokens on
+every user turn. The proposal is an index: one typed line per entry, the detail
+in `~/obsidian/lloyd/memory/<slug>.md` topic files that are pulled, never
+rendered. This landing is additive; production prompts are byte-identical.
+
+- **Tools (agent_mcp/session.py, lloyd-mcp restart).** `memory_add(type=…)`
+  writes `- [type] (date) text` (`user|feedback|project|reference`; default
+  `user` for USER.md, `project` otherwise — the plan said `project` everywhere,
+  which would tag user facts wrongly), switch `memory_tools.typed_entries`
+  (config on, code default off). A tag or date the writer already wrote is not
+  doubled. All four memory tools accept `file="topics/<slug>"`, validated by
+  `app.memory_ceiling.topic_slug` (`[a-z0-9-]{1,48}`, the whole traversal
+  defence); `TOPIC_FILE_CEILING_BYTES = 32_768` is enforced through
+  `memory_write_error`, so Write/Edit/vault_write refuse the same growth.
+- **Refusal hint.** `prompt_surface.size_error` appends the three largest `## `
+  sections and the untyped-entry count.
+- **Render-time overflow** (`prompt_builder._bound_memory_render`):
+  `memory.render_overflow: annotate | render_all`. **Default `render_all`**, a
+  deliberate deviation from the plan's `annotate`, so nothing changes until the
+  eval promotes; `annotate` cuts at an entry boundary under the file's own
+  ceiling, appends `<memory_overflow file dropped_bytes>`, logs ERROR and
+  announces once a day.
+- **The ceiling is one constant, not yet flipped.**
+  `MEMORY_MD_INDEX_CEILING_BYTES = 25_600` sits beside
+  `MEMORY_MD_CEILING_BYTES = 73_728`; the deploy is
+  `MEMORY_MD_CEILING_BYTES = MEMORY_MD_INDEX_CEILING_BYTES` in the same change
+  that writes the consolidated index, then
+  `git -C ~/obsidian apply scripts/maintenance/vault-memory-index-skills.patch`
+  (the #39 knowledge-write and #47 dream skills; the plan's
+  `skills/nightly-knowledge-write` is really `nightly-reflection-knowledge-write`).
+- **Scripts.** `scripts/memory/validate_memory_index.py` (stdlib; `structure`
+  or `full`; the live test runs `full` automatically once the ceiling flips) and
+  `scripts/memory/consolidate_memory_index.py --dry-run --out <overlay>`
+  (deterministic, lossless — every unit verbatim in a topic file — refuses an
+  `--out` inside the vault; on today's file: 73,002 B → 20,466 B index, 85
+  entries, 24 topics).
+- **Eval.** `eval/run_memory_index_ab.py` over `eval/memory_index_probes.yaml`
+  (10 index / 10 topic / 10 feedback, each anchored on verbatim MEMORY.md text
+  and located in the built arm by `--check`; `--with-trim-probes` adds #1425's
+  20). `memory_read` in a trial is answered from the arm's overlay by a
+  PreToolUse deliverer, because the live tool reads the vault, which holds no
+  topics yet. Decision (a)–(c) is computed; (d), live `memory_read` per user
+  turn, is reported pending. `tests/test_memory_index_cap.py`.

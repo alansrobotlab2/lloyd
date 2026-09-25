@@ -298,6 +298,17 @@ display:
 # times; with stamps 0/60). Read by agent_mcp/session.py; lloyd-mcp restart.
 memory_tools:
   date_stamp_entries: true
+  # Review 2026-09-24 P4: memory_add writes "- [type] (date) text", type one of
+  # user|feedback|project|reference (param `type`; default user for USER.md,
+  # project otherwise). Additive whatever the index eval decides. lloyd-mcp restart.
+  typed_entries: true
+# What the prompt does with a loaded memory file over its prompt_surface ceiling
+# (prompt_builder._load_memories, review 2026-09-24 P4): render_all injects it
+# whole (today's bytes); annotate cuts at an entry boundary and appends a
+# <memory_overflow> marker, logs ERROR and announces once a day. render_all until
+# eval/run_memory_index_ab.py promotes the index. Backend restart.
+memory:
+  render_overflow: render_all
 
 session_titles:
   enabled: true

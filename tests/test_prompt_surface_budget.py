@@ -196,6 +196,27 @@ def test_section_audit_covers_every_section(soul_text):
     assert not uncovered, f"sections missing from the audit artifact: {uncovered}"
 
 
+@vault_only
+@live_vault
+def test_the_live_memory_index_validates():
+    """Review 2026-09-24 P4: `scripts/memory/validate_memory_index.py` over the vault.
+
+    `structure` (links resolve, topic files legal and bounded, MEMORY.md under its
+    ceiling) until the index ceiling is deployed; `full` (≤ 80% of the ceiling,
+    typed lines only, short index lines) from the commit that lowers
+    `MEMORY_MD_CEILING_BYTES` to `MEMORY_MD_INDEX_CEILING_BYTES` — that flip arms
+    this check with no edit here.
+    """
+    import subprocess
+    import sys
+
+    mode = ("full" if ps.MEMORY_MD_CEILING_BYTES == ps.MEMORY_MD_INDEX_CEILING_BYTES
+            else "structure")
+    script = Path(__file__).resolve().parents[1] / "scripts/memory/validate_memory_index.py"
+    proc = subprocess.run([sys.executable, str(script), "--root", str(VAULT),
+                           "--mode", mode], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
 # ── prompt_builder: the measurement that did not exist (#466) ───────────────
 
 def test_prompt_budget_constant_exists():

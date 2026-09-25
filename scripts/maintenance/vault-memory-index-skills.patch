@@ -1,0 +1,86 @@
+diff --git i/skills/dream-consolidation/SKILL.md w/skills/dream-consolidation/SKILL.md
+index d7139d4..5387cb8 100644
+--- i/skills/dream-consolidation/SKILL.md
++++ w/skills/dream-consolidation/SKILL.md
+@@ -133,12 +133,15 @@ Get your bearings before making any changes.
+ 2. Read `~/obsidian/lloyd/MEMORY.md` — understand the current index
+ 3. Skim 2–3 existing topic files that seem most likely to need updates
+ 
+-**What the memory root actually is (measured 2026-09-09):** `~/obsidian/lloyd/`
+-holds **three prose files** — `MEMORY.md`, `USER.md` (both loaded into every
+-system prompt), `SOUL.md` — plus `research-queue-archive.md` and the `bench/`,
+-`inner_voice/`, `reviews/` subdirectories. There are **no per-topic memory
+-files** here; topic notes live in `~/obsidian/knowledge/`, `projects/`, and
+-`memory/`. So "merge near-duplicate topic files" in practice means:
++**What the memory root actually is:** `~/obsidian/lloyd/` holds **three prose
++files** — `MEMORY.md`, `USER.md` (both loaded into every system prompt),
++`SOUL.md` — plus `research-queue-archive.md`, the `bench/`, `inner_voice/`,
++`reviews/` subdirectories, and **`memory/<slug>.md` topic files** (review
++2026-09-24, P4). `MEMORY.md` is an **index**: one typed line per entry
++(`- [type] (date) hook → topics/<slug>`), the detail in the topic file it names,
++pulled on demand with `memory_read(file="topics/<slug>")` and never loaded into a
++prompt. **This pass owns the index's tightness.** So "merge near-duplicate topic
++files" in practice means:
+ 
+ - **dedupe across `MEMORY.md` ↔ `USER.md`** — the same measurement recorded twice
+   costs prompt weight twice, and both files are injected every turn;
+@@ -196,18 +199,36 @@ Remove what's no longer useful:
+ 
+ ## Phase 4 — Reindex
+ 
+-Update `~/obsidian/lloyd/MEMORY.md` to stay **under 200 lines**.
++`~/obsidian/lloyd/MEMORY.md` is the index, and after this pass it must be:
++
++- **at or under 80% of its byte ceiling** (`prompt_surface.MEMORY_MD_CEILING_BYTES`
++  — read the number from the file, never from here);
++- **typed lines only** — every top-level entry `- [feedback|user|project|reference] …`;
++- **every index line ≤ 300 characters**, and every `→ topics/<slug>` link resolving
++  to `~/obsidian/lloyd/memory/<slug>.md` (each topic file ≤ 32,768 B).
+ 
+ Format for each entry:
+ ```
+-- [Title](file.md) — one-line hook
++- [project] (2026-09-24) one-line hook → topics/<slug>
++- [feedback] (2026-09-17) the ruling, whole — a ruling is never only a pointer
+ ```
+ 
+-- Remove pointers to deleted or superseded files
++- Move detail (proving commands, counts, incident history) out of the index into
++  its topic file — append to the topic that already covers the subject; verify the
++  topic carries the text **before** you cut it from the index
++- Remove pointers to deleted or superseded topic files
+ - Shorten verbose entries to one tight line
+-- Add pointers to any newly created memory files
+ - Resolve contradictions between entries
+ 
++Then run the validator. **Exit 1 means the pass is not done** — fix what it names
++and run it again; do not stamp the lock over a failing index:
++
++```bash
++python3 ~/lloyd/scripts/memory/validate_memory_index.py
++```
++
++Paste its output line into the completion summary.
++
+ ---
+ 
+ ## Phase 5 — Stamp Lock
+diff --git i/skills/nightly-reflection-knowledge-write/SKILL.md w/skills/nightly-reflection-knowledge-write/SKILL.md
+index b96f55a..598b605 100644
+--- i/skills/nightly-reflection-knowledge-write/SKILL.md
++++ w/skills/nightly-reflection-knowledge-write/SKILL.md
+@@ -68,6 +68,14 @@ Any `facts_idx` duplicate figure you mention must carry its probe timestamp from
+ 
+ Use `Edit` for targeted changes; `Write` only for wholesale rewrite. Keep `lloyd/USER.md` under 200 lines.
+ 
++### 2a-bis. `lloyd/MEMORY.md` is an index (review 2026-09-24, P4)
++`lloyd/MEMORY.md` holds one typed line per entry; the detail lives in topic files `~/obsidian/lloyd/memory/<slug>.md`, which are never loaded into a prompt. Every write this job makes to it follows these rules:
++- **Typed entries only.** Add with `memory_add(file="MEMORY.md", type=…, entry=…)`, which writes `- [type] (YYYY-MM-DD) text`; `type` is `feedback` (a ruling or correction from Alan), `user`, `project` or `reference`. A hand-written line uses the same shape.
++- **Detail goes to the topic file, the index gets a pointer.** Proving commands, numbers and incident history go in `memory_add(file="topics/<slug>", entry=…)` (slug `[a-z0-9-]{1,48}`, one topic per subject — append to an existing topic before opening a new one), and the index line ends `→ topics/<slug>`.
++- **An index line is at most 300 characters**, pointer included. A `feedback` line is the ruling itself, complete — never a pointer to one.
++- **A refusal over the ceiling is stop-and-consolidate.** When `memory_add`/`Write`/`Edit` refuses MEMORY.md for size, do not trim ad hoc to squeeze the entry in: write the entry to its topic file, record `MEMORY.md at ceiling — consolidation owed` in the completion note, and leave the tightening to dream-consolidation (#47).
++- **No Bash heredocs, `cat >`, `sed -i` or `tee` for `lloyd/MEMORY.md` or `lloyd/USER.md`.** Bash is outside every tool that enforces the ceiling; the memory tools and `Edit` are the only writers.
++
+ ### 2b–2d. Mental models, profile, vault propagation
+ Sources: the `### Mental Model — *` and `### Profile Updates` subsections under each `## Person:` (→ `memory/mental-models.md`, `people/alan/profile.md`, `Edit` for targeted fields) and `## Vault Propagations` (`source_doc:`/`change:` pairs). Procedure in `steps-2b-2f.md`. For each propagation: if `change:` description is one-line-too-thin to execute safely,skip and log in completion report (do not hallucinate content).
+ 
