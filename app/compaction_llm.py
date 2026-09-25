@@ -338,6 +338,159 @@ async def summarize_history(
 
 
 # ---------------------------------------------------------------------------
+# Incremental summary (D2, review 2026-09-24)
+# ---------------------------------------------------------------------------
+
+#: The sections a persisted summary carries, in order. `Files touched` is not
+#: here on purpose: `app.compaction_state` renders it from the change ledger,
+#: so the model neither spends tokens on it nor gets to invent it.
+INCREMENTAL_SECTIONS: tuple[str, ...] = (
+    "Goal", "Constraints", "Progress", "Decisions", "Next steps",
+)
+
+INCREMENTAL_SYSTEM_PROMPT = """\
+You maintain the running summary of a long conversation between a user and
+an AI assistant, so the assistant can keep working after the older part of
+the conversation leaves its context window.
+
+You are given the CURRENT SUMMARY (it may be empty) and the NEW CONVERSATION
+that happened after it. Produce the UPDATED SUMMARY: everything the current
+summary says that is still true, plus what the new conversation adds. Never
+drop a fact, constraint, decision or user correction from the current summary
+unless the new conversation explicitly supersedes it; update it in place when
+it does. Do not restate the conversation turn by turn.
+
+TEXT ONLY. Do NOT call any tools. Respond with the updated summary inside
+<summary>...</summary> and nothing else, using exactly these markdown
+sections, in this order:
+
+## Goal
+What the user is trying to achieve, in their own words where possible.
+## Constraints
+Explicit requirements, preferences, non-goals and user corrections ("no,
+not that", "stop doing X") — quote them; they carry the strongest signal.
+## Progress
+What has been done and what was found, with concrete names, numbers, errors
+and their fixes. Keep specifics (identifiers, values, commands) verbatim.
+## Decisions
+Choices made and why, including approaches rejected.
+## Next steps
+What is still pending, in priority order, and what was in progress when the
+conversation was cut.
+
+Do not list the files that were edited — that list is kept separately.
+Tool results are persisted to disk; refer to them by tool and intent ("read
+auth.py", "ran pytest, 3 failures") rather than reproducing them.
+"""
+
+
+def _format_delta_for_summary(messages: list[dict]) -> str:
+    """Like `_format_history_for_summary`, plus the tool calls themselves.
+
+    A session-shape assistant row that made a tool call carries it in
+    `tool_calls` with empty content, and the older formatter skips such a row
+    entirely — the summariser saw results with no record of what asked for
+    them. Arguments are cut to a digest; the call's name and intent are what a
+    summary needs.
+    """
+    lines: list[str] = []
+    for msg in messages:
+        role = (msg.get("role") or "?").upper()
+        parts = [_message_text(msg)]
+        for tc in msg.get("tool_calls") or []:
+            fn = tc.get("function") or {}
+            name = fn.get("name") or tc.get("name") or "?"
+            args = fn.get("arguments") or ""
+            if not isinstance(args, str):
+                args = json.dumps(args)
+            if len(args) > 300:
+                args = args[:300] + "…"
+            parts.append(f"[tool_call: {name}({args})]")
+        text = "\n".join(p for p in parts if p and p.strip())
+        if not text.strip():
+            continue
+        lines.append(f"[{role}]\n{text}")
+    return "\n\n".join(lines)
+
+
+async def summarize_incremental(
+    prior_summary: str | None,
+    delta: list[dict],
+    *,
+    model: str | None = None,
+    instructions: str | None = None,
+    max_output_tokens: int = 8000,
+    timeout_seconds: float = 120.0,
+    input_budget_tokens: int | None = None,
+) -> str | None:
+    """Fold ``delta`` into ``prior_summary``; the updated summary, or None.
+
+    The caller (`app.compaction_state.fold`) has already chunked ``delta`` to
+    ``input_budget_tokens`` on turn boundaries; the bound is re-applied here
+    to the formatted text as a last guard, because a summariser request that
+    overflows the window is a 400 and a lost fold — the loop D2 exists to end.
+    None on any failure, like `summarize_history`: the caller keeps the prior
+    record and the truncation fallback still runs.
+    """
+    if not delta:
+        return None
+    base_url, model_name = _summary_endpoint(model)
+    if not base_url:
+        logger.warning("summarize_incremental: no base_url for model %r — skipping", model)
+        return None
+    delta_text = _format_delta_for_summary(delta)
+    if not delta_text.strip():
+        return None
+    if input_budget_tokens and estimate_tokens(delta_text) > input_budget_tokens:
+        delta_text, _ = _truncate_to_tokens(delta_text, int(input_budget_tokens))
+        delta_text += "\n…[new conversation clipped to the summariser's input budget]"
+
+    system_prompt = INCREMENTAL_SYSTEM_PROMPT
+    if instructions:
+        system_prompt += "\n\nUser's focus for this summary:\n" + instructions.strip()
+    current = (prior_summary or "").strip() or "(empty — this is the first summary)"
+    request_messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": (
+            "CURRENT SUMMARY:\n" + current
+            + "\n\nNEW CONVERSATION:\n\n" + delta_text
+            + "\n\nWrite the UPDATED SUMMARY now."
+        )},
+    ]
+    try:
+        data = await _post_chat_completion(
+            base_url=base_url, model_name=model_name, messages=request_messages,
+            max_tokens=max_output_tokens, timeout_seconds=timeout_seconds,
+        )
+    except httpx.HTTPError as e:
+        logger.warning("summarize_incremental: HTTP error: %s", e)
+        return None
+    except Exception as e:  # noqa: BLE001 — best-effort, like summarize_history
+        logger.warning("summarize_incremental: unexpected %s: %s", type(e).__name__, e)
+        return None
+
+    raw = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+    summary = _extract_summary(raw)
+    if not summary.strip():
+        logger.warning("summarize_incremental: empty summary returned")
+        return None
+    missing = [s for s in INCREMENTAL_SECTIONS if f"## {s}".lower() not in summary.lower()]
+    if missing:
+        # Kept, not refused: a summary missing a heading still beats losing the
+        # fold. Logged so a model that stops following the format is visible.
+        logger.info("summarize_incremental: summary lacks sections %s", missing)
+    usage = data.get("usage") or {}
+    logger.info(
+        "summarize_incremental: %d delta msgs → %d-char summary "
+        "(prompt_tokens=%d, completion_tokens=%d)",
+        len(delta), len(summary),
+        int(usage.get("prompt_tokens", 0) or 0),
+        int(usage.get("completion_tokens", 0) or 0),
+    )
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Post-compact file restore (Layer C)
 # ---------------------------------------------------------------------------
 
@@ -506,7 +659,10 @@ def restored_file_count(rows: list[dict]) -> int:
 
 __all__ = [
     "SUMMARIZATION_SYSTEM_PROMPT",
+    "INCREMENTAL_SYSTEM_PROMPT",
+    "INCREMENTAL_SECTIONS",
     "summarize_history",
+    "summarize_incremental",
     "restore_recent_files",
     "restored_file_count",
     "RESTORED_CONTEXT_TAG",

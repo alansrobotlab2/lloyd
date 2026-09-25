@@ -463,6 +463,28 @@ def test_turn_start_record_names_every_layer_that_acted():
     assert record["restored_files"] == 2
 
 
+def test_turn_start_record_reports_reuse_and_folds():
+    """D2: a turn that applied a stored summary says so, with the folds it
+    added and the rows the summary stands in for — the second turn over the
+    wall reading `summary_reused: true` is how a deploy is verified. A result
+    from before D2 (or with `persist_summary` off) reads false/0, never absent.
+    """
+    record = turn_start_record({
+        "tokens_before": 300_000, "tokens_after": 90_000,
+        "summarized": True, "summarize_attempted": True,
+        "summarize_outcome": "summarized",
+        "summary_reused": True, "summary_folds": 2, "summary_covered_rows": 412,
+    })
+    assert record["summary_reused"] is True
+    assert record["summary_folds"] == 2
+    assert record["summary_covered_rows"] == 412
+    assert record["mechanisms"] == ["summarize"]
+
+    legacy = turn_start_record({"tokens_before": 10, "tokens_after": 10})
+    assert (legacy["summary_reused"], legacy["summary_folds"],
+            legacy["summary_covered_rows"]) == (False, 0, 0)
+
+
 def test_turn_start_record_of_a_missing_result_is_untouched():
     """`None` is what the callers hand over when the stack raised and fell back
     to `load_session_messages` (#1066). Inventing a decline would turn the one

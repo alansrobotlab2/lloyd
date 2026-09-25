@@ -227,3 +227,18 @@ def test_the_late_probe_hides_the_question_in_a_tool_result(corpus):
     assert "codename" not in late.probe.lower()   # the user turn does not ask it
     item = next(v for k, v in late.files.items() if "open-items" in k)
     assert "CODENAME:" in item and "billing-east" in item
+
+
+def test_the_summary_format_arms_are_valid_only_when_the_summary_replaced_a_block():
+    """D2's eval gate: `summary_legacy` vs `summary_persisted` compare the two
+    summary formats, so a run whose summarize layer did not replace a block
+    (it only truncated) measured neither and is dropped."""
+    summarized = {"mechanisms": ["summarize"],
+                  "turn_start": {"tokens_freed": 90_000, "mechanisms": ["summarize"]}}
+    truncated = {"mechanisms": ["truncate"],
+                 "turn_start": {"tokens_freed": 90_000, "mechanisms": ["truncate"]}}
+    for arm in ("summary_legacy", "summary_persisted"):
+        assert R.valid_for_arm(arm, R.fired(summarized))
+        assert not R.valid_for_arm(arm, R.fired(truncated))
+    assert R.ARMS["summary_persisted"]["compaction"]["persist_summary"] is True
+    assert R.ARMS["summary_legacy"]["compaction"]["persist_summary"] is False

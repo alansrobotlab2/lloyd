@@ -35,6 +35,11 @@ from typing import Any, Iterable
 
 logger = logging.getLogger("lloyd-server")
 
+# The rows the turn-start stack keeps from the session file. The persisted
+# summary's indexes (app/compaction_state.py) are into this filtered list, so
+# the two must agree; `tests/test_compaction_persisted_summary.py` pins it.
+_CONVERSATION_ROLES = ("user", "assistant", "tool", "system")
+
 # The roles `app.routers._messages_harness_adapter._prepare_messages_for_harness`
 # forwards to the engine. `tokens_after` counts only these.
 _SENT_ROLES = ("user", "assistant", "tool")
@@ -309,7 +314,13 @@ def _compaction_cfg() -> dict[str, Any]:
     cfg.setdefault("mode", "summarize")          # summarize | truncate
     cfg.setdefault("summary_model", None)        # None → falls back to default model
     cfg.setdefault("keep_recent_turns", 5)
-    micro = dict(cfg.get("microcompact") or {})
+    # D2 (review 2026-09-24): the persisted, incremental summary
+    # (app/compaction_state.py). Off = a stored record is ignored and the
+    # summarize layer regenerates from scratch as it always did.
+    cfg.setdefault("persist_summary", False)
+    cfg.setdefault("summary_input_budget_tokens", 48_000)
+    cfg.setdefault("max_folds_per_turn", 3)
+    micro =dict(cfg.get("microcompact") or {})
     micro.setdefault("enabled", True)
     micro.setdefault("keep_recent_tools", 15)
     micro.setdefault("count_threshold", 20)
@@ -373,6 +384,115 @@ def _record_turn_start(session_id: str, result: dict[str, Any]) -> None:
         logger.warning("compaction: turn_start event write failed: %s", e)
 
 
+async def _persisted_summary_layer(
+    convo: list[dict],
+    data: dict,
+    *,
+    path: Path,
+    cfg: dict[str, Any],
+    model: str,
+    threshold: int,
+    system_prompt: str,
+    cur_tokens: int,
+) -> dict[str, Any]:
+    """Layer A under ``compaction.persist_summary`` (D2).
+
+    A stored record that validates is applied whatever the size — the same
+    summary text every turn is what keeps the prefix cached. The threshold
+    decides only whether the rows past its boundary are folded in. See
+    `app/compaction_state.py` for the record and the fold.
+    """
+    out: dict[str, Any] = {
+        "convo": convo, "summarized": False, "attempted": False,
+        "outcome": "under_threshold", "restored": 0, "reused": False,
+        "folds": 0, "covered_rows": 0, "head": 0,
+    }
+    session_id = path.stem
+    try:
+        from app import compaction_state as CS
+        from app.harness.telemetry import log_harness_event
+    except Exception as e:  # noqa: BLE001
+        logger.warning("compaction_state import failed: %s", e)
+        if cur_tokens > threshold:
+            out.update(attempted=True, outcome="import_failed")
+        return out
+
+    record = CS.load_record(data)
+    covered: list[dict] = []
+    remaining = convo
+    if record is not None:
+        applied = CS.apply(convo, record)
+        if applied is None:
+            # The past was rewritten under the record (a legacy `/compact`, a
+            # hand edit). Its summary may describe rows that are gone, so it is
+            # discarded and rebuilt from the rows as they are now.
+            log_harness_event(session_id, "compaction.record_invalidated", {
+                "covers_through_index": record.get("covers_through_index"),
+                "covered_rows": record.get("covered_rows"),
+                "rows_now": len(convo),
+            })
+            record = None
+        else:
+            summary_msg, covered, remaining = applied
+            out["reused"] = True
+            cur_tokens = estimate_conversation_tokens(
+                [summary_msg] + remaining, system_prompt)
+
+    if cur_tokens > threshold:
+        out["attempted"] = True
+        older, _recent = _split_for_summary(remaining, int(cfg.get("keep_recent_turns", 5)))
+        if not older:
+            out["outcome"] = "no_older_block"
+        else:
+            start = len(covered)
+            try:
+                res = await CS.fold(
+                    convo, start=start, end=start + len(older), record=record,
+                    session_id=session_id, path=path,
+                    model=cfg.get("summary_model") or model or "", cfg=cfg,
+                    max_folds=int(cfg.get("max_folds_per_turn", 3)),
+                )
+            except ImportError as e:
+                logger.warning("compaction_llm import failed: %s", e)
+                res = {"folds": 0, "record": record, "import_failed": True}
+            except Exception as e:  # noqa: BLE001 — a failed fold keeps the prior record
+                logger.warning("compaction: fold failed for %s: %s", session_id, e)
+                res = {"folds": 0, "record": record}
+            if res.get("folds"):
+                record = res["record"]
+                out["folds"] = int(res["folds"])
+                out["outcome"] = "summarized"
+            else:
+                out["outcome"] = "import_failed" if res.get("import_failed") else "empty_summary"
+    elif out["reused"]:
+        out["outcome"] = "reused"
+
+    if record is None:
+        return out
+    boundary = int(record["covered_rows"])
+    covered, remaining = convo[:boundary], convo[boundary:]
+    new_convo: list[dict] = [CS.summary_message(record)]
+    # Layer C, over what the summary covers. Re-read from disk, so it is as
+    # stable as the files are.
+    if cfg["restore"].get("enabled", True):
+        try:
+            from app.compaction_llm import restore_recent_files, restored_file_count
+            restored = restore_recent_files(
+                covered,
+                budget_tokens=int(cfg["restore"].get("budget_tokens", 50_000)),
+                max_per_file=int(cfg["restore"].get("max_per_file", 5_000)),
+                max_files=int(cfg["restore"].get("max_files", 5)),
+            )
+            new_convo.extend(restored)
+            out["restored"] = restored_file_count(restored)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("restore_recent_files failed: %s", e)
+    head = len(new_convo)
+    new_convo.extend(remaining)
+    out.update(convo=new_convo, summarized=True, covered_rows=boundary, head=head)
+    return out
+
+
 async def load_and_compact_session(
     session_path: Path | str,
     model: str = "",
@@ -416,7 +536,12 @@ async def load_and_compact_session(
         whether it summarized
       - summarize_outcome: str, one of ``no_history``, ``under_threshold``,
         ``mode_truncate``, ``import_failed``, ``no_older_block``,
-        ``empty_summary``, ``summarized`` — which of those paths this turn took
+        ``empty_summary``, ``summarized`` — which of those paths this turn took;
+        with ``compaction.persist_summary`` also ``reused`` (a stored summary
+        was applied and nothing needed folding)
+      - summary_reused: bool, a stored summary record was applied (D2)
+      - summary_folds:  int, folds this turn added to the record
+      - summary_covered_rows: int, rows the applied record covers
 
     On any error (missing file, malformed JSON), returns an empty result
     with ``history=[]`` and logs a warning. Summarization failures are
@@ -461,7 +586,7 @@ async def load_and_compact_session(
 
     # Drop non-conversation entries (subliminal, tombstones, ambient markers)
     # since they're for UI display, not for the model.
-    convo = [m for m in messages if m.get("role") in ("user", "assistant", "tool", "system")]
+    convo = [m for m in messages if m.get("role") in _CONVERSATION_ROLES]
 
     tokens_before = estimate_conversation_tokens(convo, system_prompt)
 
@@ -526,7 +651,29 @@ async def load_and_compact_session(
     # knowing this function's branch names.
     summarize_attempted = False
     summarize_outcome = "under_threshold"
-    if cur_tokens > threshold and mode == "summarize":
+    # D2: the persisted summary. Summarize mode only — `mode: truncate` (and
+    # voice's override) says drop-oldest, and a stored summary is a summary.
+    persist = bool(cfg.get("persist_summary")) and mode == "summarize"
+    summary_reused = False
+    summary_folds = 0
+    summary_covered_rows = 0
+    summary_head = 0
+    if persist:
+        layer = await _persisted_summary_layer(
+            convo, data, path=path, cfg=cfg, model=model,
+            threshold=threshold, system_prompt=system_prompt, cur_tokens=cur_tokens,
+        )
+        convo = layer["convo"]
+        summarized = layer["summarized"]
+        summarize_attempted = layer["attempted"]
+        summarize_outcome = layer["outcome"]
+        restored_count = layer["restored"]
+        summary_reused = layer["reused"]
+        summary_folds = layer["folds"]
+        summary_covered_rows = layer["covered_rows"]
+        summary_head = layer["head"]
+        cur_tokens = estimate_conversation_tokens(convo, system_prompt)
+    elif cur_tokens > threshold and mode == "summarize":
         summarize_attempted = True
         summarize_outcome = "import_failed"
         try:
@@ -595,12 +742,26 @@ async def load_and_compact_session(
         summarize_outcome = "mode_truncate"
 
     # ---- Layer (fallback): truncation ---------------------------------
-    truncated_msgs, dropped = truncate_conversation(
-        convo,
-        max_tokens=threshold,
-        turns_to_keep=TURNS_TO_KEEP,
-        system_prompt=system_prompt,
-    )
+    if summary_head:
+        # D2: the persisted summary (and its restored files) is the head of
+        # the history and is never what drop-oldest drops — a fold capped by
+        # `max_folds_per_turn` leaves verbatim rows the next turn keeps folding,
+        # and truncating those first keeps the summary that covers the rest.
+        head = convo[:summary_head]
+        tail, dropped = truncate_conversation(
+            convo[summary_head:],
+            max_tokens=max(1_000, threshold - estimate_conversation_tokens(head)),
+            turns_to_keep=TURNS_TO_KEEP,
+            system_prompt=system_prompt,
+        )
+        truncated_msgs = head + tail
+    else:
+        truncated_msgs, dropped = truncate_conversation(
+            convo,
+            max_tokens=threshold,
+            turns_to_keep=TURNS_TO_KEEP,
+            system_prompt=system_prompt,
+        )
     # What is SENT (D3): `_prepare_messages_for_harness` keeps only these
     # roles, so a legacy `system` row in the session file (old `/compact`
     # restores) is dropped on the way to the engine and must not be counted.
@@ -640,6 +801,9 @@ async def load_and_compact_session(
         "threshold": threshold,
         "summarize_attempted": summarize_attempted,
         "summarize_outcome": summarize_outcome,
+        "summary_reused": summary_reused,
+        "summary_folds": summary_folds,
+        "summary_covered_rows": summary_covered_rows,
     }
     _record_turn_start(path.stem, result)
     return result

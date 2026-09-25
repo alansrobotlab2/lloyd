@@ -1071,7 +1071,7 @@ def _get_file_lock(session_id: str) -> asyncio.Lock:
     return lock
 
 
-async def mutate_session(session_id: str, fn) -> bool:
+async def mutate_session(session_id: str, fn, *, path: Path | None = None) -> bool:
     """Atomic read-modify-write on a session file.
 
     Acquires the per-session lock, reads fresh data from disk, calls
@@ -1081,8 +1081,13 @@ async def mutate_session(session_id: str, fn) -> bool:
     `fn` MUST be synchronous and fast — never await or do I/O inside it.
     Expensive work (LLM calls, etc.) must happen OUTSIDE this helper;
     only apply the result via a small `fn` callback.
+
+    `path` names the file when it is not `SESSIONS_DIR/<id>.json` — the
+    compaction record (D2) is saved beside whatever file the turn-start stack
+    was handed, which in an eval or a test is not the live directory. The
+    lock is still keyed by `session_id`.
     """
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    meta_path = Path(path) if path is not None else SESSIONS_DIR / f"{session_id}.json"
     async with _get_file_lock(session_id):
         if not meta_path.exists():
             return False

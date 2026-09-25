@@ -77,6 +77,11 @@ ARMS
               off. The video's blunt preset.
   raised      trigger/target 0.9/0.7 at both passes: fire later, keep more.
   trigger90   trigger 0.9, target 0.52: fire later, clear as far as today.
+  summary_legacy     summarize layer, regenerate-every-turn 9-section summary.
+  summary_persisted  summarize layer with `persist_summary: true` (D2): the
+              incremental Goal/Constraints/Progress/Decisions/Next steps
+              record. Both need sizes past the truncation threshold; valid
+              only when the summarize layer replaced a block.
 
 The in-turn trigger is a fraction of the truncation threshold (210,144)
 compared against the REPORTED prompt, which carries ~55-75k of system
@@ -174,6 +179,27 @@ ARMS: dict[str, dict[str, Any]] = {
         "options": {"intra_turn_microcompact_trigger_fraction": 0.9,
                     "intra_turn_microcompact_target_fraction": 0.52},
         "expects_fire": True,
+    },
+    # D2 (review 2026-09-24): the summary formats, head to head. Both force
+    # the summarize layer; only the persisted arm writes and folds the
+    # `data["compaction"]` record (Goal / Constraints / Progress / Decisions /
+    # Next steps + ledger-rendered Files touched) through
+    # `compaction_llm.summarize_incremental`. The legacy arm is the 9-section
+    # regenerate-every-turn summary. The layer runs only past the truncation
+    # threshold (~210k on the primary), so run these at sizes above it:
+    #   --arms summary_legacy,summary_persisted --sizes 240000,280000
+    # This pair gates flipping `compaction.persist_summary` on.
+    "summary_legacy": {
+        "compaction": {"mode": "summarize", "persist_summary": False},
+        "options": {},
+        "expects_fire": True,
+        "expects_summary": True,
+    },
+    "summary_persisted": {
+        "compaction": {"mode": "summarize", "persist_summary": True},
+        "options": {},
+        "expects_fire": True,
+        "expects_summary": True,
     },
 }
 
@@ -647,6 +673,11 @@ def fired(record: dict[str, Any] | None) -> dict[str, Any]:
 
 def valid_for_arm(arm: str, f: dict[str, Any]) -> bool:
     freed = f["turn_start_freed"] + f["relief_freed"]
+    if ARMS[arm].get("expects_summary") and \
+            "summarize" not in f.get("turn_start_mechanisms", []):
+        # A summary-format arm whose summarize layer did not replace a block
+        # measured the truncation fallback, not the format.
+        return False
     return freed > 0 if ARMS[arm]["expects_fire"] else freed == 0
 
 
@@ -783,7 +814,8 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
         pre = fired(turn.to_record())
         row["turn_start"] = {k: comp.get(k) for k in (
             "tokens_before", "tokens_after", "microcompacted", "summarized",
-            "truncated", "summarize_outcome")}
+            "truncated", "summarize_outcome", "summary_reused", "summary_folds",
+            "summary_covered_rows")}
 
         # Pre-gate: production can only fire in-turn if the prompt can reach
         # the in-turn trigger; the fixed overhead is measured on the first

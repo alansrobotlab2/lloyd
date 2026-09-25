@@ -371,6 +371,15 @@ compaction:
   mode: summarize
   summary_model: primary
   keep_recent_turns: 5
+  # D2 (review 2026-09-24, app/compaction_state.py): keep the between-turn
+  # summary as data["compaction"] and fold new history into it instead of
+  # regenerating it every turn. Ships off until the recall eval's
+  # summary_persisted arm is compared (eval/run_compaction_recall_eval.py).
+  # The input budget bounds one fold's delta; leftover delta is folded on
+  # later turns, at most max_folds_per_turn per turn.
+  persist_summary: false
+  summary_input_budget_tokens: 48000
+  max_folds_per_turn: 3
   microcompact:
     enabled: true
     # Budget-driven since 2026-09-05. Below `trigger_fraction` of the

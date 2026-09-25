@@ -559,3 +559,45 @@ text from `assistant_message` (D8), which only the kept attempt produces. The
 voice worker speaks deltas as they arrive and is not trimmed. Pins:
 `app/harness/tests/test_stream_retry.py`,
 `test_finalizer.py::test_a_broken_stream_has_no_verdict_to_restate`.
+
+### D2 — the summary is persisted, folded forward and bounded
+
+Once a session crossed the wall, every turn re-summarised the whole older block
+(up to 120 s before first token, a different text each time so the prefix cache
+died every turn, and no input bound, so a big block 400'd the summariser and
+the turn fell back to drop-oldest — every turn). `app/compaction_state.py` now
+keeps it as `data["compaction"]` (X6), under `compaction.persist_summary`
+(ships **false** until the recall eval's `summary_legacy` /
+`summary_persisted` arms are compared; `eval/run_compaction_recall_eval.py`,
+run past the truncation threshold).
+
+- **Record**: `{version, summary, covers_through_entry_id,
+  covers_through_index, covered_sha, covered_rows, covered_turn_ids,
+  files_touched, created_at, updated_at, model, folds, source, instructions}`.
+  Indexes are into the stack's conversation-role filter
+  (`app.compaction._CONVERSATION_ROLES`, one definition). `covered_sha` is over
+  `id:role` lines, so microcompact rewriting contents never invalidates it; a
+  rewritten past (legacy `/compact`) does → `compaction.record_invalidated`,
+  rebuilt from the rows.
+- **Applied whenever it validates**, under the threshold too — a stable summary
+  is the cache win. The threshold decides only whether the delta past the
+  boundary is folded: `chunk_by_turns` on turn boundaries to
+  `min(summary_input_budget_tokens, summary window − 8k − 2k) − prior summary`
+  (re-chunked after each fold; an over-budget turn is reduced, never split),
+  `compaction_llm.summarize_incremental(prior, chunk)` with fixed sections
+  Goal / Constraints / Progress / Decisions / Next steps, the record saved
+  after **each** fold (`save_record` → `sessions_io.mutate_session(path=…)`,
+  writes only that key, re-validated under the lock, always placed after
+  `messages` so the retention sweep's 4 KB prefix read still finds
+  `last_active`), at most `max_folds_per_turn`. Leftover delta stays verbatim;
+  drop-oldest then truncates the rows behind the summary, never the summary.
+- **Files touched** is rendered by us from `agent_mcp/_change_ledger` over the
+  newly covered `turn_id`s (X3) and carried forward on the record (the ledger
+  keeps 7 days); the prompt tells the model not to list files.
+- A failed fold keeps the prior record (`summarize_outcome: empty_summary`).
+  New outcome `reused`; `turn_start_record` gains `summary_reused`,
+  `summary_folds`, `summary_covered_rows`; one `compaction.summary_updated`
+  event per fold. Summarize mode only — `mode: truncate` (voice) ignores the
+  record, and with the switch off a record on disk is ignored entirely.
+- `tests/test_compaction_persisted_summary.py`,
+  `tests/test_compaction_record.py::test_turn_start_record_reports_reuse_and_folds`.

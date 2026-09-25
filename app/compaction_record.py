@@ -107,6 +107,13 @@ def turn_start_record(comp: Mapping[str, Any]) -> dict[str, Any] | None:
         "tokens_freed": max(0, before - after),
         "threshold": int(comp.get("threshold") or 0),
         "context_window": int(comp.get("context_window") or 0),
+        # D2: the persisted summary. `summary_reused` is a stored record
+        # applied as is (the prefix-cache win); `summary_folds` the folds this
+        # turn added to it; `summary_covered_rows` how many rows it stands in
+        # for. All three read false/0 with `compaction.persist_summary` off.
+        "summary_reused": bool(comp.get("summary_reused")),
+        "summary_folds": int(comp.get("summary_folds") or 0),
+        "summary_covered_rows": int(comp.get("summary_covered_rows") or 0),
     }
 
 
