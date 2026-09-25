@@ -555,3 +555,59 @@ async def test_the_pass_is_not_reentrant_per_session(env, monkeypatch):
     assert env.read()[post_capture.FACT_WATERMARK_KEY] == 6, (
         "the parked pass lost its watermark write on the way out"
     )
+
+
+# ── #1487: post-capture writes through the paraphrase gate ──────────────────
+
+def test_a_paraphrase_from_a_later_session_does_not_add_a_second_active_row(
+        tmp_path, monkeypatch):
+    """Clause 5 of #1487. The re-armed extractor restates: on the live store
+    four sessions wrote `stream_chat` facts, two of them one claim in two
+    wordings, and #499's verbatim key refused neither. `_write_extracted_facts`
+    goes through the REAL `_fact_add` here (not the fixture's counter), so the
+    write gate it carries is the one exercised — with djev stubbed to call the
+    later wording a restatement, the second session appends nothing."""
+    from agent_mcp import _shared, fact_write_gate, retrieval
+    from app import djev, kg_store, paths
+
+    root = tmp_path / "facts"
+    root.mkdir()
+    kg_store.configure(tmp_path / "kg.sqlite")
+    try:
+        monkeypatch.setattr(_shared, "FACTS_ROOT", root)
+        monkeypatch.setattr(_shared, "ALIASES_PATH", root / "entity-aliases.json")
+        monkeypatch.setattr(_shared, "_entity_dirs_cache", None)
+        monkeypatch.setattr(facts_mod, "FACTS_ROOT", root)
+        monkeypatch.setattr(retrieval, "FACTS_ROOT", root)
+        monkeypatch.setattr(paths, "FACT_WRITE_GATE_LOG", tmp_path / "gate.jsonl")
+        monkeypatch.setenv(fact_write_gate.MODE_ENV, "on")
+        asked = []
+
+        def restated(state, questions, **kw):
+            asked.append(state)
+            probs = {"different": 0.03, "restated": 0.95, "superseded": 0.02}
+            return djev._build({
+                "answers": {q: {"type": "choice", "choice": "restated", "confidence": 0.95,
+                                "probabilities": probs} for q in questions},
+                "diagnostics": {"questions": {q: {"label_mass": 0.9} for q in questions}},
+            }, 5.0, None, "fact_write")
+        monkeypatch.setattr(djev, "ask_sync", restated)
+
+        post_capture._write_extracted_facts([{
+            "entity": "Lloyd",
+            "fact": "stream_chat races SSE line reads against cancel_event to allow Stop during prefill",
+        }], "20260924_221452_ivb794")
+        post_capture._write_extracted_facts([{
+            "entity": "Lloyd",
+            "fact": "stream_chat in client.py races line reads against a cancel event "
+                    "to allow Stop during prefill",
+        }], "20260925_082940_iv30d7")
+
+        rows = [r for r in kg_store.store().facts_idx.for_entity("Lloyd", include_expired=True)
+                if r["category"] == "session-extracted"]
+        active = [r for r in rows if not (r["expired_at"] or r["invalid_at"])]
+        assert len(asked) == 1, "the second session's fact was put to the gate"
+        assert len(active) == 1, active
+        assert active[0]["source_doc"] == "sessions/20260924_221452_ivb794"
+    finally:
+        kg_store.reset()

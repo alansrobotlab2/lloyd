@@ -235,3 +235,40 @@ def test_a_declared_variant_spelling_cannot_smuggle_a_second_copy_in(tree):
     assert len(_rows("TencentDB Agent Memory")) == 1
     assert not (d / "TencentDB Agent Memory-usage.md").exists(), \
         "the refused write still created its category file"
+
+
+# ── #1487: the paraphrase gate sits on top of this guard, never instead ──────
+
+@pytest.mark.parametrize("failure", ["unreachable", "http_error", "timeout", "raises"])
+def test_a_failing_djev_leaves_the_write_exactly_as_today(tree, monkeypatch, failure):
+    """With the write gate armed and djev failing every way it can, a
+    paraphrase is appended as an ordinary ADD — `app.djev.ask_sync` answers
+    None on unreachable / non-200 / timeout, and a raise inside the gate is
+    swallowed there — while a byte-identical re-add is still #499's refusal."""
+    from agent_mcp import fact_write_gate
+    from app import djev
+
+    calls = []
+
+    def failing(state, questions, **kw):
+        calls.append(kw.get("timeout"))
+        if failure == "raises":
+            raise RuntimeError("probe: djev blew up")
+        return None
+    monkeypatch.setenv(fact_write_gate.MODE_ENV, "on")
+    monkeypatch.setattr(djev, "ask_sync", failing)
+
+    first = _add(fact="stream_chat races SSE line reads against cancel_event during prefill")
+    para = _add(fact="stream_chat races SSE line reads against a cancel event during prefill")
+    assert para.get("success") is True and para.get("skipped") is False, para
+    assert para.get("verdict") == "add"
+    assert calls, "the gate asked djev (and got nothing back)"
+    assert calls[0] == fact_write_gate.TIMEOUT_S
+    texts = _file_fact_texts(tree, "Zedlink", "state")
+    assert len(texts) == 2 and first.get("skipped") is False
+
+    asked = len(calls)
+    again = _add(fact="stream_chat races SSE line reads against cancel_event during prefill")
+    assert again.get("skipped") is True and again.get("duplicate") is True, again
+    assert len(calls) == asked, "a verbatim copy is refused before djev is asked"
+    assert _file_fact_texts(tree, "Zedlink", "state") == texts

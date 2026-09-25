@@ -340,6 +340,25 @@ page went on serving the fact as current, and the two disagreed until the next
 full reindex. A `StoreUnavailable` here is not fatal — the markdown is written
 and `facts_idx.reindex()` rebuilds the index — but a silent skip is.
 
+### The paraphrase gate (#1487, ships off)
+
+#499 refuses a byte-identical re-statement; a paraphrase walks through it, and
+~a third of the writes after the 09-23 rebuild restated a fact the entity
+already held in that category. `agent_mcp/fact_write_gate.py` sits after the
+verbatim guard in `_fact_add` (so the tool and post-capture) and in the
+extractor's `write_fact_file`: the lexically closest active fact in the same
+file (token Jaccard ≥ 0.3) is put to djev as one three-way `choice`, and the
+write is **NOOP** at P(restated) ≥ 0.8 (nothing written, success returned),
+**UPDATE** when P(superseded) ≥ 0.3 *and* every word and number of the old fact
+appears in the new one (new appended, old stamped `expired_at` in the same
+atomic write), else **ADD**. Every djev failure is ADD; the result carries
+`verdict`. `knowledge_graph.write_gate.mode`: `off` | `shadow` | `noop` | `on`
+(`LLOYD_FACT_WRITE_GATE` overrides; a caller may pass `write_gate: "off"` —
+the rebuild's carry-over does — never on). Decisions log to
+`fact-write-gate.jsonl` beside `kg.sqlite`. Held out on 400 writes: 76/77 NOOPs
+right, 3/3 UPDATEs safe, djev p50 341 ms on the 37% of writes it is asked
+about — `eval/measurements/fact-write-gate-2026-09-25.md`.
+
 ---
 
 ## What a fact carries

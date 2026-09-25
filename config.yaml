@@ -2076,3 +2076,12 @@ workers:
 # false so a chat turn cannot add a fact to a tree about to be renamed.
 knowledge_graph:
   write_enabled: true
+  # #1487: the ADD/UPDATE/NOOP gate in front of fact_add (agent_mcp/
+  # fact_write_gate.py) — djev judges a paraphrase of a fact the entity already
+  # holds in that category. off | shadow (decide + log, write as today) | noop
+  # (skip restatements, never expire) | on (also supersede: expire the one fact
+  # the new one contains). Measured 2026-09-25 on 400 held-out writes
+  # (eval/measurements/fact-write-gate-2026-09-25.md): 77 NOOPs, 76 right;
+  # 3 UPDATEs, 3 safe. Off until Alan's ship call — see the write-up.
+  write_gate:
+    mode: "off"

@@ -536,6 +536,10 @@ def cmd_import_worker(args) -> int:
             "confidence": f.get("confidence") or 0.9,
             "provenance": f.get("provenance") or "STATED",
             "source_doc": f.get("source_doc"), "valid_at": f.get("valid_at"),
+            # A carry-over is a fact that already survived its own write; the
+            # #1487 paraphrase gate must not re-judge it into a noop or expire
+            # a neighbour on the way into the new tree.
+            "write_gate": "off",
         })
         if res.get("skipped"):
             stats["already_present"] += 1

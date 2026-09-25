@@ -55,6 +55,7 @@ from app.entity_naming import (
     normalize_declared_type as _normalize_declared_type,
     schema_identity as _schema_identity,
 )
+from agent_mcp import fact_write_gate
 from agent_mcp._shared import (
     FACTS_ROOT,
     ErrorCode,
@@ -231,10 +232,25 @@ def _duplicate_refusal(entity, category, dup) -> dict:
     non-success `fact_add` as a lost fact and retries or reports a drop, which
     is how a duplicate check turns into a data-loss warning on every retry.
     """
-    return {"success": True, "skipped": True, "duplicate": True,
+    return {"success": True, "skipped": True, "duplicate": True, "verdict": "noop",
             "entity": entity, "category": category, "duplicate_of": dup,
             "reason": "duplicate: this entity already carries that fact "
                       "verbatim (same entity, same text_hash); nothing was appended"}
+
+
+def _noop_result(entity, category, decision) -> dict:
+    """What `fact_add` returns when the write gate (#1487) judged the fact a
+    restatement of one the file already holds.
+
+    Success, nothing written — the same contract as `_duplicate_refusal` and
+    for the same reason: a caller that reads non-success as a lost fact would
+    retry or report a drop for a claim the store already carries.
+    """
+    return {"success": True, "skipped": True, "verdict": "noop",
+            "entity": entity, "category": category,
+            "restates": decision.target if decision else None,
+            "reason": "noop: this entity already holds the same claim in other "
+                      "words (write gate, #1487); nothing was appended"}
 
 
 def _generate_fact_id(category: str, existing_ids=()) -> str:
@@ -597,6 +613,16 @@ def _fact_add(params: dict) -> dict:
                 existing, fact_text, fact_file, entity, category)
             if dup:
                 return _duplicate_refusal(entity, category, dup)
+            # #1487: a paraphrase of a fact this file already holds. After the
+            # verbatim guard, so byte-identical re-statements are still answered
+            # by #499 and never cost a djev call; inside the lock, so an UPDATE's
+            # expiry lands in the same atomic write as the fact replacing it.
+            took, decision = fact_write_gate.gate_write(
+                entity, category, fact_text, existing, now_iso=now_iso,
+                source_doc=source_doc,
+                mode_="off" if params.get("write_gate") == "off" else None)
+            if took == "noop":
+                return _noop_result(entity, category, decision)
             fact_id = _generate_fact_id(category, [f.get("id") for f in existing if isinstance(f, dict)])
             new_fact = {"fact": fact_text, "confidence": confidence, "category": category,
                         "id": fact_id, "created_at": now_iso, "valid_at": params.get("valid_at"),
@@ -615,7 +641,9 @@ def _fact_add(params: dict) -> dict:
         # `skipped` is on both outcomes, so an absent key is never how a
         # caller learns the difference between the two.
         result: dict = {"success": True, "skipped": False, "fact_id": fact_id,
-                        "entity": entity, "category": category}
+                        "entity": entity, "category": category, "verdict": took}
+        if took == "update":
+            result["superseded"] = decision.target
         try:
             st = _store()
             # Only fills a registry that lags the tree; the gate above has

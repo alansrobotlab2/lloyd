@@ -559,6 +559,12 @@ class FactExtractor:
                 # avoids by never opening the file at all.
                 return None
 
+            # #1487: the paraphrase gate `_fact_add` carries, on the writer that
+            # produces most paraphrases — re-reading a changed document states
+            # its claims again in new words. Same module, same mode switch.
+            new_facts = self._gate_paraphrases(entity, category, existing_facts,
+                                               new_facts, now_iso, source_doc)
+
             merged_facts = self._merge_facts(existing_facts, new_facts)
             merged_facts = _assign_fact_ids(merged_facts, category)
 
@@ -579,6 +585,40 @@ class FactExtractor:
 
         self._index_and_link(entity, category, fact_file, new_facts, source_doc)
         return fact_file
+
+    def _gate_paraphrases(self, entity: str, category: str, existing: list,
+                          new_facts: list, now_iso: str, source_doc) -> list:
+        """The incoming facts the #1487 write gate lets through.
+
+        A NOOP drops the fact; an UPDATE stamps `expired_at` on the one existing
+        entry it names, in `existing` itself, so the expiry rides the same
+        atomic write as the fact replacing it. Each kept fact joins the pool
+        the next one is judged against, so a batch cannot restate itself.
+        Off (the default) or any failure to load the gate: the list unchanged.
+        """
+        try:
+            from agent_mcp import fact_write_gate
+            if fact_write_gate.mode() == "off" or not new_facts:
+                return new_facts
+        except Exception:  # noqa: BLE001 — the gate never costs the write
+            return new_facts
+        pool = [f for f in existing if isinstance(f, dict)]
+        kept = []
+        for nf in new_facts:
+            if not isinstance(nf, dict):
+                kept.append(nf)
+                continue
+            took, _ = fact_write_gate.gate_write(
+                entity, category, str(nf.get("fact") or ""), pool,
+                now_iso=now_iso, source_doc=source_doc)
+            if took == "noop":
+                continue
+            kept.append(nf)
+            pool.append(nf)
+        if len(kept) < len(new_facts):
+            print(f"  ⤫ {entity}-{category}: write gate held back "
+                  f"{len(new_facts) - len(kept)} restatement(s)")
+        return kept
 
     def _refuse_held_facts(self, entity: str, new_facts: list) -> list:
         """The incoming facts minus any whose text `entity` already carries.

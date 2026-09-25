@@ -184,6 +184,11 @@ VAULT_KG_DB_DEFAULT = VAULT_DERIVED_ROOT / "kg.sqlite"
 VAULT_KG_DB = Path(os.environ["LLOYD_KG_DB"]) if os.environ.get("LLOYD_KG_DB") \
     else VAULT_KG_DB_DEFAULT
 
+# The fact write gate's decision log (#1487, agent_mcp/fact_write_gate.py):
+# beside the store it judged, so a replay against a copy (LLOYD_KG_DB) logs
+# into the copy's directory and never into the live one's.
+FACT_WRITE_GATE_LOG = VAULT_KG_DB.parent / "fact-write-gate.jsonl"
+
 # The research topic registry: what to research, what came of it, and the
 # feedback that keeps a generator from re-proposing it (app.research_store).
 # Under DATA_ROOT for the reason in the block above — a canary booting from a
