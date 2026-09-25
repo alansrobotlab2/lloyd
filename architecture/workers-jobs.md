@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, workers]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-09-25
 ---
 
 # The worker jobs
@@ -38,27 +38,30 @@ the order the pool considers them.
 ## 1. The roster
 
 Twelve sources are registered. Priority is `DEFAULT_PRIORITY` unless config
-overrides it (`youtube-digest` and `arch-review` do), and **lower runs sooner**.
+overrides it — `youtube-digest` is the only real override (45, not the default
+60); `arch-review` and `board-steward` state 62 and 68 in config, though those
+equal their defaults — and **lower runs sooner**.
 
 | source | family | prio | cadence | inflight | turn path | KV-gated | IV | on |
 |---|---|---|---|---|---|---|---|---|
 | `scheduled-task` | dispatch | 10–70 | 60 s | 2 | `run_query` direct, recorded | no | per task | yes |
-| `autocode` | self-mod | 40 | 900 s | 1 | session | **yes** | off | yes |
+| `autocode` | self-mod | 40 | 900 s | 2 | session | **yes** | off | yes |
 | `youtube-digest` | intake | **45** | 300 s | 1 | session | no | off | yes |
 | `autotriage` | self-mod | 55 | 900 s | 1 | session | **yes** | off | yes |
-| `autoresearch` | self-mod | 60 | 3600 s | 1 | own script | no | — | **no** |
+| `autoresearch` | self-mod | 60 | 14400 s | 1 | own script | no | — | **yes** |
 | `arch-review` | self-mod | **62** | 1800 s | 1 | session | **yes** | off | yes |
 | `backlog-cluster` | self-mod | 65 | 3600 s poll | 1 | none (numpy) | no | — | yes |
 | `board-steward` | self-mod | 68 | 900 s | 1 | session (primary) | no | off | yes |
 | `deep-research` | intake | 70 | 3600 s | 1 | session | **yes** | off | yes |
 | `session-distill` | mining | 70 | 1800 s | 1 | direct (primary) | no | — | yes |
-| `automod-regression` | self-mod | 70 | 3600 s | 1 | none (subprocess) | no | — | yes |
+| `automod-regression` | self-mod | 70 | 900 s | 1 | none (subprocess) | no | — | yes |
 | `bench-mine` | mining | 80 | 7200 s | 1 | direct (primary) | no | — | yes |
 
 **KV-gated** is `LONG_LIVED = True`: tens of iterations each re-submitting a
 100–200k context, so the pool will not *claim* one while the primary's
-one-minute median KV usage is over `workers.kv_gate.max_kv_usage` (0.60). Four
-sources declare it; `backlog-cluster` declares it `False` explicitly.
+one-minute median KV usage is over `workers.kv_gate.max_kv_usage` (0.60). Five
+sources declare the attribute — `True` on the three long turns, `False`
+explicitly on `backlog-cluster` and `board-steward`.
 
 **IV** is `workers.sources.<name>.inner_voice`, and `—` is not "off": it is
 meaningful only on a source that runs through `run_prompt_in_session`, because
@@ -92,8 +95,10 @@ on 2026-09-24 (§7).
 
 - **`session-distill` fails 42% of its runs and `bench-mine` 82%, both the
   same way**: `empty response (stop_reason=max_turns) — nothing written`. Both
-  hard-code a turn budget in the source (15 and 8) rather than reading one from
-  config, and both routinely exhaust it. An empty turn is correctly recorded as
+  hard-coded a turn budget in the source (15 and 8) rather than reading one from
+  config, and both routinely exhausted it; `bench-mine` since got a config key
+  (#896, 2026-09-24 — §6), `session-distill`'s 15 is still a literal. An empty
+  turn is correctly recorded as
   a failure — that rule is [[workers]] §4 and it is what stops a
   `(no response)` note being written — so what these numbers say is that the
   budget is wrong, not that the rule is.
@@ -109,8 +114,9 @@ on 2026-09-24 (§7).
   it costs.
 - **`automod-regression` skips 30 of 39**, which is the design working: it
   measures once per promotion, dedups on the commit, and a poll that finds no
-  recent settlement returns in milliseconds. An hourly interval means "shortly
-  after a landing", not "hourly evals".
+  recent settlement returns in milliseconds. The poll interval (900 s since
+  2026-09-18, hourly before that) means "shortly after a landing", not
+  "constant evals".
 - The 7-day window also holds rows from sources under their **old names** —
   `backlog-selfmod`, `backlog-implement`, `autoimplement`,
   `selfmod-regression`, `autoimplement-regression` — all renamed on 2026-09-09,
@@ -121,7 +127,7 @@ on 2026-09-24 (§7).
 ## 3. Dispatch — one door onto the autonomy fleet
 
 One source, and it is not really a job. It is the seam the entire autonomy
-fleet comes through: 32 task files in the vault, each with its own schedule,
+fleet comes through: 36 task files in the vault, each with its own schedule,
 priority, skill and dependencies, all reaching the pool as
 `scheduled-task:<id>`. Everything the pool knows about the nightly KG chain or
 the morning triage, it knows through this one module — which is why it is both
@@ -155,7 +161,7 @@ Four behaviours are load-bearing:
   interval, and with no queue row — or a claimable item going stale — raises
   after `_STALL_ALARM_TICKS` consecutive ticks, rate-limited.
 
-Long version: [[autonomy]] for the mechanism, [[autonomy-jobs]] for the 32
+Long version: [[autonomy]] for the mechanism, [[autonomy-jobs]] for the 36
 jobs it dispatches — the reflection chain, trace2skill, the graph chain, vault
 hygiene, inbound signal.
 
@@ -181,7 +187,7 @@ one `architecture/*.md` doc per run, and nothing else.
 
 What the five share is that **no member acts on its own conclusion**.
 `backlog-cluster` writes a file that triage is free to ignore; `autotriage`
-reaches a verdict and implements nothing; `autocode` lands only through nine
+reaches a verdict and implements nothing; `autocode` lands only through eleven
 rungs and a second reader; `automod-regression` measures and never reverts; and
 `arch-review` may correct the doc it read and must *file* every other finding,
 including the one-line skill fix it could obviously make itself.
@@ -189,10 +195,11 @@ Each one's output is the next one's input, and every handoff is a file on disk
 rather than a call — so a member that is down stalls the loop rather than
 corrupting it.
 
-The fifth member is `autoresearch`, and it is **off**. It is the one that
-rewrote a prompt surface with no gate at all, and what it did with that is the
-last entry in this section — it is here as the counterexample the other four
-are shaped against.
+The family's outlier is `autoresearch`. It is the one that rewrote a prompt
+surface with no gate at all, and what it did with that is the last entry in
+this section — it is here as the counterexample the others are shaped against.
+It runs again (re-armed 2026-09-16, behind the bench-and-landing gate it
+lacked), but its gate-less week is why the loop above is shaped as it is.
 
 Long version: [[automod]], [[backlog]].
 
@@ -202,10 +209,10 @@ Long version: [[automod]], [[backlog]].
 picklist: every top-level `architecture/*.md` is a unit, plus one per
 functional *group* of [[autonomy-jobs]] and this doc (hand-kept in
 `workers.sources.arch-review.groups`). A unit rests 30 days after a review, so
-the first pass takes about a week at `daily_max: 4` and steady state is a
-review a month per unit.
+the first pass takes about ten days at `daily_max: 4` (30 docs + 11 groups =
+41 units) and steady state is a review a month per unit.
 
-**Executes** as one session (Inner Voice on) that checks every backticked path,
+**Executes** as one session (Inner Voice off) that checks every backticked path,
 count, tool name and config key against the tree — `Read`, `Grep`,
 `graph_affected`, `git log`, and `curl` on `/api/workers/health` and
 `/api/autonomy/health` for anything the doc states as measured — then reviews
@@ -270,7 +277,7 @@ item is never re-triaged, so it is the one move the loop cannot recover from.
 
 **Wakes** every 900 s, enqueues one item under `autotriage:triage` with the
 budgets carried *in the payload*, so the run uses the config that was live when
-it was queued. **Executes** one session turn, Inner Voice on.
+it was queued. **Executes** one session turn, Inner Voice off.
 
 It takes a **cluster** before it takes a single item: when `clusters.json`
 holds a cluster with ≥ `group_min_items` untriaged members, the run consolidates
@@ -311,7 +318,7 @@ no promotion under observation, no rollback pending, no round open — and
 `select_confirmed`, and enqueues at most one round under `autocode:round`.
 
 **Executes** one turn in a real session following the `automod-change-own-code`
-skill: open a worktree round, do the work, run the nine-rung gate, land it or
+skill: open a worktree round, do the work, run the eleven-rung gate, land it or
 abort. Landing runs detached, exactly as when a human drives it.
 
 - **Two gates stand in front of it.** Triage must have reached `confirmed`
@@ -323,16 +330,18 @@ abort. Landing runs detached, exactly as when a human drives it.
   thing that attaches it. It also puts the round in the Inner Voice history,
   which is where anyone reviews what it did.
 - **The clock is not the throttle; the gates are.** 14400 → 3600 → 900 s, each
-  cut for the same reason: `_loop_is_free`, the dedup key and `max_inflight: 1`
-  decide whether a round may start, so the interval's only job is to ask them
+  cut for the same reason: `_loop_is_free`, the dedup key and `max_inflight: 2`
+  (raised from the default 1 on 2026-09-17, climbed to 4 while automod
+  throughput was being pushed, cut back to 2 by Alan on 2026-09-24) decide
+  whether a round may start, so the interval's only job is to ask them
   often enough. At an hour it did not — one round settled at 19:16 and the next
   poll was 19:50, with four confirmed items waiting.
 - 1492 s average, by far the longest-running job in the pool.
 
 ### `automod-regression` — did the landing make anything worse?
 
-**Wakes** hourly under `automod:regression`, which in practice means "shortly
-after a landing": it reads `last_settled.json`, skips unless a promotion
+**Wakes** every 900 s under `automod:regression`, which in practice means
+"shortly after a landing": it reads `last_settled.json`, skips unless a promotion
 settled in the last 24 h, and **measures once per promotion**, dedupped on the
 commit. **Executes** entirely off the loop — `execute` is three lines that
 `await asyncio.to_thread(_execute_blocking)`.
@@ -358,11 +367,15 @@ commit. **Executes** entirely off the loop — `execute` is three lines that
 - It is the source that taught the event-loop rule, with two 900-second eval
   arms and a `git worktree add` between them.
 
-### `autoresearch` — off, and the reason is the interesting part
+### `autoresearch` — the gate-less week, and why it runs again now
 
-**Disabled since 2026-09-08.** One prompt-optimisation round per interval,
-wrapping `scripts/autoresearch/run_round.py`, dedupped on `autoresearch:round`
-because a round takes 30–60 minutes.
+**Off 2026-09-08 → 2026-09-16; re-armed since, and gated.** One
+prompt-optimisation round per `interval_seconds` — 14400, every four hours and
+not the hourly cadence of the incident below: a round now runs nearly all the
+time and the source is exempt from the round hold, so the interval is the share
+of the primary it may take (at most 30 min in 4 h). Wraps
+`scripts/autoresearch/run_round.py`, dedupped on `autoresearch:round` because a
+round takes 30–60 minutes.
 
 It promoted generated prompt variants straight over the live `lloyd/SOUL.md`
 and `MEMORY.md` every hour with **no gate, no test, no review and no revert**.
@@ -375,11 +388,18 @@ That is the property the other four in this family are built around, stated by
 its absence: a member of a self-modification loop may not promote its own
 conclusion.
 
-`promote()` now refuses a variant that breaks the prompt-surface invariants and
-commits what it does apply through `automod_vault_land`, so the writer is
-bounded rather than removed. It stays off until #506 closes the rest —
-`variant.json` written with `json.dump`, and the snapshot directory wired up as
-a real rollback target. Flipping `enabled` is all that re-arms it.
+`promote()` refuses a variant that breaks the prompt-surface invariants and
+commits what it does apply through `automod_vault_land` (#506's route, since
+closed), so the writer is bounded rather than removed. What made re-arming
+possible: #876 (landed 2026-09-15) restored variant benching — before it,
+`run_round` benched nothing and a round could promote on baseline-only data or
+not at all — and with benching back, the promotion floors do the gatekeeping:
+`autoresearch.promotion` demands `min_composite_delta` 0.05,
+`min_bench_win_fraction` 0.5 (held at 0.5 on 2026-09-13, #428's false-positive
+measurement) and `require_safety_pass`. Alan pre-approved the re-arm on
+2026-09-13; config flipped it on 2026-09-16. The live record since then is
+11/11 success over the 2026-09-25 window, and nearly every round ends
+`0 promotable, winner=none`: the gate is holding, which is the point.
 
 ---
 
@@ -422,7 +442,7 @@ as an attempt.
 not what gets done, and channels are **interleaved** so a channel with 280
 videos in its window does not push one with 55 to the end of the day. Each tick
 also runs `--register-new` to pick up new uploads. **Executes**
-one session turn, Inner Voice on: read the fetched transcript bundle, write the
+one session turn, Inner Voice off: read the fetched transcript bundle, write the
 vault note under `~/obsidian/knowledge/youtube/<Channel>/`, judge the video
 against `eval/lloyd_profile.md`, and file a draft backlog item when something
 there would improve Lloyd.
@@ -558,8 +578,9 @@ same program twice, and that is worth saying once rather than twice:
 - **A direct turn on the primary** through `run_prompt_on_primary`. No session,
   no Inner Voice, no transcript anyone reviews.
 - **A turn budget hard-coded at the call site** — 15 and 8 — rather than
-  read from `src_cfg` the way every session-backed source reads it. No config
-  key moves these.
+  read from `src_cfg` the way every session-backed source reads it. `bench-mine`
+  got fixed (#896, 2026-09-24: the budget rides the queue payload and a config
+  key moves it); `session-distill`'s 15 is still a literal no key moves.
 - **`_common.write_staging_note(source=NAME, …)` at the end**, which fixes the path to
   `pending-research/<source>/<date>/` and stamps `review_status: pending`. The
   Review tab is what promotes them; only `bench-mine` has a default destination
@@ -624,7 +645,8 @@ other session sources' — #896) and stages a candidate task under
   while the filter matched lowercase `baseline`, a case-sensitive comparison
   that never held, so the selector returned nothing for the ledger's entire
   life. #625 made it case-insensitive and restricted losers to trials whose
-  `trace_status` is `success`, since `judge.py:177` scores an incomplete trace
+  `trace_status` is `success`, since `judge_trace` in
+  `scripts/autoresearch/judge.py` scores an incomplete trace
   0.0 and every errored baseline row is therefore a "loser" for harness rather
   than model reasons. #876 has since cleared, the ledger is appending again (291
   rows on 2026-09-19), and 104 baseline losers sit inside the 7-day window — so
@@ -688,3 +710,18 @@ that put every disk-heavy scan on a thread, and stays.
 | all | every job's transcript and recording | [[background-runs]] |
 | all | the queue, gates and contracts they share | [[workers]] |
 | all | the KV gate's measurements | [[vllm]] |
+
+## Review log
+
+- 2026-09-25 — **stale**: the doc's measured window (09-11) had drifted —
+  `autoresearch` was re-armed 2026-09-16 (#876 restored variant benching; runs
+  every 4 h behind the promotion floors, 11/11 success), `automod-regression`
+  polls 900 s not hourly, `autocode` is `max_inflight: 2` not 1, the gate is
+  eleven rungs not nine, `arch-review`/`autotriage`/`youtube-digest` run with
+  Inner Voice **off** (config says so; the prose said on, against the doc's own
+  roster), the fleet is 36 task files not 32, `bench-mine`'s turn budget is a
+  config key since #896 (only `session-distill`'s remains a literal), and the
+  `judge.py:177` citation is dead — the zero-score is `judge_trace`. Findings
+  outside this doc filed as #1458 (stale automod-regression config comment),
+  #1459 (dead judge.py citation in `bench_mine.py`), #1460 (session-distill
+  budget has no config key).
