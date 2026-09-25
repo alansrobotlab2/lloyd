@@ -2092,3 +2092,19 @@ knowledge_graph:
   # 3 UPDATEs, 3 safe. Off until Alan's ship call — see the write-up.
   write_gate:
     mode: "off"
+
+# Query → entity seeding beyond the lexical extractor (#1486, app/entity_linker.py).
+# On since 2026-09-25 on a paired pinned-corpus measurement (86 queries):
+# entity_hit 0.337 → 0.500 (+0.163, 95% CI [0.093, 0.244]), entity_recall +0.194
+# [0.106, 0.288], fact_entity_recall +0.172 [0.088, 0.265], anchorless 25 → 16 of 66,
+# every doc metric identical; +71 ms mean recall latency [0.1, 128]
+# (eval/measurements/entity-anchoring-2026-09-25.md). The semantic half is inert
+# until the entity-vector index exists: scripts/memory/build_entity_vectors.py
+# writes it to ${LLOYD_DATA}/_pipeline/vault-derived/entity-vectors/.
+retrieval:
+  entity_seeding:
+    alias_surfaces: true       # match alias surfaces as names, score their canonical
+    semantic:
+      enabled: true            # Qwen3-Embedding-0.6B over `name (kind): top facts`
+      k: 3                     # seeds appended after the lexical RECALL_SEED_TOP_K
+      min_score: 0.0

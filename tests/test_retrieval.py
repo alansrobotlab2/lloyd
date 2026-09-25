@@ -1360,3 +1360,143 @@ def test_recall_comment_points_at_the_constant():
     assert "2026-09-04" in comment
     assert not re.search(r"default[- ]o(n|ff)\b", comment, re.IGNORECASE)
 
+
+# ── #1486: semantic entity seeding, unioned with the lexical seeds ───────────
+
+def _semantic_world(world, monkeypatch, tmp_path, *, enabled=True, k=2):
+    """A fact tree of named entities, an entity-vector index over them, a stub
+    query embedder that points at `automod`, and the switch set by config."""
+    import numpy as np
+    from app import entity_linker
+    facts_root, st = world
+    names = ["automod", "Knowledge Graph", "Code", "Nightly Retrieval Eval"]
+    for n in names:
+        _write_facts(facts_root, n, "general", [{"fact": f"{n} fact", "confidence": 0.9}])
+        st.entities.register(n)
+    vec_dir = tmp_path / "vectors"
+    vec_dir.mkdir()
+    mat = np.eye(len(names), 8, dtype=np.float32)
+    np.save(vec_dir / "vectors.npy", mat)
+    (vec_dir / "names.json").write_text(json.dumps(names))
+    from app import paths
+    monkeypatch.setattr(paths, "ENTITY_VECTORS_DIR", vec_dir)
+    entity_linker.reset_cache()
+    # "the job that keeps rewriting the code it runs in" is about `automod`;
+    # the stub embeds every query onto automod first, Nightly Retrieval Eval second.
+    q = np.zeros(8, dtype=np.float32); q[0] = 1.0; q[3] = 0.5
+    entity_linker.set_embedder(lambda text: q)
+    monkeypatch.setattr(entity_linker, "seeding_config", lambda: {
+        "alias_surfaces": False,
+        "semantic": {"enabled": enabled, "k": k, "min_score": 0.0}})
+    return names
+
+
+@pytest.fixture
+def _restore_embedder():
+    from app import entity_linker
+    yield
+    entity_linker.set_embedder(None)
+    entity_linker.reset_cache()
+
+
+def test_semantic_seeds_come_from_the_entity_vector_index(world, monkeypatch, tmp_path,
+                                                          _restore_embedder):
+    """Clause 3: `extract_entities_from_query` returns seeds drawn from the
+    semantic candidate set (entity-vector retrieval), with the embedder stubbed.
+    The query names `code` lexically and `automod` not at all."""
+    _semantic_world(world, monkeypatch, tmp_path)
+    q = "the job that keeps rewriting the code it itself runs in"
+    lexical = [n for n, _ in retrieval.extract_entities_from_query(q, semantic=False)]
+    assert "automod" not in lexical
+    seeded = [n for n, _ in retrieval.extract_entities_from_query(q)]
+    assert "automod" in seeded and "Nightly Retrieval Eval" in seeded, seeded
+    assert retrieval.recall_seeds(q, 10)[-2:] == ["automod", "Nightly Retrieval Eval"]
+
+
+def test_semantic_seeds_are_unioned_never_substituted(world, monkeypatch, tmp_path,
+                                                     _restore_embedder):
+    """Clause 4: a query whose only anchor is an exact name match yields the same
+    lexical head it yields with the switch off; the semantic seeds follow it,
+    and a semantic hit already in the head is not repeated."""
+    _semantic_world(world, monkeypatch, tmp_path)
+    q = "what does the Knowledge Graph hold"
+    off = [n for n, _ in retrieval.extract_entities_from_query(q, semantic=False)]
+    on = [n for n, _ in retrieval.extract_entities_from_query(q)]
+    assert off and on[:len(off)] == off, (off, on)
+    assert on[len(off):] == ["automod", "Nightly Retrieval Eval"]
+    # width 1: the head is exactly the lexical top-1; the union follows it.
+    assert retrieval.recall_seeds(q, 1) == [off[0], "automod", "Nightly Retrieval Eval"]
+    assert len(set(on)) == len(on)
+
+
+def test_semantic_seeding_off_is_the_lexical_list_byte_for_byte(world, monkeypatch, tmp_path,
+                                                               _restore_embedder):
+    _semantic_world(world, monkeypatch, tmp_path, enabled=False)
+    q = "what does the Knowledge Graph hold"
+    assert retrieval.semantic_seed_k() == 0
+    assert retrieval.recall_seeds(q, 10) == [
+        n for n, _ in retrieval.extract_entities_from_query(q, semantic=False)][:10]
+
+
+def test_a_failing_embedder_costs_the_semantic_seeds_not_the_lexical_ones(
+        world, monkeypatch, tmp_path, _restore_embedder):
+    from app import entity_linker
+    _semantic_world(world, monkeypatch, tmp_path)
+
+    def boom(text):
+        raise RuntimeError("no model")
+    entity_linker.set_embedder(boom)
+    q = "what does the Knowledge Graph hold"
+    assert [n for n, _ in retrieval.extract_entities_from_query(q)] == [
+        n for n, _ in retrieval.extract_entities_from_query(q, semantic=False)]
+
+
+def test_the_semantic_union_width_is_the_recall_width():
+    """`SEMANTIC_UNION_AFTER` restates `vault.RECALL_SEED_TOP_K` (vault imports
+    retrieval, not the reverse); the two must not drift."""
+    assert retrieval.SEMANTIC_UNION_AFTER == vault.RECALL_SEED_TOP_K
+
+
+def test_alias_surfaces_seed_their_canonical_when_switched_on(world, monkeypatch):
+    """#1486: an alias surface with no directory of its own (`Relationship Graph`
+    → `Knowledge Graph`) is matched as a name and scores its canonical — only
+    with `retrieval.entity_seeding.alias_surfaces` on."""
+    from app import entity_linker
+    facts_root, st = world
+    _write_facts(facts_root, "Knowledge Graph", "general", [{"fact": "kg", "confidence": 0.9}])
+    st.entities.register("Knowledge Graph")
+    st.aliases.set("Relationship Graph", "Knowledge Graph", kind="semantic", origin="test")
+    q = "what's the noise floor in our relationship graph?"
+    monkeypatch.setattr(entity_linker, "seeding_config", lambda: {
+        "alias_surfaces": False, "semantic": {"enabled": False, "k": 0, "min_score": 0.0}})
+    assert "Knowledge Graph" not in [n for n, _ in retrieval.extract_entities_from_query(q)]
+    monkeypatch.setattr(entity_linker, "seeding_config", lambda: {
+        "alias_surfaces": True, "semantic": {"enabled": False, "k": 0, "min_score": 0.0}})
+    seeds = [n for n, _ in retrieval.extract_entities_from_query(q)]
+    assert "Knowledge Graph" in seeds and "Relationship Graph" not in seeds, seeds
+
+
+def test_the_torch_embedder_matches_the_reference_implementation():
+    """`app.qwen3_embed` is the model's forward pass written out; it must agree
+    with transformers' Qwen3 (cosine ≥ 0.999) — checked here against vectors the
+    reference produced, when the model and those vectors are on this machine."""
+    import numpy as np
+    from app.paths import production_data_root
+    ref = production_data_root() / "eval" / "1486" / "q.npy"
+    ref_ids = ref.with_name("q.json")
+    try:
+        from app import qwen3_embed
+        qwen3_embed.model_dir()
+    except FileNotFoundError:
+        pytest.skip("Qwen3-Embedding-0.6B is not in the HF cache on this machine")
+    if not ref.exists():
+        pytest.skip(f"no reference vectors at {ref}")
+    from app.entity_linker import QUERY_INSTRUCTION
+    qs = {q["id"]: q["query"] for q in yaml.safe_load(
+        open(ROOT / "eval" / "vault_recall_queries.yaml"))["queries"]}
+    ids = json.loads(ref_ids.read_text())
+    R = np.load(ref)
+    for i in range(3):
+        v = qwen3_embed.embed_query(QUERY_INSTRUCTION + qs[ids[i]])
+        assert float(v @ R[i]) >= 0.999
+

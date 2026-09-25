@@ -49,6 +49,7 @@ from agent_mcp.vault import (
     _vault_recall,
 )
 from agent_mcp.facts import _extract_entities_from_query
+from agent_mcp.retrieval import recall_seeds as _recall_seeds, semantic_seed_k as _semantic_seed_k
 from app.kg_store import StoreUnavailable, store
 from app.paths import EVAL_BASELINES_DIR, VAULT_FACTS_ROOT, VAULT_KG_DB
 # The absolute latency ceiling for THIS run's context, read from the one module
@@ -522,8 +523,14 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
         # eval called a miss what production served as a hit, on 13 of the 20
         # bench queries, and the artifact reported `matches_production_defaults:
         # true` because the conjunction never looked at the seed count.
-        seeds = [e for e, _ in
-                 (_extract_entities_from_query(query) or [])[:seed_top_k]]
+        # `recall_seeds` is the one definition vault_recall uses too (#1486):
+        # the lexical head at `seed_top_k`, plus the semantic seeds when that
+        # switch is on — so the record carries exactly the seeds retrieval used.
+        if _semantic_seed_k():
+            seeds = _recall_seeds(query, seed_top_k)
+        else:
+            seeds = [e for e, _ in
+                     (_extract_entities_from_query(query) or [])[:seed_top_k]]
         scoring = _score(spec, result, seeds=seeds)
 
         rec = {

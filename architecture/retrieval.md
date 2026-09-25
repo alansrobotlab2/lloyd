@@ -205,6 +205,25 @@ size; only which rows reach it moves. Paired against depth 20, production recall
 Same direction on every metric on both pins at flat latency; depth 200 was no
 better (MRR +0.027). Adopted on the same bar as §3.5.
 
+### 3.7 Entity seeds: alias surfaces and semantic seeds (#1486)
+
+The entity leg's ceiling was its seeds: 25 of the 66 gold queries with expected
+entities had no expected entity among them (`anchorless_query_count`), because
+those queries paraphrase their subject. `retrieval.entity_seeding` adds two
+sources to `extract_entities_from_query`, both unioned AFTER the lexical top
+`RECALL_SEED_TOP_K` so the first ten seeds never change: alias surfaces matched as
+names (scoring their canonical), and `k=3` Qwen3-Embedding-0.6B nearest entities
+over `name (kind): top facts` (`app/entity_linker.py`, index built by
+`scripts/memory/build_entity_vectors.py`, query embedded in-process by
+`app/qwen3_embed.py`). `recall_seeds` is the one list `vault_recall` and the eval
+both use; the doc leg starts before the seeds when the semantic half is on.
+Paired on one pin, 86 queries: entity_hit 0.337 → 0.500 (+0.163 [0.093, 0.244]),
+fact_entity_recall +0.172 [0.088, 0.265], anchorless 25 → 16 (strict 38 → 27),
+every doc metric identical, +71 ms mean latency; the same seed count taken
+lexically (width 13) moves nothing. Rule-regenerated aliases
+(`scripts/memory/regenerate_aliases.py`, 2,100 rows on a copy) moved nothing on
+the gold set. `eval/measurements/entity-anchoring-2026-09-25.md`.
+
 ## 4. What was measured and not kept
 
 | idea | result | why it stays out |
@@ -242,6 +261,7 @@ because a broken label misses in every arm.
 - `app/qmd_health.py` — rerank and ranker fallbacks, counted and announced
 - `scripts/automod/evalpin.py` — `production_payload` mirrors the doc leg
 - `qmd/src/store.ts` (fork) — `buildFTS5Query(query, mode)`, `searchFTSAcross`, `structuredSearch` options
+- `app/entity_linker.py`, `app/qwen3_embed.py`, `agent_mcp/retrieval.py::recall_seeds` — entity seeding (#1486)
 - `eval/vault_recall_queries.yaml` — the gold set; `tests/test_eval_corpus_guard.py` guards it
 - tests: `test_recall_first_stage.py`, `test_recall_djev_ranker.py`, `test_recall_global_fusion.py`, `test_doc_candidate_pool.py`
 

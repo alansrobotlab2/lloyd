@@ -107,3 +107,78 @@ def test_a_declaration_cannot_erase_an_apply_runs_provenance(tmp_path):
                     if r["surface"] == "vllm-engine")["origin"] == "schema"
     finally:
         kg_store.reset()
+
+
+# ── #1486: rule-derived alias regeneration ────────────────────────────────────
+
+def _regen_module():
+    import importlib.util
+    p = Path(__file__).resolve().parent.parent / "scripts" / "memory" / "regenerate_aliases.py"
+    spec = importlib.util.spec_from_file_location("regenerate_aliases", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+@pytest.fixture
+def regen_store(tmp_path):
+    st = kg_store.configure(tmp_path / "kg.sqlite")
+    for n in ["Causal Agent Replay (CAR)", "Qwen3.8-Flash-Next", "Ameli et al. (2024)",
+              "Hierarchical Diffusion Policy (Ma et al.)",
+              "Hierarchical Diffusion Policy (Wang et al.)", "Knowledge Graph", "SWE-bench",
+              "SWE bench"]:
+        st.entities.register(n)
+    yield st
+    kg_store.reset()
+
+
+def test_regeneration_writes_through_the_store_with_a_rule_origin_and_a_date(regen_store, tmp_path):
+    """Clause 1: the entry point writes alias rows through `app.kg_store`'s one
+    writer, each with a non-empty `origin` naming the rule and a `created_at`."""
+    rg = _regen_module()
+    report = tmp_path / "regen.json"
+    out = rg.run(apply=True, report=report)
+    rows = [r for r in regen_store.aliases.rows() if r["origin"].startswith("regen:")]
+    assert rows and out["written"] == len(rows)
+    for r in rows:
+        assert r["origin"].split(":", 1)[1] in rg.RULES, r
+        assert r["created_at"], r
+        assert r["report_path"] == str(report)
+    assert json.loads(report.read_text())["written"] == len(rows)
+
+
+def test_a_rule_alias_resolves_where_it_resolved_to_nothing_before(regen_store):
+    """Clause 2: a punctuation variant and a parenthetical acronym of an existing
+    canonical resolve to it through `store().resolve` after regeneration, and to
+    nothing before."""
+    rg = _regen_module()
+    probes = {"Qwen3.8 Flash Next": "Qwen3.8-Flash-Next",
+              "CAR": "Causal Agent Replay (CAR)",
+              "Causal Agent Replay": "Causal Agent Replay (CAR)"}
+    assert all(kg_store.store().resolve(s) is None for s in probes)
+    rg.run(apply=True)
+    for surface, canonical in probes.items():
+        assert kg_store.store().resolve(surface) == canonical, surface
+
+
+def test_regeneration_never_routes_a_real_name_or_an_ambiguous_one(regen_store):
+    """The guard rails: a surface that is itself an entity (`SWE bench`), a
+    citation year, and a surface two canonicals both produce are never written —
+    an alias that routes a real name elsewhere is a merge by another name."""
+    rg = _regen_module()
+    p = rg.plan(regen_store.entities.all(), set())
+    surfaces = {r["surface"].lower() for r in p["rows"]}
+    assert "swe bench" not in surfaces            # an entity row already
+    assert "ameli et al." not in surfaces         # (2024) is a citation, never stripped
+    assert "hierarchical diffusion policy" not in surfaces
+    assert p["collisions"] == [{"surface": "hierarchical diffusion policy",
+                                "canonicals": ["Hierarchical Diffusion Policy (Ma et al.)",
+                                               "Hierarchical Diffusion Policy (Wang et al.)"]}]
+
+
+def test_a_dry_run_writes_nothing(regen_store):
+    rg = _regen_module()
+    before = regen_store.aliases.count()
+    out = rg.run(apply=False)
+    assert out["planned"] > 0 and out["written"] == 0
+    assert regen_store.aliases.count() == before

@@ -62,6 +62,8 @@ from agent_mcp.retrieval import (
     fact_score,
     get_facts_sync,
     graph_weighted_neighbors,
+    recall_seeds,
+    semantic_seed_k,
 )
 import math
 
@@ -1898,28 +1900,6 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
     ranker = reranker or recall_reranker()
     doc_shape = recall_doc_leg_shape(ranker)
 
-    # Seed width. The number and why it is 10 rather than 5 are at
-    # RECALL_SEED_TOP_K; the reason it had to stop being a literal here is that
-    # eval/run_eval.py restated it as `[:5]` and scored entity metrics on the
-    # smaller set (#843). Unlike the eight knobs above, this one is NOT read out
-    # of `params`, so no client key can move it — see the docstring. Resolution
-    # happens here rather than in the signature so the constant is consulted at
-    # call time, which is what lets a test move the constant and watch the width
-    # move with it.
-    seed_entities = [
-        e for e, _ in
-        extract_entities_from_query(query)[
-            :(RECALL_SEED_TOP_K if seed_top_k is None else int(seed_top_k))]]
-
-    # If graph_rerank is requested, we need neighbors regardless of expand_graph,
-    # because rerank uses them as voters. Force graph expansion in that case.
-    need_neighbors = expand_graph or graph_rerank
-    weighted_neighbors: list[tuple[str, float]] = []
-    if need_neighbors and seed_entities:
-        weighted_neighbors = graph_weighted_neighbors(
-            seed_entities, top_k=graph_top_k, hops=graph_hops
-        )
-
     def _do_search():
         # Daemon is the only search path. A CLI subprocess fallback was removed
         # 2026-04-20: on daemon failure it hits the same broken state, then eats
@@ -1948,6 +1928,45 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
                                   floor=doc_shape["floor"],
                                   lex_mode=doc_shape.get("lexMode"),
                                   extra_collections=doc_shape.get("extra"))
+
+    # #1486: with semantic seeding on, the seed list costs a query embedding
+    # (~0.2 s on CPU) before the thread pool below could start. The document
+    # leg does not read the seeds, so it is started first and runs beside the
+    # embedding; with the switch off nothing changes and it is submitted with
+    # the other legs as before.
+    _early_search = None
+    _early_pool = None
+    if semantic_seed_k():
+        _early_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        _early_search = _early_pool.submit(_do_search)
+
+    # Seed width. The number and why it is 10 rather than 5 are at
+    # RECALL_SEED_TOP_K; the reason it had to stop being a literal here is that
+    # eval/run_eval.py restated it as `[:5]` and scored entity metrics on the
+    # smaller set (#843). Unlike the eight knobs above, this one is NOT read out
+    # of `params`, so no client key can move it — see the docstring. Resolution
+    # happens here rather than in the signature so the constant is consulted at
+    # call time, which is what lets a test move the constant and watch the width
+    # move with it.
+    #
+    # `recall_seeds` is `extract_entities_from_query(query)[:width]` exactly while
+    # `retrieval.entity_seeding.semantic` is off; on, it appends up to `k`
+    # semantic seeds after that lexical head (#1486) — one definition shared with
+    # `eval/run_eval.py`, so the eval records the seeds retrieval used.
+    _width = RECALL_SEED_TOP_K if seed_top_k is None else int(seed_top_k)
+    if semantic_seed_k():
+        seed_entities = recall_seeds(query, _width)
+    else:
+        seed_entities = [e for e, _ in extract_entities_from_query(query)[:_width]]
+
+    # If graph_rerank is requested, we need neighbors regardless of expand_graph,
+    # because rerank uses them as voters. Force graph expansion in that case.
+    need_neighbors = expand_graph or graph_rerank
+    weighted_neighbors: list[tuple[str, float]] = []
+    if need_neighbors and seed_entities:
+        weighted_neighbors = graph_weighted_neighbors(
+            seed_entities, top_k=graph_top_k, hops=graph_hops
+        )
 
     def _do_code_grep():
         if not params.get("grep_code", True):
@@ -2121,7 +2140,7 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            search_fut = pool.submit(_do_search)
+            search_fut = _early_search if _early_search is not None else pool.submit(_do_search)
             facts_fut = pool.submit(_do_facts)
             grep_fut = pool.submit(_do_code_grep)
             graph_lookup_fut = pool.submit(_do_graph_lookup)
@@ -2256,6 +2275,9 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
         return result
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL, documents=[], facts=[])
+    finally:
+        if _early_pool is not None:
+            _early_pool.shutdown(wait=False)
 
 
 # ── MCP registration ─────────────────────────────────────────────────────────

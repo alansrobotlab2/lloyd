@@ -440,7 +440,48 @@ def _alias_surface_map() -> dict:
         return {}
 
 
-def extract_entities_from_query(query: str) -> list:
+def _seeding_cfg() -> dict:
+    """`retrieval.entity_seeding` (#1486), read through `app.entity_linker`."""
+    try:
+        from app.entity_linker import seeding_config
+        return seeding_config()
+    except Exception:  # noqa: BLE001 — a broken config costs the switch, not the recall
+        return {}
+
+
+_alias_surface_cache: Optional[tuple] = None
+
+
+def _with_alias_surfaces(entities: list, alias_map: dict, entity_lookup: dict) -> list:
+    """`entities` plus every alias surface that routes to a rankable directory.
+
+    `entity_lookup` gains `surface_lc → canonical directory` for each added
+    surface, so every branch that scores a matched name scores the canonical.
+    Cached on the identity of both inputs (the rankable slice is replaced
+    wholesale on refresh, the alias map per store version), so the extended list
+    is stable and `_entity_match_index`'s one-slot cache holds.
+    """
+    global _alias_surface_cache
+    c = _alias_surface_cache
+    if c is not None and c[0] is entities and c[1] is alias_map:
+        entity_lookup.update(c[3])
+        return c[2]
+    extra: dict[str, str] = {}
+    for surface_lc, canonical in (alias_map or {}).items():
+        if surface_lc in entity_lookup:
+            continue
+        target = entity_lookup.get(str(canonical).lower())
+        if target is None:
+            continue
+        extra[surface_lc] = target
+    extended = list(entities) + list(extra)
+    _alias_surface_cache = (entities, alias_map, extended, extra)
+    entity_lookup.update(extra)
+    return extended
+
+
+def extract_entities_from_query(query: str, *, semantic: Optional[bool] = None,
+                                lexical_width: Optional[int] = None) -> list:
     """Rank known entities by how well they match the query.
 
     Prior implementation (pre-#312) scored binary 2-or-3 with tie-breaks
@@ -598,7 +639,16 @@ def extract_entities_from_query(query: str) -> list:
             if hit:
                 _bump(hit, 10.0)
 
-    first_tok, tok_index, tok_sets = _entity_match_index(entities)
+    # #1486: alias SURFACES as match candidates. The fold above only ever runs
+    # on a name that is itself an entity directory, so an alias whose surface
+    # has no directory of its own — `Relationship Graph` → `Knowledge Graph`,
+    # which is exactly `graph-quality`'s query — could never be matched at all.
+    # With the switch on, such a surface is matched like a name and scores its
+    # canonical directly (`entity_lookup` maps it there), never itself.
+    match_names = entities
+    if _seeding_cfg().get("alias_surfaces"):
+        match_names = _with_alias_surfaces(entities, alias_map, entity_lookup)
+    first_tok, tok_index, tok_sets = _entity_match_index(match_names)
     # Unfiltered query tokens — an entity's first token may be a stopword
     # ("the vault") or single-char, which q_tokens drops.
     q_tokens_all = set(re.findall(r"\b\w+\b", q_lower))
@@ -641,20 +691,83 @@ def extract_entities_from_query(query: str) -> list:
             if score >= 0.25:
                 _bump(e_cased, score)
 
-    if not scores:
-        return []
-
-    edge_counts = _edge_counts_or_empty()
-    ranked = sorted(
-        scores.items(),
-        key=lambda kv: (
-            -kv[1],
-            -len(kv[0]),
-            -edge_counts.get(kv[0], 0),
-            kv[0].lower(),
-        ),
-    )
+    ranked = []
+    if scores:
+        edge_counts = _edge_counts_or_empty()
+        ranked = sorted(
+            scores.items(),
+            key=lambda kv: (
+                -kv[1],
+                -len(kv[0]),
+                -edge_counts.get(kv[0], 0),
+                kv[0].lower(),
+            ),
+        )
+    sem_cfg = _seeding_cfg().get("semantic") or {}
+    if semantic is None:
+        semantic = bool(sem_cfg.get("enabled"))
+    if semantic:
+        ranked = _union_semantic(query, ranked, entities, entity_lookup, sem_cfg,
+                                 SEMANTIC_UNION_AFTER if lexical_width is None else lexical_width)
     return ranked
+
+
+# The lexical width the semantic seeds are unioned AFTER. Equal to
+# `vault.RECALL_SEED_TOP_K` (pinned by tests/test_retrieval.py) — stated here
+# because vault imports this module, not the other way round.
+SEMANTIC_UNION_AFTER = 10
+
+
+def semantic_seed_k() -> int:
+    """How many semantic seeds a recall adds on top of its lexical width (0 = off)."""
+    sem = _seeding_cfg().get("semantic") or {}
+    return int(sem.get("k", 0)) if sem.get("enabled") else 0
+
+
+def recall_seeds(query: str, seed_top_k: int) -> list[str]:
+    """The seed list `vault_recall` uses — and the eval records — at `seed_top_k`.
+
+    One definition for both, because the eval scoring a different seed list from
+    the one retrieval used is exactly #843. With semantic seeding off this is
+    `extract_entities_from_query(query)[:seed_top_k]`, byte for byte; on, it is
+    that plus up to `k` semantic seeds the lexical width did not already hold.
+    """
+    k = semantic_seed_k()
+    ranked = extract_entities_from_query(query, lexical_width=seed_top_k) or []
+    return [e for e, _ in ranked[:seed_top_k + k]]
+
+
+def _union_semantic(query: str, ranked: list, entities: list, entity_lookup: dict,
+                    sem_cfg: dict, width: int) -> list:
+    """Insert up to `k` semantic seeds right after the first `width` lexical ones.
+
+    Union, never substitution (#1486 clause 4): the first `width` entries are
+    exactly the lexical ranking, so every consumer slicing at `width` sees what it
+    saw before; a semantic seed already inside that head adds nothing, and one
+    further down the lexical tail is moved up rather than duplicated.
+    """
+    k = int(sem_cfg.get("k", 0) or 0)
+    if k <= 0:
+        return ranked
+    try:
+        from app.entity_linker import semantic_candidates
+    except Exception:  # noqa: BLE001
+        return ranked
+    allowed = {e.lower() for e in entities}
+    head = ranked[:width]
+    have = {n.lower() for n, _ in head}
+    extra = []
+    for name, sim in semantic_candidates(query, k + len(head), allowed=allowed,
+                                         min_score=float(sem_cfg.get("min_score", 0.0) or 0.0)):
+        cased = entity_lookup.get(name.lower(), name)
+        if cased.lower() in have:
+            continue
+        have.add(cased.lower())
+        extra.append((cased, round(float(sim), 4)))
+        if len(extra) >= k:
+            break
+    tail = [(n, s) for n, s in ranked[width:] if n.lower() not in have]
+    return head + extra + tail
 
 
 # ── Edge graph ───────────────────────────────────────────────────────────────

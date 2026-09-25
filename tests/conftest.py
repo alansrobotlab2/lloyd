@@ -467,6 +467,19 @@ def _recall_ranked_by_qmd_in_tests(monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _entity_seeding_off_in_tests(monkeypatch):
+    """Recall tests seed lexically unless they ask otherwise (#1486).
+
+    `retrieval.entity_seeding` is on in the live config, and its semantic half
+    would load a 0.6B embedder and read the production entity-vector index from
+    any test that reaches `_vault_recall`. The env switch (not a monkeypatch) so
+    the live-corpus subprocesses inherit it too; the tests of the feature patch
+    `entity_linker.seeding_config` or clear the variable for their subprocess.
+    """
+    monkeypatch.setenv("LLOYD_ENTITY_SEEDING", "0")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolate_djev_shadow(tmp_path_factory):
     """No test appends a row to the log the djev floors are calibrated from.

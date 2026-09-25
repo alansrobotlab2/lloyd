@@ -197,6 +197,12 @@ VAULT_KG_DB = Path(os.environ["LLOYD_KG_DB"]) if os.environ.get("LLOYD_KG_DB") \
 # beside the store it judged, so a replay against a copy (LLOYD_KG_DB) logs
 # into the copy's directory and never into the live one's.
 FACT_WRITE_GATE_LOG = VAULT_KG_DB.parent / "fact-write-gate.jsonl"
+# Entity vectors for semantic seeding (#1486, app.entity_linker): `names.json`
+# + `vectors.npy`, built by scripts/memory/build_entity_vectors.py from the store
+# above. Derived data, so it sits beside the store; LLOYD_ENTITY_VECTORS moves it
+# with a store copy for measurement.
+ENTITY_VECTORS_DIR = Path(os.environ["LLOYD_ENTITY_VECTORS"]) \
+    if os.environ.get("LLOYD_ENTITY_VECTORS") else VAULT_DERIVED_ROOT / "entity-vectors"
 
 # The research topic registry: what to research, what came of it, and the
 # feedback that keeps a generator from re-proposing it (app.research_store).

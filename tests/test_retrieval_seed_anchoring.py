@@ -450,6 +450,74 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
     ), f"{len(out['anchorless'])} anchorless of {out['n_queries']} queries"
 
 
+_SEEDING_SCRIPT = """
+import json, sys
+sys.path.insert(0, '.')
+import yaml
+from agent_mcp import vault
+from agent_mcp.retrieval import recall_seeds, extract_entities_from_query
+import eval.run_eval as ev
+
+qs = yaml.safe_load(open('eval/vault_recall_queries.yaml'))['queries']
+def recs(fn):
+    return [{'id': q['id'], 'expected': {'entities': q.get('expect_entities') or []},
+             'seeds_extracted': fn(q['query'])} for q in qs]
+off = ev.anchorless_queries(recs(lambda t: [e for e, _ in (extract_entities_from_query(
+    t, semantic=False) or [])][:vault.RECALL_SEED_TOP_K]))
+on = ev.anchorless_queries(recs(lambda t: recall_seeds(t, vault.RECALL_SEED_TOP_K)))
+print(json.dumps({'off': off, 'on': on}))
+"""
+
+
+def test_regenerated_aliases_plus_semantic_seeding_reduce_the_anchorless_count(tmp_path):
+    """#1486 clause 5: over the checked-in gold set, the regenerated alias table
+    (applied to a COPY of the live store) plus `retrieval.entity_seeding`'s
+    alias-surface matching and semantic seeds strictly reduce the count
+    `eval/run_eval.py` reports as `anchorless_query_count` — and anchor no query
+    the lexical seeds anchored that they now lose.
+
+    Measured 2026-09-25 against the 2026-09-25 store: 25 → 16 of 66 (the eval's
+    own rule), `eval/measurements/entity-anchoring-2026-09-25.md`. Needs the
+    entity-vector index (`scripts/memory/build_entity_vectors.py`) and the
+    Qwen3-Embedding-0.6B weights; a machine without either is a named skip.
+    """
+    require_live_data(LIVE_FACTS, "the derived fact tree")
+    require_live_data(LIVE_KG_DB, "the knowledge-graph store", kind="file")
+    from app import paths
+    vec = Path(os.environ.get("LLOYD_ENTITY_VECTORS") or paths.ENTITY_VECTORS_DIR)
+    if not (vec / "vectors.npy").exists():
+        pytest.skip(f"no entity-vector index at {vec}: build it with "
+                    "scripts/memory/build_entity_vectors.py (or point LLOYD_ENTITY_VECTORS at one)")
+    try:
+        from app import qwen3_embed
+        qwen3_embed.model_dir()
+    except FileNotFoundError as exc:
+        pytest.skip(str(exc))
+    copy = tmp_path / "kg-copy.sqlite"
+    live = ks.KGStore(LIVE_KG_DB)
+    try:
+        require_live_entity_volume(list(live.entities.all()), LIVE_KG_DB)
+        live.backup(copy)
+    finally:
+        live.close()
+    env = dict(os.environ, LLOYD_FACTS_ROOT=str(LIVE_FACTS), LLOYD_KG_DB=str(copy),
+               LLOYD_ENTITY_VECTORS=str(vec))
+    env.pop("LLOYD_ENTITY_SEEDING", None)   # conftest's kill switch: this test IS the feature
+    regen = subprocess.run([sys.executable, "scripts/memory/regenerate_aliases.py", "--apply"],
+                           cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=300)
+    assert regen.returncode == 0, regen.stderr
+    overlay = tmp_path / "seeding.yaml"
+    overlay.write_text("retrieval:\n  entity_seeding:\n    alias_surfaces: true\n"
+                       "    semantic:\n      enabled: true\n      k: 3\n")
+    env["LLOYD_CONFIG_OVERLAY"] = str(overlay)
+    res = subprocess.run([sys.executable, "-c", _SEEDING_SCRIPT], cwd=str(ROOT), env=env,
+                         capture_output=True, text=True, timeout=900)
+    assert res.returncode == 0, res.stderr[-2000:]
+    out = json.loads(res.stdout.strip().splitlines()[-1])
+    assert len(out["on"]) < len(out["off"]), out
+    assert set(out["on"]) <= set(out["off"]), sorted(set(out["on"]) - set(out["off"]))
+
+
 def test_every_gold_entity_name_resolves_to_an_entity_the_store_can_return():
     """Clause 3: no expectation names something the store cannot return.
 
