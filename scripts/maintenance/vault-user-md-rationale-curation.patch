@@ -1,0 +1,76 @@
+diff --git a/skills/nightly-reflection-knowledge-write/SKILL.md b/skills/nightly-reflection-knowledge-write/SKILL.md
+index 598b605..9a810f0 100644
+--- a/skills/nightly-reflection-knowledge-write/SKILL.md
++++ b/skills/nightly-reflection-knowledge-write/SKILL.md
+@@ -20,6 +20,7 @@ Job 2b of 4. Runs after Knowledge Analysis (#39a). Your entire source of truth i
+ ## Files in this skill
+ Rules and commands are all in this body; the reasons behind them are in siblings. `Read` one (absolute path) when its condition holds:
+ - `~/obsidian/skills/nightly-reflection-knowledge-write/step-2a-user-md.md` — read before the first `lloyd/USER.md` change of a run: which artifact subsections to apply (MEMORY.md Additions / Removals / Relocations), the missing-daily-note safety net, and the `fact_invalidate` / `fact_add` calls that go with each removal.
++- `~/obsidian/skills/nightly-reflection-knowledge-write/step-2a-ter-curation.md` — read before Step 2a-ter whenever it runs: the ledger row format, how to check a `retire_when`, what may be retired and what may not, and the archive note.
+ - `~/obsidian/skills/nightly-reflection-knowledge-write/steps-2b-2f.md` — read before Step 2b and keep open through 2f: mental models, profile, vault propagation, why the pattern files are archived and what enforces it, tool-reliability facts (#437), the knowledge log's history.
+ - `~/obsidian/skills/nightly-reflection-knowledge-write/step-1-and-commit-detail.md` — read only when a step fails or looks wrong: why Phase 0 exists, the legacy `.json` handoff, the history behind each line of the commit block.
+ 
+@@ -68,6 +69,13 @@ Any `facts_idx` duplicate figure you mention must carry its probe timestamp from
+ 
+ Use `Edit` for targeted changes; `Write` only for wholesale rewrite. Keep `lloyd/USER.md` under 200 lines.
+ 
++**Every loaded line carries a reason, in a ledger the prompt never loads (#1488).** Each line this run adds to `lloyd/USER.md` gets one row, in the same run, in `lloyd/memory/user-md-ledger.md` via `memory_add(file="topics/user-md-ledger", entry=…)`:
++`- anchor: \`<first 60 chars of the entry, after "- ">\` | why: <what future behaviour it changes> | origin: <doc / item / date the line rests on> | retire_when: <a checkable condition that makes it false> | check: \`<one command or file read>\` | checked: <YYYY-MM-DD>`.
++A removed or relocated line takes its row with it (delete the row, note it in the archive entry). The reason lives in the ledger, not the line: a rationale written into USER.md itself is paid for in every prompt. `python3 ~/lloyd/scripts/memory/memory_ledger.py status` lists lines with no row and rows with no line.
++
++### 2a-ter. Curate for headroom (#1488)
++Runs when `memory_ledger.py status` prints `CURATE` for `USER.md` (under 1 KiB of headroom below its ceiling) or when a `### MEMORY.md Additions` entry would not fit; otherwise write `curation: skipped (<bytes> / <ceiling> B)` in the completion note and go on. Procedure in `step-2a-ter-curation.md`. In short: backfill at most 10 missing ledger rows; run the `check` of the 10 stalest-checked rows; **archive — never delete — at most 5 lines a night**, and only those whose check output shows the `retire_when` has happened (or that duplicate another loaded line); relocate detail to a topic file with a pointer; cite, per retired line, the check's output and its uptake row (the 2a gate still applies). A line whose check cannot be run is kept.
++
+ ### 2a-bis. `lloyd/MEMORY.md` is an index (review 2026-09-24, P4)
+ `lloyd/MEMORY.md` holds one typed line per entry; the detail lives in topic files `~/obsidian/lloyd/memory/<slug>.md`, which are never loaded into a prompt. Every write this job makes to it follows these rules:
+ - **Typed entries only.** Add with `memory_add(file="MEMORY.md", type=…, entry=…)`, which writes `- [type] (YYYY-MM-DD) text`; `type` is `feedback` (a ruling or correction from Alan), `user`, `project` or `reference`. A hand-written line uses the same shape.
+diff --git a/skills/nightly-reflection-knowledge-write/step-2a-ter-curation.md b/skills/nightly-reflection-knowledge-write/step-2a-ter-curation.md
+new file mode 100644
+index 0000000..abc9fd7
+--- /dev/null
++++ b/skills/nightly-reflection-knowledge-write/step-2a-ter-curation.md
+@@ -0,0 +1,44 @@
++---
++segment: skills
++tags:
++- skills
++type: skill
++timestamp: '2026-09-25T18:00:00'
++---
++# Knowledge Write — Step 2a-ter, curate loaded memory for headroom (#1488)
++
++`lloyd/USER.md` is loaded into every prompt and has a fixed byte ceiling that the memory tools and `Edit` enforce at the write. Without curation, the next addition is either refused or squeezed in by trimming something arbitrary. This step makes room by **selection**: a line leaves when the reason it was loaded no longer holds, and that is shown by a check run tonight, not by a guess.
++
++## 0. When it runs
++`python3 ~/lloyd/scripts/memory/memory_ledger.py status`. Curate `USER.md` when the tool prints `CURATE`, meaning less than 1 KiB of headroom is left. Also curate when an addition from the handoff was refused for size. Otherwise, record `curation: skipped (<bytes> / <ceiling> B)` in the completion note and stop.
++
++## 1. The ledger
++The ledger file is `lloyd/memory/user-md-ledger.md` (`memory_read(file="topics/user-md-ledger")`), and it is never loaded into a prompt. Each loaded line has one row:
++
++```
++- anchor: `<first 60 chars of the entry after "- ">` | why: <what future behaviour it changes> | origin: <doc / item / date> | retire_when: <checkable condition> | check: `<one command or file read>` | checked: <YYYY-MM-DD>
++```
++
++- **`why`.** Name the behaviour the line changes. A line whose `why` is "records what happened" changes no behaviour: it is a changelog entry and belongs in `memory/learnings/`.
++- **`retire_when`.** Write a concrete condition: a path that stops existing, an item that closes, a config key that flips, or a later ruling. "Never" is allowed for a standing preference of Alan's.
++- **`check`.** Write one read-only command whose output decides `retire_when`: a `grep` of `~/lloyd/config.yaml`, `test -f`, `git -C ~/lloyd log -S`, or `backlog_tasks`.
++
++## 2. Tonight's work, bounded
++1. **Backfill** at most **10** rows for lines that have none. `status` prints the `no row:` lines.
++2. **Check** the **10** stalest-`checked` rows, which `status` lists. Run each `check` and set `checked:` to today.
++3. **Retire** at most **5** lines, and only where one of these holds:
++   - the check output shows `retire_when` has happened, or the line contradicts the tree;
++   - the line duplicates another loaded line, in which case keep the more specific one;
++   - the line is a changelog or snapshot that changes no behaviour.
++
++   A line whose check cannot be run is **kept**, with the row marked `checked: <date> (check failed: <why>)`. A standing preference or ruling of Alan's is retired only by a later ruling of his.
++4. **Relocate** instead of retiring when the line is true but is detail, not a rule. Write the detail to a topic file with `memory_add(file="topics/<slug>")`. Replace the line with at most one sentence ending `→ topics/<slug>`, or remove it if another line already carries the rule.
++
++## 3. Archive, never delete
++Every retired or relocated line goes into `lloyd/reviews/user-md-retired.md`. Append it verbatim with the date, its ledger row, the check command, the output line that decided it, and the uptake row (per the 2a uptake gate: cite the row, or write `uptake: no row (<why>)`). Then remove the line from `USER.md` with `Edit` or `memory_remove`, and delete its ledger row.
++
++## 4. Report
++The completion note gets a `curation:` block. It holds bytes before and after, rows backfilled, rows checked, and lines retired and relocated, with the reason for each. It also lists every line that was eligible but was kept because its check failed. Re-run `memory_ledger.py status` after the edits and quote its first line.
++
++## MEMORY.md
++`lloyd/MEMORY.md` index lines use the same row format in `lloyd/memory/memory-md-ledger.md`. They are curated under the same bounds, only when `status` prints `CURATE` for `MEMORY.md`. A retired index line's topic file stays where it is. dream-consolidation (#47) still owns the wholesale tightening, and this step retires single lines.
