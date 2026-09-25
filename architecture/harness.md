@@ -954,3 +954,39 @@ writers — the iteration `prefix_miss` deliberately skips. Rollout is
   `tests/test_task_steering.py` (Mission Control half, over the real
   credential-wrapped routes). Measure: wall time of a 3-way `read-only`
   fan-out and vLLM batch occupancy against the same prompts sequential.
+### D2e — the summary arms measure a summary
+
+The first live run of `summary_legacy` vs `summary_persisted` (240k/280k,
+tool shape) was 24/24 `error`, and fixed it would still have compared nothing.
+`eval/run_compaction_recall_eval.py` (header, SUMMARY ARMS) now:
+
+- **Warm-up**: fitted to the window (`fit_warmup`: JSON chars / 3 per token,
+  4k reserve), clipped from the END to a head of whole turns — the part a
+  prefix cache can share — or skipped; attempted once per run whatever
+  happens, its failure recorded as `warmup.status: error`. It used to be sent
+  unclipped at 240k, 400 inside the loop's stream, and be re-sent on every
+  overflow-recovery attempt.
+- **A shape on which the summary fires** (`--shape conversation`, the default
+  for an all-summary arm list): one Read plus a long `architecture/*.md`
+  discussion per turn, the planted facts restated in the assistant's reply,
+  `--sizes` counting the non-tool rows. Microcompact stays on: turning it off
+  instead would hand the unbounded legacy summariser a ~280k-token block, a
+  guaranteed 400.
+- **Gate**: dropped before the probe unless the summariser ran this turn
+  (`summarize_outcome == summarized`), its row survived truncation, and the
+  fact is not still verbatim. Rows carry `summary_has` (the facts read off
+  the summary text), `summarizer` (calls, wall, chars), `turn_start_wall_s`;
+  `--dry` stubs the summarisers. `paired_vs_summary_legacy` in the output.
+- **Finding**: legacy can summarise only while the cleared history is within
+  ~40k of the threshold — past it its request exceeds the window (conversation
+  195k → 249k tokens, 210k → 263k) — so the fair band is conversation
+  186k–192k. The eval also arms the safety floor / outbound-content gate
+  (`GATE_ARM_POINTS` 9 → 12, with the two other live evals that armed it
+  without joining the roster).
+- **P3's `memory_flush` arm** is a summary arm on the same shape, sizes and
+  gate. Its flush turn (now armed too) is sent `flush_history`: the head of
+  whole turns before the first whose turn-start-compacted prompt crosses
+  `trigger_fraction` x the threshold — the crossing production flushes at —
+  not the whole uncompacted session, which at these sizes is past the window
+  exactly as the warm-up was. That head is ~40% of the rows, so depth 0.5 is
+  a fact that arrived after the flush (`flush.planted_in_history`).

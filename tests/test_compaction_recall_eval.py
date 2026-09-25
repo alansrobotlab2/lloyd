@@ -242,3 +242,280 @@ def test_the_summary_format_arms_are_valid_only_when_the_summary_replaced_a_bloc
         assert not R.valid_for_arm(arm, R.fired(truncated))
     assert R.ARMS["summary_persisted"]["compaction"]["persist_summary"] is True
     assert R.ARMS["summary_legacy"]["compaction"]["persist_summary"] is False
+
+
+# --- D2 follow-up: the summary arms have to measure a summary ----------------
+
+def test_the_conversation_shape_restates_the_facts_and_budgets_what_clearing_leaves(corpus):
+    """The planted Read result is cleared at turn start like every other one,
+    so in this shape the facts ride in the assistant's reply — the part a
+    summary has to carry — and `target_tokens` counts only non-tool rows."""
+    from app.compaction import estimate_conversation_tokens
+    root, files = corpus
+    s = R.build_session(9, 20_000, 0.3, root=root, corpus=files, probe="late",
+                        shape="conversation")
+    assert s.key.endswith("-conv") and s.meta["shape"] == "conversation"
+    reply = s.messages[s.planted_index + 1]
+    assert reply["role"] == "assistant"
+    text = reply["content"][0]["text"]
+    assert s.planted.passphrase in text
+    assert f"listens on port {s.planted.port} now" in text and s.planted.old_port in text
+    non_tool = estimate_conversation_tokens(
+        [m for m in s.messages if m["role"] != "tool"])
+    assert non_tool >= 20_000 and s.est_tokens > non_tool
+    # every filler turn is one Read plus a discussion
+    assert sum(1 for m in s.messages if m["role"] == "tool") == \
+        sum(1 for m in s.messages if m["role"] == "user")
+    # the #600 shape is untouched: its planted reply names no fact
+    t = R.build_session(9, 20_000, 0.3, root=root, corpus=files)
+    assert s.planted.passphrase not in t.messages[t.planted_index + 1]["content"][0]["text"]
+    assert not t.key.endswith("-conv")
+
+
+def test_auto_shape_is_conversation_only_for_an_all_summary_arm_list():
+    assert R.resolve_shape("auto", ["summary_legacy", "summary_persisted"]) == "conversation"
+    assert R.resolve_shape("auto", ["production", "summary_legacy"]) == "tool"
+    assert R.resolve_shape("auto", ["none"]) == "tool"
+    assert R.resolve_shape("tool", ["summary_legacy"]) == "tool"
+
+
+def _turns(n: int, chars: int) -> list[dict]:
+    out = []
+    for i in range(n):
+        out += [R._msg("user", f"q{i}"),
+                {"role": "assistant", "content": [{"type": "text", "text": ""}],
+                 "tool_calls": [R._tc(f"c{i}", "Read", {"file_path": "x"})]},
+                R._msg("tool", "x" * chars, tool_call_id=f"c{i}"),
+                R._msg("assistant", f"a{i}")]
+    return out
+
+
+def test_a_warmup_that_fits_is_sent_whole():
+    hist = _turns(3, 300)
+    msgs, info = R.fit_warmup([{"role": "system", "content": "s"}], hist, [], 100_000)
+    assert info["status"] == "sent" and msgs[1:] == hist
+
+
+def test_an_oversized_warmup_is_clipped_to_a_head_of_whole_turns():
+    hist = _turns(10, 30_000)                     # ~10k tokens a turn by the bound
+    window = 60_000
+    msgs, info = R.fit_warmup([{"role": "system", "content": "s"}], hist, [], window)
+    assert info["status"] == "clipped"
+    kept = msgs[1:]
+    assert kept == hist[:len(kept)]               # a HEAD: the prefix a cache is made of
+    assert 0 < len(kept) < len(hist) and len(kept) % 4 == 0   # whole turns only
+    assert hist[len(kept)]["role"] == "user"
+    assert sum(R._json_tokens(m) for m in kept) <= window - R.WARMUP_RESERVE_TOKENS
+
+
+def test_a_warmup_with_no_whole_turn_that_fits_is_skipped():
+    msgs, info = R.fit_warmup([], _turns(2, 400_000), [], 60_000)
+    assert msgs is None and info["status"] == "skipped"
+
+
+def _drain(gen_fn, **kw):
+    async def go():
+        return [c async for c in gen_fn(**kw)]
+    return asyncio.run(go())
+
+
+def test_the_warmup_is_attempted_once_and_its_failure_never_reaches_the_probe():
+    """The first live summary run: an oversized warm-up 400ed inside the
+    loop's stream, the loop's overflow recovery retried iteration 1, and the
+    warm-up — gated on an empty log — was re-sent on every attempt."""
+    sent = []
+
+    async def real(**kw):
+        sent.append((kw.get("extra_body") or {}).get("max_tokens"))
+        if (kw.get("extra_body") or {}).get("max_tokens") == 1:
+            raise RuntimeError("HTTP 400: context overflow")
+        yield {"choices": [{"delta": {"content": "ok"}}]}
+
+    log: list = []
+    done = []
+    w = R._make_stream_wrapper(real, _turns(2, 100), log, lambda: done.append(1),
+                               window=100_000)
+    base = {"messages": [{"role": "system", "content": "s"}], "tools": [],
+            "extra_body": {}}
+    assert _drain(w, iteration=1, **base)          # the probe still streams
+    assert _drain(w, iteration=1, **base)          # a retried iteration 1
+    assert sent == [1, None, None]                 # one warm-up, ever
+    warm = [x for x in log if x.get("warmup")]
+    assert len(warm) == 1 and warm[0]["status"] == "error"
+    assert "context overflow" in warm[0]["error"] and done == [1]
+
+
+def test_a_warmup_that_cannot_fit_is_never_sent():
+    sent = []
+
+    async def real(**kw):
+        sent.append((kw.get("extra_body") or {}).get("max_tokens"))
+        yield {"choices": [{"delta": {"content": "ok"}}]}
+
+    log: list = []
+    w = R._make_stream_wrapper(real, _turns(2, 400_000), log, lambda: None,
+                               window=60_000)
+    _drain(w, iteration=1, messages=[], tools=[], extra_body={})
+    assert sent == [None]
+    assert log[0]["warmup"] and log[0]["status"] == "skipped"
+
+
+def test_a_summary_arm_is_valid_only_for_a_summary_made_this_turn():
+    made = {"turn_start": {"tokens_freed": 90_000, "mechanisms": ["summarize"],
+                           "summarize_outcome": "summarized"}}
+    reused = {"turn_start": {"tokens_freed": 90_000, "mechanisms": ["summarize"],
+                             "summarize_outcome": "reused"}}
+    fell_back = {"turn_start": {"tokens_freed": 90_000, "mechanisms": ["truncate"],
+                                "summarize_outcome": "empty_summary"}}
+    for arm in ("summary_legacy", "summary_persisted"):
+        assert R.valid_for_arm(arm, R.fired(made))
+        assert not R.valid_for_arm(arm, R.fired(reused))
+        assert not R.valid_for_arm(arm, R.fired(fell_back))
+
+
+def test_summary_fidelity_is_read_off_the_summary_text():
+    p = _planted()
+    hist = [R._msg("assistant", "[compaction summary — earlier conversation]\n\n"
+                                f"codename {p.passphrase}; billing-east moved 7914 -> 7419"),
+            R._msg("user", "hi")]
+    text = R.summary_text(hist)
+    assert R.summary_has(text, p) == {"codename": True, "port_now": True, "port_old": True}
+    assert not R.fact_verbatim(hist, p)
+    assert R.fact_verbatim(hist + [R._msg("assistant", p.passphrase)], p)
+
+
+def _stream_must_not_run(**_kw):
+    raise AssertionError("a dropped or dry row must not reach the engine")
+
+
+def test_a_summary_arm_that_cannot_fire_is_dropped_before_the_engine(corpus, tmp_path,
+                                                                     monkeypatch):
+    root, files = corpus
+    s = R.build_session(3, 30_000, 0.5, root=root, corpus=files)
+    monkeypatch.setattr("app.harness.loop.stream_chat", _stream_must_not_run)
+    row = asyncio.run(R.run_one(s, "summary_persisted", discovered=[], system_prompt="sys",
+                                data_root=tmp_path / "d", base_url="http://stub"))
+    assert row["status"] == "dropped"
+    assert row["reason"] == "summary_not_fired:under_threshold"
+    assert row["summarizer"]["calls"] == 0
+
+
+@pytest.mark.parametrize("arm,fn", [("summary_legacy", "summarize_history"),
+                                    ("summary_persisted", "summarize_incremental")])
+def test_dry_run_shows_the_summary_firing_without_any_engine_traffic(
+        corpus, tmp_path, monkeypatch, arm, fn):
+    """A small window stands in for the recommended sizes: the conversation
+    shape stays over the threshold after microcompaction, the summarize layer
+    is reached, and `--dry`'s stub answers in place of the summariser."""
+    root, files = corpus
+    monkeypatch.setattr("app.compaction.get_context_window", lambda _m="": 100_000)
+    monkeypatch.setattr("app.harness.loop.stream_chat", _stream_must_not_run)
+
+    async def no_http(*_a, **_k):
+        raise AssertionError("dry run reached the summariser endpoint")
+    monkeypatch.setattr("app.compaction_llm._post_chat_completion", no_http)
+    s = R.build_session(4, 60_000, 0.1, root=root, corpus=files, probe="late",
+                        shape="conversation")
+    row = asyncio.run(R.run_one(s, arm, discovered=[], system_prompt="sys",
+                                data_root=tmp_path / "d", base_url="http://stub",
+                                dry=True))
+    assert row["status"] == "dry", row.get("reason")
+    assert row["fired"]["summarize_outcome"] == "summarized"
+    assert R.summary_fired(row["fired"])
+    calls = row["summarizer"]["per_call"]
+    assert calls and {c["fn"] for c in calls} == {fn}
+    assert row["summary_chars"] > 0 and not row["fact_verbatim_at_start"]
+    assert row["warmup"]["status"] in ("sent", "clipped", "skipped")
+
+
+def test_a_summary_the_truncation_fallback_dropped_is_not_a_measurement(
+        corpus, tmp_path, monkeypatch):
+    """Summarised, then restored files pushed the history back over the
+    threshold and drop-oldest took the summary row with it: nothing of the
+    format reaches the probe, so the row is dropped before the engine."""
+    root, files = corpus
+    monkeypatch.setattr("app.compaction.get_context_window", lambda _m="": 70_000)
+    monkeypatch.setattr("app.harness.loop.stream_chat", _stream_must_not_run)
+    s = R.build_session(4, 30_000, 0.1, root=root, corpus=files, probe="late",
+                        shape="conversation")
+    row = asyncio.run(R.run_one(s, "summary_legacy", discovered=[], system_prompt="sys",
+                                data_root=tmp_path / "d", base_url="http://stub",
+                                dry=True))
+    assert row["fired"]["summarize_outcome"] == "summarized"
+    assert row["turn_start"]["truncated"]
+    assert row["status"] == "dropped" and row["reason"] == "summary_truncated_away"
+
+
+# --- P3's memory_flush arm on the same footing -------------------------------
+
+def test_the_memory_flush_arm_is_a_summary_arm_on_the_conversation_shape():
+    assert R.ARMS["memory_flush"].get("expects_summary")
+    assert R.resolve_shape("auto", ["summary_legacy", "memory_flush"]) == "conversation"
+
+
+def test_the_flush_is_sent_the_head_production_would_have_flushed(corpus, tmp_path,
+                                                                  monkeypatch):
+    """Not the whole uncompacted session — at the summary sizes that is past
+    the window — but the longest head of whole turns whose compacted prompt
+    is under the flush trigger; sizing it never calls a summariser."""
+    root, files = corpus
+    monkeypatch.setattr("app.compaction.get_context_window", lambda _m="": 100_000)
+
+    async def no_http(*_a, **_k):
+        raise AssertionError("sizing the flush head reached the summariser")
+    monkeypatch.setattr("app.compaction_llm._post_chat_completion", no_http)
+    s = R.build_session(4, 60_000, 0.1, root=root, corpus=files, probe="late",
+                        shape="conversation")
+    (tmp_path / "d" / "sessions").mkdir(parents=True)
+    msgs, info = asyncio.run(R.flush_history(
+        s, sid="pt-eval-x", data_root=tmp_path / "d", system_prompt="sys",
+        discovered=[]))
+    assert msgs is not None
+    assert 0 < info["history_rows"] < info["rows_total"]
+    assert s.messages[info["history_rows"]]["role"] == "user"     # whole turns
+    assert info["est_prompt_tokens"] <= info["bound_tokens"]
+    assert info["planted_in_history"]                             # depth 0.1 is in it
+
+
+def test_run_flush_sends_the_head_it_is_given(corpus, tmp_path,
+                                                                 monkeypatch):
+    root, files = corpus
+    s = R.build_session(4, 20_000, 0.1, root=root, corpus=files, shape="conversation")
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps({"messages": s.messages}))
+    seen = {}
+
+    async def fake_stream(**kw):
+        seen["n"] = len(kw["messages"])
+        yield {"choices": [{"delta": {"content": "Saved nothing."}}]}
+        yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+
+    monkeypatch.setattr("app.harness.loop.stream_chat", fake_stream)
+    head = [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
+    disc = [("lloyd-mcp", [{"name": n, "description": n,
+                            "inputSchema": {"type": "object", "properties": {}}}
+                           for n in ("memory_read", "memory_add", "fact_get", "fact_add")])]
+    out = asyncio.run(R.run_flush(s, sid="pt-eval-y", path=path, discovered=disc,
+                                  system_prompt="sys", data_root=tmp_path,
+                                  base_url="http://stub", hk={}, messages=head))
+    assert not out["error"], out["error"]
+    assert seen["n"] == 1 + len(head) + 1          # system + head + flush prompt
+    assert json.loads(path.read_text())["compaction"]["flush"]["status"] == "done"
+
+
+def test_dry_run_sizes_the_flush_and_shows_the_summary_firing(corpus, tmp_path, monkeypatch):
+    root, files = corpus
+    monkeypatch.setattr("app.compaction.get_context_window", lambda _m="": 100_000)
+    monkeypatch.setattr("app.harness.loop.stream_chat", _stream_must_not_run)
+
+    async def no_http(*_a, **_k):
+        raise AssertionError("dry run reached the summariser endpoint")
+    monkeypatch.setattr("app.compaction_llm._post_chat_completion", no_http)
+    s = R.build_session(4, 60_000, 0.1, root=root, corpus=files, probe="late",
+                        shape="conversation")
+    row = asyncio.run(R.run_one(s, "memory_flush", discovered=[], system_prompt="sys",
+                                data_root=tmp_path / "d", base_url="http://stub",
+                                dry=True))
+    assert row["status"] == "dry", row.get("reason")
+    assert row["fired"]["summarize_outcome"] == "summarized"
+    assert 0 < row["flush"]["history_rows"] < row["flush"]["rows_total"]

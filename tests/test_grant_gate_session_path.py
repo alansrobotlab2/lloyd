@@ -275,7 +275,7 @@ def test_the_same_registry_set_also_arms_the_outbound_content_gate():
     )
     assert find_unarmed_dispatch_paths() == [], find_unarmed_dispatch_paths()
     assert stale_gate_arm_points() == [], stale_gate_arm_points()
-    assert len(GATE_ARM_POINTS) == 9, GATE_ARM_POINTS
+    assert len(GATE_ARM_POINTS) == 12, GATE_ARM_POINTS
 
 
 # ── The automod ban, by platform (#709) ────────────────────────────────
@@ -339,7 +339,8 @@ def test_the_automod_ban_is_idempotent_and_keeps_the_callers_list(sessions):
 def test_every_site_that_bans_minting_also_bans_automod():
     """Same pin-count idiom as the grant gate: the three router sites that
     build a turn's disallowed list each apply the platform ban, so "the other
-    endpoint is the ungated one" cannot come back one tool over."""
+    endpoint is the ungated one" cannot come back one tool over. Four sites
+    since P3's memory-flush turn, which applies both."""
     text = open(M.__file__).read()
-    assert text.count("_ban_grant_minting(") == 4  # def + 3 sites
-    assert text.count("_ban_automod_for_workers(") == 4  # def + 3 sites
+    assert text.count("_ban_grant_minting(") == 5  # def + 4 sites
+    assert text.count("_ban_automod_for_workers(") == 5  # def + 4 sites

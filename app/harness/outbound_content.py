@@ -786,6 +786,9 @@ GATE_ARM_POINTS: tuple[str, ...] = (
     "scripts/autoresearch/bench_runner_sdk.py",    # the scored bench path
     "eval/run_preserve_thinking_eval.py",          # live eval, real MCP tools
     "eval/run_tool_choice_eval.py",                # live eval, real MCP tools
+    "eval/run_compaction_recall_eval.py",          # live eval, production kwargs
+    "eval/run_prefetch_cost_eval.py",              # live eval, real MCP tools
+    "eval/decision_replay_588.py",                 # live replay, real MCP tools
 )
 
 #: Which dispatch files are outside the roster because their turns cannot reach a

@@ -653,9 +653,12 @@ def test_the_gate_is_armed_at_its_pinned_number_of_arm_points():
     Nine, not four. This round's cross-file finder found four paths the
     same-file convention could not see at all: `app/routers/voice.py` builds a
     spoken turn's options and armed nothing, and two live evals plus the bench
-    path build turns with the real MCP servers in them.
+    path build turns with the real MCP servers in them. Twelve since
+    2026-09-24: three more live evals (#562's prefetch cost, #588's decision
+    replay, #600's compaction recall) build turns from the production kwargs;
+    the first two armed without joining the roster, the third armed nothing.
     """
-    assert len(OC.GATE_ARM_POINTS) == 9, OC.GATE_ARM_POINTS
+    assert len(OC.GATE_ARM_POINTS) == 12, OC.GATE_ARM_POINTS
     assert OC.stale_gate_arm_points() == [], \
         f"stale arm points: {OC.stale_gate_arm_points()}"
     # Two denominators from two sources: the syntax finds every dispatch build in
@@ -964,11 +967,11 @@ def test_the_unarmed_paths_on_the_real_tree_are_the_unreachable_ones():
     here while measuring nothing — so the counts are pinned against the tree.
     """
     builds = OC.all_turn_builds()
-    assert len(builds) == 12, len(builds)
+    assert len(builds) == 17, len(builds)
     unreachable = sorted({b.file for b in builds if not b.sender_reachable})
     assert unreachable == ["app/routers/ide.py"], unreachable
     assert OC.sender_unreachable_dispatch_files() == unreachable
-    assert len(OC.dispatch_registry_sites()) == 10, OC.dispatch_registry_sites()
+    assert len(OC.dispatch_registry_sites()) == 15, OC.dispatch_registry_sites()
     assert len(OC.GATE_ARM_POINTS) == len(
         set(OC.dispatch_registry_sites_files()) | {OC.FLOOR_MODULE})
 

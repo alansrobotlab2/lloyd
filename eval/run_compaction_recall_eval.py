@@ -62,7 +62,14 @@ with `max_tokens: 1` (the warm-up): that is the prefix cache a session in
 production arrives at this turn with — its previous turn sent everything
 but the new user message. The probe's TTFT and cached-token numbers are
 therefore what a rewrite costs against a warm session, not against a cold
-engine.
+engine. A warm-up that cannot fit the window (sessions past ~200k) is
+clipped from the END to the longest head of whole turns that fits — the
+head is what a prefix cache is made of, so a front clip would warm nothing
+the probe shares — and is skipped when not even one turn fits. It is sent
+at most once, never retried, and a failure is recorded on the row
+(`warmup.status`: sent / clipped / skipped / error), never raised into the
+probe: the first live summary run died 24/24 because an oversized warm-up
+400ed inside the loop's own stream and was re-sent on every recovery attempt.
 
 ARMS
 ----
@@ -80,15 +87,92 @@ ARMS
   summary_legacy     summarize layer, regenerate-every-turn 9-section summary.
   summary_persisted  summarize layer with `persist_summary: true` (D2): the
               incremental Goal/Constraints/Progress/Decisions/Next steps
-              record. Both need sizes past the truncation threshold; valid
-              only when the summarize layer replaced a block.
-  memory_flush  P3: `summary_legacy` preceded by a memory-flush turn over the
-              uncompacted history (`app/memory_flush.py`, allow-listed to the
-              memory tools; `memory_add`/`fact_add` are recorded, not
-              written). The saved entries are rendered into the probe's
-              system prompt, as the next turn's memory block would carry
-              them. `flush_saved` says which planted facts the flush wrote
-              down; recall against `summary_legacy` says whether that helped.
+              record. See SUMMARY ARMS below.
+  memory_flush  P3: `summary_legacy` preceded by a memory-flush turn
+              (`app/memory_flush.py`, allow-listed to the memory tools;
+              `memory_add`/`fact_add` are recorded, not written). The flush
+              runs over the conversation as it stood when production's flush
+              trigger would have fired (`flush_history`: the head of whole
+              turns before the first whose turn-start-compacted prompt
+              crosses `trigger_fraction` x the threshold), never over the whole
+              uncompacted session, which at these sizes is past the window.
+              The saved entries are rendered into the probe's system prompt,
+              as the next turn's memory block would carry them. `flush_saved`
+              says which planted facts the flush wrote down; recall against
+              `summary_legacy` says whether that helped. A summary arm too:
+              same shape, sizes and gate (below).
+
+SUMMARY ARMS
+------------
+The question these two answer: does the persisted incremental 5-section
+summary keep the planted facts at least as well as the regenerate-every-turn
+9-section one, and what does it cost (summariser calls and wall time at turn
+start). Three things had to be true for either to measure it, and the first
+live run (24/24 rows `error`) had none of them:
+
+  * The summary has to FIRE. On the default `tool` session shape the
+    turn-start microcompact pass clears a 240k session to ~116k and the
+    summarize layer answers `under_threshold` — both arms identical.
+    Switching microcompact off instead is not a fix: `summarize_history` has
+    no input bound, the older block of an uncleared 240k session is ~230k
+    estimator tokens, and tool output tokenizes at ~1.22x the estimator on
+    the primary (measured with its tokenizer), so the legacy request is a
+    guaranteed 400 and falls back to truncation — a configuration production
+    never runs, rigged against one arm. So the pair runs on the
+    `conversation` shape (`--shape conversation`, the default when every
+    requested arm is a summary arm) with the production microcompact left on:
+    each filler turn is one Read plus a long assistant discussion drawn from
+    `architecture/*.md`, so prose (~0.87x the estimator) dominates, the
+    clearing frees the Read results and the history stays over the threshold.
+    That is the shape the summarize layer exists for in production: a long
+    conversation, not a long tool log.
+  * The fact has to be IN what the summariser reads. Microcompact clears the
+    planted Read result like any other, so in this shape the assistant's
+    reply to it restates both facts (codename; billing-east moved from the old
+    port to the new one), and salted turns mention sibling relays' ports in
+    prose. The summariser sees the facts only as conversation, which is where
+    a summary has to carry them from.
+  * The fact has to be SUMMARISED, not kept verbatim. The persisted arm folds
+    at most `max_folds_per_turn` x `summary_input_budget_tokens` (3 x 48k) of
+    older history per turn, starting from the oldest, and keeps the rest
+    verbatim; the legacy arm summarises everything but the last
+    `keep_recent_turns`. A cold session is the persisted arm's state on the
+    turn it first crosses the threshold, which is what a real session looks
+    like then. Run it at depths inside the first ~140k (`--depths 0.1,0.3,0.5`
+    at the recommended sizes) so both arms summarise the fact.
+
+Validity: a summary-arm row is kept only when its summarize layer produced a
+summary on this turn (`summarize_outcome == summarized`), the summary row
+survived the truncation fallback (`summary_truncated_away` otherwise), and
+the planted fact is not still verbatim in the history (`fact_not_summarized`).
+Both are known at turn start, so the probe is not spent on a dropped row.
+Every row carries `summary_has` (which facts the summary text itself names
+— the direct fidelity reading, independent of the model's answer),
+`summarizer` (calls, wall seconds, input/output chars) and
+`turn_start_wall_s`. `--dry` stubs the summarisers so a dry run shows
+whether the layer would fire without any engine traffic.
+
+Sizes. On this shape `--sizes` counts the non-tool rows (the raw session is
+~1.6x that). The window for a fair comparison is narrow, and it is the
+legacy summariser that sets it: the layer fires only once the history after
+clearing passes the threshold (210,144 estimator tokens; ~conversation + 26k),
+and `summarize_history` sends that whole older block unbounded, which fits
+the 262,144 window only up to ~253k real tokens (8,000 output + a 631-token
+prompt). Measured with the primary's tokenizer on the 2026-09-24 tree:
+conversation 180k does not fire; 186k and 192k fire on all 12 seeds below
+with a legacy request of 228k-246k tokens; 195k reaches 249k and 210k is
+259k-263k, a 400 that falls back to truncation (`summary_not_fired:
+empty_summary`). That band is itself a finding about production: legacy can
+summarise only in the first ~40k of growth past the threshold, and re-sends
+all of it every turn. The persisted arm's folds are ~55k real tokens each
+at any size. Re-run with `--dry` on the tree the run will use (the filler
+is this tree's own files): every row should read `dry`, `summarized`.
+
+    LLOYD_DATA=<scratch> .venvs/lloyd/bin/python eval/run_compaction_recall_eval.py \\
+        --data-root <scratch> --tools-snapshot <scratch>/tools.json \\
+        --arms summary_legacy,summary_persisted \\
+        --sizes 186000,192000 --depths 0.1,0.3,0.5 --sessions 6 --probe late \\
+        --out <scratch>/d2.json
 
 The in-turn trigger is a fraction of the truncation threshold (210,144)
 compared against the REPORTED prompt, which carries ~55-75k of system
@@ -192,10 +276,10 @@ ARMS: dict[str, dict[str, Any]] = {
     # `data["compaction"]` record (Goal / Constraints / Progress / Decisions /
     # Next steps + ledger-rendered Files touched) through
     # `compaction_llm.summarize_incremental`. The legacy arm is the 9-section
-    # regenerate-every-turn summary. The layer runs only past the truncation
-    # threshold (~210k on the primary), so run these at sizes above it:
-    #   --arms summary_legacy,summary_persisted --sizes 240000,280000
-    # This pair gates flipping `compaction.persist_summary` on.
+    # regenerate-every-turn summary. This pair gates flipping
+    # `compaction.persist_summary` on; see SUMMARY ARMS in the header for why
+    # they run on the `conversation` session shape with microcompact left ON,
+    # and for the sizes and depths to run them at.
     "summary_legacy": {
         "compaction": {"mode": "summarize", "persist_summary": False},
         "options": {},
@@ -210,8 +294,12 @@ ARMS: dict[str, dict[str, Any]] = {
     },
     # P3 (review 2026-09-24): the flush before the wall, against
     # `summary_legacy` at the same sizes. This pair gates flipping
-    # `compaction.memory_flush.enabled` on:
-    #   --arms summary_legacy,memory_flush --sizes 240000,280000
+    # `compaction.memory_flush.enabled` on. A summary arm, so it runs on the
+    # conversation shape at the SUMMARY ARMS sizes:
+    #   --arms summary_legacy,memory_flush --sizes 186000,192000
+    # The flush sees the first ~40% of rows there (`flush_history`), so a
+    # fact at depth 0.5 arrives after the flush — a control, not a miss;
+    # `flush.planted_in_history` says which rows are which.
     "memory_flush": {
         "compaction": {"mode": "summarize", "persist_summary": False,
                        "memory_flush": {"enabled": True}},
@@ -447,10 +535,84 @@ def _filler_turn(i: int, rng: random.Random, corpus: list[Path], root: Path,
     return msgs
 
 
-def _planted_turn(key: str, planted: Planted, rng: random.Random) -> tuple[list[dict], str]:
+_DISCUSS = [
+    "Walk me through how {stem} fits with the design notes.",
+    "Read {stem} and tell me whether it still matches what we documented.",
+    "What's the reasoning behind {stem}? Talk it through.",
+    "Explain {stem} to me like I'm reviewing it cold.",
+]
+
+
+def _prose_passage(rng: random.Random, doc: Path, lo: int = 3_000,
+                   hi: int = 9_000) -> str:
+    """A run of whole paragraphs from `doc`, `lo`..`hi` characters long."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", doc.read_text(errors="replace"))
+             if p.strip()]
+    if not paras:
+        return ""
+    want = rng.randint(lo, hi)
+    start = rng.randrange(len(paras))
+    out: list[str] = []
+    n = 0
+    for p in paras[start:] + paras[:start]:
+        out.append(p)
+        n += len(p)
+        if n >= want:
+            break
+    return "\n\n".join(out)[:hi]
+
+
+def _conversation_turn(i: int, rng: random.Random, corpus: list[Path],
+                       prose: list[Path], root: Path, planted: Planted,
+                       salt: bool) -> list[dict]:
+    """The `conversation` shape: one Read, then a long assistant discussion.
+
+    The Read result is what microcompaction clears; the discussion — whole
+    paragraphs of this tree's own design docs — is what it cannot, so a
+    session built of these stays over the truncation threshold after the
+    clearing and reaches the summarize layer (see SUMMARY ARMS)."""
+    path = rng.choice(corpus)
+    rel = str(path.relative_to(root))
+    lines = path.read_text(errors="replace").splitlines()
+    cid = f"call_{i}_0"
+    a = rng.randint(0, max(0, len(lines) - 40))
+    b = min(len(lines), a + rng.randint(40, 120))
+    doc = rng.choice(prose)
+    reply = (f"Read through {rel}. How it lines up with "
+             f"{doc.relative_to(root)}:\n\n" + _prose_passage(rng, doc))
+    if salt:
+        svc, port = rng.choice(list(planted.distractor_ports.items()))
+        reply += (f"\n\nSide note from the ops channel while I was in there: "
+                  f"the {svc} relay listens on port {port}.")
+    return [
+        _msg("user", rng.choice(_DISCUSS).format(stem=rel)),
+        {"role": "assistant", "content": [{"type": "text", "text": ""}],
+         "tool_calls": [_tc(cid, "Read", {"summary": f"Reading {path.name}",
+                                          "file_path": str(root / rel),
+                                          "offset": a + 1, "limit": b - a})]},
+        _msg("tool", _read_render("\n".join(lines[a:b]), a + 1), tool_call_id=cid),
+        _msg("assistant", reply),
+    ]
+
+
+def _planted_turn(key: str, planted: Planted, rng: random.Random,
+                  shape: str = "tool") -> tuple[list[dict], str]:
     path = NOTES_PATH.format(key=key)
     body = _notes_body(planted, rng)
     cid = "call_planted"
+    if shape == "conversation":
+        # The Read result is cleared at turn start like every other one, so the
+        # facts have to be in the conversation for a summary to carry them.
+        sib, sib_port = next(iter(planted.distractor_ports.items()))
+        reply = (f"Got the deploy notes open. This release ships under the "
+                 f"codename `{planted.passphrase}`. The billing-east relay was "
+                 f"on port {planted.old_port} until the migration and listens "
+                 f"on port {planted.port} now; the {sib} relay stays on "
+                 f"{sib_port}. Nothing in them blocks what we're doing; "
+                 "carrying on with the review.")
+    else:
+        reply = ("Got the deploy notes open. Nothing in them blocks "
+                 "what we're doing; carrying on with the review.")
     return [
         _msg("user", f"Pull up the deploy notes at {path} — I want them in "
                      "front of us before we touch the relays."),
@@ -458,33 +620,60 @@ def _planted_turn(key: str, planted: Planted, rng: random.Random) -> tuple[list[
          "tool_calls": [_tc(cid, "Read", {"summary": "Reading the deploy notes",
                                           "file_path": path})]},
         _msg("tool", _read_render(body), tool_call_id=cid),
-        _msg("assistant", "Got the deploy notes open. Nothing in them blocks "
-                          "what we're doing; carrying on with the review."),
+        _msg("assistant", reply),
     ], body
+
+
+SHAPES = ("tool", "conversation")
 
 
 def build_session(seed: int, target_tokens: int, depth: float,
                   *, root: Path = ROOT, corpus: list[Path] | None = None,
-                  probe: str = "early") -> Session:
+                  probe: str = "early", shape: str = "tool") -> Session:
     """One synthetic session: filler to `target_tokens` (estimator units, the
     ones every compaction trigger is written in) with the planted turn at
-    `depth` of the way through it. Deterministic in (seed, tree)."""
+    `depth` of the way through it. Deterministic in (seed, tree, shape).
+
+    `shape="tool"` is the #600 shape (mostly tool results), and
+    `target_tokens` is the whole history. `"conversation"` is the summary
+    arms' (see SUMMARY ARMS in the module docstring), and `target_tokens`
+    counts every row BUT the tool results — the part microcompaction leaves —
+    so the raw session (`est_tokens`) is ~1.6x larger."""
     from app.compaction import estimate_conversation_tokens
 
+    if shape not in SHAPES:
+        raise ValueError(f"unknown session shape {shape!r}")
     rng = random.Random(seed)
     corpus = corpus if corpus is not None else _corpus_files(root)
     if not corpus:
         raise RuntimeError("no filler corpus under the tree")
-    key = f"s{seed}-{target_tokens // 1000}k-d{int(depth * 100)}"
+    prose = [p for p in corpus if p.suffix == ".md"] or corpus
+    # The tool shape keeps its #600 key, so an existing results file resumes.
+    key = f"s{seed}-{target_tokens // 1000}k-d{int(depth * 100)}" \
+        + ("-conv" if shape == "conversation" else "")
     planted = make_planted(rng)
-    planted_msgs, notes = _planted_turn(key, planted, rng)
-    budget = target_tokens - estimate_conversation_tokens(planted_msgs)
+    planted_msgs, notes = _planted_turn(key, planted, rng, shape)
+
+    def counted(msgs: list[dict]) -> int:
+        # The conversation shape budgets what microcompaction cannot clear —
+        # everything but the tool results — because that, not the raw size,
+        # is what decides whether the summarize layer fires: raw-size
+        # targets put seeds of one size on both sides of the threshold.
+        if shape == "conversation":
+            msgs = [m for m in msgs if m.get("role") != "tool"]
+        return estimate_conversation_tokens(msgs)
+
+    budget = target_tokens - counted(planted_msgs)
     turns: list[list[dict]] = []
     total = 0
     i = 0
     while total < budget:
-        t = _filler_turn(i, rng, corpus, root, planted, salt=(i % 4 == 0))
-        total += estimate_conversation_tokens(t)
+        if shape == "conversation":
+            t = _conversation_turn(i, rng, corpus, prose, root, planted,
+                                   salt=(i % 4 == 0))
+        else:
+            t = _filler_turn(i, rng, corpus, root, planted, salt=(i % 4 == 0))
+        total += counted(t)
         turns.append(t)
         i += 1
     at = min(len(turns), max(0, round(depth * len(turns))))
@@ -500,7 +689,8 @@ def build_session(seed: int, target_tokens: int, depth: float,
     s = Session(key=key, seed=seed, target_tokens=target_tokens, depth=depth,
                 messages=messages, files=files, planted=planted,
                 planted_index=planted_index, probe=probe_text,
-                est_tokens=estimate_conversation_tokens(messages))
+                est_tokens=estimate_conversation_tokens(messages),
+                meta={"shape": shape})
     s.sha256 = hashlib.sha256(json.dumps(messages, sort_keys=True)
                               .encode()).hexdigest()
     return s
@@ -685,29 +875,114 @@ def render_saved_memory(saved: list[dict[str, Any]]) -> str:
     return "<memory>\n" + "\n".join(lines) + "\n</memory>" if lines else ""
 
 
+def _flush_tools(discovered: list, names: Iterable[str]) -> list:
+    """The discovered schemas a flush turn is advertised (its allow-list)."""
+    want = set(names)
+    out = []
+    for entry in discovered or []:
+        tools = entry[1] if isinstance(entry, (list, tuple)) and len(entry) == 2 else []
+        out += [t for t in tools if isinstance(t, dict) and t.get("name") in want]
+    return out
+
+
+async def flush_history(session: "Session", *, sid: str, data_root: Path,
+                        system_prompt: str, discovered: list
+                        ) -> tuple[list[dict] | None, dict[str, Any]]:
+    """What the P3 flush turn is sent: the conversation as it stood when
+    production's flush would have fired.
+
+    Production flushes at the END of the turn whose engine-reported prompt
+    first reached `trigger_fraction` x the compaction threshold, and the flush
+    turn is sent that session through the ordinary turn-start stack. So this
+    is the head of whole turns just before the first one whose compacted
+    prompt — system prompt, the flush's allow-listed tool schemas, history,
+    JSON-sized like the warm-up — crosses that bound. The whole uncompacted session is what the
+    first cut sent, and at the summary arms' sizes that is past the window.
+    The turn-start probes run with `mode_override="truncate"`: they size a
+    head and must never call a summariser; a head the stack had to truncate
+    is refused. No engine traffic, so `--dry` runs it too.
+    """
+    from app import memory_flush as MF
+    from app.compaction import (get_context_window, load_and_compact_session,
+                                truncation_threshold)
+    from app.routers._messages_harness_adapter import _prepare_messages_for_harness
+
+    cfg = MF.flush_cfg()
+    window = get_context_window("primary")
+    bound = min(int(float(cfg.get("trigger_fraction") or 0.85)
+                    * truncation_threshold(window)),
+                window - WARMUP_RESERVE_TOKENS)
+    overhead = _json_tokens({"role": "system", "content": system_prompt}) \
+        + _json_tokens(_flush_tools(discovered, cfg.get("tools") or MF.DEFAULT_TOOLS)) \
+        + _json_tokens({"role": "user", "content": MF.FLUSH_PROMPT})
+    msgs_all = session.messages
+    bounds = [n for n, m in enumerate(msgs_all) if m.get("role") == "user" and n > 0] \
+        + [len(msgs_all)]
+    head_path = data_root / "sessions" / f"{sid}-flushhead.json"
+    cache: dict[int, tuple[list[dict] | None, int]] = {}
+
+    async def probe(end: int) -> tuple[list[dict] | None, int]:
+        if end not in cache:
+            head_path.write_text(json.dumps({"session_id": head_path.stem,
+                                             "platform": "mission-control",
+                                             "messages": msgs_all[:end]}))
+            comp = await load_and_compact_session(head_path, model="primary",
+                                                  mode_override="truncate")
+            prepared = await _prepare_messages_for_harness(comp["history"], "primary")
+            cost = overhead + sum(_json_tokens(m) for m in prepared)
+            cache[end] = (None if comp.get("truncated") or cost > bound
+                          else prepared, cost)
+        return cache[end]
+
+    # Forward, stopping at the first head that does not fit: the prompt
+    # grows turn by turn until the trigger fires, and that crossing is the
+    # flush. Not a bisection — the predicate is not monotone, because a head
+    # past the microcompact trigger is cleared back under the bound, and the
+    # largest such head is a session production would have flushed long
+    # before it got there.
+    best = None
+    for n, end in enumerate(bounds):
+        prepared, _cost = await probe(end)
+        if prepared is None:
+            break
+        best = n
+    info: dict[str, Any] = {"bound_tokens": bound, "rows_total": len(msgs_all)}
+    if best is None:
+        info.update(history_rows=0)
+        return None, info
+    prepared, cost = await probe(bounds[best])
+    text = json.dumps(prepared)
+    info.update(history_rows=bounds[best], est_prompt_tokens=cost,
+                planted_in_history=session.planted.passphrase in text)
+    return prepared, info
+
+
 async def run_flush(session: "Session", *, sid: str, path: Path, discovered: list,
                     system_prompt: str, data_root: Path, base_url: str,
-                    hk: dict[str, Any]) -> dict[str, Any]:
-    """The P3 flush turn over the uncompacted history. Needs an engine."""
+                    hk: dict[str, Any], messages: list[dict]) -> dict[str, Any]:
+    """The P3 flush turn over `messages` (see `flush_history`). Needs an engine."""
     from app import memory_flush as MF
+    from app.harness import HookRegistry, install_default_safety_hook
     from app.harness import loop as L
     from app.harness.options import RunOptions
     from app.mcp_discovery import _get_disallowed_tools
-    from app.routers._messages_harness_adapter import _prepare_messages_for_harness
 
     cfg = MF.flush_cfg()
     pool = EvalPool(discovered, session.files, data_root,
                     planted=session.planted, memory=True)
-    msgs = await _prepare_messages_for_harness(list(session.messages), "primary")
+    msgs = list(messages)
     msgs.append({"role": "user", "content": MF.FLUSH_PROMPT})
     turn_id = MF.new_turn_id()
+    # Armed like the probe turn and production's flush turn (GATE_ARM_POINTS).
+    hooks = HookRegistry()
+    install_default_safety_hook(hooks)
     options = RunOptions(
         model="primary", base_url=base_url, system_prompt=system_prompt,
         max_turns=int(cfg.get("max_turns") or 6),
         disallowed_tools=_get_disallowed_tools(),
         allowed_tools=list(cfg.get("tools") or MF.DEFAULT_TOOLS),
         session_id=sid, turn_id=turn_id, surface="chat", priority=0,
-        **{**hk, "tool_search_enabled": False})
+        hooks=hooks, **{**hk, "tool_search_enabled": False})
 
     async def _pool(_o):
         return pool
@@ -768,19 +1043,118 @@ def fired(record: dict[str, Any] | None) -> dict[str, Any]:
         "mechanisms": list(record.get("mechanisms") or []),
         "turn_start_freed": int(ts.get("tokens_freed") or 0),
         "turn_start_mechanisms": list(ts.get("mechanisms") or []),
+        "summarize_outcome": str(ts.get("summarize_outcome") or ""),
         "relief_freed": int(sum(int(r.get("freed_tokens") or 0) for r in relief)),
         "relief_passes": len(relief),
     }
 
 
+def summary_fired(f: dict[str, Any]) -> bool:
+    """The summarize layer produced a summary on THIS turn.
+
+    `summarized` alone is not enough: under `persist_summary` it is also true
+    when a stored record was merely re-applied (`reused`), and the outcome is
+    what says a summariser actually ran. A record without an outcome (older
+    rows) falls back to the mechanism list."""
+    if "summarize" not in f.get("turn_start_mechanisms", []):
+        return False
+    outcome = f.get("summarize_outcome")
+    return outcome == "summarized" if outcome else True
+
+
 def valid_for_arm(arm: str, f: dict[str, Any]) -> bool:
     freed = f["turn_start_freed"] + f["relief_freed"]
-    if ARMS[arm].get("expects_summary") and \
-            "summarize" not in f.get("turn_start_mechanisms", []):
+    if ARMS[arm].get("expects_summary") and not summary_fired(f):
         # A summary-format arm whose summarize layer did not replace a block
-        # measured the truncation fallback, not the format.
+        # (under threshold, a summariser that failed and fell back to
+        # truncation, or a re-applied record) measured neither format.
         return False
     return freed > 0 if ARMS[arm]["expects_fire"] else freed == 0
+
+
+_SUMMARY_PREFIX = "[compaction summary"
+
+
+def summary_text(history: list[dict]) -> str:
+    """The summary row's text in a compacted history, or ''."""
+    from app.compaction import _message_text
+    for m in history:
+        if m.get("role") == "assistant":
+            t = _message_text(m)
+            if t.lstrip().startswith(_SUMMARY_PREFIX):
+                return t
+    return ""
+
+
+def summary_has(text: str, planted: Planted) -> dict[str, bool]:
+    """Which planted facts the summary text itself names — fidelity read off
+    the summary, independent of what the model then answers. The old port is
+    reported beside the new one: a summary that kept only the old port has
+    kept the wrong answer."""
+    def port(v: str) -> bool:
+        return re.search(rf"(?<!\d){re.escape(v)}(?!\d)", text) is not None
+    return {"codename": planted.passphrase.lower() in text.lower(),
+            "port_now": port(planted.port), "port_old": port(planted.old_port)}
+
+
+def fact_verbatim(history: list[dict], planted: Planted) -> bool:
+    """Is the planted codename still in a history row other than the summary?
+    (Then the row does not test the summary.)"""
+    from app.compaction import _message_text
+    for m in history:
+        t = _message_text(m)
+        if planted.passphrase in t and not t.lstrip().startswith(_SUMMARY_PREFIX):
+            return True
+    return False
+
+
+@contextmanager
+def summarizer_probe(dry: bool):
+    """Count and time every summariser call the turn-start stack makes.
+
+    Live, the real `summarize_history` / `summarize_incremental` run and are
+    timed; with `dry`, they are replaced by a stub that returns a placeholder
+    (which names no planted fact) so a dry run shows the layer firing without
+    any engine traffic."""
+    from app import compaction_llm as CL
+    from app.compaction_llm import _format_history_for_summary
+    calls: list[dict[str, Any]] = []
+    real = {"summarize_history": CL.summarize_history,
+            "summarize_incremental": CL.summarize_incremental}
+
+    def wrap(name: str):
+        async def fn(*args, **kw):
+            rows = args[1] if name == "summarize_incremental" else args[0]
+            rec: dict[str, Any] = {
+                "fn": name, "rows": len(rows or []),
+                "input_chars": len(_format_history_for_summary(rows or []))}
+            t = time.monotonic()
+            if dry:
+                out = f"(dry-run stub summary of {len(rows or [])} rows)"
+            else:
+                out = await real[name](*args, **kw)
+            rec.update(wall_s=round(time.monotonic() - t, 2),
+                       output_chars=len(out or ""), failed=not out)
+            calls.append(rec)
+            return out
+        return fn
+
+    CL.summarize_history = wrap("summarize_history")
+    CL.summarize_incremental = wrap("summarize_incremental")
+    try:
+        yield calls
+    finally:
+        CL.summarize_history = real["summarize_history"]
+        CL.summarize_incremental = real["summarize_incremental"]
+
+
+def summarizer_cost(calls: list[dict[str, Any]]) -> dict[str, Any]:
+    return {"calls": len(calls),
+            "failed": sum(1 for c in calls if c.get("failed")),
+            "wall_s": round(sum(float(c.get("wall_s") or 0) for c in calls), 2),
+            "input_chars": sum(int(c.get("input_chars") or 0) for c in calls),
+            "output_chars": sum(int(c.get("output_chars") or 0) for c in calls),
+            "per_call": calls}
 
 
 def _metrics(base_url: str) -> dict[str, float]:
@@ -823,26 +1197,94 @@ class _Sampler:
                 pass
 
 
+#: Characters of JSON per real token assumed when deciding whether a warm-up
+#: fits. Conservative on purpose: tool output tokenizes at ~3.27 characters of
+#: TEXT a token on the primary, and JSON escaping only adds characters, so
+#: over-estimating here costs a clipped warm-up and under-estimating costs a
+#: 400 — the failure this bound exists for.
+WARMUP_JSON_CHARS_PER_TOKEN = 3.0
+#: Room kept free under the window (the warm-up's one output token, template
+#: tokens the JSON length does not see).
+WARMUP_RESERVE_TOKENS = 4_096
+
+
+def _json_tokens(obj: Any) -> int:
+    return int(len(json.dumps(obj, default=str)) / WARMUP_JSON_CHARS_PER_TOKEN) + 1
+
+
+def fit_warmup(system: list[dict], history: list[dict], tools: Any,
+               window: int) -> tuple[list[dict] | None, dict[str, Any]]:
+    """The warm-up prompt that fits `window`, and what was decided.
+
+    Whole prompt if it fits; else the longest HEAD of whole turns (cut before a
+    user message) that does — a prefix cache is built from the front, so the
+    head is the part of the uncompacted prompt the probe can share, and a clip
+    from the front would warm nothing. None when not even one turn fits.
+    """
+    budget = int(window) - WARMUP_RESERVE_TOKENS - _json_tokens(tools or []) \
+        - sum(_json_tokens(m) for m in system)
+    info: dict[str, Any] = {"messages_total": len(history), "window": int(window)}
+    costs = [_json_tokens(m) for m in history]
+    if sum(costs) <= budget:
+        info.update(status="sent", messages_kept=len(history),
+                    est_prompt_tokens=int(window) - budget + sum(costs)
+                    - WARMUP_RESERVE_TOKENS)
+        return system + history, info
+    # `cut` is the last turn boundary reached within budget: a head that stops
+    # mid-turn would end on an unanswered tool call.
+    spent, cut = 0, 0
+    for n, (m, c) in enumerate(zip(history, costs)):
+        if m.get("role") == "user":
+            cut = n                    # history[:n] is whole turns, and fits
+        if spent + c > budget:
+            break
+        spent += c
+    if cut <= 0:
+        info.update(status="skipped", reason="no_whole_turn_fits", messages_kept=0)
+        return None, info
+    info.update(status="clipped", messages_kept=cut,
+                est_prompt_tokens=int(window) - budget + sum(costs[:cut])
+                - WARMUP_RESERVE_TOKENS)
+    return system + history[:cut], info
+
+
 def _make_stream_wrapper(real, warm_messages: list[dict] | None, log: list[dict],
-                         on_warm_done: Callable[[], None], needle: str = ""):
-    """Time every request, and send the warm-up before iteration 1."""
+                         on_warm_done: Callable[[], None], needle: str = "",
+                         window: int = 262_144):
+    """Time every request, and send the warm-up before iteration 1.
+
+    The warm-up is attempted at most ONCE per run, whatever happens to it: it
+    is decided before the first request (`state["warm"]`), so a loop that
+    retries iteration 1 — stream retry, overflow recovery — never re-sends it,
+    and its failure is recorded in the log instead of raised into the probe."""
+    state = {"warm": warm_messages is None}
+
     def wrapper(**kwargs):
         async def gen():
-            if kwargs.get("iteration") in (1, None) and warm_messages is not None and not log:
+            if kwargs.get("iteration") in (1, None) and not state["warm"]:
+                state["warm"] = True
                 msgs = kwargs["messages"]
-                warm = ([msgs[0]] if msgs and msgs[0].get("role") == "system" else []) \
-                    + warm_messages
-                wk = dict(kwargs, messages=warm,
-                          extra_body={**(kwargs.get("extra_body") or {}), "max_tokens": 1})
-                t = time.monotonic()
-                wu = {}
-                async for ch in real(**wk):
-                    if ch.get("usage"):
-                        wu = ch["usage"]
-                log.append({"warmup": True, "wall_s": time.monotonic() - t,
-                            "prompt_tokens": wu.get("prompt_tokens"),
-                            "cached_tokens": (wu.get("prompt_tokens_details") or {})
-                            .get("cached_tokens")})
+                system = [msgs[0]] if msgs and msgs[0].get("role") == "system" else []
+                warm, info = fit_warmup(system, warm_messages or [],
+                                        kwargs.get("tools"), window)
+                rec: dict[str, Any] = {"warmup": True, **info}
+                if warm is not None:
+                    wk = dict(kwargs, messages=warm,
+                              extra_body={**(kwargs.get("extra_body") or {}),
+                                          "max_tokens": 1})
+                    t = time.monotonic()
+                    wu: dict = {}
+                    try:
+                        async for ch in real(**wk):
+                            if ch.get("usage"):
+                                wu = ch["usage"]
+                    except Exception as e:  # noqa: BLE001 — a warm-up never kills the probe
+                        rec.update(status="error", error=f"{type(e).__name__}: {e}"[:300])
+                    rec.update(wall_s=time.monotonic() - t,
+                               prompt_tokens=wu.get("prompt_tokens"),
+                               cached_tokens=(wu.get("prompt_tokens_details") or {})
+                               .get("cached_tokens"))
+                log.append(rec)
                 on_warm_done()
             rec: dict[str, Any] = {"iteration": kwargs.get("iteration"), "ttft_s": None}
             if needle:
@@ -899,18 +1341,36 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
                            "depth": session.depth, "target_tokens": session.target_tokens,
                            "est_tokens": session.est_tokens, "session_sha256": session.sha256}
 
+    row["shape"] = session.meta.get("shape", "tool")
     with compaction_overlay(spec["compaction"]):
-        if spec.get("flush") and not dry:
-            flush = await run_flush(
-                session, sid=sid, path=path, discovered=discovered,
-                system_prompt=system_prompt, data_root=data_root,
-                base_url=base_url, hk=_get_harness_kwargs())
-            row["flush"] = {k: v for k, v in flush.items() if k != "saved"}
-            row["flush"]["saved_count"] = len(flush["saved"])
-            memory_block = render_saved_memory(flush["saved"])
-            if memory_block:
-                system_prompt = f"{system_prompt}\n\n{memory_block}"
-        comp = await load_and_compact_session(path, model="primary")
+        if spec.get("flush"):
+            fmsgs, finfo = await flush_history(
+                session, sid=sid, data_root=data_root, system_prompt=system_prompt,
+                discovered=discovered)
+            row["flush"] = dict(finfo)
+            if fmsgs is None:
+                row.update(status="dropped", reason="flush_history_empty")
+                return row
+            if not dry:
+                flush = await run_flush(
+                    session, sid=sid, path=path, discovered=discovered,
+                    system_prompt=system_prompt, data_root=data_root,
+                    base_url=base_url, hk=_get_harness_kwargs(), messages=fmsgs)
+                row["flush"].update({k: v for k, v in flush.items() if k != "saved"})
+                row["flush"]["saved_count"] = len(flush["saved"])
+                memory_block = render_saved_memory(flush["saved"])
+                if memory_block:
+                    system_prompt = f"{system_prompt}\n\n{memory_block}"
+        t_ts = time.monotonic()
+        with summarizer_probe(dry) as sum_calls:
+            comp = await load_and_compact_session(path, model="primary")
+        row["turn_start_wall_s"] = round(time.monotonic() - t_ts, 2)
+        row["summarizer"] = summarizer_cost(sum_calls)
+        stext = summary_text(comp.get("history") or [])
+        row["summary_chars"] = len(stext)
+        row["summary_has"] = summary_has(stext, session.planted) if stext else None
+        row["fact_verbatim_at_start"] = fact_verbatim(comp.get("history") or [],
+                                                      session.planted)
         turn = compaction_record.start_turn(sid, turn_id)
         turn.note_turn_start(comp)
         history = await _prepare_messages_for_harness(comp["history"], "primary")
@@ -936,12 +1396,34 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
         from app.compaction import get_context_window, truncation_threshold
         thr = truncation_threshold(get_context_window("primary"))
         trig = int(thr * float(hk.get("intra_turn_microcompact_trigger_fraction", 0.8)))
-        if spec["expects_fire"] and pre["turn_start_freed"] == 0 and \
-                session.est_tokens + 80_000 < trig:
+        if spec["expects_fire"] and not spec.get("expects_summary") and \
+                pre["turn_start_freed"] == 0 and session.est_tokens + 80_000 < trig:
             row.update(status="dropped", reason="cannot_fire", fired=pre)
             return row
+        # The summary arms' gate is fully known here, so a row that cannot
+        # measure a summary never spends the probe.
+        if spec.get("expects_summary"):
+            if not summary_fired(pre):
+                row.update(status="dropped", fired=pre,
+                           reason=f"summary_not_fired:{pre['summarize_outcome'] or 'none'}")
+                return row
+            if not stext:
+                # Summarised, then the truncation fallback dropped the summary
+                # row itself (restored files pushed the result back over).
+                row.update(status="dropped", reason="summary_truncated_away", fired=pre)
+                return row
+            if row["fact_verbatim_at_start"]:
+                # Folded past, or kept among the recent turns: the answer would
+                # come from the verbatim row, not from the summary.
+                row.update(status="dropped", reason="fact_not_summarized", fired=pre)
+                return row
+        window = context_window_for("primary")
         if dry:
-            row.update(status="dry", fired=pre)
+            # What the warm-up would do, against the same tool schemas the
+            # loop would send (the snapshot's, JSON-sized).
+            _w, winfo = fit_warmup([{"role": "system", "content": system_prompt}],
+                                   warm_hist, discovered, window)
+            row.update(status="dry", fired=pre, warmup={"warmup": True, **winfo})
             return row
 
         pool = EvalPool(discovered, session.files, data_root,
@@ -954,18 +1436,27 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
             before.update(_metrics(base_url))
             sampler.start()
 
+        # The floor every production turn installs (Bash safety, and the #1136
+        # outbound-content gate inside it). The stub pool can reach no sender,
+        # but the turn is built from the production kwargs, so it is armed the
+        # way a production turn is — `outbound_content.GATE_ARM_POINTS`.
+        from app.harness import HookRegistry, install_default_safety_hook
+        hooks = HookRegistry()
+        install_default_safety_hook(hooks)
         options = RunOptions(
             model="primary", base_url=base_url, system_prompt=system_prompt,
             max_turns=max_turns, disallowed_tools=_get_disallowed_tools(),
-            session_id=sid, turn_id=turn_id, surface="chat", priority=0, **hk)
-        options.context_meter = ContextMeter(context_window_for("primary"))
+            session_id=sid, turn_id=turn_id, surface="chat", priority=0,
+            hooks=hooks, **hk)
+        options.context_meter = ContextMeter(window)
 
         async def _pool(_o):
             return pool
         real_build, real_stream = L._build_pool, L.stream_chat
         L._build_pool = _pool
         L.stream_chat = _make_stream_wrapper(real_stream, warm_hist, log, warm_done,
-                                             needle=session.planted.passphrase)
+                                             needle=session.planted.passphrase,
+                                             window=window)
         t0 = time.monotonic()
         answer, stop, err = "", "", ""
         try:
@@ -1061,11 +1552,35 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
                                    for f in ("distinctive", "ambiguous")},
             "planted_in_prompt_at_start": sum(1 for r in kept if r.get("planted_in_prompt_at_start")),
             # P3: which planted facts the flush turn wrote down (flush arm only).
+            "flush_saw_planted": sum(1 for r in kept if (r.get("flush") or {})
+                                     .get("planted_in_history")),
             "flush_saved": {f: sum(1 for r in kept if ((r.get("flush") or {})
                                                        .get("planted_saved") or {}).get(f))
                             for f in ("distinctive", "ambiguous")},
             "preemptions_delta": sum(r.get("preemptions_delta") or 0 for r in kept),
+            "drop_reasons": _count(r.get("reason") for r in all_rows
+                                   if r.get("status") == "dropped"),
+            "warmup": _count((r.get("warmup") or {}).get("status") for r in all_rows
+                             if r.get("warmup")),
+            # What the turn-start stack cost, and what the summary itself kept
+            # (read off its text, before the model answers anything).
+            "median_turn_start_wall_s": med(kept, "turn_start_wall_s"),
+            "median_summarizer_calls": med(
+                [{"v": (r.get("summarizer") or {}).get("calls")} for r in kept], "v"),
+            "median_summarizer_wall_s": med(
+                [{"v": (r.get("summarizer") or {}).get("wall_s")} for r in kept], "v"),
+            "median_summary_chars": med(kept, "summary_chars"),
+            "summary_has": {f: sum(1 for r in kept if (r.get("summary_has") or {}).get(f))
+                            for f in ("codename", "port_now", "port_old")},
         }
+    return out
+
+
+def _count(values: Iterable[Any]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for v in values:
+        if v is not None:
+            out[str(v)] = out.get(str(v), 0) + 1
     return out
 
 
@@ -1089,6 +1604,9 @@ def paired(rows: list[dict[str, Any]], base: str = "production") -> dict[str, An
         "wall_s": lambda r: float(r.get("wall_s") or 0.0),
         "ttft_total_s": lambda r: float(sum(x for x in (r.get("ttft_s") or []) if x)),
         "tool_calls": lambda r: float(r.get("tool_calls") or 0),
+        "turn_start_wall_s": lambda r: float(r.get("turn_start_wall_s") or 0.0),
+        "summary_codename": lambda r: float(bool((r.get("summary_has") or {}).get("codename"))),
+        "summary_port_now": lambda r: float(bool((r.get("summary_has") or {}).get("port_now"))),
     }
     out: dict[str, Any] = {}
     for arm in ARMS:
@@ -1108,6 +1626,15 @@ def paired(rows: list[dict[str, Any]], base: str = "production") -> dict[str, An
             res[name] = {k: ci[k] for k in ("diff", "lo", "hi", "significant")}
         out[arm] = res
     return out
+
+
+def resolve_shape(shape: str, arms: list[str]) -> str:
+    """`auto` is `conversation` when every arm is a summary arm (the only
+    shape on which their summary fires), else the #600 `tool` shape."""
+    if shape != "auto":
+        return shape
+    return "conversation" if arms and all(ARMS[x].get("expects_summary")
+                                          for x in arms) else "tool"
 
 
 def _load_discovered(snapshot: Path) -> list:
@@ -1139,6 +1666,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--probe", choices=("early", "late"), default="late",
                     help="late: the question arrives in a tool result, after "
                          "the in-turn pass has had its chance to clear")
+    ap.add_argument("--shape", choices=("auto",) + SHAPES, default="auto",
+                    help="session shape; auto = conversation when every arm is a "
+                         "summary arm, else tool (see SUMMARY ARMS)")
     ap.add_argument("--data-root", required=True,
                     help="scratch LLOYD_DATA root (sessions, spills, event logs)")
     ap.add_argument("--tools-snapshot", required=True)
@@ -1159,10 +1689,15 @@ def main(argv: list[str] | None = None) -> int:
     sizes = [int(x) for x in a.sizes.split(",")]
     depths = [float(x) for x in a.depths.split(",")]
     arms = [x for x in a.arms.split(",") if x]
+    unknown = [x for x in arms if x not in ARMS]
+    if unknown:
+        print(f"unknown arm(s): {unknown}", file=sys.stderr)
+        return 2
+    shape = resolve_shape(a.shape, arms)
     corpus = _corpus_files()
 
     sessions = [build_session(a.seed + 1000 * si + i, size, depths[i % len(depths)],
-                              corpus=corpus, probe=a.probe)
+                              corpus=corpus, probe=a.probe, shape=shape)
                 for si, size in enumerate(sizes) for i in range(a.sessions)]
     out_path = Path(a.out)
     rows: list[dict] = []
@@ -1181,8 +1716,12 @@ def main(argv: list[str] | None = None) -> int:
                                   base_url=a.base_url, dry=a.dry)
                 rows.append(r)
                 print(json.dumps({k: r.get(k) for k in (
-                    "session", "arm", "status", "verdict", "tool_calls",
-                    "ttft_first_s", "wall_s", "run_cache_hit")}, default=str), flush=True)
+                    "session", "arm", "status", "reason", "verdict", "tool_calls",
+                    "ttft_first_s", "wall_s", "run_cache_hit", "summary_has")}
+                    | {"summarize_outcome": (r.get("fired") or {}).get("summarize_outcome"),
+                       "summarizer_calls": (r.get("summarizer") or {}).get("calls"),
+                       "warmup": (r.get("warmup") or {}).get("status")},
+                    default=str), flush=True)
                 _write(out_path, a, sessions, system_prompt, rows)
     asyncio.run(go())
     _write(out_path, a, sessions, system_prompt, rows)
@@ -1198,6 +1737,7 @@ def _write(out_path: Path, a, sessions, system_prompt, rows):
         "args": {k: v for k, v in vars(a).items() if k not in ("data_root",)},
         "system_prompt_sha256": hashlib.sha256(system_prompt.encode()).hexdigest(),
         "sessions": [{"key": s.key, "seed": s.seed, "target_tokens": s.target_tokens,
+                      "shape": s.meta.get("shape"),
                       "depth": s.depth, "est_tokens": s.est_tokens, "sha256": s.sha256,
                       "planted": {"passphrase": s.planted.passphrase,
                                   "port": s.planted.port,
@@ -1212,6 +1752,8 @@ def _write(out_path: Path, a, sessions, system_prompt, rows):
         "paired_vs_production_by_size": {
             str(t): paired([r for r in rows if r.get("target_tokens") == t])
             for t in sorted({r.get("target_tokens") for r in rows if r.get("target_tokens")})},
+        # The D2 pair: persisted against legacy, over the sessions both kept.
+        "paired_vs_summary_legacy": paired(rows, base="summary_legacy"),
         "rows": rows,
     }
     out_path.write_text(json.dumps(doc, indent=1, default=str))
