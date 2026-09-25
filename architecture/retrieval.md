@@ -244,6 +244,7 @@ the gold set. `eval/measurements/entity-anchoring-2026-09-25.md`.
 | djev orders the facts leg (#1470) | fact_entity_recall +0.008 (1 query), +280 ms | no gain |
 | pools past one canvas: 48/64 rows, anchored, naive or server-`sequential` chunks (#1474) | 64 rows doc_hit +0.058–0.070 and doc_recall +0.06–0.09, but MRR −0.064 to −0.067 (clear of zero) and +0.5 s; `sequential` MRR −0.137 | coverage bought with head order; slower |
 | residual-quantized entity codes, shared-prefix-depth seed prior (#1497) | codes are finer than folders and carry edges (d2 edge lift 21.6 vs folders 3.8) but plain cosine at the same selectivity carries 62.2; as a prior on the semantic seeds, α 0.02–0.2 → 20–23 anchorless vs 19 at α 0 | quantized cosine, strictly less than the cosine it quantizes (`eval/measurements/rq-entity-codes-2026-09-25.md`) |
+| PPR over the KG + entity→doc mentions, fused into the pool (#1492, scoped) | multi-hop+hard n=31: recovers 0/9 (lexical seeds) and 1/9 (semantic seeds) of the doc misses; equal RRF doc_hit −0.13 [−0.26, −0.03] / −0.10, weighted RRF Δ 0, MRR +0.01 [−0.09, +0.12]; +0.1 s | the entity leg's ceiling was the seeds, not propagation (`eval/measurements/ppr-graph-leg-2026-09-25.md`) |
 | RRF `lexWeight` 0.5–2.0, floors 1/1/1 or none (#1475) | 1.5–2.0: doc_recall +0.053 [+0.015, +0.099] with MRR −0.035; 0.5–0.75: doc_hit −0.081 | mixed or worse |
 
 ## 5. What the gold repair did to the numbers
