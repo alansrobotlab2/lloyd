@@ -31,7 +31,7 @@ from agent_mcp._shared import _ENTITY_STOPWORDS
 from agent_mcp.facts import _extract_entities_from_query, _get_facts_sync
 from agent_mcp.session import _load_session_index, _score_session
 from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords, strip_qmd_snippet
-from prompt_builder import PROMPT_BUDGET_CHARS, prompt_token_estimate
+from prompt_builder import PROMPT_BUDGET_CHARS, prompt_token_estimate, skills_push_enabled
 from app.event_log import log_event
 from app.sessions_io import ambient_clock_stamp
 
@@ -651,8 +651,15 @@ def _skill_injection_plan(scored: list[tuple[float, dict]]) -> list[tuple[float,
     skipped. `scored` must already be `_injectable_skills(...)` output: the
     first entry gets the full body, and a second gets an excerpt only at or
     above `SKILL_THRESHOLD_SECOND`.
+
+    `prefetch.skills.push: false` (P5's pull arm) plans nothing: no body, no
+    excerpt, so the turn gets the index and `skills_read`. The offer rows are
+    still written — `_emit_skill_match_events` takes the offer set separately —
+    and every one of them reads `landed: false`, which is the truth.
     """
     plan: list[tuple[float, dict, str]] = []
+    if not skills_push_enabled():
+        return plan
     if scored:
         plan.append((scored[0][0], scored[0][1], "body"))
     if len(scored) >= 2 and scored[1][0] >= SKILL_THRESHOLD_SECOND:

@@ -778,3 +778,43 @@ recorded nothing.
   applied but never folded.
 - `tests/test_compaction_manual.py`,
   `tests/test_session_queue.py::test_a_compact_request_waits_behind_the_running_turn_and_a_row_appended_meanwhile_survives`.
+
+### P5 — skills index with descriptions; body by tool (build half; deploy gated on the eval)
+
+Ships with today's behaviour byte for byte; the eval decides the flips.
+
+- **Index** (`prompt_builder._load_skills_index` → `_skills_index_lines`,
+  `skills.index` in config.yaml). `descriptions: false` (default) is the
+  names-only line, pinned by `test_off_is_bytewise_today`. On: one
+  `- name — description` line per skill, the description being `/api/skills`'
+  field whitespace-folded and clipped at `max_description_chars` (100); who gets
+  one is decided by 30-day use (`offers + loaded + loaded_by_read`, scanned once
+  per UTC day per process, ~0.8 s) under `budget_chars` (12,000); the tail is
+  names-only, no skill is ever dropped, and the lines render alphabetically so a
+  re-rank moves the cached prefix at most daily and says nothing by position.
+  On the live vault (189 skills) the index is 11,981 chars with 78 described.
+- **Pull arm** (`prefetch.skills.push`, default `true`). `false` makes
+  `prefetch._skill_injection_plan` plan nothing — no body, no excerpt — while
+  `_emit_skill_match_events` still writes every offer (`landed: false`), and
+  the index note becomes "load it with skills_read(name)".
+  `prompt_builder.skills_push_enabled` is the one reader for both.
+- **Telemetry.** `skill_injection_counts` gains `loaded_by_read {skill: n}` and
+  `reads` — `skills_read` calls off `brain1.tool_call_proposed` rows — as a
+  separate mapping so offer entries keep their shape and `no_telemetry` stays
+  about offers.
+- **Lint.** `scripts/skill_lint.py` DESCRIPTION bucket, measured with the
+  index's own rule and clip: `missing` (name-only; a finding) and `clipped`
+  (advisory). Premise correction: the live vault has **0** skills without a
+  description (the plan's 48 is stale); 172 of 189 exceed the 100-char clip
+  (mean 191 chars), which is what the bucket now surfaces.
+- **Eval.** `eval/run_prefetch_cost_eval.py` arms `desc_push` (descriptions
+  on, push on) and `desc_pull` (descriptions on, push off, the turn's `<skill>`
+  section dropped — what an empty plan renders), each under its own system
+  prompt built by the production builder with the two keys swapped in and
+  charged past its own probed prefix; `--queries eval/skill_match_queries.yaml`
+  loads the 51 labelled turns; column `right_skill_reached` (injected, or
+  `skills_read(expected)` in the trace), contrasts against `injected`, and
+  `pull_lost_vs_push` for the decision rule. Not run live yet:
+  `--n 100 --arms injected,injected_aa,desc_push,desc_pull --label skills-index`
+  in a paused-pool window. `tests/test_skills_index_descriptions.py`,
+  `tests/test_skill_injection_telemetry.py`.

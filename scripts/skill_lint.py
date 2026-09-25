@@ -63,6 +63,15 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from agent_mcp.skills import iter_active_skills, skill_roots  # noqa: E402
+# P5: the DESCRIPTION bucket measures what the system prompt's skill index can
+# say about each skill, so it reads the index's own description rule and clip
+# rather than restating them (a second rule is how the index and the Skills page
+# drifted before #1294).
+from prompt_builder import (  # noqa: E402
+    _skills_index_settings, clip_skill_description, skill_index_description)
+
+#: Category name of the P5 bucket, used as the table row and the payload key.
+DESCRIPTION_CATEGORY = "DESCRIPTION"
 
 REPORT_PATH = Path.home() / "obsidian" / "autonomy" / "skill-lint-report.md"
 
@@ -767,6 +776,8 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
     phantom: list[dict] = []
     missing_script: list[dict] = []
     injection: list[dict] = []
+    description: list[dict] = []
+    index_clip = _skills_index_settings()["max_description_chars"]
     authors: Counter = Counter()
     unrecorded: list[str] = []
     sizes: list[dict] = []
@@ -798,6 +809,18 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
             authors[job] += 1
         else:
             unrecorded.append(entry.name)
+
+        # Before the dead check: a dead skill is still in the prompt's index, and
+        # the index shows it by name alone, which is this bucket's finding too.
+        index_desc = skill_index_description(fm)
+        if not index_desc or len(index_desc) > index_clip:
+            description.append({
+                "name": entry.name,
+                "path": str(skill_file),
+                "reason": "missing" if not index_desc else "clipped",
+                "chars": len(index_desc),
+                "index_text": clip_skill_description(index_desc, index_clip),
+            })
 
         is_dead, dead_reasons = check_dead(fm, yaml_err)
         if is_dead:
@@ -890,6 +913,11 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
         "phantom": phantom,
         "missing_script": missing_script,
         "injection": injection,
+        # P5. `missing` renders name-only in a descriptions-on index and is a
+        # finding; `clipped` is cut at `index_clip` characters, reported so the
+        # first sentence can be front-loaded, and does not enter the verdict.
+        "description": description,
+        "description_clip": index_clip,
         "authorship": {
             "by_job": dict(sorted(authors.items())),
             "machine_written": sum(n for j, n in authors.items()
@@ -936,6 +964,8 @@ CATEGORY_TRUST: dict[str, tuple[str, str]] = {
                             "Clean verdict; the PHANTOM_EXEMPT skills are never scanned"),
     "MISSING_SCRIPT": ("yes", "the test suite asserts the corpus-wide count, so an "
                               "absent path has already turned the tests red"),
+    DESCRIPTION_CATEGORY: ("yes", "measured over every live skill's parsed description "
+                           "with the index's own rule and clip (prompt_builder)"),
     INJECTION_CATEGORY: ("yes", "every line of every skill is matched, but a match is a "
                                 "shape, not a risk — a regex misses paraphrase, so 0 "
                                 "means 'no match', never 'no risk'"),
@@ -1015,6 +1045,10 @@ def render_report(result: dict) -> str:
     n_scripts = len(result.get("missing_script", []))
     injection = result.get("injection", [])
     n_inj = len(injection)
+    desc_rows = result.get("description", [])
+    desc_missing = [d for d in desc_rows if d.get("reason") == "missing"]
+    desc_clipped = [d for d in desc_rows if d.get("reason") == "clipped"]
+    desc_clip = result.get("description_clip", "?")
     # Per-rule counts, computed from the findings rather than stored beside them,
     # so a rule that ran and found nothing and a rule that never ran both read as
     # 0 and neither can be silently dropped from the table below.
@@ -1042,6 +1076,9 @@ def render_report(result: dict) -> str:
         ("STALE", f">{STALE_DAYS}d mtime, status ≠ active", n_stale, "review for removal"),
         ("PHANTOM_TOOL", "names a tool that does not exist", n_phantom, "replace with the real tool name"),
         ("MISSING_SCRIPT", "names a repo script absent from the tree", n_scripts, "land the script or drop the citation"),
+        (DESCRIPTION_CATEGORY, f"skill index shows it name-only ({len(desc_missing)}) "
+         f"or cut at {desc_clip} chars ({len(desc_clipped)})", len(desc_rows),
+         f"write a description; front-load its trigger in the first {desc_clip} chars"),
         (INJECTION_CATEGORY, "instructs acting on remote instructions/config, or pipes remote content into a shell",
          n_inj, "rewrite to name a local/pinned step, or list in INJECTION_ALLOWLIST with a reason"),
     ]
@@ -1239,8 +1276,26 @@ def render_report(result: dict) -> str:
                              f"| {hit['line_no']} | `{quoted[:160]}` | {reason} |")
         lines.append("")
 
+    if desc_rows:
+        lines.append(f"## {DESCRIPTION_CATEGORY} — what the skill index can say "
+                     f"(clip {desc_clip} chars)")
+        lines.append("")
+        lines.append("A skill with no description is advertised by name alone when "
+                     "`skills.index.descriptions` is on; a clipped one shows its "
+                     "first characters only. Clipped rows are advisory.")
+        lines.append("")
+        lines.append("| skill | reason | chars | index shows |")
+        lines.append("|---|---|---|---|")
+        ordered = desc_missing + sorted(desc_clipped, key=lambda d: -int(d.get("chars", 0)))
+        for d in ordered[:40]:
+            shown = (d.get("index_text") or "*(name only)*").replace("|", "\\|")
+            lines.append(f"| `{d['name']}` | {d['reason']} | {d.get('chars', 0)} | {shown} |")
+        if len(ordered) > 40:
+            lines.append(f"| … | {len(ordered) - 40} more | | |")
+        lines.append("")
+
     if not (n_dead or n_missing or n_drift or n_dup or n_stale or n_phantom
-            or n_scripts or n_inj):
+            or n_scripts or n_inj or desc_missing):
         blind = untrustworthy_categories()
         if blind:
             # Every count is 0 and some of them could not have been anything
@@ -1303,6 +1358,7 @@ def main() -> int:
           f"phantom={len(result.get('phantom', []))}, "
           f"missing_script={n_scripts}, "
           f"injection={len(result.get('injection', []))}, "
+          f"description={len(result.get('description', []))}, "
           f"machine_written={(result.get('authorship') or {}).get('machine_written', 0)}, "
           f"unrecorded_author={len((result.get('authorship') or {}).get('unrecorded', []))}")
     return 0

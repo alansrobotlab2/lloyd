@@ -1376,6 +1376,21 @@ skills:
   directories:
   - ~/obsidian/skills
   - ~/lloyd/skills
+  # P5: the system prompt's skill index. descriptions: false is today's
+  # names-only line, byte for byte. On, the 30-day most-used skills get a
+  # `— description` clipped at max_description_chars while the whole index
+  # fits budget_chars; lines render alphabetically. Decided by
+  # eval/run_prefetch_cost_eval.py --arms injected,desc_push,desc_pull.
+  index:
+    descriptions: false
+    budget_chars: 12000
+    max_description_chars: 100
+# P5 pull arm: push: false stops injecting a matched skill's body into the
+# turn's <context> (offers are still logged) and the index note says to load
+# skills with skills_read. true is today's behaviour.
+prefetch:
+  skills:
+    push: true
 workers:
   db_path: ${LLOYD_DATA}/workers.db
   enabled: true

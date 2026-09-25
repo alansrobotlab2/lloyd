@@ -56,7 +56,15 @@ SKILL_MATCH_EVENT = "prefetch.skill_match"
 #: STALE bucket) rather than a constant hidden here.
 DEFAULT_DAYS = 30
 
-__all__ = ["SKILL_MATCH_EVENT", "DEFAULT_DAYS", "skill_injection_counts"]
+#: The event a tool call is logged under (`app/routers/messages.py` and
+#: `app/run_recorder.py` both write it), and the tool whose calls are a *pull*:
+#: the model asking for a skill's body itself. P5's pull arm injects no body, so
+#: without this count its skills would read as never loaded.
+TOOL_CALL_EVENT = "brain1.tool_call_proposed"
+SKILLS_READ_TOOL = "skills_read"
+
+__all__ = ["SKILL_MATCH_EVENT", "DEFAULT_DAYS", "TOOL_CALL_EVENT",
+           "SKILLS_READ_TOOL", "skill_injection_counts"]
 
 _SUFFIX = ".events.jsonl"
 
@@ -77,7 +85,17 @@ def skill_injection_counts(root, days: int = DEFAULT_DAYS) -> dict:
          "skipped": <rows unusable>, "no_telemetry": <bool>,
          "skills": {<name>: {"offers": n, "loaded": n, "ignored": n,
                              "max_score": f}},
+         "loaded_by_read": {<name>: n}, "reads": <skills_read calls counted>,
          "note": <one-line state of the window>}
+
+    `loaded_by_read` (P5) counts `skills_read(name=…)` calls in the window, off
+    the `brain1.tool_call_proposed` rows — the same rows
+    `app.uptake.skills_read_by_session` parses. It is a separate mapping rather
+    than a fourth key in each `skills` entry so an offer row stays exactly what
+    it was, and so a skill that was read but never offered does not appear in
+    `skills` as a measured zero-offer skill. It does not move `no_telemetry`,
+    which is about the offer rows: a window with reads and no offers still has
+    unmeasured offer counts.
 
     `skipped` is how many of this event type's rows the reader could not use at
     all — a line that failed to parse, an undated row, or one with no skill name
@@ -107,6 +125,8 @@ def skill_injection_counts(root, days: int = DEFAULT_DAYS) -> dict:
     events = 0
     skipped = 0
     sessions: set[str] = set()
+    by_read: dict[str, int] = {}
+    reads = 0
     for path in sorted(Path(root).glob(f"*{_SUFFIX}")):
         session_id = path.name[: -len(_SUFFIX)]
         with path.open("r", encoding="utf-8") as fh:
@@ -124,6 +144,14 @@ def skill_injection_counts(root, days: int = DEFAULT_DAYS) -> dict:
                     # of nothing-but-garbage read as no telemetry rather than as
                     # a healthy zero offers.
                     skipped += 1
+                    continue
+                if isinstance(row, dict) and row.get("event") == TOOL_CALL_EVENT:
+                    name = _read_skill_name(row.get("data"))
+                    if name is not None:
+                        when = _row_time(row.get("ts"))
+                        if when is not None and since <= when <= until:
+                            by_read[name] = by_read.get(name, 0) + 1
+                            reads += 1
                     continue
                 if not isinstance(row, dict) or row.get("event") != SKILL_MATCH_EVENT:
                     continue        # another event type: not this reader's business
@@ -171,6 +199,8 @@ def skill_injection_counts(root, days: int = DEFAULT_DAYS) -> dict:
         # undated, out-of-window or unattributable.
         "no_telemetry": events == 0,
         "skills": counts,
+        "loaded_by_read": by_read,
+        "reads": reads,
         "note": (
             f"no telemetry: {SKILL_MATCH_EVENT} appears in none of the rows "
             f"under this root inside the window — every offer/ignore count "
@@ -180,6 +210,25 @@ def skill_injection_counts(root, days: int = DEFAULT_DAYS) -> dict:
             f"{len(sessions)} sessions"
         ),
     }
+
+
+def _read_skill_name(data):
+    """The skill a `skills_read` tool-call row asked for, or None.
+
+    `data.args` is the call's arguments as a JSON *string* (a dict is accepted
+    too); anything that is not a `skills_read` call with a non-empty `name` is
+    not a read this reader can attribute.
+    """
+    if not isinstance(data, dict) or data.get("name") != SKILLS_READ_TOOL:
+        return None
+    args = data.get("args")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            return None
+    name = args.get("name") if isinstance(args, dict) else None
+    return name if isinstance(name, str) and name else None
 
 
 def _row_defect(row: dict, when):

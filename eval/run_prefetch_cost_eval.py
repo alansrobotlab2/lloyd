@@ -21,6 +21,29 @@ the production model, system prompt and tool surface under several arms:
                runs of the SAME prompt disagree, so a delta can be read against
                the eval's own noise floor rather than against zero.
 
+P5 adds two arms that change the SYSTEM prompt as well as the turn, and a query
+set with a known right skill (`--queries eval/skill_match_queries.yaml`: each
+record's `turn` is the query, `expected_skills` the answer; expected-empty turns
+are skipped):
+
+  desc_push    `skills.index.descriptions: true` (the index says what each
+               skill is for) with today's body injection — the rendered turn;
+  desc_pull    the same index with `prefetch.skills.push: false` and its note
+               ("load it with skills_read(name)"), and the turn with its
+               `<skill>` section removed — exactly what `_format_context`
+               renders when the injection plan is empty.
+
+`right_skill_reached` is True when an expected skill was injected into the
+turn (`<skill name="…">` in the prompt) OR the model called
+`skills_read(<expected>)`; None on a query with no expected skill. Each arm's
+first request is charged past ITS OWN system prefix (probed per variant), so
+the index's size is not billed per turn: in production it is cached prefix.
+Decision rule (plan 3.5): ship desc_push if its `right_skill_reached` is not
+below injected's by more than the A/A noise and the judge is not lower; ship
+desc_pull on top only if its `right_skill_reached` is at least injected's and
+mean `prefill_tokens` drops ≥ 15 %; if pull loses ≥ 2 expected skills push
+found (`pull_lost_vs_push`), keep push.
+
 Cost is taken on `prefill_tokens`: tokens each request added past the one
 before it (the first request counts everything after the fixed system+tools
 prefix). It is what a warm prefix cache must still prefill, and it is
@@ -57,6 +80,8 @@ the live store, and never `LLOYD_DATA`) to render `<facts>`.
 Usage:
     .venvs/lloyd/bin/python eval/run_prefetch_cost_eval.py            # 20 x 4 arms
     .venvs/lloyd/bin/python eval/run_prefetch_cost_eval.py --n 2 --arms injected,suppressed
+    .venvs/lloyd/bin/python eval/run_prefetch_cost_eval.py --queries eval/skill_match_queries.yaml \\
+        --n 100 --arms injected,injected_aa,desc_push,desc_pull --label skills-index   # P5
     .venvs/lloyd/bin/python eval/run_prefetch_cost_eval.py --summarize eval/measurements/x.json
 """
 from __future__ import annotations
@@ -85,9 +110,18 @@ ARM_INJECTED = "injected"
 ARM_SUPPRESSED = "suppressed"
 ARM_NO_SKILL = "no_skill"
 ARM_AA = "injected_aa"
-ARMS = (ARM_INJECTED, ARM_SUPPRESSED, ARM_NO_SKILL, ARM_AA)
+ARM_DESC_PUSH = "desc_push"
+ARM_DESC_PULL = "desc_pull"
+ARMS = (ARM_INJECTED, ARM_SUPPRESSED, ARM_NO_SKILL, ARM_AA, ARM_DESC_PUSH, ARM_DESC_PULL)
+#: What a bare run does: the #562 arms. The P5 arms are asked for by name.
+DEFAULT_ARMS = (ARM_INJECTED, ARM_SUPPRESSED, ARM_NO_SKILL, ARM_AA)
 #: Arms whose prompt is the injected rendering minus these sections.
-ABLATIONS = {ARM_NO_SKILL: ("skill",)}
+ABLATIONS = {ARM_NO_SKILL: ("skill",), ARM_DESC_PULL: ("skill",)}
+#: Arms that run under a different system prompt: the config they build it
+#: under (`skills.index.descriptions`, `prefetch.skills.push`). Absent = the
+#: production prompt as config.yaml builds it.
+SYSTEM_VARIANTS = {ARM_DESC_PUSH: {"descriptions": True, "push": True},
+                   ARM_DESC_PULL: {"descriptions": True, "push": False}}
 
 COST_METRIC = "prefill_tokens"
 LEGACY_N = 20
@@ -112,6 +146,69 @@ def arm_prompt(rendered: str, query: str, arm: str) -> str:
     if arm in ABLATIONS:
         return drop_sections(rendered, ABLATIONS[arm])
     return rendered
+
+
+def right_skill_reached(prompt: str, skills_read: list[str],
+                        expected_skills: list[str]) -> bool | None:
+    """P5: did an expected skill reach the turn — injected, or pulled by tool?
+
+    None when the query names no expected skill, so an unlabelled query is not
+    averaged in as a miss.
+    """
+    expected = [s for s in expected_skills or [] if s]
+    if not expected:
+        return None
+    injected = any(f'<skill name="{s}"' in prompt for s in expected)
+    return injected or any(s in expected for s in skills_read or [])
+
+
+def load_queries(path) -> list[dict]:
+    """Queries in this eval's shape from either query file.
+
+    `vault_recall_queries.yaml` (`queries:`) is used as is. The skill-match set
+    (`records:`) maps `turn` → `query` and keeps `expected_skills`; its
+    expected-empty turns are dropped, since `right_skill_reached` has nothing to
+    find there.
+    """
+    data = yaml.safe_load(Path(path).read_text()) or {}
+    if data.get("queries") is not None:
+        return list(data.get("queries") or [])
+    out = []
+    for rec in data.get("records") or []:
+        expected = [s for s in rec.get("expected_skills") or [] if s]
+        if not expected:
+            continue
+        out.append({"id": rec["id"], "query": rec["turn"], "category": "skill",
+                    "expect_docs": [], "expected_skills": expected})
+    return out
+
+
+def system_prompt_for(arm: str) -> str:
+    """The system prompt one arm runs under — production's unless it is a variant.
+
+    The variant is built by the production builder with the two config keys
+    swapped in for the call and restored after, so the arm measures exactly
+    what flipping those keys in config.yaml would send.
+    """
+    from app.config import CONFIG
+    from prompt_builder import build_system_prompt
+
+    variant = SYSTEM_VARIANTS.get(arm)
+    if variant is None:
+        return build_system_prompt()
+    skills = CONFIG.setdefault("skills", {})
+    prefetch_cfg = CONFIG.setdefault("prefetch", {})
+    saved = (skills.get("index"), prefetch_cfg.get("skills"))
+    try:
+        skills["index"] = dict(saved[0] or {}, descriptions=variant["descriptions"])
+        prefetch_cfg["skills"] = dict(saved[1] or {}, push=variant["push"])
+        return build_system_prompt()
+    finally:
+        for block, key, old in ((skills, "index", saved[0]), (prefetch_cfg, "skills", saved[1])):
+            if old is None:
+                block.pop(key, None)
+            else:
+                block[key] = old
 
 
 def doc_hit(block: str, expect_docs: list[str]) -> bool:
@@ -213,6 +310,9 @@ def summarize(records: list[dict]) -> dict:
             # Absent (an arm recovered from a log) is not False.
             "reached_expected_rate": _mean(int(x["reached_expected"]) for x in clean
                                            if x.get("reached_expected") is not None),
+            # P5: None on a query with no expected skill, so it is not a miss.
+            "right_skill_reached_rate": _mean(int(x["right_skill_reached"]) for x in clean
+                                              if x.get("right_skill_reached") is not None),
             "completed_rate": _mean(int(x["completed"]) for x in clean
                                     if x.get("completed") is not None),
         }
@@ -230,12 +330,16 @@ def summarize(records: list[dict]) -> dict:
     contrasts = {}
     for name, a_arm, b_arm in (("suppressed_minus_injected", ARM_INJECTED, ARM_SUPPRESSED),
                                ("no_skill_minus_injected", ARM_INJECTED, ARM_NO_SKILL),
-                               ("aa_minus_injected", ARM_INJECTED, ARM_AA)):
+                               ("aa_minus_injected", ARM_INJECTED, ARM_AA),
+                               ("desc_push_minus_injected", ARM_INJECTED, ARM_DESC_PUSH),
+                               ("desc_pull_minus_injected", ARM_INJECTED, ARM_DESC_PULL),
+                               ("desc_pull_minus_desc_push", ARM_DESC_PUSH, ARM_DESC_PULL)):
         if a_arm not in arms or b_arm not in arms:
             continue
         c = {}
         for key in ("prefill_tokens", "uncached_prompt_tokens", "output_tokens",
-                    "iterations", "tool_calls", "seconds", "judge_score"):
+                    "iterations", "tool_calls", "seconds", "judge_score",
+                    "right_skill_reached"):
             a, b = _paired(records, a_arm, b_arm, key)
             if len(a) >= 2:
                 ci = paired_bootstrap_ci(a, b)
@@ -243,6 +347,12 @@ def summarize(records: list[dict]) -> dict:
                           for k, v in ci.items() if k in ("diff", "lo", "hi", "p", "n", "significant")}
         contrasts[name] = c
     out["contrasts"] = contrasts
+
+    # P5's guard on the pull arm: expected skills push found and pull did not.
+    a, b = _paired(records, ARM_DESC_PUSH, ARM_DESC_PULL, "right_skill_reached")
+    if a:
+        out["pull_lost_vs_push"] = sum(1 for x, y in zip(a, b) if x and not y)
+        out["pull_gained_vs_push"] = sum(1 for x, y in zip(a, b) if y and not x)
 
     # Marginal value per injected token: prefill the block removed downstream,
     # per token it cost up front. > 0 pays for itself in prefill alone.
@@ -347,6 +457,7 @@ async def run_arm(prompt: str, *, options, timeout_s: float, expect_docs: list[s
 
     iterations: list[dict] = []
     tools: list[str] = []
+    skills_read: list[str] = []
     seen = prompt
     answer = ""
     stop = None
@@ -363,6 +474,15 @@ async def run_arm(prompt: str, *, options, timeout_s: float, expect_docs: list[s
                 elif kind == "tool_call":
                     tools.append(evt.get("name") or "?")
                     seen += "\n" + str(evt.get("args_json") or "")
+                    if evt.get("name") == "skills_read":
+                        args = evt.get("args_dict")
+                        if not isinstance(args, dict):
+                            try:
+                                args = json.loads(evt.get("args_json") or "{}")
+                            except (TypeError, ValueError):
+                                args = {}
+                        if isinstance(args, dict) and args.get("name"):
+                            skills_read.append(str(args["name"]))
                 elif kind == "tool_result":
                     seen += "\n" + str(evt.get("content") or "")[:20000]
                 elif kind == "result":
@@ -376,6 +496,7 @@ async def run_arm(prompt: str, *, options, timeout_s: float, expect_docs: list[s
         "_iterations": iterations,
         "tool_calls": len(tools),
         "tools": tools,
+        "skills_read": skills_read,
         "answer": answer,
         "stop_reason": stop,
         "completed": stop in ("stop", "end_turn") and bool(answer.strip()),
@@ -405,7 +526,6 @@ async def run_eval(queries: list[dict], *, arms: tuple[str, ...], max_turns: int
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
     from prefetch import prefetch_context, split_injected
-    from prompt_builder import build_system_prompt
 
     # Asked of the running aggregator, not assumed from this checkout: a
     # `pt-eval-` id is only a sandbox if the aggregator serving it enforces one.
@@ -413,20 +533,33 @@ async def run_eval(queries: list[dict], *, arms: tuple[str, ...], max_turns: int
     await require_tool_sandbox()
 
     alias, base_url, env = _endpoint()
-    system_prompt = build_system_prompt()
+    # One system prompt per variant the requested arms need (P5's arms change it).
+    prompts = {arm: system_prompt_for(arm) for arm in arms}
     disallowed = _get_disallowed_tools()
     hkw = _get_harness_kwargs()
     hooks = HookRegistry()
     install_default_safety_hook(hooks)
 
-    def options_factory(sid: str, *, max_turns: int = max_turns) -> RunOptions:
+    def options_factory(sid: str, *, max_turns: int = max_turns,
+                        arm: str = ARM_INJECTED) -> RunOptions:
+        system_prompt = prompts.get(arm) or system_prompt_for(arm)
         return RunOptions(model=alias, base_url=base_url, system_prompt=system_prompt,
                           max_turns=max_turns, mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
                           disallowed_tools=disallowed, env=env, session_id=sid,
                           surface="chat", priority=priority, hooks=hooks, **hkw)
 
-    prefix = await _system_prefix_tokens(options_factory, new_session_id("probe", "prefix"))
-    print(f"[info] system+tools prefix ≈ {prefix} tokens; {len(queries)} queries x {arms}")
+    # Probed once per distinct system prompt: an arm is charged past its own.
+    by_prompt: dict[str, int] = {}
+    prefixes: dict[str, int] = {}
+    for arm in arms:
+        text = prompts[arm]
+        if text not in by_prompt:
+            by_prompt[text] = await _system_prefix_tokens(
+                lambda sid, **kw: options_factory(sid, arm=arm, **kw),
+                new_session_id("probe", f"prefix-{arm}"))
+        prefixes[arm] = by_prompt[text]
+    prefix = prefixes.get(ARM_INJECTED, next(iter(prefixes.values()), 0))
+    print(f"[info] system+tools prefix ≈ {prefixes} tokens; {len(queries)} queries x {arms}")
 
     # Warm pass, discarded. A cold process drops whole sections at the 300 ms
     # budget (the first smoke run rendered inner-voice with no <skill> at all,
@@ -448,6 +581,7 @@ async def run_eval(queries: list[dict], *, arms: tuple[str, ...], max_turns: int
         block = rendered[: split["injected_chars"]]
         rec = {"id": spec["id"], "query": q, "category": spec.get("category"),
                "expect_docs": spec.get("expect_docs") or [],
+               "expected_skills": spec.get("expected_skills") or [],
                "prefetch_ms": round((time.perf_counter() - t0) * 1000),
                "rendered": rendered, "sections": split["injected_sections"],
                "section_tokens": split["injected_section_tokens"],
@@ -458,6 +592,9 @@ async def run_eval(queries: list[dict], *, arms: tuple[str, ...], max_turns: int
         rec["gold_paths"] = [str(p.relative_to(VAULT)) for p in gold]
         rec["_gold"] = "\n\n".join(f"### {p.relative_to(VAULT)}\n{p.read_text(errors='replace')[:3500]}"
                                    for p in gold)
+        if not gold and rec["expected_skills"]:
+            # A skill query's reference is the skill it should have used.
+            rec["_gold"] = _skill_gold(rec["expected_skills"])
         records.append(rec)
         # The A/A arm runs after its query's other arms, so a shared prefix is
         # never cached by a run that has not happened yet.
@@ -474,9 +611,12 @@ async def run_eval(queries: list[dict], *, arms: tuple[str, ...], max_turns: int
         async with gate:
             prompt = arm_prompt(rec["rendered"], rec["query"], arm)
             inj = split_injected(prompt, rec["query"])
-            out = await run_arm(prompt, options=options_factory(new_session_id(rec["id"], arm)),
+            out = await run_arm(prompt, options=options_factory(new_session_id(rec["id"], arm),
+                                                                arm=arm),
                                 timeout_s=timeout_s, expect_docs=rec["expect_docs"])
-            out.update(arm_cost(out.pop("_iterations"), system_prefix_tokens=prefix))
+            out.update(arm_cost(out.pop("_iterations"), system_prefix_tokens=prefixes[arm]))
+            out["right_skill_reached"] = right_skill_reached(
+                prompt, out.get("skills_read") or [], rec["expected_skills"])
             out["injected_tokens"] = inj["injected_tokens"]
             out["sections"] = inj["injected_sections"]
             j = await judge(base_url, alias, rec["query"], rec["_gold"], out["answer"],
@@ -504,6 +644,7 @@ async def run_eval(queries: list[dict], *, arms: tuple[str, ...], max_turns: int
         if ARM_INJECTED in a and ARM_SUPPRESSED in a:
             rec["marginal"] = marginal(a[ARM_INJECTED], a[ARM_SUPPRESSED], hit=rec["doc_hit"])
     config = {"model": alias, "base_url": base_url, "system_prefix_tokens": prefix,
+              "system_prefix_tokens_by_arm": prefixes,
               "arms": list(arms), "max_turns": max_turns, "timeout_s": timeout_s,
               "concurrency": concurrency, "seed": seed, "surface": "chat",
               "priority": priority,
@@ -534,6 +675,16 @@ def merge_artifacts(datas: list[dict], *, compact: bool = True) -> dict:
     return {"label": "merged", "sources": [d.get("label") + "@" + str(d.get("ran_at")) for d in datas],
             "configs": [d.get("config") for d in datas],
             "summary": summarize(records), "records": records}
+
+
+def _skill_gold(names: list[str], limit: int = 2) -> str:
+    """The expected skills' SKILL.md, clipped, as the judge's reference."""
+    from agent_mcp.skills import iter_active_skills
+
+    wanted = list(names)[:limit]
+    found = {a.name: a.skill_file for a in iter_active_skills() if a.name in wanted}
+    return "\n\n".join(f"### skill {n}\n{found[n].read_text(errors='replace')[:3500]}"
+                        for n in wanted if n in found)
 
 
 def _renderings(paths) -> dict[str, str] | None:
@@ -568,7 +719,8 @@ def main() -> int:
     ap.add_argument("--n", type=int, default=LEGACY_N,
                     help="first N queries (20 = the legacy nightly set)")
     ap.add_argument("--only", default=None, help="comma-separated query ids")
-    ap.add_argument("--arms", default=",".join(ARMS))
+    ap.add_argument("--arms", default=",".join(DEFAULT_ARMS),
+                    help=f"comma-separated, from {','.join(ARMS)}")
     ap.add_argument("--max-turns", type=int, default=30)
     ap.add_argument("--timeout", type=float, default=900.0)
     ap.add_argument("--concurrency", type=int, default=4)
@@ -610,8 +762,7 @@ def main() -> int:
         print(json.dumps(data["summary"], indent=2, default=str))
         return 0
 
-    queries = (yaml.safe_load(Path(args.queries).read_text()) or {}).get("queries") or []
-    queries = queries[: args.n]
+    queries = load_queries(args.queries)[: args.n]
     if args.only:
         wanted = {w.strip() for w in args.only.split(",")}
         queries = [q for q in queries if q.get("id") in wanted]

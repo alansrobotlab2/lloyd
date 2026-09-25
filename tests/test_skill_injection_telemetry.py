@@ -275,3 +275,59 @@ def test_the_writer_and_the_reader_name_one_event_type():
     import prefetch
 
     assert prefetch.SKILL_MATCH_EVENT == SKILL_MATCH_EVENT == "prefetch.skill_match"
+
+
+# ── P5: the pull arm, and reads counted as loads ──────────────────────────────
+
+def _read_call(skill, *, ts=None, args_as_dict=False):
+    args = {"summary": "Reading a skill", "name": skill}
+    return {"ts": ts or _stamp(minutes=4), "event": "brain1.tool_call_proposed",
+            "data": {"tool_call_id": "c1", "name": "skills_read",
+                     "args": args if args_as_dict else json.dumps(args)}}
+
+
+def test_pull_arm_still_reports_offers(tmp_path, monkeypatch):
+    """`prefetch.skills.push: false` renders no skill body, and the offer rows
+    are still written — every one `landed: false` — so the pull arm's
+    telemetry says what the turn was offered and that none of it was pushed.
+    The model's own `skills_read` then shows up as `loaded_by_read`."""
+    import prefetch
+    from app.config import CONFIG
+
+    monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", tmp_path)
+    monkeypatch.setattr("app.event_log.BLOBS_DIR", tmp_path / "blobs")
+    monkeypatch.setitem(CONFIG, "prefetch", {"skills": {"push": False}})
+    offers = [(9.0, {"name": "alpha", "raw": "alpha body"}),
+              (8.5, {"name": "beta", "raw": "beta body"})]
+
+    plan = prefetch._skill_injection_plan(prefetch._injectable_skills(offers))
+    assert plan == []
+    assert "<skill" not in prefetch._format_context(offers, [], show_skill_hint=False)
+    prefetch._emit_skill_match_events("pull-sess", offers, plan)
+    _seed(tmp_path, "pull-sess", [_read_call("alpha")])
+
+    res = skill_injection_counts(tmp_path, 7)
+    assert res["no_telemetry"] is False
+    assert res["skills"]["alpha"] == {"offers": 1, "loaded": 0, "ignored": 1,
+                                      "max_score": 9.0}
+    assert res["skills"]["beta"]["offers"] == 1 and res["skills"]["beta"]["loaded"] == 0
+    assert res["loaded_by_read"] == {"alpha": 1}
+
+
+def test_loaded_by_read_counts_skills_read_calls_in_the_window(tmp_path):
+    """Reads are their own mapping: an offer entry keeps its exact shape, a
+    read-only skill is not minted as a zero-offer measured skill, and reads
+    alone do not turn `no_telemetry` off (that flag is about offers)."""
+    _seed(tmp_path, "s1", [
+        _read_call("alpha"), _read_call("alpha", args_as_dict=True),
+        _read_call("beta", ts=_stamp(days=40)),          # outside the window
+        {"ts": _stamp(minutes=3), "event": "brain1.tool_call_proposed",
+         "data": {"name": "skills_search", "args": '{"query": "alpha"}'}},
+        {"ts": _stamp(minutes=3), "event": "brain1.tool_call_proposed",
+         "data": {"name": "skills_read", "args": "{not json"}},
+    ])
+
+    res = skill_injection_counts(tmp_path, 7)
+    assert res["loaded_by_read"] == {"alpha": 2}
+    assert res["reads"] == 2
+    assert res["skills"] == {} and res["no_telemetry"] is True

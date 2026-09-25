@@ -360,8 +360,7 @@ def build_system_prompt(
         if skills:
             components["skills_index"] = (
                 f"<available_skills>\n{skills}\n</available_skills>\n"
-                "Note: relevant skill content is automatically injected into each "
-                "user message as <context> when matched."
+                + _skills_index_note(skills_push_enabled())
             )
 
     goal_block = _format_goal_block(goal)
@@ -760,18 +759,197 @@ def _bound_memory_render(filename: str, raw: str, content: str) -> str:
 _is_quarantined_skill = is_quarantined_skill_file
 
 
-def _load_skills_index(overlay: Path | None = None) -> str | None:
-    """Build a list of available skill names from skill directories (overlay first).
+# ---------------------------------------------------------------------------
+# P5: the index can say what each skill is for (`skills.index` in config.yaml).
+#
+# `descriptions: false` (the default) is today's names-only line, byte for byte —
+# pinned by `tests/test_skills_index_descriptions.py`, because the index sits in
+# the cached system-prompt prefix and a changed byte there re-prefills every
+# session's next turn. On, the index is one `- name — description` line per
+# skill under `budget_chars`, each description clipped at
+# `max_description_chars`. Who gets a description is decided by 30-day use
+# (`app.skill_telemetry`: offers + loaded + loaded_by_read), the tail stays
+# names-only, and the lines are RENDERED ALPHABETICALLY whatever the rank: the
+# ranking changes once a day, and an order that followed it would rewrite the
+# prompt's position 0 every morning for no information the model can use.
+#
+# The description is the same field `GET /api/skills` shows (#1294) — the
+# walker's parsed front matter, `str(fm.get("description") or "")` — so the
+# model and the Skills page never describe one skill two ways.
+#
+# The closing note follows `prefetch.skills.push` (the other half of the arm):
+# with push on, a matched skill's body is injected into the turn and the note
+# says so (today's words); with it off, only the index is given and the note
+# says to load a skill with `skills_read(name)`. The eval that decides both is
+# `eval/run_prefetch_cost_eval.py --arms injected,desc_push,desc_pull`.
+# ---------------------------------------------------------------------------
+SKILLS_INDEX_BUDGET_CHARS = 12_000
+SKILLS_INDEX_MAX_DESCRIPTION_CHARS = 100
+#: The ranking window. `skill_telemetry.DEFAULT_DAYS` today; restated so a change
+#: to that reader's default does not silently re-rank the prompt.
+SKILLS_INDEX_RANK_DAYS = 30
+
+_SKILLS_INDEX_PUSH_NOTE = (
+    "Note: relevant skill content is automatically injected into each "
+    "user message as <context> when matched."
+)
+_SKILLS_INDEX_PULL_NOTE = (
+    "Note: skill bodies are not injected automatically. When a listed skill "
+    "fits the task, load it with skills_read(name) before you start; files it "
+    "bundles are read with Read."
+)
+
+
+def _skills_index_settings() -> dict:
+    """`skills.index` from config.yaml, every key falling back to today's index.
+
+    An unreadable config or a malformed value keeps the names-only line: this is
+    the cached prefix, and a yaml hiccup must not be what changes it.
+    """
+    out = {"descriptions": False, "budget_chars": SKILLS_INDEX_BUDGET_CHARS,
+           "max_description_chars": SKILLS_INDEX_MAX_DESCRIPTION_CHARS}
+    try:
+        from app.config import CONFIG
+
+        cfg = ((CONFIG.get("skills") or {}).get("index") or {})
+    except Exception:  # noqa: BLE001 — an unreadable config keeps today's prompt
+        return out
+    if not isinstance(cfg, dict):
+        return out
+    out["descriptions"] = cfg.get("descriptions") is True
+    for key in ("budget_chars", "max_description_chars"):
+        val = cfg.get(key)
+        if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+            out[key] = val
+    return out
+
+
+def skills_push_enabled() -> bool:
+    """`prefetch.skills.push` — whether a matched skill's body is injected.
+
+    The one reader, shared by `prefetch._skill_injection_plan` (which renders
+    no body when it is off) and the index note above (which then tells the model
+    to pull). Default and every failure is `True`, today's behaviour.
+    """
+    try:
+        from app.config import CONFIG
+
+        val = (((CONFIG.get("prefetch") or {}).get("skills") or {}).get("push", True))
+    except Exception:  # noqa: BLE001
+        return True
+    return val is not False
+
+
+def _skills_index_note(push: bool) -> str:
+    return _SKILLS_INDEX_PUSH_NOTE if push else _SKILLS_INDEX_PULL_NOTE
+
+
+def skill_index_description(frontmatter: dict) -> str:
+    """The description the index shows: `/api/skills`' field, whitespace folded.
+
+    Folded because a YAML block scalar keeps its newlines and one index entry
+    must stay one line.
+    """
+    raw = frontmatter.get("description") if isinstance(frontmatter, dict) else None
+    return " ".join(str(raw or "").split())
+
+
+def clip_skill_description(desc: str, max_chars: int) -> str:
+    """`desc` cut to at most `max_chars` characters, the cut marked with `…`."""
+    if len(desc) <= max_chars:
+        return desc
+    return desc[: max(0, max_chars - 1)].rstrip() + "…"
+
+
+_rank_cache: dict[str, dict[str, int]] = {}   # UTC date -> {skill: use count}
+
+
+def _skill_rank_counts() -> dict[str, int]:
+    """Per-skill 30-day use (offers + loaded + loaded_by_read), cached per UTC day.
+
+    The scan reads every event log in the window (~0.8 s on 2026-09-24), so it
+    runs once a day per process, not once per turn — which is also the cadence
+    the rank is allowed to move the prefix at. Any failure is `{}`: every skill
+    ties at zero and the rank falls back to alphabetical, the same answer as a
+    window with no telemetry.
+    """
+    today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    cached = _rank_cache.get(today)
+    if cached is not None:
+        return cached
+    counts: dict[str, int] = {}
+    try:
+        from app.paths import EVENT_LOGS_DIR
+        from app.skill_telemetry import skill_injection_counts
+
+        res = skill_injection_counts(EVENT_LOGS_DIR, SKILLS_INDEX_RANK_DAYS)
+        for name, row in (res.get("skills") or {}).items():
+            counts[name] = int(row.get("offers", 0)) + int(row.get("loaded", 0))
+        for name, n in (res.get("loaded_by_read") or {}).items():
+            counts[name] = counts.get(name, 0) + int(n)
+    except Exception as exc:  # noqa: BLE001 — a rank is never worth a prompt
+        logger.warning("skills index: telemetry rank unavailable (%s); "
+                       "descriptions go to the alphabetical head", exc)
+        counts = {}
+    _rank_cache.clear()
+    _rank_cache[today] = counts
+    return counts
+
+
+def _skills_index_lines(active, counts: dict[str, int] | None, *,
+                        budget: int, max_desc: int) -> list[str]:
+    """The description-arm index, one line per skill, alphabetical.
+
+    `active` is `iter_active_skills` output (anything with `.name` and
+    `.frontmatter`); `counts` ranks who gets a description — highest use first,
+    name breaking ties, so an empty mapping is plain alphabetical. The header and
+    every names-only line are always paid for: no skill is ever dropped from the
+    index to make room for another's description. Descriptions are then granted
+    in rank order while the whole index stays within `budget` characters; one
+    that does not fit is skipped and the next, shorter one may still fit. A skill
+    with no description is its name.
+    """
+    counts = counts or {}
+    rows: dict[str, str] = {}
+    for skill in active:
+        rows.setdefault(skill.name, clip_skill_description(
+            skill_index_description(skill.frontmatter), max_desc))
+    names = sorted(rows)
+    header = "Available skills (name — what it is for):"
+    used = len(header) + sum(1 + len("- ") + len(n) for n in names)
+    granted: set[str] = set()
+    for name in sorted(names, key=lambda n: (-int(counts.get(n, 0)), n)):
+        desc = rows[name]
+        if not desc:
+            continue
+        extra = len(" — ") + len(desc)
+        if used + extra <= budget:
+            granted.add(name)
+            used += extra
+    return [header] + [f"- {n} — {rows[n]}" if n in granted else f"- {n}" for n in names]
+
+
+def _load_skills_index(overlay: Path | None = None, *,
+                       descriptions: bool | None = None) -> str | None:
+    """Build the advertised skill index from skill directories (overlay first).
 
     The set is the single walker's (#1294). This function used to do its own
     `iterdir()` over the same roots with its own copy of the quarantine rule, which
     is how the advertised index, `GET /api/skills` and the Mission Control tab came
     to print 189, 187 and 194 about one vault — the model being told a set that no
     human-facing surface agreed with.
+
+    `descriptions` overrides `skills.index.descriptions` (None reads config). Off
+    is the names-only line exactly as it has always been rendered.
     """
-    skill_names = [active.name
-                   for active in iter_active_skills(overlay=overlay,
-                                                    roots=_skill_walk_roots())]
-    if not skill_names:
+    active = list(iter_active_skills(overlay=overlay, roots=_skill_walk_roots()))
+    if not active:
         return None
-    return "Available skills: " + ", ".join(skill_names)
+    settings = _skills_index_settings()
+    if descriptions is None:
+        descriptions = settings["descriptions"]
+    if not descriptions:
+        return "Available skills: " + ", ".join(a.name for a in active)
+    return "\n".join(_skills_index_lines(
+        active, _skill_rank_counts(),
+        budget=settings["budget_chars"], max_desc=settings["max_description_chars"]))
