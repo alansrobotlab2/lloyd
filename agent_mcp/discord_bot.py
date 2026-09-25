@@ -30,6 +30,7 @@ import httpx
 
 from agent_mcp._shared import make_http_client, text_result
 from app.config import service_url
+from app.harness.events import trim_discarded
 import yaml
 
 logger = logging.getLogger("lloyd-discord")
@@ -415,7 +416,12 @@ def _build_bot():
                             except json.JSONDecodeError:
                                 continue
 
-                            if event_type == "text_delta":
+                            if event_type == "retry":
+                                # The backend re-requested a broken stream
+                                # (D7); drop what it had already streamed.
+                                accumulated, _ = trim_discarded(accumulated, "", data)
+
+                            elif event_type == "text_delta":
                                 accumulated += data.get("text", "")
                                 now = time.monotonic()
                                 if now - last_edit >= 1.0 and accumulated:
@@ -697,7 +703,10 @@ def _build_bot():
                             except json.JSONDecodeError:
                                 continue
 
-                            if event_type == "text_delta":
+                            if event_type == "retry":
+                                accumulated, _ = trim_discarded(accumulated, "", data)
+
+                            elif event_type == "text_delta":
                                 accumulated += data.get("text", "")
                                 now = time.monotonic()
                                 if now - last_edit >= 1.0 and accumulated:

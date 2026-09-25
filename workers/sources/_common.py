@@ -456,6 +456,7 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20, *,
     an observer.
     """
     from app.harness import run_query
+    from app.harness.events import trim_discarded
     from app.run_recorder import record_events
     from app.sessions_io import create_session, new_background_session_id
 
@@ -488,6 +489,9 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20, *,
                                        or [])):
         if evt["type"] == "text_delta":
             chunks.append(evt.get("text", ""))
+        elif evt["type"] == "iteration_retry":
+            # A broken stream was re-requested (D7); take its deltas back.
+            chunks = [trim_discarded("".join(chunks), "", evt)[0]]
         elif evt["type"] == "result":
             # The turn's own account of how it ended. Dropping this event is
             # what made an empty answer look like a successful one.

@@ -65,6 +65,7 @@ import httpx
 
 from app.paths import SESSIONS_DIR
 from app.harness import run_query
+from app.harness.events import trim_discarded
 from app.harness import run_state as RS
 from app.harness.run_state import RunState, run_state_turn
 from workers.sources._common import _worker_run_options
@@ -207,6 +208,8 @@ async def arm_transcript(prompt: str, *, max_turns: int) -> dict:
             cached += int(usage.get("cache_read") or 0)
         elif evt["type"] == "text_delta":
             text += evt.get("text", "")
+        elif evt["type"] == "iteration_retry":
+            text, _ = trim_discarded(text, "", evt)
         elif evt["type"] == "result":
             if not text and evt.get("response_text"):
                 text = str(evt["response_text"])

@@ -451,6 +451,12 @@ harness:
     token_estimate: 1500
     dedup_max_consecutive: 2
   stream_chunk_timeout_seconds: 60
+  # A broken stream (stall, dropped connection, bad SSE line, 5xx) is
+  # re-requested at most max_attempts times a turn, and only while the
+  # iteration has sent no tool-call delta. A 4xx is never retried. 0 disables.
+  stream_retry:
+    max_attempts: 1
+    backoff_seconds: 2
   # Re-anchor session.todos this often (in agent-loop iterations) when
   # items are still open and the list has gone untouched. The system
   # prompt's <active_todos> block is frozen at turn start, so a turn that

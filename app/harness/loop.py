@@ -21,6 +21,8 @@ import time
 import uuid
 from typing import Any, AsyncIterator
 
+import httpx
+
 from app.deadline_anchor import ANCHOR_TAG
 from app.harness import events
 from app.harness.client import stream_chat
@@ -29,6 +31,7 @@ from app.harness.errors import (
     ContextOverflowError,
     MultimodalRejectedError,
     ParseError,
+    StreamStalledError,
     ToolDiscoveryError,
     ToolDispatchError,
 )
@@ -96,6 +99,62 @@ def _looks_like_unexecuted_command(text: str) -> bool:
     if not text:
         return False
     return bool(_EXEC_FENCE_RE.search(text))
+
+
+# ---------------------------------------------------------------------------
+# Broken streams (review 2026-09-24, D7)
+# ---------------------------------------------------------------------------
+#
+# A stream that dies mid-generation used to take one of two wrong exits: a
+# malformed SSE line was finalized as `finish_reason="stop"` with whatever
+# half-parsed tool calls had accumulated (and those were dispatched), and a
+# stall, dropped connection or 5xx raised out of the turn. Both are cheap to
+# retry while nothing was dispatched — the prefix is still cached, and the only
+# thing lost is the partial text the consumers take back off their buffers on
+# `iteration_retry`.
+
+_BROKEN_STREAM_ERRORS = (
+    ParseError,
+    StreamStalledError,
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.ReadError,
+    httpx.RemoteProtocolError,
+    httpx.HTTPStatusError,
+)
+
+
+def _stream_error_reason(exc: BaseException) -> str:
+    """The `iteration_retry` / `harness.stream_retried` reason for `exc`."""
+    if isinstance(exc, ParseError):
+        return "parse_error"
+    if isinstance(exc, StreamStalledError):
+        return "stream_stalled"
+    if isinstance(exc, httpx.HTTPStatusError):
+        return f"http_{exc.response.status_code}"
+    return "transport"
+
+
+def _is_client_error(exc: BaseException) -> bool:
+    """A 4xx is the request's fault; sending it again gets the same answer."""
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response is not None
+        and exc.response.status_code < 500
+    )
+
+
+async def _retry_backoff(seconds: float, cancel_event: asyncio.Event | None) -> None:
+    """Sleep before a retry, waking at once on Stop."""
+    if seconds <= 0:
+        return
+    if cancel_event is None:
+        await asyncio.sleep(seconds)
+        return
+    try:
+        await asyncio.wait_for(cancel_event.wait(), timeout=seconds)
+    except asyncio.TimeoutError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +334,10 @@ async def run_query(
         images_latched = False
         max_context_overflow_recoveries = 2
         echo_guard_reprompts = 0
+        # Broken-stream retries spent this turn (D7), and whether the
+        # iteration in hand ended on one that could not be retried.
+        stream_retries = 0
+        broken_stream = False
         # Initialised before the loop: a turn that breaks on its first check
         # (cancelled, max_turns=0) never assigns it, and the finalizer below
         # runs on every exit path.
@@ -491,12 +554,56 @@ async def run_query(
 
                     if fr := choice.get("finish_reason"):
                         finish_reason = fr
-            except ParseError as exc:
-                logger.warning("loop: parse error mid-stream — %s", exc)
-                yield events.stream_raw(exc.raw, error=str(exc))
-                # Treat parse failure as an end-of-turn with whatever we
-                # accumulated. The model can retry next turn.
-                finish_reason = finish_reason or "stop"
+            except _BROKEN_STREAM_ERRORS as exc:
+                # One handler for every way a stream breaks (D7). A 4xx is the
+                # request's own fault and goes up as before.
+                if _is_client_error(exc):
+                    raise
+                if isinstance(exc, ParseError):
+                    logger.warning("loop: parse error mid-stream — %s", exc)
+                    yield events.stream_raw(exc.raw, error=str(exc))
+                reason = _stream_error_reason(exc)
+                cancelled = (options.cancel_event is not None
+                             and options.cancel_event.is_set())
+                if isinstance(exc, ParseError) and finish_reason and not cancelled:
+                    # The finish frame already arrived: only a trailing line
+                    # (the usage chunk) was lost, and the completion is whole.
+                    pass
+                elif (not tool_calls_acc and not cancelled
+                        and stream_retries < int(getattr(
+                            options, "stream_retry_max", 0) or 0)):
+                    # Nothing was dispatched and no tool call had begun, so
+                    # the same request is safe to send again. The deltas it
+                    # already streamed are taken back by every consumer.
+                    stream_retries += 1
+                    logger.warning(
+                        "loop: broken stream (%s: %s) at iter=%d — retry %d",
+                        reason, exc, num_turns, stream_retries,
+                    )
+                    yield events.iteration_retry(
+                        reason=reason, attempt=stream_retries,
+                        discarded_text_chars=len(assistant_text),
+                        discarded_thinking_chars=len(thinking_text),
+                    )
+                    log_harness_event(session_id, "harness.stream_retried", {
+                        "reason": reason, "error": str(exc)[:300],
+                        "attempt": stream_retries, "iteration": num_turns,
+                        "discarded_text_chars": len(assistant_text),
+                        "discarded_thinking_chars": len(thinking_text),
+                    }, turn_id=getattr(options, "turn_id", "") or None)
+                    await _retry_backoff(
+                        float(getattr(options, "stream_retry_backoff_s", 0) or 0),
+                        options.cancel_event,
+                    )
+                    num_turns -= 1   # the same iteration, requested again
+                    continue
+                elif isinstance(exc, ParseError):
+                    # Not retryable: end the turn on what streamed as text, and
+                    # dispatch none of the half-parsed tool calls.
+                    broken_stream = True
+                    finish_reason = "stream_error"
+                else:
+                    raise
             except ContextOverflowError as exc:
                 # vLLM rejected the prompt for exceeding context. Recovery:
                 # truncate the largest tool result(s) in chat_messages,
@@ -609,7 +716,7 @@ async def run_query(
                 )
                 yield events.thinking_done(thinking_text, duration_ms=thinking_ms)
 
-            tool_calls_committed = _commit_tool_calls(
+            tool_calls_committed = [] if broken_stream else _commit_tool_calls(
                 tool_calls_acc, summary_tools=summary_tools,
                 finish_reason=finish_reason or "",
             )
@@ -680,6 +787,9 @@ async def run_query(
             observer_injected = len(chat_messages) > chat_msgs_len_before_hook
 
             if not tool_calls_committed:
+                if broken_stream:
+                    stop_reason = "stream_error"
+                    break
                 if observer_injected:
                     # Observer injected a system message. Continue the loop
                     # so the model gets to read it and respond — but only if

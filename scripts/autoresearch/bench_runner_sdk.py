@@ -138,6 +138,7 @@ from app.harness.bench_corpus import (
 # being importable at the moment the trace is post-processed. `injected_skill_names`
 # is the same module's other half — the turn-start route — and both are the
 # single source for which skill reached a trial by which route (#779).
+from app.harness.events import trim_discarded
 from app.harness.skill_dispatch import delivered_skill_names, injected_skill_names
 
 logger = logging.getLogger("autoresearch.bench_runner_sdk")
@@ -455,6 +456,9 @@ async def _consume(messages: list[dict[str, Any]], options: Any, trace: dict[str
         elif etype == "text_delta":
             if evt.get("text"):
                 text_parts.append(evt["text"])
+        elif etype == "iteration_retry":
+            # A broken stream was re-requested (D7); its deltas are not graded.
+            text_parts = [trim_discarded("".join(text_parts), "", evt)[0]]
         elif etype == "system":
             trace["harness_session_id"] = evt.get("session_id", "")
         elif etype == "result":

@@ -3359,6 +3359,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         dispatch = DispatchTrace()
 
         try:
+            from app.harness.events import trim_discarded
             from app.run_recorder import record_events
             recorded = record_events(
                 run_query(messages, options),
@@ -3373,6 +3374,10 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                         dispatch.observe(evt)
                     if evt["type"] == "text_delta":
                         final_response += evt["text"]
+                    elif evt["type"] == "iteration_retry":
+                        # A broken stream was re-requested (D7): its deltas
+                        # are not part of the answer.
+                        final_response, _ = trim_discarded(final_response, "", evt)
                     elif evt["type"] == "assistant_message":
                         # One event per agent-loop iteration, carrying THAT
                         # block's own text (`app/harness/events.py`, emitted at

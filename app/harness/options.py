@@ -68,6 +68,15 @@ class RunOptions:
     # `harness.stream_chunk_timeout_seconds`.
     stream_chunk_timeout_s: float = 0.0
 
+    # A broken stream (stall, dropped connection, malformed SSE line, 5xx)
+    # is re-requested this many times per turn, but only while no tool-call
+    # delta has arrived for the iteration: the prefix is cached and nothing
+    # was dispatched, so a retry costs the partial text and nothing else
+    # (D7). 0 disables. `stream_retry_backoff_s` is slept before each retry.
+    # Fed from `harness.stream_retry.{max_attempts, backoff_seconds}`.
+    stream_retry_max: int = 1
+    stream_retry_backoff_s: float = 2.0
+
     # Hooks
     hooks: "HookRegistry | None" = None
 

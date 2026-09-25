@@ -2554,6 +2554,8 @@ async def post_message(request: Request):
             turn_telemetry.note(evt)
             if evt["type"] == "text_delta":
                 full_response += evt["text"]
+            elif evt["type"] == "iteration_retry":
+                full_response, _ = trim_discarded(full_response, "", evt)
             elif evt["type"] == "assistant_message":
                 _prefix_miss.record_iteration(
                     miss_tracker, int(evt.get("iteration") or 0),

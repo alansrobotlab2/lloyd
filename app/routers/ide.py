@@ -452,6 +452,7 @@ async def _ask_lloyd(prompt: str, max_tokens: int = 800) -> str:
     global _chat_call
     if _chat_call is None:
         from app.harness import run_query, RunOptions
+        from app.harness.events import trim_discarded
         _chat_call = (run_query, RunOptions)
     run_query, RunOptions = _chat_call
 
@@ -469,6 +470,9 @@ async def _ask_lloyd(prompt: str, max_tokens: int = 800) -> str:
                 t = evt.get("text") or ""
                 if t:
                     pieces.append(t)
+            elif evt.get("type") == "iteration_retry":
+                # A broken stream was re-requested (D7); drop its deltas.
+                pieces = [trim_discarded("".join(pieces), "", evt)[0]]
             elif evt.get("type") == "result":
                 break
     except Exception as e:
@@ -604,6 +608,12 @@ async def post_ide_ai_complete(request: Request):
                     t = evt.get("text") or ""
                     if t:
                         yield t
+                elif evt.get("type") == "iteration_retry":
+                    # A broken stream is being re-requested (D7). Text already
+                    # sent to the editor cannot be taken back, so a completion
+                    # that had started ends here rather than streaming twice.
+                    if evt.get("discarded_text_chars"):
+                        break
                 elif evt.get("type") == "result":
                     break
         except Exception as e:

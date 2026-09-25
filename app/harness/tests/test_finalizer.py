@@ -107,6 +107,15 @@ def test_a_cancelled_turn_is_skipped():
     assert F.should_finalize("cancelled", SCHEMA)[0] is False
 
 
+def test_a_broken_stream_has_no_verdict_to_restate():
+    """D7: a turn that ended on a stream it could not retry holds only the
+    text that streamed before the break — restating it would invent a verdict
+    the model never reached."""
+    assert "stream_error" not in F.FINALIZABLE_STOP_REASONS
+    assert F.should_finalize("stream_error", SCHEMA) == (
+        False, "skipped: stop_reason=stream_error")
+
+
 def test_a_finished_turn_runs():
     assert F.should_finalize("stop", SCHEMA) == (True, "")
     assert F.should_finalize("end_turn", SCHEMA) == (True, "")

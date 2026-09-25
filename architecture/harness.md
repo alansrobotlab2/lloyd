@@ -527,3 +527,35 @@ binds `policy.current_scope` when a scope came in) around the dispatch;
 both spellings into the child's deny list and installs the policy hook when a
 scope is present. `tests/test_task_subagent_authority.py`;
 [[editing-safeguards]] has the gate map.
+
+### D7 — broken streams are `stream_error`, retried once while nothing was dispatched
+
+One handler in the stream loop for every way a stream breaks: `ParseError`,
+`StreamStalledError`, httpx connect / connect-timeout / read /
+remote-protocol errors and a 5xx `HTTPStatusError`. A 4xx is the request's
+own fault and re-raises. While the iteration has sent **no tool-call delta**,
+the turn is not cancelled and `RunOptions.stream_retry_max` (1) is not spent,
+the loop yields `iteration_retry` (reason `stream_stalled`, `parse_error`,
+`http_<code>`, `transport`; the discarded text/thinking counts), logs
+`harness.stream_retried`, sleeps `stream_retry_backoff_s` (2 s, woken by
+Stop) and re-requests the same messages with `num_turns -= 1; continue` — D9's
+`prelude_done_for` guard keeps the anchor from being appended twice. Otherwise
+a `ParseError` ends the turn as `stop_reason="stream_error"`: no tool call is
+committed (a half-parsed call used to be dispatched), the assistant message
+carries the text that streamed, and the finalizer skips it. Every other error
+raises as before. A `ParseError` after the finish frame (a lost usage line) is
+not a broken completion and proceeds as it always did. Config
+`harness.stream_retry: {max_attempts: 1, backoff_seconds: 2}`; `max_attempts:
+0` is the off switch. Task children and the direct worker path take the
+`RunOptions` defaults (they do not splat `_get_harness_kwargs`).
+
+Every consumer that accumulates `text_delta` trims on `iteration_retry` with
+`events.trim_discarded` — the chat router and `run_recorder` (X2), plus the
+sync `POST /api/message`, `autonomy.run_task`, `_common.run_prompt_on_primary`,
+the IDE query, `bench_runner_sdk`, `replay_run_state`, and the Discord bot on
+the router's `retry` SSE frame. The IDE's streaming completion cannot take
+text back off the wire, so a retry after text ends it. The observer takes its
+text from `assistant_message` (D8), which only the kept attempt produces. The
+voice worker speaks deltas as they arrive and is not trimmed. Pins:
+`app/harness/tests/test_stream_retry.py`,
+`test_finalizer.py::test_a_broken_stream_has_no_verdict_to_restate`.

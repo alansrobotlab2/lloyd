@@ -216,6 +216,11 @@ def _get_harness_kwargs() -> dict:
         out["stream_chunk_timeout_s"] = float(
             harness["stream_chunk_timeout_seconds"]
         )
+    retry = harness.get("stream_retry") or {}
+    if "max_attempts" in retry:
+        out["stream_retry_max"] = max(0, int(retry["max_attempts"]))
+    if "backoff_seconds" in retry:
+        out["stream_retry_backoff_s"] = max(0.0, float(retry["backoff_seconds"]))
     if "tool_call_summaries" in harness:
         out["tool_call_summaries"] = bool(harness["tool_call_summaries"])
     if "enabled" in cfg:
