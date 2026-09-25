@@ -420,24 +420,140 @@ fell inside its span) — the inversion at the heart of the rework, since the
 old gate had to ask openWakeWord here, after the VAD had already mangled the
 audio.
 
-1. Not woke, not in the window: try the transcript path (above). If it does
-   not wake, drop — logged with the VAD probability, the utterance's wake peak
-   and the transcript.
-2. Smart Turn: hold an unfinished thought (skipped for a transcript wake, whose
-   audio is already transcribed and whose request continues in the window).
-3. Parakeet on the (possibly joined) audio.
-4. Woke: embed the speaker, set the anchor, open the window, publish state.
-5. Continuation (not woke): the locked LiveKit identity, and — only when the
+1. Not woke, not in the window or the conversation: try the transcript path
+   (above). If it does not wake, drop — logged with the VAD probability, the
+   utterance's wake peak and the transcript.
+2. **Smart Turn, Parakeet and the speaker embedding at once** (2026-09-24).
+   They take the same audio and used to run one after another; now
+   `asyncio.gather` runs them in threads and the gate joins them. A held turn
+   costs one wasted transcription (~60 ms CPU), and that transcript is also
+   what tells a barge-in held mid-sentence from a cough. Smart Turn is skipped
+   for a transcript wake, whose audio is already transcribed.
+3. Unfinished: hold, and glue it to what comes next.
+4. **Lloyd's own voice**: a segment whose voiceprint is the
+   `own_voice_profile` while he is speaking or within 2 s of stopping is his
+   echo — dropped.
+5. Woke: set the anchor, open the window **and a conversation**, publish.
+6. **Managing the conversation**: a stop word while he talks (or while a
+   spoken turn is still running tools) stops him and cancels that turn; a
+   closer ("that's all", "never mind", "thanks, Lloyd") ends the
+   conversation; a **backchannel** ("yeah", "mm", "okay") is not a turn —
+   unless his last sentence was a question, when "yeah" is the answer.
+7. Continuation (not woke): the locked LiveKit identity, and — only when the
    wake-word utterance matched an *enrolled* profile — the voiceprint anchor.
-6. Woke: strip the wake phrase; a bare wake opens the window and injects
+   Past the short follow-up window (inside the conversation), also an enrolled
+   speaker once anyone is enrolled, and the **addressee judge**.
+8. Woke: strip the wake phrase; a bare wake opens the window and injects
    nothing; a short unmatched transcript on an acoustic wake is a misheard bare
    wake; a long one is injected as-is, since the acoustic model is the
    authority on whether the word was said.
+9. Lloyd was speaking and barge-in is on: a real interruption — stop him,
+   record what was heard, cancel the turn being spoken, then inject.
 
-`WakeState` is IDLE or CONTINUATION as before: a wake opens a
-`continuation_seconds` (6 s) window for the locked participant, every
-pass-through extends it, and a finished reply reopens it.
-`tests/test_voice_gate.py` drives the whole gate with a scripted recogniser.
+`WakeState` holds two windows now. The follow-up window is as before: a wake
+opens `continuation_seconds` (6 s) for the locked participant, every
+pass-through extends it, a finished reply reopens it — and a reply that ends in
+a question holds it `question_window_s` (20 s). Around it sits the
+conversation (below). `tests/test_voice_gate.py` drives the whole gate with a
+scripted recogniser; `tests/test_voice_duplex.py` the conversation, barge-in
+and backchannel rules.
+
+### Conversation mode: the wake word opens, it does not gate
+
+On 2026-09-24 one evening's session dropped 26 utterances as "not addressed",
+and every one was 'Yeah.', 'Okay.', 'Mm.', 'Thank you.' or an echo fragment —
+Alan reacting to a long answer being read aloud — while the one 'Yeah.' that
+landed inside the 6 s window was injected and answered with 59 seconds of
+speech. The window was both too short and too literal.
+
+`livekit.conversation` (on): the wake word, a push-to-talk `wake` message or a
+**typed message with the room open** opens a conversation that stays open
+`idle_close_s` (90 s) after the last exchange, and closes on a closer, on the
+speaker leaving the room, or on silence. Inside it:
+
+- **the follow-up window is today's behaviour**, unchanged: no wake word, no
+  judge;
+- **past it**, an utterance reaches the model only if djev judges it addressed
+  (`voice/addressee.py`: one frozen `noul` question over the utterance, Lloyd's
+  last sentence, how long ago he said it, who is talking, whether the name is
+  mentioned), and — once anyone is enrolled — it came from an enrolled
+  speaker. Every shipped assistant that drops the wake word gates on
+  directedness, not on a timer (Alexa's follow-up mode declines when unsure;
+  Echo Show fuses gaze with audio). No open device-directed-speech classifier
+  exists, so djev is it.
+
+`addressee: enforce` at `addressee_threshold` 0.7, graded on 46 labelled cases
+(`scripts/voice/addressee_eval.py` — follow-ups, answers and new requests with
+no name, against speech to family, phone calls, TV, self-talk, mentions and
+backchannels):
+
+| threshold | addressed accepted | non-addressed accepted | precision | recall |
+|---|---|---|---|---|
+| 0.5 | 22 / 24 | 1 / 22 | 0.957 | 0.917 |
+| **0.7** | **22 / 24** | **0 / 22** | **1.000** | **0.917** |
+| 0.9 | 21 / 24 | 0 / 22 | 1.000 | 0.875 |
+
+The one false accept at 0.5 was "Sorry, I was talking to my computer. What did
+you say?". Every backchannel scored under 0.1. The misses ("Why so slow?",
+"Try again in a minute.") land in the follow-up window in practice. djev
+answered in **~630 ms p50** — not the ~40 ms `djev.md` quotes for short
+states — which is paid only past the follow-up window. A djev that does not
+answer is a drop there, which is exactly what the gate did before the mode
+existed: an outage costs what the mode added and nothing it did not. Inside
+the follow-up window the judge runs in **shadow** (logged beside the gate's
+decision, `addressee shadow: p=…`), which is the data for revisiting the
+threshold. `shadow` mode makes the whole judge advisory; `off` never asks.
+
+The pill says so: the worker's `wake_state` carries `mode: "conversation"` and
+`conversation_elapsed_s`, and `voiceIndicator` has a `conversation` state —
+"In conversation · 1:12", or "Talking" when compact.
+
+### Barge-in: full duplex
+
+Barge-in was off, and the browser muted the mic while Lloyd spoke, on the
+premise that there was no trustworthy echo cancellation. For this topology the
+premise was wrong: Lloyd's voice reaches the browser as a LiveKit **remote
+WebRTC track** played through an `<audio>` element — the playback path Chrome's
+AEC3 takes as its echo reference (Web Audio output is the unreliable one) —
+and `echoCancellation: true` is the capture default. Alan's desk output is
+open-ear earbuds besides. So `barge_in.enabled` is on and half-duplex is a
+per-device setting, off by default. What is left is guarded the way LiveKit
+Agents and Unmute guard it:
+
+- **sustained speech, not an edge**: `_on_speech_start` schedules a check
+  `min_duration_s` (0.5 s) later and pauses only if the segmenter is still in
+  speech — a cough is an edge;
+- **a warm-up**: nothing in the first `warmup_s` (3 s) of each reply's audio,
+  while AEC converges on it; and a 300 ms **pre-roll chime** on Lloyd's track
+  when someone joins (`preroll_ms`), so the canceller has heard the track
+  before the first reply;
+- **pause, then decide** (LiveKit's false-interruption handling):
+  `TTSStreamer.pause()` takes back every frame queued but not yet played and
+  clears the source; the utterance that follows decides. An empty transcript,
+  a backchannel, a drop of any kind, or no words within
+  `false_interruption_timeout_s` (2 s) of the speaker going quiet (the
+  pipeline's new `silence` event) → `resume()`, which replays the taken-back
+  frames first, so nothing is lost. Words → `_commit_barge_in`;
+- **his own voice rejected** by voiceprint (step 4 of the gate): enrol it with
+  `scripts/voice/enroll_own_voice.py`, which renders eight sentences in the
+  production voice and stores their mean as `lloyd-voice` (held-out renders
+  score 0.80–0.90 against the 0.40 profile threshold; the highest room
+  utterance scores 0.25 against it).
+
+A real interruption stops the audio, POSTs `/api/voice/interrupted` with
+`heard` — the clauses whose playout had finished by the audio clock
+(`TTSStreamer.heard_text`) — and cancels the turn being spoken **only if it is
+still the session's running turn** (`GET /api/sessions/{id}/queue` first), so a
+barge-in never cancels the request it just made. The next turn, spoken or
+typed, carries "The listener interrupted your previous spoken reply. They heard
+only this much of it: …" in its prompt tail (`app/voice_tap.py`) — LiveKit
+Agents truncates its chat context at the playout position; the transcript here
+keeps the whole reply and the model is told which part was said.
+
+Not yet measured: speakers instead of earbuds. If AEC3 leaks with the HDMI
+monitor speakers, the second stage is server-side AEC3 (`pywebrtc-audio`)
+fed the TTS frames as far-end; until then a device that leaks gets
+half-duplex from Settings.
 
 Note that the code defaults and the config disagree in two places, and
 config.yaml wins: `WakeState.continuation_seconds` defaults to 12.0 against the
@@ -545,7 +661,9 @@ intended degradation, not a fault.
 `WakeMissCapture` keeps a rolling raw-audio ring per room plus recent score
 records, and an aiohttp server on `127.0.0.1:8501` exposes `/healthz`,
 `/ww_miss` and `/ww_label`. The backend proxies `/api/voice/ww_miss` and
-`/api/voice/ww_label` to it. It is for tuning the threshold against real misses
+`/api/voice/ww_label` to it. A label is `said_wake_word` (grades the wake
+word) and/or `addressed: yes | no | backchannel` (grades the conversation
+gate — was it meant for Lloyd, not, or an acknowledgement while he spoke). It is for tuning the threshold against real misses
 rather than synthetic audio: say the wake word, have it ignored, and flag it
 while the audio is still in the ring.
 
@@ -612,8 +730,9 @@ at a time, which is what makes it more than a regex:
 
 - **Where to cut.** A clause goes to TTS as soon as it ends — a sentence end
   (abbreviations and decimals excepted) or a line break. The *first* clause may
-  also be cut at a comma once it is 45 characters long, because it is the one
-  the listener is waiting on. Later clauses shorter than 24 characters are held
+  also be cut at a comma once it is `first_clause_chars` (20) long and the
+  comma at least half that far in — stream2sentence's rule; it was 45 —
+  because it is the one the listener is waiting on. Later clauses shorter than 24 characters are held
   and joined to the next; a string of three-word syntheses sounds like a list
   being read. Nothing is cut above 240 without a boundary.
 - **What not to say.** Block constructs are classified at the start of a line
@@ -656,6 +775,44 @@ next thing the user says is still heard.
   being spoken (the browser's button also cancels the turn server-side).
 - **A backend without streaming** answers JSON; the worker leaves the turn to
   the poller.
+- **A tool turn says what it is doing** (2026-09-24). The turn that prompted
+  this said "One moment." at 2.5 s and then nothing for 44 s across twenty tool
+  calls. `ReplySpeaker` now speaks, whenever nothing has been heard for
+  `progress.every_seconds` (8 s) during tool work, the model's own caption for
+  the latest tool (`voice/conversation.py::caption_to_speech`: "Checking
+  supervisor status" → "Checking supervisor status now."; paths, hashes and
+  snake_case identifiers come out, and a caption that no longer stands as a
+  phrase gives way to a generic line). Contextual fillers raise rapport as well
+  as perceived speed, generic ones only speed (ACM TAP 2026), so the caption
+  goes first. Between them a quiet two-tone **thinking sound**
+  (`voice/thinking.py`, RMS ~0.008 — under the browser's half-duplex
+  threshold) plays on the track, LiveKit's `BackgroundAudioPlayer` pattern.
+  `VOICE_TURN_REMINDER` also asks the model to say what it is about to do
+  before tool work and to add a brief update now and then.
+- **A turn stuck behind another says so.** The session queue is serial, so a
+  spoken turn enqueued while a typed turn investigates waits; the
+  `voice_turn` frame now carries `queued_behind`, and if the turn has not
+  started (`session` frame) within 1.5 s it says "Still finishing the last
+  thing." instead of a filler and silence.
+- **Typed turns are spoken the same way** (`voice_turn.typed_turns: stream`).
+  `_emit` hands a copy of every turn event to any **session tap**
+  (`app/voice_tap.py`), and the worker holds one open per room
+  (`GET /api/voice/listen`): a typed turn's `session` frame starts a
+  `ReplySpeaker` with no fillers, and a typed message with the room open opens
+  a conversation. The model is told in the prompt tail
+  (`VOICE_ROOM_REMINDER`: open with a short spoken answer, formatting after
+  `---`) so the chat answer keeps its formatting. Spoken turns never reach a
+  tap (`mark_voice_turn`), so a reply is never said twice; the poller is now
+  only the fallback for a backend without the tap. `summary` restores the old
+  poll-and-rewrite path.
+- **Every turn logs where its time went** — one `[latency]` line
+  (`voice/timeline.py`), pipecat's `LatencyBreakdown` in Lloyd's seams:
+  `speech_end` (VAD close minus its closing silence) → `vad_close` →
+  `turn_verdict` / `asr_done` / `embed_done` → `inject_sent` → `voice_turn` →
+  `first_delta` → `first_clause` → `first_tts_byte` → `first_pushed` →
+  `first_played` (push time plus audio already queued, from the streamer's
+  audio clock), with `eos→audio` total and `max_gap` — the longest silence
+  between audio the turn spoke. `scripts/voice/e2e_voice.py` prints them.
 
 ### Prewarm: the prefill happens during the sentence
 
@@ -951,9 +1108,13 @@ mode is engaged for a session. It publishes the mic, subscribes to the agent's
 channel (`{type: "wake_state", state, remaining_s, continuation_s, speaker}`),
 ticking the remaining seconds down locally between pushes.
 
-It is **half-duplex by default**: the mic is muted while the agent track is
-above `AGENT_SPEAKING_THRESHOLD` (0.02), which is the cheap way to stop Lloyd
-transcribing himself.
+Half-duplex — muting the mic while the agent track is above
+`AGENT_SPEAKING_THRESHOLD` (0.02) — is a **per-device setting, off by default**
+since 2026-09-24 (`web/src/lib/halfDuplex.ts`, Settings → Microphone tuning,
+`?half_duplex=1|0`). On, barge-in is impossible: the mic is off exactly while
+Lloyd talks. See "Barge-in: full duplex" for why AEC is trusted now and what
+guards the rest; a device whose speakers leak past AEC turns it back on.
+Switched off mid-reply, the mic comes straight back.
 
 The mic is not published straight from `getUserMedia`. The capture chain is
 built by hand so a per-client `GainNode` can sit between the microphone and
@@ -1160,8 +1321,9 @@ clones, and voice mode keeps speaking the old voice.
 | `livekit.tts.voice` / `.speed` / `.shaping` | `lloyd-agent-worker` — it reads `livekit.tts` once, at `TTSStreamer.__init__` |
 | the same, for spoken alerts | `systemctl --user restart lloyd-guardian` — re-stages, which re-runs `sync-voice-config.py` |
 | TTS model path / `default_model` | `agent-tts` |
-| `livekit.stt` / `.vad` / `.wake` / `.acoustic_wake` / `.voiceprint` / `.turn_detection` / `.barge_in` | `lloyd-agent-worker` |
-| `livekit.voice_turn` | **both**: the backend reads `reminder`, `thinking` and `prewarm` (`round restart --only lloyd-backend`); the worker reads `stream_replies`, `filler`, `max_spoken_chars` and `prewarm` (`lloyd-agent-worker`) |
+| `livekit.stt` / `.vad` / `.wake` / `.acoustic_wake` / `.voiceprint` / `.turn_detection` / `.barge_in` / `.conversation` | `lloyd-agent-worker` |
+| `livekit.voice_turn` | **both**: the backend reads `reminder`, `thinking`, `prewarm` and `typed_turns` (`round restart --only lloyd-backend`); the worker reads `stream_replies`, `typed_turns`, `filler`, `progress`, `queued_notice`, `thinking_sound`, `first_clause_chars`, `max_spoken_chars` and `prewarm` (`lloyd-agent-worker`) |
+| `livekit.tts.voice`, or the voiceprint backend | also re-run `scripts/voice/enroll_own_voice.py` — the own-voice profile is of the old voice / model |
 | `livekit.yaml`, or the host's tailnet address | `agent-livekit-server` — it resolves `node_ip` at boot |
 
 `agent-livekit-server` is the SFU binary and never reads TTS config —
@@ -1214,6 +1376,24 @@ voice.
   2 s segment boundary, identify end to end.
 - `eval/speaker_embed_eval.py` — the encoder bake-off (`prepare` / `embed` /
   `score`); inputs are downloaded, not tracked.
+- `tests/test_voice_duplex.py` — the latency breakdown and its gap figure;
+  the backchannel, closer, stopper and caption vocabularies; a backchannel is
+  not a turn but is the answer after a question; the conversation past the
+  follow-up window (judge enforce / shadow / unreachable, the owner, the
+  enrolled-speaker rule), a closer, the speaker leaving, the question window;
+  Lloyd's own voice dropped; the three post-VAD stages overlapping; pause
+  taking back unplayed frames and resume replaying them first, a push held by
+  a pause and released by an interrupt, heard text; barge-in pausing on
+  sustained speech, the warm-up, silence and a backchannel resuming, real words
+  stopping him with `interrupted` + a cancel of that turn only; progress
+  captions and the thinking sound, the queued notice, a typed turn through the
+  tap; the tap carrying typed turns and never spoken ones, `_emit` fanning out,
+  the interruption note used once, the typed-turn reminder only with a
+  listener, the `addressed` label.
+- `scripts/voice/addressee_eval.py` — the addressee judge over 46 labelled
+  cases, with a threshold sweep (needs djev).
+- `scripts/voice/enroll_own_voice.py` — renders the production voice and
+  enrols it as `own_voice_profile`; `--dry-run` scores held-out renders.
 - `tests/test_voice_speakable.py` — clauses whatever the slicing, the early
   first clause, abbreviations and decimals, code, dividers, lists, tables,
   inline markdown, short-clause joining, the ceiling.
@@ -1253,9 +1433,22 @@ and `e2e_voice.py` — a real LiveKit room, a canary backend on 18180/18600
 under a scratch HOME, a second worker on the `e2e-` prefix, and a synthetic
 participant that talks and times the replies. Nothing it runs touches live
 sessions, but its turns run on the live primary: pause the pool first, and do
-not run it beside a primary benchmark.
+not run it beside a primary benchmark. Since 2026-09-24 it also talks OVER
+Lloyd — a barge-in mid-reply (the counting must stop within 1.5 s and the new
+question be answered) and a "Yeah." mid-reply (the reply must carry on) — its
+third line is a remark to nobody inside the open conversation (the addressee
+judge must reject it), and it prints the worker's `[latency]` breakdowns.
 
 ## History
+
+**2026-09-24 — a conversation, not a command line.** Measured seams
+(`[latency]`), parallel post-VAD stages, an earlier first clause, progress
+lines and a thinking sound for tool turns, a notice for a queued turn, typed
+turns spoken through a session tap, backchannels that are not turns, full
+duplex (half-duplex off, barge-in on: pause, decide, resume or stop, own voice
+rejected, what was heard told to the next turn), conversation mode with a djev
+addressee judge, and CAM++ in place of Resemblyzer. Plan and research:
+`~/.claude/plans/i-want-lloyd-to-wiggly-garden.md`.
 
 **2026-09-17 — the rework.** A review measured what the pipeline did and found
 it barely working: 5 wake fires in 949 utterances since 2026-08-22, no spoken

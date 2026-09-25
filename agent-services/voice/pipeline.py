@@ -54,6 +54,9 @@ class HearingEvent:
                       immediately, before any transcript exists.
       ``speech``    — a rising edge into speech. `sample` is set. This is the
                       barge-in signal.
+      ``silence``   — the falling edge after it: the segmenter left speech.
+                      A paused reply waits this long, plus its false-
+                      interruption timeout, for the utterance to decide.
       ``utterance`` — a closed span of speech. `utterance` is set, and `wake`
                       carries the detection that fell inside it, if any.
       ``partial``   — a running hypothesis from the streaming recogniser.
@@ -129,6 +132,8 @@ class HearingPipeline:
             # against the next, unaddressed sentence as a 0.94.
             if self.wake is not None:
                 self.wake.take_peak()
+        elif self._was_speaking and not speaking:
+            events.append(HearingEvent("silence", sample=self.segmenter.cursor))
         self._was_speaking = speaking
 
         # 3. Partial hypotheses, only while someone is talking.

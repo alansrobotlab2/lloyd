@@ -195,6 +195,9 @@ class _FakeSource:
     async def wait_for_playout(self):
         self.played_out = True
 
+    def clear_queue(self):
+        pass
+
 
 class _FakeResponse:
     status_code = 200
@@ -235,7 +238,7 @@ def _streamer(chunks, **cfg_overrides):
     st._http = _FakeHTTP(chunks)
     pushed = bytearray()
 
-    async def _push(pcm_bytes, samples_per_channel):
+    async def _push(pcm_bytes, samples_per_channel, timeline=None):
         assert samples_per_channel * 2 == len(pcm_bytes)
         assert samples_per_channel % (SR // 100) == 0, "frames must be a 10 ms multiple"
         pushed.extend(pcm_bytes)
@@ -337,9 +340,9 @@ def test_a_clause_queued_before_an_interrupt_is_not_spoken():
         spoken = []
         orig = st._stream_utterance
 
-        async def record(text):
+        async def record(text, timeline=None):
             spoken.append(text)
-            await orig(text)
+            await orig(text, timeline)
 
         st._stream_utterance = record
         task = asyncio.create_task(st._drain())

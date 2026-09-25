@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { micErrorMessage, voiceIndicator } from './voiceIndicator'
+import { micErrorMessage, voiceIndicator, formatElapsed } from './voiceIndicator'
 
 const base = {
   status: 'connected' as const,
@@ -43,5 +43,32 @@ describe('micErrorMessage', () => {
   it('falls back to the raw message for anything else', () => {
     expect(micErrorMessage(new Error('publish timed out'))).toBe('Microphone failed: publish timed out')
     expect(micErrorMessage('odd')).toBe('Microphone failed: odd')
+  })
+})
+
+describe('conversation mode', () => {
+  const base = {
+    status: 'connected' as const,
+    micState: 'live' as const,
+    agentThinking: false,
+    agentSpeaking: false,
+    wakeState: 'listening' as const,
+  }
+
+  it('an open conversation reads as one, not as the short window', () => {
+    expect(voiceIndicator({ ...base, wakeMode: 'conversation' })).toBe('conversation')
+    expect(voiceIndicator({ ...base, wakeMode: 'listening' })).toBe('listening')
+    expect(voiceIndicator(base)).toBe('listening')
+  })
+
+  it('Lloyd talking and a dead mic still outrank it', () => {
+    expect(voiceIndicator({ ...base, wakeMode: 'conversation', agentSpeaking: true })).toBe('speaking')
+    expect(voiceIndicator({ ...base, wakeMode: 'conversation', micState: 'failed' })).toBe('mic-failed')
+  })
+
+  it('formats elapsed time the way the pill shows it', () => {
+    expect(formatElapsed(0)).toBe('0:00')
+    expect(formatElapsed(72.9)).toBe('1:12')
+    expect(formatElapsed(605)).toBe('10:05')
   })
 })

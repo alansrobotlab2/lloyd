@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from app import voice_tap
 from app.sessions_io import SessionTurn
 
 
@@ -33,6 +34,10 @@ async def _emit(turn: SessionTurn, event: str, data: dict) -> None:
     data.setdefault("source", turn.source)
     data.setdefault("turn_id", turn.turn_id)
     await turn.events.put({"event": event, "data": data})
+    if turn.session_id:
+        # A voice room open on this session speaks typed turns too; it reads
+        # a copy, never the turn's own queue (app/voice_tap.py).
+        voice_tap.publish(turn.session_id, event, data)
 
 
 def _content_to_string(content: Any) -> str:

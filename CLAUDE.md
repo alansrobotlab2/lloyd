@@ -2957,6 +2957,22 @@ instead of queueing at 1 behind every worker iteration.
 accounting; `cold`: the chunk-budget A/B shape). Run it with nothing else on
 :8096; it refuses a busy engine.
 
+## Voice is a conversation, full duplex
+
+Since 2026-09-24 the wake word opens a **conversation** (90 s idle close,
+closers, leaving) instead of gating every sentence; past the 6 s follow-up
+window djev judges whether an utterance was said to Lloyd
+(`agent-services/voice/addressee.py`, `addressee: enforce`), and backchannels
+("yeah", "mm") are never turns. **Barge-in is on and the browser's half-duplex
+mute is off by default** — Lloyd's voice is a WebRTC track, which is AEC3's own
+echo reference — guarded by sustained speech, a warm-up, pause-then-decide
+with lossless resume, and his own voice enrolled and rejected
+(`scripts/voice/enroll_own_voice.py`, re-run after a voice change). Typed
+turns in a voice room are spoken as they stream through a session tap
+(`app/voice_tap.py`); tool turns speak their captions. Every spoken turn logs a
+`[latency]` breakdown. `architecture/voice.md` ("The gate", "Conversation
+mode", "Barge-in") is the long version.
+
 ## Voice output
 
 The cloned voice (`clone:dave_cullen`, config `livekit.tts`) is synthesised by

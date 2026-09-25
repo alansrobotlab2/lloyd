@@ -103,6 +103,7 @@ const DOT: Record<VoiceIndicator, [string, string]> = {
   'speaking': ['bg-primary animate-pulse', 'Speaking'],
   'mic-failed': ['bg-destructive', 'No mic — Lloyd cannot hear you'],
   'mic-starting': ['bg-amber-400 animate-pulse', 'Starting mic…'],
+  'conversation': ['bg-emerald-400', 'In conversation — no wake word needed'],
   'listening': ['bg-emerald-400 animate-pulse', 'Listening'],
   'idle': ['bg-muted-foreground/60', "Say 'Lloyd'"],
 }
@@ -113,6 +114,7 @@ function StatusDot(props: {
   agentSpeaking: boolean
   agentThinking: boolean
   wakeState: 'idle' | 'listening'
+  wakeMode?: 'idle' | 'listening' | 'conversation'
 }) {
   const [cls, label] = DOT[voiceIndicator(props)]
   return <span className={cn('inline-block h-2 w-2 rounded-full', cls)} title={label} />
@@ -370,6 +372,7 @@ export default function RightChatSidebar({ isMobile = false }: { isMobile?: bool
             agentSpeaking={isSpeaking}
             agentThinking={chatThinking}
             wakeState={room?.wakeState ?? 'idle'}
+            wakeMode={room?.wakeMode}
           />
           <Tooltip>
             <TooltipTrigger asChild>
@@ -488,6 +491,8 @@ export default function RightChatSidebar({ isMobile = false }: { isMobile?: bool
               status={status}
               micState={room?.micState}
               wakeState={room?.wakeState ?? 'idle'}
+              wakeMode={room?.wakeMode}
+              conversationElapsedS={room?.conversationElapsedS ?? 0}
               wakeRemainingS={room?.wakeRemainingS ?? 0}
               wakeContinuationS={room?.wakeContinuationS ?? 6}
               wakeSpeaker={room?.wakeSpeaker ?? null}

@@ -1,5 +1,5 @@
 import { cn } from '@/lib/utils'
-import { voiceIndicator, type MicState } from '@/lib/voiceIndicator'
+import { formatElapsed, voiceIndicator, type MicState } from '@/lib/voiceIndicator'
 
 /** Visual indicator for the wake-word gate state. Seven states top-to-bottom:
  *
@@ -9,6 +9,8 @@ import { voiceIndicator, type MicState } from '@/lib/voiceIndicator'
  *                  open after he finishes)
  *   mic-failed   — red, "No mic": nothing you say can reach Lloyd
  *   mic-starting — amber, "Starting mic…" (or waiting on a permission prompt)
+ *   conversation — emerald, "In conversation · 1:12": no wake word needed
+ *                  until it closes (silence, "that's all", leaving)
  *   listening    — emerald pulse, "Listening (Xs left)" + countdown bar
  *   idle         — muted, "Say 'Lloyd' to start"
  *
@@ -21,6 +23,8 @@ export interface WakeStatePillProps {
   status: 'idle' | 'connecting' | 'connected' | 'failed'
   micState?: MicState
   wakeState: 'idle' | 'listening'
+  wakeMode?: 'idle' | 'listening' | 'conversation'
+  conversationElapsedS?: number
   wakeRemainingS: number
   wakeContinuationS: number
   wakeSpeaker: string | null
@@ -34,6 +38,8 @@ export function WakeStatePill({
   status,
   micState,
   wakeState,
+  wakeMode,
+  conversationElapsedS = 0,
   wakeRemainingS,
   wakeContinuationS,
   wakeSpeaker,
@@ -43,7 +49,7 @@ export function WakeStatePill({
 }: WakeStatePillProps) {
   const padding = compact ? 'px-3 py-1.5 text-xs' : 'px-4 py-2 text-sm'
   const wWidth = compact ? 'w-full' : 'w-72'
-  const kind = voiceIndicator({ status, micState, agentThinking, agentSpeaking, wakeState })
+  const kind = voiceIndicator({ status, micState, agentThinking, agentSpeaking, wakeState, wakeMode })
 
   if (kind === 'disconnected') {
     return (
@@ -93,6 +99,22 @@ export function WakeStatePill({
           failed ? 'bg-destructive' : 'bg-amber-400 animate-pulse',
         )} />
         <span className="truncate">{failed ? 'No mic' : 'Starting mic…'}</span>
+      </div>
+    )
+  }
+  if (kind === 'conversation') {
+    return (
+      <div className={cn(
+        'flex items-center gap-2 rounded-full border border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+        padding,
+      )}>
+        <span className="inline-block h-2 w-2 rounded-full bg-emerald-400 shrink-0" />
+        <span className="truncate font-medium">
+          {compact ? 'Talking' : 'In conversation'}{wakeSpeaker ? ` — ${wakeSpeaker}` : ''}
+        </span>
+        <span className="ml-auto tabular-nums text-emerald-200/80 text-xs">
+          {formatElapsed(conversationElapsedS)}
+        </span>
       </div>
     )
   }

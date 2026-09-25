@@ -55,6 +55,10 @@ class SessionTurn:
     # {"kind", "label", "detail", "at"}. Display-only and lossy by design
     # — the loop never reads it back. See `set_turn_activity`.
     activity: Optional[dict[str, Any]] = None
+    #: The session this turn runs on, stamped by `enqueue_turn`. It lets
+    #: `_emit` fan a turn's events out to a voice room's tap
+    #: (`app/voice_tap.py`) without every emitter having to be told.
+    session_id: str = ""
 
 
 @dataclass
@@ -902,6 +906,8 @@ async def enqueue_turn(session_id: str, turn: SessionTurn, consumer_factory) -> 
     from dedup+cap), dedup (bool).
     """
     q = _get_or_create_queue(session_id)
+    if not turn.session_id:
+        turn.session_id = session_id
     preempted = False
     dropped: list[str] = []
     deduped = False

@@ -76,16 +76,30 @@ class _HTTP:
 class _TTS:
     """Records what would be said, and honours the generation counter."""
 
+    is_speaking = False
+    is_paused = False
+    is_idle = True
+
     def __init__(self):
         self.said = []
         self.generation = 0
+        self.thinking = 0
 
-    async def speak(self, text):
+    async def speak(self, text, timeline=None):
         self.said.append(text)
 
     def interrupt(self):
         self.generation += 1
         return 0
+
+    def silence_s(self, now=None):
+        return 0.0
+
+    def start_thinking(self):
+        self.thinking += 1
+
+    async def stop_thinking(self):
+        pass
 
 
 def _bridge(resp, **voice_turn):

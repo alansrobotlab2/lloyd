@@ -1016,20 +1016,99 @@ livekit:
     prewarm: true
     # Stop and say "The rest is in the chat." past this many characters.
     max_spoken_chars: 1500
+    # The first clause of a reply may be cut at a comma once it is this long
+    # (and the comma at least half that far in) — stream2sentence's rule. It
+    # was 45: the listener waits on exactly this clause, and the rest of the
+    # reply is synthesised while it plays.
+    first_clause_chars: 20
+    # A typed turn in a session whose voice room is open: `stream` speaks its
+    # reply as it streams, through the session tap (GET /api/voice/listen),
+    # with a reminder telling the model to open with a short spoken answer.
+    # `summary` is the old path — wait for the finished answer, rewrite it on
+    # the primary (#1445), poll it out of the transcript — which on
+    # 2026-09-24 spoke 13 s of summary per answer with "session poll failed".
+    typed_turns: stream
     filler:
       # Said once, only while nothing else has been: after `after_seconds` of
       # silence, or when a tool call starts before any words.
       enabled: true
       after_seconds: 2.5
       phrases: ["One moment.", "Let me check.", "Checking now."]
+    progress:
+      # While tools run, say something at least every `every_seconds`: the
+      # model's own caption for the tool ("Checking supervisor status now."),
+      # else one of `phrases`. On 2026-09-24 a spoken "Yeah." ran twenty tool
+      # calls: "One moment." at 2.5 s, then 44 s of nothing. Contextual
+      # fillers raise rapport as well as perceived speed; generic ones only
+      # the latter (ACM TAP 2026), so the caption goes first.
+      enabled: true
+      every_seconds: 8.0
+      phrases: ["Still working on it.", "Still going.", "Still on it."]
+    # A quiet two-tone pulse on Lloyd's track while tools run and nothing is
+    # being said (voice/thinking.py) — LiveKit Agents' "thinking" sound. RMS
+    # ~0.008, under the browser's half-duplex threshold.
+    thinking_sound: true
+    queued_notice:
+      # A spoken turn waiting behind a running turn (the session queue is
+      # serial) says so once, instead of a filler and then silence.
+      phrase: "Still finishing the last thing."
+      after_seconds: 1.5
   barge_in:
-    # Interrupt Lloyd when the enrolled speaker starts talking over him.
-    # Off by default because it needs client-side echo cancellation to be
-    # safe: without AEC his own voice returns through the mic and he
-    # interrupts himself on every utterance. VoiceRoom's half-duplex mute
-    # currently makes that moot; turning this on is a decision to move to
-    # full duplex, and wants `?raw_audio=0` (browser APM on).
-    enabled: false
+    # Interrupt Lloyd when the person he is talking with talks over him.
+    #
+    # On since 2026-09-24 (full duplex; VoiceRoom's half-duplex mute is now a
+    # setting, default off). It had been off on the premise that there was no
+    # trustworthy echo cancellation, and for this topology that premise is
+    # wrong: Lloyd's voice reaches the browser as a LiveKit remote WebRTC
+    # track, exactly the playback path Chrome's AEC3 takes as its echo
+    # reference, and `echoCancellation: true` is the capture default. Alan's
+    # usual output is open-ear earbuds besides. What is left is guarded the
+    # way LiveKit Agents and Unmute guard it:
+    enabled: true
+    # sustained speech, not a VAD edge — a cough is an edge;
+    min_duration_s: 0.5
+    # nothing in the first seconds of each reply, while AEC converges on it;
+    warmup_s: 3.0
+    # pause first; if no words follow within this long after the speaker goes
+    # quiet (an empty transcript, a backchannel), resume where it stopped;
+    false_interruption_timeout_s: 2.0
+    max_pause_s: 8.0
+    # A 300 ms chime on Lloyd's track when someone joins, so the browser's
+    # echo canceller has heard his track before his first reply.
+    preroll_ms: 300
+    # and his own voice, enrolled as `voiceprint.own_voice_profile`, dropped.
+  conversation:
+    # The wake word opens a conversation instead of gating every sentence
+    # (2026-09-24). It stays open `idle_close_s` after the last exchange and
+    # closes on a closer ("that's all", "never mind", "stop"), on the speaker
+    # leaving the room, or on silence. Opened by the wake word, push-to-talk,
+    # or a typed message while the room is open.
+    #
+    # Inside it there are two zones. The short follow-up window
+    # (`wake.continuation_seconds` after Lloyd stops or the user's last turn;
+    # `question_window_s` after a reply that ends in a question) is today's
+    # proven behaviour: the locked speaker needs no wake word. Past it, an
+    # utterance must also be JUDGED addressed — djev over the utterance,
+    # Lloyd's last sentence, how long ago he said it and who is talking
+    # (voice/addressee.py) — and, once anyone is enrolled, come from an
+    # enrolled speaker. Backchannels ("yeah", "mm") are never turns.
+    enabled: true
+    idle_close_s: 90
+    question_window_s: 20
+    # `enforce` gates the zone past the follow-up window on the judge;
+    # `shadow` only logs its verdict (and that zone then drops, as before);
+    # `off` never asks. Graded 2026-09-24 on 46 labelled cases
+    # (scripts/voice/addressee_eval.py): at 0.7, 22 of 24 addressed accepted
+    # and 0 of 22 non-addressed (other people, phones, TV, self-talk,
+    # mentions, backchannels) — precision 1.00, recall 0.92; at 0.5 one false
+    # accept ("Sorry, I was talking to my computer. What did you say?"). The
+    # 26 utterances dropped as "not addressed" the evening before were all
+    # backchannels or echo, and djev scored every backchannel under 0.1.
+    # Latency p50 630 ms, which is paid only in that zone; a djev that does
+    # not answer is a drop there, which is what the gate did before this.
+    addressee: enforce
+    addressee_threshold: 0.7
+    addressee_timeout_ms: 1500
   wake:
     enabled: true
     words:
@@ -1098,6 +1177,10 @@ livekit:
     device: cpu          # resemblyzer only; CAM++ runs on onnxruntime CPU
     num_threads: 2       # CAM++ onnxruntime intra-op threads; ~20 ms a 1 s clip, ~60 ms at 4 s
     unknown_label: Unknown
+    # Lloyd's own cloned voice, enrolled from TTS renders
+    # (scripts/voice/enroll_own_voice.py). A segment that matches it while he
+    # is speaking, or within 2 s of stopping, is his echo and is dropped.
+    own_voice_profile: lloyd-voice
 # Self-modification loop: worktree -> gate -> promote, with guardian rollback.
 # `enabled: false` is the master switch and the default. The machinery lands
 # inert; turning it on is a deliberate human act.

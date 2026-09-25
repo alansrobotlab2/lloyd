@@ -63,6 +63,10 @@ from voice.pipeline import HearingEvent, HearingPipeline  # noqa: E402
 from voice.runner import HearingThread  # noqa: E402
 from voice.resample import to_int16  # noqa: E402
 from voice.speakable import ClauseStream  # noqa: E402
+from voice.thinking import ThinkingSound  # noqa: E402
+from voice.timeline import TurnTimeline  # noqa: E402
+from voice import conversation as voice_conv  # noqa: E402
+from voice.addressee import AddresseeClassifier  # noqa: E402
 
 
 LOG = logging.getLogger("lloyd-agent-worker")
@@ -89,6 +93,8 @@ BACKEND_URL = os.environ.get("LLOYD_BACKEND_URL", "http://127.0.0.1:8080").rstri
 INJECT_URL = f"{BACKEND_URL}/api/voice/inject"
 SUMMARIZE_URL = f"{BACKEND_URL}/api/voice/summarize"
 PREWARM_URL = f"{BACKEND_URL}/api/voice/prewarm"
+INTERRUPTED_URL = f"{BACKEND_URL}/api/voice/interrupted"
+LISTEN_URL = f"{BACKEND_URL}/api/voice/listen"
 
 _ENV_VAR_RE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)\}")
 
@@ -197,18 +203,30 @@ class TTSStreamer:
     One instance per RoomBridge. Holds the published track; queues
     utterances; runs them serially so the agent's voice doesn't overlap
     itself when the harness produces multiple replies in quick succession.
+
+    Since the 2026-09-24 duplex work it also keeps an **audio clock** — the
+    monotonic time at which everything pushed so far will have finished
+    playing — because three things need to know what the listener has
+    actually heard rather than what has been queued: the per-turn latency
+    breakdown (`voice/timeline.py`), `heard_text()` for an interruption, and
+    `pause()`/`resume()`, which take back the frames that were queued but not
+    yet played so a false interruption loses nothing.
     """
 
     # LiveKit AudioFrame chunks must be a multiple of 10 ms for the SDK
     # to accept them. 100 ms gives a comfortable buffer with ~1 frame of
     # latency added.
     FRAME_MS = 100
+    #: How far back pushed frames are remembered for `pause()` to take back.
+    #: The AudioSource holds about a second; anything older has played.
+    RECENT_S = 3.0
 
     def __init__(
         self,
         tts_cfg: dict,
         room: "rtc.Room",
         on_utterance_end: Optional[Callable[[], None]] = None,
+        thinking_sound: bool = False,
     ) -> None:
         self.cfg = tts_cfg
         self.api_url = (tts_cfg.get("api_url") or "http://127.0.0.1:8090").rstrip("/")
@@ -239,7 +257,7 @@ class TTSStreamer:
         self.source: Optional["rtc.AudioSource"] = None
         self.track: Optional["rtc.LocalAudioTrack"] = None
         self._publish_lock = asyncio.Lock()
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        self._queue: asyncio.Queue = asyncio.Queue()
         self._worker_task: Optional[asyncio.Task] = None
         # Currently-streaming utterance task (set by _drain). interrupt()
         # cancels it; _drain catches the CancelledError and moves on.
@@ -252,6 +270,25 @@ class TTSStreamer:
         #: Characters synthesised since the queue last drained — the length
         #: of what the listener has been told in this reply.
         self.spoken_chars = 0
+        #: Monotonic time at which everything pushed so far has played.
+        self.audio_clock = 0.0
+        #: When the current reply's first frame starts playing (None between
+        #: replies) — the barge-in warm-up is measured from here.
+        self.reply_started_at: Optional[float] = None
+        #: When the last reply finished playing — "seconds since Lloyd spoke".
+        self.last_reply_end: Optional[float] = None
+        #: (clause, playout end) for the current reply, for `heard_text`.
+        self._clause_log: list[tuple[str, float]] = []
+        #: Clauses queued or streaming but not yet logged, for `unheard_chars`.
+        self._pending_chars = 0
+        self._recent: deque = deque()
+        self._resume_frames: list[tuple[bytes, int]] = []
+        self._unpaused = asyncio.Event()
+        self._unpaused.set()
+        self._pause_epoch = 0
+        self.paused_at: Optional[float] = None
+        self._thinker = ThinkingSound(self.sample_rate) if thinking_sound else None
+        self._thinking_task: Optional[asyncio.Task] = None
         # Lazy import — keeps top-of-file clean.
         import httpx
         self._http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=120.0))
@@ -270,25 +307,54 @@ class TTSStreamer:
                 self.sample_rate, self.voice, self._shaper.describe(),
             )
 
-    async def speak(self, text: str) -> None:
+    async def speak(self, text: str, timeline: Optional[TurnTimeline] = None) -> None:
         """Queue an utterance for synthesis + playback.
 
         Every spoken path ends here — streamed clauses, the poller's summary,
         fillers — so this is where `for_speech` sits: nothing reaches the
-        vocoder around it."""
+        vocoder around it. `timeline`, when given, receives the TTS seams
+        (first byte, first frame pushed and played) and the gaps between this
+        turn's audio."""
         text = (text or "").strip()
         if not text:
             return
         if self.normalise_text:
             text = tts_text.for_speech(text)
         await self.ensure_published()
-        await self._queue.put((self.generation, text))
+        self._pending_chars += len(text)
+        await self._queue.put((self.generation, text, timeline))
 
     @property
     def is_speaking(self) -> bool:
         return self._speaking.is_set()
 
+    @property
+    def is_paused(self) -> bool:
+        return not self._unpaused.is_set()
+
+    @property
+    def is_idle(self) -> bool:
+        """Nothing playing and nothing queued."""
+        return not self.is_speaking and self._queue.empty()
+
+    def silence_s(self, now: Optional[float] = None) -> float:
+        """Seconds since the listener last heard anything from this track."""
+        now = time.monotonic() if now is None else now
+        return max(0.0, now - self.audio_clock)
+
+    def heard_text(self, at: Optional[float] = None) -> str:
+        """The clauses of the current reply whose audio finished playing by
+        `at` (default now) — what the listener actually heard."""
+        at = time.monotonic() if at is None else at
+        return " ".join(t for t, end in self._clause_log if end <= at)
+
+    def unheard_chars(self, at: Optional[float] = None) -> int:
+        at = time.monotonic() if at is None else at
+        return (sum(len(t) for t, end in self._clause_log if end > at)
+                + self._pending_chars)
+
     async def close(self) -> None:
+        await self.stop_thinking()
         if self._worker_task is not None:
             self._worker_task.cancel()
             try:
@@ -315,18 +381,145 @@ class TTSStreamer:
                 dropped += 1
             except asyncio.QueueEmpty:
                 break
+        self._pending_chars = 0
+        # A paused reply is being thrown away, not resumed: release anything
+        # blocked on the pause so it can see the cancel.
+        self._resume_frames = []
+        self.paused_at = None
+        self._unpaused.set()
         if self._current_task is not None and not self._current_task.done():
             self._current_task.cancel()
         # Best-effort: ask the AudioSource to drop any buffered frames.
         # The Python SDK exposes `clear_queue()` in recent versions; older
         # ones don't, in which case ~100ms of trailing audio may still
         # reach the browser before silence resumes.
+        self._clear_source()
+        self.audio_clock = time.monotonic()
+        self._recent.clear()
+        return dropped
+
+    # ── pause / resume (barge-in) ───────────────────────────────────────
+
+    def pause(self) -> bool:
+        """Stop the audio now, keeping everything not yet heard.
+
+        The first half of LiveKit Agents' false-interruption handling: on a
+        possible barge-in the playout pauses, and the utterance that follows
+        decides whether it was real (`interrupt()`) or not (`resume()`).
+        Frames already queued in the AudioSource cannot be paused there, only
+        dropped, so the ones whose playout had not finished are taken back
+        first and replayed by `resume()`. Returns False if already paused.
+        """
+        if self.is_paused:
+            return False
+        now = time.monotonic()
+        self._pause_epoch += 1
+        self._unpaused.clear()
+        self.paused_at = now
+        # The frame playing right now is replayed whole: a 100 ms repeat is
+        # less noticeable than a missing syllable.
+        self._resume_frames = [(pcm, n) for pcm, n, end in self._recent if end > now]
+        self._recent.clear()
+        self._clear_source()
+        self.audio_clock = now
+        return True
+
+    async def resume(self) -> bool:
+        """Carry on from where `pause()` stopped. False if not paused."""
+        if not self.is_paused:
+            return False
+        frames, self._resume_frames = self._resume_frames, []
+        paused_for = time.monotonic() - (self.paused_at or time.monotonic())
+        # Shift the heard-by times of clauses that had not finished: they now
+        # finish `paused_for` later.
+        cut = self.paused_at or 0.0
+        self._clause_log = [(t, end + paused_for if end > cut else end)
+                            for t, end in self._clause_log]
+        self.paused_at = None
+        # Replayed straight into the source, before the pause is lifted, so a
+        # push that was blocked on the pause cannot jump ahead of them.
+        for pcm, n in frames:
+            await self._capture(pcm, n, None, record=True)
+        self._unpaused.set()
+        return True
+
+    def _clear_source(self) -> None:
         if self.source is not None:
             try:
                 self.source.clear_queue()
             except Exception:
                 pass
-        return dropped
+
+    # ── pre-roll ────────────────────────────────────────────────────────
+
+    async def preroll(self, ms: int = 300) -> None:
+        """A short chime on this track when someone joins.
+
+        The browser's echo canceller (AEC3) learns the speaker-to-mic path
+        from what it plays; until it has heard something, the first words of
+        the first reply leak back into the mic. Unmute and LiveKit Agents both
+        play something at session start for exactly this. It has to go out on
+        this track — Chrome's AEC takes a remote WebRTC track as its reference
+        and does not reliably take Web Audio — and a connect chime needs no
+        explaining, which is the rule for an earcon.
+        """
+        if self.source is None or ms <= 0 or self.is_speaking:
+            return
+        n = self.sample_rate * ms // 1000
+        n -= n % (self.sample_rate // 100)
+        t = np.arange(n) / self.sample_rate
+        env = np.sin(np.pi * np.arange(n) / max(1, n - 1)) ** 2
+        half = n // 2
+        tone = np.where(np.arange(n) < half, np.sin(2 * np.pi * 523.25 * t),
+                        np.sin(2 * np.pi * 783.99 * t))
+        pcm = (tone * env * 0.08 * 32767).astype(np.int16).tobytes()
+        try:
+            await self._capture(pcm, n, None, record=False)
+        except Exception as e:
+            LOG.debug("preroll failed: %s", e)
+
+    # ── thinking sound ──────────────────────────────────────────────────
+
+    def start_thinking(self) -> None:
+        """Play the quiet working sound until the next clause (or stop)."""
+        if self._thinker is None or self.source is None:
+            return
+        if self.is_speaking or not self._queue.empty():
+            return
+        if self._thinking_task is not None and not self._thinking_task.done():
+            return
+        self._thinker.reset()
+        self._thinking_task = asyncio.create_task(self._think_loop())
+
+    async def stop_thinking(self) -> None:
+        task, self._thinking_task = self._thinking_task, None
+        if task is None or task.done():
+            return
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        # What is still queued is thinking sound; speech must not wait
+        # behind it.
+        self._clear_source()
+        self.audio_clock = time.monotonic()
+
+    @property
+    def is_thinking(self) -> bool:
+        return self._thinking_task is not None and not self._thinking_task.done()
+
+    async def _think_loop(self) -> None:
+        n = self.sample_rate * self.FRAME_MS // 1000
+        while True:
+            frame = rtc.AudioFrame(data=self._thinker.next_frame(n),
+                                   sample_rate=self.sample_rate, num_channels=1,
+                                   samples_per_channel=n)
+            # capture_frame blocks once the source holds ~1 s, which paces
+            # this loop in real time.
+            await self.source.capture_frame(frame)
+
+    # ── the queue ───────────────────────────────────────────────────────
 
     async def _drain(self) -> None:
         """Speak queued clauses back to back.
@@ -339,14 +532,23 @@ class TTSStreamer:
         synthesis latency (~250 ms) of dead air after every sentence.
         """
         while True:
-            gen, text = await self._queue.get()
+            item = await self._queue.get()
+            gen, text = item[0], item[1]
+            timeline = item[2] if len(item) > 2 else None
+            self._pending_chars = max(0, self._pending_chars - len(text))
             if gen != self.generation:
                 continue  # queued before an interrupt
+            await self.stop_thinking()
+            if not self.is_speaking:
+                self._clause_log = []
+                self.reply_started_at = None
             self._speaking.set()
-            self._current_task = asyncio.create_task(self._stream_utterance(text))
+            self._current_task = asyncio.create_task(
+                self._stream_utterance(text, timeline))
             try:
                 await self._current_task
                 self.spoken_chars += len(text)
+                self._clause_log.append((text, self.audio_clock))
             except asyncio.CancelledError:
                 LOG.info("TTS interrupted mid-utterance")
             except Exception as e:
@@ -359,12 +561,23 @@ class TTSStreamer:
             # last syllable is not the thing `clear_queue()` discards.
             try:
                 await self._push_tail_silence()
-                if await self._await_playout_or_next():
+                more = False
+                while True:
+                    if await self._await_playout_or_next():
+                        more = True
+                        break
+                    if not self.is_paused:
+                        break
+                    # Paused over the reply's last words: the queue is empty
+                    # only because pause() emptied it. Wait for the verdict.
+                    await self._unpaused.wait()
+                if more:
                     continue  # another clause arrived while this one played
             except Exception as e:
                 LOG.debug("TTS close-out failed: %s", e)
             self._speaking.clear()
             self.spoken_chars = 0
+            self.last_reply_end = time.monotonic()
             # Notify the bridge that the reply finished playing so it can
             # extend the wake-word continuation window. Best-effort: any
             # callback exception is swallowed, the drain loop survives.
@@ -401,7 +614,8 @@ class TTSStreamer:
         if samples > 0:
             await self._push_frame(bytes(2 * samples), samples)
 
-    async def _stream_utterance(self, text: str) -> None:
+    async def _stream_utterance(self, text: str,
+                                timeline: Optional[TurnTimeline] = None) -> None:
         """POST to /v1/audio/speech with stream:true,response_format:pcm and
         push every PCM chunk into the LiveKit AudioSource."""
         if self.source is None:
@@ -437,12 +651,14 @@ class TTSStreamer:
                 async for chunk in resp.aiter_bytes():
                     if not chunk:
                         continue
+                    if timeline is not None:
+                        timeline.mark("first_tts_byte")
                     leftover.extend(self._shaper.process(chunk))
                     # Push complete 100ms frames; keep any tail for the next loop.
                     while len(leftover) >= bytes_per_frame:
                         frame_bytes = bytes(leftover[:bytes_per_frame])
                         del leftover[:bytes_per_frame]
-                        await self._push_frame(frame_bytes, samples_per_frame)
+                        await self._push_frame(frame_bytes, samples_per_frame, timeline)
                         n_pushed += 1
             leftover.extend(self._shaper.flush())
             drained = True
@@ -462,7 +678,7 @@ class TTSStreamer:
         while len(leftover) >= bytes_per_frame:
             frame_bytes = bytes(leftover[:bytes_per_frame])
             del leftover[:bytes_per_frame]
-            await self._push_frame(frame_bytes, samples_per_frame)
+            await self._push_frame(frame_bytes, samples_per_frame, timeline)
             n_pushed += 1
         # Tail: any final partial frame (zero-padded to a 10ms boundary).
         if leftover:
@@ -474,7 +690,7 @@ class TTSStreamer:
                 tail = tail + b"\x00" * pad
             samples = len(tail) // 2
             if samples:
-                await self._push_frame(tail, samples)
+                await self._push_frame(tail, samples, timeline)
                 n_pushed += 1
         elapsed = time.monotonic() - t0
         LOG.info("TTS spoke %r in %.2fs (%d frames)", text[:60], elapsed, n_pushed)
@@ -506,16 +722,42 @@ class TTSStreamer:
             # Older SDKs may not expose wait_for_playout at all.
             LOG.debug("TTS playout wait unavailable: %s", e)
 
-    async def _push_frame(self, pcm_bytes: bytes, samples_per_channel: int) -> None:
+    async def _push_frame(self, pcm_bytes: bytes, samples_per_channel: int,
+                          timeline: Optional[TurnTimeline] = None) -> None:
         if self.source is None:
             return
+        # A paused reply holds here; `interrupt()` releases it into a cancel.
+        await self._unpaused.wait()
+        await self._capture(pcm_bytes, samples_per_channel, timeline, record=True)
+
+    async def _capture(self, pcm_bytes: bytes, samples: int,
+                       timeline: Optional[TurnTimeline], record: bool) -> None:
+        now = time.monotonic()
+        dur = samples / self.sample_rate
+        play_from = max(now, self.audio_clock)
+        epoch = self._pause_epoch
         frame = rtc.AudioFrame(
             data=pcm_bytes,
             sample_rate=self.sample_rate,
             num_channels=1,
-            samples_per_channel=samples_per_channel,
+            samples_per_channel=samples,
         )
         await self.source.capture_frame(frame)
+        if self._pause_epoch != epoch or self.is_paused:
+            # A pause landed while this frame waited for room in the source:
+            # it went in after the clear. Take it back for `resume()`.
+            self._clear_source()
+            self._resume_frames.append((pcm_bytes, samples))
+            return
+        self.audio_clock = play_from + dur
+        if self.reply_started_at is None:
+            self.reply_started_at = play_from
+        if record:
+            self._recent.append((pcm_bytes, samples, self.audio_clock))
+            while self._recent and self._recent[0][2] < now - self.RECENT_S:
+                self._recent.popleft()
+        if timeline is not None:
+            timeline.audio_pushed(now, play_from, dur)
 
 
 # ── Wake-word gate / continuation ────────────────────────────────────────
@@ -543,8 +785,21 @@ class WakeState:
     on; without voiceprint it's the only check.
     """
 
-    def __init__(self, cfg: dict) -> None:
+    def __init__(self, cfg: dict, conversation: Optional[dict] = None) -> None:
         self.enabled: bool = bool(cfg.get("enabled", True))
+        conv = conversation or {}
+        #: Conversation mode (2026-09-24): the wake word OPENS a conversation
+        #: instead of gating every sentence. It stays open `idle_close_s` after
+        #: the last exchange; inside it but past the short follow-up window an
+        #: utterance must also be judged addressed (voice/addressee.py). Off,
+        #: the window is the short follow-up alone, as before.
+        self.conversation_enabled: bool = bool(conv.get("enabled", False))
+        self.idle_close_s: float = float(conv.get("idle_close_s", 90.0))
+        #: A reply that ends by asking something holds the short window open
+        #: this long, so the answer needs neither the name nor the judge.
+        self.question_window_s: float = float(conv.get("question_window_s", 20.0))
+        self._conv_until: float = 0.0
+        self._conv_started: Optional[float] = None
         # Lower-cased + sorted longest-first so "hey lloyd" wins over "lloyd"
         # when the user said "hey lloyd what time is it".
         words = list(cfg.get("words") or ["lloyd"])
@@ -620,18 +875,63 @@ class WakeState:
         extensions where the speaker hasn't changed). `seconds` overrides
         `continuation_seconds` for this one opening (a client-side wake)."""
         window = self.continuation_seconds if seconds is None else seconds
-        self._until = time.monotonic() + window
+        self._until = max(self._until, time.monotonic() + window) \
+            if seconds is not None else time.monotonic() + window
         if identity is not None:
             self._locked_identity = identity
+        self.refresh_conversation()
 
     def reset(self) -> None:
         self._until = 0.0
         self._locked_identity = None
         self._anchor_embedding = None
         self._anchor_name = None
+        self._conv_until = 0.0
+        self._conv_started = None
 
     def remaining_s(self) -> float:
         return max(0.0, self._until - time.monotonic())
+
+    # ── conversation mode ──────────────────────────────────────────────
+
+    def open_conversation(self, identity: Optional[str] = None) -> None:
+        """Open (or refresh) the conversation. Every exchange calls this."""
+        if not self.conversation_enabled:
+            return
+        now = time.monotonic()
+        if not self.in_conversation(at=now):
+            self._conv_started = now
+        self._conv_until = now + self.idle_close_s
+        if identity is not None:
+            self._locked_identity = identity
+
+    def refresh_conversation(self) -> None:
+        """Push the idle close back, if a conversation is open."""
+        if self.in_conversation():
+            self._conv_until = time.monotonic() + self.idle_close_s
+
+    def close_conversation(self) -> None:
+        """A closer ("that's all"), or the speaker left: wake word needed again."""
+        self._conv_until = 0.0
+        self._conv_started = None
+        self._until = 0.0
+
+    def in_conversation(self, at: Optional[float] = None) -> bool:
+        t = at if at is not None else time.monotonic()
+        return self.conversation_enabled and t < self._conv_until
+
+    def conversation_open_for(self, identity: str, at: Optional[float] = None) -> bool:
+        return self._locked_identity == identity and self.in_conversation(at=at)
+
+    def conversation_remaining_s(self) -> float:
+        if not self.in_conversation():
+            return 0.0
+        return max(0.0, self._conv_until - time.monotonic())
+
+    def conversation_elapsed_s(self) -> float:
+        if not self.in_conversation() or self._conv_started is None:
+            return 0.0
+        return time.monotonic() - self._conv_started
 
 
 def _strip_wake_word(text: str, words: list[str]) -> Optional[str]:
@@ -919,14 +1219,26 @@ class WakeMissCapture:
 
     # -- ground-truth labels --
 
+    #: What `addressed` may say about an utterance: meant for Lloyd, not, or an
+    #: acknowledgement of something he said — the three answers the
+    #: conversation gate has to tell apart (voice/conversation.py,
+    #: voice/addressee.py). The evening of 2026-09-24 dropped 26 utterances
+    #: as "not addressed" and every one was the third kind.
+    ADDRESSED_LABELS = ("yes", "no", "backchannel")
+
     def record_label(self, *, utterance_id: Optional[str], miss_ts: Optional[float],
-                     said_wake_word: bool, note: Optional[str]) -> dict:
+                     said_wake_word: Optional[bool], note: Optional[str],
+                     addressed: Optional[str] = None) -> dict:
         """Append a ground-truth label for an existing utterance or miss
         dump. Returns the resolved target (utterance_id and/or miss path)
         so the caller can confirm it landed on the right row."""
         if not utterance_id and miss_ts is None:
             raise ValueError("either utterance_id or miss_ts is required")
-        resolved: dict = {"said_wake_word": bool(said_wake_word)}
+        if addressed is not None and addressed not in self.ADDRESSED_LABELS:
+            raise ValueError(f"addressed must be one of {', '.join(self.ADDRESSED_LABELS)}")
+        if said_wake_word is None and addressed is None:
+            raise ValueError("said_wake_word or addressed is required")
+        resolved: dict = {"said_wake_word": said_wake_word, "addressed": addressed}
         if utterance_id:
             wav = self.UTTERANCES_DIR / f"{utterance_id}.wav"
             resolved["utterance_id"] = utterance_id
@@ -942,7 +1254,8 @@ class WakeMissCapture:
             "ts": time.time(),
             "utterance_id": utterance_id or None,
             "miss_ts": miss_ts,
-            "said_wake_word": bool(said_wake_word),
+            "said_wake_word": None if said_wake_word is None else bool(said_wake_word),
+            "addressed": addressed,
             "note": (note or "")[:300] or None,
         }
         try:
@@ -1002,24 +1315,26 @@ async def _start_ww_diag_server(capture: WakeMissCapture,
             return web.json_response(
                 {"ok": False, "error": "miss_ts must be a number"}, status=400,
             )
-        if "said_wake_word" not in body:
+        if "said_wake_word" not in body and "addressed" not in body:
             return web.json_response(
-                {"ok": False, "error": "said_wake_word (bool) is required"}, status=400,
+                {"ok": False, "error": "said_wake_word (bool) or addressed "
+                 "(yes/no/backchannel) is required"}, status=400,
             )
-        said = bool(body.get("said_wake_word"))
+        said = bool(body["said_wake_word"]) if "said_wake_word" in body else None
+        addressed = (str(body.get("addressed") or "").strip().lower() or None)
         note = (body.get("note") or "").strip() or None
         try:
             resolved = capture.record_label(
                 utterance_id=utterance_id, miss_ts=miss_ts,
-                said_wake_word=said, note=note,
+                said_wake_word=said, note=note, addressed=addressed,
             )
         except ValueError as e:
             return web.json_response({"ok": False, "error": str(e)}, status=400)
         except Exception as e:
             LOG.warning("ww_label: record failed: %s", e)
             return web.json_response({"ok": False, "error": str(e)}, status=500)
-        LOG.info("ww_label: utt=%s miss_ts=%s said=%s note=%r",
-                 utterance_id, miss_ts, said, note)
+        LOG.info("ww_label: utt=%s miss_ts=%s said=%s addressed=%s note=%r",
+                 utterance_id, miss_ts, said, addressed, note)
         return web.json_response({"ok": True, "resolved": resolved})
 
     app = web.Application()
@@ -1117,7 +1432,30 @@ class RoomBridge:
         self._tts_cfg = lk_cfg.get("tts", {}) or {}
         self.tts: Optional[TTSStreamer] = None
         # Wake-word gate. Per-room so multi-room workers don't share state.
-        self.wake = WakeState(lk_cfg.get("wake", {}) or {})
+        conv_cfg = lk_cfg.get("conversation", {}) or {}
+        self.wake = WakeState(lk_cfg.get("wake", {}) or {}, conv_cfg)
+        #: "Was that said to Lloyd?" for the part of a conversation past the
+        #: short follow-up window (voice/addressee.py).
+        self.addressee = AddresseeClassifier(conv_cfg)
+        #: The closing silence the segmenter waits before an utterance ends —
+        #: subtracted from the close to date when the speaker actually stopped.
+        self._min_silence_s = float(vad_cfg.get("min_silence_ms", 380)) / 1000.0
+        #: What Lloyd said last (the last clause spoken) — the addressee
+        #: judge's context, and "did he just ask a question?".
+        self._last_agent_text = ""
+        #: The turn whose reply is being spoken, so a barge-in cancels that
+        #: turn and never one queued after it.
+        self._speaking_turn: Optional[str] = None
+        #: The spoken turn whose reply is in flight (queued, running tools or
+        #: speaking) — what "stop" cancels when nothing is being said yet.
+        self._active_turn: Optional[str] = None
+        #: The session tap (GET /api/voice/listen): typed turns spoken live.
+        self._tap_connected = False
+        self._tap_turns: dict[str, "ReplySpeaker"] = {}
+        vp = lk_cfg.get("voiceprint", {}) or {}
+        #: The enrolled profile that is Lloyd's own cloned voice. A segment
+        #: that matches it while he is speaking is his echo, not a person.
+        self._own_voice_profile = str(vp.get("own_voice_profile", "lloyd-voice"))
         turn_cfg = lk_cfg.get("turn_detection", {}) or {}
         #: How long a turn Smart Turn called unfinished waits for its
         #: continuation before being released anyway.
@@ -1125,12 +1463,22 @@ class RoomBridge:
         #: And the ceiling on how much can accumulate that way, so a speaker
         #: who never lands a complete-sounding sentence still gets answered.
         self._hold_max_s = float(turn_cfg.get("hold_max_seconds", 12.0))
-        #: Barge-in needs client-side echo cancellation; without it Lloyd's own
-        #: voice returns through the mic and interrupts him. VoiceRoom's
-        #: half-duplex mute is the belt to this one's braces.
-        self._barge_in_enabled = bool(
-            (lk_cfg.get("barge_in", {}) or {}).get("enabled", False)
-        )
+        #: Barge-in: the speaker talks over Lloyd and he stops. The browser's
+        #: AEC3 has his voice as its echo reference (it arrives as a WebRTC
+        #: track), so the old premise — no trustworthy echo cancellation — is
+        #: wrong for this topology; what remains is guarded here the way
+        #: LiveKit Agents and Unmute guard it: sustained speech, not a VAD
+        #: edge; a warm-up after each reply starts; pause first and let the
+        #: utterance decide; and his own voice rejected by voiceprint.
+        bi = lk_cfg.get("barge_in", {}) or {}
+        self._barge_in_enabled = bool(bi.get("enabled", False))
+        self._barge_min_s = float(bi.get("min_duration_s", 0.5))
+        self._barge_warmup_s = float(bi.get("warmup_s", 3.0))
+        self._barge_false_timeout_s = float(bi.get("false_interruption_timeout_s", 2.0))
+        self._barge_max_pause_s = float(bi.get("max_pause_s", 8.0))
+        self._preroll_ms = int(bi.get("preroll_ms", 300)) if self._barge_in_enabled else 0
+        #: The pending possible interruption: {identity, paused_at, silence_at}.
+        self._barge: Optional[dict] = None
         self._last_partial = ""
         #: Turns whose reply was spoken from their own stream, so the session
         #: poller — which still covers typed and ambient turns — must not say
@@ -1140,7 +1488,26 @@ class RoomBridge:
         self._turn_tasks: set[asyncio.Task] = set()
         vt = lk_cfg.get("voice_turn", {}) or {}
         self._stream_replies = bool(vt.get("stream_replies", True))
+        #: `stream`: typed turns in this session are spoken as they stream,
+        #: through the session tap. `summary`: the old poller + rewrite.
+        self._typed_stream = str(vt.get("typed_turns", "stream")).lower() == "stream"
         self._max_spoken_chars = int(vt.get("max_spoken_chars", 1500))
+        #: The first clause may be cut at a comma once it is this long (and
+        #: the comma at least half that far in) — stream2sentence's rule.
+        self._first_soft_chars = int(vt.get("first_clause_chars", 20))
+        self._thinking_sound = bool(vt.get("thinking_sound", True))
+        progress = vt.get("progress", {}) or {}
+        #: A tool turn says something at least this often: the model's own
+        #: caption for the tool it is running, else a generic line.
+        self._progress_enabled = bool(progress.get("enabled", True))
+        self._progress_every_s = float(progress.get("every_seconds", 8.0))
+        self._progress_phrases = list(progress.get("phrases") or
+                                      ["Still working on it.", "Still going.",
+                                       "Still on it."])
+        queued = vt.get("queued_notice", {}) or {}
+        #: Said once when a spoken turn is waiting behind another turn.
+        self._queued_notice = str(queued.get("phrase", "Still finishing the last thing."))
+        self._queued_notice_after_s = float(queued.get("after_seconds", 1.5))
         filler = vt.get("filler", {}) or {}
         self._filler_enabled = bool(filler.get("enabled", True))
         self._filler_after_s = float(filler.get("after_seconds", 2.5))
@@ -1186,8 +1553,11 @@ class RoomBridge:
             self._tts_cfg,
             self.room,
             on_utterance_end=self._on_tts_utterance_end,
+            thinking_sound=self._thinking_sound,
         )
         await self.tts.ensure_published()
+        if self.has_remote_participants:
+            self._schedule_preroll()
         # Seed the spoken-set with all existing assistant ids so we don't
         # re-speak history when the worker reconnects to an existing room.
         await self._seed_spoken_set()
@@ -1195,6 +1565,8 @@ class RoomBridge:
         self._tasks.append(poll_task)
         self._tasks.append(asyncio.create_task(self._flush_held_loop()))
         self._tasks.append(asyncio.create_task(self._watch_audio_loop()))
+        self._tasks.append(asyncio.create_task(self._listen_session()))
+        self._tasks.append(asyncio.create_task(self._barge_watchdog()))
 
     @property
     def has_remote_participants(self) -> bool:
@@ -1253,19 +1625,42 @@ class RoomBridge:
         a long agent reply (10s+ TTS, 6s window) would let the window
         expire mid-speech and we'd silently skip the post-TTS extension.
         """
+        self._speaking_turn = None
         if not self.wake.enabled:
             return
         if not self.wake.has_lock:
             return
         was_in_continuation = self.wake.in_continuation()
         self.wake.extend()  # keep identity, refresh timer
+        asked = voice_conv.ends_with_question(self._last_agent_text)
+        if asked:
+            # A reply that asked something: the answer needs neither the name
+            # nor the judge (Home Assistant's continue_conversation).
+            self.wake.extend(seconds=self.wake.question_window_s)
         LOG.info(
-            "[%s] TTS done — continuation %s to %.1fs",
+            "[%s] TTS done — continuation %s to %.1fs%s",
             self.room_name,
             "extended" if was_in_continuation else "reopened",
-            self.wake.continuation_seconds,
+            self.wake.remaining_s(),
+            " (asked a question)" if asked else "",
         )
         self._schedule_wake_state_publish()
+
+    def _schedule_preroll(self) -> None:
+        """Let the joiner's echo canceller hear Lloyd's track once (see
+        TTSStreamer.preroll) — a second after joining, once it subscribed."""
+        if not self._preroll_ms or self.tts is None:
+            return
+
+        async def _later():
+            await asyncio.sleep(1.5)
+            if self.tts is not None:
+                await self.tts.preroll(self._preroll_ms)
+
+        try:
+            asyncio.create_task(_later())
+        except RuntimeError:
+            pass
 
     def _schedule_partial_publish(self, text: str) -> None:
         """Push a running transcript to the browser.
@@ -1312,11 +1707,20 @@ class RoomBridge:
         long as we publish on every extend/lock."""
         try:
             wake = self.wake
+            conv = wake.in_conversation()
+            open_ = conv or wake.in_continuation()
             payload = {
                 "type": "wake_state",
-                "state": "listening" if wake.in_continuation() else "idle",
-                "remaining_s": round(wake.remaining_s(), 2),
-                "continuation_s": wake.continuation_seconds,
+                "state": "listening" if open_ else "idle",
+                # `conversation`: open with no wake word needed, until
+                # `remaining_s` of silence closes it. `listening`: the short
+                # follow-up window only (conversation mode off).
+                "mode": "conversation" if conv else ("listening" if open_ else "idle"),
+                "remaining_s": round(max(wake.remaining_s(),
+                                         wake.conversation_remaining_s()), 2),
+                "continuation_s": (wake.idle_close_s if conv
+                                   else wake.continuation_seconds),
+                "conversation_elapsed_s": round(wake.conversation_elapsed_s(), 1),
                 "speaker": wake.anchor_name,  # None when no enrolled match
                 "ts": time.time(),
             }
@@ -1368,6 +1772,12 @@ class RoomBridge:
                                 continue
                             if m.get("turn_id") in self._streamed_turns:
                                 # Already said, clause by clause, as it streamed.
+                                self._spoken_ids.add(mid)
+                                continue
+                            if self._typed_stream and self._tap_connected:
+                                # The session tap speaks typed turns as they
+                                # stream; this poller is only the fallback
+                                # for a backend without /api/voice/listen.
                                 self._spoken_ids.add(mid)
                                 continue
                             text = "".join(
@@ -1434,12 +1844,17 @@ class RoomBridge:
         # have to wait for the next utterance to learn whether we're idle
         # or already in continuation.
         self._schedule_wake_state_publish()
+        self._schedule_preroll()
 
     def _on_participant_disconnected(self, participant) -> None:
         identity = participant.identity
         LOG.info("[%s] participant left: %s", self.room_name, identity)
         self._present_since.pop(identity, None)
         self._no_audio_warned.discard(identity)
+        if self.wake.locked_identity == identity or self.wake.conversation_open_for(identity):
+            # The person Lloyd was talking with left: the conversation is over.
+            self.wake.close_conversation()
+            LOG.info("[%s] conversation closed — %s left", self.room_name, identity)
         # Cancel the per-participant audio consumer so a stale stream can't
         # keep producing duplicate transcripts after the participant is gone.
         task = self._audio_tasks.pop(identity, None)
@@ -1471,9 +1886,19 @@ class RoomBridge:
         if kind == "interrupt":
             if self.tts is None:
                 return
+            was = self.tts.is_speaking
+            heard, unheard = self.tts.heard_text(), self.tts.unheard_chars()
+            self._barge = None
             dropped = self.tts.interrupt()
             LOG.info("[%s] interrupt: dropped %d queued utterance(s)",
                      self.room_name, dropped)
+            if was:
+                # The browser cancels the turn itself; the worker records what
+                # was heard so the next turn is told.
+                try:
+                    asyncio.create_task(self._post_interrupted(heard, unheard))
+                except RuntimeError:
+                    pass
         elif kind == "wake":
             # Push-to-talk: a client (the iOS app, on an earbud / Action
             # Button press) opens the continuation window as if the wake
@@ -1491,6 +1916,7 @@ class RoomBridge:
                 seconds = min(float(raw), 30.0)
             self.wake.set_anchor(None, None)
             self.wake.extend(identity, seconds=seconds)
+            self.wake.open_conversation(identity)
             self._schedule_wake_state_publish()
             LOG.info("[%s] client wake from %s — window open %.1fs",
                      self.room_name, identity, self.wake.remaining_s())
@@ -1600,6 +2026,8 @@ class RoomBridge:
             self._on_wake(ev, identity)
         elif ev.kind == "speech":
             self._on_speech_start(identity)
+        elif ev.kind == "silence":
+            self._on_speech_end(identity)
         elif ev.kind == "partial":
             self._schedule_partial_publish(ev.text)
         elif ev.kind == "utterance":
@@ -1622,6 +2050,7 @@ class RoomBridge:
             return
         det = ev.detection
         self.wake.extend(identity)
+        self.wake.open_conversation(identity)
         self._schedule_wake_state_publish()
         if self._prewarm:
             # The user is still mid-sentence; spend that time prefilling the
@@ -1635,23 +2064,134 @@ class RoomBridge:
                  det.score if det else 0.0, self.wake.continuation_seconds)
 
     def _on_speech_start(self, identity: str) -> None:
-        """Barge-in: the user started talking while Lloyd was.
+        """Barge-in, first half: the speaker started talking while Lloyd was.
 
-        Only inside the continuation window and only for the locked speaker —
-        otherwise a television in the room silences every reply. Gated on
-        `barge_in.enabled` because it needs client-side echo cancellation to be
-        safe: without AEC the agent's own voice comes back through the mic and
-        interrupts itself on every utterance.
+        Only for the person Lloyd is talking with — otherwise a television in
+        the room silences every reply — and never in the first
+        `barge_in.warmup_s` of a reply, while the browser's echo canceller is
+        still converging on it (Unmute and LiveKit Agents both ignore that
+        window). A VAD rising edge is not enough: a cough is one. The check
+        runs `min_duration_s` later and pauses the reply only if the speaker
+        is still talking then; what they turn out to have said decides whether
+        it was an interruption (`_commit_barge_in`) or not (`_barge_resume`).
         """
+        b = self._barge
+        if b is not None and b["identity"] == identity:
+            b["silence_at"] = None  # they started again while paused
         if not self._barge_in_enabled:
             return
-        if self.tts is None or not self.tts.is_speaking:
+        tts = self.tts
+        if tts is None or not tts.is_speaking or tts.is_paused:
             return
-        if not self.wake.matches_lock(identity):
+        if not (self.wake.matches_lock(identity)
+                or self.wake.conversation_open_for(identity)):
             return
-        dropped = self.tts.interrupt()
-        LOG.info("[%s] barge-in from %s — interrupted, dropped %d queued",
-                 self.room_name, identity, dropped)
+        started = tts.reply_started_at
+        if started is not None and time.monotonic() - started < self._barge_warmup_s:
+            LOG.debug("[%s] speech inside the barge-in warm-up — ignored", self.room_name)
+            return
+        try:
+            asyncio.create_task(self._barge_check(identity))
+        except RuntimeError:
+            pass
+
+    def _on_speech_end(self, identity: str) -> None:
+        b = self._barge
+        if b is not None and b["identity"] == identity:
+            b["silence_at"] = time.monotonic()
+
+    async def _barge_check(self, identity: str) -> None:
+        await asyncio.sleep(self._barge_min_s)
+        ht = self._hearing.get(identity)
+        if ht is None or not ht.pipeline.segmenter.in_speech:
+            return
+        tts = self.tts
+        if tts is None or not tts.is_speaking or tts.is_paused or self._barge:
+            return
+        if tts.pause():
+            self._barge = {"identity": identity, "paused_at": time.monotonic(),
+                           "silence_at": None}
+            LOG.info("[%s] possible barge-in from %s — paused after %.1fs of speech",
+                     self.room_name, identity, self._barge_min_s)
+
+    async def _barge_watchdog(self) -> None:
+        """Resume a paused reply nobody followed up on (a false interruption)."""
+        try:
+            while True:
+                await asyncio.sleep(0.1)
+                b = self._barge
+                if b is None:
+                    continue
+                now = time.monotonic()
+                if b["silence_at"] is not None and \
+                        now - b["silence_at"] >= self._barge_false_timeout_s:
+                    await self._barge_resume("no words within %.1fs" % self._barge_false_timeout_s)
+                elif now - b["paused_at"] >= self._barge_max_pause_s:
+                    await self._barge_resume("paused %.0fs" % self._barge_max_pause_s)
+        except asyncio.CancelledError:
+            return
+
+    async def _barge_resume(self, why: str) -> None:
+        b, self._barge = self._barge, None
+        if b is None or self.tts is None:
+            return
+        if await self.tts.resume():
+            LOG.info("[%s] false interruption (%s) — resumed after %.1fs",
+                     self.room_name, why, time.monotonic() - b["paused_at"])
+
+    def _barge_resolve(self, identity: str, why: str) -> None:
+        """The utterance a pause was waiting on turned out not to be a turn."""
+        b = self._barge
+        if b is None or b["identity"] != identity:
+            return
+        try:
+            asyncio.create_task(self._barge_resume(why))
+        except RuntimeError:
+            pass
+
+    async def _commit_barge_in(self, identity: str, why: str) -> None:
+        """A real interruption: stop speaking, record what was heard, cancel
+        the turn being spoken (only that one), and let the caller carry on."""
+        tts = self.tts
+        self._barge = None
+        if tts is None:
+            return
+        was = tts.is_speaking
+        heard, unheard = tts.heard_text(), tts.unheard_chars()
+        turn_id = self._speaking_turn or self._active_turn
+        dropped = tts.interrupt()
+        if not was:
+            await self._cancel_turn(turn_id)
+            return
+        LOG.info("[%s] barge-in from %s (%s) — stopped; heard %d chars, %d unheard, "
+                 "dropped %d queued", self.room_name, identity, why, len(heard),
+                 unheard, dropped)
+        await self._post_interrupted(heard, unheard)
+        await self._cancel_turn(turn_id)
+
+    async def _post_interrupted(self, heard: str, unheard: int) -> None:
+        try:
+            await self.http.post(INTERRUPTED_URL, json={
+                "session_key": self.session_id, "heard": heard,
+                "unheard_chars": unheard}, timeout=5.0)
+        except Exception as e:
+            LOG.debug("[%s] interrupted POST failed: %s", self.room_name, e)
+
+    async def _cancel_turn(self, turn_id: Optional[str]) -> None:
+        """Cancel `turn_id` if it is the session's running turn — never a turn
+        queued after it, which is what the listener just asked for."""
+        if not turn_id:
+            return
+        base = f"{BACKEND_URL}/api/sessions/{self.session_id}"
+        try:
+            r = await self.http.get(f"{base}/queue", timeout=3.0)
+            cur = (r.json() or {}).get("current") if r.status_code == 200 else None
+            if not cur or cur.get("turn_id") != turn_id:
+                return
+            await self.http.post(f"{base}/cancel", timeout=3.0)
+            LOG.info("[%s] cancelled turn %s after barge-in", self.room_name, turn_id)
+        except Exception as e:
+            LOG.debug("[%s] turn cancel failed: %s", self.room_name, e)
 
     async def _embed_async(self, samples: np.ndarray, sample_rate: int):
         """Run the speaker encoder's blocking embed in a thread so the event loop
@@ -1807,23 +2347,83 @@ class RoomBridge:
         except Exception as e:
             LOG.debug("[%s] ww-diag record failed: %s", self.room_name, e)
 
+    def _enrolled_speakers(self) -> set[str]:
+        """Enrolled people — every profile but Lloyd's own voice."""
+        sid = self.speaker_id
+        if sid is None:
+            return set()
+        try:
+            names = {p["name"] for p in sid.list_profiles()}
+        except Exception:
+            return set()
+        names.discard(self._own_voice_profile)
+        return names
+
+    def _since_agent_spoke(self) -> Optional[float]:
+        tts = self.tts
+        if tts is None:
+            return None
+        if tts.is_speaking:
+            return 0.0
+        if tts.last_reply_end is None:
+            return None
+        return max(0.0, time.monotonic() - tts.last_reply_end)
+
+    async def _shadow_addressee(self, text: str, speaker: Optional[str],
+                                gate: str) -> None:
+        """Ask the judge about an utterance the gate decided without it, and
+        log the two side by side — the data that says whether to trust it."""
+        try:
+            v = await self.addressee.judge(
+                text, self._last_agent_text, self._since_agent_spoke(), speaker,
+                _mentions_wake_name(text, self.wake.words))
+        except Exception:
+            return
+        if v is not None:
+            LOG.info("[%s] addressee shadow: p=%.2f (%s) gate=%s %.0f ms — %r",
+                     self.room_name, v.probability,
+                     "addressed" if v.addressed else "not addressed", gate,
+                     v.latency_ms, text[:60])
+
     async def _handle_utterance_event(self, ev: HearingEvent, identity: str) -> None:
         """Decide what a closed utterance means, and inject it if it was for us.
 
         The wake decision is already made by the time this runs — `ev.wake` is
         the detection that fell inside this utterance's span, or None. That is
-        the inversion at the heart of the rework: the old version had to *ask*
-        openWakeWord here, after the VAD, which is why it never heard anything
-        the VAD had already mangled.
+        the inversion at the heart of the 2026-09-17 rework: the old version
+        had to *ask* openWakeWord here, after the VAD, which is why it never
+        heard anything the VAD had already mangled.
+
+        Three windows, widest last (2026-09-24):
+          * the **follow-up window** — `continuation_seconds` after Lloyd
+            stopped or the user's last turn (longer after a question): the
+            locked speaker needs no wake word, as before;
+          * the **conversation** — opened by the wake word, push-to-talk or a
+            typed message, closed after `idle_close_s` of silence or by a
+            closer: past the follow-up window an utterance must also be judged
+            addressed (voice/addressee.py) and, once anyone is enrolled, come
+            from an enrolled speaker;
+          * outside both, only the wake word opens anything.
+        Inside any of them a backchannel ("yeah", "mm") is not a turn, a closer
+        ends the conversation, and a stop word stops the reply.
         """
         utt = ev.utterance
         wake = self.wake
-        utterance_start_t = time.monotonic() - utt.duration_s
-        in_continuation = wake.enabled and wake.matches_lock(identity, at=utterance_start_t)
+        closed_at = ev.at
+        tl = TurnTimeline()
+        tl.mark("speech_end", closed_at - (0.0 if utt.reason in ("hold_timeout", "max_duration")
+                                           else self._min_silence_s))
+        tl.mark("vad_close", closed_at)
+        utterance_start_t = closed_at - utt.duration_s
+        in_follow = wake.enabled and wake.matches_lock(identity, at=utterance_start_t)
+        in_conv = wake.enabled and (
+            in_follow or wake.conversation_open_for(identity, at=utterance_start_t))
+        tts = self.tts
+        speaking = tts is not None and tts.is_speaking
         woke = ev.wake is not None
         early: Optional[voice_asr.Transcript] = None
 
-        if wake.enabled and not woke and not in_continuation:
+        if wake.enabled and not woke and not in_conv:
             peak_name, peak = self._wake_peak(identity)
             if wake.text_fallback:
                 # The second wake path: the acoustic models missed it, but the
@@ -1845,60 +2445,115 @@ class RoomBridge:
                     self.room_name, utt.duration_s, utt.max_prob, peak_name or "-",
                     peak, (early.text[:60] if early else None),
                 )
+                self._barge_resolve(identity, "not addressed")
                 return
 
-        # ── Is it a finished thought? ───────────────────────────────
+        # ── Finished thought? transcript? who? — all at once ────────
+        # Smart Turn, the recogniser and the speaker embedding all take the
+        # same audio and used to run one after another (~20 + 60-160 + 150 ms).
+        # They are independent, so they run together and the gate joins them.
+        # A held turn wastes one transcription; the transcript it produces is
+        # also what tells a barge-in held mid-sentence from a cough.
+        audio, held_s = self._take_held(identity, utt.audio)
+        # A hold that timed out is released precisely BECAUSE Smart Turn said
+        # "unfinished"; asking it again re-holds the same audio forever (the
+        # e2e barge-in on 2026-09-24 looped 2.49 s of speech for 45 s).
+        need_turn = (self.smart_turn is not None and early is None
+                     and utt.reason not in ("max_duration", "hold_timeout"))
+        need_embed = self.speaker_id is not None and (woke or in_conv)
+        reuse_early = early is not None and held_s == 0
+
+        async def _turn():
+            if not need_turn:
+                return None
+            v = await asyncio.to_thread(self.smart_turn.predict, audio)
+            tl.mark("turn_verdict")
+            return v
+
+        async def _asr():
+            r = early if reuse_early else await asyncio.to_thread(self.stt.transcribe, audio)
+            tl.mark("asr_done")
+            return r
+
+        async def _emb():
+            if not need_embed:
+                return None, "Unknown", 0.0
+            r = await self._embed_async(audio, 16000)
+            tl.mark("embed_done")
+            return r
+
+        t0 = time.monotonic()
+        verdict, result, embres = await asyncio.gather(
+            _turn(), _asr(), _emb(), return_exceptions=True)
+        if isinstance(verdict, BaseException):
+            LOG.warning("[%s] smart-turn failed: %s", self.room_name, verdict)
+            verdict = None
+        if isinstance(embres, BaseException):
+            embres = (None, "Unknown", 0.0)
+        if isinstance(result, BaseException):
+            LOG.warning("[%s] STT failed on %.2fs: %s",
+                        self.room_name, audio.size / 16000, result)
+            self._barge_resolve(identity, "stt failed")
+            return
+        text = result.text
+
         # A 380 ms silence closes an utterance; people pause longer than that
         # mid-sentence. Rather than lengthening the silence for everyone, hold
         # the audio when Smart Turn says the speaker has not finished, and
         # glue it to what comes next.
-        audio, held_s = self._take_held(identity, utt.audio)
-        if (self.smart_turn is not None and early is None
-                and utt.reason != "max_duration"):
-            verdict = await asyncio.to_thread(self.smart_turn.predict, audio)
-            if not verdict.complete and held_s < self._hold_max_s:
-                self._hold(identity, audio)
-                LOG.info(
-                    "[%s] holding %.2fs — turn looks unfinished (p=%.2f, %.0f ms)",
-                    self.room_name, audio.size / 16000, verdict.probability,
-                    verdict.elapsed_ms,
-                )
-                return
+        if verdict is not None and not verdict.complete and held_s < self._hold_max_s:
+            self._hold(identity, audio)
+            LOG.info(
+                "[%s] holding %.2fs — turn looks unfinished (p=%.2f, %.0f ms)",
+                self.room_name, audio.size / 16000, verdict.probability,
+                verdict.elapsed_ms,
+            )
+            b = self._barge
+            if (b is not None and b["identity"] == identity and text
+                    and not voice_conv.is_backchannel(text)):
+                # Words, over Lloyd, mid-sentence: that is an interruption.
+                await self._commit_barge_in(identity, "words while held")
+            return
+        if verdict is not None:
             LOG.debug("[%s] turn complete p=%.2f (%.0f ms)",
                       self.room_name, verdict.probability, verdict.elapsed_ms)
 
-        # ── Transcribe ──────────────────────────────────────────────
-        t0 = time.monotonic()
-        try:
-            # A text wake already transcribed this exact audio; nothing was
-            # held in front of it, because a held turn implies an open window.
-            result = early if early is not None and held_s == 0 else \
-                await asyncio.to_thread(self.stt.transcribe, audio)
-        except Exception as e:
-            LOG.warning("[%s] STT failed on %.2fs: %s",
-                        self.room_name, audio.size / 16000, e)
-            return
-        text = result.text
         latency = time.monotonic() - t0
         duration_s = audio.size / 16000
+        emb, emb_name, emb_score = embres
         LOG.info(
-            "[%s][diag] dur=%.2fs vad=%.2f wake=%s asr=%s/%.2fs cont=%s text=%r",
+            "[%s][diag] dur=%.2fs vad=%.2f wake=%s asr=%s/%.2fs cont=%s conv=%s "
+            "spk=%s/%.2f text=%r",
             self.room_name, duration_s, utt.max_prob,
             (f"{ev.wake.name}:{ev.wake.score:.2f}" if ev.wake else "text") if woke else "-",
-            result.backend, latency, "Y" if in_continuation else "N",
-            (text or "")[:80],
+            result.backend, latency, "Y" if in_follow else "N",
+            "Y" if in_conv and not in_follow else "N",
+            emb_name if emb is not None else "-", emb_score, (text or "")[:80],
         )
-        self._record_diag(identity, audio, ev, text, latency, in_continuation)
+        self._record_diag(identity, audio, ev, text, latency, in_follow)
+
+        # ── Lloyd's own voice ───────────────────────────────────────
+        # With the half-duplex mute gone, his voice can return through a
+        # speaker-to-mic path the browser's AEC did not fully cancel. It is
+        # enrolled as a profile (scripts/voice/enroll_own_voice.py), so a
+        # segment that matches it while he talks is dropped here.
+        if emb_name == self._own_voice_profile:
+            since = self._since_agent_spoke()
+            if since is not None and since < 2.0:
+                LOG.info("[%s] own voice (cos=%.2f) — echo dropped: %r",
+                         self.room_name, emb_score, (text or "")[:60])
+                self._barge_resolve(identity, "own voice")
+                return
+            emb_name = "Unknown"
 
         # ── Who said it ─────────────────────────────────────────────
-        # Deliberately after the wake window was opened, not before: the
-        # window is what the UI reacts to and the embed costs ~20-60 ms.
         if woke:
-            emb, name, score = await self._embed_async(audio, 16000)
             if emb is not None and self.speaker_id is not None:
-                LOG.info("[%s] wake speaker: %s (cos=%.2f)", self.room_name, name, score)
-            wake.set_anchor(emb, name if name and name != "Unknown" else None)
+                LOG.info("[%s] wake speaker: %s (cos=%.2f)", self.room_name,
+                         emb_name, emb_score)
+            wake.set_anchor(emb, emb_name if emb_name and emb_name != "Unknown" else None)
             wake.extend(identity)
+            wake.open_conversation(identity)
             await self._publish_wake_state()
 
         if not text:
@@ -1908,15 +2563,48 @@ class RoomBridge:
             else:
                 LOG.info("[%s] empty transcript for %.2fs from %s",
                          self.room_name, duration_s, identity)
+            self._barge_resolve(identity, "empty transcript")
+            return
+
+        # ── Managing the conversation, not taking part in it ────────
+        tail = _strip_wake_word(text, wake.words) if woke else None
+        rule_text = tail if tail else text
+        if wake.enabled and (in_conv or woke):
+            busy = speaking or self._active_turn is not None
+            if busy and voice_conv.is_stopper(rule_text):
+                await self._commit_barge_in(identity, f"stop word {rule_text!r}")
+                if voice_conv.is_closer(rule_text):
+                    wake.close_conversation()
+                    await self._publish_wake_state()
+                return
+            if voice_conv.is_closer(rule_text):
+                if speaking:
+                    await self._commit_barge_in(identity, "closer")
+                wake.close_conversation()
+                await self._publish_wake_state()
+                LOG.info("[%s] conversation closed by %r", self.room_name, text[:40])
+                return
+        if (wake.enabled and in_conv and not woke
+                and voice_conv.is_backchannel(
+                    text, after_question=voice_conv.ends_with_question(self._last_agent_text))):
+            # 'Yeah.' while Lloyd reads an answer aloud is the listener
+            # listening. Keep the conversation open; never a turn, never an
+            # interruption.
+            self._barge_resolve(identity, "backchannel")
+            if in_follow:
+                wake.extend(identity)
+            else:
+                wake.refresh_conversation()
+            LOG.info("[%s] backchannel %r — not a turn", self.room_name, text[:30])
             return
 
         # ── Gate decisions ──────────────────────────────────────────
         inject_text: Optional[str] = None
         speaker_name: Optional[str] = None  # populated from anchor or fresh ID
-        samples, sample_rate = audio, 16000
+        enrolled = self._enrolled_speakers()
         if not wake.enabled:
             inject_text = text
-        elif in_continuation and not woke:
+        elif in_conv and not woke:
             # Identity matches the locked participant. If voiceprint is
             # enabled AND the wake-word utterance was identified as a known
             # speaker, also require the embedding to match the anchor —
@@ -1927,9 +2615,7 @@ class RoomBridge:
             # rejects real follow-ups without providing meaningful safety.
             # In that case we fall back to identity-only matching.
             anchor = wake.anchor_embedding
-            anchor_named = wake.anchor_name is not None
-            if anchor is not None and anchor_named:
-                emb, _name, _score = await self._embed_async(samples, sample_rate)
+            if anchor is not None and wake.anchor_name is not None:
                 if emb is None:
                     # Embedding failed — degrade to identity-only this turn
                     # rather than dropping a real utterance.
@@ -1942,19 +2628,50 @@ class RoomBridge:
                             "[%s] voiceprint anchor mismatch (cos=%.2f < %.2f) — dropped %r",
                             self.room_name, sim, self.anchor_threshold, text[:80],
                         )
+                        self._barge_resolve(identity, "anchor mismatch")
                         return
                     LOG.info("[%s] voiceprint anchor match (cos=%.2f)", self.room_name, sim)
+            known = emb_name if emb_name in enrolled else None
+            if not in_follow:
+                # Past the follow-up window, inside the conversation: an
+                # enrolled speaker (once anyone is enrolled), and addressed.
+                if enrolled and known is None:
+                    LOG.info("[%s] conversation: not an enrolled speaker (%s/%.2f) — "
+                             "dropped %r", self.room_name, emb_name, emb_score, text[:60])
+                    self._barge_resolve(identity, "not enrolled")
+                    return
+                v = await self.addressee.judge(
+                    text, self._last_agent_text, self._since_agent_spoke(),
+                    known or wake.anchor_name, _mentions_wake_name(text, wake.words))
+                if not (self.addressee.enforcing and v is not None and v.addressed):
+                    LOG.info(
+                        "[%s] conversation: %s (addressee %s) — dropped %r",
+                        self.room_name,
+                        "judged not addressed" if v is not None else "no verdict",
+                        (f"p={v.probability:.2f}/{self.addressee.mode}" if v is not None
+                         else self.addressee.mode), text[:60])
+                    self._barge_resolve(identity, "not addressed (conversation)")
+                    return
+                LOG.info("[%s] conversation: addressed (p=%.2f, %.0f ms) — injecting",
+                         self.room_name, v.probability, v.latency_ms)
+            elif self.addressee.active:
+                try:
+                    asyncio.create_task(self._shadow_addressee(
+                        text, known or wake.anchor_name, "follow-up:inject"))
+                except RuntimeError:
+                    pass
             inject_text = text
-            speaker_name = wake.anchor_name
+            speaker_name = known or wake.anchor_name
             wake.extend(identity)  # extend on each turn the user takes
+            wake.open_conversation(identity)
             await self._publish_wake_state()
             LOG.info("[%s] continuation pass-through (%.1fs left)",
-                     self.room_name, wake.remaining_s())
+                     self.room_name, max(wake.remaining_s(),
+                                         wake.conversation_remaining_s()))
         else:
             # The wake word fired inside this utterance. All that is left is
             # deciding how much of the transcript is the word itself.
             speaker_name = wake.anchor_name
-            tail = _strip_wake_word(text, wake.words)
             word_count = len([w for w in text.split() if w.strip(".,!?;:'\"")])
             ww_name = ev.wake.name if ev.wake else "?"
             ww_score = ev.wake.score if ev.wake else 0.0
@@ -1964,6 +2681,7 @@ class RoomBridge:
                         "[%s] bare wake-word (%s/%.2f) — opening %.1fs window, no inject",
                         self.room_name, ww_name, ww_score, wake.continuation_seconds,
                     )
+                    self._barge_resolve(identity, "bare wake word")
                     return
                 inject_text = tail or text
             elif word_count <= 2:
@@ -2000,6 +2718,7 @@ class RoomBridge:
                     "[%s] wake name mentioned, not addressed (%s/%.2f) in %r — dropped",
                     self.room_name, ww_name, ww_score, text[:80],
                 )
+                self._barge_resolve(identity, "name mentioned")
                 return
             else:
                 # A full sentence whose wake word the ASR spelled differently.
@@ -2012,6 +2731,12 @@ class RoomBridge:
 
         if not inject_text:
             return
+        if self.tts is not None and (self.tts.is_speaking or self._barge is not None):
+            if self._barge_in_enabled:
+                # A new request while Lloyd talks: that is what an
+                # interruption is. Stop, record what was heard, cancel the
+                # old turn, then ask the new one.
+                await self._commit_barge_in(identity, "new request")
         payload = {"text": inject_text, "session_key": self.session_id}
         if speaker_name:
             payload["speaker"] = speaker_name
@@ -2021,7 +2746,7 @@ class RoomBridge:
         # The reply is spoken by its own task, which lives for the whole turn
         # — minutes, with tools. The utterance handler returns now, so the next
         # thing the user says is heard while Lloyd is still answering.
-        task = asyncio.create_task(self._speak_voice_turn(payload))
+        task = asyncio.create_task(self._speak_voice_turn(payload, tl))
         self._turn_tasks.add(task)
         task.add_done_callback(self._turn_tasks.discard)
 
@@ -2043,7 +2768,8 @@ class RoomBridge:
 
     # ── Speaking a reply as it streams ───────────────────────────────────
 
-    async def _speak_voice_turn(self, payload: dict) -> None:
+    async def _speak_voice_turn(self, payload: dict,
+                                timeline: Optional[TurnTimeline] = None) -> None:
         """Inject the turn and speak its reply clause by clause as it streams.
 
         The old path waited for the whole answer, then for the secondary model
@@ -2054,48 +2780,10 @@ class RoomBridge:
         """
         import httpx
 
-        tts = self.tts
-        gen = tts.generation
-        cs = ClauseStream()
-        t0 = time.monotonic()
-        state = {"said": 0, "capped": False, "filler": False, "first_at": None}
-
-        async def say(clause: str) -> None:
-            if state["capped"] or tts.generation != gen:
-                return
-            if state["said"] + len(clause) > self._max_spoken_chars and state["said"]:
-                state["capped"] = True
-                await tts.speak("The rest is in the chat.")
-                return
-            if state["first_at"] is None:
-                state["first_at"] = time.monotonic()
-                LOG.info("[%s] first clause %.2fs after inject: %r",
-                         self.room_name, state["first_at"] - t0, clause[:60])
-            state["said"] += len(clause)
-            await tts.speak(clause)
-
-        async def filler(cause: str) -> None:
-            # Only when nothing has been said yet, and only once a turn: a
-            # filler is for the silence before the answer, not a tic.
-            if not self._filler_enabled or state["filler"] or state["said"]:
-                return
-            state["filler"] = True
-            phrase = self._filler_phrases[self._filler_i % len(self._filler_phrases)]
-            self._filler_i += 1
-            LOG.info("[%s] filler %r at %.2fs (%s)", self.room_name, phrase,
-                     time.monotonic() - t0, cause)
-            await tts.speak(phrase)
-
-        async def filler_after_delay() -> None:
-            await asyncio.sleep(self._filler_after_s)
-            await filler("timer")
-
-        # The silence the listener hears starts now, not when the backend
-        # answers: prefetch runs before the stream opens (300 ms budget, and
-        # it overran on 2026-09-18), and the clock started only at the
-        # headers, so "One moment." arrived four seconds into the silence it
-        # exists to fill. Cancelled in `finally` on every path that ends.
-        filler_task = asyncio.create_task(filler_after_delay())
+        tl = timeline if timeline is not None else TurnTimeline()
+        tl.mark("inject_sent")
+        rs = ReplySpeaker(self, timeline=tl, label="voice", extras=True)
+        rs.start()
         try:
             async with self.http.stream(
                 "POST", INJECT_URL, json=dict(payload, stream=True),
@@ -2114,41 +2802,307 @@ class RoomBridge:
                              self.room_name)
                     return
                 async for event, data in _iter_sse(resp):
-                    if tts.generation != gen:
-                        LOG.info("[%s] reply interrupted — no longer speaking it",
-                                 self.room_name)
+                    if not await rs.on_event(event, data):
                         break
-                    if event == "voice_turn":
-                        # Registered before the first segment can be persisted,
-                        # so the poller never races the stream for it.
-                        self._streamed_turns.append(data.get("turn_id", ""))
-                    elif event == "text_delta":
-                        for clause in cs.feed(data.get("text", "")):
-                            await say(clause)
-                    elif event == "tool_start":
-                        # Whatever was written before the tool is a finished
-                        # thought ("Let me check the calendar.") — say it now,
-                        # and if nothing at all has been said, say something.
-                        for clause in cs.flush():
-                            await say(clause)
-                        await filler("tool")
-                    elif event in ("done", "error"):
-                        break
-                for clause in cs.flush():
-                    await say(clause)
-                if cs.skipped_code and not cs.stopped and state["said"]:
-                    await say("I've put the code in the chat.")
-                LOG.info("[%s] voice turn spoken: %d chars in %.1fs%s%s",
-                         self.room_name, state["said"], time.monotonic() - t0,
-                         " (capped)" if state["capped"] else "",
-                         " (filler)" if state["filler"] else "")
         except asyncio.CancelledError:
             raise
         except Exception as e:
             LOG.warning("[%s] voice turn stream failed: %s", self.room_name, e)
         finally:
-            if filler_task is not None and not filler_task.done():
-                filler_task.cancel()
+            await rs.finish()
+
+    # ── Typed turns, through the session tap ─────────────────────────────
+
+    async def _listen_session(self) -> None:
+        """Follow every turn on this session (GET /api/voice/listen) and speak
+        the ones the worker did not inject — typed turns — as they stream.
+
+        A typed message with the room open also opens a conversation: a person
+        typing to Lloyd is talking to him, and the reply that follows should
+        be answerable without the wake word.
+        """
+        import httpx
+
+        url = f"{LISTEN_URL}?session_key={self.session_id}"
+        try:
+            while True:
+                try:
+                    async with self.http.stream(
+                        "GET", url, timeout=httpx.Timeout(10.0, read=None),
+                    ) as resp:
+                        if resp.status_code != 200 or "text/event-stream" not in \
+                                resp.headers.get("content-type", ""):
+                            await resp.aread()
+                            LOG.info("[%s] no session tap (HTTP %d) — typed turns "
+                                     "fall back to the poller", self.room_name,
+                                     resp.status_code)
+                            self._tap_connected = False
+                            await asyncio.sleep(60.0)
+                            continue
+                        self._tap_connected = True
+                        LOG.info("[%s] session tap open", self.room_name)
+                        async for event, data in _iter_sse(resp):
+                            await self._on_tap_event(event, data)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    LOG.debug("[%s] session tap dropped: %s", self.room_name, e)
+                self._tap_connected = False
+                for rs in list(self._tap_turns.values()):
+                    await rs.finish()
+                self._tap_turns.clear()
+                await asyncio.sleep(2.0)
+        except asyncio.CancelledError:
+            self._tap_connected = False
+            return
+
+    async def _on_tap_event(self, event: str, data: dict) -> None:
+        tid = str(data.get("turn_id") or "")
+        if not tid or tid in self._streamed_turns and tid not in self._tap_turns:
+            return
+        if event == "session":
+            source = data.get("source")
+            if source == "user":
+                try:
+                    people = [i for i in self.room.remote_participants.keys()]
+                except Exception:
+                    people = []
+                who = people[0] if len(people) == 1 else self.wake.locked_identity
+                self.wake.open_conversation(who)
+                self.wake.extend(who)
+                self._schedule_wake_state_publish()
+                LOG.info("[%s] typed turn %s — conversation open", self.room_name, tid)
+            if not self._typed_stream or self.tts is None:
+                return
+            self._streamed_turns.append(tid)
+            rs = ReplySpeaker(self, turn_id=tid, label=f"typed:{source}", extras=False)
+            rs.started = True
+            self._tap_turns[tid] = rs
+            rs.start()
+            return
+        rs = self._tap_turns.get(tid)
+        if rs is None:
+            return
+        if not await rs.on_event(event, data) or event in ("done", "error"):
+            self._tap_turns.pop(tid, None)
+            await rs.finish()
+
+
+class ReplySpeaker:
+    """Speaks one turn's reply from its event stream, clause by clause.
+
+    One object for both ways a reply reaches the worker — the spoken turn's own
+    inject stream and a typed turn's session tap — because what to do with a
+    `text_delta` or a `tool_start` is the same either way. Spoken turns also
+    get the `extras` a listener with no screen needs: a filler before the first
+    words, a notice when the turn is queued behind another, and progress while
+    tools run (the 2026-09-24 turn that ran twenty tool calls said "One
+    moment." and then nothing for 44 seconds).
+    """
+
+    def __init__(self, bridge: "RoomBridge", turn_id: str = "",
+                 timeline: Optional[TurnTimeline] = None, label: str = "voice",
+                 extras: bool = True) -> None:
+        self.b = bridge
+        self.tts = bridge.tts
+        self.gen = self.tts.generation
+        self.turn_id = turn_id
+        self.tl = timeline if timeline is not None else TurnTimeline(label)
+        self.label = label
+        self.extras = extras
+        self.cs = ClauseStream(first_soft_chars=bridge._first_soft_chars)
+        self.t0 = time.monotonic()
+        self.said = 0
+        self.capped = False
+        self.filler_said = False
+        self.notice_said = False
+        self.first_at: Optional[float] = None
+        #: The turn is running (its `session` frame arrived), not queued.
+        self.started = False
+        self.queued_behind = False
+        self.tool_phase = False
+        self.captions: list[str] = []
+        self.caption_i = 0
+        self.progress_i = 0
+        self.last_progress_at = self.t0
+        self.progress_said = 0
+        self.done = False
+        self._ticker: Optional[asyncio.Task] = None
+
+    @property
+    def interrupted(self) -> bool:
+        return self.tts.generation != self.gen
+
+    def start(self) -> None:
+        self._ticker = asyncio.create_task(self._tick())
+
+    async def say(self, clause: str) -> None:
+        if self.capped or self.interrupted:
+            return
+        if self.said + len(clause) > self.b._max_spoken_chars and self.said:
+            self.capped = True
+            await self.tts.speak("The rest is in the chat.", self.tl)
+            return
+        if self.first_at is None:
+            self.first_at = time.monotonic()
+            self.tl.mark("first_clause", self.first_at)
+            LOG.info("[%s] first clause %.2fs after inject: %r",
+                     self.b.room_name, self.first_at - self.t0, clause[:60])
+        self.said += len(clause)
+        self.b._last_agent_text = clause
+        if self.turn_id:
+            self.b._speaking_turn = self.turn_id
+        await self.tts.speak(clause, self.tl)
+
+    async def _aside(self, phrase: str, why: str) -> None:
+        """Something said about the turn rather than as its answer."""
+        if self.interrupted or not phrase:
+            return
+        LOG.info("[%s] %s %r at %.2fs", self.b.room_name, why, phrase,
+                 time.monotonic() - self.t0)
+        self.last_progress_at = time.monotonic()
+        await self.tts.speak(phrase, self.tl)
+
+    async def filler(self, cause: str) -> None:
+        # Only when nothing has been said yet, and only once a turn: a
+        # filler is for the silence before the answer, not a tic.
+        b = self.b
+        if (not self.extras or not b._filler_enabled or self.filler_said
+                or self.notice_said or self.said):
+            return
+        self.filler_said = True
+        phrase = b._filler_phrases[b._filler_i % len(b._filler_phrases)]
+        b._filler_i += 1
+        await self._aside(phrase, f"filler ({cause})")
+
+    async def _progress(self) -> None:
+        """While tools run: the model's caption for the latest tool, or a
+        generic line when the captions are used up or unspeakable."""
+        b = self.b
+        phrase = ""
+        while self.caption_i < len(self.captions) and not phrase:
+            phrase = voice_conv.caption_to_speech(self.captions[-1])
+            self.caption_i = len(self.captions)
+        if not phrase:
+            phrase = b._progress_phrases[self.progress_i % len(b._progress_phrases)]
+            self.progress_i += 1
+        self.progress_said += 1
+        await self._aside(phrase, "progress")
+
+    def _progress_due(self, now: float) -> bool:
+        b = self.b
+        return (self.extras and b._progress_enabled and self.tool_phase
+                and not self.tts.is_speaking
+                and self.tts.silence_s(now) >= b._progress_every_s
+                and now - self.last_progress_at >= b._progress_every_s)
+
+    async def _tick(self) -> None:
+        """The clock the asides run on — started at inject, not at the first
+        frame from the backend: prefetch runs before the stream opens (300 ms
+        budget, overran on 2026-09-18), so a filler timed from the headers
+        arrived four seconds into the silence it exists to fill."""
+        b = self.b
+        try:
+            while not self.done and not self.interrupted:
+                await asyncio.sleep(0.25)
+                now = time.monotonic()
+                el = now - self.t0
+                if not self.extras:
+                    continue
+                if (self.queued_behind and not self.started and not self.notice_said
+                        and not self.said and el >= b._queued_notice_after_s):
+                    self.notice_said = True
+                    await self._aside(b._queued_notice, "queued notice")
+                    continue
+                if (not self.said and not self.filler_said and not self.notice_said
+                        and not self.queued_behind and el >= b._filler_after_s):
+                    await self.filler("timer")
+                    continue
+                if self._progress_due(now):
+                    await self._progress()
+                    continue
+                if self.tool_phase and self.tts.is_idle:
+                    self.tts.start_thinking()
+        except asyncio.CancelledError:
+            return
+
+    async def on_event(self, event: str, data: dict) -> bool:
+        """Handle one frame; False once the reply is over or cut off."""
+        if self.interrupted:
+            LOG.info("[%s] reply interrupted — no longer speaking it", self.b.room_name)
+            return False
+        if event == "voice_turn":
+            self.tl.mark("voice_turn")
+            self.turn_id = str(data.get("turn_id") or "")
+            self.queued_behind = bool(data.get("queued_behind"))
+            self.b._active_turn = self.turn_id
+            # Registered before the first segment can be persisted, so the
+            # poller never races the stream for it.
+            self.b._streamed_turns.append(self.turn_id)
+            if self.queued_behind:
+                LOG.info("[%s] spoken turn queued behind a running turn", self.b.room_name)
+        elif event == "session":
+            self.started = True
+        elif event == "text_delta":
+            self.tl.mark("first_delta")
+            if self.tool_phase:
+                self.tool_phase = False
+                await self.tts.stop_thinking()
+            for clause in self.cs.feed(data.get("text", "")):
+                await self.say(clause)
+        elif event == "tool_start":
+            # Whatever was written before the tool is a finished thought
+            # ("Let me check the calendar.") — say it now, and if nothing at
+            # all has been said, say something.
+            for clause in self.cs.flush():
+                await self.say(clause)
+            await self.filler("tool")
+            self.tool_phase = True
+            cap = str(data.get("summary") or "").strip()
+            if cap:
+                self.captions.append(cap)
+            if self._progress_due(time.monotonic()):
+                await self._progress()
+        elif event in ("done", "error"):
+            return False
+        return True
+
+    async def finish(self) -> None:
+        if self.done:
+            return
+        self.done = True
+        if self._ticker is not None:
+            self._ticker.cancel()
+        if self.b._active_turn == self.turn_id:
+            self.b._active_turn = None
+        try:
+            await self.tts.stop_thinking()
+            if not self.interrupted:
+                for clause in self.cs.flush():
+                    await self.say(clause)
+                if self.cs.skipped_code and not self.cs.stopped and self.said:
+                    await self.say("I've put the code in the chat.")
+        except Exception as e:
+            LOG.debug("[%s] reply finish: %s", self.b.room_name, e)
+        LOG.info("[%s] %s turn spoken: %d chars in %.1fs%s%s%s", self.b.room_name,
+                 self.label, self.said, time.monotonic() - self.t0,
+                 " (capped)" if self.capped else "",
+                 " (filler)" if self.filler_said else "",
+                 f" ({self.progress_said} progress)" if self.progress_said else "")
+        if self.first_at is not None:
+            try:
+                asyncio.create_task(self._log_latency())
+            except RuntimeError:
+                pass
+
+    async def _log_latency(self) -> None:
+        """The breakdown, once the reply has finished playing (so the gap
+        figure covers all of it)."""
+        for _ in range(600):
+            if not self.tts.is_speaking or self.interrupted:
+                break
+            await asyncio.sleep(0.5)
+        LOG.info("[%s][latency] %s %s", self.b.room_name, self.label, self.tl.summary())
 
 
 async def _iter_sse(resp):
@@ -2246,6 +3200,15 @@ class WorkerManager:
                 await asyncio.to_thread(self.speaker_id._ensure_encoder)
             except Exception as e:
                 LOG.warning("speaker encoder eager-load failed: %s", e)
+        # The addressee judge's client (app.djev, which reads the config) —
+        # imported here so the first conversational utterance does not pay it.
+        conv = self.lk_cfg.get("conversation", {}) or {}
+        if conv.get("enabled") and str(conv.get("addressee", "shadow")).lower() != "off":
+            try:
+                await asyncio.to_thread(lambda: AddresseeClassifier(conv)._client()
+                                        and __import__("app.djev").djev.enabled())
+            except Exception as e:
+                LOG.warning("addressee judge warm-up failed: %s", e)
         if self.wake_capture is not None:
             self._diag_runner = await _start_ww_diag_server(
                 self.wake_capture, host=self._diag_host, port=self._diag_port,

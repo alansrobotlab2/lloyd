@@ -59,20 +59,53 @@ class _Turn:
 class _HTTP:
     def __init__(self):
         self.posts = []
+        self.urls = []
+        self.cancels = []
+        self.current_turn = "turn-running"
 
     async def post(self, url, json=None, timeout=None):
-        self.posts.append(json)
+        self.urls.append(url)
+        if url.endswith("/cancel"):
+            self.cancels.append(self.current_turn)
+        else:
+            self.posts.append(json)
         return type("R", (), {"status_code": 200, "text": ""})()
 
+    async def get(self, url, timeout=None):
+        cur = {"turn_id": self.current_turn}
+        return type("R", (), {"status_code": 200,
+                              "json": lambda self_: {"current": cur}})()
 
-def _bridge(texts, turn=None, text_fallback=True):
+
+class _TTS:
+    """Enough of TTSStreamer for the gate: nothing is playing."""
+    is_speaking = False
+    is_paused = False
+    generation = 0
+    reply_started_at = None
+    last_reply_end = None
+
+    def heard_text(self):
+        return ""
+
+    def unheard_chars(self):
+        return 0
+
+    def interrupt(self):
+        self.generation += 1
+        return 0
+
+
+def _bridge(texts, turn=None, text_fallback=True, conversation=False, **extra):
     async def make():
+        cfg = {"room_prefix": "lloyd-",
+               "wake": {"words": WORDS, "continuation_seconds": 6.0,
+                        "text_fallback": text_fallback},
+               "turn_detection": {"hold_timeout_ms": 60000},
+               "conversation": {"enabled": conversation, "addressee": "off"}}
+        cfg.update(extra)
         b = livekit_worker.RoomBridge(
-            "lloyd-20260917_000000_gate",
-            {"room_prefix": "lloyd-",
-             "wake": {"words": WORDS, "continuation_seconds": 6.0,
-                      "text_fallback": text_fallback},
-             "turn_detection": {"hold_timeout_ms": 60000}},
+            "lloyd-20260917_000000_gate", cfg,
             stt=_STT(texts), vad_cfg={}, http_client=_HTTP(),
             smart_turn=turn)
         return b
@@ -125,16 +158,38 @@ def test_an_acoustic_wake_strips_the_word_from_the_request():
     assert _hear(b, wake=True) == ["turn on the lights."]
 
 
-@pytest.mark.parametrize("text", ["Stop", "Go! Go!"])
+@pytest.mark.parametrize("text", ["Go!", "Go! Go!"])
 def test_a_short_command_on_a_fired_wake_is_injected_whole(text):
-    """"Lloyd, stop" mis-heard as "Stop". The acoustic model heard the wake word
-    inside this utterance, so a transcript too short for the matcher to strip is
-    a command, not a mis-heard name. Before this the branch had no path to an
-    injection at all: it opened the window and returned, discarding the word.
-    Both texts are cases from the retained diag corpus (`Go!` fired at 0.44,
-    `Go! Go!` at 0.79), and both were commands said to Lloyd."""
+    """A short command whose wake word the ASR did not spell. The acoustic model
+    heard the wake word inside this utterance, so a transcript too short for the
+    matcher to strip is a command, not a mis-heard name. Before this the branch
+    had no path to an injection at all: it opened the window and returned,
+    discarding the word. Both texts are cases from the retained diag corpus
+    (`Go!` fired at 0.44, `Go! Go!` at 0.79), and both were commands said to
+    Lloyd. ("Lloyd, stop" heard as "Stop" was the third case; since
+    2026-09-24 it is a stop word, below.)"""
     b = _bridge([text])
     assert _hear(b, wake=True) == [text]
+
+
+def test_lloyd_stop_with_nothing_running_closes_rather_than_asks():
+    """"Lloyd, stop" heard as "Stop" with nothing to stop is a closer: it ends
+    the conversation instead of sending the model a one-word turn to answer."""
+    b = _bridge(["Stop"], conversation=True)
+    assert _hear(b, wake=True) == []
+    assert not b.wake.in_conversation()
+
+
+def test_lloyd_stop_with_a_turn_in_flight_cancels_it_and_injects_nothing():
+    """With a spoken turn still running (tools, nothing said yet), "stop" is
+    what it sounds like: that turn is cancelled — and not a new "Stop" turn
+    queued behind the one it was meant to stop."""
+    b = _bridge(["Stop"], conversation=True)
+    b._active_turn = "turn-running"
+    b.tts = _TTS()
+    _hear(b, wake=True)
+    assert [p for p in b.http.posts if "text" in p] == []
+    assert b.http.cancels == ["turn-running"]
 
 
 def test_the_acoustic_bare_wake_word_still_injects_nothing():
@@ -161,8 +216,14 @@ def test_the_window_belongs_to_whoever_woke_it():
 
 def test_an_unfinished_sentence_is_held_and_sent_with_what_follows():
     """In the window, a 380 ms pause closes an utterance. Smart Turn calls the
-    first half unfinished, so it waits and the two halves become one turn."""
+    first half unfinished, so it waits and the two halves become one turn.
+
+    Smart Turn and the recogniser run side by side since 2026-09-24, so the
+    held half is transcribed too — one ~60 ms CPU pass, spent to take Smart
+    Turn off the critical path of every turn — but what is SENT is the joined
+    audio's transcript, once."""
     b = _bridge(["Hey Lloyd.",
+                 "I was wondering if",
                  "I was wondering if you could tell me about the weather tomorrow"],
                 turn=_Turn([0.02, 0.97]))
     _hear(b)                                    # bare wake, window open
@@ -170,7 +231,7 @@ def test_an_unfinished_sentence_is_held_and_sent_with_what_follows():
     assert b._held.get("user-a"), "the unfinished half must be kept"
     posts = _hear(b)                            # second half: joined, sent
     assert posts == ["I was wondering if you could tell me about the weather tomorrow"]
-    assert b.stt.calls == 2, "the joined audio is transcribed once, as one turn"
+    assert b.stt.calls == 3, "held half + the joined turn (+ the bare wake)"
 
 
 @pytest.mark.parametrize("text,tail", [
@@ -216,34 +277,60 @@ def test_an_acoustic_wake_asks_the_backend_to_prewarm():
 
 
 class _SpeakingTTS:
+    is_paused = False
+    reply_started_at = None
+    generation = 0
+
     def __init__(self, speaking=True):
         self.is_speaking = speaking
         self.interrupts = 0
+        self.pauses = 0
 
     def interrupt(self):
         self.interrupts += 1
         return 0
 
+    def pause(self):
+        self.pauses += 1
+        self.is_paused = True
+        return True
+
+
+class _Hearing:
+    """A hearing thread whose segmenter says the speaker is still talking."""
+
+    def __init__(self, in_speech=True):
+        self.pipeline = type("P", (), {"segmenter": type("S", (), {"in_speech": in_speech})()})()
+
 
 @pytest.mark.parametrize("enabled,speaking,who,expected", [
-    (True, True, "user-a", 1),     # the window's owner talks over Lloyd: stop
+    (True, True, "user-a", 1),     # the window's owner talks over Lloyd: pause
     (True, True, "user-b", 0),     # somebody else (a TV, a guest): do not
     (True, False, "user-a", 0),    # nothing to interrupt
-    (False, True, "user-a", 0),    # off by default: needs client-side AEC
+    (False, True, "user-a", 0),    # the switch
 ])
 def test_barge_in_is_gated_on_the_switch_the_speaker_and_the_speech(
         enabled, speaking, who, expected):
-    async def make():
-        return livekit_worker.RoomBridge(
+    """Since 2026-09-24 a barge-in PAUSES first (after `min_duration_s` of
+    sustained speech) and the utterance that follows decides; nothing is
+    interrupted on the rising edge alone. tests/test_voice_duplex.py has the
+    rest of the state machine."""
+    async def go():
+        b = livekit_worker.RoomBridge(
             "lloyd-20260917_000000_barge",
             {"room_prefix": "lloyd-", "wake": {"words": WORDS},
-             "barge_in": {"enabled": enabled}},
+             "barge_in": {"enabled": enabled, "min_duration_s": 0.01,
+                          "warmup_s": 0.0}},
             stt=_STT([]), vad_cfg={}, http_client=_HTTP())
-    b = asyncio.run(make())
-    b.tts = _SpeakingTTS(speaking)
-    b.wake.extend("user-a")
-    b._on_speech_start(who)
-    assert b.tts.interrupts == expected
+        b.tts = _SpeakingTTS(speaking)
+        b._hearing[who] = _Hearing(True)
+        b.wake.extend("user-a")
+        b._on_speech_start(who)
+        await asyncio.sleep(0.05)
+        return b
+    b = asyncio.run(go())
+    assert b.tts.pauses == expected
+    assert b.tts.interrupts == 0, "an edge alone never interrupts"
 
 
 @pytest.mark.parametrize("text,injected", [

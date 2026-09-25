@@ -67,9 +67,40 @@ VOICE_TURN_REMINDER = (
     "sentences unless asked for more. If the full answer needs code, a table "
     "or a link, put it in your reply after a line containing only `---` and "
     "say that it is in the chat; nothing after that line is spoken. Write "
-    "numbers, times and units the way a person says them."
+    "numbers, times and units the way a person says them. Before you start "
+    "work that needs tools, say in one short sentence what you are about to "
+    "do, and if the work runs to several tool calls, add a brief spoken "
+    "update now and then — the listener hears nothing while tools run."
     "</system-reminder>\n\n"
 )
+
+#: The typed-turn counterpart, for a session whose voice room is open: the
+#: worker speaks the reply of a typed turn too (see `app/voice_tap.py`), but
+#: the person typed, so the chat answer keeps its formatting. What changes is
+#: the order — a short spoken answer first, detail after the `---` line the
+#: clause splitter stops at.
+VOICE_ROOM_REMINDER = (
+    "<system-reminder>A voice room is open on this chat, so the start of your "
+    "reply is also read aloud as you write it. Open with a short answer in "
+    "plain spoken sentences; if the full answer needs formatting, code, a "
+    "table or a link, put it after a line containing only `---` — nothing "
+    "after that line is spoken.</system-reminder>\n\n"
+)
+
+
+def voice_room_prefix(session_id: str) -> str:
+    """What a typed turn on `session_id` carries in its prompt tail because a
+    voice room is listening: the interruption note, if the listener cut the
+    last spoken reply off, and the typed-turn reminder. Empty when no room is
+    open — the common case, and then nothing about the turn changes."""
+    from app import voice_tap
+
+    if not voice_tap.has_listener(session_id):
+        return ""
+    out = voice_tap.take_heard_note(session_id) or ""
+    if _voice_turn_cfg().get("typed_turns", "stream") == "stream":
+        out += VOICE_ROOM_REMINDER
+    return out
 
 
 def _voice_turn_cfg() -> dict:
@@ -144,6 +175,18 @@ async def voice_inject(request: Request):
     )
     if _voice_turn_cfg().get("reminder", True):
         prefetched_text = VOICE_TURN_REMINDER + prefetched_text
+    from app import voice_tap
+    heard = voice_tap.take_heard_note(session_id)
+    if heard:
+        prefetched_text = heard + prefetched_text
+
+    # Is another turn already running (or queued) on this session? The queue
+    # is strictly serial, so this turn will wait — minutes, when a typed turn
+    # is mid-investigation — and the worker should say so instead of a filler
+    # followed by silence (the 2026-09-24 19:17 "Yeah." waited 44 s).
+    from app.sessions_io import get_queue_state
+    qs = get_queue_state(session_id)
+    queued_behind = bool(qs.get("current")) or bool(qs.get("pending_user"))
 
     await _save_session_meta(session_id, model, preview=prompt_text)
 
@@ -163,6 +206,8 @@ async def voice_inject(request: Request):
     # Lazy import to avoid the messages<->voice import cycle at load time.
     from app.routers.messages import _session_consumer
 
+    voice_tap.mark_voice_turn(turn.turn_id)
+
     try:
         await enqueue_turn(
             session_id,
@@ -179,7 +224,8 @@ async def voice_inject(request: Request):
         from app.routers.messages import _turn_sse_generator
 
         async def _sse():
-            head = {"session_id": session_id, "turn_id": turn.turn_id}
+            head = {"session_id": session_id, "turn_id": turn.turn_id,
+                    "queued_behind": queued_behind}
             yield f"event: voice_turn\ndata: {json.dumps(head)}\n\n"
             async for chunk in _turn_sse_generator(turn):
                 yield chunk
@@ -264,6 +310,74 @@ def _voice_turn_setup(session_id: str) -> dict:
     )
     return {"model": model, "meta_path": meta_path, "options": options,
             "plan_mode": voice_plan_mode}
+
+
+# ── /api/voice/listen ─────────────────────────────────────────────────────
+
+@router.get("/api/voice/listen")
+async def voice_listen(session_key: str, request: Request):
+    """Every turn's events on a session, for its voice room (`app/voice_tap.py`).
+
+    The worker opens this once per room and speaks the replies of turns it did
+    not inject itself — typed turns — through the same clause path as spoken
+    ones. It is also how the worker learns that a typed message arrived, which
+    opens a conversation (a person typing to Lloyd with the room open is
+    talking to him). An SSE comment every 15 s keeps idle proxies from closing
+    the stream.
+    """
+    import asyncio
+    import json
+
+    from app import voice_tap
+
+    session_id = (session_key or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_key is required")
+    q = voice_tap.open_tap(session_id)
+
+    async def _sse():
+        try:
+            yield ": voice tap open\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    evt = await asyncio.wait_for(q.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield f"event: {evt['event']}\ndata: {json.dumps(evt['data'])}\n\n"
+        finally:
+            voice_tap.close_tap(session_id, q)
+
+    return StreamingResponse(_sse(), media_type="text/event-stream")
+
+
+# ── /api/voice/interrupted ────────────────────────────────────────────────
+
+@router.post("/api/voice/interrupted")
+async def voice_interrupted(request: Request):
+    """The listener talked over a reply; record how much of it they heard.
+
+    Body: {session_key, heard: str, unheard_chars?: int}. `heard` is the text
+    of the clauses whose playout completed. The next turn on the session —
+    spoken or typed — carries it as a note in its prompt tail, which is
+    LiveKit Agents' "truncate the chat context at the playout position" in
+    Lloyd's terms: the transcript keeps the whole reply, and the model is told
+    which part of it was actually said.
+    """
+    from app import voice_tap
+
+    data = await request.json() if (await request.body()) else {}
+    session_id = (data.get("session_key") or data.get("session_id") or "").strip()
+    if not session_id:
+        raise HTTPException(status_code=400, detail="session_key is required")
+    heard = str(data.get("heard") or "")
+    unheard = int(data.get("unheard_chars") or 0)
+    voice_tap.record_interruption(session_id, heard, unheard)
+    logger.info("voice interrupted on %s: heard %d chars, %d unheard",
+                session_id, len(heard), unheard)
+    return JSONResponse({"recorded": True})
 
 
 # ── /api/voice/prewarm ────────────────────────────────────────────────────
@@ -458,10 +572,14 @@ async def voice_ww_label(request: Request):
     script in Phase 1c uses these labels to compute true detection rate
     vs false-accept rate per device class.
 
-    Body: {said_wake_word: bool, utterance_id?: str, miss_ts?: number, note?: str}
+    Body: {said_wake_word?: bool, addressed?: "yes"|"no"|"backchannel",
+           utterance_id?: str, miss_ts?: number, note?: str}
       Provide utterance_id for a VAD-segmented capture, OR miss_ts for a
       ring-buffer-only miss dump (the integer part of the filename). At
-      least one of the two is required.
+      least one of the two is required, and at least one of the labels:
+      `said_wake_word` grades the wake word, `addressed` grades the
+      conversation gate (was it meant for Lloyd, not, or an acknowledgement
+      like "yeah" while he spoke).
 
     Examples:
       curl -X POST http://localhost:8080/api/voice/ww_label \\

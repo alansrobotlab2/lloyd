@@ -13,6 +13,7 @@ import { RoomContext, RoomAudioRenderer, useTrackVolume } from '@livekit/compone
 import type { AgentState } from '@livekit/components-react'
 import { api } from '../api'
 import { getMicGain, subscribeMicGain } from '../lib/micGain'
+import { getHalfDuplex, subscribeHalfDuplex } from '../lib/halfDuplex'
 import { MIC_SLOW_MESSAGE, MIC_SLOW_MS, micErrorMessage, type MicState } from '../lib/voiceIndicator'
 
 const AGENT_IDENTITY_PREFIX = 'lloyd-agent'
@@ -47,6 +48,12 @@ export interface VoiceRoomState {
    *  'idle' = waiting for wake-word. 'listening' = inside the continuation
    *  window, follow-up utterances pass through without re-saying it. */
   wakeState: 'idle' | 'listening'
+  /** Which kind of open window: 'conversation' = the wake word opened a
+   *  conversation that stays open (no wake word needed) until silence or a
+   *  closer; 'listening' = only the short follow-up window. */
+  wakeMode: 'idle' | 'listening' | 'conversation'
+  /** How long the open conversation has been going, ticking locally. */
+  conversationElapsedS: number
   /** Seconds remaining in the continuation window when wakeState='listening'.
    *  Browser-side ticker decrements this every 100ms; flips to 'idle' at 0. */
   wakeRemainingS: number
@@ -66,9 +73,10 @@ interface VoiceRoomProps {
   sessionId: string
   /** Auto-publish the user's microphone after connecting. Default true. */
   publishMic?: boolean
-  /** Mute the local mic publication while Lloyd is speaking, to kill the
-   *  speakers→mic echo loop that otherwise produces fake transcripts.
-   *  Default true. Disable if you have a clean headset and want full-duplex. */
+  /** Mute the local mic publication while Lloyd is speaking. Unset = the
+   *  per-device setting (lib/halfDuplex.ts), which defaults OFF: barge-in
+   *  needs the mic live while he talks, and the browser's AEC3 already has
+   *  his voice as its echo reference. */
   halfDuplex?: boolean
   /** Render-prop receiving the room state. */
   children: (state: VoiceRoomState) => React.ReactNode
@@ -89,9 +97,12 @@ interface VoiceRoomProps {
 export default function VoiceRoom({
   sessionId,
   publishMic = true,
-  halfDuplex = true,
+  halfDuplex: halfDuplexProp,
   children,
 }: VoiceRoomProps) {
+  const [halfDuplexSetting, setHalfDuplexSetting] = useState<boolean>(() => getHalfDuplex())
+  useEffect(() => subscribeHalfDuplex(setHalfDuplexSetting), [])
+  const halfDuplex = halfDuplexProp ?? halfDuplexSetting
   const roomRef = useRef<Room | null>(null)
   if (roomRef.current === null) roomRef.current = new Room()
   const room = roomRef.current
@@ -109,6 +120,9 @@ export default function VoiceRoom({
   // is the absolute monotonic time (Date.now() + remaining_s*1000) so the
   // local 100ms ticker can compute remaining_s without drift from set-time.
   const [wakeState, setWakeState] = useState<'idle' | 'listening'>('idle')
+  const [wakeMode, setWakeMode] = useState<'idle' | 'listening' | 'conversation'>('idle')
+  const [conversationStartedAt, setConversationStartedAt] = useState(0)
+  const [conversationElapsedS, setConversationElapsedS] = useState(0)
   const [wakeExpiresAt, setWakeExpiresAt] = useState(0)
   const [wakeContinuationS, setWakeContinuationS] = useState(12)
   const [wakeSpeaker, setWakeSpeaker] = useState<string | null>(null)
@@ -121,15 +135,19 @@ export default function VoiceRoom({
     const tick = () => {
       const remain = Math.max(0, (wakeExpiresAt - Date.now()) / 1000)
       setWakeRemainingS(remain)
+      if (conversationStartedAt) {
+        setConversationElapsedS(Math.max(0, (Date.now() - conversationStartedAt) / 1000))
+      }
       if (remain <= 0) {
         setWakeState('idle')
+        setWakeMode('idle')
         setWakeSpeaker(null)
       }
     }
     tick()
     const id = setInterval(tick, 100)
     return () => clearInterval(id)
-  }, [wakeState, wakeExpiresAt])
+  }, [wakeState, wakeExpiresAt, conversationStartedAt])
 
   // Watch agent track volume — drives the "speaking" detection that
   // toggles half-duplex mute and the visualizer state.
@@ -143,8 +161,9 @@ export default function VoiceRoom({
   // the local mic so the speakers don't feed back into the ASR pipeline.
   // Restored automatically once the agent stops.
   useEffect(() => {
-    if (!halfDuplex || !micPublished) return
-    const targetMuted = agentSpeaking
+    if (!micPublished) return
+    // Switched off while muted: give the mic back.
+    const targetMuted = halfDuplex ? agentSpeaking : false
     if (targetMuted === micMuted) return
     let cancelled = false
     ;(async () => {
@@ -214,6 +233,13 @@ export default function VoiceRoom({
         const remain = typeof msg.remaining_s === 'number' ? msg.remaining_s : 0
         const cont = typeof msg.continuation_s === 'number' ? msg.continuation_s : 12
         const spk = typeof msg.speaker === 'string' ? msg.speaker : null
+        const mode = msg.mode === 'conversation' ? 'conversation'
+          : state === 'listening' ? 'listening' : 'idle'
+        const elapsed = typeof msg.conversation_elapsed_s === 'number'
+          ? msg.conversation_elapsed_s : 0
+        setWakeMode(mode)
+        setConversationStartedAt(mode === 'conversation' ? Date.now() - elapsed * 1000 : 0)
+        setConversationElapsedS(mode === 'conversation' ? elapsed : 0)
         setWakeState(state)
         setWakeContinuationS(cont)
         setWakeSpeaker(spk)
@@ -481,6 +507,8 @@ export default function VoiceRoom({
     agentAudioTrack,
     agentState,
     wakeState,
+    wakeMode,
+    conversationElapsedS,
     wakeRemainingS,
     wakeContinuationS,
     wakeSpeaker,
@@ -490,7 +518,8 @@ export default function VoiceRoom({
   }), [
     room, status, micPublished, micState, micMuted, agentSpeaking,
     localAudioTrack, agentAudioTrack, agentState,
-    wakeState, wakeRemainingS, wakeContinuationS, wakeSpeaker,
+    wakeState, wakeMode, conversationElapsedS, wakeRemainingS,
+    wakeContinuationS, wakeSpeaker,
     error, reconnect, interrupt,
   ])
 

@@ -2192,6 +2192,11 @@ async def post_message_stream(request: Request):
     prefetched_text = await prefetch_context_async(
         text, session_id=session_id, plan_mode=plan_mode_active,
     )
+    # A voice room is open on this session: the worker speaks this typed
+    # turn's reply as it streams (app/voice_tap.py), so the model is told so,
+    # in the prompt's tail like the spoken turn's own reminder.
+    from app.routers.voice import voice_room_prefix
+    prefetched_text = voice_room_prefix(session_id) + prefetched_text
     t_prefetch = time.perf_counter()
     # One PROMPT_BUDGET line per turn: the system half is logged by
     # build_system_prompt above, this adds the injected half and the total

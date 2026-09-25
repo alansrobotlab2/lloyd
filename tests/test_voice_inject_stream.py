@@ -83,7 +83,8 @@ def test_stream_true_returns_the_turns_own_events_headed_by_its_id(harness):
     assert r.headers["content-type"].startswith("text/event-stream")
     frames = _frames(r.text)
     assert frames[0] == ("voice_turn", {"session_id": "s1",
-                                        "turn_id": captured["turn"].turn_id})
+                                        "turn_id": captured["turn"].turn_id,
+                                        "queued_behind": False})
     assert [f[0] for f in frames[1:]] == ["text_delta", "done"]
     assert frames[1][1]["text"] == "It is noon."
 

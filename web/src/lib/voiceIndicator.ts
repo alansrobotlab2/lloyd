@@ -16,6 +16,7 @@ export type VoiceIndicator =
   | 'speaking'
   | 'mic-failed'
   | 'mic-starting'
+  | 'conversation'
   | 'listening'
   | 'idle'
 
@@ -25,6 +26,9 @@ export function voiceIndicator(s: {
   agentThinking: boolean
   agentSpeaking: boolean
   wakeState: 'idle' | 'listening'
+  /** 'conversation' when the wake word opened a conversation (no wake word
+   *  needed until it closes); absent or anything else = the plain window. */
+  wakeMode?: 'idle' | 'listening' | 'conversation'
 }): VoiceIndicator {
   if (s.status !== 'connected') return 'disconnected'
   // Lloyd's own activity still wins: a typed turn is audible with no mic.
@@ -33,8 +37,16 @@ export function voiceIndicator(s: {
   // Below that, the mic decides whether "say Lloyd" is a thing you can do.
   if (s.micState === 'failed') return 'mic-failed'
   if (s.micState === 'starting') return 'mic-starting'
-  if (s.wakeState === 'listening') return 'listening'
+  if (s.wakeState === 'listening') {
+    return s.wakeMode === 'conversation' ? 'conversation' : 'listening'
+  }
   return 'idle'
+}
+
+/** "1:12" — how long a conversation has been open. */
+export function formatElapsed(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds))
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
 /** How long the mic may take to start before the page says so. A permission

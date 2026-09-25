@@ -18,6 +18,8 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
+import { Switch } from '@/components/ui/switch'
+import { getHalfDuplex, setHalfDuplex, subscribeHalfDuplex } from '@/lib/halfDuplex'
 import { cn } from '@/lib/utils'
 import {
   MIC_GAIN_RANGE,
@@ -143,6 +145,8 @@ function formatDb(db: number): string {
 
 function MicTuningCard() {
   const [gain, setGainState] = useState<number>(() => getMicGain())
+  const [halfDuplex, setHalfDuplexState] = useState<boolean>(() => getHalfDuplex())
+  useEffect(() => subscribeHalfDuplex(setHalfDuplexState), [])
   const [meterPeakDb, setMeterPeakDb] = useState<number>(-Infinity)
   const [meterRmsDb, setMeterRmsDb] = useState<number>(-Infinity)
   const [error, setError] = useState<string | null>(null)
@@ -322,6 +326,24 @@ function MicTuningCard() {
             <span>rms: {formatDb(meterRmsDb)} dBFS</span>
             {!running && <span className="text-amber-500">meter stopped</span>}
           </div>
+        </div>
+
+        {/* Half-duplex */}
+        <div className="flex items-start justify-between gap-4">
+          <div className="space-y-0.5">
+            <label htmlFor="half-duplex" className="text-sm font-medium">
+              Mute mic while Lloyd speaks
+            </label>
+            <p className="text-xs text-muted-foreground">
+              Off lets you talk over Lloyd to interrupt him. Turn on for this device only if
+              his voice leaks from the speakers into the mic and he interrupts himself.
+            </p>
+          </div>
+          <Switch
+            id="half-duplex"
+            checked={halfDuplex}
+            onCheckedChange={(on) => setHalfDuplex(on)}
+          />
         </div>
 
         {/* Slider */}

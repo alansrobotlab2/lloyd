@@ -37,6 +37,7 @@ import sys
 import time
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -45,18 +46,33 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "agent-services"))
 
 LIVE_PY = Path.home() / "lloyd" / ".venvs" / "lloyd" / "bin" / "python"
-UNTRACKED_MODELS = ("smart-turn", "parakeet-tdt-v3", "nemo-streaming-480ms")
+UNTRACKED_MODELS = ("smart-turn", "parakeet-tdt-v3", "nemo-streaming-480ms", "campplus")
 BACKEND_PORT, MCP_PORT = 18180, 18600
 PREFIX = "e2e-"
 SR = 48000
 
 # (label, text, expect-reply regex or None for "must stay silent", pause after)
+#
+# Since 2026-09-24 the wake word opens a CONVERSATION (90 s), so the third line
+# lands inside it but past the 6 s follow-up window: the addressee judge
+# (djev) must reject a remark to nobody.
 SCRIPT = [
     ("wake + question", "Hey Lloyd, what is six times seven?", r"42|forty.?two", 1.0),
     ("follow-up, no wake word", "And what is that divided by two?", r"21|twenty.?one", 9.0),
-    ("window expired, not addressed", "The weather is really nice today.", None, 1.0),
+    ("conversation, not addressed", "The weather is really nice today.", None, 1.0),
     ("bare wake", "Hey Lloyd.", "", 1.2),
     ("question after bare wake", "What is the capital of France?", r"paris", 1.0),
+]
+
+# Talking over a reply: (label, opener, interjection, seconds into the reply,
+# expectation). `barge` — the reply must stop and the interjection must be
+# answered; `backchannel` — the reply must carry on and nothing is injected.
+# The interjection lands after the barge-in warm-up (3 s of reply).
+OVERLAPS = [
+    ("barge-in mid-reply", "Hey Lloyd, count slowly from one to thirty, one number per sentence.",
+     "Actually, what is two plus two?", 4.0, ("barge", r"\b4\b|four")),
+    ("backchannel mid-reply", "Hey Lloyd, count slowly from one to twenty, one number per sentence.",
+     "Yeah.", 4.0, ("backchannel", None)),
 ]
 
 
@@ -80,6 +96,11 @@ def build_rig(rig: Path) -> Path:
         # A rig left from an earlier run must test THIS commit, not that one.
         subprocess.run(["git", "-C", str(wt), "checkout", "-q", "--detach", head],
                        check=True, capture_output=True)
+    # The worker reads its LiveKit keys from `<tree>/.env`, which is untracked:
+    # a fresh rig has none and the worker exits before joining anything.
+    env_src, env_dst = Path.home() / "lloyd" / ".env", wt / ".env"
+    if env_src.exists() and not env_dst.exists():
+        env_dst.symlink_to(env_src)
     for name in UNTRACKED_MODELS:
         src = Path.home() / "lloyd" / "agent-services" / "models" / name
         dst = wt / "agent-services" / "models" / name
@@ -238,6 +259,17 @@ class Participant:
             await asyncio.sleep(0.1)
         return None
 
+    async def speaking_until_quiet(self, t0: float, wait: float = 60.0,
+                                   gap: float = 1.6) -> Optional[float]:
+        """The last loud frame after t0, once Lloyd has been quiet `gap` s."""
+        deadline = t0 + wait
+        while time.monotonic() < deadline:
+            loud = [t for t, r in self.heard if t > t0 and r > 0.01]
+            if loud and time.monotonic() - loud[-1] > gap:
+                return loud[-1]
+            await asyncio.sleep(0.1)
+        return None
+
     async def close(self):
         self._mic.cancel()
         await self.room.disconnect()
@@ -284,8 +316,70 @@ async def converse(cfg: dict, session: str, clips: dict) -> list[dict]:
         results.append(row)
         log(f"  -> {row}")
         await asyncio.sleep(pause)
+    for label, opener, inter, into, (kind, expect) in OVERLAPS:
+        await asyncio.sleep(3.0)
+        t_end = await p.say(clips[opener])
+        log(f"said {opener!r}")
+        start = await p.reply_after(t_end, wait=45.0, gap=0.3)
+        row = {"label": label, "said": inter, "wake_ui_s": None}
+        if start is None:
+            row.update(replied=False, ok=False)
+            results.append(row)
+            log(f"  -> {row}")
+            continue
+        first = start[0]
+        await asyncio.sleep(max(0.0, first + into - time.monotonic()))
+        t_inter = await p.say(clips[inter])
+        log(f"  said {inter!r} {t_inter - first:.1f}s into the reply")
+        if kind == "barge":
+            # The counting has to stop: nothing loud for a while after the
+            # interjection, other than the answer to it.
+            quiet_at = None
+            while time.monotonic() < t_inter + 20:
+                await asyncio.sleep(0.1)
+                loud = [t for t, r in p.heard if t > t_inter and r > 0.01]
+                # the first silence of >= 0.5 s after the interjection is the stop
+                prev = t_inter
+                for t in loud:
+                    if t - prev >= 0.5:
+                        quiet_at = prev
+                        break
+                    prev = t
+                if quiet_at is not None or (loud == [] and time.monotonic() - t_inter > 3):
+                    quiet_at = quiet_at or t_inter
+                    break
+            stopped = None if quiet_at is None else quiet_at - t_inter
+            answer = await p.reply_after(quiet_at or t_inter, wait=45.0)
+            heard = ""
+            if answer is not None:
+                rs = StreamResampler(SR)
+                heard = rec.transcribe(np.concatenate([rs.push(answer[2], SR),
+                                                       rs.flush()])).text
+            row.update(replied=answer is not None, stop_s=stopped,
+                       latency_s=(answer[0] - t_inter) if answer else None,
+                       reply_s=(answer[1] - answer[0]) if answer else None,
+                       heard=heard,
+                       ok=stopped is not None and stopped < 1.5 and
+                       re.search(expect, heard, re.I) is not None)
+        else:
+            end = await p.speaking_until_quiet(t_inter, wait=60.0)
+            carried = None if end is None else end - t_inter
+            row.update(replied=True, carried_on_s=carried, reply_s=carried,
+                       latency_s=None, heard="",
+                       ok=carried is not None and carried > 3.0)
+        results.append(row)
+        log(f"  -> {row}")
     await p.close()
     return results
+
+
+def latency_lines(worker_log: Path) -> list[str]:
+    """The worker's per-turn `[latency]` breakdowns (voice/timeline.py)."""
+    try:
+        text = worker_log.read_text(errors="replace")
+    except OSError:
+        return []
+    return [ln.split("[latency] ", 1)[1] for ln in text.splitlines() if "[latency] " in ln]
 
 
 def main() -> int:
@@ -308,6 +402,9 @@ def main() -> int:
 
     log("synthesising the participant's lines")
     clips = {text: synth(text) for _, text, _, _ in SCRIPT}
+    for _, opener, inter, _, _ in OVERLAPS:
+        clips[opener] = synth(opener)
+        clips[inter] = synth(inter)
 
     canary = Canary(rig, wt, python=LIVE_PY, backend_port=BACKEND_PORT,
                     mcp_port=MCP_PORT, autorestart=False)
@@ -334,8 +431,12 @@ def main() -> int:
             canary.stop()
 
     from scripts.automod.canary_config import canary_data_root
-    msgs = json.loads((canary_data_root(rig) / "sessions" / f"{session}.json")
-                      .read_text()).get("messages", [])
+    # The canary backend may keep its sessions under its own data root or under
+    # the rig tree's `.lloyd-data` (app.paths' non-production fallback).
+    candidates = [canary_data_root(rig) / "sessions" / f"{session}.json",
+                  wt / ".lloyd-data" / "sessions" / f"{session}.json"]
+    found = next((c for c in candidates if c.exists()), None)
+    msgs = json.loads(found.read_text()).get("messages", []) if found else []
     users = [c.get("text", "") for m in msgs if m.get("role") == "user"
              for c in (m.get("content") or []) if c.get("type") == "text"]
     print("\n=== injected user turns ===")
@@ -345,11 +446,20 @@ def main() -> int:
     print(f"{'':32} {'wake→UI':>8} {'voice→voice':>12} {'reply':>7}  ok  heard")
     for r in results:
         wake = "-" if r["wake_ui_s"] is None else "%+.2fs" % r["wake_ui_s"]
-        lat = "%.2fs" % r["latency_s"] if r.get("replied") else "-"
-        dur = "%.1fs" % r["reply_s"] if r.get("replied") else "-"
+        lat = "%.2fs" % r["latency_s"] if r.get("latency_s") is not None else "-"
+        dur = "%.1fs" % r["reply_s"] if r.get("reply_s") is not None else "-"
         ok = "Y" if r["ok"] else "N"
+        extra = ""
+        if "stop_s" in r:
+            extra = f" [stopped {r['stop_s']:.2f}s after]" if r["stop_s"] is not None \
+                else " [never stopped]"
+        if "carried_on_s" in r:
+            extra = f" [carried on {r['carried_on_s'] or 0:.1f}s]"
         print(f"{r['label']:32} {wake:>8} {lat:>12} {dur:>7}  {ok}   "
-              f"{r.get('heard', '')[:70]!r}")
+              f"{r.get('heard', '')[:60]!r}{extra}")
+    print("\n=== latency breakdown (worker [latency] lines, stage+ms) ===")
+    for line in latency_lines(rig / "logs" / "worker.log"):
+        print(f"  {line}")
     print(f"\nworker log: {rig / 'logs' / 'worker.log'}")
     return 0 if all(r["ok"] for r in results) else 1
 
