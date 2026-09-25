@@ -17,9 +17,13 @@ exchange it used to have.
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import hashlib
 import json
 import logging
+import time
 from contextlib import AsyncExitStack, asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from mcp import ClientSession, MCPError
@@ -34,7 +38,7 @@ except Exception:  # pragma: no cover - older SDK
     httpx2 = None
     create_mcp_http_client = None
 
-from app.config import service_url
+from app.config import CONFIG, service_url
 from app.exception_text import root_cause
 from app.harness.errors import ToolDiscoveryError, ToolDispatchError
 
@@ -146,6 +150,23 @@ CALL_TIMEOUT_SECONDS = 660.0
 # write budgets stay short because those really are blips.
 HTTP_READ_TIMEOUT_SECONDS = CALL_TIMEOUT_SECONDS + 30.0
 
+# The per-tool call budget a server declares in a tool's `_meta` (P12). Must
+# match agent_mcp.annotations.META_TIMEOUT_SECONDS. It rides in `Tool._meta`
+# and not on `ToolAnnotations`, which the installed SDK (mcp 2.1) models with
+# pydantic's default `extra="ignore"`: a `lloyd/timeoutSeconds` set there is
+# dropped at construction and never reaches the wire. `_meta` is the field
+# the spec reserves for implementation metadata, and it round-trips.
+META_TIMEOUT_SECONDS = "lloyd/timeoutSeconds"
+
+# How often a turn start re-asks the HTTP servers for tools/list, when
+# `harness.mcp_pool.discovery_ttl_s` does not say. See `MCPPool.ensure_fresh`.
+DEFAULT_DISCOVERY_TTL_S = 300.0
+
+# A refresh runs on the turn path, so it is bounded: an aggregator that
+# accepts the connection and then says nothing costs a turn this much, once
+# per TTL, and the turn proceeds on the catalog it already had.
+DISCOVERY_REFRESH_TIMEOUT_S = 10.0
+
 # Transports that carry the 2026-07-28 stateless protocol. Nothing is pinned
 # to a connection for these, so the pool does not hold one open.
 HTTP_TRANSPORT_TYPES = ("http", "streamable-http", "streamable_http", "sse")
@@ -217,6 +238,108 @@ def _flatten_result(result: Any) -> dict[str, Any]:
         out["images"] = images
     return out
 
+def discovery_ttl_s() -> float:
+    """`harness.mcp_pool.discovery_ttl_s`; 0 (or less) turns refresh off."""
+    try:
+        cfg = ((CONFIG.get("harness") or {}).get("mcp_pool") or {})
+        value = cfg.get("discovery_ttl_s", DEFAULT_DISCOVERY_TTL_S)
+        return float(DEFAULT_DISCOVERY_TTL_S if value is None else value)
+    except Exception:
+        return DEFAULT_DISCOVERY_TTL_S
+
+
+def per_tool_timeouts_enabled() -> bool:
+    """`harness.mcp_pool.per_tool_timeouts` (default on)."""
+    try:
+        cfg = ((CONFIG.get("harness") or {}).get("mcp_pool") or {})
+        return bool(cfg.get("per_tool_timeouts", True))
+    except Exception:
+        return True
+
+
+@dataclass(frozen=True)
+class _Catalog:
+    """Everything discovery produced, as one value that is swapped, never edited.
+
+    `open()`, `_reopen()` and `ensure_fresh()` each build a whole new catalog
+    and assign it in one statement. The old code cleared four dicts in place
+    and refilled them across several awaits, so a call resolving its route in
+    that window read "no server claims tool" from a pool that had every tool a
+    moment earlier — the empty-pool failure (CLAUDE.md) in miniature, for one
+    call. A reader holding the old catalog keeps a complete one.
+
+    The containers are plain dicts and lists for the callers that read them
+    (`discovered` goes straight to `build_tool_list`), and are not mutated
+    once the catalog is published. `_register()` without a builder, which
+    tests use, copies into a new catalog like everything else.
+    """
+
+    discovered: list = field(default_factory=list)   # [(server, [tool dict])]
+    routes: dict = field(default_factory=dict)       # bare -> server
+    schemas: dict = field(default_factory=dict)      # bare -> inputSchema
+    annotations: dict = field(default_factory=dict)  # bare -> ToolAnnotations dict
+    timeouts: dict = field(default_factory=dict)     # bare -> declared seconds
+
+    @property
+    def tool_count(self) -> int:
+        return sum(len(tools) for _srv, tools in self.discovered)
+
+    def fingerprint(self) -> str:
+        return hashlib.sha1(json.dumps(self.discovered, sort_keys=True,
+                                       default=str).encode()).hexdigest()
+
+
+def _build_catalog(discovered: list[tuple[str, list[dict[str, Any]]]]) -> _Catalog:
+    """Fold per-server tool lists into one catalog; first server wins a name."""
+    routes: dict[str, str] = {}
+    schemas: dict[str, dict[str, Any]] = {}
+    annotations: dict[str, dict[str, Any]] = {}
+    timeouts: dict[str, float] = {}
+    for server_name, tools in discovered:
+        for tool in tools:
+            bare = tool["name"]
+            if bare in routes:
+                logger.warning(
+                    "mcp_pool: tool name collision on %r — %s wins over %s",
+                    bare, routes[bare], server_name,
+                )
+                continue
+            routes[bare] = server_name
+            schema = tool.get("inputSchema")
+            if isinstance(schema, dict):
+                schemas[bare] = schema
+            ann = tool.get("annotations")
+            if isinstance(ann, dict):
+                annotations[bare] = ann
+            timeout = tool.get("timeoutSeconds")
+            if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) \
+                    and timeout > 0:
+                timeouts[bare] = float(timeout)
+    return _Catalog(discovered=list(discovered), routes=routes, schemas=schemas,
+                    annotations=annotations, timeouts=timeouts)
+
+
+# The current call's timing, filled by `_invoke` and read back by `call_tool`.
+# A contextvar rather than a return value or an argument because `_invoke` is
+# the seam half the tests replace with a five-argument fake; a fake simply
+# never fills it, and the result carries no `timing`, as before.
+_CALL_TIMING: contextvars.ContextVar[dict[str, int] | None] = contextvars.ContextVar(
+    "mcp_pool_call_timing", default=None)
+
+
+def _new_stats() -> dict[str, Any]:
+    return {
+        "calls": 0,
+        "handshakes": 0,
+        "handshake_ms_total": 0,
+        "handshake_ms_max": 0,
+        "refreshes": 0,
+        "refresh_changes": 0,
+        "refresh_failures": 0,
+        "last_refresh_error": None,
+    }
+
+
 class MCPPool:
     """One-process pool that holds open MCP client sessions keyed by
     server name. `aclose()` tears them all down.
@@ -245,13 +368,16 @@ class MCPPool:
             if c.get("type", "stdio") not in HTTP_TRANSPORT_TYPES
         }
         self._sessions: dict[str, ClientSession] = {}
-        self._tool_routes: dict[str, str] = {}  # bare_name → server_name
-        self._schemas: dict[str, dict[str, Any]] = {}  # bare_name → inputSchema
-        # bare_name → the server's ToolAnnotations, as a plain dict. Read by
-        # `_retry_safe`: a transport failure mid-call is retried only for a
-        # tool the server itself calls read-only or idempotent.
-        self._annotations: dict[str, dict[str, Any]] = {}
-        self._discovered: list[tuple[str, list[dict[str, Any]]]] = []
+        # Routes, schemas, annotations (read by `_retry_safe`: a transport
+        # failure mid-call is retried only for a tool the server itself calls
+        # read-only or idempotent) and declared timeouts, swapped as a unit.
+        self._catalog = _Catalog()
+        self._catalog_at = time.monotonic()
+        # What the stdio owner task discovered for the `open()` in progress.
+        self._stdio_found: list[tuple[str, list[dict[str, Any]]]] = []
+        self._stdio_failed: list[str] = []
+        self._refresh_lock = asyncio.Lock()
+        self._stats = _new_stats()
         self._opened = False
         self._open_lock = asyncio.Lock()
         self._reopen_lock = asyncio.Lock()
@@ -288,7 +414,13 @@ class MCPPool:
             # stateless protocol each call brings its own context, and a
             # connection held open across tasks is precisely what made the
             # anyio cancel scopes fragile.
+            #
+            # Everything found goes into a local list and becomes the pool's
+            # catalog in ONE assignment at the end (P12). A `_reopen` keeps the
+            # previous catalog until then, so a call resolving its route while
+            # discovery runs sees the old table, never a half-built or empty one.
             failed: list[str] = []
+            found: list[tuple[str, list[dict[str, Any]]]] = []
             for server_name, cfg in self._http_configs.items():
                 try:
                     async with self._http_session(cfg) as session:
@@ -299,10 +431,12 @@ class MCPPool:
                     )
                     failed.append(server_name)
                     continue
-                self._register(server_name, tools)
+                found.append((server_name, tools))
 
             # stdio servers: a subprocess must outlive the call, so those
             # keep the owner-task pattern.
+            self._stdio_found = []
+            self._stdio_failed = []
             if self._stdio_configs:
                 self._owner_task = asyncio.create_task(
                     self._owner_loop(), name="mcp_pool_owner"
@@ -312,6 +446,8 @@ class MCPPool:
                     err = self._open_error
                     self._open_error = None
                     raise err
+                found.extend(self._stdio_found)
+                failed.extend(self._stdio_failed)
 
             # Checked after BOTH transports have had their turn, so a failed
             # HTTP server does not mask a healthy stdio one.
@@ -331,32 +467,77 @@ class MCPPool:
             #
             # Raise instead: `get_or_open_pool` already evicts a pool whose
             # `open()` raises, so the next caller rebuilds and re-discovers.
-            if failed and not self._tool_routes:
+            # Raising here also leaves the previous catalog in place, which is
+            # what a `_reopen` that fails wants.
+            catalog = _build_catalog(found)
+            if failed and not catalog.routes:
                 raise ToolDiscoveryError(
                     "MCP discovery yielded no tools; "
                     f"failed server(s): {', '.join(failed)}",
                     servers=failed,
                 )
+            self._catalog = catalog
+            self._catalog_at = time.monotonic()
             self._opened = True
 
     def _register(self, server_name: str, tools: list[dict[str, Any]]) -> None:
-        """Record a server's tools in the routing table."""
-        self._discovered.append((server_name, tools))
-        for tool in tools:
-            bare = tool["name"]
-            if bare in self._tool_routes:
-                logger.warning(
-                    "mcp_pool: tool name collision on %r — %s wins over %s",
-                    bare, self._tool_routes[bare], server_name,
-                )
-                continue
-            self._tool_routes[bare] = server_name
-            schema = tool.get("inputSchema")
-            if isinstance(schema, dict):
-                self._schemas[bare] = schema
-            ann = tool.get("annotations")
-            if isinstance(ann, dict):
-                self._annotations[bare] = ann
+        """Add a server's tools to the catalog, by building a new one."""
+        cur = self._current_catalog()
+        self._catalog = _build_catalog(cur.discovered + [(server_name, tools)])
+
+    # -- the catalog, and the attribute names callers and tests already use --
+
+    def _current_catalog(self) -> _Catalog:
+        # A pool built with `MCPPool.__new__` (several tests) never ran
+        # `__init__`; give it an empty catalog of its own on first touch.
+        cat = self.__dict__.get("_catalog")
+        if cat is None:
+            cat = self._catalog = _Catalog()
+        return cat
+
+    def _replace_catalog(self, **changes: Any) -> None:
+        cur = self._current_catalog()
+        self._catalog = _Catalog(**{**cur.__dict__, **changes})
+
+    @property
+    def _tool_routes(self) -> dict[str, str]:
+        return self._current_catalog().routes
+
+    @_tool_routes.setter
+    def _tool_routes(self, value: dict[str, str]) -> None:
+        self._replace_catalog(routes=value)
+
+    @property
+    def _schemas(self) -> dict[str, dict[str, Any]]:
+        return self._current_catalog().schemas
+
+    @_schemas.setter
+    def _schemas(self, value: dict[str, dict[str, Any]]) -> None:
+        self._replace_catalog(schemas=value)
+
+    @property
+    def _annotations(self) -> dict[str, dict[str, Any]]:
+        return self._current_catalog().annotations
+
+    @_annotations.setter
+    def _annotations(self, value: dict[str, dict[str, Any]]) -> None:
+        self._replace_catalog(annotations=value)
+
+    def timeout_for(self, bare: str) -> float:
+        """The call budget for `bare`: its declared timeout, clamped.
+
+        A server declares a tool's budget as `lloyd/timeoutSeconds` in the
+        tool's `_meta` (`agent_mcp/annotations.py::TIMEOUT_SECONDS`). Never
+        above `CALL_TIMEOUT_SECONDS` — the HTTP read timeout is sized against
+        that ceiling, so a longer declared budget would die at the transport
+        and read as a transport error — and never below one second. An
+        undeclared tool, or `harness.mcp_pool.per_tool_timeouts: false`, gets
+        the ceiling, which is today's behaviour.
+        """
+        declared = self._current_catalog().timeouts.get(bare)
+        if declared is None or not per_tool_timeouts_enabled():
+            return CALL_TIMEOUT_SECONDS
+        return max(1.0, min(float(declared), CALL_TIMEOUT_SECONDS))
 
     def _retry_safe(self, bare: str) -> bool:
         """May a call to `bare` be re-sent after a transport failure?
@@ -425,9 +606,13 @@ class MCPPool:
                         logger.warning(
                             "mcp_pool: failed to open %s: %s", server_name, exc
                         )
+                        self._stdio_failed.append(server_name)
                         continue
                     self._sessions[server_name] = session
-                    self._register(server_name, await self._list_tools(server_name, session))
+                    # Collected, not registered: `open()` publishes the whole
+                    # catalog at once when this task signals it is done.
+                    self._stdio_found.append(
+                        (server_name, await self._list_tools(server_name, session)))
                 self._opened_event.set()
                 await self._shutdown_event.wait()
         except BaseException as exc:
@@ -454,18 +639,120 @@ class MCPPool:
                 logger.warning("mcp_pool: owner task exited with %s", exc)
             self._owner_task = None
         self._sessions.clear()
-        self._tool_routes.clear()
-        self._schemas.clear()
-        self._annotations.clear()
-        self._discovered = []
+        self._catalog = _Catalog()
         self._opened = False
 
     @property
     def discovered(self) -> list[tuple[str, list[dict[str, Any]]]]:
         """List of (server_name, mcp_tools_list) pairs ready for
         `app.harness.tool_schema.build_tool_list`.
+
+        The current catalog's list. A caller that reads it several times in
+        one step should read it once: a refresh by another turn may publish a
+        new catalog between two reads (never an emptier one on failure).
         """
-        return self._discovered
+        return self._current_catalog().discovered
+
+    async def ensure_fresh(self, ttl_s: float | None = None) -> bool:
+        """Re-run tools/list on the HTTP servers when the catalog is older than
+        `ttl_s` (default `harness.mcp_pool.discovery_ttl_s`). True when a new
+        catalog was published.
+
+        Called at a turn boundary only (`loop._build_pool`), so the tools a
+        turn advertised stay fixed for the whole turn. Discovery used to run
+        once per pool, i.e. once per backend process: a tool added, removed or
+        re-described in the aggregator was invisible until the backend
+        restarted, while the aggregator itself caches its list for 60 s.
+
+        The rules, all about never making things worse than a stale list:
+
+        - a server that fails keeps its previous entry, and a refresh that
+          would leave no tools at all publishes nothing — the empty pool is
+          the worst failure in the system, and a refresh must not be a new way
+          to reach it;
+        - unchanged discovery keeps the current catalog object;
+        - the attempt is stamped either way, so a down aggregator costs one
+          bounded attempt per TTL, not one per turn;
+        - a turn that finds another turn refreshing does not wait for it;
+        - stdio servers are not re-listed: their session is held open and
+          `_reopen` rediscovers them.
+
+        `notifications/tools/list_changed` is not implementable here: an HTTP
+        session lives for exactly one call (`_http_session`), so there is no
+        open session for the server to notify. A TTL poll is the substitute,
+        and the aggregator's own `ttl_ms` on tools/list is the same idea from
+        the other side.
+        """
+        ttl = discovery_ttl_s() if ttl_s is None else float(ttl_s)
+        if ttl <= 0 or not self._opened or not self._http_configs:
+            return False
+        if time.monotonic() - self._catalog_at < ttl:
+            return False
+        if self._refresh_lock.locked():
+            return False
+        async with self._refresh_lock:
+            if time.monotonic() - self._catalog_at < ttl:
+                return False
+            self._catalog_at = time.monotonic()
+            stats = self._stat()
+            stats["refreshes"] += 1
+            old = self._current_catalog()
+            previous = dict(old.discovered)
+            found: list[tuple[str, list[dict[str, Any]]]] = []
+            errors: list[str] = []
+            for server_name, cfg in self._http_configs.items():
+                try:
+                    async with asyncio.timeout(DISCOVERY_REFRESH_TIMEOUT_S):
+                        async with self._http_session(cfg) as session:
+                            tools = await self._list_tools(server_name, session)
+                except Exception as exc:
+                    errors.append(f"{server_name}: {root_cause(exc)}")
+                    if server_name in previous:
+                        found.append((server_name, previous[server_name]))
+                    continue
+                found.append((server_name, tools))
+            found.extend((n, t) for n, t in old.discovered
+                         if n in self._stdio_configs)
+            if errors:
+                stats["refresh_failures"] += 1
+                stats["last_refresh_error"] = "; ".join(errors)[:300]
+                logger.warning("mcp_pool: discovery refresh failed (%s); keeping "
+                               "the previous entries", "; ".join(errors))
+            new = _build_catalog(found)
+            if not new.routes:
+                return False
+            if new.fingerprint() == old.fingerprint():
+                return False
+            old_names, new_names = set(old.routes), set(new.routes)
+            logger.info(
+                "mcp_pool: discovery refresh published %d tools (+%s -%s)",
+                new.tool_count, sorted(new_names - old_names)[:10],
+                sorted(old_names - new_names)[:10],
+            )
+            self._catalog = new
+            stats["refresh_changes"] += 1
+            return True
+
+    def _stat(self) -> dict[str, Any]:
+        stats = self.__dict__.get("_stats")
+        if stats is None:
+            stats = self._stats = _new_stats()
+        return stats
+
+    def stats(self) -> dict[str, Any]:
+        """Discovery and handshake counters, for `/health/deep`."""
+        stats = dict(self._stat())
+        cat = self._current_catalog()
+        n = stats["handshakes"]
+        stats["handshake_ms_avg"] = round(stats["handshake_ms_total"] / n, 1) if n else None
+        stats["tools"] = len(cat.routes)
+        stats["declared_timeouts"] = len(cat.timeouts)
+        stats["servers"] = sorted(self._configs)
+        at = self.__dict__.get("_catalog_at")
+        stats["catalog_age_s"] = (round(time.monotonic() - at, 1)
+                                  if at is not None else None)
+        stats["opened"] = bool(self.__dict__.get("_opened"))
+        return stats
 
     async def call_tool(
         self,
@@ -558,7 +845,11 @@ class MCPPool:
             meta[META_GRANT_SCOPE] = grant_scope
         if disallowed_tools:
             meta[META_DISALLOWED] = list(disallowed_tools)
-        budget = timeout_seconds if timeout_seconds is not None else CALL_TIMEOUT_SECONDS
+        # A caller's explicit budget wins; otherwise the tool's own declared
+        # one (P12), which is never above the ceiling.
+        budget = timeout_seconds if timeout_seconds is not None else self.timeout_for(bare)
+        timing: dict[str, int] = {}
+        timing_token = _CALL_TIMING.set(timing)
 
         try:
             result = await self._invoke(
@@ -637,8 +928,21 @@ class MCPPool:
                 raise ToolDispatchError(
                     name, f"transport error: {retry_cause}"
                 ) from retry_exc
+        finally:
+            _CALL_TIMING.reset(timing_token)
 
-        return _flatten_result(result)
+        out = _flatten_result(result)
+        stats = self._stat()
+        stats["calls"] += 1
+        if timing:
+            # P11's `tool_result.handshake_ms` reads exactly this key.
+            out["timing"] = dict(timing)
+            hs = timing.get("handshake_ms")
+            if hs is not None:
+                stats["handshakes"] += 1
+                stats["handshake_ms_total"] += hs
+                stats["handshake_ms_max"] = max(stats["handshake_ms_max"], hs)
+        return out
 
     async def _invoke(
         self,
@@ -656,13 +960,27 @@ class MCPPool:
         JSON-RPC frames — so it takes a per-server lock. The lock is keyed by
         server name and kept in a dict that survives `_reopen`, which
         replaces the sessions but not this map.
+
+        The HTTP path times its two halves (P12): `handshake_ms` is entering
+        `_http_session` — connect plus `initialize()`, paid on every call
+        because the session is per call — and `call_ms` is the tools/call
+        itself. They land in `_CALL_TIMING` for `call_tool` to return as
+        `result["timing"]`. stdio has no per-call handshake and reports none.
         """
         cfg = self._http_configs.get(server_name)
         if cfg is not None:
+            timing = _CALL_TIMING.get()
+            started = time.perf_counter()
             async with self._http_session(cfg) as session:
-                return await session.call_tool(
+                entered = time.perf_counter()
+                if timing is not None:
+                    timing["handshake_ms"] = max(0, int((entered - started) * 1000))
+                result = await session.call_tool(
                     bare, args, read_timeout_seconds=budget, meta=meta,
                 )
+                if timing is not None:
+                    timing["call_ms"] = max(0, int((time.perf_counter() - entered) * 1000))
+                return result
         lock = self._stdio_locks.get(server_name)
         if lock is None:
             lock = self._stdio_locks[server_name] = asyncio.Lock()
@@ -678,7 +996,12 @@ class MCPPool:
         """Tear down and rebuild every session, in place.
 
         Keeps this MCPPool instance (and therefore its cache entry and its
-        tool routes) valid, so callers holding a reference keep working.
+        tool routes) valid, so callers holding a reference keep working. The
+        catalog is NOT cleared: `open()` swaps the rediscovered one in whole,
+        and a reopen that fails leaves the previous one standing (P12). The
+        old in-place `.clear()` of the routes left a window, across the owner
+        task's teardown and the whole rediscovery, in which every concurrent
+        call read "no server claims tool".
         """
         async with self._reopen_lock:
             if not self._stdio_configs:
@@ -695,10 +1018,6 @@ class MCPPool:
                     logger.debug("mcp_pool: owner task exit during reopen: %s", exc)
                 self._owner_task = None
             self._sessions.clear()
-            self._tool_routes.clear()
-            self._schemas.clear()
-            self._annotations.clear()
-            self._discovered = []
             self._opened = False
             self._poisoned = False
             self._shutdown_event = asyncio.Event()
@@ -766,21 +1085,41 @@ class MCPPool:
         self, server_name: str, session: ClientSession
     ) -> list[dict[str, Any]]:
         result = await session.list_tools()
-        return [
-            {
-                "name": t.name,
-                "description": t.description or "",
-                "inputSchema": _input_schema(t),
-                # Carried through, not dropped. `readOnlyHint` is what lets a
-                # consumer decide whether a batch of calls can run
-                # concurrently without asking a second, private list of tool
-                # names — which is the pattern `agent_mcp/annotations.py` was
-                # written to replace. A server that sets no hints qualifies
-                # nothing, which is the contract.
-                "annotations": _annotations(t),
-            }
-            for t in result.tools
-        ]
+        return [_tool_dict(t) for t in result.tools]
+
+
+def _tool_dict(t: Any) -> dict[str, Any]:
+    """One tools/list entry as the plain dict the catalog and `build_tool_list`
+    read. `timeoutSeconds` is present only when the server declared one."""
+    out = {
+        "name": t.name,
+        "description": t.description or "",
+        "inputSchema": _input_schema(t),
+        # Carried through, not dropped. `readOnlyHint` is what lets a
+        # consumer decide whether a batch of calls can run
+        # concurrently without asking a second, private list of tool
+        # names — which is the pattern `agent_mcp/annotations.py` was
+        # written to replace. A server that sets no hints qualifies
+        # nothing, which is the contract.
+        "annotations": _annotations(t),
+    }
+    timeout = _declared_timeout(t)
+    if timeout is not None:
+        out["timeoutSeconds"] = timeout
+    return out
+
+
+def _declared_timeout(tool: Any) -> float | None:
+    """`lloyd/timeoutSeconds` from a Tool's `_meta` (`meta` on mcp 2.x)."""
+    meta = getattr(tool, "meta", None)
+    if meta is None:
+        meta = getattr(tool, "_meta", None)
+    if not isinstance(meta, dict):
+        return None
+    value = meta.get(META_TIMEOUT_SECONDS)
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+        return float(value)
+    return None
 
 
 def _http_client(headers: dict[str, str] | None = None):
@@ -976,6 +1315,17 @@ def _evict_pool(pool: MCPPool) -> None:
         if p is pool:
             _POOL_CACHE.pop(k, None)
             return
+
+
+def pool_stats() -> list[dict[str, Any]]:
+    """`MCPPool.stats()` for every cached pool (P12, `/health/deep`)."""
+    out = []
+    for pool in list(_POOL_CACHE.values()):
+        try:
+            out.append(pool.stats())
+        except Exception as exc:  # a stats bug must not take the probe down
+            out.append({"error": str(exc)[:200]})
+    return out
 
 
 async def close_all_pools() -> None:

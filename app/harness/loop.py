@@ -1255,7 +1255,16 @@ async def _build_pool(options: RunOptions) -> MCPPool:
     cfg = dict(options.mcp_servers)
     if not cfg:
         cfg = DEFAULT_LLOYD_MCP_SERVERS
-    return await get_or_open_pool(cfg)
+    pool = await get_or_open_pool(cfg)
+    # P12: re-list tools once the catalog is older than
+    # `harness.mcp_pool.discovery_ttl_s`. Here, at the turn boundary and only
+    # here, so a turn's advertised tools never change under it. It never
+    # empties the catalog and never raises into the turn.
+    try:
+        await pool.ensure_fresh()
+    except Exception as exc:
+        logger.warning("loop: mcp discovery refresh skipped: %s", exc)
+    return pool
 
 
 def _has_system(messages: list[dict[str, Any]]) -> bool:

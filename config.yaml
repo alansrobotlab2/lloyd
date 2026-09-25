@@ -648,6 +648,14 @@ harness:
   parallel_tool_calls:
     enabled: false
     max_concurrency: 4
+  # P12. discovery_ttl_s: a turn start re-lists the aggregator's tools once the
+  # catalog is this old (0 = discover once per pool, as before); a failed or
+  # empty refresh keeps the old catalog. per_tool_timeouts: honour the budget
+  # a tool declares in `_meta` (agent_mcp/annotations.py TIMEOUT_SECONDS),
+  # clamped to the 660 s ceiling; false = the ceiling for every tool.
+  mcp_pool:
+    discovery_ttl_s: 300
+    per_tool_timeouts: true
   # P10, injection resistance for worker turns. Both halves only observe until
   # a week of rows is labelled (architecture/harness.md, Review 2026-09-24).
   # off | shadow | warn.

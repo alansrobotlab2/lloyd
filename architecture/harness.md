@@ -25,7 +25,7 @@ tissue; this doc is the map.
 | `client.py` | the httpx SSE stream to `/v1/chat/completions`; `read=None`, so stalls are bounded by `stream_chunk_timeout_s`, never time-to-first-byte |
 | `options.py` | `RunOptions` — every knob a caller can set; the router and the worker sources build one per turn |
 | `events.py` | the `NormalizedEvent` constructors: `system`, `text_delta`, `thinking_delta`, `thinking_done`, `tool_call`, `tool_result`, `assistant_message`, `result`, `stream_raw` |
-| `mcp_pool.py` | `MCPPool`: discovery with annotations, dispatch, the process-wide pool cache (`get_or_open_pool`). The HTTP path opens a session per call and is unlocked — the 2026-07-28 core is stateless, so a held connection buys nothing; only the stdio path shares one `ClientSession` and takes a per-server lock. Raises `ToolDiscoveryError` on an empty pool |
+| `mcp_pool.py` | `MCPPool`: discovery with annotations, dispatch, the process-wide pool cache (`get_or_open_pool`). The HTTP path opens a session per call and is unlocked — the 2026-07-28 core is stateless, so a held connection buys nothing; only the stdio path shares one `ClientSession` and takes a per-server lock. Raises `ToolDiscoveryError` on an empty pool. The catalog is one immutable value swapped whole, refreshed at turn start on a TTL (P12) |
 | `tool_schema.py` | MCP `inputSchema` → OpenAI tool schema; bare-name advertise with the legacy `mcp__server__tool` form still parsed for replay; `add_summary_param` |
 | `tool_search.py`, `tool_search_cache.py` | progressive disclosure: a baseline toolset plus `ToolSearch` when the pool exceeds `threshold_tools` |
 | `hooks.py` | `HookRegistry` — pre/post tool-use callbacks (Inner Voice, safety, skill dispatch, the #534 grant gate) |
@@ -601,3 +601,43 @@ run past the truncation threshold).
   record, and with the switch off a record on disk is ignored entirely.
 - `tests/test_compaction_persisted_summary.py`,
   `tests/test_compaction_record.py::test_turn_start_record_reports_reuse_and_folds`.
+
+### P12 — discovery refresh, per-tool timeouts, handshake timing
+
+- **One catalog, swapped whole.** `mcp_pool._Catalog` (discovered, routes,
+  schemas, annotations, timeouts) is built off to the side by `open()`,
+  `_reopen()` and `ensure_fresh()` and published in one assignment. `_reopen`
+  no longer `.clear()`s the routes, so a concurrent call never reads "no
+  server claims tool" mid-rediscovery, and a reopen that fails leaves the old
+  catalog standing. `_tool_routes`/`_schemas`/`_annotations` remain as
+  properties over the current catalog.
+- **Refresh at the turn boundary.** `loop._build_pool` awaits
+  `pool.ensure_fresh()`, which re-lists the HTTP servers once the catalog is
+  older than `harness.mcp_pool.discovery_ttl_s` (300; 0 = once per pool, the
+  old behaviour). A failed server keeps its previous entry, a refresh that
+  lists nothing publishes nothing (the empty pool stays unreachable this way),
+  an unchanged listing keeps the catalog object, every attempt is stamped (a
+  down aggregator costs one ≤10 s try per TTL), and a turn that finds another
+  refreshing does not wait. stdio servers are not re-listed. Within a turn the
+  advertised tools never change. `notifications/tools/list_changed` is **not
+  implementable**: the HTTP session lives for one call, so nothing is open for
+  the server to notify; the TTL poll is the substitute (the aggregator's own
+  `ttl_ms` on tools/list is the same idea from its side).
+- **Per-tool call budget.** `agent_mcp/annotations.py::TIMEOUT_SECONDS`
+  (Bash 630, http_fetch/http_search 120, http_request 180,
+  automod_gate_wait 600 — each above the tool's own internal bound) is served
+  as `lloyd/timeoutSeconds` in the Tool's **`_meta`**, not on
+  `ToolAnnotations`: mcp 2.1 models ToolAnnotations with pydantic's default
+  `extra="ignore"`, so an extra key there is silently dropped (verified; the
+  test pins it). `MCPPool.timeout_for` clamps to `[1, CALL_TIMEOUT_SECONDS]`
+  and `call_tool` uses it whenever the caller passed no `timeout_seconds` —
+  in the pool rather than in `_execute_tool_call`, so every caller (Task
+  children, thunderbird) gets it. Off switch
+  `harness.mcp_pool.per_tool_timeouts: false`.
+- **Handshake timing.** `_invoke`'s HTTP path times entering `_http_session`
+  (connect + `initialize()`, paid per call) apart from `session.call_tool`
+  and `call_tool` returns them as `result["timing"] = {handshake_ms,
+  call_ms}` — which lights up P11's optional `tool_result.handshake_ms`.
+  stdio reports none. `pool.stats()` (catalog size/age, refreshes, failures,
+  handshake count/avg/max) is on `/health/deep` under `mcp.pools`.
+  `tests/test_mcp_pool_discovery_refresh.py`.

@@ -338,9 +338,23 @@ def test_annotation_tables_have_no_stale_entries(names):
     for label, table in (("READ_ONLY", A.READ_ONLY),
                          ("DESTRUCTIVE", A.DESTRUCTIVE),
                          ("IDEMPOTENT", A.IDEMPOTENT),
-                         ("PLAN_MODE_ALWAYS_ALLOWED", A.PLAN_MODE_ALWAYS_ALLOWED)):
+                         ("PLAN_MODE_ALWAYS_ALLOWED", A.PLAN_MODE_ALWAYS_ALLOWED),
+                         ("TIMEOUT_SECONDS", frozenset(A.TIMEOUT_SECONDS))):
         stale = sorted(table - names - {"ToolSearch"} - exempt)  # ToolSearch is harness-side
         assert stale == [], f"{label} names tools that no longer exist: {stale}"
+
+
+def test_declared_timeouts_reach_the_wire_in_meta(tools):
+    """P12: a TIMEOUT_SECONDS entry is served as `_meta["lloyd/timeoutSeconds"]`
+    on the tool, where the harness pool reads it — not on ToolAnnotations,
+    whose model drops unknown keys."""
+    by_name = {t.name: t for t in tools}
+    for name, seconds in A.TIMEOUT_SECONDS.items():
+        if name not in by_name:
+            continue  # its module is degraded here (see _unverifiable_names)
+        wire = by_name[name].model_dump(by_alias=True, exclude_none=True)
+        assert wire.get("_meta", {}).get(A.META_TIMEOUT_SECONDS) == seconds, name
+        assert A.META_TIMEOUT_SECONDS not in wire.get("annotations", {})
 
 
 def test_destructive_tools_are_not_read_only():

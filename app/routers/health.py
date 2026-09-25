@@ -183,6 +183,14 @@ async def health_deep(request: Request):
     except Exception:
         dirty = None
 
+    # The backend's own view of the aggregator (P12): catalog size and age,
+    # discovery refreshes, per-call handshake cost. In-memory, no I/O.
+    try:
+        from app.harness.mcp_pool import pool_stats
+        mcp_info["pools"] = pool_stats()
+    except Exception as exc:
+        mcp_info["pools_error"] = str(exc)[:200]
+
     payload["mcp"] = mcp_info
     payload["git"] = {"dirty": dirty, "commit": BOOT_COMMIT, "branch": BOOT_BRANCH}
     if payload["checks_failed"]:

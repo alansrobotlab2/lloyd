@@ -208,15 +208,55 @@ def annotations_for(name: str) -> ToolAnnotations:
     )
 
 
+# ---------------------------------------------------------------------------
+# Per-tool call budget (review 2026-09-24, P12)
+# ---------------------------------------------------------------------------
+#
+# The harness pool gives every tools/call one ceiling,
+# `app.harness.mcp_pool.CALL_TIMEOUT_SECONDS` (660 s), sized for the longest
+# legitimate call. A tool listed here declares a shorter one, so a wedged
+# fetch fails at its own bound instead of holding the turn for eleven minutes.
+# The client clamps to the ceiling, so a number here can only shorten a wait.
+#
+# Each value sits above the tool's OWN internal bound, never at it: the tool
+# should always be the one to time out and say why; this is the backstop for
+# when it cannot (a hung socket, a wedged handler).
+#
+# Emitted as `lloyd/timeoutSeconds` in the Tool's `_meta`, NOT on
+# `ToolAnnotations`: mcp 2.1's ToolAnnotations is a pydantic model with the
+# default `extra="ignore"`, so an extra key there is dropped at construction
+# and never reaches the wire. `_meta` is the field the spec reserves for
+# implementation metadata and round-trips through tools/list.
+META_TIMEOUT_SECONDS = "lloyd/timeoutSeconds"
+
+TIMEOUT_SECONDS: dict[str, float] = {
+    # builtin_bash hard-caps a command at 600 s and kills its process group.
+    "Bash": 630.0,
+    # http_tools: one request is 15 s (WEB_TIMEOUT_S); a search may try
+    # several providers.
+    "http_fetch": 120.0,
+    "http_search": 120.0,
+    # http_request clamps its own `timeout` argument to 1-120 s.
+    "http_request": 180.0,
+    # automod._gate_wait clamps `wait_seconds` to 540.
+    "automod_gate_wait": 600.0,
+}
+
+
 def annotate(tool: Tool) -> Tool:
     """Return `tool` with annotations attached, preserving any it already has.
 
     A module that sets its own annotations wins — the table is a default
-    for the 124 tools that don't, not an override.
+    for the 124 tools that don't, not an override. The declared timeout is
+    applied either way (into `_meta`, without overwriting a module's own).
     """
-    if tool.annotations is not None:
-        return tool
-    tool.annotations = annotations_for(tool.name)
+    if tool.annotations is None:
+        tool.annotations = annotations_for(tool.name)
+    timeout = TIMEOUT_SECONDS.get(tool.name)
+    if timeout is not None:
+        meta = dict(tool.meta or {})
+        meta.setdefault(META_TIMEOUT_SECONDS, timeout)
+        tool.meta = meta
     return tool
 
 
