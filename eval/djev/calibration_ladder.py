@@ -37,6 +37,8 @@ import sys
 from pathlib import Path
 
 MIN_LABELS = 200
+#: Each class must carry at least this many rows, or no split can hold both.
+MIN_PER_CLASS = 20
 EPS = 1e-6
 
 
@@ -110,13 +112,24 @@ def load(path: Path) -> list[tuple[float, int]]:
 def ladder(rows: list[tuple[float, int]], *, alpha: float = 0.05, seed: int = 1479) -> dict:
     if len(rows) < MIN_LABELS:
         raise ValueError(f"{len(rows)} labelled rows; the ladder needs at least {MIN_LABELS}")
+    pos = sum(y for _, y in rows)
+    if min(pos, len(rows) - pos) < MIN_PER_CLASS:
+        raise ValueError(f"{pos} positive and {len(rows) - pos} negative rows; each class "
+                         f"needs at least {MIN_PER_CLASS} for a fit, a calibration and a test split")
     rng = random.Random(seed)
-    rows = rows[:]
-    rng.shuffle(rows)
+    # Stratified thirds: each split keeps the class ratio, so a rare class
+    # cannot land wholly in one split and leave the Platt fit degenerate.
+    by = {0: [r for r in rows if r[1] == 0], 1: [r for r in rows if r[1] == 1]}
+    parts: list[list[tuple[float, int]]] = [[], [], []]
+    for cls in by.values():
+        rng.shuffle(cls)
+        k = len(cls)
+        parts[0] += cls[: k // 3]; parts[1] += cls[k // 3: 2 * k // 3]; parts[2] += cls[2 * k // 3:]
+    rows = parts[0] + parts[1] + parts[2]
     ps = batch_calibrate([p for p, _ in rows])
     ys = [y for _, y in rows]
     n = len(rows)
-    i1, i2 = n // 3, 2 * n // 3
+    i1, i2 = len(parts[0]), len(parts[0]) + len(parts[1])
     a, b = fit_platt(ps[:i1], ys[:i1])
     cal = [sigmoid(a * logit(p) + b) for p in ps]
     q = conformal_quantile([c if y else 1 - c for c, y in zip(cal[i1:i2], ys[i1:i2])], alpha)

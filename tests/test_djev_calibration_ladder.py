@@ -52,3 +52,17 @@ def test_the_cli_refuses_an_unlabelled_file(tmp_path, capsys):
     f.write_text("\n".join(json.dumps({"djev_p_same": 0.4, "label": None}) for _ in range(300)))
     assert L.main(["--labels", str(f)]) == 2
     assert "0 labelled rows" in capsys.readouterr().err
+
+
+def test_refuses_a_class_too_thin_to_split():
+    """#1479's first real run: 3 positives in 233. Unstratified, the fitting
+    split held none and Platt diverged to a = -19920; the ladder now refuses."""
+    rows = [(0.9, 1)] * 3 + [(0.2, 0)] * 230
+    with pytest.raises(ValueError, match="3 positive"):
+        L.ladder(rows)
+
+
+def test_every_split_holds_both_classes():
+    rows = _rows(300, 2.0, seed=3)
+    rep = L.ladder(rows)
+    assert abs(rep["platt"]["a"]) < 50 and rep["test_n"] >= 99
