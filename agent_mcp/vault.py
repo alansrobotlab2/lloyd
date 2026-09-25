@@ -1594,10 +1594,22 @@ def _vault_search(params: dict) -> dict:
 
 def _djev_doc_text(doc: dict) -> str:
     """One pool row as the decision engine sees it: the title, then the
-    snippet qmd already returned. No disk read — the point of ranking a
-    shortlist is that everything it needs is already in hand."""
+    snippet qmd already returned, without qmd's diff formatting. No disk read
+    — the point of ranking a shortlist is that everything it needs is already
+    in hand.
+
+    The snippet goes through `strip_qmd_snippet` (#1467). qmd returns it as a
+    diff hunk — an `@@ -1,4 @@ (0 before, 153 after)` header and an `NN:`
+    prefix on every line — and the row is cut at `RECALL_DJEV_CHARS` (160)
+    AFTER this, so unstripped the header and prefixes took most of the row:
+    on a live 25-row pool djev saw ~40 characters of document text in 156.
+    Stripped, on one pinned corpus (86 queries, paired): NDCG@10 +0.036
+    [+0.001, +0.075], MRR +0.044, 16 queries better against 7 worse, doc_hit
+    unchanged (a pure reorder), ~100 ms faster. Wider rows (240, 320) gave the
+    gain back, so the width stays 160.
+    """
     title = str(doc.get("title") or doc.get("path") or "")
-    snippet = str(doc.get("snippet") or "")
+    snippet, _line = strip_qmd_snippet(str(doc.get("snippet") or ""))
     return f"{title}\n{snippet}" if snippet else title
 
 

@@ -176,3 +176,35 @@ def test_fallbacks_are_announced_once_per_cooldown():
     import time
     time.sleep(0.05)
     assert qmd_health.stats()["djev_fallbacks"] == 3 and len(rang) == 1
+
+
+def test_djev_ranks_document_text_not_qmds_diff_formatting(monkeypatch):
+    """#1467: the row djev ranks is the title and the snippet's TEXT. qmd sends
+    a snippet as a diff hunk, and the row is cut at RECALL_DJEV_CHARS after
+    this, so a header and per-line numbers left in took most of the row."""
+    raw = ("2: @@ -1,4 @@ (0 before, 153 after)\n3: ---\n"
+           "4: description: Use round restart, not supervisorctl\n5: ---")
+    row = vault._djev_doc_text({"title": "Skill: Restart Lloyd Services", "snippet": raw})
+    assert row.startswith("Skill: Restart Lloyd Services\n")
+    assert "@@" not in row and "before, 153 after" not in row
+    assert not any(line[:1].isdigit() and ":" in line[:4] for line in row.splitlines()[1:])
+    assert "description: Use round restart, not supervisorctl" in row
+    # The same strip the other surfaces use, not a private copy of it.
+    assert row.split("\n", 1)[1] == vault.strip_qmd_snippet(raw)[0]
+
+
+def test_the_recall_hands_djev_stripped_rows(djev_ranks, wire, monkeypatch):
+    seen: list = []
+
+    def fake_rank(query, candidates, **kw):
+        seen.extend(candidates)
+        return [{"index": i, "score": 1.0 - i / 100} for i in range(len(candidates))]
+
+    monkeypatch.setattr(djev, "rank", fake_rank)
+    monkeypatch.setattr(vault, "_qmd_post", lambda payload: [
+        {"file": f"qmd://knowledge/doc-{i}.md", "title": f"doc {i}", "score": 1.0 / (i + 1),
+         "snippet": f"{i + 1}: @@ -{i},3 @@ ({i} before, 9 after)\n{i + 2}: body text {i}"}
+        for i in range(8)])
+    _recall()
+    assert seen and all("@@" not in c for c in seen)
+    assert all("body text" in c and not c.split("\n", 1)[1][:1].isdigit() for c in seen)

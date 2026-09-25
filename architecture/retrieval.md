@@ -166,6 +166,29 @@ Global fusion outscores small collections wholesale. Floors of 5 (cross-encoder
 path) or 2 (djev path) on autonomy, architecture and skills recovered most of the
 hits a 40-row global pool lost; a wider pool barely helped.
 
+### 3.5 djev ranks document text, not qmd's diff header (#1467)
+
+`_djev_doc_text` builds each row as title + snippet, cut at `RECALL_DJEV_CHARS`
+(160). qmd returns the snippet as a diff hunk (`2: @@ -1,4 @@ (0 before, 153
+after)` plus `NN:` on every line), and on a live 25-row pool that left ~40
+characters of document text per 156. The row now goes through
+`strip_qmd_snippet`, the helper `vault_search` and the prefetch already used.
+One pin, 86 queries, paired against the unstripped row:
+
+| row | MRR | ΔMRR [95%] | better/worse | NDCG@10 | ΔNDCG [95%] | latency |
+|---|---|---|---|---|---|---|
+| unstripped, 160 | 0.319 | — | — | 0.357 | — | 663 ms |
+| unstripped, repeat | 0.328 | +0.009 | 2/1 | 0.363 | +0.006 | 662 ms |
+| **stripped, 160** | **0.364** | **+0.044 [−0.003, +0.093]** | **16/7** | **0.393** | **+0.036 [+0.001, +0.075]** | **559 ms** |
+| stripped, 240 | 0.330 | +0.010 | 15/9 | 0.365 | +0.008 | 655 ms |
+| stripped, 320 | 0.323 | +0.003 | 12/14 | 0.356 | −0.000 | 737 ms |
+
+doc_hit is unchanged (a pure reorder); wider rows give the gain back, as #1336
+found for full candidates, so the width stays 160. A second pin the same
+evening agreed in direction with a smaller step: MRR +0.022 [−0.024, +0.070],
+NDCG@10 +0.017 [−0.015, +0.053], 12 better / 10 worse, 658 → 555 ms. Adopted on
+equal-or-better accuracy plus the ~100 ms.
+
 ## 4. What was measured and not kept
 
 | idea | result | why it stays out |
