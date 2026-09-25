@@ -450,6 +450,28 @@ def test_a_hold_that_timed_out_is_not_held_again():
         ["Actually, what is two plus two?"]
 
 
+def test_a_hold_is_not_released_while_the_speaker_is_still_talking():
+    """The deadline passing mid-utterance used to release the first half as a
+    turn and cut the speaker off; now it waits for the utterance to close."""
+    b = _bridge(["half"])
+    b.wake.extend("user-a")
+    b._hold("user-a", np.zeros(16000, dtype=np.float32))
+    b._held_deadline["user-a"] = time.monotonic() - 1.0
+    b._hearing["user-a"] = _Hearing(True)
+
+    async def go():
+        t = asyncio.create_task(b._flush_held_loop())
+        await asyncio.sleep(0.4)
+        still = "user-a" in b._held
+        b._hearing["user-a"] = _Hearing(False)          # they stopped
+        await asyncio.sleep(0.7)
+        t.cancel()
+        return still, "user-a" in b._held
+    still_held, held_after = asyncio.run(go())
+    assert still_held, "not released while in speech"
+    assert not held_after, "released once they stopped"
+
+
 # ── the stages run together ────────────────────────────────────────────────
 
 def test_smart_turn_asr_and_the_embedding_overlap():

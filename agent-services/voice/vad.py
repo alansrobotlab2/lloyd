@@ -149,7 +149,11 @@ class SileroSegmenter:
                     st.triggered = True
                     st.buf = list(self._preroll)
                     st.buf_len = self._preroll_len
-                    st.start_sample = self._cursor - FRAME_SAMPLES - self._preroll_len
+                    # The pre-roll already ends with this frame, so the
+                    # buffer starts `preroll_len` before the cursor — not a
+                    # frame earlier, which labelled every utterance 32 ms
+                    # ahead of its audio (and the first one negative).
+                    st.start_sample = self._cursor - self._preroll_len
                     st.max_prob = p
                     st.silence_run = 0
                     self._preroll, self._preroll_len = [], 0

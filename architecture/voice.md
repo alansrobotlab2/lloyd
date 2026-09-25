@@ -230,6 +230,68 @@ utterances. A capped utterance continues straight into the next rather than
 waiting for a fresh onset, so the word after the cap survives; a participant
 who leaves mid-sentence has it flushed.
 
+**The 2026-09-24 bake-off kept Silero** (`scripts/voice/vad_eval.py`). FireRedVAD
+(Stream-VAD, Apache-2.0, exported to ONNX with a numpy Kaldi fbank) and TEN VAD
+were driven through this same state machine over 400 LibriSpeech utterances
+with known boundaries on the corpus's own room tone, 64 min of ESC-50
+non-speech, and the 500 corpus clips labelled by Parakeet. A lower threshold or
+a shorter `min_silence_ms` always closes sooner and always splits more, so the
+comparison is the close decision *at Silero's own split count*:
+
+| | offset p50/p90 at 126 splits (Silero's 380 ms) | at 220 splits (250 ms) | ESC false /h | corpus non-speech clips triggered | CPU per s of audio |
+|---|---|---|---|---|---|
+| Silero 0.45 | 411 / 471 ms | 283 / 343 | **29** | **48** / 190 | 3.2 ms |
+| FireRed 0.7 | 401 / 499 | 296 / 394 | 340 | 52 | 17.6 ms |
+| TEN 0.7 | 380 / 586 | 256 / 406 | 202 | 61 | 5.7 ms |
+| TEN 0.8 | 437 / 508 | 316 / 389 | 106 | 31 | 5.7 ms |
+
+At ~18 dB SNR (4× the room tone, closer to real speaking levels) Silero was
+best or tied at equal splits (429/606 ms against TEN 443/810, FireRed 459/634);
+only at ~11 dB did TEN 0.7 close sooner (383 vs 418 ms p50 at 156 splits) while
+Silero's hangover grew and it merged 49 turns. No candidate won on both offset
+and false segments, and both fire 4–12× as often on dogs, crows, pigs and
+frogs. FireRed's recall edge is small (0 of 67 speech clips missed vs 1).
+TEN's `libten_vad.so` also needs libc++, which this host does not have, and
+sherpa-onnx's TEN binding returns a thresholded boolean the hysteresis cannot
+use. The silero-vad 6.2.3 wheel's `silero_vad.onnx` is byte-identical to the
+vendored 6.2.2 one.
+
+**`min_silence_ms` is the lever, and it costs splits.** Silero at 0.45 on the
+same 400 utterances (which hold 239 internal pauses ≥ 200 ms, 181 ≥ 250, 85 ≥
+380): 380 ms → 126 extra splits in 94 utterances, close p50 411 ms; 250 ms →
+220 in 155 (+94, +75%), 283 ms; 200 ms → 254 in 169 (+128), 251 ms. At ~18 dB:
+106 / 197 / 222. On the 67 real-room clips Parakeet heard as speech: 3 / 8 / 8
+extra splits (2 / 7 / 7 clips). So 250 ms buys ~128 ms and puts a pause-split
+in about four of ten read utterances, each of which Smart Turn has to hold.
+
+**Smart Turn does not hold them, so 250 ms does not ship** (`vad_eval.py gate`).
+The same streams through the whole gate: the real `SileroSegmenter`, Smart
+Turn v3.2 at 0.5 on the audio since the held turn began, an unfinished verdict
+held and glued to the next utterance, and the 2.2 s hold timeout releasing it
+(verdict cost fixed at 20 ms, the flush loop's mean 125 ms added to a timeout).
+A *cutoff* is a committed turn that ends inside a ground-truth utterance;
+Parakeet's punctuation of the committed audio splits those into ones at a
+sentence end (a LibriSpeech utterance often holds several sentences) and
+mid-sentence ones:
+
+| `min_silence_ms` | mid-sentence cutoffs / 400 | all cutoffs inside an utterance | splits a hold rescued | true ends held to the timeout | end → commit p50 / p90 |
+|---|---|---|---|---|---|
+| 380 | **31 (7.8%)** | 125 (31%) | 1 | 36 | 439 / 546 ms |
+| 250 | **70 (17.5%)** | 213 (53%) | 7 | 29 | 308 / 396 |
+| 200 | 73 (18.2%) | 246 (62%) | 8 | 30 | 276 / 366 |
+| 380, ~18 dB | 18 (4.5%) | 105 (26%) | 1 | 34 | 465 / 865 |
+| 250, ~18 dB | 39 (9.8%) | 195 (49%) | 2 | 27 | 332 / 572 |
+
+250 is 131 ms faster at the median and 5–10 points worse on mid-sentence
+cutoffs, against a rule of no more than ~1 point. Smart Turn called almost
+every read-speech pause "complete" — it glued 1–8 of 105–246 splits — and
+called 7–9% of genuine ends "unfinished", which then wait out the 2.2 s
+timeout. The timeout itself cut 6–15 turns whose speaker was still talking:
+`_flush_held_loop` releases at the deadline without asking whether the VAD is
+mid-utterance. Caveats: this is read speech, Smart Turn was trained on
+conversation, and "mid-sentence" is Parakeet's punctuation; the 380 → 250
+difference is the measurement, not the absolute rate.
+
 ### The acoustic wake word, fed continuously
 
 The old `AcousticWakeWord` waited for the VAD to close an utterance, reset the
@@ -429,7 +491,10 @@ audio.
    costs one wasted transcription (~60 ms CPU), and that transcript is also
    what tells a barge-in held mid-sentence from a cough. Smart Turn is skipped
    for a transcript wake, whose audio is already transcribed.
-3. Unfinished: hold, and glue it to what comes next.
+3. Unfinished: hold, and glue it to what comes next. A hold whose deadline
+   passes while the speaker is still mid-utterance is not released — that cut
+   them off (9–15 of the cutoffs `vad_eval.py gate` counted); it waits for the
+   utterance to close, within `hold_max_seconds`.
 4. **Lloyd's own voice**: a segment whose voiceprint is the
    `own_voice_profile` while he is speaking or within 2 s of stopping is his
    echo — dropped.
@@ -1353,6 +1418,7 @@ voice.
 
 - `tests/test_voice_hearing.py` — the resampler equals a one-shot resample to
   1e-6; segmentation keeps quiet speech, bridges a breath, keeps its pre-roll,
+  labels each utterance at the stream position its audio came from,
   continues across the length cap and flushes a half-sentence; a wake inside or
   just after an utterance attaches to it and a stale one does not; the wake is
   reported before the utterance closes; the reported peak belongs to the
@@ -1426,6 +1492,9 @@ voice.
 which replaces `scripts/ww_replay.py`, a replay of the retired per-utterance
 sweep that would now measure an algorithm nothing runs —
 `asr_eval.py` (WER and speed per backend on LibriSpeech, `--snr` for noise),
+`vad_eval.py` (the VAD bake-off above: `build` the streams, `run` Silero,
+FireRed and TEN through the segmenter, `gate` the cutoffs through Smart Turn
+and the hold, `export-firered` from a scratch venv),
 `hotword_eval.py` with its corpus builder `synth_hotword_corpus.py` (the
 Parakeet hotword measurements above; re-run it before adding a word — only
 terms that measure a gain belong in `livekit.stt.hotwords`)

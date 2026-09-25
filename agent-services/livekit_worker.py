@@ -2271,6 +2271,16 @@ class RoomBridge:
         except asyncio.CancelledError:
             pass
 
+    def _still_talking(self, identity: str) -> bool:
+        ht = self._hearing.get(identity)
+        try:
+            return bool(ht is not None and ht.pipeline.segmenter.in_speech)
+        except Exception:
+            return False
+
+    def _held_seconds(self, identity: str) -> float:
+        return sum(h.size for h in self._held.get(identity) or []) / 16000
+
     async def _flush_held_loop(self) -> None:
         """Release a held turn when the speaker simply stopped.
 
@@ -2285,6 +2295,15 @@ class RoomBridge:
                 now = time.monotonic()
                 for identity, deadline in list(self._held_deadline.items()):
                     if now < deadline:
+                        continue
+                    if self._still_talking(identity) and \
+                            self._held_seconds(identity) < self._hold_max_s:
+                        # The deadline passed while they are mid-utterance: the
+                        # continuation is arriving. Releasing now cut them off
+                        # (9-15 of the cutoffs in scripts/voice/vad_eval.py
+                        # `gate`, 2026-09-24); the utterance closing will join
+                        # the hold as usual. hold_max_seconds still bounds it.
+                        self._held_deadline[identity] = now + 0.25
                         continue
                     held = self._held.pop(identity, None)
                     self._held_deadline.pop(identity, None)

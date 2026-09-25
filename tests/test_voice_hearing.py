@@ -157,6 +157,24 @@ def test_the_preroll_is_kept_so_the_first_phoneme_survives():
     assert utts[0].start_sample <= 3 * 512
 
 
+def test_an_utterances_position_is_where_its_audio_came_from():
+    """`start_sample` must index the stream at `audio[0]`, or every wake
+    attachment and every held-turn boundary is judged 32 ms off. The segmenter
+    used to subtract one frame too many, because the pre-roll already ends
+    with the triggering frame — the first utterance could start at -512."""
+    seg = _segmenter([0.0] * 3 + [0.9] * 4 + [0.0] * 5, speech_pad_ms=64)
+    stream = np.random.default_rng(3).normal(0, 0.1, 512 * 12).astype(np.float32)
+    utts = seg.feed(stream)
+    assert len(utts) == 1
+    u = utts[0]
+    assert u.start_sample == 2 * 512  # onset frame 3; the 64 ms pre-roll is frames 2-3
+    np.testing.assert_array_equal(u.audio, stream[u.start_sample:u.end_sample])
+    seg = _segmenter([0.9] * 4 + [0.0] * 5)
+    first = seg.feed(stream[: 512 * 9])[0]
+    assert first.start_sample == 0
+    np.testing.assert_array_equal(first.audio, stream[: first.audio.size])
+
+
 def test_a_capped_utterance_continues_rather_than_dropping_the_next_word():
     seg = _segmenter([0.9] * 40, max_utterance_ms=64, min_utterance_ms=0)
     utts = _feed(seg, 20)
