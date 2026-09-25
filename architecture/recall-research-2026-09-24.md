@@ -4,7 +4,7 @@ title: Recall research pass 2026-09-24 — the whole recall stack, the frontier,
 tags: [architecture, retrieval, memory, subliminal, skills, research]
 type: reference
 status: implemented
-date: 2026-09-24
+date: 2026-09-25
 ---
 
 # Recall research pass, 2026-09-24
@@ -33,13 +33,20 @@ must not edit `qmd/**`.
 ## 1. The map, as measured on 2026-09-24
 
 **Document leg** (`agent_mcp/vault.py::_vault_recall`). qmd fork daemon :8181 on
-GPU 0: FTS5 BM25 (OR mode, 11 collections) plus Qwen3-Embedding-0.6B Q8 (39,428
-chunk vectors, 900-token chunks, 15% overlap), RRF k=60, head 20 plus floors of
+GPU 0: FTS5 BM25 (OR mode, 11 collections — `agent_mcp/vault.py:84`
+`VAULT_SEGMENTS`) plus Qwen3-Embedding-0.6B Q8 (39,428 chunk vectors that day,
+**32,490 on 2026-09-25** — the live number is `GET :8181/health → vecIndex.vectors`
+and the −17.6% is unreconciled, #1503; 900-token chunks, 15% overlap), RRF k=60, head 20 plus floors of
 2×3 (≤32 rows), then djev listwise over 160-char candidates in ~0.5 s, top 20
 documents plus up to 10 facts. The cross-encoder is the fallback. The pool is the
 ceiling. Nightly, live index, n=81: doc_hit 0.704, doc_recall 0.647, MRR 0.355,
 NDCG@10 0.407, **entity_hit 0.358**, entity_recall 0.391, **fact_entity_recall
-0.374**, p50 487 ms; 25 of 81 queries anchorless.
+0.374**, p50 487 ms; `anchorless_query_count` 25 of 81. Two caveats on that line:
+the gold set is **86** queries since `7cee0eda` (#1354) landed the same evening, 66
+of which declare expected entities; and the eval's count (a seed that *contains* an
+expected entity counts as anchored, `eval/run_eval.py:933`) does not reconcile with
+§4's scratch run, which anchors 28 of those 66 — 41 and 28 cannot both be the
+anchored set, and the gap is the size of #1486's prize (#1502).
 
 **Who calls recall.** About 24 times a week, all workers, never chat. Chat gets
 memory through `prefetch.py`'s `<context>` prefix on the user message (300 ms
@@ -54,23 +61,45 @@ nothing. A hard `/compact` discarded the subliminal rows until D11 (2026-09-24);
 longer rewrites the messages.
 
 **Sessions.** qmd's `sessions` collection is searched by prefetch but not by
-`vault_recall`; `session_recall` is token overlap over seven days, five results,
-cut at 5,000 chars (#1090).
+`vault_recall` (`sessions` is in `prefetch.py:132` `VAULT_COLLECTIONS`, not in
+`VAULT_SEGMENTS`); `session_recall` is token overlap over seven days, five results
+(`agent_mcp/session.py:534-535`). The "cut at 5,000 chars" this line carried is the
+state **#1090 removed**: the corpus is now the whole lowercased user+assistant turn
+text with no cap (`agent_mcp/session.py:395-435`), so the tail of a long session is
+searchable and a hit reports which turn held it.
 
-**Facts and KG.** ~61k fact files, ~274k active facts, and `kg.sqlite` rebuilt
+**Facts and KG.** ~61k fact files and ~274k active facts as of 09-24; the derived
+tree has **31,190** files on 09-25 (`find facts -name '*.md' | wc -l`, 167 MB) — the
+09-23 quarantine #1446 moved ~120k rows out, and `architecture/memory.md`'s own
+recount of 09-21 already reads 254,529 rather than 274k. `facts_idx` holds 109,043
+rows. `kg.sqlite` rebuilt
 after the 09-22 wipe: 11,932 entities, 109,030 fact rows, 35,582 active edges
 (30k `mentions`), **166 aliases (4,028 before the wipe)**. Graph lookup at recall
 time is off in production (`RECALL_EXPAND_GRAPH` / `RECALL_GRAPH_RERANK`, stripped
 at the MCP boundary) while the nightly eval runs `expand_graph=True`; graph-read
-tools had zero calls in 1,540 sessions (#1077). The facts leg ranks by token
+tools had zero calls in 1,540 sessions; #1077's newest census (09-19) is still zero
+across **3,270 sessions / 80,089 tool calls**, positive controls Bash 55,780,
+`fact_add` 529. The facts leg ranks by token
 overlap; prefetch takes top 2 entities × 3 facts **sorted by confidence, not
 relevance**. The improve loop found 133/133 detector pairs were near-duplicates
 from auto-capture, and post-capture's per-session "durable facts" have produced
-5 `session-extracted` rows: conversations barely reach the fact layer.
+5 `session-extracted` rows — **18 by 09-25**, still only two category files
+(`Lloyd/Lloyd-session-extracted.md` 15, `Project/Project-session-extracted.md` 3,
+first dated 09-23, `app/post_capture.py:356`): conversations barely reach the fact
+layer, and the rate has not changed that.
 
-**Memory in the prompt.** SOUL.md 7 KB + MEMORY.md 73 KB (at its 73,728-byte
-ceiling) + USER.md 16 KB ride whole into every turn, ≈96 KB, above the 80 KB
-`PROMPT_BUDGET_CHARS` tripwire, which only logs.
+**Memory in the prompt** (re-measured 2026-09-25). SOUL.md 7,047 B + MEMORY.md
+20,466 B + USER.md 16,368 B ride whole into every turn: **43,881 B, under** the
+80,000-char `PROMPT_BUDGET_CHARS` tripwire (`prompt_builder.py:38`), which still only
+logs. The 73 KB-at-a-73,728-byte-ceiling state this line described no longer runs:
+MEMORY.md is a typed index over 24 topic files under `~/obsidian/lloyd/memory/`,
+pulled on demand by `memory_read(file="topics/<slug>")` (vault `1a72649f`, deployed
+`ab60a9d0`), and its ceiling is `MEMORY_MD_INDEX_CEILING_BYTES = 25_600`
+(`prompt_surface.py:115`), enforced on every writer through
+`app/memory_ceiling.py:memory_write_error` — topic files cap at 32,768 B. So P6's
+(#1488) "core + retrieved archive" half shipped, under another pass's numbering
+(#1500 narrows the item to what is genuinely left). The line that is now tight is
+USER.md: 16,368 of 16,384 bytes, and it has no curation at all.
 
 **Compaction.** Microcompact spills each cleared result and leaves a marker naming
 the file; LLM summarisation has never fired (0 of 802 clears, #1078). The #600
@@ -78,7 +107,13 @@ planted-fact eval: production 19/20 distinctive and 20/20 ambiguous, the aggress
 `tool_clear` arm 12/20 and 12/20, production paying +3.6–4.7 s TTFT per cleared
 turn (`eval/measurements/compaction-recall-2026-09-24.md`).
 
-**Skills.** 189 live skills; the system prompt lists names only; prefetch scores
+**Skills.** 189 live skills (`agent_mcp/skills.iter_active_skills`); **the index no
+longer lists names only** — `skills.index.descriptions: true` shipped 2026-09-25
+(`72f678d5`, `config.yaml:1466`: the 30-day most-used skills get a description
+clipped at 100 chars inside a 12,000-char budget, measured
+`eval/measurements/skills-index-2026-09-25.md`, where the `desc_pull` arm lost the
+right skill on 12 of 51 queries so bodies stay pushed). That is P8's (#1490)
+descriptions ask, decided without the item (#1501). Prefetch scores
 the message lexically and injects the top skill at ≥3.0. The modal score sits on
 that threshold because scores scale with corpus frequency, not query specificity.
 Semantic matching (#557) lost to lexical (recall@5 0.686 vs 0.745).
@@ -213,3 +248,18 @@ Skills: SkillRouter (2603.22455); Skill Is Not Document (2606.03565); SkillDream
 
 - **2026-09-24:** written by the recall research pass; items #1480–#1495 filed; P2
   landed the same day.
+- **2026-09-25: stale.** Every mechanism still describes what runs and P1–P3 are
+  landed with the shas they claimed; what moved is the measurements column. The
+  loaded-memory paragraph (73 KB MEMORY.md at a 73,728-byte ceiling, ≈96 KB over an
+  80 KB tripwire) describes what vault `1a72649f` and `ab60a9d0` replaced — the three
+  files total 43,881 B under a 25,600-byte index ceiling enforced on every writer, and
+  USER.md is the file now at its line; the names-only skill index shipped with
+  descriptions (`72f678d5`, `config.yaml:1466`); the 5,000-char `session_recall` cut is
+  the state #1090 *removed*, not what it added; the vector index reads 32,490 not
+  39,428; the derived fact tree is 31,190 files not ~61k; `session-extracted` facts are
+  18 not 5. The unit also disagreed with itself on entity anchoring — 25 anchorless of
+  81 in §1 against 38 unanchored of 66 in §4, thirteen queries apart, which is the size
+  of #1486's prize — left as a flag, not reconciled by guesswork. Filed: #1500 (#1488's
+  already-shipped archive half), #1501 (#1490's decided descriptions half), #1502 (the
+  two anchor denominators), #1503 (−17.6% of the vector index in a day with no
+  run-to-run comparison anywhere).
