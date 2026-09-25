@@ -309,29 +309,46 @@ def _goal_source_text(session_id: str, user_request: str, turn_source: str,
     return text or user_request
 
 
+def _goal_reanchor_interval() -> int:
+    """`harness.todo_anchor_interval_iterations`: the goal card rides the same
+    cadence as the todo re-anchor, so the two contracts are restated together."""
+    try:
+        from app.config import CONFIG
+        return int((CONFIG.get("harness") or {}).get("todo_anchor_interval_iterations", 10) or 0)
+    except Exception:  # noqa: BLE001
+        return 10
+
+
 def goal_card_anchor(state: ObserverState):
-    """A `state_anchor` that shows the primary its goal card once it exists.
+    """A `state_anchor` that shows the primary its goal card, and keeps showing it.
 
     The card used to be glued onto the turn's user message before the first
     request, which is what made extraction block the first token. Now it is
     appended at the first iteration boundary after extraction finishes —
-    append-only, so nothing already prefilled changes. Compose it with the
-    turn's other anchors (`compose_state_anchors`).
+    append-only, so nothing already prefilled changes — and restated every
+    `harness.todo_anchor_interval_iterations` after that (IV plan R4): a
+    weaker primary forgets the contract faster than Flash-Next does, and a
+    card seen once at iteration 1 is 40 tool results away by iteration 30.
+    Compose it with the turn's other anchors (`compose_state_anchors`).
     """
-    delivered = {"done": False}
+    last = {"at": None}
 
-    async def anchor(_iteration: int) -> list[dict[str, Any]]:
-        if delivered["done"] or not state.goal_card:
+    async def anchor(iteration: int) -> list[dict[str, Any]]:
+        if not state.goal_card:
             return []
         if not _observer_cfg().get("goal_card_to_primary", True):
+            return []
+        every = _goal_reanchor_interval()
+        if last["at"] is not None and (every <= 0 or iteration - last["at"] < every):
             return []
         block = _prompt.build_goal_card_block_for_primary(state.goal_card)
         if not block:
             return []
-        delivered["done"] = True
+        level = "first" if last["at"] is None else "reanchor"
+        last["at"] = iteration
         from app.deadline_anchor import ANCHOR_TAG
         return [{"role": "user", "content": block,
-                 ANCHOR_TAG: {"kind": "goal_card", "level": "first"}}]
+                 ANCHOR_TAG: {"kind": "goal_card", "level": level}}]
 
     return anchor
 

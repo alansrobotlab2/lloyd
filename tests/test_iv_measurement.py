@@ -252,3 +252,24 @@ def test_export_appends_labelled_rows_once(tmp_path, monkeypatch):
     assert append_new(out, export_rows(db)) == 1  # a relabel replaces
     rows = [json.loads(line) for line in out.read_text().splitlines()]
     assert len(rows) == 1 and rows[0]["label"] == "up"
+
+
+def test_the_observer_replay_scores_only_what_it_can(tmp_path):
+    """R4's harness: a labelled row with no recorded terminal text replays as
+    an empty stop, where an inject is always right — so it is not scored."""
+    from scripts.iv_observer_model_eval import load_cases, review_prompt
+
+    rows = [
+        {"kind": "model_inject", "label": "helped", "request": "load it",
+         "before": "The extension is in ~/lloyd.", "session_id": "a"},
+        {"kind": "model_inject", "label": "harmful", "request": "x",
+         "before": "", "session_id": "b"},                     # no text: skipped
+        {"kind": "model_inject", "label": "obsolete", "before": "y",
+         "session_id": "c"},                                    # not scored
+        {"kind": "guard_repetition", "label": None, "before": "z", "session_id": "d"},
+    ]
+    (tmp_path / "c.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    cases = load_cases(tmp_path)
+    assert [(c["session_id"], c["_want"]) for c in cases] == [("a", "inject")]
+    p = review_prompt(cases[0])
+    assert "load it" in p and "TERMINAL" in p and "noop, inject, or cancel" in p

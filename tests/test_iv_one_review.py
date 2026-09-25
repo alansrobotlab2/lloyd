@@ -205,3 +205,22 @@ def test_thinking_reaches_the_engine(monkeypatch):
     cfg["thinking"] = False
     _run(obs._call_observer(user_prompt="u", cfg=cfg))
     assert sent[1]["payload"]["chat_template_kwargs"]["enable_thinking"] is False
+
+
+def test_the_goal_card_reanchors_at_the_todo_cadence(monkeypatch):
+    """IV plan R4: a small primary forgets the contract; the card is restated
+    every `harness.todo_anchor_interval_iterations`, not shown once."""
+    from app.routers import _messages_inner_voice as iv
+
+    monkeypatch.setattr(iv, "_goal_reanchor_interval", lambda: 10)
+    state = obs.ObserverState(session_id="s", turn_id="t", user_request="x",
+                              chat_messages_handle=[], cancel_event=asyncio.Event())
+    anchor = iv.goal_card_anchor(state)
+    assert _run(anchor(1)) == []                    # not extracted yet
+    state.goal_card = {"success_criteria": ["ship it"], "out_of_scope": [],
+                       "completion_signals": []}
+    fired = [i for i in range(2, 40) if _run(anchor(i))]
+    assert fired == [2, 12, 22, 32]
+    monkeypatch.setattr(iv, "_goal_reanchor_interval", lambda: 0)
+    anchor = iv.goal_card_anchor(state)
+    assert [i for i in range(1, 30) if _run(anchor(i))] == [1]

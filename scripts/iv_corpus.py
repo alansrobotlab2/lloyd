@@ -21,7 +21,7 @@ Two sources, two files, one row shape:
             the row's (session, turn, sequence, id). usage.db opened read-only.
 
 Row: {source, session_id, turn_id?, date, kind, trigger?, safeguard?, text,
-      before?, after?, label, label_source}
+      request?, before?, after?, label, label_source}
 
     python scripts/iv_corpus.py seed ~/lloyd-data/recovered/qmd-sessions-pre-wipe/gemma-20260921
     python scripts/iv_corpus.py export
@@ -112,6 +112,10 @@ def seed_rows(root: Path) -> list[dict[str, Any]]:
             if who != "user" or not body.startswith("[INNER VOICE]"):
                 continue
             text = body[len("[INNER VOICE]"):].strip()
+            # The request the turn was serving: the last user block before
+            # this one that is not itself an [INNER VOICE] line.
+            request = next((b for w, b in reversed(blocks[:i])
+                            if w == "user" and not b.startswith("[INNER VOICE]")), "")
             before = next((b for w, b in reversed(blocks[:i]) if w != "user"), "")
             after = next((b for w, b in blocks[i + 1:] if w != "user"), "")
             kind = classify(text)
@@ -119,7 +123,8 @@ def seed_rows(root: Path) -> list[dict[str, Any]]:
             rows.append({
                 "source": "recovered", "session_id": path.stem,
                 "date": path.parent.name, "kind": kind, "text": text[:1200],
-                "before": before[-400:], "after": after[:400],
+                "request": request[:1200],
+                "before": before[-1500:], "after": after[:400],
                 "label": label,
                 "label_source": "iv-review-2026-09-24" if label else None,
             })

@@ -647,7 +647,7 @@ def test_attach_delivers_the_goal_card_by_anchor_not_by_blocking():
             first = await anchor(2)
             assert len(first) == 1 and "<goal_card>" in first[0]["content"]
             assert "run the command" in first[0]["content"]
-            assert await anchor(3) == [], "delivered once"
+            assert await anchor(3) == [], "not again until the re-anchor cadence"
             return inst
 
     inst = run_async(scenario())
