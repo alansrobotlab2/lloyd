@@ -65,13 +65,15 @@ set -euo pipefail
 #                                  discrete card CUDA returns OOM and the
 #                                  request fails, which is the behaviour the
 #                                  cap exists to synthesise.
-#   flashinfer                     Not installed, and that is load-bearing
-#                                  rather than an omission: its MoE backends
-#                                  sit ahead of MARLIN in vLLM's NVFP4
-#                                  selection order and are Blackwell-only, so
-#                                  its absence makes the fallback certain
-#                                  instead of merely likely. Attention is
-#                                  TRITON_ATTN for the same reason.
+#   flashinfer                     Installed anyway: the vLLM wheel pulls
+#                                  flashinfer-python in as a dependency
+#                                  (0.6.18.post1 in the live venv, checked
+#                                  2026-09-25). Its MoE backends sit ahead of
+#                                  MARLIN in vLLM's NVFP4 selection order but
+#                                  are Blackwell-only and reject themselves on
+#                                  capability, so the engine still logs
+#                                  MARLIN (HUMMING under BATCH_INVARIANT=1).
+#                                  Attention is pinned to TRITON_ATTN.
 #
 # RE-RUNNING IS SAFE. Every step is idempotent; the overlay refuses rather than
 # half-applies if the pins have moved.

@@ -692,6 +692,37 @@ calling it, which costs ~25 ms on a sporadic decision: the request finishes
 
 The **one** action taken was a boot warm-up (§2.2).
 
+**Re-measured 2026-09-25, at `BATCH_INVARIANT=1`** (shipped 09-24, §2.2). The
+table above predates it, and the batch-invariant kernels roughly double a
+small read: the 3-question ticket is **80.6 ms** p50, the ~8.7k-token state
+1,960 ms cold and 111 ms warm, and batching fits **74.8 ms fixed + 0.71 ms per
+extra decision**. A 32-row recall rank is 253 ms p50 one at a time, 267 ms two
+at a time (5.8 requests/s), and 1,016 ms four at a time (4.0/s): with
+`MAX_SEQS=1` the engine serializes, and past two concurrent callers it queues.
+
+**The 2026-09-23 upstream was trialled and not adopted (#1477).** djev-spark
+`08b708e` moves to vLLM nightly `e9757321` with a python-only perf stack
+(constrained-vocab reads, last-step skip, fused sampler, engine samples) and
+takes its structured server from `mmastrac/djev@9a67e54`. Built as a side venv,
+booted through `agent-djev.conf`, measured on one pinned corpus against the
+incumbent:
+
+| engine | ticket p50 | recall avg | rank p50 at 2 concurrent | seeded reads | recall vs incumbent |
+|---|---|---|---|---|---|
+| incumbent (`dee37d89`) | 80.6 ms | 564 ms | 267 ms, 5.8/s | exact | — |
+| new engine, same settings | 80.5 ms | 570 ms | 266 ms, 5.9/s | exact | doc_hit +0.023 (2/0), MRR +0.007 |
+| + `--constrained` | 77.1 ms | 554 ms | 254 ms, 6.1/s | exact | identical to the row above |
+| + `--constrained`, `MAX_SEQS=2` | 75.4 ms | 553 ms | 417 ms, 5.1/s | exact | doc_hit +0.035, MRR +0.012 |
+
+Three reasons it stays out. The new engine alone is no faster. Its only speedup,
+`--constrained`, reads over the label tokens only, so `label_mass` is 1.0 on
+every answer (entity replay: min, p05 and p50 all 1.000). That empties the one
+honest confidence signal this doc rests on (§3.2): every floor goes inert and
+`low_trust` can never fire. And it leaves 2.59 GiB of KV at the same weights
+(19.02 GiB), capping context at 75,456 tokens against 81,920 today. `MAX_SEQS=2`
+is slower at two concurrent callers and cuts context to 44,832. The trial's
+venv and sources were removed; production was restored byte for byte.
+
 ### 7.2 Accuracy — the reason nothing gates
 
 **Listwise capacity**, and two hard limits that are invisible without the
