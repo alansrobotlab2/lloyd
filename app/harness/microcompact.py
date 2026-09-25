@@ -42,9 +42,9 @@ Two clearing triggers, evaluated together:
 
      Legacy count rule (over ``count_threshold``, keep the most recent
      ``keep_recent_tools``, clear the rest regardless of pressure) now
-     requires ``legacy_count_rule=True`` *and* no budget. Both automatic
-     call sites disable it; only ``/compact`` still uses it, where the
-     user has explicitly asked to shrink.
+     requires ``legacy_count_rule=True`` *and* no budget. Every production
+     call site disables it; ``/compact`` used it until D11 (2026-09-24),
+     when it became a queued fold into the persisted summary record.
 
   2. **Spill-aware.** Any tool result already containing the
      ``<persisted-output>`` spill marker AND older than the last
@@ -60,7 +60,7 @@ instruction it gave could not be followed; and ``_replace_tool_content``
 overwrote spilled results' ``<persisted-output>`` blocks too, destroying
 the very path this module's docstring promised was preserved.
 
-Three call sites, and the second is the one that matters most:
+Two call sites, and the second is the one that matters most:
 
   * ``app.compaction.load_and_compact_session`` — turn start, rebuilding
     history from the session JSON.
@@ -70,7 +70,8 @@ Three call sites, and the second is the one that matters most:
     shaped: on ``20260905_024955_iv5f05`` it held a 70-tool-call turn to
     5 inline results for its whole length, and it is easy to miss because
     it imports this function under an alias.
-  * ``app.routers.messages`` — the ``/compact`` slash command.
+
+(``/compact`` was a third, with the count rule, until D11.)
 
 There is no time-based trigger. Lloyd has no prompt cache to align
 with, so the cache-TTL heuristic Claude Code uses doesn't apply here.
@@ -415,9 +416,8 @@ def microcompact(
     elif legacy_count_rule and len(compactable_indices) > count_threshold:
         # Legacy count rule. Ignores context pressure entirely, which is
         # what cleared 93 of 97 results on a conversation using 17% of
-        # its window. Retained for `/compact`, where the user has
-        # explicitly asked to shrink, and for direct callers that pass no
-        # budget; the turn-start and mid-turn paths both disable it.
+        # its window. Retained for direct callers that pass no budget; no
+        # production path uses it since `/compact` stopped (D11).
         to_clear.update(sizeable)
 
     # Spill-aware: a candidate that already carries a persisted-output

@@ -447,8 +447,8 @@ async def test_a_window_over_one_budget_leaves_the_watermark_behind_and_drains(e
 async def test_a_compaction_that_replaces_the_messages_reshapes_the_window_it_stamps(env):
     """The session file is shared mutable state across a process boundary.
 
-    Manual `/compact` replaces `data["messages"]` wholesale: the `_swap` callback
-    at `app/routers/messages.py:1723-1740` assigns the compacted list, refreshes
+    Manual `/compact` replaced `data["messages"]` wholesale until D11 (a hand
+    edit still can): its `_swap` callback assigned the compacted list, refreshed
     `last_active` and `message_count`, and writes nothing else — so the
     `fact_watermark` it leaves behind was counted against a list that no longer
     exists. `mutate_session` then persists the dict whatever the callback decided,

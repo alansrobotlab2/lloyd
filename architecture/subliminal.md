@@ -549,17 +549,12 @@ role skips these entries for free.
 follows this module's precedent deliberately — one entry per reasoning phase,
 a role no transcript producer has a branch for, `content` left empty as a
 second layer — and it lands on the same side of both filters. See [[harness]].
-The one place the two roles share a fate worth knowing about: the `/compact`
-slash command — `_slash_compact_sse`, handled inline by `post_message_stream`
-before the queue, which force-summarizes with no threshold check because the
-user explicitly asked — rewrites `data["messages"]` to the conversation-only
-set. So it discards every `subliminal` and `thinking` row in the session, not
-just those in the block it summarized. That is called
-out at the write site as known and deliberate — putting UI-only rows back at
-the right positions is a merge that swap cannot express — and for the thinking
-trace the event log's `brain1.thinking_block_emitted` remains the durable
-record. The subliminal rows have no such backup: after a hard compaction, what
-the agent saw on those turns is gone.
+The one place the two roles used to share a fate: the `/compact` slash command
+rewrote `data["messages"]` to the conversation-only set, discarding every
+`subliminal` and `thinking` row in the session. Since D11 (2026-09-24) it is a
+queued turn that folds into the persisted `data["compaction"]` record and never
+rewrites the messages, so both kinds of row survive it (see [[harness]], D11).
+Sessions compacted before that lost them for good.
 
 The same prefix is passed to Inner Voice as `subliminal_context`, trimmed to
 `_SUBLIMINAL_PROMPT_CHAR_CAP` (4000) chars so the observer can tell when the

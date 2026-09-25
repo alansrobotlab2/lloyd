@@ -49,7 +49,6 @@ from app.sessions_io import (
     _session_queues,
     _save_session_meta,
     _append_messages,
-    mutate_session,
     _broadcast_queue_state,
     enqueue_turn,
     get_queue_state,
@@ -58,7 +57,6 @@ from app.sessions_io import (
     ambient_clock_stamp,
     set_turn_activity,
     tool_activity_detail,
-    session_now_iso,
 )
 from app.mcp_discovery import _get_mcp_servers, _get_disallowed_tools, _get_harness_kwargs
 from app.post_capture import _post_session_capture, _maybe_extract_focus
@@ -826,6 +824,9 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     return, the consumer pushes the sentinel `None` to close the stream.
     """
     payload = turn.payload
+    # `/compact` (D11) is a turn on the queue, not an agent turn.
+    if payload.get("kind") == "compact":
+        return await _run_compact_turn(session_id, turn, q)
     text: str = payload["text"]
     prefetched_text: str = payload["prefetched_text"]
     model: str = payload["model"]
@@ -1921,178 +1922,129 @@ async def _turn_sse_generator(turn: SessionTurn):
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Slash commands — handled inline by post_message_stream before the queue.
+# Slash commands — `/compact` is queued as a turn of its own kind (D11).
 # ---------------------------------------------------------------------------
 
 
-async def _slash_compact_sse(
-    session_id: str,
-    model_override: str,
-    instructions: str | None,
-):
-    """One-shot SSE generator for the ``/compact`` slash command.
+async def _run_compact_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None:
+    """The ``/compact`` slash command, run as a queued turn (D11).
 
-    Force-summarizes the session (no threshold check — the user
-    explicitly asked) and rewrites the session JSON in place. Yields
-    SSE events tracking progress so the UI can show what happened:
+    It used to be a one-shot generator beside the queue: it read a snapshot,
+    awaited the summariser for up to two minutes, then replaced
+    ``data["messages"]`` with what it had summarised — deleting anything a turn
+    appended meanwhile, and every thinking and subliminal row in the session.
+    Now it holds the session's slot like any turn (nothing is appended
+    underneath it), folds everything but the last ``keep_recent_turns`` into
+    the persisted record (`app/compaction_state.manual_compact`, the D2 record
+    with ``source: "manual"``) and never touches the messages. The next turn's
+    stack applies that record whatever ``compaction.persist_summary`` says.
 
-      * ``compact_start``  — { instructions }
-      * ``compact_done``   — { microcompacted, summarized, restored,
-                               truncated, tokens_before, tokens_after }
-      * ``error``          — { detail } on unrecoverable failure
-
-    Heavy lifting (summarize_history) runs OUTSIDE mutate_session so
-    we don't hold the per-session lock across an LLM call.
+    Events, keys as before:
+      * ``compact_start`` — { session_id, instructions }
+      * ``compact_done``  — { session_id, microcompacted, summarized,
+        restored_files, truncated, tokens_before, tokens_after,
+        context_window } plus ``folds`` and ``covered_rows``
+      * ``error``         — { detail } when nothing changed
     """
-    from app.compaction import (
-        _compaction_cfg,
-        _split_for_summary,
-        estimate_conversation_tokens,
-        get_context_window,
-    )
-    from app.compaction_llm import summarize_history
-    from app.harness.microcompact import (
-        DEFAULT_COMPACTABLE_TOOLS,
-        microcompact,
-    )
+    from app.compaction_state import manual_compact
 
-    def _sse(event: str, payload: dict[str, Any]) -> str:
-        return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+    payload = turn.payload
+    instructions = payload.get("instructions") or ""
+    model = payload.get("model") or ""
+    meta_path = payload.get("meta_path") or (SESSIONS_DIR / f"{session_id}.json")
 
-    yield _sse("compact_start", {
+    await _emit(turn, "session", {"session_id": session_id, "turn_id": turn.turn_id})
+    await turn.events.put({"event": "queue_state", "data": get_queue_state(session_id)})
+    await _emit(turn, "compact_start", {
         "session_id": session_id,
-        "instructions": instructions or "",
+        "instructions": instructions,
     })
+    set_turn_activity(session_id, "working", "compacting")
 
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
-    if not meta_path.exists():
-        yield _sse("error", {"detail": f"session {session_id} not found"})
+    res = await manual_compact(meta_path, model=model, instructions=instructions)
+    if res.get("error"):
+        _event_log.log_event(session_id, "compaction.manual", {
+            "ok": False, "error": res["error"], "instructions": instructions,
+        }, turn_id=turn.turn_id)
+        await _emit(turn, "error", {"detail": res["error"]})
         return
 
-    try:
-        raw = json.loads(meta_path.read_text())
-    except Exception as e:
-        yield _sse("error", {"detail": f"failed to read session: {e}"})
-        return
-
-    messages = raw.get("messages") or []
-    convo = [m for m in messages if m.get("role") in ("user", "assistant", "tool", "system")]
-    if not convo:
-        yield _sse("error", {"detail": "session has no conversation history"})
-        return
-
-    cfg = _compaction_cfg()
-    model = model_override or raw.get("model", "") or CONFIG.get("model", {}).get("default", "")
-    tokens_before = estimate_conversation_tokens(convo)
-
-    # Layer B — microcompact pre-pass (cheap, runs first)
-    micro_cleared = 0
-    if cfg["microcompact"].get("enabled", True):
-        mc = cfg["microcompact"]
-        tools = mc.get("compactable_tools") or DEFAULT_COMPACTABLE_TOOLS
-        # `/compact` is an explicit user request to shrink the context, so
-        # this path keeps the count rule rather than gating on pressure —
-        # the user has already decided. It still spills before clearing,
-        # so the shrink is recoverable and the markers name their calls.
-        convo, micro_cleared = microcompact(
-            convo,
-            keep_recent_tools=int(mc.get("keep_recent_tools", 15)),
-            count_threshold=int(mc.get("count_threshold", 20)),
-            compactable_tools=tools,
-            min_chars_to_clear=int(mc.get("min_chars_to_clear", 2_000)),
-            session_id=session_id,
-            legacy_count_rule=True,
-        )
-
-    # Layer A — force LLM summary regardless of threshold
-    keep_recent = int(cfg.get("keep_recent_turns", 5))
-    older, recent = _split_for_summary(convo, keep_recent)
-    summarized = False
-    restored_count = 0
-    if older:
-        summary = await summarize_history(
-            older,
-            model=cfg.get("summary_model") or model or None,
-            instructions=instructions,
-        )
-        if summary:
-            summarized = True
-            new_convo: list[dict] = [{
-                "role": "assistant",
-                "content": [{
-                    "type": "text",
-                    "text": (
-                        "[compaction summary — manual /compact"
-                        + (f" focus: {instructions}" if instructions else "")
-                        + "]\n\n"
-                        + summary
-                    ),
-                }],
-            }]
-            # No Layer C here (D3). This history is PERSISTED, and the
-            # restore is now a `user` row so that it reaches the engine: saved
-            # into the session it would be a permanent "user message" every
-            # transcript producer, the titler and fact extraction read as
-            # something Alan typed, re-sent stale on every later turn. The old
-            # `system` rows were saved and then dropped by the harness adapter,
-            # so the engine never saw them either; nothing is lost. The files
-            # are one Read away, and the turn-start pass still restores fresh
-            # when it summarizes.
-            new_convo.extend(recent)
-            convo = new_convo
-        else:
-            yield _sse("error", {"detail": "summarization failed; session unchanged"})
-            return
-
-    tokens_after = estimate_conversation_tokens(convo)
-
-    # Persist back to disk. mutate_session enforces the per-session
-    # lock; the callback here is sync + fast (just swaps the messages
-    # list and updates last_active).
-    new_messages = list(convo)
-
-    def _swap(data: dict) -> None:
-        # Preserve UI-only roles (subliminal, etc.) by keeping the
-        # tail of the original list as-is — actually no, the safer
-        # contract is "messages now equals the compacted set." UI-only
-        # entries that lived in the dropped block were already filtered
-        # out at convo-build time, so we don't try to re-merge them.
-        #
-        # Known and deliberate: this discards `role="subliminal"` and
-        # `role="thinking"` rows for the whole session, not just the
-        # compacted block, because `convo` keeps only the conversation
-        # roles. A hard compaction therefore drops the thinking trace from
-        # the session JSON; the event log's `brain1.thinking_block_emitted`
-        # stays the durable record. Preserving UI-only rows across a
-        # compaction is a separate change — it needs a merge that puts them
-        # back at the right positions, which this swap cannot express.
-        data["messages"] = new_messages
-        data["last_active"] = session_now_iso()
-        data["message_count"] = len(new_messages)
-
-    await mutate_session(session_id, _swap)
-
-    yield _sse("compact_done", {
-        "session_id": session_id,
-        "microcompacted": micro_cleared,
-        "summarized": summarized,
-        "restored_files": restored_count,
+    # Recorded like a turn-start rewrite (#1078): the turn's context-policy
+    # record, and one event with a session id on it. A manual compaction used
+    # to land in neither store.
+    comp = {
+        "tokens_before": res["tokens_before"],
+        "tokens_after": res["tokens_after"],
+        "microcompacted": 0,
+        "summarized": res["summarized"],
+        "summarize_attempted": res["attempted"],
+        "summarize_outcome": "summarized" if res["summarized"] else "no_older_block",
         "truncated": False,
-        "tokens_before": tokens_before,
-        "tokens_after": tokens_after,
-        "context_window": get_context_window(model),
+        "restored_files": 0,
+        "context_window": res["context_window"],
+        "summary_reused": res["reused"],
+        "summary_folds": res["folds"],
+        "summary_covered_rows": res["covered_rows"],
+    }
+    compaction_turn = _compaction_record.start_turn(session_id, turn.turn_id)
+    compaction_turn.note_turn_start(comp)
+    _event_log.log_event(session_id, "compaction.manual", {
+        "ok": True,
+        **(compaction_turn.turn_start or {}),
+        "source": "manual",
+        "instructions": instructions,
+        "folds": res["folds"],
+        "covered_rows": res["covered_rows"],
+    }, turn_id=turn.turn_id)
+
+    await _emit(turn, "compact_done", {
+        "session_id": session_id,
+        "microcompacted": 0,
+        "summarized": res["summarized"],
+        "restored_files": 0,
+        "truncated": False,
+        "tokens_before": res["tokens_before"],
+        "tokens_after": res["tokens_after"],
+        "context_window": res["context_window"],
+        "folds": res["folds"],
+        "covered_rows": res["covered_rows"],
     })
+
+
+def _compact_turn(session_id: str, text: str, model_override: str) -> SessionTurn:
+    """The queued turn for ``/compact [instructions]``. Everything after the
+    command word is the summary's focus."""
+    model = model_override
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not model and meta_path.exists():
+        try:
+            model = json.loads(meta_path.read_text()).get("model", "") or ""
+        except Exception:  # noqa: BLE001 — the default model will do
+            model = ""
+    if not model:
+        model = CONFIG.get("model", {}).get("default", "")
+    return SessionTurn(
+        turn_id=uuid.uuid4().hex[:12],
+        source="user",
+        payload={
+            "kind": "compact",
+            "instructions": text[len("/compact"):].strip(),
+            "model": model,
+            "meta_path": meta_path,
+        },
+        enqueued_at=datetime.now(),
+    )
 
 
 @router.post("/api/message/stream")
 async def post_message_stream(request: Request):
     """SSE endpoint. Enqueues a user turn; consumer streams events back.
 
-    Slash commands (handled inline before queueing):
-      * ``/compact [optional instructions]`` — force a context summary
-        of the current session, replacing older history with the
-        9-section summary + restored files. Returns a one-shot SSE
-        response without enqueueing an agent turn.
+    Slash commands:
+      * ``/compact [optional instructions]`` — fold everything but the last
+        ``keep_recent_turns`` into the session's persisted summary record.
+        Queued like any user turn (it waits for a running one) and run by
+        ``_run_compact_turn``; the messages are never rewritten (D11).
     """
     data = await request.json()
     text = data.get("text", "").strip()
@@ -2125,13 +2077,12 @@ async def post_message_stream(request: Request):
                 status_code=400,
                 detail="/compact requires an active session",
             )
-        # Everything after the command word is treated as a focus
-        # instruction passed through to the summarization prompt.
-        instructions = text[len("/compact"):].strip() or None
-        return StreamingResponse(
-            _slash_compact_sse(session_id, model_override, instructions),
-            media_type="text/event-stream",
+        turn = _compact_turn(session_id, text, model_override)
+        await enqueue_turn(
+            session_id, turn,
+            consumer_factory=lambda: _session_consumer(session_id),
         )
+        return StreamingResponse(_turn_sse_generator(turn), media_type="text/event-stream")
     # ------------------------------------------------------------------
 
     model = model_override or ""

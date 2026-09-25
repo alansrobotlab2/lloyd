@@ -40,8 +40,17 @@ which every row has named since X3. Best effort — the ledger keeps 7 days, so
 the record carries the list forward rather than re-deriving it.
 
 Off switch: ``compaction.persist_summary`` (ships false until the recall eval
-says otherwise). Off, a record on disk is ignored entirely and the turn-start
-stack behaves exactly as it did before this module existed.
+says otherwise). Off, an automatic record on disk is ignored entirely and the
+turn-start stack behaves exactly as it did before this module existed.
+
+The one exception is a record a person asked for (D11). ``/compact`` is a
+queued turn that folds everything but the last ``keep_recent_turns`` into this
+same record (``manual_compact``) and never rewrites ``data["messages"]``, so
+the record is the ONLY thing a ``/compact`` leaves behind: ignoring it with the
+flag off would make the command a no-op. A manual record (``is_manual``) is
+therefore always applied, and a session that has one stays on this path from
+then on — later over-the-wall turns fold into it (in summarize mode) rather
+than regenerating beside it.
 """
 
 from __future__ import annotations
@@ -218,7 +227,21 @@ def build_record(
         "folds": int((prior or {}).get("folds") or 0) + int(folds_added),
         "source": source,
         "instructions": instructions or "",
+        # D11: when a person last asked for this record with `/compact`. Rides
+        # forward through every later automatic fold, because it is what keeps
+        # the record in force with `compaction.persist_summary` off
+        # (`is_manual`): a fold that relabelled it `auto` would silently hand
+        # the session back to the regenerate path and undo the `/compact`.
+        "manual_at": now if source == "manual" else (prior or {}).get("manual_at"),
     }
+
+
+def is_manual(record: dict | None) -> bool:
+    """A record a person asked for with ``/compact`` (D11), now or before a
+    later automatic fold. Such a record is applied whatever
+    ``compaction.persist_summary`` says — see ``manual_compact``."""
+    return bool(record) and bool(
+        record.get("manual_at") or record.get("source") == "manual")
 
 
 async def save_record(session_id: str, record: dict, *,
@@ -497,6 +520,117 @@ async def fold(
     }
 
 
+# ---------------------------------------------------------------------------
+# /compact (D11)
+# ---------------------------------------------------------------------------
+
+#: Folds one `/compact` may run. The person is waiting on it and asked for the
+#: whole older block, so this is well above `max_folds_per_turn`; still a cap,
+#: because each fold is a summariser call of up to two minutes.
+DEFAULT_MANUAL_MAX_FOLDS = 12
+
+
+async def manual_compact(
+    path: Path | str,
+    *,
+    model: str = "",
+    instructions: str = "",
+    cfg: dict | None = None,
+) -> dict[str, Any]:
+    """Fold everything but the last ``keep_recent_turns`` turns into the
+    session's record, with ``instructions`` as the summary's focus.
+
+    Reads the session, never writes ``messages``: the record is saved through
+    ``fold`` → ``save_record``, which touches ``data["compaction"]`` alone, so
+    thinking rows, subliminal rows and anything appended meanwhile all survive.
+    The caller runs this as a queued turn (``SessionQueue``), which is what
+    keeps another turn from appending underneath it in the first place.
+
+    No files are restored (D3): the restore belongs to the turn that sends the
+    history, and the turn-start stack restores over what the record covers.
+
+    Returns ``{"error": str}`` on a failure that changed nothing, else the
+    ``compact_done`` fields plus ``record``/``folds``/``reused``.
+    """
+    import json
+
+    from app.compaction import (
+        _compaction_cfg,
+        _split_for_summary,
+        estimate_conversation_tokens,
+        get_context_window,
+    )
+    from app.harness.telemetry import log_harness_event
+
+    path = Path(path)
+    session_id = path.stem
+    cfg = cfg if cfg is not None else _compaction_cfg()
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {"error": f"session {session_id} not found"}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"failed to read session: {e}"}
+    convo = conversation_rows(data.get("messages") or [])
+    if not convo:
+        return {"error": "session has no conversation history"}
+
+    record = load_record(data)
+    start = 0
+    reused = False
+    if record is not None:
+        boundary = validate(record, convo)
+        if boundary is None:
+            log_harness_event(session_id, "compaction.record_invalidated", {
+                "covers_through_index": record.get("covers_through_index"),
+                "covered_rows": record.get("covered_rows"),
+                "rows_now": len(convo),
+                "source": "manual",
+            })
+            record = None
+        else:
+            start, reused = boundary, True
+
+    def _view(rec: dict | None, boundary: int) -> list[dict]:
+        return ([summary_message(rec)] + convo[boundary:]) if rec else convo
+
+    tokens_before = estimate_conversation_tokens(_view(record, start))
+    keep_recent = int(cfg.get("keep_recent_turns", 5))
+    older, _recent = _split_for_summary(convo[start:], keep_recent)
+    folds = 0
+    if older:
+        manual_cfg = cfg.get("manual") or {}
+        res = await fold(
+            convo, start=start, end=start + len(older), record=record,
+            session_id=session_id, path=path,
+            model=cfg.get("summary_model") or model or "", cfg=cfg,
+            max_folds=int(manual_cfg.get("max_folds", DEFAULT_MANUAL_MAX_FOLDS)),
+            instructions=instructions or "", source="manual",
+        )
+        folds = int(res.get("folds") or 0)
+        if not folds:
+            return {"error": "summarization failed; session unchanged"}
+        record = res["record"]
+    boundary = int(record["covered_rows"]) if record else 0
+    return {
+        "session_id": session_id,
+        "record": record,
+        "folds": folds,
+        "reused": reused,
+        "attempted": bool(older),
+        "summarized": bool(folds),
+        "covered_rows": boundary,
+        # The legacy count-rule microcompact pass is gone (D11); the turn-start
+        # stack still microcompacts under pressure on the next turn.
+        "microcompacted": 0,
+        "restored_files": 0,
+        "truncated": False,
+        "tokens_before": tokens_before,
+        "tokens_after": estimate_conversation_tokens(_view(record, boundary)),
+        "context_window": get_context_window(model),
+    }
+
+
 __all__ = [
     "RECORD_KEY",
     "RECORD_VERSION",
@@ -516,4 +650,6 @@ __all__ = [
     "render_files_touched",
     "input_budget",
     "fold",
+    "is_manual",
+    "manual_compact",
 ]

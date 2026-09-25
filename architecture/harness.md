@@ -287,7 +287,7 @@ with the file count on the row (`restored_files`, read by
 `role: "system"` rows were dropped by `_prepare_messages_for_harness`, which
 keeps only `user`/`assistant`/`tool`, while `tokens_after` still counted them.
 `tokens_after` now estimates only those three roles. `/compact` no longer
-restores at all: its history is persisted, and a persisted `user` row would be
+restores at all (still true after D11, which stopped it rewriting history): its history was persisted, and a persisted `user` row would be
 read by every transcript producer as something the user typed (the old system
 rows were persisted and never sent, so nothing reached the engine either way).
 Pinned by `tests/test_compaction_llm_restore.py`.
@@ -317,8 +317,8 @@ domain results no longer go straight to truncation. Deleting the key (or
 `RunOptions.intra_turn_microcompact_non_compactable`. `Task` is not listed
 (`keep_recent` protects the newest result); skill-delivery results are short
 and left alone by size. `_execute_tool_call` now `maybe_spill`s error results
-too; the empty-result marker stays success-only. `/compact` still uses the
-allow-list.
+too; the empty-result marker stays success-only. `/compact` ran no microcompact
+pass at all after D11.
 
 ### P7 — the context-rot curve sets the compaction trigger
 
@@ -598,7 +598,8 @@ run past the truncation threshold).
   New outcome `reused`; `turn_start_record` gains `summary_reused`,
   `summary_folds`, `summary_covered_rows`; one `compaction.summary_updated`
   event per fold. Summarize mode only — `mode: truncate` (voice) ignores the
-  record, and with the switch off a record on disk is ignored entirely.
+  record, and with the switch off a record on disk is ignored entirely —
+  except a record `/compact` made, which D11 applies either way.
 - `tests/test_compaction_persisted_summary.py`,
   `tests/test_compaction_record.py::test_turn_start_record_reports_reuse_and_folds`.
 
@@ -743,3 +744,37 @@ byte-identical — the property the finalizer already relies on for `"none"`.
   (`run_prompt_on_primary`), whose `TurnResult.ok` reads non-empty text as
   success. Pins: `app/harness/tests/test_tool_choice_levers.py`,
   `tests/test_task_subagent_answer.py::test_a_wrapped_up_budget_run_returns_its_summary_marked_truncated`.
+
+### D11 — `/compact` is a queued turn that folds into the same record
+
+`/compact` was a one-shot SSE generator beside the queue: it read a snapshot,
+awaited the summariser (up to 120 s), then replaced `data["messages"]` — so
+anything appended meanwhile was deleted, every `thinking`/`subliminal` row in
+the session went with it, it ran the legacy count-rule microcompact, and it
+recorded nothing.
+
+- `post_message_stream` enqueues `SessionTurn(source="user", payload={"kind":
+  "compact", instructions, model, meta_path})` (`_compact_turn`); `_run_turn`
+  dispatches it to `_run_compact_turn`, so it waits behind a running turn and
+  holds the slot while it folds.
+- `compaction_state.manual_compact` folds everything but the last
+  `keep_recent_turns` past the record's boundary through D2's `fold(...,
+  source="manual", instructions=...)`, at most `compaction.manual.max_folds`
+  (12) folds. **It never writes `data["messages"]`**; only `data["compaction"]`
+  changes. No files are restored (D3), and the count-rule pass is gone.
+- Events keep their keys: `compact_start {session_id, instructions}`,
+  `compact_done {session_id, microcompacted, summarized, restored_files,
+  truncated, tokens_before, tokens_after, context_window}` plus `folds` and
+  `covered_rows`; `error {detail}` when nothing changed (summariser failed).
+  `web/src` reads none of them today. It is recorded: `compaction_record.start_turn`
+  + `note_turn_start`, and one `compaction.manual` event (the turn-start record
+  plus `source`, `instructions`, `folds`, `covered_rows`; `ok: false` on failure).
+- **With `persist_summary` off (as D2 ships), a manual record is still applied.**
+  The record is all `/compact` leaves behind now, so ignoring it would make the
+  command a no-op. A record carries `manual_at` (set by a manual fold, carried
+  forward through every later automatic fold); `compaction_state.is_manual`
+  puts the session on the persisted path whatever the flag says. In summarize
+  mode later over-the-wall turns fold into it; in truncate mode (voice) it is
+  applied but never folded.
+- `tests/test_compaction_manual.py`,
+  `tests/test_session_queue.py::test_a_compact_request_waits_behind_the_running_turn_and_a_row_appended_meanwhile_survives`.

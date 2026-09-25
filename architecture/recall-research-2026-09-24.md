@@ -50,7 +50,8 @@ prompt (prefix-cached), the ephemeral `<context>` prefix rebuilt each turn from
 the message and `SessionFocus` (2–8 KB, uncached, persisted as a `subliminal` row
 nobody replays), and tools on demand. Ambient producers drain first, ≤3 per turn.
 Direct-path runs (`run_prompt_on_primary`, `autonomy.run_task`) are prefetched by
-nothing. A hard `/compact` discards the subliminal rows.
+nothing. A hard `/compact` discarded the subliminal rows until D11 (2026-09-24); it no
+longer rewrites the messages.
 
 **Sessions.** qmd's `sessions` collection is searched by prefetch but not by
 `vault_recall`; `session_recall` is token overlap over seven days, five results,

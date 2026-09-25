@@ -239,9 +239,10 @@ def _fact_watermark(data: dict) -> int:
 
     And a watermark the file cannot vouch for reads as *never extracted*, which is
     the load-bearing half. The message list is shared mutable state that a whole
-    other request path replaces wholesale: manual `/compact` assigns
-    `data["messages"] = new_messages` under `mutate_session`
-    (`app/routers/messages.py:1723-1742`) and never touches this key, so a 20- or
+    other request path replaced wholesale: manual `/compact` assigned
+    `data["messages"] = new_messages` under `mutate_session` until D11 (it now
+    folds into `data["compaction"]` and leaves the messages alone; a hand edit
+    still can) and never touched this key, so a 20- or
     30-message session compacted to 10 leaves a stamp of 20 or 30 counting against
     a list that no longer exists. Read raw on a 16-message file, `messages[20:]`
     is empty — forever, however many turns arrive. That is #1159's silence again,

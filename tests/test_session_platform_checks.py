@@ -1556,8 +1556,8 @@ async def test_every_session_body_writer_stamps_an_offset(tmp_path, monkeypatch)
 def test_no_session_body_writer_stamps_a_naive_now():
     """The source half: no `created_at`/`last_active` assignment in the writers
     uses a bare `datetime.now().isoformat()` or a zone-less `time.strftime` —
-    which is how `messages.py`'s compaction swap, not reachable from a unit test
-    without a whole turn, is held to the same rule."""
+    which is how `messages.py` (whose compaction swap D11 removed) is held to the
+    same rule."""
     naive = re.compile(
         r'(last_active|created_at)["\']\]?\s*[:=][^\n]*'
         r'(datetime\.now\(\)\.isoformat\(\)|time\.strftime\()')
@@ -1570,7 +1570,11 @@ def test_no_session_body_writer_stamps_a_naive_now():
                 offenders.append(f"{rel}:{i}: {line.strip()}")
     assert offenders == []
     msgs = (ROOT / "app" / "routers" / "messages.py").read_text(encoding="utf-8")
-    assert 'data["last_active"] = session_now_iso()' in msgs
+    # D11 removed the compaction swap, the one place this router wrote the
+    # stamp itself; `/compact` now leaves the messages and `last_active` to
+    # `sessions_io`. A new direct write here must use the offset-bearing helper.
+    assert ('data["last_active"]' not in msgs
+            or 'data["last_active"] = session_now_iso()' in msgs)
     # `now` in those two functions is the offset-bearing helper, not a naive now.
     sio = (ROOT / "app" / "sessions_io.py").read_text(encoding="utf-8")
     assert sio.count("now = session_now_iso()") == 2

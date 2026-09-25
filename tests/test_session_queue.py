@@ -6,6 +6,8 @@ Covers Phases 1–3:
            drain_pending clears ambient only; ambient cancel marker
 - Phase 3: ambient queue cap drops oldest; dedup_key collapses duplicates;
            queue_state event emitted on enqueue/drain
+- D11: `/compact` is a queued turn — it waits behind a running turn, and a
+        row that turn appends survives the compaction
 - #909: the two-tier drain — `DELETE /api/sessions/{id}` empties both
         queues and a queued user turn never reaches `_run_turn`, while
         `/cancel?drain_pending=true` stays ambient-only
@@ -37,6 +39,20 @@ from app.sessions_io import (  # noqa: E402
 )
 from app.routers import messages as msg_mod  # noqa: E402
 from app.routers import sessions as sess_mod  # noqa: E402
+
+import pytest  # noqa: E402
+
+# Captured at import, before any test swaps in a stub: the tests below assign
+# `msg_mod._run_turn` directly, and the D11 test needs the real dispatch.
+_REAL_RUN_TURN = msg_mod._run_turn
+
+
+@pytest.fixture(autouse=True)
+def _restore_run_turn():
+    """Put the real `_run_turn` back after every test, so a stub assigned here
+    does not leak into a later test module in the same process."""
+    yield
+    msg_mod._run_turn = _REAL_RUN_TURN
 
 
 async def _fake_run_turn(session_id: str, turn: SessionTurn, q):
@@ -633,6 +649,85 @@ async def test_cancel_with_drain_pending_leaves_the_queued_user_turn():
     assert queued_user.turn_id in started, "the surviving user turn never ran"
     assert queued_ambient.turn_id not in started, "the drained ambient ran anyway"
     print("OK cancel: drain_pending=true cleared ambient, user turn survived and ran")
+
+
+async def test_a_compact_request_waits_behind_the_running_turn_and_a_row_appended_meanwhile_survives(
+    tmp_path, monkeypatch,
+):
+    """D11: `/compact` holds the session's slot like any turn. It used to run
+    beside the queue, read a snapshot, await the summariser and then replace
+    `data["messages"]` — deleting whatever the running turn appended during
+    that wait. Queued, it starts only after the running turn ends, and it never
+    rewrites the messages, so the late row is there afterwards."""
+    from app import compaction_llm
+    from app import event_log
+    from app.config import CONFIG
+    from agent_mcp import _change_ledger as ledger
+
+    sid = "20260924_120000_d11q"
+    monkeypatch.setattr(sessions_io, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr(msg_mod, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr(event_log, "EVENT_LOGS_DIR", tmp_path / "events")
+    monkeypatch.setattr(ledger, "CHANGES_ROOT", tmp_path / "changes")
+    monkeypatch.setitem(CONFIG, "compaction", {
+        "mode": "summarize", "keep_recent_turns": 1, "persist_summary": False,
+        "microcompact": {"enabled": False}, "restore": {"enabled": False},
+    })
+    summarised: list[list[str]] = []
+
+    async def _summarise(prior, delta, **kw):
+        summarised.append([r.get("id") for r in delta])
+        return "## Goal\nG"
+    monkeypatch.setattr(compaction_llm, "summarize_incremental", _summarise)
+
+    rows = []
+    for i in range(3):
+        rows += [{"id": f"u{i}", "role": "user", "content": [{"type": "text", "text": f"q{i}"}]},
+                 {"id": f"k{i}", "role": "thinking", "content": [], "reasoning": "r"},
+                 {"id": f"a{i}", "role": "assistant", "content": [{"type": "text", "text": f"a{i}"}]}]
+    (tmp_path / f"{sid}.json").write_text(json.dumps({"session_id": sid, "messages": rows}))
+
+    release = asyncio.Event()
+    order: list[str] = []
+
+    async def running_turn(session_id, turn, q):
+        if turn.payload.get("kind") == "compact":
+            order.append("compact")
+            return await _REAL_RUN_TURN(session_id, turn, q)
+        order.append("running")
+        await release.wait()
+        await sessions_io._append_messages(session_id, [
+            {"id": "late", "role": "assistant",
+             "content": [{"type": "text", "text": "written while /compact waited"}]}])
+        order.append("appended")
+
+    msg_mod._run_turn = running_turn
+    _session_queues.pop(sid, None)
+    running = _make_turn("running")
+    await _enqueue(sid, running)
+    await asyncio.sleep(0.05)
+    compact = msg_mod._compact_turn(sid, "/compact", "qwen-unknown")
+    await _enqueue(sid, compact)
+    await asyncio.sleep(0.05)
+    assert order == ["running"], "the compact turn started under a running turn"
+    assert get_queue_state(sid)["pending_user"] == 1
+
+    release.set()
+    await asyncio.wait_for(compact.done.wait(), timeout=5)
+    assert order == ["running", "appended", "compact"]
+
+    data = json.loads((tmp_path / f"{sid}.json").read_text())
+    ids = [m["id"] for m in data["messages"]]
+    assert "late" in ids, "a row appended while /compact waited was deleted"
+    assert ids[:len(rows)] == [r["id"] for r in rows]
+    assert data["compaction"]["source"] == "manual"
+    assert summarised and "late" not in summarised[0]
+    events = []
+    while not compact.events.empty():
+        evt = compact.events.get_nowait()
+        if evt is not None:
+            events.append(evt["event"])
+    assert "compact_done" in events
 
 
 async def main():

@@ -345,6 +345,8 @@ def _compaction_cfg() -> dict[str, Any]:
     cfg["restore"] = restore
     manual = dict(cfg.get("manual") or {})
     manual.setdefault("buffer_tokens", 3_000)
+    # D11: folds one `/compact` may run (app/compaction_state.manual_compact).
+    manual.setdefault("max_folds", 12)
     cfg["manual"] = manual
     return cfg
 
@@ -367,10 +369,9 @@ def _record_turn_start(session_id: str, result: dict[str, Any]) -> None:
     The session id is the session file's stem, which is why this is emitted here
     rather than by the caller: `app/routers/voice.py` calls this function on a
     turn that books no usage row at all, and the event log is the one store where
-    a voice turn's rewrite still lands with an owner. The manual `/compact` route
-    does NOT reach here — `_slash_compact_sse` builds its own history and calls
-    `summarize_history` directly — so a manual compaction lands in neither store,
-    a gap this change does not close.
+    a voice turn's rewrite still lands with an owner. The manual `/compact` turn
+    does not reach here either; it records itself as `compaction.manual`
+    (`app/routers/messages.py::_run_compact_turn`, D11).
     """
     from app.compaction_record import turn_start_record
 
@@ -394,12 +395,16 @@ async def _persisted_summary_layer(
     threshold: int,
     system_prompt: str,
     cur_tokens: int,
+    allow_fold: bool = True,
 ) -> dict[str, Any]:
-    """Layer A under ``compaction.persist_summary`` (D2).
+    """Layer A under ``compaction.persist_summary`` (D2), or for a session a
+    person compacted by hand (D11, ``compaction_state.is_manual``).
 
     A stored record that validates is applied whatever the size — the same
     summary text every turn is what keeps the prefix cached. The threshold
-    decides only whether the rows past its boundary are folded in. See
+    decides only whether the rows past its boundary are folded in, and only
+    when ``allow_fold`` (summarize mode): a manual record is honoured in
+    truncate mode too, but that mode never calls a summariser. See
     `app/compaction_state.py` for the record and the fold.
     """
     out: dict[str, Any] = {
@@ -438,7 +443,9 @@ async def _persisted_summary_layer(
             cur_tokens = estimate_conversation_tokens(
                 [summary_msg] + remaining, system_prompt)
 
-    if cur_tokens > threshold:
+    if cur_tokens > threshold and not allow_fold:
+        out["outcome"] = "mode_truncate"
+    elif cur_tokens > threshold:
         out["attempted"] = True
         older, _recent = _split_for_summary(remaining, int(cfg.get("keep_recent_turns", 5)))
         if not older:
@@ -653,7 +660,17 @@ async def load_and_compact_session(
     summarize_outcome = "under_threshold"
     # D2: the persisted summary. Summarize mode only — `mode: truncate` (and
     # voice's override) says drop-oldest, and a stored summary is a summary.
+    # D11: except a record a person asked for with `/compact`, which is applied
+    # whatever the flag or the mode says. `/compact` no longer rewrites the
+    # messages, so that record is all it leaves; ignoring it would make the
+    # command a no-op. It is never folded in truncate mode.
     persist = bool(cfg.get("persist_summary")) and mode == "summarize"
+    if not persist:
+        try:
+            from app.compaction_state import is_manual, load_record
+            persist = is_manual(load_record(data))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("compaction_state import failed: %s", e)
     summary_reused = False
     summary_folds = 0
     summary_covered_rows = 0
@@ -662,6 +679,7 @@ async def load_and_compact_session(
         layer = await _persisted_summary_layer(
             convo, data, path=path, cfg=cfg, model=model,
             threshold=threshold, system_prompt=system_prompt, cur_tokens=cur_tokens,
+            allow_fold=(mode == "summarize"),
         )
         convo = layer["convo"]
         summarized = layer["summarized"]

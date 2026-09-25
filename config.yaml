@@ -387,7 +387,8 @@ compaction:
   # regenerating it every turn. Ships off until the recall eval's
   # summary_persisted arm is compared (eval/run_compaction_recall_eval.py).
   # The input budget bounds one fold's delta; leftover delta is folded on
-  # later turns, at most max_folds_per_turn per turn.
+  # later turns, at most max_folds_per_turn per turn. A record made by
+  # /compact (manual.max_folds below) is applied whatever this says (D11).
   persist_summary: false
   summary_input_budget_tokens: 48000
   max_folds_per_turn: 3
@@ -455,6 +456,11 @@ compaction:
     max_files: 5
   manual:
     buffer_tokens: 3000
+    # D11: `/compact` is a queued turn that folds all but keep_recent_turns
+    # into the same data["compaction"] record, never rewriting the messages.
+    # A record it writes is applied even with persist_summary false (else the
+    # command would do nothing). Folds one /compact may run:
+    max_folds: 12
 harness:
   # Images tools return (screenshots): app/harness/tool_images.py. A model
   # sees them only when its models.<alias>.supports_vision is literally true
