@@ -9,14 +9,17 @@ relations:
   - architecture/knowledge-graph.md
   - architecture/memory.md
   - architecture/index.md
+  - architecture/harness.md
+  - architecture/retrieval.md
+  - architecture/voice.md
 tags: [architecture, lloyd, djev, decisions, calibration]
 summary: GPU 2's structured-decision engine — how it is served, its wire
-  protocol, the one client, three tools, the schema registry, three shadow
-  seams, the eval arm, and the measurements that say rank with it and do not
-  gate on it.
+  protocol, the one client, three tools, the recall ranker, the schema
+  registry, four shadow seams, the voice addressee gate, and the measurements
+  that say rank with it and do not gate on it.
 type: reference
 status: implemented
-date: 2026-09-21
+date: 2026-09-25
 ---
 
 # djev — the structured-decision engine on GPU 2
@@ -48,16 +51,18 @@ routes a turn to it. That stays true.
  └────────────────▲────────────────┘
                   │
       app/djev.py — the one client: ask · ask_sync · rank; None on any failure
-        ▲                    ▲                           ▲
- agent_mcp/djev.py     app/djev_shadow.py          agent_mcp/vault.py
- djev_rank             bounded queue → worker      RECALL_DJEV_RERANK (off)
- djev_decide           → shadow.jsonl              ← eval/run_eval.py --djev-rerank
- djev_status              ▲       ▲        ▲
-                        rerank  dedupe  entity    3 seam sites; rerank only
-                                                  under the qmd kill switch
+        ▲                 ▲                      ▲                       ▲
+ agent_mcp/djev.py   agent_mcp/vault.py     app/djev_shadow.py      voice/addressee.py
+ djev_rank           RECALL_RERANKER="djev" bounded queue → worker  enforce: P(addressed)
+ djev_decide         orders every recall    → shadow.jsonl          ≥ 0.7, else drop
+ djev_status         (§8.1); cross-encoder     ▲      ▲      ▲      ▲  (§6.5, the one gate)
+ (the model's        is the fallback        rerank dedupe entity action_review
+  own calls, §9.1)                          (dark  (aggr.) (sweep) (backend,
+                                            §6.1)                  worker turns)
 
  eval/djev/schemas.py   frozen question shapes, floors, thresholds, gate_ready
- eval/djev/replay.py    calibration against recorded corpora
+ eval/djev/replay.py    calibration against recorded corpora, and the eval replay
+ eval/djev/calibration_ladder.py   what a yes/no schema must pass before it may gate
 ```
 
 ---
@@ -95,9 +100,17 @@ instead of measuring:
 3. **`noul` is not automatically safer than `choice`.** The yes/no form has no
    option list to order, and it measured *worst*. Pick framings by measurement.
 4. **So ranking, ordering and shortlisting are safe today, and a yes/no gate
-   ships with a calibrated threshold or not at all.** Nothing in this round
-   gates anything: `Schema.gate_ready` is False on all five schemas, and each
-   carries a `gate_blocked_reason`.
+   ships with a calibrated threshold or not at all.** No registry schema
+   gates anything: `Schema.gate_ready` is False on all six, and each carries a
+   `gate_blocked_reason`.
+
+**One production path does gate on djev, outside the registry**: the voice
+addressee judge (§6.5, 2026-09-24). Past the short follow-up window of a voice
+conversation it drops an utterance whose P(addressed) is under a fixed 0.7. It
+was measured on 46 labelled cases, not on the ladder §9.4 describes, and its
+question lives in its own module rather than in `eval/djev/schemas.py`. What
+makes it tolerable is its direction: a `None` or a "no" is a drop, which is
+what that zone did before djev existed.
 
 ---
 
@@ -195,11 +208,13 @@ the sampler transient.
   starts or stops `agent-djev` to match it at backend boot. That is why the
   program is `autostart=false`: with `autostart=true`, supervisord would load
   17.6 GiB onto GPU 2 at every boot and the backend would kill it seconds
-  later. Every process reads config.yaml once, at boot, and the tools and two
-  of the three seams live in the aggregator. So to change it, edit the flag and
-  run `round restart` (both legs). A backend-only restart stops the engine
-  while the aggregator keeps calling it and writing `djev: null` rows. The
-  entity sweep picks the flag up on its next run.
+  later. Every process reads config.yaml once, at boot. The tools, the recall
+  ranker and the `rerank` and `dedupe` seams live in the aggregator; the
+  `action_review` seam lives in the backend; the addressee judge lives in
+  `lloyd-agent-worker`. So to change it, edit the flag and run `round restart`
+  (both legs), and restart `lloyd-agent-worker` for voice. A backend-only
+  restart stops the engine while the aggregator keeps calling it and writing
+  `djev: null` rows. The entity sweep picks the flag up on its next run.
 - **GPU 2 holds djev or the secondary, never both.** `secondary_enabled` and
   `djev.enabled` are an either/or. With both true, `server.py` stops both
   programs and logs an ERROR — but that arbitrates the *config file*, not the
@@ -217,8 +232,17 @@ the sampler transient.
 - **A tuning change** is an edit to `agent-djev.conf`, then `supervisorctl
   reread` and `update`. `update` restarts a changed program itself, so a
   `restart` after it boots the engine a second time. Unlike the primary, djev is not a
-  `round restart` leg. Nothing in production waits on it, so a restart costs
-  advice only.
+  `round restart` leg. What waits on it is the recall (which falls back to the
+  cross-encoder, §8.1) and the voice addressee zone (which drops, §6.5), so a
+  restart costs speed and conversation reach, not correctness.
+- **A worker turn may not restart or hand-boot it.** `start-djev.sh` is one of
+  the supervised launchers `app/harness/service_control.py` refuses for
+  background sessions (#1363), because hand-booting it with a bespoke
+  environment is a production engine restart. A chat session is not refused.
+- **An attended trial runs from an uncommitted `agent-djev.conf`.** The #1477
+  upstream trial (§7.1) did exactly that and restored the committed conf byte
+  for byte. The committed conf is what this section describes; `git status` on
+  that file is the check that production is on it.
 
 ---
 
@@ -300,7 +324,9 @@ them (§4):
 - **The server's default is `samples: "auto"`, and it is all or nothing.** It
   takes one read. If any question's first-read entropy is above
   `auto_threshold` 0.1, it takes `auto_max − 1` (3) more at once, so a chunk
-  costs 1 read or 4. The client sends no `samples`, so it gets that default.
+  costs 1 read or 4. A caller that passes no `samples` gets that default; the
+  recall ranker passes `samples=1` (§8.1), and the tools pass one only when the
+  model does.
   The call above took four reads in 156 ms, and the first live shadow rows
   have a median of ~160 ms for 1–3 questions. The ~40 ms figure in §7.1 is
   `samples=1`.
@@ -331,11 +357,12 @@ httpx appears only behind the function-local import in `ask()`.
 |---|---|
 | `ask_sync(state, questions, *, timeout=15, seam="", floor=None, samples=None, instructions=None, seed=None)` | `Answers` or `None` |
 | `ask(...)` | the async twin, for callers already on the event loop. A tool handler calling `ask_sync` on the loop would block it for as long as the engine takes |
-| `rank(query, candidates, *, timeout, seam="rank", floor, levels)` | `[{index, score, label, confidence, label_mass, argmax_is_label, low_trust}]` best first, `[]` for no candidates, or `None`. **Raises** `ValueError` above 16 candidates |
+| `rank(query, candidates, *, timeout, seam="rank", floor, levels, chars=1200, samples=None, max_n=16)` | `[{index, score, label, confidence, label_mass, argmax_is_label, low_trust}]` best first, `[]` for no candidates, or `None`. **Raises** `ValueError` above `max_n` candidates, and on a `max_n` past `CANVAS_CHUNK_QUESTIONS` (32). The recall ranker is the one caller that raises it to 32 (§8.1) |
 | `rank_questions(candidates, levels)`, `rank_state(query, candidates, chars=1200)` | the question map (`c0`…`cN`) and canvas state a ranking sends, shared with the shadow seam |
 | `enabled()`, `structured_url()` | the slot switch (through `llm_slots`) and `djev.structured_url` |
 | `reachable(timeout=2)` | a live `GET /health`. Never called from `list_tools()` |
-| `stats()` | call counts per outcome, and a 64-call latency ring per seam. Offline |
+| `stats()` | call counts per outcome, and a 64-call latency ring per seam. Offline, and per process: the voice worker's `voice:addressee` ring is not visible from `djev_status` |
+| `replay_env(path, arm, anchor)`, `replay_stats(path)` | the eval replay (§8.2): the environment one arm runs under, and what each arm reused, drew fresh or failed |
 
 Constants: `DEFAULT_TIMEOUT_S` 15 (the server's own upstream read is 600 s and
 has no 504, so this is the only bound on a wedged engine), `RANK_DEFAULT_N` 12,
@@ -347,7 +374,7 @@ ordered worst to best, because `score` is an expected value over the level
 **Three-valued, like `semantic_candidates`.** `ask` and `ask_sync` return
 `None` on any failure: unreachable, non-200, malformed, empty, or the slot
 switched off. Never `[]`, never an exception. (`rank` adds two cases of its
-own: `[]` for no candidates, and `ValueError` above 16.) A caller must be able to tell "djev had no opinion" from
+own: `[]` for no candidates, and `ValueError` above `max_n`.) A caller must be able to tell "djev had no opinion" from
 "djev did not answer", because only the first is evidence. Every caller in the
 tree treats `None` as "carry on unchanged".
 
@@ -486,7 +513,13 @@ every pair schema, so dedupe, entity and clusters cannot drift apart in how
 they present a pair. `BY_SEAM` maps a seam to its schema. A seam with no
 schema still records, with an empty `schema` hash and no floor.
 `tests/test_djev_schemas.py::test_every_live_seam_has_a_schema` covers only the
-names in `djev_shadow.SEAMS`, so a new seam must be added there too.
+names in `djev_shadow.SEAMS`, so a new seam must be added there too. The voice
+addressee question (§6.5) is in neither: it is a frozen dict in its own module.
+
+The `entity` threshold's two sources are no longer both on disk. The 150 gate
+verdicts it was fitted on still exist; the 151 human-verified bad merges it was
+checked against (§7.2) were lost in the 2026-09-22 wipe, before the hourly
+snapshots began (#1478).
 
 **"The seam's shape" means the batch size, not the prompt.** `pair_state` is
 shared, but the text around it is not. The dedupe seam appends " (Item B is
@@ -553,8 +586,11 @@ is being appended to. One row per decision:
 | `error` | instead of `djev`, when the seam's own callable raised |
 
 Counters (`djev_status`): `enqueued`, `dropped`, `written`, `errors`,
-`skipped`, plus `queue_depth`, `worker_alive`, `log_rows` and
-`pending_shutdown_drops`.
+`skipped`, plus `queue_depth`, `queue_max`, `worker_alive`, `log`, `log_rows`,
+`pending_shutdown_drops`, and `seam_log`: rows, newest row and `dark` per seam.
+The counters are per process. The aggregator's are what `djev_status` reports;
+the backend's (`action_review`) have no route, so the log's `seam_log` is the
+only view of that seam.
 
 ---
 
@@ -631,8 +667,11 @@ re-walks most. `actual` is the gate's `SAME`/`REVIEW` and each judge's vote.
 **This gate is one judge today, not two.** `default_judges()` adds the
 secondary only while `resolve_model_alias("secondary")` still returns
 `secondary`, and it has not since `secondary_enabled: false`. The "unanimity"
-rule is a single primary vote. djev as the restored *second* judge is the
-obvious follow-on round, and §7.2 is what that round has to beat.
+rule is a single primary vote. djev as the restored *second* judge was
+measured and not adopted (#1478, 2026-09-24): with the reverted set gone
+(§7.2) there is no ground truth left to show an advisory second vote helps,
+and against the gate's own verdicts no framing beat the plain one (AUC 0.914
+to 0.931 against 0.931).
 
 ### 6.4 Worker action review — `app/harness/action_review.py` (P10)
 
@@ -653,6 +692,45 @@ queue on shutdown (2 s bound), so a landing restart's losses are counted into
 `dropped_at_shutdown` as they are in the aggregator.
 The measurement and decision rule live in `architecture/harness.md`
 ("Review 2026-09-24", P10).
+
+**It has recorded nothing yet, and that is the pool, not the seam.** Measured
+2026-09-25 18:00Z: 0 `action_review` rows. The worker pool has been paused by an
+operator since before the seam landed (03:21Z that day), and the only worker
+traffic since was `bench_*` and `rpceval` sessions, which do not go through
+`/api/message/stream`. The same install and record path, driven in a scratch
+process against the live engine, wrote its row. Rows start when the pool
+resumes; a week of them is what P10's measurement needs.
+
+### 6.5 Voice addressee — `agent-services/voice/addressee.py` (a gate)
+
+The one place djev **decides** something in production (§1). A voice
+conversation has two zones after the wake word opens it: a short follow-up
+window where the locked speaker needs no wake word, and the rest of the open
+conversation, where every utterance was dropped before 2026-09-24. In the
+second zone, with `livekit.conversation.addressee: enforce`, the judge asks one
+`noul` — is the speaker's latest utterance directed at Lloyd? — over the
+utterance, Lloyd's last sentence, how long ago he said it and who is talking,
+and the utterance reaches the model only at P ≥ `addressee_threshold` (0.7).
+
+- **Measured, but not the way §9.4 asks.** 46 hand-labelled cases
+  (`scripts/voice/addressee_eval.py`): at 0.7, 22 of 24 addressed accepted and
+  0 of 22 non-addressed, precision 1.00 and recall 0.92; at 0.5, one false
+  accept. Every backchannel scored under 0.1. That is below the ladder's 200
+  labels, with no `label_mass` floor, no schema hash and no `SchemaDrift` check.
+  The module's own comment says a changed word is a re-measurement.
+- **Fails closed, to the old behaviour.** A `None` (engine down, slow, or the
+  slot off) is a drop, which is what the zone did before the judge existed. The
+  follow-up window never asks djev, so a wrong answer can only cost what
+  conversation mode added.
+- **Latency p50 630 ms** in that zone only, under a 1.5 s client timeout. It
+  competes with the recall ranker for a `MAX_SEQS=1` engine (§5.3, §7.1).
+- **It is not a shadow seam.** It calls `djev.ask` with `seam="voice:addressee"`,
+  which names its latency ring in the voice worker's own process, and it writes
+  nothing to `shadow.jsonl`. The worker logs each drop with its P
+  (`conversation: … (addressee p=…) — dropped`); an accepted utterance simply
+  becomes a turn.
+  `architecture/voice.md` ("The gate", "Conversation mode") is the long
+  version.
 
 ---
 
@@ -757,8 +835,12 @@ scores.
 
 Four things to take from that table:
 
-- **Only `reverted` is ground truth.** Everything else measures agreement with
-  another model, and a 0.94 AUC against a judge is not accuracy.
+- **Only `reverted` is ground truth, and it is gone.** Everything else
+  measures agreement with another model, and a 0.94 AUC against a judge is not
+  accuracy. The 151 bad merges (`entity-merges-reverted-*.json`) were lost in
+  the 2026-09-22 wipe, before the hourly snapshots began, and `replay.py
+  --corpus reverted` now returns nothing (#1478). The numbers in this table
+  stand as a record; the `reverted` row cannot be re-run.
 - **The threshold measured on ordinary pairs does not transfer to the hard
   ones.** On the 137 definition-carrying pairs of the 151 verified-bad merges,
   `acc@0.5` was 0.562, and **50 of 137 scored above 0.9** while `label_mass`
@@ -778,11 +860,14 @@ Four things to take from that table:
   sample is the truer one. Its reliability curve is plainly miscalibrated: the
   0.0–0.1 bin observed 0.338 and the 0.9–1.0 bin observed 0.690.
 
-**`edges` is the largest prize and the one to take next.** It is 1,183–3,817
-decisions a day, at two sequential primary calls each today. djev nearly
-doubles the majority-class floor at 34 ms a decision, and 35,802 labelled rows
-already exist. What is missing is a human-checked subset: 0.580 agreement with
-the v4 prompt is agreement, not correctness.
+**`edges` looked like the largest prize, and its first use found no signal.**
+It is 1,183–3,817 decisions a day, at two sequential primary calls each today,
+and djev nearly doubles the majority-class floor at 34 ms a decision. #1472
+tried the cheapest use of it, ordering the 26,090 never-judged `mentions` edges
+so a nightly cycle upgrades more of them, on 400 balanced v4 judgments: AUC
+0.469 and 0.553 for the two state shapes tried. No change. What is still missing is a
+human-checked subset: 0.580 agreement with the v4 prompt is agreement, not
+correctness.
 
 ### 7.3 The floors, and why one of them is unset
 
@@ -815,13 +900,34 @@ rows are the seam's own requests on the seam's own corpus, so they set this
 one. `eval/djev/replay.py --floors` prints the distribution as it accumulates.
 Read §11 before trusting it.
 
+### 7.4 djev reads option names, not only their order (#1452, 2026-09-24)
+
+§1 measured order. This measures names: the same prompt with each option's
+description kept and its NAME changed, argmax only, on a pinned 38-prompt
+corpus of the four production shapes (`eval/djev/name_prior_corpus.jsonl`,
+`eval/djev_name_prior_probe.py`, report `eval/djev/name_prior_2026-09-24.json`).
+
+| variant | flips of the winning description | rate [Wilson 95%] | above the repeat floor |
+|---|---|---|---|
+| identical repeat | 0 / 38 | 0.00 [0.00, 0.09] | — |
+| nonce names | 6 / 38 | 0.16 [0.07, 0.30] | no |
+| inverted names | 14 / 38 | **0.37 [0.23, 0.53]** | **yes** |
+
+Giving an option the name of its opposite moves the answer on a third of
+prompts; the 10-way `edges` shape moved most (7 of 10). Meaningless names did
+not clear the floor. So the name is part of the frozen schema, like the order,
+and a name that says the opposite of its description is a defect a hash cannot
+see.
+
 ---
 
 ## 8. Adoption: the arm, not the log
 
 `RECALL_DJEV_RERANK = False` in `agent_mcp/vault.py`, with
-`RECALL_DJEV_RERANK_TOP = 12`. `vault_recall` also takes `djev_rerank` and
-`djev_rerank_top` per call. `eval/run_eval.py --djev-rerank` passes the flag,
+`RECALL_DJEV_RERANK_TOP = 12`. `djev_rerank` and `djev_rerank_top` are in
+`RECALL_EVAL_KNOBS`: read from params in process only, stripped by `call_tool`
+from any tool call, and absent from the schema; a caller that sets one is told
+so in the result. `eval/run_eval.py --djev-rerank` passes the flag,
 and `build_run_config` records `matches_production_defaults: false` for such a
 run, so a djev-reranked baseline never compares as production's by accident.
 With the arm on, only the head of the pool is reordered, and the tail keeps
@@ -904,7 +1010,12 @@ has to match it (Alan: equal accuracy plus throughput is a win).
   scores behind it do not repeat (§8.2).
 - **Deployed shape:** global fusion's 20-row head + floors 2/2/2 for autonomy,
   architecture and skills, cross-encoder off, `rank(chars=160, samples=1,
-  max_n=32, timeout=4)`, seam `recall_rank`. Against the cross-encoder path on
+  max_n=32, timeout=4)`, seam `recall_rank` (`RECALL_DJEV_HEAD`, `_FLOOR`,
+  `_POOL`, `_CHARS`, `_SAMPLES`, `_TIMEOUT_S`). Each row is the title and qmd's
+  snippet through `strip_qmd_snippet` (#1467, 2026-09-25): unstripped, qmd's
+  diff header and line prefixes left ~40 of the 160 characters for document
+  text, and stripping them gave NDCG@10 +0.036 [+0.001, +0.075] as a pure
+  reorder (§13). Against the cross-encoder path on
   one pin: doc_hit 0.517 vs 0.494, MRR 0.256 vs 0.201, NDCG 0.275 vs 0.234,
   doc_recall 0.357 vs 0.361. Every paired interval includes zero, and p50 is
   0.52 s vs 2.18 s.
@@ -934,6 +1045,15 @@ the structured server's own body for one 32-row recall rank:
   3090) or TRITON_ATTN. The bisect is #1357, and it needs djev down for about
   two minutes a variant.
 
+**Resolved 2026-09-24 (#1361): `BATCH_INVARIANT=1` repeats exactly.** Measured
+in production's shape (a seeded canvas, one read,
+`eval/djev/seeded_canvas_probe.py`), the incumbent moved 0–0.37 nats warm and
+1–2.2 cold, and batch-invariant mode read 0.0000 in both. No single kernel was
+the cause; the fix is the mode as a whole. It shipped the same day at +26 ms
+recall p50 and 81,920 context, down from 131,072 (§2.2;
+`eval/djev/kernel_bisect_2026-09-24.md`). The unseeded probe the item was filed
+with can never read zero, because an unseeded canvas is drawn from an RNG.
+
 For a recall this costs little: the top result is stable. For a paired eval it
 is fatal, because two arms running the same code ask djev the same questions
 and get different answers. On 2026-09-21 the regression check rolled back two
@@ -944,6 +1064,8 @@ asked is answered from its answer, a request only this arm asks is drawn fresh
 and counted, and a failure is counted and never stored. The regression check
 reads those counts to pick its noise floor and to refuse an arm djev did not
 answer (`architecture/automod.md` §8.1b). Production never sets the variable.
+The replay stays after #1361: it costs nothing, and any boot without
+`BATCH_INVARIANT=1` (an attended trial, a bisect arm) brings the noise back.
 
 ---
 
@@ -989,7 +1111,7 @@ elif out.cross_chunk or out.uninformative:
 else:
     a = out["severity"]              # Answer: value, label, confidence, label_mass, low_trust
 
-rows = djev.rank(query, shortlist)   # ≤16 candidates, else ValueError; None on failure
+rows = djev.rank(query, shortlist)   # ≤16 (max_n, at most 32), else ValueError; None on failure
 ```
 
 - Name a `seam` on every call. It is how `djev_status` reports latency per
@@ -1013,7 +1135,7 @@ rows = djev.rank(query, shortlist)   # ≤16 candidates, else ValueError; None o
 4. If a replay corpus exists, calibrate against it **at the seam's own request
    shape**: `replay.py --corpus <c> --batch <decisions per canvas the seam
    sends>`. Write the threshold, the floor, `calibrated_on` and
-   `calibrated_hash` into the schema by hand, as the existing five do.
+   `calibrated_hash` into the schema by hand, as the calibrated ones do.
 5. Let the shadow rows accumulate, then set the floor from them
    (`replay.py --floors`) — **after** quarantining the fixture rows still in
    the log from before #1324 landed (§11), or the floor is a floor set from
@@ -1038,8 +1160,15 @@ The measurement half of that list is `eval/djev/calibration_ladder.py`
 acceptance at error rate `alpha`, reporting the error among accepted rows and
 the abstain rate on a held-out split. It refuses under 200 human labels. The
 dedupe seam's 240 unlabelled pairs, drawn from its own non-fixture shadow rows,
-are at `~/lloyd-data/eval/djev/dedupe-labels-1479.jsonl`; a person fills
-`label` with `same`, `different` or `unsure`.
+are at `~/lloyd-data/eval/djev/dedupe-labels-1479.jsonl`.
+
+**They are labelled, and dedupe cannot climb yet.** All 240 carry a label: 230
+`different`, 7 `unsure`, 3 `same`. The ladder's first run put all three
+positives outside the fitting split and Platt diverged (every test row
+abstained). `cf6b572b` stratifies the splits and refuses a class under
+`MIN_PER_CLASS` (20), so the ladder now says so instead of fitting. A dedupe
+gate needs positives the seam's traffic barely produces: at 3 in 240, about
+1,600 labelled rows to reach 20.
 
 ### 9.5 Switches
 
@@ -1051,6 +1180,9 @@ are at `~/lloyd-data/eval/djev/dedupe-labels-1479.jsonl`; a person fills
 | recording in one process | `LLOYD_DJEV_SHADOW=0` |
 | the tools | `mcp_servers.lloyd-mcp.disabled_tools: [djev_rank, …]` |
 | the rerank arm | it is off: `RECALL_DJEV_RERANK = False` |
+| djev as the recall's ranker | `RECALL_RERANKER = "qmd"` in `agent_mcp/vault.py` (the cross-encoder takes over, and the `rerank` seam wakes) |
+| the action reviewer | `harness.action_review.mode: off` |
+| the voice addressee gate | `livekit.conversation.addressee: shadow` (log only, the zone drops) or `off`, then restart `lloyd-agent-worker` |
 
 ---
 
@@ -1067,7 +1199,9 @@ tail -f ~/lloyd-data/logs/services/agent-djev.log
 
 # calibrate against a recorded corpus
 .venvs/lloyd/bin/python eval/djev/replay.py --corpus clusters --limit 200 --balance --swap-probe
-.venvs/lloyd/bin/python eval/djev/replay.py --corpus reverted --limit 151
+# (--corpus reverted returns nothing since the 2026-09-22 wipe, §7.2)
+.venvs/lloyd/bin/python eval/djev/calibration_ladder.py --help   # §9.4
+.venvs/lloyd/bin/python eval/djev_name_prior_probe.py --help     # §7.4
 .venvs/lloyd/bin/python eval/djev/replay.py --floors      # from the shadow log
 
 # the adoption arm
@@ -1091,7 +1225,13 @@ merely add noise. It serializes in front of every read, and the whole table
 shifts.
 
 Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
-`test_djev_schemas.py`, `test_djev_shadow.py`, `test_djev_rerank_arm.py`.
+`test_djev_fast_decisions.py`, `test_djev_schemas.py`, `test_djev_shadow.py`,
+`test_djev_shadow_isolation.py`, `test_djev_rerank_arm.py`,
+`test_recall_djev_ranker.py`, `test_djev_replay.py`,
+`test_djev_calibration_ladder.py`, `test_djev_name_prior_probe.py`,
+`test_djev_determinism_probe.py`, `test_djev_doc_claims.py`,
+`test_start_djev_flags.py`, `test_agent_djev_supervisor_semantics.py`,
+`test_action_review.py`.
 
 | Path | Holds |
 |---|---|
@@ -1099,16 +1239,21 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
 | `app/djev_shadow.py` | the shadow recorder |
 | `app/llm_slots.py` | the slot switch shared with the secondary |
 | `agent_mcp/djev.py` | the three tools |
-| `agent_mcp/vault.py`, `agent_mcp/backlog.py`, `scripts/memory/entity_semantic_gate.py` | the three seams |
+| `agent_mcp/vault.py` | the recall ranker (§8.1), the rerank arm and the `rerank` seam |
+| `agent_mcp/backlog.py`, `scripts/memory/entity_semantic_gate.py`, `app/harness/action_review.py` | the `dedupe`, `entity` and `action_review` seams |
+| `agent-services/voice/addressee.py`, `scripts/voice/addressee_eval.py` | the voice addressee gate and its labelled eval (§6.5) |
+| `prompt_builder.py` | the "Fast decisions" paragraph (§9.1) |
+| `app/harness/service_control.py` | refuses a background turn's restart or hand-boot of the engine |
 | `scripts/service_health_check.py` | `SERVICES["agent-djev"]` declares `"port": 8011`, so a supervisor `RUNNING` line with no listener behind it shows up as a red probe, and `_switched_off()` reads `llm_slots.slots()` so a `djev.enabled: false` verdict is not an outage |
-| `eval/djev/schemas.py`, `eval/djev/replay.py` | the registry, and calibration |
+| `eval/djev/schemas.py`, `eval/djev/replay.py`, `eval/djev/calibration_ladder.py` | the registry, calibration, and the gate ladder |
+| `eval/djev_name_prior_probe.py`, `eval/djev/seeded_canvas_probe.py`, `scripts/djev_determinism_probe.py` | the name-prior probe (§7.4) and the two repeat probes (§8.2) |
 | `agent-services/bin/start-djev.sh`, `agent-services/setup/setup-djev.sh`, `agent-services/bin/bench-djev.py` | serving, setup, the bench |
 | `agent-services/supervisor/conf.d/agent-djev.conf` | the program and every tuning knob |
 | `~/.local/state/lloyd-djev/` | `shadow.jsonl`, `dropped_at_shutdown.json` |
 
 ---
 
-## 11. Known gaps (2026-09-20)
+## 11. Known gaps (2026-09-20, re-checked 2026-09-25)
 
 - **`SchemaDrift`'s message names `replay.py --calibrate`, which does not
   exist.** Calibration is `--corpus <c> --batch <n>` and a hand edit (§9.3).
@@ -1121,9 +1266,16 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
   defaults to 1, which is wrong: omitted, it is `"auto"`.
 - **Engine contention** between shadow reads and tool calls (§5.3). It is
   harmless while every consumer is advisory.
-- **Scores do not repeat across identical requests** (§8.2, #1357). Evals
-  that compare arms must replay (`app.djev.replay_env`), or they measure djev's
-  noise as the change.
+- **Scores repeat only while `BATCH_INVARIANT=1` is on** (§8.2). Production
+  boots with it; an attended trial or a bisect arm may not. Evals that compare
+  arms still replay (`app.djev.replay_env`).
+- **The voice addressee gate sits outside the registry** (§6.5): a fixed 0.7
+  measured on 46 cases, no floor, no hash check. It fails closed to the old
+  behaviour, which is why it is tolerable, not why it is finished.
+- **No ground truth remains for `entity`** (§7.2). Any future entity gate needs
+  a new human-checked set.
+- **The `action_review` seam has no rows** (§6.4), because the pool has been
+  paused since it landed.
 
 ### Closed 2026-09-21 — test runs wrote to production's shadow log (#1324)
 
@@ -1191,6 +1343,8 @@ titles), never by taking the last 63. Until that happens any floor read by
 `wc -l ~/.local/state/lloyd-djev/shadow.jsonl` across a full-suite run should
 move only with production traffic.
 
+Re-counted by that rule on 2026-09-25: 65 rows of 346, still in the log.
+
 ---
 
 ## 12. Rules, short form
@@ -1199,6 +1353,8 @@ move only with production traffic.
   schema, option order included, once calibrated.
 - Order-averaging is not the fix, and `noul` is not automatically safer than
   `choice`. Pick framings by measurement.
+- Option names are read, not only their order (§7.4). Name each option for
+  what its description says, and freeze the name with the schema.
 - Never sort a ranking across canvas chunks.
 - Surface `label_mass` everywhere, and set its floor from data **of the same
   request shape**.
@@ -1211,9 +1367,12 @@ move only with production traffic.
 - djev stays out of `models:` and out of `resolve_model_alias`.
 - djev orders the vault recall (#1336); qmd's cross-encoder is its fallback,
   and the fallback is counted, never silent.
-- djev's scores do not repeat. An eval that compares two arms replays its
-  answers per request (§8.2), and never takes djev down while a regression
-  check holds `regression.lock`.
+- djev's seeded reads repeat only under `BATCH_INVARIANT=1`. An eval that
+  compares two arms replays its answers per request anyway (§8.2), and never
+  takes djev down while a regression check holds `regression.lock`.
+- A gate on djev is the exception and has to say so where it lives. Today
+  there is one, the voice addressee (§6.5), and it fails closed to the
+  behaviour it replaced.
 
 ## 13. Research pass 2026-09-24 — where else djev can earn its card
 
@@ -1293,6 +1452,25 @@ keeps the findings that should not be re-derived.
   (2608.00824); complete-list fusion (2608.07152); a tuned convex α beats RRF
   from a handful of labels (2210.11934). All fork work (#1475).
 
+**What became of them** (re-checked 2026-09-25). Two landed, one is fork work
+that landed, one is open, and nine were measured and closed `rejected`:
+
+| item | idea | outcome |
+|---|---|---|
+| #1467 | strip qmd's diff formatting from the ranked row | **landed** `3647eeae`: NDCG@10 +0.036, a pure reorder, faster |
+| #1468 | binary relevance rows (DiffuRank) | rejected: ~10 ms faster, ranks clearly worse |
+| #1469 | a FIRST-style top-1 `choice` row | rejected: disagreed with the score rows on 55/86 and was worse when it did |
+| #1470 | djev orders the facts leg | rejected: one query better in 86, +280 ms |
+| #1471 | grow the gold set from real recalls | rejected: 6 usable recalls in the whole retained history |
+| #1472 | rank the `mentions` backlog | rejected: AUC 0.47 and 0.55, no signal (§7.2) |
+| #1473 | droppability ordering for compaction | rejected: ~6% less re-prefill, planted fact cleared more often |
+| #1474 | anchored or sequential chunks past 32 rows | rejected: more documents found, head ordered worse, ~0.5 s slower |
+| #1475 | qmd fork first-stage changes | **landed** in the fork: complete-list fusion at depth 100 |
+| #1476 | djev generates for the ex-secondary jobs | rejected: equal score, worse spoken form, slower than an idle primary |
+| #1477 | rebuild on the 2026-09-23 upstream | open: trialled 2026-09-25 and not adopted (§7.1) |
+| #1478 | djev as cluster pair judge and entity second vote | rejected: no ground truth left to show a gain (§6.3) |
+| #1479 | the calibration ladder | **landed** `a0cb33de` + `cf6b572b`; dedupe cannot climb it yet (§9.4) |
+
 **Not filed, on purpose.** Per-turn tool shortlisting (the catalog sits in the
 KV-cached position-0 prefix; a per-turn subset makes every prefix unique). An
 Inner Voice pre-screen (296 calls a week). Rewrite selection (oracle ceiling
@@ -1301,6 +1479,17 @@ is causal, last-token pooled). Attention-based in-context reranking (ICLR 2025)
 fits a bidirectional model but needs attention read out of the vLLM patch.
 
 ## Review log
+
+- **2026-09-25 — refreshed against HEAD `cd72bc92`.** Checked the client,
+  tools, schemas, recorder, seams, config and committed conf against the tree
+  and the live log. Added what had landed with no line here: the voice
+  addressee gate (§6.5), the name-prior result (§7.4), #1361's resolution of
+  the repeat problem (§8.2), #1467's row strip (§8.1), the ladder's labels and
+  first run (§9.4), and the outcomes of #1467–#1479 (§13). Corrected what had
+  gone stale: `rank`'s signature, the per-call arm knobs (now eval-only), the
+  lost `reverted` corpus, the #1478 second-judge verdict, the `edges` claim
+  (#1472), the counters, the seam and consumer tables, and the test list.
+  Recorded that `action_review` has no rows because the pool is paused.
 
 - **2026-09-21 — #1324 closed, and the entry below is superseded on this
   point.** It recorded "§11's fixture counts … with the leak still live
