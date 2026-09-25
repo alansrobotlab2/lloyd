@@ -192,3 +192,26 @@ The harness also carries its own unit suite *inside the package*, at
 `test_tool_search.py`, `test_loop_tool_search.py`, `test_harness_unit.py`.
 Both directories run under `pytest`; a change to `loop.py` usually breaks
 something in the second one first.
+
+## Review 2026-09-24
+
+### D9 — one anchor per iteration; no orphaned tool calls; Stop during prefill
+
+- **A retried iteration runs its head once.** The overflow and multimodal
+  recoveries `num_turns -= 1; continue`, which re-entered the loop head with
+  the same iteration number, so the notification drain and the state anchor
+  ran again and a second copy of the anchor was appended onto a prompt being
+  retried *because* it was too big. `prelude_done_for` in `run_query` records
+  the iteration whose head already ran. `test_state_anchor.py` pins `[1, 2]`.
+- **Cancelling the dispatcher cancels the MCP call.** `asyncio.wait` does not
+  cancel what it waits on; `_execute_tool_call` now cancels `tool_task` on any
+  `BaseException` from the wait (a generator closed mid-batch, the pool's
+  `wait_for`) and still cancels the cancel-watcher in `finally`.
+  `test_dispatch_split.py::test_cancelling_the_dispatcher_cancels_the_pool_call`.
+- **Stop lands mid-prefill.** `client.stream_chat` checked `cancel_event`
+  only after a line arrived, and a 200k-token prefill emits no line for as
+  long as it takes. `_next_line` races every read against one
+  `cancel_event.wait()` task for the stream; a cancel leaves `cli.stream`,
+  which closes the connection and aborts the request in vLLM.
+  `chunk_timeout_s` still bounds only the gap after the first line.
+  `test_stream_stall.py::test_a_cancel_during_prefill_ends_the_stream_promptly`.

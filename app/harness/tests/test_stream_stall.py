@@ -158,3 +158,69 @@ def test_config_key_reaches_run_options():
     )
     opts = RunOptions(model="primary", **kwargs)
     assert opts.stream_chunk_timeout_s > 0
+
+
+# ---------------------------------------------------------------------------
+# D9: Stop during prefill. The cancel used to be checked only after a line
+# arrived, so while the engine prefilled — no bytes for as long as a 200k
+# prompt takes — Stop did nothing until the first token.
+# ---------------------------------------------------------------------------
+
+async def _drain_with_cancel(cancel_after: float, **kw) -> tuple[list, float]:
+    cancel = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    loop.call_later(cancel_after, cancel.set)
+    t0 = loop.time()
+    out = [c async for c in stream_chat(
+        base_url="http://127.0.0.1:9",
+        model="primary",
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        extra_body=None,
+        cancel_event=cancel,
+        timeout_s=30.0,
+        **kw,
+    )]
+    return out, loop.time() - t0
+
+
+def test_a_cancel_during_prefill_ends_the_stream_promptly(monkeypatch):
+    _install(monkeypatch, [
+        (5.0, _chunk("first token after a long prefill")),
+        (0.0, "data: [DONE]"),
+    ])
+    chunks, elapsed = asyncio.run(_drain_with_cancel(0.1, chunk_timeout_s=0.05))
+    assert chunks == []
+    assert elapsed < 1.0, f"Stop took {elapsed:.2f}s to land during prefill"
+
+
+def test_a_cancel_mid_stream_stops_between_lines(monkeypatch):
+    _install(monkeypatch, [
+        (0.0, _chunk("a")),
+        (2.0, _chunk("b")),
+        (0.0, "data: [DONE]"),
+    ])
+    chunks, elapsed = asyncio.run(_drain_with_cancel(0.1))
+    assert [c["choices"][0]["delta"]["content"] for c in chunks] == ["a"]
+    assert elapsed < 1.0
+
+
+def test_the_stall_deadline_still_fires_with_a_cancel_event_wired(monkeypatch):
+    """Racing the cancel must not swallow the between-lines deadline."""
+    _install(monkeypatch, [
+        (0.0, _chunk("hello")),
+        (0.30, _chunk(" world")),
+    ])
+    with pytest.raises(StreamStalledError) as exc:
+        asyncio.run(_drain_with_cancel(10.0, chunk_timeout_s=0.05))
+    assert exc.value.lines_seen >= 1
+
+
+def test_a_cancel_event_that_never_fires_changes_nothing(monkeypatch):
+    _install(monkeypatch, [
+        (0.20, _chunk("late")),
+        (0.0, _chunk("more")),
+        (0.0, "data: [DONE]"),
+    ])
+    chunks, _ = asyncio.run(_drain_with_cancel(10.0, chunk_timeout_s=0.05))
+    assert len(chunks) == 2

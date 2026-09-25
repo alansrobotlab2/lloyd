@@ -234,3 +234,97 @@ def test_a_raising_sink_neither_drops_the_anchor_nor_ends_the_turn(monkeypatch):
     assert len(captured) == 3, "the loop kept going past the failed record"
     assert any("REMINDER" in str(m.get("content")) for m in captured[0])
     assert events[-1]["type"] == "result"
+
+
+# ---------------------------------------------------------------------------
+# D9: a retried iteration is not a new iteration. The overflow and multimodal
+# recoveries `num_turns -= 1; continue`, which re-entered the loop head with
+# the same number and appended a second anchor onto a prompt being retried
+# because it was too big.
+# ---------------------------------------------------------------------------
+
+class _RaiseFirstThen(_Script):
+    """Raises `exc` on the first request, then plays `turns` in order."""
+
+    def __init__(self, exc: Exception, turns):
+        super().__init__(turns)
+        self.exc = exc
+        self.raised = False
+
+    def __call__(self, **kwargs):
+        if not self.raised:
+            self.raised = True
+            return self._raise()
+        return super().__call__(**kwargs)
+
+    async def _raise(self):
+        raise self.exc
+        yield  # pragma: no cover - makes this an async generator
+
+
+def _anchor_recording():
+    seen: list[int] = []
+
+    async def anchor(iteration: int) -> list[dict[str, Any]]:
+        seen.append(iteration)
+        return [{"role": "user", "content": f"<anchor>{iteration}</anchor>"}]
+    return seen, anchor
+
+
+def _anchor_copies(msgs: list[dict], iteration: int) -> int:
+    tag = f"<anchor>{iteration}</anchor>"
+    return sum(1 for m in msgs if m.get("content") == tag)
+
+
+def test_an_overflow_retry_does_not_re_anchor_the_same_iteration(monkeypatch):
+    from app.harness.errors import ContextOverflowError
+
+    script = _RaiseFirstThen(
+        ContextOverflowError("prompt too long", requested_input_tokens=300_000),
+        [("a", TC), ("done", [])],
+    )
+    seen, anchor = _anchor_recording()
+    captured = _run(monkeypatch, script, anchor)
+
+    assert seen == [1, 2], seen
+    assert _anchor_copies(captured[0], 1) == 1, captured[0]
+    assert _anchor_copies(captured[1], 1) == 1
+
+
+def test_a_multimodal_retry_does_not_re_anchor_the_same_iteration(monkeypatch):
+    from app.harness.errors import MultimodalRejectedError
+
+    script = _RaiseFirstThen(
+        MultimodalRejectedError("primary refused image input"),
+        [("a", TC), ("done", [])],
+    )
+    seen, anchor = _anchor_recording()
+    captured = _run(monkeypatch, script, anchor)
+
+    assert seen == [1, 2], seen
+    assert _anchor_copies(captured[0], 1) == 1, captured[0]
+
+
+def test_a_retried_iteration_does_not_drain_notifications_twice(monkeypatch):
+    """The drain is the other half of the head; it is skipped on a retry too
+    (what it would find then, it finds on the next real iteration)."""
+    from app.harness.errors import ContextOverflowError
+
+    script = _RaiseFirstThen(
+        ContextOverflowError("prompt too long", requested_input_tokens=300_000),
+        [("done", [])],
+    )
+    drains: list[int] = []
+
+    async def drain():
+        drains.append(1)
+        return []
+
+    _patch_pool(monkeypatch)
+    monkeypatch.setattr("app.harness.loop.stream_chat", script)
+    opts = RunOptions(
+        model="primary", session_id="anchor-test", tool_search_enabled=False,
+        notification_drain=drain,
+    )
+    asyncio.run(_drain([{"role": "user", "content": "go"}], opts))
+    assert len(drains) == 1, drains

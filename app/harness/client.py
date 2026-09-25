@@ -40,6 +40,53 @@ from app.harness.tool_images import (
 
 logger = logging.getLogger("lloyd-harness-client")
 
+# What `_next_line` returns when the cancel won the race. A distinct object,
+# not `None` or `""`: an empty string is a real SSE line (the frame separator).
+_CANCELLED = object()
+
+
+async def _next_line(
+    lines: AsyncIterator[str],
+    cancel_wait: "asyncio.Future[Any] | None",
+    timeout: float,
+) -> Any:
+    """The next SSE line, or `_CANCELLED` if the cancel fired first (D9).
+
+    Checking `cancel_event` between lines, as this client used to, is inert
+    exactly while the model is prefilling: no line arrives for as long as a
+    200k-token prefill takes, so Stop did nothing until the first token. Here
+    every read races `cancel_wait` (one `cancel_event.wait()` task for the
+    whole stream, owned by the caller). `timeout` > 0 bounds the read and
+    raises `TimeoutError`; `StopAsyncIteration` passes through at end of
+    stream. The losing read is cancelled, never left running.
+    """
+    if cancel_wait is None:
+        if timeout > 0:
+            return await asyncio.wait_for(lines.__anext__(), timeout=timeout)
+        return await lines.__anext__()
+    if cancel_wait.done():
+        return _CANCELLED
+    read = asyncio.ensure_future(lines.__anext__())
+    try:
+        done, _ = await asyncio.wait(
+            {read, cancel_wait},
+            timeout=timeout if timeout > 0 else None,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    except BaseException:
+        read.cancel()
+        raise
+    if read in done:
+        return read.result()
+    read.cancel()
+    try:
+        await read
+    except (asyncio.CancelledError, Exception):
+        pass
+    if cancel_wait in done:
+        return _CANCELLED
+    raise TimeoutError
+
 
 async def stream_chat(
     *,
@@ -67,8 +114,9 @@ async def stream_chat(
     `ParseError` with the raw line attached so the caller can emit a
     `stream_raw` event before deciding whether to abort or continue.
 
-    Cancellation is checked between every line read; on cancel the
-    httpx context exits cleanly and vLLM aborts the request.
+    Cancellation races every line read, the wait for the first one
+    included, so Stop lands mid-prefill instead of at the first token; on
+    cancel the httpx context exits cleanly and vLLM aborts the request.
 
     `chunk_timeout_s` (0 disables) bounds the gap BETWEEN lines once the
     stream has started producing, raising `StreamStalledError`. It
@@ -152,39 +200,54 @@ async def stream_chat(
                     response=resp,
                 )
             # Manual iteration so each line read can carry its own
-            # deadline; `async for` gives no hook for that.
+            # deadline and race the cancel; `async for` gives no hook for
+            # either.
             lines = resp.aiter_lines().__aiter__()
             lines_seen = 0
-            while True:
-                try:
-                    if chunk_timeout_s > 0 and lines_seen:
-                        raw = await asyncio.wait_for(
-                            lines.__anext__(), timeout=chunk_timeout_s
+            cancel_wait = (
+                asyncio.ensure_future(cancel_event.wait())
+                if cancel_event is not None else None
+            )
+            try:
+                while True:
+                    try:
+                        raw = await _next_line(
+                            lines, cancel_wait,
+                            chunk_timeout_s if lines_seen else 0.0,
                         )
-                    else:
-                        raw = await lines.__anext__()
-                except StopAsyncIteration:
-                    break
-                except (asyncio.TimeoutError, TimeoutError):
-                    logger.warning(
-                        "stream_chat: no data for %.1fs after %d line(s) from %s",
-                        chunk_timeout_s, lines_seen, url,
-                    )
-                    raise StreamStalledError(chunk_timeout_s, lines_seen=lines_seen)
-                lines_seen += 1
-                if cancel_event is not None and cancel_event.is_set():
-                    logger.info("stream_chat: cancel_event set, breaking")
-                    break
-                if not raw:
-                    continue
-                if not raw.startswith("data: "):
-                    # Comments (": keep-alive") and other SSE control
-                    # frames — ignore.
-                    continue
-                data = raw[6:]
-                if data.strip() == "[DONE]":
-                    break
-                try:
-                    yield json.loads(data)
-                except json.JSONDecodeError as exc:
-                    raise ParseError(f"malformed SSE chunk: {exc}", raw=data)
+                    except StopAsyncIteration:
+                        break
+                    except (asyncio.TimeoutError, TimeoutError):
+                        logger.warning(
+                            "stream_chat: no data for %.1fs after %d line(s) from %s",
+                            chunk_timeout_s, lines_seen, url,
+                        )
+                        raise StreamStalledError(chunk_timeout_s, lines_seen=lines_seen)
+                    if raw is _CANCELLED:
+                        # Leaving `cli.stream` closes the connection, which is
+                        # what makes vLLM abort the request — mid-prefill too.
+                        logger.info(
+                            "stream_chat: cancel_event set after %d line(s), breaking",
+                            lines_seen,
+                        )
+                        break
+                    lines_seen += 1
+                    if cancel_event is not None and cancel_event.is_set():
+                        logger.info("stream_chat: cancel_event set, breaking")
+                        break
+                    if not raw:
+                        continue
+                    if not raw.startswith("data: "):
+                        # Comments (": keep-alive") and other SSE control
+                        # frames — ignore.
+                        continue
+                    data = raw[6:]
+                    if data.strip() == "[DONE]":
+                        break
+                    try:
+                        yield json.loads(data)
+                    except json.JSONDecodeError as exc:
+                        raise ParseError(f"malformed SSE chunk: {exc}", raw=data)
+            finally:
+                if cancel_wait is not None and not cancel_wait.done():
+                    cancel_wait.cancel()

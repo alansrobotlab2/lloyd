@@ -283,6 +283,14 @@ async def run_query(
         )
         _cap_history_reasoning(chat_messages, keep=keep_reasoning)
 
+        # The iteration whose head (notification drain + state anchor) has
+        # already run. The overflow and multimodal retries `num_turns -= 1;
+        # continue`, which re-enters the head with the SAME iteration number;
+        # running it again appended a second copy of the anchor (and re-fired
+        # its once-per-level bookkeeping) onto a prompt that was being retried
+        # precisely because it was too big (D9).
+        prelude_done_for = 0
+
         while True:
             num_turns += 1
             if num_turns > options.max_turns:
@@ -298,7 +306,9 @@ async def run_query(
             # model sees them on this iteration. The callback also
             # persists them into the session JSON so reconstruction on
             # subsequent turns stays consistent.
-            if options.notification_drain is not None:
+            prelude_due = prelude_done_for != num_turns
+            prelude_done_for = num_turns
+            if prelude_due and options.notification_drain is not None:
                 try:
                     drained = await options.notification_drain()
                 except Exception as exc:
@@ -316,7 +326,7 @@ async def run_query(
             # byte-stable or every iteration re-prefills the whole context.
             # These are NOT persisted — see RunOptions.state_anchor — so the
             # event each one writes here is the only record that it fired.
-            if options.state_anchor is not None:
+            if prelude_due and options.state_anchor is not None:
                 try:
                     anchors = await options.state_anchor(num_turns)
                 except Exception as exc:
@@ -2527,6 +2537,14 @@ async def _execute_tool_call(
                     {tool_task, cancel_task},
                     return_when=asyncio.FIRST_COMPLETED,
                 )
+            except BaseException:
+                # The dispatcher itself was cancelled (the generator closed
+                # mid-batch, the pool's wait_for fired) or the wait raised.
+                # `asyncio.wait` does not cancel what it waits on, so without
+                # this the MCP call ran on as an orphan task nobody awaits —
+                # a Bash still executing after its turn was gone (D9).
+                tool_task.cancel()
+                raise
             finally:
                 if not cancel_task.done():
                     cancel_task.cancel()

@@ -241,3 +241,45 @@ def test_the_lock_map_survives_a_reopen():
     src = inspect.getsource(P.MCPPool._reopen)
     assert "_stdio_locks" not in src, \
         "a lock recreated under a waiter lets two frames onto one pipe"
+
+
+async def test_cancelling_the_dispatcher_cancels_the_pool_call():
+    """D9: `asyncio.wait` does not cancel what it waits on. When the task
+    running `_execute_tool_call` is itself cancelled (a closed generator
+    mid-batch, the pool's `wait_for`), the MCP call must go with it rather
+    than run on as an orphan nobody awaits — and the cancel-watcher too."""
+    import asyncio
+
+    started = asyncio.Event()
+    outcome: list[str] = []
+
+    class _Pool:
+        async def call_tool(self, name, args, **kw):
+            started.set()
+            try:
+                await asyncio.sleep(30)
+                outcome.append("finished")
+            except asyncio.CancelledError:
+                outcome.append("cancelled")
+                raise
+            return {"content": "late", "is_error": False}
+
+    before = set(asyncio.all_tasks())
+    cancel_event = asyncio.Event()
+    dispatcher = asyncio.create_task(L._execute_tool_call(
+        tc=_tc(), pool=_Pool(),
+        options=RunOptions(model="m", cancel_event=cancel_event),
+        session_id="s",
+    ))
+    await asyncio.wait_for(started.wait(), 2)
+    dispatcher.cancel()
+    try:
+        await dispatcher
+    except asyncio.CancelledError:
+        pass
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert outcome == ["cancelled"], outcome
+    leftovers = [t for t in asyncio.all_tasks() - before
+                 if t is not asyncio.current_task() and not t.done()]
+    assert leftovers == [], leftovers
