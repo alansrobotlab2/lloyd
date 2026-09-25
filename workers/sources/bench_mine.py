@@ -110,7 +110,10 @@ BASELINE_ID_PREFIX = "BASELINE"
 #: exactly three values — ``success``, ``timeout``, ``error``
 #: (``scripts/autoresearch/bench_runner.py:13``) — and ``judge_trace`` zeroes
 #: any trace that did not complete: ``if trace.get("status") != "success"``
-#: returns ``composite_score: 0.0`` outright (``scripts/autoresearch/judge.py:177``).
+#: returns ``composite_score: 0.0`` outright (``judge_trace`` in
+#: ``scripts/autoresearch/judge.py`` — cited by name because line numbers in
+#: that file drift; ``_score_objective``'s "must not turn that into 0.0" is a
+#: different contract, for an unmeasurable check on a trace that DID complete).
 #: So a timed-out or errored baseline trial writes a zero composite for a
 #: reason that has nothing to do with the task. Of the ledger's 4,080 baseline
 #: rows on 2026-09-19, 77 carry ``error`` and every one of them sits below the
@@ -159,7 +162,7 @@ def _recent_ledger_losers(days: int = 7, limit: int = 5) -> list[dict]:
                 if not variant_id.startswith(BASELINE_ID_PREFIX):
                     continue
                 # A composite of 0.0 from a trace that never completed is a
-                # number about the harness (`judge.py:177` zeroes it before
+                # number about the harness (`judge.judge_trace` zeroes it before
                 # looking at the task), so it is not failure signal to mine.
                 if str(row.get("trace_status") or "") not in USABLE_TRACE_STATUSES:
                     continue

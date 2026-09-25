@@ -730,7 +730,7 @@ is the known self-grading failure mode, and this is where it is stopped.
   them selectable. #625 made the comparison case-insensitive
   (`BM.BASELINE_ID_PREFIX`) and added the guard the widening made reachable: a
   loser may only be a trial whose `trace_status` is `success`, because
-  `judge.py:177` zeroes the composite of any trace that did not complete and
+  `judge_trace` (`scripts/autoresearch/judge.py`) zeroes the composite of any trace that did not complete and
   all 77 `error` baseline rows sit below the 0.6 line by construction. Both are
   pinned in `tests/test_workers_sources.py`, one of those tests crossing the
   writer→ledger→selector seam by asking `materialize_baseline` for its own id.
