@@ -317,10 +317,11 @@ memory_tools:
 # What the prompt does with a loaded memory file over its prompt_surface ceiling
 # (prompt_builder._load_memories, review 2026-09-24 P4): render_all injects it
 # whole (today's bytes); annotate cuts at an entry boundary and appends a
-# <memory_overflow> marker, logs ERROR and announces once a day. render_all until
-# eval/run_memory_index_ab.py promotes the index. Backend restart.
+# <memory_overflow> marker, logs ERROR and announces once a day. annotate since
+# the index deploy (2026-09-25); render_all is the pre-index behaviour. Backend
+# restart.
 memory:
-  render_overflow: render_all
+  render_overflow: annotate
 
 session_titles:
   enabled: true

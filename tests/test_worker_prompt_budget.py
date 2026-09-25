@@ -102,8 +102,13 @@ def test_load_memories_honours_the_file_list(tmp_path):
     assert "user body" not in only
 
 
-def test_the_worker_prompt_is_measurably_smaller(tmp_path):
-    """The point of the change is tokens, so assert tokens."""
+def test_the_worker_prompt_is_measurably_smaller(tmp_path, monkeypatch):
+    """The point of the change is tokens, so assert tokens.
+
+    The oversized USER.md is the measuring stick, not an overflow case: pin
+    `render_all` so the P4 `annotate` cut does not shrink it first.
+    """
+    monkeypatch.setattr(prompt_builder, "_render_overflow_mode", lambda: "render_all")
     (tmp_path / "MEMORY.md").write_text("m" * 1_000)
     (tmp_path / "USER.md").write_text("u" * 80_000)
 

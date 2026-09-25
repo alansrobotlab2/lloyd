@@ -671,7 +671,13 @@ rendered. This landing is additive; production prompts are byte-identical.
   eval promotes; `annotate` cuts at an entry boundary under the file's own
   ceiling, appends `<memory_overflow file dropped_bytes>`, logs ERROR and
   announces once a day.
-- **The ceiling is one constant, not yet flipped.**
+- **Deployed 2026-09-25** on Alan's call after two runs at 7/10 on the pull
+  check with answers non-inferior at half the prompt: vault commit 1a72649f
+  (20,466 B index + 24 topic files in `lloyd/memory/`, both nightly skills
+  patched), `MEMORY_MD_CEILING_BYTES = MEMORY_MD_INDEX_CEILING_BYTES`,
+  `memory.render_overflow: annotate`. Watch criterion (d) — `memory_read` per
+  user turn ≤ 0.5 — for 7 days from the event logs.
+- **The ceiling is one constant** (history of the flip below).
   `MEMORY_MD_INDEX_CEILING_BYTES = 25_600` sits beside
   `MEMORY_MD_CEILING_BYTES = 73_728`; the deploy is
   `MEMORY_MD_CEILING_BYTES = MEMORY_MD_INDEX_CEILING_BYTES` in the same change

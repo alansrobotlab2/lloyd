@@ -82,12 +82,10 @@ def test_the_hint_counts_only_untyped_top_level_entries():
     assert ps.untyped_entry_count(text) == 1
 
 
-def test_the_index_ceiling_is_one_constant_and_not_yet_live():
-    """The deploy step is `MEMORY_MD_CEILING_BYTES = MEMORY_MD_INDEX_CEILING_BYTES`."""
+def test_the_index_ceiling_is_one_constant_and_live():
+    """Deployed 2026-09-25: `MEMORY_MD_CEILING_BYTES = MEMORY_MD_INDEX_CEILING_BYTES`."""
     assert ps.MEMORY_MD_INDEX_CEILING_BYTES == 25_600
-    assert ps.MEMORY_MD_CEILING_BYTES == 73_728, (
-        "the MEMORY.md ceiling was lowered without the index deploy; lower it only in "
-        "the change that writes the consolidated index, after the eval promotes it")
+    assert ps.MEMORY_MD_CEILING_BYTES == ps.MEMORY_MD_INDEX_CEILING_BYTES
     assert ps.MEMORY_CEILINGS["MEMORY.md"] == ps.MEMORY_MD_CEILING_BYTES
 
 

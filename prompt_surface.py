@@ -102,22 +102,18 @@ USER_MD_CEILING_BYTES = 16_384
 #: plus SOUL.md can exceed `prompt_builder.PROMPT_BUDGET_CHARS` (80,000 chars), so
 #: the sum stays bounded by the `over_budget` flag on the per-turn PROMPT_BUDGET line
 #: and these two constants bound each file's growth.
-MEMORY_MD_CEILING_BYTES = 73_728
 
-#: The ceiling MEMORY.md takes once it is an index (review 2026-09-24, P4): typed
+#: The ceiling MEMORY.md takes as an index (review 2026-09-24, P4): typed
 #: one-line entries, detail in `lloyd/memory/<slug>.md` topic files pulled by
 #: `memory_read(file="topics/<slug>")`. 25,600 B ≈ 6.4k tokens, against the ~18k
-#: the 73 KB file costs every user turn today.
+#: the 73 KB file cost every user turn.
 #:
-#: NOT live. Lowering `MEMORY_MD_CEILING_BYTES` is the deploy step, gated on
-#: `eval/run_memory_index_ab.py` promoting the indexed arm, and it is ONE edit:
-#: `MEMORY_MD_CEILING_BYTES = MEMORY_MD_INDEX_CEILING_BYTES`, landed in the same
-#: change that writes the consolidated index (`scripts/memory/
-#: consolidate_memory_index.py`) into the vault — never alone, because a ceiling
-#: below the live file is a freeze (the paragraph above). Until then this number is
-#: read only by the consolidator (its target) and the index validator (its
-#: `--ceiling` default for an overlay), so nothing that runs in production moves.
+#: LIVE since 2026-09-25: `MEMORY_MD_CEILING_BYTES` below is this number, landed
+#: with the consolidated index written into the vault (vault commit 1a72649f;
+#: eval/measurements/memory-index-ab-2026-09-25.md). The 73,728 B history above
+#: is why it is never lowered without a matching trim.
 MEMORY_MD_INDEX_CEILING_BYTES = 25_600
+MEMORY_MD_CEILING_BYTES = MEMORY_MD_INDEX_CEILING_BYTES
 
 #: The four entry types a memory line carries (review 2026-09-24, P4), written by
 #: `memory_add(type=…)` as `- [feedback] (2026-09-24) text`. `feedback` is Alan's
