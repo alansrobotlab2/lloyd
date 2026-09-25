@@ -80,6 +80,7 @@ logger = logging.getLogger("lloyd-autonomy")
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 from app.paths import AUTONOMY_RUNS_DIR  # anchored to DATA_ROOT
 from app.run_acceptance import GRADE_KEY as _ACCEPTANCE_GRADE_KEY, DispatchTrace, grade_run
+from app.silent_sentinel import is_silent_response, run_is_silent
 LLOYD_HOME = Path(__file__).parent
 
 def recover_stuck_tasks() -> list:
@@ -3498,8 +3499,8 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         # used to brand a run that signed off `[SILENT]` a silent failure. The
         # mirror case — a run whose terminal block was the sentinel but which
         # had narrated first — is the one that recorded `silent: false`. The
-        # substring form of the test lives in `workers/sources/scheduled_task.py`
-        # against `response_preview` and is #642's to change, not this one's.
+        # other three readers of the sentinel go through `app.silent_sentinel`
+        # and defer to the flag written here (#1507).
         terminal_text = final_response if last_block is None else last_block
 
         silent_failures = _detect_silent_failures(
@@ -3519,7 +3520,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         # The whole terminal block, never a substring of anything: the sentinel
         # is how a run declines to be surfaced, and a run that said the words
         # mid-flight and then reported normally is not that.
-        is_silent = terminal_text.strip() == "[SILENT]"
+        is_silent = is_silent_response(terminal_text)
         meta = {"stop_reason": stop_reason, "usage": usage, "num_turns": num_turns,
                 "tool_errors": len(tool_errors), "silent": is_silent,
                 "silent_failure_indicators": len(silent_failures),
@@ -4028,7 +4029,9 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
         # its `duration_seconds` lands in `wasted_hours` below and a restart
         # shows up in the number that exists to catch wasted GPU.
         failed = status != "success" or (empty and not artifact_backed)
-        silent = "[SILENT]" in response or bool(meta.get("silent"))
+        # #1507: the run record's own verdict, never a substring of the text —
+        # a report that mentions the token is a reporting run.
+        silent = run_is_silent(meta, response)
 
         e = by_task.setdefault(tid, {
             "task_id": tid, "runs": 0, "successes": 0, "failures": 0,

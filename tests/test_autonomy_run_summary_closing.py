@@ -509,3 +509,104 @@ async def test_the_notify_preflight_reads_the_task_file_via_run_task(monkeypatch
                                meta={"silent": False})
     assert out["status"] == "success"
     assert adapter_env["seen"]["tid"] == 24   # `execute` coerces with int(task_id)
+
+
+# ── #1507: one [SILENT] predicate, and a MENTION is not a decline ────────────
+#
+# The run record and the Discord helper read the sentinel by exact match; the
+# adapter and the health rollup read it by substring. A report that mentions
+# the token mid-sentence — the 2026-09-03 case — was recorded as a real run,
+# had its notification dropped, and counted as declined in `silent_rate`.
+
+MENTION = ("Checked the feeds. Nothing is urgent, but I did not answer [SILENT] "
+           "because two items need you: the renewal and the calendar clash.")
+
+
+def test_the_predicate_is_exact_match():
+    from app.silent_sentinel import is_silent_response, run_is_silent
+    assert is_silent_response("[SILENT]")
+    assert is_silent_response("  [SILENT]\n")
+    assert not is_silent_response(MENTION)
+    assert not is_silent_response("[SILENT] nothing new")
+    assert not is_silent_response("")
+    assert not is_silent_response(None)
+    # A recorded flag wins either way; a row without one falls back to exact.
+    assert run_is_silent({"silent": True}, MENTION)
+    assert not run_is_silent({"silent": False}, "[SILENT]")
+    assert not run_is_silent({}, MENTION)
+    assert run_is_silent(None, "[SILENT]")
+
+
+def test_a_mention_is_not_silent_in_the_run_record(run_driver):
+    run_driver(_text_stream(MENTION))
+    out = asyncio.run(autonomy.run_task(24))
+    assert out["meta"]["silent"] is False
+
+
+def test_a_mention_is_a_reporting_run_in_the_health_rollup():
+    """The assertion none of the four sites pinned: the metric agrees with the
+    record. One row with the recorded flag, one legacy row without meta."""
+    rows = [
+        _row("run_scheduled-task_20260920_000010_aaaaaa", "success",
+             summary=MENTION, response_json=MENTION,
+             meta_json=json.dumps({"silent": False})),
+        _row("run_scheduled-task_20260920_000011_bbbbbb", "success",
+             summary=MENTION, response_json=MENTION),
+        _row("run_scheduled-task_20260920_000012_cccccc", "success",
+             summary="[SILENT]", response_json="[SILENT]"),
+    ]
+    health = autonomy.compute_health(rows, [_task()], days=7)
+    (task,) = [t for t in health["tasks"] if str(t["task_id"]) == "24"]
+    assert task["runs"] == 3
+    assert task["silent"] == 1, task
+    assert task["silent_rate"] == round(1 / 3, 3)
+
+
+async def test_a_mention_still_notifies_through_the_adapter(monkeypatch, adapter_env):
+    await _drive_execute(monkeypatch, adapter_env, response=MENTION,
+                         meta={"silent": False})
+    assert len(adapter_env["notifications"]) == 1
+    await _drive_execute(monkeypatch, adapter_env, response=MENTION, meta={})
+    assert len(adapter_env["notifications"]) == 2
+
+
+async def test_the_discord_helper_posts_a_mention_and_drops_the_sentinel(monkeypatch):
+    import app.discord_notify as discord_notify
+    import httpx
+
+    posts: list = []
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, **kw):
+            posts.append(kw["json"])
+
+    monkeypatch.setitem(discord_notify.CONFIG, "discord",
+                        {"home_channel": "123", "token": "t"})
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    await discord_notify._discord_notify_task_complete(24, "Nightly Signal", MENTION)
+    await discord_notify._discord_notify_task_complete(24, "Nightly Signal", " [SILENT]\n")
+    assert len(posts) == 1
+    assert posts[0]["embeds"][0]["description"] == MENTION
+
+
+def test_no_reader_of_the_sentinel_uses_a_substring():
+    """Four sites, one predicate: none may test the token by containment."""
+    for rel in ("autonomy.py", "app/discord_notify.py",
+                "workers/sources/scheduled_task.py"):
+        src = (_REPO / rel).read_text(encoding="utf-8")
+        assert not re.search(r'"\[SILENT\]"\s+(not\s+)?in\b', src), rel
+        assert '.strip() == "[SILENT]"' not in src, rel
+
+
+def test_the_autonomy_router_does_not_import_the_notify_helper():
+    src = (_REPO / "app/routers/autonomy.py").read_text(encoding="utf-8")
+    assert "_discord_notify_task_complete" not in src

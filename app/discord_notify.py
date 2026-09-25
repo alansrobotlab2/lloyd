@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 
 from app.config import CONFIG
+from app.silent_sentinel import is_silent_response
 
 
 logger = logging.getLogger("lloyd-server")
@@ -25,7 +26,7 @@ async def _discord_notify_task_complete(task_id: int, task_name: str, response_p
     token = _discord_token()
     if not home_channel or not token:
         return
-    if not response_preview or response_preview.strip() == "[SILENT]":
+    if not response_preview or is_silent_response(response_preview):
         return
     embed = {
         "title": f"Task Complete: {task_name}",

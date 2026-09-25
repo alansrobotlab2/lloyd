@@ -11,7 +11,6 @@ import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from app.discord_notify import _discord_notify_task_complete
 from agent_mcp._shared import (
     AUTONOMY_TASK_FIELDS, parse_frontmatter_text, with_body_contract)
 

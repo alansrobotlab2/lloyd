@@ -553,7 +553,11 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         result = await run_task(int(task_id), max_duration=max_dur)
 
     preview = (result.get("response_preview") or "")
-    if result.get("success") and preview and "[SILENT]" not in preview:
+    # #1507: the run record's verdict (its terminal block, exact match), not a
+    # substring of the preview — a report that mentions the token still posts.
+    from app.silent_sentinel import run_is_silent
+    silent = run_is_silent(result.get("meta"), preview)
+    if result.get("success") and preview and not silent:
         try:
             path = _find_task_file(task_id)
             if path:
