@@ -525,11 +525,72 @@ def _match_evidence(session: dict, query_tokens: set,
     return snippets, location
 
 
+# ── session_recall as a qmd query (#1485, OFF) ───────────────────────────────
+#
+# "tokens" is the scorer below: substring counts over the user sessions' JSON
+# in the window. "qmd" asks the daemon's lex+vec hybrid over the `sessions`
+# collection (the markdown exports of the same chats), keeps the 5-result shape
+# and the date window, and drops a transcript that echoes the query or is the
+# caller's own session (#1511). Measured and not deployed
+# (`eval/measurements/episodic-recall-2026-09-25.md`): where both backends can see
+# the chat (JSON era, n=10) hit@5 0.9 tokens vs 0.8 qmd, diff -0.1 [-0.4, +0.2],
+# at 0.7 ms vs 62 ms p50. Its 0.72-vs-0 win on older chats (n=32) is only the
+# 2026-09-22 wipe: those chats' JSON is gone and their exports survived.
+SESSION_RECALL_BACKEND = "tokens"
+_SESSION_QMD_OVERFETCH = 4
+_SESSION_ID_RE = re.compile(r"^(\d{8})_(\d{6})_")
+
+
+def _session_recall_qmd(query: str, days: int, limit: int) -> dict:
+    from agent_mcp import _task_registry
+    from agent_mcp.transcript_self_hit import note_path, self_hit_reason
+    from agent_mcp.vault import RECALL_LEX_MODE, _qmd_daemon_search, strip_qmd_snippet
+
+    rows = _qmd_daemon_search(query, max(limit, 1) * _SESSION_QMD_OVERFETCH, ["sessions"],
+                              skip_rerank=True, legs=("lex", "vec"), lex_mode=RECALL_LEX_MODE)
+    cutoff = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime("%Y%m%d")
+    sid = str(_task_registry.current_session_id.get("") or "") or None
+    results, seen = [], set()
+    for r in rows:
+        rel = note_path(str(r.get("file") or ""))
+        if rel is None:
+            continue
+        stem = Path(rel).stem
+        m = _SESSION_ID_RE.match(stem)
+        if not m or m.group(1) < cutoff or stem in seen:
+            continue
+        if self_hit_reason(query, r, sid):
+            continue
+        seen.add(stem)
+        snippet, _ = strip_qmd_snippet(r.get("snippet", ""))
+        d, t = m.group(1), m.group(2)
+        results.append({
+            "session_id": stem,
+            "created_at": f"{d[:4]}-{d[4:6]}-{d[6:]}T{t[:2]}:{t[2:4]}:{t[4:]}",
+            "model": "",
+            "preview": snippet[:200],
+            "message_count": 0,
+            "match_score": round(float(r.get("score", 0) or 0), 3),
+            "snippets": [snippet[:_SNIPPET_WINDOW]],
+            "match_location": {},
+        })
+        if len(results) >= limit:
+            break
+    return {"query": query, "sessions": results, "total_searched": len(rows),
+            "backend": "qmd"}
+
+
 def _session_recall(params: dict) -> dict:
     """Search recent session transcripts for topics, decisions, or discussions."""
     query = params.get("query", "").strip()
     if not query:
         return _err("query is required", ErrorCode.MISSING_PARAM, sessions=[])
+    if SESSION_RECALL_BACKEND == "qmd":
+        try:
+            return _session_recall_qmd(query, int(params.get("days", 7)),
+                                       int(params.get("limit", 5)))
+        except Exception:  # noqa: BLE001 — a daemon outage falls back to the scorer
+            pass
 
     days = int(params.get("days", 7))
     limit = int(params.get("limit", 5))

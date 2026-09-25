@@ -276,6 +276,30 @@ RECALL_DJEV_SAMPLES = 1
 RECALL_DJEV_TIMEOUT_S = 4.0
 
 
+# ── Episodic floors (#1485, OFF) ─────────────────────────────────────────────
+#
+# Chat transcripts (qmd `sessions`) are indexed but outside `VAULT_SEGMENTS`, so
+# no recall could reach "what did we decide about X last week". On, the doc leg
+# names `sessions` as an extra collection with a floor of 1, and the djev head
+# shrinks 20 -> 18 so head + floors still fit one 32-row canvas:
+# 18 + (2+2+2+1) x 2 = 32. A floored transcript that echoes the query, or is the
+# caller's own session, is dropped (`agent_mcp/transcript_self_hit.py`, #1511).
+#
+# Measured 2026-09-25 (`eval/measurements/episodic-recall-2026-09-25.md`), arms
+# interleaved on the live daemon + djev: on 33 paraphrased recall questions about
+# past chats, doc_hit 0.000 -> 0.697 [+0.55, +0.85]; on the 79-query doc gold set
+# doc_hit +0.000 [-0.063, +0.076], MRR -0.014 [-0.059, +0.032] (an A/A of today's
+# recall moved MRR -0.016: djev does not repeat itself); p50 +30 ms. Adding
+# `autonomy-runs` too (head 16) cost doc MRR -0.041 [-0.082, -0.004]. Not flipped:
+# the regression pin (`scripts/automod/evalpin.py`, `~/.config/qmd/evalpin.yml`)
+# has no `sessions` collection and does not send `extra`, so every later
+# promotion would be judged against a request production no longer sends, and
+# the question set is synthetic — P0 (#1480) is the measurement that should flip it.
+RECALL_EPISODIC_FLOORS = False
+RECALL_EPISODIC_FLOOR = {"sessions": 1}
+RECALL_EPISODIC_DJEV_HEAD = 18
+
+
 def recall_reranker() -> str:
     """Who orders the recall's document pool: "djev" or "qmd"."""
     if RECALL_RERANKER != "djev":
@@ -290,12 +314,19 @@ def recall_reranker() -> str:
 def recall_doc_leg_shape(reranker: str | None = None) -> dict:
     """What the recall's document leg asks qmd for. The one definition the doc
     leg and `scripts/automod/evalpin.production_payload` both read."""
+    episodic = RECALL_EPISODIC_FLOORS
+    # Off, the shape is today's dict exactly — no `extra` key at all.
+    extra = {"extra": list(RECALL_EPISODIC_FLOOR)} if episodic else {}
     if (reranker or recall_reranker()) == "djev":
-        return {"limit": RECALL_DJEV_POOL, "candidateLimit": RECALL_DJEV_HEAD,
-                "rerank": False, "floor": dict(RECALL_DJEV_FLOOR), "lexMode": RECALL_LEX_MODE}
+        return {"limit": RECALL_DJEV_POOL,
+                "candidateLimit": RECALL_EPISODIC_DJEV_HEAD if episodic else RECALL_DJEV_HEAD,
+                "rerank": False,
+                "floor": {**RECALL_DJEV_FLOOR, **(RECALL_EPISODIC_FLOOR if episodic else {})},
+                "lexMode": RECALL_LEX_MODE, **extra}
     pool = RECALL_GLOBAL_DOC_POOL if RECALL_QMD_FUSION == "global" else RECALL_DOC_POOL
     return {"limit": pool, "candidateLimit": pool, "rerank": RECALL_QMD_RERANK,
-            "floor": dict(RECALL_COLLECTION_FLOOR), "lexMode": RECALL_LEX_MODE}
+            "floor": {**RECALL_COLLECTION_FLOOR, **(RECALL_EPISODIC_FLOOR if episodic else {})},
+            "lexMode": RECALL_LEX_MODE, **extra}
 
 
 def recall_doc_pool() -> int:
@@ -778,7 +809,8 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
                       exact_pool: Optional[int] = None,
                       candidate_limit: Optional[int] = None,
                       floor: Optional[dict] = None,
-                      lex_mode: Optional[str] = None) -> list:
+                      lex_mode: Optional[str] = None,
+                      extra_collections: Optional[list] = None) -> list:
     """Send a lex and/or vec query to the qmd daemon.
 
     **Returns a list, or raises `QmdUnavailable`.** An empty list means the
@@ -890,6 +922,11 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
     # scope and keeps its own shape exactly as it had it.
     allowed = set(VAULT_SEGMENTS)
     unrestricted = allowed.issubset(set(collections or []))
+    # #1485: collections outside the segments an unrestricted search may also
+    # name (the recall's episodic floors). They join the request and survive the
+    # fold; nothing else about the unrestricted path changes.
+    extra = [c for c in (extra_collections or []) if c not in allowed] if unrestricted else []
+    allowed |= set(extra)
     # `limit` sizes the answer; `pool` sizes what it is ranked out of, because a
     # document that is not in the reply is not in the answer at any rank. The
     # restricted path keeps pool == limit — it gets `[:limit]` back with no fold,
@@ -912,7 +949,7 @@ def _qmd_daemon_search(query: str, limit: int, collections: list,
         # A caller may fuse a smaller head than it asks back: the djev ranker
         # (#1336) takes the fused head plus the floors' rows, all returned.
         "candidateLimit": candidate_limit if (candidate_limit and unrestricted) else pool,
-        "collections": list(VAULT_SEGMENTS) if unrestricted else collections,
+        "collections": list(VAULT_SEGMENTS) + extra if unrestricted else collections,
         # Always explicit. Omitting it means "the daemon's default", which
         # is rerank-on today and is not something this client should lean on.
         # The stash this came from made the key conditional; that undoes a
@@ -1791,6 +1828,21 @@ def _djev_shadow_rerank(documents: list[dict], query: str) -> None:
         logger.debug("djev rerank shadow: %s", e)
 
 
+def _drop_recall_self_hits(query: str, documents: list[dict]) -> list[dict]:
+    """The recall's documents without a transcript echoing `query` (#1511/#1485).
+
+    Only a `sessions/` path is ever judged, so with the episodic floors off (no
+    transcript can reach the pool) this returns `documents` unchanged.
+    """
+    if not any(str(d.get("path") or "").startswith("sessions/") for d in documents):
+        return documents
+    from agent_mcp import _task_registry
+    from agent_mcp.transcript_self_hit import self_hit_reason
+    sid = str(_task_registry.current_session_id.get("") or "") or None
+    return [d for d in documents
+            if not self_hit_reason(query, {"file": d.get("path"), "snippet": d.get("snippet")}, sid)]
+
+
 def _vault_recall(params: dict, *, seed_top_k: int | None = None,
                   reranker: str | None = None) -> dict:
     """Combined recall over documents, entity facts and graph neighbours.
@@ -1894,7 +1946,8 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
                                   exact_pool=doc_shape["limit"],
                                   candidate_limit=doc_shape["candidateLimit"],
                                   floor=doc_shape["floor"],
-                                  lex_mode=doc_shape.get("lexMode"))
+                                  lex_mode=doc_shape.get("lexMode"),
+                                  extra_collections=doc_shape.get("extra"))
 
     def _do_code_grep():
         if not params.get("grep_code", True):
@@ -2166,6 +2219,7 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
             # Not inside the fallback: that path exists because djev just failed
             # to answer, and a shadow row would queue another read at it.
             _djev_shadow_rerank(documents, query)
+        documents = _drop_recall_self_hits(query, documents)
         if graph_rerank:
             documents = _graph_rerank(documents, seed_entities, weighted_neighbors, alpha=rerank_alpha)[:limit]
         else:
