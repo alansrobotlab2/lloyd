@@ -35,6 +35,10 @@ from typing import Any, Iterable
 
 logger = logging.getLogger("lloyd-server")
 
+# The roles `app.routers._messages_harness_adapter._prepare_messages_for_harness`
+# forwards to the engine. `tokens_after` counts only these.
+_SENT_ROLES = ("user", "assistant", "tool")
+
 
 # ---------------------------------------------------------------------------
 # Token accounting
@@ -310,6 +314,9 @@ def _compaction_cfg() -> dict[str, Any]:
     micro.setdefault("keep_recent_tools", 15)
     micro.setdefault("count_threshold", 20)
     micro.setdefault("compactable_tools", None)  # None → use module default
+    # Deny-list mode (D10). Set → every tool's result may be cleared except
+    # these, and `compactable_tools` is ignored. None → the allow-list above.
+    micro.setdefault("non_compactable_tools", None)
     # Budget gating. Microcompaction gets first refusal above
     # `trigger_fraction` of the truncation threshold — it is cheaper than
     # summarization and preserves more — and clears down to
@@ -497,6 +504,8 @@ async def load_and_compact_session(
                 min_chars_to_clear=int(mc_cfg.get("min_chars_to_clear", 2_000)),
                 session_id=path.stem,
                 disallowed_tools=disallowed_tools,
+                # Deny mode wins when configured; None keeps `tools`.
+                non_compactable_tools=mc_cfg.get("non_compactable_tools"),
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("microcompact pre-pass failed: %s", e)
@@ -523,6 +532,7 @@ async def load_and_compact_session(
         try:
             from app.compaction_llm import (
                 restore_recent_files,
+                restored_file_count,
                 summarize_history,
             )
         except Exception as e:  # noqa: BLE001
@@ -569,8 +579,10 @@ async def load_and_compact_session(
                                 max_per_file=int(cfg["restore"].get("max_per_file", 5_000)),
                                 max_files=int(cfg["restore"].get("max_files", 5)),
                             )
+                            # One `user` row (D3): a `system` row is dropped by
+                            # the harness adapter and never reached the engine.
                             new_convo.extend(restored)
-                            restored_count = len(restored)
+                            restored_count = restored_file_count(restored)
                         except Exception as e:  # noqa: BLE001
                             logger.warning("restore_recent_files failed: %s", e)
                     new_convo.extend(recent)
@@ -589,7 +601,12 @@ async def load_and_compact_session(
         turns_to_keep=TURNS_TO_KEEP,
         system_prompt=system_prompt,
     )
-    tokens_after = estimate_conversation_tokens(truncated_msgs, system_prompt)
+    # What is SENT (D3): `_prepare_messages_for_harness` keeps only these
+    # roles, so a legacy `system` row in the session file (old `/compact`
+    # restores) is dropped on the way to the engine and must not be counted.
+    tokens_after = estimate_conversation_tokens(
+        [m for m in truncated_msgs if m.get("role") in _SENT_ROLES], system_prompt,
+    )
 
     if dropped > 0 and mode == "summarize" and not summarized:
         # Summarization was supposed to handle this but didn't (import

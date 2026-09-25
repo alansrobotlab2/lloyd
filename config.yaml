@@ -403,6 +403,18 @@ compaction:
     - Glob
     - Edit
     - Write
+    # Deny-list mode (D10, 2026-09-24): when set, every tool result may be
+    # cleared EXCEPT these, and `compactable_tools` above is ignored — so MCP
+    # domain results are cleared (spilled first) instead of going straight to
+    # truncation. Read by the turn-start pass and the in-turn rung 1. Remove
+    # the key (or set null) to go back to the allow-list.
+    non_compactable_tools:
+    - TodoWrite
+    - ToolSearch
+    - EnterPlanMode
+    - ExitPlanMode
+    - SetGoal
+    - ClearGoal
   restore:
     enabled: true
     budget_tokens: 50000

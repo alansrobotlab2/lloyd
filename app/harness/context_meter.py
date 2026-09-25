@@ -118,6 +118,18 @@ class ContextMeter:
         return self._reported + self._appended
 
     @property
+    def offset(self) -> int:
+        """The fixed cost `chat_messages` does not contain (system prompt,
+        tool schemas), in tokens. 0 until the first `observe_append`.
+
+        Rung 1 of the relief ladder budgets in estimator units, so it needs
+        this to turn "`used` must fall to `target`" into "the estimate of the
+        list must fall to `target - offset`". It survives `resync`, which is
+        what lets a second pass see the relieved size rather than the peak.
+        """
+        return self._offset
+
+    @property
     def headroom(self) -> int:
         """Tokens left before the window. 0 when unmeasured or over."""
         if not self.measured:

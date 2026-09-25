@@ -414,7 +414,6 @@ async def run_query(
                     options=options,
                     meter=meter,
                     reason="pre_request",
-                    total_usage=total_usage,
                     keep_recent=int(getattr(
                         options, "intra_turn_microcompact_keep_recent", 15)),
                     iteration=num_turns,
@@ -518,7 +517,6 @@ async def run_query(
                     meter=meter,
                     reason="overflow",
                     target=overflow_target,
-                    total_usage=total_usage,
                     keep_recent=int(getattr(
                         options, "intra_turn_microcompact_keep_recent", 15)),
                     iteration=num_turns,
@@ -671,7 +669,6 @@ async def run_query(
                             options=options,
                             meter=meter,
                             reason="terminal_inject",
-                            total_usage=total_usage,
                             keep_recent=int(getattr(
                                 options, "intra_turn_microcompact_keep_recent", 15)),
                             iteration=num_turns,
@@ -934,7 +931,6 @@ async def run_query(
                         options=options,
                         meter=meter,
                         reason="intra_turn",
-                        total_usage=total_usage,
                         keep_recent=keep,
                         tool_count=tool_count,
                         iteration=num_turns,
@@ -1275,7 +1271,6 @@ def _relieve_context(
     meter: Any,
     reason: str,
     target: int = 0,
-    total_usage: dict[str, int] | None = None,
     keep_recent: int = 15,
     tool_count: int = 0,
     iteration: int = 0,
@@ -1374,7 +1369,7 @@ def _relieve_context(
         _intra_turn_microcompact(
             chat_messages,
             options=options,
-            total_usage=total_usage or {},
+            meter=meter,
             keep_recent=keep_recent,
             tool_count=tool_count or sum(
                 1 for m in chat_messages if m.get("role") == "tool"
@@ -1573,12 +1568,14 @@ def _intra_turn_microcompact(
     chat_messages: list[dict],
     *,
     options: Any,
-    total_usage: dict[str, int],
+    meter: Any,
     keep_recent: int,
     tool_count: int,
     iteration: int,
-) -> None:
+) -> int:
     """Clear stale tool results in place, but only under real pressure.
+
+    Returns how many results it cleared.
 
     Uses the same threshold arithmetic as the turn-start pass in
     `app.compaction`, so the two cannot disagree about where the wall is.
@@ -1586,13 +1583,18 @@ def _intra_turn_microcompact(
     in the other direction, and a module-level edge here would close the
     cycle.
 
-    Context size anchors on vLLM's reported `input_tokens` — the real size
-    of the prompt the server just processed — while the estimator supplies
-    the per-message deltas. The gap between them is the system prompt and
-    tool schemas, which `chat_messages` does not contain; carrying it as an
-    `offset` keeps both halves in the same units. Triggering on the real
-    figure while budgeting against the estimate would mean triggering and
-    then clearing nothing, since the estimate is always the smaller number.
+    Context size is the turn's `ContextMeter` (D6, 2026-09-24): the engine's
+    last reported prompt plus an estimate of what was appended since, with
+    the fixed cost `chat_messages` does not contain (system prompt, tool
+    schemas) carried as `meter.offset`. The budget is in estimator units,
+    so it is `target - offset`. Until D6 this pass re-derived the offset
+    from `total_usage["input_tokens"]` — a PEAK over the whole turn — so
+    after one relief pass the offset silently absorbed every token that
+    pass had freed and the next pass over-cleared, and on the overflow path
+    (whose rejected size never reaches `total_usage`) it under-triggered.
+    `meter.resync`, which every rung already calls, is what lets a second
+    pass see the relieved size. An unmeasured meter still lets the rung run
+    on the estimate alone, as it always could.
     """
     try:
         from app.compaction import (
@@ -1602,7 +1604,7 @@ def _intra_turn_microcompact(
         )
     except Exception as e:  # noqa: BLE001
         logger.warning("loop: intra-turn microcompact unavailable: %s", e)
-        return
+        return 0
 
     threshold = truncation_threshold(get_context_window(getattr(options, "model", "")))
     trigger = int(threshold * float(
@@ -1615,14 +1617,21 @@ def _intra_turn_microcompact(
     def _estimate(msgs: list[dict]) -> int:
         return estimate_conversation_tokens(msgs, "")
 
-    estimated = _estimate(chat_messages)
-    reported = int(total_usage.get("input_tokens", 0) or 0)
-    # Everything in the prompt that isn't in `chat_messages`. Clamped at 0
-    # so an over-reporting estimate can't invent headroom.
-    offset = max(0, reported - estimated)
-    current = estimated + offset
+    measured = bool(getattr(meter, "measured", False))
+    if measured:
+        # Idempotent: re-estimates the tail since the last report and
+        # learns the offset if no append has been observed yet, so a meter
+        # primed with a report alone still budgets in the right units.
+        meter.observe_append(chat_messages)
+        current = int(meter.used)
+        # Everything in the prompt that isn't in `chat_messages`. The meter
+        # clamps it at 0, so an over-reporting estimate can't invent headroom.
+        offset = int(meter.offset)
+    else:
+        current = _estimate(chat_messages)
+        offset = 0
     if current <= trigger:
-        return
+        return 0
 
     compacted, cleared = _intra_microcompact(
         chat_messages,
@@ -1642,6 +1651,7 @@ def _intra_turn_microcompact(
         # marker on a long turn, and the turn that clears most is the one
         # with `Read` denied (#1066).
         disallowed_tools=list(getattr(options, "disallowed_tools", None) or []),
+        **_rung_one_tool_selection(options),
     )
     if cleared:
         chat_messages[:] = compacted
@@ -1651,6 +1661,23 @@ def _intra_turn_microcompact(
             cleared, tool_count, keep_recent, current,
             _estimate(chat_messages) + offset, target, iteration,
         )
+    return int(cleared or 0)
+
+
+def _rung_one_tool_selection(options: Any) -> dict[str, Any]:
+    """Which tool results rung 1 may clear (D10).
+
+    `intra_turn_microcompact_non_compactable` set (a tuple, possibly empty)
+    is deny-list mode: every result may be cleared except those tools'.
+    Unset (None) is the historical allow-list — `Read/Bash/Grep/Glob/Edit/
+    Write` only — under which an MCP domain result (a vault search, an
+    http_fetch, a graph query) was never cleared and went straight to rung
+    4's truncation.
+    """
+    deny = getattr(options, "intra_turn_microcompact_non_compactable", None)
+    if deny is None:
+        return {}
+    return {"non_compactable_tools": tuple(deny)}
 
 
 # The pair a consumer divides to get a cached fraction. They have to be the
@@ -2591,8 +2618,12 @@ async def _execute_tool_call(
     # `result_chars` in the transcript, which is itself truncated to 2014 —
     # describes the preview and not the answer (#1052).
     raw_chars = len(content) if isinstance(content, str) else None
-    if not is_error and isinstance(content, str):
-        content = fallback_for_empty_result(content, name)
+    if isinstance(content, str):
+        # Errors are spilled too (D10): a 200 KB traceback or a failing test
+        # run is as large as any success and was the one result nothing
+        # bounded. The empty-result marker stays success-only.
+        if not is_error:
+            content = fallback_for_empty_result(content, name)
         content = maybe_spill(
             content,
             tool_name=name,

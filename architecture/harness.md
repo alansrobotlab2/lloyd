@@ -277,3 +277,45 @@ finalizer's tools array equal to the last request's, overflow recoveries ≤ 2.
 The stdio lock is driven through `MCPPool.call_tool` with fake sessions
 (`test_dispatch_split.py`), including a reopen while a call holds the lock.
 Write new loop tests on these seams; do not reintroduce source pins.
+
+### D3 — restored files reach the engine
+
+`compaction_llm.restore_recent_files` returns ONE `role: "user"` row,
+`<restored-context><file path=… truncated_to=…>…</file>…</restored-context>`,
+with the file count on the row (`restored_files`, read by
+`restored_file_count`; the adapter never forwards it). The old per-file
+`role: "system"` rows were dropped by `_prepare_messages_for_harness`, which
+keeps only `user`/`assistant`/`tool`, while `tokens_after` still counted them.
+`tokens_after` now estimates only those three roles. `/compact` no longer
+restores at all: its history is persisted, and a persisted `user` row would be
+read by every transcript producer as something the user typed (the old system
+rows were persisted and never sent, so nothing reached the engine either way).
+Pinned by `tests/test_compaction_llm_restore.py`.
+
+### D6 — rung 1 budgets from the meter
+
+`loop._intra_turn_microcompact(chat_messages, *, options, meter, …) -> int`
+reads `meter.used` and `ContextMeter.offset` instead of re-deriving an offset
+from `total_usage["input_tokens"]`, a turn PEAK: after one relief pass the
+peak booked every freed token as fixed cost and the next pass cleared to the
+`keep_recent` floor, and on the overflow path (whose rejected size never
+reaches `total_usage`) rung 1 under-triggered. `_relieve_context` no longer
+takes `total_usage`. Unmeasured meter → the estimate alone, as before.
+Pinned by `test_context_meter.py::test_a_second_pass_budgets_from_the_relieved_size_not_the_peak`,
+`::test_an_unmeasured_meter_still_lets_rung_one_run_on_the_estimate` and
+`tests/test_overflow_recovery.py::test_the_rejected_size_reaches_rung_one`.
+
+### D10 — rung 1 deny-list; error results spill
+
+`compaction.microcompact.non_compactable_tools` (config.yaml ships
+`DEFAULT_NON_COMPACTABLE`: TodoWrite, ToolSearch, Enter/ExitPlanMode,
+SetGoal, ClearGoal) switches both the turn-start pass and rung 1 to deny-list
+mode: every tool result may be cleared (spilled first) except those, so MCP
+domain results no longer go straight to truncation. Deleting the key (or
+`null`) restores the `compactable_tools` allow-list. It reaches rung 1 via
+`mcp_discovery.intra_turn_compaction_kwargs` →
+`RunOptions.intra_turn_microcompact_non_compactable`. `Task` is not listed
+(`keep_recent` protects the newest result); skill-delivery results are short
+and left alone by size. `_execute_tool_call` now `maybe_spill`s error results
+too; the empty-result marker stays success-only. `/compact` still uses the
+allow-list.

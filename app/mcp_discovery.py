@@ -263,6 +263,12 @@ def intra_turn_compaction_kwargs() -> dict:
         out["intra_turn_microcompact_trigger_fraction"] = float(mc["trigger_fraction"])
     if "target_fraction" in mc:
         out["intra_turn_microcompact_target_fraction"] = float(mc["target_fraction"])
+    # Deny-list mode (D10): present — even empty — means every tool result
+    # may be cleared except these; absent or null keeps the allow-list.
+    if mc.get("non_compactable_tools") is not None:
+        out["intra_turn_microcompact_non_compactable"] = tuple(
+            str(x) for x in mc["non_compactable_tools"]
+        )
     out.update(context_relief_kwargs())
     return out
 

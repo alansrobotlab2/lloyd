@@ -1818,10 +1818,7 @@ async def _slash_compact_sse(
         estimate_conversation_tokens,
         get_context_window,
     )
-    from app.compaction_llm import (
-        restore_recent_files,
-        summarize_history,
-    )
+    from app.compaction_llm import summarize_history
     from app.harness.microcompact import (
         DEFAULT_COMPACTABLE_TOOLS,
         microcompact,
@@ -1900,16 +1897,15 @@ async def _slash_compact_sse(
                     ),
                 }],
             }]
-            # Layer C — restore recent files
-            if cfg["restore"].get("enabled", True):
-                restored = restore_recent_files(
-                    older,
-                    budget_tokens=int(cfg["restore"].get("budget_tokens", 50_000)),
-                    max_per_file=int(cfg["restore"].get("max_per_file", 5_000)),
-                    max_files=int(cfg["restore"].get("max_files", 5)),
-                )
-                new_convo.extend(restored)
-                restored_count = len(restored)
+            # No Layer C here (D3). This history is PERSISTED, and the
+            # restore is now a `user` row so that it reaches the engine: saved
+            # into the session it would be a permanent "user message" every
+            # transcript producer, the titler and fact extraction read as
+            # something Alan typed, re-sent stale on every later turn. The old
+            # `system` rows were saved and then dropped by the harness adapter,
+            # so the engine never saw them either; nothing is lost. The files
+            # are one Read away, and the turn-start pass still restores fresh
+            # when it summarizes.
             new_convo.extend(recent)
             convo = new_convo
         else:

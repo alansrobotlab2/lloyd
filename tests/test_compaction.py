@@ -506,6 +506,17 @@ def test_truncation_threshold_math():
 # ---------------------------------------------------------------------------
 
 
+def _primed_meter(reported: int, msgs: list[dict]):
+    """A real `ContextMeter` that has seen one engine report of `reported`
+    tokens for `msgs` — the state rung 1 reads its budget from (D6)."""
+    from app.harness.context_meter import ContextMeter, context_window_for
+
+    m = ContextMeter(context_window_for("primary"))
+    m.observe_usage({"input_tokens": reported}, len(msgs))
+    m.observe_append(msgs)
+    return m
+
+
 def test_intra_turn_microcompact_is_silent_without_pressure():
     """The call site that did the most damage, and the one easiest to miss.
 
@@ -526,7 +537,7 @@ def test_intra_turn_microcompact_is_silent_without_pressure():
     msgs = _tool_pairs(40, chars=4_000)
     before = list(msgs)
     _intra_turn_microcompact(
-        msgs, options=_Opts(), total_usage={"input_tokens": 40_000},
+        msgs, options=_Opts(), meter=_primed_meter(40_000, msgs),
         keep_recent=15, tool_count=40, iteration=40,
     )
     assert msgs == before, "cleared tool results with the window 80% empty"
@@ -550,7 +561,7 @@ def test_intra_turn_microcompact_fires_when_actually_near_the_wall():
     # vLLM reports a prompt well past the trigger; the estimator alone
     # would not have caught it, which is why the real figure is consulted.
     _intra_turn_microcompact(
-        msgs, options=_Opts(), total_usage={"input_tokens": int(threshold * 0.95)},
+        msgs, options=_Opts(), meter=_primed_meter(int(threshold * 0.95), msgs),
         keep_recent=15, tool_count=40, iteration=40,
     )
     assert id(msgs) == original_id, "must mutate in place for the observer's handle"
@@ -562,6 +573,110 @@ def test_intra_turn_microcompact_fires_when_actually_near_the_wall():
     # The recent floor is respected even under pressure.
     tool_msgs = [m for m in msgs if m.get("role") == "tool"]
     assert all("cleared from context" not in _marker_text(m) for m in tool_msgs[-15:])
+
+
+# ---------------------------------------------------------------------------
+# Rung 1 deny-list mode (D10)
+# ---------------------------------------------------------------------------
+
+
+def _named_pairs(names: list[str], *, chars: int = 6_000) -> list[dict]:
+    """One assistant/tool pair per name, each result `chars` long."""
+    msgs: list[dict] = [{"role": "user", "content": "go"}]
+    for i, name in enumerate(names):
+        cid = f"call_{i:03d}"
+        msgs.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": cid, "type": "function", "function": {
+                "name": name, "arguments": json.dumps({"q": f"q{i}"})}}],
+        })
+        msgs.append({"role": "tool", "tool_call_id": cid,
+                     "content": f"{name} result {i}\n" * (chars // 20)})
+    return msgs
+
+
+def _cleared_names(msgs: list[dict]) -> list[str]:
+    names = {tc["id"]: tc["function"]["name"]
+             for m in msgs if m.get("role") == "assistant"
+             for tc in m.get("tool_calls") or []}
+    return [names[m["tool_call_id"]] for m in msgs
+            if m.get("role") == "tool" and "cleared from context" in _marker_text(m)]
+
+
+def test_microcompact_deny_list_clears_domain_results():
+    """An MCP domain result (here `vault_search`, and its namespaced form) was
+    never in the allow-list, so under pressure it went straight to truncation.
+    Deny-list mode clears it like any other stale result."""
+    from app.harness.microcompact import DEFAULT_NON_COMPACTABLE, microcompact
+
+    msgs = _named_pairs(["vault_search", "mcp__lloyd-mcp__http_fetch"] * 10)
+    kw = dict(keep_recent_tools=4, token_budget=1, legacy_count_rule=False,
+              estimate_fn=lambda m: estimate_conversation_tokens(m, ""),
+              min_chars_to_clear=2_000, session_id="")
+
+    _, allow_cleared = microcompact(msgs, **kw)
+    assert allow_cleared == 0, "allow-list mode must still ignore domain tools"
+
+    out, cleared = microcompact(msgs, non_compactable_tools=DEFAULT_NON_COMPACTABLE, **kw)
+    assert cleared == 16, cleared           # 20 results, the newest 4 kept
+    assert set(_cleared_names(out)) == {"vault_search", "mcp__lloyd-mcp__http_fetch"}
+
+
+def test_microcompact_deny_list_protects_todowrite_and_toolsearch():
+    """What the model steers by — its todo list, the catalogue ToolSearch loaded —
+    is never cleared, bare or namespaced, however stale."""
+    from app.harness.microcompact import DEFAULT_NON_COMPACTABLE, microcompact
+
+    names = ["TodoWrite", "mcp__lloyd-mcp__ToolSearch", "vault_search"] * 6
+    msgs = _named_pairs(names)
+    out, cleared = microcompact(
+        msgs, keep_recent_tools=0, token_budget=1, legacy_count_rule=False,
+        estimate_fn=lambda m: estimate_conversation_tokens(m, ""),
+        min_chars_to_clear=2_000, session_id="",
+        non_compactable_tools=DEFAULT_NON_COMPACTABLE,
+    )
+    assert cleared == 6, cleared
+    assert set(_cleared_names(out)) == {"vault_search"}
+
+
+def test_the_intra_turn_pass_reads_the_deny_list_from_config():
+    """The key reaches rung 1 through the seam every turn path builds its
+    options from (`intra_turn_compaction_kwargs`), and its absence keeps the
+    allow-list — so removing the key is the off switch."""
+    import app.mcp_discovery as disc
+    from app.compaction import get_context_window, truncation_threshold
+    from app.harness.loop import _intra_turn_microcompact
+    from app.harness.options import RunOptions
+
+    base = {"trigger_fraction": 0.8, "target_fraction": 0.6}
+    undo = _stub(disc, "CONFIG", {"compaction": {"microcompact": dict(
+        base, non_compactable_tools=["TodoWrite", "ToolSearch"])}})
+    try:
+        on = disc.intra_turn_compaction_kwargs()
+    finally:
+        undo()
+    undo = _stub(disc, "CONFIG", {"compaction": {"microcompact": dict(base)}})
+    try:
+        off = disc.intra_turn_compaction_kwargs()
+    finally:
+        undo()
+    assert on["intra_turn_microcompact_non_compactable"] == ("TodoWrite", "ToolSearch")
+    assert "intra_turn_microcompact_non_compactable" not in off
+
+    threshold = truncation_threshold(get_context_window("primary"))
+
+    def _run(kwargs):
+        opts = RunOptions(model="primary", session_id="", **kwargs)
+        msgs = _named_pairs(["vault_search"] * 20 + ["TodoWrite"] * 2)
+        cleared = _intra_turn_microcompact(
+            msgs, options=opts, meter=_primed_meter(int(threshold * 0.95), msgs),
+            keep_recent=4, tool_count=22, iteration=22,
+        )
+        return cleared, _cleared_names(msgs)
+
+    cleared, names = _run(on)
+    assert cleared > 0 and set(names) == {"vault_search"}, (cleared, names)
+    assert _run(off) == (0, [])
 
 
 # ---------------------------------------------------------------------------
@@ -992,6 +1107,9 @@ _TESTS = [
     test_microcompact_legacy_count_rule_still_available,
     test_intra_turn_microcompact_is_silent_without_pressure,
     test_intra_turn_microcompact_fires_when_actually_near_the_wall,
+    test_microcompact_deny_list_clears_domain_results,
+    test_microcompact_deny_list_protects_todowrite_and_toolsearch,
+    test_the_intra_turn_pass_reads_the_deny_list_from_config,
     test_truncation_threshold_math,
     test_microcompact_marker_names_a_route_the_turn_can_take,
     test_the_pre_turn_pass_carries_the_turn_s_deny_list,

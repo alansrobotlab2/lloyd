@@ -211,6 +211,11 @@ class RunOptions:
     intra_turn_microcompact_trigger_fraction: float = 0.8
     intra_turn_microcompact_target_fraction: float = 0.6
     intra_turn_microcompact_min_chars: int = 2_000
+    # Deny-list mode for rung 1 (D10). None = the historical allow-list
+    # (Read/Bash/Grep/Glob/Edit/Write only); a tuple = every tool's result
+    # may be cleared except these. From `compaction.microcompact.
+    # non_compactable_tools` via `app.mcp_discovery`.
+    intra_turn_microcompact_non_compactable: tuple[str, ...] | None = None
 
     # ---- context pressure -------------------------------------------------
     # Live view of how much of the window this turn has spent. Caller-owned

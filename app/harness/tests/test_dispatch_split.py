@@ -413,3 +413,31 @@ async def test_cancelling_the_dispatcher_cancels_the_pool_call():
     leftovers = [t for t in asyncio.all_tasks() - before
                  if t is not asyncio.current_task() and not t.done()]
     assert leftovers == [], leftovers
+
+async def test_an_error_result_over_the_spill_threshold_is_spilled():
+    """D10: an error result is spilled like any other. A 200 KB traceback or a
+    failing test run used to go into the prompt whole — the one result nothing
+    bounded. It stays an error, and gets no empty-result marker."""
+    from app.harness.tool_result_spill import PERSISTED_OUTPUT_TAG, SPILL_THRESHOLD_CHARS
+
+    big = "Traceback line\n" * (SPILL_THRESHOLD_CHARS // 10)
+
+    class _Pool:
+        async def call_tool(self, name, args, **kw):
+            return {"content": big, "is_error": True}
+
+    evt = await L._execute_tool_call(tc=_tc(name="Bash", call_id="err1"), pool=_Pool(),
+                                     options=RunOptions(model="m"),
+                                     session_id="d10_spill_probe")
+    assert evt["is_error"] is True
+    assert evt["content"].startswith(PERSISTED_OUTPUT_TAG), evt["content"][:200]
+    assert len(evt["content"]) < len(big)
+
+    class _EmptyErr:
+        async def call_tool(self, name, args, **kw):
+            return {"content": "", "is_error": True}
+
+    evt = await L._execute_tool_call(tc=_tc(name="Bash", call_id="err2"), pool=_EmptyErr(),
+                                     options=RunOptions(model="m"),
+                                     session_id="d10_spill_probe")
+    assert evt["content"] == ""

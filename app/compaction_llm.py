@@ -409,6 +409,9 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> tuple[str, bool]:
     return text[:cut], True
 
 
+RESTORED_CONTEXT_TAG = "restored-context"
+
+
 def restore_recent_files(
     dropped_messages: list[dict],
     *,
@@ -416,13 +419,24 @@ def restore_recent_files(
     max_per_file: int = 5_000,
     max_files: int = 5,
 ) -> list[dict]:
-    """Re-inject the most-recently-touched files as system messages.
+    """Re-inject the most-recently-touched files as ONE user-role row.
 
-    Returns a list of system-role message dicts ready to be inserted
-    into the new history right after the summary message. Each entry
-    is tagged with a ``[restored-context: file=<path>]`` header so the
-    model and the UI can both tell what's restored vs. live tool
-    output.
+    Returns ``[]`` or a single message ready to be inserted into the new
+    history right after the summary message::
+
+        {"role": "user", "content": [{"type": "text", "text":
+          "<restored-context>\n<file path=\"…\" truncated_to=\"5000t\">…</file>…"
+          "</restored-context>"}], "restored_files": N}
+
+    **Why ``user`` (D3, 2026-09-24).** These rows used to be ``role:
+    "system"``, and ``_prepare_messages_for_harness`` keeps only
+    ``user``/``assistant``/``tool`` — so every restored file was dropped on
+    the way to the engine while ``tokens_after`` still counted it (up to
+    ``budget_tokens`` of over-report). A single row, because the engine is
+    handed one block the model can tell apart from anything the user typed
+    by its tag, and so the file count cannot change how the history groups
+    into turns. ``restored_files`` rides on the row so a caller counts files
+    without parsing file contents that may themselves contain ``<file``.
 
     Files are re-read from disk *fresh* (current state), not from the
     original tool result. This is intentional — files often change
@@ -438,10 +452,10 @@ def restore_recent_files(
     if not paths:
         return []
 
-    out: list[dict] = []
+    parts: list[str] = []
     spent = 0
     for path in paths:
-        if len(out) >= max_files:
+        if len(parts) >= max_files:
             break
         if spent >= budget_tokens:
             break
@@ -458,27 +472,42 @@ def restore_recent_files(
         if per_file_cap <= 0:
             break
         content, was_trunc = _truncate_to_tokens(content, per_file_cap)
-        header = f"[restored-context: file={path}"
+        attrs = f'path="{path}"'
         if was_trunc:
-            header += f" truncated_to={per_file_cap}t"
-        header += "]\n"
-        body = header + content
-        out.append({
-            "role": "system",
-            "content": [{"type": "text", "text": body}],
-        })
+            attrs += f' truncated_to="{per_file_cap}t"'
+        body = f"<file {attrs}>\n{content}\n</file>"
+        parts.append(body)
         spent += estimate_tokens(body)
 
-    if out:
-        logger.info(
-            "restore_recent_files: re-injected %d/%d candidate files (~%d tokens)",
-            len(out), len(paths), spent,
-        )
-    return out
+    if not parts:
+        return []
+    text = (
+        f"<{RESTORED_CONTEXT_TAG}>\n"
+        "Files you worked with before the compaction above, re-read from "
+        "disk as they are now.\n"
+        + "\n".join(parts)
+        + f"\n</{RESTORED_CONTEXT_TAG}>"
+    )
+    logger.info(
+        "restore_recent_files: re-injected %d/%d candidate files (~%d tokens)",
+        len(parts), len(paths), spent,
+    )
+    return [{
+        "role": "user",
+        "content": [{"type": "text", "text": text}],
+        "restored_files": len(parts),
+    }]
+
+
+def restored_file_count(rows: list[dict]) -> int:
+    """How many files ``restore_recent_files`` put in ``rows``."""
+    return sum(int(r.get("restored_files") or 0) for r in rows or [])
 
 
 __all__ = [
     "SUMMARIZATION_SYSTEM_PROMPT",
     "summarize_history",
     "restore_recent_files",
+    "restored_file_count",
+    "RESTORED_CONTEXT_TAG",
 ]

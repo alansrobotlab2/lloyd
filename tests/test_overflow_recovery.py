@@ -217,3 +217,37 @@ def test_the_terminal_inject_ladder_runs_whole_after_the_latch_closed_a_pass(har
         assert all(c["freed_tokens"] == 0 for c in got), (reason, got)
     term = run.by_reason("terminal_inject")[0]
     assert term["used"] > WALL - 6_000, term          # still at the wall after the pass
+
+
+def test_the_rejected_size_reaches_rung_one(harness, monkeypatch):
+    """D6: the overflow recovery's rung 1 budgets from the size the engine
+    REJECTED, not from the turn's peak `input_tokens`.
+
+    The recovery feeds the rejection's `requested_input_tokens` into the meter,
+    but rung 1 used to read `total_usage["input_tokens"]` instead — the peak of
+    requests that SUCCEEDED, which never includes the rejected one. Here the
+    engine reports no usage at all, so that peak was 0: rung 1 saw only its own
+    estimate, sat under its trigger, and cleared nothing at the one moment the
+    turn was certain to be over the wall. Reading the meter, it sees 300,000.
+    """
+    from app.harness import loop as loop_mod
+
+    real = loop_mod._intra_turn_microcompact
+    seen: list[tuple[int, int]] = []
+
+    def _spy(chat_messages, *, meter, **kw):
+        used = int(meter.used)
+        cleared = real(chat_messages, meter=meter, **kw)
+        seen.append((used, cleared))
+        return cleared
+
+    monkeypatch.setattr(loop_mod, "_intra_turn_microcompact", _spy)
+    run = harness([("a", [TC(1)]), ("b", [TC(2)]), ("done", [])],
+                  level=BAND, max_turns=5, overflow_times=1, overflow_at=2)
+
+    over = [c for c in run.ladder_calls() if c["reason"] == "overflow"]
+    assert len(over) == 1, run.calls
+    at_wall = [(used, cleared) for used, cleared in seen if used >= WALL]
+    assert len(at_wall) == 1, seen
+    assert at_wall[0][1] > 0, (
+        f"rung 1 ran at {at_wall[0][0]} tokens and cleared nothing: {seen}")

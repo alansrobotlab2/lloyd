@@ -207,6 +207,112 @@ def test_relief_reports_which_rungs_it_ran():
 
 
 # ---------------------------------------------------------------------------
+# rung 1 budgets from the meter (D6)
+# ---------------------------------------------------------------------------
+
+def _read_pairs(start: int, n: int, chars: int = 8_000) -> list[dict]:
+    msgs: list[dict] = []
+    for i in range(start, start + n):
+        cid = f"r{i:03d}"
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [{
+            "id": cid, "type": "function", "function": {
+                "name": "Read", "arguments": json.dumps({"file_path": f"/f{i}.py"})}}]})
+        msgs.append({"role": "tool", "tool_call_id": cid,
+                     "content": f"line of file {i}\n" * (chars // 16)})
+    return msgs
+
+
+def _inline_reads(msgs: list[dict]) -> int:
+    return sum(1 for m in msgs if m.get("role") == "tool"
+               and "cleared from context" not in str(m.get("content")))
+
+
+def _rung_one_levels():
+    from app.compaction import get_context_window, truncation_threshold
+
+    threshold = truncation_threshold(get_context_window("primary"))
+    return int(threshold * 0.8), int(threshold * 0.6)
+
+
+def test_a_second_pass_budgets_from_the_relieved_size_not_the_peak():
+    """The turn's PEAK input size is not where the prompt sits after a pass.
+
+    Until D6 rung 1 re-derived its offset from `total_usage["input_tokens"]`,
+    a peak: after one pass cleared the prompt down to target, the next pass
+    read `peak - estimate(now)` as fixed cost, so every token the first pass
+    had freed was booked as system prompt and the second pass cleared down to
+    the `keep_recent` floor. Budgeting from the meter — resynced after the
+    first pass — clears only back down to target.
+    """
+    from app.compaction import estimate_conversation_tokens
+    from app.harness.loop import _intra_turn_microcompact
+
+    trigger, target = _rung_one_levels()
+    opts = _opts(intra_turn_microcompact_trigger_fraction=0.8,
+                 intra_turn_microcompact_target_fraction=0.6)
+    # A turn well past the wall (the overflow shape): 150 results, and a
+    # fixed cost of 10k tokens the list does not contain.
+    msgs = [{"role": "user", "content": "review"}] + _read_pairs(0, 150)
+    meter = ContextMeter(context_window_for("primary"))
+    peak = estimate_conversation_tokens(msgs, "") + 10_000
+    meter.observe_usage({"input_tokens": peak}, len(msgs))
+    meter.observe_append(msgs)
+    offset = meter.offset
+    assert offset == 10_000
+
+    first = _intra_turn_microcompact(msgs, options=opts, meter=meter,
+                                     keep_recent=15, tool_count=150, iteration=1)
+    meter.resync(msgs)
+    per_result = estimate_conversation_tokens(_read_pairs(0, 1), "")
+    # Within one result of target (the markers that replace cleared results
+    # cost a little themselves).
+    assert first > 0 and abs(meter.used - target) <= per_result, (
+        first, meter.used, target)
+    assert meter.offset == offset, "resync must keep the fixed cost"
+
+    # The turn grows back over the trigger with fresh results.
+    i = 150
+    while meter.used <= trigger:
+        msgs.extend(_read_pairs(i, 1))
+        meter.observe_append(msgs)
+        i += 1
+    # What the peak arithmetic would have budgeted: every token pass one
+    # freed reads as fixed cost, and the budget collapses to the floor.
+    peak_budget = target - (peak - estimate_conversation_tokens(msgs, ""))
+    assert peak_budget < 15 * per_result, peak_budget
+
+    second = _intra_turn_microcompact(msgs, options=opts, meter=meter,
+                                      keep_recent=15, tool_count=i, iteration=2)
+    meter.resync(msgs)
+    assert second > 0
+    # Cleared back to target — not to the floor, which is what the peak did.
+    assert abs(meter.used - target) <= per_result, (meter.used, target)
+    # ~50 results stay inline where the peak's budget would have left 15.
+    assert _inline_reads(msgs) >= 3 * 15, _inline_reads(msgs)
+
+
+def test_an_unmeasured_meter_still_lets_rung_one_run_on_the_estimate():
+    """No usage report yet (iteration 1, or an engine that reports none) is
+    not a reason to refuse: the estimate alone decides, as it always could."""
+    from app.compaction import estimate_conversation_tokens
+    from app.harness.loop import _intra_turn_microcompact
+
+    trigger, target = _rung_one_levels()
+    msgs = [{"role": "user", "content": "review"}]
+    i = 0
+    while estimate_conversation_tokens(msgs, "") <= trigger:
+        msgs.extend(_read_pairs(i, 5))
+        i += 5
+    meter = ContextMeter(context_window_for("primary"))      # never observed
+    cleared = _intra_turn_microcompact(
+        msgs, options=_opts(intra_turn_microcompact_trigger_fraction=0.8,
+                            intra_turn_microcompact_target_fraction=0.6),
+        meter=meter, keep_recent=15, tool_count=i, iteration=1)
+    assert cleared > 0
+    assert estimate_conversation_tokens(msgs, "") <= target
+
+
+# ---------------------------------------------------------------------------
 # the wall-aware parse failure
 # ---------------------------------------------------------------------------
 

@@ -78,6 +78,9 @@ with, so the cache-TTL heuristic Claude Code uses doesn't apply here.
 Compactable tool list defaults to ``Read, Bash, Grep, Glob, Edit,
 Write`` plus any namespaced ``mcp__*`` variants of those names. The
 caller can override via the ``compactable_tools`` argument.
+Or, with ``non_compactable_tools``, every tool except a deny list
+(``DEFAULT_NON_COMPACTABLE``) — config ``compaction.microcompact.
+non_compactable_tools``, which wins over ``compactable_tools`` when set.
 """
 
 from __future__ import annotations
@@ -98,6 +101,22 @@ logger = logging.getLogger("lloyd-microcompact")
 
 DEFAULT_COMPACTABLE_TOOLS: tuple[str, ...] = (
     "Read", "Bash", "Grep", "Glob", "Edit", "Write",
+)
+
+# Deny-list mode (D10, 2026-09-24): with ``non_compactable_tools`` given,
+# every tool result may be cleared EXCEPT these. The allow-list above never
+# covered an MCP domain tool (vault search, http_fetch, graph queries...), so
+# those results were never cleared and went straight to truncation. What is
+# protected here is state the model steers by and cannot cheaply re-derive:
+# its todo list, the tool catalogue ToolSearch loaded, plan mode, the goal.
+# Deliberately NOT listed: ``Task`` — the newest result is protected by
+# ``keep_recent_tools`` like any other, and an old subagent report is exactly
+# the bulk this exists to clear. Skill-delivery results carry the name of the
+# tool call the skill intercepted and are short (under ``min_chars_to_clear``),
+# so they are left alone by size rather than by name.
+DEFAULT_NON_COMPACTABLE: tuple[str, ...] = (
+    "TodoWrite", "ToolSearch", "EnterPlanMode", "ExitPlanMode",
+    "SetGoal", "ClearGoal",
 )
 
 # Fallback marker, used only when the call that produced the result can't
@@ -173,17 +192,25 @@ def _cleared_marker(
     )
 
 
-def _is_compactable_tool_call(name: str, allow: set[str]) -> bool:
-    """Match either bare ``Read`` or namespaced ``mcp__lloyd-mcp__Read``."""
+def _is_compactable_tool_call(
+    name: str, allow: set[str], deny: set[str] | None = None,
+) -> bool:
+    """Match either bare ``Read`` or namespaced ``mcp__lloyd-mcp__Read``.
+
+    ``deny`` given (even empty) is deny-list mode: any named tool is
+    compactable unless its bare name is in ``deny``, and ``allow`` is not
+    consulted. An unnamed call is never compactable in either mode — the
+    marker could not say what it cleared.
+    """
     if not name:
         return False
+    bare = name.rsplit("__", 1)[-1] if "__" in name else name
+    if deny is not None:
+        return name not in deny and bare not in deny
     if name in allow:
         return True
     # Namespaced form: mcp__<server>__<tool>
-    if "__" in name:
-        bare = name.rsplit("__", 1)[-1]
-        return bare in allow
-    return False
+    return bare in allow
 
 
 def _tool_result_text(message: dict) -> str:
@@ -257,6 +284,7 @@ def microcompact(
     session_id: str = "",
     legacy_count_rule: bool = True,
     disallowed_tools: Iterable[str] | None = None,
+    non_compactable_tools: Iterable[str] | None = None,
 ) -> tuple[list[dict], int]:
     """Replace stale compactable tool results with a cleared marker.
 
@@ -287,6 +315,10 @@ def microcompact(
         turn to answer for and leaves it unset, which reads as
         everything-allowed — the conservative direction, since the
         alternative is withholding a Read from a chat turn that has one.
+      non_compactable_tools: deny-list mode. When given (even empty),
+        ``compactable_tools`` is ignored and every tool's result may be
+        cleared except these (bare or namespaced). ``None`` keeps the
+        allow-list. See ``DEFAULT_NON_COMPACTABLE``.
 
     Recoverability: with ``session_id`` set, each result is written to
     the session's spill dir before its content leaves the prompt, and the
@@ -298,6 +330,10 @@ def microcompact(
         return list(messages), 0
 
     allow: set[str] = {t for t in compactable_tools}
+    deny: set[str] | None = (
+        None if non_compactable_tools is None
+        else {str(t) for t in non_compactable_tools}
+    )
     # One lookup for the whole pass: every marker this pass writes answers
     # the same question about the same tool menu.
     read_denied = tool_is_denied(READ_TOOL, disallowed_tools)
@@ -330,7 +366,7 @@ def microcompact(
             continue
         cid = msg.get("tool_call_id") or msg.get("call_id") or ""
         name = tc_id_to_name.get(cid, "")
-        if _is_compactable_tool_call(name, allow):
+        if _is_compactable_tool_call(name, allow, deny):
             compactable_indices.append(i)
 
     if not compactable_indices:
@@ -617,6 +653,7 @@ def shrink_assistant_arguments(
 
 __all__ = [
     "DEFAULT_COMPACTABLE_TOOLS",
+    "DEFAULT_NON_COMPACTABLE",
     "CLEARED_MARKER",
     "SHRUNK_ARG_MARKER",
     "microcompact",
