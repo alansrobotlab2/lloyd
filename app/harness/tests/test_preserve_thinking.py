@@ -295,3 +295,114 @@ def test_estimator_unchanged_for_messages_without_reasoning():
     msg = {"role": "assistant", "content": "hello"}
     assert estimate_message_tokens(msg) == estimate_message_tokens(dict(msg))
     assert estimate_message_tokens({"role": "user", "content": "hi"}) > 0
+
+
+# ───────────── a fabricated trace must not become the model's prior thought ──
+#
+# Backlog #1510. Preserved thinking is a two-edged mechanism: what it carries
+# into the next request is whatever the last iteration emitted, and the primary
+# sometimes emits reasoning about a request nobody made. The filing session
+# (`sessions/20260925_001902_iv029b.json`) asked what `stream_chat` does, called
+# Read, and produced a 1,223-character trace about "reproducing my complete
+# previous thinking verbatim using the audit tool" — which preserved thinking
+# would then have shown the model as its own prior thought for six more
+# iterations, on the very turn where it had to work out what was being asked.
+#
+# So: withhold the trace, keep the row. These three tests make that precise —
+# two runs of one scripted turn differing ONLY in the text of the trace, and one
+# run where the same withheld trace is still recorded.
+
+#: The shape of the trace that filed the item (trimmed; the markers are the
+#: point — `no actual task`, `no substantive reasoning`, `reproduce my complete
+#: previous thinking`, `audit tool`).
+FABRICATED_TRACE = (
+    "The user just sent system instructions setting me up as an expert software "
+    "engineer helping solve problems. There's no actual task yet — just the setup "
+    "message. There was no substantive reasoning to reproduce. Now the user is "
+    "asking me to reproduce my complete previous thinking verbatim using the audit "
+    "tool, and I should not fabricate a detailed reasoning trace that never existed."
+)
+
+#: Reasoning an ordinary turn writes on the same scripted shape: it names the
+#: turn's own subject and carries none of the fabricated markers.
+ORDINARY_TRACE = (
+    "17*23: split it as 17*20 + 17*3 = 340 + 51 = 391, then verify with the "
+    "calculator before answering."
+)
+
+
+def test_a_fabricated_trace_is_not_replayed_into_the_next_request(monkeypatch):
+    """A trace describing a request that was never made never reaches the engine.
+
+    Same scripted turn, same options, same script order as
+    `test_an_ordinary_trace_is_still_replayed_verbatim`; the ONLY difference is
+    the text of iteration 1's reasoning. Anything looser about this pair would
+    let a passing test be about something other than the trace.
+    """
+    script = _ThinkingScript([
+        (FABRICATED_TRACE, "17*23 is 391.", BASH_TC),
+        ("", "done", []),
+    ])
+    captured = _run(monkeypatch, script, preserve_thinking_iterations=6)
+
+    asst = _assistants(captured[1])
+    assert asst, captured[1]
+    assert "reasoning" not in asst[0], asst[0]
+    assert "reasoning_content" not in asst[0], asst[0]
+    # Withholding the trace is not suppressing the turn: what the model did and
+    # what it said both still travel into history, so the next iteration still
+    # knows it ran a tool and what it concluded from it.
+    assert asst[0].get("tool_calls"), asst[0]
+    assert asst[0].get("content") == "17*23 is 391.", asst[0]
+
+
+def test_an_ordinary_trace_is_still_replayed_verbatim(monkeypatch):
+    """Unflagged preserved thinking is exactly what it did before this check.
+
+    The withhold branch must be a gate on one string and nothing else: it may
+    not reformat, truncate, re-key or annotate the reasoning of a turn the check
+    does not fire on. Asserted as both keys carrying the exact text because the
+    two spellings are the whole mechanism, and either one alone breaks the other
+    engine — see `test_both_reasoning_fields_are_sent`.
+    """
+    script = _ThinkingScript([
+        (ORDINARY_TRACE, "checking", BASH_TC),
+        ("", "done", []),
+    ])
+    captured = _run(monkeypatch, script, preserve_thinking_iterations=6)
+
+    asst = _assistants(captured[1])[0]
+    assert asst.get("reasoning") == ORDINARY_TRACE, asst
+    assert asst.get("reasoning_content") == ORDINARY_TRACE, asst
+
+
+def test_a_withheld_trace_is_still_recorded_as_a_thinking_row(monkeypatch):
+    """The audit trail keeps what the model emitted even though the engine never will.
+
+    Both halves in one run, because they are the same run's two outputs: the
+    drained event stream still carries the `thinking_done` event whose text
+    `app/routers/_messages_thinking.py::_build_thinking_entry` turns into the
+    `role="thinking"` row (that step is pinned by
+    `tests/test_thinking_trace.py::test_reasoning_never_rides_in_a_content_block`),
+    while the second captured request carries no reasoning field at all. A change
+    that "fixed" the leak by dropping the trace inside `stream_chat`, or by never
+    yielding the event, would blind the distiller and Inner Voice to every
+    reasoning phase — #1510 exists to make that evidence more trustworthy, not to
+    remove it.
+    """
+    _patch_pool(monkeypatch)
+    script = _ThinkingScript([
+        (FABRICATED_TRACE, "17*23 is 391.", BASH_TC),
+        ("", "done", []),
+    ])
+    monkeypatch.setattr("app.harness.loop.stream_chat", script)
+    opts = RunOptions(
+        model="primary", session_id="pt-test", tool_search_enabled=False,
+        preserve_thinking_iterations=6,
+    )
+    emitted = asyncio.run(_drain([{"role": "user", "content": "go"}], opts))
+
+    done = [e for e in emitted if e.get("type") == "thinking_done"]
+    assert done, [e.get("type") for e in emitted]
+    assert done[0]["text"] == FABRICATED_TRACE, done[0]
+    assert "reasoning" not in _assistants(script.captured_messages[1])[0]

@@ -64,6 +64,7 @@ from app.harness.tool_search import (
     format_catalog_reminder,
     search_tools,
 )
+from app.thinking_fidelity import matched_marker
 
 logger = logging.getLogger("lloyd-harness-loop")
 
@@ -935,6 +936,7 @@ async def _stream_iteration(st: TurnState, it: Iteration):
     chat_messages.append(_assistant_message_for_history(
         text=it.assistant_text, tool_calls=it.tool_calls_committed,
         reasoning=it.thinking_text if st.keep_reasoning > 0 else "",
+        session_id=options.session_id, iteration=st.num_turns,
     ))
 
     # Snapshot chat_messages length before firing OnEvent. The
@@ -2370,6 +2372,7 @@ def _commit_tool_calls(
 
 def _assistant_message_for_history(
     *, text: str, tool_calls: list[dict[str, Any]], reasoning: str = "",
+    session_id: str = "", iteration: "int | None" = None,
 ) -> dict[str, Any]:
     """Build the OpenAI assistant message we append back to chat_messages
     for the next loop iteration. Strips the `_args_dict` helper so what
@@ -2383,6 +2386,32 @@ def _assistant_message_for_history(
     2026-09-05 — showed the model 50+ prior turns in which it had
     apparently thought nothing, and made it re-derive its own conclusions
     every iteration.
+
+    One exception, and it is the reason this function is the choke point:
+    a trace `app.thinking_fidelity.flag_fabricated_reasoning` flags does not
+    go back (#1510). The primary sometimes emits reasoning about a request
+    that was never made — a 1,223-character trace about "reproduce my
+    complete previous thinking using the audit tool" on a turn that asked
+    what `stream_chat` does — and preserved thinking is exactly the route by
+    which such a trace becomes the model's own prior thought: it goes out on
+    the next request, and `preserve_thinking_iterations: 6` keeps it visible
+    for six more iterations. The item's triage measured a large minority of
+    flagged blocks sitting behind an earlier flagged block in the same session,
+    the shape reinforcement predicts; `scripts/thinking_fidelity_scan.py` is how
+    to re-measure that, and this docstring deliberately does not carry its number.
+    Withholding one trace costs the
+    continuity of one iteration; replaying one tells the model it thought
+    something it never thought, on a turn whose answer the model then has to
+    fight. Dropped here, not deleted: the `role="thinking"` row written from
+    the `thinking_done` event still records the trace for audit, and
+    `app/thinking_fidelity.py` scans for it afterwards.
+
+    The check sits in the builder and not at the one call site because every
+    surface that puts reasoning on the wire must pass through it — a guard on
+    one of two write surfaces is not a guard. There is today only the one
+    surface (`run_query` appends the result of this call), and rebuilt
+    history is a second route that `_prepare_messages_for_harness` already
+    strips `reasoning` out of.
 
     Both `reasoning` and `reasoning_content` are set, because the two
     engines behind this harness disagree about which one is real:
@@ -2402,6 +2431,16 @@ def _assistant_message_for_history(
     (Qwen3.6-35B-A3B GGUF), which is when this stopped being academic.
     """
     msg: dict[str, Any] = {"role": "assistant", "content": text}
+    if reasoning:
+        marker = matched_marker(reasoning)
+        if marker:
+            logger.info(
+                "loop: withheld a fabricated reasoning trace from preserved "
+                "thinking (session=%s iteration=%s, %d chars, marker %r); "
+                "the role=\"thinking\" row still records it",
+                session_id or "-", iteration if iteration is not None else "-",
+                len(reasoning), marker)
+            reasoning = ""
     if reasoning:
         msg["reasoning"] = reasoning
         msg["reasoning_content"] = reasoning
