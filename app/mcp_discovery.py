@@ -351,9 +351,9 @@ def context_relief_kwargs() -> dict:
         out["context_relief_shrink_arguments_tools"] = tuple(
             str(x) for x in cr["shrink_arguments_tools"]
         )
-    if "send_max_tokens_reservation" in cr:
-        out["context_relief_send_max_tokens_reservation"] = bool(
-            cr["send_max_tokens_reservation"]
+    if "max_overflow_recoveries" in cr:
+        out["max_context_overflow_recoveries"] = max(
+            0, int(cr["max_overflow_recoveries"])
         )
     return out
 

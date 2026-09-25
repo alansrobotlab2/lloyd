@@ -695,14 +695,14 @@ has still not been run as of 2026-09-11.
 ## 10. Still open
 
 - **The acceptance bar, for the fleet as it runs today** — `workers.slots` 6
-  and `workers.sources.autocode.max_inflight` 4, so four long-lived rounds
-  resident beside triage, the scheduled tasks and a chat. One normal day at
+  and `workers.sources.autocode.max_inflight` 2 (4 until the evening of
+  2026-09-24), so two long-lived rounds resident beside triage, the scheduled tasks and a chat. One normal day at
   that shape with Alan chatting passes when (a) no chat turn carries a prefix
   miss, (b) the fleet's misses and re-prefilled tokens per day are at or under
   §6.1's per-day baseline, (c) KV p50 is under the gate
   (`workers.kv_gate.max_kv_usage`, 0.60), and (d) no two-request window runs
   under 15 tok/s that is not a cold admission. The bar written for slots = 2
-  asked for *zero* misses after iteration 2; with four rounds each idle for
+  asked for *zero* misses after iteration 2; with several rounds each idle for
   minutes between iterations (below) that cannot hold on one pool, so the
   re-stated bar asks for what a person feels (a, d) and a budget for the rest
   (b). Clearing it needs a day of real chat, which the window below is not.
@@ -712,7 +712,8 @@ has still not been run as of 2026-09-11.
   `scripts/vllm_prefix_miss_window.py` over the extract committed as
   `tests/fixtures/vllm_prefix_miss_2026-09-23.json`: **219 turns, 219
   measured, 65 turns carrying 172 misses and 16,084,128 re-prefilled tokens**,
-  worst turn 601,503. By session kind: autocode 158 misses (14.5M), then
+  worst turn 601,503. Taken at four rounds; the shape now running (slots 6,
+  2 rounds) has not been counted yet. By session kind: autocode 158 misses (14.5M), then
   deep-research 4, arch-review 3, youtube-digest 3, review 3, autonomy 1.
   Chat 0 — but only 4 of the 219 turns were chat, so (a) was not tested and
   this is not the normal day the bar asks for. 197 miss iterations logged, 85

@@ -64,7 +64,6 @@ class TurnState:
     num_turns: int = 0
     stop_reason: str = "stop"
     context_overflow_recoveries: int = 0
-    max_context_overflow_recoveries: int = 2
     # One multimodal rejection latches image attachment off for the rest of
     # THIS run (#1419).
     images_latched: bool = False

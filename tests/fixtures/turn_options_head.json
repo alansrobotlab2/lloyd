@@ -10,7 +10,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -33,16 +32,12 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {},
    "final_schema": null,
    "final_schema_prompt": "",
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "worker:autocode",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -84,7 +79,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 0,
    "request_timeout_s": 600.0,
@@ -127,7 +121,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -146,16 +139,12 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {},
    "final_schema": null,
    "final_schema_prompt": "",
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -189,7 +178,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 0,
    "request_timeout_s": 600.0,
@@ -232,7 +220,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -253,16 +240,12 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(secondary)"
-   },
    "extra_body": {},
    "final_schema": null,
    "final_schema_prompt": "",
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -296,7 +279,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 0,
    "request_timeout_s": 600.0,
@@ -340,7 +322,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -399,16 +380,12 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {},
    "final_schema": null,
    "final_schema_prompt": "",
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "worker:autotriage",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -450,7 +427,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 0,
    "request_timeout_s": 600.0,
@@ -495,7 +471,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -512,16 +487,12 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {},
    "final_schema": null,
    "final_schema_prompt": "",
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "worker:autocode",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -563,7 +534,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 1,
    "request_timeout_s": 600.0,
@@ -608,7 +578,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -623,16 +592,12 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {},
    "final_schema": null,
    "final_schema_prompt": "",
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -666,7 +631,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 1,
    "request_timeout_s": 600.0,
@@ -711,7 +675,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -727,16 +690,12 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(secondary)"
-   },
    "extra_body": {},
    "final_schema": null,
    "final_schema_prompt": "",
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -770,7 +729,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 1,
    "request_timeout_s": 600.0,
@@ -816,7 +774,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -851,16 +808,12 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {},
    "final_schema": null,
    "final_schema_prompt": "",
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "worker:autotriage",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -902,7 +855,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 1,
    "request_timeout_s": 600.0,
@@ -951,7 +903,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -974,9 +925,6 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "item:autocode:3",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {},
    "final_schema": {
     "type": "object"
@@ -985,7 +933,6 @@
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "autonomy-task:9",
-   "history": [],
    "hooks": {
     "on_event": [
      {
@@ -1044,7 +991,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 0,
    "request_timeout_s": 600.0,
@@ -1087,7 +1033,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -1106,16 +1051,12 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {},
    "final_schema": null,
    "final_schema_prompt": "",
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -1157,7 +1098,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 0,
    "request_timeout_s": 600.0,
@@ -1202,7 +1142,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -1225,16 +1164,12 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(override-model)"
-   },
    "extra_body": {},
    "final_schema": null,
    "final_schema_prompt": "",
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -1276,7 +1211,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "default",
    "preserve_thinking_iterations": 3,
    "priority": 2,
    "request_timeout_s": 600.0,
@@ -1319,7 +1253,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -1338,16 +1271,12 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {},
    "final_schema": null,
    "final_schema_prompt": "",
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -1389,7 +1318,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 0,
    "request_timeout_s": 600.0,
@@ -1454,7 +1382,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -1515,9 +1442,6 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "item:autotriage:7",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {},
    "final_schema": {
     "type": "object"
@@ -1526,7 +1450,6 @@
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "worker:autotriage",
-   "history": [],
    "hooks": {
     "on_event": [
      {
@@ -1585,7 +1508,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 1,
    "request_timeout_s": 600.0,
@@ -1625,7 +1547,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -1644,9 +1565,6 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {
     "voice": true
    },
@@ -1655,7 +1573,6 @@
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -1689,7 +1606,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 0,
    "request_timeout_s": 600.0,
@@ -1728,7 +1644,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -1747,9 +1662,6 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {
     "voice": true
    },
@@ -1758,7 +1670,6 @@
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -1792,7 +1703,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 0,
    "request_timeout_s": 600.0,
@@ -1831,7 +1741,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -1852,9 +1761,6 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(secondary)"
-   },
    "extra_body": {
     "voice": true
    },
@@ -1863,7 +1769,6 @@
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -1897,7 +1802,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 0,
    "request_timeout_s": 600.0,
@@ -1936,7 +1840,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -1955,9 +1858,6 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {
     "voice": true
    },
@@ -1966,7 +1866,6 @@
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -2000,7 +1899,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 0,
    "request_timeout_s": 600.0,
@@ -2039,7 +1937,6 @@
    "context_relief_enabled": true,
    "context_relief_min_completion_tokens": 6000,
    "context_relief_reasoning_keep_under_pressure": 2,
-   "context_relief_send_max_tokens_reservation": false,
    "context_relief_shrink_arguments": true,
    "context_relief_shrink_arguments_min_chars": 2000,
    "context_relief_shrink_arguments_tools": [
@@ -2058,9 +1955,6 @@
    "echo_guard_mode": "nudge",
    "effect_scope": "",
    "effort": null,
-   "env": {
-    "ANTHROPIC_BASE_URL": "http://engine/R(primary)"
-   },
    "extra_body": {
     "voice": true
    },
@@ -2069,7 +1963,6 @@
    "finalizer_max_tokens": 8192,
    "finalizer_timeout_s": 180.0,
    "grant_scope": "",
-   "history": [],
    "hooks": {
     "on_event": [],
     "post": [],
@@ -2103,7 +1996,6 @@
    "parallel_safe_task_profiles": [],
    "parallel_tool_calls_enabled": false,
    "parallel_tool_calls_max_concurrency": 4,
-   "permission_mode": "bypassPermissions",
    "preserve_thinking_iterations": 3,
    "priority": 0,
    "request_timeout_s": 600.0,

@@ -420,8 +420,13 @@ def _child(args: argparse.Namespace) -> None:
             preserve_thinking_iterations=6,
             parallel_tool_calls_enabled=(arm == "par"),
             parallel_tool_calls_max_concurrency=3,
-            **kw,
         )
+        # Set after construction, not splatted: a `**kw` is read by the
+        # outbound-content roster as a build that might register MCP servers,
+        # and this one cannot — its pool is the scripted `Pool` above, so no
+        # sender tool is reachable and the gate has nothing to arm.
+        for key, value in kw.items():
+            setattr(opts, key, value)
         del elog[:]
         out_events: list[list[Any]] = []
         error = None

@@ -996,6 +996,11 @@ async def test_a_chat_sessions_background_completion_keeps_its_own_key(pool,
     from app.routers import messages as R
 
     chat_session = "test-chat-session-929"
+    # Module-level state an earlier test in the same process may have left
+    # (tests/test_task_steering.py registers close handoffs for its fake
+    # children): judge only what THIS spawn adds.
+    handoff_before = dict(TR._close_handoff)
+    keys_before = set(TR._pending_by_session)
     spawn = await pool.call_tool(
         "Bash", {"command": "echo chat-routed", "run_in_background": True},
         session_id=chat_session,
@@ -1021,8 +1026,9 @@ async def test_a_chat_sessions_background_completion_keeps_its_own_key(pool,
 
     keys = sorted(TR._pending_by_session)
     assert chat_session in keys, keys
-    assert not [k for k in keys if k.startswith("task:")], keys
-    assert not TR._close_handoff, TR._close_handoff
+    assert not [k for k in keys
+                if k.startswith("task:") and k not in keys_before], keys
+    assert TR._close_handoff == handoff_before, TR._close_handoff
 
     persisted: list[tuple[str, list[dict]]] = []
 

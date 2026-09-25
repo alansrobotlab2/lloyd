@@ -979,16 +979,19 @@ def test_the_unarmed_paths_on_the_real_tree_are_the_unreachable_ones():
     """Positive control over the real tree, not over a fixture I wrote.
 
     The exclusion above must be *doing* something on the live checkout: the two
-    IDE builds are found, are excluded, and the excluded set is exactly them. A
-    finder that excluded everything, or nothing, would satisfy every other test
-    here while measuring nothing — so the counts are pinned against the tree.
+    IDE builds and the replay-diff harness are found, are excluded, and the
+    excluded set is exactly them. A finder that excluded everything, or nothing,
+    would satisfy every other test here while measuring nothing — so the counts
+    are pinned against the tree.
     """
     builds = OC.all_turn_builds()
     # 17 until P13.4 folded the router's four builds (the sync route's among
-    # them) and voice's one into the one shared builder.
-    assert len(builds) == 13, len(builds)
+    # them) and voice's one into the one shared builder; 14 since P13.1-3's
+    # replay-diff harness, whose scripted pool reaches no sender tool.
+    assert len(builds) == 14, len(builds)
     unreachable = sorted({b.file for b in builds if not b.sender_reachable})
-    assert unreachable == ["app/routers/ide.py"], unreachable
+    assert unreachable == ["app/routers/ide.py",
+                           "eval/run_harness_replay_diff.py"], unreachable
     assert OC.sender_unreachable_dispatch_files() == unreachable
     assert len(OC.dispatch_registry_sites()) == 11, OC.dispatch_registry_sites()
     assert len(OC.GATE_ARM_POINTS) == len(

@@ -12,7 +12,10 @@ by this file (`LLOYD_RECORD_TURN_OPTIONS=1`) against the tree BEFORE the
 builder existed (base 8ac6f4a8), for every kind across five session shapes, and
 the table test compares what the builder produces now against it field for
 field — every `RunOptions` field, the system prompt's inputs, the prompt tail,
-the installed hooks in order, the refreshed disallowed list.
+the installed hooks in order, the refreshed disallowed list. D13 removed
+four fields nothing read (`env`, `permission_mode`, `history`,
+`context_relief_send_max_tokens_reservation`) from `RunOptions`, and from
+the fixture by deleting those keys — every other recorded value is as it was.
 
 Everything that reads config or the live vault is replaced by a deterministic
 stand-in that echoes its arguments, so the fixture pins what each site PASSED,

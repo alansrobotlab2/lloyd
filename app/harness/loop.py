@@ -254,8 +254,11 @@ async def run_query(
 
     `messages` is an OpenAI-style message list — typically built by
     `app.compaction.load_and_compact_session(...)` plus the current
-    user turn. The harness prepends `options.system_prompt` as the system
-    message unless the list already carries one (position 0, inserted once).
+    user turn. When `options.chat_messages_handle` is a non-empty list the
+    loop runs on that list and ignores `messages` (a resumed Task passes its
+    stored history that way). The harness prepends `options.system_prompt`
+    as the system message unless the list already carries one (position 0,
+    inserted once).
 
     Cancellation: if `options.cancel_event` is set during streaming, the
     httpx context exits cleanly and the loop emits a final `result`
@@ -752,9 +755,10 @@ async def _stream_iteration(st: TurnState, it: Iteration):
         # truncate the largest tool result(s) in chat_messages,
         # append a synthetic tool note explaining the truncation,
         # and let the loop retry the same turn. Bounded by
-        # ``max_context_overflow_recoveries`` to avoid an infinite
+        # ``options.max_context_overflow_recoveries`` to avoid an infinite
         # loop if truncation can't free enough budget.
-        if st.context_overflow_recoveries >= st.max_context_overflow_recoveries:
+        bound = st.options.max_context_overflow_recoveries
+        if st.context_overflow_recoveries >= bound:
             logger.error(
                 "loop: context overflow after %d recovery attempts — giving up",
                 st.context_overflow_recoveries,
@@ -1755,9 +1759,14 @@ def _relieve_context(
     # -- rung 0: old screenshots ----------------------------------------
     # ~1.3k tokens each and the cheapest thing in the prompt to lose: the
     # newest few still show the current screen, and the files stay on disk.
+    # Under pressure only, like every rung after rung 1 (D13): dropping an
+    # image rewrites a message the engine has cached, and a turn below
+    # target has nothing to buy with that re-prefill.
     try:
         from app.harness.tool_images import images_cfg, keep_newest
-        if any(m.get("_image_refs") for m in chat_messages if isinstance(m, dict)):
+        if _over() and any(
+            m.get("_image_refs") for m in chat_messages if isinstance(m, dict)
+        ):
             dropped = keep_newest(
                 chat_messages, int(images_cfg().get("keep_on_compaction") or 3))
             if dropped:
@@ -1768,7 +1777,7 @@ def _relieve_context(
 
     # -- rung 1: stale tool results -------------------------------------
     try:
-        _intra_turn_microcompact(
+        cleared = _intra_turn_microcompact(
             chat_messages,
             options=options,
             meter=meter,
@@ -1779,7 +1788,11 @@ def _relieve_context(
             iteration=iteration,
         )
         meter.resync(chat_messages)
-        report["rungs"].append("tool_results")
+        # Named only when it cleared something (D13): rung 1 self-gates, and
+        # a report listing it on every pass said it acted when it had not.
+        # A pass whose other rungs ran and freed ~0 still records.
+        if cleared:
+            report["rungs"].append(f"tool_results:{cleared}")
     except Exception as exc:  # noqa: BLE001
         logger.warning("loop: relief rung 'tool_results' failed: %s", exc)
 

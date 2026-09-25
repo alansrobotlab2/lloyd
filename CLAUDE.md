@@ -1689,7 +1689,7 @@ authority — these keys are not the OpenAI wire names):
   until the real number arrives.
 - `tool_call` — `{type, call_id, name, args_json, args_dict, summary}` — tool
   invocation. `summary` is the model's own one-liner for the transcript;
-  it is absent from `args_json`/`args_dict` (see "Tool-call summaries").
+  it is absent from `args_dict` and kept in `args_json` (see "Tool-call summaries").
 - `tool_result` — `{type, call_id, name, content, is_error}` (+ `duration_ms`,
   `handshake_ms`, `error_class` when known, P11) — tool result
 - `assistant_message` — `{type, text, tool_calls, thinking, usage,
@@ -1781,6 +1781,16 @@ engine mid-generation hangs the turn until the client gives up. The key
 existed from the start and was read by nothing until 2026-09-06.
 A broken stream is retried once while no tool-call delta arrived, else ends `stream_error` (D7, `harness.stream_retry`; architecture/harness.md).
 A turn that raises or is cancelled still books its tokens, once, from the running totals (D12; architecture/harness.md).
+Review 2026-09-24 invariants (one line each; architecture/harness.md "Review 2026-09-24" has the long versions and the item table):
+- A gate hook registers `fail_closed=True` (safety, policy, outbound content, bench corpus): if it raises, the call is denied and `harness.hook_raised` logged (D5).
+- A `Task` child inherits the parent's grant scope and deny list through `_meta` (D4).
+- A transcript tool result over 2,000 chars is stored as a `<persisted-output>` pointer to the full text, never a 2 KB cut (D1).
+- The between-turn summary is a top-level `data["compaction"]` record folded forward, never a message row (D2/X6; `compaction.persist_summary`, off).
+- Files restored after compaction arrive as ONE `user` row; a `system` row is dropped by the adapter (D3).
+- Relief rung 1 budgets from the `ContextMeter`, never the turn's peak usage (D6); `/compact` is a queued turn (D11).
+- Every chat-path turn's `RunOptions` comes from `app/routers/turn_options.py::build_turn_options`; do not hand-build a fifth (P13.4).
+- Loop ordering is pinned by driving `run_query` through `app/harness/tests/_replay.py`, never by `inspect.getsource` (P13.0).
+- `RunOptions` carries no knob nothing reads (`test_run_options_carries_no_dead_knobs`); the overflow bound is `harness.context_relief.max_overflow_recoveries` (D13).
 
 **Two engines, two reasoning keys**: assistant messages carry reasoning back
 as **both** `reasoning` and `reasoning_content`. vLLM populates the template

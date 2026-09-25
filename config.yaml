@@ -578,9 +578,10 @@ harness:
     shrink_arguments: true
     shrink_arguments_min_chars: 2000
     shrink_arguments_tools: [Write, Edit]
-    # A/B only. A max_tokens reservation truncates a long think on a short
-    # answer, and llama.cpp truncates silently rather than erroring.
-    send_max_tokens_reservation: false
+    # An engine that rejects the prompt as over the window gets the largest
+    # tool results truncated and the request re-sent, at most this many
+    # times per turn; the next rejection ends the turn with the error.
+    max_overflow_recoveries: 2
   # Thinking trace. Persist each agent-loop iteration's reasoning phase as
   # its own `role="thinking"` session entry, so the chat timeline can show
   # a "Thought for 11.8s" row where the thinking actually happened. Before
@@ -625,10 +626,12 @@ harness:
   # Tool-call summaries. Adds a `summary` string parameter to every
   # advertised tool — a short phrase the model writes describing what the
   # call is doing, rendered beside the tool name in the chat and Inner
-  # Voice transcripts. Display metadata only: the harness strips it before
-  # dispatch and before the call is replayed back as history, so no tool
-  # ever receives it. false removes the parameter from every schema and the
-  # UI falls back to the bare tool name.
+  # Voice transcripts. Display metadata only: the harness strips it from the
+  # arguments a tool is dispatched with, so no tool ever receives it, and
+  # KEEPS it in the call replayed back as history — that replay is the
+  # model's only example of the call, and stripping it there taught the
+  # model to stop writing one. false removes the parameter from every
+  # schema and the UI falls back to the bare tool name.
   tool_call_summaries: true
   # Read-before-edit and stale-file gates (agent_mcp/builtin_fs.py). An
   # Edit against a file this session has never Read is a guess; an Edit

@@ -48,7 +48,10 @@ tissue; this doc is the map.
 - **Preserved thinking rides under two keys.** vLLM reads `reasoning`,
   llama.cpp reads `reasoning_content`; each ignores the other silently.
   `_prune_reasoning` drops the pair together. Window:
-  `harness.preserve_thinking_iterations`.
+  `harness.preserve_thinking_iterations`, applied at turn entry
+  (`_cap_history_reasoning`) and — only when the meter says the prompt is over
+  target — again by relief rung 2, down to
+  `context_relief.reasoning_keep_under_pressure`. Never per iteration (#520).
 - **An empty tool pool is the worst failure.** With no `tools` array vLLM
   never engages the tool parser and the model narrates tool calls as prose.
   `MCPPool.open()` raises on empty discovery so `get_or_open_pool` evicts and
@@ -1175,3 +1178,113 @@ Pin: `tests/test_workers_router.py::test_the_sync_message_route_is_gone`.
   deny list; calls logged with the parent id; trailer; rpc Read then Edit
   passes the gate; client deadline refusal; loop stamps Bash only; prompt
   bytewise off; a real shell through the real client and aggregator app).
+
+### D13 — cleanup; docstrings describe the code as it ends up
+
+- **Dead `RunOptions` knobs removed**: `history`, `permission_mode`, `env`
+  (Claude Agent SDK leftovers the loop never read) and
+  `context_relief_send_max_tokens_reservation` (an A/B nothing wired), with
+  their kwargs at every construction site (the options builder, the worker
+  seam, autonomy, `ide.py`, the tool-choice eval, the autoresearch runner),
+  the two fields they fed in `brain1.options_built`, and
+  `harness.context_relief.send_max_tokens_reservation`. `permission_mode` was
+  never enforced: Discord's non-owner tier still sends `"default"` in the body
+  and the builder no longer reads it — that tier's real restriction was
+  always `extra_disallowed` (`agent_mcp/discord_bot.py` left untouched). `agent.permission_mode` stays in config.yaml
+  as the value the dashboard displays. Pin:
+  `test_harness_unit.py::test_run_options_carries_no_dead_knobs`; the P13.4
+  fixture lost those four keys and nothing else.
+- **The overflow bound is an option**: `RunOptions.max_context_overflow_recoveries`
+  (2) from `harness.context_relief.max_overflow_recoveries`, replacing the
+  `TurnState` constant. `test_overflow_recovery.py::test_the_recovery_bound_is_an_option`.
+- **Relief report**: rung 1 is named `tool_results:<n>` only when it cleared
+  n results (it was appended on every pass); a pass whose other rungs ran and
+  freed ~0 still records. Rung 0 (old screenshots) runs only over target,
+  like rungs 2–4 — dropping one rewrites a cached message.
+- **Discovery errors**: a cross-server tool-name collision in
+  `build_tool_list` raises `ToolDiscoveryError` (was `ValueError`); an
+  over-64-char tool name is still left out, now with a warning naming it.
+- **Doc drift**: `run_query` (the handle wins over `messages`), `options.py`
+  and config.yaml's `tool_call_summaries` comment (the caption is stripped
+  from the dispatched args and KEPT in the replayed `arguments`),
+  `events.tool_call` (absent from `args_dict`, present in `args_json`), the
+  thinking window above (turn entry and rung 2), and the system prompt's
+  platform line, `Lloyd (Claude Agent SDK)` → `Lloyd (local harness)` — one
+  cold prefill per open session after the restart.
+- **Red tests on main fixed test/doc-side**: the live bench census
+  (`test_bench_split.py`, four new synthetic `bench_014`–`017` files named);
+  `architecture/vllm.md` §10 now names the running shape (autocode
+  `max_inflight` 2); `test_task_steering.py` clears the close-handoff map it
+  fills and `test_mcp_transport.py` judges only what its own spawn adds.
+  P13.1-3's `eval/run_harness_replay_diff.py` sets its perturbation kwargs
+  after construction instead of splatting them, so the outbound-content roster
+  reads it as what it is (a scripted pool, no sender tool reachable).
+- **Replay diff, P9 → D13** (30 sessions, 68 turns, both arms): A/A clean;
+  A/B history and hook traces identical; 42 turns differ only in relief
+  telemetry — a `harness.context_relief` event is no longer written for a
+  pass in which no rung acted, and the overflow notice and
+  `harness.overflow_recovered` name `tool_results:<n>`. That is the change.
+
+### Closing summary
+
+| id | landed |
+|---|---|
+| D9 | a85f38e6 |
+| X1–X4 | 735c6be3 |
+| P13.0 | 8ee4c1d2 |
+| D3, D6, D10 | c9246ca2 |
+| P7 | e2b26f00 (runner), 09d6d704 (cost side) |
+| P10 | dfe18fdf |
+| D5 | 02d46ef4 |
+| D8 | a19759d2 |
+| D1 | 82421732 |
+| P11 | d677acec |
+| D4 | f75f4004 |
+| D7 | d11c4486 |
+| D2 | f01e6357; D2e 4764a840 |
+| P12 | c83c3912 |
+| P4 | ed6d699e |
+| D12 | e468a326 |
+| P6 | c366ce6e |
+| D11 | 9bd457b1 |
+| P5 | 7beb765a |
+| P3 | b4ac86f6 |
+| P1 | 9f41bb74 |
+| P8 | 8ac6f4a8 |
+| P13.4–6 | 6a866ae1 |
+| P13.1–3 | this landing |
+| P9 | this landing |
+| D13 | this landing |
+
+**Ships on**: every D fix (D1–D13) and X1–X4; P11 telemetry; P12 (discovery
+TTL 300 s, per-tool timeouts); P13 (behaviour-preserving, replay-diffed);
+P6's max-turns wrap-up (`harness.max_turns_wrapup`, primary only); P8's
+fan-out for the `read-only` profile (`parallel_safe`); D10's deny-list
+(`non_compactable_tools`); D7's one retry. **Ships in shadow**: P10
+(`action_review.mode`, `injection_probe.mode`). **Ships off / as today**:
+D2's `compaction.persist_summary`, P3's `compaction.memory_flush.enabled`,
+P1's `prompt_layout` (`system_head`, `freeze_memory: false`), P4's memory
+index (`memory.render_overflow: render_all`, today's full render), P5's
+`skills.index.descriptions`, P6's `echo_guard.mode: nudge`, P9's
+`harness.rpc.enabled`, and the general `parallel_tool_calls`.
+
+**Pending measurements and decisions** (each deploys only on a measured gain;
+a negative result is a clean `rejected`):
+
+- **P7** — the context-rot run (tonight's window) sets
+  `compaction.microcompact.trigger_fraction` via `--decide`.
+- **D2** — `eval/run_compaction_recall_eval.py` `summary_legacy` vs
+  `summary_persisted`, then `persist_summary: true`.
+- **P3** — the same eval's `memory_flush` arm, then `memory_flush.enabled`.
+- **P4** — the memory index A/B (`eval/run_memory_trim_ab.py`); on a win, the
+  render flip, the MEMORY.md ceiling change and the vault patch.
+- **P5** — the skills eval's `desc_push` / `desc_pull` arms, then
+  `skills.index.descriptions` and the pull switch.
+- **P1** — rollout `system_tail`, then the `user_tail` A/B
+  (`brain1.turn_start_prefix`), then `freeze_memory`.
+- **P6** — whether `echo_guard.mode: tool_choice` beats `nudge`.
+- **P9** — its eval needs a session with live, unsandboxed Bash, which the
+  bench/eval sandbox rule (CLAUDE.md, "The vault is protected at the tool
+  layer") forbids by construction: Alan's call on how it is run.
+- **P10** — a labelling week (200 calls, hand-labelled) before any threshold
+  is written and `warn` is considered.

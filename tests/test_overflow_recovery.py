@@ -86,7 +86,7 @@ def test_the_overflow_ladder_runs_whole_after_the_latch_already_closed_a_pass(ha
     assert over[0]["rearm"] is None, over[0]        # no re-arm level was recorded either,
     # because none was consulted: `run_query` hands the overflow rung no latch, so
     # `_relieve_context` took no per-turn bound and was free to descend all four rungs.
-    assert "tool_results" in over[0]["rungs"], over[0]
+    assert any(r.startswith("tool_results:") for r in over[0]["rungs"]), over[0]
     assert any(r.startswith("reasoning") for r in over[0]["rungs"]), over[0]
     assert any(r.startswith("truncate") for r in over[0]["rungs"]), over[0]
     # Started from the size the ENGINE reported (300,000), not from the meter's last

@@ -280,10 +280,8 @@ async def run_eval(queries: list[dict], *, timeout: float, model: str | None) ->
             base_url=base_url,
             system_prompt=system_prompt,
             max_turns=1,
-            permission_mode="bypassPermissions",
             mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
             disallowed_tools=disallowed,
-            env=model_env,
             # 3, not 1. Priority ASC: an eval yields to the round, never the
             # other way round. A measurement is repeatable and an implement
             # round is not.

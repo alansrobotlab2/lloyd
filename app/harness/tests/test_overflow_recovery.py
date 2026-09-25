@@ -152,6 +152,34 @@ def test_recovery_is_bounded_and_then_raises(monkeypatch):
     assert script.calls == 3
 
 
+@pytest.mark.parametrize("bound", [0, 1, 3])
+def test_the_recovery_bound_is_an_option(monkeypatch, bound):
+    """D13: the bound is `RunOptions.max_context_overflow_recoveries`
+    (`harness.context_relief.max_overflow_recoveries`), not a constant in the
+    loop. `bound` recoveries are attempted, then the next rejection raises."""
+    shared = _shared_with_big_results(n=2, size=100)
+    script = _OverflowThenOk(overflows=99)
+    opts = RunOptions(
+        model="primary", session_id="", tool_search_enabled=False,
+        context_meter=ContextMeter(262_144), chat_messages_handle=shared,
+        max_context_overflow_recoveries=bound,
+    )
+    with pytest.raises(ContextOverflowError):
+        _run(monkeypatch, script, opts)
+    assert script.calls == bound + 1
+
+
+def test_the_recovery_bound_is_read_from_config(monkeypatch):
+    from app import mcp_discovery
+    from app.config import CONFIG
+
+    harness = dict(CONFIG.get("harness") or {})
+    harness["context_relief"] = {"max_overflow_recoveries": 5}
+    monkeypatch.setitem(CONFIG, "harness", harness)
+    assert mcp_discovery.context_relief_kwargs()[
+        "max_context_overflow_recoveries"] == 5
+
+
 def test_the_recovered_attempt_is_not_charged_against_max_turns(monkeypatch):
     shared = _shared_with_big_results(n=10)
     script = _OverflowThenOk(overflows=1)

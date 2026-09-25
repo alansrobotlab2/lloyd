@@ -457,7 +457,7 @@ def build_system_prompt(
     # itself was unaffected — which is exactly why this needs a name of its
     # own rather than an ordering rule nobody can see.
     platform_hints = (
-        "Platform: Lloyd (Claude Agent SDK). "
+        "Platform: Lloyd (local harness). "
         f"Home: {LLOYD_HOME}. "
         "Vault: ~/obsidian/. Knowledge notes go in ~/obsidian/knowledge/. "
         "All persistent notes, research output, and files created by the agent "

@@ -158,9 +158,13 @@ def tool_call(
 
     ``summary`` is the model's own one-line description of what this call
     is doing, lifted off the arguments by ``_commit_tool_calls``. It is
-    display metadata for the transcript UI and is absent from both
-    ``args_json`` and ``args_dict`` — empty string when the model omitted
-    it, or when the tool declares a real ``summary`` parameter of its own.
+    display metadata for the transcript UI: absent from ``args_dict`` (what
+    the tool is dispatched with) and deliberately still present in
+    ``args_json`` (the ``arguments`` string replayed to the engine as
+    history, which is the model's only example of the call — stripping it
+    there taught the model to stop writing one). Empty string when the model
+    omitted it, or when the tool declares a real ``summary`` parameter of
+    its own.
     """
     return {
         "type": "tool_call",

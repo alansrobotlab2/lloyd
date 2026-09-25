@@ -455,6 +455,9 @@ async def test_a_bash_script_reads_through_lloyd_rpc_end_to_end(rpc_on, monkeypa
     monkeypatch.setattr(_rpc, "_port", port)
     server = uvicorn.Server(uvicorn.Config(M.starlette_app, host="127.0.0.1",
                                            port=port, log_level="error"))
+    # The same singleton may already have run under another file's fixture.
+    if getattr(M.combined, "_session_manager", None) is not None:
+        M.combined._session_manager._has_started = False
     task = asyncio.create_task(server.serve())
     try:
         async with httpx.AsyncClient() as probe:
@@ -496,6 +499,13 @@ async def test_a_bash_script_reads_through_lloyd_rpc_end_to_end(rpc_on, monkeypa
     finally:
         server.should_exit = True
         await task
+        # `agent_mcp.main.starlette_app` is a module singleton whose Streamable
+        # HTTP session manager refuses a second `.run()`; tests/test_mcp_transport.py
+        # boots the same app later in the same process, so hand the manager back
+        # in its never-started state (its task group closed with the lifespan).
+        mgr = getattr(M.combined, "_session_manager", None)
+        if mgr is not None:
+            mgr._has_started = False
 
 
 def test_the_copies_of_the_wire_names_agree():

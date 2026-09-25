@@ -459,7 +459,6 @@ async def _ask_lloyd(prompt: str, max_tokens: int = 800) -> str:
     options = RunOptions(
         model="primary",
         max_turns=1,
-        permission_mode="bypassPermissions",
         extra_body={"max_tokens": max_tokens},
     )
     pieces: list[str] = []
@@ -599,7 +598,6 @@ async def post_ide_ai_complete(request: Request):
         options = RunOptions(
             model="primary",
             max_turns=1,
-            permission_mode="bypassPermissions",
             extra_body={"max_tokens": 200},
         )
         try:

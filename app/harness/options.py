@@ -1,9 +1,12 @@
 """Replacement for `claude_agent_sdk.ClaudeAgentOptions`.
 
-`RunOptions` is a dataclass that mirrors the SDK's options surface minus
-SDK-only kwargs (resume, stderr, setting_sources, agents, skills,
-plugins, cli_path, fork_session, etc.). Adds `history` for OpenAI-style
-message lists (the harness builds these from `compaction.load_and_compact_session`).
+`RunOptions` is everything one `run_query` call runs under. The
+conversation itself is not in it: it is `run_query`'s `messages` argument,
+or `chat_messages_handle` when the caller owns the list. The SDK-era
+knobs that nothing read — `history`, `permission_mode`, `env`, and the
+relief ladder's `send_max_tokens_reservation` A/B — were removed in the
+review of 2026-09-24 (D13); `tests/test_harness_unit.py::
+test_run_options_carries_no_dead_knobs` keeps them out.
 """
 
 from __future__ import annotations
@@ -24,7 +27,6 @@ class RunOptions:
 
     # Prompting
     system_prompt: str = ""
-    history: list[dict[str, Any]] = field(default_factory=list)
 
     # Loop control
     max_turns: int = 60
@@ -43,7 +45,6 @@ class RunOptions:
     # "tool_choice" discards the attempt and re-sends the identical request
     # with `tool_choice: "required"`. Fed from `harness.echo_guard.mode`.
     echo_guard_mode: str = "nudge"
-    permission_mode: str = "bypassPermissions"
     disallowed_tools: list[str] = field(default_factory=list)
 
     # Optional per-iteration refresher for the disallowed tools list.
@@ -73,7 +74,6 @@ class RunOptions:
     mcp_servers: dict[str, dict] = field(default_factory=dict)
 
     # Request-level
-    env: dict[str, str] = field(default_factory=dict)
     request_timeout_s: float = 600.0
     extra_body: dict[str, Any] = field(default_factory=dict)
     api_key: str = "no-key-required"
@@ -105,8 +105,8 @@ class RunOptions:
     # Hooks
     hooks: "HookRegistry | None" = None
 
-    # Shared chat messages buffer. When supplied, the harness uses this
-    # list directly instead of copying `history` into a private buffer.
+    # Shared chat messages buffer. When supplied (and non-empty), the
+    # harness uses this list directly and ignores `run_query`'s `messages`.
     # Lets the Inner Voice observer mutate (e.g. inject a system message)
     # between iterations, with the harness picking it up on the next loop pass.
     chat_messages_handle: list[dict[str, Any]] | None = None
@@ -197,8 +197,11 @@ class RunOptions:
     # Tool-call summaries. Adds one string parameter, `summary`, to every
     # advertised tool: a short phrase the model writes describing what the
     # call is doing, rendered beside the tool name in the transcript. It is
-    # display metadata — the harness strips it before dispatch and before
-    # replaying the call back as history, so no tool ever sees it. Turning
+    # display metadata — the harness strips it from the arguments it
+    # dispatches, so no tool ever sees it, and deliberately KEEPS it in the
+    # `arguments` string replayed back as history: that replay is the only
+    # example of the call the model sees again, and a stripped caption
+    # taught it to stop writing one (CLAUDE.md, "Tool-call summaries"). Turning
     # this off removes the parameter from every schema; the UI then falls
     # back to showing the tool name alone. Fed from
     # `harness.tool_call_summaries`.
@@ -292,24 +295,12 @@ class RunOptions:
     context_relief_shrink_arguments: bool = True
     context_relief_shrink_arguments_min_chars: int = 2_000
     context_relief_shrink_arguments_tools: tuple[str, ...] = ("Write", "Edit")
-    # Opt-in A/B only: reserve completion room with an explicit max_tokens.
-    # Off because a cap truncates a long think on a short answer, and
-    # llama.cpp truncates silently rather than erroring.
-    context_relief_send_max_tokens_reservation: bool = False
+    # An engine that rejects the prompt as over the window is answered by
+    # truncating the largest tool results and re-sending, at most this many
+    # times per turn; one more rejection ends the turn with the error. Fed
+    # from `harness.context_relief.max_overflow_recoveries` (D13).
+    max_context_overflow_recoveries: int = 2
 
-    # Structured final answer. When `final_schema` is set and the turn ends
-    # of its own accord, the loop runs ONE extra completion that restates the
-    # answer as a JSON object matching this schema, and reports it on the
-    # `result` event as `structured`.
-    #
-    # It cannot be applied to the turn itself: a guided-decoding grammar
-    # constrains `content`, and during the loop the model has to be free to
-    # emit qwen3_xml tool calls. See app/harness/finalizer.py — in particular
-    # why the extra request must send the identical `tools` list with
-    # `tool_choice: "none"` rather than dropping tools.
-    #
-    # Inert when unset, which is every caller but the worker sources that
-    # want a machine-readable verdict.
     # Concurrent tool dispatch, for READ-ONLY batches only. A batch runs
     # concurrently when every call in it is annotated `readOnlyHint` (or is a
     # parse error, or ToolSearch); anything that can write — Bash, Edit,
@@ -331,6 +322,19 @@ class RunOptions:
     # set, which is what makes the overlap safe rather than hopeful.
     parallel_safe_task_profiles: frozenset[str] = frozenset()
 
+    # Structured final answer. When `final_schema` is set and the turn ends
+    # of its own accord, the loop runs ONE extra completion that restates the
+    # answer as a JSON object matching this schema, and reports it on the
+    # `result` event as `structured`.
+    #
+    # It cannot be applied to the turn itself: a guided-decoding grammar
+    # constrains `content`, and during the loop the model has to be free to
+    # emit qwen3_xml tool calls. See app/harness/finalizer.py — in particular
+    # why the extra request must send the identical `tools` list with
+    # `tool_choice: "none"` rather than dropping tools.
+    #
+    # Inert when unset, which is every caller but the worker sources that
+    # want a machine-readable verdict.
     final_schema: dict[str, Any] | None = None
     final_schema_prompt: str = ""
     # 4096, not 1024: this is the WHOLE completion budget and the grammar only

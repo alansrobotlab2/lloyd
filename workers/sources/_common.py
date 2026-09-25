@@ -410,13 +410,11 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
         base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
         system_prompt=system_prompt,
         max_turns=max_turns,
-        permission_mode="bypassPermissions",
         mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
         disallowed_tools=disallowed,
         # A direct worker turn has nobody at Mission Control; see
         # agent_mcp.annotations.hidden_on_surface.
         surface="worker",
-        env=model_env,
         priority=priority,
         hooks=hooks,
         # The budget warning, at the seam BOTH direct shapes share. Left at its

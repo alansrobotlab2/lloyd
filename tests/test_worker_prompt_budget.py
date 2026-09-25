@@ -136,7 +136,7 @@ def test_the_prompt_budget_line_names_the_platform(caplog):
 
 
 def test_the_budget_line_reports_the_platform_not_a_prompt_component(caplog):
-    """A local named `platform` — the "Platform: Lloyd (Claude Agent SDK)…"
+    """A local named `platform` — the "Platform: Lloyd (local harness)…"
     hints block — shadowed the parameter and printed itself into the log line
     as though it were the session's platform.
 
@@ -150,7 +150,7 @@ def test_the_budget_line_reports_the_platform_not_a_prompt_component(caplog):
     line = next(r.getMessage() for r in caplog.records
                 if "PROMPT_BUDGET" in r.getMessage())
     assert "platform=worker" in line
-    assert "Claude Agent SDK" not in line
+    assert "Platform: Lloyd" not in line
 
 
 def test_the_prompt_budget_line_says_user_when_no_platform(caplog):

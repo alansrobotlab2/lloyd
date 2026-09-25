@@ -249,23 +249,19 @@ def build_turn_options(snapshot: SessionSnapshot, body: dict, kind: TurnKind, *,
         _m._install_action_review(hooks, platform=platform, text=text,
                                   source=identity[1], session_id=session_id)
 
-    # ── Budget, priority, permission ────────────────────────────────────
+    # ── Budget, priority ────────────────────────────────────────────────
     if kind == "stream":
         max_turns = _m._turn_budget(body, platform=platform)
         priority = _m._clamp_priority(body.get("priority", 0))
-        permission_mode = (body.get("permission_mode")
-                           or agent_cfg.get("permission_mode", "bypassPermissions"))
     elif kind == "flush":
         from app import memory_flush as _mf
 
         cfg = _mf.flush_cfg()
         max_turns = int(cfg.get("max_turns") or 6)
         priority = 1
-        permission_mode = agent_cfg.get("permission_mode", "bypassPermissions")
     else:
         max_turns = agent_cfg.get("max_turns", 60)
         priority = 0
-        permission_mode = agent_cfg.get("permission_mode", "bypassPermissions")
 
     harness_kwargs = dict(_get_harness_kwargs())
     extra: dict[str, Any] = {}
@@ -291,11 +287,9 @@ def build_turn_options(snapshot: SessionSnapshot, body: dict, kind: TurnKind, *,
         base_url=model_env.get("ANTHROPIC_BASE_URL", _DEFAULT_BASE_URL),
         system_prompt=system_prompt,
         max_turns=max_turns,
-        permission_mode=permission_mode,
         mcp_servers=_get_mcp_servers(),
         disallowed_tools=_get_disallowed_tools(plan_mode=snapshot.plan_mode)
         + (body.get("extra_disallowed") or []),
-        env=model_env,
         hooks=hooks,
         priority=priority,
         **extra,

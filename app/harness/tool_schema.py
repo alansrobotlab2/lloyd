@@ -14,17 +14,24 @@ MCP `tools/list` returns:
 Tools are advertised under their bare MCP name. The historical
 `mcp__<server>__<tool>` prefix was a Claude Agent SDK artifact — with the
 in-process harness we control naming, and skill docs / SOUL.md / persisted
-sessions all reference tools by bare name. ``build_tool_list`` raises if
-two MCP servers ever export the same bare name; today only ``lloyd-mcp``
-exists, but we want fail-loud rather than silent shadowing.
+sessions all reference tools by bare name. ``build_tool_list`` raises
+``ToolDiscoveryError`` if two MCP servers ever export the same bare name;
+today only ``lloyd-mcp`` exists, but we want fail-loud rather than silent
+shadowing.
 
-OpenAI's spec caps tool names at 64 chars. Validated at translation time
-so a future MCP server with a long name fails loudly instead of silently.
+OpenAI's spec caps tool names at 64 chars. ``mcp_tool_to_openai`` refuses a
+longer one; ``build_tool_list`` leaves that tool out of the catalog and logs
+a warning naming it, so the rest of the catalog still ships.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+from app.harness.errors import ToolDiscoveryError
+
+logger = logging.getLogger(__name__)
 
 OPENAI_TOOL_NAME_MAX = 64
 
@@ -159,9 +166,12 @@ def build_tool_list(
     ``mcp__server__tool`` form is also accepted so old config can be
     rolled forward.
 
-    Raises ``ValueError`` if two servers export the same bare tool name —
-    bare-name advertise gives us no way to disambiguate, and we want a
-    loud error rather than silent shadowing.
+    Raises ``ToolDiscoveryError`` if two servers export the same bare tool
+    name — bare-name advertise gives us no way to disambiguate, and we want
+    a loud error rather than silent shadowing. It is a discovery failure,
+    named as one, so `run_query`'s caller sees the same error class as for
+    an empty catalog (D13). A tool whose name is over the 64-char limit is
+    left out with a warning, not silently.
     """
     tools: list[dict[str, Any]] = []
     seen: dict[str, str] = {}  # bare_name -> server_name
@@ -178,13 +188,18 @@ def build_tool_list(
             if f"mcp__{server_name}__{bare}" in disallowed:
                 continue
             if bare in seen and seen[bare] != server_name:
-                raise ValueError(
+                raise ToolDiscoveryError(
                     f"tool name collision: {bare!r} exported by both "
-                    f"{seen[bare]!r} and {server_name!r}"
+                    f"{seen[bare]!r} and {server_name!r}",
+                    servers=[seen[bare], server_name],
                 )
             try:
                 openai_tool = mcp_tool_to_openai(mcp_tool)
-            except ValueError:
+            except ValueError as exc:
+                logger.warning(
+                    "tool_schema: not advertising %r from %r: %s",
+                    bare, server_name, exc,
+                )
                 continue
             seen[bare] = server_name
             tools.append(openai_tool)

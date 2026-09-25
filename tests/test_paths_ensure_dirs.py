@@ -216,10 +216,17 @@ def _backend_boot_sightings(monkeypatch) -> list[tuple[str, bool]]:
     """
     router = server.app.router
     production = list(router.on_startup)
-    assert paths.ensure_dirs in production, (
+    # By qualified name, not identity: another test file `importlib.reload`s
+    # app.paths, which rebinds `paths.ensure_dirs` to a new function object while
+    # server.py still holds the one it registered (same module dict, so the old
+    # object reads the same globals).
+    ours = [h for h in production if getattr(h, "__module__", "") == "app.paths"
+            and getattr(h, "__name__", "") == "ensure_dirs"]
+    assert ours, (
         "server.py does not register paths.ensure_dirs as a startup hook at all")
-    assert production[0] is paths.ensure_dirs, (
-        f"the dirs hook sits at index {production.index(paths.ensure_dirs)} of the"
+    ensure_dirs = ours[0]
+    assert production[0] is ensure_dirs, (
+        f"the dirs hook sits at index {production.index(ensure_dirs)} of the"
         " backend's registration order, not first")
 
     sightings: list[tuple[str, bool]] = []
@@ -229,7 +236,7 @@ def _backend_boot_sightings(monkeypatch) -> list[tuple[str, bool]]:
 
     def in_place(hook):
         name = getattr(hook, "__name__", repr(hook))
-        if hook is paths.ensure_dirs:
+        if hook is ensure_dirs:
             return hook  # the real callable, unmodified, in its real slot
 
         def recorder(*args, **kwargs):

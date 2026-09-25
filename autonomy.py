@@ -3268,13 +3268,11 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
             system_prompt=system_prompt,
             max_turns=max_turns,
-            permission_mode="bypassPermissions",
             mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
             disallowed_tools=disallowed_tools,
             # A scheduled task has nobody at Mission Control; see
             # agent_mcp.annotations.hidden_on_surface.
             surface="worker",
-            env=model_env,
             priority=1,
             hooks=task_hooks,
             state_anchor=_build_task_anchor(timeout, max_turns),

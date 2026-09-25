@@ -309,13 +309,58 @@ def test_build_tool_list_accepts_legacy_namespaced_disallow():
     assert out == []
 
 
-def test_build_tool_list_raises_on_cross_server_collision():
+def test_a_cross_server_collision_surfaces_as_tool_discovery_error():
+    """D13: a discovery failure, named as one (it used to be a bare
+    ValueError), carrying both servers."""
+    from app.harness.errors import ToolDiscoveryError
+
     discovered = [
         ("server-a", [{"name": "shared", "description": "", "inputSchema": {}}]),
         ("server-b", [{"name": "shared", "description": "", "inputSchema": {}}]),
     ]
-    with pytest.raises(ValueError, match="collision"):
+    with pytest.raises(ToolDiscoveryError, match="collision") as info:
         build_tool_list(discovered, disallowed=set())
+    assert info.value.servers == ["server-a", "server-b"]
+
+
+def test_a_long_tool_name_is_warned_not_silently_dropped(caplog):
+    """D13: the over-64-char tool is still left out (the engine would reject
+    the whole request), but the log names it; the rest of the catalog ships."""
+    long_name = "x" * 65
+    discovered = [("lloyd-mcp", [
+        {"name": long_name, "description": "", "inputSchema": {}},
+        {"name": "Read", "description": "", "inputSchema": {}},
+    ])]
+    with caplog.at_level("WARNING", logger="app.harness.tool_schema"):
+        out = build_tool_list(discovered, disallowed=set())
+    assert [t["function"]["name"] for t in out] == ["Read"]
+    assert any(long_name in r.getMessage() for r in caplog.records)
+
+
+def test_run_options_carries_no_dead_knobs():
+    """D13: four `RunOptions` fields that nothing read — SDK leftovers
+    (`permission_mode`, `env`, `history`) and an A/B the loop never wired
+    (`context_relief_send_max_tokens_reservation`) — are gone, and so is the
+    config key that fed the last one. A knob that reads as a setting and
+    does nothing is the failure this pins against."""
+    import dataclasses
+    from pathlib import Path
+
+    import yaml
+
+    from app.harness.options import RunOptions
+
+    names = {f.name for f in dataclasses.fields(RunOptions)}
+    dead = {"permission_mode", "env", "history",
+            "context_relief_send_max_tokens_reservation"}
+    assert not names & dead, names & dead
+    for knob in dead:
+        with pytest.raises(TypeError):
+            RunOptions(model="m", **{knob: None})
+    cfg = yaml.safe_load(
+        (Path(__file__).resolve().parents[3] / "config.yaml").read_text())
+    relief = (cfg.get("harness") or {}).get("context_relief") or {}
+    assert "send_max_tokens_reservation" not in relief
 
 
 # ---------------------------------------------------------------------------

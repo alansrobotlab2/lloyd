@@ -62,6 +62,9 @@ def _clean():
     SR.reset()
     yield
     SR.reset()
+    # A closed child registers a close handoff to its parent; leaving the
+    # module-level map populated leaked into tests/test_mcp_transport.py.
+    _task_registry._close_handoff.clear()
 
 
 @pytest.fixture(autouse=True)

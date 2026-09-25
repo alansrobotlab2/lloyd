@@ -202,8 +202,50 @@ def test_relief_reports_which_rungs_it_ran():
     meter = _pressured(msgs)
     report = _relieve_context(msgs, options=_opts(), meter=meter, reason="probe")
     assert report["reason"] == "probe"
-    assert "tool_results" in report["rungs"]
+    # Rung 1 is named only when it cleared something (D13); this history has
+    # no tool results, so the rungs that ran are the reasoning ones.
+    assert not any(r.startswith("tool_results") for r in report["rungs"])
+    assert any(r.startswith("reasoning:") for r in report["rungs"])
     assert report["used_before"] >= report["used_after"]
+
+
+def test_rung_1_is_reported_with_its_count_only_when_it_cleared():
+    """D13: `tool_results:<n>` when rung 1 cleared n results, absent when it
+    cleared none — it self-gates, and naming it on every pass said it acted
+    when it had not."""
+    msgs = [{"role": "user", "content": "go"}]
+    for i in range(20):
+        msgs.append({"role": "assistant", "content": "",
+                     "tool_calls": [{"id": f"c{i}", "type": "function",
+                                     "function": {"name": "Read",
+                                                  "arguments": "{}"}}]})
+        msgs.append({"role": "tool", "tool_call_id": f"c{i}", "name": "Read",
+                     "content": "X" * 30_000})
+    meter = _pressured(msgs)
+    report = _relieve_context(
+        msgs, options=_opts(intra_turn_microcompact_keep_recent=2),
+        meter=meter, reason="probe", keep_recent=2,
+    )
+    named = [r for r in report["rungs"] if r.startswith("tool_results")]
+    assert len(named) == 1 and int(named[0].split(":")[1]) > 0, report["rungs"]
+
+
+def test_rung_0_leaves_images_alone_below_target(monkeypatch):
+    """D13: dropping an old screenshot rewrites a cached message, so it waits
+    for pressure like rungs 2-4. Below target nothing is touched."""
+    from app.harness import tool_images
+
+    calls = []
+    monkeypatch.setattr(tool_images, "keep_newest",
+                        lambda msgs, keep: calls.append(keep) or 1)
+    msgs = [{"role": "tool", "tool_call_id": "c", "content": "shot",
+             "_image_refs": ["a.png"]} for _ in range(6)]
+    m = ContextMeter(262_144)
+    m.observe_usage({"input_tokens": 10_000}, len(msgs))
+    report = _relieve_context(msgs, options=_opts(), meter=m, reason="probe")
+    assert calls == [] and not any(r.startswith("images") for r in report["rungs"])
+    _relieve_context(msgs, options=_opts(), meter=_pressured(msgs), reason="probe")
+    assert calls, "under pressure rung 0 runs"
 
 
 # ---------------------------------------------------------------------------
@@ -649,7 +691,7 @@ def test_a_relief_pass_emits_one_event_with_rungs_tokens_and_session(
     assert data["rungs"] == report["rungs"], (
         "the event names the rungs the caller sees, not a re-derivation of them"
     )
-    assert "tool_results" in data["rungs"]
+    assert any(r.startswith("reasoning:") for r in data["rungs"])
     assert data["freed_tokens"] == report["freed_tokens"]
     assert data["used_before"] == report["used_before"]
     assert data["used_after"] == report["used_after"]
@@ -711,8 +753,9 @@ def test_a_pass_that_ran_a_rung_and_freed_nothing_is_still_recorded(
     msgs = _reasoning_msgs()
     meter = _pressured(msgs)
     # Every rung kept at "keep everything", so each one runs and none of them
-    # takes anything back: rung 1 appends `tool_results` on the strength of
-    # having been attempted, which is what makes rungs non-empty at zero freed.
+    # takes anything back: rung 2 appends `reasoning:<keep>` on the strength
+    # of having been attempted, which is what makes rungs non-empty at zero
+    # freed (rung 1 is named only when it cleared something, D13).
     opts = _opts(session_id="s1078_zero",
                  preserve_thinking_iterations=12,
                  context_relief_reasoning_keep_under_pressure=12)

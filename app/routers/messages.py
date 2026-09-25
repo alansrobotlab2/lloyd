@@ -863,8 +863,6 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     _event_log.log_event(session_id, "brain1.options_built", {
         "model": model,
         "max_turns": options.max_turns,
-        "permission_mode": options.permission_mode,
-        "env_keys": sorted(options.env.keys()),
         "mcp_server_keys": sorted(options.mcp_servers.keys()),
         "disallowed_tools": list(options.disallowed_tools),
     }, turn_id=turn.turn_id)

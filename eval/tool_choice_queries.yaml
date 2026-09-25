@@ -7,7 +7,7 @@
 #
 # How it is scored: the runner stops at the FIRST tool_call event, which the
 # harness yields before dispatch. Since P13.3 there is one dispatch site,
-# app/harness/loop.py:1188-1216, in `_dispatch_batch`: a call is admitted in
+# app/harness/loop.py:1192-1220, in `_dispatch_batch`: a call is admitted in
 # wire order, `tc_evt = events.tool_call(...)` is built, `yield tc_evt` hands it
 # out, and only then do `_pre_dispatch(...)` and `_execute_tool_call(...)` run
 # for it — inline at concurrency 1, or as a task for a parallel read-only batch.

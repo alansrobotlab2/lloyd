@@ -332,6 +332,10 @@ LIVE_BENCH_CATEGORIES = {
     "bench_011_haiku_quantum": "synthetic",
     "bench_012_replay_schedule_verify_chain": "replay",
     "bench_013_replay_memory_update_novelty": "replay",
+    "bench_014_audit_dead_wikilinks": "synthetic",
+    "bench_015_audit_cross_entity_fact_copies": "synthetic",
+    "bench_016_audit_skill_dead_paths": "synthetic",
+    "bench_017_audit_unresolved_task_skills": "synthetic",
 }
 
 
