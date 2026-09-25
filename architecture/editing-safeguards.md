@@ -107,6 +107,16 @@ before assuming a layer can be turned off — or that it is installed.
   not self-check, and says so in its docstring, which names this file and
   `agent_mcp/main.call_tool`'s dispatch check as the gate. Voice is the same shape as the one #534 closed for the
   grant gate, one layer down and still open.
+- **A gate that raises denies** (review 2026-09-24, D5). `safety.py`, the
+  outbound content gate and the grant gate register with
+  `add_pre_tool_use(..., fail_closed=True)`: if the callback raises, the call
+  is denied with `gate <name> raised <Type>: <msg>`, and that deny beats a
+  deliver held from earlier in the walk. Before this every raise was a pass,
+  so an import failure inside `_safety_pretool_cb` let every Bash through.
+  Observers and the skill deliverer stay fail-open. Every raise, either kind,
+  writes one `harness.hook_raised` event (`hook`, `tool`, `error`,
+  `fail_closed`, `tool_use_id`). The aggregator's own dispatch check is
+  unaffected.
 
 ## The code graph
 

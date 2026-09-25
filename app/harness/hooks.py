@@ -36,6 +36,14 @@ Precedence: a deny beats a deliver regardless of registration order, so a
 catastrophic `Bash` is blocked rather than answered with a skill card by a
 deliverer registered ahead of the safety hook.
 
+A callback that raises (review 2026-09-24, D5): every raise is logged as a
+`harness.hook_raised` event. What happens next is the registration's
+`fail_closed` flag. Fail-open (the default — observers, the skill deliverer)
+treats it as a pass. Fail-closed (the gates: safety, outbound content, the
+grant policy) denies the call and names the error, because a gate that cannot
+evaluate must not open; before this a lazy import failing inside the safety
+hook let every Bash through.
+
 PostToolUse / PostToolUseFailure callbacks always return `{}` —
 they're observers, not gates. They commonly spawn `asyncio.ensure_future`
 work to fire the critic personas without blocking the primary loop.
@@ -45,6 +53,8 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Awaitable, Callable
+
+from app.harness import telemetry
 
 logger = logging.getLogger("lloyd-harness-hooks")
 
@@ -63,6 +73,11 @@ class HookRegistry:
 
     def __init__(self) -> None:
         self._pre: list[tuple[str | None, HookCallback]] = []
+        # Parallel to `_pre`, index for index: whether a raise from that
+        # callback denies (a gate) or passes (an observer). Kept beside the
+        # pairs rather than in them because callers and tests read `_pre` as
+        # `(matcher, cb)` pairs.
+        self._pre_fail_closed: list[bool] = []
         self._post: list[HookCallback] = []
         self._post_failure: list[HookCallback] = []
         # OnEvent callbacks fire on every NormalizedEvent the loop yields.
@@ -97,8 +112,17 @@ class HookRegistry:
     # Registration
     # ------------------------------------------------------------------
 
-    def add_pre_tool_use(self, matcher: str | None, cb: HookCallback) -> None:
+    def add_pre_tool_use(
+        self, matcher: str | None, cb: HookCallback, *, fail_closed: bool = False,
+    ) -> None:
+        """Register a PreToolUse callback.
+
+        `fail_closed=True` is for gates: if `cb` raises, the call is denied
+        with the error named. The default is for observers and deliverers,
+        whose failure must never block a tool the gates would allow.
+        """
         self._pre.append((matcher, cb))
+        self._pre_fail_closed.append(bool(fail_closed))
 
     def add_post_tool_use(self, cb: HookCallback) -> None:
         self._post.append(cb)
@@ -132,8 +156,13 @@ class HookRegistry:
         Returns the deny dict (with `hookSpecificOutput`) if any callback
         denies; returns the first callback's `skillDeliver` dict if any
         callback asks for a delivery and none denies; returns `{}` if all
-        pass. Callback exceptions are logged and treated as pass — denial must
-        be explicit, never accidental.
+        pass.
+
+        A callback that raises writes one `harness.hook_raised` event. A
+        fail-open callback's raise is then a pass; a fail-closed one's (a
+        gate registered with `fail_closed=True`) is a deny naming the gate and
+        the error, returned at once — so, like any deny, it beats a deliver
+        held from earlier in the walk.
 
         A deliver is provisional until the walk finishes: holding the first one
         and continuing is what keeps registration order from deciding whether a
@@ -154,16 +183,43 @@ class HookRegistry:
             "tool_summary": tool_summary,
         }
         deliver: dict[str, Any] | None = None
-        for matcher, cb in self._pre:
+        for i, (matcher, cb) in enumerate(self._pre):
             if matcher is not None and matcher != tool_name:
                 continue
             try:
                 out = await cb(input_dict, tool_use_id, None)
             except Exception as exc:
-                logger.warning(
-                    "PreToolUse callback raised on %s: %s", tool_name, exc, exc_info=True
+                fail_closed = (i < len(self._pre_fail_closed)
+                               and self._pre_fail_closed[i])
+                name = getattr(cb, "__qualname__", None) or repr(cb)
+                telemetry.log_harness_event(session_id, "harness.hook_raised", {
+                    "hook": name,
+                    "tool": tool_name,
+                    "error": f"{exc.__class__.__name__}: {exc}"[:500],
+                    "fail_closed": fail_closed,
+                    "tool_use_id": tool_use_id,
+                })
+                if not fail_closed:
+                    logger.warning(
+                        "PreToolUse callback raised on %s: %s",
+                        tool_name, exc, exc_info=True,
+                    )
+                    continue
+                logger.error(
+                    "PreToolUse gate %s raised on %s — denying: %s",
+                    name, tool_name, exc, exc_info=True,
                 )
-                continue
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": (
+                            f"gate {name} raised {exc.__class__.__name__}: "
+                            f"{exc} — denied because a gate that cannot "
+                            "evaluate must not open"
+                        ),
+                    }
+                }
             if not out:
                 continue
             hso = out.get("hookSpecificOutput") or {}

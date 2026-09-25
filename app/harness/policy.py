@@ -1101,7 +1101,7 @@ def install_policy_hook(hooks: HookRegistry, *, store: GrantStore | None = None,
             return {}
         return _deny(decision.reason)
 
-    hooks.add_pre_tool_use(None, _policy_pretool_cb)
+    hooks.add_pre_tool_use(None, _policy_pretool_cb, fail_closed=True)
 
 
 # ---------------------------------------------------------------------------

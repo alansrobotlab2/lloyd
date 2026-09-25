@@ -356,4 +356,4 @@ def install_bench_corpus_hook(hooks: Any) -> None:
     Matcherless (fires on every tool), and installed by the runtime-routed
     bench runner only — see `_bench_corpus_pretool_cb`.
     """
-    hooks.add_pre_tool_use(None, _bench_corpus_pretool_cb)
+    hooks.add_pre_tool_use(None, _bench_corpus_pretool_cb, fail_closed=True)

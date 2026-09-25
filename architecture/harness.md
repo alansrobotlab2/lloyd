@@ -386,3 +386,19 @@ at FN ≤ 30% and `label_mass` clears the floor set from the week's rows (write
 `threshold`, `label_mass_floor`, `calibrated_on`, `calibrated_hash` into the
 schema). Never a hard block on djev alone; deny stays with the safety and grant
 hooks. `tests/test_action_review.py`, `tests/test_injection_probe.py`.
+
+### D5 — deny hooks fail closed
+
+`HookRegistry.add_pre_tool_use(matcher, cb, *, fail_closed=False)`. A raising
+PreToolUse callback writes one `harness.hook_raised` event through
+`telemetry.log_harness_event`; fail-open (the default: the Inner Voice
+observer, `skill_dispatch`) then passes as before, fail-closed
+returns a deny naming the gate and the error at once, ahead of any held
+deliver. The three gates — `safety._safety_pretool_cb`,
+`outbound_content._content_pretool_cb`, `policy._policy_pretool_cb` — register
+fail-closed, and so does the bench-contamination guard
+`bench_corpus._bench_corpus_pretool_cb`. `_pre` stays `(matcher, cb)` pairs (tests unpack them); the flag
+lives index-for-index in `_pre_fail_closed`. Pins:
+`app/harness/tests/test_harness_unit.py` (the four `a_raising_*` /
+`a_raised_hook_*` tests) and
+`tests/test_harness_safety_docstring_pointers.py::test_the_three_gates_are_registered_fail_closed`.

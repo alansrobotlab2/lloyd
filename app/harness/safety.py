@@ -485,5 +485,5 @@ def install_default_safety_hook(hooks: HookRegistry) -> None:
     with a scope at the two dispatch paths that build a registry without this
     floor (`autonomy.run_task`, `workers/sources/_common.py`).
     """
-    hooks.add_pre_tool_use(None, _safety_pretool_cb)
+    hooks.add_pre_tool_use(None, _safety_pretool_cb, fail_closed=True)
     install_outbound_content_gate(hooks)

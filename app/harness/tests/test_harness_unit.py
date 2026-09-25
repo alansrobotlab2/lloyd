@@ -310,15 +310,81 @@ def test_pre_tool_use_first_deny_wins_short_circuit():
     assert fired == ["a"]
 
 
-def test_pre_tool_use_swallows_callback_exception_treats_as_pass():
+# D5 (review 2026-09-24): a raising PreToolUse callback is a pass only when it
+# was registered fail-open; a gate registered fail-closed denies.
+
+async def _raise_cb(input_data, _id, _ctx):
+    raise RuntimeError("boom")
+
+
+def _capture_hook_events(monkeypatch):
+    from app.harness import telemetry
+    seen = []
+    monkeypatch.setattr(
+        telemetry, "log_harness_event",
+        lambda sid, event, data, **kw: seen.append((sid, event, data)),
+    )
+    return seen
+
+
+def test_a_raising_observer_hook_is_a_pass_by_default(monkeypatch):
+    _capture_hook_events(monkeypatch)
     reg = HookRegistry()
-
-    async def raise_cb(input_data, _id, _ctx):
-        raise RuntimeError("boom")
-
-    reg.add_pre_tool_use(None, raise_cb)
+    reg.add_pre_tool_use(None, _raise_cb)
     out = asyncio.run(reg.fire_pre_tool_use(session_id="s", tool_name="Bash", tool_input={}))
     assert out == {}
+
+
+def test_a_raising_gate_hook_denies_and_names_the_error(monkeypatch):
+    _capture_hook_events(monkeypatch)
+    reg = HookRegistry()
+    reg.add_pre_tool_use(None, _raise_cb, fail_closed=True)
+    out = asyncio.run(reg.fire_pre_tool_use(session_id="s", tool_name="Bash", tool_input={}))
+    hso = out["hookSpecificOutput"]
+    assert hso["permissionDecision"] == "deny"
+    reason = hso["permissionDecisionReason"]
+    assert "_raise_cb" in reason
+    assert "RuntimeError: boom" in reason
+    assert "must not open" in reason
+
+
+def test_a_raising_gate_beats_a_deliver_registered_ahead_of_it(monkeypatch):
+    _capture_hook_events(monkeypatch)
+    reg = HookRegistry()
+
+    async def deliver_cb(input_data, _id, _ctx):
+        return {"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "skillDeliver": {"skill": "x", "label": "r", "content": "card"},
+        }}
+
+    reg.add_pre_tool_use(None, deliver_cb)
+    reg.add_pre_tool_use(None, _raise_cb, fail_closed=True)
+    out = asyncio.run(reg.fire_pre_tool_use(session_id="s", tool_name="Bash", tool_input={}))
+    hso = out["hookSpecificOutput"]
+    assert hso.get("permissionDecision") == "deny"
+    assert "skillDeliver" not in hso
+
+
+def test_a_raised_hook_writes_one_hook_raised_event(monkeypatch):
+    seen = _capture_hook_events(monkeypatch)
+    reg = HookRegistry()
+    reg.add_pre_tool_use(None, _raise_cb)
+    reg.add_pre_tool_use(None, _raise_cb, fail_closed=True)
+    asyncio.run(reg.fire_pre_tool_use(
+        session_id="s1", tool_name="Bash", tool_input={}, tool_use_id="c1"))
+    assert [e for _s, e, _d in seen] == ["harness.hook_raised"] * 2
+    first, second = seen[0][2], seen[1][2]
+    assert first["fail_closed"] is False and second["fail_closed"] is True
+    assert first["tool"] == "Bash" and first["tool_use_id"] == "c1"
+    assert "RuntimeError: boom" in first["error"]
+    assert all(s == "s1" for s, _e, _d in seen)
+
+    seen.clear()
+    reg2 = HookRegistry()
+    reg2.add_pre_tool_use(None, _raise_cb)
+    asyncio.run(reg2.fire_pre_tool_use(session_id="s1", tool_name="Bash", tool_input={}))
+    assert len(seen) == 1
 
 
 def test_post_tool_use_fires_all_observers():

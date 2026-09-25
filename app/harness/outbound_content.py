@@ -1492,4 +1492,4 @@ def install_outbound_content_gate(
                        sorted({f.rule for f in blocking}))
         return _deny(reason)
 
-    hooks.add_pre_tool_use(None, _content_pretool_cb)
+    hooks.add_pre_tool_use(None, _content_pretool_cb, fail_closed=True)
