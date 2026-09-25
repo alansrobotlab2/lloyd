@@ -1,0 +1,71 @@
+{
+  "promote": false,
+  "token_wins": 0,
+  "bash_timeouts_on": 0,
+  "tasks": {
+    "rpc_backlog_board_pass": {
+      "prompt_tokens_drop": -0.017,
+      "pass_rate": {
+        "off": 1.0,
+        "off_rep": 1.0,
+        "on": 1.0
+      },
+      "aa_gap": 0.0,
+      "pass_rate_ok": true,
+      "median_turns": {
+        "off": 7,
+        "off_rep": 8,
+        "on": 7
+      },
+      "median_wall_s": {
+        "off": 50.5,
+        "off_rep": 48.2,
+        "on": 49.9
+      },
+      "rpc_calls_on": 0
+    },
+    "rpc_grep_read_synthesis": {
+      "prompt_tokens_drop": -0.032,
+      "pass_rate": {
+        "off": 1.0,
+        "off_rep": 0.8,
+        "on": 1.0
+      },
+      "aa_gap": 0.2,
+      "pass_rate_ok": true,
+      "median_turns": {
+        "off": 14,
+        "off_rep": 16,
+        "on": 15
+      },
+      "median_wall_s": {
+        "off": 77.6,
+        "off_rep": 79.4,
+        "on": 88.7
+      },
+      "rpc_calls_on": 0
+    },
+    "rpc_vault_frontmatter_reconcile": {
+      "prompt_tokens_drop": -0.004,
+      "pass_rate": {
+        "off": 0.0,
+        "off_rep": 0.0,
+        "on": 0.0
+      },
+      "aa_gap": 0.0,
+      "pass_rate_ok": true,
+      "median_turns": {
+        "off": 7,
+        "off_rep": 7,
+        "on": 7
+      },
+      "median_wall_s": {
+        "off": 36.0,
+        "off_rep": 34.7,
+        "on": 31.5
+      },
+      "rpc_calls_on": 0
+    }
+  },
+  "rule": "prompt_tokens_sum drop >= 30% on >= 2 tasks, on pass rate >= off - A/A gap, zero Bash timeouts on the on arm"
+}
