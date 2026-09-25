@@ -1,7 +1,7 @@
 ---
 title: qmd — the vault search engine, Lloyd's fork, and how it runs
 status: implemented
-date: 2026-09-22
+date: 2026-09-25
 ---
 
 # qmd — the vault search engine, Lloyd's fork, and how it runs
@@ -187,7 +187,10 @@ its own `urllib` request (`agent_mcp/backlog_similar.py::semantic_candidates`,
 `app/routers/memory.py::memory_search`), reads only `results`, and so reports no
 `meta` to `qmd_health` — a rerank that could not run on either path is invisible,
 and rule A of the dedupe silently degrades to the lexical rule. `memory_search`
-also sends the raw query without `_qmd_sanitize`. #302.
+also sends the raw query without `_qmd_sanitize` (`semantic_candidates` now
+sanitizes). Both re-checked in the code on 2026-09-25. The gap is #1498; it
+was first recorded on 09-22 inside #302, an older and already-closed rerank
+item, so until then it had no open owner.
 
 ## 5. Keeping it healthy
 
@@ -226,12 +229,20 @@ production; the regression runner's pins ran 42% of wall time on 2026-09-21 and
 slowed production's reranks ~1.8×. Experiments use their own index name and port
 (`reap_stale` matches only its own), and prepared snapshots (a re-embedded or
 re-titled copy) are served by patching `snapshot()` — the pattern
-`architecture/retrieval.md` §2 describes.
+`architecture/retrieval.md` §2 describes. A candidate fork build is measured
+the other way round: the pin serves the same snapshot, and a patched
+`production_daemon()` swaps the `qmd.js` path for the candidate worktree's
+`dist/cli/qmd.js` and adds any environment it needs. That is how #1475's
+fusion depth was measured before the fork change landed. Run the candidate
+once with no new setting first; it has to reproduce production's numbers, or
+the build rather than the setting is what changed.
 
 ## 7. Performance (2026-09-21)
 
 - **Fusion alone** (rerank off, global, ~32 rows): ~50–200 ms per request,
-  phases in the daemon log (`fts`, `embed`, `vec`, `chunk`).
+  phases in the daemon log (`fts`, `embed`, `vec`, `chunk`). Re-checked
+  2026-09-25 with `QMD_FUSION_DEPTH=100`: 119–140 ms warm. The first query
+  after a daemon restart pays ~2 s of embedding-model load.
 - **Cross-encoder**: ~56 rows/s on a quiet 3090 — 40 rows ≈ 1.8 s, 240 rows ≈
   5–7 s under the GPU's normal load. The recall no longer pays it except on its
   fallback path; djev orders the pool on GPU 2 instead.
@@ -255,10 +266,24 @@ re-titled copy) are served by patching `snapshot()` — the pattern
 - `agent-services/conf/qmd-index.yml` (template), `~/.config/qmd/index.yml`, `~/.config/qmd/evalpin.yml`
 - `scripts/maintenance/qmd_index_maintenance.py`, `scripts/qmd_fork_landing.py`, `scripts/automod/evalpin.py`
 - `app/qmd_health.py`, `agent_mcp/vault.py`
-- tests: `test_qmd_single_build.py`, `test_qmd_index_template.py`, `test_qmd_index_maintenance.py`, `test_qmd_fork_landing.py`, `test_qmd_query_shape.py`, `test_qmd_health.py`, `test_service_health_check_qmd.py`, `test_qmd_doc_claims.py`
+- tests: `test_qmd_single_build.py`, `test_qmd_index_template.py`, `test_qmd_index_maintenance.py`, `test_qmd_fork_landing.py`, `test_qmd_query_shape.py`, `test_qmd_health.py`, `test_qmd_maintenance_health.py`, `test_service_health_check_qmd.py`, `test_qmd_doc_claims.py`
 
 ## Review log
 
+- **2026-09-25** — `current`. Re-checked against the tree, both configs and
+  the running daemon: fork at `079c9c9` on `lloyd`, level with `origin/lloyd`;
+  the six `QMD_*` knobs in `agent-qmd-daemon.conf` (now including
+  `QMD_FUSION_DEPTH=100`, §1 and §3); the 14 collections and the 11 the recall
+  searches (`VAULT_SEGMENTS`); the three models in `index.yml` and
+  `evalpin.yml`; BM25 weights 1.5 / 4.0 / 1.0; watcher 2 s / 10 s / 60 s;
+  cleanup at 04:45; `EMBED_PENDING_MAX_RATIO = 0.25`; the kept Gemma backup;
+  every path in §8. Corrected: §4 cited #302 for the two callers that bypass
+  `_qmd_post`, but #302 is an older, closed rerank item that the finding had
+  been merge-appended into, so the gap was unowned; it is #1498 now, and
+  `semantic_candidates` has since started sanitizing. §8 was missing
+  `test_qmd_maintenance_health.py`. Added: §6's candidate-build pin pattern and
+  §7's warm figure at fusion depth 100. #1367 capped task #81 only; the
+  watcher is still uncapped, as §3 says.
 - **2026-09-22** — `current`; the mechanism still runs (fork at `db52729` with
   `dist/` rebuilt and pushed to `origin/lloyd`, daemon serving `[::1]:8181` off
   that tree, #81 `up_next`, template↔live drift reporting 2 items) but three
