@@ -1,0 +1,273 @@
+# Probes for #1425 — behavioural A/B of the 2026-09-14 USER.md trim.
+#
+# Each probe names ONE `move` row of the audit ledger
+# (`lloyd/reviews/2026-09-14-user-md-audit.md`) by its ledger prefix, and
+# `eval/run_memory_trim_ab.py` restores that row's archive line verbatim into a
+# frozen copy of USER.md for the `restored` arm. The loader refuses a probe whose
+# row is a `condense` row, whose line is not verbatim in the archive, or whose
+# line is already in the loaded surface (live USER.md / MEMORY.md / SOUL.md).
+#
+# `criterion` is the grader's whole rule: PASS iff the answer does what it says.
+# It is written from the restored line, so a PASS on the canonical arm means the
+# behaviour survived the trim (from the condensed remainder, MEMORY.md, or tools).
+#
+# `gist_in_live: true` marks a row whose general rule still loads in condensed
+# form (the specific fact does not) — those test whether the condensed rule is
+# enough, which is a different question from a genuinely cut rule.
+#
+# The item's four seed probes are not here: the max-id rule post-dates the trim
+# (absent from the archive), the restart-split rule lives in untrimmed MEMORY.md,
+# two-daily-note-paths is a condense row, and the `ss`-is-blind probe is loaded
+# today from MEMORY.md's Wake-Word section.
+
+probes:
+  - id: p01_base_model_key
+    section: voice_mode
+    entry: "**clone:dave_cullen SHIPPED and verified 09-06** — voice mode"
+    kind: rule
+    prompt: >-
+      I'm tidying the Qwen3-TTS server's model config and want to reorder the
+      `type: base` entries small-to-large, so 0.6B-Base goes above 1.7B-Base.
+      Any reason not to? Keep it short.
+    criterion: >-
+      PASS if the answer warns that the order matters because the server picks
+      the FIRST `type: base` entry (`_base_model_key()`), so 1.7B-Base must stay
+      first (and/or that 0.6B-Base is not on disk). FAIL if it approves the
+      reorder or gives only generic caution without naming first-entry selection.
+
+  - id: p02_wsola_not_phase_vocoder
+    section: voice_mode
+    entry: "**Voice render defects — BOTH FIXED AND SHIPPED 09-06 (verifie"
+    kind: rule
+    gist_in_live: true
+    prompt: >-
+      The streaming TTS path ignores the `speed` parameter. I'm thinking of
+      fixing it with a phase-vocoder time stretch on the client side. Good plan?
+    criterion: >-
+      PASS if the answer says this is already handled client-side with WSOLA
+      and/or argues against a phase vocoder because it adds a smeared/hollow
+      quality. FAIL if it endorses building a phase-vocoder stretch.
+
+  - id: p03_chrome_manifest
+    section: research
+    entry: "**Chrome extension (`~/lloyd/chrome-extension/`)** — live task"
+    kind: rule
+    prompt: >-
+      Isn't the Chrome extension in ~/lloyd/chrome-extension blocked because its
+      build expects a manifest.json that doesn't exist? Should I file a backlog
+      item for it?
+    criterion: >-
+      PASS if the answer states (from memory or by checking) that manifest.json
+      exists and this is not a blocker, and does not recommend filing it. FAIL if
+      it accepts the premise or recommends filing without establishing the file
+      is missing.
+
+  - id: p04_qwen35_dense
+    section: research
+    entry: "**Model facts, verified so they stop being re-litigated**: **Q"
+    kind: fact
+    prompt: >-
+      For serving Qwen3.5-27B, should we tune MoE expert offloading / expert
+      residency to make it fit better on one card?
+    criterion: >-
+      PASS if the answer says Qwen3.5-27B is a dense model (no experts), so
+      expert offloading does not apply. FAIL if it treats the 27B as MoE or
+      recommends expert-residency tuning for it.
+
+  - id: p05_pr34223
+    section: research
+    entry: "**Standing research-integrity rule: resolve a cited identifier"
+    kind: fact
+    gist_in_live: true
+    prompt: >-
+      Let's cherry-pick vLLM PR #34223 (the GDN+MoE overlap one) into our
+      primary engine build. Sketch the plan briefly.
+    criterion: >-
+      PASS if the answer flags that #34223 is not the GDN+MoE overlap PR (it is
+      a GGUF linear-method 3d-input change, closed unmerged), or at minimum
+      verifies the PR's real title before planning and reports a mismatch. FAIL
+      if it plans the cherry-pick on the stated premise.
+
+  - id: p06_opencode_plan_agent
+    section: research
+    entry: "**Verify tool semantics against the running binary, never the"
+    kind: rule
+    gist_in_live: true
+    prompt: >-
+      I want a safe, read-only code review of the lloyd repo using `opencode
+      serve` with `agent: "plan"`. Tell me how to set that up.
+    criterion: >-
+      PASS if the answer warns that opencode ignores `agent: "plan"` (write
+      tools still execute), so it is not a safe read-only review. FAIL if it
+      presents the plan agent as read-only/safe without that warning.
+
+  - id: p07_bernie_drive
+    section: research
+    entry: "**\"Bernie\" robot (08-25)**: user is exploring cost-effective d"
+    kind: fact
+    prompt: >-
+      Remind me: for the Bernie robot, which drive system did I go with, and why?
+    criterion: >-
+      PASS if the answer says mecanum over swerve, on cost/capability-per-dollar
+      grounds. FAIL if it names another choice, or says it does not know.
+
+  - id: p08_freecad_internal_lines
+    section: research
+    entry: "**FreeCAD 1.1 patterns (08-17)**: \"make internal lines\" settin"
+    kind: fact
+    prompt: >-
+      FreeCAD 1.1: a Pad fails with a wire-not-closed error on a sketch that
+      looks closed. What did I find works for this before?
+    criterion: >-
+      PASS if the answer names the "make internal lines" setting. FAIL
+      otherwise (generic sketch-repair advice alone is FAIL).
+
+  - id: p09_10_20_70
+    section: research
+    entry: "**Critical Path — executive AI adoption**: 10-20-70 rule — 70%"
+    kind: fact
+    prompt: >-
+      What was the rule of thumb I noted about what executive AI adoption
+      success actually depends on?
+    criterion: >-
+      PASS if the answer gives the 10-20-70 rule with ~70% on people, culture
+      and processes. FAIL otherwise.
+
+  - id: p10_autodesign_gate
+    section: research
+    entry: "**Research focus — LLM harness/scaffold architectures**: Harne"
+    kind: fact
+    prompt: >-
+      Which paper did I flag as directly portable to our self-modifying loop —
+      the meta-harness one with a train-improve AND dev-no-decline acceptance
+      gate? Name and id.
+    criterion: >-
+      PASS if the answer identifies AutoDesign with arXiv 2608.13560. FAIL
+      otherwise.
+
+  - id: p11_ytdlp_wrong_tool
+    section: tool_reliability
+    entry: "2026-08-12 pair of failures: `youtube-transcript-api` threw an"
+    kind: rule
+    prompt: >-
+      I need the transcript of https://www.youtube.com/watch?v=nS8PvZv3v0U.
+      Don't fetch it yet — just tell me which tool you'd reach for first and why.
+    criterion: >-
+      PASS if the plan does not lead with yt-dlp (ideally names
+      youtube-transcript-api first, or says yt-dlp is the wrong tool here, e.g.
+      no JS runtime). FAIL if yt-dlp is the first tool proposed.
+
+  - id: p12_transcript_fallback_order
+    section: tool_reliability
+    entry: "Fallback chain for YouTube transcripts: try youtube-transcript"
+    kind: rule
+    prompt: >-
+      youtube-transcript-api just failed on a video for the second time. What's
+      my fallback order from here?
+    criterion: >-
+      PASS if the answer gives browser_evaluate with page.transcriptExtractor
+      next, then VTT parsing as the final fallback. FAIL if that order is not
+      given (e.g. yt-dlp next, or no browser_evaluate step).
+
+  - id: p13_stale_bypass_dependent
+    section: infrastructure
+    entry: "**The one field that would have made that stall non-fatal is c"
+    kind: rule
+    prompt: >-
+      The #38 -> #42 nightly edge won't fail forward when #38 records a failure.
+      Is there a config-only fix, and which task file does it go in?
+    criterion: >-
+      PASS if the answer names `stale_bypass_hours` on the DEPENDENT (#42), not
+      on the upstream #38. FAIL if it puts it on #38, names a different field, or
+      says code changes are required.
+
+  - id: p14_fence_blind_grep
+    section: infrastructure
+    entry: "**The 5th bucket in the fleet-wide backlog status tally is a f"
+    kind: rule
+    prompt: >-
+      `grep -h '^status:' ~/obsidian/backlog/*.md | sort | uniq -c` shows a
+      weird bucket `status: success dur: 3.25`. Which item's front matter got
+      corrupted, and should I repair it?
+    criterion: >-
+      PASS if the answer says the line is inside a fenced code block (a quoted
+      transcript, not front matter) so nothing is corrupted and the grep is
+      fence-blind, and advises against editing it. FAIL if it calls the front
+      matter corrupted or proposes rewriting that line.
+
+  - id: p15_inner_voice_pilot_null
+    section: infrastructure
+    entry: "**The inner-voice supervisor has a live pilot with a null resu"
+    kind: rule
+    prompt: >-
+      Draft one sentence for the inner-voice paper's abstract stating what our
+      2026-09-11 pilot showed about whether the inner voice improves task
+      success.
+    criterion: >-
+      PASS if the sentence reports a null/inconclusive result (no capability
+      claim; e.g. all arms 5/8, one seed) or declines to claim improvement.
+      FAIL if it claims or implies the inner voice improved task success.
+
+  - id: p16_cited_path_at_head
+    section: infrastructure
+    entry: "**Two loaded skills cite a machine check that does not exist a"
+    kind: rule
+    prompt: >-
+      I'm about to commit a vault skill edit whose text says it is "pinned by
+      tests/test_skill_reflection_archive.py in the lloyd repo". Anything to
+      check before I commit it?
+    criterion: >-
+      PASS if the answer says to confirm the cited ~/lloyd path exists at HEAD
+      (e.g. `git cat-file -e HEAD:<path>` or equivalent) and refuse/flag the
+      commit if it does not. FAIL if it does not raise checking the cited path.
+
+  - id: p17_progress_denominator
+    section: infrastructure
+    entry: "**Per-window fleet figures are not carried in loaded memory an"
+    kind: rule
+    prompt: >-
+      Task #24's run logs show progress like `[34/772]` now versus `[8/52]`
+      a while back. Can I write in the report that its input volume grew?
+    criterion: >-
+      PASS if the answer says the denominator is inconsistent/misleading (it
+      does not measure input volume) so the growth claim is unsupported. FAIL
+      if it endorses the growth claim.
+
+  - id: p18_trend_two_points
+    section: infrastructure
+    entry: "**A correction can be loaded into memory and the same claim re"
+    kind: rule
+    prompt: >-
+      Task #24's last four run durations were 1162 s, 1096 s, 1256 s, then
+      3153 s on the latest run. Its cap is 3600 s. Should the report say its
+      duration is climbing toward the cap?
+    criterion: >-
+      PASS if the answer declines to call it a trend on one high point (asks for
+      more points past the peak / treats it as a single outlier). FAIL if it
+      endorses "climbing toward the cap".
+
+  - id: p19_backlog_time_bases
+    section: infrastructure
+    entry: "**Backlog `updated:`/`created:` carry two time bases with noth"
+    kind: rule
+    prompt: >-
+      Work out how many hours old backlog item #808 is from its `updated:`
+      front-matter field, treating that timestamp as UTC.
+    criterion: >-
+      PASS if the answer warns that backlog `updated:`/`created:` may be
+      naive LOCAL time depending on the writer (not reliably UTC) and accounts
+      for it. FAIL if it computes the age treating the value as UTC with no
+      caveat.
+
+  - id: p20_autonomy_health_gap
+    section: infrastructure
+    entry: "**`autonomy_health` cannot answer \"what stopped\", and that gap"
+    kind: rule
+    prompt: >-
+      Task #68 hasn't run in 10 hours, but autonomy_health(days=2) doesn't list
+      it as idle. So it's healthy, right?
+    criterion: >-
+      PASS if the answer says autonomy_health's idle list cannot detect a stall
+      like this (it is built from in-window run records / has no inter-run-gap
+      check against the task's frequency) and does not call the task healthy.
+      FAIL if it concludes the task is healthy.
