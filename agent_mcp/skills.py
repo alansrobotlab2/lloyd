@@ -9,9 +9,11 @@ Each skill is a folder containing a SKILL.md with YAML frontmatter
 (name, description, category, tags) followed by the skill body.
 """
 
+import hashlib
 import json
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Iterator, NamedTuple, Optional
 
@@ -411,8 +413,136 @@ def _skill_token_sets(skill: dict) -> tuple[set[str], set[str], set[str], set[st
     return tok
 
 
+# ── Pseudo-queries per skill (#1490, Skill2Query) ─────────────────────────────
+#
+# `scripts/skill_pseudo_queries.py` asks the primary, offline, for a handful of
+# requests a user would type when a skill's procedure is the job, generated from
+# the skill's own name/description/tags/body and nothing else. With
+# `skills.pseudo_queries.enabled` the scorer counts query tokens found in those
+# requests — and in none of the skill's name/description/tags, so nothing is
+# counted twice — as a metadata hit at `weight`. Off by default, and off is
+# byte-for-byte the old scorer: `eval/measurements/skill-pseudo-queries-2026-09-25.md`.
+
+PSEUDO_QUERY_MODES = ("union", "max")
+
+
+def skill_text_hash(skill: dict) -> str:
+    """What a skill's pseudo-queries were generated from; a change invalidates them."""
+    tags = skill.get("tags") or []
+    if isinstance(tags, str):
+        tags = [tags]
+    blob = "\x1f".join([skill.get("name") or "", str(skill.get("description") or ""),
+                        " ".join(map(str, tags)), skill.get("body") or ""])
+    return hashlib.sha1(blob.encode("utf-8", "replace")).hexdigest()
+
+
+def pseudo_query_settings() -> dict | None:
+    """`skills.pseudo_queries` as `{weight, mode, path}`, or None when off.
+
+    Every failure reads as off, which is today's scorer.
+    """
+    try:
+        from app.config import CONFIG
+        cfg = (CONFIG.get("skills") or {}).get("pseudo_queries") or {}
+    except Exception:  # noqa: BLE001
+        return None
+    if cfg.get("enabled") is not True:
+        return None
+    try:
+        weight = float(cfg.get("weight", 3.0))
+    except (TypeError, ValueError):
+        weight = 3.0
+    mode = cfg.get("mode", "union")
+    if mode not in PSEUDO_QUERY_MODES:
+        mode = "union"
+    path = cfg.get("path") or ""
+    if not path:
+        try:
+            from app.paths import SKILL_PSEUDO_QUERIES_PATH
+            path = SKILL_PSEUDO_QUERIES_PATH
+        except Exception:  # noqa: BLE001
+            return None
+    return {"weight": weight, "mode": mode, "path": Path(str(path)).expanduser()}
+
+
+_pq_file_cache: dict = {"key": None, "skills": {}}
+_pq_lock = threading.Lock()
+
+
+def _load_pseudo_queries(path: Path) -> tuple[tuple, dict]:
+    """`(cache key, {name: {"hash", "queries"}})`, re-read when the file's mtime moves.
+
+    A missing or unreadable file is `{}` — no skill gains anything, which is
+    the scorer with the flag off.
+    """
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return (str(path), None, None), {}
+    with _pq_lock:
+        if _pq_file_cache["key"] == key:
+            return key, _pq_file_cache["skills"]
+        try:
+            skills = json.loads(path.read_text()).get("skills") or {}
+        except (OSError, ValueError, AttributeError):
+            skills = {}
+        _pq_file_cache["key"] = key
+        _pq_file_cache["skills"] = skills
+        return key, skills
+
+
+def pseudo_query_index() -> dict | None:
+    """The settings plus the loaded table — one config read and one stat.
+
+    `_search_skills` takes this once per turn and hands it to every
+    `_score_skill` call; the default path of `_score_skill` takes it per call.
+    """
+    settings = pseudo_query_settings()
+    if settings is None:
+        return None
+    key, table = _load_pseudo_queries(settings["path"])
+    return {**settings, "key": key, "table": table}
+
+
+def _pseudo_query_token_sets(skill: dict, index: dict) -> tuple[frozenset, ...]:
+    """Per pseudo-query token sets for this skill, minus its own metadata tokens.
+
+    Memoized on the dict under `_pq`, keyed by the cache file's identity, so a
+    regenerated file is picked up and an unchanged one costs a tuple compare.
+    Queries generated from a different version of the skill (hash mismatch) are
+    ignored rather than trusted.
+    """
+    key = index["key"]
+    memo = skill.get("_pq")
+    if memo is not None and memo[0] == key:
+        return memo[1]
+    entry = index["table"].get(skill.get("name") or "") or {}
+    sets: tuple[frozenset, ...] = ()
+    if entry.get("queries") and entry.get("hash") == skill_text_hash(skill):
+        name_t, desc_t, tag_t, _ = _skill_token_sets(skill)
+        meta = name_t | desc_t | tag_t
+        sets = tuple(s for s in (frozenset(_query_tokens(str(q)) - meta)
+                                 for q in entry["queries"] if isinstance(q, str)) if s)
+    skill["_pq"] = (key, sets)
+    return sets
+
+
+def _pseudo_query_hits(skill: dict, query_tokens: set[str], index: dict) -> int:
+    sets = _pseudo_query_token_sets(skill, index)
+    if not sets:
+        return 0
+    if index["mode"] == "max":
+        return max(len(query_tokens & s) for s in sets)
+    return len(query_tokens & frozenset().union(*sets))
+
+
+_UNSET = object()
+
+
 def _score_skill(skill: dict, query_tokens: set[str],
-                 require_metadata_hit: bool = True) -> float:
+                 require_metadata_hit: bool = True,
+                 pseudo_queries=_UNSET) -> float:
     """Score a skill against query tokens. Higher = more relevant.
 
     If `require_metadata_hit` is True (default), a skill with zero
@@ -431,10 +561,16 @@ def _score_skill(skill: dict, query_tokens: set[str],
     tag_hits = len(query_tokens & tag_tokens)
     body_hits = min(len(query_tokens & body_tokens), _BODY_HITS_CAP)
 
-    if require_metadata_hit and (name_hits + desc_hits + tag_hits) == 0:
+    pq = pseudo_query_index() if pseudo_queries is _UNSET else pseudo_queries
+    pq_hits = _pseudo_query_hits(skill, query_tokens, pq) if pq else 0
+
+    if require_metadata_hit and (name_hits + desc_hits + tag_hits + pq_hits) == 0:
         return 0.0
 
-    return name_hits * 3.0 + desc_hits * 2.0 + tag_hits * 1.5 + body_hits * 0.3
+    score = name_hits * 3.0 + desc_hits * 2.0 + tag_hits * 1.5 + body_hits * 0.3
+    if pq_hits:
+        score += pq_hits * pq["weight"]
+    return score
 
 
 # ── Tool handlers ─────────────────────────────────────────────────────────────

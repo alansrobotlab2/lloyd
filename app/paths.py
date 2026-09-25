@@ -104,6 +104,10 @@ SERVICE_LOGS_DIR = DATA_ROOT / "logs" / "services"
 VAULT_ROOT = Path.home() / "obsidian"
 
 VAULT_DERIVED_ROOT = PIPELINE_DIR / "vault-derived"
+# Skill2Query pseudo-queries per skill (#1490): written offline by
+# scripts/skill_pseudo_queries.py, read by agent_mcp.skills when
+# skills.pseudo_queries.enabled is on. Regenerable, keyed by each skill's text hash.
+SKILL_PSEUDO_QUERIES_PATH = PIPELINE_DIR / "skill-pseudo-queries.json"
 
 # Runtime state directories. These were once spelled `Path.home() / "lloyd" /
 # ...` at a dozen call sites, which pinned them to the *user's* lloyd checkout

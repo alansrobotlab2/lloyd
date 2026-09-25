@@ -166,7 +166,7 @@ measurement and do-not-duplicate pointers.
 | P5 | #1487 | ADD/UPDATE/NOOP gate at `fact_add`; conversations reach the fact layer | P0 knowledge update |
 | P6 | #1488 | Rationale-line curation of MEMORY.md; core + retrieved archive; sleep-time notes via the ambient queue | behaviour bench, cache |
 | P7 | #1489 | ReasoningBank for autocode rounds | scorecard rows |
-| P8 | #1490 | Skill pseudo-queries, rerank over bodies, one-line descriptions | skill-match eval 0.745 |
+| P8 | #1490 | Skill pseudo-queries, rerank over bodies (descriptions decided, #1501) | skill-match eval 0.6961 today; measured 2026-09-25: pseudo-queries landed off (did not replicate across generations), djev rerank rejected (`eval/measurements/skill-pseudo-queries-2026-09-25.md`) |
 | P9 | #1491 | Answer-bearing sentence pruning of the best-chunk window | "use", MRR (after #1467) |
 | P10 | #1492 | Entity→chunk mentions + PPR fused into the pool | multi-hop + hard only |
 | P11 | #1493 | Qwen3-Embedding-4B side index | pinned-corpus paired |

@@ -26,7 +26,8 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from pathlib import Path
 
-from agent_mcp.skills import SKILLS_DIRS, _iter_skills, _score_skill, _query_tokens
+from agent_mcp.skills import (SKILLS_DIRS, _iter_skills, _score_skill, _query_tokens,
+                              pseudo_query_index)
 from agent_mcp._shared import _ENTITY_STOPWORDS
 from agent_mcp.facts import _extract_entities_from_query, _get_facts_sync
 from agent_mcp.session import _load_session_index, _score_session
@@ -612,8 +613,11 @@ def _search_skills(query_tokens: set[str],
     can judge a candidate SKILL.md through this function rather than a copy.
     """
     scored = []
+    # One config read and one stat per turn, not one per skill (#1490).
+    pq = pseudo_query_index()
     for skill in (_get_skills_cached() if skills is None else skills):
-        score = _score_skill(skill, query_tokens, require_metadata_hit=True)
+        score = _score_skill(skill, query_tokens, require_metadata_hit=True,
+                             pseudo_queries=pq)
         if score > SKILL_REPORT_FLOOR:
             scored.append((score, skill))
     scored.sort(key=lambda x: -x[0])
