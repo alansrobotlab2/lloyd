@@ -106,12 +106,36 @@ async def _route_names() -> set[str]:
 
 
 def _index_names() -> set[str]:
-    """The names the prompt advertises, parsed off the rendered index line."""
+    """The names the prompt advertises, parsed off the index as it is served.
+
+    Two renderings exist (`skills.index.descriptions`): the names-only line
+    `Available skills: a, b, c`, and since 2026-09-25 (P5 desc_push, `72f678d5`)
+    the description arm, a header plus one `- name` / `- name — description` line
+    per skill. This parses whichever config serves — the point is the set the
+    model is told — and refuses a third shape rather than guessing (#1513: the
+    parser only knew the first one, and went red the day the second shipped).
+    """
     index = pb._load_skills_index()
     assert index, "the prompt advertises no skills at all, so equality proves nothing"
     prefix = "Available skills: "
-    assert index.startswith(prefix), index[:60]
-    return set(index[len(prefix):].split(", "))
+    if index.startswith(prefix):
+        return set(index[len(prefix):].split(", "))
+    header, *rows = index.split("\n")
+    assert header == "Available skills (name — what it is for):", index[:60]
+    assert rows and all(r.startswith("- ") for r in rows), rows[:3]
+    return {r[2:].split(" — ", 1)[0] for r in rows}
+
+
+def test_the_index_parser_reads_both_renderings(skill_tree, monkeypatch):
+    """`_index_names` returns one set whichever arm renders the index."""
+    names_only = pb._load_skills_index(descriptions=False)
+    described = pb._load_skills_index(descriptions=True)
+    assert names_only and described and names_only != described
+    sets = []
+    for rendered in (names_only, described):
+        monkeypatch.setattr(pb, "_load_skills_index", lambda *a, _r=rendered, **k: _r)
+        sets.append(_index_names())
+    assert sets[0] == sets[1] == {s.name for s in _walked()}
 
 
 # ── clause 1: one walker, three behaviours ───────────────────────────────────

@@ -90,10 +90,15 @@ def _overlay(tmp_path: Path) -> Path:
 def _note_real_components(session_id: str, tmp_path: Path) -> dict:
     """Have `prompt_builder` build and record a real component dict.
 
-    An `overlay_dir` carrying its own `SOUL.md`, plus a `goal`, are the two
-    documented knobs that make the component set deterministic without touching
-    the live vault: `SOUL.md`, `goal` and `harness_hints` then appear in a known
-    order on every platform. `memories` and `skills_index` are asserted nowhere
+    An `overlay_dir` carrying its own `SOUL.md`, a `goal`, and an explicit
+    `session_state="system_head"` are the three documented knobs that make the
+    component set deterministic without touching the live vault or config.yaml:
+    `SOUL.md`, `goal` and `harness_hints` then appear in a known order on every
+    platform. The layout is pinned rather than read from
+    `harness.prompt_layout.session_state` because production moved it to
+    `system_tail` on 2026-09-25 (P1 step 1), which renders the goal as a trailing
+    `session_state` component after `harness_hints` — a config rollout, not a
+    manifest property, and the test went red on main the day it shipped (#1513). `memories` and `skills_index` are asserted nowhere
     in this file on purpose — whether they load depends on what is under the
     vault, and that is not what these clauses are about.
     """
@@ -101,7 +106,8 @@ def _note_real_components(session_id: str, tmp_path: Path) -> dict:
 
     prompt_builder.build_system_prompt(session_id=session_id,
                                        overlay_dir=_overlay(tmp_path),
-                                       goal={"text": "record every model request"})
+                                       goal={"text": "record every model request"},
+                                       session_state="system_head")
     comps = cm.components_for(session_id).get("components") or {}
     assert {"SOUL.md", "goal", "harness_hints"} <= set(comps), sorted(comps)
     return comps
