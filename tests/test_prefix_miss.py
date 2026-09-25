@@ -129,8 +129,9 @@ def test_record_iteration_logs_each_confirmed_miss():
     released = pm.record_iteration(t, 4, _u(180_000, 0),
                                    log=lambda n, d: events.append((n, d)))
     assert len(released) == 1
-    name, data = events[0]
-    assert name == "brain1.prefix_miss"
+    # The first call of a turn also writes P1's `brain1.turn_start_prefix`.
+    assert [n for n, _ in events] == ["brain1.turn_start_prefix", "brain1.prefix_miss"]
+    name, data = events[1]
     assert data["uncached_tokens"] == 180_000
     assert data["turn_prefix_misses"] == 1
 

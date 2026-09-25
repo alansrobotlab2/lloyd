@@ -525,6 +525,18 @@ harness:
   # how Lloyd knows what he has already learned about this machine.
   worker_prompt:
     drop_memory_files: [USER.md]
+  # P1 cross-turn prefix reuse (architecture/harness.md, Review 2026-09-24).
+  # session_state: where goal/plan/todos render — system_head (today, byte-
+  # identical), system_tail (one <session_state> block after the static
+  # hints), user_tail (appended to the user message; system prompt stable).
+  # freeze_memory: render MEMORY.md/USER.md from a per-session snapshot and
+  # carry later edits as a <memory_delta> note on the user message.
+  # replay_injected_context: replay past user turns with their injected
+  # prefix/tail re-joined (behaviour choice, not a cache one).
+  prompt_layout:
+    session_state: system_head
+    freeze_memory: false
+    replay_injected_context: false
   context_anchor:
     enabled: true
     warn_fraction: 0.76

@@ -1620,7 +1620,7 @@ def test_the_skill_s_descriptions_of_the_table_match_what_the_code_emits():
 
 # ------------------------------------------- presence: the persisted block --
 
-#: What `app/routers/_messages_subliminal.py:86` + the writer actually put in a
+#: What `app/routers/_messages_subliminal.py:144` + the writer actually put in a
 #: transcript: one message per injected block, role "subliminal", content a list of
 #: text blocks. Verified against the live store before this was written — 59 such
 #: blocks in the 120 most recent session files, 48 carrying a note list.
@@ -2149,7 +2149,7 @@ def _note_block(title, path="", excerpt=""):
     """One persisted `<vault-context>` block in production's own form.
 
     `prefetch.py` writes `- **<title>** (score: N, file: <vault path>): <excerpt>`
-    and `_messages_subliminal.py:86` stores that line verbatim; both the path and
+    and `_messages_subliminal.py:144` stores that line verbatim; both the path and
     the excerpt are in the string the reader used to throw away.
     """
     meta = f"score: 0.87, file: {path}" if path else "score: 0.87"

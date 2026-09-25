@@ -191,7 +191,7 @@ SKILL_PRESENCE_NOTE = (
 )
 
 #: Which prefetched *note* was in force for a turn IS persisted: the writer
-#: (`app/routers/_messages_subliminal.py:86`) stores the whole injected block as a
+#: (`app/routers/_messages_subliminal.py:144`) stores the whole injected block as a
 #: `role="subliminal"` message right after the user turn it was built for, and that
 #: block carries the `<vault-context>` note list `prefetch.py:938` assembled. So a
 #: note row is evidence-bound like a skill row, not a guess.
@@ -205,7 +205,7 @@ NOTE_PRESENCE_UNREACHABLE = "unavailable:no_injected_block_in_window"
 NOTE_PRESENCE_NOTE = (
     "Presence from the persisted injected block: the writer stores each turn's "
     "<vault-context> as a role=\"subliminal\" message "
-    "(app/routers/_messages_subliminal.py:86) and these rows are built from it. "
+    "(app/routers/_messages_subliminal.py:144) and these rows are built from it. "
     "Reach is bounded by `turns_with_block` — a turn with no persisted block "
     "contributes no note evidence, and a note prefetch did not inject was not in "
     "that prompt either."
@@ -387,7 +387,7 @@ class VaultCtx(str):
     """The bold title of an injected note line, plus the rest of that line.
 
     The writer's form (`prefetch.py`, stored verbatim by
-    `app/routers/_messages_subliminal.py:86`) is::
+    `app/routers/_messages_subliminal.py:144`) is::
 
         - **<title>** (score: 0.87, file: knowledge/x.md): <body excerpt>
 
@@ -492,7 +492,7 @@ def human_turns(root: Path | str | None = None, days: int = 30) -> list[Turn]:
             text = _text_of(msg.get("content"))
             if role == "subliminal":
                 # The writer persists the injected block as its OWN message
-                # (`app/routers/_messages_subliminal.py:86`, role="subliminal",
+                # (`app/routers/_messages_subliminal.py:144`, role="subliminal",
                 # written immediately after the user turn it was built for), not
                 # as a field on the user message. Reading only the field is what
                 # made the skill/note lookups below dead code: they parsed a

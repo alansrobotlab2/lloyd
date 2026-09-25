@@ -180,6 +180,9 @@ async def voice_inject(request: Request):
     if heard:
         prefetched_text = heard + prefetched_text
 
+    from app.prompt_layout import append_turn_tail
+    prefetched_text = append_turn_tail(prefetched_text, setup.get("turn_tail", ""))
+
     # Is another turn already running (or queued) on this session? The queue
     # is strictly serial, so this turn will wait — minutes, when a typed turn
     # is mid-investigation — and the worker should say so instead of a filler
@@ -265,10 +268,18 @@ def _voice_turn_setup(session_id: str) -> dict:
 
     voice_plan = existing.get("plan") or {}
     voice_plan_mode = bool(voice_plan.get("plan_mode"))
+    # P1: the frozen memory snapshot and the state/delta tail, as the chat
+    # path builds them. Both no-ops by default.
+    from app import memory_snapshot, prompt_layout
+
+    frozen_mem, memory_note = memory_snapshot.frozen_memories(session_id)
     system_prompt = build_system_prompt(
         session_id=session_id,
         todos=existing.get("todos") or [], plan=voice_plan,
+        **prompt_layout.mem_kwargs(frozen_mem),
     )
+    turn_tail = prompt_layout.turn_tail(
+        existing.get("todos") or [], voice_plan, None, memory_note)
 
     def _voice_refresh_disallowed() -> list[str]:
         from app.paths import SESSIONS_DIR as _SD
@@ -309,7 +320,7 @@ def _voice_turn_setup(session_id: str) -> dict:
         **_get_harness_kwargs(),
     )
     return {"model": model, "meta_path": meta_path, "options": options,
-            "plan_mode": voice_plan_mode}
+            "plan_mode": voice_plan_mode, "turn_tail": turn_tail}
 
 
 # ── /api/voice/listen ─────────────────────────────────────────────────────

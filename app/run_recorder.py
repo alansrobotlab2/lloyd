@@ -270,7 +270,8 @@ class _RunRecorder:
             }
             _prefix_miss.record_iteration(
                 self.miss, int(evt.get("iteration") or self.iteration), usage,
-                duration_ms=int(evt.get("duration_ms") or 0), log=self._log)
+                duration_ms=int(evt.get("duration_ms") or 0), log=self._log,
+                ttft_ms=evt.get("ttft_ms"))
             if evt.get("tool_calls") and self.text.strip():
                 await self._append([build_assistant_text_entry(
                     self.text, timestamp=datetime.now().isoformat(),

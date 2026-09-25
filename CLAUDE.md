@@ -1707,7 +1707,9 @@ prompt — `<active_todos>`, the plan, the goal — is frozen at turn start.
 **Never refresh the system prompt mid-turn**; re-anchor by appending instead
 (`RunOptions.state_anchor`, mirroring `notification_drain`). A turn that
 creates its own todo list would otherwise never see it again — see
-`app/routers/messages.py::_build_state_anchor`.
+`app/routers/messages.py::_build_state_anchor`. Across turns, P1's
+`harness.prompt_layout` switches move that state and memory edits to the user
+message's tail (architecture/harness.md, "P1").
 
 **Preserved thinking**: assistant messages carry their reasoning back into
 history under **both** `reasoning` and `reasoning_content`, bounded to

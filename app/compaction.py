@@ -627,6 +627,11 @@ async def load_and_compact_session(
     # since they're for UI display, not for the model.
     # P3: and the rows a memory-flush turn wrote (`is_history_row`).
     convo = [m for m in messages if is_history_row(m)]
+    # P1, off by default: replay each past user turn as what was sent (its
+    # subliminal prefix and tail re-joined), not the bare text.
+    from app import prompt_layout as _prompt_layout
+    if _prompt_layout.replay_injected_context():
+        convo = _prompt_layout.replay_injected(convo, messages)
 
     tokens_before = estimate_conversation_tokens(convo, system_prompt)
 

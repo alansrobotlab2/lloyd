@@ -7,6 +7,8 @@ JSON never sees:
   2. `build_ambient_turn()` `<ambient ...>...</ambient>` envelope wrapping
      producer text
   3. 20-turn `<system-reminder>` memory-preservation nudge
+  4. P1's turn tail (`<session_state>`, `<memory_delta>`) appended after
+     the text (`app/prompt_layout.py`)
 
 These helpers extract the injected prefix from `prefetched_text` vs the
 original `text` so we can persist it as a `role="subliminal"` entry for
@@ -25,6 +27,8 @@ _SUBLIMINAL_KINDS = (
     ("memory_nudge",     "<system-reminder>"),
     ("ambient_envelope", "<ambient "),
     ("prefetch",         "<context>"),
+    ("session_state",    "<session_state>"),
+    ("memory_delta",     "<memory_delta>"),
 )
 
 # Tag → source-name map for the summary badge. Ordering matches rendering
@@ -38,6 +42,8 @@ _SUBLIMINAL_SOURCE_TAGS = (
     ("sessions", "<recent-sessions>"),
     ("hint",     "<skill-hint>"),
     ("ide",      "<ide_state>"),
+    ("state",    "<session_state>"),
+    ("memory_delta", "<memory_delta>"),
 )
 
 
@@ -65,6 +71,35 @@ def _extract_subliminal_prefix(prefetched_text: str, text: str) -> str:
     return prefetched_text
 
 
+def _split_subliminal(prefetched_text: str, text: str) -> tuple[str, str]:
+    """`(prefix, tail)`: what was injected before and after the user's text.
+
+    P1 can append a turn tail (`<session_state>`, `<memory_delta>`; see
+    `app/prompt_layout.py`) after the text, which `_extract_subliminal_prefix`
+    alone would read as the ambient shape and record the user's own words as
+    injection. The tail is recognised by its opening tag, so it is split off
+    only when it really is one. With no tail this is exactly
+    `(_extract_subliminal_prefix(...), "")`.
+    """
+    from app.prompt_layout import TAIL_SEP, TAIL_TAGS
+
+    body, tail = prefetched_text, ""
+    for tag in TAIL_TAGS:
+        marker = TAIL_SEP + tag
+        idx = prefetched_text.find(marker)
+        while idx != -1:
+            head = prefetched_text[:idx]
+            if head == text or head.endswith("\n" + text):
+                body, tail = head, prefetched_text[idx + len(TAIL_SEP):]
+                break
+            idx = prefetched_text.find(marker, idx + 1)
+        if tail:
+            break
+    if not tail:
+        return _extract_subliminal_prefix(prefetched_text, text), ""
+    return _extract_subliminal_prefix(body, text), tail
+
+
 def _classify_subliminal(prefix: str) -> str:
     """Return 'prefetch' | 'ambient_envelope' | 'memory_nudge' | 'other'."""
     lead = prefix.lstrip()
@@ -79,17 +114,35 @@ def _detect_subliminal_sources(prefix: str) -> list[str]:
     return [name for name, marker in _SUBLIMINAL_SOURCE_TAGS if marker in prefix]
 
 
-def _build_subliminal_entry(turn: SessionTurn, prefix: str, timestamp: str) -> dict:
-    """Shape the subliminal message entry. Kept pure for testability."""
+def _subliminal_text(prefix: str, tail: str = "") -> str:
+    """The row's text: the prefix, then the tail, as the model read them."""
+    if not tail:
+        return prefix
+    return f"{prefix}\n\n{tail}" if prefix else tail
+
+
+def _build_subliminal_entry(turn: SessionTurn, prefix: str, timestamp: str,
+                            tail: str = "") -> dict:
+    """Shape the subliminal message entry. Kept pure for testability.
+
+    `tail` (P1) is what rode after the user's text; it is shown after the
+    prefix so the row holds everything the model saw, and its length is
+    recorded (`tail_chars`, omitted when empty) so a replay can put the two
+    halves back on either side of the text.
+    """
+    shown = _subliminal_text(prefix, tail)
+    meta = {
+        "kind":     _classify_subliminal(prefix or tail),
+        "sources":  _detect_subliminal_sources(shown),
+        "chars":    len(shown),
+        "turn_id":  turn.turn_id,
+    }
+    if tail:
+        meta["tail_chars"] = len(tail)
     return {
         "id": f"subl_{turn.turn_id}",
         "role": "subliminal",
-        "content": [{"type": "text", "text": prefix}],
+        "content": [{"type": "text", "text": shown}],
         "timestamp": timestamp,
-        "subliminal": {
-            "kind":     _classify_subliminal(prefix),
-            "sources":  _detect_subliminal_sources(prefix),
-            "chars":    len(prefix),
-            "turn_id":  turn.turn_id,
-        },
+        "subliminal": meta,
     }

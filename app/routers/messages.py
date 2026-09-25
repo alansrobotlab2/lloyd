@@ -67,6 +67,8 @@ from app.compaction import load_and_compact_session
 from app import event_log as _event_log  # Inner Voice — agent-side event capture
 from app import compaction_record as _compaction_record  # which context policy fired
 from app import prefix_miss as _prefix_miss
+from app import memory_snapshot as _memory_snapshot
+from app import prompt_layout as _prompt_layout
 from app import turn_usage
 from app import sessions_io
 
@@ -87,7 +89,8 @@ from app.routers._messages_harness_adapter import (
     _prepare_messages_for_harness,
 )
 from app.routers._messages_subliminal import (
-    _extract_subliminal_prefix,
+    _split_subliminal,
+    _subliminal_text,
     _classify_subliminal,
     _detect_subliminal_sources,
     _build_subliminal_entry,
@@ -1031,12 +1034,15 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # chat UI can surface what the agent actually saw. Persisted right
     # after the user message to reflect "this is the extra context Lloyd
     # had at turn time." Scripts filter by role, so they skip it for free.
-    subl_prefix = _extract_subliminal_prefix(prefetched_text, text)
-    if subl_prefix:
+    # P1: a turn tail (`<session_state>` / `<memory_delta>`) rides after the
+    # text; it is recorded too, so the row is everything the model saw.
+    subl_prefix, subl_tail = _split_subliminal(prefetched_text, text)
+    if subl_prefix or subl_tail:
         await _append_messages(
             session_id,
-            [_build_subliminal_entry(turn, subl_prefix, now_ts)],
+            [_build_subliminal_entry(turn, subl_prefix, now_ts, tail=subl_tail)],
         )
+        subl_prefix = _subliminal_text(subl_prefix, subl_tail)
 
     # Build OpenAI-format messages from the compacted session history.
     # The harness is stateless per request — we reconstruct the full
@@ -1373,7 +1379,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 _prefix_miss.record_iteration(
                     miss_tracker, int(evt.get("iteration") or current_iteration),
                     iter_usage, duration_ms=int(evt.get("duration_ms") or 0),
-                    log=_miss_log)
+                    log=_miss_log,
+                    ttft_ms=evt.get("ttft_ms"))
                 # Flush text segment to disk if tool calls follow it.
                 if evt.get("tool_calls") and full_response.strip():
                     seg_entry = build_assistant_text_entry(
@@ -2146,10 +2153,16 @@ async def post_message_stream(request: Request):
     # POST that runs a worker turn, so this resolves correctly for them; a
     # brand-new chat reads as `mission-control` and keeps everything.
     turn_platform, _turn_source = _session_identity(session_id)
+    # P1: a frozen memory snapshot (`harness.prompt_layout.freeze_memory`) and
+    # the state/delta tail the user message carries. Both no-ops by default.
+    frozen_mem, memory_note = _memory_snapshot.frozen_memories(session_id, turn_platform)
     system_prompt = build_system_prompt(
         todos=session_todos, plan=session_plan, goal=session_goal,
         session_id=session_id, platform=turn_platform,
+        **_prompt_layout.mem_kwargs(frozen_mem),
     )
+    turn_tail = _prompt_layout.turn_tail(
+        session_todos, session_plan, session_goal, memory_note)
     t_prompt = time.perf_counter()
 
     # Off the event loop: the search phase blocks for up to
@@ -2165,6 +2178,7 @@ async def post_message_stream(request: Request):
     # in the prompt's tail like the spoken turn's own reminder.
     from app.routers.voice import voice_room_prefix
     prefetched_text = voice_room_prefix(session_id) + prefetched_text
+    prefetched_text = _prompt_layout.append_turn_tail(prefetched_text, turn_tail)
     t_prefetch = time.perf_counter()
     # One PROMPT_BUDGET line per turn: the system half is logged by
     # build_system_prompt above, this adds the injected half and the total
@@ -2358,10 +2372,15 @@ async def build_ambient_turn(
     plan = existing.get("plan") or {}
     goal = existing.get("goal") or {}
     plan_mode_active = bool(plan.get("plan_mode"))
+    ambient_platform = _session_identity(session_id)[0]
+    frozen_mem, memory_note = _memory_snapshot.frozen_memories(session_id, ambient_platform)
     system_prompt = build_system_prompt(
         todos=existing.get("todos") or [], plan=plan, goal=goal,
-        session_id=session_id, platform=_session_identity(session_id)[0],
+        session_id=session_id, platform=ambient_platform,
+        **_prompt_layout.mem_kwargs(frozen_mem),
     )
+    ambient_tail = _prompt_layout.turn_tail(
+        existing.get("todos") or [], plan, goal, memory_note)
 
     # An ambient injection carries no request body, so the gate can only be
     # armed by the session's own platform — which is right, and today never
@@ -2442,6 +2461,7 @@ async def build_ambient_turn(
         f'and stop. If it is worth surfacing, reply briefly and naturally — the user will '
         f'see your message as a normal assistant turn.'
     )
+    prefetched_text = _prompt_layout.append_turn_tail(prefetched_text, ambient_tail)
 
     payload: dict[str, Any] = {
         "text": text,
@@ -2492,10 +2512,16 @@ async def build_flush_turn(session_id: str, turn_id: str = "") -> SessionTurn:
     plan = existing.get("plan") or {}
     goal = existing.get("goal") or {}
     # The session's own system prompt, so the turn renders the same prefix
-    # the chat does and re-uses its KV cache instead of re-prefilling.
+    # the chat does and re-uses its KV cache instead of re-prefilling. P1:
+    # the same frozen memory snapshot the chat renders, but no turn tail —
+    # a flush needs neither the session state nor the memory delta, and
+    # the tail sits after the prefix either way.
+    flush_platform = _session_identity(session_id)[0]
+    frozen_mem, _memory_note = _memory_snapshot.frozen_memories(session_id, flush_platform)
     system_prompt = build_system_prompt(
         todos=existing.get("todos") or [], plan=plan, goal=goal,
-        session_id=session_id, platform=_session_identity(session_id)[0],
+        session_id=session_id, platform=flush_platform,
+        **_prompt_layout.mem_kwargs(frozen_mem),
     )
     flush_payload: dict = {}
     flush_scope = _authority_scope_for(session_id, flush_payload)
@@ -2622,13 +2648,20 @@ async def post_message(request: Request):
 
     sync_session_plan = _load_session_plan(session_id)
     sync_plan_mode_active = bool(sync_session_plan.get("plan_mode"))
+    sync_todos = _load_session_todos(session_id)
+    sync_platform = _session_identity(session_id)[0]
+    frozen_mem, memory_note = _memory_snapshot.frozen_memories(session_id, sync_platform)
     system_prompt = build_system_prompt(
-        todos=_load_session_todos(session_id), plan=sync_session_plan,
-        session_id=session_id, platform=_session_identity(session_id)[0],
+        todos=sync_todos, plan=sync_session_plan,
+        session_id=session_id, platform=sync_platform,
+        **_prompt_layout.mem_kwargs(frozen_mem),
     )
     prefetched_text = await prefetch_context_async(
         text, session_id=session_id, plan_mode=sync_plan_mode_active,
     )
+    prefetched_text = _prompt_layout.append_turn_tail(
+        prefetched_text,
+        _prompt_layout.turn_tail(sync_todos, sync_session_plan, None, memory_note))
 
     meta_path = SESSIONS_DIR / f"{session_id}.json"
 
@@ -2750,7 +2783,8 @@ async def post_message(request: Request):
                 _prefix_miss.record_iteration(
                     miss_tracker, int(evt.get("iteration") or 0),
                     evt.get("usage") or {},
-                    duration_ms=int(evt.get("duration_ms") or 0), log=_miss_log)
+                    duration_ms=int(evt.get("duration_ms") or 0), log=_miss_log,
+                    ttft_ms=evt.get("ttft_ms"))
             elif evt["type"] == "result":
                 usage = evt.get("usage") or {}
                 # Third writer of a usage row — streaming chat, the background

@@ -165,6 +165,8 @@ class TurnMissTracker:
     #: the next non-zero read decides which.
     pending: list[Miss] = field(default_factory=list)
     announced: bool = False
+    #: P1: whether this turn's `brain1.turn_start_prefix` has been written.
+    start_recorded: bool = False
 
     @classmethod
     def for_turn(cls, session_id: str = "", turn_id: str = "",
@@ -230,15 +232,47 @@ _tasks: set[asyncio.Task] = set()
 _last_announce_at: float = 0.0
 
 
+def record_turn_start(tracker: TurnMissTracker, usage: dict | None, *,
+                      ttft_ms: int | None = None, iteration: int = 0,
+                      log: LogFn | None = None) -> bool:
+    """P1: the first iteration's prompt reuse, once per turn.
+
+    The miss counter deliberately ignores iterations 1-2, so the one request
+    that tells whether the previous turn's prefix survived — this turn's first
+    — was measured by nothing. `brain1.turn_start_prefix {input_tokens,
+    cache_read, ttft_ms}` is that number: after a todo/goal/MEMORY.md change
+    it reads ~0 under `system_head` and ~system prompt + prior turns under
+    `user_tail`. Measurement only, so it is not behind `enabled()`. Never raises.
+    """
+    if tracker.start_recorded:
+        return False
+    tracker.start_recorded = True
+    try:
+        inp, cached = usage_numbers(usage)
+        _log(log, "brain1.turn_start_prefix", {
+            "iteration": int(iteration or 1),
+            "input_tokens": inp,
+            "cache_read": cached,
+            "reuse": round(cached / inp, 3) if inp else None,
+            "ttft_ms": ttft_ms,
+        })
+    except Exception as exc:  # noqa: BLE001 — accounting is not the turn
+        logger.debug("prefix_miss: turn_start_prefix failed: %s", exc)
+    return True
+
+
 def record_iteration(tracker: TurnMissTracker, iteration: int,
                      usage: dict | None, *, duration_ms: int = 0,
-                     log: LogFn | None = None) -> list[Miss]:
+                     log: LogFn | None = None,
+                     ttft_ms: int | None = None) -> list[Miss]:
     """Fold one `assistant_message` in, log its misses, and maybe announce.
 
     Never raises and never blocks the stream: the fold is arithmetic, the log
     is one append, and the announcement — which may need an HTTP read and
-    runs notify-send — is a task the caller does not wait on.
+    runs notify-send — is a task the caller does not wait on. The first call
+    of a turn also writes `brain1.turn_start_prefix` (`record_turn_start`).
     """
+    record_turn_start(tracker, usage, ttft_ms=ttft_ms, iteration=iteration, log=log)
     if not enabled():
         return []
     try:

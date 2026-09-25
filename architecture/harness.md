@@ -863,3 +863,49 @@ compared, `eval/run_compaction_recall_eval.py`, run past the threshold).
   memory_adds, fact_adds, duration_ms, status, stop_reason}` when the flush turn
   ends; `turn_start_record.flushed_before_summary` on the next rewrite.
 - `tests/test_memory_flush.py`.
+### P1 — cross-turn prefix reuse (switched; ships as today)
+
+The system prompt heads every request, so anything in it that moves between
+turns re-prefills the whole previous conversation on the next turn's first
+iteration. Two things moved it: the session state (`<goal>`, `<plan>`,
+`<active_todos>`, rendered ahead of the static harness hints) and the memory
+files (re-read every turn, so one `memory_add` anywhere invalidated every open
+session). Three switches under `harness.prompt_layout`, all shipping off:
+
+- **`session_state: system_head | system_tail | user_tail`**
+  (`prompt_builder.session_state_layout`, unknown values read as
+  `system_head`). `system_head` is today's output byte for byte (checked
+  against `f75f4004` over seven input shapes with the real vault; pinned by
+  `test_system_head_is_byte_identical_to_today`). `system_tail` renders one
+  `build_session_state_block` (`<session_state>` around the same three
+  renderers) after every static paragraph, registered as the `session_state`
+  component. `user_tail` leaves it out of the system prompt;
+  `app/prompt_layout.turn_tail` builds it and the four turn paths (stream,
+  ambient, sync in `messages.py`; `voice._voice_turn_setup`) append it to
+  `prefetched_text`, so it lands at the tail of the sent user message.
+  P3's flush turn renders the same (frozen) system prompt but gets no tail;
+  D11's compact turn builds no prompt at all.
+- **`freeze_memory`** (`app/memory_snapshot.py`): the first turn writes the
+  memory body `_load_memories` renders for the session's platform to
+  `sessions/<sid>.tool-results/_memory_snapshot.md`; later turns pass it as
+  `build_system_prompt(memories_text=…)`. Edits since are a `<memory_delta>`
+  note (+/− line counts and the added lines, ≤2000 chars) on the turn tail —
+  in every layout, since a system-prompt copy would defeat the freeze. The
+  bypass is at the caller, not inside `_load_memories`.
+- **`replay_injected_context`**: `load_and_compact_session` re-joins each past
+  user row with its turn's `subliminal` row (`prompt_layout.replay_injected`,
+  after P3's `is_history_row` filter) so history replays what was sent. The subliminal rows never reach
+  `_prepare_messages_for_harness` (compaction drops the role first), so the
+  re-join sits in compaction, not the adapter the plan named.
+
+`_messages_subliminal._split_subliminal(prefetched, text) → (prefix, tail)`
+recognises a tail by its opening tag (`prompt_layout.TAIL_TAGS`); the row
+shows prefix then tail and records `tail_chars` (omitted when empty). With no
+tail it equals the old `_extract_subliminal_prefix`.
+
+**Measurement, always on:** `prefix_miss.record_turn_start` writes
+`brain1.turn_start_prefix {iteration, input_tokens, cache_read, reuse,
+ttft_ms}` on the first `assistant_message` of each turn from all three
+writers — the iteration `prefix_miss` deliberately skips. Rollout is
+`system_tail`, then an A/B of `user_tail`; adopt when turn-N+1 first-iteration
+`reuse` rises and `eval/run_eval.py` does not fall. `tests/test_prompt_layout.py`.

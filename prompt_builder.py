@@ -296,6 +296,60 @@ def _format_goal_block(goal: dict | None) -> str | None:
     )
 
 
+#: Where a turn's session state (goal, plan, todos) is rendered — P1.
+#:   system_head — inside the system prompt, ahead of the harness hints
+#:                 (today's layout, byte-identical).
+#:   system_tail — inside the system prompt, after everything static, as one
+#:                 `<session_state>` block. A todo edit then invalidates only
+#:                 the tail of the system prompt, not the hints under it.
+#:   user_tail   — not in the system prompt at all; the caller appends it to
+#:                 the turn's user message (`app/prompt_layout.py`), so the
+#:                 system prompt is byte-stable across state changes and the
+#:                 whole previous conversation stays prefix-cached.
+SESSION_STATE_LAYOUTS = ("system_head", "system_tail", "user_tail")
+
+
+def session_state_layout() -> str:
+    """`harness.prompt_layout.session_state`, validated. Never raises.
+
+    Read lazily, like `_memory_files_for`: this module is imported by CLI
+    scripts that never bring up the app package, and anything unreadable or
+    unknown is today's layout — a layout nobody asked for is the one outcome
+    worse than the old cache behaviour.
+    """
+    try:
+        from app.config import CONFIG
+
+        value = (((CONFIG.get("harness") or {}).get("prompt_layout") or {})
+                 .get("session_state", "system_head"))
+    except Exception:  # noqa: BLE001
+        return "system_head"
+    value = str(value or "system_head").strip()
+    if value not in SESSION_STATE_LAYOUTS:
+        logger.warning("harness.prompt_layout.session_state=%r is not one of %s; "
+                       "using system_head", value, SESSION_STATE_LAYOUTS)
+        return "system_head"
+    return value
+
+
+def build_session_state_block(
+    todos: list[dict] | None = None,
+    plan: dict | None = None,
+    goal: dict | None = None,
+) -> str | None:
+    """The session's mutable state as one `<session_state>` block, or None.
+
+    The same three renderers `system_head` uses, in the same order (goal,
+    plan, todos), wrapped so the block can move as a unit to the tail of the
+    system prompt or of the user message (P1).
+    """
+    blocks = [b for b in (_format_goal_block(goal), _format_plan_block(plan),
+                          _format_active_todos(todos)) if b]
+    if not blocks:
+        return None
+    return "<session_state>\n" + "\n\n".join(blocks) + "\n</session_state>"
+
+
 def build_system_prompt(
     include_skills_index: bool = True,
     overlay_dir: str | Path | None = None,
@@ -304,6 +358,8 @@ def build_system_prompt(
     goal: dict | None = None,
     session_id: str = "",
     platform: str = "",
+    memories_text: str | None = None,
+    session_state: str | None = None,
 ) -> str:
     """Build the full system prompt for a Lloyd session.
 
@@ -339,6 +395,14 @@ def build_system_prompt(
     irrelevant to the work. `sessions_io.NON_USER_PLATFORMS` is the one
     definition of "nobody is reading this", imported lazily so eval and
     bench scripts that call this function stay importable.
+
+    `memories_text` — when not None, used verbatim as the memory body instead
+    of reading MEMORY.md/USER.md (`""` means no memory block). This is how a
+    session's frozen snapshot (`app/memory_snapshot.py`) reaches the prompt.
+
+    `session_state` — the layout (`SESSION_STATE_LAYOUTS`); None reads
+    `harness.prompt_layout.session_state`. `system_head` is today's output
+    byte for byte; `user_tail` leaves the state out entirely.
     """
     overlay = _resolve_overlay(overlay_dir)
     components: dict[str, str] = {}
@@ -351,7 +415,10 @@ def build_system_prompt(
     if soul:
         components["SOUL.md"] = soul
 
-    memories = _load_memories(overlay, soul=soul, files=_memory_files_for(platform))
+    if memories_text is None:
+        memories = _load_memories(overlay, soul=soul, files=_memory_files_for(platform))
+    else:
+        memories = memories_text or None
     if memories:
         components["memories"] = f"<memory>\n{memories}\n</memory>"
 
@@ -363,17 +430,20 @@ def build_system_prompt(
                 + _skills_index_note(skills_push_enabled())
             )
 
-    goal_block = _format_goal_block(goal)
-    if goal_block:
-        components["goal"] = goal_block
+    layout = session_state if session_state in SESSION_STATE_LAYOUTS \
+        else session_state_layout()
+    if layout == "system_head":
+        goal_block = _format_goal_block(goal)
+        if goal_block:
+            components["goal"] = goal_block
 
-    plan_block = _format_plan_block(plan)
-    if plan_block:
-        components["plan"] = plan_block
+        plan_block = _format_plan_block(plan)
+        if plan_block:
+            components["plan"] = plan_block
 
-    todos_block = _format_active_todos(todos)
-    if todos_block:
-        components["todos"] = todos_block
+        todos_block = _format_active_todos(todos)
+        if todos_block:
+            components["todos"] = todos_block
 
     parts: list[str] = list(components.values())
 
@@ -461,6 +531,14 @@ def build_system_prompt(
     # are the instructions prompt_builder itself owns, as distinct from the
     # vault files it reads. Grouping them cannot change the joined string.
     components["harness_hints"] = "\n\n".join(parts[len(components):])
+    # P1: the mutable state goes last, so a todo/plan/goal change moves only
+    # the bytes after every static paragraph. In `user_tail` it is not here
+    # at all — the caller appends it to the user message.
+    if layout == "system_tail":
+        state_block = build_session_state_block(todos, plan, goal)
+        if state_block:
+            components["session_state"] = state_block
+            parts.append(state_block)
     if session_id:
         log_prompt_size(components, session_id=session_id, platform=platform)
         # #581: `log_prompt_size` reports each component's SIZE and then drops
