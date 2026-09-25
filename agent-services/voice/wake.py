@@ -161,8 +161,14 @@ class WakeWordFactory:
         refractory_ms: int = 1500,
         verifier_models: Optional[dict] = None,
         verifier_threshold: float = 0.1,
+        models: Optional[list] = None,
     ) -> None:
         self.models_dir = Path(models_dir).expanduser()
+        #: Explicit model files (names under `models_dir`, or absolute paths).
+        #: None keeps the old rule — every `*.onnx` directly in `models_dir` —
+        #: which is how a stray file (a stop word, a candidate) would quietly
+        #: become a wake word; the config names its models since 2026-09-24.
+        self.models = list(models) if models else None
         self.engine_dir = Path(engine_dir).expanduser()
         self.threshold = float(threshold)
         self.refractory_ms = int(refractory_ms)
@@ -175,7 +181,15 @@ class WakeWordFactory:
     def validate(self) -> None:
         """Raise if the model files are not where config says. Called once at
         startup so a typo is a boot error rather than a silently deaf worker."""
-        self._paths = sorted(str(p) for p in self.models_dir.glob("*.onnx"))
+        if self.models is not None:
+            paths = [p if p.is_absolute() else self.models_dir / p
+                     for p in (Path(m).expanduser() for m in self.models)]
+            missing = [str(p) for p in paths if not p.is_file()]
+            if missing:
+                raise RuntimeError(f"wake-word model(s) not found: {', '.join(missing)}")
+            self._paths = [str(p) for p in paths]
+        else:
+            self._paths = sorted(str(p) for p in self.models_dir.glob("*.onnx"))
         if not self._paths:
             raise RuntimeError(f"no wake-word .onnx models in {self.models_dir}")
         for p in (self._mel, self._emb):
@@ -245,6 +259,150 @@ def build_factory(cfg: dict) -> Optional[WakeWordFactory]:
         refractory_ms=int(cfg.get("refractory_ms", 1500)),
         verifier_models=cfg.get("verifier_models") or {},
         verifier_threshold=float(cfg.get("verifier_threshold", 0.1)),
+        models=cfg.get("models") or None,
+    )
+    f.validate()
+    return f
+
+
+# --------------------------------------------------------------------------
+# The stop word: a second, separately-thresholded detector, armed only while
+# Lloyd is speaking. Home Assistant arms its `stop` wake word the same way —
+# it is the cheapest interrupt there is, because nothing but a word the model
+# was trained on can fire it, and outside Lloyd's own speech it is not even
+# consulted. Trained through scripts/voice/wakeword/ (lloyd_stop.yaml) and
+# measured by scripts/voice/stop_eval.py; architecture/voice.md has both.
+# --------------------------------------------------------------------------
+
+
+class StopDetector:
+    """One stop-word model on one audio stream, with an arm switch.
+
+    Fed every frame whether armed or not (by default), so its feature window is
+    warm the moment Lloyd starts talking — a freshly armed model that had not
+    been fed would be deaf for its first 400 ms, which is when a "stop" said
+    over the first words of a reply lands. While disarmed it reports nothing.
+
+    A detection must *cross* the threshold while armed: if the score is
+    already above it when `arm()` is called (the user's own last word was
+    "wait", and Lloyd began answering 300 ms later) it has to fall back below
+    before it can fire. Without that, arming would replay the user's request
+    as an interrupt of its own answer.
+
+    Not thread-safe, like `ContinuousWakeWord`: one per stream, fed from one
+    place. `arm()` / `disarm()` are plain flag writes, safe from the same loop.
+    """
+
+    def __init__(self, model, threshold: float = 0.6, refractory_ms: int = 1500,
+                 feed_when_disarmed: bool = True, name: str = "lloyd_stop") -> None:
+        self.name = name
+        self.threshold = float(threshold)
+        self._refractory = int(refractory_ms / 1000.0 * 16000)
+        self._feed_when_disarmed = bool(feed_when_disarmed)
+        # The inner stream only scores; firing, latching and the refractory
+        # window are decided here, so its own threshold never fires.
+        self._w = ContinuousWakeWord(model, threshold=float("inf"), refractory_ms=0,
+                                     on_score=self._note)
+        self._chunker = FrameChunker(FRAME_SAMPLES)
+        self._armed = False
+        self._latched = False
+        self._score = 0.0
+        self._last_fire = -(10 ** 9)
+
+    def _note(self, name: str, score: float, cursor: int) -> None:
+        self._score = score
+
+    @property
+    def armed(self) -> bool:
+        return self._armed
+
+    @property
+    def cursor(self) -> int:
+        return self._w.cursor
+
+    @property
+    def score(self) -> float:
+        """The latest frame's score, armed or not."""
+        return self._score
+
+    def arm(self) -> None:
+        if not self._armed:
+            self._armed = True
+            self._latched = self._score >= self.threshold
+
+    def disarm(self) -> None:
+        self._armed = False
+        self._latched = False
+
+    def take_peak(self) -> tuple[str, float]:
+        return self._w.take_peak()
+
+    def feed(self, samples_16k: np.ndarray) -> list[WakeDetection]:
+        """Push 16 kHz audio (float32 or int16). Returns stop detections, only
+        while armed."""
+        if not self._armed and not self._feed_when_disarmed:
+            return []
+        out: list[WakeDetection] = []
+        for frame in self._chunker.push(samples_16k):
+            self._score = 0.0
+            self._w.feed(frame)  # exactly one 80 ms frame: one score
+            s = self._score
+            if s < self.threshold:
+                self._latched = False
+                continue
+            if not self._armed or self._latched:
+                continue
+            self._latched = True
+            if self._w.cursor - self._last_fire < self._refractory:
+                continue
+            self._last_fire = self._w.cursor
+            out.append(WakeDetection(self.name, s, self._w.cursor, time.monotonic()))
+        return out
+
+
+class StopWordFactory:
+    """Validates the stop model once, then mints a `StopDetector` per stream."""
+
+    def __init__(self, model: str | Path, engine_dir: str | Path, threshold: float = 0.6,
+                 refractory_ms: int = 1500, feed_when_disarmed: bool = True) -> None:
+        self.model = Path(model).expanduser()
+        self.threshold = float(threshold)
+        self.refractory_ms = int(refractory_ms)
+        self.feed_when_disarmed = bool(feed_when_disarmed)
+        self._inner = WakeWordFactory(models_dir=self.model.parent, engine_dir=engine_dir,
+                                      threshold=threshold, refractory_ms=refractory_ms,
+                                      models=[self.model.name])
+
+    @property
+    def name(self) -> str:
+        return self.model.stem
+
+    def validate(self) -> None:
+        self._inner.validate()
+
+    def create(self) -> StopDetector:
+        return StopDetector(self._inner._build_model(), threshold=self.threshold,
+                            refractory_ms=self.refractory_ms,
+                            feed_when_disarmed=self.feed_when_disarmed, name=self.name)
+
+
+def build_stop_factory(cfg: dict) -> Optional[StopWordFactory]:
+    """From the `livekit.acoustic_wake` block's `stop:` sub-block, or None.
+
+    None when the stop word is off (`stop.enabled: false`, the default) or the
+    whole acoustic wake block is disabled. Enabled but misconfigured is a boot
+    error, like `build_factory`: a stop word that silently never fires is the
+    failure a person would not notice until they needed it.
+    """
+    stop = (cfg or {}).get("stop") or {}
+    if not cfg.get("enabled", True) or not stop.get("enabled", False):
+        return None
+    f = StopWordFactory(
+        model=stop.get("model", "agent-services/models/wakeword/stop/lloyd_stop.onnx"),
+        engine_dir=stop.get("engine_dir") or cfg.get("engine_dir", "agent-services/models/openwakeword"),
+        threshold=float(stop.get("threshold", 0.6)),
+        refractory_ms=int(stop.get("refractory_ms", cfg.get("refractory_ms", 1500))),
+        feed_when_disarmed=bool(stop.get("feed_when_disarmed", True)),
     )
     f.validate()
     return f

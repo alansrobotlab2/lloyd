@@ -1,0 +1,106 @@
+# Training recipe for agent-services/models/wakeword/lloyd_stop.onnx — the
+# interrupt word, armed only while Lloyd is speaking (Home Assistant's stop
+# word). Run through train.py beside this file; architecture/voice.md
+# "Retraining the wake word" has the procedure and the numbers.
+#
+# Every phrase opens the utterance: the model is asked "did someone just say
+# stop", and the windows it must NOT fire on are mostly Lloyd's own replies
+# (the `lloyd.extras` clone-voice stream below) and in-sentence uses of the
+# same words ("don't stop", "can't wait", "hold onto").
+model_name: lloyd_stop
+target_phrases: ["stop", "lloyd stop", "stop talking", "stop stop", "okay stop",
+                 "hold on", "wait", "wait wait", "lloyd wait"]
+
+n_samples: 25000
+n_samples_val: 5000
+n_background_samples: 2000
+n_background_samples_val: 500
+tts_batch_size: 8
+
+custom_negative_phrases:
+  - "don't stop"
+  - "a bus stop"
+  - "stopped"
+  - "stopping"
+  - "the stop sign"
+  - "non stop"
+  - "a full stop"
+  - "unstoppable"
+  - "i can't wait"
+  - "waiting"
+  - "the wait time"
+  - "wait for it to finish"
+  - "hold onto that"
+  - "on hold"
+  - "holding"
+  - "the whole thing"
+  - "hello"
+  - "top"
+  - "shop"
+  - "stock"
+  - "step"
+  - "stomp"
+  - "hey lloyd"
+  - "lloyd"
+  - "okay"
+  - "yes"
+  - "no"
+  - "thanks"
+  - "sure"
+  - "go on"
+  - "keep going"
+  - "got it"
+  - "uh huh"
+  - "yeah"
+  - "right"
+  - "that's all"
+  - "it will stop when the job finishes"
+  - "you can stop the service later"
+  - "the process has to wait for the lock"
+  - "i'll hold on to the file"
+  - "the bus didn't stop there"
+  - "we waited for an hour"
+
+noise_scales: [0.98]
+noise_scale_ws: [0.98]
+length_scales: [0.75, 1.0, 1.25]
+slerp_weights: [0.2, 0.35, 0.5, 0.65, 0.8]
+
+data_dir: ${WW_ROOT}/data
+output_dir: ${WW_ROOT}/output
+
+augmentation:
+  clip_duration: 2.0
+  batch_size: 16
+  rounds: 3
+  background_paths: [${WW_ROOT}/data/backgrounds]
+  rir_paths: [${WW_ROOT}/data/rirs]
+
+model:
+  model_type: conv_attention
+  model_size: medium
+
+steps: 100000
+learning_rate: 0.0001
+weight_decay: 0.01
+label_smoothing: 0.05
+max_negative_weight: 1500   # v1 recipe: 3000; halved with positives x2 for recall (A/B 2026-09-24)
+target_fp_per_hour: 0.2
+
+batch_n_per_class:
+  positive: 100
+  adversarial_negative: 50
+  ACAV100M_sample: 1024
+  background_noise: 50
+
+lloyd:
+  shuffle_speakers: true
+  extras:
+    # Kokoro + VCTK voices (scripts/voice/wakeword/synth_extras.py)
+    - {dir: "${WW_ROOT}/extra/lloyd_stop/pos_other_tts", kind: positive, rounds: 3}
+    - {dir: "${WW_ROOT}/extra/lloyd_stop/neg_other_tts", kind: negative, rounds: 3}
+    # Lloyd's own replies in the clone voice (live TTS), the training half;
+    # the eval half is disjoint sentences.
+    - {dir: "${WW_ROOT}/extra/lloyd_stop/clone_train", kind: negative_stream, augment: true}
+    # Real room audio, even-numbered utterances only; the odd half is held out.
+    - {dir: "${WW_ROOT}/extra/room_train", kind: negative_stream}

@@ -697,6 +697,14 @@ Agents and Unmute guard it:
   score 0.80–0.90 against the 0.40 profile threshold; the highest room
   utterance scores 0.25 against it).
 
+**The acoustic stop word** (`acoustic_wake.stop`, `lloyd_stop.onnx`, see
+"Retraining the wake word") is the fast path: fed every frame beside the
+wake word, armed only while Lloyd is speaking (`_sync_stop_arming`), it fires
+inside "stop talking" / "Lloyd, stop" / "hold on" before the VAD has closed
+anything, and `_on_stop_word` stops him and cancels the turn being spoken —
+for the person he is talking with only. A bare "stop." is too short for it;
+the transcript's stop words catch that one a beat later.
+
 A real interruption stops the audio, POSTs `/api/voice/interrupted` with
 `heard` — the clauses whose playout had finished by the audio clock
 (`TTSStreamer.heard_text`) — and cancels the turn being spoken **only if it is
@@ -1554,6 +1562,76 @@ Three things that bit the first run:
   not: old model set vs new, same thresholds, recall and every false-accept
   set side by side.
 
+### The 2026-09-24 round: a stop word, and a v2 that did not ship
+
+`train.py` grew a `lloyd:` block the package never sees (`--to` stops at a
+stage). The package's `run` is still not used:
+
+- **`shuffle_speakers`** — Piper's generator walks speaker pairs in order,
+  so 25 000 clips blend speakers 0–27 with the rest; shuffled, each clip draws
+  a random pair from all 904.
+- **`extras`** — clips from other engines (`synth_extras.py`: Kokoro v1.0's 54
+  voices and Piper-VCTK's 109 through sherpa-onnx, CPU, nothing installed),
+  augmented like Piper's; and *negative streams* — the even half of the
+  non-wake room utterances and 60 of Lloyd's own replies in `clone:dave_cullen`
+  (from the live TTS, `stop_eval.py build --train-out`) — concatenated and cut
+  into every window the runtime sees. Cut one file at a time, most room
+  utterances are shorter than the 1.28 s window and give nothing (253 windows
+  against 2274).
+- **`LLOYD_WW_GPU_MEM_GB`** caps the process's CUDA cache. Uncapped, Piper
+  synthesis at batch 8 grew to **7.3 GB** of GPU 0 over 30 000 clips (a clip
+  needs ~1 GB); at 0.9 it held 1.15–1.2 GB and ran as fast. Augmentation and
+  extraction are CPU (`CUDA_VISIBLE_DEVICES=`); training a medium head is
+  ~0.7 GB and 22 minutes on the GPU, 4.5 hours on 8 CPU threads.
+
+**`lloyd_stop.onnx`** (`lloyd_stop.yaml`) is the interrupt word, armed only
+while Lloyd is speaking (`voice.wake.build_stop_factory`, config
+`livekit.acoustic_wake.stop`, `enabled: false` until the worker wires it).
+Phrases: "stop", "Lloyd stop", "stop talking", "stop stop", "okay stop", "hold
+on", "wait", "wait wait", "Lloyd wait". Measured by `scripts/voice/stop_eval.py`
+through the detector the worker will run: held-out positives and near-misses
+are Qwen3-TTS x-vector clones (the ten wake_eval voices, LibriSpeech 1272 and
+Alan from the room corpus — an engine no training clip came from); Lloyd's own
+voice is 30 replies disjoint from the 60 trained on, most saying "stop",
+"wait" or "hold on" mid-sentence; the room is the ODD half (244 utterances).
+
+| run | threshold | recall (88) | near-miss (88) | Lloyd's voice (30) | room | LibriSpeech |
+|---|---|---|---|---|---|---|
+| A: v1 weights (neg 3000, pos 50/batch) | 0.5 | 38 | 1 | 0 | 0 | 0 |
+| A | 0.6 | 30 | 0 | 0 | 0 | 0 |
+| **B: neg 1500, pos 100/batch (shipped)** | 0.5 | 47 | 1 | 0 | 2 | 0 |
+| **B** | **0.6** | **42** | **0** | **0** | **0** | **0** |
+| B | 0.7 | 35 | 0 | 0 | 0 | 0 |
+
+Lloyd's voice never scores above 0.03 on either model, so the risk the task
+was built around is closed. Recall is the weak side and it is uneven by phrase
+(B @ 0.6): "stop talking" 10/11, "Lloyd, stop" / "hold on" / "wait, wait" 7/11,
+"okay, stop" 6/11, a bare "stop." 2/11 and a bare "wait." 1/11 — one syllable
+is too little for a 1.28 s window. Say "stop talking". The transcript closer
+vocabulary stays the backstop for the rest.
+
+**`hey_lloyd_v2` did not ship.** Same recipe plus shuffled speakers, 30 000
+samples, Kokoro/VCTK positives (5700 windows) and negatives, the room and
+Lloyd's-voice streams, seven more mention negatives ("did lloyd finish", "tell
+lloyd"…). Held-out, same set as above, room = odd half:
+
+| model set | threshold | hey/hi/okay/hello (60) | bare (20) | near-miss (80) | room | LibriSpeech |
+|---|---|---|---|---|---|---|
+| `hey_lloyd` + `Lloyd` (live) | 0.7 | 33 | 5 | 0 | 0 | 0 |
+| `hey_lloyd_v2` + `Lloyd` | 0.7 | 34 | 5 | 0 | 0 | 0 |
+| `hey_lloyd` alone | 0.6 | 35 | 0 | 0 | 0 | 0 |
+| `hey_lloyd_v2` alone | 0.6 | 34 | 0 | 0 | 0 | 0 |
+
+One clip either way is noise. The misses are largely the same clips in both —
+Eric, Ono_Anna, Ryan, Serena and Sohee saying "hi"/"okay Lloyd" — so more voices from the same synthetic engines did not reach them. The next
+lever is not more Piper-like data; it is real recordings of the household or
+a Qwen3-TTS-cloned positive set (which would spend the held-out engine).
+
+Wake models are now **named** (`livekit.acoustic_wake.models`) rather than
+globbed, and new models live in subdirectories (`stop/`), so a candidate or a
+stop word dropped next to the wake models can never become a wake word — not
+even under a worker still running the old glob.
+
 ## Operating it
 
 ### Restarting the right thing for a voice change
@@ -1584,7 +1662,7 @@ voice.
 
 | Asset | Tracked? |
 |---|---|
-| `agent-services/models/{wakeword,openwakeword,silero-vad}/*.onnx` | **yes**, force-added past `models/` |
+| `agent-services/models/{wakeword,wakeword/stop,openwakeword,silero-vad}/*.onnx` | **yes**, force-added past `models/` |
 | `agent-services/models/{smart-turn,parakeet-tdt-v3,nemo-streaming-480ms}/` (~1.1 GB) | **no** — `bash agent-services/setup/fetch-voice-models.sh`, size-checked |
 | `agent-services/models/parakeet-realtime-eou-120m/` (optional, not configured; ~480 MB fp32) | **no** — `encoder.onnx`, `decoder.onnx`, `joiner.onnx`, `tokens.txt` from `huggingface.co/adityakalro/sherpa-onnx-parakeet-eou-120m`, then the `tokens.txt` repair under "Streaming bake-off". Only the bake-off and `tests/test_voice_streaming_asr.py` (which skips without it) read it |
 | `agent-services/services/tts/qwen3-tts-local.patch` + `-upstream-commit.txt` | **yes** |

@@ -96,7 +96,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("model_dirs", nargs="+")
     ap.add_argument("--thresholds", type=float, nargs="+", default=[0.3, 0.4, 0.5, 0.6, 0.7])
+    ap.add_argument("--diag", default=str(DIAG),
+                    help="room corpus (default: this tree's data root; pre-#1444 it "
+                         "was a hidden dir in the home, which stop_eval.py defaults to)")
+    ap.add_argument("--real-half", choices=["all", "even", "odd"], default="all",
+                    help="hey_lloyd_v2 and lloyd_stop trained on the EVEN half of the "
+                         "non-wake utterances (sorted by name); report `odd` for them")
     args = ap.parse_args()
+    diag = Path(args.diag).expanduser()
 
     pos, neg = [], []
     for p in sorted(TTS.glob("*.wav")):
@@ -104,10 +111,13 @@ def main() -> int:
         if m:
             (pos if m.group(1) == "pos" else neg).append((m.group(2), int(m.group(3)), load_16k(p)))
     fired = set()
-    if (DIAG / "scores.jsonl").exists():
-        fired = {json.loads(line)["utterance_id"] for line in (DIAG / "scores.jsonl").open()
+    if (diag / "scores.jsonl").exists():
+        fired = {json.loads(line)["utterance_id"] for line in (diag / "scores.jsonl").open()
                  if line.strip() and json.loads(line).get("ww_fired")}
-    real = [load_16k(p) for p in sorted((DIAG / "utterances").glob("*.wav")) if p.stem not in fired]
+    keep = {"all": lambda i: True, "even": lambda i: i % 2 == 0,
+            "odd": lambda i: i % 2 == 1}[args.real_half]
+    real = [load_16k(p) for i, p in enumerate(
+        p for p in sorted((diag / "utterances").glob("*.wav")) if p.stem not in fired) if keep(i)]
     libri = libri_clips()
     real_h = sum(c.size for c in real) / SR / 3600
     libri_h = sum(c.size for c in libri) / SR / 3600
@@ -115,7 +125,7 @@ def main() -> int:
     n_bare = len(pos) - n_pre
     voices = sorted({v for v, _, _ in pos})
     print(f"held-out TTS: {len(voices)} voices, {n_pre} prefixed + {n_bare} bare positives, "
-          f"{len(neg)} near-misses | real room: {len(real)} utts ({real_h:.2f} h) | "
+          f"{len(neg)} near-misses | real room ({args.real_half}): {len(real)} utts ({real_h:.2f} h) | "
           f"LibriSpeech: {len(libri)} clips ({libri_h * 60:.1f} min)\n")
 
     for d in args.model_dirs:

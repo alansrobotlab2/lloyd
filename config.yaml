@@ -1192,6 +1192,11 @@ livekit:
   acoustic_wake:
     enabled: true
     models_dir: agent-services/models/wakeword
+    # Named, not globbed (2026-09-24): every *.onnx in models_dir used to be
+    # loaded as a wake word, so a stop word or a candidate dropped into the
+    # directory would silently start waking Lloyd. New models go in
+    # subdirectories (stop/, v2/), which the old glob never reached either.
+    models: [hey_lloyd.onnx, Lloyd.onnx]
     engine_dir: agent-services/models/openwakeword
     # 0.7 since hey_lloyd.onnx replaced Hey_Lloyd.onnx (2026-09-17, retrained
     # with livekit-wakeword's conv-attention head — scripts/voice/wakeword/).
@@ -1208,6 +1213,20 @@ livekit:
     # "hey Lloyd" opens the window three times and the diagnostic log reads
     # as three separate wakes.
     refractory_ms: 1500
+    # The interrupt word, armed only while Lloyd is speaking (voice/wake.py
+    # `build_stop_factory`; Home Assistant's stop word). Its own model and
+    # threshold; never one of the wake models above. Numbers:
+    # scripts/voice/stop_eval.py, architecture/voice.md "Retraining the wake word".
+    stop:
+      # Armed only while Lloyd is speaking (livekit_worker._sync_stop_arming);
+      # a detection stops him and cancels the turn being spoken. On since
+      # 2026-09-24: at 0.6, 42/88 held-out stop phrases caught, 0 of 88
+      # near-misses, 0 of 30 of Lloyd's own replies (never above 0.03), 0 room,
+      # 0 LibriSpeech (scripts/voice/stop_eval.py). A bare "stop."/"wait." is
+      # too short for it (2/11, 1/11) — the transcript stop words cover those.
+      enabled: true
+      model: agent-services/models/wakeword/stop/lloyd_stop.onnx
+      threshold: 0.6
   voiceprint:
     enabled: true
     profiles_dir: ${LLOYD_DATA}/voice_profiles

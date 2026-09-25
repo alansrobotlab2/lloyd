@@ -1379,7 +1379,7 @@ class RoomBridge:
     def __init__(self, room_name: str, lk_cfg: dict, stt,
                  vad_cfg: dict, http_client, speaker_id=None,
                  wake_factory=None, wake_capture: Optional[WakeMissCapture] = None,
-                 smart_turn=None, streaming_asr=None) -> None:
+                 smart_turn=None, streaming_asr=None, stop_factory=None) -> None:
         self.room_name = room_name
         self.lk_cfg = lk_cfg
         self.stt = stt
@@ -1393,6 +1393,9 @@ class RoomBridge:
         self.wake_factory = wake_factory
         self.smart_turn = smart_turn
         self.streaming_asr = streaming_asr
+        #: The acoustic stop word (voice/wake.py::build_stop_factory), one
+        #: detector per stream, armed only while Lloyd is speaking.
+        self.stop_factory = stop_factory
         #: identity -> HearingThread. One pipeline per participant.
         self._hearing: dict[str, HearingThread] = {}
         #: Utterances held back because Smart Turn called them unfinished, keyed
@@ -1963,6 +1966,7 @@ class RoomBridge:
         pipeline = HearingPipeline(
             in_rate=sample_rate,
             wake=self.wake_factory.create() if self.wake_factory is not None else None,
+            stop=self.stop_factory.create() if self.stop_factory is not None else None,
             segmenter=voice_vad.build_segmenter(self.vad_cfg),
             streaming=self.streaming_asr,
         )
@@ -2028,6 +2032,8 @@ class RoomBridge:
             self._on_speech_start(identity)
         elif ev.kind == "silence":
             self._on_speech_end(identity)
+        elif ev.kind == "stop":
+            self._on_stop_word(ev, identity)
         elif ev.kind == "partial":
             self._schedule_partial_publish(ev.text)
         elif ev.kind == "utterance":
@@ -2095,6 +2101,42 @@ class RoomBridge:
         except RuntimeError:
             pass
 
+    def _on_stop_word(self, ev: HearingEvent, identity: str) -> None:
+        """The acoustic stop word, heard while Lloyd was speaking.
+
+        Faster than the transcript's stop words (voice/conversation.py): it
+        fires inside the word, before the VAD has closed the utterance or
+        Parakeet has run. No warm-up — "stop" is never a cough — but still only
+        for the person Lloyd is talking with, and only while he is talking.
+        """
+        tts = self.tts
+        if tts is None or not (tts.is_speaking or tts.is_paused):
+            return
+        if not (self.wake.matches_lock(identity)
+                or self.wake.conversation_open_for(identity)):
+            return
+        det = ev.detection
+        LOG.info("[%s] stop word %s/%.2f from %s", self.room_name,
+                 det.name if det else "?", det.score if det else 0.0, identity)
+        try:
+            asyncio.create_task(self._commit_barge_in(identity, "acoustic stop word"))
+        except RuntimeError:
+            pass
+
+    def _sync_stop_arming(self) -> None:
+        """Arm each stream's stop detector exactly while Lloyd is speaking.
+
+        Plain flag writes, read by the hearing threads; a 100 ms lag either
+        way is inside the model's own 1.28 s window.
+        """
+        tts = self.tts
+        armed = tts is not None and tts.is_speaking and not tts.is_paused
+        for ht in list(self._hearing.values()):
+            det = getattr(ht.pipeline, "stop", None)
+            if det is None or det.armed == armed:
+                continue
+            det.arm() if armed else det.disarm()
+
     def _on_speech_end(self, identity: str) -> None:
         b = self._barge
         if b is not None and b["identity"] == identity:
@@ -2119,6 +2161,7 @@ class RoomBridge:
         try:
             while True:
                 await asyncio.sleep(0.1)
+                self._sync_stop_arming()
                 b = self._barge
                 if b is None:
                     continue
@@ -3186,6 +3229,10 @@ class WorkerManager:
         self.smart_turn = voice_turn.build_smart_turn(
             self.lk_cfg.get("turn_detection", {}) or {}
         )
+        # The acoustic stop word (off unless `acoustic_wake.stop.enabled`).
+        self.stop_factory = voice_wake.build_stop_factory(
+            self.lk_cfg.get("acoustic_wake", {}) or {}
+        )
         # Wake-word miss capture rig (Phase A). Always-on by default; gate
         # via livekit.acoustic_wake.diag.{enabled,host,port}. The aiohttp
         # listener is started in run() so the cleanup hook has a runner.
@@ -3270,6 +3317,7 @@ class WorkerManager:
                 wake_capture=self.wake_capture,
                 smart_turn=self.smart_turn,
                 streaming_asr=self.streaming_asr,
+                stop_factory=self.stop_factory,
             )
             try:
                 await bridge.connect()

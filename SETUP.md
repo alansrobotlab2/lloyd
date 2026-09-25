@@ -999,6 +999,7 @@ nothing to do:
 ```
 agent-services/models/wakeword/hey_lloyd.onnx    # trained 2026-09-17, recipe in scripts/voice/wakeword/
 agent-services/models/wakeword/Lloyd.onnx        # custom-trained, recipe lost in the 08-22 rebuild
+agent-services/models/wakeword/stop/lloyd_stop.onnx  # stop word, 2026-09-24, lloyd_stop.yaml
 agent-services/models/openwakeword/melspectrogram.onnx
 agent-services/models/openwakeword/embedding_model.onnx
 agent-services/models/silero-vad/silero_vad.onnx

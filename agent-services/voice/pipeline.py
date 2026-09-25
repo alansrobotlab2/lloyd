@@ -63,6 +63,9 @@ class HearingEvent:
       ``utterance`` — a closed span of speech. `utterance` is set, and `wake`
                       carries the detection that fell inside it, if any.
       ``partial``   — a running hypothesis from the streaming recogniser.
+      ``stop``      — the acoustic stop word ("stop talking", "Lloyd, stop",
+                      "hold on") while armed, i.e. while Lloyd is speaking.
+                      `detection` is set.
     """
 
     kind: str
@@ -86,11 +89,15 @@ class HearingPipeline:
         self,
         in_rate: int,
         wake: Optional[ContinuousWakeWord] = None,
+        stop: Optional[Any] = None,
         segmenter: Optional[SileroSegmenter] = None,
         streaming: Optional[Any] = None,
     ) -> None:
         self.resampler = StreamResampler(in_rate)
         self.wake = wake
+        #: voice/wake.py::StopDetector — fed every frame, reports only while
+        #: the worker has armed it (Lloyd is speaking).
+        self.stop = stop
         self.segmenter = segmenter if segmenter is not None else SileroSegmenter()
         self.streaming = streaming
         self._stream_handle = None
@@ -128,6 +135,17 @@ class HearingPipeline:
                 events.append(
                     HearingEvent("wake", sample=det.sample_index, detection=det)
                 )
+
+        # 1b. The stop word, same audio, same clock. It fires mid-word, before
+        #     the VAD has closed anything, which is its whole point.
+        if self.stop is not None:
+            try:
+                for det in self.stop.feed(audio):
+                    events.append(HearingEvent("stop", sample=det.sample_index,
+                                               detection=det))
+            except Exception as e:
+                LOG.warning("stop word failed: %s — disabling it", e)
+                self.stop = None
 
         # 2. Segmentation.
         utterances = self.segmenter.feed(audio)

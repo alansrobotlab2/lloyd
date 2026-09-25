@@ -816,3 +816,63 @@ def test_the_label_rig_takes_an_addressed_label(tmp_path):
     with pytest.raises(ValueError):
         cap.record_label(utterance_id="abc", miss_ts=None, said_wake_word=None,
                          note=None, addressed="maybe")
+
+
+# ── the acoustic stop word, wired ──────────────────────────────────────────
+
+class _StopDet:
+    def __init__(self, fire=False):
+        self.armed = False
+        self.fire = fire
+        self.fed = 0
+
+    def arm(self):
+        self.armed = True
+
+    def disarm(self):
+        self.armed = False
+
+    def feed(self, audio):
+        from voice.wake import WakeDetection
+        self.fed += 1
+        return [WakeDetection("lloyd_stop", 0.9, 0, 0.0)] if self.fire and self.armed else []
+
+
+def test_the_pipeline_feeds_the_stop_word_and_reports_it():
+    from voice.pipeline import HearingPipeline
+    det = _StopDet(fire=True)
+    p = HearingPipeline(in_rate=16000, stop=det)
+    frame = np.zeros(1600, dtype=np.int16)
+    assert [e.kind for e in p.feed(frame, 16000) if e.kind == "stop"] == []
+    det.arm()
+    assert [e.kind for e in p.feed(frame, 16000) if e.kind == "stop"] == ["stop"]
+    assert det.fed == 2, "fed while disarmed too, so it is warm when armed"
+
+
+def test_it_is_armed_exactly_while_lloyd_speaks():
+    b = _bridge([])
+    det = _StopDet()
+    b._hearing["user-a"] = type("H", (), {"pipeline": type("P", (), {"stop": det})()})()
+    b.tts = _TTS(speaking=True)
+    b._sync_stop_arming()
+    assert det.armed
+    b.tts.is_paused = True
+    b._sync_stop_arming()
+    assert not det.armed, "a paused reply is already waiting on the speaker"
+    b.tts.is_paused = False
+    b.tts.is_speaking = False
+    b._sync_stop_arming()
+    assert not det.armed
+
+
+def test_a_stop_word_stops_lloyd_for_his_speaker_only():
+    from voice.wake import WakeDetection
+    for who, stopped in (("user-a", 1), ("user-b", 0)):
+        b = _barge_bridge([])
+
+        async def go():
+            b._on_stop_word(HearingEvent("stop", detection=WakeDetection("lloyd_stop", 0.8, 0, 0.0)), who)
+            await asyncio.sleep(0.05)
+        asyncio.run(go())
+        assert b.tts.interrupts == stopped, who
+        assert b.http.cancels == (["t-old"] if stopped else []), who
