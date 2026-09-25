@@ -826,7 +826,7 @@ is the known self-grading failure mode, and this is where it is stopped.
   facts and no extractor ever emitted one, so it had zero rows in `runs` for
   its entire life while stat-walking the facts tree every 300 s.
   [[workers-jobs]] §7 has the rest.
-- **The `queue` table still grows without bound; `runs` no longer does.**
+- **Neither `queue` nor `runs` grows without bound any more.**
   The 6,268 / 5,910 / 9.4 MB reading of 2026-09-11 became history the moment
   `~/lloyd` was deleted whole on 2026-09-22 — a pytest fixture teardown, and
   every gitignored byte in it went with the code; commit `6426668b` moved
@@ -836,9 +836,9 @@ is the known self-grading failure mode, and this is where it is stopped.
   the markdown run records and the session archive — against a
   conversation's 90), and the `tool_effects` rows sharing the database prune
   themselves (14 days settled, 30 unknown). Measured 2026-09-25: 534 runs /
-  493 queue rows / 1.5 MB. The sweep's own header names its sibling `queue`
-  table as deliberately NOT pruned — that horizon is an open decision with
-  no owner (#1466).
+  493 queue rows / 1.5 MB. The `queue` table's terminal rows (`completed`,
+  `poisoned`, `quarantined`) go at the same 30 days (`QUEUE_MAX_AGE_DAYS`,
+  #1466); `queued`/`claimed`/`running` rows are never pruned.
 
 ## Review log
 

@@ -409,9 +409,10 @@ never name different files, and a database the live pool is holding reports
 `SKIPPED (database locked …)` with exit 0 instead of a traceback. It is a DELETE with
 no VACUUM — freed pages are reused by the next INSERT, which is what bounds the file,
 and VACUUM would take an exclusive lock on a WAL database the pool is writing. The
-sibling `queue` table is still append-only: whether its terminal rows are pruned on
-the same horizon or kept for the operator history view is an open decision on #1018,
-not an oversight.
+sibling `queue` table is pruned on the same horizon since #1466: rows in a terminal
+state (`completed`, `poisoned`, `quarantined`) older than 30 days
+(`QUEUE_MAX_AGE_DAYS`) are deleted, and a live row (`queued`, `claimed`, `running`)
+never is, whatever its age.
 
 ---
 

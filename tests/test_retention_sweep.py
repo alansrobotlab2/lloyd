@@ -975,7 +975,7 @@ def test_dry_run_and_apply_print_the_same_workers_store_line(rs, capsys, monkeyp
     path = _seed_runs_db(rs.WORKERS_DB)
 
     def store_line() -> str:
-        lines = [ln for ln in capsys.readouterr().out.splitlines() if "workers.db" in ln]
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if "workers.db runs" in ln]
         assert len(lines) == 1, f"expected exactly one workers.db line, got {lines}"
         return lines[0]
 
@@ -1111,7 +1111,7 @@ def test_main_reports_the_skip_and_still_exits_zero(rs, capsys, monkeypatch,
     monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
     assert rs.main() == 0, "a locked store must not fail the whole sweep"
 
-    lines = [ln for ln in capsys.readouterr().out.splitlines() if "workers.db" in ln]
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if "workers.db runs" in ln]
     assert len(lines) == 1, lines
     assert "SKIPPED" in lines[0], lines[0]
     assert "database locked" in lines[0], lines[0]
@@ -1140,6 +1140,127 @@ def test_an_absent_database_or_table_is_zero_deleted_not_a_repair(rs):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     conn.close()
     assert "runs" not in tables, "the sweep must not create the runs table either"
+
+
+# ---------------------------------------------------------------------------
+# The ninth rung: workers.db table `queue`, terminal rows only (#1466).
+#
+# #1018 bounded `runs` and left the sibling `queue` table's horizon open. Terminal
+# rows (completed / poisoned / quarantined) go at QUEUE_MAX_AGE_DAYS; a live row
+# (queued / claimed / running) is never touched, however old — an ancient `queued`
+# row is work waiting, and a `running` one is work in flight.
+# ---------------------------------------------------------------------------
+
+#: (state, age in days, stamp completed_at?). Every live state is seeded far past the
+#: horizon on purpose: age alone must never reach them.
+_QUEUE_ROWS = (
+    ("completed", 31.0, True), ("completed", 29.0, True),
+    ("poisoned", 45.0, True), ("quarantined", 60.0, True),
+    ("completed", 40.0, False),          # terminal with no stamp: aged by enqueued_at
+    ("queued", 90.0, False), ("claimed", 90.0, False), ("running", 90.0, False),
+)
+
+
+def _seed_queue_db(path: Path, rows=_QUEUE_ROWS) -> Path:
+    from datetime import datetime, timedelta, timezone
+
+    from workers.queue import _SCHEMA
+
+    conn = sqlite3.connect(path)
+    conn.executescript(_SCHEMA)
+    now = datetime.now(timezone.utc)
+    for n, (state, age_days, stamped) in enumerate(rows):
+        ts = (now - timedelta(days=age_days)).isoformat()
+        conn.execute(
+            "INSERT INTO queue (source, kind, payload_json, dedup_key, state,"
+            " enqueued_at, completed_at) VALUES (?,?,?,?,?,?,?)",
+            ("scheduled-task", "run", "{}", f"k{n}", state, ts,
+             ts if stamped else None),
+        )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def _queue_rows(path: Path) -> list[tuple[str, str]]:
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return sorted(conn.execute("SELECT dedup_key, state FROM queue"))
+    finally:
+        conn.close()
+
+
+def test_the_queue_state_names_are_the_queues_own():
+    """The terminal set is written against the states `workers/queue.py` writes; a
+    state renamed there would silently stop matching here and the table would grow
+    again with the sweep reporting `0 deleted`."""
+    src = (Path(__file__).resolve().parents[1] / "workers" / "queue.py").read_text()
+    for state in ("queued", "claimed", "running", "completed", "poisoned", "quarantined"):
+        assert f"state='{state}'" in src, state
+
+
+def test_terminal_queue_rows_past_the_horizon_go_and_live_rows_never_do(rs):
+    assert rs.QUEUE_MAX_AGE_DAYS == 30
+    assert set(rs.QUEUE_TERMINAL_STATES) == {"completed", "poisoned", "quarantined"}
+    path = _seed_queue_db(rs.WORKERS_DB)
+    before = _queue_rows(path)
+    now = time.time()
+
+    rows, freed, skip = rs.sweep_queue_rows(apply=False, now=now, db=path)
+    assert (rows, freed, skip) == (4, 0, "")
+    assert _queue_rows(path) == before, "a dry run must not remove a row it counted"
+
+    rows, _freed, skip = rs.sweep_queue_rows(apply=True, now=now, db=path)
+    assert (rows, skip) == (4, "")
+    assert _queue_rows(path) == [("k1", "completed"), ("k5", "queued"),
+                                 ("k6", "claimed"), ("k7", "running")]
+
+
+def test_the_queue_line_is_reported_in_both_modes_beside_the_runs_line(
+        rs, capsys, monkeypatch):
+    path = _seed_queue_db(rs.WORKERS_DB)
+
+    def queue_line() -> str:
+        lines = [ln for ln in capsys.readouterr().out.splitlines()
+                 if "workers.db queue" in ln]
+        assert len(lines) == 1, lines
+        return lines[0]
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    dry = queue_line()
+    assert f">{rs.QUEUE_MAX_AGE_DAYS}d" in dry and "4 deleted" in dry, dry
+    assert "completed/poisoned/quarantined" in dry, dry
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    assert "4 deleted" in queue_line()
+    assert len(_queue_rows(path)) == 4
+
+
+def test_a_locked_queue_is_skipped_not_a_failure(rs, db_write_lock_holder):
+    path = _seed_queue_db(rs.WORKERS_DB)
+    db_write_lock_holder(path)
+    rows, freed, skip = rs.sweep_queue_rows(apply=True, now=time.time(), db=path,
+                                            busy_timeout_ms=200)
+    assert (rows, freed) == (0, 0)
+    assert skip.startswith("SKIPPED (database locked"), skip
+    assert len(_queue_rows(path)) == len(_QUEUE_ROWS)
+
+
+def test_an_absent_queue_table_is_zero_not_a_repair(rs):
+    assert rs.sweep_queue_rows(apply=True, now=time.time()) == (0, 0, "")
+    assert not rs.WORKERS_DB.exists()
+    other = rs.WORKERS_DB.parent / "other.db"
+    sqlite3.connect(other).close()
+    assert rs.sweep_queue_rows(apply=True, now=time.time(), db=other) == (0, 0, "")
+
+
+def test_the_header_no_longer_calls_the_queue_unpruned():
+    src = _SCRIPT.read_text(encoding="utf-8")
+    assert "NOT pruned" not in src
+    assert "QUEUE_MAX_AGE_DAYS" in src.split('"""', 2)[1], (
+        "the header must name the queue rung's constant")
 
 
 def test_the_bare_invocation_prunes_the_store_it_resolves(tmp_path):
@@ -1174,7 +1295,7 @@ def test_the_bare_invocation_prunes_the_store_it_resolves(tmp_path):
     dry = subprocess.run([py3, str(_SCRIPT)], capture_output=True, text=True,
                          env=env, cwd="/", timeout=120)
     assert dry.returncode == 0, dry.stderr[-800:]
-    dry_line = _store_line(dry.stdout, "workers.db")
+    dry_line = _store_line(dry.stdout, "workers.db runs")
     assert ">30d" in dry_line, (
         f"the bare interpreter reports the store without its horizon, so an operator "
         f"approving `--apply` cannot see how far back it reaches: {dry_line}")
@@ -1187,7 +1308,7 @@ def test_the_bare_invocation_prunes_the_store_it_resolves(tmp_path):
                              text=True, env=env, cwd="/", timeout=120)
     assert applied.returncode == 0, applied.stderr[-800:]
     assert "Traceback" not in applied.stdout + applied.stderr
-    assert _store_line(applied.stdout, "workers.db") == dry_line, (
+    assert _store_line(applied.stdout, "workers.db runs") == dry_line, (
         "the line an operator approved in dry-run must be the line apply prints")
     assert _run_ids(db) == {"run-inside", "run-today"}, (
         "the store the venv tests cover is not the store cron prunes: with no venv the "

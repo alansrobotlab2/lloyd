@@ -39,10 +39,18 @@ the transcript scratch home from backlog #566:
    than restated, because a second rule here would prune a file the queue never writes to
    and report success. No VACUUM: a DELETE frees pages for the next INSERT to reuse, which
    bounds the file, and VACUUM takes an exclusive lock on a WAL database the live pool is
-   writing. The sibling `queue` table is NOT pruned — its horizon is an open decision on
-   #1018. A database the pool will not release inside the bounded busy wait is reported
+   writing. A database the pool will not release inside the bounded busy wait is reported
    `SKIPPED (database locked …)` and exits 0, never a traceback: a weekly sweep that
    fails because the queue was busy reads as "the store is fine" to everything downstream.
+
+9. ~/lloyd-data/workers.db table `queue` — the queue's items themselves (#1466, the
+   horizon #1018 left open). DELETE rows in a TERMINAL state (`completed`, `poisoned`,
+   `quarantined`) whose `completed_at` (or `enqueued_at`, for a terminal row that
+   carries none) is older than QUEUE_MAX_AGE_DAYS — 30, the same horizon as `runs`,
+   so an item and the run rows that name it (`runs.queue_id`) leave together. A live
+   state (`queued`, `claimed`, `running`) is never touched, whatever its age: those are
+   work in flight or waiting, and the pool and the maintenance sweep own them. Same
+   database, same busy wait, same `SKIPPED` form, no VACUUM.
 
 Age signal: sessions are aged by the `last_active` field in the JSON
 (mtime lies — any reprocessing touches the file); task logs and transcript
@@ -188,6 +196,15 @@ SPILL_MAX_AGE_DAYS = 30
 # is the one `skills/retention-sweep/SKILL.md` documents; the two are pinned together by
 # tests/test_retention_sweep.py.
 WORKER_RUN_MAX_AGE_DAYS = 30
+# The queue's items (`workers.db` table `queue`), terminal states only (#1466). Its own
+# constant so the two horizons can move apart, but 30 today: a run row outliving the
+# item it names, or the reverse, is a join that answers differently depending on which
+# table the reader started from.
+QUEUE_MAX_AGE_DAYS = 30
+#: States a queue row can be pruned in. Everything else — `queued`, `claimed`,
+#: `running`, and any state a future writer invents — is kept, because an unknown
+#: state is not evidence the work is over.
+QUEUE_TERMINAL_STATES = ("completed", "poisoned", "quarantined")
 # How long to wait for a write lock the live queue pool is holding before giving up on
 # this store. Bounded on purpose: the sweep is a weekly background job and the queue is
 # the thing users wait on, so the sweep yields rather than contends — and the bound is
@@ -672,6 +689,36 @@ def sweep_worker_runs(apply: bool, now: float, *, db: Path | None = None,
     queue observable — with a deferred begin the read succeeds and only the DELETE
     notices, which is a report of `0` for a store that was never swept.
     """
+    return _prune_db_rows(apply, now, db=db, busy_timeout_ms=busy_timeout_ms,
+                          table="runs", where="completed_at < ?", params=(),
+                          max_age_days=WORKER_RUN_MAX_AGE_DAYS)
+
+
+def sweep_queue_rows(apply: bool, now: float, *, db: Path | None = None,
+                     busy_timeout_ms: int = DB_BUSY_TIMEOUT_MS) -> tuple[int, int, str]:
+    """DELETE terminal `queue` rows older than QUEUE_MAX_AGE_DAYS (#1466).
+
+    Only `QUEUE_TERMINAL_STATES`; a live row is never counted or deleted. Aged by
+    `completed_at`, which every terminal writer stamps, falling back to `enqueued_at`
+    (NOT NULL) so a terminal row missing its stamp is still bounded rather than kept
+    forever. Same contract as `sweep_worker_runs`: `(rows, bytes, skip_note)`.
+    """
+    marks = ",".join("?" for _ in QUEUE_TERMINAL_STATES)
+    return _prune_db_rows(apply, now, db=db, busy_timeout_ms=busy_timeout_ms,
+                          table="queue",
+                          where=(f"state IN ({marks}) "
+                                 f"AND COALESCE(completed_at, enqueued_at) < ?"),
+                          params=QUEUE_TERMINAL_STATES,
+                          max_age_days=QUEUE_MAX_AGE_DAYS)
+
+
+def _prune_db_rows(apply: bool, now: float, *, db: Path | None, busy_timeout_ms: int,
+                   table: str, where: str, params: tuple,
+                   max_age_days: int) -> tuple[int, int, str]:
+    """Count, and under `apply` delete, `table` rows matching `where` in one write txn.
+
+    `where` ends in the cutoff placeholder; `params` fill the ones before it.
+    """
     path = db if db is not None else WORKERS_DB
     if not path.is_file():
         # Absent db is the empty case, not a repair: a round, a sandbox or a fresh
@@ -686,26 +733,27 @@ def sweep_worker_runs(apply: bool, now: float, *, db: Path | None = None,
 
     try:
         conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
-        table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='runs'").fetchone()
-        if table is None:
-            # A database with no runs table is the same case as no database at all —
+        present = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table,)).fetchone()
+        if present is None:
+            # A database without the table is the same case as no database at all —
             # a fresh or relocated store, not something to repair. The sweep's job is
             # to bound rows, and creating or migrating schema here would put a weekly
             # cleanup tool in the path of the queue's own migration.
             return 0, 0, ""
         cutoff = (datetime.fromtimestamp(now, tz=timezone.utc)
-                  - timedelta(days=WORKER_RUN_MAX_AGE_DAYS)).isoformat()
+                  - timedelta(days=max_age_days)).isoformat()
+        args = (*params, cutoff)
         try:
             conn.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as exc:
             return 0, 0, _db_skip_note(exc)
         try:
             rows = conn.execute(
-                "SELECT COUNT(*) FROM runs WHERE completed_at < ?", (cutoff,)
-            ).fetchone()[0]
+                f"SELECT COUNT(*) FROM {table} WHERE {where}", args).fetchone()[0]
             if apply and rows:
-                conn.execute("DELETE FROM runs WHERE completed_at < ?", (cutoff,))
+                conn.execute(f"DELETE FROM {table} WHERE {where}", args)
             conn.commit()
         except sqlite3.Error as exc:
             conn.rollback()
@@ -741,6 +789,7 @@ def main() -> int:
     scr_n, scr_b = sweep_transcript_scratch(args.apply, now)
     spill_n, spill_b = sweep_session_spills(args.apply, now)
     wr_n, wr_b, wr_skip = sweep_worker_runs(args.apply, now)
+    wq_n, wq_b, wq_skip = sweep_queue_rows(args.apply, now)
 
     print(f"  task logs >{TASK_LOG_MAX_AGE_DAYS}d:  "
           f"{logs_n} deleted, {logs_b / 1024:.0f} KiB freed")
@@ -773,6 +822,12 @@ def main() -> int:
     else:
         print(f"  workers.db runs >{WORKER_RUN_MAX_AGE_DAYS}d: "
               f"{wr_n} deleted, {wr_b / 1024:.0f} KiB freed")
+    queue_label = (f"  workers.db queue ({'/'.join(QUEUE_TERMINAL_STATES)}) "
+                   f">{QUEUE_MAX_AGE_DAYS}d")
+    if wq_skip:
+        print(f"{queue_label}: {wq_skip} — nothing pruned")
+    else:
+        print(f"{queue_label}: {wq_n} deleted, {wq_b / 1024:.0f} KiB freed")
     return 0
 
 
