@@ -792,6 +792,14 @@ ob sync-setup --vault "<vault-name>" --path ~/obsidian   # + E2E encryption pass
 > supports one sync client per device; running desktop Sync and Headless Sync on
 > the same vault causes data conflicts.
 
+Point the vault's git hooks at the tracked ones (git does not carry hooks with a
+repo). The pre-commit hook refuses a `knowledge/` note whose front-matter `type`
+is not canonical, whichever writer produced it (#1512):
+
+```bash
+git -C ~/obsidian config core.hooksPath ~/lloyd/scripts/vault/hooks
+```
+
 `agent-obsidian-sync` will not start until the guardian has measured the vault.
 `start-obsidian-sync.sh` runs `vaultwatch.py sync-gate` and refuses while the
 vault tripwire is set or the tree is below its last healthy file count

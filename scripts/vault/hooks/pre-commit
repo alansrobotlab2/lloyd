@@ -1,0 +1,73 @@
+#!/usr/bin/python3
+"""Vault pre-commit: a knowledge/ note may not be committed with an off-set `type`.
+
+`vault_write` normalises a knowledge note's front-matter `type` on its way in,
+but that is one writer. A shell heredoc, an editor, a nightly job or a Claude
+Code session writes the file and commits it with plain git, and the guard never
+sees it — that is how `type: note` reached
+`knowledge/software/lloyd-inner-voice-history-to-v5.4-2026-09-24.md` (#1512,
+commit ca6604b6). Every one of those writers commits through git, so this is the
+one place they all pass.
+
+The rule is `okf_taxonomy.rejected_document_type` — the lander's stricter,
+read-only half: only an already-canonical value lands. Fix a refusal
+byte-for-byte (edit the one `type:` line), never by re-emitting the file.
+
+Installed by `git -C ~/obsidian config core.hooksPath <lloyd>/scripts/vault/hooks`
+(SETUP.md). Stdlib only, runs on /usr/bin/python3. Fails OPEN when the taxonomy
+cannot be imported: a broken lloyd tree must not stop the vault from committing,
+and the tree-wide test still catches what slips through.
+"""
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+LLOYD_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _staged_knowledge_notes() -> list[str]:
+    out = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR", "-z"],
+        capture_output=True, check=True).stdout.decode("utf-8", "replace")
+    return [p for p in out.split("\0")
+            if p.startswith("knowledge/") and p.endswith(".md")]
+
+
+def _staged_text(path: str) -> str:
+    return subprocess.run(["git", "show", f":{path}"], capture_output=True,
+                          check=True).stdout.decode("utf-8", "replace")
+
+
+def main() -> int:
+    sys.path.insert(0, str(LLOYD_ROOT))
+    try:
+        from scripts.vault.okf_taxonomy import (  # noqa: E402
+            canonical_for_write, rejected_document_type)
+    except Exception as exc:  # fail open, say so
+        print(f"vault pre-commit: okf_taxonomy unavailable ({exc}); type check skipped",
+              file=sys.stderr)
+        return 0
+    bad = []
+    for path in _staged_knowledge_notes():
+        value = rejected_document_type(_staged_text(path))
+        if value is None:
+            continue
+        try:
+            hint = f"write `type: {canonical_for_write(value)}`"
+        except Exception as exc:  # KnowledgeTypeError names what to write
+            hint = str(exc).split(". The vocabulary")[0]
+        bad.append(f"  {path}: type {value!r} — {hint}")
+    if not bad:
+        return 0
+    print("vault pre-commit: knowledge/ notes with a non-canonical `type` (#1512):",
+          file=sys.stderr)
+    print("\n".join(bad), file=sys.stderr)
+    print("Fix the one `type:` line in place (not by re-writing the file), then commit.",
+          file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
