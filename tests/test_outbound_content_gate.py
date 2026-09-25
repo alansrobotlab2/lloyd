@@ -660,7 +660,7 @@ def test_the_gate_is_armed_at_its_pinned_number_of_arm_points():
     Eleven since P13.4: the chat router's builds and the voice build became
     one builder, `app/routers/turn_options.py`, so two roster entries became one.
     """
-    assert len(OC.GATE_ARM_POINTS) == 11, OC.GATE_ARM_POINTS
+    assert len(OC.GATE_ARM_POINTS) == 12, OC.GATE_ARM_POINTS
     assert OC.stale_gate_arm_points() == [], \
         f"stale arm points: {OC.stale_gate_arm_points()}"
     # Two denominators from two sources: the syntax finds every dispatch build in
@@ -987,13 +987,14 @@ def test_the_unarmed_paths_on_the_real_tree_are_the_unreachable_ones():
     builds = OC.all_turn_builds()
     # 17 until P13.4 folded the router's four builds (the sync route's among
     # them) and voice's one into the one shared builder; 14 since P13.1-3's
-    # replay-diff harness, whose scripted pool reaches no sender tool.
-    assert len(builds) == 14, len(builds)
+    # replay-diff harness, whose scripted pool reaches no sender tool; 15 with
+    # #1511's transcript self-hit probe.
+    assert len(builds) == 15, len(builds)
     unreachable = sorted({b.file for b in builds if not b.sender_reachable})
     assert unreachable == ["app/routers/ide.py",
                            "eval/run_harness_replay_diff.py"], unreachable
     assert OC.sender_unreachable_dispatch_files() == unreachable
-    assert len(OC.dispatch_registry_sites()) == 11, OC.dispatch_registry_sites()
+    assert len(OC.dispatch_registry_sites()) == 12, OC.dispatch_registry_sites()
     assert len(OC.GATE_ARM_POINTS) == len(
         set(OC.dispatch_registry_sites_files()) | {OC.FLOOR_MODULE})
 

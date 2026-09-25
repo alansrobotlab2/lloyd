@@ -950,6 +950,37 @@ def _fuse_fresh_vault(lex: list[dict], hybrid: list[dict] | None) -> list[dict]:
             for r in _merge_vault_results(lex, hybrid)]
 
 
+def exclude_self_transcripts_enabled() -> bool:
+    """`prefetch.exclude_self_transcripts` (#1511). Default and failure: True."""
+    try:
+        from app.config import CONFIG
+        val = (CONFIG.get("prefetch") or {}).get("exclude_self_transcripts", True)
+    except Exception:  # noqa: BLE001
+        return True
+    return val is not False
+
+
+def _drop_self_transcripts(text: str, hits: list[dict],
+                           session_id: str | None) -> list[dict]:
+    """`hits` without the session notes that echo this prompt (#1511).
+
+    A prompt sent before retrieves the transcript holding it — and the previous
+    run's answer beneath it — at the top of `<vault-context>`; a session also
+    retrieves its own export from the second turn on. Both are dropped here,
+    against the user's own message (never the ladder's term lists), before the
+    merge so the slot goes to the next hit. `agent_mcp/transcript_self_hit.py`
+    holds the rule; this is only the switch and the log line.
+    """
+    if not hits or not exclude_self_transcripts_enabled():
+        return hits
+    from agent_mcp.transcript_self_hit import drop_self_hits
+    kept, dropped = drop_self_hits(text, hits, session_id)
+    if dropped:
+        logger.info("prefetch dropped %d self-transcript hit(s): %s", len(dropped),
+                    " ".join(f"{d.get('file')}({d.get('self_hit')})" for d in dropped))
+    return kept
+
+
 def _merge_vault_results(fresh: list[dict], carried: list[dict]) -> list[dict]:
     """Union of this turn's hits and the carried-over ones, deduped by file,
     capped at VAULT_MAX_RESULTS. Carried entries are flagged so the
@@ -1412,6 +1443,11 @@ def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
     # copies vanish rather than showing up as "carried".
     fresh = _fuse_fresh_vault(vault_lex_result, vault_hybrid_result)
     carried = focus.take_vault() if focus is not None else []
+    # #1511: a transcript that echoes THIS message (or is this session's own
+    # export) is dropped from both halves, the carried one included — a carry
+    # from the last turn can be this session's own note too.
+    fresh = _drop_self_transcripts(text, fresh, session_id)
+    carried = _drop_self_transcripts(text, carried, session_id)
     vault_result = _merge_vault_results(fresh, carried)
     carried = [r for r in vault_result if r.get("carried")]
 

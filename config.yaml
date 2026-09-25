@@ -1473,6 +1473,11 @@ skills:
 prefetch:
   skills:
     push: true
+  # #1511: drop a `sessions/` transcript that echoes this prompt (or is this
+  # session's own export) from <vault-context>. Gold set unchanged (79 q, doc_hit
+  # and MRR diff 0.000); the 4 E2E probe re-runs lost their echo 4/4 and all
+  # still made the Read call. eval/measurements/transcript-self-hit-2026-09-25.md
+  exclude_self_transcripts: true
 workers:
   db_path: ${LLOYD_DATA}/workers.db
   enabled: true

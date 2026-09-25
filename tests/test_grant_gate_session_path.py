@@ -287,7 +287,7 @@ def test_the_same_registry_set_also_arms_the_outbound_content_gate():
     )
     assert find_unarmed_dispatch_paths() == [], find_unarmed_dispatch_paths()
     assert stale_gate_arm_points() == [], stale_gate_arm_points()
-    assert len(GATE_ARM_POINTS) == 11, GATE_ARM_POINTS  # 12 until P13.4
+    assert len(GATE_ARM_POINTS) == 12, GATE_ARM_POINTS  # 12 until P13.4, 11 after, 12 with #1511
 
 
 # ── The automod ban, by platform (#709) ────────────────────────────────

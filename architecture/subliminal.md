@@ -296,6 +296,16 @@ facts@6ms vault@140ms` shows when each one arrived.
   keeps the focus-enriched sentence (see 3b). Before that they shared one
   string and the hybrid's lex component returned nothing on every enriched
   query.
+- **Self-transcripts are dropped (#1511).** The `sessions` collection holds
+  every chat's own export, so a prompt sent before retrieved the note holding
+  it — prompt, tool result and answer — at score 1.00, and a re-run regression
+  probe could pass from its own last answer. `_drop_self_transcripts` removes,
+  from both the fresh and the carried hits, a `sessions/` note that is this
+  session's own export or whose user turn repeats this message near-verbatim
+  (`agent_mcp/transcript_self_hit.py`: ≥ 0.8 of its word 3-shingles and ≥ 0.95
+  of its words; under 6 words never). Gold set unchanged; the four probe
+  re-runs lost their echo 4/4. `prefetch.exclude_self_transcripts: false` is
+  the switch; `eval/run_transcript_self_hit_audit.py` re-measures.
 - **`skip_rerank=True`** in prefetch. The reranker rarely changes top-1 and
   mostly shuffles within top-5 — not worth the tax on a latency-critical path.
   Explicit `vault_recall` calls keep reranking on.
