@@ -60,6 +60,10 @@ __pycache__/
 !eval/episodic-arm/*.json
 # …and the prefetch cost eval's merged (numbers-only) artifacts (#562).
 !eval/measurements/prefetch-cost-*-merged.json
+# …and the engine output probe's committed floor, idle runs and reference
+# (#1268): the comparator's threshold is that file, so it must be tracked.
+!eval/engine_output/*.json
+!eval/engine_output/*/*.json
 
 # ─── Secrets ────────────────────────────────────────
 .env

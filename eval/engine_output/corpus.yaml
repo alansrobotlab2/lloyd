@@ -1,0 +1,125 @@
+# Engine output-integrity probe corpus (#1268).
+#
+# Replayed by eval/engine_output_probe.py against the primary at temperature 0
+# with logprobs: 1. The point is not quality — it is that the SAME prompts,
+# sent the same way, come back as the same tokens with the same logprobs from
+# one engine build to the next, within the idle floor in floor.json.
+#
+# Changing any prompt changes the corpus sha256 every run record carries, and
+# the comparator refuses (exit 2) to compare records over different corpora —
+# so an edit here means re-measuring floor.json and re-capturing a reference.
+#
+# A prompt is a list of `parts`, concatenated in order. A part is literal text,
+# `{prefix: name}` (a shared block below — the long system prompt five chat
+# prompts reuse, which is the prefix-cache path), or `{expand: name}` (a
+# numbered template repeated `count` times, cycling through `cycle` lists —
+# committed data that expands deterministically into thousands of tokens,
+# instead of thousands of tokens of committed prose).
+#
+# The chat prompts are written in the model's own ChatML shape with an empty
+# <think></think> block (thinking off), so each answer starts at once and 48
+# tokens reach real content. The tool prompts carry the qwen3_xml <tools> /
+# <tool_call><function=...> contract the chat template renders.
+
+version: 1
+max_tokens: 48
+
+expansions:
+  operating_rules:
+    count: 110
+    template: "Rule {i}. When a request touches {area}, {verb} before acting, and record in the transcript which {artifact} you relied on; if the {artifact} is missing, say so plainly rather than inferring it, because a guess that reads as a fact costs more than an honest gap.\n"
+    cycle:
+      area: [the vault, the backlog, a worker job, the automod loop, a service restart, the knowledge graph, a scheduled task, the dashboard, the voice stack, a retrieval query, a subagent, a browser page]
+      verb: [read the current state, check the ledger, confirm the path exists, re-read the file, ask what changed since, measure it, compare against the floor, look at the last run]
+      artifact: [file, ledger row, measurement, log line, config key, commit, test, session record]
+  long_filler:
+    count: 420
+    template: "Section {i}: the {thing} in bay {bay} was inspected on shift {shift}; its reading was {reading} and the inspector noted that the {thing} {note}. No further action was scheduled for section {i}.\n"
+    cycle:
+      thing: [pump, valve, compressor, relay, bearing, sensor, conveyor, heat exchanger, filter housing, gearbox, fan, actuator, transformer]
+      bay: [A, B, C, D, E, F, G]
+      shift: [one, two, three]
+      reading: [nominal, slightly high, slightly low, within tolerance, at the upper limit, steady, unchanged from last week]
+      note: [was clean, needed a new gasket, hummed at startup, had a loose cover, was quieter than expected, showed light corrosion, was recently replaced]
+
+prefixes:
+  lloyd_system:
+    - "<|im_start|>system\nYou are Lloyd, a fully local AI agent running on a single workstation. You answer the person you work for directly and briefly, you never invent tool output, and you follow the operating rules below exactly.\n\n# Operating rules\n\n"
+    - {expand: operating_rules}
+    - "\nEnd of operating rules. Answer in one or two sentences unless asked otherwise.<|im_end|>\n"
+  tools_xml:
+    - "<|im_start|>system\n# Tools\n\nYou have access to the following functions:\n\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"Bash\", \"description\": \"Run a shell command and return its output.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\", \"description\": \"The command to run\"}, \"timeout\": {\"type\": \"integer\", \"description\": \"Seconds before the command is killed\"}}, \"required\": [\"command\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"Read\", \"description\": \"Read a file from disk.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"file_path\": {\"type\": \"string\", \"description\": \"Absolute path of the file\"}, \"limit\": {\"type\": \"integer\", \"description\": \"Lines to read\"}}, \"required\": [\"file_path\"]}}}\n{\"type\": \"function\", \"function\": {\"name\": \"http_fetch\", \"description\": \"Fetch a public web page and return its text.\", \"parameters\": {\"type\": \"object\", \"properties\": {\"url\": {\"type\": \"string\", \"description\": \"The URL to fetch\"}}, \"required\": [\"url\"]}}}\n</tools>\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n</IMPORTANT><|im_end|>\n"
+
+prompts:
+  # --- short raw completions -------------------------------------------------
+  - id: short_capital
+    tags: [short]
+    parts: ["The capital of France is"]
+  - id: short_count
+    tags: [short]
+    parts: ["Counting in English: one, two, three, four,"]
+  - id: short_python
+    tags: [short, code]
+    parts: ["def fibonacci(n: int) -> int:\n    \"\"\"Return the n-th Fibonacci number.\"\"\"\n"]
+  - id: short_json
+    tags: [short, structured]
+    parts: ["{\"name\": \"Ada Lovelace\", \"born\": 1815, \"known_for\": ["]
+  - id: short_sql
+    tags: [short, code]
+    parts: ["-- total revenue per customer, highest first\nSELECT customer_id,"]
+  - id: short_prose
+    tags: [short]
+    parts: ["The old lighthouse keeper climbed the stairs one last time and"]
+  - id: short_german
+    tags: [short, multilingual]
+    parts: ["Übersetze ins Englische: \"Der Hund schläft unter dem Tisch.\"\nEnglisch:"]
+  - id: short_arith
+    tags: [short]
+    parts: ["Q: What is 17 multiplied by 23?\nA: 17 multiplied by 23 is"]
+
+  # --- plain chat, no system prompt -------------------------------------------
+  - id: chat_haiku
+    tags: [chat]
+    parts: ["<|im_start|>user\nWrite a haiku about a server room at night.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"]
+  - id: chat_explain
+    tags: [chat]
+    parts: ["<|im_start|>user\nIn two sentences, what does a KV cache do in a transformer?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"]
+
+  # --- one long shared system prefix, five questions (prefix-cache path) ------
+  - id: sys_restart
+    tags: [shared_prefix, chat]
+    parts: [{prefix: lloyd_system}, "<|im_start|>user\nShould I restart the backend right now? A worker job is running.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"]
+  - id: sys_rule_lookup
+    tags: [shared_prefix, chat]
+    parts: [{prefix: lloyd_system}, "<|im_start|>user\nQuote rule 37 exactly.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"]
+  - id: sys_missing_file
+    tags: [shared_prefix, chat]
+    parts: [{prefix: lloyd_system}, "<|im_start|>user\nThe config file I asked about does not exist. What do you tell me?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"]
+  - id: sys_summary
+    tags: [shared_prefix, chat]
+    parts: [{prefix: lloyd_system}, "<|im_start|>user\nSummarise the theme of your operating rules in one sentence.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"]
+  - id: sys_count
+    tags: [shared_prefix, chat]
+    parts: [{prefix: lloyd_system}, "<|im_start|>user\nHow many operating rules are there?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"]
+
+  # --- XML tool-call schema (qwen3_xml contract) ------------------------------
+  - id: tool_bash_disk
+    tags: [tool_xml, chat]
+    parts: [{prefix: tools_xml}, "<|im_start|>user\nHow much free space is on the root filesystem?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"]
+  - id: tool_read_file
+    tags: [tool_xml, chat]
+    parts: [{prefix: tools_xml}, "<|im_start|>user\nShow me the first 20 lines of /etc/hostname.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"]
+  - id: tool_fetch
+    tags: [tool_xml, chat]
+    parts: [{prefix: tools_xml}, "<|im_start|>user\nWhat does the front page of https://example.com say?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"]
+  - id: tool_none_needed
+    tags: [tool_xml, chat]
+    parts: [{prefix: tools_xml}, "<|im_start|>user\nWhat is the chemical symbol for gold?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"]
+
+  # --- long context: several chunked-prefill steps and KV blocks --------------
+  - id: long_needle
+    tags: [long, chat]
+    parts: ["<|im_start|>user\nBelow is a maintenance log.\n\n", {expand: long_filler}, "\nWhich bay was section 257 in, and what was its reading? Answer in one sentence.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"]
+  - id: long_continue
+    tags: [long]
+    parts: [{expand: long_filler}, "Section 421: the"]

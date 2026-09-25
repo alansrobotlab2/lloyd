@@ -1,0 +1,65 @@
+[
+ {
+  "count": 40,
+  "prompt_tokens": 1807,
+  "same_tokens": true,
+  "bitwise": true,
+  "max_lp_delta": 0.0
+ },
+ {
+  "count": 60,
+  "prompt_tokens": 2714,
+  "same_tokens": true,
+  "bitwise": false,
+  "max_lp_delta": 0.012291010469198227
+ },
+ {
+  "count": 66,
+  "prompt_tokens": 2987,
+  "same_tokens": true,
+  "bitwise": false,
+  "max_lp_delta": 0.17724661622196436
+ },
+ {
+  "count": 72,
+  "prompt_tokens": 3256,
+  "same_tokens": true,
+  "bitwise": false,
+  "max_lp_delta": 0.21370278298854828
+ },
+ {
+  "count": 80,
+  "prompt_tokens": 3623,
+  "same_tokens": true,
+  "bitwise": false,
+  "max_lp_delta": 0.19210221513640136
+ },
+ {
+  "count": 84,
+  "prompt_tokens": 3804,
+  "same_tokens": true,
+  "bitwise": false,
+  "max_lp_delta": 0.061672598123550415
+ },
+ {
+  "count": 88,
+  "prompt_tokens": 3988,
+  "same_tokens": true,
+  "bitwise": false,
+  "max_lp_delta": 0.2308278032578528
+ },
+ {
+  "count": 92,
+  "prompt_tokens": 4168,
+  "same_tokens": false,
+  "bitwise": false,
+  "max_lp_delta": null
+ },
+ {
+  "count": 130,
+  "prompt_tokens": 5961,
+  "same_tokens": true,
+  "bitwise": false,
+  "max_lp_delta": 0.03058634325861931
+ }
+]
