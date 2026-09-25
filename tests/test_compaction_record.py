@@ -862,19 +862,15 @@ def test_a_streamed_turn_lands_the_same_record(store, monkeypatch, tmp_path):
 def test_a_streamed_turn_that_dies_mid_flight_still_leaves_the_firing_behind(store, monkeypatch, tmp_path):
     """A turn that dies before its `result` event: the event is the only record.
 
-    Driven through `_run_turn`'s `except` arm — the failure path — this pins the
-    half of #1078 that a usage row cannot cover. Such a turn gets no usage row at
-    all: the arm's insert sits under `if not final_persisted:` (messages.py:1503)
-    and inside `if stream_stats["input_tokens"] or stream_stats["output_tokens"]`
-    (:1530), and `stream_stats` is only populated by the `result` handler (:1302)
-    — the event the crash skipped. So the firing survives exactly where the clause
-    puts it: one event in `event_logs/<session>.events.jsonl`, carrying the
-    session id, the rungs and the tokens.
+    Driven through `_run_turn`'s `except` arm — the failure path. The firing
+    survives where the clause puts it: one event in
+    `event_logs/<session>.events.jsonl`, carrying the session id, the rungs and
+    the tokens.
 
-    The arm's own `compaction=compaction_turn` (:1548) is pinned by
-    `test_every_chat_insert_site_carries_the_field`, not from here: reaching that
-    insert needs a turn that recorded usage without persisting, which no driver
-    can produce without contriving a failure inside the persist call itself.
+    Until D12 such a turn wrote no usage row at all — `stream_stats` is filled
+    only by the `result` handler, the event the crash skipped. It now books one
+    from the harness's running totals (`TurnTelemetry.partial_row`), and that
+    row carries the pass too, through the same `compaction=compaction_turn`.
     """
     with _wired(monkeypatch, boom=True) as wired:
         _drive_run_turn(wired["module"], tmp_path)
@@ -889,9 +885,9 @@ def test_a_streamed_turn_that_dies_mid_flight_still_leaves_the_firing_behind(sto
         "the surviving record names the rungs — the log line it replaces named "
         "tokens and nothing else"
     )
-    assert _raw_compactions(store, SESSION_ID) == [], (
-        "documenting the gap this test is about: the dead turn writes no usage "
-        "row, so a column-only design would lose this firing entirely"
+    rows = _raw_compactions(store, SESSION_ID)
+    assert len(rows) == 1 and rows[0] is not None, (
+        f"the dead turn books one usage row carrying its relief pass (D12): {rows}"
     )
 
 

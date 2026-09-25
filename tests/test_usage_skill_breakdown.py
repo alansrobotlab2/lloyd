@@ -534,7 +534,7 @@ def _pristine_messages_module(monkeypatch):
 
 
 async def _drive_run_turn(tmp_path, monkeypatch, *, prefetched, events,
-                          fail_first_append=False,
+                          fail_first_append=False, raise_after=False,
                           session_id="20260924_090000_webchat"):
     """Run the real `_run_turn` over a stubbed harness `run_query`.
 
@@ -544,8 +544,9 @@ async def _drive_run_turn(tmp_path, monkeypatch, *, prefetched, events,
     by the function under test rather than quoted at it, and a name that is not in
     scope there raises instead of passing.
 
-    `fail_first_append` raises out of the first persistence call, which is how a
-    turn reaches the `except` arm and its second `record_usage` call.
+    `fail_first_append` raises out of the answer's persistence call, which lands
+    a turn that has already booked its row in the `except` arm; `raise_after`
+    makes the harness raise once `events` are spent, before any `result`.
     """
     import asyncio
 
@@ -570,6 +571,8 @@ async def _drive_run_turn(tmp_path, monkeypatch, *, prefetched, events,
         seen["options"] = options
         for evt in events:
             yield evt
+        if raise_after:
+            raise RuntimeError("simulated harness failure mid-turn")
 
     monkeypatch.setattr(msg, "run_query", _fake_run_query)
 
@@ -675,15 +678,40 @@ def test_a_real_turn_through_the_stream_writer_records_the_skill_dimension(
 
 
 def test_the_stream_error_path_still_names_the_skill_deliveries(tmp_path, monkeypatch):
-    """A turn that faults after its `result` event is booked by a different
-    `record_usage` call (`messages.py:1513-1530`) than the result path's, and that
-    call has the same argument in scope only by coincidence of editing. A
-    persistence fault is injected on the first message append, which is where the
-    result path lands in the `except` arm with `final_persisted` still false.
+    """A turn that dies before its `result` event is booked by a different
+    `record_usage` call (`_run_turn`'s `_book_usage`, D12) than the result
+    path's, and that call has the same argument in scope only by coincidence of
+    editing. The harness here streams one iteration and then raises, which is
+    the shape of a turn that died mid-flight.
 
     Without the dimension there the skill is invisible in exactly the case an
     operator investigates: the turns that broke.
     """
+    import asyncio
+
+    prefetched = _real_prefetch_text("full protocol body\n", "one excerpt line\n")
+    asyncio.run(_drive_run_turn(
+        tmp_path, monkeypatch, prefetched=prefetched, raise_after=True,
+        events=[{"type": "text_delta", "text": "a partial answer"},
+                {"type": "assistant_message", "iteration": 1,
+                 "usage": {"input_tokens": 4000, "output_tokens": 50}}]))
+
+    rows = _usage_rows()
+    assert len(rows) == 1, (
+        "expected the error path's row; the fault did not reach the `except` "
+        f"arm and this test proved nothing: {len(rows)}"
+    )
+    assert json.loads(rows[0]["skills"]) == [
+        {"name": FULL_SKILL, "route": "prefetch"},
+        {"name": EXCERPT_SKILL, "route": "prefetch_excerpt"},
+    ], f"the error writer dropped the skill dimension: {rows[0]['skills']}"
+
+
+def test_a_fault_after_the_result_row_does_not_book_the_turn_twice(tmp_path, monkeypatch):
+    """A persistence fault after the `result` handler has booked its row lands
+    the turn in the `except` arm with `stream_stats` already full. That used to
+    write a second row for the same turn (this file pinned it as two); D12 makes
+    the booking once-only, so the result row is the only one."""
     import asyncio
 
     prefetched = _real_prefetch_text("full protocol body\n", "one excerpt line\n")
@@ -693,12 +721,5 @@ def test_the_stream_error_path_still_names_the_skill_deliveries(tmp_path, monkey
                 _fake_result_event()]))
 
     rows = _usage_rows()
-    assert len(rows) == 2, (
-        "expected the result path's row and the error path's row; the fault did "
-        f"not reach the `except` arm and this test proved nothing: {len(rows)}"
-    )
-    for row in rows:
-        assert json.loads(row["skills"]) == [
-            {"name": FULL_SKILL, "route": "prefetch"},
-            {"name": EXCERPT_SKILL, "route": "prefetch_excerpt"},
-        ], f"a writer dropped the skill dimension: {row['skills']}"
+    assert len(rows) == 1, f"one turn, one usage row; got {len(rows)}"
+    assert (rows[0]["input_tokens"], rows[0]["output_tokens"]) == (4000, 50)

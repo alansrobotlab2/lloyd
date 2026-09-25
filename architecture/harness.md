@@ -687,3 +687,26 @@ rendered. This landing is additive; production prompts are byte-identical.
   PreToolUse deliverer, because the live tool reads the vault, which holds no
   topics yet. Decision (a)–(c) is computed; (d), live `memory_read` per user
   turn, is reported pending. `tests/test_memory_index_cap.py`.
+
+### D12 — errored turns book usage; a cancelled task saves its text
+
+`usage.db` saw only turns that reached `result`: `stream_stats` is filled by
+that handler, so a turn that raised after two iterations booked nothing, and
+one whose consumer task was cancelled lost its partial text too. The chat
+router's error arm now fills `stream_stats` from `TurnTelemetry.partial_row()`
+(peak prompt, summed output and cache-create, the iteration count) when the
+result never came, books the row with `stop_reason="error"`, `num_turns` and
+the wall-clock `duration_ms` — in the no-text branch as well — and its `done`
+frame carries `stop_reason: "error"` and the error clipped to 300 chars. An
+`except asyncio.CancelledError` ahead of it persists the unwritten tool pairs
+and the text (`cancelled: true`, shielded against a second cancel), books
+`stop_reason="cancelled"`, sends `done(cancelled)` and re-raises. A
+`usage_booked` flag makes the booking once-only: a fault inside the `result`
+handler after its `record_usage` used to book the turn a second time from the
+error arm (`test_usage_skill_breakdown.py` had pinned the two rows).
+`run_recorder.close_interrupted` books the same running totals
+(`cancelled` for CancelledError/TimeoutError, else `error`), once. The browser
+ignores both new `done` fields; `_common.run_prompt_in_session` maps
+`stop_reason: "error"` back to `None`, which its callers read as "never
+completed" (autocode's `infra_failed`), exactly as an errored turn read before,
+and appends the error to `errors`. Pins: `tests/test_messages_errored_turn_usage.py`.

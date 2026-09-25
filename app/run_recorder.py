@@ -51,6 +51,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from datetime import datetime
 from typing import Any, AsyncIterator
 
@@ -135,6 +136,10 @@ class _RunRecorder:
         # P11: the same fold the chat path uses (app/turn_usage.py), so a
         # background row and a chat row carry the same telemetry columns.
         self.telemetry = turn_usage.TurnTelemetry()
+        # D12: one usage row per run, whichever path writes it — the `result`
+        # handler or `close_interrupted` for a run that never reached it.
+        self.usage_booked = False
+        self.started = time.perf_counter()
 
     # -- helpers ---------------------------------------------------------
     async def _append(self, entries: list[dict]) -> None:
@@ -154,7 +159,7 @@ class _RunRecorder:
             logger.warning("run_recorder: log_event failed for %s: %s",
                            self.session_id, exc)
 
-    def _record_usage(self, stats: dict) -> None:
+    def _record_usage(self, stats: dict, *, stop_reason: str | None = None) -> None:
         """A usage row for a direct background run, as every chat turn has.
 
         Until prefix-miss accounting these two paths wrote no usage row at
@@ -163,8 +168,14 @@ class _RunRecorder:
         count would have had nowhere to live for one of the three paths that
         run an agent loop.
         """
+        if self.usage_booked:
+            return
         if not (stats.get("input_tokens") or stats.get("output_tokens")):
             return
+        self.usage_booked = True
+        telemetry = self.telemetry.row()
+        if stop_reason is not None:
+            telemetry["stop_reason"] = stop_reason
         try:
             import usage_store
             usage_store.record_usage(
@@ -183,7 +194,7 @@ class _RunRecorder:
                 # session id (#1078). Read at insert time, so passes that land
                 # after the `result` event are in the row too.
                 compaction=self.compaction,
-                **self.telemetry.row(),
+                **telemetry,
             )
         except Exception as exc:      # noqa: BLE001 — accounting is not the run
             logger.warning("run_recorder: usage row failed for %s: %s",
@@ -410,12 +421,29 @@ class _RunRecorder:
                 turn_id=self.turn_id,
             ))
         await self._append(tail)
+        # D12: the tokens the run spent before it stopped short. Only the
+        # `result` handler used to book a row, so a background run killed at
+        # its deadline — the common way one ends badly — cost nothing on the
+        # dashboard. Running totals from the per-iteration events, in the
+        # units the result path uses (peak prompt, summed output).
+        partial = self.telemetry.partial_row()
+        self._record_usage({
+            **partial,
+            "duration_ms": int((time.perf_counter() - self.started) * 1000),
+            **self.miss.summary(),
+        }, stop_reason=("cancelled" if reason in _CANCEL_REASONS else "error"))
         self._log("background.run_interrupted", {
             "reason": reason,
             "response_chars": len(self.text),
             "tool_calls": len(self.tool_calls),
             "results": len(self.results_by_id),
         })
+
+
+# `close_interrupted`'s reason is the exception's class name. These are the
+# ways a run is stopped from outside rather than failing on its own.
+_CANCEL_REASONS = frozenset({"CancelledError", "TimeoutError", "GeneratorExit",
+                             "KeyboardInterrupt", "TurnTimeout"})
 
 
 async def record_events(events: AsyncIterator[dict], *, session_id: str,

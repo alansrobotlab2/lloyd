@@ -865,6 +865,17 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                     elif event == "done":
                         out["text"] = str(data.get("response") or "")
                         out["stop_reason"] = data.get("stop_reason")
+                        # An errored turn's `done` says `stop_reason: "error"`
+                        # since D12. Callers read None as "the harness never
+                        # completed" (autocode's infra_failed, arch-review's
+                        # and youtube-digest's infra branches), which is what
+                        # an errored turn has always read as here — so it keeps
+                        # reading None, and the error it now carries reaches
+                        # `errors` instead of being dropped.
+                        if out["stop_reason"] == "error":
+                            out["stop_reason"] = None
+                            if data.get("error"):
+                                out["errors"].append(str(data["error"])[:400])
                         out["num_turns"] = data.get("num_turns")
                         out["structured"] = data.get("structured")
                         out["structured_error"] = str(data.get("structured_error") or "")

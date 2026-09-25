@@ -1778,6 +1778,7 @@ it. `client.stream_chat` sets httpx `read=None`, so without this a wedged
 engine mid-generation hangs the turn until the client gives up. The key
 existed from the start and was read by nothing until 2026-09-06.
 A broken stream is retried once while no tool-call delta arrived, else ends `stream_error` (D7, `harness.stream_retry`; architecture/harness.md).
+A turn that raises or is cancelled still books its tokens, once, from the running totals (D12; architecture/harness.md).
 
 **Two engines, two reasoning keys**: assistant messages carry reasoning back
 as **both** `reasoning` and `reasoning_content`. vLLM populates the template

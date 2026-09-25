@@ -909,6 +909,96 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     def _miss_log(name: str, data: dict) -> None:
         _event_log.log_event(session_id, name, data, turn_id=turn.turn_id)
 
+    # D12: a turn is booked in `usage.db` exactly once. The `result` handler
+    # books it; a turn that raises or is cancelled before (or after) that
+    # books through `_book_usage` below, which reads this flag first. Without
+    # it an exception raised inside the result handler after its
+    # `record_usage` — `_fetch_files_changed`, an append — would book the turn
+    # a second time from the error path, since `stream_stats` is filled by then.
+    usage_booked = False
+
+    def _fill_partial_stats() -> None:
+        """Running totals onto `stream_stats` for a turn with no `result`.
+
+        Only the `result` handler fills `stream_stats`, so a turn that dies
+        after two iterations reads zero tokens there and used to book nothing
+        at all (D12). `TurnTelemetry` has been folding the per-iteration
+        `assistant_message` usage all along: peak prompt, summed output, the
+        same units `turn_usage_row` gives a finished turn."""
+        if not stream_stats["input_tokens"]:
+            stream_stats.update(turn_telemetry.partial_row())
+        if not stream_stats.get("duration_ms"):
+            stream_stats["duration_ms"] = int(
+                (time.perf_counter() - t_query_start) * 1000)
+        stream_stats["peak_input_tokens"] = last_turn_input
+
+    def _book_usage(stop_reason: str) -> None:
+        """The usage row for a turn that ended without the `result` path's."""
+        nonlocal usage_booked
+        if usage_booked:
+            return
+        if not (stream_stats["input_tokens"] or stream_stats["output_tokens"]):
+            return
+        usage_booked = True
+        try:
+            usage_store.record_usage(
+                session_id=session_id,
+                model=model,
+                input_tokens=stream_stats["input_tokens"],
+                output_tokens=stream_stats["output_tokens"],
+                cache_create=stream_stats["cache_create"],
+                cache_read=stream_stats["cache_read"],
+                cost_usd=0.0,
+                duration_ms=stream_stats.get("duration_ms"),
+                duration_api_ms=None,
+                num_turns=stream_stats.get("num_turns") or current_iteration,
+                # The turn died but its prompt was real: the tokens were spent
+                # with these skills in front of the model (#783), and a
+                # half-finished turn is the turn a per-skill cost would
+                # otherwise understate.
+                skills=skill_deliveries(prefetched_text),
+                # A turn that died under context pressure is the turn whose
+                # relief record matters most (#1078): the overflow branch
+                # relieves without latching and then re-raises, so without
+                # this the ladder's most interesting pass would be unbooked.
+                compaction=compaction_turn,
+                **miss_tracker.summary(),
+                # `row()` says None for a turn that never saw `result`; the
+                # way it ended is known here, so it is said.
+                **{**turn_telemetry.row(), "stop_reason": stop_reason},
+            )
+        except Exception as ue:
+            logger.warning(f"Failed to record usage ({stop_reason} path): {ue}")
+
+    async def _persist_partial_tail(*, cancelled: bool) -> None:
+        """Whatever the turn had in hand when it stopped short, to disk: the
+        tool pairs not yet written and the unflushed assistant text."""
+        ts = datetime.now().isoformat()
+        tail: list[dict] = []
+        results_by_id = {r["call_id"]: r["result"] for r in tool_results_log}
+        for tc in tool_calls_log:
+            cid = tc["call_id"]
+            if cid not in persisted_tool_ids:
+                persisted_tool_ids.add(cid)
+                # No `evt`, same as the `result`-path rebuild: the call log
+                # cannot say how big the answer was, so the row omits
+                # `raw_chars`.
+                tail.extend(_tool_pair(
+                    tc, result_str=results_by_id.get(cid, ""),
+                    timestamp=ts,
+                    iteration_stats=current_iteration_stats,
+                    turn_id=turn.turn_id))
+        if full_response.strip():
+            tail.append(build_assistant_text_entry(
+                full_response, timestamp=ts, stats=stream_stats,
+                reasoning=accumulated_thinking,
+                reasoning_ms=accumulated_thinking_ms,
+                cancelled=cancelled,
+                turn_id=turn.turn_id,
+            ))
+        if tail:
+            await _append_messages(session_id, tail)
+
     # Which context policy rewrote this turn's history (app/compaction_record.py).
     # Registered before the compaction stack runs and before `run_query`, because
     # the relief ladder books its passes from inside the harness loop, which has
@@ -1400,6 +1490,9 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                 cache_create_tokens = usage.get("cache_create", 0) or 0
                 miss_summary = _prefix_miss.finish(miss_tracker, log=_miss_log)
 
+                # Set before the call, so nothing after it in this handler
+                # can raise its way into a second row from the error path.
+                usage_booked = True
                 try:
                     usage_store.record_usage(
                         session_id=session_id,
@@ -1654,64 +1747,57 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         # the post-loop cancel block from the old SDK path is not needed.
         # cancelled_mid_stream is set in the `result` handler and handled there.
 
+    except asyncio.CancelledError:
+        # The consumer task was cancelled (shutdown, a dropped consumer) rather
+        # than stopped through `cancel_event` — which ends in a `result` with
+        # `stop_reason="cancelled"` and is handled above. Same outcome here,
+        # D12: the partial tail goes to disk marked cancelled, the tokens it
+        # spent are booked, and the cancel propagates. Shielded, so a second
+        # cancel arriving mid-write cannot take the transcript with it.
+        _fill_partial_stats()
+        if not final_persisted:
+            final_persisted = True
+            try:
+                await asyncio.shield(asyncio.ensure_future(
+                    _persist_partial_tail(cancelled=True)))
+            except BaseException as pe:  # noqa: BLE001 — re-raising the cancel below
+                logger.warning(f"Turn {turn.turn_id} cancelled; partial tail not saved: {pe!r}")
+        _book_usage("cancelled")
+        try:
+            await _emit(turn, "done", {
+                "response": full_response, "session_id": session_id,
+                "stats": stream_stats, "cancelled": True,
+                "stop_reason": "cancelled",
+            })
+        except BaseException:  # noqa: BLE001 — the cancel is what matters
+            pass
+        raise
     except Exception as e:
+        # D12: booked whatever path the error took — with content or without,
+        # before the `result` event or inside its handler (`_book_usage` is a
+        # no-op once that handler has booked).
+        _fill_partial_stats()
         if not final_persisted:
             if full_response or tool_calls_log:
                 logger.warning(f"Turn {turn.turn_id} harness error with content: {e}")
-                err_ts = datetime.now().isoformat()
-                tail = []
-                results_by_id = {r["call_id"]: r["result"] for r in tool_results_log}
-                for tc in tool_calls_log:
-                    cid = tc["call_id"]
-                    if cid not in persisted_tool_ids:
-                        # No `evt`, same as the `result`-path rebuild
-                        # above: the call log cannot say how big the
-                        # answer was, so the row omits `raw_chars`.
-                        tail.extend(_tool_pair(
-                            tc, result_str=results_by_id.get(cid, ""),
-                            timestamp=err_ts,
-                            iteration_stats=current_iteration_stats,
-                            turn_id=turn.turn_id))
-                stream_stats["peak_input_tokens"] = last_turn_input
-                if full_response.strip():
-                    tail.append(build_assistant_text_entry(
-                        full_response, timestamp=err_ts, stats=stream_stats,
-                        reasoning=accumulated_thinking,
-                        reasoning_ms=accumulated_thinking_ms,
-                        turn_id=turn.turn_id,
-                    ))
-                if tail:
-                    await _append_messages(session_id, tail)
-                try:
-                    if stream_stats["input_tokens"] or stream_stats["output_tokens"]:
-                        usage_store.record_usage(
-                            session_id=session_id,
-                            model=model,
-                            input_tokens=stream_stats["input_tokens"],
-                            output_tokens=stream_stats["output_tokens"],
-                            cache_create=stream_stats["cache_create"],
-                            cache_read=stream_stats["cache_read"],
-                            # The turn died but its prompt was real: the tokens
-                            # were spent with these skills in front of the model
-                            # (#783), and a half-finished turn is the turn a
-                            # per-skill cost would otherwise understate.
-                            skills=skill_deliveries(prefetched_text),
-                            # A turn that died under context pressure is the
-                            # turn whose relief record matters most (#1078):
-                            # the overflow branch relieves without latching and
-                            # then re-raises, so without this the ladder's most
-                            # interesting pass would be the one left unbooked.
-                            compaction=compaction_turn,
-                            **miss_tracker.summary(),
-                        )
-                except Exception as ue:
-                    logger.warning(f"Failed to record usage (exception path): {ue}")
+                await _persist_partial_tail(cancelled=False)
+                _book_usage("error")
                 await _emit(turn, "done", {
                     'response': full_response, 'session_id': session_id, 'stats': stream_stats,
+                    # Said, not implied: a caller used to read a `done` with no
+                    # `stop_reason` here and could not tell an errored turn
+                    # from a stream that closed without one.
+                    'stop_reason': 'error',
+                    'error': str(e)[:300],
+                    'num_turns': stream_stats.get("num_turns"),
                 })
             else:
                 logger.error(f"Turn {turn.turn_id} harness error: {e}")
+                _book_usage("error")
                 await _emit(turn, "error", {"detail": str(e)})
+        else:
+            logger.warning(f"Turn {turn.turn_id} raised after it was persisted: {e}")
+            _book_usage("error")
     finally:
         # Inner Voice — stop observing this turn, always.
         #
