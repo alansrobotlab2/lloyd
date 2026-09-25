@@ -41,12 +41,13 @@ and the −17.6% is unreconciled, #1503; 900-token chunks, 15% overlap), RRF k=6
 documents plus up to 10 facts. The cross-encoder is the fallback. The pool is the
 ceiling. Nightly, live index, n=81: doc_hit 0.704, doc_recall 0.647, MRR 0.355,
 NDCG@10 0.407, **entity_hit 0.358**, entity_recall 0.391, **fact_entity_recall
-0.374**, p50 487 ms; `anchorless_query_count` 25 of 81. Two caveats on that line:
-the gold set is **86** queries since `7cee0eda` (#1354) landed the same evening, 66
-of which declare expected entities; and the eval's count (a seed that *contains* an
-expected entity counts as anchored, `eval/run_eval.py:933`) does not reconcile with
-§4's scratch run, which anchors 28 of those 66 — 41 and 28 cannot both be the
-anchored set, and the gap is the size of #1486's prize (#1502).
+0.374**, p50 487 ms; `anchorless_query_count` 25 — of the **66** queries that
+declare expected entities, not of 81 (`anchorless_queries` skips the other 15), so
+41 of 66 are anchored. The gold set is **86** queries since `7cee0eda` (#1354)
+landed the same evening, still 66 with expected entities (20 without); the nightly
+of 2026-09-25 on the 86 reads the same 25 anchorless. That count is the canonical
+definition of "anchored" in this doc; §4 states the scratch harness's stricter
+number beside it (#1502).
 
 **Who calls recall.** About 24 times a week, all workers, never chat. Chat gets
 memory through `prefetch.py`'s `<context>` prefix on the user message (300 ms
@@ -193,13 +194,32 @@ MRR 0.093 → 0.114 (7 queries better, 1 worse); turn latency p50 27 → 62 ms a
 landing gate set beforehand (hybrid in budget on ≥85% of turns, merged doc_hit not
 below today's) was met. [[subliminal]] §Worker 3 has the mechanism.
 
-**P4, entity anchoring (#1486).** A scratch GLiNER2 run (`fastino/gliner2-base-v1`,
-CPU, scratch venv) over the 66 gold queries with expected entities: today's
-extractor has a seed naming an expected entity on 28; GLiNER2 spans linked to the
-registry by normalized n-gram match, 27; the union, 30. All 36 queries still
-unanchored have their expected entity *in the registry*: they paraphrase it rather
-than name it. Span detection is not the bottleneck, so the item was re-weighted
-toward alias regeneration and semantic entity retrieval over `name + definition`.
+**P4, entity anchoring (#1486).** Two instruments count anchoring, and they use
+different matches; the eval's is canonical here (#1502).
+
+- **Canonical — the eval's `anchorless_queries`** (`eval/run_eval.py`,
+  `summary.overall.anchorless_query_count`): a query is anchored when any
+  extracted seed and any expected entity, both normalised, contain one another
+  (either direction); queries with no expected entities are skipped. Over the 66
+  of 86 gold queries that declare expected entities, today's extractor anchors
+  **41** and leaves **25** anchorless (nightlies of 2026-09-23, -24 on the 81-query
+  set and -25 on the 86 all read 25; the 2026-09-22 reading was 23).
+- **Scratch — the GLiNER2 harness** (`fastino/gliner2-base-v1`, CPU, scratch venv,
+  not in the tree), which required a normalised n-gram hit from a span to a
+  registry entity naming an expected entity — stricter, so every number is lower:
+  today's extractor **28** of 66 (eval: 41), GLiNER2 spans **27**, the union **30**
+  (no eval-definition number exists for the GLiNER2 or union arms). The 36 the
+  union leaves unanchored under this match all have their expected entity *in the
+  registry*: they paraphrase it rather than name it.
+
+The finding survives either count — span detection is not the bottleneck — so the
+item was re-weighted toward alias regeneration and semantic entity retrieval over
+`name + definition`. The size of the prize is the canonical one: **25** anchorless
+queries of 66, not 38. The 13 queries between the two are ones the eval's
+two-way substring test anchors and the n-gram match does not (not checked query by
+query — the scratch run kept no per-query ids); the scratch harness does not yet
+emit `anchorless_query_count`, so a re-run of it should, before its numbers are
+compared with the eval's again.
 
 **P1, compaction (#1481).** The number to move is the #600 `tool_clear` arm, 12/20
 on both facts, against production's 19/20 and 20/20 at +3.6–4.7 s TTFT.
@@ -263,3 +283,8 @@ Skills: SkillRouter (2603.22455); Skill Is Not Document (2606.03565); SkillDream
   already-shipped archive half), #1501 (#1490's decided descriptions half), #1502 (the
   two anchor denominators), #1503 (−17.6% of the vector index in a day with no
   run-to-run comparison anywhere).
+- **2026-09-25 (#1502, by hand):** anchoring reconciled — the eval's
+  `anchorless_query_count` is canonical (25 anchorless of the 66 of 86 queries with
+  expected entities, 41 anchored); §4's GLiNER2 numbers (28 / 27 / 30) are stated
+  beside it as the scratch harness's stricter match. No eval re-run; the counts are
+  read from the existing nightly baselines.
