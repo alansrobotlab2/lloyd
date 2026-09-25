@@ -2061,6 +2061,10 @@ workers:
       interval_seconds: 1800
       max_inflight: 1
       max_duration_seconds: 600
+      # Iteration ceiling for one distill turn (#1460). It was a literal 15 at
+      # the call site, so no config key could move it. Absent, the code's
+      # default is 15. Carried in the queue payload: a change reaches new items only.
+      max_turns: 15
   staging_root: ${LLOYD_DATA}/_pipeline/vault-derived/pending-research
 
 # Fact writes through the fact_add MCP tool. The rebuild sets this

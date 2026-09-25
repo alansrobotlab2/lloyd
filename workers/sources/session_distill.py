@@ -48,6 +48,13 @@ from app.paths import SESSIONS_DIR  # anchored to DATA_ROOT, not $HOME/lloyd
 
 _MAX_ENQUEUE_PER_TICK = 3
 
+#: Iteration ceiling for one distill turn, when `workers.sources.session-distill`
+#: names no `max_turns`. It was a literal at the call site, so moving it took a
+#: code change and a deploy, while 42% of runs to 2026-09-11 died on
+#: `stop_reason=max_turns` (#1460, bench-mine's #896 treatment). The value
+#: rides the queue payload, so an item enqueued under one budget runs under it.
+DEFAULT_MAX_TURNS = 15
+
 # How long a session must have sat untouched before it is worth distilling.
 _QUIET_SECONDS = 30 * 60
 
@@ -195,7 +202,8 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         new_id = queue.enqueue(
             source=NAME,
             kind="distill",
-            payload={"session_path": str(p), "mtime": m},
+            payload={"session_path": str(p), "mtime": m,
+                     "max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS))},
             priority=int(src_cfg.get("priority", DEFAULT_PRIORITY)),
             dedup_key=f"session-distill:{p.name}",
         )
@@ -204,6 +212,15 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     if enqueued:
         logger.info("Enqueued %d session-distill items (%d eligible, %d already done)",
                     enqueued, len(candidates), len(done))
+
+
+def _turn_budget(item: QueueItem) -> int:
+    """The iteration budget this item was enqueued under.
+
+    An item queued before the key existed carries none and runs at the
+    default, so a config change never strands already-queued work.
+    """
+    return int((item.payload or {}).get("max_turns") or DEFAULT_MAX_TURNS)
 
 
 async def execute(item: QueueItem) -> dict[str, Any]:
@@ -235,7 +252,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         f"## Durable Facts\n- ...\n\n## Confidence\n<0.0-1.0>: <justification>\n"
     )
     turn = await run_prompt_on_primary(
-        prompt, max_turns=15, source=NAME,
+        prompt, max_turns=_turn_budget(item), source=NAME,
         title=f"distill {session_name}")
     if not turn.ok:
         # 135 of this source's 356 notes have the body "(no response)". An

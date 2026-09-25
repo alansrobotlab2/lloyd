@@ -1223,3 +1223,44 @@ def test_bench_mine_config_names_the_turn_budget():
     cfg = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
     src = cfg["workers"]["sources"]["bench-mine"]
     assert int(src["max_turns"]) >= BM.DEFAULT_MAX_TURNS
+
+
+# ---------------------------------------------------------------------------
+# session-distill: the same #896 treatment (#1460)
+#
+# `max_turns=15` was a literal at the one call site, so the budget the
+# arch-review called wrong could not move without a deploy.
+# ---------------------------------------------------------------------------
+
+
+async def test_session_distill_carries_the_configured_turn_budget(tmp_path, monkeypatch, q):
+    monkeypatch.setattr(SD, "SESSIONS_DIR", tmp_path)
+    _session(tmp_path, "20260906_quiet_one", age_seconds=7200)
+    await SD.enqueue_if_due(q, {"max_turns": 22})
+    items = q.list_items(source=SD.NAME)
+    assert len(items) == 1 and items[0].payload["max_turns"] == 22, [i.payload for i in items]
+
+    q2 = WorkQueue(tmp_path / "workers-default.db")
+    _session(tmp_path, "20260906_quiet_two", age_seconds=7200)
+    await SD.enqueue_if_due(q2, {})
+    items = q2.list_items(source=SD.NAME)
+    assert items and all(i.payload["max_turns"] == SD.DEFAULT_MAX_TURNS == 15 for i in items)
+
+
+async def test_session_distill_runs_with_the_budget_the_item_carries(tmp_path, monkeypatch, q):
+    import workers.queue as Q
+    monkeypatch.setattr(Q, "_queue_instance", q, raising=False)
+    seen: list = []
+    monkeypatch.setattr(SD, "run_prompt_on_primary", _recording_turn(seen))
+
+    await SD.execute(_item({"session_path": str(tmp_path / "a.json"), "max_turns": 7}))
+    # Queued before the key existed: runs at the default, never stranded.
+    await SD.execute(_item({"session_path": str(tmp_path / "b.json")}))
+    assert seen == [7, SD.DEFAULT_MAX_TURNS], seen
+
+
+def test_session_distill_config_names_the_turn_budget():
+    root = Path(__file__).resolve().parents[1]
+    cfg = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
+    src = cfg["workers"]["sources"]["session-distill"]
+    assert int(src["max_turns"]) == 15
