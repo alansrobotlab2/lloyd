@@ -204,6 +204,11 @@ equal-or-better accuracy plus the ~100 ms.
 | qmd's own query expansion (1.7B) | doc_hit −0.037, doc_recall −0.061, MRR +0.027; generation 0.74 s p50, 4.7 s p90 | slower, trades hits for order |
 | near-duplicate collapse before ranking (48-row pool) | doc_hit −0.012, MRR +0.015, +78 ms | neutral, slower |
 | `~/lloyd/architecture` as a qmd collection | doc_recall −0.025 (−0.059 with the floor moved to it) | NOT a verdict: no gold label points into those docs, so the eval can only see them take pool slots — the current architecture docs are unreachable by recall today (backlog follow-up) |
+| binary relevance rows instead of the 4-level scale (#1468) | `noul` MRR −0.063 [−0.114, −0.018], 9/17; 2-level −0.010 | the scale's expected value carries the gradation |
+| FIRST-style top-1 `choice` row, with and without CapCal (#1469) | −0.074 / −0.064 MRR, both clear of zero; letter labels alone −0.036 | the row's pick disagreed on 55/86 and lost |
+| djev orders the facts leg (#1470) | fact_entity_recall +0.008 (1 query), +280 ms | no gain |
+| pools past one canvas: 48/64 rows, anchored, naive or server-`sequential` chunks (#1474) | 64 rows doc_hit +0.058–0.070 and doc_recall +0.06–0.09, but MRR −0.064 to −0.067 (clear of zero) and +0.5 s; `sequential` MRR −0.137 | coverage bought with head order; slower |
+| RRF `lexWeight` 0.5–2.0, floors 1/1/1 or none (#1475) | 1.5–2.0: doc_recall +0.053 [+0.015, +0.099] with MRR −0.035; 0.5–0.75: doc_hit −0.081 | mixed or worse |
 
 ## 5. What the gold repair did to the numbers
 
