@@ -1458,13 +1458,16 @@ skills:
   # `— description` clipped at max_description_chars while the whole index
   # fits budget_chars; lines render alphabetically. Decided by
   # eval/run_prefetch_cost_eval.py --arms injected,desc_push,desc_pull.
+  # On since 2026-09-25 (eval/measurements/skills-index-2026-09-25.md: desc_push
+  # reached the right skill as often as today with the same judge score).
   index:
-    descriptions: false
+    descriptions: true
     budget_chars: 12000
     max_description_chars: 100
 # P5 pull arm: push: false stops injecting a matched skill's body into the
 # turn's <context> (offers are still logged) and the index note says to load
-# skills with skills_read. true is today's behaviour.
+# skills with skills_read. true is today's behaviour. Stays true: desc_pull lost
+# the right skill on 12 of 51 queries against push (2026-09-25).
 prefetch:
   skills:
     push: true
