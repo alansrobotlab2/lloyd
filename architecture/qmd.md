@@ -282,8 +282,8 @@ the build rather than the setting is what changed.
   been merge-appended into, so the gap was unowned; it is #1498 now, and
   `semantic_candidates` has since started sanitizing. §8 was missing
   `test_qmd_maintenance_health.py`. Added: §6's candidate-build pin pattern and
-  §7's warm figure at fusion depth 100. #1367 capped task #81 only; the
-  watcher is still uncapped, as §3 says.
+  §7's warm figure at fusion depth 100. #1367 put its cap on task #81 only;
+  the watcher still has no guard of its own, as §3 says.
 - **2026-09-22** — `current`; the mechanism still runs (fork at `db52729` with
   `dist/` rebuilt and pushed to `origin/lloyd`, daemon serving `[::1]:8181` off
   that tree, #81 `up_next`, template↔live drift reporting 2 items) but three
