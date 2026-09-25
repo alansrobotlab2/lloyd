@@ -1329,6 +1329,18 @@ What each row says:
   says nothing. Resemblyzer rates the x-vector clone as close to `ref.wav` as
   ICL (0.90 vs 0.88) but it is a different rendering of Dave; that is the
   listen question (C/D against A/B).
+- **Decided 2026-09-25: text-input streaming is not worth building.** Alan
+  judged the x-vector clone indistinguishable from ICL by ear (listen set
+  `listen/decide/`, all three shaped as production is), so the voice was not
+  the obstacle — the gain was. On the production server the x-vector clone is
+  no faster by itself (TTFB p50 237 vs 239 ms, RTF 0.47 vs 0.48, `clone:
+  dave_cullen_xvec` beside `clone:dave_cullen`). And the 0.33 s above was
+  measured against the old 45-character first-clause cut: at production's 20
+  the clause wait is p50 211 ms (max 444), before subtracting live text's own
+  priming cost — ~0.1–0.2 s of a ~1.7–2 s turn, for a port of the live-text
+  loop into the compiled production model plus a new server protocol and
+  worker client. Revisit only if the model's first token (~600 ms) and the
+  TTS first byte (~240–350 ms) have been cut and this is what remains.
 - **CosyVoice3's 25 Hz codec does not bring the top back**: raw it is −2.8 dB
   over 1.5–9 kHz against Qwen3's −3.4, better only at 1.5–2.5 kHz (+0.2 vs
   −1.3); the presence shelves would still be needed. Best WER (0/10) and
