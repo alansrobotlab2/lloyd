@@ -1613,17 +1613,17 @@ workers:
       interval_seconds: 14400
       max_inflight: 1
       max_duration_seconds: 1800
-    # Behavioural-regression check for a landed self-modification. Off until
-    # the loop itself is enabled — it is a no-op without a promotion under
-    # observation, but there is no reason to schedule it before then.
+    # Behavioural-regression check for a landed self-modification. It is a
+    # no-op without an unmeasured promotion on the ledger, so polling it
+    # costs nothing between landings.
     automod-regression:
       # Enabled as a POST-LANDING check, not a gate rung. The gate's canary is
       # deliberately data-isolated (its own empty scratch vault), so a quality
       # eval run there would score an empty corpus and measure nothing. This
       # has to run against live data in a separate worktree, which is what the
       # paired A/B does. It measures once per promotion and dedups on the
-      # commit, so an hourly interval means "shortly after a landing", not
-      # hourly evals.
+      # commit, so a 15-minute poll means a missed measurement starts within
+      # minutes of a landing, not an eval every 15 minutes.
       # Since 2026-09-18 the comparison runs DETACHED, one per promotion off
       # the ledger (architecture/automod.md §8.1): the promoter starts the
       # runner the moment a landing is verified, and this source is only the
