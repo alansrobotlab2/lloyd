@@ -121,9 +121,16 @@ Signal sources, both real, neither invented:
   behaviour/prompt loops; nothing routed it into fact quality. An entry is
   credited to an entity only if a token in its heading is a **registered
   entity**, so a heading can never invent an entity to delete facts about.
-- **drift** — entities with a fact file written inside N days. Uses fact-file
-  mtime, not `facts_idx.created_at`: the 09-03 rebuild rewrote every row's
-  date, and directory mtimes don't move when a file is edited in place.
+- **drift** — entities with a fact row *created* inside N days: the newest
+  per-row `created_at` in the fact files' front matter, read by regex (~1.4 s
+  over 11,959 dirs), not file mtimes (#1461). The nightly rebuild rewrites the
+  whole tree, so on 2026-09-25 11,806 of 11,807 dirs had a fresh mtime and the
+  pool was the corpus. A full re-extraction still re-stamps every row, so the
+  record carries the census — `drift_corpus_total`, `drift_pool_fraction`,
+  `drift_status` (`slice` / `sweep` at ≥90% of the corpus / `stale` when the
+  pool is empty, with `drift_newest_fact`) — and the CLI prints the pool as a
+  fraction of entity dirs plus a `[drift] sweep:` or `[drift] 0 candidates …
+  stale since <date>` line beside the counts.
 
 Writers are the existing tools called as functions. Three writers of
 `expired_at` would be the drift bug `fact_get` and the router already had

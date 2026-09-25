@@ -101,6 +101,13 @@ def main() -> int:
         scanned = (f"entities scanned={n_scanned} of {total} drift candidates"
                    if total is not None else
                    f"entities scanned={n_scanned}")
+        # The pool as a share of the tree (#1461): `of 11806 drift candidates`
+        # read as a selection on a night the pool was 11,806 of 11,807 entity
+        # dirs. The fraction goes on the same line as the count it qualifies.
+        corpus = rec.get("drift_corpus_total")
+        if total is not None and corpus:
+            scanned += (f" ({total}/{corpus} entity dirs = "
+                        f"{100.0 * total / corpus:.2f}% of the corpus)")
         if refused:
             scanned += f" refused={len(refused)} ({', '.join(refused)})"
         print(f"[{mode}] signals={rec['signals']} {scanned}"
@@ -122,6 +129,21 @@ def main() -> int:
             print(f"[corrections] 0 signals in window: log stale since "
                   f"{rec['corrections_stale_since']} (window "
                   f"{rec.get('corrections_window_days')} days)")
+        # The drift twins of that line (#1461). A pool that is the corpus is a
+        # sweep, not a recency slice — a rebuild re-stamped every row's
+        # `created_at` — and an empty pool is a stopped writer, not a quiet
+        # night. Both on stdout beside the counts, for the same reason.
+        window = rec.get("drift_window_days")
+        if rec.get("drift_status") == "sweep":
+            print(f"[drift] sweep: {total} of {corpus} entity dirs "
+                  f"({100.0 * (rec.get('drift_pool_fraction') or 0):.2f}%) have a fact "
+                  f"created in the last {window} days — the pool is the corpus, not a "
+                  f"recency slice (a rebuild re-stamps created_at); the scanned "
+                  f"entities are its newest-created, ties by name")
+        elif rec.get("drift_status") == "stale":
+            print(f"[drift] 0 candidates in window: no fact created in the last "
+                  f"{window} days across {corpus} entity dirs; stale since "
+                  f"{rec.get('drift_newest_fact') or 'never (no dated fact)'}")
         if rec.get("store_ok") is False:
             print(f"[warn] knowledge-graph store unreadable: {rec.get('store_error')}")
         elif rec.get("store_ok") is True:

@@ -103,10 +103,24 @@ def corrections_paths() -> list[Path]:
 CORRECTIONS_WINDOW_DAYS = 30
 RECORD_DIR = PIPELINE_DIR / "improvement"
 
-# Entity dirs whose mtime is inside this window count as "a writer has been
-# here recently, and that fresh claim is the one most likely to already be
-# stale". Three days: the nightly extractor runs daily, so one cycle of slack.
+# Entity dirs holding a fact whose own `created_at` is inside this window count
+# as "a writer has been here recently, and that fresh claim is the one most
+# likely to already be stale". Three days: the nightly extractor runs daily, so
+# one cycle of slack.
 DRIFT_WINDOW_DAYS = 3
+# A drift pool this large a share of the entity dirs is not a recency slice, it
+# is the corpus (#1461: 11,806 of 11,807 on 2026-09-25, off file mtimes the
+# nightly rebuild resets). The run still scans its newest-created `limit`, but
+# it says `sweep` beside the counts rather than letting `of 11806` read as a
+# selection.
+DRIFT_SWEEP_FRACTION = 0.9
+# The one timestamp the drift signal reads: a fact row's own `created_at`, as
+# the fact markdown's front matter carries it (`  created_at: '2026-09-23T…'`,
+# one per row). Read by regex over the front matter rather than through YAML:
+# the walk covers every fact file in the tree each run, and a YAML parse of
+# ~31k files is the difference between a second and a minute.
+_CREATED_AT_RE = re.compile(
+    r"""^[ \t-]*created_at:[ \t]*['"]?([0-9][^'"\n#]*?)['"]?[ \t]*$""", re.M)
 # The minimum age gap before "written later" is evidence of "superseded".
 # Same-day pairs are re-phrasings, not corrections — that is the class that
 # produced the 32,857 false positives.
@@ -466,23 +480,109 @@ def last_corrections_read() -> dict:
     return dict(_LAST_CORRECTIONS_READ) if _LAST_CORRECTIONS_READ else dict(_NOT_READ)
 
 
+def _newest_fact_created(entity_dir: Path) -> datetime.datetime | None:
+    """The newest per-fact `created_at` in one entity dir's fact files, or None.
+
+    Front matter only: the body is rendered prose and names no timestamps, but
+    a stray `created_at:` line in it must not become evidence either.
+    """
+    newest: datetime.datetime | None = None
+    for path in entity_dir.glob("*.md"):
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if not text.startswith("---"):
+            continue
+        end = text.find("\n---", 3)
+        front = text[3:end] if end != -1 else text[3:]
+        for m in _CREATED_AT_RE.finditer(front):
+            when = _iso(m.group(1))
+            if when is not None and (newest is None or when > newest):
+                newest = when
+    return newest
+
+
+def _drift_scan(days: int = DRIFT_WINDOW_DAYS,
+                now: datetime.datetime | None = None) -> tuple[list[dict], dict]:
+    """(`_drift_candidates`, census of the tree it was selected from).
+
+    The census is `{corpus, undated, newest_fact, pool, fraction, status,
+    window_days}`: `corpus` is every entity dir walked, `undated` those whose
+    fact rows carry no parseable `created_at` (never candidates — a row that
+    cannot say when it was written cannot say it is recent), `newest_fact` the
+    newest `created_at` anywhere in the tree, and `status` one of
+
+      slice         the pool is a strict, discriminating subset of the corpus
+      sweep         pool >= DRIFT_SWEEP_FRACTION of the corpus: a rebuild
+                    re-stamped the tree, so the window selects everything
+      stale         nothing was created inside the window — `newest_fact` says
+                    since when (the drift twin of `corrections_stale_since`)
+      empty_corpus  no entity dirs at all
+    """
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(days=days)
+    census = {"corpus": 0, "undated": 0, "newest_fact": None, "pool": 0,
+              "fraction": None, "status": "empty_corpus", "window_days": days}
+    try:
+        entries = list(FACTS_ROOT.iterdir())
+    except OSError:
+        return [], census
+    newest_all: datetime.datetime | None = None
+    ranked: list[tuple[datetime.datetime, str]] = []
+    for child in entries:
+        try:
+            if not child.is_dir() or child.name.startswith((".", "_")):
+                continue
+        except OSError:
+            continue
+        census["corpus"] += 1
+        newest = _newest_fact_created(child)
+        if newest is None:
+            census["undated"] += 1
+            continue
+        if newest_all is None or newest > newest_all:
+            newest_all = newest
+        if newest < cutoff:
+            continue
+        ranked.append((newest, child.name))
+    ranked.sort(key=lambda pair: (-pair[0].timestamp(), pair[1]))
+    census["pool"] = len(ranked)
+    census["newest_fact"] = newest_all.isoformat() if newest_all else None
+    if census["corpus"]:
+        census["fraction"] = round(len(ranked) / census["corpus"], 4)
+        census["status"] = ("stale" if not ranked else
+                            "sweep" if len(ranked) >= DRIFT_SWEEP_FRACTION * census["corpus"]
+                            else "slice")
+    candidates = [{"entity": name, "source": "drift",
+                   "evidence": ("fact created "
+                                f"{newest.astimezone(datetime.timezone.utc):%Y-%m-%d %H:%M}Z")}
+                  for newest, name in ranked]
+    return candidates, census
+
+
 def _drift_candidates(days: int = DRIFT_WINDOW_DAYS) -> list[dict]:
-    """Every entity with a fact file written inside `days`, newest write first.
+    """Every entity with a fact row created inside `days`, newest first.
 
     This is the whole ranked candidate pool, untruncated, and it exists as a
     function of its own so a run can name the denominator it selected from:
     `read_drift_signals` returns a `limit`-sized prefix of this list, and
     #699's complaint was that nothing in the record said what the prefix was a
-    prefix *of*.
+    prefix *of*. `_drift_scan` returns the same list with the census that says
+    what the pool is a share of.
 
-    Fact-file mtimes, not `facts_idx.created_at`: the index records when a
-    fact was *written into the graph*, and the whole tree was rebuilt on
-    09-03, so every backfilled row carries a rebuild date. Directory mtimes
-    would be wrong too — they only move when a file is added or removed, and
-    the nightly extractor rewrites in place. The tree walk is 0.4 s over
-    23,625 entity dirs on the live box.
+    Per-fact `created_at`, not file or directory mtimes (#1461). The nightly
+    rebuild rewrites the whole fact tree, so every file's mtime sat inside a
+    3-day window by construction: on 2026-09-25 11,806 of 11,807 entity dirs
+    were "drift", the pool was the corpus, and the 40 scanned were whichever
+    dirs the rebuild wrote last. A row's `created_at` moves only when a writer
+    adds that row. A full re-extraction still re-stamps every row — then the
+    pool really is the corpus, and the census names it a `sweep` rather than
+    letting it pass as a selection. The walk reads the fact files' front
+    matter by regex, not the store's `facts_idx`, so the signal follows
+    `FACTS_ROOT` wherever a test or a rebuild points it and needs no store.
 
-    Order is newest write first, ties broken by name so the ranking is
+    Order is newest `created_at` first, ties broken by name so the ranking is
     reproducible across runs. Sorting by name and truncating — which is what
     this did until #699 — made the nightly `--limit 40` the ASCII-earliest 40 of
     the drifted pool (1,594 entities measured 2026-09-15), the same 40 on three
@@ -490,30 +590,11 @@ def _drift_candidates(days: int = DRIFT_WINDOW_DAYS) -> list[dict]:
     20260914-210026 are set-identical), and that drift slice shared 0 of 38
     entities with the 38 most-recently-written ones.
     """
-    cutoff = datetime.datetime.now().timestamp() - days * 86400
-    try:
-        entries = list(FACTS_ROOT.iterdir())
-    except OSError:
-        return []
-    ranked: list[tuple[float, str]] = []
-    for child in entries:
-        try:
-            if not child.is_dir() or child.name.startswith((".", "_")):
-                continue
-            newest = max((p.stat().st_mtime for p in child.glob("*.md")), default=0)
-            if newest < cutoff:
-                continue
-        except OSError:
-            continue
-        ranked.append((newest, child.name))
-    ranked.sort(key=lambda pair: (-pair[0], pair[1]))
-    return [{"entity": name, "source": "drift",
-             "evidence": f"fact file written {datetime.datetime.fromtimestamp(newest):%Y-%m-%d %H:%M}"}
-            for newest, name in ranked]
+    return _drift_scan(days)[0]
 
 
 def read_drift_signals(days: int = DRIFT_WINDOW_DAYS, limit: int = 50) -> list[dict]:
-    """The `limit` entities whose fact files were written most recently.
+    """The `limit` entities whose newest fact row was created most recently.
 
     This is the only automatic quality signal the store itself emits: a fact
     written this week is a claim about a world that has moved since. It is not
@@ -551,10 +632,11 @@ def _collect_signals(sources=("corrections", "drift"), days: int = DRIFT_WINDOW_
     out: list[dict] = []
     seen: set[str] = set()
     drift_candidates_total: int | None = None
+    census: dict | None = None
     if "corrections" in wanted:
         out.extend(read_correction_signals(limit=limit, window_days=corrections_days))
     if "drift" in wanted:
-        candidates = _drift_candidates(days)
+        candidates, census = _drift_scan(days)
         drift_candidates_total = len(candidates)
         out.extend(candidates[:limit])
     deduped = []
@@ -565,7 +647,20 @@ def _collect_signals(sources=("corrections", "drift"), days: int = DRIFT_WINDOW_
         deduped.append(sig)
         if len(deduped) >= limit:
             break
-    return deduped, {"drift_candidates_total": drift_candidates_total}
+    return deduped, {"drift_candidates_total": drift_candidates_total,
+                     **_drift_tally(census)}
+
+
+def _drift_tally(census: dict | None) -> dict:
+    """The drift census as run-record keys; every value None when drift was not
+    consulted, because a run that walked no tree measured no corpus (#1461)."""
+    census = census or {}
+    return {"drift_corpus_total": census.get("corpus"),
+            "drift_pool_fraction": census.get("fraction"),
+            "drift_status": census.get("status"),
+            "drift_newest_fact": census.get("newest_fact"),
+            "drift_undated_dirs": census.get("undated"),
+            "drift_window_days": census.get("window_days")}
 
 
 def collect_signals(sources=("corrections", "drift"), days: int = DRIFT_WINDOW_DAYS,
@@ -1186,7 +1281,7 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
     if entities:
         signals = [{"entity": e, "source": "explicit", "evidence": "named by caller"}
                    for e in entities]
-        tally = {"drift_candidates_total": None}
+        tally = {"drift_candidates_total": None, **_drift_tally(None)}
     else:
         signals, tally = _collect_signals(sources=sources, days=days, limit=limit,
                                           corrections_days=corrections_days)
@@ -1299,6 +1394,17 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         # from this JSON alone. None = drift was not consulted (explicit
         # entities, or `--sources corrections`).
         "drift_candidates_total": tally["drift_candidates_total"],
+        # What that pool is a share of (#1461). `drift_corpus_total` is every
+        # entity dir walked and `drift_pool_fraction` the pool over it, so a
+        # pool that IS the corpus (a rebuild re-stamped every row) reads as
+        # `drift_status: sweep`, and an empty one as `stale` with the newest
+        # fact's date — the drift twin of `corrections_stale_since`.
+        "drift_corpus_total": tally["drift_corpus_total"],
+        "drift_pool_fraction": tally["drift_pool_fraction"],
+        "drift_status": tally["drift_status"],
+        "drift_newest_fact": tally["drift_newest_fact"],
+        "drift_undated_dirs": tally["drift_undated_dirs"],
+        "drift_window_days": tally["drift_window_days"],
         "entities": [s["entity"] for s in signals],
         "actions_planned": planned,
         "actions_taken": taken,
@@ -1353,8 +1459,10 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
             record_obj["record_error"] = str(exc)
 
     logger.info(
-        "improve(%s): signals=%d drift_candidates=%s planned=%d taken=%d active_facts %d -> %d%s",
+        "improve(%s): signals=%d drift_candidates=%s/%s (%s) planned=%d taken=%d "
+        "active_facts %d -> %d%s",
         "apply" if apply else "dry-run", len(signals), tally["drift_candidates_total"],
+        tally["drift_corpus_total"], tally["drift_status"],
         planned, taken, before, after,
         "" if record_obj.get("fact_entity_recall") is None
         else f" fact_entity_recall={record_obj['fact_entity_recall']}")

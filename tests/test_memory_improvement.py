@@ -209,17 +209,32 @@ def test_drift_signal_finds_the_tree_a_writer_touched_today(world):
     found = fi.read_drift_signals(days=3)
     assert [s["entity"] for s in found] == ["FRESH"], found
     assert found[0]["source"] == "drift"
+    # #1461: the backdated mtimes above no longer decide anything. Freshen
+    # STALE's file the way the nightly rebuild does — rewritten, rows unchanged
+    # — and it is still not drift: its newest row was created 60 days ago.
+    os.utime(stale_file, None)
+    os.utime(facts_root / "STALE", None)
+    found = fi.read_drift_signals(days=3)
+    assert [s["entity"] for s in found] == ["FRESH"], found
 
 
 def test_collect_signals_dedupes_by_entity(world):
     facts_root, st, vault_root = world
     _write_facts(facts_root, "TTS", "state",
-                 [{"fact": "TTS built-in voices return 500 errors.", "created_at": _days_ago(4)}])
+                 [{"fact": "TTS built-in voices return 500 errors.", "created_at": _days_ago(1)}])
     _reindex(st, facts_root)
+    # Both sources must name TTS for the dedupe to be exercised: a row created
+    # yesterday (drift reads `created_at` since #1461, and this row used to be
+    # drift only through its file mtime) and a dated, in-window correction (an
+    # undated heading names no entity since #802).
     (vault_root / "memory" / "corrections.md").write_text(
-        "## TTS regression\n**Correction:** TTS broke again.\n", encoding="utf-8")
+        f"## {_ago(1)} 07:00 PDT — TTS regression\n**Correction:** TTS broke again.\n",
+        encoding="utf-8")
+    assert "TTS" in {s["entity"] for s in fi.read_drift_signals(days=3)}
+    assert "TTS" in {s["entity"] for s in fi.read_correction_signals()}
     signals = fi.collect_signals(sources=("corrections", "drift"))
     assert sum(1 for s in signals if s["entity"] == "TTS") == 1
+    assert signals[0]["source"] == "corrections", signals
 
 
 # ── 1b. #699: the drift slice must be the newest writes, and its size stated ──
@@ -238,7 +253,12 @@ def test_collect_signals_dedupes_by_entity(world):
 
 
 def _aged(facts_root, entity, days=0, hours=0):
-    """Backdate one entity's fact file so its drift mtime is explicit.
+    """Backdate every fact row of one entity so its drift age is explicit.
+
+    Stamps each row's `created_at` — the field the drift signal reads since
+    #1461 — and deliberately leaves the file mtime at "just now": the rewrite
+    here is what the nightly rebuild does to every file, so a fixture that
+    passes with fresh mtimes is one the mtime signal could not have passed.
 
     Fails when `entity` matches no fact file. A helper that silently no-ops on a
     missed target leaves that entity freshly written, so a fixture meaning "this
@@ -246,14 +266,20 @@ def _aged(facts_root, entity, days=0, hours=0):
     keeps passing while pinning nothing — the review rung of this item's first
     round found the helper doing exactly that, and clause 5 is the guard.
     """
-    import os
-    stamp = (datetime.now() - timedelta(days=days, hours=hours)).timestamp()
+    stamp = _days_ago(days, hours=hours)
     paths = list((facts_root / entity).glob("*.md"))
     assert paths, (
         f"_aged({entity!r}) matched no *.md under {facts_root}, so the intended "
         f"backdating never happened and that entity is still freshly written")
     for path in paths:
-        os.utime(path, (stamp, stamp))
+        text = path.read_text(encoding="utf-8")
+        end = text.index("\n---", 3)
+        fm = yaml.safe_load(text[3:end])
+        assert fm.get("facts"), f"{path} carries no fact rows to backdate"
+        for row in fm["facts"]:
+            row["created_at"] = stamp
+        path.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}{text[end + 1:]}",
+                        encoding="utf-8")
 
 
 def _five_drifted(facts_root, st):
@@ -396,6 +422,127 @@ def test_corrections_outrank_drift_when_every_drift_write_is_newer(world):
     signals = fi.collect_signals(sources=("corrections", "drift"), days=3, limit=2)
     assert [(s["entity"], s["source"]) for s in signals] == [
         ("TTS", "corrections"), ("BBB", "drift")], signals
+
+
+# ── 1b'. #1461: drift reads per-fact created_at, and names a sweep or a stall ──
+#
+# The nightly rebuild rewrites the whole fact tree, so on 2026-09-25 11,806 of
+# 11,807 entity dirs had a file modified inside the 3-day window: the "drift
+# pool" was the corpus and `scanned=40 of 11806` named the tree, not a slice.
+# The inverse was silent: a rebuild stopped for >3 days would print
+# `signals=0` and exit 0. Every tree below is written in the test, so every
+# file's mtime is "now" — the rebuild's shape — and only `created_at` differs.
+
+def _dated_tree(facts_root, st, recent=(), old=()):
+    """Entities with rows created 2 h ago (`recent`) and 30 days ago (`old`)."""
+    for name in recent:
+        _write_facts(facts_root, name, "state",
+                     [{"fact": f"{name} is running.", "created_at": _days_ago(0, hours=2)}])
+    for name in old:
+        _write_facts(facts_root, name, "state",
+                     [{"fact": f"{name} is running.", "created_at": _days_ago(30)}])
+    _reindex(st, facts_root)
+
+
+def _cli(monkeypatch, capsys, *argv):
+    spec = importlib.util.spec_from_file_location("fact_improvement_cli_1461", _SCRIPT_PATH)
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    monkeypatch.setattr(sys, "argv", ["fact-improvement.py", *argv])
+    code = cli.main()
+    return code, capsys.readouterr().out
+
+
+def test_drift_pool_is_a_strict_subset_when_only_mtimes_are_fresh(world):
+    """Clause 1: five dirs rewritten just now, two with rows created inside the
+    window. The mtime signal called all five drift; the pool is the two."""
+    facts_root, st, _ = world
+    _dated_tree(facts_root, st, recent=("NEW1", "NEW2"), old=("OLD1", "OLD2", "OLD3"))
+
+    candidates, census = fi._drift_scan(3)
+    assert sorted(c["entity"] for c in candidates) == ["NEW1", "NEW2"], candidates
+    assert census["corpus"] == 5 and census["pool"] == 2, census
+    assert census["fraction"] == 0.4 and census["status"] == "slice", census
+
+    rec = fi.run_improvement(sources=("drift",), days=3, limit=40, record=False)
+    assert rec["drift_candidates_total"] == 2
+    assert rec["drift_corpus_total"] == 5
+    assert rec["drift_pool_fraction"] == 0.4
+    assert rec["drift_status"] == "slice"
+
+
+def test_a_pool_that_is_the_corpus_is_named_a_sweep(world, capsys, monkeypatch):
+    """Clause 2: when every dir has a row created in the window (a rebuild
+    re-stamped them), the count line carries the fraction and stdout says
+    `sweep` — `of 5 drift candidates` alone read as a selection."""
+    facts_root, st, _ = world
+    _dated_tree(facts_root, st, recent=("A1", "A2", "A3", "A4", "A5"))
+
+    code, out = _cli(monkeypatch, capsys, "--sources", "drift", "--limit", "2")
+    assert code == 0, out
+    assert "entities scanned=2 of 5 drift candidates (5/5 entity dirs = 100.00% of the corpus)" \
+        in out, out
+    assert "[drift] sweep: 5 of 5 entity dirs" in out, out
+    assert "[drift] 0 candidates" not in out, out
+
+
+def test_an_empty_pool_prints_a_stale_line_not_a_bare_zero(world, capsys, monkeypatch):
+    """Clause 3: nothing created inside the window across a populated tree is
+    a stopped writer. The record says `stale` with the newest row's date, and
+    stdout says so beside the counts — the drift twin of #802's corrections
+    line."""
+    facts_root, st, _ = world
+    _dated_tree(facts_root, st, old=("OLD1", "OLD2"))
+
+    rec = fi.run_improvement(sources=("drift",), days=3, record=False)
+    assert rec["drift_candidates_total"] == 0 and rec["signals"] == 0
+    assert rec["drift_status"] == "stale", rec["drift_status"]
+    assert rec["drift_newest_fact"][:10] == _days_ago(30)[:10], rec["drift_newest_fact"]
+
+    code, out = _cli(monkeypatch, capsys, "--sources", "drift")
+    assert "[drift] 0 candidates in window: no fact created in the last 3 days " \
+           "across 2 entity dirs; stale since " + _days_ago(30)[:10] in out, out
+    assert "[drift] sweep" not in out, out
+
+
+def test_a_discriminating_pool_prints_neither_drift_caveat(world, capsys, monkeypatch):
+    """The two caveats are verdicts, not decoration: a real slice prints the
+    fraction and no `[drift]` line at all."""
+    facts_root, st, _ = world
+    _dated_tree(facts_root, st, recent=("NEW1",), old=("OLD1", "OLD2", "OLD3"))
+
+    code, out = _cli(monkeypatch, capsys, "--sources", "drift")
+    assert "entities scanned=1 of 1 drift candidates (1/4 entity dirs = 25.00% of the corpus)" \
+        in out, out
+    assert "[drift]" not in out, out
+
+
+def test_drift_census_is_null_when_drift_was_not_consulted(world):
+    """A run that walked no tree measured no corpus: every census key is None,
+    never 0, for explicit entities and for `--sources corrections`."""
+    facts_root, st, _ = world
+    _dated_tree(facts_root, st, recent=("NEW1",))
+    for rec in (fi.run_improvement(entities=["NEW1"], record=False),
+                fi.run_improvement(sources=("corrections",), record=False)):
+        for key in ("drift_candidates_total", "drift_corpus_total", "drift_pool_fraction",
+                    "drift_status", "drift_newest_fact", "drift_undated_dirs"):
+            assert rec[key] is None, (key, rec[key])
+
+
+def test_drift_reads_front_matter_rows_only_and_counts_undated_dirs(world):
+    """A `created_at:` line in the rendered body is not a row, and a dir whose
+    rows carry no `created_at` at all is counted `undated`, never drift."""
+    facts_root, st, _ = world
+    _write_facts(facts_root, "KEYLESS", "state",
+                 [{"fact": "KEYLESS has no stamp.", "created_at": OMIT}])
+    body = facts_root / "KEYLESS" / "KEYLESS-state.md"
+    body.write_text(body.read_text(encoding="utf-8")
+                    + f"\ncreated_at: '{_days_ago(0)}'\n", encoding="utf-8")
+    _dated_tree(facts_root, st, recent=("NEW1",))
+
+    candidates, census = fi._drift_scan(3)
+    assert [c["entity"] for c in candidates] == ["NEW1"], candidates
+    assert census["undated"] == 1 and census["corpus"] == 2, census
 
 
 # ── 1c. #802: the corrections window, its threading, and its stale marker ────
