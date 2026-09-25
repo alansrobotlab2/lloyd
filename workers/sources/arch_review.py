@@ -25,20 +25,36 @@ Two kinds of unit, because the docs are not all the same shape:
 
 Three properties decide whether this is safe, and they are the whole module:
 
-* **Every review edits production.** `~/lloyd` is the running tree, so a saved
-  file is a deploy. `Write` is denied — the doc already exists and `Edit` is
-  the only verb needed. Every other path the turn touched — anywhere in this
-  repo, and anywhere in the vault except `backlog/`, where its filings belong,
-  and `autonomy/`, whose task files are the scheduler's bookkeeping (#1296) —
-  is reverted after the turn from a `git status` baseline taken before it, and
-  a path that was *already* dirty is reported by content hash rather than
-  reverted, because somebody else is mid-edit on it. What a `git status` sweep
-  can never see is an **ignored** path, so the tools that write one
-  (`fact_*` under `_pipeline/`, `memory_*`) are denied outright rather than
-  swept. The doc's own diff is bounded
-  (`max_delta_lines`, `max_shrink_pct`, front matter intact) and a group's diff
-  must land inside its own section. Whatever survives all of that, the
-  **source** commits — the model never runs `git`.
+* **A review edits a scratch checkout, and only a commit reaches production**
+  (#1462). `~/lloyd` is the running tree, so a saved file is a deploy; until
+  2026-09-25 the turn edited it in place, and a half-rewritten doc sat live —
+  embedded by qmd, recallable, dirt in the landing path — for the whole turn,
+  stranded by any backend death. Now `execute` cuts a detached worktree at live
+  HEAD under the automod state dir (never `~/lloyd-work`, where autocode counts
+  worktrees as open rounds) and hands the turn that path as `Repository:`. The
+  worktree is removed in a `finally`, and one a killed backend left behind is
+  swept on the next tick. `Write` is denied — the doc already exists and
+  `Edit` is the only verb needed. Every other path the turn touched in the
+  worktree is recorded and reverted; in the vault — except `backlog/`, where
+  its filings belong, and `autonomy/`, whose task files are the scheduler's
+  bookkeeping (#1296) — it is reverted from a `git status` baseline taken
+  before the turn, and a path that was *already* dirty is reported by content
+  hash rather than reverted, because somebody else is mid-edit on it. On the
+  live tree the turn's OWN writes — the entries its session left in the
+  per-turn change ledger — are reverted file by file, the ledger refusing any
+  file that moved since the turn wrote it; everything else that changed there
+  (a human, a landing, a Bash write the ledger never saw) is reported, never
+  reverted. What a `git status` sweep can never see is an
+  **ignored** path, so the tools that write one (`fact_*` under `_pipeline/`,
+  `memory_*`) are denied outright rather than swept. The doc's own diff is
+  bounded (`max_delta_lines`, `max_shrink_pct`, front matter intact) and a
+  group's diff must land inside its own section. Whatever survives all of
+  that, the **source** commits onto live `main` — under the automod lock, and
+  only while the live doc (HEAD, index and working tree) still holds the blob
+  the review started from; a doc that moved under the review is a
+  `commit_conflict`, never an overwrite. A commit a drain or the lock holds
+  off keeps the reviewed content in the state dir, not as dirt on live, and
+  the next tick commits it. The model never runs `git`.
 * **A finding is filed, not fixed.** The turn may change one doc and nothing
   else. A skill with a phantom tool name, an unbounded autonomy step, a dead
   consumer: those become `arch-review` drafts, tagged `spawned-by-review`, and
@@ -66,6 +82,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import subprocess
 import time
@@ -199,7 +216,23 @@ DEFAULT_BATCH = 2
 BIG_DOC_LINES = 600
 
 STATE_FILENAME = "arch_review.json"
+#: Where the review turn's scratch checkouts live, under the automod state dir.
+#: NOT `~/lloyd-work`: autocode counts every worktree there as an open round
+#: (`autocode._loop_worktrees`), so a review checkout there would hold a slot.
+WORKTREE_DIRNAME = "arch-review-worktrees"
+#: Reviewed doc content waiting for a commit a drain or the lock held off.
+PENDING_DIRNAME = "arch-review-pending"
+#: Reviewed doc content whose live doc moved under the review — kept, so a
+#: human can read what the review wanted, and never written over live.
+CONFLICT_DIRNAME = "arch-review-conflicts"
 _GIT_TIMEOUT = 60
+
+#: Worktrees an `execute` in THIS process is using. Both the tick that sweeps
+#: stale ones and the executes that cut them run in the backend process, so a
+#: set in memory is exactly the liveness that matters: a backend death kills
+#: the turn and empties the set together, and everything left on disk is then
+#: stale by construction.
+_ACTIVE_WORKTREES: set[str] = set()
 
 
 # ── The picklist ─────────────────────────────────────────────────────────────
@@ -835,7 +868,13 @@ do not ask for confirmation — nobody answers questions here.]
 Review ONE unit of Lloyd's `architecture/` documentation against the tree it \
 describes, then fix that one doc and file everything else.
 
-Repository: {root} (this is PRODUCTION — a saved file is a deploy)
+Repository: {root}
+  A scratch checkout of production at {head}, made for this review and deleted \
+after it. Edit the doc HERE; this job's runner commits it onto production for \
+you. Production itself is {live} — read it if you must, never write to it: a \
+change there is not yours to make, is not reverted, and is recorded against \
+this review. Tools that run code (the venv, `pytest`) live in production: \
+`{live}/.venvs/lloyd/bin/python`.
 Head commit: {head}
 Last reviewed: {last_reviewed}
 
@@ -911,7 +950,7 @@ deleted, a broken front matter block, or {section_bound_hint} — and the whole 
 doc edit is thrown away, while your filed items survive. Stay well inside it.
 
 Every file you write other than that one doc is reverted after the turn — \
-anywhere in this repository, and anywhere in the vault except `backlog/`, \
+anywhere in this checkout, and anywhere in the vault except `backlog/`, \
 where your filings belong, and `autonomy/`, whose task files are the \
 scheduler's bookkeeping and are spared a revert while still being named in the \
 run record. A file that was already modified before your turn \
@@ -991,7 +1030,10 @@ config keys rather than on the prose.
 def build_prompt(unit: dict, *, head: str, last_reviewed: str, doc_lines: int,
                  section: tuple[int, int] | None, heading: str, already_filed: list[dict],
                  groups_config: list[str] | None, spawn_cap: int, max_delta_lines: int,
-                 max_shrink_pct: int, today: str, root: Path) -> str:
+                 max_shrink_pct: int, today: str, root: Path,
+                 live: Path | None = None) -> str:
+    """The review prompt. `root` is the scratch checkout the turn edits in and
+    `live` the production tree it must not touch (#1462)."""
     kind, slug = unit["kind"], unit["doc"]
     is_group = kind == "group"
     if is_group and section:
@@ -1011,6 +1053,7 @@ def build_prompt(unit: dict, *, head: str, last_reviewed: str, doc_lines: int,
               "added or dropped — that is a finding: file it.\n</groups_config>\n")
     return PROMPT.format(
         root=str(root),
+        live=str(live or repo_root()),
         head=head or "unknown",
         last_reviewed=last_reviewed or "never",
         unit_block=unit_block,
@@ -1173,7 +1216,11 @@ def _git_ok(repo: Path, *args: str) -> tuple[bool, str]:
 
 
 def commit_doc(root: Path, rel: str, message: str) -> tuple[bool, str]:
-    """Commit exactly one doc to `main`, or say why not.
+    """Commit exactly one doc's live working-tree content to `main`, or say why not.
+
+    Since #1462 this pays only a `pending_commit` written before the review
+    moved into a scratch worktree — one whose doc was left dirty on live. A
+    review's own content is committed by `commit_reviewed`.
 
     Two things hold it off. A **landing drain** means the promoter is idling
     the backend to restart it, and a commit into that window moves HEAD under
@@ -1206,6 +1253,233 @@ def commit_doc(root: Path, rel: str, message: str) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def _safe_name(unit: str) -> str:
+    """A unit id as one filename component (`group:workers-jobs:Distil` →
+    `group-workers-jobs-Distil`)."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(unit)).strip("-")[:120] or "unit"
+
+
+def _state_subdir(name: str) -> Path:
+    from scripts.automod import state as S
+    return S.STATE_DIR / name
+
+
+def worktree_parent() -> Path:
+    return _state_subdir(WORKTREE_DIRNAME)
+
+
+def cut_worktree(live: Path, unit: str) -> tuple[Optional[Path], str, str]:
+    """`(path, base_sha, error)` — a detached checkout of live HEAD for one turn.
+
+    Detached, so it holds no branch and a `git branch` in production shows
+    nothing. Reviewing code at HEAD in a checkout is reviewing live: the health
+    routes the prompt names are the live backend's either way.
+    """
+    base = _git(live, "rev-parse", "HEAD").strip()
+    if not base:
+        return None, "", f"cannot read HEAD of {live}"
+    parent = worktree_parent()
+    parent.mkdir(parents=True, exist_ok=True)
+    path = parent / f"{_safe_name(unit)}-{int(time.time())}"
+    ok, err = _git_ok(live, "worktree", "add", "--detach", str(path), base)
+    if not ok:
+        return None, base, f"git worktree add failed: {err}"
+    _ACTIVE_WORKTREES.add(str(path))
+    return path, base, ""
+
+
+def remove_worktree(live: Path, path: Path) -> None:
+    """Remove one review checkout and its registration. Never raises."""
+    _ACTIVE_WORKTREES.discard(str(path))
+    _git_ok(live, "worktree", "remove", "--force", str(path))
+    if path.exists():
+        import shutil
+        shutil.rmtree(path, ignore_errors=True)
+    _git_ok(live, "worktree", "prune")
+
+
+def sweep_stale_worktrees(live: Path | None = None) -> list[str]:
+    """Remove review checkouts no `execute` in this process is using.
+
+    What a backend killed mid-turn leaves behind. Only this job's own
+    directory is touched, so a round's worktree can never be swept here.
+    """
+    live = live or repo_root()
+    parent = worktree_parent()
+    if not parent.is_dir():
+        return []
+    removed = []
+    for child in sorted(parent.iterdir()):
+        if str(child) in _ACTIVE_WORKTREES or not child.is_dir():
+            continue
+        remove_worktree(live, child)
+        removed.append(child.name)
+    if removed:
+        logger.info("arch-review: swept %d stale review worktree(s): %s",
+                    len(removed), ", ".join(removed[:3]))
+    return removed
+
+
+def _under_dir(real: str, root: Path) -> Optional[str]:
+    """`real` relative to `root` (both realpath'd), or None when outside it."""
+    try:
+        return str(Path(real).relative_to(Path(os.path.realpath(root))))
+    except ValueError:
+        return None
+
+
+def revert_live_ledger_writes(session_id: str, live: Path, wt: Path) -> list[dict]:
+    """Revert the review turn's OWN writes to the live tree, file by file.
+
+    The turn is told to edit its scratch checkout, but it is handed Bash and
+    `Edit` and the production path is in its context; a write into `~/lloyd`
+    by absolute path is the one stray the checkout cannot absorb. A `git
+    status` sweep of live cannot tell that write from a human's or a landing's
+    made during the same minutes, so it only reports — and the per-turn change
+    ledger (`agent_mcp/_change_ledger.py`) is what can tell them apart: it
+    names exactly the files this session's `Edit`/`Write` calls touched, with
+    the pre-image. `_change_ledger.revert` refuses a file whose content moved
+    since the turn wrote it, so a human's later edit is never undone; a refusal
+    is reported by name, never forced.
+
+    Every turn directory of the session is walked, not one turn id: the session
+    is minted for this review alone (`run_prompt_in_session` creates it), and
+    the turn id never comes back to the caller. Entries under the checkout are
+    skipped — those are the review's work — and so is anything outside live
+    (the vault keeps its own sweep). A Bash write leaves no ledger entry and
+    stays in the report-only half.
+    """
+    if not session_id:
+        return []
+    try:
+        from agent_mcp import _change_ledger as CL
+    except Exception as exc:  # noqa: BLE001 — no ledger means report-only, as before
+        logger.warning("arch-review: change ledger unavailable: %s", exc)
+        return []
+    base = CL.turn_dir(session_id, "_").parent
+    if not base.is_dir():
+        return []
+    out: list[dict] = []
+    for tdir in sorted(p for p in base.iterdir() if p.is_dir()):
+        turn_id = tdir.name
+        paths = []
+        for row in CL.list_changes(session_id, turn_id):
+            real = str(row.get("real") or "")
+            if not real or _under_dir(real, wt) is not None:
+                continue
+            if _under_dir(real, live) is None:
+                continue
+            paths.append(real)
+        if not paths:
+            continue
+        for res in CL.revert(session_id, turn_id, paths):
+            rel = _under_dir(str(res.get("real") or ""), live) or str(res.get("path"))
+            status = str(res.get("status") or "")
+            if status in ("restored", "deleted"):
+                action = f"reverted via change ledger ({status})"
+            elif status == "refused":
+                action = f"refused by change ledger: {res.get('reason')}; not reverted"
+            else:
+                action = f"change ledger {status}: {res.get('reason')}"
+            out.append({"repo": live.name, "path": rel, "action": action,
+                        "turn_id": turn_id})
+    return out
+
+
+def _blob_sha(data: bytes) -> str:
+    """The git blob id of `data`, computed as git does — no subprocess."""
+    return hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest()
+
+
+def _live_doc_blobs(live: Path, rel: str) -> dict[str, str]:
+    """The live doc's blob in HEAD, in the index and in the working tree.
+
+    All three, because `git commit -- <rel>` commits the working-tree file
+    whatever the index holds: a human's staged-but-uncommitted change to the
+    doc would be swept into the review's commit by a HEAD-only check.
+    """
+    head = _git(live, "rev-parse", f"HEAD:{rel}").strip()
+    staged = _git(live, "ls-files", "-s", "--", rel).split()
+    index = staged[1] if len(staged) >= 2 else ""
+    try:
+        work = _blob_sha((live / rel).read_bytes())
+    except OSError:
+        work = ""
+    return {"head": head, "index": index, "work": work}
+
+
+def commit_reviewed(live: Path, rel: str, content: bytes, base_blob: str,
+                    message: str) -> tuple[str, str]:
+    """Land reviewed doc content on live `main`, or say why not.
+
+    Returns `(outcome, detail)`: `committed` with the sha, `deferred` (a
+    landing drain or the automod lock — try again next tick), `conflict`
+    (the live doc moved since the review's base: never overwritten), `noop`
+    (live already holds exactly this content), or `failed`.
+
+    Under the lock, the live doc's HEAD, index and working-tree blobs must all
+    still equal `base_blob`. Then the content is written and committed with a
+    pathspec and no `git add`, touching no other file and no human's staged
+    index. A failed commit puts the file back to HEAD, so live is never left
+    dirty by this job.
+    """
+    from scripts.automod import state as S
+    try:
+        from app.routers.automod import drain_active
+    except Exception:  # noqa: BLE001 — no backend here means no drain to respect
+        drain_active = lambda: False  # noqa: E731
+    if drain_active():
+        return "deferred", "a landing is draining the backend"
+    want = _blob_sha(content)
+    try:
+        with S.Lock(owner=f"{NAME} commit"):
+            blobs = _live_doc_blobs(live, rel)
+            if blobs["head"] == want and blobs["index"] == want and blobs["work"] == want:
+                return "noop", "live already holds the reviewed content"
+            moved = {k: v for k, v in blobs.items() if v != base_blob}
+            if moved:
+                return "conflict", (
+                    f"live {rel} changed since the review's base {base_blob[:12]}: "
+                    + ", ".join(f"{k} {v[:12] or 'absent'}" for k, v in sorted(moved.items())))
+            target = live / rel
+            tmp = target.with_name(f".{target.name}.arch-review.tmp")
+            try:
+                tmp.write_bytes(content)
+                tmp.replace(target)
+            except OSError as exc:
+                tmp.unlink(missing_ok=True)
+                return "failed", f"could not write {rel}: {exc}"
+            ok, err = _git_ok(live, "commit", "-q", "-m", message, "--", rel)
+            if not ok:
+                _git(live, "checkout", "--", rel)
+                return "failed", f"git commit failed: {err}"
+            return "committed", _git(live, "rev-parse", "HEAD").strip()
+    except S.LockHeld as exc:
+        return "deferred", str(exc)
+
+
+def store_pending(unit: str, rel: str, content: bytes, base_blob: str, message: str) -> dict:
+    """Keep reviewed content in the state dir until a later tick commits it."""
+    d = _state_subdir(PENDING_DIRNAME)
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{_safe_name(unit)}.md"
+    path.write_bytes(content)
+    return {"rel": rel, "message": message, "content_path": str(path),
+            "base_blob": base_blob}
+
+
+def keep_conflict(unit: str, content: bytes) -> str:
+    """Save the content of a review whose live doc moved, for a human to read."""
+    d = _state_subdir(CONFLICT_DIRNAME)
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{_safe_name(unit)}-{int(time.time())}.md"
+    try:
+        path.write_bytes(content)
+    except OSError:
+        return ""
+    return str(path)
+
+
 def _commit_message(unit: str, doc_status: str) -> str:
     return f"arch-review: {unit} — {doc_status}"
 
@@ -1216,6 +1490,11 @@ def commit_pending(state: dict, root: Path | None = None) -> list[dict]:
     Deliberately at the *top* of `enqueue_if_due` rather than on a timer: the
     tick is the only thing that runs regularly, and a doc waiting to be
     committed is the one piece of this job's output that is not yet durable.
+
+    A pending row carries `content_path` and `base_blob` since #1462, and is
+    committed from that stored content through `commit_reviewed`, with the
+    same conflict rule as the turn's own commit. A row from before then names
+    only `rel` — its doc was left dirty on live — and is paid by `commit_doc`.
     """
     root = root or repo_root()
     done: list[dict] = []
@@ -1227,8 +1506,37 @@ def commit_pending(state: dict, root: Path | None = None) -> list[dict]:
         if not rel:
             row.pop("pending_commit", None)
             continue
-        ok, detail = commit_doc(root, rel, str(pending.get("message") or
-                                               _commit_message(unit, "current")))
+        message = str(pending.get("message") or _commit_message(unit, "current"))
+        content_path = pending.get("content_path")
+        if content_path:
+            try:
+                content = Path(content_path).read_bytes()
+            except OSError as exc:
+                row.pop("pending_commit", None)
+                done.append({"unit": unit, "commit": "", "doc": rel,
+                             "note": f"stored content unreadable: {exc}"})
+                continue
+            outcome, detail = commit_reviewed(root, rel, content,
+                                              str(pending.get("base_blob") or ""), message)
+            if outcome == "deferred":
+                continue
+            row.pop("pending_commit", None)
+            Path(content_path).unlink(missing_ok=True)
+            if outcome == "committed":
+                row["reviewed_commit"] = detail
+                done.append({"unit": unit, "commit": detail, "doc": rel})
+                logger.info("arch-review: committed deferred %s as %s", rel, detail[:12])
+            elif outcome == "conflict":
+                row["commit_conflict"] = detail
+                kept = keep_conflict(unit, content)
+                done.append({"unit": unit, "commit": "", "doc": rel,
+                             "conflict": detail, "kept": kept})
+                logger.warning("arch-review: deferred %s not committed — %s (kept at %s)",
+                               rel, detail, kept)
+            else:
+                done.append({"unit": unit, "commit": "", "doc": rel, "note": detail})
+            continue
+        ok, detail = commit_doc(root, rel, message)
         if ok:
             row["pending_commit"] = None
             row.pop("pending_commit", None)
@@ -1264,6 +1572,9 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     not need better verdicts, it needs an edge cut.
     """
     now = time.time()
+    # A review checkout a killed backend left behind (#1462). Before anything
+    # can return early: the sweep is the only thing that removes one.
+    await asyncio.to_thread(sweep_stale_worktrees)
     state = await asyncio.to_thread(load_state)
     committed = await asyncio.to_thread(commit_pending, state)
     if committed:
@@ -1367,7 +1678,7 @@ def _prepare(unit: dict, root: Path) -> dict:
 
 async def execute(item: QueueItem) -> dict[str, Any]:
     from workers.sources import get_sources_config
-    from scripts.automod import backlog as B, state as S
+    from scripts.automod import backlog as B
 
     payload = item.payload or {}
     unit_key = str(payload.get("unit") or "")
@@ -1377,41 +1688,68 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     if not unit_key or not slug:
         return {"status": "failed", "summary": "queue item carries no unit"}
     src_cfg = get_sources_config().get(NAME, {}) or {}
-    root = repo_root()
+    live = repo_root()
+    base = {"unit": unit_key, "kind": kind, "doc": slug, "name": name}
+    rel = f"{ARCH_DIRNAME}/{slug}.md"
+
+    # 0. A human editing this doc on live right now. Not the unit's fault and
+    #    not an attempt: parking a unit because somebody had the file open
+    #    would make the picklist stall on exactly the docs being worked on. It
+    #    is checked before a worktree is cut, since a review of a doc about to
+    #    change would only end in a commit conflict.
+    before_live = await asyncio.to_thread(_porcelain, live)
+    if rel in before_live:
+        return {"status": "skipped", "summary": f"{unit_key}: {rel} has uncommitted edits",
+                "meta": {**base, "doc_dirty": True}}
+
+    # 1. The scratch checkout the turn works in (#1462). A failure to cut one
+    #    is infrastructure, not the unit's: no attempt, the unit stays due.
+    wt, base_sha, cut_error = await asyncio.to_thread(cut_worktree, live, unit_key)
+    if wt is None:
+        logger.warning("arch-review %s: %s — leaving the unit due", unit_key, cut_error)
+        return {"status": "failed", "summary": f"{unit_key}: {cut_error}"[:500],
+                "meta": {**base, "infra": True}}
+    try:
+        return await _review_in(wt, live, base_sha, item, payload, src_cfg, base,
+                                before_live, B)
+    finally:
+        await asyncio.to_thread(remove_worktree, live, wt)
+
+
+async def _review_in(wt: Path, live: Path, base_sha: str, item: QueueItem, payload: dict,
+                     src_cfg: dict, base: dict, before_live: set[str], B) -> dict[str, Any]:
+    """One review turn in the scratch checkout `wt`, committed onto `live`."""
+    from scripts.automod import state as S
+
+    unit_key, kind, slug, name = base["unit"], base["kind"], base["doc"], base["name"]
     spawn_cap = int(payload.get("spawn_cap") or src_cfg.get("spawn_cap", DEFAULT_SPAWN_CAP))
     max_delta = int(payload.get("max_delta_lines")
                     or src_cfg.get("max_delta_lines", DEFAULT_MAX_DELTA_LINES))
     max_shrink = int(payload.get("max_shrink_pct")
                      or src_cfg.get("max_shrink_pct", DEFAULT_MAX_SHRINK_PCT))
-    base = {"unit": unit_key, "kind": kind, "doc": slug, "name": name}
 
-    # 1. Resolve the unit. A doc that is gone or a heading that has been
-    #    renamed is the unit's own problem and counts an attempt — three of
-    #    them park it until a human fixes the config list or the doc.
-    prep = await asyncio.to_thread(_prepare, {"doc": slug, "kind": kind, "name": name}, root)
+    # 2. Resolve the unit, in the checkout. A doc that is gone or a heading
+    #    that has been renamed is the unit's own problem and counts an attempt
+    #    — three of them park it until a human fixes the config list or the doc.
+    prep = await asyncio.to_thread(_prepare, {"doc": slug, "kind": kind, "name": name}, wt)
     if prep["error"]:
         n = await asyncio.to_thread(_count_attempt, unit_key, prep["error"])
         logger.warning("arch-review %s: %s (attempt %d)", unit_key, prep["error"], n)
         return {"status": "failed", "summary": f"{unit_key}: {prep['error']}"[:500],
                 "meta": {**base, "attempts": n}}
     rel, section, heading = prep["rel"], prep["section"], prep["heading"]
+    base_blob = await asyncio.to_thread(lambda: _git(wt, "rev-parse", f"HEAD:{rel}").strip())
 
-    # 2. Baselines, in both trees. `-uall` so an untracked directory is never
-    #    one entry that would be deleted wholesale on the way out.
-    before_lloyd = await asyncio.to_thread(_porcelain, root)
+    # 3. Baselines. The checkout is fresh, so its baseline is whatever git
+    #    reports there now (normally nothing). The vault keeps its old sweep
+    #    exactly: it cannot be sandboxed. Live is fingerprinted too, so a
+    #    rewrite of a path already dirty there is reported (#915).
+    before_wt = await asyncio.to_thread(_porcelain, wt)
     before_vault = await asyncio.to_thread(vault_dirty, VAULT_ROOT)
-    # Content, not just presence: a path already dirty can never show up in
-    # `after - before`, so without this the turn could rewrite one freely (#915).
-    fp_lloyd = await asyncio.to_thread(fingerprints, root, before_lloyd)
+    fp_live = await asyncio.to_thread(fingerprints, live, before_live)
     fp_vault = await asyncio.to_thread(fingerprints, VAULT_ROOT, before_vault)
-    if rel in before_lloyd:
-        # A human is editing this doc right now. Not the unit's fault and not
-        # an attempt: parking a unit because somebody had the file open would
-        # make the picklist stall on exactly the docs being worked on.
-        return {"status": "skipped", "summary": f"{unit_key}: {rel} has uncommitted edits",
-                "meta": {**base, "doc_dirty": True}}
 
-    # 3. The spawn floor, before the turn — an id at or below it that the turn
+    # 4. The spawn floor, before the turn — an id at or below it that the turn
     #    claims is a merge, not a filing (`B.split_claimed`).
     id_floor = await asyncio.to_thread(B.max_item_id)
     already = await asyncio.to_thread(open_review_items, slug, name if kind == "group" else "")
@@ -1423,9 +1761,9 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         section=section, heading=heading, already_filed=already,
         groups_config=groups_cfg if kind == "doc" else None,
         spawn_cap=spawn_cap, max_delta_lines=max_delta, max_shrink_pct=max_shrink,
-        today=datetime.now(timezone.utc).strftime("%Y-%m-%d"), root=root)
+        today=datetime.now(timezone.utc).strftime("%Y-%m-%d"), root=wt, live=live)
 
-    # 4. The session.
+    # 5. The session.
     run: dict = {}
     timed_out = ""
     try:
@@ -1437,7 +1775,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
             final_schema=ARCH_REVIEW_SCHEMA,
             final_schema_prompt=FINAL_SCHEMA_PROMPT)
     except DrainActive as exc:
-        # A landing owns the backend. Nothing was written, so nothing to undo.
+        # A landing owns the backend. Nothing was written, so nothing to undo;
+        # the checkout goes with the `finally`.
         return {"status": "skipped", "summary": f"landing in progress: {exc}"[:500],
                 "meta": {**base, "drain_active": True}}
     except TurnTimeout as exc:
@@ -1446,35 +1785,51 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         timed_out = str(exc)
 
     session_id = str(run.get("session_id") or "")
+    if not session_id and timed_out:
+        # A timed-out turn returns no `run`; `TurnTimeout` names the session in
+        # its message, and the live-write revert below needs it most here.
+        m = re.search(r"worker turn in (\S+) exceeded", timed_out)
+        session_id = m.group(1) if m else ""
     text = str(run.get("text") or "")
     stop_reason = run.get("stop_reason")
 
-    # 5. Stray writes — everything but the one doc, in both trees.
-    after_lloyd = await asyncio.to_thread(_porcelain, root)
+    # 6. Stray writes. In the checkout, everything but the one doc is recorded
+    #    and reverted (it is discarded anyway; the record is the point). In the
+    #    vault, exactly as before. On live, precisely what THIS TURN wrote is
+    #    reverted, off its own change ledger — the per-file record with the
+    #    pre-image, which refuses a file somebody wrote after the turn did —
+    #    and anything else that changed on live during the turn is REPORTED,
+    #    never reverted: a human, a landing or a nightly must not lose the write.
+    strays = await asyncio.to_thread(revert_live_ledger_writes, session_id, live, wt)
+    ledgered = {s["path"] for s in strays}
+    after_wt = await asyncio.to_thread(_porcelain, wt)
     after_vault = await asyncio.to_thread(vault_dirty, VAULT_ROOT)
-    strays = await asyncio.to_thread(revert_strays, root, before_lloyd, after_lloyd, {rel})
+    after_live = await asyncio.to_thread(_porcelain, live)
+    strays += await asyncio.to_thread(revert_strays, wt, before_wt, after_wt, {rel})
     strays += await asyncio.to_thread(revert_strays, VAULT_ROOT, before_vault, after_vault)
-    # Reported, never reverted — see `modified_preexisting`. The doc is exempt
-    # in this repo: a human editing it sends the unit down the `doc_dirty`
-    # path before the turn ever starts, so any change here is the turn's own.
-    strays += await asyncio.to_thread(modified_preexisting, root, fp_lloyd, {rel})
+    strays += [{"repo": live.name, "path": p,
+                "action": "reported (changed on live during the turn; not reverted)"}
+               for p in sorted(after_live - before_live) if p not in ledgered]
+    # Reported, never reverted — see `modified_preexisting`. A path the ledger
+    # already answered for is not reported twice.
+    strays += [r for r in await asyncio.to_thread(modified_preexisting, live, fp_live)
+               if r["path"] not in ledgered]
     strays += await asyncio.to_thread(modified_preexisting, VAULT_ROOT, fp_vault)
 
-    # 6. The doc's own diff, against the bounds. Parsed first, because whether
-    #    a large deletion is allowed depends on the status the turn assigned.
+    # 7. The doc's own diff, in the checkout, against the bounds. Parsed first,
+    #    because whether a large deletion is allowed depends on the status.
     parsed = parse_result(text, run.get("structured"), kind)
     status = (parsed or {}).get("doc_status") or ""
     changed, reject = await asyncio.to_thread(
-        check_doc_bound, root, rel,
+        check_doc_bound, wt, rel,
         max_delta_lines=max_delta, max_shrink_pct=max_shrink,
         allow_shrink=status in ("superseded", "aspirational"),
         section=section if kind == "group" else None)
     if changed and reject:
-        await asyncio.to_thread(_git, root, "checkout", "--", rel)
         changed = False
         logger.warning("arch-review %s: doc edit rejected — %s", unit_key, reject)
 
-    # 7. Infra-shaped: the harness never got a completion. Not the unit's
+    # 8. Infra-shaped: the harness never got a completion. Not the unit's
     #    fault, so it costs no attempt and the unit stays due.
     if not timed_out and not text.strip() and stop_reason is None:
         errs = "; ".join(str(e)[:160] for e in (run.get("errors") or [])[:2])
@@ -1484,7 +1839,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                 "meta": {**base, "session_id": session_id, "infra": True,
                          "stray_writes": strays}}
 
-    # 8. Verify what it claims it filed.
+    # 9. Verify what it claims it filed.
     filed_claim = list((parsed or {}).get("filed") or [])
     spawned, merged = await asyncio.to_thread(
         B.split_claimed, filed_claim, id_floor=id_floor, self_id=0)
@@ -1501,27 +1856,49 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     appended = list((parsed or {}).get("appended_to") or [])
     over_cap = max(0, len(filed) - spawn_cap)
 
-    # 9. Commit the one doc.
-    commit_sha, commit_note = "", ""
+    # 10. Commit the one doc onto live — only a timed-out turn's half edit is
+    #     never committed. A drain or the lock defers it with the content kept
+    #     in the state dir; a live doc that moved is a conflict, never an
+    #     overwrite.
+    commit_sha, commit_note, commit_conflict, conflict_kept = "", "", "", ""
+    if changed and timed_out:
+        changed = False
+        commit_note = "turn timed out; half edit not committed"
     if changed:
+        content = await asyncio.to_thread((wt / rel).read_bytes)
         message = _commit_message(unit_key, status or "reviewed")
-        ok, detail = await asyncio.to_thread(commit_doc, root, rel, message)
-        if ok:
+        outcome, detail = await asyncio.to_thread(
+            commit_reviewed, live, rel, content, base_blob, message)
+        if outcome == "committed":
             commit_sha = detail
+        elif outcome == "deferred":
+            commit_note = detail
+            pending = await asyncio.to_thread(
+                store_pending, unit_key, rel, content, base_blob, message)
+            await asyncio.to_thread(_touch_state, unit_key, pending_commit=pending)
+            logger.info("arch-review %s: commit of %s deferred to the next tick (%s)",
+                        unit_key, rel, detail)
+        elif outcome == "conflict":
+            commit_conflict = detail
+            conflict_kept = await asyncio.to_thread(keep_conflict, unit_key, content)
+            logger.warning("arch-review %s: %s — not committed, kept at %s",
+                           unit_key, detail, conflict_kept)
+        elif outcome == "noop":
+            changed = False
+            commit_note = detail
         else:
             commit_note = detail
-            await asyncio.to_thread(
-                _touch_state, unit_key, pending_commit={"rel": rel, "message": message})
-            logger.info("arch-review %s: leaving %s dirty for the next tick (%s)",
-                        unit_key, rel, detail)
+            logger.warning("arch-review %s: commit of %s failed — %s", unit_key, rel, detail)
 
-    # 10. The record. A timeout is a real attempt: the turn had its budget.
+    # 11. The record. A timeout is a real attempt: the turn had its budget.
     now_iso = _now_iso()
     event = {"event": "arch_review", "unit": unit_key, "kind": kind, "doc": slug,
              "name": name, "verdict": status or None,
              "grouping": (parsed or {}).get("grouping"),
              "doc_updated": bool(changed), "doc_update_rejected": reject or "",
              "commit": commit_sha, "commit_deferred": commit_note,
+             "commit_conflict": commit_conflict, "conflict_kept": conflict_kept,
+             "base": base_sha, "base_blob": base_blob, "worktree": str(wt),
              "filed": filed, "filed_unverified": unverified, "merged": merged,
              "appended_to": appended, "spawn_cap": spawn_cap,
              "spawned_over_cap": over_cap, "id_floor": id_floor,
@@ -1548,7 +1925,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         last_reviewed_at=now_iso, reviewed_commit=(commit_sha or prep["head"]),
         verdict=status or None, grouping=(parsed or {}).get("grouping"),
         filed=filed, attempts=0, last_attempt_at=now_iso, last_error="",
-        section_missing=False)
+        section_missing=False, commit_conflict=commit_conflict or None)
 
     bits = [f"{unit_key}: {status or 'no verdict'}"]
     if (parsed or {}).get("grouping"):
@@ -1557,8 +1934,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         bits.append(f"doc committed {commit_sha[:12]}")
     elif reject:
         bits.append(f"doc edit rejected ({reject})")
+    elif commit_conflict:
+        bits.append(f"doc not committed: {commit_conflict}")
     elif commit_note:
-        bits.append(f"doc left dirty ({commit_note})")
+        bits.append(f"doc commit deferred ({commit_note})")
     if filed:
         bits.append("filed " + ", ".join(f"#{i}" for i in filed))
     if merged:
@@ -1568,16 +1947,17 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     if unverified:
         bits.append(f"{len(unverified)} unverified id(s)")
     if strays:
-        bits.append(f"{len(strays)} stray write(s) reverted")
+        bits.append(f"{len(strays)} stray write(s)")
     return {
         "status": "success",
         "summary": ", ".join(bits)[:500],
-        "artifact_path": str(root / rel),
+        "artifact_path": str(live / rel),
         "response": text,
         "meta": {**base, "session_id": session_id, "verdict": status,
                  "grouping": (parsed or {}).get("grouping"),
                  "doc_updated": bool(changed), "doc_update_rejected": reject or "",
                  "commit": commit_sha, "commit_deferred": commit_note,
+                 "commit_conflict": commit_conflict, "conflict_kept": conflict_kept,
                  "filed": filed, "filed_unverified": unverified, "merged": merged,
                  "appended_to": appended, "stray_writes": strays,
                  "stop_reason": stop_reason, "num_turns": run.get("num_turns"),

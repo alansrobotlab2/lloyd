@@ -1559,10 +1559,13 @@ restated in prose; the first one that was went stale the same day. `architecture
 is the long version.
 
 The turn checks the unit's claims against the tree and the health routes,
-reviews the code it names, **edits that one doc**, and files everything else
-as `arch-review` drafts. Four rails decide what survives, and they are the
-whole design: every path the turn touched other than the doc — in this repo
-and anywhere in the vault bar `backlog/` — is reverted against a
+reviews the code it names, **edits that one doc** — in a detached scratch
+checkout of live HEAD under the automod state dir, never in `~/lloyd` (#1462;
+the turn's own live writes are reverted off its change ledger, a ledger refusal
+or any other live change is reported, never forced) — and files
+everything else as `arch-review` drafts. Four rails decide what survives, and
+they are the whole design: every path the turn touched other than the doc — in
+the checkout and anywhere in the vault bar `backlog/` — is reverted against a
 `git status` baseline taken *before* the turn (a diff, never a snapshot, or a
 human's open editor buffer goes with it), while a path *already* dirty is
 reported by content hash rather than reverted, since somebody else is mid-edit
@@ -1573,8 +1576,11 @@ over 400 changed lines, over 30% deleted (waived for a `superseded` banner),
 or with the front matter gone; a **group** edit must land inside its own
 `## ` section, by old-side `git diff -U0` hunks, so the seven groups sharing
 `autonomy-jobs.md` cannot re-open each other's text; and the **source**
-commits, under the automod lock and never during a landing drain — the model
-is denied `Write` and told never to run `git`. A rejected doc edit does not
+commits onto live, under the automod lock and never during a landing drain,
+only while the live doc still holds the review's base blob (else
+`commit_conflict`, never an overwrite; a deferred commit waits in the state
+dir, not as dirt on live) — the model is denied `Write` and told never to run
+`git`. A rejected doc edit does not
 unfile the findings.
 
 `spawned-by-review` is read three ways and they disagree on purpose: merged at

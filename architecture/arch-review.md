@@ -27,9 +27,9 @@ It is deliberately one fifth of the machinery an earlier plan called for. That
 plan built a registry parsed from the docs' own tables, bundles, churn-driven
 cadence and three revert nets, and almost all of it protected against one
 thing: *the model editing a production doc*. This version keeps the edit and
-replaces the nets with a `git status` diff taken either side of the turn, two
-numbers from `git diff --numstat`, and a commit the source makes rather than
-the model.
+replaces the nets with a scratch checkout the turn edits in (since #1462), a
+`git status` diff taken either side of the turn, two numbers from
+`git diff --numstat`, and a commit the source makes rather than the model.
 
 ## 1. The picklist is the scheduler
 
@@ -74,11 +74,26 @@ is what survives the state file being deleted.
 
 State is `~/.local/state/lloyd-automod/arch_review.json`, one row per unit:
 `last_reviewed_at`, `reviewed_commit`, `verdict`, `filed`, `attempts`,
-`last_attempt_at`, `last_error`, `pending_commit`.
+`last_attempt_at`, `last_error`, `pending_commit`, `commit_conflict`.
 
-## 2. Every review edits production, and four rails decide what survives
+## 2. A review edits a scratch checkout, and four rails decide what reaches live
 
-`~/lloyd` is the running tree: a saved file is a deploy. What the turn may not
+`~/lloyd` is the running tree: a saved file is a deploy. Until 2026-09-25 the
+turn edited it in place — on 09-24 `workers-jobs.md` sat dirty on live `main`
+for 20+ minutes mid-review (21 edits): embedded by qmd's watcher, recallable,
+dirt in the landing path, stranded by any backend death, and a human who opened
+the doc mid-turn would have had their edits committed under `arch-review:`
+(#1462). Now `execute` cuts a **detached worktree at live HEAD** under
+`~/.local/state/lloyd-automod/arch-review-worktrees/` and hands the turn that
+path as `Repository:`; production is named in the prompt as read-only.
+Reviewing code at HEAD in a checkout is reviewing live, and the health routes
+are the live backend's either way. Not under `~/lloyd-work`: autocode counts
+every worktree there as an open round. The checkout is removed in a
+`finally` (success, drain, timeout, exception), and one a killed backend left
+behind is swept at the top of the next tick — `_ACTIVE_WORKTREES` is an
+in-memory set, so a restart empties it together with the turns it described.
+
+What the turn may not
 use is a **deny-list over the whole chat toolbox**, not a grant list:
 `workers/sources/_common.py:592-600` says outright that a worker
 session "is handed exactly the toolbox a chat gets", and `DISALLOWED`
@@ -91,15 +106,31 @@ readers and `backlog_write_task`; **what is left of the chat toolbox is still
 live**, `memory_add` and the `fact_*` writers among them, and those write vault
 paths §2.1's sweep never looks at (#709).
 
-1. **A `git status` diff, not a snapshot.** Baselines are taken in `~/lloyd`
-   and across the vault except `backlog/` *before* the turn, with
-   `--untracked-files=all` so an untracked directory is never one entry to
-   delete wholesale. Afterwards, every path that appeared and is not the doc is
-   reverted: tracked back to HEAD, untracked unlinked. A snapshot would revert
-   a human's open editor buffer; a diff cannot — and the limit of that trade is
-   that a path already dirty *before* the turn cannot appear, so a stray edit to
-   one (a vault `autonomy/*.md` task file, which the scheduler dirties on nearly
-   every run) is neither reverted nor reported (#915). `backlog/` is
+1. **A `git status` diff, not a snapshot.** Baselines are taken in the
+   checkout, on live and across the vault except `backlog/` *before* the turn,
+   with `--untracked-files=all` so an untracked directory is never one entry to
+   delete wholesale. Afterwards, every path that appeared in the checkout or
+   the vault and is not the doc is reverted: tracked back to HEAD, untracked
+   unlinked (in the checkout that is moot — it is deleted — but the record is
+   the point). A snapshot would revert a human's open editor buffer; a diff
+   cannot. A path already dirty *before* the turn is fingerprinted and a
+   rewrite of it is reported, never reverted (#915); a vault `autonomy/*.md`
+   task file is the scheduler's and is kept (#1296). **On live, the turn's
+   own writes are reverted precisely, everything else is reported.** A
+   `git status` diff of live cannot tell a model's write into `~/lloyd` by
+   absolute path from a human's, a landing's or a nightly's made in the same
+   minutes, so live is not swept. The per-turn change ledger can:
+   `revert_live_ledger_writes` walks every turn of the review's own session
+   under `sessions/<sid>.changes/` (the session is minted for this review, and
+   the turn id never returns to the caller), takes each entry whose realpath is
+   under live and not under the checkout, and reverts it through
+   `_change_ledger.revert` — pre-image restored, a create removed
+   (`reverted via change ledger (restored|deleted)`). The ledger refuses a file
+   whose content moved since the turn wrote it, and a refusal is reported by
+   name (`refused by change ledger: …; not reverted`), never forced. A live
+   path that changed but is in no ledger entry — a human's edit, a Bash write,
+   which the ledger does not see — is reported
+   (`changed on live during the turn; not reverted`). `backlog/` is
    deliberately outside the sweep, because filing is the job.
 2. **The doc's own diff is bounded.** More than `max_delta_lines` (400)
    changed lines is a rewrite, not a correction. More than `max_shrink_pct`
@@ -117,15 +148,23 @@ paths §2.1's sweep never looks at (#709).
    editable. Zero context is load-bearing: with context a one-line edit reports
    a hunk reaching three lines into the neighbour, and seven groups sharing
    [[autonomy-jobs]] would reject each other constantly.
-4. **The source commits, the model never runs `git`.** One `git commit -m … --
-   <doc>` with a pathspec and no `git add`, so it commits that file's
-   working-tree content and touches neither another file nor a human's
-   partially staged index. It runs under `scripts.automod.state.Lock`
-   (non-blocking) and only when `app.routers.automod.drain_active()` is False —
-   a commit inside the promoter's idle window moves HEAD under a round that is
-   mid-merge. Either refusal leaves the doc dirty with `pending_commit` on its
-   state row, and the next tick pays it; the automod loop tolerates dirt
-   disjoint from a round's own diff, so a waiting doc stalls nothing.
+4. **The source commits onto live, the model never runs `git`.** The bound
+   checks run on the checkout's diff; what survives is carried to live by
+   `commit_reviewed`. Under `scripts.automod.state.Lock` (non-blocking) and
+   only when `app.routers.automod.drain_active()` is False — a commit inside
+   the promoter's idle window moves HEAD under a round that is mid-merge — it
+   requires the live doc's blob in HEAD, the index **and** the working tree to
+   still equal the review's base blob, writes the reviewed content, and runs
+   one `git commit -m … -- <doc>` with a pathspec and no `git add`. Live HEAD
+   having moved for other files is fine; the doc having moved is a
+   `commit_conflict`: never an overwrite, recorded on the event and the state
+   row, and the reviewed content kept under `arch-review-conflicts/` for a
+   human to read. A drain or the lock **defers**: the content goes to
+   `arch-review-pending/<unit>.md` with `pending_commit {rel, message,
+   content_path, base_blob}`, live stays clean, and the next tick commits it
+   under the same conflict rule. A pending row from before #1462 (only
+   `rel`, doc dirty on live) is still paid by `commit_doc`. A turn that timed
+   out never has its half edit committed.
 
 A rejected doc edit does **not** unfile the findings. The two halves of a
 review are independent, and losing four real findings because the fifth
@@ -213,7 +252,8 @@ review.
   a SKILL.md, an unbounded autonomy step, a dead consumer: all filed. This is
   the rule most likely to look like waste and is the reason the sweep in §2.1
   exists — the model is told it, *and* the tree enforces it. The sweep covers
-  `~/lloyd` whole-tree and the whole vault bar `backlog/`; what it cannot cover
+  the checkout whole-tree and the whole vault bar `backlog/`, and watches live;
+  what it cannot cover
   is a **gitignored** path, since `git status` does not report one, so the
   tools that write under `_pipeline/` (`fact_*`) or to `lloyd/MEMORY.md`
   (`memory_*`) are denied instead (#709).

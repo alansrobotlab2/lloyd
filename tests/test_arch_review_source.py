@@ -133,6 +133,11 @@ def tree(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "LEDGER_PATH", state / "promotions.jsonl")
     monkeypatch.setattr(S, "LOCK_PATH", state / "lock")
     monkeypatch.setattr(B, "BACKLOG_DIR", vault / "backlog")
+    # The per-turn change ledger the live-write revert reads (#1462): a tmp
+    # root and an empty in-memory cache, so no test reads another's turns.
+    from agent_mcp import _change_ledger as CL
+    monkeypatch.setattr(CL, "CHANGES_ROOT", tmp_path / "sessions")
+    CL.reset()
     return {"repo": repo, "vault": vault, "state": state, "arch": arch,
             "backlog": vault / "backlog", "ledger": state / "promotions.jsonl"}
 
@@ -172,14 +177,62 @@ def _block(status="current", updated="yes", grouping="none", filed="none", appen
                         filed=filed, appended=appended)
 
 
+def _snapshot(repo: Path) -> dict[str, bytes]:
+    """Every file under `repo` except `.git`, by repo-relative path."""
+    return {str(p.relative_to(repo)): p.read_bytes() for p in repo.rglob("*")
+            if p.is_file() and ".git" not in p.relative_to(repo).parts}
+
+
+def _move_into_checkout(live: Path, wt: Path, before: dict[str, bytes]) -> None:
+    """Carry what `edits()` wrote under `live` over to the checkout `wt`, and
+    put `live` back as it was.
+
+    The stand-in edits are written against `tree["repo"]` paths because that is
+    where the fixtures' `Path`s point; a model is handed the checkout as its
+    `Repository:` (#1462), and this is the move that makes the stand-in edit
+    where the model does. `live_edits` bypass it — a write that stays on
+    production is the case the live watch exists for.
+    """
+    after = _snapshot(live)
+    for rel in sorted(set(before) | set(after)):
+        if before.get(rel) == after.get(rel):
+            continue
+        dst = wt / rel
+        if rel in after:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(after[rel])
+        else:
+            dst.unlink(missing_ok=True)
+        src = live / rel
+        if rel in before:
+            src.write_bytes(before[rel])
+        else:
+            src.unlink()
+
+
 def _turn(text: str, *, edits=None, raises: Exception | None = None,
-          stop_reason: str = "stop", structured=None):
-    """A stand-in session that really writes, so the git rails see real files."""
+          stop_reason: str = "stop", structured=None, live_edits=None):
+    """A stand-in session that really writes, so the git rails see real files.
+
+    `edits` land in the scratch checkout the prompt names (see
+    `_move_into_checkout`); `live_edits` land on the live tree, as a human's or
+    a landing's write during the turn would."""
     async def run(prompt, **kwargs):
+        import re as _re
         run.prompt = prompt
         run.kwargs = kwargs
+        m = _re.search(r"^Repository: (\S+)", prompt, _re.M)
+        run.worktree = Path(m.group(1)) if m else None
+        live = A.repo_root()
+        run.live_status_during_turn = None
         if edits is not None:
+            before = _snapshot(live)
             edits()
+            if run.worktree is not None and run.worktree != live:
+                _move_into_checkout(live, run.worktree, before)
+        if live_edits is not None:
+            live_edits()
+        run.live_status_during_turn = _git(live, "status", "--porcelain")
         if raises is not None:
             raise raises
         return {"text": text, "session_id": "20260911_archrevi_ab12",
@@ -971,8 +1024,13 @@ async def test_a_held_automod_lock_defers_the_commit_to_the_next_tick(tree, monk
     with S.Lock(owner="a round"):
         out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
     assert out["meta"]["commit"] == "" and out["meta"]["commit_deferred"]
-    assert "Body line one." in doc.read_text(), "the edit is kept, dirty"
-    assert A.load_state()["doc:memory"]["pending_commit"]["rel"] == "architecture/memory.md"
+    # #1462: the reviewed content waits in the state dir, not as dirt on live.
+    assert "Body line one." not in doc.read_text()
+    assert _git(tree["repo"], "status", "--porcelain") == "", "live is left clean"
+    pending = A.load_state()["doc:memory"]["pending_commit"]
+    assert pending["rel"] == "architecture/memory.md"
+    assert "Body line one." in Path(pending["content_path"]).read_text()
+    assert pending["content_path"].startswith(str(tree["state"]))
 
     # The lock is gone; the next tick owes the commit and pays it.
     state = A.load_state()
@@ -980,7 +1038,10 @@ async def test_a_held_automod_lock_defers_the_commit_to_the_next_tick(tree, monk
     A.save_state(state)
     assert [d["unit"] for d in done] == ["doc:memory"]
     assert _git(tree["repo"], "log", "-1", "--format=%s").strip().startswith("arch-review:")
+    assert "Body line one." in doc.read_text(), "committed from the stored content"
+    assert _git(tree["repo"], "status", "--porcelain") == ""
     assert "pending_commit" not in A.load_state()["doc:memory"]
+    assert not Path(pending["content_path"]).exists(), "the stored content is spent"
 
 
 async def test_a_landing_drain_defers_the_commit(tree, monkeypatch):
@@ -996,7 +1057,9 @@ async def test_a_landing_drain_defers_the_commit(tree, monkeypatch):
     assert A.load_state()["doc:memory"]["pending_commit"]
 
 
-def test_a_deferred_commit_someone_else_resolved_is_dropped(tree):
+def test_a_legacy_deferred_commit_someone_else_resolved_is_dropped(tree):
+    """A `pending_commit` from before #1462 names only `rel` (its doc was left
+    dirty on live) and is still paid — or dropped — by `commit_doc`."""
     state = {"doc:memory": {"pending_commit": {"rel": "architecture/memory.md",
                                                "message": "arch-review: doc:memory — current"}}}
     done = A.commit_pending(state, tree["repo"])
@@ -1276,3 +1339,287 @@ async def test_an_untouched_dirty_path_is_not_reported(tree, monkeypatch):
 def test_fingerprints_skips_what_it_cannot_read(tree):
     fp = A.fingerprints(tree["repo"], ["README.md", "does-not-exist.md", "../escape.md"])
     assert set(fp) == {"README.md"}
+
+
+# ── 9. #1462: the turn edits a scratch checkout; only a commit reaches live ───
+#
+# Until 2026-09-25 the review turn edited `~/lloyd` in place: a half-rewritten
+# doc sat live for the whole turn (21 edits, uncommitted 20+ minutes on
+# `workers-jobs.md` on 09-24), a backend death stranded it, and a human who
+# opened the doc mid-turn had their edits committed under `arch-review:`.
+
+
+async def test_live_is_clean_for_the_whole_turn_and_the_doc_lands_by_commit(tree, monkeypatch):
+    """Acceptance 1: the stand-in edits the doc; while the turn runs, live
+    shows nothing, and the edit reaches live only as the commit."""
+    run = _turn(_block(), edits=_edit(_doc(tree), "Body line 1.", "Body line one."))
+    monkeypatch.setattr(A, "run_prompt_in_session", run)
+    out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+
+    assert run.worktree is not None and run.worktree != tree["repo"]
+    assert str(run.worktree).startswith(str(tree["state"] / A.WORKTREE_DIRNAME)), (
+        "under the automod state dir, never ~/lloyd-work where autocode counts rounds")
+    assert run.live_status_during_turn == "", "nothing attributable to the review on live"
+    assert f"Production itself is {tree['repo']}" in run.prompt
+    assert "(this is PRODUCTION" not in run.prompt
+    assert out["meta"]["commit"], out["meta"]
+    assert "Body line one." in _doc(tree).read_text()
+    assert _git(tree["repo"], "status", "--porcelain") == ""
+    assert _git(tree["repo"], "show", "--name-only", "--format=", "HEAD").split() == \
+        ["architecture/memory.md"]
+
+
+async def test_the_checkout_is_removed_after_every_ending(tree, monkeypatch):
+    """Success, a drain and a timeout all leave no checkout and no registration."""
+    for turn in (_turn(_block()),
+                 _turn("", raises=DrainActive("landing")),
+                 _turn("", raises=TurnTimeout("exceeded"))):
+        monkeypatch.setattr(A, "run_prompt_in_session", turn)
+        await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+        assert turn.worktree is not None
+        assert not turn.worktree.exists(), turn.worktree
+        assert str(turn.worktree) not in _git(tree["repo"], "worktree", "list")
+        assert not A._ACTIVE_WORKTREES
+
+
+async def test_a_doc_changed_on_live_during_the_turn_is_not_overwritten(tree, monkeypatch):
+    """Acceptance 2: a human (or a landing) edits the doc on live between the
+    review's base and its commit. The review is refused as a conflict, live
+    keeps the human's text, and the reviewed content is kept for reading."""
+    doc = _doc(tree)
+
+    def human():
+        doc.write_text(doc.read_text().replace("Body line 5.", "A human's line."))
+    monkeypatch.setattr(A, "run_prompt_in_session",
+                        _turn(_block(), edits=_edit(doc, "Body line 1.", "Body line one."),
+                              live_edits=human))
+    out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+
+    text = doc.read_text()
+    assert "A human's line." in text and "Body line one." not in text, "not overwritten"
+    assert out["meta"]["commit"] == ""
+    assert "changed since the review's base" in out["meta"]["commit_conflict"]
+    assert "Body line one." in Path(out["meta"]["conflict_kept"]).read_text()
+    ev = _arch_events(tree)[0]
+    assert ev["commit_conflict"] and ev["base_blob"]
+    assert A.load_state()["doc:memory"]["commit_conflict"]
+    assert "pending_commit" not in A.load_state()["doc:memory"]
+    reported = {s["path"]: s["action"] for s in out["meta"]["stray_writes"]}
+    assert "architecture/memory.md" in reported, "the live change is named, not reverted"
+    assert "not reverted" in reported["architecture/memory.md"]
+
+
+async def test_a_doc_committed_on_live_during_the_turn_is_a_conflict_too(tree, monkeypatch):
+    """A landing that commits the doc moves HEAD's blob, with a clean tree."""
+    doc = _doc(tree)
+
+    def landing():
+        doc.write_text(doc.read_text() + "\nLanded by a round.\n")
+        _git(tree["repo"], "commit", "-qam", "a round touched the doc")
+    monkeypatch.setattr(A, "run_prompt_in_session",
+                        _turn(_block(), edits=_edit(doc, "Body line 1.", "Body line one."),
+                              live_edits=landing))
+    out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+    assert out["meta"]["commit_conflict"]
+    assert _git(tree["repo"], "log", "-1", "--format=%s").strip() == "a round touched the doc"
+    assert "Body line one." not in doc.read_text()
+
+
+async def test_live_head_moving_elsewhere_does_not_block_the_commit(tree, monkeypatch):
+    """Only the doc's blob matters: a commit to another file during the turn
+    (a nightly, a landing) is built on, not refused."""
+    def nightly():
+        (tree["repo"] / "README.md").write_text("nightly wrote this\n")
+        _git(tree["repo"], "commit", "-qam", "nightly")
+    monkeypatch.setattr(A, "run_prompt_in_session",
+                        _turn(_block(), edits=_edit(_doc(tree), "Body line 1.", "Body line one."),
+                              live_edits=nightly))
+    out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+    assert out["meta"]["commit"] and not out["meta"]["commit_conflict"]
+    assert _git(tree["repo"], "log", "-2", "--format=%s").split("\n")[:2] == \
+        ["arch-review: doc:memory — current", "nightly"]
+    assert (tree["repo"] / "README.md").read_text() == "nightly wrote this\n"
+
+
+def test_a_staged_change_to_the_live_doc_is_a_conflict(tree):
+    """`git commit -- <doc>` commits the working tree whatever the index holds,
+    so a human's staged edit would be swept into the review's commit by a
+    HEAD-only check."""
+    doc = _doc(tree)
+    base = _git(tree["repo"], "rev-parse", "HEAD:architecture/memory.md").strip()
+    original = doc.read_text()
+    doc.write_text(original + "staged by a human\n")
+    _git(tree["repo"], "add", "architecture/memory.md")
+    doc.write_text(original)
+    outcome, detail = A.commit_reviewed(tree["repo"], "architecture/memory.md",
+                                        b"reviewed\n", base, "arch-review: x")
+    assert outcome == "conflict" and "index" in detail, detail
+
+
+def test_commit_reviewed_touches_nothing_else_and_noops_on_equal_content(tree):
+    (tree["repo"] / "README.md").write_text("a human is mid-edit\n")
+    rel = "architecture/memory.md"
+    base = _git(tree["repo"], "rev-parse", f"HEAD:{rel}").strip()
+    content = (tree["repo"] / rel).read_bytes().replace(b"Body line 2.", b"Body line two.")
+    outcome, sha = A.commit_reviewed(tree["repo"], rel, content, base, "arch-review: t")
+    assert outcome == "committed" and sha
+    assert _git(tree["repo"], "show", "--name-only", "--format=", "HEAD").split() == [rel]
+    assert (tree["repo"] / "README.md").read_text() == "a human is mid-edit\n"
+    again = A.commit_reviewed(tree["repo"], rel, content, base, "arch-review: t")
+    assert again[0] == "noop", again
+
+
+async def test_a_deferred_commit_whose_doc_moved_is_a_conflict_on_the_next_tick(
+        tree, monkeypatch):
+    """Acceptance 3's other half: the stored content is committed on a later
+    tick only while the live doc still holds the base blob."""
+    from scripts.automod import state as S
+    doc = _doc(tree)
+    monkeypatch.setattr(A, "run_prompt_in_session",
+                        _turn(_block(), edits=_edit(doc, "Body line 1.", "Body line one.")))
+    with S.Lock(owner="a round"):
+        await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+    assert _git(tree["repo"], "status", "--porcelain") == ""
+    doc.write_text(doc.read_text() + "\nA human got there first.\n")
+    _git(tree["repo"], "commit", "-qam", "human edit")
+
+    state = A.load_state()
+    done = A.commit_pending(state, tree["repo"])
+    A.save_state(state)
+    assert done and done[0]["conflict"], done
+    assert "A human got there first." in doc.read_text()
+    assert "Body line one." not in doc.read_text()
+    assert _git(tree["repo"], "log", "-1", "--format=%s").strip() == "human edit"
+    row = A.load_state()["doc:memory"]
+    assert "pending_commit" not in row and row["commit_conflict"]
+
+
+async def test_a_timed_out_turns_half_edit_is_never_committed(tree, monkeypatch):
+    monkeypatch.setattr(A, "run_prompt_in_session",
+                        _turn("", edits=_edit(_doc(tree), "Body line 1.", "half an edit"),
+                              raises=TurnTimeout("exceeded 3540s")))
+    before = _git(tree["repo"], "rev-parse", "HEAD")
+    await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+    assert _git(tree["repo"], "rev-parse", "HEAD") == before
+    assert "half an edit" not in _doc(tree).read_text()
+
+
+async def test_a_stale_checkout_is_swept_by_the_tick_and_a_live_one_is_not(tree):
+    """A backend killed mid-turn leaves its checkout behind; the next tick
+    removes it. A checkout an `execute` in this process holds is left alone."""
+    stale, _, err = A.cut_worktree(tree["repo"], "doc:memory")
+    assert stale is not None, err
+    held, _, err = A.cut_worktree(tree["repo"], "doc:voice")
+    assert held is not None, err
+    A._ACTIVE_WORKTREES.discard(str(stale))          # what a restart does to the set
+    try:
+        await A.enqueue_if_due(_Queue(), _cfg())
+        assert not stale.exists()
+        assert str(stale) not in _git(tree["repo"], "worktree", "list")
+        assert held.exists(), "an in-flight review keeps its checkout"
+    finally:
+        A.remove_worktree(tree["repo"], held)
+    assert len(_git(tree["repo"], "worktree", "list").splitlines()) == 1
+
+
+def test_the_docstring_no_longer_says_every_review_edits_production():
+    assert "Every review edits production" not in (A.__doc__ or "")
+    assert "scratch checkout" in (A.__doc__ or "")
+
+
+# ── 9b. the turn's OWN live writes are reverted, off its change ledger ───────
+
+#: The session id the stand-in turn reports (see `_turn`).
+_TURN_SID = "20260911_archrevi_ab12"
+
+
+def _ledger_write(path: Path, content: str, *, session: str = _TURN_SID,
+                  turn: str = "turn-1") -> None:
+    """Write `path` the way the aggregator's Edit/Write does: through the
+    per-turn change ledger, pre-image first, post-image hash after."""
+    import os
+    from agent_mcp import _change_ledger as CL
+    real = os.path.realpath(path)
+    pre = path.read_bytes() if path.exists() else None
+    scope = (session, turn)
+    entry = CL.begin(scope, real=real, path=str(path),
+                     op="create" if pre is None else "edit")
+    CL.snapshot_pre(scope, entry, pre)
+    path.write_text(content)
+    CL.commit(scope, entry, CL.sha256_file(real))
+
+
+async def test_a_turns_own_ledgered_write_to_live_is_reverted(tree, monkeypatch):
+    """Rail 1 kept whole: the turn writes into ~/lloyd by absolute path through
+    Edit/Write, the ledger names it, and it is put back — edited file restored,
+    created file removed — while the doc still lands by commit."""
+    readme = tree["repo"] / "README.md"
+    created = tree["repo"] / "model_made_this.py"
+
+    def model_writes_live():
+        _ledger_write(readme, "the model rewrote production\n")
+        _ledger_write(created, "x = 1\n", turn="turn-2")
+    monkeypatch.setattr(A, "run_prompt_in_session",
+                        _turn(_block(), edits=_edit(_doc(tree), "Body line 1.", "Body line one."),
+                              live_edits=model_writes_live))
+    out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+
+    assert readme.read_text() == "hello\n", "restored from the ledger's pre-image"
+    assert not created.exists(), "a create is reverted by removing it"
+    acts = {s["path"]: s["action"] for s in out["meta"]["stray_writes"]}
+    assert acts["README.md"] == "reverted via change ledger (restored)", acts
+    assert acts["model_made_this.py"] == "reverted via change ledger (deleted)", acts
+    assert out["meta"]["commit"], "the doc still lands by commit"
+    assert _git(tree["repo"], "status", "--porcelain") == ""
+
+
+async def test_a_human_live_edit_outside_the_ledger_is_reported_not_reverted(
+        tree, monkeypatch):
+    readme = tree["repo"] / "README.md"
+    monkeypatch.setattr(A, "run_prompt_in_session",
+                        _turn(_block(updated="no"),
+                              live_edits=lambda: readme.write_text("a human typed this\n")))
+    out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+    assert readme.read_text() == "a human typed this\n"
+    acts = {s["path"]: s["action"] for s in out["meta"]["stray_writes"]}
+    assert acts == {"README.md": "reported (changed on live during the turn; not reverted)"}
+
+
+async def test_a_ledgered_write_that_moved_since_is_refused_and_reported(tree, monkeypatch):
+    """The turn wrote README; a human wrote it again before the turn ended.
+    The ledger refuses (the sha moved) and the human's text survives."""
+    readme = tree["repo"] / "README.md"
+
+    def turn_then_human():
+        _ledger_write(readme, "the model rewrote production\n")
+        readme.write_text("a human wrote after the turn\n")
+    monkeypatch.setattr(A, "run_prompt_in_session",
+                        _turn(_block(updated="no"), live_edits=turn_then_human))
+    out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+    assert readme.read_text() == "a human wrote after the turn\n", "never forced"
+    acts = {s["path"]: s["action"] for s in out["meta"]["stray_writes"]}
+    assert acts["README.md"].startswith("refused by change ledger: file changed since"), acts
+    assert len([s for s in out["meta"]["stray_writes"] if s["path"] == "README.md"]) == 1
+
+
+async def test_ledger_entries_of_another_session_or_the_checkout_are_left_alone(
+        tree, monkeypatch):
+    """Only this review's session is read, and its checkout edits are the
+    review's work, not strays to revert."""
+    readme = tree["repo"] / "README.md"
+    run = _turn(_block(updated="no"),
+                live_edits=lambda: _ledger_write(readme, "someone else's chat\n",
+                                                 session="20260911_120000_chat"))
+    monkeypatch.setattr(A, "run_prompt_in_session", run)
+    out = await A.execute(_item(_payload("doc:memory", "doc", "memory")))
+    assert readme.read_text() == "someone else's chat\n"
+    acts = {s["path"]: s["action"] for s in out["meta"]["stray_writes"]}
+    assert "not reverted" in acts["README.md"]
+
+    # A ledger entry under the checkout itself is skipped.
+    wt = tree["state"] / "fake-checkout"
+    wt.mkdir()
+    (wt / "doc.md").write_text("pre\n")
+    _ledger_write(wt / "doc.md", "post\n", turn="turn-9")
+    assert A.revert_live_ledger_writes(_TURN_SID, tree["repo"], wt) == []
+    assert (wt / "doc.md").read_text() == "post\n"
