@@ -1507,9 +1507,9 @@ workers:
       # and branch; gates queue for the full test suite and the canary ports
       # (`gate-tests.lock`, `gate-canary.lock`); landings stay one at a time
       # under the automod lock, and a landing waits out the other round's
-      # turn before it pauses the pool. 2 while the board is being caught up
-      # (Alan, 2026-09-17); back to 1 afterwards. Needs a backend restart.
-      max_inflight: 4
+      # turn before it pauses the pool. 2 (Alan, 2026-09-24, once the board was
+      # cleared by hand; it was 4 during the 09-18 catch-up). Needs a backend restart.
+      max_inflight: 2
       max_duration_seconds: 3600
       # 150, not 100 — the code's own default and its reason
       # (workers/sources/autocode.py DEFAULT_MAX_TURNS): a round called
