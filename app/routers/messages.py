@@ -1230,6 +1230,13 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         session_id, max_turns=int(options.max_turns or 0),
         deadline_seconds=float(payload.get("deadline_seconds") or 0.0),
         context_meter=options.context_meter)
+    # The goal card reaches the primary through the anchor now, once the
+    # observer's concurrent extraction has it (IV plan R2).
+    if iv_observer_state is not None:
+        from app.deadline_anchor import compose_state_anchors
+        from app.routers._messages_inner_voice import goal_card_anchor
+        options.state_anchor = compose_state_anchors(
+            options.state_anchor, goal_card_anchor(iv_observer_state))
 
     _event_log.log_event(session_id, "brain1.query_started", {
         "model": model,

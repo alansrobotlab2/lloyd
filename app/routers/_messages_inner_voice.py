@@ -24,6 +24,7 @@ import usage_store
 from app import event_log as _event_log
 from app.harness import HookRegistry
 from app.paths import SESSIONS_DIR
+from app.inner_voice import guards as _guards
 from app.inner_voice import observer_prompt as _prompt
 from app.inner_voice.observer import (
     ObserverState,
@@ -274,6 +275,67 @@ def _observer_priority(options: Any, platform: str) -> int | None:
     return base
 
 
+def _goal_source_text(session_id: str, user_request: str, turn_source: str,
+                      producer_source: str = "") -> str:
+    """What the goal card is extracted from: the USER's words (IV plan R2).
+
+    2026-08-30 (session 20260830_182633_ive386): the user asked for YouTube
+    highlights, a notification landed in the same turn, the card was built
+    from the notification, and the observer then called the user's own
+    request out of scope three times and cancelled it. So injected blocks are
+    stripped, and an ambient turn (a notification, a producer, a follow-up)
+    takes its card from the last message the user actually typed — the
+    ambient text is what arrived, not what was asked. An `inner_voice_goal`
+    follow-up is the exception: its text IS the goal's next step.
+    """
+    text = _guards.strip_injected_blocks(user_request)
+    if turn_source != "ambient" or producer_source == "inner_voice_goal":
+        return text or user_request
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    try:
+        msgs = json.loads(meta_path.read_text()).get("messages") or []
+    except Exception:  # noqa: BLE001
+        return text or user_request
+    for m in reversed(msgs):
+        if m.get("role") != "user" or (m.get("source") or "user") != "user":
+            continue
+        body = m.get("content")
+        if isinstance(body, list):
+            body = "".join(c.get("text") or "" for c in body
+                           if isinstance(c, dict) and c.get("type") == "text")
+        body = _guards.strip_injected_blocks(str(body or ""))
+        if body:
+            return body
+    return text or user_request
+
+
+def goal_card_anchor(state: ObserverState):
+    """A `state_anchor` that shows the primary its goal card once it exists.
+
+    The card used to be glued onto the turn's user message before the first
+    request, which is what made extraction block the first token. Now it is
+    appended at the first iteration boundary after extraction finishes —
+    append-only, so nothing already prefilled changes. Compose it with the
+    turn's other anchors (`compose_state_anchors`).
+    """
+    delivered = {"done": False}
+
+    async def anchor(_iteration: int) -> list[dict[str, Any]]:
+        if delivered["done"] or not state.goal_card:
+            return []
+        if not _observer_cfg().get("goal_card_to_primary", True):
+            return []
+        block = _prompt.build_goal_card_block_for_primary(state.goal_card)
+        if not block:
+            return []
+        delivered["done"] = True
+        from app.deadline_anchor import ANCHOR_TAG
+        return [{"role": "user", "content": block,
+                 ANCHOR_TAG: {"kind": "goal_card", "level": "first"}}]
+
+    return anchor
+
+
 async def attach_observer_for_turn(
     *,
     session_id: str,
@@ -296,9 +358,11 @@ async def attach_observer_for_turn(
 ) -> ObserverState | None:
     """Install the observer onto `options.hooks` for one turn.
 
-    This is async because it runs goal extraction (one LLM call) before
-    the primary turn starts. Returns the ObserverState, or None if Inner
-    Voice is disabled for this session/turn source.
+    Goal extraction is started here and runs beside the primary's first
+    iteration (it used to be awaited before it). Returns the ObserverState,
+    or None if Inner Voice is disabled for this session/turn source. The
+    caller composes `goal_card_anchor(state)` into `options.state_anchor`
+    AFTER setting its own anchors, or the card never reaches the primary.
 
     Side effects:
       * Sets `options.hooks` to a fresh HookRegistry if none exists.
@@ -311,52 +375,7 @@ async def attach_observer_for_turn(
     if options.hooks is None:
         options.hooks = HookRegistry()
     options.chat_messages_handle = chat_messages_handle
-
-    # Goal extraction — one LLM call before the primary turn starts. Best-
-    # effort; on failure observer runs in lighter-touch mode (no goal card).
-    # Pass the last few user/assistant exchanges so follow-up messages
-    # ("yeah do it", "still broken") get resolved against the prior
-    # thread instead of yielding an empty goal card.
-    recent = _recent_exchanges_for_goal_extraction(
-        session_id, current_user_text=user_request,
-    )
-    goal_card = await extract_goal_card(
-        user_request, recent_exchanges=recent,
-        priority=getattr(options, "priority", None))
-
-    # Show the primary the contract it is being judged against.
-    #
-    # The card is extracted on every IV turn regardless, and until now
-    # only the observer ever read it — so the primary could be nudged
-    # toward a success criterion nobody had told it about. Appending the
-    # block to the user message the harness is about to send costs no
-    # extra call. It goes on the LAST user message specifically because
-    # the system prompt has to stay byte-stable for vLLM's prefix cache
-    # (see architecture/subliminal.md).
     cfg = _observer_cfg()
-    if cfg.get("goal_card_to_primary", True) and goal_card:
-        block = _prompt.build_goal_card_block_for_primary(goal_card)
-        if block and chat_messages_handle:
-            last = chat_messages_handle[-1]
-            if last.get("role") == "user" and isinstance(last.get("content"), str):
-                last["content"] = last["content"] + "\n\n" + block
-
-    # Surface the goal card to the UI: log a structured event so the
-    # /api/inner_voice/state endpoint can read back the most recent extraction
-    # for the session (latest_goal_card + latest_user_request).
-    try:
-        _event_log.log_event(
-            session_id,
-            "inner_voice.goal_card_extracted",
-            {
-                "user_request": user_request,
-                "goal_card": goal_card or {},
-                "turn_source": turn_source,
-            },
-            turn_id=turn_id,
-        )
-    except Exception as e:  # noqa: BLE001 — non-fatal
-        logger.warning("[iv.observer] goal_card event log failed: %s", e)
 
     prior_interventions = (
         _load_prior_turn_interventions(
@@ -379,7 +398,7 @@ async def attach_observer_for_turn(
         enqueue_ambient_callback=enqueue_ambient_callback,
         clarify_callback=clarify_callback,
         persist_intervention_callback=persist_intervention_callback,
-        goal_card=goal_card,
+        goal_card=None,
         subliminal_context=subliminal_context,
         todos=todos,
         plan_artifact=plan_artifact,
@@ -395,15 +414,46 @@ async def attach_observer_for_turn(
         source=source,
         # Observer calls are scheduled like the turn they watch — except on
         # an unattended one, which yields to anything a human is waiting on.
-        # A round's own observer at the round's priority sits in front of a
-        # chat turn's first token.
         priority=_observer_priority(options, platform),
     )
+
+    # Goal extraction runs BESIDE iteration 1, not in front of it (IV plan
+    # R2): awaited, it added up to 8 s to the first token of every observed
+    # turn. It is a pending task of the observer, so the terminal review —
+    # the one that reads the card — drains it first. The primary is shown the
+    # card by `goal_card_anchor` once it exists, appended at an iteration
+    # boundary, because the system prompt and the turn's first message are
+    # already prefilled by then.
+    goal_text = _goal_source_text(session_id, user_request, turn_source,
+                                  producer_source)
+
+    async def _extract() -> None:
+        recent = _recent_exchanges_for_goal_extraction(
+            session_id, current_user_text=user_request,
+        )
+        card = await extract_goal_card(
+            goal_text, recent_exchanges=recent,
+            priority=getattr(options, "priority", None))
+        state.goal_card = card
+        try:
+            _event_log.log_event(
+                session_id,
+                "inner_voice.goal_card_extracted",
+                {"user_request": goal_text, "goal_card": card or {},
+                 "turn_source": turn_source},
+                turn_id=turn_id,
+            )
+        except Exception as e:  # noqa: BLE001 — non-fatal
+            logger.warning("[iv.observer] goal_card event log failed: %s", e)
+
+    task = asyncio.ensure_future(_extract())
+    state.pending_tasks.add(task)
+    task.add_done_callback(state.pending_tasks.discard)
+
     logger.info(
         "[iv.observer] attached session=%s turn=%s source=%s budget=%d "
-        "goal_card=%s",
+        "goal_card=extracting",
         session_id, turn_id, turn_source, state.intervention_budget,
-        "extracted" if goal_card else "none",
     )
     return state
 
@@ -417,5 +467,6 @@ __all__ = [
     "_inner_voice_hooks_dict",
     "attach_observer_for_turn",
     "build_iv_hook_registry",
+    "goal_card_anchor",
     "close_observer",
 ]

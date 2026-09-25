@@ -591,13 +591,13 @@ def test_install_observer_pretool_does_not_block():
     assert calls == [], "pretool must not call the LLM when disabled"
     assert chat == [], chat
 
-    # Opted in: the LLM runs and its inject lands, but dispatch is still
-    # never blocked. Synchronous so the assertion doesn't race the task.
+    # The opt-in is gone (IV plan R2): the key is ignored, nothing judges a
+    # pretool event, and the call only lands in the trajectory.
     calls.clear()
     out, chat = _fire({"pretool_llm_enabled": True, "async_nonterminal": False})
     assert out == {}, "pretool must never return a deny dict"
-    assert len(calls) == 1, calls
-    assert any("[INNER VOICE]" in (m.get("content") or "") for m in chat), chat
+    assert calls == [], calls
+    assert chat == [], chat
     print("test_install_observer_pretool_does_not_block: OK")
 
 

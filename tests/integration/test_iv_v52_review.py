@@ -472,6 +472,17 @@ def test_cancel_for_ignored_injects_allowed_once_the_primary_has_read_one():
         state, decision, trigger="tool_result", tool_calls=[],
         has_pending_tools=True,
     )
+    # It clears the unread-inject rule — and is then refused anyway (IV plan
+    # R2): "ignored my injects" is a judgment about intent, and the corpus's
+    # one confident cancel of that kind killed the turn the user asked for.
+    assert decision.action == "noop_cancel_not_observable", decision.action
+
+    # A verbatim loop the repetition guard has NAMED is observable.
+    from types import SimpleNamespace
+    state.guards = SimpleNamespace(fires=[SimpleNamespace(guard="repetition")])
+    decision = ObserverDecision(action="cancel", reason="same call in a loop, again")
+    _apply_decision_guards(state, decision, trigger="tool_result", tool_calls=[],
+                           has_pending_tools=True)
     assert decision.action == "cancel", decision.action
 
 

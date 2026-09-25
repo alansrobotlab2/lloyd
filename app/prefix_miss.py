@@ -376,7 +376,7 @@ async def maybe_announce(tracker: TurnMissTracker, miss: Miss, *,
         return False
 
 
-def _announce(title: str, body: str, voice: bool) -> dict:
+def _announce(title: str, body: str, voice: bool, level: str = "info") -> dict:
     """Through the guardian's one fan-out, as `announce`: journal and toast,
     and speech only when asked. Same import route `scripts/automod/promote.py`
     takes for its landing announcement."""
@@ -399,4 +399,4 @@ def _announce(title: str, body: str, voice: bool) -> dict:
         voice=voice,
         voice_window=policy.VOICE_REPEAT_SECONDS,
     )
-    return notifier.announce(title, body, level="info")
+    return notifier.announce(title, body, level=level)

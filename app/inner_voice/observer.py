@@ -104,6 +104,14 @@ def _observer_cfg() -> dict[str, Any]:
     obs.setdefault("goal_extraction_max_tokens", _prompt.DEFAULT_GOAL_EXTRACTION_MAX_TOKENS)
     obs.setdefault("goal_extraction_enabled", True)
     obs.setdefault("fast_path_enabled", True)
+    # IV plan R2: one terminal review with thinking on, plus a mid-turn review
+    # every `review_every_iterations` (0 = derived from max_turns).
+    obs.setdefault("thinking", True)
+    obs.setdefault("thinking_max_tokens", 2048)
+    obs.setdefault("thinking_timeout_seconds", 20)
+    obs.setdefault("review_every_iterations", 0)
+    obs.setdefault("trajectory_max_entries", 40)
+    obs.setdefault("terminal_text_window_chars", 8000)
     # v5 cost controls. Defaults chosen from the first production window
     # (1,182 rows / 44 turns): pretool was 45% of observer spend and
     # produced 3 interventions, none of which could block anything —
@@ -187,6 +195,23 @@ def _todo_stewardship_cfg() -> dict[str, Any]:
     ts.setdefault("stalled_progress", False)
     ts.setdefault("stalled_after_tool_calls", 5)
     return ts
+
+
+def review_interval(max_turns: int, cfg: dict[str, Any] | None = None) -> int:
+    """Iterations between two mid-turn reviews — scaled to the turn's shape.
+
+    One global constant served a 5-event chat and a 150-iteration round
+    alike (the 09-04 review's A1): the v5 → v5.4 history is that constant
+    being retuned for a workload-mix problem. A sixth of the turn's budget,
+    held between 4 and 12, gives a 60-iteration chat a look every 10 and a
+    250-iteration round one every 12. `review_every_iterations` > 0 pins it.
+    """
+    pinned = int((cfg or {}).get("review_every_iterations", 0) or 0)
+    if pinned > 0:
+        return pinned
+    if max_turns <= 0:
+        return 10
+    return max(4, min(12, max_turns // 6))
 
 
 def _load_todos_from_session(session_id: str) -> list[dict[str, Any]]:
@@ -330,6 +355,7 @@ async def _post_chat_completion_with_tools(
     max_tokens: int,
     timeout_seconds: float,
     priority: int | None = None,
+    enable_thinking: bool = False,
 ) -> dict[str, Any]:
     """POST a chat completion with `tools` + `tool_choice="required"`.
 
@@ -361,7 +387,9 @@ async def _post_chat_completion_with_tools(
         "tool_choice": "required",
         "temperature": 0.2,
         "max_tokens": max_tokens,
-        "chat_template_kwargs": {"enable_thinking": False},
+        # The grammar `tool_choice="required"` imposes applies after
+        # `</think>`, so reasoning and a forced tool call coexist.
+        "chat_template_kwargs": {"enable_thinking": bool(enable_thinking)},
         "priority": priority,
     }
     # #581: manifest this non-streaming send site too. Never raises and
@@ -829,8 +857,15 @@ async def _call_observer(
     timeout_override: float | None = None,
     priority: int | None = None,
     async_call: bool = False,
+    terminal: bool = False,
 ) -> ObserverDecision:
     """One observer LLM call. Returns a parsed ObserverDecision.
+
+    Thinking is on (`inner_voice.observer.thinking`) now that a turn pays for
+    one or two calls, not thirteen: `enable_thinking=False` with a 400-token
+    cap was a cost decision made for the old volume. Measured 2026-09-24 on
+    the live primary, an observer-shaped 5k-token prompt: 1.2 s without,
+    1.6–1.9 s with (~300 chars of reasoning), same verdict.
 
     Tool-call mode: vLLM is forced to emit exactly one of the LEVER_TOOLS
     function calls. The tool name IS the action; args carry reason/content.
@@ -867,12 +902,16 @@ async def _call_observer(
             reason="observer endpoint unresolved",
             error="no base_url",
         )
+    thinking = bool(cfg.get("thinking", True))
     timeout = float(
         timeout_override
         if timeout_override is not None
+        else cfg.get("thinking_timeout_seconds", 20) if thinking
         else cfg.get("timeout_seconds", _prompt.DEFAULT_TIMEOUT_SECONDS)
     )
-    max_tokens = int(cfg.get("max_tokens", _prompt.DEFAULT_MAX_TOKENS))
+    max_tokens = int(
+        cfg.get("thinking_max_tokens", 2048) if thinking
+        else cfg.get("max_tokens", _prompt.DEFAULT_MAX_TOKENS))
     probe_timeout = float(
         cfg.get("probe_timeout_seconds", DEFAULT_PROBE_TIMEOUT_SECONDS)
     )
@@ -916,6 +955,7 @@ async def _call_observer(
                 max_tokens=max_tokens,
                 timeout_seconds=timeout,
                 priority=priority,
+                enable_thinking=thinking,
             )
             usage = body.get("usage") or {}
             in_tok = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
@@ -1144,6 +1184,18 @@ class ObserverState:
     # The turn guards on the same registry (`app.harness.turn_guards`). The
     # deterministic senses live there; the observer listens.
     guards: Any | None = None
+    # The whole turn's shape, one entry per tool call: iteration, tool, the
+    # primary's caption, a preview of the arguments, and the outcome once the
+    # result lands. Every review reads this instead of a 300-char fragment
+    # (IV plan R2) — a judge that sees the shape of the turn cannot invent
+    # "working tree clean" from a docstring.
+    trajectory: list[dict[str, Any]] = field(default_factory=list)
+    # Todo-flip and stalled-progress blocks waiting for the next review.
+    pending_review_blocks: list[str] = field(default_factory=list)
+    last_review_iteration: int = 0
+    # Injects whose reason is a scope judgment. One per turn at most: the
+    # corpus's one harmful case was three out-of-scope injects and a cancel.
+    scope_injects: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1283,6 +1335,8 @@ async def _apply_lever(
             except Exception as e:
                 logger.warning("[iv.observer] inject persist failed: %s", e)
         _count_intervention(state, decision)
+        if _is_scope_judgment(decision):
+            state.scope_injects += 1
         logger.info(
             "[iv.observer] inject session=%s turn=%s reason=%s",
             state.session_id, state.turn_id, decision.reason,
@@ -1833,6 +1887,40 @@ _DESTRUCTIVE_CANCEL_REASON_PATTERN = re.compile(
 )
 
 
+# A cancel is allowed on two things an observer can actually observe (IV plan
+# R2): a destructive loop, and a verbatim tool loop the repetition guard has
+# already named this turn. Everything else a cancel has ever been used for is
+# a judgment about intent — and the corpus's one confident mid-turn judgment of
+# that kind (08-30, "the transcript is out of scope") killed the turn the user
+# asked for.
+_LOOP_CANCEL_REASON_PATTERN = re.compile(
+    r"\b(?:loop\w*|same (?:call|command|tool|args?|query)|repeat\w*|verbatim|identical)\b",
+    re.IGNORECASE,
+)
+
+# A scope judgment: at most one inject per turn, and never a cancel.
+_SCOPE_REASON_PATTERN = re.compile(
+    r"\b(?:out[- ]of[- ]scope|off[- ](?:task|topic|scope|request)|not (?:what|the) (?:the user|user) asked|"
+    r"drift\w*|scope)\b",
+    re.IGNORECASE,
+)
+
+
+def _cancel_is_observable(state: ObserverState, reason: str) -> bool:
+    if _DESTRUCTIVE_CANCEL_REASON_PATTERN.search(reason or ""):
+        return True
+    if not _LOOP_CANCEL_REASON_PATTERN.search(reason or ""):
+        return False
+    guards = getattr(state, "guards", None)
+    fires = getattr(guards, "fires", None) or []
+    return any(getattr(f, "guard", "") == "repetition" for f in fires)
+
+
+def _is_scope_judgment(decision: ObserverDecision) -> bool:
+    return bool(_SCOPE_REASON_PATTERN.search(
+        f"{decision.reason or ''} {decision.content or ''}"))
+
+
 def _apply_decision_guards(
     state: ObserverState,
     decision: ObserverDecision,
@@ -1866,6 +1954,19 @@ def _apply_decision_guards(
         decision.action = "inject"
         decision.bypass_budget = True
         decision.safeguard = "stall_rescue_ambient"
+
+    if (
+        decision.action == "inject"
+        and state.scope_injects >= 1
+        and _is_scope_judgment(decision)
+    ):
+        decision.action = "noop_scope_repeat"
+        decision.safeguard = "scope_once"
+        decision.reason = (
+            (decision.reason or "")
+            + " [suppressed: one scope inject per turn; the primary has heard it]"
+        ).strip()
+        return
 
     # On an unattended turn the LLM still decides WHETHER to speak; Python
     # decides what it says.
@@ -2074,6 +2175,22 @@ def _apply_decision_guards(
         decision.safeguard = "cancel_for_completion"
         decision.reason = ((decision.reason or "") + " " + note).strip()
 
+    # Last among the cancel rules, so a more specific downgrade above still
+    # names itself; whatever cancel survives them must be observable.
+    if decision.action == "cancel" and not _cancel_is_observable(state, decision.reason or ""):
+        logger.info(
+            "[iv.observer] cancel not observable session=%s turn=%s reason=%r",
+            state.session_id, state.turn_id, decision.reason,
+        )
+        decision.action = "noop_cancel_not_observable"
+        decision.safeguard = "cancel_observable"
+        decision.reason = (
+            (decision.reason or "")
+            + " [downgraded: cancel is for a destructive loop or a verbatim tool "
+            "loop the repetition guard named; this was neither]"
+        ).strip()
+        return
+
 
 # ---------------------------------------------------------------------------
 # Public API: install_observer
@@ -2253,23 +2370,11 @@ def install_observer(
     if state.guards is not None:
         state.guards.add_listener(_on_guard_fire)
 
-    fast_path_enabled = bool(cfg.get("fast_path_enabled", True))
-    pretool_llm_enabled = bool(cfg.get("pretool_llm_enabled", False))
     async_nonterminal = bool(cfg.get("async_nonterminal", True))
-    sample_every = int(cfg.get("tool_result_sample_every", 5))
-    escalate_bytes = int(cfg.get("tool_result_escalate_bytes", 20000))
-    # An unattended turn is sampled less and escalates later. The observer
-    # runs on the PRIMARY at the watched turn's priority, in front of
-    # whatever a human is typing, and a worker round produces long benign
-    # results all day: a pytest tail clears the 20k escalate threshold and
-    # buys an LLM call that says nothing. Applied at install, so a chat turn
-    # is byte-for-byte unchanged.
-    if _is_unattended(platform):
-        sample_every = int(cfg.get("unattended_tool_result_sample_every", 10))
-        escalate_bytes = int(
-            cfg.get("unattended_tool_result_escalate_bytes", 60000))
     repetition_window = int(cfg.get("repetition_window", _guards.REPETITION_WINDOW))
     silent_limit = int(cfg.get("silent_iterations_before_review", 10))
+    review_every = review_interval(int(max_turns or 0), cfg)
+    trajectory_cap = int(cfg.get("trajectory_max_entries", 40))
     context_pressure_enabled = bool(cfg.get("context_pressure_enabled", True))
     context_pressure_threshold = float(cfg.get("context_pressure_threshold", 0.8))
     # ONE floor for the loop and the observer. Two would mean the observer
@@ -2283,19 +2388,16 @@ def install_observer(
     def _judge_timeout(is_async: bool) -> float | None:
         """Deadline for one observer call.
 
-        The two synchronous terminal judgments keep the tight
-        `timeout_seconds` — the primary is blocked on them. Everything else
-        runs off the critical path, where a short deadline buys nothing and
-        throws the judgment away; `_drain_pending` is the real bound there.
+        The terminal review keeps `timeout_seconds` (or the thinking
+        deadline) — the primary is blocked on it. A mid-turn review runs off
+        the critical path, where a short deadline buys nothing and throws
+        the judgment away; `_drain_pending` is the real bound there.
 
         Each call site passes the SAME `is_async` into `_call_observer` as
-        `async_call` — the flag that grants the pre-flight probe and the one
-        retry — so a call can never carry the async deadline while being
-        treated as critical-path for recovery, or the reverse.
+        `async_call`, so a call can never carry the async deadline while
+        being treated as critical-path for recovery, or the reverse.
         """
         return async_timeout if is_async else None
-    # `inject_cooldown_iterations` is read from `state.cfg` inside
-    # `_apply_decision_guards`, which is module-level; no local needed.
 
     def _spawn(coro) -> None:
         """Run a non-terminal judgment off the harness's critical path.
@@ -2341,501 +2443,262 @@ def install_observer(
     async def pretool_cb(
         input_data: dict[str, Any], tool_use_id: str | None, _ctx: Any
     ) -> dict[str, Any]:
-        # v4: pretool is observation-only. IV cannot block tool dispatch.
-        # Hard safety on destructive Bash is enforced upstream by the
-        # harness's default safety hook (app/harness/safety.py), which
-        # runs regardless of whether IV is opted in.
+        # Observation only, and no row: pretool judgment and the row it wrote
+        # on every tool call are gone (IV plan R2/R5). What the observer keeps
+        # is the record of what the primary did — the signature ring, which
+        # gives a result the command that produced it, and the trajectory,
+        # which is what every review now reads.
         if state.closed or state.cancel_event.is_set():
             return {}
-        tool_name = input_data.get("tool_name", "")
+        tool_name = input_data.get("tool_name", "") or ""
         tool_input = input_data.get("tool_input") or {}
-        # The primary's own caption for this call. Carried beside
-        # `tool_input`, never inside it — see below.
+        # The primary's own caption: what it SAID the call was for. Carried
+        # into the trajectory, never into the signature (see guards.py).
         tool_summary = input_data.get("tool_summary") or ""
-
-        # The ring feeds `build_tool_result_summary` the command that produced
-        # a result (tool_result events carry no arguments). The repetition
-        # guard that used to run here is a turn guard now
-        # (`app/harness/turn_guards.py`), on every turn.
-        state.recent_tool_calls.append(
-            _guards.tool_call_signature(tool_name, tool_input)
-        )
+        sig = _guards.tool_call_signature(tool_name, tool_input)
+        state.recent_tool_calls.append(sig)
         state.tool_calls_seen += 1
         if len(state.recent_tool_calls) > ring_cap:
             del state.recent_tool_calls[:-ring_cap]
-
-        # Tier 1: cheap deterministic noop for benign tools — saves an LLM
-        # call. The harness will dispatch the tool either way.
-        fp = _fast_path_pretool(tool_name, tool_input) if fast_path_enabled else None
-
-        # Tier 2 is OFF by default since v5. Pretool cannot block dispatch
-        # (that moved to `app/harness/safety.py` in v4), so an inject here
-        # lands as the next user message only AFTER the tool has already
-        # run — by which point the `tool_result` trigger sees the same call
-        # plus its outcome and can judge it better. In the first production
-        # window pretool was 264 LLM calls and 1.44M input tokens, 45% of
-        # all observer spend, for 3 interventions that changed nothing a
-        # later trigger would not also have caught.
-        #
-        # The row is still written either way: the prior-decisions log and
-        # the mark-without-evidence check both read tool activity out of
-        # it, so dropping the row would blind checks that still work.
-        if not pretool_llm_enabled:
-            decision = fp or ObserverDecision(
-                action="noop", reason="observation-only: pretool LLM disabled",
-                fast_path=True, safeguard="observation_only",
-            )
-            await _persist(state, decision, trigger="pretool", related_tool=tool_name)
-            return {}
-
-        if fp is not None:
-            await _persist(state, fp, trigger="pretool", related_tool=tool_name)
-            return {}
-
-        # LLM judgment with soft-lever-only tools. Decision can be
-        # noop / inject / cancel / ambient / clarify. An inject here lands
-        # as the next user message after the tool dispatches; a cancel
-        # ends the turn after this tool finishes. Neither blocks dispatch.
-        async def _judge_pretool() -> None:
-            summary = _prompt.build_pretool_event_summary(
-                tool_name, tool_input, tool_summary,
-            )
-            user_prompt = _build_event_user_prompt(state, summary)
-            decision = await _call_observer(
-                user_prompt=user_prompt, cfg=state.cfg, priority=state.priority,
-                timeout_override=_judge_timeout(async_nonterminal),
-                async_call=async_nonterminal,
-            )
-            if state.closed or state.cancel_event.is_set():
-                decision.action = "noop_pretool_after_cancel"
-                decision.reason = (
-                    (decision.reason or "")
-                    + " [skipped: turn cancelled while pretool LLM was in flight]"
-                ).strip()
-                await _persist(state, decision, trigger="pretool", related_tool=tool_name)
-                return
-            _apply_decision_guards(
-                state, decision, trigger="pretool", tool_calls=[],
-                has_pending_tools=True,
-            )
-            await _apply_lever(state, decision, trigger="pretool", related_tool=tool_name)
-            await _persist(state, decision, trigger="pretool", related_tool=tool_name)
-
-        if async_nonterminal:
-            _spawn(_judge_pretool())
-        else:
-            await _judge_pretool()
+        state.trajectory.append({
+            "iteration": state.last_iteration + 1,
+            "tool": tool_name,
+            "caption": " ".join(str(tool_summary).split())[:120],
+            "preview": sig.preview[:160],
+            "outcome": None,
+        })
+        if len(state.trajectory) > trajectory_cap:
+            del state.trajectory[:-trajectory_cap]
         return {}
 
+    async def _review(summary: str, *, trigger: str, tool_calls: list,
+                      is_terminal: bool, is_async: bool) -> None:
+        """One LLM judgment over the turn's shape, then the guards and lever."""
+        user_prompt = _build_event_user_prompt(state, summary)
+        decision = await _call_observer(
+            user_prompt=user_prompt, cfg=state.cfg, priority=state.priority,
+            timeout_override=_judge_timeout(is_async),
+            async_call=is_async, terminal=is_terminal,
+        )
+        if state.closed or state.cancel_event.is_set():
+            decision.action = "noop_assistant_after_cancel"
+            decision.reason = (
+                (decision.reason or "")
+                + " [skipped: turn cancelled while observer LLM was in flight]"
+            ).strip()
+            await _persist(state, decision, trigger=trigger)
+            return
+        _apply_decision_guards(
+            state, decision, trigger=trigger, tool_calls=tool_calls,
+            is_terminal=is_terminal,
+        )
+        await _apply_lever(state, decision, trigger=trigger)
+        await _persist(state, decision, trigger=trigger)
+
     async def on_event_cb(evt: dict[str, Any]) -> None:
-        # Mirror the pretool guard: if the user (or IV itself) cancelled the
-        # turn, stop observing. Otherwise the observer keeps issuing LLM
-        # judgment calls and applying levers (injects, ambients) for a turn
-        # the user already abandoned.
+        # If the user (or IV itself) cancelled the turn, stop observing.
         if state.closed or state.cancel_event.is_set():
             return
         etype = evt.get("type")
         if etype == "text_delta":
             # The loop never fires OnEvent for deltas (only assistant_message,
-            # tool_call, tool_result and result), so this branch is a guard,
-            # not a source: the text is taken whole from assistant_message
-            # below, and accumulating here as well would count it twice for
-            # any caller that did forward deltas.
+            # tool_call, tool_result and result); the text is taken whole
+            # from assistant_message below (review 2026-09-24, D8).
+            return
+
+        if etype == "tool_result":
+            _note_tool_result(evt)
             return
 
         if etype == "assistant_message":
             text = evt.get("text", "") or ""
-            # The primary's text so far, for every per-event prompt
-            # (`primary_text_so_far`) and for the /goal evaluator when the
-            # `result` event carries no `response_text`. It used to be fed
-            # only from `text_delta`, which never reaches this hook, so it
-            # was always empty (review 2026-09-24, D8).
             if text:
                 state.accumulated_text += text
             tool_calls = evt.get("tool_calls", []) or []
             iteration = int(evt.get("iteration", 0))
             state.last_iteration = iteration
             # A text-only iteration means the harness is about to END the
-            # turn: loop.py keeps looping only if this hook grows
-            # chat_messages. Everything about this event has to be
-            # synchronous, and it is the observer's last chance to act.
+            # turn: loop.py keeps looping only if a hook grows chat_messages.
             is_terminal = not tool_calls
 
-            if is_terminal:
-                # Land any judgment still in flight from earlier in the
-                # turn before deciding, so its inject isn't lost and so
-                # its decision is visible to the guards below.
-                await _drain_pending()
+            if not is_terminal:
+                if not text.strip():
+                    state.silent_iterations += 1
+                else:
+                    state.silent_iterations = 0
+                # The iteration floor (IV plan R2). A mid-turn review runs
+                # every `review_every` iterations, at a silent streak, or when
+                # a todo flip / stalled-progress check is waiting — never on a
+                # sampled tool result. It reads the trajectory, not a fragment.
+                reasons: list[str] = []
+                if review_every > 0 and iteration - state.last_review_iteration >= review_every:
+                    reasons.append("floor")
+                if silent_limit > 0 and state.silent_iterations >= silent_limit:
+                    reasons.append("silent")
+                if state.pending_review_blocks:
+                    reasons.append("todo")
+                if not reasons:
+                    return
+                silent = state.silent_iterations if "silent" in reasons else 0
+                if "silent" in reasons:
+                    state.silent_iterations = 0
+                state.last_review_iteration = iteration
+                blocks = "".join(state.pending_review_blocks)
+                state.pending_review_blocks.clear()
+                summary = _prompt.build_review_summary(
+                    iteration=iteration, text=text, tool_calls=tool_calls,
+                    finish_reason=str(evt.get("finish_reason") or "tool_calls"),
+                    trajectory=state.trajectory, silent_streak=silent,
+                    extra_blocks=blocks,
+                )
+                if async_nonterminal:
+                    _spawn(_review(summary, trigger="assistant_message",
+                                   tool_calls=tool_calls, is_terminal=False,
+                                   is_async=True))
+                else:
+                    await _review(summary, trigger="assistant_message",
+                                  tool_calls=tool_calls, is_terminal=False,
+                                  is_async=False)
+                return
 
-                # Nothing the observer says here can be acted on: the loop
-                # would have to send another request and there is no room to
-                # answer in. Round 875 reached exactly this point at 241k of
-                # 262,144 tokens, was injected into, and spent its last
-                # iteration on a completion the window truncated. The loop
-                # drops such an inject on the same floor; skipping the LLM
-                # call as well saves a primary request in front of whatever
-                # a human is typing.
-                if context_pressure_enabled:
-                    cp = _guards.context_pressure(
-                        state.context_meter,
-                        threshold=context_pressure_threshold,
-                        floor_tokens=context_floor_tokens,
-                    )
-                    if cp.exhausted:
-                        await _persist(state, ObserverDecision(
-                            action="noop_context_exhausted",
-                            safeguard="context_pressure",
-                            reason=(
-                                f"context exhausted: {cp.used} of {cp.window} "
-                                f"tokens used, under the "
-                                f"{context_floor_tokens}-token floor — an "
-                                f"inject here cannot be answered"
-                            ),
-                        ), trigger="assistant_message")
-                        return
-
-                # A turn guard already answered this iteration (a stall, an
-                # open round, an open todo list): the loop will continue on
-                # its inject, and a second, model-worded nudge on the same
-                # stop is the double-inject the suppressor exists to prevent.
-                if state.guards is not None and state.guards.fired_on_iteration(iteration):
+            # ---- terminal: the one review that has ever paid for itself ----
+            await _drain_pending()
+            if context_pressure_enabled:
+                cp = _guards.context_pressure(
+                    state.context_meter,
+                    threshold=context_pressure_threshold,
+                    floor_tokens=context_floor_tokens,
+                )
+                if cp.exhausted:
                     await _persist(state, ObserverDecision(
-                        action="noop",
-                        reason="fast-path: a turn guard already injected on this iteration",
-                        fast_path=True, safeguard="turn_guard",
+                        action="noop_context_exhausted",
+                        safeguard="context_pressure",
+                        reason=(
+                            f"context exhausted: {cp.used} of {cp.window} "
+                            f"tokens used, under the {context_floor_tokens}-token "
+                            f"floor — an inject here cannot be answered"
+                        ),
                     ), trigger="assistant_message")
                     return
-
-            # Track the run of iterations with no user-visible text. Reset
-            # the moment the primary says anything.
-            if tool_calls and not text.strip():
-                state.silent_iterations += 1
-            else:
-                state.silent_iterations = 0
-
-            # Tier 1: cheap noop for tool-dispatch-only iterations. The
-            # pretool trigger already saw each proposed tool with its real
-            # args — running an LLM here too is duplicate work.
-            escalated_silent_streak = 0
-            if fast_path_enabled:
-                fp = _fast_path_assistant_message(
-                    text, tool_calls,
-                    silent_streak=state.silent_iterations,
-                    silent_streak_limit=silent_limit,
-                )
-                if fp is None and tool_calls and not text.strip():
-                    # Escalated on the silent streak. Re-arm so the next
-                    # review is another full streak away, not every iteration.
-                    escalated_silent_streak = state.silent_iterations
-                    state.silent_iterations = 0
-                if fp is not None:
-                    # A stub-announce stall returns an inject — apply it so it
-                    # appends to chat_messages and the loop continues this turn.
-                    # noop fast-paths are persist-only.
-                    if fp.action == "inject":
-                        await _apply_lever(state, fp, trigger="assistant_message")
-                    await _persist(state, fp, trigger="assistant_message")
-                    return
-
-            finish_reason = str(evt.get("finish_reason") or "stop")
-            # Plan A.4 — completion gate. Pass todos so the terminal-iteration
-            # summary appends a PENDING TODOS block when stewardship is on.
+            # A turn guard already answered this iteration (a stall, an open
+            # round, an open todo list), or the text is a tool call written as
+            # prose (a capability fault the guard raised to a person): a
+            # model-worded nudge on the same stop is a double inject.
+            if state.guards is not None and state.guards.fired_on_iteration(iteration):
+                await _persist(state, ObserverDecision(
+                    action="noop",
+                    reason="fast-path: a turn guard already injected on this iteration",
+                    fast_path=True, safeguard="turn_guard",
+                ), trigger="assistant_message")
+                return
+            if _guards.looks_like_prose_tool_call(text):
+                await _persist(state, ObserverDecision(
+                    action="noop_capability_fault", safeguard="capability_fault",
+                    reason="a tool call written as text is a missing capability; "
+                           "raised to a person, not nudged",
+                ), trigger="assistant_message")
+                return
             ts = state.todo_stewardship_cfg
             todos_for_gate = (
                 state.todos
                 if ts.get("enabled", True) and ts.get("completion_gate", True)
                 else []
             )
-            summary = _prompt.build_assistant_message_summary(
-                iteration, text, tool_calls, finish_reason,
-                goal_card=state.goal_card,
+            summary = _prompt.build_review_summary(
+                iteration=iteration, text=text, tool_calls=[],
+                finish_reason=str(evt.get("finish_reason") or "stop"),
+                trajectory=state.trajectory, goal_card=state.goal_card,
                 todos=todos_for_gate,
-                silent_streak=escalated_silent_streak,
+                text_window=int(state.cfg.get("terminal_text_window_chars", 8000)),
+                extra_blocks="".join(state.pending_review_blocks),
             )
-
-            async def _judge_assistant_message() -> None:
-                user_prompt = _build_event_user_prompt(state, summary)
-                decision = await _call_observer(
-                    user_prompt=user_prompt, cfg=state.cfg, priority=state.priority,
-                    timeout_override=_judge_timeout(
-                        async_nonterminal and not is_terminal
-                    ),
-                    async_call=async_nonterminal and not is_terminal,
-                )
-                if state.closed or state.cancel_event.is_set():
-                    decision.action = "noop_assistant_after_cancel"
-                    decision.reason = (
-                        (decision.reason or "")
-                        + " [skipped: turn cancelled while observer LLM was in flight]"
-                    ).strip()
-                    await _persist(state, decision, trigger="assistant_message")
-                    return
-                _apply_decision_guards(
-                    state, decision, trigger="assistant_message",
-                    tool_calls=tool_calls, is_terminal=is_terminal,
-                )
-                await _apply_lever(state, decision, trigger="assistant_message")
-                await _persist(state, decision, trigger="assistant_message")
-
-            # A mid-work iteration (tool calls in flight) is judged off the
-            # critical path; the terminal one never is, because loop.py
-            # reads chat_messages the instant this returns.
-            if async_nonterminal and not is_terminal:
-                _spawn(_judge_assistant_message())
-            else:
-                await _judge_assistant_message()
+            state.pending_review_blocks.clear()
+            state.last_review_iteration = iteration
+            await _review(summary, trigger="assistant_message", tool_calls=[],
+                          is_terminal=True, is_async=False)
             return
-
-
-        if etype == "tool_result":
-            tool_name = evt.get("name", "") or ""
-            content = evt.get("content", "") or ""
-            is_error = bool(evt.get("is_error", False))
-
-            # Capture tool name for the goal-completion evaluator. Cap at 32
-            # most-recent so we don't unbounded-grow on long turns.
-            if tool_name:
-                state.tool_calls_this_turn.append(tool_name)
-                if len(state.tool_calls_this_turn) > 32:
-                    state.tool_calls_this_turn = state.tool_calls_this_turn[-32:]
-
-            # Is a round open? The one terminal stall worth rescuing on an
-            # unattended turn is a turn stopping with uncommitted work in a
-            # worktree, and that is the only signal that says so. Keyed on a
-            # non-error result, because a refused `automod_start` opens
-            # nothing.
-            bare_tool = tool_name.rsplit("__", 1)[-1]
-            if bare_tool == "automod_start" and not is_error:
-                state.round_open = True
-            elif bare_tool in ("automod_land", "automod_abort") and not is_error:
-                state.round_open = False
-
-            # Plan A.5 — mid-turn TodoWrite refresh + flip detection. The
-            # static reference TODOS block in IV's prompt is sourced from
-            # `state.todos`, which is snapshotted at install_observer.
-            # Without this refresh, multi-flip turns show IV a stale list.
-            # Also detect in_progress→completed flips here so the LLM
-            # judgment below can challenge marks-without-evidence.
-            todo_flips: list[dict[str, str]] = []
-            any_status_change = False
-            ts_cfg = state.todo_stewardship_cfg
-            if (
-                tool_name == "TodoWrite"
-                and not is_error
-                and ts_cfg.get("enabled", True)
-            ):
-                fresh = _load_todos_from_session(state.session_id)
-                fresh_status = {
-                    (t.get("content") or ""): (t.get("status") or "")
-                    for t in fresh
-                    if t.get("content")
-                }
-                # Detect any status change (used by A.6 to reset the
-                # stalled-progress counter — pending→in_progress also
-                # counts as forward motion, not just completion flips).
-                if fresh_status != state.prior_todo_status:
-                    any_status_change = True
-                # Surface in_progress→completed flips for A.5's
-                # mark-without-evidence challenge. Other transitions
-                # (pending→in_progress, completed→completed, list shape
-                # changes) are not flagged here.
-                if ts_cfg.get("mark_without_evidence", True):
-                    for content_key, new_status in fresh_status.items():
-                        old_status = state.prior_todo_status.get(content_key)
-                        if old_status == "in_progress" and new_status == "completed":
-                            todo_flips.append({
-                                "content": content_key,
-                                "from": old_status,
-                                "to": new_status,
-                            })
-                # Update snapshot + status map. Done unconditionally on
-                # successful TodoWrite so even pending→in_progress flips
-                # propagate to the next IV prompt's reference block.
-                state.todos = fresh
-                state.prior_todo_status = fresh_status
-
-            # Plan A.6 — stalled-progress counter. Counts non-TodoWrite
-            # tool results since the last TodoWrite that altered any
-            # status. Reset on a status change; increment on any other
-            # tool result. Errors don't increment (a tool error is the
-            # primary's problem to handle, not a stall signal).
-            stalled_fired = False
-            if ts_cfg.get("enabled", True) and ts_cfg.get("stalled_progress", False):
-                if any_status_change:
-                    state.tool_calls_since_last_flip = 0
-                elif tool_name != "TodoWrite" and not is_error:
-                    state.tool_calls_since_last_flip += 1
-                threshold = int(ts_cfg.get("stalled_after_tool_calls", 5))
-                has_active = any(
-                    (t.get("status") or "") in ("pending", "in_progress")
-                    for t in state.todos
-                )
-                if (
-                    state.tool_calls_since_last_flip >= threshold
-                    and has_active
-                ):
-                    stalled_fired = True
-                    # Reset immediately so the gate doesn't re-fire on the
-                    # next tool_result. The IV's decision (inject or noop)
-                    # ends this stall window; if primary keeps stalling,
-                    # the counter rebuilds and re-fires after another N.
-                    state.tool_calls_since_last_flip = 0
-
-            # Tier 1: cheap check. Errors, spills and large payloads
-            # escalate; benign results are sampled. TodoWrite flips and the
-            # stalled-progress gate always bypass the fast path — both are
-            # bookkeeping-integrity checks that need LLM judgment.
-            if not is_error:
-                state.benign_tool_results += 1
-            if fast_path_enabled and not todo_flips and not stalled_fired:
-                fp = _fast_path_tool_result(
-                    tool_name, content, is_error,
-                    benign_seen=state.benign_tool_results,
-                    sample_every=sample_every,
-                    escalate_bytes=escalate_bytes,
-                )
-                if fp is not None:
-                    await _persist(state, fp, trigger="tool_result", related_tool=tool_name)
-                    return
-
-            # Tier 2: LLM judgment. When `todo_flips` is non-empty, the
-            # summary builder appends a mark-without-evidence eval block
-            # so the LLM is forced to walk each completed-todo against
-            # the recent tool calls and inject a challenge if there's no
-            # plausible work behind the flip. When `stalled_fired` is
-            # true, a stalled-progress block is appended asking the LLM
-            # to inject if the primary is busy but not advancing the
-            # committed plan.
-            # The call that produced this result. tool_result events carry
-            # no arguments, so recover them from the signature ring the
-            # pretool hook fills — most recent entry for this tool name.
-            call_preview = ""
-            for sig in reversed(state.recent_tool_calls):
-                if sig.tool == tool_name:
-                    call_preview = sig.preview
-                    break
-            summary = _prompt.build_tool_result_summary(
-                tool_name, content, is_error,
-                todo_flips=todo_flips,
-                recent_decisions=state.decisions_this_turn,
-                stalled_progress=stalled_fired,
-                tool_calls_since_flip_threshold=int(
-                    ts_cfg.get("stalled_after_tool_calls", 5)
-                ) if stalled_fired else 0,
-                active_todos=state.todos if stalled_fired else None,
-                call_preview=call_preview,
-            )
-
-            async def _judge_tool_result() -> None:
-                user_prompt = _build_event_user_prompt(state, summary)
-                decision = await _call_observer(
-                    user_prompt=user_prompt, cfg=state.cfg, priority=state.priority,
-                    timeout_override=_judge_timeout(async_nonterminal),
-                    async_call=async_nonterminal,
-                )
-                if state.closed or state.cancel_event.is_set():
-                    decision.action = "noop_tool_result_after_cancel"
-                    decision.reason = (
-                        (decision.reason or "")
-                        + " [skipped: turn cancelled while observer LLM was in flight]"
-                    ).strip()
-                    await _persist(
-                        state, decision, trigger="tool_result", related_tool=tool_name,
-                    )
-                    return
-                _apply_decision_guards(
-                    state, decision, trigger="tool_result", tool_calls=[],
-                    # Mid-dispatch: the harness is inside its tool loop and
-                    # the primary has not produced its next iteration.
-                    has_pending_tools=True,
-                )
-                await _apply_lever(
-                    state, decision, trigger="tool_result", related_tool=tool_name,
-                )
-                await _persist(
-                    state, decision, trigger="tool_result", related_tool=tool_name,
-                )
-
-            # Tool results land mid-dispatch — the primary is waiting on
-            # this hook to return before the loop continues, so judge off
-            # the critical path.
-            if async_nonterminal:
-                _spawn(_judge_tool_result())
-            else:
-                await _judge_tool_result()
-            return
-
 
         if etype == "result":
-            stop_reason = evt.get("stop_reason", "") or ""
-            response_text = evt.get("response_text", "") or ""
-            # The turn is over the moment this handler returns, so land
-            # anything still in flight before judging — and before the
-            # /goal evaluator reads `decisions_this_turn`.
+            # No judgment here any more (IV plan R2): it ran after the human
+            # already had the answer, cost 740k tokens in the surviving window
+            # for zero interventions, and could only produce an ambient. The
+            # todo completion gate moved to the terminal assistant_message,
+            # where an inject still works. What stays is the /goal evaluator,
+            # which has a real loop behind it.
             await _drain_pending()
-            # Plan A.4 — at the result event the harness has already exited;
-            # inject is a no-op here, so pending-todos drives an `ambient`
-            # follow-up turn instead.
-            ts = state.todo_stewardship_cfg
-            todos_for_gate = (
-                state.todos
-                if ts.get("enabled", True) and ts.get("completion_gate", True)
-                else []
-            )
-            summary = _prompt.build_result_summary(
-                stop_reason, response_text, goal_card=state.goal_card,
-                todos=todos_for_gate,
-            )
-            user_prompt = _build_event_user_prompt(state, summary)
-            decision = await _call_observer(
-                user_prompt=user_prompt, cfg=state.cfg, priority=state.priority,
-            )
-            if state.cancel_event.is_set():
-                decision.action = "noop_result_after_cancel"
-                decision.reason = (
-                    (decision.reason or "")
-                    + " [skipped: turn cancelled while observer LLM was in flight]"
-                ).strip()
-                await _persist(state, decision, trigger="result")
-                state.closed = True
-                return
-            # Translate the lever to what can still happen BEFORE running
-            # the guards. The harness has already emitted its terminal event,
-            # so an `inject` chosen here is really a request for an ambient
-            # follow-up — but the guards see the raw `inject` and the
-            # consecutive-inject suppressor or the cooldown can downgrade it
-            # to a noop, silently discarding the follow-up. Downgrade first
-            # and the guards act on the lever that will actually fire.
-            translated, note = _guards.result_trigger_downgrade(
-                action=decision.action,
-                has_ambient_channel=state.enqueue_ambient_callback is not None,
-                has_content=bool(decision.content.strip()),
-            )
-            if translated != decision.action:
-                if note:
-                    decision.reason = (
-                        (decision.reason or "") + f" [{note}]"
-                    ).strip()
-                decision.action = translated
-            _apply_decision_guards(
-                state, decision, trigger="result", tool_calls=[],
-                has_pending_tools=False,
-            )
-            await _apply_lever(state, decision, trigger="result")
-            await _persist(state, decision, trigger="result")
-
-            # Persistent-goal completion loop (the /goal feature). Runs
-            # AFTER the regular observer decision, so a normal ambient
-            # already fired (e.g. from todo gating) won't be overwritten;
-            # instead we only queue a goal-driven ambient when none was
-            # queued and the goal is still unmet.
-            if state.persistent_goal:
+            if state.persistent_goal and not state.cancel_event.is_set():
                 await _handle_persistent_goal_at_result(
-                    state, evt, prior_decision=decision,
+                    state, evt,
+                    prior_decision=ObserverDecision(action="noop", reason="no result judgment"),
                 )
-
             state.closed = True
             return
+
+    def _note_tool_result(evt: dict[str, Any]) -> None:
+        """Bookkeeping only — no LLM call is ever made on a tool result now."""
+        tool_name = evt.get("name", "") or ""
+        content = evt.get("content", "") or ""
+        if not isinstance(content, str):
+            content = str(content)
+        is_error = bool(evt.get("is_error", False))
+        if tool_name:
+            state.tool_calls_this_turn.append(tool_name)
+            if len(state.tool_calls_this_turn) > 32:
+                state.tool_calls_this_turn = state.tool_calls_this_turn[-32:]
+        # The trajectory entry this result answers: the newest one for this
+        # tool still waiting on an outcome.
+        for entry in reversed(state.trajectory):
+            if entry["tool"] == tool_name and entry["outcome"] is None:
+                if is_error:
+                    entry["outcome"] = "ERROR"
+                elif _guards.looks_like_failure_payload(content):
+                    entry["outcome"] = "returned, but reports it did not complete"
+                else:
+                    entry["outcome"] = f"ok {_prompt.human_bytes(len(content))}"
+                break
+        bare_tool = tool_name.rsplit("__", 1)[-1]
+        if bare_tool == "automod_start" and not is_error:
+            state.round_open = True
+        elif bare_tool in ("automod_land", "automod_abort") and not is_error:
+            state.round_open = False
+
+        # Todo stewardship: refresh the live list and detect flips. A flip or
+        # a stalled-progress streak no longer buys its own call; it rides the
+        # next review as an extra block.
+        ts_cfg = state.todo_stewardship_cfg
+        any_status_change = False
+        todo_flips: list[dict[str, str]] = []
+        if tool_name == "TodoWrite" and not is_error and ts_cfg.get("enabled", True):
+            fresh = _load_todos_from_session(state.session_id)
+            fresh_status = {
+                (t.get("content") or ""): (t.get("status") or "")
+                for t in fresh if t.get("content")
+            }
+            if fresh_status != state.prior_todo_status:
+                any_status_change = True
+            if ts_cfg.get("mark_without_evidence", True):
+                for content_key, new_status in fresh_status.items():
+                    old_status = state.prior_todo_status.get(content_key)
+                    if old_status == "in_progress" and new_status == "completed":
+                        todo_flips.append({"content": content_key,
+                                           "from": old_status, "to": new_status})
+            state.todos = fresh
+            state.prior_todo_status = fresh_status
+        if todo_flips:
+            state.pending_review_blocks.append(
+                _prompt.build_mark_without_evidence_block(todo_flips, state.trajectory))
+        if ts_cfg.get("enabled", True) and ts_cfg.get("stalled_progress", False):
+            if any_status_change:
+                state.tool_calls_since_last_flip = 0
+            elif tool_name != "TodoWrite" and not is_error:
+                state.tool_calls_since_last_flip += 1
+            threshold = int(ts_cfg.get("stalled_after_tool_calls", 5))
+            active = [t for t in state.todos
+                      if (t.get("status") or "") in ("pending", "in_progress")]
+            if state.tool_calls_since_last_flip >= threshold and active:
+                state.tool_calls_since_last_flip = 0
+                state.pending_review_blocks.append(
+                    _prompt.build_stalled_progress_block(threshold, active))
 
     hooks.add_pre_tool_use(None, pretool_cb)
     hooks.add_on_event(on_event_cb)

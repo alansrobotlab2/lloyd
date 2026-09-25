@@ -62,6 +62,9 @@ CFG = {
     "async_timeout_seconds": 12.0,
     "probe_timeout_seconds": 1.0,
     "max_tokens": 64,
+    # These pins are about the deadline semantics, which thinking changes
+    # only by choosing a longer default; tests/test_iv_one_review.py pins that.
+    "thinking": False,
 }
 
 ASYNC_TIMEOUT = CFG["async_timeout_seconds"]  # 12.0 — what production passes async
@@ -263,8 +266,9 @@ def test_sync_terminal_call_returns_on_first_deadline_and_never_probes(monkeypat
 
 
 def test_observer_dispatch_marks_terminal_sync_and_off_path_async(monkeypatch):
-    """The two terminal handlers must reach `_call_observer` with
-    async_call False; the tool_result handler, with it True.
+    """The terminal review must reach `_call_observer` with async_call
+    False; a mid-turn review, with it True; `result` and `tool_result` not at
+    all (IV plan R2 removed both judgments).
 
     Dropping `and not is_terminal` at the terminal assistant_message site,
     or flipping `async_call` at any site, would put the probe and a full
@@ -297,8 +301,7 @@ def test_observer_dispatch_marks_terminal_sync_and_off_path_async(monkeypatch):
     # sampled out — sampling is a different guard with its own tests.
     # fast_path_enabled=False so the terminal assistant_message is judged
     # by the LLM rather than short-circuited by the fast path.
-    cfg.update({"async_nonterminal": True, "tool_result_sample_every": 1,
-                "fast_path_enabled": False})
+    cfg.update({"async_nonterminal": True, "review_every_iterations": 1})
     monkeypatch.setattr(obs_mod, "_observer_cfg", lambda: dict(cfg))
 
     async def scenario():
@@ -310,12 +313,16 @@ def test_observer_dispatch_marks_terminal_sync_and_off_path_async(monkeypatch):
             primary_model="stub-model",
         )
         await hooks.fire_on_event(
+            {"type": "assistant_message", "text": "Checking the clauses.",
+             "tool_calls": [{"function": {"name": "Bash"}}], "iteration": 1},
+        )
+        await hooks.fire_on_event(
             {"type": "tool_result", "name": "Bash", "content": "ok",
              "is_error": False},
         )
         await hooks.fire_on_event(
             {"type": "assistant_message", "text": "All clauses verified.",
-             "tool_calls": [], "iteration": 1},
+             "tool_calls": [], "iteration": 2},
         )
         await hooks.fire_on_event(
             {"type": "result", "stop_reason": "end_turn",
@@ -333,15 +340,15 @@ def test_observer_dispatch_marks_terminal_sync_and_off_path_async(monkeypatch):
 
     # The off-critical-path tool_result judgment: async flag True AND the
     # 12 s deadline — the flag and the budget travel together.
-    assert by_site.get("async"), f"tool_result never judged as async: {calls}"
+    assert by_site.get("async"), f"mid-turn review never judged as async: {calls}"
     for c in by_site["async"]:
         assert c["timeout_override"] == CFG["async_timeout_seconds"]
     # Both synchronous terminal calls (terminal assistant_message +
     # result): async_call False and NO timeout override, i.e. the tight
     # 5 s `timeout_seconds` still decides, with no probe or retry able to
     # attach.
-    assert len(by_site.get("sync", [])) == 2, (
-        f"expected exactly the two terminal calls to run sync, got "
+    assert len(by_site.get("sync", [])) == 1, (
+        f"expected exactly the one terminal review to run sync, got "
         f"{by_site.get('sync')}"
     )
     for c in by_site["sync"]:

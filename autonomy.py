@@ -3336,6 +3336,10 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
                 # asked to be watched.
                 if iv_state is not None:
                     options.cancel_event = iv_cancel
+                    from app.deadline_anchor import compose_state_anchors
+                    from app.routers._messages_inner_voice import goal_card_anchor
+                    options.state_anchor = compose_state_anchors(
+                        options.state_anchor, goal_card_anchor(iv_state))
             except Exception as exc:  # noqa: BLE001 — watching is not the run
                 logger.warning("Task #%s: could not attach the observer: %s",
                                task_id, exc)

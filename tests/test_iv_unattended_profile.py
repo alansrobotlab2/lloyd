@@ -311,10 +311,15 @@ def test_a_destructive_cancel_is_still_allowed_with_no_injects():
 
 def test_a_user_turn_cancel_is_untouched_by_the_unattended_gate():
     st = _state(platform="mission-control", unattended=False)
-    d = O.ObserverDecision(action="cancel", reason="the primary is off track")
+    d = O.ObserverDecision(action="cancel", reason="destructive loop: rm -rf over the vault")
     O._apply_decision_guards(st, d, trigger="assistant_message",
                              tool_calls=[], is_terminal=True)
     assert d.action == "cancel"
+    # A judgment about intent is not observable, on any platform (IV plan R2).
+    d = O.ObserverDecision(action="cancel", reason="the primary is off track")
+    O._apply_decision_guards(st, d, trigger="assistant_message",
+                             tool_calls=[], is_terminal=True)
+    assert d.action == "noop_cancel_not_observable"
 
 
 def test_the_platform_note_names_the_source_and_forbids_the_report_nudge():

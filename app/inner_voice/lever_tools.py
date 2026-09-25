@@ -51,10 +51,10 @@ LEVER_TOOLS: list[dict[str, Any]] = [
             "name": "inject",
             "description": (
                 "Append a brief nudge to primary's chat history (will be "
-                "prefixed [INNER VOICE]). Use when primary is drifting from "
-                "the goal, looping, or about to terminate without answering. "
-                "After two injects on the same theme, escalate to cancel "
-                "instead of injecting again."
+                "prefixed [INNER VOICE]). Use when the primary is about to end "
+                "the turn without delivering what the user asked for, or is "
+                "plainly working on something else. One nudge per theme: if "
+                "it did not land, say nothing more."
             ),
             "parameters": {
                 "type": "object",
@@ -83,12 +83,11 @@ LEVER_TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "cancel",
             "description": (
-                "Force-stop the turn. Reserve for: (a) primary in a destructive "
-                "loop it won't break out of; (b) primary has ignored 2+ injects "
-                "on the same theme; (c) tight loop calling the same tool with "
-                "same args. Do NOT use cancel as a 'task complete' lever — the "
-                "harness terminates naturally on text-only iterations. Do NOT "
-                "cancel mid-tool-sequence."
+                "Force-stop the turn. ONLY for (a) a destructive loop the "
+                "primary will not break out of, or (b) a verbatim tool loop "
+                "the repetition guard has already named this turn. Never for "
+                "scope, drift or ignored nudges, and never as a 'task "
+                "complete' lever. Anything else is downgraded to a no-op."
             ),
             "parameters": {
                 "type": "object",
@@ -99,60 +98,6 @@ LEVER_TOOLS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["reason"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "ambient",
-            "description": (
-                "Queue a follow-up turn that fires after this one finishes. "
-                "Use when something is worth surfacing but doesn't need to "
-                "interrupt the current turn."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "One short phrase: why queueing follow-up.",
-                    },
-                    "content": {
-                        "type": "string",
-                        "minLength": 5,
-                        "description": "Body of the ambient follow-up message.",
-                    },
-                },
-                "required": ["reason", "content"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "clarify",
-            "description": (
-                "Ask the user a question; pauses primary until they reply. Use "
-                "ONLY when the goal is genuinely ambiguous in a way that will "
-                "materially change the answer. Sparingly."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "One short phrase: why ambiguity needs user input.",
-                    },
-                    "content": {
-                        "type": "string",
-                        "minLength": 5,
-                        "description": "The clarifying question to surface to the user.",
-                    },
-                },
-                "required": ["reason", "content"],
                 "additionalProperties": False,
             },
         },

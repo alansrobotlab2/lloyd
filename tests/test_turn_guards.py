@@ -309,3 +309,21 @@ def test_the_direct_worker_options_carry_the_guards():
     opts = _worker_run_options(10, source="bench-mine")
     assert opts.hooks.turn_guards is not None
     assert opts.hooks.turn_guards.platform == "worker"
+
+
+def test_a_tool_call_written_as_prose_is_raised_not_injected(rows, monkeypatch):
+    import app.harness.turn_guards as tg
+    import app.prefix_miss as pm
+
+    toasts: list = []
+    monkeypatch.setattr(pm, "_announce", lambda *a, **k: toasts.append(a) or {})
+    monkeypatch.setattr(tg, "_last_fault_announce", 0.0)
+    chat: list = []
+    hooks, _ = _worker(chat, platform="mission-control", session_id="20260924_1_ab")
+    text = 'Running it now: {"name": "Bash", "input": {"command": "sqlite3 workers.db"}}'
+    _run(hooks.fire_on_event(_terminal(text)))
+    _run(hooks.fire_on_event(_terminal(text, iteration=2)))
+    assert chat == [], "a missing capability is not fixed by more text"
+    assert [r["action"] for r in rows] == ["noop_capability_fault"] * 2
+    assert len(toasts) == 1, "one toast per cooldown, not one per iteration"
+    assert toasts[0][3] == "warning"

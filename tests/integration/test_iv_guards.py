@@ -378,7 +378,8 @@ def test_nonterminal_judgment_does_not_block_the_hook():
         raise AssertionError("should have been cancelled")
 
     cfg = obs_mod._observer_cfg()
-    cfg.update({"async_nonterminal": True, "fast_path_enabled": False})
+    # review_every_iterations=1: a mid-turn review is due on this event.
+    cfg.update({"async_nonterminal": True, "review_every_iterations": 1})
 
     async def scenario():
         hooks = HookRegistry()
@@ -596,14 +597,14 @@ def test_observation_rows_record_the_observer_model():
     print("test_observation_rows_record_the_observer_model: OK")
 
 
-def test_attach_appends_goal_card_to_the_harness_user_message():
-    """The block must land on the message the HARNESS sends.
+def test_attach_delivers_the_goal_card_by_anchor_not_by_blocking():
+    """IV plan R2: extraction runs beside iteration 1, and the card reaches
+    the primary through the state anchor once it exists.
 
-    `chat_messages_handle` is the harness's in-memory list; the session
-    JSON keeps its own copy of the user message and never sees this
-    block. Appending to the last user message (rather than the system
-    prompt) is deliberate — the system prompt has to stay byte-stable for
-    vLLM's prefix cache.
+    It used to be awaited and glued onto the user message before the first
+    request, which put up to 8 s in front of every observed turn's first
+    token. The user message is now never touched; the first anchor after
+    the card lands carries it, once.
     """
     from app.routers import _messages_inner_voice as iv
 
@@ -613,6 +614,7 @@ def test_attach_appends_goal_card_to_the_harness_user_message():
         "completion_signals": ["output shown"],
     }
     chat = [{"role": "user", "content": "run echo hello"}]
+    gate = asyncio.Event()
 
     class _Opts:
         hooks = None
@@ -620,26 +622,60 @@ def test_attach_appends_goal_card_to_the_harness_user_message():
         max_turns = 60
 
     async def fake_extract(*a, **kw):
+        await gate.wait()
         return card
 
-    with patch.object(iv, "_iv_should_fire_on_turn", return_value=True), \
-         patch.object(iv, "extract_goal_card", fake_extract), \
-         patch.object(iv, "_load_prior_turn_interventions", return_value=[]), \
-         patch.object(iv, "install_observer",
-                      return_value=_state(intervention_budget=3)) as inst, \
-         patch.object(iv._event_log, "log_event", lambda *a, **kw: None):
-        run_async(iv.attach_observer_for_turn(
-            session_id="guard_sess", turn_id="t1", turn_source="user",
-            user_request="run echo hello", options=_Opts(),
-            chat_messages_handle=chat, cancel_event=asyncio.Event(),
-        ))
+    fake_state = _state(intervention_budget=3)
 
-    assert "<goal_card>" in chat[-1]["content"], chat[-1]["content"]
-    assert "run the command" in chat[-1]["content"]
-    assert chat[-1]["content"].startswith("run echo hello"), "original text preserved"
+    async def scenario():
+        with patch.object(iv, "_iv_should_fire_on_turn", return_value=True), \
+             patch.object(iv, "extract_goal_card", fake_extract), \
+             patch.object(iv, "_load_prior_turn_interventions", return_value=[]), \
+             patch.object(iv, "install_observer", return_value=fake_state) as inst, \
+             patch.object(iv._event_log, "log_event", lambda *a, **kw: None):
+            state = await iv.attach_observer_for_turn(
+                session_id="guard_sess", turn_id="t1", turn_source="user",
+                user_request="run echo hello", options=_Opts(),
+                chat_messages_handle=chat, cancel_event=asyncio.Event(),
+            )
+            # Attach returned while extraction is still waiting.
+            assert state.goal_card is None and state.pending_tasks
+            anchor = iv.goal_card_anchor(state)
+            assert await anchor(1) == []
+            gate.set()
+            await asyncio.gather(*list(state.pending_tasks))
+            first = await anchor(2)
+            assert len(first) == 1 and "<goal_card>" in first[0]["content"]
+            assert "run the command" in first[0]["content"]
+            assert await anchor(3) == [], "delivered once"
+            return inst
+
+    inst = run_async(scenario())
+    assert chat[-1]["content"] == "run echo hello", "the user message is not touched"
     # max_turns must reach the observer or iteration pressure can never fire.
     assert inst.call_args.kwargs["max_turns"] == 60
-    print("test_attach_appends_goal_card_to_the_harness_user_message: OK")
+
+
+def test_the_goal_is_read_from_the_users_words(tmp_path, monkeypatch):
+    """08-30: a card built from a notification called the user's own request
+    out of scope. Injected blocks are stripped; an ambient turn takes its
+    goal from the last message the user typed."""
+    import json as _json
+    from app.routers import _messages_inner_voice as iv
+
+    monkeypatch.setattr(iv, "SESSIONS_DIR", tmp_path)
+    (tmp_path / "s1.json").write_text(_json.dumps({"messages": [
+        {"role": "user", "content": [{"type": "text", "text": "give me YouTube highlights"}]},
+        {"role": "user", "source": "ambient", "content": "background task finished"},
+    ]}))
+    assert iv._goal_source_text(
+        "s1", "background task finished", "ambient") == "give me YouTube highlights"
+    assert iv._goal_source_text(
+        "s1", "summarise it\n<task_notification>\nfetched\n</task_notification>",
+        "user") == "summarise it"
+    assert iv._goal_source_text(
+        "s1", "next step of the goal", "ambient",
+        producer_source="inner_voice_goal") == "next step of the goal"
 
 
 # ---------------------------------------------------------------------------
@@ -845,7 +881,7 @@ def test_the_recorder_stays_quiet_on_the_recorded_healthy_history():
 
 
 TESTS = [
-    test_attach_appends_goal_card_to_the_harness_user_message,
+    test_attach_delivers_the_goal_card_by_anchor_not_by_blocking,
     test_stall_detects_real_stalls,
     test_stall_ignores_signoffs_and_speech_acts,
     test_fast_path_does_not_inject_on_signoff,

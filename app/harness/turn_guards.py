@@ -53,6 +53,11 @@ logger = logging.getLogger("lloyd-harness-turn-guards")
 # comparison window, and never under the old observer ring.
 _RING_FLOOR = 16
 
+# A capability fault is announced at most this often per process: one toast
+# says the pool is broken; ten say nothing more.
+_FAULT_ANNOUNCE_COOLDOWN_S = 1800.0
+_last_fault_announce: float = 0.0
+
 _ROUND_OPEN_TOOLS = frozenset({"automod_start"})
 _ROUND_CLOSE_TOOLS = frozenset({"automod_land", "automod_abort"})
 
@@ -85,6 +90,7 @@ def _cfg() -> dict[str, Any]:
     tg.setdefault("failure_payload", True)
     tg.setdefault("todo_gate", True)
     tg.setdefault("round_open", True)
+    tg.setdefault("capability_fault", True)
     return tg
 
 
@@ -373,6 +379,11 @@ def install_turn_guards(
         if evt.get("tool_calls"):
             return
         text = evt.get("text", "") or ""
+        # A tool call written as prose: the capability is missing, and more
+        # text cannot supply it. Raised to a person, never injected.
+        if cfg.get("capability_fault", True) and _g.looks_like_prose_tool_call(text):
+            await _capability_fault(text)
+            return
         # One inject per terminal iteration: the loop continues on any growth.
         if cfg.get("stall_rescue", True) and _g.is_terminal_stall(text):
             await state.fire(
@@ -407,6 +418,44 @@ def install_turn_guards(
                             f"open todo(s) it wrote this turn"),
                     content=_g.todo_gate_content(open_items),
                 )
+
+    async def _capability_fault(text: str) -> None:
+        global _last_fault_announce
+        sid = state._sid()
+        logger.error(
+            "turn_guards: capability fault — tool call written as prose "
+            "session=%s turn=%s iter=%d (empty tool pool? see CLAUDE.md)",
+            sid, state._tid(), state.last_iteration,
+        )
+        await state._record("capability_fault", "assistant_message",
+                            "noop_capability_fault",
+                            "deterministic: the primary wrote a tool call as text",
+                            text[-600:], None)
+        if sid:
+            try:
+                from app import event_log
+                event_log.log_event(sid, "harness.capability_fault",
+                                    {"iteration": state.last_iteration,
+                                     "text_tail": text[-400:]},
+                                    turn_id=state._tid() or None)
+            except Exception:  # noqa: BLE001
+                pass
+        import time as _time
+        now = _time.monotonic()
+        if _last_fault_announce and now - _last_fault_announce < _FAULT_ANNOUNCE_COOLDOWN_S:
+            return
+        _last_fault_announce = now
+        try:
+            from app.prefix_miss import _announce
+            await asyncio.to_thread(
+                _announce, "Lloyd wrote a tool call as text",
+                (f"Session {sid or '?'} ended an iteration with a tool call in "
+                 f"its prose instead of dispatching it — usually an empty tool "
+                 f"pool. Check `mcp_pool: failed to discover` in server.err."),
+                False, "warning",
+            )
+        except Exception as exc:  # noqa: BLE001 — the toast is not the guard
+            logger.warning("turn_guards: capability-fault announce failed: %s", exc)
 
     hooks.add_pre_tool_use(None, pretool_cb)
     hooks.add_on_event(on_event_cb)

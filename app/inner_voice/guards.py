@@ -1307,3 +1307,47 @@ def looks_like_failure_payload(content: str) -> bool:
     and scanning a 20 KB payload for them on every tool result is waste.
     """
     return bool(_FAILURE_PAYLOAD_RE.search((content or "")[:600]))
+
+
+# ---------------------------------------------------------------------------
+# A tool call written as prose — a capability fault, not a nudge (IV plan R2)
+# ---------------------------------------------------------------------------
+#
+# When the tool pool is empty the model still knows its tools from the system
+# prompt and writes the call as text: `{"name": "Bash", "input": {...}}` (an
+# Anthropic shape that appears nowhere in this repo), a `<tool_call>` block, or
+# `<function=...>`. On 2026-09-06 the observer saw exactly that three times and
+# injected "run it for real" three times; more text cannot supply a missing
+# capability. So this is detected, logged and raised to a person, never
+# injected. CLAUDE.md, "An empty tool pool is the worst failure in the system".
+_PROSE_TOOL_CALL_RE = re.compile(
+    r"\{\s*\"name\"\s*:\s*\"[A-Za-z_][\w.-]*\"\s*,\s*\"(?:input|arguments|parameters)\"\s*:"
+    r"|<tool_call>\s*\{"
+    r"|<function=[A-Za-z_][\w.-]*>",
+)
+
+
+def looks_like_prose_tool_call(text: str) -> bool:
+    """True iff a text-only iteration carries a tool call written as text."""
+    return bool(_PROSE_TOOL_CALL_RE.search(text or ""))
+
+
+# ---------------------------------------------------------------------------
+# Text the goal extractor must not read (IV plan R2)
+# ---------------------------------------------------------------------------
+#
+# 2026-08-30, session 20260830_182633_ive386: the user asked for YouTube
+# highlights, a notification landed in the same turn, the goal card was built
+# from the notification, and the observer injected three times that the
+# transcript was "out of scope" and then cancelled the turn the user asked
+# for. The card is about the USER's request; system-injected blocks are not it.
+_INJECTED_BLOCK_RE = re.compile(
+    r"<(task_notification|diagnostics_notification|system-reminder|ide_state|"
+    r"background_task|notification|context|goal_card)\b[^>]*>.*?</\1>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+
+def strip_injected_blocks(text: str) -> str:
+    """The user's own words: harness- and system-injected blocks removed."""
+    return _INJECTED_BLOCK_RE.sub("", text or "").strip()
