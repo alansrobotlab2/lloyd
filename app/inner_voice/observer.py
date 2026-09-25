@@ -2472,11 +2472,22 @@ def install_observer(
             return
         etype = evt.get("type")
         if etype == "text_delta":
-            state.accumulated_text += evt.get("text", "")
+            # The loop never fires OnEvent for deltas (only assistant_message,
+            # tool_call, tool_result and result), so this branch is a guard,
+            # not a source: the text is taken whole from assistant_message
+            # below, and accumulating here as well would count it twice for
+            # any caller that did forward deltas.
             return
 
         if etype == "assistant_message":
             text = evt.get("text", "") or ""
+            # The primary's text so far, for every per-event prompt
+            # (`primary_text_so_far`) and for the /goal evaluator when the
+            # `result` event carries no `response_text`. It used to be fed
+            # only from `text_delta`, which never reaches this hook, so it
+            # was always empty (review 2026-09-24, D8).
+            if text:
+                state.accumulated_text += text
             tool_calls = evt.get("tool_calls", []) or []
             iteration = int(evt.get("iteration", 0))
             state.last_iteration = iteration

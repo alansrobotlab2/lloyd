@@ -145,8 +145,11 @@ Threaded into every per-event prompt by `build_user_prompt_for_event`:
   see [Tool-call captions](#tool-call-captions).
 
 Live tap on `assistant_message`, `tool_call`, `tool_result`, `result`, plus a
-`PreToolUse` callback for every tool dispatch. Text deltas flow into
-`accumulated_text` for context but don't trigger an LLM call per token.
+`PreToolUse` callback for every tool dispatch. The loop never fires OnEvent
+for text deltas; each `assistant_message`'s text is appended to
+`accumulated_text`, which every per-event prompt shows as the primary's
+response so far and the /goal evaluator falls back to (review 2026-09-24, D8 —
+before that it was fed only from the deltas and was always empty).
 
 ### What it can do — five soft levers
 

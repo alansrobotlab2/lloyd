@@ -80,8 +80,10 @@ class HookRegistry:
         self._pre_fail_closed: list[bool] = []
         self._post: list[HookCallback] = []
         self._post_failure: list[HookCallback] = []
-        # OnEvent callbacks fire on every NormalizedEvent the loop yields.
-        # Used by the Inner Voice observer to tap the primary's stream.
+        # OnEvent callbacks fire for assistant_message, tool_call,
+        # tool_result and result — not for every event the loop yields
+        # (no text_delta, thinking_delta, system). Used by the Inner Voice
+        # observer to tap the primary's stream.
         self._on_event: list[Callable[[dict[str, Any]], Awaitable[None]]] = []
         self._skill_dispatch_installed = False
 
@@ -133,8 +135,10 @@ class HookRegistry:
     def add_on_event(
         self, cb: Callable[[dict[str, Any]], Awaitable[None]]
     ) -> None:
-        """Register a callback that fires for every NormalizedEvent the
-        harness loop yields. Cheap: typical usage is `queue.put_nowait`.
+        """Register a callback the harness loop fires for assistant_message,
+        tool_call, tool_result and result events — not for text_delta,
+        thinking_delta or system, so a consumer that wants the text reads it
+        off assistant_message. Awaited inline by the loop: keep it cheap.
         """
         self._on_event.append(cb)
 

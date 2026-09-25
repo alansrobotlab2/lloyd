@@ -402,3 +402,23 @@ lives index-for-index in `_pre_fail_closed`. Pins:
 `app/harness/tests/test_harness_unit.py` (the four `a_raising_*` /
 `a_raised_hook_*` tests) and
 `tests/test_harness_safety_docstring_pointers.py::test_the_three_gates_are_registered_fail_closed`.
+
+### D8 — observer inject race; observer text
+
+- **An inject made on the assistant_message is moved behind the batch.**
+  The observer judges an iteration with tool calls on its `assistant_message`
+  and can inject then, before the batch runs; `batch_base` was taken after
+  that hook, so the inject sat outside the slice `_reorder_batch_messages`
+  may move and the next request went out as `assistant(tool_calls) → user →
+  tool`. It is now `chat_msgs_len_before_hook`, shared by both dispatch
+  paths.
+  `test_loop_inject_ordering.py::test_an_inject_landing_during_the_assistant_hook_is_reordered_behind_the_tool_results`
+  drives both.
+- **The observer sees the primary's text.** Its `accumulated_text` was fed
+  from `text_delta`, which the loop never fires OnEvent for, so every
+  per-event prompt said "(none yet)" and the /goal evaluator got nothing when
+  `result` carried no `response_text`. It is appended from each
+  `assistant_message` now; the `text_delta` branch is a no-op guard against
+  double counting. `hooks.py`'s docstrings name the four events that do fire
+  (`assistant_message`, `tool_call`, `tool_result`, `result`).
+  `tests/test_observer_accumulated_text.py`.

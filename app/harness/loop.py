@@ -731,7 +731,13 @@ async def run_query(
             # `assistant(tool_calls) → user → tool`, which is not a shape
             # any engine accepts. `_reorder_batch_messages` below puts the
             # slice back in wire order once the batch is done.
-            batch_base = len(chat_messages)
+            #
+            # Taken from BEFORE the assistant_message hook fired, not from
+            # here: an observer inject appended during `fire_on_event(asst_evt)`
+            # sits between `assistant(tool_calls)` and this batch's tool
+            # messages, and a base taken after it would leave the inject
+            # outside the slice the reorder may move (review 2026-09-24, D8).
+            batch_base = chat_msgs_len_before_hook
 
             run_parallel = (
                 getattr(options, "parallel_tool_calls_enabled", False)

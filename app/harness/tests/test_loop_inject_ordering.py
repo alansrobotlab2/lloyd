@@ -191,3 +191,51 @@ def test_no_inject_ends_the_turn_on_one_iteration(monkeypatch):
     )
     asyncio.run(_drain([{"role": "user", "content": "hi"}], opts))
     assert len(script.captured_messages) == 1
+
+
+# ── an inject that lands during the assistant_message hook (D8) ─────────────
+
+@pytest.mark.parametrize("parallel", [False, True], ids=["sequential", "parallel"])
+def test_an_inject_landing_during_the_assistant_hook_is_reordered_behind_the_tool_results(
+        monkeypatch, parallel):
+    """The observer judges an iteration WITH tool calls on its
+    assistant_message and may inject then, before the batch runs. That
+    append sits between `assistant(tool_calls)` and the batch's tool
+    messages, so `batch_base` has to be taken before the hook fired or the
+    reorder cannot see it and the next request goes out as
+    `assistant(tool_calls) → user → tool`, which no engine accepts. Both
+    dispatch paths share the base, so both are driven."""
+    from app.harness.tests import _replay as R
+
+    handle: list[dict] = [{"role": "user", "content": "go"}]
+    fired = {"n": 0}
+
+    async def cb(evt: dict) -> None:
+        if evt.get("type") == "assistant_message" and evt.get("tool_calls") \
+                and not fired["n"]:
+            fired["n"] += 1
+            handle.append({"role": "user", "content": "[INNER VOICE] narrow it"})
+
+    hooks = HookRegistry()
+    hooks.add_on_event(cb)
+
+    engine = R.ReplayEngine([R.Step(tool_calls=[
+        R.tool_call("c1", "Read", "a"), R.tool_call("c2", "Grep", "b"),
+        R.tool_call("c3", "Glob", "c")]), R.Step(text="done")])
+    pool = R.ReplayPool(delay_by_call_id={"c1": 0.02})
+    R.install(monkeypatch, engine, pool)
+    asyncio.run(R.drive(RunOptions(
+        model="m", max_turns=4, tool_search_enabled=False,
+        parallel_tool_calls_enabled=parallel, hooks=hooks,
+        chat_messages_handle=handle), handle))
+
+    assert fired["n"] == 1
+    if parallel:
+        assert pool.max_inflight > 1, "the batch did not take the parallel path"
+    sent = engine.requests[1].messages
+    roles = [m["role"] for m in sent]
+    assert roles == ["user", "assistant", "tool", "tool", "tool", "user"], roles
+    # Wire order of the tool messages is untouched; only the boundary moved.
+    assert [m.get("tool_call_id") for m in sent if m["role"] == "tool"] == \
+        ["c1", "c2", "c3"]
+    assert sent[-1]["content"] == "[INNER VOICE] narrow it"
