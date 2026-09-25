@@ -147,7 +147,8 @@ def _build_speaker_id(vp_cfg: dict):
     return None when disabled / construction fails. We swallow construction
     failures (resemblyzer missing, profiles_dir unwritable) because voice
     works fine without it — degrading to identity-only matching is the
-    sensible fallback."""
+    sensible fallback. A missing CAM++ model file surfaces later, at the
+    eager `_ensure_encoder`, as a warning — same degradation."""
     if not vp_cfg.get("enabled", True):
         LOG.info("voiceprint matching disabled in config")
         return None
@@ -155,9 +156,12 @@ def _build_speaker_id(vp_cfg: dict):
         from speaker_id import SpeakerIdentifier
         return SpeakerIdentifier(
             profiles_dir=vp_cfg.get("profiles_dir", os.path.join(_data_root(), "voice_profiles")),
-            threshold=float(vp_cfg.get("profile_threshold", 0.75)),
+            threshold=float(vp_cfg.get("profile_threshold", 0.40)),
             unknown_label=str(vp_cfg.get("unknown_label", "Unknown")),
             device=str(vp_cfg.get("device", "cpu")),
+            backend=str(vp_cfg.get("backend", "campplus")),
+            model_path=vp_cfg.get("model_path") or None,
+            num_threads=int(vp_cfg.get("num_threads", 2)),
         )
     except Exception as e:
         LOG.warning("voiceprint init failed (%s) — falling back to identity matching", e)
@@ -1086,14 +1090,14 @@ class RoomBridge:
         # from VoiceRoom on connect. Used by ww-diag to A/B browser DSP
         # configurations.
         self._client_meta: dict[str, dict] = {}
-        # Optional SpeakerIdentifier (resemblyzer). When None, the wake-word
-        # gate falls back to LiveKit-identity-only matching for continuation.
+        # Optional SpeakerIdentifier (livekit.voiceprint.backend: CAM++ or
+        # Resemblyzer). When None, the wake-word gate falls back to LiveKit-identity-only matching for continuation.
         self.speaker_id = speaker_id
         vp_cfg = lk_cfg.get("voiceprint", {}) or {}
         # Cosine threshold for "is this still the same speaker as the
         # wake-word utterance". Separate from the profile threshold —
         # anchor matching is an easier task than full identification.
-        self.anchor_threshold = float(vp_cfg.get("anchor_threshold", 0.65))
+        self.anchor_threshold = float(vp_cfg.get("anchor_threshold", 0.25))
         self.room = rtc.Room()
         self._tasks: list[asyncio.Task] = []
         # Strong refs to in-flight utterance handlers. asyncio's create_task
@@ -1612,7 +1616,7 @@ class RoomBridge:
         second after the user stopped speaking. The speaker embedding is
         deliberately *not* awaited here — it is attached when the utterance
         arrives, a few hundred milliseconds later, and making the window wait
-        on Resemblyzer would give back most of what was gained.
+        on the speaker encoder would give back most of what was gained.
         """
         if not self.wake.enabled:
             return
@@ -1650,7 +1654,7 @@ class RoomBridge:
                  self.room_name, identity, dropped)
 
     async def _embed_async(self, samples: np.ndarray, sample_rate: int):
-        """Run resemblyzer's blocking embed in a thread so the event loop
+        """Run the speaker encoder's blocking embed in a thread so the event loop
         stays responsive. Returns (embedding, name, score) on success or
         (None, unknown_label, 0.0) on failure.
 
@@ -1662,8 +1666,9 @@ class RoomBridge:
             return None, "Unknown", 0.0
         # SpeakerIdentifier takes int16 and divides by 32768 itself. The hearing
         # pipeline hands over float32 in [-1, 1]; passed straight through, that
-        # is a 90 dB attenuation ahead of Resemblyzer's silence trimming —
-        # invisible while no profile is enrolled, wrong the day one is.
+        # was a 90 dB attenuation ahead of Resemblyzer's silence trimming —
+        # invisible while no profile is enrolled, wrong the day one is. The
+        # contract stays int16 whichever encoder is behind it.
         if samples.dtype != np.int16:
             samples = to_int16(samples)
         loop = asyncio.get_running_loop()
@@ -1887,7 +1892,7 @@ class RoomBridge:
 
         # ── Who said it ─────────────────────────────────────────────
         # Deliberately after the wake window was opened, not before: the
-        # window is what the UI reacts to and Resemblyzer costs ~150 ms.
+        # window is what the UI reacts to and the embed costs ~20-60 ms.
         if woke:
             emb, name, score = await self._embed_async(audio, 16000)
             if emb is not None and self.speaker_id is not None:

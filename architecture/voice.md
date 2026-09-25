@@ -47,7 +47,7 @@ Both the worker and the TTS engine are pinned to **GPU 0** (the desktop 3090)
 by `CUDA_VISIBLE_DEVICES` in their supervisord programs — see
 [[infrastructure]] for why the worker must stay off GPU 1. Every model the
 worker runs is CPU ONNX: Silero VAD, openWakeWord, Smart Turn, Parakeet (via
-sherpa-onnx) and Resemblyzer. The worker's VRAM is a dependency initialising a
+sherpa-onnx) and the CAM++ speaker encoder (onnxruntime). The worker's VRAM is a dependency initialising a
 CUDA context, not a model.
 
 ```mermaid
@@ -446,26 +446,86 @@ configured 0.4.
 
 ### Who is speaking: profiles and enrollment
 
-`agent-services/speaker_id.py` is Resemblyzer — 256-d d-vectors, unit-norm so
-cosine is a dot product — and it does two different jobs with one encoder:
+`agent-services/speaker_id.py` embeds an utterance into a unit-norm vector —
+cosine is a dot product — and does two different jobs with one encoder:
 
-- **Enrolled recognition.** `*.npy` files in `livekit.voiceprint.profiles_dir`
+- **Enrolled recognition.** Profiles in `livekit.voiceprint.profiles_dir`
   (`~/lloyd-data/voice_profiles`). `identify()` returns the best profile above
-  `profile_threshold` (0.75) or `unknown_label`. That name becomes the
+  `profile_threshold` (0.40) or `unknown_label`. That name becomes the
   `[Alan]: …` prefix on the injected turn.
 - **Anchor matching** for the continuation window above, against
-  `anchor_threshold` (0.4) — a deliberately looser bar, because it is answering
-  "same voice as ten seconds ago", not "who is this".
+  `anchor_threshold` (0.25) — a deliberately looser bar, because it is
+  answering "same voice as ten seconds ago", not "who is this".
+
+**The encoder is CAM++ since 2026-09-24** (`livekit.voiceprint.backend:
+campplus`; `resemblyzer` is the other value). 3D-Speaker's
+`speech_campplus_sv_en_voxceleb_16k`, the 28 MB ONNX export sherpa-onnx
+publishes, run through onnxruntime on CPU with a numpy Kaldi fbank in front —
+no new dependency. `eval/speaker_embed_eval.py` measured it against the old
+Resemblyzer GE2E and ReDimNet-B2 (torch, scratch venv) on 1–4 s clips, the
+lengths the worker embeds:
+
+| | Resemblyzer | CAM++ | ReDimNet-B2 |
+|---|---|---|---|
+| clip-to-clip EER, LibriSpeech test-clean (40 spk × 10 crops) | 9.7% | **4.7%** | 4.5% |
+| … when the shorter clip is 1 s / 2 s / 4 s | 13.0 / 4.5 / 0.3% | 6.3 / 1.2 / 0.05% | 6.3 / 1.3 / 0% |
+| profile (mean of 3 clips) vs clip EER | 4.3% | 2.5% | 1.8% |
+| same / different speaker cosine, p5–p95 | 0.57–0.86 / 0.37–0.64 | 0.27–0.76 / −0.07–0.26 | 0.25–0.75 / −0.10–0.23 |
+| own voice: Lloyd clone p5 − room p95 (clean / through-the-room) | +0.07 / +0.07 | **+0.31 / +0.18** | +0.17 / +0.06 |
+| room corpus pairwise cosine, p5 / p50 / p95 | 0.34 / 0.52 / 0.74 | −0.02 / 0.16 / 0.50 | −0.05 / 0.11 / 0.39 |
+| embed, median ms at 1 s / 4 s (2 threads, busy box) | 16 / 39 | 21 / 62 | 26 / 73 |
+| runs in the lloyd venv | yes | yes (onnxruntime) | no (torch + torchaudio) |
+
+The plan's 0.65% / 0.57% are VoxCeleb1-O on whole utterances; short
+cross-domain crops cost every model the same factor. ReDimNet-B2 is a hair
+ahead on LibriSpeech and behind on own-voice separation, and would need an
+ONNX export of its torchaudio front end, so CAM++ ships.
+
+- **Own-voice rejection** (Phase 2): 12 renders of `clone:dave_cullen` from the
+  live TTS server, a profile from the mean of 5, scored against 21 held-out
+  1–4 s windows and the 194 room utterances ≥ 1 s. With CAM++ any threshold in
+  0.26–0.44 rejects all 21 clean windows and keeps every room utterance
+  (0.26–0.36 for band-limited copies at 15 dB SNR); ~0.30 is the middle of
+  both. Resemblyzer's best single threshold rejected 95.2% and kept 95.4%.
+  Enrol from several renders: the 5-render mean scores held-out windows at a
+  median 0.75, a single render at 0.54.
+  The highest room utterances against the clone are "Laughter", "Okay. Okay."
+  and "What's the good word?" at 0.24–0.25 — nothing in that corpus is Lloyd.
+  21 windows from 7 renders is thin; re-measure through the room before
+  trusting the margin on a loudspeaker.
+- **The room corpus** (`~/.lloyd/ww_diag`, 500 clips, mostly Alan plus TV) is
+  unlabelled, so it measures spread, not accuracy. CAM++ spreads it over
+  −0.02–0.50 where Resemblyzer crowded it into 0.34–0.74 — which is why
+  Resemblyzer's 0.4 anchor threshold let 89% of different-speaker LibriSpeech
+  pairs through.
+- **The published export is patched as it loads.** Its 52 `AveragePool`
+  nodes carry `count_include_pad=1`, so the partial 100-frame segment at the
+  end of every utterance is divided by 100 where PyTorch divides by what is
+  there, and the embedding collapses each time an utterance crosses a 2 s
+  boundary: 38% EER as published, the same through sherpa-onnx's own
+  `SpeakerEmbeddingExtractor`. `_patch_count_include_pad` flips the attribute
+  in the model bytes; the file on disk stays the published one, so the fetch
+  script's size check holds. WeSpeaker's CAM++_LM export has the same
+  collapse by another route and was not pursued.
+- **Profiles are tagged by backend**: `<name>.<backend>.npy`. Another
+  backend's profile is ignored and logged, never compared (512-d vs 256-d, and
+  cosines across models mean nothing); an untagged `<name>.npy` is a legacy
+  Resemblyzer profile. Deleting a name removes every backend's copy. A backend
+  switch therefore means re-enrolling, and moving both thresholds —
+  Resemblyzer's were 0.75 / 0.4, config.yaml has the measurement.
+- `enroll_reference(name, clips)` stores the renormalised mean of several
+  clips — how Phase 2 enrols the clone as `lloyd-voice` — and `embed_many`
+  embeds a list; `enroll` is the one-clip case.
 
 One `SpeakerIdentifier` is shared across every room, so the encoder loads
 once — at worker startup since 2026-09-17. Lazy, it cost 0.8 s on the first
 wake of every worker lifetime, in the path between transcript and inject.
 
-It takes **int16** and divides by 32768 itself. The hearing pipeline produces
-float32 in [-1, 1], so `_embed_async` converts first; passed straight through,
-that is a 90 dB attenuation ahead of Resemblyzer's silence trimming — invisible
-while no profile is enrolled, wrong the day one is
-(`test_the_speaker_encoder_is_handed_int16`).
+Its contract is **int16** at any rate (it resamples to 16 kHz itself). The
+hearing pipeline produces float32 in [-1, 1], so `_embed_async` converts first;
+under Resemblyzer a float passed straight through was a 90 dB attenuation ahead
+of its silence trimming — invisible while no profile is enrolled, wrong the day
+one is (`test_the_speaker_encoder_is_handed_int16`).
 
 Enrollment is a UI action, not a script: **Settings → Voice profiles** records
 a clip in the browser and POSTs it to `/api/voice/speakers/enroll`
@@ -1124,7 +1184,8 @@ voice.
 | `voice_library/profiles/dave_cullen/` | **no** — back up; not reproducible |
 | `qwen3-tts/models/` (4.3 GB of Base weights) | **no** — re-downloadable, slowly |
 | `.env` (`LIVEKIT_API_*`) | **no** — regenerate with `gen-livekit-secrets.sh` |
-| `~/lloyd-data/voice_profiles/*.npy` | **no** — re-enroll from Settings |
+| `agent-services/models/campplus/` (CAM++, 28 MB) | **no** — `bash agent-services/setup/fetch-voice-models.sh` (from sherpa-onnx's `speaker-recongition-models` release, size-checked) |
+| `~/lloyd-data/voice_profiles/*.<backend>.npy` | **no** — re-enroll from Settings |
 
 ### Tests and tools
 
@@ -1145,6 +1206,14 @@ voice.
   sentence sent as one turn, a woken mention dropped while a trailing
   address is kept, the one-filler matcher, the speaker encoder
   handed int16, the prewarm request.
+- `tests/test_speaker_id_backend.py` — backend selection, `<name>.<backend>.npy`
+  tagging, legacy and other-backend profiles ignored, `enroll_reference`
+  averaging, the numpy fbank against a stored torchaudio reference, the
+  `count_include_pad` byte patch; on the real CAM++ model (skipped unfetched):
+  same speaker over different on LibriSpeech fixture clips, no drift across a
+  2 s segment boundary, identify end to end.
+- `eval/speaker_embed_eval.py` — the encoder bake-off (`prepare` / `embed` /
+  `score`); inputs are downloaded, not tracked.
 - `tests/test_voice_speakable.py` — clauses whatever the slicing, the early
   first clause, abbreviations and decimals, code, dividers, lists, tables,
   inline markdown, short-clause joining, the ceiling.

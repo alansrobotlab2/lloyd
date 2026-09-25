@@ -1072,9 +1072,31 @@ livekit:
   voiceprint:
     enabled: true
     profiles_dir: ${LLOYD_DATA}/voice_profiles
-    profile_threshold: 0.75
-    anchor_threshold: 0.4
-    device: cpu
+    # campplus | resemblyzer. CAM++ since 2026-09-24 (agent-services/speaker_id.py;
+    # model from agent-services/setup/fetch-voice-models.sh). Profiles are saved
+    # as <name>.<backend>.npy and another backend's are ignored, so a switch
+    # needs re-enrolment — AND the two thresholds below, which are per model:
+    # Resemblyzer's were 0.75 / 0.4, where its cosines crowd into 0.4-0.9.
+    backend: campplus
+    # Both thresholds from eval/speaker_embed_eval.py on LibriSpeech test-clean,
+    # 40 speakers x 10 crops of 1/2/3/4 s (the worker's utterance lengths):
+    #                            pair EER   profile EER   own-voice margin
+    #   resemblyzer (old)          9.7%        4.3%           +0.07
+    #   CAM++ (this)               4.7%        2.5%           +0.31
+    # Profile = the mean of 3 clips, scored against the speaker's other 7 and
+    # 39 other speakers' 7. At 0.40 CAM++ misses 5.0% of a speaker's clips and
+    # names the wrong person on 0.48% — Resemblyzer's 0.75 had the same 0.48%
+    # false accepts for 13.6% misses. Clean read speech: expect more misses in
+    # the room, fewer if a profile is enrolled from several clips.
+    profile_threshold: 0.40
+    # One clip against one clip ("still the same voice as the wake word").
+    # A false reject drops a real follow-up, so this sits at ~4% of same-speaker
+    # pairs rejected (7.4% when a clip is 1 s) and lets 6.0% of different-
+    # speaker pairs through. Resemblyzer's 0.4 let 89% through — it was an
+    # identity check in name only.
+    anchor_threshold: 0.25
+    device: cpu          # resemblyzer only; CAM++ runs on onnxruntime CPU
+    num_threads: 2       # CAM++ onnxruntime intra-op threads; ~20 ms a 1 s clip, ~60 ms at 4 s
     unknown_label: Unknown
 # Self-modification loop: worktree -> gate -> promote, with guardian rollback.
 # `enabled: false` is the master switch and the default. The machinery lands

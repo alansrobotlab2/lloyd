@@ -597,9 +597,12 @@ def _get_speaker_identifier():
         )
     return SpeakerIdentifier(
         profiles_dir=vp_cfg.get("profiles_dir", str(VOICE_PROFILES_DIR)),
-        threshold=float(vp_cfg.get("profile_threshold", 0.75)),
+        threshold=float(vp_cfg.get("profile_threshold", 0.40)),
         unknown_label=str(vp_cfg.get("unknown_label", "Unknown")),
         device=str(vp_cfg.get("device", "cpu")),
+        backend=str(vp_cfg.get("backend", "campplus")),
+        model_path=vp_cfg.get("model_path") or None,
+        num_threads=int(vp_cfg.get("num_threads", 2)),
     )
 
 
@@ -621,9 +624,11 @@ async def voice_speakers_enroll(request: Request):
 
     Multipart form fields:
       name: str    — profile name (alphanumeric/-/_)
-      audio: file  — wav file (any sample rate; resemblyzer resamples)
+      audio: file  — wav file (any sample rate; resampled to 16 kHz)
 
-    Embeds the audio with resemblyzer and saves <profiles_dir>/<name>.npy.
+    Embeds the audio with the configured speaker encoder
+    (`livekit.voiceprint.backend`, CAM++ by default) and saves
+    <profiles_dir>/<name>.<backend>.npy.
     """
     form = await request.form()
     name = (form.get("name") or "").strip()

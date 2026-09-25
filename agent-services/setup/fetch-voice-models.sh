@@ -11,6 +11,8 @@
 #   smart-turn/            pipecat Smart Turn v3.2, CPU int8 ONNX       ~9 MB   BSD-2-Clause
 #   parakeet-tdt-v3/       NeMo Parakeet TDT 0.6B v3, int8, sherpa-onnx ~670 MB CC-BY-4.0
 #   nemo-streaming-480ms/  NeMo streaming FastConformer CTC, 480 ms     ~460 MB (livekit.stt.streaming, off)
+#   campplus/              3D-Speaker CAM++ VoxCeleb speaker embedding  ~28 MB  Apache-2.0
+#                          (livekit.voiceprint.backend: campplus; speaker_id.py patches it as it loads)
 #
 # Sizes are checked, not just presence: a truncated encoder still loads and
 # still transcribes — badly — and nothing else would say why.
@@ -31,6 +33,7 @@ FILES=(
   "parakeet-tdt-v3|tokens.txt|93939|$HF/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/main/tokens.txt"
   "nemo-streaming-480ms|model.onnx|458883812|$HF/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-ctc-en-480ms/resolve/main/model.onnx"
   "nemo-streaming-480ms|tokens.txt|11896|$HF/csukuangfj/sherpa-onnx-nemo-streaming-fast-conformer-ctc-en-480ms/resolve/main/tokens.txt"
+  "campplus|3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx|29596978|https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
 )
 
 missing=0

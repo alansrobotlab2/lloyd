@@ -28,7 +28,7 @@ import {
 } from '@/lib/micGain'
 
 const RECORD_SECONDS = 5
-const SAMPLE_RATE_HINT = 16000  // resemblyzer resamples internally; this is just a request
+const SAMPLE_RATE_HINT = 16000  // the speaker encoder resamples to 16 kHz server-side; this is just a request
 
 interface Profile {
   name: string
@@ -39,8 +39,8 @@ interface Profile {
 /** Capture `seconds` of mic audio and return it as a 16-bit PCM WAV blob.
  *  Uses the Web Audio API directly (ScriptProcessor) to get raw samples;
  *  MediaRecorder produces webm/opus, which the backend's `wave.open` won't
- *  parse. Mono. Browser sample rate (typically 48 kHz) — resemblyzer's
- *  preprocess_wav handles the resample. */
+ *  parse. Mono. Browser sample rate (typically 48 kHz) — the backend's
+ *  speaker encoder resamples to 16 kHz. */
 async function recordWav(
   seconds: number,
   onProgress?: (elapsedMs: number) => void,
