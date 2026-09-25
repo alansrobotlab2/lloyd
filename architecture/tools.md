@@ -590,7 +590,7 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | Tool | Properties | Required | Does |
 |---|---|---|---|
 | `djev_rank` | RO | `query`, `candidates` | Re-rank a shortlist (≤12 default, 16 max) against a query on GPU 2. The order is the output; the scores are not calibrated |
-| `djev_decide` | RO | `state`, `questions` | Typed questions (yes/no, one-of-N, ordered scale) about one text, in ~40 ms |
+| `djev_decide` | RO | `state`, `questions` | Typed questions (yes/no, one-of-N, ordered scale) about one text, in under a second. Compact result by default, `verbose` for every diagnostic |
 | `djev_status` | RO | — | Enabled, reachable, per-seam latency, shadow queue, per-schema floors and gate status |
 
 #### `facts` (7)

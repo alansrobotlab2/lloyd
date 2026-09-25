@@ -156,6 +156,38 @@ def _validate(questions: Any) -> str | None:
     return None
 
 
+def _compact(out: "djev.Answers") -> dict:
+    """What a caller acts on, and nothing it reads past.
+
+    The full `as_dict()` is ~300 characters an answer — `label_mass`,
+    `argmax_is_label`, unrounded probabilities — and every character of it
+    comes back into the primary's context. The point of the tool is that the
+    judgement is cheaper here than in the primary's reasoning, so the read-back
+    must not eat the saving. A trust problem is still said: `low_trust` and
+    `uninformative` appear on an answer only when true, `min_label_mass` stays
+    on the body, and the cross-chunk and degenerate-read warnings are added by
+    the caller exactly as on the verbose path. `verbose: true` returns it all.
+    """
+    answers = {}
+    for qid, a in out.answers.items():
+        row: dict[str, Any] = {"label": a.label}
+        if a.type != "choice":
+            # A choice's value IS its label; a noul's is P(yes) and a score's
+            # the expected level index, both worth the number.
+            row["value"] = round(float(a.value), 3)
+        # A score's probabilities are keyed by level index; the verbose form
+        # carries a `legend` to read them by, so compact keys them by name.
+        legend = a.legend or {}
+        row["p"] = {legend.get(str(k), k): round(float(v), 3)
+                    for k, v in a.probabilities.items()}
+        if a.low_trust:
+            row["low_trust"] = True
+        if a.uninformative:
+            row["uninformative"] = True
+        answers[qid] = row
+    return {"answers": answers, "min_label_mass": round(out.min_label_mass, 3)}
+
+
 async def _decide(args: dict) -> str:
     state = args.get("state")
     if state is None or (isinstance(state, str) and not state.strip()):
@@ -178,7 +210,7 @@ async def _decide(args: dict) -> str:
     if out is None:
         return _err("djev did not answer (engine unreachable, disabled, or the "
                     "response was malformed). No decision was made.")
-    body = out.as_dict()
+    body = out.as_dict() if args.get("verbose") else _compact(out)
     body["note"] = _TRUST_NOTE
     if out.cross_chunk:
         body["warning"] = (
@@ -252,9 +284,10 @@ async def list_tools():
         Tool(
             name="djev_rank",
             description=(
-                "Re-rank a SHORTLIST of candidates against a query on the idle "
-                "GPU-2 decision engine, in ~0.5 s for 12. Use as a final stage "
-                "after a cheap retrieval pass, never as the retrieval itself. "
+                "Order a SHORTLIST against a query instead of comparing the "
+                "candidates in your reasoning, in ~0.5 s for 12 on the idle "
+                "GPU 2. Use as a final stage after a cheap retrieval pass, "
+                "never as the retrieval itself. "
                 "Ordering is the trustworthy output; the scores are not "
                 "calibrated probabilities. Refuses more than "
                 f"{djev.RANK_MAX_N} candidates rather than truncating."
@@ -291,12 +324,12 @@ async def list_tools():
         Tool(
             name="djev_decide",
             description=(
-                "Ask typed questions — yes/no, one-of-N, ordered scale — about "
-                "one piece of text and get probabilities back in ~40 ms, on "
-                "the otherwise-idle GPU 2 rather than the busy primary. Good "
-                "for classifying, shortlisting and ordering. The scores are "
-                "self-consistent, NOT calibrated: do not compare them to a "
-                "fixed cutoff such as 0.5."
+                "Classify or triage instead of deliberating: typed questions "
+                "about one text, answered in under a second. Up to 32 yes/no, "
+                "one-of-N or ordered-scale questions per call, on the idle "
+                "GPU 2. Trust the label and the order; the scores are NOT "
+                "calibrated, so do not compare them to a fixed cutoff such "
+                "as 0.5."
             ),
             inputSchema={
                 "type": "object",
@@ -320,6 +353,9 @@ async def list_tools():
                     "samples": {"type": "integer", "description":
                                 "Noise draws to average (default 1; more is "
                                 "steadier and proportionally slower)"},
+                    "verbose": {"type": "boolean", "description":
+                                "Every diagnostic instead of the compact "
+                                "answer (default false)"},
                     "timeout_seconds": {"type": "number", "description":
                                         "Client-side bound (default "
                                         f"{djev.DEFAULT_TIMEOUT_S})"},

@@ -424,9 +424,15 @@ djev_rank(query="how do I restart the backend safely", candidates=[
 - It is validated before any call. There must be 1–32 questions. A `choice`
   needs a `criteria` object with at least two options. A `score` needs an
   ordered list of at least two levels.
-- It returns `Answers.as_dict()` plus the `note`. It adds `warning` when the
-  server split the canvas, and `warning_uninformative` when every answer came
-  back the same.
+- It returns a **compact** body by default: per answer `label`, `value`
+  (omitted for a `choice`, where it is the label), probabilities rounded to
+  three places as `p`, and `low_trust` / `uninformative` only when true; plus
+  `min_label_mass` and the `note`. `verbose: true` returns `Answers.as_dict()`
+  instead. Either way it adds `warning` when the server split the canvas, and
+  `warning_uninformative` when every answer came back the same. The compact
+  form exists because the tool's value is that a judgement costs less here
+  than in the primary's reasoning, and the full diagnostics are ~300
+  characters an answer read back into the primary's context.
 
 **`djev_status`** — no required arguments (an optional `verbose` is accepted
 and ignored). It returns the client's `stats()`,
@@ -913,6 +919,18 @@ answer (`architecture/automod.md` §8.1b). Production never sets the variable.
 ## 9. Using it
 
 ### 9.1 From a turn
+
+**The model is told in its system prompt, not only in the tool descriptions**
+(2026-09-25). In the first four days djev was called from one session of ~900,
+and from no worker turn: a description is read at call time, after the model
+has already decided to reason a ranking out in tokens. `prompt_builder.py`
+carries a constant "Fast decisions" paragraph beside the web-lookup and
+code-navigation ones, on chat and worker turns both. It names the shapes that
+pay (rank, shortlist, classify, triage several things against stated
+criteria), says to trust the order and the label and never a cutoff, and says
+a single judgement already in hand needs no call. Both descriptions lead with
+"instead of", which is what the ToolSearch catalog gist keeps.
+`tests/test_djev_fast_decisions.py` pins all of it.
 
 - **`djev_rank` is a final stage over a shortlist**, never the retrieval
   itself. Shortlist with `vault_search`, `vault_recall` or a grep, then rank the best

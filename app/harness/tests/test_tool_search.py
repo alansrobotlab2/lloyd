@@ -427,7 +427,6 @@ GIST_LOSS_EXCEPTIONS: dict[str, str] = {
     "Task": "the resume-instead-of-restart rule needs the task_id, which the schema carries",
     "graph_explain": "'use before hand-searching' is ordering advice; the gist names the graph",
     "graph_affected": "'call this before changing a shared function' is ordering advice",
-    "djev_decide": "'do not compare to a fixed cutoff' is about reading scores, not choosing the tool",
     "http_fetch": "the first sentence already routes: page here, API to http_request, localhost to Bash",
     "research_propose": "'instead of researching it twice' describes the dedupe list it returns",
     "research_next": "'never takes work away' is a read-only note; 'peek' already says so",

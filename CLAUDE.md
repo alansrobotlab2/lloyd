@@ -2890,7 +2890,9 @@ is not a chat slot, is absent from `models:` and `resolve_model_alias`, and
 nothing routes a turn to it. It answers three MCP tools (`djev_rank`,
 `djev_decide`, `djev_status`) and records three production seams in shadow.
 Since #1336 (2026-09-21) it also **orders every vault recall** in place of
-qmd's cross-encoder, which is its fallback. **Rank with it; do not gate on it** — measured, a fixed
+qmd's cross-encoder, which is its fallback. The system prompt's "Fast decisions" paragraph tells the model to hand
+rank/classify/triage judgements to it rather than reason them out
+(2026-09-25). **Rank with it; do not gate on it** — measured, a fixed
 0.5 cutoff is meaningless and every threshold belongs to one frozen schema,
 option order included. `architecture/djev.md` is the long version and carries
 the numbers, the floors and the follow-on work.

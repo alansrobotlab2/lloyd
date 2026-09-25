@@ -516,6 +516,28 @@ def build_system_prompt(
     )
     parts.append(code_graph)
 
+    # Fast decisions. djev answers typed questions on GPU 2, which sits idle
+    # while the primary runs flat out, and in its first four days the model
+    # called it from one session of ~900: its tool descriptions are read at
+    # call time, after the model has already chosen to reason the answer out
+    # in tokens. Same asymmetry as the two paragraphs above, same fix. The
+    # last sentence is the rail: a call costs the state and the questions
+    # written out, so a single judgement already in hand is cheaper answered.
+    # Constant text only, like the paragraphs above.
+    fast_decisions = (
+        "Fast decisions: when you are about to rank, shortlist, classify or "
+        "triage several things against stated criteria, hand the judgement to "
+        "djev instead of deliberating over each one in your reasoning. "
+        "djev_decide takes one text and up to 32 typed questions (yes/no, "
+        "one-of-N, ordered scale) and djev_rank orders up to 16 candidates "
+        "against a query; both run on the otherwise idle GPU 2 in under a "
+        "second and cost you only the call. Trust the ordering and the chosen "
+        "label, never a score against a fixed cutoff such as 0.5, and if djev "
+        "returns an error carry on with your own judgement. A single judgement you "
+        "can already answer in a sentence needs no tool."
+    )
+    parts.append(fast_decisions)
+
     # P9: only while `harness.rpc.enabled` — off, the prompt is byte for byte
     # what it was. A constant paragraph (the path is LLOYD_HOME's), so turning
     # it on costs one re-prefill, not one per turn.
