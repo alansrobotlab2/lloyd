@@ -124,9 +124,10 @@ whether the primary engine is answering *at all* and holds the sources it
 names (default `autocode`) while it is not — the backend coming back before
 the 95 GiB table is resident used to spend items' attempt budgets on
 connection errors (#1430). Its kill switch is deliberately absent from
-tracked config (a gate the loop must not be able to disarm), and it has no
-long-form doc yet (#1465). All three report beside `pool.kv_gate` in
-`/api/workers/status`.
+tracked config (a gate the loop must not be able to disarm); "The primary
+reachability hold" below is the long form (#1465). All three report beside
+`pool.kv_gate` in `/api/workers/status`, and `WorkerPool._claim_holds` is
+the one call site that unions them into the claim query's `NOT IN`.
 
 It exists because of what the 09-09 stall turned out to be
 (`vllm.md`): long-lived agent loops evicting each
@@ -148,6 +149,51 @@ every long-lived job for the length of every prefill. No reading — sampler
 off, engine down, a sample older than 30 s — means open. State is `pool.kv_gate` in
 `/api/workers/status` and a row on the dashboard's worker panel, and each
 transition logs one line.
+
+### The primary reachability hold
+
+The KV gate asks how the engine is *doing* and the round hold asks whether a
+round is already in flight; while the primary is still loading, both are
+silent. `primary_hold` (`workers/pool.py::_primary_hold_held`, #1430) asks
+whether it is answering **at all**. It exists because of 2026-09-23 19:35: the
+stack restarted, the backend came back before the primary had its 95.37 GiB
+host-RAM n-gram table resident, and the pool claimed three autocode rounds in
+65 seconds that each died with `All connection attempts failed` — each booked
+as an attempt on its item (#1220 and #654 went to draft inside two minutes;
+#1151 the same way on 09-18). vLLM does not open its port until the model is
+resident, so "not answering `/health`" means "a turn started now cannot run",
+not "slow". **It protects the attempt ledger, not the engine**: an item that
+is never claimed keeps its attempt.
+
+- **What it holds.** `LONG_LIVED` sources ∩ `sources` (default
+  `[autocode]`, `DEFAULT_PRIMARY_HOLD_SOURCES`), and only while the last probe
+  said *not answering*. Everything else claims as before.
+- **The probe.** `primary_engine_answering` GETs the primary's own `/health`
+  (`promote.PRIMARY_HEALTH`). HTTP 200 is answering; any other status, a
+  refused connection **or a timeout** is not — a timeout holds the round
+  rather than spending anything, so a low `probe_timeout_s` costs a late
+  round, never a lost attempt. The one case that fails **open** is being
+  unable to ask at all (the probe import fails or raises): a broken probe must
+  not become a stalled pool, the same rule the KV gate states for a missing
+  reading. An engine that answers 200 and then drops every stream is a
+  different failure, bounded by the ledger's `INFRA_RETRY_CAP`.
+- **Cached, off the loop.** Claims come every second or two, so the verdict
+  is cached for `probe_seconds` (10) and refreshed through
+  `asyncio.to_thread`; a claim never waits on HTTP. A probe already in flight
+  is not joined — the previous answer stands — and the cache age is stamped
+  from the *answer*, so a slow `/health` is not re-asked by every idle slot.
+  `probe_timeout_s` is 2. It logs only on engage and release.
+- **The kill switch is deliberately untracked.** `workers.primary_hold`
+  (`enabled`, `sources`, `probe_seconds`, `probe_timeout_s`) is read over the
+  code defaults only when a person puts it in `config.yaml`, and it is absent
+  from the checked-in file on purpose: the gate that protects an item's
+  attempt budget from this loop's own claims must not be something the loop
+  can edit to disarm it. Do not "fix" its absence by adding the block; adding
+  it is a human path. `tests/test_round_hold.py` pins the defaults and the
+  no-block case.
+- **State** is `pool.primary_hold` in `/api/workers/status`: `engaged`,
+  `engaged_since`, `engagements`, `held_sources`, `answering` (None until the
+  first claim asks) and `last_detail`, the probe's own words.
 
 ### What a claim binds
 
