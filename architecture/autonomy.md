@@ -218,12 +218,31 @@ the task underneath it.
 
 ### Dependencies, and failing forward
 
-`depends_on` is a single id. The gate is freshness, not mere completion: the
-upstream must have succeeded within **half this task's interval**, not merely
-"since my last run". Without that, yesterday's upstream satisfies today's gate
-and the chains settle into a stable inverted order where every downstream task
-consumes a day-old artifact — observed June 2026, with reflection running
-39→38/40→42 and trajectory running 57 before 56.
+`depends_on` is a single id. The gate is freshness, not mere completion.
+Without it, yesterday's upstream satisfies today's gate and the chains settle
+into a stable inverted order where every downstream task consumes a day-old
+artifact — observed June 2026, with reflection running 39→38/40→42 and
+trajectory running 57 before 56. What "fresh" means depends on the windows:
+
+- **Both tasks windowed, dependent daily or slower** (#1437 Defect B,
+  `_window_dependency_fresh`): the dependent's cycle is its window occurrence
+  that last opened, closing at C; the upstream's output is fresh unless the
+  upstream still OWES a run before C — its next slot (`_next_run_after`, the
+  instant dispatch will next take it) falls before C. So #57 (open 23:00
+  local) waits for #56 (01:00 local) of the same night, and #42 follows #38
+  in their shared window, whatever the hour count. The old bound, half the
+  dependent's interval, straddled the window whenever a dependent's window
+  opened before its upstream's: in the healthy chain it needed a bypass over
+  21.9 h to stay safe and after a slip one under 21.0 h to release, so no
+  `stale_bypass_hours` could serve both. When the upstream is owed, is inside
+  its own window and is due on this very tick (`_upstream_due_in_window`, its
+  own `depends_on` included), the bypass is not consulted either: it would
+  dispatch the dependent beside its upstream on the previous cycle's file.
+- **Otherwise** (either side windowless, or a sub-daily dependent): the
+  upstream must have succeeded within **half this task's interval**, as
+  before.
+
+Either way the upstream's run must be newer than the dependent's own last run.
 
 A dependency the gate cannot name holds its dependent — **fail closed** (#558).
 Two shapes reach that: no task file answers the id at all, and an upstream that
@@ -286,7 +305,19 @@ window.
 `last_run` is a *completion* time, so the due moment drifts later by the run's
 own duration every cycle; for a task pinned to a one-hour window that drift
 eventually steps past the window and skips a day. So when a window is in force
-the interval check allows `min(3600, interval * 0.25)` of slack. Fourteen of
+the interval check allows `min(3600, interval * 0.25)` of slack.
+
+A daily-or-slower windowed task also counts its period from the window
+occurrence its run belonged to, not from the run (#1437 Defect B,
+`_elapsed_due_at`): due again at that opening plus the interval less the
+slack, floored at half an interval after the run. Before this, one
+out-of-window run re-anchored the task outside its window — #38 finished at
+14:31Z on 2026-09-23, came due at 13:31Z the next day after its window had
+closed, and lost that night too. Now it is due at 05:00Z. The run-record guard
+asks the same function of each success, and a completion writes `next_run` as
+the first in-window instant at or after it (`_next_run_after`), so the board
+names the slot dispatch will use. Windowless and sub-daily tasks are unchanged:
+`last_run + interval - slack`, `next_run = last_run + interval`. Fourteen of
 the 32 tasks end up with an enforced window: thirteen set
 `preferred_hours`, and #84's empty list falls through to the hour in its
 `scheduled_at`.

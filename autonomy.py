@@ -1213,6 +1213,11 @@ def _due_slack_seconds(task: dict) -> float:
 def _run_period_start(task: dict, *, now: datetime.datetime) -> Optional[datetime.datetime]:
     """Start of the period a success at `now` would still be held for.
 
+    For a window-anchored task (#1437) this is only the outer bound: the
+    elapsed gate may release it earlier, from the window opening its run
+    belonged to, so `_already_ran_this_period` also asks each success
+    `_elapsed_due_at` — the gate's own question.
+
     `now - (interval - slack)`, which is deliberately the exact window the
     elapsed gate would have granted had the completion stamp survived: a
     successful run at S refuses the next dispatch while `now <= S + interval -
@@ -1234,7 +1239,7 @@ def _run_period_start(task: dict, *, now: datetime.datetime) -> Optional[datetim
 
 
 def _successful_run_this_period(
-    task_id, *, period_start: datetime.datetime,
+    task_id, *, period_start: datetime.datetime, holds=None,
 ) -> tuple[bool, str]:
     """Did a run record for this task report success inside the current period?
 
@@ -1285,6 +1290,8 @@ def _successful_run_this_period(
         when = _parse_iso(fm.get("completed_at")) or _parse_iso(fm.get("started_at"))
         if when is None or when < period_start:
             continue
+        if holds is not None and not holds(when):
+            continue
         if newest is None or when > newest[0]:
             newest = (when, str(fm.get("run_id") or path.stem))
     if newest is None:
@@ -1312,8 +1319,16 @@ def _already_ran_this_period(task: dict, *, now: datetime.datetime) -> str:
     period_start = _run_period_start(task, now=now)
     if period_start is None:
         return ""
+    # A window-anchored task can come due before `period_start` has passed its
+    # last success (`_elapsed_due_at` counts from the window opening), so each
+    # success is also asked the elapsed gate's own question — does it still
+    # hold at `now`? `period_start` stays as the cheap outer bound: it admits
+    # every record that test keeps, and more.
+    def _still_holds(when):
+        return now < _elapsed_due_at(task, when)
+    holds = _still_holds if _window_anchored(task) is not None else None
     ok, run_id = _successful_run_this_period(
-        task_id, period_start=period_start)
+        task_id, period_start=period_start, holds=holds)
     return run_id if ok else ""
 
 
@@ -1488,8 +1503,37 @@ def _dependency_bypassed(dependent: dict, dep_task: dict,
     return True
 
 
+def _upstream_due_in_window(dep_task: dict, dep_last_run: datetime.datetime,
+                            all_tasks: list[dict], now: datetime.datetime,
+                            seen: frozenset) -> bool:
+    """Will the scheduler dispatch this windowed upstream on this very tick?
+
+    Asked only for a window pair whose upstream still owes this cycle a run
+    (`_window_dependency_fresh` False), before the `stale_bypass_hours`
+    override is consulted. The upstream's own gates, in `_is_task_due`'s
+    order, at `now`: `up_next`, no rest or cooldown, its elapsed-due instant
+    passed, inside its window, and its own `depends_on` met. That last one
+    recurses up the chain; `seen` stops a cycle, which then reads as "not
+    about to run" so the override stays reachable."""
+    dep_id = str(dep_task.get("id", ""))
+    if dep_id in seen:
+        return False
+    hours = _window_hours(dep_task)
+    if hours is None or str(dep_task.get("status", "")).strip() != "up_next":
+        return False
+    if _in_infra_rest(dep_task, now) or _in_failure_cooldown(dep_task, now):
+        return False
+    due_at = _elapsed_due_at(dep_task, dep_last_run)
+    if due_at is None or now < due_at:
+        return False
+    if _first_in_window_at_or_after(hours, now) != now:
+        return False
+    return _is_dependency_met(dep_task, all_tasks, now=now, _seen=seen)
+
+
 def _is_dependency_met(task: dict, all_tasks: list[dict], *,
-                       now: Optional[datetime.datetime] = None) -> bool:
+                       now: Optional[datetime.datetime] = None,
+                       _seen: frozenset = frozenset()) -> bool:
     """Is `task`'s `depends_on` satisfied right now?
 
     `all_tasks` is the resolution set — pass `dependency_resolution_set()` in
@@ -1560,8 +1604,30 @@ def _is_dependency_met(task: dict, all_tasks: list[dict], *,
     # frequency is outside FREQUENCY_INTERVALS meets this line only by a direct
     # call, where it is judged against a day's 12 h half-window rather than
     # crashing (#815; tests/test_autonomy_dependency_fail_closed.py pins it).
+    #
+    # WINDOWS FIRST (#1437 Defect B). When both tasks declare a window and the
+    # dependent runs daily or slower, freshness is a fact of the two windows,
+    # not of an hour count: `_window_dependency_fresh` asks whether the
+    # upstream still owes a run before the dependent's current window closes.
+    # `interval / 2` straddled the window whenever the dependent's opened
+    # before its upstream's — safe in the healthy chain needed a bound over
+    # 21.9 h, releasing after a slip needed one under 21.0 h — so no
+    # `stale_bypass_hours` could serve both. The bypass stays an explicit
+    # override below; the ordinary chain no longer needs it.
     interval = _frequency_interval_seconds(task) or 86400.0
-    if (now - dep_last_run).total_seconds() > interval / 2:
+    fresh = _window_dependency_fresh(task, dep_task, dep_last_run, now)
+    if fresh is None:
+        fresh = (now - dep_last_run).total_seconds() <= interval / 2
+    elif not fresh and _upstream_due_in_window(
+            dep_task, dep_last_run, all_tasks, now,
+            _seen | {str(task.get("id", ""))}):
+        # The upstream is inside its window and due this very tick, so the
+        # output this cycle consumes is about to exist: a bypass now would
+        # dispatch the dependent BESIDE its upstream on the previous cycle's
+        # file. On 2026-09-25 05:00Z that is #42 next to #38, 38.5 h past
+        # #38's last run and so past its 36 h `stale_bypass_hours`.
+        return False
+    if not fresh:
         return _dependency_bypassed(task, dep_task, dep_last_run, now)
     my_last_run = _parse_iso(task.get("last_run"))
     if not my_last_run:
@@ -1604,6 +1670,185 @@ def _is_preferred_hour(task: dict) -> bool:
     return _local_hour() in hours
 
 
+# ── Window occurrences (#1437 Defect B) ──────────────────────────────────────
+# `preferred_hours` are machine-local hours, so "the window" is a recurring
+# span of local time — [22,23,0,1,2,3,4] opens at 22:00 and closes at 05:00 the
+# next morning. Two things are measured against its OCCURRENCES, never against
+# a fixed hour count: when a windowed task is next due (`_elapsed_due_at`) and
+# whether an upstream's output belongs to a dependent's cycle
+# (`_window_dependency_fresh`). On 2026-09-23 #38 and #56 ran at 14:25-14:31Z,
+# outside their windows; `last_run + interval` then re-anchored both outside
+# again, each lost its next window, and `interval / 2` could not call their
+# output fresh anywhere inside a dependent's window — four daily jobs held two
+# cycles, with no `stale_bypass_hours` value able to release them safely.
+
+def _local_tz():
+    """tzinfo the window hours are read in; None = this machine's zone.
+
+    Indirection so a test can pin a fixed offset. None goes through
+    `astimezone()` with no argument, which applies the zone's DST rule for each
+    instant rather than today's offset."""
+    return None
+
+
+def _to_local(instant: datetime.datetime) -> datetime.datetime:
+    """`instant` as naive machine-local wall time."""
+    return instant.astimezone(_local_tz()).replace(tzinfo=None)
+
+
+def _from_local(naive: datetime.datetime) -> datetime.datetime:
+    """Naive machine-local wall time back to an aware UTC instant."""
+    tz = _local_tz()
+    aware = naive.astimezone() if tz is None else naive.replace(tzinfo=tz)
+    return aware.astimezone(datetime.timezone.utc)
+
+
+def _window_hours(task: dict) -> Optional[list]:
+    """The task's window as sorted hours, or None when it has no real window.
+
+    A window naming all 24 hours has no opening and is no window at all."""
+    hours = _effective_preferred_hours(task)
+    if not hours:
+        return None
+    hs = sorted({int(h) % 24 for h in hours})
+    return hs if 0 < len(hs) < 24 else None
+
+
+def _window_occurrences(hours: list, around: datetime.datetime,
+                        days: int = 2) -> list:
+    """(open, close) UTC instants of every window occurrence within `days`
+    local days of `around`, sorted. A run of hours that wraps midnight is one
+    occurrence, opening on the evening's date."""
+    hs = set(hours)
+    base = _to_local(around).date()
+    out = []
+    for d in range(-days - 1, days + 1):
+        day = base + datetime.timedelta(days=d)
+        for h in sorted(hs):
+            if (h - 1) % 24 in hs:
+                continue
+            length = 1
+            while (h + length) % 24 in hs:
+                length += 1
+            start = datetime.datetime.combine(day, datetime.time(h))
+            out.append((_from_local(start),
+                        _from_local(start + datetime.timedelta(hours=length))))
+    out.sort()
+    return out
+
+
+def _latest_window_open(hours: list,
+                        at: datetime.datetime) -> Optional[tuple]:
+    """The occurrence that most recently OPENED at or before `at`."""
+    best = None
+    for occ in _window_occurrences(hours, at):
+        if occ[0] <= at:
+            best = occ
+    return best
+
+
+def _first_in_window_at_or_after(hours: list,
+                                 at: datetime.datetime) -> datetime.datetime:
+    """`at` itself when it is inside the window, else the next opening."""
+    for start, end in _window_occurrences(hours, at):
+        if start <= at < end:
+            return at
+        if start > at:
+            return start
+    return at  # unreachable for a real window; a due check must never raise
+
+
+def _window_anchored(task: dict) -> Optional[list]:
+    """Window hours when this task's CADENCE follows its window, else None.
+
+    Only for a period of at least a day: a window occurs once per local day, so
+    a sub-daily task's cycles cannot be window occurrences, and it keeps the
+    pure elapsed-time rule. A task with no window keeps it too — unchanged."""
+    interval = _frequency_interval_seconds(task)
+    if interval is None or interval < 86400.0:
+        return None
+    return _window_hours(task)
+
+
+def _elapsed_due_at(task: dict,
+                    last_run: datetime.datetime) -> Optional[datetime.datetime]:
+    """The instant a run that completed at `last_run` stops holding the task.
+
+    ONE definition for the elapsed gate in `_is_task_due`, the run-record guard
+    (`_already_ran_this_period`) and the `next_run` a completion writes
+    (`_next_run_after`), so the guard can never hold what the intact stamp
+    would release (#1296) and the board names the slot dispatch will use.
+
+    Windowless, or sub-daily: `last_run + interval - slack`, exactly as before.
+
+    Window-anchored: a run belongs to the window occurrence that last OPENED at
+    or before it — for an out-of-window run, the one it slipped from — and the
+    next cycle is that opening plus the interval, less the slack. So one
+    out-of-window completion can no longer carry the next due instant past the
+    next window: #38 done at 14:31Z comes due for 05:00Z the next morning, not
+    13:31Z (after its window had closed). Floored at `last_run + interval / 2`
+    so a run made just before a window opens is not repeated inside it. Never
+    later than the old rule: the opening is at or before `last_run`, and the
+    slack is at most a quarter period.
+    """
+    interval = _frequency_interval_seconds(task)
+    if interval is None:
+        return None
+    slack = datetime.timedelta(seconds=_due_slack_seconds(task))
+    period = datetime.timedelta(seconds=interval)
+    hours = _window_anchored(task)
+    occ = _latest_window_open(hours, last_run) if hours else None
+    if occ is None:
+        return last_run + period - slack
+    return max(occ[0] + period - slack, last_run + period / 2)
+
+
+def _next_run_after(task: dict,
+                    completed: datetime.datetime) -> Optional[datetime.datetime]:
+    """The `next_run` a successful completion writes.
+
+    Windowless tasks keep `completed + interval`. A window-anchored task gets
+    the first in-window instant at or after its elapsed-due instant — after an
+    out-of-window run, `completed + interval` named an hour the window forbids,
+    so the board showed a slot the scheduler could never use."""
+    interval = _frequency_interval_seconds(task)
+    if interval is None:
+        return None
+    hours = _window_anchored(task)
+    if hours is None:
+        return completed + datetime.timedelta(seconds=interval)
+    return _first_in_window_at_or_after(hours, _elapsed_due_at(task, completed))
+
+
+def _window_dependency_fresh(task: dict, dep_task: dict,
+                             dep_last_run: datetime.datetime,
+                             now: datetime.datetime) -> Optional[bool]:
+    """Is the upstream's last run the one this dependent's cycle consumes?
+
+    None when the windows cannot answer — either task has no window, or the
+    dependent's cadence is sub-daily — and the caller keeps `interval / 2`.
+
+    The dependent's cycle is its window occurrence that last opened at or
+    before `now`, closing at C. The upstream OWES a run in that cycle when its
+    own next slot — `_next_run_after(upstream, its last_run)`, the instant the
+    scheduler will next dispatch it — falls before C. Owed means not fresh:
+    the dependent waits for this cycle's upstream, whether the upstream's
+    window opens before its own (#38 → #42, the same hours) or inside it (#56
+    at local 01:00 → #57, open from 23:00). Not owed means the output on hand
+    is the newest this cycle will get, in window or not. After #38 slipped to
+    14:31Z it is owed 05:00Z, runs there, and #42 follows it in the same
+    window, instead of being held 14.5-20.5 h past a 12 h bound.
+    """
+    mine = _window_anchored(task)
+    if mine is None or _window_hours(dep_task) is None:
+        return None
+    occ = _latest_window_open(mine, now)
+    slot = _next_run_after(dep_task, dep_last_run)
+    if occ is None or slot is None:
+        return None
+    return slot >= occ[1]
+
+
 def _is_task_due(task: dict, all_tasks: list[dict], *,
                  now: Optional[datetime.datetime] = None) -> bool:
     # `all_tasks` is the dependency resolution set, not the dispatch candidates
@@ -1644,12 +1889,14 @@ def _is_task_due(task: dict, all_tasks: list[dict], *,
         return False
     last_run = _parse_iso(task.get("last_run"))
     if last_run:
-        elapsed = (now - last_run).total_seconds()
         # last_run is a COMPLETION time, so due-time drifts later by the run's
         # own duration every cycle. For a task pinned to a one-hour window that
         # drift eventually steps past the window and skips a day, so allow a
-        # little slack when a window is in force.
-        if elapsed < interval - _due_slack_seconds(task):
+        # little slack when a window is in force — and a daily-or-slower
+        # windowed task counts its period from the window opening its run
+        # belonged to, so one out-of-window run cannot cost it the next window
+        # (#1437 Defect B, `_elapsed_due_at`).
+        if now < _elapsed_due_at(task, last_run):
             return False
     # The infra ceiling (#1085), ABOVE the retry cooldown on purpose: a task
     # that just crossed it is inside both, and the cooldown would win the
@@ -2362,7 +2609,8 @@ async def _record_artifact_success(task: dict, task_id, run_id: str,
 
     interval = _frequency_interval_seconds(task)
     completed_dt = datetime.datetime.fromisoformat(completed_at)
-    next_run_iso = (completed_dt + datetime.timedelta(seconds=interval)).isoformat() if interval else None
+    next_run_dt = _next_run_after(task, completed_dt) if interval else None
+    next_run_iso = next_run_dt.isoformat() if next_run_dt else None
     # Both stamps, exactly as on a text-confirmed success: `last_run` is what
     # `_is_dependency_met` reads, and the cooldown gate reads
     # "last_attempt newer than last_run" as "the most recent attempt failed".
@@ -3274,7 +3522,10 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
 
         interval = _frequency_interval_seconds(task)
         completed_dt = datetime.datetime.fromisoformat(completed_at)
-        next_run_iso = (completed_dt + datetime.timedelta(seconds=interval)).isoformat() if interval else None
+        # The due gate's own definition: an out-of-window completion writes the
+        # next in-window slot, not `completed + interval` (#1437).
+        next_run_dt = _next_run_after(task, completed_dt) if interval else None
+        next_run_iso = next_run_dt.isoformat() if next_run_dt else None
         # last_attempt tracks EVERY attempt; last_run only successes. The
         # cooldown gate reads "last_attempt newer than last_run" as "the most
         # recent attempt failed", so a success must set both.
