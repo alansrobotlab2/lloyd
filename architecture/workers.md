@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, workers]
 type: reference
 status: implemented
-date: 2026-09-11
+date: 2026-09-25
 ---
 
 # The worker pool and the unified work queue
@@ -72,8 +72,11 @@ Three more share the database, and each is here because *this* file owns it:
 `GRANT_DDL` and read by `app/harness/policy.py` rather than redeclared there —
 two definitions of a table whose NOT-NULL `expires_at` is the whole safety
 property is how one of them stops being true — and `tool_effects` (#544) is
-created by `agent_mcp/_tool_effects.py` against `configured_db_path()`. So
-`.tables` shows six, and only the first three belong to the pool.
+created by `agent_mcp/_tool_effects.py` against `configured_db_path()`. One
+more shares the file without being *owned* here: `egress_events` (#628),
+created by `agent_mcp/egress.py`, the egress guard's record of every
+destination it saw. So `.tables` shows seven, and only the first three
+belong to the pool.
 
 An item walks one path:
 
@@ -112,6 +115,18 @@ without this sentence, the `kv_gate` comment in `config.yaml` or `vllm.md`
 both enumerations named three).
 Held sources join the same `NOT IN` as the saturated ones, for the same
 reason, and a held item keeps its place and its attempt.
+
+The KV gate is one of **three** holds applied there. **`round_hold`**
+(`workers.round_hold`, #1101's `exempt_bound`) keeps everything off its
+exempt list unclaimed while an automod round is in flight;
+`architecture/automod.md` owns its semantics. **`primary_hold`** probes
+whether the primary engine is answering *at all* and holds the sources it
+names (default `autocode`) while it is not — the backend coming back before
+the 95 GiB table is resident used to spend items' attempt budgets on
+connection errors (#1430). Its kill switch is deliberately absent from
+tracked config (a gate the loop must not be able to disarm), and it has no
+long-form doc yet (#1465). All three report beside `pool.kv_gate` in
+`/api/workers/status`.
 
 It exists because of what the 09-09 stall turned out to be
 (`vllm.md`): long-lived agent loops evicting each
@@ -271,9 +286,10 @@ Two rules carry it:
 Whatever failed to verify is carried into the next run of that same task, as a
 `gaps:<task_id>` watermark — a gap that lives only in the prose of the last run
 is a gap nobody reads — and an empty list is written on a clean run so a
-resolved gap stops being re-litigated. Still a pilot: **no row in `runs`
-carries a bundle yet** (checked 2026-09-11), so every number the health view
-derives from one is currently derived from nothing.
+resolved gap stops being re-litigated. Still a pilot: the first bundles
+landed on 2026-09-23 — 3 rows in `runs` carry one (nightly
+`scheduled-task` reflection runs) as of 2026-09-25 — so every rate the
+health view derives from a bundle rests on a sample of three.
 
 ### Event-loop discipline
 
@@ -315,8 +331,13 @@ them is **observation** — which is the axis worth choosing on.
 `app/routers/messages.py` is still the only turn path that attaches the
 observer, so work a human must be able to audit as it happens goes through it
 rather than having the observer wiring copied into a second place.
-`automod_start` refuses a turn with no Inner Voice, which is what makes that
-structural rather than a convention; a transcript is not an observer.
+`automod_start` still refuses a *chat* turn with no Inner Voice
+(`automod.require_inner_voice`), but since 2026-09-12 a worker or autonomy
+session passes: the observer's measured effect on rounds was negative
+(#874), and every background run has been recorded since 2026-09-10, so a
+round driven from a worker session is as reviewable as one driven from an
+IV session. A refusal that made `inner_voice: false` on `autocode` stop
+every round from opening would be the opposite of a switch.
 `architecture/background-runs.md` is the long version of both axes.
 
 Both scopes §2 binds have to cross a process seam to reach the right column.
@@ -346,8 +367,10 @@ return the concatenated text and nothing else, and a turn that ends at
 indistinguishable from a short answer once the stop reason has been thrown
 away.
 
-What that cost: **225 of the 498 notes under `pending-research/` have the body
-`(no response)`.** The source responsible, `domain-research`, wrote the empty
+What that cost: **225 of the 498 notes then staged under `pending-research/`
+had the body `(no response)`** — that staging tree did not survive the
+2026-09-22 deletion of `~/lloyd` (§8); 29 notes are staged now and none is
+empty. The source responsible, `domain-research`, wrote the empty
 note, ticked its topic off in the queue file so it could never be retried, and
 returned success. It has since been retired for that whole class of reason.
 Nothing anywhere said a research job had failed. Sources now check
@@ -383,15 +406,15 @@ what it reads, what it writes, and the measured state of it.
 | source | prio | what it does | turn path |
 |---|---|---|---|
 | `scheduled-task` | 10–70 | runs `~/obsidian/autonomy/*.md` via `autonomy.run_task` | its own, recorded; IV per task |
-| `autotriage` | 55 | triages one backlog item, or consolidates one cluster | session, IV on |
-| `autocode` | 40 | one gated automod round per confirmed item | session, IV on |
+| `autotriage` | 55 | triages one backlog item, or consolidates one cluster | session, IV off |
+| `autocode` | 40 | one gated automod round per confirmed item | session, IV off |
 | `backlog-cluster` | 65 | nightly clustering of the open board for the above | none (numpy, off-loop) |
-| `arch-review` | 62 | one `architecture/` doc or one functional group: check it against the tree, edit it, file the rest | session, IV on |
+| `arch-review` | 62 | one `architecture/` doc or one functional group: check it against the tree, edit it, file the rest | session, IV off |
 | `board-steward` | 68 | one board pass: proposed moves and the next item for `autocode`, recorded beside the state machine's | session (primary), IV off |
 | `automod-regression` | 70 | paired A/B eval after a promotion | none (subprocess on a thread) |
 | `autoresearch` | 60 | one prompt-optimisation round | its own |
 | `deep-research` | 70 | one registry topic, through the deep-dive-research skill | session, IV off |
-| `youtube-digest` | 45 | one tracked-channel video: transcript → vault note → Lloyd eval → backlog draft | session, IV on |
+| `youtube-digest` | 45 | one tracked-channel video: transcript → vault note → Lloyd eval → backlog draft | session, IV off |
 | `session-distill` | 70 | mines finished chats for gaps and patterns | direct |
 | `bench-mine` | 80 | new bench tasks from failed autonomy runs, and from baseline losses when the ledger has any it can read | direct |
 
@@ -404,10 +427,16 @@ one file rather than two is worth the duplication). `scheduled-task` is a
 range because it maps each task's own frontmatter through `_PRIORITY_MAP` —
 critical/high/medium/low/background to 10/20/30/50/70 — which is why it can
 both preempt everything and sit behind everything in the same tick.
-`autoresearch` has been `enabled: false` since 2026-09-08: it promoted
-generated prompt variants straight over the live `lloyd/SOUL.md` with no gate,
-test, review or revert. config.yaml carries the full reason and what has to
-close before it is re-armed.
+`autoresearch` was `enabled: false` from 2026-09-08 to 2026-09-16: it had
+promoted generated prompt variants straight over the live `lloyd/SOUL.md`
+with no gate, test, review or revert. It is **re-armed since 2026-09-16**
+(Alan pre-approved 09-13 once #506 and #876 closed) behind the conditions
+that were the reason for the stop: `promote()` refuses a variant that
+breaks the prompt-surface invariants and commits through
+`automod_vault_land`, and `autoresearch.promotion` sets the bench bar. It
+runs every 4 h, exempt from the round hold — the share of the primary it
+may take beside a live round, at most 30 min in 4 h. config.yaml carries
+the full history.
 
 `autotriage` takes a **cluster** before it takes a single item — one turn
 closing several duplicates is finite work where the single pool is not — which
@@ -415,8 +444,17 @@ is what `backlog-cluster` exists to prepare. `architecture/automod.md` is the
 long version of both.
 
 The IV column is `workers.sources.<name>.inner_voice`, read through
-`_common.source_inner_voice` (default `True`, since that is what the
-session-backed sources do). A `scheduled-task` run is watched when its task
+`_common.source_inner_voice` (fallback **`False`** since #1015: an unkeyed
+source now reads as unobserved, because `board-steward` arrived unkeyed on
+2026-09-12 and inherited the old `True` — watched on the primary every
+900 s nobody had chosen). **Since 2026-09-12 ("cut 1 of
+senses-not-supervision") every session-backed source sets the key false**:
+observer injects were measurably harmful on unattended turns (#874 —
+abandoned at iteration 38 with 44 minutes left on an invented premise,
+sixteen false repetition fires in a day), and the stall-rescue, budget and
+context-pressure anchors now do deterministically what the observer used to
+attempt. Observation stays on for chat, where a human reads it and its
+value was measured there. A `scheduled-task` run is watched when its task
 file says `inner_voice: true`, which beats the fleet default
 `autonomy.inner_voice` (off).
 
@@ -425,13 +463,15 @@ tri-state to say so**: `null` means the source does not set the key, which for
 a direct-path source is not "off, and you could turn it on" — nothing there can
 be observed at all, because the observer is wired in `app/routers/messages.py`
 and nowhere else. Reporting a flat `false` there would invite a knob that reads
-as broken the one time somebody uses it. Which is exactly what config.yaml does
-to `backlog-cluster` today: it sets `inner_voice: false` on a source whose
-`execute` runs no agent turn at all — a numpy pass over stored vectors plus a
-few JSON calls — so the panel renders the one source that *cannot* be observed
-as the one that has been switched off. Harmless (nothing reads the key on that
-path) and wrong in the direction the tri-state was built to prevent; the honest
-value is no key.
+as broken the one time somebody uses it. The promise is being broken today,
+just not where an earlier draft of this file said: `config.yaml` no longer
+sets `inner_voice` on `backlog-cluster` — #1015 removed the key and a
+comment marks the omission deliberate — but the UI-written override file
+re-adds `inner_voice: false` for it (among six sources), so the panel still
+renders the one source that *cannot* be observed as the one that has been
+switched off. Harmless (nothing reads the key on that path) and wrong in
+exactly the direction the tri-state was built to prevent; the honest value
+is no key, and the stray one is filed (#1464).
 
 **`deep-research` owns its own retries, and that is not a preference.** The
 pool records an in-band `{"status": "failed"}` and then calls `mark_completed`
@@ -562,8 +602,10 @@ effect without a restart.
 
 **`workers.enabled` is UI-mutable and therefore does not live only in
 config.yaml.** `POST /api/workers/enable` writes it to
-`data/tool_overrides.yaml`, which is untracked and merged over config.yaml at
-boot. It used to `yaml.dump(CONFIG)` over `config.yaml` itself, and all three
+`~/lloyd-data/data/tool_overrides.yaml`, which is untracked and merged over
+config.yaml at boot (it moved out of the code tree with the rest of the
+runtime data on 2026-09-22, after a pytest fixture teardown deleted
+`~/lloyd` outright — commit `6426668b`). It used to `yaml.dump(CONFIG)` over `config.yaml` itself, and all three
 consequences were serious: `CONFIG` is the *loaded* config, so the dump would
 have written `${LIVEKIT_API_SECRET}` out expanded into a tracked file; it
 flattened the comments out of a file that is mostly comments; and it left the
@@ -640,12 +682,19 @@ That endpoint exists because `/api/workers/status` reports what a source is
 *allowed* to do and how much is queued, and nothing joined a source to its
 outcomes. Its `fail_rate` is `null` over zero runs rather than 0.0.
 
-**`/health` lists every source the config names, plus every source `runs` or
-`queue` has ever seen**, which is why an operator reading it today finds
-`domain-research`, `backlog-selfmod`, `selfmod-regression`, `autoimplement`
-and `backlog-implement` beside the live ones. They are retirements and
-renamings (see MEMORY.md's naming history), not drift, and their history is
-worth keeping readable — a row with `configured: false` is the one to look at.
+**`/health` lists every source the config names, plus every source the
+window's rollup or queue depth has seen** — a row with `configured: false`
+is the one to look at. What such a row *is* has changed: the 2026-09-22
+deletion of `~/lloyd` reset both tables (§8) and the retention sweep prunes
+`runs` past 30 days, so the retirements and renamings earlier drafts of
+this file enumerated there (`domain-research`, `backlog-selfmod`,
+`selfmod-regression`, `autoimplement`, `backlog-implement` — see MEMORY.md's
+naming history) no longer appear in any window it can ask for. The
+unconfigured row an operator finds today is `queue-maintenance`: the poison
+sweep's own ledger identity (`workers/maintenance.py`'s `SOURCE`) — a
+mechanism that records runs without being a scheduled source.
+`configured: false` now has two readings: a swept-away retirement, or a
+mechanism wearing a source's name.
 
 The other half of the router is the **pending-research review surface** —
 `GET /api/workers/pending`, `/pending/read`, and `POST /pending/promote` /
@@ -732,10 +781,31 @@ is the known self-grading failure mode, and this is where it is stopped.
   facts and no extractor ever emitted one, so it had zero rows in `runs` for
   its entire life while stat-walking the facts tree every 300 s.
   [[workers-jobs]] §7 has the rest.
-- **Run history grows without bound.** 6,268 runs and 5,910 queue rows on
-  2026-09-11, 9.4 MB — up ~1,400 runs in the three days since this was last
-  counted at 4,894 / 4,544 / 6.3 MB. Fine for now; there is no retention job.
-  The session files these runs now write *are* archived — at 30 days against a
-  conversation's 90, by `scripts/groundskeeper/retention-sweep.py` — and the
-  `tool_effects` rows sharing the database prune themselves (14 days settled,
-  30 unknown). `queue` and `runs` are the two that only ever grow.
+- **The `queue` table still grows without bound; `runs` no longer does.**
+  The 6,268 / 5,910 / 9.4 MB reading of 2026-09-11 became history the moment
+  `~/lloyd` was deleted whole on 2026-09-22 — a pytest fixture teardown, and
+  every gitignored byte in it went with the code; commit `6426668b` moved
+  all runtime data to `~/lloyd-data`, where both tables' oldest rows now
+  read `2026-09-22T20:02Z`. `scripts/groundskeeper/retention-sweep.py` now
+  prunes `runs` at 30 days (`WORKER_RUN_MAX_AGE_DAYS`, the same horizon as
+  the markdown run records and the session archive — against a
+  conversation's 90), and the `tool_effects` rows sharing the database prune
+  themselves (14 days settled, 30 unknown). Measured 2026-09-25: 534 runs /
+  493 queue rows / 1.5 MB. The sweep's own header names its sibling `queue`
+  table as deliberately NOT pruned — that horizon is an open decision with
+  no owner (#1466).
+
+## Review log
+
+- 2026-09-25: **stale** — every mechanism checked out (claim SQL, backoff,
+  dedup release, recovery sweep, KV gate, source protocol, result contract,
+  hold-before-claim, pause ownership, routes); the live-status prose had
+  moved. Corrected: `autoresearch` re-armed 2026-09-16 behind promotion
+  gates (was "off since 09-08"); Inner Voice fallback `False` since #1015
+  and every session-backed source off since 2026-09-12, with
+  `automod_start`'s refusal chat-only (the table said "IV on" four times);
+  the seventh shared table `egress_events`; first evidence bundles 2026-09-
+  23; `tool_overrides.yaml`'s path; `/health`'s `configured: false` roster
+  (now `queue-maintenance`, not the swept-away retirements); §8 counts —
+  both tables reset by the 2026-09-22 deletion, `runs` pruned at 30 days,
+  `queue` still growing. Filed #1463–#1466.
