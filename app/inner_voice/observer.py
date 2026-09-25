@@ -482,7 +482,10 @@ async def extract_goal_card(
             priority=priority,
         )
     except Exception as e:  # noqa: BLE001 — best-effort
-        logger.warning("[iv.observer] goal extraction failed: %s", e)
+        # repr: an httpx timeout stringifies to "", which is how half the
+        # observed turns' failures read as "goal extraction failed: " with no
+        # cause.
+        logger.warning("[iv.observer] goal extraction failed: %r", e)
         return None
     latency_ms = int((time.perf_counter() - started) * 1000)
     extracted = _extract_tool_call(body)

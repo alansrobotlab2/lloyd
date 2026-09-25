@@ -244,7 +244,12 @@ DEFAULT_MAX_TOKENS = 400
 DEFAULT_TIMEOUT_SECONDS = 5.0
 
 # Goal extraction call gets its own (slightly larger) budget.
-DEFAULT_GOAL_EXTRACTION_TIMEOUT_SECONDS = 8.0
+# 20, not 8, since IV plan R2 moved extraction off the critical path: it runs
+# beside the turn's first iteration, queued behind that turn's own requests on
+# the same engine, and nothing waits on it but the terminal review's drain.
+# At 8 s it failed on about half of observed turns (09-23: 8 of 12), while a
+# direct call takes 0.7-1.3 s.
+DEFAULT_GOAL_EXTRACTION_TIMEOUT_SECONDS = 20.0
 DEFAULT_GOAL_EXTRACTION_MAX_TOKENS = 600
 
 
