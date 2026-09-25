@@ -3475,6 +3475,11 @@ revert it; `qmd/WORKLOG.md` section 7 is the long version of everything below.
 - **Any write to the index used to cost the next query a full vector-index
   rebuild** (~1 s at 37k vectors); the index now refreshes incrementally, and
   the watcher walks at most once a minute.
+- **The prefetch hybrid leg lands on the same turn** (2026-09-24): it costs
+  ~55 ms after the lex leg now, not 1.1–3.0 s, so `_prefetch_run` waits for it
+  and fuses it with the lex hits; carry-over is only the busy-daemon fallback.
+  The whole recall stack was reviewed that day against the frontier —
+  `architecture/recall-research-2026-09-24.md`, items #1480–#1495.
 - **Do not time qmd while something else owns GPU 0**: a TTS restart compiles
   for ~4 minutes and the regression pin is a second daemon on the same card.
   Read `meta.phases` and `nvidia-smi` before believing a number.

@@ -45,6 +45,7 @@ already uses; arch-review refreshes that one).
 | [[subliminal]] | pre-call context retrieval: skills, facts, vault docs, sessions, backlog |
 | [[qmd]] | the vault search engine: Lloyd's fork, the daemon, index, config and models, its REST API, maintenance, eval pins |
 | [[retrieval]] | vault recall's document leg: qmd fusion (OR keyword leg, Qwen3 vectors), djev ranking, the gold set, every measured change |
+| [[recall-research-2026-09-24]] | the whole recall stack reviewed against the frontier on 2026-09-24: the map as measured, what the literature says, the proposals filed from it, what was not proposed and why |
 | [[ambient-context-injection]] | how background producers surface context into the active chat |
 | [[skills]] | on-demand SKILL.md procedures from the vault |
 | [[voice]] | the whole voice-to-voice round trip: LiveKit transport, wake word, ASR, speaker id, the cloned TTS voice and its client-side shaping |
