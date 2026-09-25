@@ -123,6 +123,11 @@ DESKTOP_LEASE_PATH = DESKTOP_DIR / "lease.json"
 # The mitigation drill's latest measured result per stop control (#703):
 # `scripts/mitigation_drill.py` writes it, `GET /api/workers/status` reports it.
 MITIGATION_DRILL_STATE = DATA_ROOT / "mitigation_drill.json"
+# The autocode ReasoningBank (#1489): strategy items distilled from the review
+# rung's refusals. A cache the automod ledger always rebuilds whole
+# (`scripts/automod/reasoning_bank.py`); read only while
+# `workers.sources.autocode.reasoning_bank` is on.
+REASONING_BANK_PATH = DATA_ROOT / "automod" / "reasoning_bank.jsonl"
 
 #: Everything `ensure_dirs()` creates, as data rather than as a literal inside the
 #: function. `LOGS_DIR` is an ancestor of `SCREENSHOTS_DIR`, so a filesystem probe

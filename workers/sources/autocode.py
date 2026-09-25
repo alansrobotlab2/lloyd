@@ -1493,7 +1493,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # computed after it was always empty. 0 of the 92 autocode sessions on
     # record to 2026-09-13 had ever been told they were a re-offer: no
     # `from_branch`, no findings, no clause verdicts, every one a fresh start.
-    reoffer = _reoffer_for(candidate.id)
+    reoffer = _reoffer_for(candidate.id) + _strategy_block(candidate, triage)
 
     # Recorded BEFORE the turn. `implemented_ids` counts any event for the
     # item, so this is what makes it one attempt per item: a turn that crashes
@@ -1601,6 +1601,41 @@ def _reoffer_for(item_id: int) -> str:
         findings_appended=sum(r["findings_appended"]
                               for r in B.prior_rounds(S.LEDGER_PATH, item_id)),
         clause_verdicts=_last_review_clauses(item_id))
+
+
+def _strategy_block(candidate, triage) -> str:
+    """Lessons from the review rung's refusals on similar items (#1489), or "".
+
+    `workers.sources.autocode.reasoning_bank`, default OFF. The offline replay
+    (eval/measurements/reasoningbank-2026-09-25.md) could only ask whether the
+    injected lessons would have named a later refusal's cause; whether a round
+    told them lands more often needs a live A/B, which is a human's call.
+    `reasoning_bank_mode`: `prior` (default — the most frequent refusal causes,
+    which named a refusal's cause more often offline) or `similar` (item
+    similarity, which did no better than random). Never the item's own rounds —
+    the re-offer banner above already carries those.
+    A failure costs the block, never the round.
+    """
+    cfg = _source_cfg(NAME)
+    if not bool(cfg.get("reasoning_bank", False)):
+        return ""
+    try:
+        from scripts.automod import backlog as B, reasoning_bank as RB, state as S
+        bank = RB.refresh_if_stale(
+            S.LEDGER_PATH,
+            max_age_days=float(cfg.get("reasoning_bank_max_age_days",
+                                       RB.DEFAULT_MAX_AGE_DAYS)))
+        query = RB.item_query(candidate.name, B.acceptance_clauses_of(triage),
+                              getattr(candidate, "body", "") or "")
+        k = int(cfg.get("reasoning_bank_k", RB.DEFAULT_K))
+        if str(cfg.get("reasoning_bank_mode", "prior")) == "similar":
+            items = RB.retrieve(bank, query, k=k, exclude_item=int(candidate.id))
+        else:
+            items = RB.prior_items(bank, k=k, exclude_item=int(candidate.id))
+        return RB.render_block(items)
+    except Exception as exc:  # noqa: BLE001 — advice is not the round
+        logger.warning("#%s: reasoning bank unavailable: %s", candidate.id, exc)
+        return ""
 
 
 async def _run_and_record(item, candidate, triage, budget, started,
