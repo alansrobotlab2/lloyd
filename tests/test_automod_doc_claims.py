@@ -661,13 +661,19 @@ def test_the_aggregator_verdict_streak_matches_the_doc():
     assert policy.MCP_FATAL_STREAK >= 2
 
 
-def test_a_round_requires_an_observer():
-    """§2: "A round runs under Inner Voice, or not at all"."""
+def test_the_observer_requirement_is_off_by_default(monkeypatch):
+    """§2's "a round runs under Inner Voice, or not at all" was retired on
+    2026-09-24 (IV plan R5): since 09-12 it refused only chat-driven rounds,
+    and every turn is recorded and runs the turn guards now. The gate still
+    exists behind `automod.require_inner_voice: true`."""
     src = (ROOT / "agent_mcp" / "automod.py").read_text()
     assert "_inner_voice_gate" in src
-    import yaml
-    cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
-    assert cfg["automod"]["require_inner_voice"] is True
+    import agent_mcp.automod as M
+    from app.config import CONFIG
+    monkeypatch.setitem(CONFIG, "automod", {k: v for k, v in
+                                            (CONFIG.get("automod") or {}).items()
+                                            if k != "require_inner_voice"})
+    assert M._require_inner_voice() is False
 
 
 # ─── the qmd fork: the one tree outside the gate (backlog #854) ───────────

@@ -111,6 +111,13 @@ worktree path; Lloyd edits it with the ordinary Edit/Write/Bash tools and
 commits. There is deliberately no `automod_write_code` tool — proposing a
 change is just normal work that happens somewhere safe.
 
+**Retired 2026-09-24 (IV plan R5): `automod.require_inner_voice` now defaults
+to false.** Since 2026-09-12 worker and autonomy sessions were already exempt,
+so the rule below refused only a chat-driven round, and both of its reasons are
+now met without the observer: every turn is recorded and every turn runs the
+deterministic turn guards (`app/harness/turn_guards.py`). Setting the key true
+restores the refusal described here for chat turns.
+
 **A round runs under Inner Voice, or not at all.** `automod_start` refuses a
 turn with no observer attached. Two reasons, and the second is the one that
 survives a round nobody was watching live: the observer catches the loop

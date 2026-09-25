@@ -1183,13 +1183,6 @@ def test_stall_rescue_and_the_guard_rewrites_name_themselves(monkeypatch):
                            is_terminal=True)
     assert amb.action == "inject" and amb.safeguard == "stall_rescue_ambient", amb
 
-    # Unattended terminal inject: Python wrote the words.
-    state = _state(unattended=True)
-    inj = ObserverDecision(action="inject", reason="deliver the report", content="report now")
-    _apply_decision_guards(state, inj, trigger="assistant_message", tool_calls=[],
-                           is_terminal=True)
-    assert inj.action == "inject" and inj.safeguard == "unattended_content", inj
-
     # A model inject no guard touched stays unkeyed.
     state = _state()
     plain = ObserverDecision(action="inject", reason="drifting", content="refocus")

@@ -1160,18 +1160,10 @@ class ObserverState:
     # supply one, which is every path but the chat router — and then every
     # context judgment below reads "unmeasured" and changes nothing.
     context_meter: Any | None = None
-    # Who this turn is for. `unattended` is `platform in NON_USER_PLATFORMS`,
-    # resolved once at install rather than re-derived per event, and it is
-    # what makes the difference between "deliver the final report" (right for
-    # a chat, wrong for a round — the harness asks for the report itself) and
-    # "commit and gate".
+    # Who this turn is for (the session's platform and source). Carried to
+    # the turn guards, which choose their words by it.
     platform: str = ""
     source: str = ""
-    unattended: bool = False
-    # True between a successful `automod_start` and the `automod_land` or
-    # `automod_abort` that closes it. The one terminal stall that matters on
-    # an unattended turn is a turn stopping with a round still open.
-    round_open: bool = False
     turn_started_at: float = field(default_factory=time.perf_counter)
     last_iteration: int = 0
     # Count of benign (non-error, small) tool results seen this turn —
@@ -1533,28 +1525,7 @@ def _context_pressure_note(state: ObserverState) -> str:
     if not cp.critical:
         return ""
     return _prompt.build_context_pressure_note(
-        cp.used, cp.window, cp.fraction, round_open=state.round_open,
-    )
-
-
-def _platform_note(state: ObserverState) -> str:
-    """One line saying who, if anyone, is reading this turn.
-
-    Round 874's observer told a worker round to "deliver the final report
-    now". Nobody was going to read it: `run_prompt_in_session` takes the
-    harness finalizer's structured outcome, not the turn's prose. The
-    deterministic content replacement in `_apply_decision_guards` is the
-    backstop; this is the half that stops the observer forming the
-    intention in the first place.
-    """
-    if not state.unattended:
-        return ""
-    src = f" (source={state.source})" if state.source else ""
-    return (
-        f"PLATFORM: {state.platform}{src} — no human reads this session; the "
-        f"harness asks for the report itself. Never inject 'deliver the final "
-        f"report'. Assert nothing about the working tree or the repo unless a "
-        f"tool result shown to you says so, and name that result in `reason`."
+        cp.used, cp.window, cp.fraction,
     )
 
 
@@ -1581,7 +1552,6 @@ def _build_event_user_prompt(
         prior_turn_interventions=state.prior_turn_interventions,
         iteration_pressure_note=_iteration_pressure_note(state),
         context_pressure_note=_context_pressure_note(state),
-        platform_note=_platform_note(state),
     )
 
 
@@ -1876,9 +1846,8 @@ _IGNORED_INJECT_REASON_PATTERN = re.compile(
 )
 
 # The one cancel that is legitimate with no injects behind it, and therefore
-# the one exempt from the unattended gate: the primary is doing damage and
-# stopping it is the point. Everything else on an unattended turn is a
-# judgment about disobedience, which needs something to have been disobeyed.
+# the first of the two a cancel may still be used for: the primary is doing
+# damage and stopping it is the point.
 _DESTRUCTIVE_CANCEL_REASON_PATTERN = re.compile(
     r"\b(?:destructive|destroy\w*|rm\s+-rf|data\s+loss|wipe\w*|"
     r"delet\w+\s+(?:the\s+)?(?:vault|repo|repository|database)|"
@@ -1968,35 +1937,6 @@ def _apply_decision_guards(
         ).strip()
         return
 
-    # On an unattended turn the LLM still decides WHETHER to speak; Python
-    # decides what it says.
-    #
-    # Round 874: the observer injected "deliver the final report now" on the
-    # invented premise "working tree clean", and a healthy round was
-    # abandoned at iteration 38 with 44 minutes left. Two things were wrong
-    # and only one of them is fixable by prompting. Nobody reads a worker
-    # turn's prose — `run_prompt_in_session` takes the harness finalizer's
-    # structured outcome — so "deliver the report" is never the right nudge
-    # there, whatever the model believes about the tree. The model's own
-    # words are kept in `reason`, where they are a record of its judgment
-    # rather than an instruction to the primary.
-    if (
-        is_terminal
-        and decision.action == "inject"
-        and state.unattended
-        and bool(state.cfg.get("unattended_terminal_content_deterministic", True))
-    ):
-        original = (decision.content or "").strip()
-        decision.content = (
-            UNATTENDED_ROUND_OPEN_CONTENT if state.round_open
-            else UNATTENDED_TERMINAL_RESCUE_CONTENT
-        )
-        decision.reason = (
-            (decision.reason or "")
-            + f" [unattended: content replaced; observer said {original[:200]!r}]"
-        ).strip()
-        decision.safeguard = "unattended_content"
-
     # Consecutive-inject suppression, across all mid-work triggers.
     if _guards.suppress_consecutive_inject(
         action=decision.action,
@@ -2075,36 +2015,6 @@ def _apply_decision_guards(
     # force-stops the turn for disobedience the primary never had a chance to
     # commit. `injects_primary_has_seen` counts only injects followed by a
     # completed primary iteration.
-    # Cancelling an unattended turn throws away work nobody is watching, so
-    # it needs evidence the primary was actually told something first. The
-    # destructive-loop case is exempt — that one is about stopping damage,
-    # not about disobedience.
-    if (
-        decision.action == "cancel"
-        and state.unattended
-        and not _DESTRUCTIVE_CANCEL_REASON_PATTERN.search(decision.reason or "")
-        and _guards.injects_primary_has_seen(state.decisions_this_turn) == 0
-    ):
-        logger.info(
-            "[iv.observer] downgraded unattended cancel session=%s turn=%s "
-            "trigger=%s reason=%r",
-            state.session_id, state.turn_id, trigger, decision.reason,
-        )
-        _event_log.log_event(
-            state.session_id,
-            "inner_voice.unattended_cancel_downgraded",
-            {"trigger": trigger, "reason": decision.reason},
-            turn_id=state.turn_id,
-        )
-        decision.action = "noop_unattended_cancel_unseen"
-        decision.safeguard = "unattended_cancel"
-        decision.reason = (
-            (decision.reason or "")
-            + " [downgraded: unattended turn, and the primary has not yet seen "
-            "an inject to disobey]"
-        ).strip()
-        return
-
     if decision.action == "cancel" and _IGNORED_INJECT_REASON_PATTERN.search(
         decision.reason or ""
     ):
@@ -2214,47 +2124,6 @@ def _context_floor_tokens() -> int:
         return 12_000
 
 
-def _is_unattended(platform: str) -> bool:
-    """True when nobody is reading this turn's reply.
-
-    `sessions_io.NON_USER_PLATFORMS` is the one definition, imported lazily
-    so the inner_voice package stays importable without an app bootstrap.
-    Fails to False, which keeps the user-facing behaviour on an import error
-    — the observer has always behaved this way and an unattended round is
-    the new case, so the unknown case should be the old one.
-    """
-    if not platform:
-        return False
-    try:
-        from app.sessions_io import NON_USER_PLATFORMS
-    except Exception:  # noqa: BLE001
-        return False
-    return platform in NON_USER_PLATFORMS
-
-
-# What the observer injects on an unattended turn that stops with nothing
-# left to say. The LLM still decides WHETHER to speak; Python decides what
-# the words are.
-#
-# Round 874 is why. The observer injected "deliver the final report now" on
-# the invented premise "working tree clean", the model abandoned a healthy
-# round at iteration 38 with 44 minutes left, and nobody was ever going to
-# read the report it was asked for — `run_prompt_in_session` takes the
-# harness finalizer's structured outcome, not the turn's prose.
-UNATTENDED_TERMINAL_RESCUE_CONTENT = (
-    "You are stopping, and this session has no human reader — the harness "
-    "asks for the report itself, so there is nothing to deliver here. If "
-    "there is work left that you can still finish, do it. If there is not, "
-    "end the turn."
-)
-
-UNATTENDED_ROUND_OPEN_CONTENT = (
-    "A round is open. Do not write a report — the harness asks for one. "
-    "Commit what is in the worktree and call automod_gate, then "
-    "automod_land or automod_abort."
-)
-
-
 def install_observer(
     *,
     hooks: Any,  # HookRegistry
@@ -2339,7 +2208,6 @@ def install_observer(
         context_meter=context_meter,
         platform=platform or "",
         source=source or "",
-        unattended=_is_unattended(platform),
     )
     # The deterministic senses. Normally already on this registry — the
     # router installs them on every turn beside the safety hook — and this
@@ -2656,11 +2524,6 @@ def install_observer(
                 else:
                     entry["outcome"] = f"ok {_prompt.human_bytes(len(content))}"
                 break
-        bare_tool = tool_name.rsplit("__", 1)[-1]
-        if bare_tool == "automod_start" and not is_error:
-            state.round_open = True
-        elif bare_tool in ("automod_land", "automod_abort") and not is_error:
-            state.round_open = False
 
         # Todo stewardship: refresh the live list and detect flips. A flip or
         # a stalled-progress streak no longer buys its own call; it rides the

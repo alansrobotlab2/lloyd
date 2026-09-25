@@ -1788,7 +1788,7 @@ only from the former; Qwen3.6's own jinja (what llama.cpp applies) reads only
 the latter. Sending one breaks preserved thinking on the other engine
 silently. See `_assistant_message_for_history`.
 
-**Tool naming**: Built-in tools (Bash, Read, Write, Edit, Grep, Glob, Task) are advertised to vLLM under bare names. This keeps session JSON, SOUL.md deny rules, and Inner Voice `pretooluse_deny` patterns working unchanged.
+**Tool naming**: Built-in tools (Bash, Read, Write, Edit, Grep, Glob, Task) are advertised to vLLM under bare names. This keeps session JSON and SOUL.md deny rules working unchanged.
 
 ## Concurrent tool dispatch (read-only batches only)
 
@@ -3146,8 +3146,9 @@ literal, because a seventh reader written next month is how this comes back.
   a literal until this landed, which is to say it was not a setting; no
   session-backed source passes the argument now, because a per-source switch a
   caller can override with a literal reads as broken the one time somebody
-  uses it. On: `autocode`, `autotriage`, `youtube-digest`. Off:
-  `deep-research`. The key is set only on sources that can be observed at all
+  uses it. Off for every source since 2026-09-12 (the observer's measured
+  effect on rounds was negative); the deterministic turn guards run on
+  every turn regardless (`app/harness/turn_guards.py`). The key is set only on sources that can be observed at all
   — the observer is wired in `app/routers/messages.py` and nowhere else, so it
   means nothing on a `run_prompt_on_primary` source, and `/api/workers/health`
   reports it tri-state rather than inviting a knob nothing reads. UI-mutable

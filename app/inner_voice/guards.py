@@ -10,7 +10,7 @@ The design rule stays what it always was: **new judgment starts in the
 vault prompt.** A rule only earns a place here after the prompt has
 demonstrably failed at it and the failure is cheap to detect and
 expensive to miss. Every function below traces to an observed
-production failure; see `architecture/inner-voice.md` for the history.
+production failure; see `~/obsidian/knowledge/software/lloyd-inner-voice-history-to-v5.4-2026-09-24.md` for the history.
 
 All functions are pure: they take a decision plus context and return a
 new action label (or a verdict), never touching ObserverState, the

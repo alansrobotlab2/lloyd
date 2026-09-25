@@ -34,12 +34,22 @@ def _enabled() -> bool:
 
 
 def _require_inner_voice() -> bool:
-    """`automod.require_inner_voice` in config.yaml, default true."""
+    """`automod.require_inner_voice` in config.yaml, default FALSE since
+    2026-09-24 (IV plan R5).
+
+    The rule was "a round runs under Inner Voice, or not at all", and since
+    2026-09-12 it has not been true: a worker or autonomy session passes, so
+    only a round driven from a chat was ever refused. Both of its reasons are
+    met without the observer now — every turn is recorded (the chat transcript,
+    `app/run_recorder.py` for the rest) and every turn runs the deterministic
+    turn guards (`app/harness/turn_guards.py`) — so the one case it still
+    governed was a person's own chat. Setting the key true restores the gate.
+    """
     try:
         from app.config import CONFIG
-        return bool((CONFIG.get("automod") or {}).get("require_inner_voice", True))
+        return bool((CONFIG.get("automod") or {}).get("require_inner_voice", False))
     except Exception:
-        return True
+        return False
 
 
 #: Session-file key holding the turn ids this session has been refused on.

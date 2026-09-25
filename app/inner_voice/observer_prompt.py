@@ -586,7 +586,7 @@ def build_iteration_pressure_note(
 
 
 def build_context_pressure_note(
-    used: int, window: int, fraction: float, *, round_open: bool = False,
+    used: int, window: int, fraction: float,
 ) -> str:
     """Warn the observer that the turn is running out of CONTEXT, not turns.
 
@@ -599,16 +599,10 @@ def build_context_pressure_note(
     gathering and deliver the answer" is right. Under context pressure it is
     wrong twice over: writing a long answer is itself the expensive act, and
     the primary has already been told this by the `<context>` anchor the
-    harness fired. So the only nudge worth making here is "commit and gate",
-    and the default is silence.
+    harness fired. So the default is silence.
     """
     pct = int(fraction * 100)
-    tail = (
-        " A round is open: the useful nudge is commit, then automod_gate, "
-        "then land or abort — never 'write the report'."
-        if round_open else
-        " If there is nothing to commit, let the turn end."
-    )
+    tail = " If there is nothing left to do, let the turn end."
     return (
         f"CONTEXT PRESSURE: this turn has used {used:,} of {window:,} tokens "
         f"({pct}% of the compaction threshold). The harness has ALREADY told "
@@ -675,7 +669,6 @@ def build_user_prompt_for_event(
     prior_turn_interventions: list[dict[str, Any]] | None = None,
     iteration_pressure_note: str = "",
     context_pressure_note: str = "",
-    platform_note: str = "",
 ) -> str:
     """Assemble the per-event user prompt the observer evaluates."""
     budget_line = (
@@ -696,7 +689,6 @@ def build_user_prompt_for_event(
     context_section = (
         f"\n{context_pressure_note}\n" if context_pressure_note else ""
     )
-    platform_section = f"{platform_note}\n\n" if platform_note else ""
     subliminal_block = _format_subliminal_context(subliminal_context)
     subliminal_section = f"\n{subliminal_block}" if subliminal_block else ""
     plan_block = _format_plan_artifact(plan_artifact)
@@ -706,7 +698,6 @@ def build_user_prompt_for_event(
     persistent_goal_block = _format_persistent_goal(persistent_goal)
     persistent_goal_section = f"{persistent_goal_block}\n\n" if persistent_goal_block else ""
     return (
-        f"{platform_section}"
         f"USER REQUEST:\n{user_request}\n\n"
         f"{persistent_goal_section}"
         f"{_format_goal_card(goal_card)}\n"

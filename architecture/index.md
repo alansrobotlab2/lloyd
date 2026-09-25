@@ -41,7 +41,7 @@ already uses; arch-review refreshes that one).
 | [[editing-safeguards]] | read-before-edit gates, edit diagnostics and blast radius, the change and effect ledgers, the code graph |
 | [[data-home]] | runtime data outside the code tree since the 09-22 deletion: `~/lloyd-data`, the `DATA_ROOT` resolver and who gets which root, the delete guard, hourly read-only snapshots, the data tripwire, restore |
 | [[vault-protection]] | the 09-10/09-12 vault wipes and the four layers after them: the bench/eval tool sandbox, the wholesale-delete check, the guardian's vault tripwire and sync gate, 15-minute snapshots |
-| [[inner-voice]] | the observer that watches the primary stream and steers it with five soft levers |
+| [[inner-voice]] | deterministic turn guards on every turn, plus an opt-in terminal review and the loop that measures it |
 | [[subliminal]] | pre-call context retrieval: skills, facts, vault docs, sessions, backlog |
 | [[qmd]] | the vault search engine: Lloyd's fork, the daemon, index, config and models, its REST API, maintenance, eval pins |
 | [[retrieval]] | vault recall's document leg: qmd fusion (OR keyword leg, Qwen3 vectors), djev ranking, the gold set, every measured change |

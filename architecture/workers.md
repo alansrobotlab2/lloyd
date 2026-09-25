@@ -331,13 +331,12 @@ them is **observation** — which is the axis worth choosing on.
 `app/routers/messages.py` is still the only turn path that attaches the
 observer, so work a human must be able to audit as it happens goes through it
 rather than having the observer wiring copied into a second place.
-`automod_start` still refuses a *chat* turn with no Inner Voice
-(`automod.require_inner_voice`), but since 2026-09-12 a worker or autonomy
-session passes: the observer's measured effect on rounds was negative
-(#874), and every background run has been recorded since 2026-09-10, so a
-round driven from a worker session is as reviewable as one driven from an
-IV session. A refusal that made `inner_voice: false` on `autocode` stop
-every round from opening would be the opposite of a switch.
+`automod_start` no longer asks for Inner Voice (2026-09-24, IV plan R5).
+Since 2026-09-12 a worker or autonomy session already passed — the
+observer's measured effect on rounds was negative (#874) — so the rule
+refused only a round driven from a chat, and every turn is now recorded and
+runs the deterministic turn guards. `automod.require_inner_voice: true`
+restores the refusal for chat turns.
 `architecture/background-runs.md` is the long version of both axes.
 
 Both scopes §2 binds have to cross a process seam to reach the right column.

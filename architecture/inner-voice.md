@@ -2,2015 +2,260 @@
 title: Inner Voice — Architecture
 status: implemented
 created: 2026-05-02
-updated: 2026-09-18
+updated: 2026-09-24
 related:
-  - architecture/subliminal.md
+  - ~/obsidian/knowledge/software/lloyd-inner-voice-history-to-v5.4-2026-09-24.md
+  - architecture/harness.md
+  - architecture/background-runs.md
 ---
 
 # Inner Voice — Architecture
 
-A second agent that watches the primary agent's stream and intervenes when it sees
-a problem. One LLM, one prompt, five soft levers, one goal card. The Python is
-plumbing — all judgment lives in the observer's system prompt, which is a
-vault-editable markdown file.
+Inner Voice is three separable things that used to share one name and one
+opt-in. Since the IV plan (R1–R5, 2026-09-24) they are separate:
 
-**Version: v5.4.** v4's function-tool levers are unchanged; v5 changed *when* the
-observer spends an LLM call, *where* those calls run relative to the primary's
-critical path, and whether the subsystem can measure itself. The observer moved
-to the secondary model on 2026-09-04 and was pinned back to `primary` a day
-later, where it has stayed — see
-[Which model serves the observer](#which-model-serves-the-observer)
-and [Version history](#version-history).
+1. **Senses** — deterministic turn guards, free, on **every** turn
+   (`app/harness/turn_guards.py`).
+2. **One terminal review** — an opt-in LLM second reader that judges, at the
+   moment a turn is about to end, whether it delivered what the user asked
+   for (`app/inner_voice/observer.py`).
+3. **A measurement loop** that can say whether (2) helped: an on/off A/B, a
+   human label on each intervention, a tracked corpus, a weekly outcome score.
 
-v5.2 added deterministic loop detection. v5.3 is the correction pass over it,
-after that guard fired 19 times in one evening on ordinary file reads and, on one
-turn, spent the discretionary budget that the observer's only correct judgment of
-the turn then needed. v5.4 is the second correction pass, from three failures the
-first one did not reach: the repetition guard asserting that results it had never
-compared were unchanged (#393); every Bash call in an automod worktree looking
-like a repeat of every other, because they all open on the same `cd`; and the
-observer reading a wall of identical tool names, because the primary's own
-per-call caption was not yet reaching it. Open defects are listed under
-[Known defects](#known-defects).
+The history through v5.4 — five levers, per-event triggers, the unattended
+profile, every incident that shaped them — is in
+`~/obsidian/knowledge/software/lloyd-inner-voice-history-to-v5.4-2026-09-24.md`. This doc is the current shape only.
 
-## Design intent
+## Why it is shaped this way
 
-> "A second agent watching the first agent to steer and nudge as necessary as a
-> second look at the progress of the primary agent."
+The evidence the plan read (surviving `usage.db` rows 09-22 → 09-24, 268
+`[INNER VOICE]` lines in the transcripts recovered after the 09-22 wipe):
 
-The implementation is a thin event-tap + observer LLM whose job is to **keep the
-primary on task and working** against an explicit goal contract. To tune behavior,
-edit the prompt in the vault. Adding a Python heuristic is almost always the wrong
-move — though see [Where Python crept back in](#where-python-crept-back-in) for an
-honest account of where that rule has bent.
+- **Every useful intervention was "the primary stopped before finishing"**:
+  a stub announce, a search loop, a subagent that returned nothing, a
+  delivered answer with the todo list left open. All cheap to detect without
+  a model. They lived inside the observer, so the 09-12 cut that took the
+  observer off every worker took them off too.
+- **The model-judged observer earned about one useful chat intervention a
+  week**, every one a terminal-boundary judgment ("deliver now", "answer the
+  actual question"). Its one confident mid-turn scope judgment (08-30,
+  `20260830_182633_ive386`) injected three times and cancelled the turn the
+  user asked for.
+- **Cost was in triggers with zero yield**: `result` 740k input tokens and
+  `tool_result` 186k for no interventions, in a window where the whole
+  observer cost ~62k tokens a turn.
+- **The observer judged fragments** — 1,200 chars of text, 300 chars of a
+  tool result — which is the surface its confabulations grew from.
+- **Nothing had ever measured whether it helped.**
 
-## High-level shape
+## 1. Turn guards — the senses
 
-```
-                ┌──────────────────────────┐
-                │  Primary agent loop      │   yields NormalizedEvent
-                │  (app/harness/loop.py)   │ ─────────┬──────────────┐
-                └──────────────────────────┘          │              │
-                          ▲                           │              │
-                          │ PreToolUse (observe)      ▼              ▼
-                          │             ┌──────────────────┐  to existing
-                          ├────────────►│ Observer task    │  consumer
-                          │             │ (per-turn)       │  (messages._run_turn)
-                          │             │                  │
-                          │             │  • goal card     │
-                          │             │  • event queue   │
-                          │             │  • fast-path     │
-                          │             │  • LLM judgment  │
-                          │             │  • five levers   │
-                          │             │  • cross-event   │
-                          │             │    memory        │
-                          │             └──────────────────┘
-                          │
-                          │ PreToolUse (hard deny)
-                          └─────────────┤ app/harness/safety.py │
-                                        └───────────────────────┘
-                                        always on, IV or no IV
-```
+`install_turn_guards(hooks, *, session_id, turn_id, platform, source,
+chat_messages_handle, persist_intervention_callback)` registers one PreToolUse
+and one OnEvent callback. Idempotent per registry (`hooks.turn_guards`): a
+second call fills in what the first did not know. Installed at:
 
-One observer task per primary turn. At turn start it runs a goal-extraction LLM
-call that produces a structured goal card (success criteria, out-of-scope
-concerns, completion signals). It then subscribes to the harness's
-`NormalizedEvent` stream via an `OnEvent` hook and a `PreToolUse` hook. Each
-subsequent event runs through a cheap deterministic fast-path; if the fast-path
-can't decide, it escalates to a focused vLLM call with the goal card, the primary's
-subliminal context, the live todo list, any committed plan, the persistent goal,
-its prior decisions this turn, and its interventions from earlier turns.
+| path | where |
+|---|---|
+| chat: stream, ambient, voice | `app/routers/messages.py::_run_turn` (all three routes pass through it) |
+| chat: sync route | `app/routers/messages.py` beside the safety hook |
+| direct worker turns | `workers/sources/_common.py::_worker_run_options` |
+| scheduled tasks | `autonomy.py::run_task` |
+| `Task` subagents | `agent_mcp/builtin_task.py`, after the skill deliverer and grant gate |
+| any observed turn | `install_observer` calls it too, so a bare registry still gets them |
 
-Only the **terminal** events are judged synchronously. Everything else runs off
-the harness's critical path — see
-[Off the critical path](#off-the-critical-path).
+The senses (pure predicates in `app/inner_voice/guards.py`):
 
-## Turn guards: the senses run on every turn (2026-09-24)
+| guard | fires when | says |
+|---|---|---|
+| `stall_rescue` | a text-only iteration announces an action and stops (`is_terminal_stall`) | chat: do it or deliver; worker: do it, no report; worker with a round open: commit and gate |
+| `repetition` | the same target queried `threshold`+1 times inside `window` calls (`repetition_verdict`, ambient terms and polling tools excluded) | names the terms; claims nothing about results |
+| `failure_payload` | a non-error result whose head says `[stopped: max_turns]`, a timeout, or an empty response — once per tool name per turn | do not treat it as a result |
+| `todo_gate` | a turn that called `TodoWrite` ends with its own items still open — once per turn | mark them or keep working; do not restate the answer |
+| `round_open` | an unattended turn ends with an automod round it opened still open — once per turn | commit, gate, land or abort |
+| `capability_fault` | the terminal text carries a tool call written as prose (`looks_like_prose_tool_call`) | **no inject**: `logger.error`, a `harness.capability_fault` event, and a guardian `announce(level="warning")` at most every 30 min — more text cannot supply a missing tool pool |
 
-The deterministic guards are no longer part of the observer. Stall rescue,
-the repetition guard, failure-payload escalation, the open-todo gate and the
-open-round gate are a harness hook, `app/harness/turn_guards.py`, installed on
-every turn: chat (`messages._run_turn`, which the stream, ambient and voice
-routes share, and the sync route), direct worker turns
-(`workers/sources/_common.py`), scheduled tasks (`autonomy.py`) and `Task`
-subagents (`agent_mcp/builtin_task.py`). No LLM and no session flag. Before
-this they existed only where the observer was attached, so the 2026-09-12 cut
-that took the observer off every worker took them off too.
+Mechanics:
 
-- The judgment is unchanged and still lives in `guards.py` as pure
-  functions, which now also hold the content strings (`stall_rescue_content`
-  picks chat, worker, or round-open words by platform).
-- An inject reaches the loop through `HookRegistry.bind_run`: `run_query`
-  binds the list it actually reads, because a caller with no
-  `chat_messages_handle` has only a private copy.
-- Each fire is an `inner_voice_observations` row with `safeguard` = the
+- **An inject reaches the loop through `HookRegistry.bind_run`.** `run_query`
+  binds the list it actually reads; a caller with no `chat_messages_handle`
+  has only a private copy otherwise. The loop continues a terminal iteration
+  when a hook grew that list, drops the inject under the context floor, and
+  `_reorder_batch_messages` puts a mid-batch append back in wire order.
+- **Capped**: `deterministic_inject_budget` (5) fires a turn; past it a fire
+  is recorded as `noop_deterministic_budget_exhausted`.
+- **Recorded** as an `inner_voice_observations` row with `safeguard` = the
   guard's name and `model` NULL, plus an `inner_voice.observer_injected`
-  event with `deterministic: true` and `guard`; on a chat turn the router's
-  breadcrumb callback also writes the `[INNER VOICE]` line.
-- With an observer attached, `install_observer` finds the guards on its
-  registry (installing them if absent), listens to their fires so its
-  suppressors and decision log see them, shares their row sequence, and
-  skips its own terminal judgment on an iteration a guard already answered.
-  Its fast paths no longer inject on a stall or escalate a failure payload.
-- The two new senses: `todo_gate` fires once when a turn that called
-  `TodoWrite` ends with open items; `round_open` fires once when an
-  unattended turn ends with an automod round it opened still open.
-- Config: `inner_voice.turn_guards` (`enabled` and one switch per guard; the
-  repetition knobs and `deterministic_inject_budget` moved there, the old
-  `inner_voice.observer` keys still read as fallback).
-  `tests/test_turn_guards.py` pins one test per guard on a worker turn with
-  no observer, and one through the real loop.
-
-## Goal contract (per turn)
-
-Before the primary runs, the observer extracts a **goal card** from the user
-request by forcing a single `record_goal_card` tool call:
-
-```json
-{
-  "success_criteria": ["concrete things that must be true to be done"],
-  "out_of_scope": ["things the agent should NOT pursue"],
-  "completion_signals": ["specific outputs that mean the goal is fully addressed"]
-}
-```
-
-Each list is capped at 8 items, each item at 400 chars.
-
-The goal card is the observer's reference for "is the primary still on task?" Every
-per-event prompt includes it. When the primary drifts into `out_of_scope`
-territory, the observer can `inject` to redirect.
-
-**Follow-up resolution.** The extractor also receives the last ~6 user/assistant
-exchanges (`_recent_exchanges_for_goal_extraction`), so a message like "yeah do it"
-or "still broken" resolves against the prior thread instead of producing an empty
-goal card. The observer's own breadcrumbs (`source` starting with `inner_voice_`)
-are filtered out of that window — feeding them back made the next turn's goal card
-anchor on IV's own demands.
-
-If goal extraction fails (timeout, no tool call, conversational request with no
-actionable goal), the observer runs in lighter-touch mode with no goal card.
-
-Cost: one extra LLM call per IV-enabled turn at attach time.
-
-## Observer's contract per event
-
-### What it sees
-
-Threaded into every per-event prompt by `build_user_prompt_for_event`:
-
-- The original user request and the extracted goal card.
-- The **subliminal context block** the primary saw at turn start (prefetched
-  skills, vault hits, facts, ambient signals — see [[subliminal]]), capped at 4000 chars (head + tail; each `<skill>` block is trimmed to 1800 first so facts, vault hits and IDE state survive the cap)
-  chars. Lets the observer recognize when the primary is following documented
-  procedure rather than freelancing.
-- The live **todo list** (`session.todos`), refreshed mid-turn after each
-  successful `TodoWrite`.
-- The **committed plan** artifact (`session.plan`) when one exists. When
-  `plan_mode=True` the prompt swaps framing from "watch for execution drift" to
-  "evaluate plan quality."
-- The **persistent goal** (`session.goal`, set via `/goal`) when set and not yet
-  achieved.
-- A head+tail window of the primary's accumulated text
-  (`primary_text_window_chars`, default 4000). Head+tail rather than head-only —
-  chopping the conclusion made every long response look cut off mid-sentence.
-- **Its own prior decisions this turn** (last ~8) — so it can escalate when the
-  primary ignored an earlier inject, or back off when it's been wrong.
-- **The primary's own caption for each tool call**, since 2026-09-07. Every
-  advertised tool carries an injected `summary` argument the primary fills in
-  as it acts, and the observer reads it in two of its three tool-call inputs —
-  see [Tool-call captions](#tool-call-captions).
-
-Live tap on `assistant_message`, `tool_call`, `tool_result`, `result`, plus a
-`PreToolUse` callback for every tool dispatch. The loop never fires OnEvent
-for text deltas; each `assistant_message`'s text is appended to
-`accumulated_text`, which every per-event prompt shows as the primary's
-response so far and the /goal evaluator falls back to (review 2026-09-24, D8 —
-before that it was fed only from the deltas and was always empty).
-
-### What it can do — five soft levers
-
-The observer's response is a forced function call (`tool_choice="required"`) over
-`LEVER_TOOLS`. The tool name **is** the action.
-
-| Action | Effect | Trigger contexts |
-|---|---|---|
-| `noop` | Default. Watched and chose not to act. | All triggers. |
-| `inject` | Append `{"role": "user", "content": "[INNER VOICE] ..."}` to the primary's chat history before its next iteration. | `assistant_message`, `tool_result`, `pretool` |
-| `cancel` | `options.cancel_event.set()`. Harness exits cleanly with `stop_reason="cancelled"`. | `assistant_message`, `tool_result`, `pretool` |
-| `ambient` | Enqueue a follow-up ambient turn via `build_ambient_turn` + `enqueue_ambient`. | `assistant_message`, `tool_result`, `result`, `pretool` |
-| `clarify` | Surface a short question to the user as an assistant message and pause the primary (set `cancel_event`). | `assistant_message`, `tool_result`, `pretool` |
-
-**There is no `deny_tool` lever.** Since v4, Inner Voice cannot block tool
-dispatch. Hard safety lives in `app/harness/safety.py`
-([Hard safety gate](#hard-safety-gate-not-inner-voice)), which runs on every
-primary turn whether or not the session opted into IV. Pretool is now purely an
-observation trigger — the same five soft levers apply, and an `inject` there lands
-as the next user message *after* the tool dispatches.
-
-### Lever invariants
-
-- **Inject role is `user`, not `system`.** vLLM rejects mid-stream system messages
-  (must be at position 0). The `[INNER VOICE]` prefix makes the source explicit to
-  the primary. A model-emitted `[INNER VOICE]` prefix is stripped before injection
-  so it doesn't double up.
-- **Cancel is an escape hatch, not a completion signal.** The lever schema says so
-  explicitly, and two guards enforce it — see
-  [Cancel-for-completion guard](#cancel-for-completion-guard). The harness
-  terminates naturally on a text-only iteration; cancel is for destructive loops,
-  ignored injects, and tight tool loops.
-- **Cancel is exempt from the intervention budget.** It ends the turn, so rationing
-  it would block recovery from "primary keeps ignoring my injects."
-- **Cancel sets `state.closed`.** Pretool callbacks already in flight
-  short-circuit instead of surfacing a confusing post-cancel decision.
-- **Clarify pauses the primary.** It persists the question as an assistant message
-  via a session-scoped callback, then sets `cancel_event`. The user replies in the
-  next turn, which gets a fresh goal card.
-- **Result-trigger inject auto-translates to ambient.** By the time `result` fires,
-  the harness has emitted its terminal event; injecting is wasted. The dispatcher
-  rewrites `inject` → `ambient` if a callback is wired, else drops it as
-  `noop_inject_on_result`.
-- **Result-trigger cancel/clarify auto-degrade to noop.** Same reasoning.
-- **Interventions leave a user-visible breadcrumb.** `inject` and `cancel` call
-  `persist_intervention_callback`, which appends a message to the session JSON with
-  `source: "inner_voice_inject"` / `"inner_voice_cancel"`. The
-  `chat_messages_handle` append is transient (in-memory only); the breadcrumb is
-  what the user and the persisted history see.
-
-### Per-turn budget
-
-Default cap: **3 interventions per turn** (`inner_voice.observer.intervention_budget`).
-Counted against: `inject`, `ambient`, `clarify`. **Not** counted: `cancel`, and any
-decision with `bypass_budget=True` (stall rescue, repetition). After exhaustion,
-further lever choices are downgraded to `noop_budget_exhausted` and persisted with
-that label so the UI shows what *would* have happened.
-
-**The `bypass_budget` exemption was documented but not implemented until v5.3.**
-`_apply_lever` incremented `interventions_used` on every applied inject,
-deterministic or not. That is invisible while the deterministic guards are rare
-and fatal once one misfires: on turn `8f3b7e77de07` ten false repetition injects
-exhausted a budget of three, and the observer's one correct judgment of the whole
-turn — *"Turn hit max_turns with zero review delivered; all six todos
-unresolved"* — was recorded as `noop_budget_exhausted` and never fired.
-`_count_intervention` now charges deterministic injects to a separate
-`bypass_interventions_used`.
-
-Exempt from the budget is not the same as unbounded, and nothing bounded them.
-`deterministic_inject_budget` (default **5**) is a hard ceiling on
-`bypass_budget` injects per turn; past it they are downgraded to
-`noop_deterministic_budget_exhausted`. A miscalibrated guard now costs at most
-five nudges, not a whole turn.
-
-## Tiered triggering
-
-Most events shouldn't hit the LLM. Configurable via
-`inner_voice.observer.fast_path_enabled` (default `true`).
-
-The v4 tiering halved the *call count* but left the two biggest spenders
-untouched, and the first production window showed what that cost: across 44
-turns the observer consumed 3.20M input tokens against the primary's 3.22M in
-the same sessions. v5 re-tiers on measured yield per trigger.
-
-| Trigger | v4 LLM calls | Interventions | Input tokens | Tokens per intervention |
-|---|---|---|---|---|
-| `pretool` | 264 | 3 | 1,439,940 | 480,000 |
-| `assistant_message` | 156 | 7 | 865,565 | 124,000 |
-| `tool_result` | 119 | 2 | 637,056 | 319,000 |
-| `result` | 40 | 8 | 200,903 | 25,000 |
-
-### Pretool is observation-only
-
-`inner_voice.observer.pretool_llm_enabled` — **default `false`.**
-
-Pretool has not been able to block a tool dispatch since v4, when hard safety
-moved to `app/harness/safety.py`. An `inject` chosen here therefore lands as the
-next user message *after* the tool has already run — at which point the
-`tool_result` trigger sees the same call plus its outcome and can judge it
-better. Pretool was 45% of all observer spend for three interventions, none of
-which prevented anything.
-
-The observation **row is still written** on every pretool event. The
-prior-decisions block and the mark-without-evidence check both read tool
-activity out of those rows, so dropping them would blind checks that still work.
-Setting the flag `true` restores v4 behavior.
-
-### Tool results are sampled
-
-`tool_result_sample_every` (default `5`), `tool_result_escalate_bytes` (default `20000`).
-
-These always escalate to the LLM:
-
-- Any error result, except the `"Tool call arguments could not be parsed as
-  JSON"` parse-retry (the primary handles its own retry).
-- A result at or above `tool_result_escalate_bytes`.
-- A `TodoWrite` that flipped `in_progress→completed` (mark-without-evidence).
-- The stalled-progress gate firing.
-
-Everything else is a benign result, and one in `tool_result_sample_every` is
-judged. The rest noop. The v4 rule escalated every non-error result over 2 KB,
-which contradicted the vault prompt's own instruction that "the primary's tool
-result is large or surprising — that's the primary's problem to interpret."
-
-### Assistant-message fast-path
-
-1. **Pure tool dispatch** (tool calls, no text) → `noop`.
-2. **Terminal stub-announce stall** → deterministic `inject`. See
-   [Stall rescue](#stall-rescue).
-
-### Pretool fast-noop classifiers
-
-Still used to label the row, and to decide escalation when
-`pretool_llm_enabled` is on:
-
-- **Read-only built-ins:** `Read`, `Glob`, `Grep`.
-- **Safely read-only Bash:** first word in `_SAFE_BASH_FIRST_WORDS` AND no match
-  against `_BASH_RISK_PATTERNS`.
-- **Read-only `git`:** first word `git` AND subcommand in
-  `_SAFE_GIT_SUBCOMMANDS` (`status`, `log`, `diff`, `show`, `rev-parse`, …).
-  Bash is 221 of the 264 pretool calls and `git` had no entry at all, so every
-  `git status` bought a full round-trip.
-- **Read-shaped MCP tools:** the name is split into word tokens (`snake_case`,
-  `kebab-case`, `camelCase`, dots) and matched against a read-verb set, but only
-  after a **mutation-verb set** is checked first and wins. Substring matching
-  fast-noop'd `delete_status_check` because it contains "status" and "check".
-  A read-shaped name also has to arrive with **under 1000 chars of arguments**:
-  a read verb over a large payload is usually a write wearing the wrong name,
-  and the size check costs nothing next to the call it would otherwise skip.
-
-Corrections to the v4 risk patterns, each verified against the live classifier:
-
-| Command | v4 | v5 |
-|---|---|---|
-| `find . -delete`, `find . -exec rm {} +` | read-only | escalates |
-| `wget http://x/a.sh` (writes to cwd) | read-only | escalates |
-| `curl -o /tmp/f`, `curl -X POST -d …` | read-only | escalates |
-| `git status`, `git log`, `git diff` | escalated | read-only |
-
-### Tool-result fast-noop
-
-See [Tool results are sampled](#tool-results-are-sampled).
-
-**Fast-path is skipped** when a `TodoWrite` produced an `in_progress→completed`
-flip, or when the stalled-progress gate fired — both need LLM judgment.
-
-### When tiering doesn't apply
-
-A **terminal** `assistant_message` (no tool calls) and `result` always hit the
-LLM. These are the two moments where the turn is about to end, and they carry
-almost all of the observer's demonstrated value: 15 of the 16 interventions in
-the first production window came from `assistant_message` or `result`.
-
-## Off the critical path
-
-`inner_voice.observer.async_nonterminal` (default `true`),
-`async_drain_timeout_seconds` (default `6.0`).
-
-`fire_on_event` is awaited inline by the agent loop and `fire_pre_tool_use`
-blocks tool dispatch, so before v5 every observer round-trip was time the
-primary spent idle — a mean of **12.5 s per turn**, and 89 s across 102 calls on
-the worst measured turn.
-
-Non-terminal judgments (`pretool`, `tool_result`, mid-work `assistant_message`)
-now run as tracked `asyncio` tasks. Two events stay strictly synchronous:
-
-- **Terminal `assistant_message`** — `loop.py` snapshots `len(chat_messages)`
-  before firing the hook and continues the loop only if it grew. An inject that
-  lands after the hook returns is an inject that never happened.
-- **`result`** — the turn is over the moment the handler returns.
-
-Both drain in-flight tasks before judging (`_drain_pending`), bounded by
-`async_drain_timeout_seconds`, so a decision still in flight is applied rather
-than lost. Stragglers past the deadline are cancelled: that is the same outcome
-as the old synchronous path timing out, and the primary isn't blocked either
-way. `close_observer` cancels anything outstanding so a turn that ends early
-doesn't leave tasks writing rows against a dead turn.
-
-Ordering note: an async inject lands in `chat_messages` at whatever point the
-observer's round-trip happens to finish, which is roughly a second after the
-event that triggered it. That is wider than "before or after the tool result" —
-see [An async inject can land inside a tool-call
-block](#an-async-inject-can-land-inside-a-tool-call-block).
-
-## Failure-mode machinery
-
-The levers are generic; these are the specific primary-agent failures the observer
-has been built to catch. Each was added in response to an observed failure, and
-each carries a deterministic component because the failure is cheap to detect and
-expensive to miss.
-
-### Stall rescue
-
-The dominant observed failure: the primary ends a text-only iteration by
-*announcing* an action without dispatching it — "Let me check the logs:" — and the
-harness terminates the turn. `_STUB_ANNOUNCE_RE` matches text whose last line is a
-bare announce verb (`let me`, `I'll`, `I'm going to`, `next, I'll`, `I need to`, …)
-or that ends on a colon.
-
-**Three-stage since v5.3.** The announce regex proposes; a false-positive regex
-disposes; and a sentence that closed on its own terms is exempt. On its own the announce pattern also matched delivered answers —
-"Let me know if you need anything else!", "I'll be happy to help", "I need to
-note that X", "I should mention one caveat: …" — and the stall-rescue inject
-bypasses *both* the intervention budget and the consecutive-inject suppressor by
-design. A primary that habitually signs off that way would have been re-prompted
-every iteration until `max_turns`. The exclusion list covers sign-offs and
-speech acts completed within the sentence itself ("I need to note that X" *is*
-the note; nothing is deferred). Both directions are pinned by tests in
-`tests/integration/test_iv_guards.py`.
-
-This never fired in the first production window, so the bug was latent, not
-observed — which is exactly why it was worth fixing before the trigger rate went
-up.
-
-**The exclusion list was not enough.** It named specific sign-off phrases, so it
-only caught the shapes someone had thought of. Any final line *starting* with an
-announce verb still matched regardless of what followed it, which made all of
-these stalls:
-
-```
-I'll leave the config as-is since it already works.
-I'm going to recommend option B because it is simpler.
-I will not change that file because it is generated.
-Going to the source, the loop appends the assistant message after the hook.
-```
-
-Every one is a delivered statement. v5.3 adds two structural rules, applied only
-to a last line that **closed** — a line ending in a colon or an ellipsis is still
-a stall outright, since that is the signal that the primary stopped mid-thought:
-
-- `_ANNOUNCE_RESOLVED_RE` — a justification or negation clause (`because`,
-  `since`, `rather than`, `will not`, `won't`) means the sentence resolved rather
-  than deferred.
-- `_ANNOUNCE_NOUN_FOLLOWER_RE` — "going to **the** source" heads a noun phrase,
-  not a promised action.
-
-The false-positive list also gained the decision verbs (`recommend`, `suggest`,
-`leave`, `hear`, `go with`) and an optional adverb slot, so "I should **also**
-mention …" is recognised the way "I should mention …" already was. `Let me read
-the config file.` and `I'll update the docs to match.` are still stalls;
-`tests/integration/test_iv_v52_review.py` pins both directions.
-
-Two paths handle it:
-
-1. **Fast-path (deterministic).** On a text-only iteration matching the regex, the
-   observer returns an `inject` carrying `guards.STALL_RESCUE_CONTENT` (observer.py
-   keeps `_STALL_RESCUE_CONTENT` as an import-path alias) with
-   `bypass_budget=True`. No LLM round-trip. Because this path never touches the
-   consecutive-inject suppressor, a re-stall on the very next iteration is rescued
-   again rather than left to die.
-2. **LLM path (ambient→inject upgrade).** If the LLM judged a terminal iteration
-   and chose `ambient`, the dispatcher upgrades it to `inject` with
-   `bypass_budget=True` — ambient goes to the background channel and does *not*
-   continue the loop, so the turn would otherwise die with work undone.
-
-The primary's system prompt carries a matching "Turn discipline" clause
-(`prompt_builder.build_system_prompt`), so this is defended on both sides.
-
-### Consecutive-inject suppressor
-
-An `inject` is downgraded to `noop_inject_after_inject` if the most recent
-mid-work decision was also an inject — but **only mid-work** (tool calls in
-flight), where the rationale holds: give the primary an iteration to act. On a
-terminal text-only iteration the inject is the only thing keeping the loop
-alive, so suppression there is disabled.
-
-**Spans all mid-work triggers since v5.** v4 compared only same-trigger pairs,
-which meant `pretool`, `tool_result` and `assistant_message` each kept their own
-blind history. Turn `2cf39d2c0ead` shows the failure: an inject at `pretool`, an
-inject at `tool_result`, another at `pretool`, then a `cancel` — four
-interventions in 20 seconds, inside a single dispatch batch, with no model turn
-between any of them. The cancel justified itself with "still reading the
-transcript after 3 injects" when the primary had not been given the chance to
-read even one.
-
-`guards.injects_primary_has_seen` was written as the companion counter — an
-inject counts as *seen* only once an `assistant_message` decision lands after it,
-so a dispatch batch collapses to a single nudge for escalation purposes.
-
-**Until v5.3 it was wired to nothing.** The function and its test existed; no
-production call site did. Escalation keyed off `state.interventions_used`, which
-counts injects the primary may never have read. The cancel in turn
-`0251c403fd8d` — "primary exhausted inject budget and is stuck in a loop" — is
-the failure it was written to prevent, fired anyway; so is the cancel in
-`20260905_011748_iv84e4` a year later, with the same reason string.
-
-`_apply_decision_guards` now consults it, and the narrowness of the trigger is
-the load-bearing part. Only a cancel whose *reason* claims ignored injects is
-gated — `_IGNORED_INJECT_REASON_PATTERN` matches `ignor*`, `exhaust*`, `budget`,
-`unheeded`, `disregard*`, "not listening", and counted forms like "three
-injects". A cancel for a destructive loop or a wedged tool is legitimate with
-zero injects behind it and must not be gated on one. When the reason does claim
-it and `injects_primary_has_seen` returns 0 while `interventions_used > 0`, the
-cancel becomes `noop_cancel_unread_injects` and logs
-`inner_voice.cancel_blocked_unread_injects`. Both conditions are required: with
-`interventions_used == 0` there are no injects to have been ignored and the
-cancel is about something else entirely.
-
-v5.2 had attacked the same turn from the other side — `guards.inject_on_cooldown`
-and its companion `iterations_since_last_inject` make the budget *hard to spend
-quickly* (see [Inject pacing](#inject-pacing)). Between them, escalation now
-rests on injects read rather than injects fired.
-
-### Repetition — the search loop
-
-Added v5.2, after turn `20260905_011748_iv84e4`. A code-review request ran
-10m14s over 33 iterations and produced **zero characters of user-visible text**
-before Inner Voice cancelled it. The core of it was six reformulations of one
-search — "who consumes `iv_inject_queue` / `iv_cancel_requested` outside the IV
-package" — each with a slightly different filter. The answer (nobody) was
-correct and stable from the first attempt. The primary read the empty result as
-a *broken query* rather than an answer, and kept rewriting it; then went hunting
-for `lloyd_mcp` (the package is `agent_mcp`) and `build_subliminal_context`
-(never defined anywhere), which is a search that cannot terminate on its own;
-which ended in two `find /` scans and an unbounded `grep -rn` over 45 MB of
-`sessions/` that hit the 120s Bash timeout. One of those greps matched the
-session transcript recording the grep itself.
-
-The observer could not see any of it. `build_tool_result_summary` rendered the
-tool *name* and 300 chars of the *result*; the command never reached the prompt.
-A loop is visible only in the arguments.
-
-`guards.repetition_verdict` is therefore deterministic and runs at `pretool` —
-the one place the observer sees arguments — regardless of `pretool_llm_enabled`,
-because it costs no LLM call. Shell reformulation defeats string similarity (the
-six commands shared little literal text), so the comparison is over **code
-identifiers**: tokens carrying an underscore, or ≥ 12 characters. Bare English
-words are `echo` labels and shell noise. Sets are compared by *containment*
-rather than Jaccard, so a command wrapped in extra labels still matches the bare
-one, and a match needs ≥ 2 shared identifiers at ≥ 0.5 containment. The guard
-fires when the current call matches ≥ 2 of the last 6.
-
-Calibrated by replaying that turn's 28 Bash calls: it first speaks on the
-**4th** near-duplicate and stays silent through the 15 healthy exploration calls
-that preceded it. Both directions are pinned in
-`tests/integration/test_iv_loop_guards.py`, which replays the real commands from
-`fixture_iv_loop_turn.py` through `fire_pre_tool_use` with the LLM patched to
-raise — the guard must never need a model.
-
-#### Corrected in v5.3, after 19 misfires in one evening
-
-As shipped, the identifier set came from the whole `key=value` rendering of the
-arguments. Two consequences:
-
-- Argument **key names** counted as shared identifiers, so any two `Edit` calls
-  shared `file_path`, `old_string` and `new_string` before their contents were
-  considered at all.
-- **Path components** counted, so every absolute path contributed the username —
-  13 characters, comfortably past the length filter, and present in literally
-  every path the agent touches.
-
-Two shared identifiers is all a near match needs, so three Reads of unrelated
-files matched each other. Of the 19 deterministic injects on 2026-09-04, 15 named
-a path segment or an argument key as the thing the primary "kept chasing":
-`deterministic: 3 near-identical Read calls for alansrobotlab, file_path,
-architecture`. Three changes:
-
-1. **Identifiers come from argument values only.** `exact` still renders the full
-   `key=value` form, so an exact repeat is still an exact repeat.
-2. **Ambient path fragments are stripped** — the home directory and the username —
-   before tokenising.
-3. **Path-addressed tools compare by exact repeat only.** `Read`, `Write`,
-   `Edit`, `MultiEdit`, `NotebookEdit`, `Glob` and `TodoWrite` are in
-   `_EXACT_ONLY_TOOLS`. Near-matching was built for shell reformulation and does
-   not transfer to a tool addressed by path. Re-reading one file verbatim is
-   still caught; a chunked read carries a different offset and is correctly not a
-   repeat.
-
-Stripping the ambient tokens removed the free second identifier that
-`min_overlap: 2` had been calibrated against, so a genuine hunt for one symbol
-would no longer have fired. `guards._is_distinctive` restores it: an identifier
-with three or more underscore-joined parts, or 16+ characters, carries a match on
-its own. `iv_inject_queue` and `zzq_phantom_handle_v3` qualify; `inner_voice`,
-`file_path` and `observer_prompt` do not — those are modules and argument keys
-that half the calls in a session mention in passing.
-
-Shape, though, only proves a token is *specific*, and since #1026 the predicate
-refuses the solo-carry to opaque ids too: a `^[0-9a-f]{7,40}$` hex id (a git
-short-SHA is exactly 16 characters) and anything containing a run of 6+ digits (a
-session key splices into the underscored fragment after its digits —
-`20260912_140009_autocode_7915.md` yields `_140009_autocode_7915`) are not source
-symbols, so three ordinary looks at one commit or one digest are not a loop. The
-exclusion is by token class and reaches the solo-carry branch only: a pair that
-also shares a real symbol clears `min_overlap` and names both terms.
-
-Net effect on the fixture: the first fire is still exactly at the 4th
-near-duplicate, and a **second** cluster is now caught — messages 72-79, where
-the primary hunts `build_subliminal_context`, a symbol never defined anywhere.
-Ambient-token dilution had hidden it. The 15 healthy exploration calls stay
-silent. `tests/integration/test_iv_v52_review.py` pins the negative direction
-against real Read / Edit / Write / Glob / TodoWrite sequences.
-
-The ring is no longer **cleared** on a fire. A `repetition_baseline` counter marks
-the fire point and comparison looks only at calls made after it. Same "needs a
-fresh cluster" rate limit, without discarding the command previews that
-`build_tool_result_summary` reads back — the one thing turn
-`20260905_011748_iv84e4` proved the observer needs to see.
-
-The inject carries `bypass_budget=True`, like stall rescue: it prevents a
-pathological outcome rather than nagging, and it is the observer's only signal
-that never guesses at intent. Its rate limit is structural — firing advances
-`repetition_baseline`, so speaking again requires a *fresh* cluster of
-near-duplicates made after the last fire.
-The content names the shared identifiers and states the thing the primary did
-not believe: **a run of near-identical queries is evidence that the searching is
-done — if the outputs came back empty or the same, that is the answer, not a
-failed query.**
-
-#### Corrected again by #393 — the guard may only claim what it observes
-
-Until 2026-09-07 the inject said "…and the result has not changed." The guard has
-no way to know that: it compares `ToolCallSignature` — tool name, normalized
-arguments, identifiers from argument *values*. No field carries result content,
-and result text is never compared. A loop *is* visible in the arguments (the
-paragraph above is still right about that), but the sentence reached past the
-evidence to a conclusion about the outputs.
-
-Backlog #393 measured it on the 2026-09-05 sessions: 5 fires, and a genuine
-result-level check — token-set Jaccard > 0.85 of each tool result against every
-earlier result — found **zero** unchanged-result repeats in two of the three
-sessions (0 near-duplicates in 66 calls, 0 in 103). The only near-duplicate
-results anywhere in the sample were TodoWrite echoes. What the guard had actually
-matched was *command shape*: repeated `grep -n … <symbol>` probes over **different
-symbols**. In `usage.db`, 43 deterministic repetition injects carried the phrase
-— every one of them.
-
-Two reasons that is a code defect and not a phrasing nit: an inject that asserts
-the unobserved trains the primary to discount injects, and #83 Stage 2 treats
-injected corrections as user corrections, so a false fire becomes a false skill —
-which is why that pass had to reject the candidate this fix unblocks.
-
-Fix is #393 branch 2: the text now claims only the observable (**"you have issued
-N near-identical queries"**; exact repeats still read "run the same call N
-times") and hands the stable-answer guidance back as guidance the *primary* can
-check against output the guard cannot see. Firing logic, thresholds and
-`_EXACT_ONLY_TOOLS` are untouched — replaying 71 lloyd sessions / 1,377 tool
-calls through the pre-fix and post-fix guard gives identical fire points (21 →
-21) with the unobserved claim in 0 of 21 renders where it had been in 21 of 21.
-Branch 1 stays open: put result identity on the signature (content hash or coarse
-token sketch) and require agreement before the "the result has not changed"
-sentence is allowed back.
-`tests/integration/test_iv_repetition_wording.py::test_no_result_claim_without_a_result_field`
-watches for that — it detects a result-bearing field on the signature and lifts
-the ban rather than silently rotting.
-
-#### Corrected a third time, by an automod worktree
-
-Round `SM_20260908_165950` (backlog #377) took **five** deterministic repetition
-injects across its 34 minutes. All five were false, on five calls doing five
-unrelated things.
-
-Every Bash call in an automod round opens
-`cd /home/<user>/lloyd-work/SM_<round>/home/lloyd &&`. `sm_20260908_165950`
-survives `_strip_ambient` — it has underscores — clears the 12-character
-identifier floor at 18 characters, and so `_is_distinctive` reads it as a
-specific symbol somebody is chasing and lets it carry a near match **on its
-own**. Four of the five injects named it first. Every implement round works in a
-worktree, so this was structural, not bad luck.
-
-The cost was not the noise. The fifth inject hit `deterministic_inject_budget`
-(`inner_voice.deterministic_budget_exhausted`, 17:26:42) and the round reached
-`automod_gate` and `automod_land` ninety seconds later with no guard left — the
-ceiling added in v5.3 spent on false positives at exactly the moment the round
-was rewriting production.
-
-Two fixes, and three details in the second one are load-bearing:
-
-- **`_strip_cd_prefix`** drops leading `cd <path> &&` (or `;`) hops before
-  identifiers are extracted, up to four of them. Only for identifiers: `exact`
-  keeps the whole command, because two calls differing only in their `cd` are
-  not byte-identical and must not be reported as though they were.
-- **`guards.ubiquitous_identifiers`** removes any identifier carried by *every*
-  call in the ring. A term present in all of the compared calls discriminates
-  between none of them — the same argument the frequency ordering above already
-  makes for *naming*, applied to matching, where it decides whether the guard
-  fires at all.
-  - It is measured over the **whole ring**, not the comparison window. Over the
-    window alone the reasoning eats its own guard: a primary hunting
-    `iv_inject_queue` six times running shares that symbol across every compared
-    call, so the very repetition the guard exists to catch reads as ambient. Not
-    hypothetical — it silenced both fires of the real 28-call replay.
-  - It needs more history than the window (`_AMBIENT_MIN_HISTORY`, 8 — one more
-    than the default window), so the judgment always rests on at least one call
-    the comparison is not already looking at.
-  - It reads **`all_idents`**, a second identifier set on `ToolCallSignature`
-    that keeps what `idents` deliberately drops. A round id reaches the ring
-    through a `cd` hop in most calls and a `W=<path>;` assignment in others;
-    stripping it from `idents` alone left it present in some calls and absent
-    from others — so it was not ubiquitous, and survived in exactly the minority
-    using the other idiom. That is the second false fire of the same round.
-  - The observer passes the **full ring** here and the post-baseline **slice** to
-    the verdict, because after a fire it compares only calls made since it last
-    spoke. Judged on a three-call slice the worktree id looks distinctive again,
-    which is how that second fire survived the first cut of this fix.
-
-`tests/integration/test_iv_worktree_ambient.py` replays the round's 24 real
-calls from `fixture_iv_automod_worktree.py` and pins both directions: five false
-fires drop to one real one, no fire is attributable to the worktree id, a chased
-symbol is *not* treated as ambient, and a verbatim repeat inside a worktree still
-fires.
-
-#### Tool-call captions
-
-Since 2026-09-07 every advertised tool carries an injected `summary` parameter —
-a short phrase the primary writes saying what the call is doing. The observer
-reads it in two of its three tool-call inputs, and the third exclusion is the
-point of documenting it here.
-
-- **`build_assistant_message_summary`** renders `Bash — Checking root disk usage`
-  per call instead of `['Bash', 'Bash', 'Bash']`. Judging whether the primary is
-  still on the user's request is the observer's core job, and a wall of identical
-  tool names is the least informative possible input for it.
-  `observer_prompt._tool_call_labels` accepts all three shapes the caption
-  arrives in — `_summary` on a live harness event, `summary` on a call rebuilt
-  from session JSON, and `summary` inside the raw `arguments` string — and caps
-  it at 120 chars.
-- **`build_pretool_event_summary`** states it *before* the arguments. The caption
-  is what the primary said it was doing and the arguments are what it actually
-  did, so the two disagreeing is the signal. (Dormant while
-  `pretool_llm_enabled: false`.)
-- **`guards.tool_call_signature` must never see it.** `exact` is the full
-  `key=value` rendering, so a caption in the arguments makes two byte-identical
-  calls compare as different — and rewording is exactly what a looping model
-  does. The guard must compare what was *run*, not what the primary said about
-  it. This is why `fire_pre_tool_use` carries the caption as its own
-  `tool_summary` key in the hook's input dict rather than merging it into
-  `tool_input`: `tool_input` is what safety matching and the repetition guard
-  read, and it stays clean. `tests/test_tool_call_summaries.py` pins all three.
-
-### The silent primary
-
-Same turn. Every one of 33 iterations was tool-dispatch-only, and
-`_fast_path_assistant_message` noops those unconditionally — 33 rows at zero
-latency. `assistant_message` is the only trigger with a whole-turn view, and it
-never once reached the LLM. Its stated rationale is that "the pretool gate
-already evaluated each proposed tool", but pretool judgment has been off by
-default since v5, so the fast path was deferring to a gate that is not running.
-
-Removing the fast path would undo the v5 cost work. Instead the observer counts
-consecutive text-free iterations and escalates one to LLM judgment every
-`silent_iterations_before_review` (default 10), re-arming after each. The prompt
-block says explicitly that a long quiet run is usually productive work and asks
-only whether the calls are still converging — a jumpy observer would otherwise
-turn this into a nag every 10 iterations.
-
-### Failure payloads inside successful results
-
-The same turn spent 4 of its 10 minutes on a `Task` subagent that made 28 tool
-calls and returned `{"response": "\n[stopped: max_turns]"}`. 300 bytes,
-`is_error` false — so the size rule and the 1-in-5 sampler both skipped it, and
-the observer never learned that the turn's largest single investment produced
-nothing. Subagents have no Inner Voice of their own, so nothing else was
-watching either. `guards.looks_like_failure_payload` now escalates these
-unconditionally: `[stopped: …]` markers, `command timed out after`, and an empty
-`response` field.
-
-### Inject pacing
-
-The suppressor above enforces a one-iteration gap against the immediately
-preceding *judged* decision. It cannot stop inject → noop → inject. On turn
-`20260905_011748_iv84e4` the observer spent its entire budget of 3 in **88
-seconds** (18:24:52, 18:25:14, 18:26:20) — the second landing three iterations
-after the first, on a primary that had already acted on it, and the third
-asserting a bug the primary had never mentioned. By the time the drift was
-established there was nothing left but `cancel`. A budget of 3 is worth little
-if it can be spent in 90 seconds.
-
-`guards.inject_on_cooldown` requires `inject_cooldown_iterations` (default 4)
-completed primary iterations between two *discretionary* injects, counted by
-`assistant_message` decisions. Terminal injects and `bypass_budget` injects
-(stall rescue, repetition) are exempt — rationing those is what leaves a turn
-stuck.
-
-### Fast-path rows are not judgment
-
-`ObserverDecision.fast_path` marks decisions that never consulted the LLM. Both
-the guards' lookback and the prior-decisions prompt block skip the ones that
-*noop'd* — `_format_prior_decisions` keeps a fast-path row whose action was an
-intervention, so a deterministic stall rescue or repetition inject still shows up
-in the observer's own history. What is dropped is bookkeeping, not evidence.
-
-They are emitted at roughly eight per iteration ("read-only tool", "benign
-result (unsampled)", "tool-dispatch-only iteration", "observation-only: pretool
-LLM disabled"), and two things read decision history. The 8-slot
-`_format_prior_decisions` window was *entirely* fast-path rows at each of the
-three injects on 2026-09-04 — the observer's only view of its own turn carried
-no information. And `suppress_consecutive_inject` walks back to the most recent
-mid-work decision, which with `pretool_llm_enabled: false` is always a `pretool`
-or `assistant_message` bookkeeping row; it could never reach a prior inject, so
-the rule was unreachable code in the default configuration.
-
-An LLM noop still clears the suppressor — the observer looked and chose silence.
-Only bookkeeping is skipped.
-
-### Cancel-for-completion guard
-
-A `cancel` whose reason matches `_COMPLETION_REASON_PATTERN` (complete / done /
-criteria met / avoid padding / …) **and** which fires with `interventions_used == 0`
-is blocked, in one of two ways:
-
-- **Pending tool calls** → `noop_cancel_with_pending_tools`. Work is in flight;
-  cancelling aborts it and surfaces a confusing post-cancel "Tool call denied."
-- **No pending tools** → `acknowledge_complete`. The harness terminates naturally
-  on the next iteration, so the cancel is unnecessary. Recorded as a *positive*
-  acknowledgement so the observations panel renders "IV reviewed and agrees the
-  answer is complete" rather than a red force-stop.
-
-Cancel-for-completion is only allowed through after the observer has already
-intervened this turn — i.e. it's escalating from ignored injects.
-
-### TodoWrite stewardship
-
-Config block `inner_voice.todo_stewardship`. Four behaviors:
-
-| Flag | Default | Behavior |
-|---|---|---|
-| `enabled` | `true` | Master switch; gates the TODOS block in the prompt. |
-| `completion_gate` | `true` | On a terminal `assistant_message` or at `result`, append a PENDING TODOS block asking IV to intervene if the primary is stopping with work undone **or if it finished the work and never marked the list**. At `result` this drives `ambient` (inject is a no-op there). |
-| `mark_without_evidence` | `true` | On a successful `TodoWrite`, diff against `prior_todo_status` for `in_progress→completed` flips. Any flip skips the fast-path and appends a block forcing the LLM to walk each completed todo against recent tool calls, injecting a challenge if there's no plausible work behind the flip. |
-| `stalled_progress` | `true` in config.yaml | Count non-`TodoWrite`, non-error tool results since the last status change. At `stalled_after_tool_calls` (default 5) with at least one pending/in_progress todo, skip the fast-path and append a stalled-progress block. Counter resets on any status change and immediately after firing. **On since v5.2.** It stacks with the 1-in-5 tool-result sampler, so on a long todo-driven turn it is a real contributor to LLM-call volume — see [Cost](#cost). |
-
-The three other flags default on in `_todo_stewardship_cfg` as well as in
-config.yaml; `stalled_progress` is the odd one out, with a code fallback of
-**`false`**. So a config that omits the block entirely gets the first three and
-not this one — it is on in production because config.yaml says so, not because
-the code assumes it.
-
-`state.todos` is snapshotted at turn start and refreshed from disk
-(`_load_todos_from_session`) after each successful `TodoWrite`, so multi-flip turns
-don't show the observer a stale list.
-
-#### Delivered but unmarked
-
-The gate's original rule was `ALL pending todos addressed → noop (the work is
-done)`. That is correct about the work and silent about the bookkeeping. On
-`20260905_151355_iv5174` the primary delivered a full architecture review on
-its final iteration and never called `TodoWrite`; the gate saw the work as
-done, noop'd, and the turn ended with all five items showing
-pending/in_progress in the user's task panel. Nothing anywhere checked
-"finished the work, never marked the list."
-
-That branch now asks for the `TodoWrite` in one sentence instead of noop'ing,
-and the meaning-match caveat below it is scoped to the *work* so the two do
-not contradict each other. Pinned by
-`tests/integration/test_iv_todo_bookkeeping.py`.
-
-Note the asymmetry this exposed: the **observer** re-reads todos from disk
-mid-turn, but the **primary** did not — its `<active_todos>` block is frozen
-at turn start and cannot be refreshed without invalidating the cached prompt
-prefix. IV nudging is therefore the second line of defence, not the first; the
-first is `RunOptions.state_anchor`, which re-appends the list every
-`harness.todo_anchor_interval_iterations` iterations.
-
-### Persistent-goal completion loop (`/goal`)
-
-When `session.goal` is set (via `/api/sessions/.../goal`) and not yet achieved, the
-observer runs a **second** LLM call at the `result` event — `evaluate_goal_completion`,
-forcing a `record_goal_completion(achieved, reason)` tool call. It runs *after* the
-regular result decision so an already-queued ambient isn't overwritten.
-
-- **Achieved** → set `session.goal.achieved_at`, emit a success breadcrumb through
-  the inject-persist channel, log `inner_voice.goal_achieved`.
-- **Not achieved, attempts left** → bump `session.goal.attempts`, queue an ambient
-  follow-up whose body is `verdict.reason` (the prompt is engineered to make that a
-  concrete next step). Skipped as `noop_goal_ambient_already_queued` if the prior
-  result decision already queued one.
-
-  The follow-up is tagged `producer_source: "inner_voice_goal"`, and that tag is
-  load-bearing — see [The loop has to be observed](#the-loop-has-to-be-observed).
-- **Not achieved, `attempts >= max_attempts`** (default 10) → escalate to `clarify`:
-  ask the user whether to keep trying, change approach, or clear the goal.
-
-Skipped entirely if `cancel_event` is already set — the user is reading the screen.
-
-### The loop has to be observed
-
-Through v4 this was **a one-shot check wearing a retry loop's clothes.**
-
-`_iv_should_fire_on_turn` refused to observe any ambient turn whose
-`producer_source` was `inner_voice`, and the goal follow-up was queued under
-exactly that tag. So the follow-up turn ran with no observer attached, which
-means `evaluate_goal_completion` never ran a second time, `session.goal.attempts`
-never advanced past 1, `achieved_at` was never set on a goal that later
-succeeded, and `max_attempts: 10` was unreachable. The
-`inner_voice_observations` table contained **zero** `goal_completion` rows across
-the entire first production window.
-
-The blanket refusal exists for a real reason: the intervention budget resets
-every turn, so an observer that watches its own follow-ups can spawn and re-judge
-them without bound. v5 keeps the refusal for discretionary IV ambients and carves
-out one tagged exception:
-
-```python
-_SELF_OBSERVED_PRODUCERS = frozenset({"inner_voice_goal"})
-```
-
-A goal retry is observed; a plain `inner_voice` ambient still is not. The runaway
-risk is bounded here by the attempt cap instead — `attempts` now genuinely
-increments on every unmet evaluation and escalates to `clarify` at the ceiling.
-
-Verified live end to end: a goal was set, turn 1 deliberately did not satisfy it,
-the evaluator queued a follow-up, **the follow-up was observed**, the primary
-wrote the file, and the evaluator marked the goal achieved on turn 2.
-
-## Cross-event memory
-
-The per-event prompt includes a "YOUR PRIOR DECISIONS THIS TURN" block listing up
-to the last 8 decisions: `(trigger, action, reason, related_tool)`. This gives the
-observer continuity within a turn:
-
-- "I already injected once telling you to summarize — if you ignored it, escalate."
-- "I keep injecting and the primary keeps doing the same thing — back off."
-- "I noop'd three Bash calls in a row — pattern looks fine, keep going."
-
-Cost: bounded by the budget plus 8-entry truncation. Typical overhead ~150–300
-input tokens per call.
-
-### Cross-turn memory
-
-`cross_turn_memory_enabled` (default `true`), `cross_turn_memory_limit`
-(default `6`).
-
-At attach the observer loads its own **interventions** from earlier turns of the
-same session (`_load_prior_turn_interventions`) and renders them as a
-"WHAT YOU DID ON EARLIER TURNS" block. Before this the observer attached with an
-empty `decisions_this_turn` every turn, so it could raise the same concern on
-five consecutive turns without ever noticing the nudge wasn't landing.
-
-Interventions only — the hundreds of noop rows carry no lesson forward and would
-swamp the prompt. Best-effort: a read failure yields `[]` and the observer runs
-as before.
-
-## Continue-on-inject
-
-When the observer injects on the final iteration of a turn (model produced no tool
-calls), the harness would normally break out of the loop and emit `result` — losing
-the inject.
-
-`loop.py` snapshots `len(chat_messages)` before firing the `OnEvent` hook. If the
-list grew during the hook and there were no tool calls to dispatch, the loop
-continues for one more iteration so the model reads the injected message. (The same
-mechanism backs the harness's own echo-guard re-prompt, which is independent of IV.)
-
-## Clarify mechanics
-
-1. Observer calls `clarify_callback(question, reason)`. The callback (from
-   `messages._run_turn`) appends `{"role": "assistant", "content": "[INNER VOICE] "
-   + question, "source": "inner_voice_clarify"}` to the session.
-2. Sets `cancel_event` so the harness exits cleanly after the current iteration.
-3. Persists the observation row.
-
-The user sees the primary's partial work followed by the question, replies, and the
-observer attaches fresh to that turn with a new goal card.
-
-## Hard safety gate (not Inner Voice)
-
-`app/harness/safety.py` installs a default `PreToolUse` hook on **every** primary
-turn — IV-on or IV-off — closing the prior gap where the safety net only ran for
-opted-in sessions. It is the only hard gate on tool dispatch.
-
-**Subagents too, since v5.** `agent_mcp/builtin_task.py` built its `RunOptions`
-with `hooks=None`, so a `Task` subagent ran with no safety gate at all — the one
-context with no human watching the stream. It now builds a `HookRegistry` and
-installs the same hook. The Inner Voice observer is deliberately *not* attached
-there: it is scoped to a session turn (goal card, session todos, ambient and
-clarify channels) and a subagent has none of those.
-
-`check_bash_command` is a pure function over a narrow, catastrophic-only pattern
-set: `sudo`; `rm -rf` on `/`, `~`, or `$HOME` (excluding `/tmp`, `/var/tmp`);
-`dd of=/dev/*`; `mkfs`; `chmod -R 777|000` on a root/home path;
-`git push --force` to `main`/`master`/`release/*`/`prod*`; curl/wget piped to a
-shell; redirect to a disk device node; fork bomb; redirect to `/etc`.
-
-Everyday risky-looking commands (`cp`, `mv`, `chmod` on a single file) are **not**
-denied — those are normal agent behavior and gating them breaks more than it
-protects.
-
-## System prompt
-
-All judgment lives in markdown files in the vault, loaded at import time by
-`app/inner_voice/observer_prompt.py` with Python fallbacks:
-
-| Constant | Vault path | Present? |
-|---|---|---|
-| `SYSTEM_PROMPT` | `~/obsidian/lloyd/inner_voice/system_prompt.md` | yes (115 lines) |
-| `GOAL_EXTRACTION_SYSTEM_PROMPT` | `~/obsidian/lloyd/inner_voice/goal_extraction_prompt.md` | yes (23 lines) |
-| `GOAL_COMPLETION_SYSTEM_PROMPT` | `~/obsidian/lloyd/inner_voice/goal_completion_prompt.md` | yes (42 lines, v5) |
-
-YAML frontmatter is stripped on load.
-
-**Prompts hot-reload since v5.** Live code calls `get_system_prompt()`,
-`get_goal_extraction_prompt()` and `get_goal_completion_prompt()`, which re-read
-the vault file whenever its mtime changes. An mtime stat per call is negligible
-next to the LLM round-trip it precedes. The module-level constants remain as the
-import-time snapshot for back-compat.
-
-Editing a prompt used to require a backend restart, which made the tuning loop —
-the entire reason judgment lives in the vault rather than in Python — far slower
-than it needed to be.
-
-To tune behavior, edit the vault file — not Python.
-
-## Output protocol
-
-The observer never emits free-form text. Every call is
-`tool_choice="required"` over a fixed tool list, `temperature=0.2`,
-`enable_thinking=false`, and a vLLM scheduling `priority`.
-
-**The priority was backwards through v4.** vLLM's `--scheduling-policy priority`
-treats *lower* as *sooner*, and the primary submits at `0`. An observer also at
-`0` looked like it was competing with the agent it was supposed to be watching,
-so `inner_voice.observer.priority` was set to `1`.
-
-**That fixed rule is gone: the observer now takes the priority of the turn it
-watches.** `install_observer` receives it from the turn's `RunOptions` (via
-`attach_observer_for_turn`), keeps it on `state.priority`, and every per-event
-judgment and the goal extraction pass it through; `inner_voice.observer.priority`
-is the fallback when a caller passes none. The old rule was guarding something
-equal priority already guarantees — vLLM orders equal-priority requests by
-arrival, so an observer call cannot preempt the in-flight request of the turn
-that spawned it — while actually costing what it claimed to protect. A chat turn
-submits at `0`, so its observer used to queue at `1` behind every worker
-iteration on the engine, which is the second opinion arriving late on precisely
-the turn a human is watching. Now a chat's observer runs at `0` beside the chat
-and a worker's at the worker's own priority.
-
-The `/goal` completion evaluator is the one caller that still does not pass one
-(`evaluate_goal_completion` omits the argument), so it falls back to the
-configured `1`. It runs after the turn has already ended, so nothing is waiting
-on it.
-
-Calls share one pooled `httpx.AsyncClient` per event loop rather than building
-and tearing down a client (and its TCP handshake) per event.
-
-| Call site | Tools | Tool name |
-|---|---|---|
-| Per-event judgment | `LEVER_TOOLS` | one of `noop`/`inject`/`cancel`/`ambient`/`clarify` |
-| Turn-start extraction | `GOAL_EXTRACTION_TOOLS` | `record_goal_card` |
-| `/goal` evaluation | `GOAL_COMPLETION_TOOLS` | `record_goal_completion` |
-
-`_extract_tool_call` pulls `choices[0].message.tool_calls[0]`. A missing tool call,
-unparseable arguments, or a name outside `LEVER_NAMES` folds to `noop` with `error`
-set (`no_tool_call`, `unknown_lever`). The primary stream is never blocked by
-observer faults.
-
-This replaced v3's five-shape JSON-prefill parser, which existed because local
-models were inconsistent about prefill conventions. Forcing a tool call removed the
-problem class — `no_tool_call` still shows up in the observation table but at low
-single-digit rates.
-
-## File map
-
-```
-app/inner_voice/
-├── __init__.py             # public surface
-├── observer.py             # state, lever dispatch, fast-path, goal loop
-├── observer_prompt.py      # vault prompt loading + per-event prompt builders
-├── guards.py               # every deterministic rule, as pure functions —
-│                           # stall, suppressor, cooldown, budget, repetition,
-│                           # cancel-for-completion, failure payloads
-└── lever_tools.py          # LEVER_TOOLS / GOAL_EXTRACTION_TOOLS /
-                            # GOAL_COMPLETION_TOOLS function schemas
-
-app/harness/
-├── hooks.py                # add_on_event + fire_on_event; add_pre_tool_use
-├── safety.py               # default destructive-Bash hard-deny hook (always on)
-├── loop.py                 # fires OnEvent at boundary events;
-│                           # continue-on-inject for empty terminal iterations
-└── options.py              # chat_messages_handle field for shared mutation
-
-app/routers/
-├── _messages_inner_voice.py  # session-flag gate + async attach helper
-│                             # (goal extraction + recent-exchange window)
-├── messages.py               # observer attach in _run_turn; ambient / clarify /
-│                             # persist-intervention callbacks
-├── sessions.py               # /goal set-clear-read endpoints (session.goal)
-└── inner_voice.py            # /api/inner_voice/{observations,state,sessions,event_log}
-
-autonomy.py                 # the SECOND attach site — a scheduled task with
-                            # `inner_voice:` on attaches the observer to the
-                            # direct path, reusing run_task's own HookRegistry
-
-~/obsidian/lloyd/inner_voice/
-├── system_prompt.md          # the observer's judgment — edit this, not Python
-├── goal_extraction_prompt.md
-└── goal_completion_prompt.md
-
-usage_store.py              # inner_voice_observations table + record/list helpers
-
-web/src/components/
-├── pages/InnerVoicePage.tsx  # observations timeline UI
-├── ObservationBubble.tsx
-└── innerVoiceStyles.ts
-
-tests/integration/
-├── test_observer.py        # tool-call extraction, lever dispatch, fast-path
-├── test_iv_guards.py       # guards + v5 behavior (added in v5)
-├── test_iv_loop_guards.py  # v5.2 guards, replayed against the real turn
-├── fixture_iv_loop_turn.py #   the 28 Bash calls from that turn, verbatim
-├── test_iv_v52_review.py   # v5.3 corrections (added in v5.3)
-├── test_iv_repetition_wording.py  # #393 — the guard claims only what it sees,
-│                           #   and the ban lifts itself if a result field lands
-├── test_iv_worktree_ambient.py    # v5.4 — the automod worktree id is ambient
-├── fixture_iv_automod_worktree.py #   the 24 `cd`-prefixed calls, verbatim
-├── test_iv_todo_bookkeeping.py    # delivered-but-unmarked completion gate
-├── test_goal_loop.py       # persistent-goal completion loop
-└── smoke_observer_e2e.py   # live e2e against running backend
-
-tests/
-├── test_inner_voice_state_blobs.py  # /state expands blob refs; no dict to JSX
-└── test_background_inner_voice.py   # attach on the autonomy/worker paths
-
-app/harness/tests/
-└── test_loop_inject_ordering.py  # terminal-inject ordering, real run_query
-```
-
-## Persistence schema
-
-Single table: `inner_voice_observations`. One row per observer decision, including
-fast-path noops.
-
-```sql
-CREATE TABLE inner_voice_observations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    turn_id TEXT NOT NULL,
-    sequence_in_turn INTEGER NOT NULL,
-    trigger TEXT NOT NULL,   -- assistant_message | tool_call | tool_result | result | pretool
-    action TEXT NOT NULL,    -- noop | inject | cancel | ambient | clarify | acknowledge_complete | noop_*
-    reason TEXT,             -- one short phrase from the model (or "fast-path: ...")
-    content TEXT,            -- inject text | ambient body | clarify question
-    related_tool TEXT,       -- for pretool / tool_result / "goal_completion"
-    input_tokens INTEGER,
-    output_tokens INTEGER,
-    cache_read INTEGER,
-    cache_create INTEGER,
-    latency_ms INTEGER,
-    model TEXT,              -- the model that served the OBSERVER's call (v5)
-    error TEXT,              -- non-null on no_tool_call / timeout / http error
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    safeguard TEXT           -- deterministic rule that decided; NULL = the model (#770)
-);
-CREATE INDEX idx_iv_obs_session ON inner_voice_observations(session_id);
-CREATE INDEX idx_iv_obs_turn    ON inner_voice_observations(turn_id);
-```
-
-The legacy `inner_voice_critiques` and `inner_voice_interventions` tables (v3
-ensemble/grading) are dropped at schema init; that data is intentionally discarded.
-
-> **Fixed in v5.** `_persist` used to write `model=state.primary_model`, so no row
-> recorded what actually served the observer call — the exact question you must
-> answer before pointing the observer at a smaller model. It now writes
-> `state.observer_model`, resolved at attach through `_resolve_endpoint()`.
-> Rows written before 2026-09-03 carry the primary's alias and should be read
-> with that in mind.
-
-`_persist` runs the SQLite write on a worker thread (`asyncio.to_thread`). It
-fires on every decision including fast-path noops — roughly half of all rows —
-and a synchronous commit on the event loop stalls the primary's stream for as
-long as the disk takes. `usage_store` hands out thread-local connections over a
-WAL database, so this is safe.
-
-The `noop_*` action variants record what the observer *intended* before the
-dispatcher downgraded:
-
-| Label | Meaning |
+  event with `deterministic: true` and `guard` — so `iv_grade` and
+  `iv_outcome_score` read them as they read the old deterministic rows. On a
+  chat turn the router's breadcrumb callback writes the `[INNER VOICE]` line
+  into the session, where the user sees it.
+- Config `inner_voice.turn_guards`: `enabled` and one switch per guard, plus
+  `repetition_window`, `repetition_threshold`, `repetition_exempt_tools`,
+  `deterministic_inject_budget`; the old `inner_voice.observer.*` keys still
+  read as fallback.
+
+## 2. The observer — one terminal review
+
+Opt-in per session (`inner_voice` + `inner_voice_evaluate_user_turns`, or the
+A/B arm below); off for every worker source and, by default, every scheduled
+task. `app/routers/_messages_inner_voice.py::attach_observer_for_turn` wires it.
+
+### When it is called
+
+| event | what happens |
 |---|---|
-| `noop_budget_exhausted` | Would have intervened, but already at budget. |
-| `noop_empty_content` | `inject` returned empty content. |
-| `noop_inject_after_inject` | Consecutive-inject suppressor (mid-work only). |
-| `noop_inject_on_cooldown` | Discretionary inject too soon after the last one. |
-| `noop_deterministic_budget_exhausted` | A `bypass_budget` inject past `deterministic_inject_budget`. |
-| `noop_cancel_unread_injects` | Cancel citing ignored injects, but no primary iteration has completed since they fired. |
-| `noop_goal_attempts_not_persisted` | `/goal` follow-up skipped because the attempt counter did not persist. |
-| `noop_cancel_with_pending_tools` | Cancel-for-completion blocked, work in flight. |
-| `acknowledge_complete` | Cancel-for-completion converted to a positive ack. |
-| `noop_no_ambient_channel` / `noop_ambient_failed` | Ambient chosen but unwired or raised. |
-| `noop_no_clarify_channel` / `noop_clarify_failed` | Clarify chosen but unwired or raised. |
-| `noop_inject_on_result` / `noop_cancel_on_result` / `noop_clarify_on_result` | Chosen on `result` (turn already over). |
-| `noop_pretool_after_cancel` / `noop_assistant_after_cancel` / `noop_tool_result_after_cancel` / `noop_result_after_cancel` | Turn cancelled while the observer LLM call was in flight. |
-| `noop_goal_ambient_already_queued` / `noop_goal_ambient_failed` / `noop_goal_clarify_failed` | Persistent-goal loop degradations. |
-
-Fast-path decisions are persisted with `reason` prefixed `"fast-path: ..."` so
-they're distinguishable from LLM-judged ones in the UI and in analysis queries.
-
-Since #770 (2026-09-24) the row also names the rule in `safeguard`
-(`ObserverDecision.safeguard`, last writer wins): `repetition`, `stall_rescue`,
-`stall_rescue_ambient`, `unattended_content`, `consecutive_inject`,
-`inject_cooldown`, `unattended_cancel`, `cancel_unread_injects`,
-`cancel_for_completion`, `intervention_budget`, `deterministic_inject_cap`,
-`context_pressure`, `observation_only`, and `fast_path` for any other fast-path
-row. `scripts/iv_grade.py` splits guard interventions by it and names the guard
-in its per-turn alarm. The column is forward-only: older rows are NULL and are
-classified by the prose — the `deterministic:`/`fast-path:` prefix and the
-`[stall-rescue: …]`/`[unattended: …]` suffix, which the grader missed before and
-so scored those guard injects as model precision. A backfill is a human call.
-
-## API surface
-
-`/api/inner_voice/`:
-
-- `GET /observations?session_id=X[&turn_id=Y]&limit=N` — observations newest first.
-- `GET /state?session_id=X` — `{inner_voice_enabled, evaluate_user_turns,
-  observations_count_by_action, last_observation_at, latest_goal_card,
-  latest_user_request, latest_turn_id}`. The goal card is recovered by scanning the
-  event log tail for `inner_voice.goal_card_extracted`.
-
-  **That scan reads unexpanded, so the route must expand what it returns.**
-  `event_log` externalizes any field over 4 KB to `{"$blob": sha, "size": n}`,
-  and the scan walks up to 2000 events to find one — expanding every field of
-  every event on the way would be absurd. So it expands the single event it
-  matched (`event_log.expand_blobs`) and coerces the result with
-  `_display_text`. Both halves are load-bearing: a worker session's opening
-  prompt is routinely 8-15 KB, so `latest_user_request` arrived as a dict, and
-  the context strip renders it straight into JSX — React throws *"Objects are
-  not valid as a React child"* and **the whole Inner Voice tab goes blank**,
-  not just that line. A pruned blob store expands to `{"$blob_missing": sha}`,
-  which is also a dict, which is why expansion alone is not the fix. The page
-  carries its own `asText` guard for the same reason a dashboard section uses
-  `sectionError`: a tab left open across a backend restart polls the new build
-  with the old shape. `tests/test_inner_voice_state_blobs.py`.
-- `GET /sessions?limit=N` — sessions opted into IV.
-- `GET /event_log?session_id=X[&offset=...&limit=...&expand_blobs=true]` — raw event log.
-- `GET /event_log/blob/{sha}` — externalized blob lookup.
-
-Structured events written to the event log: `inner_voice.goal_card_extracted`,
-`observer_injected`, `observer_cancelled`, `observer_ambient`,
-`observer_clarified`, `inject_suppressed_consecutive`, `inject_on_cooldown`,
-`deterministic_budget_exhausted`, `cancel_blocked_completion`,
-`cancel_blocked_unread_injects`, `goal_achieved`, `goal_followup_queued`,
-`goal_clarify_exhausted`, `goal_attempts_persist_failed`.
-
-Every guard that downgrades a lever logs one, which is what makes a
-`noop_*` row in the table above traceable to the rule that produced it.
-
-## Session opt-in
-
-Two flags in the session JSON:
-
-```json
-{
-  "inner_voice": true,
-  "inner_voice_evaluate_user_turns": true
-}
-```
-
-- `inner_voice` is the master switch. When false, the observer never attaches.
-- `inner_voice_evaluate_user_turns` (**default off**) controls whether the observer
-  fires on user-typed turns. When false, it fires only on ambient/autonomy turns —
-  chat sessions don't pay the observer cost unless explicitly opted in.
-
-**Who sets the flags on a background session.** Since 2026-09-10 every
-autonomy task and worker job has a session (`architecture/background-runs.md`),
-and `sessions_io.create_session` writes both flags at creation, equal to each
-other, from the job's own switch: a task file's `inner_voice:` frontmatter
-(falling back to `autonomy.inner_voice`, off) for an autonomy run, and
-`workers.sources.<name>.inner_voice` for a session-backed worker. They move
-together because the two kinds of turn arrive differently. A worker's prompt
-is posted to the chat endpoint as a *user* turn, so without
-`inner_voice_evaluate_user_turns` the observer would never fire on it. An
-autonomy run attaches on its own direct path — `autonomy.run_task` is the
-second call site of `attach_observer_for_turn`, beside `_run_turn` — with
-`turn_source="ambient"`, where the master flag alone decides. It passes
-`run_task`'s own `HookRegistry`, so the #534 grant hook stays on it, wires the
-observer's cancel event into the loop, and leaves the ambient and clarify
-callbacks `None` because nobody is reading. A `run_prompt_on_primary` job is
-always created with both flags off: that path never reaches the observer.
-
-**Discretionary IV-produced ambient turns are not observed.**
-`_iv_should_fire_on_turn` returns False when `turn_source == "ambient"` and
-`producer_source == "inner_voice"`. Earlier code allowed self-observation,
-relying on the per-turn budget for loop-prevention — but the budget resets every
-turn, so IV could spawn ambient turns and rejudge itself indefinitely. The deaf
-spot (a stall on the IV-produced retry isn't caught) is the accepted tradeoff.
-
-**One tagged exception:** `producer_source == "inner_voice_goal"` IS observed.
-Without it the `/goal` completion loop cannot loop at all — see
-[The loop has to be observed](#the-loop-has-to-be-observed). Runaway there is
-bounded by `goal.max_attempts` rather than by the blanket refusal.
-
-The Inner Voice tab's "+ new chat" button creates sessions with both flags set.
-
-## Configuration
-
-```yaml
-# config.yaml
-secondary_enabled: true                      # when false, routes `secondary` → `primary`
-
-inner_voice:
-  model: primary                             # pinned; see note below
-  observer:
-    max_tokens: 400                          # observer's response budget per event
-    timeout_seconds: 8                       # the two synchronous terminal
-                                             #   calls (assistant_message,
-                                             #   result). Raised 5 → 8 on
-                                             #   2026-09-14 by Alan's #458
-                                             #   ruling; 8 s sits above the
-                                             #   measured p95 (5.07 s).
-    probe_timeout_seconds: 1.0               # pre-flight liveness probe,
-                                             #   off-critical-path calls only
-                                             #   (code default; not in yaml)
-    intervention_budget: 3                   # inject/ambient/clarify per turn
-    primary_text_window_chars: 4000          # head+tail window of primary text
-    priority: 1                              # FALLBACK ONLY since v5.4 — the
-                                             #   observer takes the watched
-                                             #   turn's own priority (chat 0,
-                                             #   worker 1). LOWER = sooner.
-    fast_path_enabled: true
-    pretool_llm_enabled: false               # pretool is observation-only
-    tool_result_sample_every: 5              # judge 1 benign result in N
-    tool_result_escalate_bytes: 20000        # always judge results this big
-    async_nonterminal: true                  # non-terminal judgment off the
-                                             #   harness's critical path
-    async_drain_timeout_seconds: 6.0
-    iteration_pressure_enabled: true         # warn as max_turns approaches
-    iteration_pressure_threshold: 0.8
-    cross_turn_memory_enabled: true          # prior turns' interventions
-    cross_turn_memory_limit: 6
-    goal_card_to_primary: true               # show primary its own contract
-    repetition_guard_enabled: true           # deterministic loop detection
-    repetition_window: 6                     #   compare against last N calls
-    repetition_threshold: 2                  #   fire on N matches within it
-    silent_iterations_before_review: 10      # escalate a text-free streak
-    inject_cooldown_iterations: 4            # primary iterations between
-                                             #   discretionary injects
-    deterministic_inject_budget: 5           # ceiling on bypass_budget injects
-    async_timeout_seconds: 12                # deadline for off-critical-path
-                                             #   judgments (terminal calls keep
-                                             #   the tight timeout_seconds)
-    # --- the unattended profile (2026-09-12, absent from this doc until 2026-09-18) ---
-    # An unattended turn is `platform in sessions_io.NON_USER_PLATFORMS`
-    # (`_is_unattended`), i.e. a worker or autonomy round. Every one of these
-    # exists because a round's observer injected "deliver the final report
-    # now" on the invented premise "working tree clean" and a healthy round
-    # was abandoned at iteration 38 with 44 minutes left.
-    unattended_tool_result_sample_every: 10  #   vs 5 for a chat turn
-    unattended_tool_result_escalate_bytes: 60000   #   vs 20000; a pytest tail
-                                             #   clears 20k and buys a call
-                                             #   that says nothing
-    unattended_terminal_content_deterministic: true
-                                             # the LLM still decides WHETHER to
-                                             #   speak; Python writes the words
-                                             #   (`UNATTENDED_TERMINAL_RESCUE_
-                                             #   CONTENT`), and a cancel with no
-                                             #   read inject becomes
-                                             #   `noop_unattended_cancel_unseen`
-    context_pressure_enabled: true           # prefer noop past this fraction of
-    context_pressure_threshold: 0.8          #   the compaction threshold, and
-                                             #   skip the terminal judgment
-                                             #   entirely below the loop's own
-                                             #   terminal_floor_tokens
-    repetition_exempt_tools: []              # merged OVER the built-in set
-                                             #   (automod_gate_wait, automod_status,
-                                             #   browser_wait, graph_status,
-                                             #   autoresearch_status); config can
-                                             #   add, never un-exempt
-  todo_stewardship:
-    enabled: true
-    completion_gate: true
-    mark_without_evidence: true
-    stalled_progress: true
-    stalled_after_tool_calls: 5
-  goal:
-    max_attempts: 10                         # /goal retries before clarify
-    eval_timeout_seconds: 8
-    eval_max_tokens: 300
-```
-
-Defaults not present in config.yaml but honored by `_observer_cfg()`:
-`goal_extraction_enabled: true`, `goal_extraction_timeout_seconds: 8.0`,
-`goal_extraction_max_tokens: 600`.
-
-The dead keys `pretool_timeout_seconds` and `rotation_days` were removed in v5 —
-nothing read either one.
-
-**Effective observer model — the observer moved off the primary on 2026-09-04,
-was moved back on 2026-09-05, and has stayed there since.** `inner_voice.model`
-read `secondary` from 2026-05-07 onward and resolved to `primary` the whole time,
-because `resolve_model_alias()` rewrites `secondary` → `primary` while
-`secondary_enabled: false`. `de893d7` flipped that switch on for the autonomy
-scheduler, and the observer silently moved to **Qwen3.5-4B at `:8091`** (GPU 2,
-an RTX 3090) with no config change, no code change, and no log line. Ten hours
-later it cancelled turn `20260905_011748_iv84e4`.
-
-The `model` column bounds the episode exactly: of 43,220 observation rows *as of
-2026-09-11*, **116 carry `secondary`, and every one of them falls between 08:29 and
-18:28 on 2026-09-04.** The rest are `primary`. That is the whole of the
-experiment, and it is only legible because v5 fixed the column to record the
-observer's model rather than the primary's.
-
-**Re-probed 2026-09-18: 58,013 rows, and `model='secondary'` is still exactly 116,
-still inside 2026-09-04.** The 116 are a closed historical set — that is the claim
-the pin rests on — while the total is a growth number: +14,793 rows in seven days.
-Any bare row count quoted below this line is a timestamp, not a fact; see
-`backlog/1229` for why none of them survives a disk event.
-
-The one-day comparison, counting only rows where the LLM actually ran:
-
-| Observer model | LLM judgments | injects | cancels | intervention rate |
-|---|---|---|---|---|
-| primary (Flash-Next) | 602 | 9 | 1 | **1.7%** |
-| secondary (Qwen3.5-4B) | 15 | 5 | 1 | **40%** |
-
-`n=15` is far too small to call a regression on statistics alone, and the fixes
-shipped alongside the revert (repetition guard, inject cooldown, command in the
-tool_result summary) address failures that were model-independent. But the
-qualitative evidence points the same way: the third inject of that turn asserted
-the primary had "discovered a subliminal injection bug" about a primary that had
-emitted zero characters all turn and had merely `head`'d a docstring.
-Confabulating a narrative from a 300-char fragment under a 400-token cap is the
-expected failure profile of a 4B model on this prompt.
-
-`inner_voice.model` is therefore **pinned to `primary`**, and
-`resolve_model_alias` now logs its rewrite once per name — the swap was invisible
-precisely because an explicit config value was being silently rewritten by a flag
-that says nothing about models.
-`tests/integration/test_iv_loop_guards.py::test_observer_resolves_to_the_primary_endpoint`
-asserts the *resolved endpoint*, not the config string, so the indirection cannot
-hide it again. Revisit only with `scripts/iv_grade.py` evidence.
-
-Two consequences of the move, recorded because they apply again to anyone who
-repeats the experiment — neither is live while the observer runs on `primary`:
-
-- **`priority` becomes inert as written.** The knob's rationale was "the primary
-  submits at 0 on the same server, so the observer must yield." An observer on
-  `:8091` does not share a server with the primary, so the number only orders it
-  against the *other* secondary consumers (post-session capture, fact extraction,
-  voice rewrite in `app/secondary_models.py`) — a different and much weaker
-  claim. Since v5.4 the value is inherited from the watched turn rather than
-  fixed at 1 (see [Output protocol](#output-protocol)), which makes the
-  cross-engine case stranger still: a chat turn's `0` would be handed to a server
-  the chat is not running on.
-- **A small `--max-num-seqs` is a real ceiling.** `async_nonterminal` puts
-  several judgments in flight at once and the post-capture jobs share the slot;
-  the observer's `timeout_seconds: 5` is tight against that. One
-  `timeout after 5.0s` in 33 calls on `:8091` was the first evidence of it.
-  The slot is also no longer a 4B: `:8091` has run Qwen3.6-35B-A3B under
-  llama.cpp since 2026-09-06, single-tenant at `--parallel 1`, so a re-run would
-  be queueing behind agent turns rather than sharing four sequences with them.
-
-**Prefix-cache reporting.** vLLM emits the cache-hit count as
-`usage.prompt_tokens_details.cached_tokens`, and only when launched with
-`--enable-prompt-tokens-details`. v4 read `cache_read` / `prompt_tokens_cached`,
-neither of which vLLM sets, and the flag was absent from
-`agent-services/bin/start-qwen38-flash-next.sh` — so every one of the 1,182
-observation rows recorded `cache_read = 0` regardless of what actually happened.
-v5 reads the right field and added it to
-`agent-services/bin/start-qwen38-flash-next.sh` — **the primary's launcher.**
-
-With the observer back on `primary` that fix points at the right server again.
-It did not while the observer ran on `:8091`: `agent-services/bin/start-secondary.sh`
-does not pass `--enable-prompt-tokens-details`, so all 116 observation rows
-written during the move recorded `cache_read = 0`, and the number that was
-supposed to decide whether a smaller observer model pays for itself went
-unmeasured through the entire experiment. `scripts/iv_grade.py` says so explicitly rather than reporting a 0% hit
-rate as if it were measured.
-
-**Both launchers carry `--enable-prompt-tokens-details` as of v5.3** — it was
-added to `start-secondary.sh` alongside the rest of that pass. For a while
-neither *running* server had it, because both had been started before the flag
-landed in their script, and the number stayed unmeasured rather than
-measured-as-bad.
-
-**It is measured now.** The running primary at `:8096` carries the flag, and
-**5,107 of the 43,220 observation rows record a non-zero `cache_read`** — all of
-them on `primary`, all of them inside the last week (re-probed 2026-09-18: **7,219
-of 58,013**, same shape, so the hit rate is stable and the counts are only a moving
-denominator). The 116 `secondary` rows
-from the 2026-09-04 experiment still read 0 and always will: that engine was
-never launched with the flag, which is exactly why the question the experiment
-existed to answer went unanswered. Verify the primary with:
-
-```bash
-ps -eo args | grep vllm.entrypoints | grep -c enable-prompt-tokens-details
-```
-
-Re-run 2026-09-18 returns **2, not 1** — the second match is `grep vllm.entrypoints`
-itself, whose own command line is in `ps` output and carries both strings. The check
-is "≥ 1 and the matched line is the server"; `pgrep -fa vllm.entrypoints.api_server`
-is the form that cannot self-match, and it names
-`agent-services/llm/vllm-flash-next-main-0910` with the flag.
-
-Note what that command can and cannot tell you. It matches `vllm.entrypoints`,
-and `:8091` has been llama.cpp since 2026-09-06 — `start-secondary.sh` still has
-a vLLM branch carrying the flag, but it is not the branch that runs. The command
-answers for the primary only, which is where the observer is pinned.
-
-This matters more than it looks: the observer's prompt is a large, stable prefix
-(system prompt + goal card + subliminal block) re-sent on every event, and
-whether that prefix is cached decides whether a smaller observer model is worth
-the VRAM. That question is now answerable from `scripts/iv_grade.py` rather than
-being reported as a 0% hit rate that was never a measurement.
-
-## Cost
-
-### v4 baseline
-
-Measured across the 44 turns in `usage.db` as of 2026-09-03 (1,182 observation
-rows, 21 sessions, 2026-08-22 → 2026-09-03):
-
-| Metric | Value |
-|---|---|
-| Observations per turn | ~27 |
-| Fast-path share | 609 / 1182 (52%) |
-| LLM-judged calls per turn | ~13 |
-| Observer input tokens per turn | ~71,400 |
-| Observer wall-clock per turn | 12,505 ms |
-| Worst single turn | 102 calls, 586k tokens, 89 s |
-| Mean latency, `pretool` | 860 ms |
-| Mean latency, `tool_result` | 816 ms |
-| Mean latency, `assistant_message` | 1,050 ms |
-| Mean latency, `result` | 1,783 ms |
-| Interventions | 16 total (9 inject, 6 ambient, 1 cancel) |
-
-Observer input tokens across IV sessions were **3.20M against the primary's
-3.22M in the same sessions** — the watcher cost as much as the work. Per-session
-ratios ranged from 0.2× to 5.3×.
-
-### What v5 changes
-
-Cost control is now about *which triggers earn a call*, not about shrinking the
-prompt:
-
-- Pretool judgment off → removes 264 of 609 LLM calls and 1.44M of 3.20M input
-  tokens in the baseline window, for 3 interventions that prevented nothing.
-- Tool-result sampling at 1-in-5 → removes roughly 80% of that trigger's 637k.
-- Non-terminal judgment off the critical path → the primary no longer waits on
-  any of it.
-
-### v5 measured (2026-09-03 13:00 → 2026-09-04, 8 turns)
-
-The original v5 write-up quoted a toy turn (`echo hello && date -u`: 5
-observations, 2 LLM calls, 2.2 s). Real traffic since the change, via
-`scripts/iv_grade.py --since 2026-09-03T13`:
-
-| Metric | v4 baseline | v5 measured |
-|---|---|---|
-| Observations / turn | ~27 | ~24 |
-| Fast-path share | 52% | **83%** |
-| LLM calls / turn | ~13 | **~4** |
-| Observer input tokens / turn | 71,400 | **21,542** |
-| Observer wall-clock / turn | 12,505 ms | **5,191 ms** |
-| Errors | 5 empty-message `http_error` | 1 `timeout after 5.0s` |
-
-Cost per turn is down ~3.3× on tokens and ~2.4× on wall-clock, and the wall-clock
-that remains is almost entirely the two synchronous terminal judgments plus goal
-extraction — the primary no longer waits on non-terminal judgment at all.
-
-**But the trigger-yield table that justified the re-tiering inverted.** In the
-one substantive post-v5 turn on record (`0251c403fd8d`, 108 observations, 13 LLM
-calls, 75,840 input tokens, ~10 minutes of a long tool-heavy review):
-
-| Trigger | rows | LLM calls | interventions |
-|---|---|---|---|
-| `pretool` | 38 | 0 | 0 |
-| `assistant_message` | 32 | **0** | 0 |
-| `tool_result` | 38 | 13 | **4** (3 inject, 1 cancel) |
-| `result` | 0 | 0 | — |
-
-Every one of the 32 `assistant_message` events was a tool-dispatch-only
-iteration, so all 32 took the fast-path noop and the trigger v5 called the most
-valuable never ran a single LLM call. There is no `result` row because the
-observer *cancelled the turn* at a `tool_result`. On a long agentic turn, the
-sampled `tool_result` trigger is the observer's only judgment channel — and it is
-the one v5 sampled down to 1-in-5. See
-[Trigger yield is workload-dependent](#trigger-yield-is-workload-dependent).
-
-The remaining per-call cost is still dominated by prompt size (~5,800 input
-tokens: goal card + subliminal block + todos + plan + prior decisions + text
-window). Whether the stable prefix of that is cached was unmeasured through the
-whole of v5 — the `--enable-prompt-tokens-details` fix went to the primary's
-launcher while the observer was briefly on the secondary — and is measurable
-again now that the observer is pinned back to `primary` and that engine is
-running with the flag. See [Prefix-cache reporting](#configuration).
-
-## Measuring itself
-
-**The measurement loop (IV plan R3, 2026-09-24).** Four pieces, because the
-only numbers this module had were proxies it computed about itself:
-
-- **An on/off A/B on the chat path** (`app/inner_voice/ab.py`,
-  `inner_voice.ab`, ships off). A new chat created inside the window is
-  assigned an arm by a hash of its id and the experiment name, and created
-  with the matching `inner_voice` / `inner_voice_evaluate_user_turns` flags
-  plus `inner_voice_ab: {experiment, arm}` — so every reader of "is IV on
-  here" already honours it. Sessions created with explicit flags (the IV
-  tab, `/goal`) and worker sessions are never enrolled.
-  `scripts/iv_ab_report.py` compares the arms on the event log only — bad
-  stop rate, tool-error rate, the correction proxy (with z against the other
-  arm), median iterations and duration; a session whose flags were changed
-  by hand is `crossed_over` and left out. This is the acceptance test for
-  the concept.
-- **A human label on each intervention**: thumbs on `ObservationBubble` for
-  inject/cancel/ambient/clarify rows, `POST
-  /api/inner_voice/observations/{id}/verdict`, columns `verdict` /
-  `verdict_at`.
-- **A tracked corpus**, `eval/iv/` (`scripts/iv_corpus.py`): `seed` wrote
-  the 270 `[INNER VOICE]` lines recovered after the 09-22 wipe (242
-  repetition, 26 model-written, 2 cancels; 20 of the 26 carry the 09-24 hand
-  reading), `export` appends thumbed rows from usage.db to `labelled.jsonl`.
-- **The outcome score, weekly**: `iv_metrics_record.py` attaches
-  `outcome_score` (a child `iv_outcome_score.py --json` over the last 7
-  days) to the nightly row once a week. The scorer leaves out the six
-  test-suite sessions whose event logs hold 580 of the 583
-  `observer_injected` events on disk (`--include-test-sessions` to audit).
-
-`scripts/iv_grade.py` — read-only analysis over `inner_voice_observations`
-joined against the session JSON. Nothing in the chat path depends on it, and
-that is deliberate: the observer watches the primary, it does not get watched
-synchronously by a third thing.
-
-```bash
-python scripts/iv_grade.py                 # all sessions
-python scripts/iv_grade.py --session <id>
-python scripts/iv_grade.py --since 2026-08-01
-python scripts/iv_grade.py --json          # machine-readable
-```
-
-Three outputs:
-
-- **Cost** — observations, LLM calls, fast-path share, input tokens per turn,
-  observer ms per turn, cache-hit rate, and a per-trigger table with
-  **tokens per intervention**, which is the number that decides whether a
-  trigger is earning its place.
-- **Precision proxy** — for each `inject`, did the turn keep going afterwards?
-  An inject with no later `assistant_message` in the same turn was stranded: the
-  turn ended anyway and the nudge bought nothing.
-- **Recall proxy** — for each turn the observer signed off on at `result`, did
-  the user's very next message read like a correction?
-
-Both rates are **proxies and are labelled as such in the output.** They are not
-ground truth. They are good enough to catch a regression and to compare two
-prompts, which is what the tuning loop actually needs — and they are the first
-answer of any kind to "is Inner Voice working?"
-
-Baseline over the v4 window: 21 injects, 14 landed, 7 stranded (0.67 landed
-rate); 15 signed-off turns checked, 0 followed by a correction. Five of the
-seven stranded injects were `pretool` — the trigger v5 turns off.
-
-`scripts/iv_outcome_score.py` (#833) is the outcome side the proxies lack. It
-joins the same table to `event_logs/*.events.jsonl` on (session_id, turn_id) —
-`related_tool` is a tool name, never a call id — and labels each turn from the
-event log alone: `brain1.result_message.data.stop_reason` by default,
-`--label tool_error` for an `Error`/`Traceback` tool result. Per class
-(`inject[model]`, `inject[guard]` via `iv_grade._is_deterministic`, `cancel`,
-`ambient`, `clarify`) it prints n / TP / FP / precision / recall / lift over the
-base rate and the FN pool (bad turns with no intervention); a class under 30
-scored rows gets counts only. A `cancel` mostly causes its own `cancelled`, so
-its TP is partly self-inflicted; the keep / record-only ruling stays a human's.
-
-## Verification
-
-- `tests/integration/test_observer.py` — tool-call extraction, lever dispatch
-  (including clarify), result-trigger downgrades, budget accounting, fast-path
-  classifiers, stall-rescue regex, cancel-for-completion guard, cross-event
-  memory rendering, goal extraction, `install_observer` plumbing with mocked vLLM.
-- `tests/integration/test_iv_guards.py` — the `guards.py` pure functions plus the
-  v5 behavior that had no coverage: the stall false-positives, the cross-trigger
-  suppressor, the `/goal` attach gate, tool-result sampling, off-critical-path
-  dispatch (asserts the hook returns in under a second while the judgment is
-  still in flight, and that a terminal judgment stays synchronous), prompt
-  hot-reload, the goal-card append, and the observer-model column.
-- `tests/integration/test_goal_loop.py` — persistent-goal completion loop.
-- `tests/integration/test_iv_loop_guards.py` — the v5.2 guards replayed against
-  the real turn that motivated them (`fixture_iv_loop_turn.py`), with the LLM
-  patched to raise so the guard can never quietly depend on a model.
-- `tests/integration/test_iv_v52_review.py` — the v5.3 corrections. At the time
-  it landed, 17 of its 21 cases failed against the code as it stood on
-  2026-09-04; the other four were controls that must pass in both directions (a
-  verbatim repeat still fires, a real stall is still a stall, the `/goal` loop
-  still loops, the attach gate still honours both flags). It has grown to 23
-  cases since.
-- `tests/integration/test_iv_repetition_wording.py` — #393: the repetition inject
-  claims only what the signature can observe, `_EXACT_ONLY_TOOLS` membership, and
-  the proof that the rewording changed no fire point. Its
-  `test_no_result_claim_without_a_result_field` lifts the ban automatically if a
-  result-bearing field is ever added to the signature.
-- `tests/integration/test_iv_worktree_ambient.py` — v5.4: the automod worktree id
-  is ambient, replayed against the round's 24 real calls in
-  `fixture_iv_automod_worktree.py`. Pins both directions, including that a
-  *chased* symbol is not mistaken for an ambient one.
-- `tests/integration/test_iv_todo_bookkeeping.py` — the delivered-but-unmarked
-  branch of the completion gate, and that handing control back to the user stays
-  a noop.
-- `tests/test_inner_voice_state_blobs.py` — `/state` expands the one event it
-  matched and coerces it, so no dict reaches JSX.
-- `tests/test_background_inner_voice.py` — the attach path for autonomy and
-  worker runs, including that a registry is created only when none exists.
-- `app/harness/tests/test_loop_inject_ordering.py` — drives the real `run_query`
-  with a scripted vLLM stream and asserts on the message list the model actually
-  receives, so terminal-inject ordering cannot regress silently.
-
-The five `tests/integration` observer modules — `test_observer.py`,
-`test_iv_guards.py`, `test_iv_loop_guards.py`, `test_iv_v52_review.py` and
-`test_goal_loop.py` — stub `record_inner_voice_observation` at import. Before
-that every test run appended rows to the production `usage.db` under fake session
-ids, polluting the exact table `scripts/iv_grade.py` reads to judge the
-subsystem.
-- `tests/integration/smoke_observer_e2e.py` — live e2e: creates an IV session, posts
-  a message via SSE, polls observations until the result-trigger row lands.
-- Manual smoke prompts:
-  - `"What's 2+2?"` — vanilla noop chain, empty goal card.
-  - `"Run echo hello && date -u via Bash"` — pretool observation row +
-    tool-result fast-noop + terminal `assistant_message` and `result` LLM calls
-    (5 observations, 2 calls, ~2.2 s of observer time).
-  - `"Run rm -rf /home/alansrobotlab/lloyd-data/sessions"` — `safety.py` hard-deny path
-    (not IV).
-  - `"Let me check the logs:"`-shaped tasks — stall-rescue fast-path.
-  - `"Full systems check"` — goal-card-tracked progress across iterations.
-  - `"Fix the bug"` (no specifics) — clarify lever.
-
-## Failure modes and recovery
-
-| Failure | Behavior |
-|---|---|
-| Goal extraction LLM error / no tool call | Observer runs in lighter-touch mode (no goal card). Logged at WARNING. |
-| Observer LLM HTTP error or timeout | Decision = `noop`, `error` populated, primary stream unblocked. |
-| Observer returns no tool call | `noop` with `error="no_tool_call"`. Observed at low single-digit rates. |
-| Observer returns an unknown tool name | `noop` with `error="unknown_lever"`. |
-| Observer hook callback raises | `HookRegistry.fire_on_event` swallows it with a warning. Primary continues. |
-| Turn cancelled while an observer call is in flight | Decision relabeled `noop_*_after_cancel`, persisted, no lever applied. |
-| Ambient / clarify callback raises | Degrades to `noop_ambient_failed` / `noop_clarify_failed`. |
-| `session.goal` mutation fails | Logged; the goal loop skips this turn's bookkeeping. |
-| Empty terminal iteration | Two safety nets: (a) stall-rescue inject triggers continue-on-inject; (b) `messages.py` surfaces a synthetic placeholder if the turn ends with no text. |
-
-## Design boundaries
-
-Deliberate constraints in the current implementation, documented so future work has
-the context for revisiting them.
-
-### Where Python crept back in
-
-The stated design is "all judgment in the prompt; the Python is plumbing." That is
-not strictly true, and it's worth naming: real judgment lives in code — the
-stall-announce regex, the consecutive-inject suppressor, the cancel-for-completion
-guard, the todo-flip detector, the stalled-progress counter, the completion-reason
-pattern.
-
-Each was added for the same reason: the LLM path was unreliable at a failure mode
-that is cheap to detect deterministically, and the cost of missing it (a turn dies
-with work undone) is high. The tradeoff is that behavior is tuned in two places.
-Anything **new** should still start in the prompt; a deterministic component should
-only be added after the prompt has demonstrably failed at it.
-
-v5 does not reduce that judgment, but it does stop hiding it. All of it moved out
-of `install_observer`'s 500-line closure into `app/inner_voice/guards.py` as pure
-functions that take a decision plus context and return a verdict — no state, no
-event log, no database. The closure now reads as dispatch, and every rule is
-directly testable. Two of the bugs found in the v4 review (the stall
-false-positives and the single-trigger suppressor) were invisible precisely
-because exercising them meant building an ObserverState and firing hooks.
-
-### One observer per turn
-
-A single observer task watches one primary turn start to finish. It doesn't persist
-across turns and has no memory of prior turns beyond the primary's chat history.
-The goal card is re-extracted per turn.
-
-If diverse perspectives are ever needed (red-team vs. continuation), the right place
-is the prompt — "first list three concerns from different angles, then pick the
-strongest." A Python fan-out layer would re-scatter judgment across regex,
-thresholds, and aggregation.
-
-### Single intervention budget axis
-
-The 3-per-turn cap applies to inject/ambient/clarify combined. Per-trigger
-sub-budgets ("max 1 clarify per turn") are not enforced. If over-intervention on a
-specific trigger becomes a pattern, sub-budgets are the cheapest fix.
-
-### Which model serves the observer
-
-See [Configuration](#configuration). Observer adds 1 + N LLM calls per turn (goal
-extraction + one per escalated event, + 1 more when `/goal` is set).
-
-**It runs on `primary`, pinned.** v5 deliberately did *not* move it to a smaller
-model: re-tiering had removed most of the cost without touching judgment quality,
-and the prefix-cache hit rate — the number that decides whether a smaller model
-pays — was unmeasured. **"Measure first" did not survive contact.**
-`secondary_enabled` flipped to `true` for the autonomy scheduler, and the
-observer moved to Qwen3.5-4B at `:8091` for ten hours on 2026-09-04 with the
-cache question still open, because the `--enable-prompt-tokens-details` fix had
-landed on the primary's launcher rather than the secondary's.
-
-What those 116 rows showed: 0 parse failures, 0 `no_tool_call`, 1 timeout in 33
-calls, latencies of 340–1,124 ms (vs. 816–1,783 ms on the primary), and lever
-choices that read as coherent. The 4B could hold the lever contract. What was
-never established is judgment quality — the one substantive turn it observed
-ended with the observer cancelling a legitimate review (see
-[v5 measured](#v5-measured-2026-09-03-1300--2026-09-04-8-turns)), and no before/after
-comparison against the primary-served observer exists. The pin went back in on
-2026-09-05.
-
-**The evidence for the pin is now stale in the observer's favour, and that is
-worth saying plainly.** The 40%-intervention result was measured against a 4B
-model that no longer occupies the slot: `:8091` has been Qwen3.6-35B-A3B since
-2026-09-06. The pin stays until someone actually re-runs `scripts/iv_grade.py`
-against the 35B — but the reason to re-run it is much stronger than it was, and
-the cache number that made it unanswerable the first time is available now.
-
-### Trigger yield is workload-dependent
-
-v5's re-tiering rests on one measurement: in the v4 window, 15 of 16
-interventions came from `assistant_message` or `result`, so those two always hit
-the LLM and everything else was sampled or switched off.
-
-That window was dominated by short turns. On a long tool-heavy turn every
-`assistant_message` is a tool-dispatch-only iteration, which the fast-path noops
-unconditionally, and `result` never fires at all if the observer cancels first —
-so the two "always judged" triggers contribute nothing and the whole subsystem
-rides on 1-in-5 `tool_result` sampling. The post-v5 turn `0251c403fd8d` is
-exactly that shape.
-
-The sampler is the wrong shape for this: it fires on a fixed count of benign
-results regardless of what the primary is doing, so on a long turn the observer's
-view is a random 20% of tool outcomes with no continuity. The cheapest correction
-is a *time*- or *iteration*-based floor ("judge at least once every N iterations
-or M seconds of tool work") on top of the count sampler, which costs a bounded
-number of extra calls and restores mid-turn continuity. Not yet implemented.
-
-### Mid-stream injection only between iterations
-
-The observer cannot inject during a streaming text response. The earliest it can act
-on a model decision is after `assistant_message` (end of an iteration's stream).
-Token-level intervention would require solving the streaming-completeness problem
-(when is partial text "enough" to judge?) and is out of scope.
-
-### No system-role mid-stream injection
-
-vLLM rejects it. Inject uses `user` role with the `[INNER VOICE]` prefix. The prefix
-is also semantically clearer for the primary, so there's no strong reason to
-revisit even on a backend that allows multi-position system messages.
-
-### Goal-card extraction is one-shot
-
-Extracted once at turn start, not refined as the primary works. If the request was
-ambiguous, the recourse is `clarify` (new turn, new goal card) rather than
-re-deriving mid-turn. A "goal refinement" lever is plausible but adds complexity.
-
-### Grading is a proxy, not ground truth
-
-`scripts/iv_grade.py` answers "did the loop continue after an inject?" and "did
-the user's next message look like a correction?" Neither is the real question,
-which is whether the intervention improved the outcome. A human-labelled sample,
-or an LLM judge over the before/after pair, would be stronger. The proxies are
-cheap, unbiased in the ways that matter for regression detection, and they exist
-— which beats the previous state of having no measurement at all.
-`scripts/iv_outcome_score.py` adds an outcome label from the event log (see
-"Measuring itself"), still correlational rather than counterfactual.
-
-### Subagents get safety but not an observer
-
-`Task` subagents now install the hard-safety hook but no Inner Voice observer.
-The observer is scoped to a session turn — goal card, session todos, ambient and
-clarify channels — and a subagent has none of those. A subagent-shaped observer
-(terminal-only, no ambient) is plausible if runaway subagent loops become a
-real pattern.
-
-## Inject placement inside a tool batch
-
-`_apply_inject` appends a `user` message directly to
-`state.chat_messages_handle`, which is the harness's live buffer. When the
-primary made SEVERAL tool calls in one iteration and the inject fired between
-two of them, that left
-
-    assistant(tool_calls) -> user -> tool
-
-for every call after the first — a shape no engine accepts. It was rare enough
-to go unnoticed (the inject has to land mid-batch) and its failure surfaces as
-a stream error rather than as anything naming Inner Voice.
-
-`app/harness/loop.py::_reorder_batch_messages` fixes it at the harness end
-rather than here: it snapshots where the batch's messages begin and, once the
-batch is done, moves the tool messages ahead of anything a hook appended
-during it. Tool messages keep their order and so do the injects; only the
-boundary moves, and it mutates the list in place so this module's handle stays
-valid.
-
-The fix is at the harness end on purpose. The observer is not the only thing
-that can append mid-batch, and a rule enforced where the messages are
-assembled holds for the next appender too. Concurrent tool dispatch
-(`harness.parallel_tool_calls`) would have made this routine rather than rare.
+| terminal `assistant_message` (no tool calls) | **the review** — synchronous, because the loop decides whether to continue by whether the list grew. Skipped when a turn guard already injected on this iteration, when the text is a prose tool call, or when the context is under the loop's floor. |
+| non-terminal `assistant_message` | a **mid-turn review**, async, only when due: every `review_interval(max_turns)` iterations (a sixth of the budget, 4–12; `review_every_iterations` pins it), at a silent streak (`silent_iterations_before_review`), or when a todo flip / stalled-progress block is waiting |
+| `pretool` | no judgment, no row — the call is appended to the signature ring and the trajectory |
+| `tool_result` | no judgment, no row — the trajectory entry gets its outcome; todo flips and stalled progress become blocks for the next review |
+| `result` | no judgment. The `/goal` evaluator still runs here; it has a real loop behind it |
+
+### What it reads
+
+`build_review_summary`: the **trajectory** — one line per tool call this turn:
+iteration, tool, the primary's own caption (or the argument preview when it gave
+none), and the harness's outcome (`ok 1.2kB`, `ERROR`, `returned, but reports it
+did not complete`) — then the iteration itself: the terminal text in full
+(`terminal_text_window_chars`, 8000, head+tail), the goal-card walk, the
+pending-todos block, and any waiting mark-without-evidence or stalled-progress
+block. Plus, as before: the user request, the goal card, todos, plan, `/goal`,
+subliminal context, this turn's decisions and earlier turns' interventions,
+iteration and context pressure notes.
+
+Tool output that reaches a prompt is framed `<untrusted_tool_output>` and the
+prompt states the rule (`UNTRUSTED_RULE`): it can carry instructions; they are
+not addressed to the observer.
+
+### Three levers
+
+`app/inner_voice/lever_tools.py`: `noop`, `inject`, `cancel`, forced with
+`tool_choice="required"`. `ambient` and `clarify` are no longer offered (5 uses
+all time); the `/goal` loop still uses the ambient and clarify channels itself.
+
+Decision guards (`_apply_decision_guards`), in order:
+
+- consecutive-inject suppression and the inject cooldown (unchanged);
+- **one scope inject per turn** (`_is_scope_judgment`) — a second is
+  `noop_scope_repeat`;
+- the unread-inject and cancel-for-completion downgrades (unchanged);
+- **cancel only on what can be observed** (`_cancel_is_observable`): a
+  destructive loop, or a loop reason on a turn where the repetition guard has
+  already fired. Anything else is `noop_cancel_not_observable`.
+
+The discretionary budget (`intervention_budget`, 3) is unchanged; guard fires
+never spend it.
+
+### The call
+
+Thinking on (`inner_voice.observer.thinking`, `thinking_max_tokens` 2048,
+`thinking_timeout_seconds` 20). Measured 2026-09-24 on the live primary with an
+observer-shaped 5k-token prompt: 1.2 s without, 1.6–1.9 s with, same verdicts.
+Served by `inner_voice.model` (pinned `primary`) at the watched turn's priority,
+one step lower on an unattended turn. The observer must not be weaker than the
+primary it watches — the 09-03 4B episode (40% intervention rate against 1.7%)
+is the negative result.
+
+### Goal card
+
+Extracted **beside** iteration 1, not before it (it used to add up to 8 s to
+the first token). The extraction is one of the observer's pending tasks, so the
+terminal review drains it first. `_goal_source_text` reads the user's own words:
+system-injected blocks are stripped, and an ambient turn takes its goal from
+the last message the user typed (the 08-30 card was built from a
+notification). The primary is shown the card by `goal_card_anchor`, composed
+into `options.state_anchor` after the turn's own anchors: first at the
+iteration boundary after it exists, then every
+`harness.todo_anchor_interval_iterations` (IV plan R4 — a weaker primary
+forgets the contract faster).
+
+### Prompt
+
+`~/obsidian/lloyd/inner_voice/system_prompt.md` (v5, "one job"), with an
+embedded fallback in `observer_prompt.py`. The vault is live and shared: an
+edit lands at once, so a prompt change that assumes new code ships with it.
+
+## 3. The measurement loop
+
+- **On/off A/B** (`app/inner_voice/ab.py`, `inner_voice.ab`, ships off). A new
+  chat created inside `[start, end)` is assigned an arm by
+  `sha256(name:session_id)` against `fraction_on`, at file creation in
+  `sessions_io._save_session_meta`, as the same `inner_voice` /
+  `inner_voice_evaluate_user_turns` flags every reader already honours, plus
+  `inner_voice_ab: {experiment, arm, assigned_on}` (also on `/state` as
+  `ab_arm`). Sessions created with explicit flags and worker sessions are never
+  enrolled. `scripts/iv_ab_report.py` compares the arms from the event log:
+  bad-stop rate, tool-error rate, correction proxy (z against the other arm),
+  median iterations and duration; a session flipped by hand is `crossed_over`
+  and left out. **This is the acceptance test for the concept.**
+- **Human labels**: thumbs on `ObservationBubble` for inject / cancel /
+  ambient / clarify rows → `POST /api/inner_voice/observations/{id}/verdict`
+  → `verdict`, `verdict_at`.
+- **Tracked corpus** `eval/iv/` (`scripts/iv_corpus.py`): `seed` wrote the 270
+  recovered lines (242 repetition, 26 model-written, 2 cancels; 20 of the 26
+  carry the 09-24 hand reading: helped / unactionable / obsolete / harmful /
+  low_value / failed); `export` appends thumbed rows from usage.db.
+- **Observer-model replay** (`scripts/iv_observer_model_eval.py`): each labelled
+  case becomes one terminal review against a chosen model and prompt. Cases
+  with no recorded terminal text are not scored (they replay as an empty
+  stop). The recovered corpus keeps text for only 2 of its labelled cases, so
+  the noop side waits on thumbed rows. The secondary-as-observer run needs
+  GPU 2, which serves djev; it is an attended window, not a round.
+- **Weekly outcome score**: `scripts/iv_metrics_record.py` attaches
+  `outcome_score` (a child `iv_outcome_score.py --json` over 7 days) to the
+  nightly metrics row once a week. The scorer leaves out the six test-suite
+  sessions (`TEST_SESSION_IDS`) whose logs hold 580 of the 583
+  `observer_injected` events on disk.
+- `scripts/iv_grade.py` is unchanged — proxies, and it says so.
+
+## Persistence
+
+`inner_voice_observations` (usage.db): `id, session_id, turn_id,
+sequence_in_turn, trigger, action, reason, content, related_tool, input_tokens,
+output_tokens, cache_read, cache_create, latency_ms, model, error, created_at,
+safeguard, verdict, verdict_at`. `model` is what served the observer's call,
+NULL for a guard. `safeguard` names the deterministic rule that decided, NULL
+for the model. Turn guards and the observer share one `sequence_in_turn`
+counter per turn. Rows are written off the event loop.
+
+Event log: `inner_voice.observer_injected` (with `deterministic`, `guard`),
+`inner_voice.goal_card_extracted`, `inner_voice.goal_achieved`,
+`harness.capability_fault`, plus the observer's suppression events.
+
+## API
+
+- `GET /api/inner_voice/observations?session_id=&turn_id=&limit=`
+- `POST /api/inner_voice/observations/{id}/verdict` `{"verdict": "up"|"down"|null}`
+- `GET /api/inner_voice/state?session_id=` — flags, `ab_arm`, counts, latest goal card
+- `GET /api/inner_voice/events` — the session event log
+
+## Retired (IV plan R5)
+
+- The observer's **unattended profile**: `_is_unattended`, the deterministic
+  terminal words, the unattended cancel gate, the PLATFORM note. The words a
+  worker turn needs live in `guards.py` and the turn guards speak them.
+- **`pretool` rows** on every tool call (102 of 350 rows in the window said
+  only "observation-only").
+- **`automod.require_inner_voice`** now defaults false: since 09-12 it refused
+  only chat-driven rounds, and every turn is recorded and guarded now.
+- The `result` judgment, `tool_result` sampling, `ambient` / `clarify` as
+  model levers, `unattended_*` sampling config.
 
 ## Known defects
 
-Open as of 2026-09-11. Each is reachable on the current default config. The
-2026-09-04 review's other findings were fixed in v5.3, and the three v5.4
-corrections are listed in [Version history](#version-history).
+- **Guard races under `async_nonterminal`** (09-04 review A4): two async
+  mid-turn reviews can both clear the suppressor. Much rarer now that a
+  mid-turn review is due every several iterations rather than on sampled
+  results; still a soft cap, not an exact one.
+- **`stalled_progress` has never been measured** for precision.
+- **`iteration_pressure_enabled` guards the prompt note only**, not whether
+  the review runs.
 
-### An async inject can land inside a tool-call block
+## Verification
 
-`_judge_tool_result` and mid-work `_judge_assistant_message` are spawned as tasks
-and resolve ~1 s later, at an arbitrary suspension point — including between an
-`assistant(tool_calls=[a,b])` message and its `role: "tool"` replies, or between
-two tool replies. The result is a message sequence no OpenAI-format producer
-would emit. vLLM's `qwen3_xml` template renders it without erroring, so this
-showed up as degraded judgment rather than a crash.
-
-**The invalid-shape half is fixed, at the harness end.**
-`loop.py::_reorder_batch_messages` snapshots where a batch's messages begin and,
-once the batch is done, moves every `role: "tool"` message ahead of anything a
-hook appended during it — in place, because the list may be the observer's own
-`chat_messages_handle`. So the sequence the engine receives is well-formed again
-whoever appended mid-batch. See
-[Inject placement inside a tool batch](#inject-placement-inside-a-tool-batch)
-for why the fix belongs there rather than here.
-
-**What remains open is placement, not validity.** The inject still lands at
-whatever suspension point its round-trip happens to finish on, so it can be
-reordered to the end of a batch it was provoked by the *middle* of, or land
-against a later batch entirely. The observer's nudge is then answering an event
-the primary has already moved past. The sibling defect — a *terminal* inject
-landing before the assistant text it answered — was fixed in v5.3 by appending
-the iteration's assistant turn to history before firing the hook, and is pinned
-by `app/harness/tests/test_loop_inject_ordering.py`, which drives the real
-`run_query` and asserts on the message list the model receives.
-
-Fix for the remainder: stage async injects in a queue and splice them in at the
-next iteration boundary rather than appending live.
-
-### Guard races under `async_nonterminal`
-
-The intervention budget is documented as a deliberate soft cap. The
-consecutive-inject suppressor has the same race and is *not* documented as one:
-`_apply_decision_guards` reads `state.decisions_this_turn`, which
-`_persist` only appends **after** `_apply_lever` has run. Two `tool_result`
-judgments in flight over one dispatch batch can therefore both clear the
-suppressor and both inject — precisely the "four interventions in 20 seconds with
-no model turn between them" that v5 extended the suppressor to prevent.
-
-Fix: append a provisional entry to `decisions_this_turn` before applying the
-lever, or serialize lever application behind an `asyncio.Lock`.
-
-### Goal extraction is pure added latency to first token
-
-Goal extraction is `await`ed before `run_query` starts, so its LLM call (up to
-`goal_extraction_timeout_seconds: 8`) is added latency to first token on every IV
-turn. The card is not needed until the first judged event; the extraction could
-run concurrently with the primary's first iteration.
-
-The one complication is `goal_card_to_primary`, which appends the card to the
-primary's last user message — that has to happen before the request is built. A
-concurrent extraction would have to either drop that feature or accept that the
-primary sees the card from the *second* iteration onward.
-
-### `stalled_progress` has not been measured
-
-It went on by default in v5.2 without a before/after. It stacks with the 1-in-5
-tool-result sampler, and it fires on a fixed count of non-`TodoWrite` results, so
-on a long todo-driven turn it escalates roughly every fifth tool result on top of
-whatever the sampler already picked. Turn `8f3b7e77de07` ran 30 LLM calls and
-192k observer input tokens. Whether that spend earns anything is exactly the
-question `scripts/iv_grade.py` exists to answer, and it has not been asked.
-
-### 10. `iteration_pressure_enabled` guards only the prompt note, not the gate (2026-09-18)
-
-`inner_voice.observer.iteration_pressure_enabled: false` reads like the kill switch
-for iteration pressure and is not one. The key is consulted at exactly one site,
-`_iteration_pressure_note` (`observer.py:1437`), which renders the warning into the
-observer's own prompt. The other consumer of `guards.iteration_pressure` — the
-`_fast_path_assistant_message` gate that forces an LLM review at 80% of `max_turns`
-— reads only the result of that helper and never the flag. So turning the switch off
-silences the explanation and keeps the escalation: the documented meaning
-("nudge the primary to converge as it approaches `max_turns`", `config.yaml:99-101`)
-is the one thing the key does *not* stop. Same shape as the `goal_extraction_enabled`
-key that `97a86cc` had to add because four keys had no reader at all — this is the
-next one in that list, and the fix is the same shape: read the flag at the gate, not
-only at the renderer.
-
-## Review log
-
-- **2026-09-18 — `current`.** Architecture held; the numbers and the unattended
-  profile did not. The observer's model pin, the repetition guard's v5.2→v5.4
-  corrections (carrier rule, `_strip_cd_prefix`, `ubiquitous_identifiers`), the
-  async-lane work on #458 (`engine_unresponsive` / `call_slow`,
-  `max_attempts = 2 if async_call else 1`, `_probe_engine` in
-  `app/inner_voice/observer.py`, not `app/llm_engines.py`), the batch-ordering fix
-  (`_reorder_batch_messages` at `app/harness/loop.py:1717`), the five levers, the
-  five `/api/inner_voice` routes, and all 15 named test modules check out. Corrected:
-  `timeout_seconds` is 8 (5 → 8 on 2026-09-14, Alan's #458 ruling) and the block was
-  missing the whole unattended profile plus `context_pressure_*` and
-  `repetition_exempt_tools`; the table's row counts (43,220 → 58,013 live, `cache_read`
-  5,107 → 7,219) are re-probed and labelled as timestamps; the `Task`-subagent
-  82%-`secondary` figure is a 2026-09-03 reading of a slot that has run
-  Qwen3.6-35B-A3B under llama.cpp since 2026-09-06, so it can no longer be
-  re-measured at all; the two `noop_*` labels the code emits and the table omitted
-  (`noop_context_exhausted`, `noop_unattended_cancel_unseen`) are both 2026-09-12
-  unattended-profile additions — the feature was documented nowhere in this file until
-  now. Filed `backlog/1229` (measured baselines live only in gitignored `usage.db` and
-  a gitignored `_pipeline/` series) and `backlog/1230` (`secondary_enabled` still
-  rewrites the observer's model, no runtime guard).
-
-## Version history
-
-| Version | Change |
-|---|---|
-| v1–v2 (`#345` Stages 0–2) | Event log + Python heuristics + "Brain 2" critic. |
-| v3 (Stages 3–7) | 3-persona ensemble, consensus termination, skill-recall checker, grading pass, intra-turn progress monitoring. Then collapsed: *"replace ensemble/grading machinery with thin observer."* |
-| v3.x | Renamed brain1/brain2 → agent/critic; goal card added; cancel exempt from budget; mid-turn microcompaction; user-visible intervention breadcrumbs. |
-| **v4** | **Function-tool levers** (`tool_choice="required"`) replace the JSON-prefill parser. **`deny_tool` dropped** — hard safety moved to `app/harness/safety.py` and made unconditional. `finish_reason` surfaced on `assistant_message` for stall detection. |
-| v4 + Plan A | TodoWrite stewardship: completion gate (A.1/A.4), mark-without-evidence (A.2/A.5), stalled-progress counter (A.3/A.6). |
-| v4 + Plan B | Plan-mode framing switch, committed-plan artifact in the prompt, `/plan` ritual. |
-| v4 + `/goal` | Persistent session goal + post-turn completion evaluator with attempt cap → clarify escalation. |
-| **v5** | **Measured triggering.** Pretool judgment off by default; tool results sampled; non-terminal judgment moved off the harness's critical path. Judgment extracted to `guards.py` as pure functions. `scripts/iv_grade.py` scores the subsystem retrospectively. Prompts hot-reload from the vault. |
-| v5 fixes | `/goal` follow-ups are observed, so the loop actually loops (was one-shot). Stall regex no longer fires on sign-offs. Suppressor spans all mid-work triggers. Observer priority 1, not 0. Prefix-cache tokens read from the field vLLM actually sets. Timeouts labelled as timeouts. `model` column records the observer's model. `find -delete` / `wget` / `curl -o` escalate; `git status` doesn't. Tool-name matching is word-wise. Subagents get the safety hook. Tests no longer write to the production database. |
-| **v5.1** (observed, not planned) | `secondary_enabled: true` — the observer moved off the primary onto Qwen3.5-4B at `:8091` with the prefix-cache question still unmeasured. No code change; a config flip plus a supervisor program. Documented here because the v5 cost model, the `priority: 1` rationale and the "measure first" boundary all assumed it had not happened. **Reverted in v5.2**: on its one day at `:8091` the observer intervened on 6 of 15 LLM-judged events (40%) against primary’s 10 of 602 (1.7%), fabricated a finding, and cancelled a turn. |
-| **v5.3** | **Correction pass over v5.2**, from an architecture review run with Inner Voice watching. Repetition identifiers come from argument values with ambient path fragments stripped, and path-addressed tools compare by exact repeat only — the guard had fired 19 times in one evening on unrelated file reads. `bypass_budget` injects stop charging the discretionary budget (they never should have) and gain a `deterministic_inject_budget` ceiling. Stall detection exempts announce verbs in sentences that resolved. Terminal injects append after the assistant text they answer. `result` translates the lever before the guards run, so a cooldown can no longer discard a follow-up. `injects_primary_has_seen` is finally wired, gating cancel-for-ignored-injects. `close_observer` runs in `_run_turn`'s `finally`. `/goal` skips the follow-up when the attempt counter fails to persist. Off-critical-path judgments get their own longer deadline. |
-| **v5.2** | **Deterministic loop detection.** `guards.repetition_verdict` at `pretool` (free, no LLM); silent-streak escalation; failure payloads (`[stopped: max_turns]`, Bash timeouts) always escalate; `inject_cooldown_iterations` paces discretionary injects; `ObserverDecision.fast_path` keeps bookkeeping rows out of the guards' lookback and the observer's prompt window; `todo_stewardship.stalled_progress` on by default; `build_tool_result_summary` shows the primary's actual command. Observer pinned to `primary`, and `resolve_model_alias` logs its rewrite. All from turn `20260905_011748_iv84e4`. |
-| **v5.4** | **The guard stops overclaiming, and stops firing on the room it is standing in.** #393: the repetition inject claims only what a `ToolCallSignature` can observe — 43 injects in `usage.db` had asserted "the result has not changed" about results never compared — with the firing logic untouched (21 → 21 fire points over 71 replayed sessions). Round `SM_20260908_165950`: `_strip_cd_prefix` and `guards.ubiquitous_identifiers` stop an automod worktree id carrying a near match, after five false injects exhausted the deterministic budget ninety seconds before that round reached its gate. The primary's per-call `summary` caption reaches the observer's prompt (`_tool_call_labels`, `build_pretool_event_summary`) and is kept out of the repetition signature, which compares what was run rather than what the primary said about it. Observer calls take the priority of the turn they watch instead of a fixed `1`. `/state` expands blob references, so a 15 KB worker prompt no longer blanks the Inner Voice tab. |
+`tests/test_turn_guards.py` (one test per guard on a worker turn with no
+observer, one through the real loop), `tests/test_iv_one_review.py` (R2/R4),
+`tests/test_iv_measurement.py` (R3), and the existing `tests/test_iv_*`,
+`tests/integration/test_iv_*`, `tests/integration/test_observer.py`. After R2
+the nightly series should show `input_tokens_per_turn` and
+`observer_ms_per_turn` falling (predicted ~15–20k tokens a turn against ~62k).

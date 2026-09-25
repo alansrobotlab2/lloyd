@@ -1,4 +1,4 @@
-"""The observer, on a turn nobody is reading.
+"""The observer, on a turn nobody is reading — what survived R5.
 
 Three losses on 2026-09-11, all from the observer treating an autocode round
 exactly as it treats a chat:
@@ -208,17 +208,15 @@ def test_the_loop_and_the_observer_read_one_floor():
 
 
 # ---------------------------------------------------------------------------
-# the unattended profile
+# the unattended profile, retired (IV plan R5)
+#
+# The observer's own unattended profile — deterministic terminal words, the
+# unattended cancel gate, the PLATFORM note — was deleted on 2026-09-24. The
+# observer has been off for every worker since 09-12, and the words a worker
+# turn needs now come from the turn guards, which run on every turn
+# (tests/test_turn_guards.py). What stays here is what still applies to any
+# observed turn.
 # ---------------------------------------------------------------------------
-
-def test_unattended_is_keyed_on_the_shared_platform_set():
-    from app.sessions_io import NON_USER_PLATFORMS
-
-    for p in NON_USER_PLATFORMS:
-        assert O._is_unattended(p) is True
-    assert O._is_unattended("mission-control") is False
-    assert O._is_unattended("") is False
-
 
 def _state(**kw) -> O.ObserverState:
     import asyncio
@@ -226,77 +224,18 @@ def _state(**kw) -> O.ObserverState:
     base = dict(
         session_id="s", turn_id="t", user_request="do it",
         chat_messages_handle=[], cancel_event=asyncio.Event(),
-        cfg={}, platform="worker", unattended=True,
+        cfg={}, platform="mission-control",
     )
     base.update(kw)
     return O.ObserverState(**base)
 
 
-def test_a_terminal_inject_on_an_unattended_turn_gets_deterministic_words():
-    """874's loss. The model's judgment is kept in `reason`; its words are
-    not handed to the primary.
-    """
-    st = _state()
-    d = O.ObserverDecision(
-        action="inject",
-        reason="the working tree is clean and the round is finished",
-        content="The working tree is clean. Deliver the final report now.")
-    O._apply_decision_guards(st, d, trigger="assistant_message",
-                             tool_calls=[], is_terminal=True)
-    assert d.action == "inject"
-    assert d.content == O.UNATTENDED_TERMINAL_RESCUE_CONTENT
-    assert "deliver the final report" not in d.content.lower()
-    # The claim it made is preserved as evidence of what it thought.
-    assert "Deliver the final report now." in d.reason
-
-
-def test_an_open_round_gets_the_commit_and_gate_words():
-    st = _state(round_open=True)
-    d = O.ObserverDecision(action="inject", reason="stalled",
-                           content="write up what you found")
-    O._apply_decision_guards(st, d, trigger="assistant_message",
-                             tool_calls=[], is_terminal=True)
-    assert d.content == O.UNATTENDED_ROUND_OPEN_CONTENT
-    assert "automod_gate" in d.content
-    assert "automod_land" in d.content
-
-
-def test_a_user_turn_keeps_the_observers_own_words():
-    st = _state(platform="mission-control", unattended=False)
-    d = O.ObserverDecision(action="inject", reason="stalled",
-                           content="You said you would check the logs.")
-    O._apply_decision_guards(st, d, trigger="assistant_message",
-                             tool_calls=[], is_terminal=True)
-    assert d.content == "You said you would check the logs."
-
-
-def test_the_replacement_has_a_kill_switch():
-    st = _state(cfg={"unattended_terminal_content_deterministic": False})
-    d = O.ObserverDecision(action="inject", reason="x", content="ORIGINAL")
-    O._apply_decision_guards(st, d, trigger="assistant_message",
-                             tool_calls=[], is_terminal=True)
-    assert d.content == "ORIGINAL"
-
-
-def test_a_mid_turn_inject_is_not_rewritten():
-    """Only the terminal one. A mid-work nudge is about the work and the
-    observer's own words are the point of it.
-    """
-    st = _state()
-    d = O.ObserverDecision(action="inject", reason="x",
-                           content="you are editing the live tree")
-    O._apply_decision_guards(st, d, trigger="pretool",
-                             tool_calls=[{"id": "c1"}], is_terminal=False)
-    assert d.content == "you are editing the live tree"
-
-
-def test_an_unattended_cancel_with_no_seen_injects_is_downgraded():
-    """Cancelling an unattended turn throws away work nobody is watching."""
-    st = _state()
-    d = O.ObserverDecision(action="cancel", reason="the primary is off track")
-    O._apply_decision_guards(st, d, trigger="assistant_message",
-                             tool_calls=[], is_terminal=True)
-    assert d.action == "noop_unattended_cancel_unseen"
+def test_the_profile_is_gone_and_its_words_moved_to_the_guards():
+    assert not hasattr(O, "_is_unattended")
+    assert not hasattr(O, "_platform_note")
+    assert G.stall_rescue_content(unattended=True, round_open=True) \
+        == G.UNATTENDED_ROUND_OPEN_CONTENT
+    assert "automod_gate" in G.UNATTENDED_ROUND_OPEN_CONTENT
 
 
 def test_a_destructive_cancel_is_still_allowed_with_no_injects():
@@ -304,44 +243,24 @@ def test_a_destructive_cancel_is_still_allowed_with_no_injects():
     st = _state()
     d = O.ObserverDecision(
         action="cancel", reason="primary is running rm -rf on the vault")
-    O._apply_decision_guards(st, d, trigger="pretool",
+    O._apply_decision_guards(st, d, trigger="assistant_message",
                              tool_calls=[], is_terminal=False)
     assert d.action == "cancel"
 
 
-def test_a_user_turn_cancel_is_untouched_by_the_unattended_gate():
-    st = _state(platform="mission-control", unattended=False)
-    d = O.ObserverDecision(action="cancel", reason="destructive loop: rm -rf over the vault")
-    O._apply_decision_guards(st, d, trigger="assistant_message",
-                             tool_calls=[], is_terminal=True)
-    assert d.action == "cancel"
-    # A judgment about intent is not observable, on any platform (IV plan R2).
+def test_a_cancel_about_intent_is_not_observable():
+    st = _state()
     d = O.ObserverDecision(action="cancel", reason="the primary is off track")
     O._apply_decision_guards(st, d, trigger="assistant_message",
                              tool_calls=[], is_terminal=True)
     assert d.action == "noop_cancel_not_observable"
 
 
-def test_the_platform_note_names_the_source_and_forbids_the_report_nudge():
-    st = _state(source="autocode")
-    note = O._platform_note(st)
-    assert "worker" in note and "autocode" in note
-    assert "deliver the final" in note.lower()
-    assert "no human reads" in note.lower()
-
-
-def test_no_platform_note_on_a_user_turn():
-    assert O._platform_note(_state(platform="mission-control",
-                                   unattended=False)) == ""
-
-
-def test_the_context_note_says_commit_and_gate_not_write_the_report():
-    st = _state(context_meter=_meter(0.80), round_open=True,
+def test_the_context_note_prefers_silence():
+    st = _state(context_meter=_meter(0.80),
                 cfg={"context_pressure_threshold": 0.5})
     note = O._context_pressure_note(st)
     assert "CONTEXT PRESSURE" in note
-    assert "automod_gate" in note
-    assert "write the report" in note          # named as the thing NOT to do
     assert "prefer noop" in note
 
 
