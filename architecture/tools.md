@@ -917,9 +917,41 @@ the user has switched that preference off.
 ### Subagents (`Task`)
 
 `Task` runs a nested `run_query` inside the aggregator with its own
-`RunOptions` from `subagents.<type>`. Recursion is capped at depth 1. The
-parent's model and endpoint arrive in `_meta`, and a tool running in the
-aggregator has no other way to know them.
+`RunOptions` from `subagents.<type>`. Recursion is capped at depth 1,
+because every level is another live loop on the one primary engine that
+nothing outside the process can stop, and resuming a child by `task_id`
+already hands it the whole working state without nesting (the ruling and its
+enforcement are below). The parent's model and endpoint arrive in `_meta`, and
+a tool running in the aggregator has no other way to know them.
+
+**Why depth 1, and where it is enforced** (#1515). The cap is enforced twice.
+Every child's `RunOptions.disallowed_tools` gets `Task` appended
+(`agent_mcp/builtin_task.py:366-368`), which the harness honours at advertise
+time (`app/harness/tool_schema.py:186`, `build_tool_list`) and again at
+dispatch (`app/harness/loop.py:2855`, `_pre_dispatch`: "disabled by
+configuration") — this is the layer that holds on the real path, because a
+child's tool calls re-enter `main.call_tool` over loopback `/mcp` from a fresh
+ASGI task where no contextvar survives. The `_task_depth` contextvar check
+against `MAX_TASK_DEPTH = 1` (`agent_mcp/builtin_task.py:37`, checked at
+`agent_mcp/builtin_task.py:282-285`) is the backstop for a same-context call. `tests/test_task_depth_cap.py` pins both,
+so a silent widening fails. The cap exists **because** of what each extra
+level would stack on one box: every level is a live `run_query` on the same
+primary whose parent sits blocked on the tool call, so its 100-200k prefix has
+to survive in the engine's free KV pool meanwhile (the cold re-prefill failure
+of `vllm.md`), its `Task` call budget has to nest inside its parent's, and —
+since nothing outside the process can stop a wedged child (below) — each level
+multiplies the un-killable work a single stuck call can hold. At depth 1, and
+with `Task` not `readOnlyHint` so a batch containing it runs sequentially, one
+turn delegates to at most one live child at a time. What deep delegation is
+usually wanted for — handing the next step the whole working state instead of
+a summary — is delivered here without nesting by resuming the same child with
+its `task_id`. **No per-level cost has been measured**; the ruling is
+structural, not a number. What would justify raising it is a measured curve at
+depth 1 vs 2 vs 3 of wall clock, input tokens (including re-prefills) and peak
+concurrent primary requests for the same task, plus an outside-the-process
+cancel for a wedged child (#1135). The recursive-delegation pattern
+(JAZ, arXiv:2609.26891, one analyzed 70-deep example) was read on 2026-09-25
+and is not adopted on that evidence.
 
 Every result carries a `task_id`, and passing it back with a follow-up prompt
 **resumes** the subagent. The stored run's identity wins: type, profile, model,
