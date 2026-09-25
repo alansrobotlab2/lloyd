@@ -145,32 +145,22 @@ inner_voice:
     timeout_seconds: 8
     intervention_budget: 3
     primary_text_window_chars: 4000
-    # vLLM scheduling priority. LOWER is higher priority and the primary
-    # submits at 0, so the observer must be >0 to actually yield to it.
+    # vLLM scheduling priority, used only when the watched turn carries none:
+    # the observer normally runs at its turn's own priority (one step lower
+    # on an unattended turn), so it never preempts the primary it watches.
     priority: 1
     fast_path_enabled: true
-    # Pretool cannot block dispatch (hard safety lives in
-    # app/harness/safety.py), so an LLM judgment there only produces a
-    # nudge that lands after the tool already ran. Observation-only.
-    pretool_llm_enabled: false
-    # Judge one benign tool result in N; errors, spilled payloads, todo
-    # flips and the stalled-progress gate always escalate.
-    tool_result_sample_every: 5
-    tool_result_escalate_bytes: 20000
-    # The same two, for a turn nobody is reading. The observer runs on the
-    # PRIMARY at the watched turn's priority, so every escalation it makes
-    # sits in front of whatever a human is typing — and a worker round
-    # produces long benign results all day: a pytest tail clears the 20k
-    # threshold and buys an LLM call that says nothing.
-    unattended_tool_result_sample_every: 10
-    unattended_tool_result_escalate_bytes: 60000
-    # Tools whose repetition IS the protocol, merged over the built-in set
-    # (automod_gate_wait, automod_status, browser_wait, graph_status,
-    # autoresearch_status). On 2026-09-11 the repetition guard fired 16
-    # times on autocode turns in one day, 7 of them on the round id alone,
-    # and one turn hit the deterministic cap of 5 the moment its gate
-    # started. Config adds to this list; it never un-exempts the built-ins.
-    repetition_exempt_tools: []
+    # IV plan R2 (2026-09-24): one terminal review per turn, plus a mid-turn
+    # review every `review_every_iterations` (0 = a sixth of max_turns, held
+    # to 4..12), at a silent streak, or when a todo check is waiting. Nothing
+    # judges `pretool`, `tool_result` or `result` any more. Thinking is on:
+    # measured +0.5 s on an observer-shaped prompt, same verdicts.
+    thinking: true
+    thinking_max_tokens: 2048
+    thinking_timeout_seconds: 20
+    review_every_iterations: 0
+    trajectory_max_entries: 40
+    terminal_text_window_chars: 8000
     # The context wall is the other way a turn dies, and in September 2026
     # it was the one that actually killed rounds. Past this fraction of the
     # compaction threshold the observer is told to prefer noop — the
@@ -180,11 +170,6 @@ inner_voice:
     # is skipped entirely: nothing said there can be answered.
     context_pressure_enabled: true
     context_pressure_threshold: 0.8
-    # On an unattended turn the LLM still decides WHETHER to speak; Python
-    # decides what it says. Round 874's observer injected "deliver the final
-    # report now" on the invented premise "working tree clean" and a healthy
-    # round was abandoned at iteration 38 with 44 minutes left.
-    unattended_terminal_content_deterministic: true
     # Run non-terminal judgments off the harness's critical path.
     async_nonterminal: true
     async_drain_timeout_seconds: 6.0
@@ -196,15 +181,6 @@ inner_voice:
     cross_turn_memory_limit: 6
     # Show the primary the goal card it is being judged against.
     goal_card_to_primary: true
-    # Deterministic repetition guard. Compares the identifiers in each
-    # proposed tool call against the recent ones; fires when the same target
-    # is queried `repetition_threshold`+1 times inside `repetition_window`.
-    # Costs no LLM call, so it runs even with pretool judgment off — it is
-    # the only place the observer sees tool ARGUMENTS, and a loop is
-    # invisible in the tool name and result alone.
-    repetition_guard_enabled: true
-    repetition_window: 6
-    repetition_threshold: 2
     # Escalate an otherwise fast-pathed assistant_message to LLM judgment
     # after this many consecutive iterations with no user-visible text.
     # 0 disables. The primary produced 33 in a row on 2026-09-04 and nothing
@@ -213,11 +189,6 @@ inner_voice:
     # Minimum primary iterations between two discretionary injects.
     # bypass_budget injects (stall rescue, repetition) are exempt.
     inject_cooldown_iterations: 4
-    # Ceiling on DETERMINISTIC injects (stall rescue, repetition) per turn.
-    # Those bypass the discretionary budget by design, which left nothing
-    # bounding a miscalibrated guard: on 2026-09-04 the repetition guard
-    # fired 19 times in one evening. Exempt from the budget, not unbounded.
-    deterministic_inject_budget: 5
     # Deadline for judgments that run OFF the harness's critical path. The
     # primary is not waiting on these, so the tight `timeout_seconds` that
     # protects the two synchronous terminal calls only threw the work away —
@@ -225,6 +196,47 @@ inner_voice:
     # one on a spawned non-terminal call. `async_drain_timeout_seconds` is
     # the real bound at the next terminal event.
     async_timeout_seconds: 12
+  # The deterministic senses, on EVERY turn — chat, worker, scheduled task,
+  # Task subagent — whether or not the observer is attached
+  # (app/harness/turn_guards.py, IV plan R1, 2026-09-24). Until then they
+  # lived inside the observer, so the 09-12 cut that took the observer off
+  # workers took these off too. No LLM call; each fire is an
+  # inner_voice_observations row with `safeguard` = the guard and no model.
+  turn_guards:
+    enabled: true
+    # A text-only iteration that announces an action and stops.
+    stall_rescue: true
+    # Same target queried `repetition_threshold`+1 times inside
+    # `repetition_window` calls; the only guard that reads tool ARGUMENTS.
+    repetition: true
+    repetition_window: 6
+    repetition_threshold: 2
+    # Tools whose repetition IS the protocol, merged over the built-in set
+    # (automod_gate_wait, automod_status, browser_wait, graph_status,
+    # autoresearch_status). Config adds; it never un-exempts the built-ins.
+    repetition_exempt_tools: []
+    # A result that returned normally but says the work did not happen
+    # (`Task` -> `[stopped: max_turns]`, a Bash timeout). Once per tool a turn.
+    failure_payload: true
+    # A turn ending with open items on a todo list IT wrote this turn.
+    todo_gate: true
+    # An unattended turn ending with an automod round still open.
+    round_open: true
+    # A tool call written as prose: logged and announced, never injected.
+    capability_fault: true
+    # Ceiling on these injects per turn. Exempt from the observer's budget,
+    # not unbounded: on 2026-09-04 the repetition guard fired 19 times in
+    # one evening.
+    deterministic_inject_budget: 5
+  # The IV on/off A/B on the chat path (IV plan R3). A new chat created in
+  # [start, end) gets an arm by a hash of its id; scripts/iv_ab_report.py
+  # reads the result. The window is the switch.
+  ab:
+    enabled: true
+    name: iv-chat-1
+    start: '2026-09-25'
+    end: '2026-10-09'
+    fraction_on: 0.5
   todo_stewardship:
     enabled: true
     completion_gate: true
@@ -1251,14 +1263,6 @@ automod:
   # calls in the log were all correct, and the observation windows were
   # costing ~2 h/day of round time against a 156-item confirmed queue.
   chamber: true
-  # A round may only be opened from a turn with Inner Voice attached. Two
-  # reasons: the observer watches the one activity that rewrites production,
-  # and an IV session is the only kind the Inner Voice tab lists, so this is
-  # what makes a round reviewable afterwards rather than just a ledger row and
-  # a diff. `automod_start` enables the flag and refuses once, because the
-  # observer attaches at turn start and cannot be added to a turn in flight.
-  # The CLI is exempt: no bound session, and a human is their own observer.
-  require_inner_voice: true
   gate:
     # Rung reuse. A gate with review runs 7-12 minutes and every re-gate
     # replays the whole ladder, so a 60-minute round gets about one fix

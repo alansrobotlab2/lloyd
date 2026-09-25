@@ -1514,6 +1514,11 @@ def _dispatch_automod(monkeypatch, tmp_path, session_id):
         return M._tool_effects.Claim()
 
     monkeypatch.setattr(M._tool_effects, "claim", _claim)
+    # The refusal under test exists behind `automod.require_inner_voice`,
+    # which defaults off since 2026-09-24 (IV plan R5); these pin the gate's
+    # behaviour when it is on.
+    import agent_mcp.automod as _AM
+    monkeypatch.setattr(_AM, "_require_inner_voice", lambda: True)
 
     async def _call(tool, args, turn_id):
         res = await M.call_tool(tool, args, {
