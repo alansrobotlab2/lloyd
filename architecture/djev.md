@@ -163,7 +163,8 @@ secondary's config and the model it served drifted apart on 2026-09-06.
 | Knob | Value | Why not upstream's |
 |---|---|---|
 | `GPU` | `2` | `CUDA_DEVICE_ORDER=PCI_BUS_ID` is mandatory, or index 2 lands on another card |
-| `MAX_MODEL_LEN` | `131072` | vLLM's own measured ceiling here is 154 976. The full 262 144 needs 5.98 GiB of bf16 KV on top of 17.53 GiB of weights, against 23.6 GiB of card |
+| `BATCH_INVARIANT` | `1` | the only measured config whose production-shaped (seeded) reads repeat exactly: 0.0000 nats against up to 2.17 on the Marlin incumbent, at +26 ms recall p50 (547.5 ms, under the 550 ceiling). Shipped 2026-09-24; `eval/djev/kernel_bisect_2026-09-24.md` (#1361) |
+| `MAX_MODEL_LEN` | `81920` | the largest context BATCH_INVARIANT=1 boots at (its kernels load 19.02 GiB of weights, leaving ~83.4k tokens of KV; 98304 and 131072 refuse). Production prompts to djev were all under 5,000 tokens when it shipped. Before BATCH_INVARIANT=1 it was 131072; vLLM's own measured ceiling on the incumbent kernels is 154 976. The full 262 144 needs 5.98 GiB of bf16 KV on top of 17.53 GiB of weights, against 23.6 GiB of card |
 | `MAX_SEQS` | `1` | profiling materialises ~10 fp32 copies of `[MAX_SEQS × CANVAS, vocab]`, which is 40 GiB at upstream's 32×128 and 1.25 GiB at 1×128 |
 | `CANVAS` | `128` | the served canvas width |
 | `GPU_UTIL` | `0.97` | upstream's 0.40 is a fraction of a Spark's 121 GiB unified memory. On a 24 GiB card it would not hold the weights |

@@ -155,15 +155,18 @@
 #   production-shaped reads repeat, at +26 ms recall p50 (547.5 vs 521.4, 2.5 ms
 #   under the 550 ceiling) and 131072 -> 81920 context.
 #
-#   So the defaults below are still the INCUMBENT. Flipping BATCH_INVARIANT here
-#   alone would boot OOM, because agent-djev.conf pins MAX_MODEL_LEN="131072";
-#   the change is both lines of that conf's environment= (BATCH_INVARIANT="1",
+#   SHIPPED 2026-09-24 on Alan's call: the defaults below and agent-djev.conf's
+#   environment= are BATCH_INVARIANT="1" and MAX_MODEL_LEN="81920" together —
+#   either one alone boots OOM or at the old context. Largest production prompt
+#   before the switch was <5,000 tokens (vllm:request_prompt_tokens), and the
+#   djev tools cap their inputs, so 81920 is ample. Before the switch
+#   the change was both lines of that conf's environment= (BATCH_INVARIANT="1",
 #   MAX_MODEL_LEN="81920"), a production context cut that is Alan's call
 #   (#1357). tests/test_start_djev_flags.py refuses a shipped default that has
 #   no row, so an unmeasured boot cannot become production by editing one of the
 #   two.
 #
-# shipped defaults: MOE_BACKEND="" BATCH_INVARIANT="0"
+# shipped defaults: MOE_BACKEND="" BATCH_INVARIANT="1"
 
 set -euo pipefail
 
@@ -181,7 +184,7 @@ PORT="${PORT:-8010}"
 STRUCTURED_PORT="${STRUCTURED_PORT:-8011}"
 TLS_PORT="${TLS_PORT:-0}"
 
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-81920}"
 MAX_SEQS="${MAX_SEQS:-1}"
 CANVAS="${CANVAS:-128}"
 GPU_UTIL="${GPU_UTIL:-0.97}"
@@ -216,7 +219,7 @@ EXTRA_ARGS="${EXTRA_ARGS:---async-scheduling}"
 #       vLLM parses it with int(), so an empty or "true" value raises at import.
 #       Needs MAX_MODEL_LEN under ~100k; at 131072 the KV pool does not fit.
 MOE_BACKEND="${MOE_BACKEND:-}"
-BATCH_INVARIANT="${BATCH_INVARIANT:-0}"
+BATCH_INVARIANT="${BATCH_INVARIANT:-1}"
 # CUDA graphs and the driver context, and ONLY those. It is deliberately not
 # an activations budget: the sampler transient below is the dominant
 # activation and is already counted, so adding a second activations figure

@@ -139,13 +139,15 @@ def test_moe_backend_reaches_the_vllm_argv(boot):
         f"--moe-backend did not reach the argv as one flag and one value: {r['argv']}"
 
 
-def test_moe_backend_unset_leaves_the_incumbent_argv_alone(boot):
-    """The production boot must stay byte-identical to the one in the header."""
+def test_the_default_boot_is_the_shipped_measured_row(boot):
+    """The default boot is the shipped row of the header: no --moe-backend (vLLM
+    resolves auto), batch-invariant ON, 81920 context (#1361, shipped 2026-09-24)."""
     r = boot()
     assert r["recorded"], f"the engine was never launched: {r['out'][-800:]}"
     assert "--moe-backend" not in r["argv"], \
         f"an unset MOE_BACKEND changed the boot: {r['argv']}"
-    assert r["env"]["VLLM_BATCH_INVARIANT"] == "0"
+    assert r["env"]["VLLM_BATCH_INVARIANT"] == "1"
+    assert _flag_pair(r["argv"], "--max-model-len") == ["81920"], r["argv"]
 
 
 def test_batch_invariant_is_exported_into_the_engine_environment(boot):
@@ -240,8 +242,15 @@ def test_the_shipped_defaults_have_a_measured_row():
     `auto` in the table because that is what vLLM resolves it to."""
     moe, inv = _script_defaults()
     want = (moe or "auto").split()[0]
+    ctx = re.search(r'^MAX_MODEL_LEN="\$\{MAX_MODEL_LEN:-(\d+)\}"$', SCRIPT_TEXT, re.MULTILINE)
+    assert ctx, "start-djev.sh no longer declares its MAX_MODEL_LEN default in one line"
+    # A row that names a MAX_MODEL_LEN measured THAT context; only the shipped
+    # one is the shipped boot (#1361 booted BATCH_INVARIANT=1 at 81920 and 65536).
     rows = [r for r in _header_rows()
-            if r["variant"].split()[0] == want and r["variant"].rstrip().endswith(f"/ {inv}")]
+            if r["variant"].split()[0].rstrip(",") == want
+            and r["variant"].rstrip().endswith(f"/ {inv}")
+            and ("MAX_MODEL_LEN" not in r["variant"]
+                 or f"MAX_MODEL_LEN {ctx.group(1)} " in r["variant"])]
     assert rows, (
         f"shipped defaults MOE_BACKEND={moe!r} BATCH_INVARIANT={inv!r} have no row in "
         f"the header's variant table, so this boot has never been measured by "
