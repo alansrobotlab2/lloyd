@@ -17,7 +17,17 @@
 #   topic     anchor is in canonical MEMORY.md, in a topic file, and NOT in the
 #             index — the indexed arm has to pull it with
 #             memory_read(file="topics/<slug>"); `objective_checks` records whether
-#             it did (decision (c): ≥ 8/10 answered with a memory_read).
+#             it did (decision (c): ≥ 8/10 answered with a memory_read). A topic
+#             probe also names `answer_terms`, the words its criterion turns on;
+#             each must be absent from the whole index (case-insensitive) and in
+#             the topic file, so a clipped hook that paraphrases the answer is
+#             refused, not only a verbatim anchor. And the answer must be history,
+#             not state: in the 2026-09-25 run three topic probes (the reaped
+#             round SM_20260917_000427, the HTTP create route with no dedupe, the
+#             halt that wrote no ledger row) passed with no read because the model
+#             grepped the ledger, git and the code — facts the machine re-derives,
+#             and the halt one had been fixed since. A topic answer is a past
+#             measurement or incident detail the tree and the ledger do not hold.
 #   feedback  anchor is on a `[feedback]` line of the index — Alan's rulings and
 #             the house rules; decision (b) is that the indexed arm loses none.
 #
@@ -144,6 +154,7 @@ probes:
   - id: t01_tencentdb_fragmented
     kind: topic
     anchor: "one system split across `TencentDB` (3) / `TencentDB Agent Memory` (30)"
+    answer_terms: ["TencentDB Agent Memory"]
     objective_checks: {tool_called: memory_read}
     prompt: >-
       fact_get("TencentDB") returns only a handful of rows even though we've
@@ -154,21 +165,25 @@ probes:
       TencentDB-Agent-Memory), so a lookup on the short name returns a small
       fraction. FAIL if it blames missing ingestion or gives no mechanism.
 
-  - id: t02_reaped_round
+  - id: t02_gate_0908_suite_green
     kind: topic
-    anchor: "my round (`SM_20260917_000427`) was reaped"
+    anchor: "the 19:36 full check reported **2,495 tests passing, exit 0**"
+    answer_terms: ["2,495"]
     objective_checks: {tool_called: memory_read}
     prompt: >-
-      What happened to automod round SM_20260917_000427 for item #1199? Can I
-      amend and re-gate it?
+      On 2026-09-08 several confirmed automod implementations aborted, each
+      citing pre-existing test failures. Do you already know whether the test
+      suite was actually red that day?
     criterion: >-
-      PASS if the answer says the round was reaped and its worktree, branch and
-      commits are gone (so it cannot be amended/re-gated/resumed; the work is
-      lost). FAIL if it proposes amending the round as if it still existed.
-
+      PASS if the answer says the suite was not red: a full check that evening
+      (19:36) reported 2,495 tests passing with exit 0 while dozens of commits
+      landed, so the aborts came from a gate that reports a verdict without naming
+      failing tests (an environmental break read as a bad change). FAIL if it
+      says the suite was red that day, or gives no evidence of the green full run.
   - id: t03_livekit_udp_proc
     kind: topic
     anchor: "/net/udp{,6}` for ports 50000-50100"
+    answer_terms: ["/net/udp"]
     objective_checks: {tool_called: memory_read}
     prompt: >-
       Voice mode seems dead. What exactly should I run to check whether LiveKit
@@ -181,6 +196,7 @@ probes:
   - id: t04_release_watch_commits
     kind: topic
     anchor: "gate any watch-drop on **commits-in-window**"
+    answer_terms: ["commits-in-window"]
     objective_checks: {tool_called: memory_read}
     prompt: >-
       The doc-digester has seen no new isaac-lab tag for 17 cycles. I'd like to
@@ -194,6 +210,7 @@ probes:
   - id: t05_task83_max_turns_floor
     kind: topic
     anchor: "So the remedy for task 83 is a declaration above 60, not a smaller one."
+    answer_terms: ["above 60"]
     objective_checks: {tool_called: memory_read}
     prompt: >-
       Autonomy task #83 keeps dying at max_turns. I'll add `max_turns: 40` to its
@@ -206,6 +223,7 @@ probes:
   - id: t06_sub6s_failure
     kind: topic
     anchor: "a sub-6-second failure on a GPU task is a config or routing refusal, not a model failure"
+    answer_terms: ["sub-6-second"]
     objective_checks: {tool_called: memory_read}
     prompt: >-
       An autonomy task on the primary failed after 3 seconds with an HTTP error.
@@ -215,35 +233,40 @@ probes:
       or routing refusal (e.g. an unknown model name / 404), not at the model
       itself. FAIL if it treats it as a model failure.
 
-  - id: t07_http_create_no_dedupe
+  - id: t07_djev_misdescribed
     kind: topic
-    anchor: "The HTTP create route `app/routers/backlog.py:676`"
+    anchor: 'a correction of a prior answer that had called it "a Django-like framework"'
+    answer_terms: ["Django"]
     objective_checks: {tool_called: memory_read}
     prompt: >-
-      One guardian rollback left three near-identical open backlog items. Doesn't
-      backlog creation dedupe? Why didn't it catch these?
+      Have you ever given a wrong answer about what djev is? Do you remember
+      what you called it?
     criterion: >-
-      PASS if the answer says the dedupe lives only on the MCP backlog_write_task
-      path and the guardian files through the HTTP create route
-      (POST /api/backlog/task-create), which has no dedupe. FAIL if it blames the
-      similarity threshold or gives no route asymmetry.
-
-  - id: t08_halt_no_ledger_event
+      PASS if the answer says yes and names the wrong description: a prior answer
+      (2026-09-21) called djev "a Django-like framework" and was later corrected
+      (djev is the local structured-decision engine on GPU 2). FAIL if it denies
+      any such mistake, or names a different wrong description.
+  - id: t08_bench010_quarantine
     kind: topic
-    anchor: "create/remove `promotions-halted` and call **nothing else**"
+    anchor: "the file sat intact and byte-identical in that quarantine"
+    answer_terms: ["quarantine"]
     objective_checks: {tool_called: memory_read}
     prompt: >-
-      Promotions were halted for a few hours last week. Can I find in the automod
-      ledger exactly when the halt was set and cleared, and by whom?
+      On 2026-09-14 backlog #1139 prescribed, as step 1, `git checkout HEAD --
+      lloyd/bench/bench_010_safety_destructive.md`, on the premise that
+      agent-obsidian-sync had deleted the file and git HEAD was the only surviving
+      copy. Do you already know whether that premise was right?
     criterion: >-
-      PASS if the answer says set_halted/clear_halted write only the
-      promotions-halted file and append no ledger event, so the ledger has no halt
-      transition rows (at best a side mention in an alert row). FAIL if it tells
-      the user to grep for a halt event as if one exists.
-
+      PASS if the answer says the premise was false: the file had not been deleted
+      by sync but deliberately moved into a quarantine (intact, byte-identical) by
+      a running Claude Code session during the vault-wipe containment, which was
+      holding it because restoring it would reopen the path that wiped the vault.
+      FAIL if it accepts the sync-deletion premise or endorses the restore as
+      prescribed.
   - id: t09_merged_into_done
     kind: topic
     anchor: "if it is `done` (or `archived`), re-file with `force: true`"
+    answer_terms: ["force: true"]
     objective_checks: {tool_called: memory_read}
     prompt: >-
       backlog_write_task answered my new finding with merged_into: 893. Anything
@@ -256,6 +279,7 @@ probes:
   - id: t10_clobber_cause_unknown
     kind: topic
     anchor: "The source of the truncation is still unidentified"
+    answer_terms: ["still unidentified"]
     objective_checks: {tool_called: memory_read}
     prompt: >-
       MEMORY.md got truncated on 2026-09-10 — that was the vault wipe that day,

@@ -691,7 +691,12 @@ rendered. This landing is additive; production prompts are byte-identical.
   20). `memory_read` in a trial is answered from the arm's overlay by a
   PreToolUse deliverer, because the live tool reads the vault, which holds no
   topics yet. Decision (a)–(c) is computed; (d), live `memory_read` per user
-  turn, is reported pending. `tests/test_memory_index_cap.py`.
+  turn, is reported pending. `tests/test_memory_index_cap.py`. The first run
+  (2026-09-25) missed (c) at 7/10: three topic probes were answered by grepping
+  the ledger, git and the code, not from their index lines (the reaped-round
+  line carried nothing about it). Those probes now ask for incident history the
+  machine does not hold, and every topic probe names `answer_terms` that must be
+  absent from the index, SOUL.md and USER.md. The consolidator was not changed.
 
 ### D12 — errored turns book usage; a cancelled task saves its text
 

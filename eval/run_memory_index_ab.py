@@ -35,7 +35,8 @@ arm's overlay, through the same file-name grammar the tool uses
 Probes: `eval/memory_index_probes.yaml`, 30 — 10 answer-in-index, 10
 answer-in-topic (`objective_checks: tool_called: memory_read`), 10 `feedback`
 rulings — each anchored on verbatim MEMORY.md text that `check_probe_anchors`
-locates in the index or a topic file before anything runs. `--with-trim-probes`
+locates in the index or a topic file before anything runs; a topic probe's
+`answer_terms` must also be absent from the index, SOUL.md and USER.md. `--with-trim-probes`
 adds the 20 #1425 trim probes as a regression set (their USER.md lines are the
 same in every arm, so they measure collateral damage).
 
@@ -118,6 +119,7 @@ class Probe:
     criterion: str
     anchor: str = ""
     objective_checks: dict[str, Any] = field(default_factory=dict)
+    answer_terms: list[str] = field(default_factory=list)  # topic probes only
     # resolved at check time
     topic: str = ""
 
@@ -134,9 +136,13 @@ def load_probes(path: Path = PROBES_PATH, *, with_trim: bool = False,
             raise ProbeRejected(f"probe {p.get('id', '?')}: missing {sorted(missing)}")
         if p["kind"] not in KINDS[:3]:
             raise ProbeRejected(f"{p['id']}: unknown kind {p['kind']!r}")
+        terms = [str(t) for t in p.get("answer_terms") or []]
+        if p["kind"] == "topic" and not terms:
+            raise ProbeRejected(f"{p['id']}: a topic probe names its answer_terms")
         probes.append(Probe(id=p["id"], kind=p["kind"], prompt=p["prompt"].strip(),
                             criterion=p["criterion"].strip(), anchor=p["anchor"],
-                            objective_checks=dict(p.get("objective_checks") or {})))
+                            objective_checks=dict(p.get("objective_checks") or {}),
+                            answer_terms=terms))
     counts = {k: sum(p.kind == k for p in probes) for k in KINDS[:3]}
     if any(n != PROBES_PER_KIND for n in counts.values()):
         raise ProbeRejected(f"expected {PROBES_PER_KIND} probes per kind, got {counts}")
@@ -161,6 +167,8 @@ def check_probe_anchors(probes: list[Probe], canonical: Path, indexed: Path) -> 
     index = (indexed / "MEMORY.md").read_text(encoding="utf-8")
     topics = {p.stem: p.read_text(encoding="utf-8")
               for p in sorted((indexed / TOPICS_SUBDIR).glob("*.md"))}
+    prompt = index + "".join((indexed / n).read_text(encoding="utf-8")
+                             for n in ("SOUL.md", "USER.md") if (indexed / n).exists())
     for p in probes:
         if p.kind == "trim":
             continue
@@ -174,6 +182,17 @@ def check_probe_anchors(probes: list[Probe], canonical: Path, indexed: Path) -> 
             if len(homes) != 1:
                 raise ProbeRejected(f"{p.id}: anchor is in {len(homes)} topic files")
             p.topic = homes[0]
+            # The anchor is a verbatim sentence, so it is trivially absent from a
+            # clipped hook that still paraphrases the answer. The terms the
+            # criterion turns on are what the prompt — the index, and the SOUL.md
+            # and USER.md every arm shares — must not carry (2026-09-25).
+            for term in p.answer_terms:
+                if term.lower() in prompt.lower():
+                    raise ProbeRejected(f"{p.id}: answer term {term!r} is in the index "
+                                        "or the shared prompt files")
+                if term not in topics[p.topic]:
+                    raise ProbeRejected(f"{p.id}: answer term {term!r} is not in "
+                                        f"topics/{p.topic}")
         elif not in_index:
             raise ProbeRejected(f"{p.id}: {p.kind} anchor is not in the index")
         elif p.kind == "feedback":

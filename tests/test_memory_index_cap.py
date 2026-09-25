@@ -376,3 +376,53 @@ def test_the_decision_needs_feedback_intact_and_topics_read():
     unread = [rec(f"t{i}", "topic", "PASS", "PASS", "PASS", read=i < 7) for i in range(10)]
     assert decide(unread)["criteria"]["c_topic_answered_by_read"]["ok"] is False
     assert decide(good)["criteria"]["d_live_reads_per_user_turn"]["ok"] is None
+
+
+def test_a_topic_probe_whose_answer_terms_reach_the_prompt_is_refused(tmp_path):
+    """2026-09-25: a verbatim anchor is trivially absent from a clipped hook that
+    still paraphrases the answer, so a topic probe's answer terms are checked
+    against the whole prompt — the index and the shared SOUL.md/USER.md."""
+    from eval.run_memory_index_ab import Probe, ProbeRejected, check_probe_anchors
+
+    canon, idx = tmp_path / "canonical", tmp_path / "indexed"
+    canon.mkdir()
+    (idx / "memory").mkdir(parents=True)
+    entry = "- **Gate misread (09-08).** The 19:36 full check reported 2,495 tests passing."
+    (canon / "MEMORY.md").write_text(f"# M\n\n## Lessons\n{entry}\n")
+    (idx / "memory" / "lessons.md").write_text(f"# Lessons\n\n{entry}\n")
+    (idx / "SOUL.md").write_text("# soul\n")
+    (idx / "USER.md").write_text("# user\n")
+
+    def probe(terms):
+        return Probe(id="t", kind="topic", prompt="?", criterion="?",
+                     anchor="The 19:36 full check reported 2,495", answer_terms=terms)
+
+    (idx / "MEMORY.md").write_text("- [project] **Gate misread (09-08).** → topics/lessons\n")
+    p = probe(["2,495"])
+    check_probe_anchors([p], canon, idx)
+    assert p.topic == "lessons"
+    with pytest.raises(ProbeRejected, match="not in topics/lessons"):
+        check_probe_anchors([probe(["2,496"])], canon, idx)
+    # The hook paraphrases the answer: the anchor is still absent, the term is not.
+    (idx / "MEMORY.md").write_text(
+        "- [project] **Gate misread (09-08).** Suite green, 2,495 passing… → topics/lessons\n")
+    with pytest.raises(ProbeRejected, match="answer term '2,495'"):
+        check_probe_anchors([probe(["2,495"])], canon, idx)
+    (idx / "MEMORY.md").write_text("- [project] **Gate misread (09-08).** → topics/lessons\n")
+    (idx / "USER.md").write_text("# user\nthe suite was 2,495 green\n")
+    with pytest.raises(ProbeRejected, match="shared prompt files"):
+        check_probe_anchors([probe(["2,495"])], canon, idx)
+
+
+def test_every_topic_probe_names_answer_terms(tmp_path):
+    import yaml
+
+    from eval.run_memory_index_ab import ProbeRejected, load_probes
+
+    assert all(p.answer_terms for p in load_probes() if p.kind == "topic")
+    bad = tmp_path / "p.yaml"
+    probes = [{"id": f"{k}{i}", "kind": k, "prompt": "?", "criterion": "?", "anchor": "a"}
+              for k in ("index", "topic", "feedback") for i in range(10)]
+    bad.write_text(yaml.safe_dump({"probes": probes}))
+    with pytest.raises(ProbeRejected, match="answer_terms"):
+        load_probes(bad)

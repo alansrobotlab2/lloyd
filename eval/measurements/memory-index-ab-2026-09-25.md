@@ -33,3 +33,38 @@ re-run. Deploy steps if accepted: one edit (`MEMORY_MD_CEILING_BYTES =
 MEMORY_MD_INDEX_CEILING_BYTES`), `consolidate_memory_index.py` output written
 into `~/obsidian/lloyd/`, `git -C ~/obsidian apply
 scripts/maintenance/vault-memory-index-skills.patch`, restart both services.
+
+## Tightened topic probes (for the re-run)
+
+The three reads that did not happen were not index leaks. In the indexed arm's
+traces, t02 (reaped round `SM_20260917_000427`), t07 (the HTTP create route
+with no dedupe) and t08 (the halt that wrote no ledger row) were each answered
+by grepping `promotions.jsonl`, git and the code: the facts are re-derivable
+from the machine. t02's index line ("Automod round deaths outnumber round
+starts…") carries nothing about the reaped round, and t08's claim is stale at
+HEAD, since `ce2444bd` added `promotion_halt_set`/`_clear` rows. So the
+consolidator stays as it is. A bold-lead hook is the entry's thesis, and the
+ten index probes depend on it. The probes were re-pointed at incident history
+instead:
+
+| was | now | topic | answer term |
+|---|---|---|---|
+| t02_reaped_round | t02_gate_0908_suite_green | nightly-chain-agent-architecture-2026 | `2,495` |
+| t07_http_create_no_dedupe | t07_djev_misdescribed | a-subsystem-with-no-memory-identity | `Django` |
+| t08_halt_no_ledger_event | t08_bench010_quarantine | extracted-from-lloyd-claude-md-2026-09 | `quarantine` |
+
+Every topic probe now names `answer_terms`, and `check_probe_anchors` refuses one
+that the index, SOUL.md or USER.md carries (case-insensitive) or that is missing
+from its topic file. On the rebuilt overlay (73,002 B → 20,466 B, unchanged),
+all ten anchors and terms are absent from the prompt and present in their topic
+file. Re-run (topic probes, all three arms), with the pool paused and the
+primary lock held:
+
+    flock <scratch>/primary.lock .venvs/lloyd/bin/python eval/run_memory_index_ab.py \
+        --out eval/measurements/memory-index-ab-topics-rerun --only \
+        t01_tencentdb_fragmented t02_gate_0908_suite_green t03_livekit_udp_proc \
+        t04_release_watch_commits t05_task83_max_turns_floor t06_sub6s_failure \
+        t07_djev_misdescribed t08_bench010_quarantine t09_merged_into_done \
+        t10_clobber_cause_unknown
+
+Deploy if (c) reads ≥ 8/10.
