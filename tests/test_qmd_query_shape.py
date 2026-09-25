@@ -623,3 +623,38 @@ def test_task_81_safety_bullet_states_the_code_triggers():
     assert f"**{m.ORPHAN_RATIO_TRIGGER:.2f}**" in safety
     assert f"**{m.ORPHAN_ABS_TRIGGER:,}**" in safety
     assert "50,000" not in body and "50000" not in body
+
+
+# ── #1498: Mission Control's memory search sanitizes like the recall ─────────
+
+def _memory_search_payload(monkeypatch, q: str):
+    import asyncio
+    import json as _json
+
+    from app.routers import memory as mem
+    seen = []
+
+    def fake_query(payload, **kw):
+        seen.append(payload)
+        return {"results": []}
+
+    monkeypatch.setattr(vault, "qmd_query", fake_query)
+    out = _json.loads(asyncio.run(mem.memory_search(q=q, limit=5, scope="")).body)
+    return seen, out
+
+
+def test_memory_search_sanitizes_its_query_the_way_the_recall_does(monkeypatch):
+    """A `-term` reaching the vec leg is an HTTP 500 from qmd (#325); the recall
+    has run `_qmd_sanitize` since, and memory search sent the raw string."""
+    raw = 'qwen3-embedding "rerank" +fallback\x07now'
+    seen, out = _memory_search_payload(monkeypatch, raw)
+    assert len(seen) == 1
+    clean = vault._qmd_sanitize(raw)
+    assert clean == "qwen3 embedding rerank fallback now"
+    assert [s["query"] for s in seen[0]["searches"]] == [clean, clean]
+    assert out["query"] == raw, "the reply still names what the user typed"
+
+
+def test_memory_search_with_nothing_left_after_sanitizing_asks_nothing(monkeypatch):
+    seen, out = _memory_search_payload(monkeypatch, ' - + " ')
+    assert seen == [] and out["results"] == []

@@ -1,16 +1,13 @@
 """Memory (Obsidian vault) browse/search/read/save endpoints."""
 
-import json
+import asyncio
 import re
-import urllib.request
 from datetime import date, datetime
 from pathlib import Path
 
 import yaml
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-
-from app.config import service_url
 
 
 router = APIRouter()
@@ -168,17 +165,22 @@ async def memory_stats():
 async def memory_search(q: str = "", limit: int = 10, scope: str = ""):
     if not q:
         return JSONResponse({"query": q, "results": []})
-    payload = json.dumps({
-        "searches": [{"type": "lex", "query": q}, {"type": "vec", "query": q}],
+    # The recall's door and the recall's sanitizer (#1498): a `-term` reaching
+    # the vec leg is an HTTP 500 from qmd (#325), and a request opened here
+    # rather than through `qmd_query` was a reply `qmd_health` never saw.
+    from agent_mcp.vault import _qmd_sanitize, qmd_query
+    clean = _qmd_sanitize(q)
+    if not clean:
+        return JSONResponse({"query": q, "results": []})
+    payload = {
+        "searches": [{"type": "lex", "query": clean}, {"type": "vec", "query": clean}],
         "limit": limit,
         "collections": scope.split(",") if scope else _VAULT_SEGMENTS,
-    }).encode()
-    req = urllib.request.Request(service_url("qmd", "http://localhost:8181/query"), data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    }
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
-        from agent_mcp.vault import qmd_file
-        results = [{"path": qmd_file(r.get("file", "")), "title": r.get("title", ""), "score": r.get("score", 0), "snippet": r.get("snippet", ""), "summary": r.get("summary", "")} for r in data.get("results", [])]
+        # Off the event loop: a blocking HTTP call here stalls every chat stream.
+        data = await asyncio.to_thread(qmd_query, payload)
+        results = [{"path": r.get("file", ""), "title": r.get("title", ""), "score": r.get("score", 0), "snippet": r.get("snippet", ""), "summary": r.get("summary", "")} for r in data.get("results", [])]
         return JSONResponse({"query": q, "results": results})
     except Exception as e:
         return JSONResponse({"query": q, "error": str(e), "results": []})

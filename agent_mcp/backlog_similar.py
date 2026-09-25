@@ -204,17 +204,16 @@ def semantic_candidates(text: str, *, limit: int = 6, timeout: float = 5.0) -> l
     `None` on ANY failure — the caller must tell "no neighbours" from "no
     daemon", because only the first is evidence."""
     try:
-        import urllib.request
-        from agent_mcp.vault import QMD_DAEMON_URL, _qmd_sanitize
+        # Through qmd's one door (#1498), so a rerank that could not run here is
+        # counted by `app/qmd_health.py` like the recall's — rule A below rests
+        # on the reranker score, and degrading it silently is the failure.
+        from agent_mcp.vault import _qmd_sanitize, qmd_query
         q = _qmd_sanitize(text)[:1000]
         if not q:
             return []
         payload = {"searches": [{"type": "vec", "query": q}],
                    "collections": ["backlog"], "limit": int(limit), "rerank": True}
-        req = urllib.request.Request(QMD_DAEMON_URL, data=json.dumps(payload).encode(),
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read())
+        data = qmd_query(payload, timeout=timeout)
         out: list[dict] = []
         for r in data.get("results", []) or []:
             m = _QMD_ID_RE.search(str(r.get("file") or ""))

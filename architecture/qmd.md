@@ -100,7 +100,7 @@ supervisord program agent-qmd-daemon
   `~/lloyd/architecture/` are not a collection (measured, not adopted:
   `architecture/retrieval.md` §4).
 - **Paths come back percent-encoded** (`encodeQmdPath`, per segment). Lloyd
-  decodes them at `agent_mcp/vault.py::_qmd_post` (`qmd_file`).
+  decodes them at `agent_mcp/vault.py::qmd_query` (`qmd_file`), the one door.
 
 ## 3. Models, and the one place they are set
 
@@ -163,7 +163,7 @@ supervisord program agent-qmd-daemon
 | `searches` | `[{type, query}]`, type `lex`, `vec` or `hyde` — single-line, no `-term` on vec (sanitize first) |
 | `collections` | names to search; omitted means all |
 | `limit`, `candidateLimit` | rows returned; rows fused before any rerank. Set both explicitly |
-| `rerank` / `skipRerank` | cross-encoder on/off — always explicit |
+| `rerank` / `skipRerank` | cross-encoder on/off; absent means on. The recall and the dedupe set it explicitly |
 | `fusion: "global"` | one score-merged ranking across the named collections |
 | `collectionFloor` | a number or `{collection: n}` — floor rows are appended after the fused head |
 | `lexMode: "or"` | OR the lex terms (default AND) |
@@ -174,23 +174,28 @@ The reply carries `results` (`file` as `qmd://collection/path`, encoded; `title`
 `GET /health` carries uptime, rerank counters and `vecIndex` (vectors, full builds,
 incremental refreshes). Callers in Lloyd:
 
-- `agent_mcp/vault.py` — the recall doc leg (`recall_doc_leg_shape`), `vault_search`,
-  entity lookups; `_qmd_post` is the door that folds `meta` into
-  `app/qmd_health.py`;
-- `agent_mcp/backlog_similar.py` — write-time dedupe (vec only, reranked, `backlog`);
-- `app/routers/memory.py` — Mission Control's memory search;
-- `scripts/automod/evalpin.py` — the regression pin's warm-up
-  (`production_payload`, read from the recall's own shape).
+Every request Lloyd's processes send goes through one door,
+`agent_mcp/vault.py::qmd_query`: it posts the caller's payload unchanged, folds the
+reply's `meta` into `app/qmd_health.py`, and decodes each result's `file`. A
+payload with no `rerank` key counts as a rerank request, as it is to qmd (the
+REST handler skips only on `rerank: false`). Callers:
 
-The dedupe and Mission Control callers are **not** behind that door: each opens
-its own `urllib` request (`agent_mcp/backlog_similar.py::semantic_candidates`,
-`app/routers/memory.py::memory_search`), reads only `results`, and so reports no
-`meta` to `qmd_health` — a rerank that could not run on either path is invisible,
-and rule A of the dedupe silently degrades to the lexical rule. `memory_search`
-also sends the raw query without `_qmd_sanitize` (`semantic_candidates` now
-sanitizes). Both re-checked in the code on 2026-09-25. The gap is #1498; it
-was first recorded on 09-22 inside #302, an older and already-closed rerank
-item, so until then it had no open owner.
+- `agent_mcp/vault.py` — the recall doc leg (`recall_doc_leg_shape`), `vault_search`,
+  entity lookups, through `_qmd_post` (rows shaped for the recall);
+- `agent_mcp/backlog_similar.py::semantic_candidates` — write-time dedupe (vec only,
+  reranked, `backlog`), sanitized with `_qmd_sanitize`;
+- `app/routers/memory.py::memory_search` — Mission Control's memory search (lex +
+  vec, no `rerank` key, so the daemon's default rerank), sanitized the same way
+  and run off the event loop;
+- `scripts/automod/evalpin.py` — the regression pin's warm-up
+  (`production_payload`, read from the recall's own shape). It talks to the pin
+  daemon, not production, and is outside the door on purpose.
+
+Until #1498 (2026-09-25) the dedupe and memory-search callers opened their own
+`urllib` requests and read only `results`, so a rerank that could not run on
+either path was counted nowhere and rule A of the dedupe degraded to the lexical
+rule silently; `memory_search` also sent the raw query. `tests/test_qmd_health.py`
+pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
 
 ## 5. Keeping it healthy
 

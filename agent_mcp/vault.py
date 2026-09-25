@@ -686,26 +686,52 @@ def qmd_file(file: str) -> str:
     return "qmd://" + urllib.parse.unquote(file[len("qmd://"):])
 
 
-def _qmd_post(payload: dict) -> list:
+def qmd_query(payload: dict, *, timeout: float | None = None) -> dict:
+    """The one door every request to the qmd daemon's `/query` leaves through.
+
+    Posts `payload` as given, folds the reply's `meta` into `app/qmd_health.py`,
+    and returns the daemon's whole reply with every result's `file` decoded
+    (`qmd_file`). Raises whatever the transport raises — each caller decides what
+    an outage means for it. `timeout` defaults to `_qmd_timeout()`.
+
+    The recall (`_qmd_post`), Mission Control's memory search
+    (`app/routers/memory.py::memory_search`) and the write-time backlog dedupe
+    (`agent_mcp/backlog_similar.py::semantic_candidates`) all call it; the last
+    two used to open their own request, so a rerank that could not run on those
+    paths was counted nowhere (#1498).
+    """
     req = urllib.request.Request(
         QMD_DAEMON_URL,
         data=json.dumps(payload).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=_qmd_timeout()) as resp:
+    with urllib.request.urlopen(req, timeout=timeout or _qmd_timeout()) as resp:
         data = json.loads(resp.read())
+    if not isinstance(data, dict):
+        data = {}
     # The daemon says whether the rerank this request asked for actually ran
-    # (`app/qmd_health.py`). It never raises and never blocks the recall: an
-    # unreranked answer is a worse answer, not a missing one.
+    # (`app/qmd_health.py`). It never raises and never blocks the caller: an
+    # unreranked answer is a worse answer, not a missing one. A payload with no
+    # `rerank` key IS a rerank request — qmd's REST handler skips only on
+    # `rerank === false` — which is what memory search sends (#1498).
     try:
         from app import qmd_health
-        qmd_health.note_response(payload.get("rerank") is True, data.get("meta"))
+        qmd_health.note_response(payload.get("rerank") is not False, data.get("meta"))
     except Exception:  # noqa: BLE001
         pass
+    data["results"] = [
+        {**r, "file": qmd_file(r.get("file", ""))}
+        for r in (data.get("results") or []) if isinstance(r, dict)
+    ]
+    return data
+
+
+def _qmd_post(payload: dict) -> list:
+    data = qmd_query(payload)
     return [
         {
-            "file": qmd_file(r.get("file", "")),
+            "file": r.get("file", ""),
             "title": r.get("title", ""),
             "snippet": r.get("snippet", ""),
             "score": r.get("score", 0),
