@@ -874,6 +874,24 @@ async def browser_navigate(request):
     return JSONResponse(result)
 
 
+async def subagent_control(request):
+    """Stop or steer a running `Task` child. `POST /subagents/{task_id}/{verb}`.
+
+    The children run in this process, so Mission Control's buttons are proxied
+    here by the backend (`app/routers/subagents.py`). Authority is the
+    registry's own `orchestrator-session` rule, applied to the session the
+    request names — see `_subagent_registry.control_request`.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid json body"}, status_code=400)
+    status, out = _subagent_registry.control_request(
+        request.path_params.get("verb", ""),
+        request.path_params.get("task_id", ""), body)
+    return JSONResponse(out, status_code=status)
+
+
 async def changes(request):
     """What a turn wrote. `GET /changes?session=<sid>&turn=<turn_id>`."""
     session = request.query_params.get("session") or ""
@@ -1006,6 +1024,7 @@ starlette_app = combined.streamable_http_app(
         Route("/browser/navigate", browser_navigate, methods=["POST"]),
         Route("/changes", changes, methods=["GET"]),
         Route("/changes/revert", changes_revert, methods=["POST"]),
+        Route("/subagents/{task_id}/{verb}", subagent_control, methods=["POST"]),
     ],
 )
 

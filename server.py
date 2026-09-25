@@ -41,6 +41,7 @@ from app.routers import health as _health_router
 from app.routers import automod as _automod_router
 from app.routers import browser as _browser_router
 from app.routers import desktop as _desktop_router
+from app.routers import subagents as _subagents_router
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -335,6 +336,7 @@ app.include_router(_health_router.router)
 app.include_router(_automod_router.router)
 app.include_router(_browser_router.router)
 app.include_router(_desktop_router.router)
+app.include_router(_subagents_router.router)
 
 # The runtime-state directories, created before anything in this process can
 # write to them (#712). `app.paths` no longer mkdirs at import, so the boot that

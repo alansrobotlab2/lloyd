@@ -561,3 +561,106 @@ async def test_authority_across_the_meta_boundary_one_session_cannot_steer(
     stored_a = SR._history[a["task_id"]].chat_messages
     assert [m["content"] for m in _injected(stored_a)] == [INJECT_BODY]
     assert [m["role"] for m in _injected(stored_a)] == ["user"]
+
+
+# ── P8: the Mission Control half, over the real routes ─────────────────────
+#
+# `POST /api/subagents/{task_id}/cancel|steer` on the backend proxies to the
+# aggregator's `POST /subagents/{task_id}/{verb}`, which applies THIS module's
+# policy to the session the request names. Driven through the real, credential-
+# wrapped aggregator app and the real backend router.
+
+_MC_TOKEN = "p8-steering-credential-0123456789abcdef"
+
+
+def _asgi_client_factory(app):
+    import httpx
+
+    real = httpx.AsyncClient      # captured: the patch below is module-global
+
+    def make(*_a, **kw):
+        kw.pop("transport", None)
+        return real(transport=httpx.ASGITransport(app=app), **kw)
+    return make
+
+
+@pytest.fixture
+def mc_routes(monkeypatch):
+    import agent_mcp.aggregator_auth as A
+    from agent_mcp import main as mcp_main
+    from app.routers import subagents as SUB
+
+    monkeypatch.delenv(A.TOKEN_FILE_ENV, raising=False)
+    monkeypatch.setenv(A.TOKEN_ENV, _MC_TOKEN)
+    A.reset_for_tests()
+    monkeypatch.setattr(SUB.httpx, "AsyncClient",
+                        _asgi_client_factory(mcp_main.starlette_app))
+    yield SUB, mcp_main
+    A.reset_for_tests()
+
+
+def _json(resp):
+    return resp.status_code, json.loads(resp.body)
+
+
+def test_mission_control_cancels_only_for_the_spawning_session(mc_routes):
+    SUB, _ = mc_routes
+    ev = asyncio.Event()
+    rec = _row(cancel_event=ev)
+
+    status, body = _json(asyncio.run(SUB.cancel_subagent(
+        rec.task_id, {"session_id": OTHER})))
+    assert status == 403 and not ev.is_set(), body
+    assert STEERING_POLICY in body["error"]
+
+    status, body = _json(asyncio.run(SUB.cancel_subagent(rec.task_id, {})))
+    assert status == 400 and not ev.is_set(), body
+
+    status, body = _json(asyncio.run(SUB.cancel_subagent(
+        rec.task_id, {"session_id": PARENT, "reason": "wedged"})))
+    assert status == 200 and body["cancelled"] is True, body
+    assert ev.is_set()
+
+    status, body = _json(asyncio.run(SUB.cancel_subagent(
+        "task-nope", {"session_id": PARENT})))
+    assert status == 404, body
+
+
+def test_mission_control_steer_appends_for_the_spawning_session(mc_routes):
+    SUB, _ = mc_routes
+    chat = [{"role": "user", "content": "do the thing"}]
+    rec = _row(chat_messages=chat)
+
+    status, _body = _json(asyncio.run(SUB.steer_subagent(
+        rec.task_id, {"session_id": OTHER, "text": INJECT_TEXT})))
+    assert status == 403 and not _injected(chat)
+
+    status, body = _json(asyncio.run(SUB.steer_subagent(
+        rec.task_id, {"session_id": PARENT, "text": INJECT_TEXT})))
+    assert status == 200, body
+    assert _contents(_injected(chat)) == [INJECT_BODY]
+
+
+def test_the_aggregator_control_route_requires_the_credential(mc_routes):
+    import httpx
+
+    _, mcp_main = mc_routes
+    rec = _row()
+
+    async def bare():
+        async with httpx.AsyncClient(
+                base_url="http://127.0.0.1:8500",
+                transport=httpx.ASGITransport(app=mcp_main.starlette_app)) as c:
+            return await c.post(f"/subagents/{rec.task_id}/cancel",
+                                json={"session_id": PARENT})
+    r = asyncio.run(bare())
+    assert r.status_code == 401
+    assert not rec.cancel_event.is_set()
+
+
+def test_the_subagent_route_is_derived_from_the_aggregator_registry():
+    from app.aggregator_config import route, subagent_route
+
+    url = subagent_route("task/x y", "cancel")
+    assert url.startswith(route("state").rsplit("/state", 1)[0])
+    assert url.endswith("/subagents/task%2Fx%20y/cancel")

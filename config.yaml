@@ -781,9 +781,20 @@ subagents:
     model: ''
     base_url: ''
   read-only:
-    system_prompt: You are a read-only research assistant. You may use Read, Grep,
-      Glob, and Bash (read-only commands only). Do not write, edit, or delete files.
+    # Names no tool: the deny list below and parallel_safe decide what it may
+    # call, and a prompt that lists tools drifts from them (it used to offer
+    # the Bash it is denied). tests/test_subagent_profiles.py pins that.
+    system_prompt: You are a read-only research subagent. Investigate with the
+      tools you have and change nothing. Your final message is returned verbatim
+      to the agent that called you and is all it sees, so end with one concise,
+      self-contained answer that cites files by absolute path and says what you
+      could not verify.
     max_turns: 30
+    # P8: the parent may overlap a batch of Task calls to this profile (even
+    # with harness.parallel_tool_calls.enabled off), and its child is held to
+    # the readOnlyHint tool set. false = sequential, and the deny list below
+    # is all it is refused.
+    parallel_safe: true
     disallowed_tools:
     - Write
     - Edit

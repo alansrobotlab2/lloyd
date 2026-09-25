@@ -493,3 +493,121 @@ async def test_history_is_in_wire_order_when_the_last_call_lands_first(monkeypat
     asst = [m for m in sent if m["role"] == "assistant"][-1]
     assert [tc["id"] for tc in asst["tool_calls"]] == ["c1", "c2", "c3"]
     assert [m["tool_call_id"] for m in sent if m["role"] == "tool"] == ["c1", "c2", "c3"]
+
+
+# ── P8: parallel read-only Task fan-out ─────────────────────────────────────
+#
+# A batch of fresh `Task` calls to a `parallel_safe` profile overlaps even with
+# general parallel dispatch off; anything else in the batch, an unsafe profile,
+# or a resume keeps it sequential. Each child still gets the parent's grant
+# scope and deny list in `_meta` (D4), exactly as a sequential call would.
+
+_TASK_TOOLS = {"Read": True, "Grep": True, "Bash": False, "Task": False}
+
+
+def _fanout_opts(**kw):
+    kw.setdefault("parallel_tool_calls_enabled", False)
+    kw.setdefault("parallel_safe_task_profiles", frozenset({"read-only"}))
+    return RunOptions(model="m", max_turns=4, tool_search_enabled=False, **kw)
+
+
+async def _fanout(monkeypatch, calls, **opts):
+    slow = {c["id"]: 0.03 for c in calls}
+    pool = R.ReplayPool(_TASK_TOOLS, delay_by_call_id=slow)
+    R.install(monkeypatch, R.ReplayEngine([R.Step(tool_calls=calls),
+                                           R.Step(text="done")]), pool)
+    events_out = await R.drive(_fanout_opts(**opts))
+    return pool, events_out
+
+
+async def test_a_parallel_safe_task_batch_overlaps_with_general_dispatch_off(monkeypatch):
+    pool, events_out = await _fanout(monkeypatch, [
+        R.tool_call("t1", "Task", "a", prompt="x", subagent_type="read-only"),
+        R.tool_call("t2", "Task", "b", prompt="y", subagent_type="read-only"),
+        R.tool_call("t3", "Task", "c", prompt="z", subagent_type="read-only"),
+    ])
+    assert pool.max_inflight == 3, pool.timeline
+    # History still in wire order.
+    tool_msgs = [e for e in R.of_type(events_out, "tool_result")]
+    assert {e["call_id"] for e in tool_msgs} == {"t1", "t2", "t3"}
+
+
+async def test_the_fanout_is_bounded_by_max_concurrency(monkeypatch):
+    pool, _ = await _fanout(monkeypatch, [
+        R.tool_call(f"t{i}", "Task", "a", prompt="x", subagent_type="read-only")
+        for i in range(4)
+    ], parallel_tool_calls_max_concurrency=2)
+    assert pool.max_inflight == 2, pool.timeline
+
+
+async def test_one_unsafe_profile_keeps_the_task_batch_sequential(monkeypatch):
+    pool, _ = await _fanout(monkeypatch, [
+        R.tool_call("t1", "Task", "a", prompt="x", subagent_type="read-only"),
+        R.tool_call("t2", "Task", "b", prompt="y", subagent_type="general-purpose"),
+    ])
+    assert pool.max_inflight == 1, pool.timeline
+    # No subagent_type means the tool's default, general-purpose: not safe.
+    pool, _ = await _fanout(monkeypatch, [
+        R.tool_call("t1", "Task", "a", prompt="x", subagent_type="read-only"),
+        R.tool_call("t2", "Task", "b", prompt="y"),
+    ])
+    assert pool.max_inflight == 1, pool.timeline
+
+
+async def test_a_resume_never_overlaps(monkeypatch):
+    pool, _ = await _fanout(monkeypatch, [
+        R.tool_call("t1", "Task", "a", prompt="x", subagent_type="read-only"),
+        R.tool_call("t2", "Task", "b", prompt="more", subagent_type="read-only",
+                    task_id="task-abc"),
+    ])
+    assert pool.max_inflight == 1, pool.timeline
+
+
+async def test_a_task_mixed_with_a_read_waits_for_the_general_flag(monkeypatch):
+    calls = [R.tool_call("t1", "Task", "a", prompt="x", subagent_type="read-only"),
+             R.tool_call("r1", "Read", "b", path="/a")]
+    pool, _ = await _fanout(monkeypatch, calls)
+    assert pool.max_inflight == 1, pool.timeline
+    pool, _ = await _fanout(monkeypatch, calls, parallel_tool_calls_enabled=True)
+    assert pool.max_inflight == 2, pool.timeline
+
+
+async def test_no_parallel_safe_profiles_means_no_fanout(monkeypatch):
+    pool, _ = await _fanout(monkeypatch, [
+        R.tool_call("t1", "Task", "a", prompt="x", subagent_type="read-only"),
+        R.tool_call("t2", "Task", "b", prompt="y", subagent_type="read-only"),
+    ], parallel_safe_task_profiles=frozenset())
+    assert pool.max_inflight == 1, pool.timeline
+
+
+async def test_every_child_of_a_fanout_inherits_the_grant_scope_and_deny_list(monkeypatch):
+    """D4 holds on the parallel path: each Task call carries the same grant
+    scope and this iteration's deny list in its dispatch kwargs, which
+    `mcp_pool.call_tool` puts in `_meta` and `main.call_tool` binds for the
+    child (`builtin_task.current_parent_grant_scope` / `_disallowed`)."""
+    pool, _ = await _fanout(monkeypatch, [
+        R.tool_call("t1", "Task", "a", prompt="x", subagent_type="read-only"),
+        R.tool_call("t2", "Task", "b", prompt="y", subagent_type="read-only"),
+    ], grant_scope="worker:deep-research",
+        disallowed_tools=["email_send", "grant_create"])
+    assert pool.max_inflight == 2, pool.timeline
+    tasks = [c for c in pool.calls if c["name"] == "Task"]
+    assert len(tasks) == 2
+    for c in tasks:
+        assert c["grant_scope"] == "worker:deep-research"
+        assert set(c["disallowed_tools"]) >= {"email_send", "grant_create"}
+
+
+def test_parallel_safe_task_qualification():
+    safe = frozenset({"read-only"})
+    ro = {"Read"}
+    fresh = _tc("Task", "t1", {"subagent_type": "read-only", "prompt": "p"})
+    resume = _tc("Task", "t2", {"subagent_type": "read-only", "task_id": "x"})
+    default = _tc("Task", "t3", {"prompt": "p"})
+    assert L._batch_is_read_only([fresh, fresh], ro, safe)
+    assert L._is_task_fanout([fresh, fresh], safe)
+    assert not L._batch_is_read_only([fresh, resume], ro, safe)
+    assert not L._batch_is_read_only([fresh, default], ro, safe)
+    assert not L._batch_is_read_only([fresh, fresh], ro)          # no profiles
+    assert not L._is_task_fanout([fresh, _tc("Read", "r")], safe)
+    assert L._batch_is_read_only([fresh, _tc("Read", "r")], ro, safe)

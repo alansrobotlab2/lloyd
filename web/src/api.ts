@@ -1557,6 +1557,24 @@ export const api = {
   killSessionProc: (sessionId: string): Promise<{ killed: boolean; session_id: string }> =>
     fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/kill-proc`, { method: 'POST' }).then(r => r.json()),
 
+  // ── Task subagents (P8) ──
+  // Live rows from the aggregator; cancel/steer act FOR `sessionId`, which the
+  // aggregator checks against the session that spawned the child.
+  getSubagents: (): Promise<AgentState['subagents'] & { error?: string }> =>
+    fetch(`${API_BASE}/subagents`).then(r => r.json()),
+  cancelSubagent: (taskId: string, sessionId: string, reason = ''): Promise<SubagentControlResult> =>
+    fetch(`${API_BASE}/subagents/${encodeURIComponent(taskId)}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, reason }),
+    }).then(r => r.json()),
+  steerSubagent: (taskId: string, sessionId: string, text: string): Promise<SubagentControlResult> =>
+    fetch(`${API_BASE}/subagents/${encodeURIComponent(taskId)}/steer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, text }),
+    }).then(r => r.json()),
+
   // ── Inner Voice ──
   // Patch session metadata: experiment tag + critic opt-in flag +
   // user-turn evaluation flag. All optional — caller sends only what changed.
@@ -2121,8 +2139,20 @@ export interface RecentSessions {
   sessions: RecentSession[]
 }
 
+export interface SubagentControlResult {
+  ok?: boolean
+  task_id?: string
+  cancelled?: boolean
+  error?: string
+}
+
 export interface SubagentRun {
   run_id: string
+  // Stable across continuations; what cancel/steer address. Optional because
+  // an older aggregator build may not send the control fields.
+  task_id?: string
+  steerable?: boolean
+  cancellable?: boolean
   subagent_type: string
   description: string
   prompt_preview: string

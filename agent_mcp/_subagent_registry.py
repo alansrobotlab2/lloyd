@@ -430,6 +430,48 @@ def cancel_run(task_id: str, *, caller: CallerScope, reason: str = "") -> bool:
     return True
 
 
+def control_request(verb: str, task_id: str, body: Any) -> tuple[int, dict[str, Any]]:
+    """`POST /subagents/{task_id}/{cancel|steer}` on the aggregator (P8).
+
+    The Mission Control half of the control surface. The backend proxies the
+    browser's request here (Task children live in this process, the same seam
+    `/state` and `/browser/navigate` cross), and the request names the session
+    it acts for: `{"session_id", "reason"?, "text"?}`. That session goes through
+    `policy_allows` like any other caller — this route does not widen the
+    policy, it gives the orchestrating session a way in that is not a tool
+    call. A request naming another session is refused (403), exactly as a tool
+    call from that session would be; the credential on every aggregator route
+    (#1053) is what keeps an arbitrary local process from asking at all.
+
+    Returns `(status, body)`: 200 done, 400 malformed, 404 no active run,
+    403 refused by the policy or a run with no handle to act on.
+    """
+    if verb not in ("cancel", "steer"):
+        return 404, {"error": f"unknown verb {verb!r}"}
+    if not isinstance(body, dict):
+        return 400, {"error": "body must be an object"}
+    session_id = str(body.get("session_id") or "").strip()
+    if not session_id:
+        return 400, {"error": "session_id is required: the session this request acts for"}
+    reason = str(body.get("reason") or "").strip()
+    if active_run(task_id) is None:
+        return 404, {"error": f"no active subagent run for task_id {task_id!r}",
+                     "task_id": task_id}
+    caller = CallerScope(session_id=session_id)
+    try:
+        if verb == "cancel":
+            cancel_run(task_id, caller=caller, reason=reason or "mission control")
+            return 200, {"ok": True, "task_id": task_id, "cancelled": True}
+        text = str(body.get("text") or "")
+        if not text.strip():
+            return 400, {"error": "text is required to steer"}
+        message = steer(task_id, text, caller=caller, reason=reason or "mission control")
+        return 200, {"ok": True, "task_id": task_id, "appended": message}
+    except SteeringRefused as exc:
+        return 403, {"error": str(exc), "task_id": task_id,
+                     "policy": STEERING_POLICY}
+
+
 # ---------------------------------------------------------------------------
 # Resumable history
 # ---------------------------------------------------------------------------

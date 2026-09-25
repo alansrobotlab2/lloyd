@@ -323,6 +323,13 @@ class RunOptions:
     # hook deliberately refuses to play at.
     parallel_tool_calls_enabled: bool = False
     parallel_tool_calls_max_concurrency: int = 4
+    # P8: `Task` subagent profiles whose children may overlap
+    # (`subagents.<type>.parallel_safe: true`). A batch made only of fresh
+    # `Task` calls to these profiles runs concurrently even while
+    # `parallel_tool_calls_enabled` is off, under the same concurrency bound.
+    # `agent_mcp/builtin_task.py` holds such a child to the read-only tool
+    # set, which is what makes the overlap safe rather than hopeful.
+    parallel_safe_task_profiles: frozenset[str] = frozenset()
 
     final_schema: dict[str, Any] | None = None
     final_schema_prompt: str = ""

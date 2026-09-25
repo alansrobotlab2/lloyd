@@ -193,3 +193,128 @@ def test_a_wrapped_up_budget_run_returns_its_summary_marked_truncated(monkeypatc
     assert res["stop_reason"] == "max_turns"
     assert res["tools_used"] == ["Read", "Read"]
     assert engine.requests[-1].kwargs["tool_choice"] == "none"
+
+
+# ── P8: subagent defaults (review 2026-09-24) ───────────────────────────────
+
+def _real_loop_task(monkeypatch, steps, *, profile=None, args=None, tools=None):
+    """Run `_task` through the REAL loop against a scripted engine and pool."""
+    from app.harness.tests._replay import ReplayEngine, ReplayPool, install
+
+    engine = ReplayEngine(steps)
+    pool = ReplayPool(tools)
+    install(monkeypatch, engine, pool)
+    prof = {"system_prompt": "", "max_turns": 8, "disallowed_tools": [],
+            "model": "primary", "base_url": "http://127.0.0.1:8096"}
+    prof.update(profile or {})
+    monkeypatch.setattr(builtin_task, "_load_subagent_profile", lambda t: dict(prof))
+    res = json.loads(asyncio.run(builtin_task._task(
+        {"prompt": "review the thing", **(args or {})})))
+    return res, engine, pool
+
+
+def test_an_empty_profile_prompt_gets_the_default_subagent_prompt(monkeypatch):
+    from app.harness.tests._replay import Step
+
+    res, engine, _ = _real_loop_task(monkeypatch, [Step(text="The answer.")])
+    assert res["response"] == "The answer."
+    system = engine.requests[0].messages[0]
+    assert system["role"] == "system"
+    assert builtin_task._DEFAULT_SUBAGENT_PROMPT in system["content"]
+    assert "returned to that agent verbatim" in builtin_task._DEFAULT_SUBAGENT_PROMPT
+
+    # A profile that names its own prompt keeps it, and gets no default.
+    _res, engine, _ = _real_loop_task(
+        monkeypatch, [Step(text="ok")], profile={"system_prompt": "PROFILE PROMPT"})
+    content = engine.requests[0].messages[0]["content"]
+    assert "PROFILE PROMPT" in content
+    assert builtin_task._DEFAULT_SUBAGENT_PROMPT not in content
+
+
+def test_the_iteration_anchor_is_sized_to_the_profiles_budget(monkeypatch):
+    """A 4-iteration child hears its cap at 75% (iteration 3), in the chat
+    path's wording, appended to the conversation — never in position 0."""
+    from app.harness.tests._replay import Step, tool_call
+
+    steps = [Step(tool_calls=[tool_call(f"c{i}", "Read", path=f"/{i}")])
+             for i in range(3)] + [Step(text="Done: read three files.")]
+    res, engine, _ = _real_loop_task(monkeypatch, steps, profile={"max_turns": 4})
+    assert res["response"] == "Done: read three files."
+    anchors = [m for r in engine.requests for m in r.messages
+               if m.get("role") == "user"
+               and "<budget>Iteration" in str(m.get("content"))]
+    assert anchors, "the child was never told its budget"
+    assert "Iteration 3 of 4" in anchors[0]["content"]
+    assert "<budget>" not in engine.requests[-1].messages[0]["content"]
+
+
+def test_final_schema_round_trips_to_structured(monkeypatch):
+    from app.harness import finalizer
+    from app.harness.tests._replay import Step
+
+    seen = {}
+
+    async def fake_finalizer(**kw):
+        seen["schema"] = kw["schema"]
+        return {"verdict": "race"}, "", {}
+
+    monkeypatch.setattr(finalizer, "run_finalizer", fake_finalizer)
+    schema = {"type": "object", "properties": {"verdict": {"type": "string"}},
+              "required": ["verdict"]}
+    res, _engine, _ = _real_loop_task(
+        monkeypatch, [Step(text="It is a race.")], args={"final_schema": schema})
+    assert seen["schema"] == schema
+    assert res["response"] == "It is a race."
+    assert res["structured"] == {"verdict": "race"}
+    assert res["structured_error"] == ""
+
+    # No schema asked for: no structured keys, and no finalizer call.
+    seen.clear()
+    res, _engine, _ = _real_loop_task(monkeypatch, [Step(text="plain")])
+    assert "structured" not in res and not seen
+
+    # A schema that is not an object schema is refused on the result, not
+    # by failing the Task — the prose answer still stands.
+    res, _engine, _ = _real_loop_task(
+        monkeypatch, [Step(text="plain")], args={"final_schema": {"type": "string"}})
+    assert res["response"] == "plain"
+    assert res["structured"] is None
+    assert "type" in res["structured_error"]
+    assert not seen
+
+    # The finalizer is skipped after a budget death, and says so.
+    from app.harness.tests._replay import tool_call
+    res, _engine, _ = _real_loop_task(
+        monkeypatch,
+        [Step(tool_calls=[tool_call("c1", "Read")]), Step(text="Partial.")],
+        profile={"max_turns": 1}, args={"final_schema": schema})
+    assert res["stop_reason"] == "max_turns" and res["structured"] is None
+    assert res["structured_error"] == "skipped: stop_reason=max_turns"
+
+
+def test_final_schema_is_advertised_on_the_task_input_schema():
+    tool = asyncio.run(builtin_task.list_tools())[0]
+    prop = tool.input_schema["properties"]["final_schema"]
+    assert prop["type"] == "object"
+    assert "final_schema" not in tool.input_schema["required"]
+
+
+def test_a_parallel_safe_childs_tool_set_is_read_only(monkeypatch):
+    """The fan-out is safe because of the child, not because of its prompt:
+    a parallel-safe profile's child is advertised only readOnlyHint tools."""
+    from app.harness.tests._replay import Step
+
+    tools = {"Read": True, "Grep": True, "vault_write": False, "Bash": False,
+             "email_send": False, "Edit": False, "Write": False}
+    _res, engine, _ = _real_loop_task(
+        monkeypatch, [Step(text="ok")], tools=tools,
+        profile={"parallel_safe": True})
+    advertised = {t["function"]["name"] for t in (engine.requests[0].tools or [])}
+    assert {"Read", "Grep"} <= advertised
+    assert not advertised & {"vault_write", "Bash", "email_send", "Edit", "Write"}, advertised
+
+    # The same profile without the flag keeps its ordinary tool set.
+    _res, engine, _ = _real_loop_task(
+        monkeypatch, [Step(text="ok")], tools=tools, profile={"parallel_safe": False})
+    advertised = {t["function"]["name"] for t in (engine.requests[0].tools or [])}
+    assert "vault_write" in advertised

@@ -1024,10 +1024,18 @@ async def run_query(
             # outside the slice the reorder may move (review 2026-09-24, D8).
             batch_base = chat_msgs_len_before_hook
 
+            # P8: a batch of fresh Task calls to parallel-safe profiles
+            # overlaps even with general dispatch off. Each child still gets
+            # its own `_meta` grant scope and deny list from `_execute_tool_call`
+            # (D4), exactly as it would sequentially.
+            _safe_tasks = frozenset(
+                getattr(options, "parallel_safe_task_profiles", None) or ())
             run_parallel = (
-                getattr(options, "parallel_tool_calls_enabled", False)
-                and len(tool_calls_committed) > 1
-                and _batch_is_read_only(tool_calls_committed, _read_only_names(pool))
+                len(tool_calls_committed) > 1
+                and _batch_is_read_only(tool_calls_committed,
+                                        _read_only_names(pool), _safe_tasks)
+                and (getattr(options, "parallel_tool_calls_enabled", False)
+                     or _is_task_fanout(tool_calls_committed, _safe_tasks))
             )
 
             if run_parallel:
@@ -2477,15 +2485,39 @@ def _read_only_names(pool: MCPPool) -> set[str]:
     return names
 
 
+_TASK_TOOL_NAMES = frozenset({"Task", "mcp__lloyd-mcp__Task"})
+
+
+def _is_parallel_safe_task(tc: dict[str, Any],
+                           parallel_safe_profiles: frozenset[str] | set[str]) -> bool:
+    """A fresh `Task` call to a profile declared `parallel_safe` (P8).
+
+    The profile is read off the call's own arguments, with the tool's default
+    (`general-purpose`) when none is given — a default that is not parallel
+    safe. A `task_id` resume never qualifies: the stored run's profile wins
+    over the argument (`builtin_task._task`), so the argument says nothing
+    about what would run, and two resumes of one id race `claim_history`.
+    """
+    if tc["function"]["name"] not in _TASK_TOOL_NAMES or not parallel_safe_profiles:
+        return False
+    args = tc["_args_dict"]
+    if str(args.get("task_id") or "").strip():
+        return False
+    return str(args.get("subagent_type") or "general-purpose") in parallel_safe_profiles
+
+
 def _batch_is_read_only(tool_calls: list[dict[str, Any]],
-                        read_only: set[str]) -> bool:
+                        read_only: set[str],
+                        parallel_safe_profiles: frozenset[str] | set[str] = frozenset(),
+                        ) -> bool:
     """True when every call in the batch is safe to overlap with the others.
 
     A parse error never dispatches, and ToolSearch is intercepted in-process
     and touches only the LoadedToolSet, which `_pre_dispatch` mutates in wire
-    order anyway. Everything else must carry the hint. One writer makes the
-    whole batch sequential: two Edits to one file, or an Edit racing the Read
-    that justifies it, is not a reordering anybody asked for.
+    order anyway. Everything else must carry the hint — or be a fresh `Task`
+    to a parallel-safe profile, whose child is held to the read-only set. One
+    writer makes the whole batch sequential: two Edits to one file, or an Edit
+    racing the Read that justifies it, is not a reordering anybody asked for.
     """
     for tc in tool_calls:
         if tc["_args_dict"].get("__parse_error__"):
@@ -2493,8 +2525,31 @@ def _batch_is_read_only(tool_calls: list[dict[str, Any]],
         name = tc["function"]["name"]
         if name == TOOLSEARCH_TOOL_NAME or name in read_only:
             continue
+        if _is_parallel_safe_task(tc, parallel_safe_profiles):
+            continue
         return False
     return True
+
+
+def _is_task_fanout(tool_calls: list[dict[str, Any]],
+                    parallel_safe_profiles: frozenset[str] | set[str]) -> bool:
+    """A batch that is nothing but parallel-safe `Task` calls (P8).
+
+    This is the one batch shape that overlaps while general parallel dispatch
+    (`harness.parallel_tool_calls.enabled`) is still off: the fan-out case is
+    where overlap pays most — each child is minutes of engine time — and it is
+    the case whose safety does not rest on the soak that flag is waiting on,
+    because the child's tool set is fixed read-only by its profile. A batch
+    that mixes in a Read waits for the general flag like any other.
+    """
+    seen = False
+    for tc in tool_calls:
+        if tc["_args_dict"].get("__parse_error__"):
+            continue
+        if not _is_parallel_safe_task(tc, parallel_safe_profiles):
+            return False
+        seen = True
+    return seen
 
 
 def _tool_history_message(call_id: str, evt: dict[str, Any], *,

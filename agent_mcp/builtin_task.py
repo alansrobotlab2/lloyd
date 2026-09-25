@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import functools
 import json
 import logging
 import uuid
@@ -86,6 +87,24 @@ def current_caller_scope() -> CallerScope:
     )
 
 
+# The system prompt a child gets when its profile names none (P8). A
+# `general-purpose` child used to run with NO system prompt at all — a bare
+# user message and a toolbox — so nothing told it that its last message is the
+# whole deliverable, and a child that ended on "Let me check one more thing"
+# handed that line back as its answer. Deliberately tool-agnostic: a profile's
+# deny list decides what it may call, and a prompt that names tools drifts from
+# that list (the `read-only` profile's prompt told it to use the Bash it was
+# denied).
+_DEFAULT_SUBAGENT_PROMPT = (
+    "You are a subagent working for another agent on one scoped task. Your "
+    "final message is returned to that agent verbatim and is all it sees of "
+    "your work: none of your tool calls or intermediate text reach it. Do the "
+    "task, then end with one self-contained answer. Be concise. Cite files by "
+    "absolute path (with line numbers where they matter). Say plainly what "
+    "you could not verify or did not get to, rather than implying you did."
+)
+
+
 def _load_subagent_profile(subagent_type: str) -> dict[str, Any]:
     """Read one `subagents:` profile from the live config.
 
@@ -104,7 +123,60 @@ def _load_subagent_profile(subagent_type: str) -> dict[str, Any]:
         "disallowed_tools": list(profile.get("disallowed_tools") or []),
         "model": profile.get("model", ""),
         "base_url": profile.get("base_url", ""),
+        # P8: the parent may overlap a batch of calls to this profile, so its
+        # child is held to the read-only tool set (see `_task`). Literally
+        # `true` only, matching `app.mcp_discovery.parallel_safe_task_profiles`
+        # — the parent's reading and the child's must be the same.
+        "parallel_safe": profile.get("parallel_safe") is True,
     }
+
+
+def _parallel_safe_blocked(disallowed: list[str]) -> list[str]:
+    """`disallowed` plus every discovered tool that is not read-only (P8).
+
+    A parallel-safe child is overlapped with its siblings by the parent's loop
+    (`app.harness.loop._is_task_fanout`), so what makes that safe has to be a
+    property of the child, not of its prompt: every tool without `readOnlyHint`
+    in `agent_mcp.annotations` is refused to it, the same derivation plan mode
+    uses. Evaluated per iteration through `disallowed_tools_refresh`, because
+    the tool universe is recorded when the child's own pool opens — after
+    these options are built. `ToolSearch` and `_`-internal names stay usable;
+    until a universe exists the three-tool floor applies, never nothing.
+    """
+    from agent_mcp.annotations import READ_ONLY
+    from app.mcp_discovery import PLAN_MODE_BLOCKED_TOOLS, _TOOL_UNIVERSE
+
+    out = list(disallowed)
+    seen = set(out)
+    names = set(_TOOL_UNIVERSE) or set(PLAN_MODE_BLOCKED_TOOLS)
+    for name in sorted(names):
+        if name in READ_ONLY or name.startswith("_") or name == "ToolSearch":
+            continue
+        if name not in seen:
+            out.append(name)
+            seen.add(name)
+    return out
+
+
+def _final_schema_arg(args: dict[str, Any]) -> tuple[dict | None, str]:
+    """The optional `final_schema` argument, or why it was refused.
+
+    The object goes to the harness finalizer as a guided-decoding grammar, so
+    only a JSON-Schema *object* schema is accepted; anything else is reported
+    back on the result as `structured_error` rather than failing the Task — the
+    child's prose answer is still the answer.
+    """
+    raw = args.get("final_schema")
+    if raw in (None, "", {}):
+        return None, ""
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return None, "final_schema is not valid JSON"
+    if not isinstance(raw, dict) or raw.get("type") != "object":
+        return None, 'final_schema must be a JSON Schema with "type": "object"'
+    return raw, ""
 
 
 def _base_url_for(model: str) -> str:
@@ -202,6 +274,7 @@ async def _task(args: dict[str, Any]) -> str:
     prompt = args.get("prompt", "")
     subagent_type = args.get("subagent_type", "general-purpose")
     resume_id = (args.get("task_id") or "").strip()
+    final_schema, schema_error = _final_schema_arg(args)
 
     if not prompt:
         return json.dumps({"error": "prompt is required"})
@@ -245,6 +318,7 @@ async def _task(args: dict[str, Any]) -> str:
     from app.tool_bans import WORKER_AUTOMOD_BAN
     from app.harness.skill_dispatch import install_skill_dispatch_hook
     from app.harness.turn_guards import install_turn_guards
+    from app.deadline_anchor import build_iteration_anchor
 
     # Resolve model and base_url.
     #
@@ -315,6 +389,16 @@ async def _task(args: dict[str, Any]) -> str:
     # The Inner Voice observer is deliberately NOT attached here: it is
     # scoped to a session turn (goal card, session todos, ambient and
     # clarify channels) and a subagent has none of those.
+    # P8: a parallel-safe profile's child may be running beside its siblings,
+    # so it gets the read-only set, re-derived per iteration (see
+    # `_parallel_safe_blocked`). A resume keeps the profile it was stored
+    # with, so a stored parallel-safe run stays read-only too.
+    disallowed_refresh = None
+    if profile.get("parallel_safe"):
+        base_disallowed = list(disallowed)
+        disallowed = _parallel_safe_blocked(base_disallowed)
+        disallowed_refresh = functools.partial(_parallel_safe_blocked, base_disallowed)
+
     task_hooks = HookRegistry()
     install_default_safety_hook(task_hooks)
     # The dispatch-time skill deliverer (#536), under the same
@@ -363,9 +447,17 @@ async def _task(args: dict[str, Any]) -> str:
     options = RunOptions(
         model=model,
         base_url=base_url,
-        system_prompt=profile["system_prompt"],
+        system_prompt=profile["system_prompt"] or _DEFAULT_SUBAGENT_PROMPT,
         max_turns=profile["max_turns"],
         disallowed_tools=disallowed,
+        disallowed_tools_refresh=disallowed_refresh,
+        # P8: the child sees its own cap coming, in the chat path's wording at
+        # 75% and 90% — before this a child learned its budget from the cap.
+        # Appended, never written into position 0.
+        state_anchor=build_iteration_anchor(profile["max_turns"]),
+        # P8: the caller's optional contract for the answer. Restated by the
+        # finalizer after a clean stop only; `structured` rides the result.
+        final_schema=final_schema,
         hooks=task_hooks,
         mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
         session_id=sub_session_id,
@@ -447,6 +539,8 @@ async def _task(args: dict[str, Any]) -> str:
     tool_calls_summary: list[str] = []
     stop_reason = "stop"
     num_turns = 0
+    structured: dict | None = None
+    structured_error = schema_error
 
     # Open the live row BEFORE the loop starts. A Task blocks its caller
     # for as long as it runs, so a row created on completion would only
@@ -518,6 +612,9 @@ async def _task(args: dict[str, Any]) -> str:
             elif evt["type"] == "result":
                 stop_reason = evt.get("stop_reason", "stop")
                 num_turns = int(evt.get("num_turns", 0) or 0)
+                if final_schema is not None:
+                    structured = evt.get("structured")
+                    structured_error = str(evt.get("structured_error") or "")
     except asyncio.CancelledError:
         # Closed here rather than in `finally`: a finally runs before the
         # success paths below, and `finish` is idempotent, so a blanket
@@ -591,6 +688,9 @@ async def _task(args: dict[str, Any]) -> str:
             err["partial_text"] = last_iter_text[:500]
         if description:
             err["description"] = description
+        if final_schema is not None or schema_error:
+            err["structured"] = None
+            err["structured_error"] = structured_error
         err["task_id"] = record.task_id
         _close("failed", stop_reason=stop_reason, error=reason)
         return json.dumps(err)
@@ -607,6 +707,12 @@ async def _task(args: dict[str, Any]) -> str:
         result["tools_used"] = tool_calls_summary
     if description:
         result["description"] = description
+    # Only when the caller asked: `structured` is the object or None, and
+    # `structured_error` says why it is None (skipped after a non-clean stop,
+    # a bad schema, a finalizer failure) — never a silent absence.
+    if final_schema is not None or schema_error:
+        result["structured"] = structured
+        result["structured_error"] = structured_error
     result["task_id"] = record.task_id
     _close("completed", stop_reason=stop_reason, response_chars=len(final_text))
     return json.dumps(result)
@@ -638,7 +744,9 @@ async def list_tools():
                 "CONTINUE the same subagent instead of starting over — it keeps "
                 "its conversation, its tool results and its warm cache, which is "
                 "what you want when one ran out of turns mid-investigation. "
-                "Nested Task calls are not allowed (recursion cap = 1)."
+                "Nested Task calls are not allowed (recursion cap = 1). "
+                "Several `subagent_type: read-only` Tasks called in one "
+                "message run at the same time; that profile cannot write."
             ),
             inputSchema={
                 "type": "object",
@@ -652,6 +760,17 @@ async def list_tools():
                         "type": "string",
                         "description": "Profile name from config.yaml subagents section (default: general-purpose)",
                         "default": "general-purpose",
+                    },
+                    "final_schema": {
+                        "type": "object",
+                        "description": (
+                            "Optional JSON Schema (type: object) for a "
+                            "machine-readable answer. After the subagent "
+                            "finishes cleanly it restates its answer as one "
+                            "object matching this schema, returned as "
+                            "`structured` beside `response`; "
+                            "`structured_error` says why when there is none."
+                        ),
                     },
                     "task_id": {
                         "type": "string",

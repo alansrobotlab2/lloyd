@@ -909,3 +909,48 @@ ttft_ms}` on the first `assistant_message` of each turn from all three
 writers — the iteration `prefix_miss` deliberately skips. Rollout is
 `system_tail`, then an A/B of `user_tail`; adopt when turn-N+1 first-iteration
 `reuse` rises and `eval/run_eval.py` does not fall. `tests/test_prompt_layout.py`.
+
+### P8 — parallel read-only Task fan-out; subagent defaults
+
+- **Fan-out.** `subagents.<type>.parallel_safe: true` (shipped on
+  `read-only` only) is read by `mcp_discovery.parallel_safe_task_profiles()`
+  into `RunOptions.parallel_safe_task_profiles`. `loop._batch_is_read_only`
+  accepts a `Task` call whose `subagent_type` is in that set and that carries
+  no `task_id` (a resume's stored profile wins over the argument, and two
+  resumes of one id race `claim_history`); no `subagent_type` means
+  `general-purpose`, which is not safe. A batch that is **only** such Tasks
+  (`_is_task_fanout`) overlaps even with `harness.parallel_tool_calls.enabled`
+  off, under the same `max_concurrency`; a Task mixed with a Read waits for
+  the general flag like any other batch.
+- **Why it is safe.** Not the prompt: `builtin_task` holds a parallel-safe
+  child to the `readOnlyHint` set (`_parallel_safe_blocked`, plan mode's
+  derivation, re-read per iteration through `disallowed_tools_refresh`
+  because the tool universe is recorded when the child's own pool opens).
+  Each overlapped call is still its own `_execute_tool_call`, so the D4
+  `_meta` grant scope and this iteration's deny list reach every child.
+  Kill switch: remove `parallel_safe` (children run sequentially and keep
+  only their profile's deny list).
+- **Defaults.** A profile with an empty prompt gets `_DEFAULT_SUBAGENT_PROMPT`
+  (final message is all the caller sees; concise; absolute paths; say what
+  was not verified). Every child gets `build_iteration_anchor(max_turns)`
+  (75%/90%, appended). `Task` takes an optional `final_schema` (a JSON Schema
+  with `type: object`) → `RunOptions.final_schema`; the result then carries
+  `structured` and `structured_error` (a bad schema or a skipped finalizer is
+  reported there, never a failed Task). The `read-only` profile's prompt no
+  longer names the Bash it is denied (`tests/test_subagent_profiles.py`).
+- **Stop/steer from Mission Control.** `POST /api/subagents/{task_id}/cancel`
+  and `/steer` (`app/routers/subagents.py`) proxy to the aggregator's
+  `POST /subagents/{task_id}/{verb}` (`_subagent_registry.control_request`),
+  URL and credential from `app.aggregator_config.subagent_route`. The body
+  names the session it acts for and `policy_allows`
+  (`orchestrator-session`) decides — 403 for any other session, 404 for no
+  active run. `GET /api/subagents` lists the rows; `RunningAgentsPanel` shows
+  running children with a stop button acting for each row's
+  `parent_session_id`. The policy is not widened: the operator acts as the
+  spawning session, the same authority that session's next turn has.
+- Pins: `app/harness/tests/test_parallel_dispatch.py` (P8 block),
+  `tests/test_task_subagent_answer.py` (default prompt, iteration anchor,
+  `final_schema` round trip, read-only child), `tests/test_subagent_profiles.py`,
+  `tests/test_task_steering.py` (Mission Control half, over the real
+  credential-wrapped routes). Measure: wall time of a 3-way `read-only`
+  fan-out and vLLM batch occupancy against the same prompts sequential.

@@ -240,6 +240,7 @@ def _get_harness_kwargs() -> dict:
         out["parallel_tool_calls_enabled"] = bool(par["enabled"])
     if "max_concurrency" in par:
         out["parallel_tool_calls_max_concurrency"] = max(1, int(par["max_concurrency"]))
+    out["parallel_safe_task_profiles"] = parallel_safe_task_profiles()
     fin = harness.get("finalizer") or {}
     if "max_tokens" in fin:
         out["finalizer_max_tokens"] = int(fin["max_tokens"])
@@ -251,6 +252,21 @@ def _get_harness_kwargs() -> dict:
     out.update(max_turns_wrapup_kwargs())
     out.update(intra_turn_compaction_kwargs())
     return out
+
+
+def parallel_safe_task_profiles() -> frozenset[str]:
+    """`subagents.<type>.parallel_safe: true`, as the set the loop checks (P8).
+
+    Read from the same `subagents:` block `agent_mcp/builtin_task.py` loads
+    its profiles from, so the parent that decides to overlap a batch and the
+    child that holds itself to the read-only set agree on which profiles
+    those are. Literally `true` only: a truthy string is a typo, not a vote.
+    """
+    profiles = CONFIG.get("subagents") or {}
+    return frozenset(
+        str(name) for name, prof in profiles.items()
+        if isinstance(prof, dict) and prof.get("parallel_safe") is True
+    )
 
 
 def max_turns_wrapup_kwargs() -> dict:

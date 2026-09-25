@@ -40,6 +40,8 @@ _PATHS: dict[str, str] = {
     "changes": "/changes",
     "changes_revert": "/changes/revert",
     "browser_navigate": "/browser/navigate",
+    # `{task_id}` and `{verb}` are filled by `subagent_route`.
+    "subagent_control": "/subagents/{task_id}/{verb}",
 }
 
 
@@ -52,6 +54,13 @@ def _origin() -> str:
 def route(name: str) -> str:
     """Absolute URL of one aggregator route, e.g. `route("changes_revert")`."""
     return _origin() + _PATHS[name]
+
+
+def subagent_route(task_id: str, verb: str) -> str:
+    """Absolute URL of `POST /subagents/{task_id}/{verb}` (P8), id quoted."""
+    from urllib.parse import quote
+    return _origin() + _PATHS["subagent_control"].format(
+        task_id=quote(task_id, safe=""), verb=quote(verb, safe=""))
 
 
 def auth_headers_for(url: str) -> dict[str, str]:
