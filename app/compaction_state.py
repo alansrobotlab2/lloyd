@@ -61,12 +61,15 @@ import time
 from pathlib import Path
 from typing import Any, Iterable
 
-from app.compaction import _CONVERSATION_ROLES
+from app.compaction import _CONVERSATION_ROLES, is_history_row
 
 logger = logging.getLogger("lloyd-compaction-state")
 
 RECORD_KEY = "compaction"
 RECORD_VERSION = 1
+#: The memory-flush entry inside the record (P3, `app/memory_flush.py`).
+#: It may exist with no summary at all; `load_record` then reads None.
+FLUSH_KEY = "flush"
 
 #: The roles the turn-start stack keeps from `data["messages"]`. Indexes in the
 #: record are into THIS filtered list, so the filter is the one definition in
@@ -100,8 +103,7 @@ _MIN_INPUT_BUDGET_TOKENS = 2_000
 
 def conversation_rows(messages: Iterable[dict]) -> list[dict]:
     """The rows the turn-start stack works on, in session order."""
-    return [m for m in messages or [] if isinstance(m, dict)
-            and m.get("role") in CONVERSATION_ROLES]
+    return [m for m in messages or [] if is_history_row(m)]
 
 
 def covered_sha(rows: Iterable[dict]) -> str:
@@ -260,8 +262,15 @@ async def save_record(session_id: str, record: dict, *,
         convo = conversation_rows(data.get("messages") or [])
         if validate(record, convo) is None:
             raise _Stale()
-        data.pop(RECORD_KEY, None)
-        data[RECORD_KEY] = record
+        prior = data.pop(RECORD_KEY, None)
+        out = record
+        # P3: the memory-flush bookkeeping (`app/memory_flush.py`) shares this
+        # key and is not the fold's to drop. Carried over from disk onto a
+        # copy, so the caller's in-memory record is untouched.
+        flush = prior.get(FLUSH_KEY) if isinstance(prior, dict) else None
+        if isinstance(flush, dict) and FLUSH_KEY not in record:
+            out = {**record, FLUSH_KEY: flush}
+        data[RECORD_KEY] = out
 
     try:
         return await sessions_io.mutate_session(

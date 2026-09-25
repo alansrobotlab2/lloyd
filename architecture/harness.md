@@ -818,3 +818,48 @@ Ships with today's behaviour byte for byte; the eval decides the flips.
   `--n 100 --arms injected,injected_aa,desc_push,desc_pull --label skills-index`
   in a paused-pool window. `tests/test_skills_index_descriptions.py`,
   `tests/test_skill_injection_telemetry.py`.
+
+### P3 — memory flush before compaction (ships off)
+
+Shortly before the compaction wall, one quiet turn writes what is worth keeping
+into memory while the older turns are still verbatim (OpenClaw's pre-compaction
+flush). `app/memory_flush.py`; switch `compaction.memory_flush.enabled`
+(**false** until the recall eval's `summary_legacy` / `memory_flush` arms are
+compared, `eval/run_compaction_recall_eval.py`, run past the threshold).
+
+- **Trigger** at the end of a chat turn, in `_run_turn`'s `result` branch
+  (`_memory_flush_after_turn`), not inside `load_and_compact_session`: when the
+  turn's engine-reported peak prompt ≥ `trigger_fraction` (0.85) × the
+  compaction threshold and no flush is open in this cycle, it enqueues
+  `build_flush_turn` as an ambient turn (dedup key `memory_flush`; runs when
+  the session is idle, a user turn preempts it).
+- **Cycle** bookkeeping is `data["compaction"]["flush"]` = `{turn_id, at,
+  status queued|done|cancelled, trigger_tokens, threshold, memory_adds,
+  fact_adds, duration_ms, consumed}`. A cycle ends when D2's record
+  `updated_at` passes the flush's `at`, or when a later turn start summarised
+  or truncated (`consumed`, the only signal with `persist_summary` off). A
+  cancelled flush, or one queued over an hour ago that never reported, does not
+  hold the cycle closed. `compaction_state.save_record` carries the entry over;
+  `load_record` ignores a `compaction` dict holding only a flush.
+- **The turn**: `RunOptions.allowed_tools` (new; None = no allow-list) =
+  `memory_read, memory_add, fact_get, fact_add` (the plan's `fact_search` does
+  not exist). Applied where the catalog is built (the left-out tools join the
+  surface-hidden set, so every iteration's dispatch set too) and explicitly in
+  `_pre_dispatch` (an undiscovered name or ToolSearch is refused, `disabled`).
+  An allow-list turn gets an uncached LoadedToolSet, so the chat's loaded tools
+  survive it; tool search is off unless ToolSearch is listed. Task children
+  build their own RunOptions and are unaffected (and `Task` is not listed).
+  `priority=1`, `max_turns` 6, session system prompt (cache reuse), safety +
+  grant hooks, no Inner Voice (`_iv_should_fire_on_turn` skips `memory_flush`).
+  The prompt asks for typed `memory_add` entries (P4's `type`) and one closing
+  line; it does not address the user.
+- **Rows**: the flush turn's id is `mflush-<hex>` (`FLUSH_TURN_PREFIX`), so
+  every row it writes carries it (X3). `app.compaction.is_history_row` is the
+  one filter for the turn-start stack and `compaction_state.conversation_rows`:
+  flush rows stay in the transcript and never re-enter the prompt, the summary
+  or its index. (The user row is not separately tagged `producer`: the id is
+  the tag, and it kept this item's hunks out of `_run_turn`'s top.)
+- **Measure**: event `compaction.memory_flush {turn_id, trigger_tokens,
+  memory_adds, fact_adds, duration_ms, status, stop_reason}` when the flush turn
+  ends; `turn_start_record.flushed_before_summary` on the next rewrite.
+- `tests/test_memory_flush.py`.

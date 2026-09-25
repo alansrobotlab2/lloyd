@@ -82,6 +82,13 @@ ARMS
               incremental Goal/Constraints/Progress/Decisions/Next steps
               record. Both need sizes past the truncation threshold; valid
               only when the summarize layer replaced a block.
+  memory_flush  P3: `summary_legacy` preceded by a memory-flush turn over the
+              uncompacted history (`app/memory_flush.py`, allow-listed to the
+              memory tools; `memory_add`/`fact_add` are recorded, not
+              written). The saved entries are rendered into the probe's
+              system prompt, as the next turn's memory block would carry
+              them. `flush_saved` says which planted facts the flush wrote
+              down; recall against `summary_legacy` says whether that helped.
 
 The in-turn trigger is a fraction of the truncation threshold (210,144)
 compared against the REPORTED prompt, which carries ~55-75k of system
@@ -200,6 +207,18 @@ ARMS: dict[str, dict[str, Any]] = {
         "options": {},
         "expects_fire": True,
         "expects_summary": True,
+    },
+    # P3 (review 2026-09-24): the flush before the wall, against
+    # `summary_legacy` at the same sizes. This pair gates flipping
+    # `compaction.memory_flush.enabled` on:
+    #   --arms summary_legacy,memory_flush --sizes 240000,280000
+    "memory_flush": {
+        "compaction": {"mode": "summarize", "persist_summary": False,
+                       "memory_flush": {"enabled": True}},
+        "options": {},
+        "expects_fire": True,
+        "expects_summary": True,
+        "flush": True,
     },
 }
 
@@ -561,8 +580,12 @@ class EvalPool:
 
     def __init__(self, discovered: list, files: dict[str, str],
                  spill_root: Path, tree_root: Path = ROOT,
-                 planted: Planted | None = None) -> None:
+                 planted: Planted | None = None, memory: bool = False) -> None:
         self._discovered = discovered
+        # P3 arm only: the memory tools answer (writes are recorded in
+        # `saved`, never written). Every other arm keeps refusing them.
+        self.memory = memory
+        self.saved: list[dict[str, Any]] = []
         self.files = files
         self.spill_root = spill_root
         self.tree_root = tree_root
@@ -631,8 +654,87 @@ class EvalPool:
                          if rx.search(ln)]
             return {"content": "\n".join(hits[:200]) or "No matches found",
                     "is_error": False}
+        if self.memory and bare in ("memory_add", "fact_add"):
+            self.saved.append({"tool": bare, **dict(args or {})})
+            return {"content": json.dumps({"ok": True}), "is_error": False}
+        if self.memory and bare == "memory_read":
+            return {"content": "(empty)", "is_error": False}
+        if self.memory and bare == "fact_get":
+            return {"content": json.dumps({"facts": []}), "is_error": False}
         return {"content": f"{bare} is not available in this evaluation; "
                            "use Read or Grep.", "is_error": True}
+
+
+def flush_saved(saved: list[dict[str, Any]], planted: Planted) -> dict[str, bool]:
+    """Which planted facts the flush turn wrote down (P3)."""
+    text = "\n".join(json.dumps(e) for e in saved)
+    return {"distinctive": planted.passphrase in text,
+            "ambiguous": planted.port in text}
+
+
+def render_saved_memory(saved: list[dict[str, Any]]) -> str:
+    """The flush's entries as the next turn's system prompt would carry them."""
+    lines = []
+    for e in saved:
+        if e.get("fact"):
+            body = f"{e.get('entity') or '?'}: {e['fact']}"
+        else:
+            body = e.get("entry") or json.dumps(
+                {k: v for k, v in e.items() if k != "tool"})
+        lines.append(f"- {body}")
+    return "<memory>\n" + "\n".join(lines) + "\n</memory>" if lines else ""
+
+
+async def run_flush(session: "Session", *, sid: str, path: Path, discovered: list,
+                    system_prompt: str, data_root: Path, base_url: str,
+                    hk: dict[str, Any]) -> dict[str, Any]:
+    """The P3 flush turn over the uncompacted history. Needs an engine."""
+    from app import memory_flush as MF
+    from app.harness import loop as L
+    from app.harness.options import RunOptions
+    from app.mcp_discovery import _get_disallowed_tools
+    from app.routers._messages_harness_adapter import _prepare_messages_for_harness
+
+    cfg = MF.flush_cfg()
+    pool = EvalPool(discovered, session.files, data_root,
+                    planted=session.planted, memory=True)
+    msgs = await _prepare_messages_for_harness(list(session.messages), "primary")
+    msgs.append({"role": "user", "content": MF.FLUSH_PROMPT})
+    turn_id = MF.new_turn_id()
+    options = RunOptions(
+        model="primary", base_url=base_url, system_prompt=system_prompt,
+        max_turns=int(cfg.get("max_turns") or 6),
+        disallowed_tools=_get_disallowed_tools(),
+        allowed_tools=list(cfg.get("tools") or MF.DEFAULT_TOOLS),
+        session_id=sid, turn_id=turn_id, surface="chat", priority=0,
+        **{**hk, "tool_search_enabled": False})
+
+    async def _pool(_o):
+        return pool
+    real_build = L._build_pool
+    L._build_pool = _pool
+    t0 = time.monotonic()
+    stop, err = "", ""
+    try:
+        async for ev in L.run_query(msgs, options):
+            if ev.get("type") == "result":
+                stop = ev.get("stop_reason") or ""
+    except Exception as e:  # noqa: BLE001
+        err = f"{type(e).__name__}: {e}"
+    finally:
+        L._build_pool = real_build
+    wall = time.monotonic() - t0
+    # The bookkeeping a finished flush leaves, so the turn-start record's
+    # `flushed_before_summary` reads what production would.
+    data = json.loads(path.read_text())
+    data["compaction"] = {"flush": {
+        "turn_id": turn_id, "at": time.time(), "status": "done" if not err else "failed",
+        **MF.count_saves(e["tool"] for e in pool.saved)}}
+    path.write_text(json.dumps(data))
+    return {"turn_id": turn_id, "stop_reason": stop, "error": err,
+            "wall_s": round(wall, 2), "saved": pool.saved,
+            "tool_names": [n for n, _ in pool.calls],
+            "planted_saved": flush_saved(pool.saved, session.planted)}
 
 
 # ---------------------------------------------------------------------------
@@ -798,6 +900,16 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
                            "est_tokens": session.est_tokens, "session_sha256": session.sha256}
 
     with compaction_overlay(spec["compaction"]):
+        if spec.get("flush") and not dry:
+            flush = await run_flush(
+                session, sid=sid, path=path, discovered=discovered,
+                system_prompt=system_prompt, data_root=data_root,
+                base_url=base_url, hk=_get_harness_kwargs())
+            row["flush"] = {k: v for k, v in flush.items() if k != "saved"}
+            row["flush"]["saved_count"] = len(flush["saved"])
+            memory_block = render_saved_memory(flush["saved"])
+            if memory_block:
+                system_prompt = f"{system_prompt}\n\n{memory_block}"
         comp = await load_and_compact_session(path, model="primary")
         turn = compaction_record.start_turn(sid, turn_id)
         turn.note_turn_start(comp)
@@ -815,7 +927,7 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
         row["turn_start"] = {k: comp.get(k) for k in (
             "tokens_before", "tokens_after", "microcompacted", "summarized",
             "truncated", "summarize_outcome", "summary_reused", "summary_folds",
-            "summary_covered_rows")}
+            "summary_covered_rows", "flushed_before_summary")}
 
         # Pre-gate: production can only fire in-turn if the prompt can reach
         # the in-turn trigger; the fixed overhead is measured on the first
@@ -948,6 +1060,10 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "recovered_via_tool": {f: sum(1 for r in kept if f in (r.get("recovered_via_tool") or []))
                                    for f in ("distinctive", "ambiguous")},
             "planted_in_prompt_at_start": sum(1 for r in kept if r.get("planted_in_prompt_at_start")),
+            # P3: which planted facts the flush turn wrote down (flush arm only).
+            "flush_saved": {f: sum(1 for r in kept if ((r.get("flush") or {})
+                                                       .get("planted_saved") or {}).get(f))
+                            for f in ("distinctive", "ambiguous")},
             "preemptions_delta": sum(r.get("preemptions_delta") or 0 for r in kept),
         }
     return out

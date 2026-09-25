@@ -40,6 +40,30 @@ logger = logging.getLogger("lloyd-server")
 # the two must agree; `tests/test_compaction_persisted_summary.py` pins it.
 _CONVERSATION_ROLES = ("user", "assistant", "tool", "system")
 
+# P3 (review 2026-09-24, app/memory_flush.py): every row a memory-flush turn
+# writes carries a `turn_id` with this prefix (X3), because the flush turn's
+# SessionTurn is minted with it. Those rows stay in the transcript and never
+# re-enter the prompt or the summary: the flush is bookkeeping the model did
+# for itself, not conversation.
+FLUSH_TURN_PREFIX = "mflush-"
+
+
+def is_flush_row(m: dict) -> bool:
+    """True for a row written by a memory-flush turn."""
+    tid = m.get("turn_id") if isinstance(m, dict) else None
+    return isinstance(tid, str) and tid.startswith(FLUSH_TURN_PREFIX)
+
+
+def is_history_row(m: dict) -> bool:
+    """The one definition of a row the turn-start stack keeps.
+
+    `app.compaction_state.conversation_rows` reads it too: the persisted
+    summary's indexes are into this filtered list, and `save_record`
+    re-validates against it, so the two filters must be the same function.
+    """
+    return (isinstance(m, dict) and m.get("role") in _CONVERSATION_ROLES
+            and not is_flush_row(m))
+
 # The roles `app.routers._messages_harness_adapter._prepare_messages_for_harness`
 # forwards to the engine. `tokens_after` counts only these.
 _SENT_ROLES = ("user", "assistant", "tool")
@@ -500,6 +524,14 @@ async def _persisted_summary_layer(
     return out
 
 
+def _flushed_this_cycle(data: dict) -> bool:
+    try:
+        from app import memory_flush
+        return memory_flush.flushed_this_cycle(data)
+    except Exception:  # noqa: BLE001 — accounting never breaks a turn
+        return False
+
+
 async def load_and_compact_session(
     session_path: Path | str,
     model: str = "",
@@ -593,7 +625,8 @@ async def load_and_compact_session(
 
     # Drop non-conversation entries (subliminal, tombstones, ambient markers)
     # since they're for UI display, not for the model.
-    convo = [m for m in messages if m.get("role") in _CONVERSATION_ROLES]
+    # P3: and the rows a memory-flush turn wrote (`is_history_row`).
+    convo = [m for m in messages if is_history_row(m)]
 
     tokens_before = estimate_conversation_tokens(convo, system_prompt)
 
@@ -822,6 +855,10 @@ async def load_and_compact_session(
         "summary_reused": summary_reused,
         "summary_folds": summary_folds,
         "summary_covered_rows": summary_covered_rows,
+        # P3: a flush finished in this cycle before this rewrite. False when
+        # nothing was rewritten, or with `compaction.memory_flush` off.
+        "flushed_before_summary": bool(
+            (summarized or dropped > 0) and _flushed_this_cycle(data)),
     }
     _record_turn_start(path.stem, result)
     return result

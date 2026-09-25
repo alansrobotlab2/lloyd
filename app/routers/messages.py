@@ -1588,6 +1588,16 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     stream_stats["files_changed"] = files_changed
                 stats_dict = stream_stats
 
+                # P3: memory flush before compaction (app/memory_flush.py).
+                # Books a flush turn that just ended, or queues one when this
+                # turn came close to the compaction wall. Never raises.
+                await _memory_flush_after_turn(
+                    session_id, turn, comp=comp,
+                    peak_tokens=max(int(input_tokens or 0), int(last_turn_input or 0)),
+                    stop_reason=stop_reason, duration_ms=int(duration_ms or 0),
+                    tool_names=[tc["function"]["name"] for tc in tool_calls_log],
+                    turn_start=compaction_turn.turn_start)
+
                 result_text = full_response
 
                 end_ts = datetime.now().isoformat()
@@ -2444,6 +2454,118 @@ async def build_ambient_turn(
         payload=payload,
         enqueued_at=enqueued_at,
     )
+
+
+async def build_flush_turn(session_id: str, turn_id: str = "") -> SessionTurn:
+    """The memory-flush turn (P3, `app/memory_flush.py`): one quiet ambient
+    turn, shortly before compaction, that writes what is worth keeping into
+    memory.
+
+    Beside `build_ambient_turn` and deliberately not built through it: that
+    envelope asks the model whether to surface a signal to the user, and a
+    flush surfaces nothing. What it shares is the tier — `source="ambient"`,
+    so the queue runs it when the session is idle and a user turn preempts it.
+
+    * `turn_id` carries `FLUSH_TURN_PREFIX`, so every row it writes is kept in
+      the transcript and dropped from history by `load_and_compact_session`.
+    * `allowed_tools` is the memory tools only, tool search off: a flush that
+      could reach Bash or the vault would be a second, unobserved chat turn.
+    * `priority=1`, like background work; `max_turns` from config.
+    * `producer_source="memory_flush"`: `_iv_should_fire_on_turn` skips it.
+    """
+    from app import memory_flush as _mf
+
+    meta_path = SESSIONS_DIR / f"{session_id}.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found")
+    cfg = _mf.flush_cfg()
+    existing = json.loads(meta_path.read_text())
+    model = _resolve_model_name(existing.get("model", "") or CONFIG.get("model", {}).get("default", ""))
+    model_env = _get_model_env(model)
+    plan = existing.get("plan") or {}
+    goal = existing.get("goal") or {}
+    # The session's own system prompt, so the turn renders the same prefix
+    # the chat does and re-uses its KV cache instead of re-prefilling.
+    system_prompt = build_system_prompt(
+        todos=existing.get("todos") or [], plan=plan, goal=goal,
+        session_id=session_id, platform=_session_identity(session_id)[0],
+    )
+    flush_payload: dict = {}
+    flush_scope = _authority_scope_for(session_id, flush_payload)
+    if flush_scope:
+        _ban_grant_minting(flush_payload)
+    flush_banned = _ban_automod_for_workers(flush_payload, session_id)
+    hooks = HookRegistry()
+    install_default_safety_hook(hooks)
+    if flush_scope:
+        install_policy_hook(hooks, scope=flush_scope)
+
+    harness_kwargs = dict(_get_harness_kwargs())
+    harness_kwargs["tool_search_enabled"] = False
+    options = RunOptions(
+        model=model,
+        base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
+        system_prompt=system_prompt,
+        max_turns=int(cfg.get("max_turns") or 6),
+        permission_mode=CONFIG.get("agent", {}).get("permission_mode", "bypassPermissions"),
+        mcp_servers=_get_mcp_servers(),
+        disallowed_tools=_get_disallowed_tools(plan_mode=bool(plan.get("plan_mode"))) + flush_banned,
+        allowed_tools=list(cfg.get("tools") or _mf.DEFAULT_TOOLS),
+        env=model_env,
+        hooks=hooks,
+        session_id=session_id,
+        surface=_tool_surface(_session_identity(session_id)[0]),
+        priority=1,
+        grant_scope=flush_scope,
+        **harness_kwargs,
+    )
+    text = _mf.FLUSH_PROMPT
+    payload: dict[str, Any] = {
+        "text": text,
+        "prefetched_text": text,
+        "model": model,
+        "options": options,
+        "meta_path": meta_path,
+        "priority": "notable",
+        "producer_source": _mf.PRODUCER,
+        "summary": "memory flush before compaction",
+        "dedup_key": _mf.PRODUCER,
+    }
+    return SessionTurn(
+        turn_id=turn_id if _mf.is_flush_turn_id(turn_id) else _mf.new_turn_id(),
+        source="ambient",
+        payload=payload,
+        enqueued_at=datetime.now(),
+    )
+
+
+async def _memory_flush_after_turn(
+    session_id: str, turn: SessionTurn, *, comp: dict, peak_tokens: int,
+    stop_reason: str, duration_ms: int, tool_names: list[str],
+    turn_start: dict | None,
+) -> None:
+    """The `result` branch's one call into P3. Never raises."""
+    try:
+        from app import memory_flush as _mf
+
+        if _mf.is_flush_turn_id(turn.turn_id):
+            await _mf.record_done(
+                session_id, turn_id=turn.turn_id, tool_names=tool_names,
+                duration_ms=duration_ms, stop_reason=stop_reason)
+            return
+        if stop_reason in ("cancelled", "error"):
+            return
+
+        async def _enqueue(flush_turn_id: str) -> None:
+            await enqueue_ambient(
+                session_id, await build_flush_turn(session_id, flush_turn_id))
+
+        await _mf.after_turn(
+            session_id, turn_id=turn.turn_id, turn_start=turn_start,
+            peak_tokens=peak_tokens, threshold=int((comp or {}).get("threshold") or 0),
+            enqueue=_enqueue)
+    except Exception as e:  # noqa: BLE001 — never on the path that answers
+        logger.warning("memory_flush: %s: %s", session_id, e)
 
 
 async def enqueue_ambient(session_id: str, turn: SessionTurn) -> dict[str, Any]:

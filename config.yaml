@@ -392,6 +392,18 @@ compaction:
   persist_summary: false
   summary_input_budget_tokens: 48000
   max_folds_per_turn: 3
+  # P3 (review 2026-09-24, app/memory_flush.py): when a chat turn's peak prompt
+  # reaches trigger_fraction x the compaction threshold, queue one quiet
+  # ambient turn that may call only `tools` and saves durable facts to memory
+  # before the older turns are summarised. Once per compaction cycle. Its rows
+  # stay in the transcript and never re-enter history. Ships off until the
+  # recall eval's memory_flush arm is compared.
+  memory_flush:
+    enabled: false
+    trigger_fraction: 0.85
+    max_turns: 6
+    tools: [memory_read, memory_add, fact_get, fact_add]
+    once_per_cycle: true
   microcompact:
     enabled: true
     # Budget-driven since 2026-09-05. Below `trigger_fraction` of the

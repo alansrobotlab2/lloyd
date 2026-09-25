@@ -59,6 +59,16 @@ class RunOptions:
     # turn, instead of waiting for a fresh user turn to rebuild options.
     disallowed_tools_refresh: Callable[[], list[str]] | None = None
 
+    # An allow-list (P3, review 2026-09-24). None — every caller before it —
+    # means no allow-list. A list means ONLY these tools (bare names; the
+    # legacy `mcp__<server>__<tool>` spelling is normalised) are advertised
+    # and dispatchable this turn, on top of everything `disallowed_tools`
+    # already refuses. ToolSearch counts as a tool here: absent from the
+    # list, tool search is off for the turn, and the session's cached
+    # LoadedToolSet is left alone. A Task child builds its own RunOptions
+    # and does not inherit it (and a list without `Task` cannot spawn one).
+    allowed_tools: list[str] | None = None
+
     # MCP / tools
     mcp_servers: dict[str, dict] = field(default_factory=dict)
 

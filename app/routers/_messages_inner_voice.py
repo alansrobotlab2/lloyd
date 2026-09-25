@@ -121,6 +121,10 @@ def _iv_should_fire_on_turn(
     if not enabled:
         return False
     if turn_source == "ambient":
+        # P3: a memory flush is bookkeeping the model does for itself before
+        # compaction; there is no request to hold it to and nobody reading.
+        if producer_source == "memory_flush":
+            return False
         if producer_source.startswith("inner_voice"):
             return producer_source in _SELF_OBSERVED_PRODUCERS
         return True

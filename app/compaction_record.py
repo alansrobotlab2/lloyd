@@ -114,6 +114,9 @@ def turn_start_record(comp: Mapping[str, Any]) -> dict[str, Any] | None:
         "summary_reused": bool(comp.get("summary_reused")),
         "summary_folds": int(comp.get("summary_folds") or 0),
         "summary_covered_rows": int(comp.get("summary_covered_rows") or 0),
+        # P3: a memory flush finished in this compaction cycle before this
+        # rewrite (app/memory_flush.py). Always false with the flush off.
+        "flushed_before_summary": bool(comp.get("flushed_before_summary")),
     }
 
 

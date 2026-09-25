@@ -220,6 +220,29 @@ def _surface_hidden(options: RunOptions) -> set[str]:
     return set(hidden_on_surface(surface))
 
 
+def _allowed_names(options: RunOptions) -> set[str] | None:
+    """The turn's allow-list, normalised, or None when it has none (P3)."""
+    allowed = getattr(options, "allowed_tools", None)
+    if allowed is None:
+        return None
+    return {normalize_tool_name(str(n)) for n in allowed}
+
+
+def _allow_list_hidden(options: RunOptions, discovered) -> set[str]:
+    """Every discovered tool an allow-list leaves out (P3).
+
+    Joined to the surface's hidden set, so it reaches the catalog build AND
+    every iteration's dispatch set, a plan-mode refresher's included. The
+    explicit check in `_pre_dispatch` is the second half: a name nobody
+    discovered would otherwise fall through to MCP.
+    """
+    allowed = _allowed_names(options)
+    if allowed is None:
+        return set()
+    return {t["name"] for _srv, tools in discovered for t in tools
+            if normalize_tool_name(t["name"]) not in allowed}
+
+
 async def run_query(
     messages: list[dict[str, Any]],
     options: RunOptions,
@@ -283,6 +306,7 @@ async def run_query(
         # advertised, and in every iteration's dispatch set below, including a
         # plan-mode refresher's, which would otherwise rebuild it without them.
         surface_hidden = _surface_hidden(options)
+        surface_hidden |= _allow_list_hidden(options, pool.discovered)
         catalog = build_tool_list(list(pool.discovered),
                                   set(options.disallowed_tools) | surface_hidden)
         # Every advertised tool grows one extra string parameter the model
@@ -2705,6 +2729,16 @@ async def _pre_dispatch(
             content=f"Tool {name!r} is disabled by configuration.",
             is_error=True, error_class="disabled",
         )
+    # P3: an allow-list refuses everything it does not name, including a
+    # name no server discovered and ToolSearch itself.
+    allowed = _allowed_names(options)
+    if allowed is not None and name not in allowed:
+        return events.tool_result(
+            call_id=call_id, name=raw_name,
+            content=(f"Tool {name!r} is not available on this turn. "
+                     f"Available: {', '.join(sorted(allowed))}."),
+            is_error=True, error_class="disabled",
+        )
 
     # ToolSearch — intercept locally, no MCP round-trip. The matched tools
     # are added to the LoadedToolSet so subsequent turns see them in
@@ -3093,6 +3127,20 @@ async def _resolve_loaded_tool_set(
             "loop: tool_search requested but ToolSearch is in disallowed_tools — "
             "falling back to full catalog (%d tools).",
             len(catalog),
+        )
+
+    # P3: an allow-list turn (a memory flush) gets its own set and never
+    # touches the session's cached one. Its catalog is a handful of tools, so
+    # caching it would invalidate the chat's loaded set by signature and the
+    # next chat turn would have to re-discover every tool it had loaded.
+    allowed = _allowed_names(options)
+    if allowed is not None:
+        return LoadedToolSet(
+            catalog=catalog,
+            baseline=baseline,
+            enabled=enabled and TOOLSEARCH_TOOL_NAME in allowed,
+            catalog_signature=tool_search_cache.catalog_signature(catalog),
+            summaries=summaries,
         )
 
     return await tool_search_cache.get_or_create(
