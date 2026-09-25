@@ -752,13 +752,15 @@ def _fast_path_tool_result(
         return None
     if len(content) >= escalate_bytes:
         return None
-    # A result that returned normally but reports the work did not happen.
-    # `Task` returning `{"response": "\n[stopped: max_turns]"}` is 300 bytes
-    # with is_error False, so both the size rule and the sampler skipped it
-    # and the observer never learned that a four-minute subagent produced
-    # nothing. Always escalate — these are rare and always material.
+    # A result that returned normally but reports the work did not happen
+    # (`Task` → `[stopped: max_turns]`, 300 bytes, is_error False). The turn
+    # guards inject on it deterministically now, on every turn; a second,
+    # model-worded nudge about the same result adds nothing.
     if _guards.looks_like_failure_payload(content):
-        return None
+        return ObserverDecision(
+            action="noop", reason="fast-path: failure payload — answered by the turn guard",
+            fast_path=True,
+        )
     if sample_every > 0 and benign_seen % sample_every == 0:
         return None  # sampled for LLM judgment
     return ObserverDecision(
@@ -787,20 +789,15 @@ def _fast_path_assistant_message(
     """Cheap deterministic decision for assistant messages that don't need
     LLM judgment.
 
-    Two fast paths:
+    Pure tool dispatch (text-less, just tool_calls) → noop. The pretool
+    gate already evaluated each proposed tool with its real args, so
+    re-judging here is duplicate work; the IV sees the tool result next.
 
-    1. Pure tool dispatch (text-less, just tool_calls) → noop. The pretool
-       gate already evaluated each proposed tool with its real args, so
-       re-judging here is duplicate work; the IV sees the tool result next.
-
-    2. Terminal stub-announce stall: a text-only iteration (no tool calls)
-       whose text only ANNOUNCES a next action ("Let me …:", trailing colon)
-       without dispatching it. The harness is about to END the turn —
-       loop.py only continues if the observer appends an inject — so force a
-       continue-inject deterministically. This makes stall rescue instant
-       (no observer-LLM round-trip) and, because it never touches the
-       consecutive-inject suppressor in the LLM path, a re-stall on the very
-       next iteration is rescued again rather than left to die.
+    The terminal stub-announce stall used to be the second fast path here.
+    It is the turn guards' now (`app/harness/turn_guards.py`), which run on
+    every turn whether or not an observer is attached; the terminal branch of
+    `install_observer` skips its own judgment on an iteration a guard already
+    answered, and judges it normally when the guard is switched off.
     """
     if tool_calls and not text.strip():
         # ...unless the primary has been silent for a long run. The stated
@@ -816,14 +813,6 @@ def _fast_path_assistant_message(
             action="noop",
             reason="fast-path: tool-dispatch-only iteration",
             fast_path=True,
-        )
-    if not tool_calls and _guards.is_terminal_stall(text):
-        return ObserverDecision(
-            action="inject",
-            reason="fast-path: terminal stub-announce stall — forcing continuation",
-            content=_guards.STALL_RESCUE_CONTENT,
-            bypass_budget=True,
-            safeguard="stall_rescue",
         )
     return None
 
@@ -1152,6 +1141,9 @@ class ObserverState:
     # the next terminal event and at close so a decision in flight is
     # never silently dropped.
     pending_tasks: set[asyncio.Task] = field(default_factory=set)
+    # The turn guards on the same registry (`app.harness.turn_guards`). The
+    # deterministic senses live there; the observer listens.
+    guards: Any | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1411,8 +1403,12 @@ async def _persist(
     # Capture the sequence number before any await. Non-terminal judgments
     # run concurrently now, so reading `state.sequence` after suspending
     # could hand two rows the same number.
-    state.sequence += 1
-    seq = state.sequence
+    guards = getattr(state, "guards", None)
+    if guards is not None:
+        seq = guards.next_sequence()
+    else:
+        state.sequence += 1
+        seq = state.sequence
     try:
         await asyncio.to_thread(
             record_inner_voice_observation,
@@ -2228,6 +2224,35 @@ def install_observer(
         source=source or "",
         unattended=_is_unattended(platform),
     )
+    # The deterministic senses. Normally already on this registry — the
+    # router installs them on every turn beside the safety hook — and this
+    # call then only fills in the handle and the breadcrumb channel. A caller
+    # that attaches an observer to a bare registry still gets them.
+    from app.harness.turn_guards import install_turn_guards
+
+    state.guards = install_turn_guards(
+        hooks, session_id=session_id, turn_id=turn_id, platform=platform,
+        source=source, chat_messages_handle=chat_messages_handle,
+        persist_intervention_callback=persist_intervention_callback,
+    )
+
+    def _on_guard_fire(fire: Any) -> None:
+        # What a guard did is part of this turn's history: the consecutive-
+        # inject suppressor, the escalation count and the prompt's decision
+        # log all read `decisions_this_turn`, and the deterministic cap is
+        # shared.
+        state.bypass_interventions_used += 1
+        state.decisions_this_turn.append({
+            "trigger": fire.trigger,
+            "action": "inject",
+            "reason": fire.reason,
+            "related_tool": fire.related_tool,
+            "fast_path": False,
+        })
+
+    if state.guards is not None:
+        state.guards.add_listener(_on_guard_fire)
+
     fast_path_enabled = bool(cfg.get("fast_path_enabled", True))
     pretool_llm_enabled = bool(cfg.get("pretool_llm_enabled", False))
     async_nonterminal = bool(cfg.get("async_nonterminal", True))
@@ -2243,16 +2268,7 @@ def install_observer(
         sample_every = int(cfg.get("unattended_tool_result_sample_every", 10))
         escalate_bytes = int(
             cfg.get("unattended_tool_result_escalate_bytes", 60000))
-    repetition_enabled = bool(cfg.get("repetition_guard_enabled", True))
     repetition_window = int(cfg.get("repetition_window", _guards.REPETITION_WINDOW))
-    repetition_threshold = int(
-        cfg.get("repetition_threshold", _guards.REPETITION_THRESHOLD)
-    )
-    # Merged over the built-in set rather than replacing it: config adds a
-    # polling tool, it does not un-exempt `automod_gate_wait`.
-    repetition_exempt = _guards.REPETITION_EXEMPT_TOOLS | frozenset(
-        str(x) for x in (cfg.get("repetition_exempt_tools") or [])
-    )
     silent_limit = int(cfg.get("silent_iterations_before_review", 10))
     context_pressure_enabled = bool(cfg.get("context_pressure_enabled", True))
     context_pressure_threshold = float(cfg.get("context_pressure_threshold", 0.8))
@@ -2337,68 +2353,16 @@ def install_observer(
         # `tool_input`, never inside it — see below.
         tool_summary = input_data.get("tool_summary") or ""
 
-        # Tier 0: deterministic repetition guard. This is the only place the
-        # observer ever sees tool ARGUMENTS, and a loop lives entirely in the
-        # arguments — same tool, same target, endlessly reworded. It costs no
-        # LLM call, so it runs even though pretool judgment is otherwise off.
-        #
-        # `tool_summary` is deliberately NOT part of the signature. `exact`
-        # is the full key=value rendering and byte-equality is what makes a
-        # repeat "exact"; two identical commands carrying differently-worded
-        # captions would stop matching, and a caption is exactly the part of
-        # a call a looping model rewords each time. The guard must compare
-        # what was RUN, not what the primary said about it.
+        # The ring feeds `build_tool_result_summary` the command that produced
+        # a result (tool_result events carry no arguments). The repetition
+        # guard that used to run here is a turn guard now
+        # (`app/harness/turn_guards.py`), on every turn.
         state.recent_tool_calls.append(
             _guards.tool_call_signature(tool_name, tool_input)
         )
         state.tool_calls_seen += 1
         if len(state.recent_tool_calls) > ring_cap:
             del state.recent_tool_calls[:-ring_cap]
-        if repetition_enabled:
-            # Compare only against calls made SINCE the guard last spoke, so
-            # another inject needs a fresh cluster of near-duplicates rather
-            # than the same one re-judged. Done with a baseline rather than by
-            # clearing the ring, because the ring also carries the command
-            # previews `build_tool_result_summary` reads back — dropping those
-            # blinds the observer to what the primary actually ran, which is
-            # the one thing turn 20260905_011748_iv84e4 proved it needs.
-            since_fire = state.tool_calls_seen - state.repetition_baseline
-            comparable = (
-                state.recent_tool_calls[-since_fire:] if since_fire > 0 else []
-            )
-            rep = _guards.repetition_verdict(
-                comparable,
-                window=repetition_window,
-                threshold=repetition_threshold,
-                # From the WHOLE ring, not the post-baseline slice. An
-                # identifier every call carries cannot discriminate between
-                # them, and after a fire `comparable` is too short to tell —
-                # which is how an automod round's worktree id kept matching.
-                ambient=_guards.ubiquitous_identifiers(state.recent_tool_calls),
-                exempt_tools=repetition_exempt,
-            )
-            if rep is not None:
-                state.repetition_baseline = state.tool_calls_seen
-                decision = ObserverDecision(
-                    action="inject",
-                    reason=(
-                        f"deterministic: {rep.repeats + 1} near-identical "
-                        f"{tool_name} calls for {', '.join(rep.shared_terms[:4])}"
-                    ),
-                    content=_guards.repetition_inject_content(rep),
-                    # Like stall rescue, this prevents a pathological outcome
-                    # rather than nagging, and it is the observer's most
-                    # reliable signal — it never guesses at intent.
-                    bypass_budget=True,
-                    safeguard="repetition",
-                )
-                await _apply_lever(
-                    state, decision, trigger="pretool", related_tool=tool_name,
-                )
-                await _persist(
-                    state, decision, trigger="pretool", related_tool=tool_name,
-                )
-                return {}
 
         # Tier 1: cheap deterministic noop for benign tools — saves an LLM
         # call. The harness will dispatch the tool either way.
@@ -2529,6 +2493,18 @@ def install_observer(
                             ),
                         ), trigger="assistant_message")
                         return
+
+                # A turn guard already answered this iteration (a stall, an
+                # open round, an open todo list): the loop will continue on
+                # its inject, and a second, model-worded nudge on the same
+                # stop is the double-inject the suppressor exists to prevent.
+                if state.guards is not None and state.guards.fired_on_iteration(iteration):
+                    await _persist(state, ObserverDecision(
+                        action="noop",
+                        reason="fast-path: a turn guard already injected on this iteration",
+                        fast_path=True, safeguard="turn_guard",
+                    ), trigger="assistant_message")
+                    return
 
             # Track the run of iterations with no user-visible text. Reset
             # the moment the primary says anything.

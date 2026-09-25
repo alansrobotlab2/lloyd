@@ -124,6 +124,73 @@ STALL_RESCUE_CONTENT = (
 )
 
 
+# The same stall on a turn nobody reads. "Deliver the result" is the wrong
+# instruction there — `run_prompt_in_session` takes the harness finalizer's
+# structured outcome, not the prose — so it says do the work or stop.
+UNATTENDED_STALL_RESCUE_CONTENT = (
+    "You ended the turn by announcing an action without doing it. Do it now, in "
+    "this same turn. No human reads this session and the harness asks for the "
+    "outcome itself, so do not write a report: finish the work, or end the turn "
+    "if there is none left."
+)
+
+# What an unattended turn is told when it stops with nothing left to say.
+# Round 874 is why the words are fixed: the observer injected "deliver the
+# final report now" on the invented premise "working tree clean", and a
+# healthy round was abandoned at iteration 38 with 44 minutes left.
+UNATTENDED_TERMINAL_RESCUE_CONTENT = (
+    "You are stopping, and this session has no human reader — the harness "
+    "asks for the report itself, so there is nothing to deliver here. If "
+    "there is work left that you can still finish, do it. If there is not, "
+    "end the turn."
+)
+
+# The one terminal stop on an unattended turn that is always wrong: a round
+# is open. The reaper keeps the branch, but a round whose author stopped
+# before gating is a re-offer and another hour of the loop.
+UNATTENDED_ROUND_OPEN_CONTENT = (
+    "A round is open. Do not write a report — the harness asks for one. "
+    "Commit what is in the worktree and call automod_gate, then "
+    "automod_land or automod_abort."
+)
+
+
+def stall_rescue_content(*, unattended: bool, round_open: bool) -> str:
+    """The words for a stall rescue, chosen by who reads the turn."""
+    if unattended and round_open:
+        return UNATTENDED_ROUND_OPEN_CONTENT
+    if unattended:
+        return UNATTENDED_STALL_RESCUE_CONTENT
+    return STALL_RESCUE_CONTENT
+
+
+def todo_gate_content(open_items: list[str]) -> str:
+    """The nudge for a turn ending with its own todo list still open.
+
+    Worded so a turn that is really done pays one short iteration, not a
+    restated answer: the case study that motivated the old LLM version was
+    "delivered, but never marked the list", and the answer is already on
+    screen by then.
+    """
+    shown = "; ".join(f"'{c[:80]}'" for c in open_items[:5])
+    more = f" (and {len(open_items) - 5} more)" if len(open_items) > 5 else ""
+    return (
+        f"Your todo list still shows {len(open_items)} open item(s): {shown}{more}. "
+        f"If they are done, mark them completed with TodoWrite and stop — do not "
+        f"restate your answer. If they are not done, keep working on them now."
+    )
+
+
+def failure_payload_content(tool: str) -> str:
+    """The nudge for a result that returned normally but says nothing ran."""
+    return (
+        f"The {tool} call returned without an error, but its payload says the "
+        f"work did not complete (stopped, timed out, or an empty response). Do "
+        f"not treat that output as a result. Retry it narrower, do the work "
+        f"directly, or say plainly that it failed."
+    )
+
+
 def is_terminal_stall(text: str) -> bool:
     """True iff `text` is a text-only iteration that announces work and stops.
 

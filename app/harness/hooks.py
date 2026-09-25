@@ -86,6 +86,22 @@ class HookRegistry:
         # observer to tap the primary's stream.
         self._on_event: list[Callable[[dict[str, Any]], Awaitable[None]]] = []
         self._skill_dispatch_installed = False
+        # The list the loop actually reads, and the options it runs under,
+        # bound by `run_query` at turn start (`bind_run`). A callback that
+        # wants to append a user message — the turn guards' inject — needs the
+        # loop's own list, and a caller that passed no `chat_messages_handle`
+        # has no other way to reach it: the loop copies `messages` into a
+        # private list then.
+        self.chat_messages: list[dict[str, Any]] | None = None
+        self.run_options: Any = None
+        # `app.harness.turn_guards.TurnGuardState` once installed; the
+        # installer keys its idempotency on it and the observer listens to it.
+        self.turn_guards: Any = None
+
+    def bind_run(self, chat_messages: list[dict[str, Any]], options: Any) -> None:
+        """Called by `run_query` once per run, before the first request."""
+        self.chat_messages = chat_messages
+        self.run_options = options
 
     # ------------------------------------------------------------------
     # What is registered here (set by the installer, read by anything that

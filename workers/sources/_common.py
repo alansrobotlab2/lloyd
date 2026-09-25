@@ -398,6 +398,10 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
     hooks = HookRegistry()
     install_policy_hook(hooks)
     install_outbound_content_gate(hooks)
+    # The deterministic senses: a direct worker turn is exactly where a stall
+    # or a search loop has nobody watching. `app/harness/turn_guards.py`.
+    from app.harness.turn_guards import install_turn_guards
+    install_turn_guards(hooks, platform="worker", source=source or "")
 
     model_env = _get_model_env("primary")
 

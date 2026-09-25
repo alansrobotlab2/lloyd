@@ -39,6 +39,7 @@ from app.harness import (
 )
 from app.harness.context_meter import ContextMeter, context_window_for
 from app.harness.events import trim_discarded
+from app.harness.turn_guards import install_turn_guards
 from app.harness.skill_dispatch import injected_skill_names, skill_deliveries
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
@@ -1084,6 +1085,20 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # stream endpoint and from the ambient producer, and both already have
     # the session id. One read of the session file, same answer either way.
     run_platform, run_source = _session_identity(session_id)
+
+    # The deterministic senses — stall rescue, repetition, failure payloads,
+    # an open todo list or round at the end — on every turn, observed or not.
+    # Here rather than beside the safety hook at the three construction sites
+    # because this is where the turn id, the platform and the breadcrumb
+    # channel all exist, and all three routes (stream, ambient, voice) pass
+    # through it. `app/harness/turn_guards.py`.
+    if options.hooks is None:
+        options.hooks = HookRegistry()
+    install_turn_guards(
+        options.hooks, session_id=session_id, turn_id=turn.turn_id,
+        platform=run_platform, source=run_source,
+        persist_intervention_callback=_iv_persist_intervention_cb,
+    )
 
     iv_observer_state = await attach_observer_for_turn(
         session_id=session_id,
@@ -2467,6 +2482,10 @@ async def post_message(request: Request):
     install_default_safety_hook(iv_hooks)
     if sync_grant_scope:
         install_policy_hook(iv_hooks, scope=sync_grant_scope)
+    install_turn_guards(
+        iv_hooks, session_id=session_id,
+        platform=_session_identity(session_id)[0],
+    )
     # No skill deliverer here, on purpose (#750): nothing in the tree calls
     # the sync route — every real turn posts to /api/message/stream — so an
     # install would be dead code and, the day it is not, a delivery no

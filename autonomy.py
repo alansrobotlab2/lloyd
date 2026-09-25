@@ -3246,6 +3246,12 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         # already armed with `grant_scope` two lines above, and a content gate
         # that read a different scope would be a second convention.
         install_outbound_content_gate(task_hooks, scope=grant_scope)
+        # The deterministic senses (stall rescue, repetition, failure
+        # payloads), which the observer's opt-in used to gate. The session and
+        # turn ids are read off the options the loop binds.
+        from app.harness.turn_guards import install_turn_guards
+        install_turn_guards(task_hooks, platform="autonomy",
+                            source=str(task.get("name") or ""))
 
         # ONE number for the cap and for the warning about the cap. The harness
         # stops the run at `max_turns` (`app/harness/loop.py`), and the anchor

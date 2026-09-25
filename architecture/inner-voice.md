@@ -85,6 +85,42 @@ Only the **terminal** events are judged synchronously. Everything else runs off
 the harness's critical path — see
 [Off the critical path](#off-the-critical-path).
 
+## Turn guards: the senses run on every turn (2026-09-24)
+
+The deterministic guards are no longer part of the observer. Stall rescue,
+the repetition guard, failure-payload escalation, the open-todo gate and the
+open-round gate are a harness hook, `app/harness/turn_guards.py`, installed on
+every turn: chat (`messages._run_turn`, which the stream, ambient and voice
+routes share, and the sync route), direct worker turns
+(`workers/sources/_common.py`), scheduled tasks (`autonomy.py`) and `Task`
+subagents (`agent_mcp/builtin_task.py`). No LLM and no session flag. Before
+this they existed only where the observer was attached, so the 2026-09-12 cut
+that took the observer off every worker took them off too.
+
+- The judgment is unchanged and still lives in `guards.py` as pure
+  functions, which now also hold the content strings (`stall_rescue_content`
+  picks chat, worker, or round-open words by platform).
+- An inject reaches the loop through `HookRegistry.bind_run`: `run_query`
+  binds the list it actually reads, because a caller with no
+  `chat_messages_handle` has only a private copy.
+- Each fire is an `inner_voice_observations` row with `safeguard` = the
+  guard's name and `model` NULL, plus an `inner_voice.observer_injected`
+  event with `deterministic: true` and `guard`; on a chat turn the router's
+  breadcrumb callback also writes the `[INNER VOICE]` line.
+- With an observer attached, `install_observer` finds the guards on its
+  registry (installing them if absent), listens to their fires so its
+  suppressors and decision log see them, shares their row sequence, and
+  skips its own terminal judgment on an iteration a guard already answered.
+  Its fast paths no longer inject on a stall or escalate a failure payload.
+- The two new senses: `todo_gate` fires once when a turn that called
+  `TodoWrite` ends with open items; `round_open` fires once when an
+  unattended turn ends with an automod round it opened still open.
+- Config: `inner_voice.turn_guards` (`enabled` and one switch per guard; the
+  repetition knobs and `deterministic_inject_budget` moved there, the old
+  `inner_voice.observer` keys still read as fallback).
+  `tests/test_turn_guards.py` pins one test per guard on a worker turn with
+  no observer, and one through the real loop.
+
 ## Goal contract (per turn)
 
 Before the primary runs, the observer extracts a **goal card** from the user

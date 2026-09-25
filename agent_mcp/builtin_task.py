@@ -244,6 +244,7 @@ async def _task(args: dict[str, Any]) -> str:
     from app.harness.safety import install_default_safety_hook
     from app.tool_bans import WORKER_AUTOMOD_BAN
     from app.harness.skill_dispatch import install_skill_dispatch_hook
+    from app.harness.turn_guards import install_turn_guards
 
     # Resolve model and base_url.
     #
@@ -331,6 +332,11 @@ async def _task(args: dict[str, Any]) -> str:
     grant_scope = current_parent_grant_scope.get("")
     if grant_scope:
         install_policy_hook(task_hooks, scope=grant_scope)
+    # The deterministic senses are not the observer: a subagent that stalls
+    # on "Let me check…" or re-runs one grep five times is the common case,
+    # and nothing about them needs a session. Platform left empty on purpose —
+    # a subagent's terminating text IS its answer, so "deliver" is right.
+    install_turn_guards(task_hooks)
 
     # Per-invocation session id so each subagent run gets its own
     # tool_search LoadedToolSet — different disallowed_tools profiles

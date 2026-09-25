@@ -211,6 +211,10 @@ async def run_query(
         chat_messages = list(messages)
     if options.system_prompt and not _has_system(chat_messages):
         chat_messages.insert(0, {"role": "system", "content": options.system_prompt})
+    # Hooks that append (the turn guards' inject) must reach THIS list, which
+    # is a private copy whenever the caller passed no handle.
+    if options.hooks is not None and hasattr(options.hooks, "bind_run"):
+        options.hooks.bind_run(chat_messages, options)
 
     # Live context-window position. Caller-owned when supplied — the router
     # hands the SAME object to the Inner Voice observer so both read one

@@ -634,10 +634,10 @@ def test_every_deterministic_noop_is_tagged_fast_path():
     assert obs_mod._fast_path_pretool("Read", {"file_path": "/x"}).fast_path
     assert obs_mod._fast_path_pretool("Bash", {"command": "ls -la"}).fast_path
     assert _fast_path_assistant_message("", [{"name": "Bash"}]).fast_path
-    # The stall-rescue inject is judgment, not bookkeeping — it must NOT be
-    # filtered out of the observer's history.
-    stall = _fast_path_assistant_message("Now let me check the logs:", [])
-    assert stall.action == "inject" and not stall.fast_path
+    # The stall is a turn guard's now (`app/harness/turn_guards.py`); the
+    # observer's fast path leaves it to the terminal branch, which skips an
+    # iteration a guard already answered and judges it when guards are off.
+    assert _fast_path_assistant_message("Now let me check the logs:", []) is None
     print("test_every_deterministic_noop_is_tagged_fast_path: OK")
 
 
@@ -797,16 +797,19 @@ def test_subagent_max_turns_is_never_sampled_away():
         '"Bash", "Grep"], "description": "Review IV observer prompt"}'
     )
     assert guards.looks_like_failure_payload(payload)
-    # benign_seen deliberately off the sampling boundary — this must escalate
-    # regardless of where the sampler happens to be.
-    assert _fast_path_tool_result("Task", payload, False, benign_seen=3, sample_every=5) is None
+    # benign_seen deliberately off the sampling boundary. The turn guard
+    # answers it on every turn now (tests/test_turn_guards.py), so the
+    # observer records it as answered rather than paying a call on it.
+    fp = _fast_path_tool_result("Task", payload, False, benign_seen=3, sample_every=5)
+    assert fp is not None and "turn guard" in fp.reason, fp
     print("test_subagent_max_turns_is_never_sampled_away: OK")
 
 
 def test_bash_timeout_payload_escalates():
     payload = '{"error": "command timed out after 120000ms", "command": "grep -rn ..."}'
     assert guards.looks_like_failure_payload(payload)
-    assert _fast_path_tool_result("Bash", payload, False, benign_seen=3, sample_every=5) is None
+    fp = _fast_path_tool_result("Bash", payload, False, benign_seen=3, sample_every=5)
+    assert fp is not None and "turn guard" in fp.reason, fp
     print("test_bash_timeout_payload_escalates: OK")
 
 
@@ -1108,8 +1111,11 @@ def _record_here(monkeypatch) -> list:
     is set once at import, and another file in the same worker can replace the
     writer after that — which read as a guard that stamped nothing."""
     rows: list = []
-    monkeypatch.setattr(obs_mod, "record_inner_voice_observation",
-                        lambda **kw: (rows.append(kw), len(rows))[1])
+    rec = lambda **kw: (rows.append(kw), len(rows))[1]  # noqa: E731
+    monkeypatch.setattr(obs_mod, "record_inner_voice_observation", rec)
+    # The turn guards write through `usage_store` directly.
+    import usage_store
+    monkeypatch.setattr(usage_store, "record_inner_voice_observation", rec)
     return rows
 
 
@@ -1155,9 +1161,19 @@ def test_the_repetition_guard_row_carries_its_safeguard_key(monkeypatch):
         "observation_only", "fast_path"}, rows
 
 
-def test_stall_rescue_and_the_guard_rewrites_name_themselves():
-    stall = _fast_path_assistant_message("Now let me check the logs:", [])
-    assert stall.action == "inject" and stall.safeguard == "stall_rescue"
+def test_stall_rescue_and_the_guard_rewrites_name_themselves(monkeypatch):
+    from app.harness.hooks import HookRegistry
+    from app.harness.turn_guards import install_turn_guards
+    recorded = _record_here(monkeypatch)
+    hooks = HookRegistry()
+    install_turn_guards(hooks, session_id="stall_key", turn_id="t",
+                        chat_messages_handle=[])
+    asyncio.new_event_loop().run_until_complete(hooks.fire_on_event({
+        "type": "assistant_message", "text": "Now let me check the logs:",
+        "tool_calls": [], "iteration": 1,
+    }))
+    assert [(r["action"], r["safeguard"]) for r in recorded] == [
+        ("inject", "stall_rescue")], recorded
 
     # Terminal ambient upgraded to inject: the model chose ambient, the guard
     # chose inject, so the row is the guard's.
@@ -1186,7 +1202,8 @@ def test_persist_writes_the_key_and_marks_fast_path_rows(monkeypatch):
     recorded = _record_here(monkeypatch)
     loop = asyncio.new_event_loop()
     loop.run_until_complete(obs_mod._persist(
-        state, _fast_path_assistant_message("Now let me check the logs:", []),
+        state, ObserverDecision(action="inject", reason="stall", content="go",
+                                bypass_budget=True, safeguard="stall_rescue"),
         "assistant_message"))
     loop.run_until_complete(obs_mod._persist(
         state, ObserverDecision(action="noop", reason="fast-path: x", fast_path=True),

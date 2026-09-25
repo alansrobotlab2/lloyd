@@ -386,11 +386,13 @@ def test_stub_announce_regex_matches_real_stalls():
 
 
 def test_fast_path_flags_terminal_stub_announce_as_inject():
-    """A text-only 'Let me …:' iteration → deterministic budget-bypassing inject."""
-    fp = _fast_path_assistant_message("Let me force-expire them:", [])
-    assert fp is not None and fp.action == "inject", fp
-    assert fp.bypass_budget is True
-    assert fp.content.strip()
+    """A text-only 'Let me …:' iteration is the turn guard's inject now.
+
+    The observer's fast path no longer answers it; `install_observer` puts the
+    guards on its registry and skips its own judgment on an iteration they
+    answered. tests/test_turn_guards.py pins the inject itself.
+    """
+    assert _fast_path_assistant_message("Let me force-expire them:", []) is None
     print("test_fast_path_flags_terminal_stub_announce_as_inject: OK")
 
 

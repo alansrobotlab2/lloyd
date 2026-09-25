@@ -141,9 +141,9 @@ def test_fast_path_does_not_inject_on_signoff():
         "Here's the report.\n\nLet me know if you need anything else!", [],
     )
     assert d is None or d.action != "inject", d
-    d2 = _fast_path_assistant_message("Now let me check the logs:", [])
-    assert d2 is not None and d2.action == "inject", d2
-    assert d2.bypass_budget is True
+    # The real stall is the turn guard's (tests/test_turn_guards.py); the
+    # observer's fast path hands it on rather than answering it itself.
+    assert _fast_path_assistant_message("Now let me check the logs:", []) is None
     print("test_fast_path_does_not_inject_on_signoff: OK")
 
 
