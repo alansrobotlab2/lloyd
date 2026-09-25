@@ -686,25 +686,46 @@ def test_nothing_else_in_the_checkout_names_the_removed_notes():
     `git grep` over tracked content is the denominator, not an `rglob`: the
     tracked checkout is what a reader or a scheduled job can be pointed at, and
     `_pipeline/` is ignored by git, so the generated artefacts that legitimately
-    carry these names cannot inflate the count. Markdown is excluded from the
-    search, because prose is exactly where this removal gets recorded — an
+    carry these names cannot inflate the count. Within the tracked tree the
+    scope is ENUMERATED, not defaulted, and the enumeration is the whole
+    claim — `scripts/`, `app/`, `workers/`, `*.py`, `*.yaml`, `*.sh`. Not
+    "all code and config": a pointer spelled in a file type outside the list
+    would pass uncaught, and files of any kind inside the three swept
+    directories are in scope. Prose and pathspec name ONE list on purpose;
+    the earlier phrasing ("code and config only") was an adjective over a
+    list, and adjectives are how denominators drift. Everything
+    prose-shaped stays out.
+    Markdown, because prose is exactly where this removal gets recorded — an
     architecture note or changelog naming the two files by name is the
-    *expected* outcome, and a fact-extractor test must not fail one. Every
-    code and config surface (`scripts/`, `app/`, `workers/`, `*.py`, `*.yaml`,
-    `*.sh`) stays in scope; those are the files that can actually point at a
-    path. Exit status 1 is git's "no matches" — a real answer, distinct from a
-    failed git call, which is asserted rather than swallowed.
+    *expected* outcome, and a fact-extractor test must not fail one. Data
+    corpora for the same reason in a different extension: the first
+    implementation grepped `.` minus `*.md` rather than the enumerated
+    surfaces, and two eval corpora that landed in September 2026 read as
+    references — `eval/djev/name_prior_corpus.jsonl` (one dedupe row, line 9,
+    quoting a backlog body that names both files) and
+    `eval/iv/recovered-2026-08-22..09-21.jsonl` (eight recovered-transcript
+    lines, 77–84, quoting work logs from before the deletion). Neither points
+    at a path; a name quoted inside a corpus row is data the eval reads, not
+    code the checkout runs. Exit status 1 is git's "no matches" — a real
+    answer, distinct from a failed git call, which is asserted rather than
+    swallowed.
     """
     root = Path(__file__).resolve().parents[1]
     me = str(Path(__file__).resolve().relative_to(root))
     probe = ["git", "-C", str(root), "grep", "-l", "--fixed-strings",
              "-e", DEAD_DERIVED_INDEXES[0], "-e", DEAD_DERIVED_INDEXES[1]]
+    # One pathspec shared by the control and the check below: two hand copies
+    # of a denominator is exactly how this grep drifted from the surfaces its
+    # own docstring enumerates.
+    surfaces = ["scripts", "app", "workers", "*.py", "*.yaml", "*.sh",
+                ":(exclude)*.md"]
 
-    # Positive control first: this file names both strings, so a grep that
-    # cannot see it cannot report an honest "nothing else does". Without this
-    # the empty result below would be indistinguishable from a silently
-    # broken call, and a check that cannot fail is not a pin.
-    control = subprocess.run(probe + ["--", ".", ":(exclude)*.md"],
+    # Positive control first: this file names both strings and is a `*.py`
+    # surface, so a grep that cannot see it cannot report an honest "nothing
+    # else does". Without this the empty result below would be
+    # indistinguishable from a silently broken call, and a check that cannot
+    # fail is not a pin.
+    control = subprocess.run(probe + ["--", *surfaces],
                              capture_output=True, text=True)
     assert control.returncode == 0 and me in control.stdout.split(), (
         f"the reference grep cannot see its own file (rc={control.returncode}, "
@@ -712,7 +733,7 @@ def test_nothing_else_in_the_checkout_names_the_removed_notes():
         "unevaluable")
 
     hits = subprocess.run(
-        probe + ["--", ".", ":(exclude)*.md", f":(exclude){me}"],
+        probe + ["--", *surfaces, f":(exclude){me}"],
         capture_output=True, text=True)
     assert hits.returncode in (0, 1), (
         f"git grep failed ({hits.stderr.strip()[:160]}); the reference check is "
