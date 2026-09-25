@@ -259,3 +259,21 @@ The transcript pointer for a tool result is `maybe_spill`'s
 `<persisted-output>` block, with no second marker (X5). The persisted
 compaction record is a top-level `data["compaction"]` key written after
 `messages`, never a message row (X6).
+
+### P13.0 — behaviour, not source text
+
+The loop's ordering invariants were pinned with `inspect.getsource(run_query)`
+substring checks, which certify that a line is still there rather than that
+the loop still behaves. They are now driven through the real `run_query` on
+`app/harness/tests/_replay.py`: `ReplayEngine` replaces `loop.stream_chat`
+(SSE-shaped chunks — reasoning under either key, content, `tool_calls` name and
+argument fragments, finish, usage — and a snapshot of every request's messages
+and `tools`), and `ReplayPool` replaces `loop._build_pool` (answers from a
+dict, `delay_by_call_id` to reorder completions, start/completion/cancel order
+and peak overlap). `app/harness/tests/test_loop_invariants.py` is the index:
+position 0 inserted once and history append-only, wire order on both dispatch
+paths, `_pre_dispatch` sequential before any call, both reasoning keys, the
+finalizer's tools array equal to the last request's, overflow recoveries ≤ 2.
+The stdio lock is driven through `MCPPool.call_tool` with fake sessions
+(`test_dispatch_split.py`), including a reopen while a call holds the lock.
+Write new loop tests on these seams; do not reintroduce source pins.

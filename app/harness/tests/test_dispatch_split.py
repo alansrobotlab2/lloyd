@@ -13,7 +13,7 @@ shape no engine accepts.
 
 from __future__ import annotations
 
-import inspect
+import pytest
 
 from app.harness import loop as L
 from app.harness.options import RunOptions
@@ -101,10 +101,34 @@ def test_it_mutates_in_place_so_the_observers_handle_stays_valid():
     assert [m["role"] for m in handle] == ["assistant", "tool", "tool", "user"]
 
 
-def test_the_loop_calls_it_after_every_batch():
-    src = inspect.getsource(L.run_query)
-    assert "batch_base = len(chat_messages)" in src
-    assert "_reorder_batch_messages(chat_messages, batch_base)" in src
+@pytest.mark.parametrize("parallel", [False, True])
+async def test_a_hook_inject_during_a_batch_lands_after_the_batch(monkeypatch, parallel):
+    """Through the real loop, on both dispatch paths: a pretool hook that
+    appends to the shared buffer while the batch runs ends up AFTER every tool
+    message of that batch, and the next request carries that shape."""
+    from app.harness.hooks import HookRegistry
+    from app.harness.tests import _replay as R
+
+    handle: list[dict] = []
+    hooks = HookRegistry()
+
+    async def inject(input_dict, tool_use_id, _ctx):
+        if input_dict["tool_name"] == "Read":
+            handle.append({"role": "user", "content": "[INNER VOICE] wrap up"})
+        return {}
+    hooks.add_pre_tool_use(None, inject)
+
+    engine = R.ReplayEngine([R.Step(tool_calls=[
+        R.tool_call("c1", "Read", "a"), R.tool_call("c2", "Grep", "b"),
+        R.tool_call("c3", "Glob", "c")]), R.Step(text="done")])
+    R.install(monkeypatch, engine, R.ReplayPool(delay_by_call_id={"c1": 0.02}))
+    await R.drive(RunOptions(model="m", max_turns=4, tool_search_enabled=False,
+                             parallel_tool_calls_enabled=parallel, hooks=hooks,
+                             chat_messages_handle=handle))
+
+    sent = [m["role"] for m in engine.requests[1].messages]
+    assert sent == ["user", "assistant", "tool", "tool", "tool", "user"], sent
+    assert [m["role"] for m in handle][:6] == sent
 
 
 # ── the split ───────────────────────────────────────────────────────────────
@@ -201,10 +225,32 @@ async def test_an_early_result_short_circuits_the_dispatch():
 
 # ── annotations reach the pool ──────────────────────────────────────────────
 
-def test_list_tools_carries_annotations():
+async def test_list_tools_carries_annotations():
+    """Discovery keeps the server's hints, so a read-only batch can qualify
+    from what the server said rather than a second list of names."""
+    import mcp.types as T
+
     from app.harness import mcp_pool as P
-    src = inspect.getsource(P.MCPPool._list_tools)
-    assert '"annotations": _annotations(t)' in src
+
+    class _Session:
+        async def list_tools(self):
+            return T.ListToolsResult(tools=[
+                T.Tool(name="Read", inputSchema={"type": "object"},
+                       annotations=T.ToolAnnotations(readOnlyHint=True)),
+                T.Tool(name="Bash", inputSchema={"type": "object"},
+                       annotations=T.ToolAnnotations(readOnlyHint=False,
+                                                     destructiveHint=True)),
+                T.Tool(name="plain", inputSchema={"type": "object"}),
+            ])
+
+    pool = P.MCPPool({})
+    tools = await pool._list_tools("srv", _Session())
+    by_name = {t["name"]: t for t in tools}
+    assert by_name["Read"]["annotations"]["readOnlyHint"] is True
+    assert by_name["Bash"]["annotations"]["readOnlyHint"] is False
+    assert by_name["plain"]["annotations"] == {}
+    pool._register("srv", tools)
+    assert L._read_only_names(pool) == {"Read"}
 
 
 def test_annotations_reads_both_sdk_naming_conventions():
@@ -226,20 +272,104 @@ def test_annotations_reads_both_sdk_naming_conventions():
     assert _annotations(_None()) == {}
 
 
-def test_the_stdio_path_serialises_calls_on_its_shared_session():
-    from app.harness import mcp_pool as P
-    src = inspect.getsource(P.MCPPool._invoke)
-    assert "self._stdio_locks" in src
-    assert "async with lock:" in src
-    # The HTTP path opens a session per call and must NOT be serialised.
-    http_part = src.split("lock = self._stdio_locks")[0]
-    assert "async with self._http_session(cfg) as session:" in http_part
+# ── the stdio lock, driven through MCPPool.call_tool ───────────────────────
+
+class _FakeSession:
+    """Stands in for a `ClientSession`. `shared` is one overlap counter across
+    every session in a test, so a second session after a reopen still counts
+    against the first."""
+
+    def __init__(self, shared: dict, name: str = "s"):
+        self.shared = shared
+        self.name = name
+
+    async def call_tool(self, bare, args, read_timeout_seconds=None, meta=None):
+        import asyncio
+
+        import mcp.types as T
+
+        self.shared["live"] = self.shared.get("live", 0) + 1
+        self.shared["peak"] = max(self.shared.get("peak", 0), self.shared["live"])
+        try:
+            await asyncio.sleep(self.shared.get("delay", 0.03))
+        finally:
+            self.shared["live"] -= 1
+        return T.CallToolResult(content=[T.TextContent(type="text", text=bare)])
 
 
-def test_the_lock_map_survives_a_reopen():
+def _stdio_pool(servers=("s",), shared=None):
     from app.harness import mcp_pool as P
-    src = inspect.getsource(P.MCPPool._reopen)
-    assert "_stdio_locks" not in src, \
+
+    shared = shared if shared is not None else {}
+    pool = P.MCPPool({n: {"type": "stdio", "command": "true"} for n in servers})
+    for n in servers:
+        pool._sessions[n] = _FakeSession(shared, n)
+        pool._tool_routes[f"t_{n}"] = n
+    pool._opened = True
+    return pool, shared
+
+
+async def test_two_concurrent_stdio_calls_serialise_on_their_shared_session():
+    import asyncio
+
+    pool, shared = _stdio_pool()
+    got = await asyncio.gather(pool.call_tool("t_s", {}), pool.call_tool("t_s", {}))
+    assert [g["content"] for g in got] == ["t_s", "t_s"]
+    assert shared["peak"] == 1, "two frames were on one pipe at once"
+
+
+async def test_the_stdio_lock_is_per_server_not_global():
+    import asyncio
+
+    pool, shared = _stdio_pool(servers=("a", "b"))
+    await asyncio.gather(pool.call_tool("t_a", {}), pool.call_tool("t_b", {}))
+    assert shared["peak"] == 2, "different servers must not wait on each other"
+
+
+async def test_the_http_path_is_not_serialised(monkeypatch):
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    from app.harness import mcp_pool as P
+
+    shared: dict = {}
+    # The real default config: an HTTP server, never contacted here because
+    # `_http_session` is replaced below.
+    pool = P.MCPPool(dict(P.DEFAULT_LLOYD_MCP_SERVERS))
+    (server,) = P.DEFAULT_LLOYD_MCP_SERVERS
+    pool._tool_routes["t_h"] = server
+    pool._opened = True
+
+    @asynccontextmanager
+    async def _session(_cfg):
+        yield _FakeSession(shared, "h")
+
+    monkeypatch.setattr(pool, "_http_session", _session)
+    await asyncio.gather(pool.call_tool("t_h", {}), pool.call_tool("t_h", {}))
+    assert shared["peak"] == 2
+
+
+async def test_the_lock_map_survives_a_reopen():
+    """A reopen while a call holds the lock must not mint a fresh lock: the
+    call issued after the reopen still waits for the one in flight."""
+    import asyncio
+
+    pool, shared = _stdio_pool()
+    shared["delay"] = 0.05
+
+    async def _open():
+        pool._sessions["s"] = _FakeSession(shared, "s")
+        pool._tool_routes["t_s"] = "s"
+        pool._opened = True
+
+    pool.open = _open   # the owner task and subprocess are not the subject here
+
+    first = asyncio.create_task(pool.call_tool("t_s", {}))
+    await asyncio.sleep(0.01)            # first now holds the lock
+    await pool._reopen()
+    second = asyncio.create_task(pool.call_tool("t_s", {}))
+    await asyncio.gather(first, second)
+    assert shared["peak"] == 1, \
         "a lock recreated under a waiter lets two frames onto one pipe"
 
 

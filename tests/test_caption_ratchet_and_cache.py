@@ -73,26 +73,103 @@ def test_result_event_defaults_to_zero_for_a_turn_with_no_tools():
     assert evt["tool_calls_total"] == 0 and evt["tool_calls_captioned"] == 0
 
 
-def test_the_loop_counts_only_tools_that_were_asked_for_a_caption():
+# Driven through the real `run_query` on the replay seams
+# (`app/harness/tests/_replay.py`); these used to be source-substring pins.
+
+def _caption_pool():
+    from app.harness.tests import _replay as R
+
+    return R.ReplayPool({
+        "Read": True, "Bash": False,
+        # Declares a real, required `summary` of its own, so it is not in
+        # `summary_tools` and its `summary` is a genuine argument.
+        "session_inject_context": {
+            "inputSchema": {"type": "object",
+                            "properties": {"summary": {"type": "string"}},
+                            "required": ["summary"]},
+            "annotations": {"readOnlyHint": False}},
+    })
+
+
+async def _caption_turn(monkeypatch, steps, **opts):
+    from app.harness.options import RunOptions
+    from app.harness.tests import _replay as R
+
+    pool = _caption_pool()
+    R.install(monkeypatch, R.ReplayEngine(steps), pool)
+    out = await R.drive(RunOptions(model="m", max_turns=8,
+                                   tool_search_enabled=False, **opts))
+    return out, pool
+
+
+def _nudged(out):
+    from app.harness.loop import _CAPTION_NUDGE
+    from app.harness.tests import _replay as R
+
+    return [e["call_id"] for e in R.of_type(out, "tool_result")
+            if _CAPTION_NUDGE in e["content"]]
+
+
+async def test_only_summary_tools_are_counted(monkeypatch):
     """`session_inject_context` has a real `summary` of its own and is not in
-    `summary_tools`; counting it would report a caption nobody injected."""
-    import inspect
+    `summary_tools`; counting it would report a caption nobody injected — and
+    its `summary` must reach the tool as an argument, not be lifted off."""
+    from app.harness.tests import _replay as R
 
-    from app.harness import loop
+    out, pool = await _caption_turn(monkeypatch, [
+        R.Step(tool_calls=[
+            R.tool_call("c1", "Read", "reading x", file_path="/x"),
+            R.tool_call("c2", "session_inject_context", "a real argument"),
+        ]),
+        R.Step(text="done"),
+    ])
+    result = R.of_type(out, "result")[0]
+    assert (result["tool_calls_total"], result["tool_calls_captioned"]) == (1, 1)
+    by_id = {c["call_id"]: c for c in pool.calls}
+    assert "summary" not in by_id["c1"]["args"]
+    assert by_id["c1"]["summary"] == "reading x"
+    assert by_id["c2"]["args"]["summary"] == "a real argument"
+    assert _nudged(out) == []
 
-    src = inspect.getsource(loop.run_query)
-    assert 'tc["function"]["name"] in summary_tools' in src
+
+async def test_the_nudge_fires_once_per_turn(monkeypatch):
+    """One result carries it — the first miss. Thirty would be noise."""
+    from app.harness.tests import _replay as R
+
+    out, _pool = await _caption_turn(monkeypatch, [
+        R.Step(tool_calls=[R.tool_call("c1", "Read", "captioned", file_path="/a")]),
+        R.Step(tool_calls=[R.tool_call("c2", "Bash", command="ls")]),
+        R.Step(tool_calls=[R.tool_call("c3", "Bash", command="pwd"),
+                           R.tool_call("c4", "Read", file_path="/b")]),
+        R.Step(text="done"),
+    ])
+    assert _nudged(out) == ["c2"]
+    result = R.of_type(out, "result")[0]
+    assert (result["tool_calls_total"], result["tool_calls_captioned"]) == (4, 1)
 
 
-def test_the_nudge_fires_at_most_once_per_turn():
-    """One result carries it. Thirty would be its own kind of noise."""
-    import inspect
+async def test_in_a_parallel_batch_the_nudge_lands_on_the_first_miss_in_wire_order(
+        monkeypatch):
+    """The first result back is arbitrary; the ratchet is about the first call
+    the model MADE without a caption."""
+    from app.harness.tests import _replay as R
 
-    from app.harness import loop
+    pool = _caption_pool()
+    pool.delay_by_call_id = {"c1": 0.04, "c2": 0.03, "c3": 0.0}
+    R.install(monkeypatch, R.ReplayEngine([
+        R.Step(tool_calls=[R.tool_call("c1", "Read", "has one", file_path="/a"),
+                           R.tool_call("c2", "Read", file_path="/b"),
+                           R.tool_call("c3", "Read", file_path="/c")]),
+        R.Step(text="done"),
+    ]), pool)
+    from app.harness.options import RunOptions
 
-    src = inspect.getsource(loop.run_query)
-    assert "elif not caption_nudged:" in src
-    assert "caption_nudged = True" in src
+    out = await R.drive(RunOptions(model="m", max_turns=4, tool_search_enabled=False,
+                                   parallel_tool_calls_enabled=True))
+    assert pool.completed[0] == "c3", "the fixture did not reorder"
+    assert _nudged(out) == ["c2"]
+    result = R.of_type(out, "result")[0]
+    assert (result["tool_calls_total"], result["tool_calls_captioned"]) == (3, 1)
 
 
 # ── prefix-cache accounting ─────────────────────────────────────────────────

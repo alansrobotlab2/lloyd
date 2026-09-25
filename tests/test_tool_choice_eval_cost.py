@@ -104,82 +104,70 @@ def _first_line_containing(lines: list[str], needle: str, where: str) -> int:
     raise AssertionError  # unreachable; keeps the return type honest
 
 
-# ── clause 5, structural half: the CLAIM, not the numbers ───────────────────
+# ── clause 5, behavioural half: the CLAIM, not the numbers ──────────────────
 #
 # The cited range is a pointer and pointers rot. This file's own history is the
 # evidence: it cited 378-388 (the context-overflow recovery block, the defect
 # #748 fixed), then after #748 it cited 737-748 — correct when written — and a
 # later loop.py edit slid those nine lines down without touching the mechanism.
 # So the range test above pins the comment to today's tree; the tests below pin
-# the mechanism on EVERY tool-call emit path, so a refactor that reorders yield
-# and dispatch fails here even if somebody forgets to touch this file, and a
-# refactor that merely MOVES the code fails only the pointer test (a one-line
-# fix) instead of silently making the eval dispatch live.
+# the mechanism on BOTH tool-call emit paths (the single-call loop and Phase 1 of
+# the parallel read-only batch) by driving the real `run_query` on the replay
+# seams (`app/harness/tests/_replay.py`) and breaking at the first `tool_call`,
+# exactly as the eval does. They used to scan `run_query`'s source for the order
+# of `yield tc_evt` and `_dispatch_one_tool_call(` (P13.0 replaced that): a
+# source scan certifies text, and the eval's safety is a behaviour.
 
-def _emit_sites() -> list[tuple[int, int]]:
-    """(emit_line, yield_line) 1-based for every `X = events.tool_call(` in the
-    harness loop, over the whole function rather than a cited window."""
-    import inspect
-
-    from app.harness import loop
-
-    # Line numbers are relative to the start of run_query, which is all this
-    # checks — the point is order within a path, not an address in the file.
-    src = inspect.getsource(loop.run_query).splitlines()
-    sites = []
-    for i, line in enumerate(src):
-        if "= events.tool_call(" in line:
-            yielded = next((k for k in range(i + 1, min(i + 25, len(src)))
-                            if "yield tc_evt" in src[k]), None)
-            assert yielded is not None, (
-                f"events.tool_call emitted at run_query+{i} is never yielded within "
-                "25 lines — the eval's break-at-tool_call would never see it")
-            sites.append((i + 1, yielded + 1))
-    return sites
+_EMIT_PATHS = {
+    # (tools in the first completion, parallel flag)
+    "single_call": ([("c1", "Bash")], False),
+    "sequential_batch": ([("c1", "Read"), ("c2", "Bash")], True),
+    "parallel_batch": ([("c1", "Read"), ("c2", "Grep")], True),
+}
 
 
-def test_every_tool_call_emit_site_yields_before_its_dispatch():
+def _emit_turn(monkeypatch, path, *, stop_at_first_call):
+    from app.harness.options import RunOptions
+    from app.harness.tests import _replay as R
+
+    calls, parallel = _EMIT_PATHS[path]
+    pool = R.ReplayPool()
+    R.install(monkeypatch, R.ReplayEngine([
+        R.Step(tool_calls=[R.tool_call(cid, name, "s") for cid, name in calls]),
+        R.Step(text="done"),
+    ]), pool)
+    opts = RunOptions(model="m", max_turns=4, tool_search_enabled=False,
+                      parallel_tool_calls_enabled=parallel)
+    stop = (lambda e: e["type"] == "tool_call") if stop_at_first_call else None
+    out = asyncio.run(R.drive(opts, on_event=stop))
+    return out, pool
+
+
+@pytest.mark.parametrize("path", sorted(_EMIT_PATHS))
+def test_every_tool_call_emit_site_yields_before_its_dispatch(monkeypatch, path):
     """No path may hand out a `tool_call` and then have already run it.
 
-    Checked per emit site: between building the event and yielding it there is no
-    `_dispatch_one_tool_call(` and no `_execute_tool_call(`. Today there are two
-    sites — the single-call path and Phase 1 of the parallel-batch path — and the
-    count is asserted so a THIRD path (a speculative dispatcher, a replay path)
-    cannot appear without someone reading this comment.
+    The eval breaks at the first `tool_call` and closes the generator; on every
+    dispatch path the pool must not have been asked for anything by then, and
+    closing there must not dispatch it afterwards either.
     """
-    import inspect
-
-    from app.harness import loop
-
-    src = inspect.getsource(loop.run_query).splitlines()
-    sites = _emit_sites()
-    assert len(sites) >= 2, (
-        f"expected the single-call and the parallel-batch emit sites, found "
-        f"{len(sites)} — either a path is gone or a new one appeared, and the "
-        "query set's safety comment describes both")
-    for emit, yielded in sites:
-        between = "\n".join(src[emit - 1:yielded])
-        for forbidden in ("_dispatch_one_tool_call(", "_execute_tool_call("):
-            assert forbidden not in between, (
-                f"run_query+{emit} dispatches via {forbidden} before yielding at "
-                f"+{yielded}: the tool-choice eval would execute the tool")
+    out, pool = _emit_turn(monkeypatch, path, stop_at_first_call=True)
+    assert out[-1]["type"] == "tool_call", [e["type"] for e in out]
+    assert pool.started == [], (
+        f"{path}: the pool was called ({pool.started}) before the first tool_call "
+        "was handed out — the tool-choice eval would execute the tool")
 
 
-def test_a_dispatch_follows_each_yield_somewhere_so_the_break_is_what_stops_it():
+@pytest.mark.parametrize("path", sorted(_EMIT_PATHS))
+def test_a_dispatch_follows_each_yield_somewhere_so_the_break_is_what_stops_it(
+        monkeypatch, path):
     """The other direction: if no dispatch ever followed the yield, the comment
     would be describing a generator that returns before running tools, and the
     eval's safety would be an accident of the caller rather than of the loop."""
-    import inspect
-
-    from app.harness import loop
-
-    src = inspect.getsource(loop.run_query).splitlines()
-    for emit, yielded in _emit_sites():
-        later = "\n".join(src[yielded:])
-        assert ("_dispatch_one_tool_call(" in later
-                or "_execute_tool_call(" in later), (
-            f"nothing after run_query+{yielded} dispatches — the yield-before-"
-            "dispatch claim no longer describes anything")
+    out, pool = _emit_turn(monkeypatch, path, stop_at_first_call=False)
+    announced = [e["call_id"] for e in out if e["type"] == "tool_call"]
+    assert announced and sorted(pool.started) == sorted(announced), (
+        f"{path}: announced {announced}, dispatched {pool.started}")
 
 
 # ── clause 6: per-query usage, from this query's own request ────────────────

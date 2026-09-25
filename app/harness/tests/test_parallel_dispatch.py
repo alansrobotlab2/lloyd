@@ -92,10 +92,21 @@ def test_a_parse_error_and_toolsearch_do_not_disqualify():
     assert L._batch_is_read_only(calls, ro)
 
 
-def test_read_only_names_comes_from_the_annotations_not_a_local_list():
-    src = inspect.getsource(L._read_only_names)
-    assert 'ann.get("readOnlyHint")' in src
-    assert "pool.discovered" in src
+def test_read_only_names_comes_from_the_annotations_a_real_pool_discovered():
+    """The hint is read off what `MCPPool` discovered from the server, not off
+    a list kept in the harness: a tool the server marks read-only qualifies, the
+    same name unmarked does not, and nothing is inferred from the name."""
+    from app.harness.mcp_pool import MCPPool
+
+    pool = MCPPool({})
+    pool._register("srv", [
+        {"name": "Read", "inputSchema": {}, "annotations": {"readOnlyHint": True}},
+        {"name": "Grep", "inputSchema": {}, "annotations": {"readOnlyHint": False}},
+        {"name": "custom_lookup", "inputSchema": {},
+         "annotations": {"readOnlyHint": True}},
+        {"name": "Glob", "inputSchema": {}},
+    ])
+    assert L._read_only_names(pool) == {"Read", "custom_lookup"}
 
 
 # ── the batch runs ──────────────────────────────────────────────────────────
@@ -154,39 +165,9 @@ async def test_history_is_wire_order_even_when_results_land_reversed():
 
 
 # ── the loop wiring ─────────────────────────────────────────────────────────
-
-def test_the_loop_gates_on_the_flag_and_the_batch_size():
-    src = inspect.getsource(L.run_query)
-    assert 'getattr(options, "parallel_tool_calls_enabled", False)' in src
-    assert "len(tool_calls_committed) > 1" in src
-    assert "_batch_is_read_only(tool_calls_committed, _read_only_names(pool))" in src
-
-
-def test_the_loop_does_not_use_a_taskgroup():
-    """A TaskGroup cancels its siblings on the first exception; one tool
-    failing is a tool_result, not a reason to abandon the batch."""
-    src = inspect.getsource(L.run_query)
-    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
-    assert "TaskGroup" not in code
-
-
-def test_the_loop_cancels_outstanding_tasks_if_the_generator_closes():
-    src = inspect.getsource(L.run_query)
-    block = src.split("run_parallel = (")[1]
-    assert "finally:" in block and "t.cancel()" in block
-
-
-def test_the_loop_writes_history_in_wire_order():
-    src = inspect.getsource(L.run_query)
-    block = src.split("# Phase 3")[1]
-    assert "for tc in tool_calls_committed:" in block
-    assert 'results.get(tc["id"])' in block
-
-
-def test_the_mixed_path_still_runs_the_original_sequential_loop():
-    src = inspect.getsource(L.run_query)
-    assert "if tool_calls_committed_done else tool_calls_committed" in src
-
+#
+# Driven through the real `run_query` on the replay seams
+# (`app/harness/tests/_replay.py`), never by reading its source.
 
 def test_captions_are_accounted_in_wire_order():
     """The ratchet is about the first miss, not the first to come back."""
@@ -390,3 +371,125 @@ async def test_an_inject_during_a_parallel_batch_lands_after_the_tool_messages(
     assert roles == ["user", "assistant", "tool", "tool", "user", "assistant"], roles
     tool_ids = [m["tool_call_id"] for m in handle if m["role"] == "tool"]
     assert tool_ids == ["c1", "c2"], "history must be wire order"
+
+
+# ── behavioural pins on the replay seams (P13.0) ────────────────────────────
+#
+# These replaced source-substring checks on `run_query`: the flag and
+# batch-size gate, "no TaskGroup", "the finally cancels outstanding tasks",
+# "Phase 3 writes wire order" and "the mixed path runs the sequential loop".
+# Each is now the behaviour the substring was standing in for.
+
+from app.harness.tests import _replay as R  # noqa: E402
+
+
+def _opts(**kw):
+    kw.setdefault("parallel_tool_calls_enabled", True)
+    return RunOptions(model="m", max_turns=4, tool_search_enabled=False, **kw)
+
+
+async def test_a_batch_with_one_bash_runs_sequentially_and_a_read_only_batch_overlaps(
+        monkeypatch):
+    slow = {"c1": 0.03, "c2": 0.03, "c3": 0.03}
+
+    # Read-only batch, flag on: all three calls are in flight together.
+    pool = R.ReplayPool(delay_by_call_id=slow)
+    R.install(monkeypatch, R.ReplayEngine([R.Step(tool_calls=[
+        R.tool_call("c1", "Read", "a"), R.tool_call("c2", "Grep", "b"),
+        R.tool_call("c3", "Glob", "c")]), R.Step(text="done")]), pool)
+    await R.drive(_opts())
+    assert pool.max_inflight == 3, pool.timeline
+
+    # One Bash in the same batch: strictly one at a time, in wire order.
+    pool = R.ReplayPool(delay_by_call_id=slow)
+    R.install(monkeypatch, R.ReplayEngine([R.Step(tool_calls=[
+        R.tool_call("c1", "Read", "a"), R.tool_call("c2", "Bash", "b", command="ls"),
+        R.tool_call("c3", "Glob", "c")]), R.Step(text="done")]), pool)
+    await R.drive(_opts())
+    assert pool.max_inflight == 1, pool.timeline
+    assert pool.timeline == ["start:c1", "done:c1", "start:c2", "done:c2",
+                             "start:c3", "done:c3"]
+
+    # Read-only batch with the flag OFF: sequential too.
+    pool = R.ReplayPool(delay_by_call_id=slow)
+    R.install(monkeypatch, R.ReplayEngine([R.Step(tool_calls=[
+        R.tool_call("c1", "Read", "a"), R.tool_call("c2", "Grep", "b")]),
+        R.Step(text="done")]), pool)
+    await R.drive(_opts(parallel_tool_calls_enabled=False))
+    assert pool.max_inflight == 1, pool.timeline
+
+
+async def test_one_failing_tool_in_a_batch_does_not_cancel_its_siblings(monkeypatch):
+    """A TaskGroup would cancel the slow sibling when the fast one raised; one
+    tool failing is a tool_result, not a reason to abandon the batch."""
+    pool = R.ReplayPool(answers={"c1": RuntimeError("boom")},
+                        delay_by_call_id={"c1": 0.0, "c2": 0.05})
+    R.install(monkeypatch, R.ReplayEngine([R.Step(tool_calls=[
+        R.tool_call("c1", "Read", "a"), R.tool_call("c2", "Grep", "b")]),
+        R.Step(text="done")]), pool)
+    out = await R.drive(_opts())
+
+    results = {e["call_id"]: e for e in R.of_type(out, "tool_result")}
+    assert results["c1"]["is_error"] and "boom" in results["c1"]["content"]
+    assert results["c2"]["is_error"] is False
+    assert results["c2"]["content"] == "RESULT[Grep]"
+    assert pool.cancelled == [] and pool.completed == ["c1", "c2"]
+    assert R.of_type(out, "result")[0]["stop_reason"] == "stop"
+
+
+async def test_an_exception_escaping_the_executor_is_contained_per_call(monkeypatch):
+    """The batch's own guard, below `_execute_tool_call`'s: an exception that
+    escapes the executor becomes that call's error result and nothing else."""
+    pool = R.ReplayPool(delay_by_call_id={"c2": 0.05})
+    real = L._execute_tool_call
+
+    async def flaky(**kw):
+        if kw["tc"]["id"] == "c1":
+            raise RuntimeError("executor blew up")
+        return await real(**kw)
+
+    monkeypatch.setattr(L, "_execute_tool_call", flaky)
+    R.install(monkeypatch, R.ReplayEngine([R.Step(tool_calls=[
+        R.tool_call("c1", "Read", "a"), R.tool_call("c2", "Grep", "b")]),
+        R.Step(text="done")]), pool)
+    out = await R.drive(_opts())
+    results = {e["call_id"]: e for e in R.of_type(out, "tool_result")}
+    assert results["c1"]["is_error"] and "executor blew up" in results["c1"]["content"]
+    assert results["c2"]["content"] == "RESULT[Grep]"
+    assert pool.cancelled == []
+
+
+async def test_closing_the_generator_mid_batch_cancels_outstanding_calls(monkeypatch):
+    """A Stop click or a disconnect closes the generator; a tool still running
+    for a turn nobody is reading must be cancelled, not left to finish."""
+    pool = R.ReplayPool(delay_by_call_id={"c1": 0.0, "c2": 5.0, "c3": 5.0})
+    R.install(monkeypatch, R.ReplayEngine([R.Step(tool_calls=[
+        R.tool_call("c1", "Read", "a"), R.tool_call("c2", "Grep", "b"),
+        R.tool_call("c3", "Glob", "c")]), R.Step(text="done")]), pool)
+
+    out = await R.drive(_opts(),
+                        on_event=lambda e: e["type"] == "tool_result")
+    assert [e["call_id"] for e in R.of_type(out, "tool_result")] == ["c1"]
+    for _ in range(5):          # let the cancellations be delivered
+        await asyncio.sleep(0)
+    assert sorted(pool.cancelled) == ["c2", "c3"], pool.timeline
+    assert pool.completed == ["c1"]
+    assert pool.inflight == 0
+
+
+async def test_history_is_in_wire_order_when_the_last_call_lands_first(monkeypatch):
+    pool = R.ReplayPool(delay_by_call_id={"c1": 0.06, "c2": 0.03, "c3": 0.0})
+    engine = R.ReplayEngine([R.Step(tool_calls=[
+        R.tool_call("c1", "Read", "a"), R.tool_call("c2", "Grep", "b"),
+        R.tool_call("c3", "Glob", "c")]), R.Step(text="done")])
+    R.install(monkeypatch, engine, pool)
+    out = await R.drive(_opts())
+
+    assert pool.completed == ["c3", "c2", "c1"], "the fixture did not reorder"
+    # Yielded as they land...
+    assert [e["call_id"] for e in R.of_type(out, "tool_result")] == ["c3", "c2", "c1"]
+    # ...but replayed to the engine in the order the model made them.
+    sent = engine.requests[1].messages
+    asst = [m for m in sent if m["role"] == "assistant"][-1]
+    assert [tc["id"] for tc in asst["tool_calls"]] == ["c1", "c2", "c3"]
+    assert [m["tool_call_id"] for m in sent if m["role"] == "tool"] == ["c1", "c2", "c3"]

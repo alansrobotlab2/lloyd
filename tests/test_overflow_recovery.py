@@ -30,9 +30,9 @@ import pytest
 
 from app.harness import tool_search_cache
 from app.harness.errors import ContextOverflowError
-from app.harness.loop import _relieve_context, run_query
+from app.harness.loop import _relieve_context
 from tests._relief_harness import (
-    BAND, TC, WALL, relief_harness, seeded_history)
+    BAND, TC, TRIGGER, WALL, relief_harness, seeded_history)
 
 
 @pytest.fixture(autouse=True)
@@ -126,65 +126,43 @@ def test_a_latched_turn_still_ends_context_exhausted_when_recovery_cannot_keep_u
     assert len(run.intra_passes()) == 1, run.calls
 
 
-def test_the_overflow_recovery_call_site_is_the_one_that_must_stay_unlatched():
-    """Clause 3's boundary, pinned where it is actually decided: the call site.
+def test_the_overflow_recovery_call_site_is_the_one_that_must_stay_unlatched(harness):
+    """Clause 3's boundary, pinned by what the loop hands the ladder on a driven turn.
 
     The recovery ladder is the last thing between a round and `context_exhausted`, so
-    it must run the whole ladder whether or not relief already ran that turn. That is
-    a property of ONE line — the `reason="overflow"` call must not hand in a `latch`
-    — and a latch passed there would silently disable the recovery on every turn that
-    had already run one intra-turn pass, which is every long round.
+    it must run the whole ladder whether or not relief already ran that turn. A latch
+    handed to the `reason="overflow"` call would silently disable the recovery on every
+    turn that had already run one intra-turn pass, which is every long round.
 
-    The reason string on that call is `"overflow"`, and the reason on the latched one
-    is `"intra_turn"`; both are asserted on below because a rename of either would
-    otherwise move the latch onto the recovery path in silence.
+    This used to read `run_query`'s source with `ast` (P13.0 replaced it): the driver
+    records every `_relieve_context` call the REAL loop makes, with the latch object it
+    was handed, so the same properties are asserted as behaviour —
 
-    Asserted against the source of `run_query` rather than a driven turn because the
-    clause is a property of ONE line, and the alternative — reproducing a real wall
-    crossing — is what `test_overflow_recovery_recovers_and_completes` and
-    `test_context_exhaustion_after_max_recoveries` already do with an artificial
-    meter, and neither can show that a latch was NOT handed to the recovery.
-
-    Read with `ast`, not as text. A substring scan over the call's source cannot tell
-    a keyword argument from the prose of a comment inside the same call, so a comment
-    mentioning a latch would have made the text version of this test pass while the
-    recovery was being latched for real; and a bare `"latch" not in call` fails the
-    instant the keyword it is meant to prove absent is named out loud. Each call is
-    resolved to its actual keyword names, so what is asserted is what Python parses.
+      * every per-iteration (`intra_turn`) call of the turn is handed a latch, and it
+        is ONE latch object for the whole turn (a latch minted per iteration would
+        re-open on every iteration and gate nothing);
+      * the latch re-arms at the level the knobs compute (`TRIGGER`, 0.8 of the
+        threshold), not at a literal;
+      * the `overflow` call on the same turn is handed no latch at all.
     """
-    import ast
     import inspect
-    import textwrap
 
-    tree = ast.parse(textwrap.dedent(inspect.getsource(run_query)))
+    run = harness([("a", [TC(1)]), ("b", [TC(2)]), ("c", [TC(3)]), ("done", [])],
+                  level=BAND, max_turns=6, overflow_times=1, overflow_at=3)
 
-    def keywords_of(reason: str) -> set[str]:
-        """The parameter names the `_relieve_context` call for `reason` really passes.
+    intra = run.intra_calls()
+    assert len(intra) >= 2, [(c["used"], c["latched"]) for c in intra]
+    latches = {id(c["latch"]) for c in intra}
+    assert None not in [c["latch"] for c in intra], intra
+    assert len(latches) == 1, f"one latch per turn, found {len(latches)}"
+    assert run.intra_passes() and run.intra_passes()[0]["rearm"] == TRIGGER, (
+        run.intra_passes())
 
-        Every such call in `run_query` is collected and cross-checked, so a call site
-        with a different reason string can never be mistaken for the one under test.
-        """
-        found = []
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call)
-                    and getattr(node.func, "id", None) == "_relieve_context"):
-                names = {kw.arg for kw in node.keywords if kw.arg}
-                got = next((kw.value.value for kw in node.keywords
-                            if kw.arg == "reason"), None)
-                found.append((got, names))
-        assert len(found) == 4, f"expected 4 relief call sites, got {found}"
-        matches = [names for got, names in found if got == reason]
-        assert len(matches) == 1, f"{reason!r}: {found}"
-        return matches[0]
-
-    overflow = keywords_of("overflow")
-    assert "latch" not in overflow, (
-        f"the context-overflow recovery now hands in a latch ({sorted(overflow)}); "
-        "a latched recovery runs a partial ladder and kills a round that could still "
-        "have been saved")
-
-    intra = keywords_of("intra_turn")
-    assert "latch" in intra, f"the per-iteration pass lost its latch: {sorted(intra)}"
+    over = run.by_reason("overflow")
+    assert len(over) == 1, run.calls
+    assert over[0]["latch"] is None, (
+        "the context-overflow recovery was handed a latch; a latched recovery runs a "
+        "partial ladder and kills a round that could still have been saved")
 
     # Unbounded means what it says: `_relieve_context` has no per-call rung bound to
     # be passed, so "no latch" is the whole of the bound. If someone adds a `stop_at`
@@ -194,14 +172,6 @@ def test_the_overflow_recovery_call_site_is_the_one_that_must_stay_unlatched():
     assert not rung_bounds & set(inspect.signature(_relieve_context).parameters), (
         "a per-call rung bound appeared on _relieve_context; the overflow rung is "
         "unbounded only while no such parameter exists")
-
-    # The latch is per turn: created once inside `run_query`, and the level it re-arms
-    # at is computed, not hard-coded — a literal here would drift off the 0.8 knob.
-    created = [n for n in ast.walk(tree)
-               if isinstance(n, ast.Assign)
-               and any(getattr(t, "id", "") == "relief_latch" for t in n.targets)
-               and getattr(n.value.func, "id", "") == "_ReliefLatch"]
-    assert len(created) == 1, f"one latch per turn, found {len(created)}"
 
 
 def test_the_terminal_inject_ladder_runs_whole_after_the_latch_closed_a_pass(harness):
