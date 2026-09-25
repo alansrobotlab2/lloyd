@@ -1165,6 +1165,80 @@ yet — the last syllable, reliably. Two fixes, and they are complementary:
   room with no subscriber must not wedge the drain loop, and an older SDK
   without the method must not break it.
 
+### TTS bake-off 2026-09-24
+
+Phase 5's TTS rows, run as proposals: nothing here changed production, and the
+voice is Alan's call by ear. Harness: `scripts/voice/tts_bakeoff.py` —
+`synth` in whatever venv runs the candidate (an OpenAI-style
+`/v1/audio/speech` runner, or a local runner module), `score` in the lloyd venv.
+Ten short replies (the first five are the listen set); TTFB is request → first
+non-silent PCM; *clause TTFA* is today's path with text paced like the LLM
+(45 tok/s, BPE-sized pieces): the first clause `ClauseStream` would cut
+arrives, then it is synthesised; *live TTFA* feeds the same paced tokens to a
+runner that takes text incrementally. Presence is the sub-1 kHz-gated method
+above, bands normalised to 100–1500 Hz, minus `ref.wav`; WER is Parakeet greedy
+with no hotwords (#1165's rater); similarity is Resemblyzer cosine to `ref.wav`
+(the worker's own speaker encoder). `tests/test_tts_bakeoff.py` pins the pacing,
+the clause cut and that the gate ignores loud high-only frames.
+
+| candidate | TTFB p50/p90 | RTF | clause TTFA p50 | live TTFA p50 | WER | sim | presence 1.5–9k (2.5–3.5k / 5–9k) | VRAM |
+|---|---|---|---|---|---|---|---|---|
+| production Qwen3-TTS 1.7B ICL, raw | 0.27/0.31 s | 0.52 | 0.63 s | — | 0.7% | 0.88 | −3.4 (−2.7 / −4.7) | 7.4 GB (server) |
+| same, worker-shaped (what is heard) | — | — | — | — | 1.5% | 0.85 | −0.9 (+0.0 / −1.8) | — |
+| Qwen3-TTS 1.7B, keless fork, x-vector clone, whole text | 1.42/2.00 s ‡ | 3.3 ‡ | 1.63 s ‡ | — | 1.5% | 0.90 | −2.4 (−1.5 / −3.1) | 4.3 GB |
+| same, **live text** | — | — | — | 1.69 s ‡ | 1.5% | 0.89 | −3.2 (−2.3 / −3.7) | 4.3 GB |
+| Fun-CosyVoice3-0.5B-2512, zero-shot clone, whole text | 4.58/5.22 s ‡ | 0.93 ‡ | 3.70 s ‡ | — | 0.0% | 0.91 | −2.8 (−2.4 / −4.8) | 4.0 GB |
+| same, bistream (text generator) | — | — | — | 5.86 s ‡ | 104% | — | — | 4.0 GB |
+| Pocket TTS, CPU ×2, stock voice `alba` (not a clone) | 0.45/0.84 s ‡ | 1.21 ‡ | 0.64 s ‡ | — | 1.5% | 0.62 | not comparable † | 0 |
+
+‡ In-process candidates ran at `nice 19` beside a load average of 50–65 (gate
+workers, a wake-word training job) and shared GPU 0 with the live TTS; the
+production row is the only uncontended one. Their absolute latencies are
+upper bounds, and only comparisons *within* one runner mean anything.
+† A different speaker; presence is speaker-dependent. Its 0.62 similarity is
+the metric's floor for "not Dave" — the clone rows sit at 0.85–0.91.
+
+What each row says:
+
+- **Streaming text into Qwen3-TTS works only without ICL.** The `keless`
+  fork's live-text loop is CustomVoice-only; patched to take a Base-model clone
+  (`keless-clone-live-text.patch` beside the results), the **x-vector** clone
+  streams cleanly: in the same runtime the live TTFA from the first token
+  (p50 1.69 s) is whole-text TTFB (1.42 s) plus priming, i.e. the wait for the
+  clause disappears. At production speed that wait is the whole gain: p50
+  **0.33 s** (max 0.47) of the 0.63 s clause TTFA at 45 tok/s. **ICL — the
+  voice production ships — does not stream.** Its prompt sums the *whole*
+  target text onto the reference clip's 218 codec frames; given text a token at
+  a time it speaks only the words already inside that block and stops ("Sure.",
+  "The build finished cleanly."), also when the first 4 or 8 words are held
+  back to seed the block, and with the target right-aligned in the block it
+  says nothing. Resemblyzer rates the x-vector clone as close to `ref.wav` as
+  ICL (0.90 vs 0.88) but it is a different rendering of Dave; that is the
+  listen question (C/D against A/B).
+- **CosyVoice3's 25 Hz codec does not bring the top back**: raw it is −2.8 dB
+  over 1.5–9 kHz against Qwen3's −3.4, better only at 1.5–2.5 kHz (+0.2 vs
+  −1.3); the presence shelves would still be needed. Best WER (0/10) and
+  similarity (0.91) of the set. Two claims from the plan did not hold here:
+  **speed is refused in streaming** (`token2wav` asserts `speed change only
+  support non-stream inference mode`), so WSOLA stays; and its `stream=True`
+  delivered each short reply as one chunk (TTFB ≈ wall, ~4.6 s fp32 without
+  TRT/vLLM). Its bistream input with a zero-shot prompt spoke the tail of the
+  *reference transcript* before every reply (WER 104%) — unusable as run.
+- **Pocket TTS could not clone**: its cloning weights are gated on Hugging
+  Face and there is no token on this box, so it fell back to the stock-voice
+  model. On 2 CPU threads under this load it ran at RTF 1.2 — not real time.
+  Re-run once Alan accepts the terms (`kyutai/pocket-tts`) and exports
+  `HF_TOKEN`.
+- **VoxCPM2 was not run**: ~8 GB against the ~4–6 GB GPU 0 leaves beside the
+  live TTS, qmd and the desktop.
+
+Nothing measured beats production on the numbers, so nothing changes.
+Listen files: `~/.cache/lloyd-voice-eval/tts-bake-2026-09-24/listen/`
+(`00_REFERENCE…` is the clip; `sN_A…` production raw, `B` production shaped,
+`C`/`D` x-vector whole/live, `E`/`F` CosyVoice3 whole/bistream, `G` Pocket
+stock voice); per-sentence JSON, runners and the fork patch are in
+`…/results/`.
+
 ## The browser half
 
 `web/src/components/VoiceRoom.tsx`, mounted by `VoiceModeContext` when voice
@@ -1487,6 +1561,10 @@ voice.
 - `tests/test_transcript_entries.py` — assistant rows carry their `turn_id`,
   in both writers.
 - `tests/test_guardian_speak.py` — the spoken alert channel (unchanged).
+- `tests/test_tts_bakeoff.py` — the bake-off harness: lossless LLM-paced
+  tokens, the first-clause cut, and presence gated on sub-1 kHz energy.
+- `tests/test_tts_bakeoff.py` — the bake-off harness: lossless LLM-paced
+  tokens, the first-clause cut, and presence gated on sub-1 kHz energy.
 
 `scripts/voice/`: `replay.py` (the pipeline over WAVs; `compare-wake`) —
 which replaces `scripts/ww_replay.py`, a replay of the retired per-utterance
@@ -1495,6 +1573,8 @@ sweep that would now measure an algorithm nothing runs —
 `vad_eval.py` (the VAD bake-off above: `build` the streams, `run` Silero,
 FireRed and TEN through the segmenter, `gate` the cutoffs through Smart Turn
 and the hold, `export-firered` from a scratch venv),
+`tts_bakeoff.py` (TTS candidates: TTFB, live-text TTFA, RTF, presence, WER,
+speaker similarity — see "TTS bake-off 2026-09-24"),
 `hotword_eval.py` with its corpus builder `synth_hotword_corpus.py` (the
 Parakeet hotword measurements above; re-run it before adding a word — only
 terms that measure a gain belong in `livekit.stt.hotwords`)
