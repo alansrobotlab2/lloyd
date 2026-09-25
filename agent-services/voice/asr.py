@@ -374,59 +374,156 @@ class WhisperRecognizer:
         return Transcript(text, time.monotonic() - t0, self.name)
 
 
+#: Tokens a streaming model may emit that are not words. `<EOU>` is the
+#: parakeet_realtime_eou model's end-of-utterance marker, `<EOB>` its
+#: end-of-backchannel one; neither may reach a caption or a prompt.
+_CONTROL_TOKENS = ("<EOU>", "<EOB>")
+
+
 class SherpaStreamingRecognizer:
-    """Cache-aware streaming FastConformer CTC, for partial hypotheses.
+    """Cache-aware streaming NeMo model through sherpa-onnx, for partials.
 
-    Not the final transcript: CTC greedy at a 480 ms chunk is measurably worse
-    than the offline transducer, and the offline pass costs ~60 ms anyway. This
-    exists so there is something to show — and eventually something to start
-    generating from — while the speaker is still talking.
+    Not the final transcript: every streaming model measured here is worse than
+    the offline transducer on the same audio, and the offline pass costs ~60 ms
+    anyway. This exists so there is something to show — and eventually
+    something to start generating from — while the speaker is still talking.
 
-    One `OnlineStream` per audio stream; the recognizer object itself is shared.
+    Two export layouts, told apart by the files present:
+
+    * `model.onnx` — a FastConformer CTC head (`nemo-streaming-480ms`, the
+      original display-only model);
+    * `encoder/decoder/joiner(.int8).onnx` — a transducer. This is what
+      `parakeet-realtime-eou-120m` and `nemotron-speech-streaming-0.6b` ship as.
+      sherpa reads the chunk geometry and the mel size from the encoder's own
+      metadata.
+
+    A model whose `tokens.txt` carries `<EOU>` also reports end of utterance:
+    `accept` strips the marker from the text and `endpointed(stream)` says it
+    was seen since the last `reset`. One `OnlineStream` per audio stream; the
+    recognizer object itself is shared.
     """
 
     name = "nemo-streaming"
 
     def __init__(self, model_dir: str | Path, num_threads: int = 2,
-                 provider: str = "cpu") -> None:
+                 provider: str = "cpu", precision: str = "int8",
+                 language: str = "") -> None:
         self.model_dir = Path(model_dir).expanduser()
+        # Per-stream language hint, for the multilingual Nemotron 3.5 export
+        # ("en", "auto", ...). Empty = do not set one.
+        self.language = language
         self.num_threads = int(num_threads)
         self.provider = provider
+        self.precision = precision
+        self.kind = ""
+        self.has_eou = False
         self._rec = None
+
+    def _pick(self, stem: str) -> str:
+        order = ((f"{stem}.int8.onnx", f"{stem}.onnx") if self.precision == "int8"
+                 else (f"{stem}.onnx", f"{stem}.int8.onnx"))
+        for n in order:
+            p = self.model_dir / n
+            if p.exists():
+                return str(p)
+        raise RuntimeError(f"{self.model_dir}: none of {order} present")
 
     def load(self) -> None:
         if self._rec is not None:
             return
         import sherpa_onnx
 
-        model = self.model_dir / "model.onnx"
         tokens = self.model_dir / "tokens.txt"
-        if not model.exists() or not tokens.exists():
+        if not tokens.exists():
             raise RuntimeError(f"streaming model files missing in {self.model_dir}")
         t0 = time.monotonic()
-        self._rec = sherpa_onnx.OnlineRecognizer.from_nemo_ctc(
-            model=str(model),
-            tokens=str(tokens),
-            num_threads=self.num_threads,
-            provider=self.provider,
-            sample_rate=SAMPLE_RATE,
-            feature_dim=80,
-        )
-        LOG.info("nemo streaming loaded in %.1fs", time.monotonic() - t0)
+        if (self.model_dir / "model.onnx").exists():
+            self.kind = "ctc"
+            self._rec = sherpa_onnx.OnlineRecognizer.from_nemo_ctc(
+                model=str(self.model_dir / "model.onnx"),
+                tokens=str(tokens),
+                num_threads=self.num_threads,
+                provider=self.provider,
+                sample_rate=SAMPLE_RATE,
+                feature_dim=80,
+            )
+        else:
+            self.kind = "transducer"
+            self._rec = sherpa_onnx.OnlineRecognizer.from_transducer(
+                encoder=self._pick("encoder"),
+                decoder=self._pick("decoder"),
+                joiner=self._pick("joiner"),
+                tokens=str(tokens),
+                num_threads=self.num_threads,
+                provider=self.provider,
+                sample_rate=SAMPLE_RATE,
+                feature_dim=80,
+                decoding_method="greedy_search",
+            )
+        self.has_eou = any(line.split(" ", 1)[0] == "<EOU>"
+                           for line in tokens.read_text(encoding="utf-8").splitlines())
+        LOG.info("streaming asr (%s%s) loaded in %.1fs from %s", self.kind,
+                 ", eou" if self.has_eou else "", time.monotonic() - t0, self.model_dir)
 
     def create_stream(self):
         self.load()
-        return self._rec.create_stream()
+        stream = self._rec.create_stream()
+        if self.language:
+            stream.set_option("language", self.language)
+        return _EouStream(stream)
 
-    def accept(self, stream, audio_16k: np.ndarray) -> str:
+    def _decode(self, st: "_EouStream") -> str:
+        while self._rec.is_ready(st.s):
+            self._rec.decode_stream(st.s)
+        raw = self._rec.get_result(st.s) or ""
+        if self.has_eou and "<EOU>" in raw:
+            # sherpa does not reset the prediction network after <EOU>, and
+            # this model then emits nothing more for the rest of the stream:
+            # 45 words of LibriSpeech came out "happy". NeMo's own EOU loop
+            # resets the decoder there, so this does too — keeping the words
+            # so far, and the fact that the model called an end.
+            st.committed = strip_control_tokens(st.committed + " " + raw)
+            st.eou = True
+            self._rec.reset(st.s)
+            raw = ""
+        return strip_control_tokens(st.committed + " " + raw)
+
+    def accept(self, stream: "_EouStream", audio_16k: np.ndarray) -> str:
         """Feed audio, decode what is ready, return the running hypothesis."""
-        stream.accept_waveform(SAMPLE_RATE, np.asarray(audio_16k, dtype=np.float32))
-        while self._rec.is_ready(stream):
-            self._rec.decode_stream(stream)
-        return (self._rec.get_result(stream) or "").strip()
+        stream.s.accept_waveform(SAMPLE_RATE, np.asarray(audio_16k, dtype=np.float32))
+        return self._decode(stream)
 
-    def reset(self, stream) -> None:
-        self._rec.reset(stream)
+    def endpointed(self, stream: "_EouStream") -> bool:
+        """True once the model has emitted `<EOU>` since the last reset.
+        Always False for a model without the token."""
+        return stream.eou
+
+    def finish(self, stream: "_EouStream") -> str:
+        """No more audio: flush the encoder's right context, return the final."""
+        stream.s.input_finished()
+        return self._decode(stream)
+
+    def reset(self, stream: "_EouStream") -> None:
+        self._rec.reset(stream.s)
+        stream.committed, stream.eou = "", False
+
+
+class _EouStream:
+    """A sherpa `OnlineStream`, plus the text committed at each `<EOU>` and
+    whether one has been seen since the last reset."""
+
+    __slots__ = ("s", "committed", "eou")
+
+    def __init__(self, s) -> None:
+        self.s = s
+        self.committed = ""
+        self.eou = False
+
+
+def strip_control_tokens(text: str) -> str:
+    for tok in _CONTROL_TOKENS:
+        text = text.replace(tok, " ")
+    return " ".join(text.split())
 
 
 def parakeet_hotwords(stt_cfg: dict, exclude=()) -> list[str]:
@@ -485,6 +582,8 @@ def build_streaming_recognizer(cfg: dict) -> Optional[SherpaStreamingRecognizer]
         model_dir=sc.get("model_dir", "agent-services/models/nemo-streaming-480ms"),
         num_threads=int(sc.get("num_threads", 2)),
         provider=sc.get("provider", "cpu"),
+        precision=str(sc.get("precision", "int8")),
+        language=str(sc.get("language", "") or ""),
     )
     r.load()
     return r

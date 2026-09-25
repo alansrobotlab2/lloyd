@@ -31,6 +31,9 @@ from .wake import ContinuousWakeWord, WakeDetection
 
 LOG = logging.getLogger("lloyd-agent-worker.pipeline")
 
+#: Audio handed to a new partials stream ahead of the frame that opened it.
+STREAM_PREROLL_S = 0.5
+
 SAMPLE_RATE = 16000
 
 #: How far after an utterance's end a wake detection may still be attributed to
@@ -94,6 +97,14 @@ class HearingPipeline:
         self._pending: list[WakeDetection] = []
         self._was_speaking = False
         self._partial = ""
+        # The last STREAM_PREROLL_S of audio, handed to a new partials stream
+        # before the frame that opened it. A cache-aware streaming encoder
+        # drops the first ~0.3 s of a stream, and the stream only opens once
+        # the VAD has already heard speech, so without this every caption lost
+        # its first word ("what is the weather" -> "the weather", measured
+        # 2026-09-24 on tests/fixtures/voice/complete_16k.wav).
+        self._ring: list[np.ndarray] = []
+        self._ring_len = 0
 
     @property
     def cursor(self) -> int:
@@ -139,15 +150,25 @@ class HearingPipeline:
         # 3. Partial hypotheses, only while someone is talking.
         if self.streaming is not None and speaking:
             try:
+                feed = audio
                 if self._stream_handle is None:
                     self._stream_handle = self.streaming.create_stream()
-                text = self.streaming.accept(self._stream_handle, audio)
+                    if self._ring:
+                        feed = np.concatenate(self._ring + [audio])
+                text = self.streaming.accept(self._stream_handle, feed)
                 if text and text != self._partial:
                     self._partial = text
                     events.append(HearingEvent("partial", text=text))
             except Exception as e:
                 LOG.warning("streaming asr failed: %s — disabling partials", e)
                 self.streaming = None
+
+        if self.streaming is not None:
+            self._ring.append(audio)
+            self._ring_len += audio.size
+            cap = int(STREAM_PREROLL_S * 16000)
+            while self._ring and self._ring_len - self._ring[0].size >= cap:
+                self._ring_len -= self._ring.pop(0).size
 
         for utt in utterances:
             det = self._claim_wake(utt)

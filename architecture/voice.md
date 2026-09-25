@@ -467,12 +467,104 @@ transcript's `backend` reads `parakeet+hw` when the biased decode was used,
 so the diag line says which one spoke. `parakeet_hotwords: false` is the
 switch.
 
-`livekit.stt.streaming` (off) runs a cache-aware streaming FastConformer CTC
-for live partial transcripts on the data channel (`partial_transcript`).
-Nothing consumes a partial at either end yet — `VoiceRoom`'s data handler
-returns on any message type but `wake_state` — and the committed transcript is
-always the offline recogniser's, so switching this on today buys a 438 MB model
-and no visible change. Preemptive generation is the reason to turn it on.
+`livekit.stt.streaming` (off) runs a cache-aware streaming model for live
+partial transcripts on the data channel (`partial_transcript`). Nothing
+consumes a partial at either end yet — `VoiceRoom`'s data handler returns on
+any message type but `wake_state` — and the committed transcript is always the
+offline recogniser's, so switching this on today buys a model load and no
+visible change. Live captions and preemptive generation are the reasons to turn
+it on. `SherpaStreamingRecognizer` takes either export layout, told apart by
+the files in `model_dir`: `model.onnx` (FastConformer CTC, the
+`nemo-streaming-480ms` default) or `encoder/decoder/joiner(.int8).onnx` (a
+transducer); `precision: int8|fp32` picks which file, and `language` is the
+per-stream hint the multilingual Nemotron 3.5 export needs (`en`).
+
+#### Streaming bake-off (2026-09-24): nothing replaces the default yet
+
+`scripts/voice/asr_stream_eval.py` measures what `asr_eval.py` cannot: each
+clip fed in 20 ms frames on a simulated wall clock (a result exists when the
+decode that consumed the frame returns, so a model slower than real time falls
+behind as it would live), *partial lag* per word (first correct appearance in
+the running hypothesis minus that word's end by Parakeet TDT's own timestamps,
+on words the two agree on), `<EOU>` latency and false triggers against Smart
+Turn, and CPU. LibriSpeech **test-clean**, every 13th row (202 clips, 1513 s);
+lag and RTF from the first 60 of those. All CPU, streaming decode on 2
+threads, while other jobs held the host at a load of ~50 on 32 cores, so RTF is
+pessimistic in absolute terms and fair between rows.
+
+| model (sherpa-onnx unless noted) | WER (202) | vs TDT | lag p50 / p90 | RTF @2t | `<EOU>` |
+|---|---|---|---|---|---|
+| **Parakeet TDT 0.6B v3** (offline, final) | **2.09%** | — | n/a | 0.06 @4t | — |
+| parakeet_realtime_eou_120m-v1, fp32 | 3.43% | +64% | **131 / 293 ms** | 0.19 | yes |
+| parakeet_realtime_eou_120m-v1, int8 (own quant) | 3.62% | +73% | 126 / 294 ms | 0.20 | yes |
+| nemotron-speech-streaming-en-0.6b, 160 ms | 2.48% | +19% | 370 / 630 ms | 0.81 | — |
+| nemotron-3.5-asr-streaming-0.6b, 160 ms, `en` | 3.50% | +67% | 402 / 661 ms | 0.74 | — |
+| Moonshine v2 streaming medium (moonshine-voice SDK) | 2.48% | +19% | 862 / 1482 ms | 0.62 | — |
+| FastConformer transducer, 80 ms | 2.81% | +34% | 372 / 534 ms | 0.23 | — |
+| FastConformer CTC, 480 ms (`nemo-streaming-480ms`, on disk) | 3.20% | +53% | 700 / 944 ms | 0.08 | — |
+
+The bar was a partials model within ~10% relative of TDT's WER at ≤200 ms lag
+on CPU, and nothing clears both halves. The EOU 120M is the only one under
+200 ms, at +64% WER; Nemotron 0.6B and Moonshine medium are the closest on WER
+(+19%) at 370 and 862 ms, and Nemotron costs most of a core per stream.
+Against Parakeet run fresh on the 33 room utterances where it hears 4+ words
+(`~/.lloyd/ww_diag`; far-field, mostly the TV), every streaming model disagrees
+with it on 43–54% of words (EOU fp32 43%, Nemotron 47%, Moonshine 49%, CTC
+480 ms 54%) — nothing here is close to replacing the final pass on room audio
+either. `stt_text` in `scores.jsonl` is not a usable reference: it was written
+at capture time by the recogniser and segmentation of the day, and often
+describes different audio than the saved wav.
+
+**End of utterance is not a Smart Turn replacement either.** Same 202 clips,
+plus the 172 with 8+ words cut at the middle word boundary and a pause spliced
+in (0.5 s and 1.0 s, room-floor noise):
+
+| | end detected | latency p50 / p90 | fires mid-sentence |
+|---|---|---|---|
+| Smart Turn v3.2 after 380 ms VAD silence | 84% complete (else 2.2 s hold) | 460 ms / 2.2 s | 76% of cuts |
+| EOU 120M `<EOU>`, fp32 | 79% within 1 s | 692 / 1091 ms | 50% of pauses |
+| EOU 120M `<EOU>`, int8 | 68% within 1 s | 853 / 1165 ms | 40% of pauses |
+
+Both fire at most mid-sentence cuts of *read* speech, whose prosody at a
+phrase boundary sounds final; this set ranks them, it does not calibrate
+either. The `<EOU>` token is later than Smart Turn's path at the median and
+misses one clip in five. It could be a second opinion; it is not a better
+first one.
+
+Three things the bake-off found in the streaming path, fixed whatever model is
+configured:
+
+- **The first ~0.3 s of a stream is lost**, and the partials stream only
+  opens once the VAD has heard speech, so every caption dropped its first
+  word ("what is the weather" came out "the weather"; the EOU model then never
+  called the remainder a finished question). `HearingPipeline` keeps the last
+  `STREAM_PREROLL_S` (0.5 s) and hands it to a new stream with its first frame.
+- **sherpa does not reset the prediction network after `<EOU>`**, and the EOU
+  model then emits nothing for the rest of the stream: one 45-word clip came
+  out "happy", and fp32 read 8.09% WER on 60 clips before the fix, 3.43% on
+  202 after. The recogniser now commits the text at each `<EOU>` and resets
+  the stream, as NeMo's own EOU loop does; `endpointed(stream)` stays true
+  until `reset`.
+- The only sherpa export of the EOU model
+  (`huggingface.co/adityakalro/sherpa-onnx-parakeet-eou-120m`, fp32) ships a
+  wrong `tokens.txt`: it lists `<eou> 1026` and `<blk> 1027`, but the joiner
+  has 1027 outputs, so blank is 1026 and sherpa refuses to load it
+  (`<blk> is not the last token`). Keep the first 1026 lines and append
+  `<blk> 1026`. int8 is `onnxruntime.quantization.quantize_dynamic(…,
+  QuantType.QUInt8)` per file, which needs the `onnx` package and so is done
+  outside the lloyd venv.
+
+Not measured: Kyutai stt-1b (CUDA only) and any GPU slice — every candidate
+above has a CPU sherpa or SDK runtime, and none was close enough on WER for a
+GPU run to change the answer. Moonshine needs `moonshine-voice` (its own
+`libmoonshine.so`), which the lloyd venv does not have, so it could not ship
+without a new dependency even had it won.
+
+If captions land before a better model does, the EOU 120M in fp32 is the one
+to configure (`model_dir: agent-services/models/parakeet-realtime-eou-120m`,
+`precision: fp32`): it is the only candidate whose words appear while they are
+still being said, and the committed transcript stays Parakeet TDT's. That is a
+proposal for when something consumes partials, not a change made here.
 
 ### The gate
 
@@ -1165,6 +1257,20 @@ yet — the last syllable, reliably. Two fixes, and they are complementary:
   room with no subscriber must not wedge the drain loop, and an older SDK
   without the method must not break it.
 
+### Speculative generation: not built, and why (2026-09-24)
+
+The plan's last bake-off row was LiveKit's `preemptive_generation`: fire the
+turn on the first end-of-turn hint and cancel it if the transcript changes.
+The `[latency]` breakdown says there is no window for it here. After the VAD
+closes, the only wait before inject is the slowest of three parallel stages
+(Parakeet ~60 ms idle), and the transcript that wait produces is what the turn
+needs — firing earlier would need streaming partials good enough to trust, and
+the ASR bake-off above found none (every streaming model ≥19% worse WER, the
+one under 200 ms lag 64% worse). The seams worth attacking are elsewhere in
+the breakdown: the model's first token (~600 ms), the first TTS byte
+(~350 ms), and Qwen3-TTS text-input streaming (~0.33 s, a voice decision —
+see the TTS bake-off). Revisit if a streaming ASR clears the bar.
+
 ### TTS bake-off 2026-09-24
 
 Phase 5's TTS rows, run as proposals: nothing here changed production, and the
@@ -1480,6 +1586,7 @@ voice.
 |---|---|
 | `agent-services/models/{wakeword,openwakeword,silero-vad}/*.onnx` | **yes**, force-added past `models/` |
 | `agent-services/models/{smart-turn,parakeet-tdt-v3,nemo-streaming-480ms}/` (~1.1 GB) | **no** — `bash agent-services/setup/fetch-voice-models.sh`, size-checked |
+| `agent-services/models/parakeet-realtime-eou-120m/` (optional, not configured; ~480 MB fp32) | **no** — `encoder.onnx`, `decoder.onnx`, `joiner.onnx`, `tokens.txt` from `huggingface.co/adityakalro/sherpa-onnx-parakeet-eou-120m`, then the `tokens.txt` repair under "Streaming bake-off". Only the bake-off and `tests/test_voice_streaming_asr.py` (which skips without it) read it |
 | `agent-services/services/tts/qwen3-tts-local.patch` + `-upstream-commit.txt` | **yes** |
 | `agent-services/conf/livekit.yaml` (template) | **yes** |
 | `voice_library/profiles/dave_cullen/` | **no** — back up; not reproducible |
@@ -1498,6 +1605,12 @@ voice.
   reported before the utterance closes; the reported peak belongs to the
   dropped utterance; the numpy Silero equals the package's output; the VAD
   imports no torch.
+- `tests/test_voice_streaming_asr.py` — control tokens never reach a caption;
+  `precision`/`language` reach the recogniser; a new partials stream is handed
+  the pre-roll; on the EOU model (skipped when absent): partials grow and the
+  end is reported, a cut phrase is not ended mid-phrase, the pre-roll restores
+  the first word, and words after an `<EOU>` are still transcribed.
+- `scripts/voice/asr_stream_eval.py` — the streaming bake-off above.
 - `tests/test_voice_wake_and_turn.py` — the refractory window, near-miss
   peaks, a model that raises; on the real model: a detection in a continuous
   stream, through a 16× attenuation, per-stream isolation, and the fire landing

@@ -927,6 +927,13 @@ livekit:
       # in the browser. Display only — the committed transcript is always the
       # offline recogniser's. Off until something reads partials for more than
       # decoration; preemptive LLM generation is the reason to turn it on.
+      #
+      # model_dir may be a CTC export (model.onnx) or a transducer
+      # (encoder/decoder/joiner.onnx); `precision: int8|fp32` picks the file,
+      # `language` is the per-stream hint for Nemotron 3.5 ("en"). The
+      # 2026-09-24 bake-off (architecture/voice.md "Streaming bake-off") found
+      # no model within 10% of Parakeet's WER at <=200 ms partial lag; the
+      # EOU 120M (fp32, 131 ms, +64% WER) is the one to try for captions.
       enabled: false
       model_dir: agent-services/models/nemo-streaming-480ms
       num_threads: 2
