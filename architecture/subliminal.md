@@ -2,7 +2,7 @@
 segment: architecture
 tags: [architecture,subliminal,memory,prefetch]
 type: architecture
-updated: 2026-09-20
+updated: 2026-09-24
 status: implemented
 ---
 
@@ -127,7 +127,7 @@ QMD daemon on GPU 0):
 | facts | ~5 ms warm | ~5 ms | ~150 ms once per process (entity index) |
 | sessions | <5 ms | <5 ms | temporal queries only |
 | vault lex leg | — | 6–50 ms warm; 0.5–1.3 s per cold term | 1–4 short calls; soft-waited 150 ms, then carried over |
-| vault lex+vec | 1.1–2.6 s at 456 docs; ~2.5–3.0 s at the 2026-09-20 corpus (see the QMD daemon row) | same | never lands; carried to the next turn |
+| vault lex+vec | 1.1–2.6 s at 456 docs; ~2.5–3.0 s at the 2026-09-20 corpus | 52 ms p50 / 57 ms p90 after the lex leg (2026-09-24, fork `VecIndex`) | waited on in budget and fused with lex on the same turn; carried over only when a busy daemon makes it miss |
 
 Before the fix every one of the last 20 logged turns hit the wall (301–348 ms):
 vault was dropped 20/20 and facts 12/20. The vault number was structural — the
@@ -257,10 +257,23 @@ facts@6ms vault@140ms` shows when each one arrived.
     best score kept. Measured end to end: 21–25 ms on warm-term turns, ~150 ms
     on cold-term turns, with every other worker in by ~6 ms.
   - **3b `lex+vec` hybrid** — started only after 3a returns (the daemon
-    serializes requests). Takes 1.1–2.6 s, so it always straggles. Its result
-    is stashed on the session's `SessionFocus` and merged into the **next**
-    turn's `<vault-context>`, deduped against that turn's lex hits and rendered
-    with `semantic hit from the previous turn's query`. Its two legs get
+    serializes requests). **Since 2026-09-24 it lands on the same turn**: it
+    costs 52 ms p50 / 57 ms p90 after the lex leg (the fork's in-memory
+    `VecIndex` replaced the exact scans that made it 1.1–3.0 s), so the wait
+    loop holds the turn for it up to the budget, and `_fuse_fresh_vault`
+    merges it with 3a's hits. The two are not a superset of each other — on
+    the 86-query prefetch eval lex alone scored doc_hit 0.140, hybrid alone
+    0.151, fused 0.221 — so neither replaces the other. Replaying the real
+    `_prefetch_run` over the gold set as a first turn: hybrid landed 86/86,
+    doc_hit 0.151 → 0.221, MRR 0.093 → 0.114 (7 queries better, 1 worse),
+    turn p50 27 → 62 ms and p90 301 → 89 ms (the old path pinned 14 of 86
+    turns at the wall behind a lex+hybrid pair it did not wait for). While 3a
+    is still running on cold terms both legs get only the 150 ms soft wait.
+    When 3b misses the budget behind a busy daemon it is stashed on the
+    session's `SessionFocus` and merged into the **next** turn's
+    `<vault-context>`, deduped against that turn's hits and rendered with
+    `semantic hit from the previous turn's query` — the fallback, no longer
+    the normal path. Its two legs get
     different text: the lex leg the message's short term list (AND
     semantics), the vec leg the focus-enriched sentence — with one string for
     both, the hybrid's lex component returned nothing on enriched queries.
@@ -268,9 +281,9 @@ facts@6ms vault@140ms` shows when each one arrived.
     carried hits when there are any: lex scores are normalized per query, so a
     page of confident-looking lex misses used to evict the one semantic hit
     the previous turn found. A stash older than
-    `VAULT_CARRY_MAX_AGE_S` (15 min) is discarded. If 3b ever does land in
-    budget, its (superset) result is used directly and the stash is cleared.
-  - Why carry over rather than drop: across five sample queries the vec leg
+    `VAULT_CARRY_MAX_AGE_S` (15 min) is discarded. When 3b lands in budget
+    the stash it wrote is consumed on the same turn.
+  - Why carry over rather than drop (the fallback): across five sample queries the vec leg
     contributed 1–4 results above the 0.5 floor that lex alone missed (e.g.
     "inner voice observer stall rescue": hybrid 4 hits, lex 0). Consecutive
     turns share most of their focus-enriched query, so a one-turn delay keeps
@@ -666,7 +679,7 @@ Tier-2 topic extraction (above).
 
 | Service | Port | GPU | Purpose |
 |---------|------|-----|---------|
-| QMD daemon | 8181 | GPU 0 | Hybrid BM25 + vector search, embedding model (`Qwen3-Embedding-0.6B-Q8_0` since 2026-09-21, `embeddinggemma-300M-Q8_0` before; the fork in `~/lloyd/qmd`). Single node process — serializes requests. **Vec-leg timing is corpus-proportional, not a constant: measured 2.5–3.0 s at the 2026-09-20 index (15,850 files / 38,907 chunks) — 2.6 s was a 456-doc world.** The one thing that does NOT scale with corpus is the *fixed startup tax*: `embed ≈ vec ≈ chunk+1` ms on every query, warm, any text, any leg (39 ms on a 6-char word). 3.0 s is the worst case for a straggler, so a 500 ms carry-over is safe; lex leg 10–80 ms and AND-only |
+| QMD daemon | 8181 | GPU 0 | Hybrid BM25 + vector search, embedding model (`Qwen3-Embedding-0.6B-Q8_0` since 2026-09-21, `embeddinggemma-300M-Q8_0` before; the fork in `~/lloyd/qmd`). Single node process — serializes requests. **Vec-leg timing was corpus-proportional under the exact per-collection scans: 2.5–3.0 s at the 2026-09-20 index (15,850 files / 38,907 chunks). The fork's in-memory `VecIndex` removed that: 52 ms p50 / 57 ms p90 for prefetch's hybrid call on 2026-09-24, so the leg lands in budget.** The one thing that does NOT scale with corpus is the *fixed startup tax*: `embed ≈ vec ≈ chunk+1` ms on every query, warm, any text, any leg (39 ms on a 6-char word). 3.0 s is the worst case for a straggler, so a 500 ms carry-over is safe; lex leg 10–80 ms and AND-only |
 | vLLM primary (Qwen3.8-Flash-Next) | 8096 | GPU 1 (RTX PRO 6000, `--gpu-memory-utilization 0.9345`) | Main agent model. Served capture/fact/focus extraction too while `secondary_enabled` was false |
 | llama.cpp secondary (Qwen3.6-35B-A3B UD-Q3_K_XL) | 8091 | GPU 2 (RTX 3090) | Capture / fact / focus / title extraction. Running, `secondary_enabled: true`. Single-tenant (`--parallel 1`) — these jobs queue behind each other. **Not** Inner Voice: the observer is pinned to `primary` in config.yaml after a 4B briefly landed in this slot and intervened on 40% of judged events |
 | Qwen3-TTS | 8090 | GPU 0 | Voice output |
@@ -804,3 +817,9 @@ with the genuinely correct answer, never an easier target.
 ## Review log
 
 - **2026-09-20 — stale.** Corrected in place: the eval baseline table had drifted a full point on every row it printed (MRR 0.359→0.497, entity_hit 0.65→0.50, ent_recall 0.47→0.40, fER 0.392→0.375, latency 5,063→4,281 ms) and its headline "multi-hop MRR 0.022 / retrieval effectively does not work" was a bucket-name bug in `run_eval.py` (`"multi-hop"` vs the query set's `multi_hop`) — measured correctly it is 0.513, and the entity trio is itself pinned by unsatisfiable `expect_entities` until the #878 guard's next run. Also: the QMD vector leg's 1.1–2.6 s was a 456-doc world and reads ~2.5–3.0 s on the current 15,850-file index (it is corpus-proportional; only the ~39 ms startup tax is constant); the corpus sizes in the latency section (283 skills / 328 backlog) are roughly half- and quarter-true (189 retrievable, 1,235). Filed #1298 (committed qmd template drifts from the live `~/.config/qmd/index.yml`, two collections point at non-existent paths), #1299 (`sessions-background/` exports are indexed by nothing while the indexed session corpus runs 21 user files against 1,593 background files per week), #1300 (the nightly retrieval-eval reader averages baselines across a query-set change with no corpus gate). Activity notes left on #407 and #1064, where auto-dedupe merged two unrelated findings.
+- **2026-09-24 — recall research pass** (`architecture/recall-research-2026-09-24.md`).
+  The hybrid leg's 1.1–3.0 s was measured again and is gone: 52 ms p50 / 57 ms
+  p90 after the lex leg on the 86-query prefetch eval, because the qmd fork's
+  in-memory `VecIndex` replaced the per-collection exact scans. The leg now
+  lands on the same turn and is fused with the lex leg (`_fuse_fresh_vault`);
+  carry-over is the busy-daemon fallback. First-turn doc_hit 0.151 → 0.221.

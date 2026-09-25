@@ -101,11 +101,14 @@ MIN_MESSAGE_LEN = 10            # skip prefetch for very short messages
 #   vault lex  6ms hot / 80-160ms per novel call; the leg runs 1-4 short
 #                        sub-queries and stops issuing new ones near the
 #                        deadline, so it lands with whatever it has
-#   vault vec  1.1-2.6s  NEVER lands in 300ms. The query embedding
-#                        dominates and qmd's embedding cache only brings a
-#                        repeated query down to ~1.1s. It runs as a
-#                        straggler and its result carries over to the next
-#                        turn (VAULT_CARRY_MAX_AGE_S).
+#   vault vec  ~52ms p50 / ~57ms p90 after the lex leg (86-query prefetch
+#                        eval, 2026-09-24) — the fork's in-memory VecIndex
+#                        replaced the per-collection exact scans that made it
+#                        1.1-3.0s. It is waited on inside the budget and its
+#                        hits are fused with the lex leg's on the SAME turn;
+#                        only when the daemon is busy (it serializes) does it
+#                        straggle, and then its result carries over to the
+#                        next turn (VAULT_CARRY_MAX_AGE_S) as before.
 # 300ms keeps first-token latency predictable for the voice pipeline.
 PREFETCH_BUDGET_MS = 300
 
@@ -788,9 +791,9 @@ def _search_vault(query: str, focus: SessionFocus | None = None,
     conversation keywords — this lets short messages like "what about the
     PID gains?" inherit context from the broader conversation about servos.
 
-    `legs` picks the qmd search legs. Prefetch runs the lex leg inside its
-    budget (see `_search_vault_lex`) and the full hybrid as a straggler
-    whose result is carried to the next turn — the vec leg costs 1.1-2.6s.
+    `legs` picks the qmd search legs. Prefetch runs the lex leg (see
+    `_search_vault_lex`) and then the full hybrid, both inside its budget;
+    a hybrid that misses the budget carries over to the next turn.
     """
     # Enrich query with conversation focus
     effective_query = focus.enrich_query(query) if focus else query
@@ -894,8 +897,9 @@ def _search_vault_hybrid_and_stash(query: str, focus: SessionFocus | None,
                                    after=None) -> list[dict]:
     """Full lex+vec vault search. Stashes its result on `focus` *before*
     returning so the outcome is deterministic either way: if it lands
-    inside the budget the caller consumes the stash immediately; if it
-    straggles, the next turn picks the stash up as a carry-over.
+    inside the budget (the common case since 2026-09-24, ~55 ms) the caller
+    fuses it with the lex leg on this turn; if it straggles behind a busy
+    daemon, the next turn picks the stash up as a carry-over.
 
     The lex leg gets the message's short term list (AND semantics), the
     vec leg the focus-enriched sentence — see `_qmd_daemon_search`.
@@ -919,6 +923,24 @@ def _search_vault_hybrid_and_stash(query: str, focus: SessionFocus | None,
     if focus is not None:
         focus.stash_vault(res)
     return res
+
+
+def _fuse_fresh_vault(lex: list[dict], hybrid: list[dict] | None) -> list[dict]:
+    """This turn's lex and hybrid hits as one fresh list.
+
+    The hybrid leg is NOT a superset of the lex leg: they send different
+    lex queries (the ladder's sub-queries vs the first sub-query alone) and
+    the vec leg displaces lex rows under fusion. Measured on the 86-query
+    prefetch eval (2026-09-24): lex alone doc_hit 0.140, hybrid alone 0.151,
+    the two merged 0.221. The merge is `_merge_vault_results`' ordering —
+    the one the eval measured, hybrid rows guaranteed their reserved
+    slots — with the `carried` flag taken off again, because a hit this
+    turn's own query found must not be rendered as one from the last turn.
+    """
+    if hybrid is None:
+        return list(lex)
+    return [{k: v for k, v in r.items() if k != "carried"}
+            for r in _merge_vault_results(lex, hybrid)]
 
 
 def _merge_vault_results(fresh: list[dict], carried: list[dict]) -> list[dict]:
@@ -1309,20 +1331,23 @@ def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
             ("backlog", f_backlog),
         )
 
-        # Block at most `budget_s` total across the *required* futures. Any
-        # still running at the deadline is abandoned for this turn. The
-        # hybrid vault leg is not required: it is the carry-over producer
-        # and is expected to straggle, so waiting on it would pin every
-        # turn at the full budget (which is exactly what the old
-        # single-vault-future design did — 20/20 logged turns at 300ms+).
-        pending = {f for name, f in named if name != "vault_vec"}
+        # Block at most `budget_s` total across every future. Any still
+        # running at the deadline is abandoned for this turn. The hybrid
+        # vault leg is waited on too since 2026-09-24: it costs ~55 ms after
+        # the lex leg, not the 1.1-3.0 s that once made waiting on it pin
+        # every turn at the full budget (20/20 logged turns at 300ms+ under
+        # the old single-vault-future design). It still carries over when
+        # a busy daemon makes it miss.
+        pending = {f for name, f in named}
         soft_s = VAULT_LEX_SOFT_WAIT_MS / 1000.0
         while pending:
             elapsed = time.monotonic() - t0
             remaining = budget_s - elapsed
-            if pending == {f_vault_lex}:
-                # Everything else is in; give a cold lex ladder only the
-                # soft wait, then let it straggle and carry over.
+            if f_vault_lex in pending and pending <= {f_vault_lex, f_vault_hybrid}:
+                # Everything else is in and the lex ladder is still running
+                # (cold terms). The hybrid leg queues behind it at the
+                # serializing daemon, so neither will land soon: give them
+                # only the soft wait, then let both straggle and carry over.
                 remaining = min(remaining, soft_s - elapsed)
             if remaining <= 0:
                 break
@@ -1351,9 +1376,8 @@ def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
                 except Exception:
                     pass  # Individual failure — non-fatal
 
-        # If the hybrid leg happened to finish while we waited on the
-        # others (fast daemon, cached embedding), take it now.
-        if f_vault_hybrid.done():
+        # The hybrid leg may have finished between the last wait and here.
+        if vault_hybrid_result is None and f_vault_hybrid.done():
             try:
                 vault_hybrid_result = f_vault_hybrid.result()
             except Exception:
@@ -1375,11 +1399,11 @@ def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
             logger.info("prefetch budget=%dms exceeded, dropped=%s",
                         PREFETCH_BUDGET_MS, ",".join(dropped))
 
-    # Vault: this turn's best landed leg (hybrid is a superset of lex) plus
+    # Vault: this turn's landed legs fused (see `_fuse_fresh_vault`) plus
     # whatever the previous turn's stragglers stashed. A leg that landed
     # this turn also stashed itself; the merge dedupes by file so those
     # copies vanish rather than showing up as "carried".
-    fresh = vault_hybrid_result if vault_hybrid_result is not None else vault_lex_result
+    fresh = _fuse_fresh_vault(vault_lex_result, vault_hybrid_result)
     carried = focus.take_vault() if focus is not None else []
     vault_result = _merge_vault_results(fresh, carried)
     carried = [r for r in vault_result if r.get("carried")]
@@ -1431,7 +1455,7 @@ def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
         int((time.monotonic() - t0) * 1000), len(injectable), len(skills_result),
         len(facts_result),
         len(backlog_result), len(vault_result),
-        "hybrid" if vault_hybrid_result is not None else ("lex" if "vault" in landed else "lex-straggling"),
+        "lex+hybrid" if vault_hybrid_result is not None else ("lex" if "vault" in landed else "lex-straggling"),
         f"+{len(carried)} carried" if carried else "",
         len(session_result), len(ambient_entries),
         " ".join(f"{k}@{v}ms" for k, v in sorted(landed.items(), key=lambda kv: kv[1])),

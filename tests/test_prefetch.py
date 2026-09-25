@@ -520,10 +520,10 @@ def test_slow_hybrid_is_dropped_then_carried_over(quiet_workers, monkeypatch):
     t0 = time.monotonic()
     out1 = prefetch.prefetch_context(msg, session_id=sid, plan_mode=False)
     elapsed = time.monotonic() - t0
-    # The hybrid straggler must not pin the turn at the budget wall; the
-    # required workers are instant here, so the call should return well
-    # under the 120ms budget.
-    assert elapsed < 0.10, f"prefetch blocked for {elapsed:.3f}s despite fast required workers"
+    # The hybrid leg is waited on since 2026-09-24, but only up to the
+    # budget: a leg stuck behind a busy daemon costs the turn the 120ms
+    # budget and no more, then carries over.
+    assert 0.10 <= elapsed < 0.25, f"prefetch returned after {elapsed:.3f}s against a 120ms budget"
     assert "Lex Hit" in out1
     assert "Vec Hit" not in out1  # straggler not ready yet
     assert out1.endswith("\n\n" + msg)
@@ -559,15 +559,40 @@ def test_hybrid_leg_starts_only_after_lex_returns(quiet_workers, monkeypatch):
 
 
 def test_fast_hybrid_is_used_and_stash_cleared(quiet_workers, monkeypatch):
-    # The wait loop no longer waits for the hybrid leg, so to observe the
-    # "hybrid landed in budget" branch another required worker has to be
-    # slower than lex + hybrid. Make skills take 60ms.
-    monkeypatch.setattr(prefetch, "_search_vault", _fake_vault(hybrid_delay=0.0))
-    monkeypatch.setattr(prefetch, "_search_skills", lambda q: (time.sleep(0.06), [])[1])
+    # Every other worker is instant here: the wait loop must still hold the
+    # turn for the hybrid leg (~55 ms in production) instead of returning on
+    # the lex leg alone and leaving the semantic hits to the next turn.
+    monkeypatch.setattr(prefetch, "_search_vault", _fake_vault(hybrid_delay=0.03))
     sid = "test-fast-hybrid"
     out = prefetch.prefetch_context("tell me about the alfie servo shoulder pid", session_id=sid, plan_mode=False)
-    assert "Vec Hit" in out and "carried" not in out
+    assert "Vec Hit" in out and "previous turn" not in out
     assert prefetch._get_session_focus(sid).pending_vault == {}
+
+
+def test_in_turn_hybrid_keeps_lex_hits_it_does_not_return(quiet_workers, monkeypatch):
+    # The hybrid leg is not a superset of the lex leg (different lex query,
+    # vec rows displace lex rows under fusion): on the 86-query prefetch eval
+    # lex alone scored doc_hit 0.140, hybrid alone 0.151, the two fused 0.221.
+    # A lex-only hit must survive the hybrid landing, and neither leg's hits
+    # may be labelled as carried from a previous turn.
+    def _search(query, focus=None, legs=("lex", "vec"), **kw):
+        if legs == ("lex",):
+            return [{"file": "lexonly.md", "title": "Lex Only", "score": 0.9, "snippet": "x"}]
+        return [{"file": "veconly.md", "title": "Vec Only", "score": 0.7, "snippet": "y"}]
+
+    monkeypatch.setattr(prefetch, "_search_vault", _search)
+    out = prefetch.prefetch_context("tell me about the alfie servo shoulder pid",
+                                    session_id="test-fuse", plan_mode=False)
+    assert "Lex Only" in out and "Vec Only" in out
+    assert "previous turn" not in out
+
+
+def test_fuse_fresh_vault_without_hybrid_is_the_lex_leg():
+    lex = [{"file": "a.md", "title": "A", "score": 0.9}]
+    assert prefetch._fuse_fresh_vault(lex, None) == lex
+    fused = prefetch._fuse_fresh_vault(lex, [{"file": "b.md", "title": "B", "score": 0.6}])
+    assert [r["file"] for r in fused] == ["a.md", "b.md"]
+    assert not any(r.get("carried") for r in fused)
 
 
 def test_stale_carry_over_is_discarded(quiet_workers, monkeypatch):
