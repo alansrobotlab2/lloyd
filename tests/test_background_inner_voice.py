@@ -373,3 +373,47 @@ def test_the_switch_is_ui_mutable_without_dirtying_the_tracked_config(tmp_path,
     assert "not-a-real-source" not in out["workers"]["sources"]
     # …and only this one key per source is honoured.
     assert out["workers"]["sources"]["autocode"]["enabled"] is True
+
+
+def test_an_override_may_not_introduce_inner_voice_on_an_unobservable_source(
+        tmp_path, monkeypatch):
+    """#1464: backlog-cluster's tracked block carries no `inner_voice` key on
+    purpose (#1015) — it has no turn to observe, and /api/workers/health
+    renders it null. The override file re-added `inner_voice: false`, which
+    made the unobservable source read as one that had been switched off.
+    The merge must refuse to introduce the key, and the next save must drop
+    it from the file."""
+    import yaml
+
+    import app.config as cfgmod
+
+    path = tmp_path / "o.yaml"
+    monkeypatch.setattr(cfgmod, "TOOL_OVERRIDES_PATH", path)
+    path.write_text(
+        "workers:\n  sources:\n"
+        "    autocode:\n      inner_voice: false\n"
+        "    backlog-cluster:\n      inner_voice: false\n")
+    base = {"workers": {"sources": {
+        "autocode": {"inner_voice": True},
+        "backlog-cluster": {"enabled": True, "threshold": 0.75},
+    }}}
+    out = cfgmod._merge_tool_overrides(base)
+    assert "inner_voice" not in out["workers"]["sources"]["backlog-cluster"]
+    # A source that does carry the key is still adjustable.
+    assert out["workers"]["sources"]["autocode"]["inner_voice"] is False
+
+    monkeypatch.setattr(cfgmod, "CONFIG", out)
+    cfgmod.save_tool_overrides()
+    saved = yaml.safe_load(path.read_text())
+    assert "backlog-cluster" not in saved["workers"]["sources"]
+    assert saved["workers"]["sources"]["autocode"] == {"inner_voice": False}
+
+
+def test_backlog_cluster_tracked_block_has_no_inner_voice_key():
+    """The half of #1015's guarantee that config.yaml owns."""
+    import yaml
+
+    from app.paths import LLOYD_HOME
+
+    cfg = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text())
+    assert "inner_voice" not in cfg["workers"]["sources"]["backlog-cluster"]

@@ -1898,7 +1898,9 @@ workers:
       max_duration_seconds: 900
       # No session and no `inner_voice` key: a numpy pass plus a few JSON
       # calls to the secondary, so there is no turn to observe and
-      # /api/workers/health renders it null (#1015).
+      # /api/workers/health renders it null (#1015). An override-file
+      # `inner_voice` for a source with no key here is ignored at load
+      # (app/config.py::_merge_tool_overrides, #1464).
       threshold: 0.75
       # Kill switch for the LLM pair-judge; off = cosine, paths and parents only.
       judge: true

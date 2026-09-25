@@ -180,6 +180,20 @@ def _merge_tool_overrides(config: dict) -> dict:
         live_src = ((config.get("workers") or {}).get("sources") or {}).get(name)
         if not isinstance(live_src, dict):
             continue  # overrides can't introduce sources, only adjust them
+        if "inner_voice" not in live_src:
+            # Nor can they introduce the KEY (#1464). A tracked block with no
+            # `inner_voice` is a source that has no turn to observe
+            # (backlog-cluster, #1015), and /api/workers/health renders it
+            # null; an override `false` there turns "not observable" into
+            # "switched off" — a knob that does nothing. Refused, so the next
+            # save_tool_overrides() drops the stale key from the file too.
+            logger.warning(
+                "tool_overrides.yaml sets workers.sources.%s.inner_voice, but "
+                "config.yaml's block for that source carries no inner_voice "
+                "key (it is not observable). Ignored; delete the key from the "
+                "override file.", name,
+            )
+            continue
         want_iv = bool(o["inner_voice"])
         if "inner_voice" in live_src and bool(live_src["inner_voice"]) != want_iv:
             logger.warning(
