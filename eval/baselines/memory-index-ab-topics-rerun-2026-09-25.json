@@ -1,0 +1,1883 @@
+{
+  "item": "review-2026-09-24-P4",
+  "ran_at": "2026-09-25T15:21:12Z",
+  "wall_seconds": 1562.7,
+  "model": "primary",
+  "max_agent_turns": 16,
+  "consolidation": {
+    "source": "/tmp/claude-1000/-home-alansrobotlab-lloyd/01e74b2d-8c78-469c-a73c-bf0670f72d46/scratchpad/p4r/arms/canonical/MEMORY.md",
+    "source_bytes": 73002,
+    "index_bytes": 20466,
+    "target_bytes": 20480,
+    "hook_cap_chars": 153,
+    "entries": 85,
+    "entry_types": {
+      "project": 72,
+      "feedback": 13
+    },
+    "validation": {
+      "root": "/tmp/claude-1000/-home-alansrobotlab-lloyd/01e74b2d-8c78-469c-a73c-bf0670f72d46/scratchpad/p4r/arms/indexed",
+      "mode": "full",
+      "ceiling": 25600,
+      "memory_md_bytes": 20466,
+      "errors": [],
+      "topic_files": 24,
+      "links": 85,
+      "tight_limit": 20480,
+      "untyped_entries": 0,
+      "long_lines": 0,
+      "ok": true
+    }
+  },
+  "topic_files": 24,
+  "arm_prompt_chars": {
+    "canonical": {
+      "prompt_chars": 110559,
+      "memory_md_chars": 72562
+    },
+    "indexed": {
+      "prompt_chars": 58101,
+      "memory_md_chars": 20104
+    }
+  },
+  "scope_guard": {
+    "memory_md_bytes_before": 73002,
+    "memory_md_bytes_after": 73002
+  },
+  "probes": [
+    {
+      "id": "t01_tencentdb_fragmented",
+      "kind": "topic",
+      "prompt": "fact_get(\"TencentDB\") returns only a handful of rows even though we've ingested plenty about it. Do you already know why?",
+      "criterion": "PASS if the answer explains entity-name fragmentation: the same system is split across several name forms (e.g. TencentDB / TencentDB Agent Memory / TencentDB-Agent-Memory), so a lookup on the short name returns a small fraction. FAIL if it blames missing ingestion or gives no mechanism.",
+      "anchor": "one system split across `TencentDB` (3) / `TencentDB Agent Memory` (30)",
+      "objective_checks": {
+        "tool_called": "memory_read"
+      },
+      "answer_terms": [
+        "TencentDB Agent Memory"
+      ],
+      "topic": "entity-resolution-graph-integrity"
+    },
+    {
+      "id": "t02_gate_0908_suite_green",
+      "kind": "topic",
+      "prompt": "On 2026-09-08 several confirmed automod implementations aborted, each citing pre-existing test failures. Do you already know whether the test suite was actually red that day?",
+      "criterion": "PASS if the answer says the suite was not red: a full check that evening (19:36) reported 2,495 tests passing with exit 0 while dozens of commits landed, so the aborts came from a gate that reports a verdict without naming failing tests (an environmental break read as a bad change). FAIL if it says the suite was red that day, or gives no evidence of the green full run.",
+      "anchor": "the 19:36 full check reported **2,495 tests passing, exit 0**",
+      "objective_checks": {
+        "tool_called": "memory_read"
+      },
+      "answer_terms": [
+        "2,495"
+      ],
+      "topic": "nightly-chain-agent-architecture-2026"
+    },
+    {
+      "id": "t03_livekit_udp_proc",
+      "kind": "topic",
+      "prompt": "Voice mode seems dead. What exactly should I run to check whether LiveKit has its media UDP ports bound?",
+      "criterion": "PASS if the probe given reads /proc/<livekit-server pid>/net/udp (and/or udp6) for ports in 50000-50100, or reads the worker log for a session with non-zero rms_peak. FAIL if its check is `ss`/`netstat` alone.",
+      "anchor": "/net/udp{,6}` for ports 50000-50100",
+      "objective_checks": {
+        "tool_called": "memory_read"
+      },
+      "answer_terms": [
+        "/net/udp"
+      ],
+      "topic": "wake-word-audio"
+    },
+    {
+      "id": "t04_release_watch_commits",
+      "kind": "topic",
+      "prompt": "The doc-digester has seen no new isaac-lab tag for 17 cycles. I'd like to drop it from the watch list. What should the drop rule be?",
+      "criterion": "PASS if the answer says not to drop on days/cycles since the last tag and to gate the drop on commit activity in the window (compare/commit_activity), e.g. because a long-silent source later tagged v3.0.0-EA. FAIL if it approves dropping on tag silence.",
+      "anchor": "gate any watch-drop on **commits-in-window**",
+      "objective_checks": {
+        "tool_called": "memory_read"
+      },
+      "answer_terms": [
+        "commits-in-window"
+      ],
+      "topic": "extracted-from-lloyd-claude-md-2026-09"
+    },
+    {
+      "id": "t05_task83_max_turns_floor",
+      "kind": "topic",
+      "prompt": "Autonomy task #83 keeps dying at max_turns. I'll add `max_turns: 40` to its task file so it stops earlier and writes a report. Good?",
+      "criterion": "PASS if the answer says a declared max_turns below the global 60 is floored at 60 (never honoured when smaller), so the fix is a declaration above 60. FAIL if it approves `max_turns: 40` as a cap.",
+      "anchor": "So the remedy for task 83 is a declaration above 60, not a smaller one.",
+      "objective_checks": {
+        "tool_called": "memory_read"
+      },
+      "answer_terms": [
+        "above 60"
+      ],
+      "topic": "class-rules-added-2026-09-20-nightly"
+    },
+    {
+      "id": "t06_sub6s_failure",
+      "kind": "topic",
+      "prompt": "An autonomy task on the primary failed after 3 seconds with an HTTP error. Model bug or something else? What does the duration tell you?",
+      "criterion": "PASS if the answer says a failure that fast on a GPU task points at a config or routing refusal (e.g. an unknown model name / 404), not at the model itself. FAIL if it treats it as a model failure.",
+      "anchor": "a sub-6-second failure on a GPU task is a config or routing refusal, not a model failure",
+      "objective_checks": {
+        "tool_called": "memory_read"
+      },
+      "answer_terms": [
+        "sub-6-second"
+      ],
+      "topic": "autonomy-dispatch-and-board-status-2026"
+    },
+    {
+      "id": "t07_djev_misdescribed",
+      "kind": "topic",
+      "prompt": "Have you ever given a wrong answer about what djev is? Do you remember what you called it?",
+      "criterion": "PASS if the answer says yes and names the wrong description: a prior answer (2026-09-21) called djev \"a Django-like framework\" and was later corrected (djev is the local structured-decision engine on GPU 2). FAIL if it denies any such mistake, or names a different wrong description.",
+      "anchor": "a correction of a prior answer that had called it \"a Django-like framework\"",
+      "objective_checks": {
+        "tool_called": "memory_read"
+      },
+      "answer_terms": [
+        "Django"
+      ],
+      "topic": "a-subsystem-with-no-memory-identity"
+    },
+    {
+      "id": "t08_bench010_quarantine",
+      "kind": "topic",
+      "prompt": "On 2026-09-14 backlog #1139 prescribed, as step 1, `git checkout HEAD -- lloyd/bench/bench_010_safety_destructive.md`, on the premise that agent-obsidian-sync had deleted the file and git HEAD was the only surviving copy. Do you already know whether that premise was right?",
+      "criterion": "PASS if the answer says the premise was false: the file had not been deleted by sync but deliberately moved into a quarantine (intact, byte-identical) by a running Claude Code session during the vault-wipe containment, which was holding it because restoring it would reopen the path that wiped the vault. FAIL if it accepts the sync-deletion premise or endorses the restore as prescribed.",
+      "anchor": "the file sat intact and byte-identical in that quarantine",
+      "objective_checks": {
+        "tool_called": "memory_read"
+      },
+      "answer_terms": [
+        "quarantine"
+      ],
+      "topic": "extracted-from-lloyd-claude-md-2026-09"
+    },
+    {
+      "id": "t09_merged_into_done",
+      "kind": "topic",
+      "prompt": "backlog_write_task answered my new finding with merged_into: 893. Anything I need to check before moving on?",
+      "criterion": "PASS if the answer says to read #893's status and, if it is done/archived, re-file with force: true (because dedupe can merge into a closed item and the finding then has no owner). FAIL if it treats the merge as settled.",
+      "anchor": "if it is `done` (or `archived`), re-file with `force: true`",
+      "objective_checks": {
+        "tool_called": "memory_read"
+      },
+      "answer_terms": [
+        "force: true"
+      ],
+      "topic": "write-time-dedupe-merges-a-fresh"
+    },
+    {
+      "id": "t10_clobber_cause_unknown",
+      "kind": "topic",
+      "prompt": "MEMORY.md got truncated on 2026-09-10 \u2014 that was the vault wipe that day, wasn't it?",
+      "criterion": "PASS if the answer says the source of the MEMORY.md truncation is still unidentified and it should not be attributed to the 09-10 wipe as fact. FAIL if it confirms the wipe did it.",
+      "anchor": "The source of the truncation is still unidentified",
+      "objective_checks": {
+        "tool_called": "memory_read"
+      },
+      "answer_terms": [
+        "still unidentified"
+      ],
+      "topic": "clobber-record-2026-09-10-restored-2026"
+    }
+  ],
+  "decision": {
+    "complete": 10,
+    "incomplete": [],
+    "effect": {
+      "n": 10,
+      "lost": 0,
+      "gained": 0,
+      "discordant": 0
+    },
+    "noise_floor": {
+      "n": 10,
+      "lost": 1,
+      "gained": 1,
+      "discordant": 2
+    },
+    "by_kind": {
+      "index": {
+        "effect": {
+          "n": 0,
+          "lost": 0,
+          "gained": 0,
+          "discordant": 0
+        },
+        "noise": {
+          "n": 0,
+          "lost": 0,
+          "gained": 0,
+          "discordant": 0
+        },
+        "pass_rate": {
+          "canonical": null,
+          "canonical_rep": null,
+          "indexed": null
+        }
+      },
+      "topic": {
+        "effect": {
+          "n": 10,
+          "lost": 0,
+          "gained": 0,
+          "discordant": 0
+        },
+        "noise": {
+          "n": 10,
+          "lost": 1,
+          "gained": 1,
+          "discordant": 2
+        },
+        "pass_rate": {
+          "canonical": 0.9,
+          "canonical_rep": 0.9,
+          "indexed": 0.9
+        }
+      },
+      "feedback": {
+        "effect": {
+          "n": 0,
+          "lost": 0,
+          "gained": 0,
+          "discordant": 0
+        },
+        "noise": {
+          "n": 0,
+          "lost": 0,
+          "gained": 0,
+          "discordant": 0
+        },
+        "pass_rate": {
+          "canonical": null,
+          "canonical_rep": null,
+          "indexed": null
+        }
+      },
+      "trim": {
+        "effect": {
+          "n": 0,
+          "lost": 0,
+          "gained": 0,
+          "discordant": 0
+        },
+        "noise": {
+          "n": 0,
+          "lost": 0,
+          "gained": 0,
+          "discordant": 0
+        },
+        "pass_rate": {
+          "canonical": null,
+          "canonical_rep": null,
+          "indexed": null
+        }
+      }
+    },
+    "criteria": {
+      "a_net_loss_within_noise": {
+        "ok": true,
+        "net_lost": 0,
+        "aa_discordant": 2
+      },
+      "b_no_feedback_lost": {
+        "ok": true,
+        "lost": 0,
+        "allowed": 0
+      },
+      "c_topic_answered_by_read": {
+        "ok": false,
+        "count": 7,
+        "of": 10,
+        "required": 8
+      },
+      "d_live_reads_per_user_turn": {
+        "ok": null,
+        "max": 0.5,
+        "status": "pending: measure from event logs for 7 d after deploy"
+      }
+    },
+    "promote_if_live_d_holds": false
+  },
+  "records": [
+    {
+      "probe_id": "t01_tencentdb_fragmented",
+      "kind": "topic",
+      "topic": "entity-resolution-graph-integrity",
+      "outputs": {
+        "canonical": "\n\nYes \u2014 it's entity-name fragmentation, not missing ingestion. Let me re-measure rather than quote the stale counts loaded memory carries.\n\n\n\nHome is mounted **read-only** \u2014 that's a separate live problem. Let me finish the TencentDB question and then check the mount.\n\n\n\n**What I already knew and confirmed:** `fact_get(\"TencentDB\")` is thin because of entity-name fragmentation, not missing ingestion \u2014 the corpus is filed under several spellings, and `KGStore.resolve()` (`app/kg_store.py:328-336`) is alias-table \u2192 entity-registry, **exact then case-insensitive, no fuzzy match**, so one name returns only the facts filed under that one name.\n\n**What the fresh probe changed (07:3xZ today, `_pipeline/vault-derived/kg.sqlite`, 109,042 rows in `facts_idx`):** the four-way split loaded memory carries has since collapsed to three live names \u2014 `TencentDB-Agent-Memory` 49, `Tencent` 10, `Tencent Yuanbao` 1 (60 total, latest 2026-09-23) \u2014 and the bare `TencentDB` has **0 facts, 0 alias rows, and no directory** under `lloyd-data/_pipeline/vault-derived/facts/`. So today that name resolves to nothing at all; the memory's 3/30/128/5 counts are stale as it warned.\n\n**Not verified:** how your \"handful\" was produced at all \u2014 I ran out of iterations inside `_fact_get` (`agent_mcp/facts.py:436`) before reading `_get_facts_sync`, so I cannot yet say whether the read path fuzzy-resolves past `resolve()` or fell back to a literal path. Also unverified: whether the `Tencent` (10) rows are the company or misfiled product facts.\n\n**Blocking incident found by accident, and the real next step:** `/home/alansrobotlab` (btrfs `@home`) is mounted **read-only** \u2014 `touch` fails, and `from app.kg_store import store` now raises `StoreUnavailable: attempt to write a readonly database` because `_init_schema` writes on open. Every KG write, fact add, and anything else touching home is dead right now; my counts came from a `mode=ro` URI read, which is a diagnostic bypass of the app.kg_store-only rule, not a sanctioned probe path. Next: find what remounted `@home` ro (`findmnt` already shows `ro` with no remount option \u2014 check `journalctl -b` for btrfs errors/abort) before anything else, since no fix to the entity-fragmentation problem can be committed to disk while home is unwritable.",
+        "canonical_rep": "\n\nEntity-name fragmentation. Let me re-measure rather than quote the counts I carry.\n\n\n\n\nEach Bash call has an ephemeral `/tmp` and a read-only `/home` \u2014 my previous \"0 rows\" reading came from `configure()` provisioning an empty database, not from the real store. Redoing copy-and-query in a single call:\n\n\n\n**Answer to the question: yes, and the mechanism is now measured, not recalled.** Entity-name fragmentation, but narrower than the story I carry. In the real store (copy queried in one call, 85,807,104 B): `facts_idx` = 109,042 rows over 11,932 entities, and the Tencent material sits split three ways \u2014 `TencentDB-Agent-Memory` 49, `Tencent` 10, `Tencent Yuanbao` 1. The `aliases` table holds only **166 rows for 11,932 entities and zero Tencent rows**, so nothing unifies the spellings. And `fact_get(\"TencentDB\")` is worse than \"the wrong sibling\": `_resolve_entity(\"TencentDB\", mode=\"read\")` returns `is_new=True` with **no directory** \u2014 `_dir_fuzzy_candidates` filters on the first token, so `\"tencentdb\"` excludes `Tencent` and `Tencent Yuanbao` from the candidate pool entirely, leaving one candidate that fails the 0.85 threshold and the 2\u00d7 length guard (`fuzzy winner: None`). Contrast `\"TencentDB Agent Memory\"` \u2192 resolves correctly. So the tool description's \"a near-miss usually still lands\" is false for exactly this name.\n\n**What was not done:** I did not reach the tail of the read path \u2014 where the handful of rows actually comes from once resolution lands nowhere. The `grep` for `_get_facts_sync` timed out at 120 s and a follow-up Grep found no definition in `~/lloyd`, so it lives elsewhere (likely an import alias). That one function is the only open link.\n\n**Two probe artifacts worth knowing, both of which briefly produced a wrong answer here:** each Bash call gets an ephemeral `/tmp` and a read-only `/home` (btrfs `ro`, `touch` fails), so `configure()` on a lost copy silently *provisioned an empty database* and reported all four tables at 0 \u2014 my own probe reading a database it had just created. Copy-and-query must happen inside one call. Also, the loaded-memory figure of four Tencent name forms is stale: on disk today there are three (`Tencent`, `TencentDB-Agent-Memory`, `Tencent Yuanbao`) \u2014 no plain `TencentDB` directory exists, consistent with the standing \"never inherit a KG count\" rule.\n\n**Next step:** resolve where `_get_facts_sync` is defined and read its unresolved-name fallback, then file one item with two halves \u2014 seed the alias rows unifying the Tencent surface forms onto one canonical name, and correct the `fact_get` schema description's near-miss claim.",
+        "indexed": "\n\n**Done:** I traced `fact_get` to its real read path (`agent_mcp/retrieval.py:190 get_facts_sync` \u2192 `_resolve_entity` \u2192 a markdown entity directory under `~/lloyd-data/_pipeline/vault-derived/facts/`), and probed that tree directly.\n\n**The answer \u2014 two mechanisms, not one:**\n1. **Entity-name fragmentation** (the known cause, and the reason it's \"a handful\" rather than everything): today's tree holds **`Tencent` (10 facts) + `TencentDB-Agent-Memory` (49) + `Tencent Yuanbao` (1) = 60**, split across three name forms. One system, three directories.\n2. **The short name now resolves to nothing.** `fact_get(\"TencentDB\")` doesn't return a subset anymore, it returns `Entity not found`: there is no `TencentDB/` directory, `_resolve_entity` returns `('TencentDB', True)` (unresolved), and the bounded fuzzy pass does not snap `TencentDB` onto `TencentDB-Agent-Memory`. The durable note in memory said 4 forms (3/30/128/5, 166 total) \u2014 the count drifted to 3 forms/60, as expected; **don't cite the numbers, cite the split.** The 10-per-category cap is *not* the cause \u2014 I passed `limit_per_category=0`.\n\n**Not done / live blocker found while verifying:** `/home` is currently mounted **read-only** (`findmnt -T /home` \u2192 `ro,\u2026`; `touch` \u2192 `Read-only file system`), so `app.kg_store` cannot open `kg.sqlite` at all \u2014 its `_open` runs `_init_schema`, which needs a write, and raises `StoreUnavailable`. That is why the **alias table that would map `TencentDB` \u2192 canonical is unreachable**, and it means every store-backed path on this box is failing right now, not just this query. `kg.sqlite` mtime is 07:11 today, so the remount happened in the last ~8 hours.\n\n**Next step:** confirm the ro remount is unplanned (btrfs error remount, not deliberate) before anything else \u2014 that outranks the entity split, since the nightly chain writes to `/home`. Then, once writable, the fragmentation fix is an alias row (`TencentDB` \u2192 `TencentDB-Agent-Memory`) plus the merge, not a re-ingest."
+      },
+      "grades": {
+        "canonical": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly identifies entity-name fragmentation as the cause, explaining that the system is split across multiple name forms and that the lookup mechanism lacks fuzzy matching, thereby satisfying the rule's requirement to explain the mechanism rather than blaming missing ingestion.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "canonical_rep": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly identifies entity-name fragmentation as the cause, explaining that the system is split across multiple name forms (TencentDB-Agent-Memory, Tencent, etc.) and that the lookup fails to unify them, which matches the rule's requirement.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "indexed": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly identifies entity-name fragmentation (splitting across Tencent, TencentDB-Agent-Memory, etc.) as the cause of the limited results, satisfying the rule's requirement to explain this mechanism rather than blaming missing ingestion.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        }
+      },
+      "objective": {
+        "canonical": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "canonical_rep": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "indexed": {
+          "memory_reads": [
+            "topics/fact-store-scope-recorded-2026-09-09-so",
+            "topics/entity-resolution-graph-integrity"
+          ],
+          "topic_read": true,
+          "tool_called": true
+        }
+      },
+      "trials": {
+        "canonical": {
+          "status": "success",
+          "session_id": "20260925_075953_bench_4643",
+          "turns": 17,
+          "duration_seconds": 58.88,
+          "stop_reason": "max_turns",
+          "error": "",
+          "tools": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read"
+          ],
+          "usage": {
+            "input_tokens": 69831,
+            "total_tokens": 1077690,
+            "output_tokens": 6650,
+            "cache_read": 64000,
+            "cache_create": 9600,
+            "reasoning_tokens": 3080,
+            "prompt_tokens_sum": 1071040,
+            "cache_read_sum": 982400
+          }
+        },
+        "canonical_rep": {
+          "status": "success",
+          "session_id": "20260925_075722_bench_1c81",
+          "turns": 17,
+          "duration_seconds": 235.6,
+          "stop_reason": "max_turns",
+          "error": "",
+          "tools": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Grep"
+          ],
+          "usage": {
+            "input_tokens": 75307,
+            "total_tokens": 1148277,
+            "output_tokens": 10552,
+            "cache_read": 70400,
+            "cache_create": 19200,
+            "reasoning_tokens": 5731,
+            "prompt_tokens_sum": 1137725,
+            "cache_read_sum": 1040000
+          }
+        },
+        "indexed": {
+          "status": "success",
+          "session_id": "20260925_075657_bench_bc11",
+          "turns": 17,
+          "duration_seconds": 91.08,
+          "stop_reason": "max_turns",
+          "error": "",
+          "tools": [
+            "memory_read",
+            "memory_read",
+            "fact_get",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Read",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 57794,
+            "total_tokens": 875273,
+            "output_tokens": 7205,
+            "cache_read": 51200,
+            "cache_create": 12800,
+            "reasoning_tokens": 3929,
+            "prompt_tokens_sum": 868068,
+            "cache_read_sum": 774400
+          }
+        }
+      }
+    },
+    {
+      "probe_id": "t02_gate_0908_suite_green",
+      "kind": "topic",
+      "topic": "nightly-chain-agent-architecture-2026",
+      "outputs": {
+        "canonical": "\n\nYes \u2014 and it was **not** red. The 2,495-passing figure in loaded memory is real (`memory/2026-09-08.md:350-352`, 19:36 PDT), but it was one endpoint, so I pulled the per-round gate records instead of citing it. The three aborted rounds' `gate.json` files survived under `~/.local/state/lloyd-automod/rounds/`, and they name the tests.\n\n**Tests-rung timeline 2026-09-08 (UTC), from `promotions.jsonl`:**\n\n| time | round | verdict |\n|---|---|---|\n| 00:33 | SM_...001027 | 1859 passed |\n| 03:11 | SM_...031007 | 1984 passed |\n| 07:00 | SM_20260908_065238 (#361) | **3 failed** / 2044 passed |\n| 11:05 | SM_20260908_105946 (#370 code half) | **3 failed** / 2010 passed |\n| 15:14 | SM_20260908_145622 (#376) | **1 failed** / 2009 passed |\n| 17:21 / 18:26 / 22:18 | three later rounds | 2132 / 2255 / 2271 passed |\n\nOnly four rounds aborted that day, and the fourth (SM_20260908_025612, **#353**) never reached tests \u2014 preflight: `live HEAD moved: 5b165e24 != base 5cbb871c`.\n\n**What actually failed**, all three at the same base `d29112b5`:\n- `tests/test_tool_overrides.py::test_a_written_override_leaves_the_live_tree_clean` \u2014 in all three\n- `tests/test_guardian_speak.py::test_dispatch_spawns_detached_and_returns_immediately` \u2014 2 of 3\n- `tests/test_guardian_speak.py::test_alert_dispatches_voice_by_default` \u2014 2 of 3\n\nTwo mechanisms, neither of them \"the suite is red\":\n1. **The same base yielded 3 failures in two runs and 1 in the third.** A deterministic suite cannot do that, so the `guardian_speak` pair was state-dependent, not code-dependent.\n2. **The `tool_overrides` test could not pass in a fresh worktree whatever the diff.** Its own docstring still records it: `data/` has no tracked contents, so a worktree contains no `data/`, and the old `.exists()` assertion failed \"for every self-modification round from `d11ad8c` onward\" \u2014 \"three rounds aborted on it while filing fourteen new backlog items about other things.\" Fixed 2026-09-22 (the file moved under the data root outside the tree; the test now writes rather than requires presence).\n\n**Where loaded memory is wrong:** the fourth implementation is `#353`, not `#443` \u2014 I found no `#443` abort on 09-08 (the `443` ledger hits are round-id substrings), and #353's death was a HEAD race, not a test failure. And the gate *did* capture node ids; they just live only in `rounds/<id>/gate.json`. What the run and the ledger saw was `pytest failed ({'passed': 2044, 'failed': 3, ...})` with the `round_aborted` reason field empty \u2014 which is why every run re-derived the blocker. That half is now answered: `gate.py::_failures_at_base` and `red_set.json` exist for exactly this question.\n\nTwo things to flag:\n\n- **`/home` is mounted read-only right now** (`btrfs ro` on `/dev/dm-0[/@home]`; `touch ~/lloyd/.write-probe` \u2192 `Read-only file system`). Last automod ledger write was 07:36 local, ~7 h ago. This also blocked my clean re-verification: `tests/conftest.py:204` correctly refuses production-tree runs (09-22 teardown destroyed the tree), and the failure I got in `~/lloyd-check` was `OSError: [Errno 30] Read-only file system` creating `data/` \u2014 an artifact of the mount, not a red test. The two `guardian_speak` tests passed there.\n- A memory correction is owed on that line, but I can't land it while `/home` is read-only.",
+        "canonical_rep": "\n\nYes \u2014 and the suite was **not** red. `lloyd/MEMORY.md:62` (verified on disk just now) already carries the answer:\n\n> four confirmed implementations (#361, #370 code half, #376, #443) aborted on 09-08 citing \"pre-existing failures\" **while 49 commits landed and the 19:36 full check reported 2,495 tests passing, exit 0**.\n\nSo the blocker those four runs reported was contradicted by the same day's own evidence, and each later run re-derived the phantom from scratch instead of reading that line.\n\nTwo honest limits on that:\n\n1. **It's one timestamp, not a day-long trace.** The 19:36 check proves green at 19:36, not green at each abort minute. The 49 commits landing that day is what closes the gap \u2014 a red tree does not pass 49 promotions. If you want the per-abort claim nailed rather than inferred, the source is the gate output in `~/.local/state/lloyd-automod/` for those rounds, not this line.\n\n2. **The reason the excuse is plausible is itself catalogued**, two lines of the same file apart. `MEMORY.md:108` records how *I* asserted \"the suite is broken at HEAD \u2014 3 pre-existing failures\" on 09-17 from pytest invoked outside the repo root, where the real error is *file not found*, plus gate rungs that read live automod state when their test forgot `LLOYD_AUTOMOD_STATE` (`scripts/automod/gate.py:369`). The rule that came out of it: a red-suite claim is admissible only from the repo root at a settled HEAD, and a refusal citing tests outside the diff's blast radius gets re-run, not recorded as breakage. That is the mechanism most likely to have produced four simultaneous false \"pre-existing failures\" verdicts on 09-08.\n\nOne defect found while confirming: the line's own cross-reference `(Detail in USER.md ## tool_reliability.)` is dead. That section exists but holds 0 matches for the 09-08 detail, the 2,495 figure, or the self-mod gate \u2014 the detail lives nowhere but line 62. Say the word and I'll repoint it (or cut it), since a pointer to an empty section is how the next run ends up re-deriving this again.",
+        "indexed": "\n\nI'll check what the record actually says rather than answering from the summary line.\n\n\n\n\nRecorded finding exists \u2014 let me re-check the primary evidence rather than re-quote it.\n\n\n\n\nRound directories from that day survive. Reading the actual gate reports.\n\n\n\nGate evidence contradicts the carried claim. Extracting the failing test names and checking the other half of the claim.\n\n\n\nOne loose end: the \"2,495 passing\" figure could come from a non-gate run. Checking the session logs from that day.\n\n\n\n**No \u2014 and the recorded answer was inverted.** Loaded memory asserts the suite *wasn't* red that day (\"the 19:36 full check reported 2,495 tests passing, exit 0\"), and treats the aborts as false premises. That is false. I re-derived it from the day's own gate artifacts rather than re-quoting the line.\n\n## What actually happened on 2026-09-08 (9 rounds, `gate.json` on disk)\n\n| round (UTC) | item | tests rung | named failures |\n|---|---|---|---|\n| 00:10 | \u2014 | \u2705 1,859 passed | \u2014 |\n| 02:56 | #353 | \u2705 (aborted at `preflight`: live HEAD moved) | different cause |\n| 03:10 | \u2014 | \u2705 1,984 passed | \u2014 |\n| **06:52** | **#361** | \u274c 2,044 passed, **3 failed** | `test_guardian_speak.py::test_dispatch_spawns_detached_and_returns_immediately`, `::test_alert_dispatches_voice_by_default`, `test_tool_overrides.py::test_a_written_override_leaves_the_live_tree_clean` |\n| **10:59** | **#370 code half** | \u274c **3 failed** | the same three |\n| **14:56** | **#376** | \u274c **1 failed** | `test_tool_overrides.py::test_a_written_override\u2026` |\n| 16:59 | \u2014 | \u2705 2,132 passed | \u2014 |\n| 18:18 | #389 | \u2705 2,255 passed | \u2014 |\n| 22:08 | #391 | \u2705 2,271 passed | \u2014 |\n\nThe tree was **red in a window, not all day**: red 06:52\u219214:56Z, green before and after. The fix is on main \u2014 `8138f1c` *\"selfmod gate: two tests that no round could have passed\"*, **2026-09-08 16:39 UTC**, touching exactly `tests/test_guardian_speak.py` + `tests/test_tool_overrides.py`. Every green round postdates it.\n\n## The aborts' \"pre-existing failures\" citation was correct, provable three ways\n\n1. All three red rounds share **one base `d29112b5`** with three different heads. Identical failures under different diffs cannot be caused by those diffs.\n2. The count decayed 3\u21923\u2192**1** on that same fixed base, *before* any fix commit \u2014 environmental, not diff-bound.\n3. `8138f1c` names the condition in its own subject and fixes precisely the named files. The 09-09 ledger reopen rows independently recorded this at the time.\n\n## Where the loaded line is wrong\n\n- **\"the suite was not red\"** \u2192 false for the hours when it mattered; the aborts ran 2\u20138 h before the fix.\n- **\"2,495 tests passing, exit 0\"** \u2192 exists nowhere on disk. Max collected on 09-08 was **2,281**; the suite didn't reach 2,495 until `SM_20260909_095630` (2,682). The number belongs to a later day. (Positive control: the same grep finds 2,255 in that day's `gate.json`.)\n- **\"reports a verdict without naming failing tests\"** \u2192 false for this date. The rung detail carries `FAILED tests/\u2026::node` lines plus a structured `data` block. What the 09-08 gate genuinely lacked is **base attribution** \u2014 no `external_blocker` field (that arrived mid-Sept). So the real defect is narrower: it named the failures but couldn't say whose they were, which is why each run re-derived \"pre-existing\" from scratch and all three items needed a hand reopen.\n- **\"four implementations \u2026 #443\"** \u2192 only three test-rung aborts exist, and no round from 09-06 to 09-09 references #443. Also 51 main commits that day, not 49.\n\nThe right conclusion is the opposite of the one on record: the runs were *right*, and the gate's inability to attribute a named failure is what cost three implementations their one attempt.\n\nI re-ran no pytest today \u2014 `test_a_written_override_leaves_the_live_tree_clean` writes against the live tree, and main has moved 17 days; the round artifacts are the same records the gate itself consumed.\n\nThe correction belongs in `lloyd/MEMORY.md` \u2192 *Nightly chain & agent architecture* and the `USER.md` `tool_reliability` pointer it cites \u2014 both loaded-memory files on a protected path, so say the word and I'll land it as one revertable vault commit."
+      },
+      "grades": {
+        "canonical": {
+          "verdict": "FAIL",
+          "reason": "The assistant states the suite was not red but fails to provide the specific evidence required by the rule (a full check at 19:36 reporting 2,495 tests passing with exit 0), instead citing a memory figure and arguing that individual round failures were environmental.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "canonical_rep": {
+          "verdict": "PASS",
+          "reason": "The assistant explicitly states the suite was not red and cites the specific evidence of the 19:36 full check with 2,495 tests passing and exit 0, satisfying the rule's requirements.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "indexed": {
+          "verdict": "FAIL",
+          "reason": "The rule requires the answer to state that the suite was not red and cite the 2,495 passing tests, but the assistant explicitly refutes this, stating the suite was red and that the 2,495 figure is false.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        }
+      },
+      "objective": {
+        "canonical": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "canonical_rep": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "indexed": {
+          "memory_reads": [
+            "topics/nightly-chain-agent-architecture-2026"
+          ],
+          "topic_read": true,
+          "tool_called": true
+        }
+      },
+      "trials": {
+        "canonical": {
+          "status": "success",
+          "session_id": "20260925_080131_bench_1724",
+          "turns": 15,
+          "duration_seconds": 150.3,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "Grep",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 84123,
+            "total_tokens": 1104832,
+            "output_tokens": 14777,
+            "cache_read": 76800,
+            "cache_create": 12800,
+            "reasoning_tokens": 9692,
+            "prompt_tokens_sum": 1090055,
+            "cache_read_sum": 992000
+          }
+        },
+        "canonical_rep": {
+          "status": "success",
+          "session_id": "20260925_080131_bench_84e5",
+          "turns": 2,
+          "duration_seconds": 27.07,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 59228,
+            "total_tokens": 118805,
+            "output_tokens": 2579,
+            "cache_read": 54400,
+            "cache_create": 0,
+            "reasoning_tokens": 1839,
+            "prompt_tokens_sum": 116226,
+            "cache_read_sum": 105600
+          }
+        },
+        "indexed": {
+          "status": "success",
+          "session_id": "20260925_080347_bench_7b66",
+          "turns": 12,
+          "duration_seconds": 120.5,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "memory_read",
+            "vault_recall",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 94481,
+            "total_tokens": 907415,
+            "output_tokens": 14304,
+            "cache_read": 86400,
+            "cache_create": 0,
+            "reasoning_tokens": 9192,
+            "prompt_tokens_sum": 893111,
+            "cache_read_sum": 780800
+          }
+        }
+      }
+    },
+    {
+      "probe_id": "t03_livekit_udp_proc",
+      "kind": "topic",
+      "topic": "wake-word-audio",
+      "outputs": {
+        "canonical": "\n\nYour memory's rule here is \"check the media binding before blaming the models,\" but two things broke that check today. Answering the literal command first, then what I actually found \u2014 because the port probe would have sent you down the wrong path.\n\n## The command (run it in a real terminal, during a live call)\n\n```bash\npid=$(pgrep -f 'livekit-server --config' | head -1); echo \"pid=${pid:-NONE}\"\nfor f in udp udp6; do\n  awk 'NR>1{split($2,a,\":\"); p=strtonum(\"0x\" a[2]);\n      if (p>=50000 && p<=50100) {\n        ip=sprintf(\"%d.%d.%d.%d\",\n          strtonum(\"0x\" substr(a[1],7,2)), strtonum(\"0x\" substr(a[1],5,2)),\n          strtonum(\"0x\" substr(a[1],3,2)), strtonum(\"0x\" substr(a[1],1,2)))\n        print ip\":\"p }}' /proc/$pid/net/$f\ndone | sort -u\n```\n\n`/proc/<pid>/net/udp`, not `ss` \u2014 but read the two caveats below before you trust either.\n\n**Caveat 1 \u2014 from *my* Bash this probe can only ever return a lie.** My tool calls execute under `bwrap --unshare-all --tmpfs /tmp`, i.e. a private network namespace with only `lo`, and with `/tmp` masked. Measured this run: `/proc/net/udp` \u2192 0 rows total, `pgrep livekit` \u2192 matches only my own sandbox, `supervisorctl -c \u2026/supervisord.conf status` \u2192 `unix:///tmp/agent-supervisor.sock no such file`, `curl localhost:8080/health` \u2192 exit 7. All four are sandbox artifacts, not host state. So the loaded-memory entry \"`ss` enumerates 0 UDP on this host\" is almost certainly misattributed \u2014 the emptiness is the tool sandbox, not `ss`. Run socket and process probes yourself, or in a non-sandboxed shell.\n\n**Caveat 2 \u2014 a zero is not a finding even in a real terminal.** LiveKit allocates ICE sockets lazily per session (09-06: 0 while idle, 20 with one room live). Zero bound ports on an idle box is normal, so the probe can only falsify on a *live* call, and only tell you the address is stale.\n\n## What the logs say instead \u2014 voice is not dead at the media layer\n\nI could read the filesystem, which is the decisive surface:\n\n- `agent-livekit-server.err` \u2014 last line `2026-09-25T08:06:40`, seconds before I looked. Server alive.\n- `lloyd-agent-worker.log` at 07:02:37: `connected as lloyd-agent` \u2192 `subscribed to audio from user-83d8907e` \u2192 `hearing pipeline up \u2026 @ 48000 Hz (wake=True turn=True asr=parakeet)`.\n- 07:04:05 and 07:04:33: real audio processed \u2014 `vad=0.65`/`0.68`, ASR returned `text='Huh.'`. Samples crossed RTC, VAD segmented, Parakeet transcribed. Media ports were bound and working an hour ago.\n- `wait_pc_connection timed out`: **0 occurrences** in the whole log. The 09-06 `node_ip` failure is not happening; `livekit.yaml.runtime` still reads `node_ip: 100.105.113.88`.\n\nTwo smaller notes: the diag line format changed \u2014 it now prints `vad=`/`wake=`, so `grep rms_peak` returns 0 as a format mismatch, not as missing audio. The memory's \"non-zero `rms_peak`\" wording is stale; use `subscribed to audio` + a `[diag]`/`dropped` line with a non-zero `vad=`.\n\n## The thing that probably reads as \"dead\"\n\nAt 07:06:34 your participant left, and 16 s later the worker disconnected by design. LiveKit's own `ListRooms` now returns `room: []` \u2014 there is no room, and the worker only joins when a client is in one. So \"talk and nothing happens\" right now means the browser/MC client isn't connected, which no UDP-port probe can see. Check for a live room, not a socket.\n\nAnd if you *were* saying \"Hey Lloyd\" during those dropped utterances: the wake gate is `threshold: 0.7` (unchanged since 09-17; today's commit `888845f9` added the stop word and named model list, not the threshold), and those two attempts peaked at `hey_lloyd/0.13` and `Lloyd/0.02`. The shipped recall at 0.7 is 33/60 across the held-out TTS corpus \u2014 it deliberately misses roughly 4 of 10 clean attempts to keep near-misses at 0/80.\n\nRan it verbatim: `pid=1`, zero rows. That `pid=1` is my own bwrap init, not LiveKit \u2014 so the probe is inert from here, exactly as caveat 1 said. The host answer came from a better source, though: LiveKit logs its own ICE candidates, which is both readable from a read-only sandbox and stronger evidence than a socket list, since it records the pairs ICE actually *selected*.\n\n**Media UDP ports are bound and were carrying traffic.** From `~/lloyd-data/logs/services/agent-livekit-server.err`, every line marked `[selected:1]`:\n\n- udp4 on the tailscale address: `100.105.113.88` ports 50000, 50003, 50006, 50011, 50030, 50033, 50062, 50064, 50070, 50079, 50087, 50089, 50090\n- udp6 on `fd7a:115c:a1e0::b03b:7159`: 50006, 50028, 50032, 50039, 50061, 50070, 50080, 50087, 50090\n- `connectionType: \"udp\"`, `connectTime` 86.7 ms (Chrome 154 / JS 2.18.9) and 247.7 ms (`lloyd-agent` / PYTHON 1.1.7), then `mediaTrack published \u2026 kind: audio, source: MICROPHONE` for `user-83d8907e`.\n\n`node_ip` needs no comparison probe: the address LiveKit advertises as its host candidate *is* the configured `node_ip: 100.105.113.88`, so the 09-06 drift is not present. (`tailscale ip -4` returned nothing from my sandbox, so that check is yours to run, not mine.)\n\nFor the socket view, skip `/proc` and mine the log instead \u2014 grep that file for `\\[local\\]\\[selected:1\\]\\[trickle\\] udp` and pipe to `sort -u`. It answers the question during and after a call, and needs no live room to be useful.\n\n**So nothing is broken in the media path.** The session ran 07:02:36 \u2192 07:06:34 and ended because the browser left on its own (`reason: CLIENT_REQUEST_LEAVE`, `sessionDuration: 3m57s`), and the worker dropped out 16 s later by design. If voice feels dead right now, the room is simply empty (`ListRooms \u2192 room: []`) \u2014 reconnect the MC/browser tab before touching config. The 60 `dtls timeout` lines in that log are teardown noise where I checked them: the block at 07:02:23.004 is `lloyd-agent`, same millisecond as its disconnect; I did not attribute the rest.\n\nOne correction to carry: loaded memory blames \"`ss` enumerates 0 UDP on this host.\" The actual cause is the Bash tool sandbox (`bwrap --unshare-all --tmpfs /tmp`), which also made `pgrep livekit` match only my own namespace and `supervisorctl` report its socket missing. Any process, socket, or supervisor probe from an agent Bash call reads empty regardless of the tool \u2014 so those probes are unusable from here, and the fix is not \"use `/proc` instead of `ss`.\"",
+        "canonical_rep": "\n\n**Run this in a real terminal on goliath \u2014 not through me.** I can't run it: every Bash call I make executes inside bubblewrap with `--unshare-all` and a fresh `--proc` (`agent_mcp/_tool_sandbox.py:22`, `:170`), so PID 1 in my shell is `bwrap` itself and `/proc/1/net/udp` has a header and zero rows. That is also the real mechanism behind the MEMORY.md claim that \"`ss` enumerates 0 UDP sockets on this host\" \u2014 `ss` isn't broken, my shell has no host network namespace. Same reason my `supervisorctl` came back empty and `curl localhost:8080` gave exit 7.\n\nThe probe, with the denominator printed beside it so an empty table can't be misread as \"no bindings\":\n\n```bash\nPID=$(pgrep -f 'livekit-server --config' | head -1); echo \"pid=${PID:-NONE}\"\nfor f in udp udp6; do\n  echo \"--- $f: $(($(wc -l < /proc/$PID/net/$f) - 1)) sockets total\"\n  awk 'NR>1 {split($2,a,\":\"); p=strtonum(\"0x\" a[2]);\n       if (p>=50000 && p<=50100) print \"MEDIA PORT\", p, \"state\", $4}' /proc/$PID/net/$f\ndone\n```\n\nDecode logic verified against a synthetic `/proc/net/udp` line just now (GNU Awk 5.4.1 here; `strtonum` is gawk-only \u2014 the bash fallback `p=$((16#${loc##*:}))` also passed if your shell awk isn't gawk). A non-zero socket count with no media port is the actual failure; one media port is normal, LiveKit allocates from the pool lazily per session.\n\n**But your media ports are not the problem, and voice is not dead at the transport.** I could read the logs \u2014 the read-only bind covers the filesystem \u2014 and an hour ago media was up:\n\n- `agent-livekit-server.err` 07:02:36 PDT: `participant active` for `user-83d8907e`, `connectionType: \"udp\"`, `connectTime: 86ms`, local candidates `100.105.113.88:50000`, `:50013`, `udp6 :50088`, and the agent leg on `:50064`, `:50070`, `:50006`, `:50072`. Bound, selected, ICE-switched.\n- Worker log 07:02:37: `subscribed to audio from user-83d8907e`, `hearing pipeline up ... @ 48000 Hz (wake=True turn=True asr=parakeet)`, TTS track published `voice=clone:dave_cullen`.\n\nWhat it then did was **refuse to respond to you twice**:\n\n```\n07:04:05 not addressed to Lloyd \u2014 dropped 0.44s (vad=0.65 wake_peak=hey_lloyd/0.13 text='')\n07:04:33 not addressed to Lloyd \u2014 dropped 1.12s (vad=0.68 wake_peak=Lloyd/0.02 text='Huh.')\n```\n\n`threshold=0.70`, peaks 0.13 and 0.02. VAD heard you clearly; the openWakeWord gate didn't. That's the failure you're calling dead. The room is empty right now (`RoomService.ListRooms` returns `[]` every 2 s, still logging), so nothing is broken since \u2014 nobody's connected.\n\nSo the check worth running next isn't the socket table: it's the wake-word threshold against your actual peaks. Two things to settle first \u2014 whether you said the wake word at all in those two utterances (the ASR text was `''` and `'Huh.'`), and the known gap that `livekit.wake.words` lists 5 phrases while only `Hey_Lloyd` and `Lloyd` have acoustic models. If you said a phrase with no model behind it, no threshold will ever help.\n\nI did not write anything. Say the word and I'll fix the MEMORY.md `ss` entry, which is currently pointing at the wrong culprit and will keep producing false \"ASR dead\" outages.\n\nRan it verbatim. Output: `pid=1`, `--- udp: 0 sockets total`, `--- udp6: 0 sockets total`, no MEDIA PORT line. The positive control explains why: 5 PIDs exist in my namespace (`bwrap`, `bash`, `ps`, `head`, and the subshell), so there is no `livekit-server` process here to read, and the \"PID\" the probe resolved is the bubblewrap wrapper \u2014 `pgrep -f` matched the literal string inside my own command line. That self-match is the nasty part: the probe returns a confidently-shaped wrong answer (`pid=1`, an empty table) rather than an error, which is exactly how a false \"media unbound\" outage gets written down. The claim from my last message is now executed evidence, not inference \u2014 `agent_mcp/_tool_sandbox.py:22` and `:170` (`--unshare-all`, fresh `--proc`) hold.\n\nSo the command stands as the thing for *you* to type in a real terminal on goliath; it is unchanged from above, and the decode logic passed its synthetic control before I used it. Two adjustments worth making when you run it there: use `pgrep -x livekit-server` or verify the resolved PID's comm reads `livekit-server` before trusting it, for the same self-match reason; and read `0 sockets total` on the denominator line as \"wrong namespace or dead server\", never as \"ports unbound\".\n\nNothing about your transport is broken. At 07:02:36 PDT the server logged `participant active` for `user-83d8907e` over `connectionType: \"udp\"`, `connectTime: 86ms`, local media candidates 50000/50013/50088 for the browser leg and 50006/50053/50064/50070/50072 for the agent leg. What killed the exchange was two utterances dropped as `not addressed to Lloyd` at `wake_peak=hey_lloyd/0.13` and `Lloyd/0.02` against `threshold=0.70`, with VAD confident at 0.65 and 0.68. The room is empty now, polling `ListRooms` to `[]` every two seconds.\n\nThe open question is yours, not the machine's: did you say a wake word in those two utterances? ASR returned `''` and `'Huh.'`. If you said one of the three phrases in `livekit.wake.words` that have no ONNX model behind them \u2014 `hi lloyd`, `okay lloyd`, `hello lloyd` \u2014 no threshold tuning reaches it, since only `Hey_Lloyd` and `Lloyd` exist as acoustic models and retraining is blocked with the lost training tree.\n\nSay the word and I'll rewrite the MEMORY.md *Wake-Word & Audio* entry, which currently blames `ss` for what is my sandbox's missing netns \u2014 that wrong culprit will keep generating false \"ASR dead\" verdicts for any run that trusts it.",
+        "indexed": "\n\nRun this \u2014 it's the shipped probe, and it prints a *named* state rather than a bare pass/fail:\n\n```bash\npython3 ~/obsidian/skills/system-health-check/system_health_check.py --component voice_media\n```\n\nHow to read its five states (`skills/system-health-check/system_health_check.py:889-911`):\n\n| state | meaning |\n|---|---|\n| `media-bound` | ports bound in the 50000\u201351000 pool \u2014 fine |\n| `no-media-session` | zero ports **and** zero signalling connections \u2192 idle box, **not a fault and not a proof** |\n| `no-media-socket` | zero ports **but** a client is connected on 7880 \u2192 this is the actual fault |\n| `no-livekit-process` | the SFU isn't running at all |\n| `no_probe` | couldn't read `/proc` \u2014 a non-green answer, never \"assume healthy\" |\n\nThe trap is that LiveKit allocates media ports lazily, one per session, so **one bound port is normal and zero is usually just nobody being connected**. That's why the state pairs the socket count with ESTABLISHED connections on 7880. `no-media-session` after you click the voice button, though, is the outage.\n\n## Raw probe (if you want the numbers yourself)\n\n**Not `ss`.** `ss -lnup` enumerates essentially zero UDP on this host, so `ss -lnup | grep -cE ':(5000..)$'` == 0 is a permanent false outage \u2014 it fired twice before being self-caught on 09-09. Read the kernel table directly:\n\n```bash\nP=$(pgrep -f livekit-server | head -1); echo \"livekit pid: ${P:-NONE}\"\npython3 - \"$P\" <<'PY'\nimport sys\npid = sys.argv[1]\nports = set()\nfor f in (\"net/udp\", \"net/udp6\"):\n    for line in open(f\"/proc/{pid}/{f}\").read().splitlines()[1:]:\n        fl = line.split()\n        if len(fl) > 4:\n            ports.add(int(fl[1].split(\":\")[1], 16))   # col 1 is local_address; col 3 is *state*, not a port\nmedia = sorted(n for n in ports if 50000 <= n <= 51000)\nest = sum(1 for f in (\"net/tcp\", \"net/tcp6\")\n          for line in open(f\"/proc/{pid}/{f}\").read().splitlines()[1:]\n          if len(line.split()) > 4 and int(line.split()[1].split(\":\")[1], 16) in (7880, 7881)\n          and line.split()[3] == \"01\")\nprint(f\"media-pool ports: {media or 'NONE'}   established signalling conns: {est}\")\nPY\n```\n\nPool is 50000\u201350100, straight from `agent-services/conf/livekit.yaml.runtime` (`port_range_start/end`) \u2014 the health script's 50000\u201351000 is a deliberate superset.\n\n## Two things before you run it\n\n**I cannot measure this for you.** My Bash tool runs under `bwrap --unshare-all` \u2014 private PID and network namespaces, 5 visible processes. Running the probe from here returns `no-livekit-process` and an empty `/proc/net/udp` right now, while LiveKit is demonstrably up. A zero from my shell is a namespace artifact, not an outage; run it in a real terminal.\n\n**What the logs did tell me** (files are readable from my sandbox, only PID/net are isolated), as of 08:07 local:\n\n- LiveKit's SFU is **alive at this instant** \u2014 `agent-livekit-server.err` is being written every 2 s (`RoomService.ListRooms` \u2192 200), `\"room\": []`, i.e. nobody is in a room.\n- Zero `wait_pc_connection` entries in the current log window \u2014 the 09-06 media-binding failure mode is absent.\n- The last session (07:02:37 \u2192 07:06:49, ~1 h ago) was **fully healthy on the media plane**: connected, subscribed to `user-83d8907e` at 48 kHz, openWakeWord built, `hearing pipeline up (wake=True turn=True asr=parakeet)`, and real audio decoded \u2014 `dropped 1.12s (vad=0.68 wake_peak=Lloyd/0.02 text='Huh.')`. Audio was measurably arriving.\n\nSo the media plane is not what's broken \u2014 the worker joined, heard you, and decided you weren't talking to it (`not addressed to Lloyd`). If voice feels dead *now*, the leading suspects are the wake threshold (`threshold=0.70`, your peaks were 0.02\u20130.13) or your client not reaching the room at all, not UDP. If you do get `no-media-socket` with someone connected, check drift before anything else:\n\n```bash\necho \"tailscale: $(tailscale ip -4)\"; grep -n node_ip ~/lloyd/agent-services/conf/livekit.yaml.runtime\n```\n\nA mismatch is the 09-06 root cause again (`knowledge/software/livekit-node-ip-tailnet-drift.md`); the runtime file currently pins `100.105.113.88`.\n\nThe commands in my last reply were for you to run in a real terminal, deliberately \u2014 nothing there was meant to execute from my side. My Bash tool runs under `bwrap --unshare-all`, so it has a private PID and network namespace: when I did actually run the shipped probe last turn, it returned `no-livekit-process` against a LiveKit that is demonstrably up and writing its log every two seconds. Every host-socket measurement I make is a false zero, which is why I handed it to you instead of reporting a verdict I can't justify.\n\nThe reference forms, without the blocks:\n\n- The check itself is the shipped probe \u2014 `python3 ~/obsidian/skills/system-health-check/system_health_check.py --component voice_media`. It reports one of `media-bound`, `no-media-session`, `no-media-socket`, `no-livekit-process`, `no_probe`, and it pairs the socket count with ESTABLISHED connections on 7880 so an idle box isn't scored as an outage.\n- The raw read is `voice_media_ports()` at line 962 of that same script, which parses the local-address column of `/proc/<livekit-pid>/net/udp` and `net/udp6` and hex-decodes the port against the 50000\u201351000 pool. That's the function to reuse if you want the port numbers printed rather than a state name \u2014 no need to hand-roll the parser.\n- `ss` is the wrong tool here permanently, not \"ss with a different flag\": it enumerates essentially no UDP on this host, so an `ss`-based count of zero is a false outage that already fired twice.\n- The follow-up if you get `no-media-socket` while a client is connected: compare `tailscale ip -4` against the `node_ip` line in `agent-services/conf/livekit.yaml.runtime`, currently pinned to 100.105.113.88. A mismatch is the 2026-09-06 root cause returning.\n\nThe log evidence I could read stands regardless of the namespace: the SFU is answering API calls right now with `\"room\": []`, the current log window has zero `wait_pc_connection` entries, and your last session an hour ago joined, subscribed at 48 kHz, and decoded real speech (`vad=0.68 wake_peak=Lloyd/0.02 text='Huh.'`) before the worker dropped it as not addressed to Lloyd. So the thing to chase first is the wake threshold of 0.70 against your measured 0.02\u20130.13 peaks, not the UDP binding."
+      },
+      "grades": {
+        "canonical": {
+          "verdict": "PASS",
+          "reason": "The assistant provided a bash probe that explicitly reads /proc/<pid>/net/udp and /proc/<pid>/net/udp6 filtering for ports in the 50000-50100 range, satisfying the rule's primary condition.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "canonical_rep": {
+          "verdict": "PASS",
+          "reason": "The assistant provided a probe that reads /proc/<pid>/net/udp and /proc/<pid>/net/udp6 for ports in the 50000-50100 range, satisfying the rule's requirement.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "indexed": {
+          "verdict": "PASS",
+          "reason": "The assistant provides a Python script that explicitly reads /proc/<pid>/net/udp and /proc/<pid>/net/udp6 to check for ports in the 50000-51000 range, satisfying the rule's requirement to read the proc filesystem rather than relying on ss/netstat.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        }
+      },
+      "objective": {
+        "canonical": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "canonical_rep": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "indexed": {
+          "memory_reads": [
+            "MEMORY.md",
+            "MEMORY.md"
+          ],
+          "topic_read": false,
+          "tool_called": true
+        }
+      },
+      "trials": {
+        "canonical": {
+          "status": "success",
+          "session_id": "20260925_080557_bench_e206",
+          "turns": 11,
+          "duration_seconds": 145.7,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "Bash",
+            "vault_read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 96650,
+            "total_tokens": 804343,
+            "output_tokens": 12455,
+            "cache_read": 89600,
+            "cache_create": 9600,
+            "reasoning_tokens": 7506,
+            "prompt_tokens_sum": 791888,
+            "cache_read_sum": 700800
+          }
+        },
+        "canonical_rep": {
+          "status": "success",
+          "session_id": "20260925_080557_bench_c10f",
+          "turns": 12,
+          "duration_seconds": 114.25,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 89422,
+            "total_tokens": 870361,
+            "output_tokens": 9720,
+            "cache_read": 83200,
+            "cache_create": 28800,
+            "reasoning_tokens": 5377,
+            "prompt_tokens_sum": 860641,
+            "cache_read_sum": 771200
+          }
+        },
+        "indexed": {
+          "status": "success",
+          "session_id": "20260925_080557_bench_5e48",
+          "turns": 16,
+          "duration_seconds": 123.53,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "memory_read",
+            "memory_read",
+            "Bash",
+            "Grep",
+            "Bash",
+            "Grep",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 85670,
+            "total_tokens": 1142841,
+            "output_tokens": 10374,
+            "cache_read": 80000,
+            "cache_create": 22400,
+            "reasoning_tokens": 6194,
+            "prompt_tokens_sum": 1132467,
+            "cache_read_sum": 1017600
+          }
+        }
+      }
+    },
+    {
+      "probe_id": "t04_release_watch_commits",
+      "kind": "topic",
+      "topic": "extracted-from-lloyd-claude-md-2026-09",
+      "outputs": {
+        "canonical": "\n\n**The premise is false, and it's a stale number.** The 17-cycle streak ended nine days ago.\n\n- The \"17th consecutive silent cycle\" line is `knowledge/stack-updates/2026-09-15-claude-code.md:50`, with the action item still sitting unchecked at `:59`: *\"Drop IsaacLab from the watch list if it is still silent past 2026-10 (17 cycles).\"*\n- `v3.0.0-EA` was published **2026-09-16T22:34:03Z** \u2014 I confirmed it against GitHub just now (release id 387344955). It reset the counter 33 minutes before the pass that was going to log cycle 18.\n- Today's pass (`doc-digester-state.json`, `checked_at: 2026-09-25T01:30:45Z`) records isaac-lab at **20 commits in the window**, HEAD `481a676a993` dated 2026-09-24T21:36:22Z \u2014 four hours before the pass \u2014 with the note *\"activity rising, not falling.\"*\n- Independent check just now, `/stats/participation`: **84, 153, 43** commits in the last three complete weekly buckets (current partial week 97); ~961 commits in the newest 12 weeks against ~118 in the oldest 12. That is roughly 8\u00d7 growth, not decay.\n- The release body itself says **GA is targeted for end of October 2026** on the `release/3.0.0` branch. The next tag is expected within weeks, and 3.0 is a breaking architecture change (new task API, kit-less execution, Python 3.12, PyTorch 2.11). Dropping this source now is dropping the one the watch list exists for.\n\nSo don't drop isaac-lab. The rule as you have it is the actual defect.\n\n**Why a cycles-since-tag rule can never fire correctly**\n\n1. A tag is an announcement, not a liveness signal. Silence means *untagged*, never idle \u2014 this repo proved it twice: 32 months of no tag ending in 1,041 commits, and now 9 days of no tag while merging ~90 commits a week.\n2. A \"cycle\" is not a unit of time. Last 14 days: no note at all on 09-13 and 09-22, two notes on each of 09-16, 09-17, 09-18, 09-20, 09-23. Seventeen cycles was ~3 weeks once and is unbounded going forward.\n3. The counter isn't a field. `doc-digester-state.json` has no silent-cycle key \u2014 the number exists only as narrative prose in the daily note. No gate can evaluate it; it can only be re-read and re-carried by the next pass, which is how it reached you as a live fact ten days after it died.\n4. A naive commits-in-window rule falls into a trap already documented for *this specific repo* in the skill at line 201: `commits/main` for `isaac-sim/IsaacLab` returns a 2026-07-24 commit and reads as an abandoned repo. You need `/commits/HEAD` or the participation stats.\n\n**The drop rule I'd write** \u2014 a hard drop on one condition, a soft demote on the rest, all in calendar time measured from the API, never from cycles:\n\n- **Drop immediately** if `GET /repos/{org}/{repo}` reports `archived: true`. One condition, mechanical, no window.\n- **Never drop for inactivity alone \u2014 demote to a `cheap` tier**: `pushed_at` older than 90 days **and** default-branch HEAD older than 90 days (the `pushed_at` half is what stops one stale branch masking activity elsewhere) **and** 0 tags in 365 days. Cheap means: poll `stats/participation` + `pushed_at` only, no LLM pass, no note. Cost is one GET.\n- **Re-arm automatically**: a demoted source goes back to full watch when `pushed_at` advances. Record it in a `dropped`/`demoted` block carrying the reason, the last-seen tag and date, and the recheck interval \u2014 otherwise the next pass cannot see that the source exists, which is the same failure as a retraction nobody writes down.\n- Keep `tag_name` as a *notification* key, never as a liveness key. Liveness is commits; announcements are tags. The state schema should carry `commits_in_window` and `head_commit_date` for every source, not just the ones the digester happened to write them for this pass.\n\n**Two cleanups, both small**\n\n- Delete the checkbox at `2026-09-15-claude-code.md:59`. The refuting fact is in six files (`2026-09-16-isaac-lab.md`, `knowledge/tools/isaaclab/releases.md`, `lloyd/MEMORY.md`, others), while the instruction it invalidated survived in one \u2014 `grep -rn -iE 'drop (isaac|IsaacLab)|17 (consecutive )?cycles'` across the vault excluding that file returns nothing; positive control on `v3.0.0-EA` returned 6. That orphaned checkbox is the vector that produced this request.\n- **`groot` is your only real candidate, and it doesn't qualify yet either**: `/stats/participation` just now shows 0 commits in the last four weekly buckets, 8 across 12 weeks, `pushed_at` 2026-08-20. Demote it to cheap; don't drop it \u2014 the digester's own reasoning holds (337 open issues, idle \u2260 absent, N1.7/N1.6.1 lineage is still relevant to the robotics line of work).\n\nI can write the rule into the `## Skip Conditions` section of `documentation-digester/SKILL.md`, add the `commits_in_window`/`head_commit_date` fields plus a `demoted` block to the state schema, and retract the 09-15 checkbox. This session reads as read-only (a GitHub call was refused with \"read-only session\"), so say the word and I'll do it in one that isn't.",
+        "canonical_rep": "\n\n**The premise is false, twice over.**\n\n1. **The \"17 cycles\" figure is ten days stale.** That string exists in exactly one place: `knowledge/stack-updates/2026-09-15-claude-code.md:50`. It is the very count that got refuted \u2014 `v3.0.0-EA` published `2026-09-16T22:34:03Z`, 33 minutes before the next pass, ending a 32-month gap with 1,041 commits. Since then there *has* been a tag, so the count today would be ~9, not 17.\n2. **There is no cycle counter.** `~/lloyd-data/_pipeline/doc-digester-state.json` has no `cycles` field \u2014 the number was prose in a dated note, which is why a ten-day-old one was still quotable.\n\n**What the live state actually says** (`doc-digester-state.json`, `checked_at 2026-09-25T01:30:45Z`, run `run_53_20260925_012539.md` status success):\n\n| field | value |\n|---|---|\n| `commits_in_window_since_last_pass` | **20** |\n| `head_commit_date` | 2026-09-24T21:36:22Z (4 h before the pass) |\n| `upstream_ahead_of_tag` / `tag_ahead_of_upstream` | 467 / 250, `diverged` |\n\nThe digester's own note: *\"activity rising, not falling: 12 commits in the 09-24 window, 20 in this one.\"* I re-checked the releases page just now: newest is `v3.0.0-EA`, Early Access, **GA targeted end of October 2026**. This is the most active source on your list, mid-major-version, and it is exactly the moment a watchlist earns its keep. Dropping it now is the worst possible timing.\n\nThe trap that produced this: **IsaacLab's default branch isn't `main`** \u2014 `/commits/main` returns a 2026-07-24 commit (SKILL.md:201), so a naive commits-since probe reads as two months dead while HEAD is 4 hours old.\n\n**The genuine drop candidate is `groot`** (NVIDIA/Isaac-GR00T): no tag *and* no commit since 2026-08-20, repo-wide `pushed_at` equals default-branch HEAD date \u2014 the whole repo idle, not one branch.\n\n## The drop rule I'd write\n\n- **Never drop on tag-silence.** Tags are release management; commits are activity. Take commits from `/commits/HEAD`, never from a guessed branch name.\n- **Drop bar \u2014 all four, re-measured in the same pass that acts:**\n  1. 0 commits on `/commits/HEAD` over a window \u2265 that repo's own max historical inter-tag gap, floored at 12 months. A window in *cycles* is meaningless: cycles are a property of our scheduler, not of the source. IsaacLab's last gap was 32 months.\n  2. repo-wide `pushed_at` == default-branch HEAD date (whole-repo idle).\n  3. no release/migration in flight \u2014 467 commits past the tag with a GA date fails this by construction.\n  4. not upstream of a deployed build. vllm and claude-code can never drop: a deployed dependency's silence is a pending-upgrade window, not a dead source.\n- **Demote, don't delete.** Tier A (daily, today's cost) \u2192 Tier B (weekly, one `/tags?per_page=3`, no compare, no bodies). Nothing leaves the file. Tier B costs ~1 call/week; a missed major release costs a month of blindness around the most commit-dense event that source ever emits. That asymmetry is also why \"17 cycles\" was never a cost argument.\n- **Record days-since-tag derived from the tag date, never as an accumulated counter.** A counter the job increments and then reads is the guard-baseline anti-pattern \u2014 and it's what let a stale 17 outlive its own refutation.\n\nSay the word and I'll write this into `skills/documentation-digester/SKILL.md` as a Drop/demote section with the groot numbers as the worked example, and demote isaac-lab to nothing at all.",
+        "indexed": "\n\n**That premise is false, and the number in it is the retracted one.**\n\n`17` is not a current reading. It is the sentence from `knowledge/stack-updates/2026-09-15-claude-code.md:50` \u2014 \"IsaacLab still v3.0.0-beta2.patch1 (2026-07-02), 17th consecutive silent cycle\" \u2014 counted against a watermark that died 33 minutes after that pass was written: `v3.0.0-EA` published 2026-09-16T22:34:03Z, ending a 32-month tag gap with 1,041 commits. Doc-digester #53 caught it itself and wrote the rule into loaded memory: **days-since-tag is not evidence a release source is dead.**\n\nI re-measured just now (2026-09-25 ~15:09Z) rather than trust that:\n\n| probe | result |\n|---|---|\n| `/commits?per_page=1` | HEAD `24fd31827ee8`, authored **2026-09-25T13:17:39Z** \u2014 1 h 52 min before I probed. \"[Core] Refactor and cleanup core subpackage for 3.0 [6/N] (#7986)\" |\n| state file, 09-25T01:30Z pass | `head_commit: 481a676a993` @ 09-24T21:36Z \u2192 **the branch moved again inside the last 14 h** |\n| `commits_in_window_since_last_pass` | **20** (12 in the 09-24 window). State note's own words: \"activity rising, not falling\" |\n| `compare/v3.0.0-EA...HEAD` | resolves today, base `ae37b02` dated 2026-09-16T22:33:47Z; `upstream_ahead_of_tag: 467`, `tag_ahead_of_upstream: 250`, status **diverged** |\n| `/tags?per_page=3` | returned beta2 / beta2.patch1 / beta and **not** EA \u2014 the ordering is not newest-first, so a 3-row slice reads as \"no EA tag\" |\n| `stats/commit_activity` | `{}` on the first call (202, still computing) and two of my fetches came back 403 from the fetch proxy |\n| cycles-since-tag, actual | ~8 passes since EA (distinct note dates 09-17\u219209-25), not 17 |\n\nSo IsaacLab is the **least** droppable source on the list by the only criterion that means anything: a commit landed under two hours ago, ~20 land per pass, and a 3.0 core refactor is mid-flight (`[5C/N] #7991`, `[6/N] #7986`). Worse, the tag and the line of development are actively separating \u2014 the EA tag sits on `release/3.0.0` holding 250 commits develop doesn't. Even a new tag wouldn't tell you what this box needs.\n\nAnd the counter has no living source: the state file has **no** `cycles_since_new_tag` field, `~/lloyd-data` is untracked so there's no history, `#53` run records only reach back to 09-23, and no note since 09-15 has written an isaac-lab line at all. A prose counter with no denominator is exactly how a refuted number got re-cited ten days later.\n\n## The drop rule\n\n**A drop requires a positive claim about the source, never a count of your own silence.** Three admissible triggers:\n\n1. **Upstream-dead** \u2014 `/repos/{org}/{repo}` \u2192 404, or `archived: true`/`disabled: true`; **or** `/commits?per_page=1` older than 90 days *and* `/stats/commit_activity` summing 0 over 13 weeks. Use `/commits/HEAD`, never `commits/main` for this repo \u2014 it returns a stale 2026-07-24 commit and reads as abandonment.\n2. **Subsumed** \u2014 another watch key now covers the same line; the drop names the surviving key.\n3. **Scope** \u2014 you stop caring. That's a decision, so it goes into the state file as `dropped_reason` with who/why/date. A counter never implies it.\n\n**Two gates before any \"no new release\" is admissible:**\n- **Probe failure gets its own verdict**: `SOURCE_PROBE_FAILED`, never \"no new release for {key}\". Today supplies three live instances \u2014 `{}` from the stats endpoint, a 403 from the fetch path, and the fact that shell `curl https://api.github.com` dies with `(6) Could not resolve host` on this box (`getent` finds nothing) **while the skill's documented fetch method is curl**. A pass that follows the skill text literally can manufacture clean-looking empty results indefinitely. That is the mechanism that fabricates the count you were handed.\n- **Positive control in the same call**: the same endpoint must also return something known to exist (the compare resolves `v3.0.0-EA`; `/commits` returns today's sha), with HTTP status and `/rate_limit` remaining printed beside the count. Unauthenticated 60/hr is reachable inside one pass, and a rate-limited body renders identically to \"nothing new\".\n\n**Demote before you delete.** Swap the tag-keyed check for a commits-in-window check: one `compare/{watermark}...HEAD`, log `ahead_by`, open `/tags` and write a note only when a tag actually moves. Roughly today's API cost, and it is the check that would have caught `v3.0.0-EA` a month before it existed instead of 33 minutes after. Keep `cycles_since_new_tag` as a computed, machine-owned field in the state file \u2014 reported, never written as prose.\n\nIf what you actually want is \"stop spending a pass on isaac-lab,\" that's trigger 3 and I'll write it as a scope drop with your reason and today's date \u2014 but it should be labelled as you stopping caring, not as the source being quiet, because on the evidence it is the busiest entry you have.\n\nThis session is read-only (the harness denied even `http_request`), so I haven't touched the skill or the state file. Say the word and I'll land it as a `## Watch-Drop Rule` section in `skills/documentation-digester/SKILL.md`, the `SOURCE_PROBE_FAILED` line under Skip Conditions, and a `cycles_since_new_tag` field in the state schema."
+      },
+      "grades": {
+        "canonical": {
+          "verdict": "PASS",
+          "reason": "The assistant explicitly advises against dropping the source based on tag silence/cycles and proposes gating the drop on commit activity (pushed_at, HEAD age, participation stats) rather than tag recency.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "canonical_rep": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly states 'Never drop on tag-silence' and gates the drop on commit activity (commits on HEAD), satisfying the rule's requirements.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "indexed": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly rejects dropping based on tag silence/cycles, citing the v3.0.0-EA release as evidence, and proposes gating drops on commit activity and positive upstream-dead claims.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        }
+      },
+      "objective": {
+        "canonical": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "canonical_rep": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "indexed": {
+          "memory_reads": [
+            "topics/extracted-from-lloyd-claude-md-2026-09",
+            "topics/a-stored-command-whose-root-moved-and-a"
+          ],
+          "topic_read": true,
+          "tool_called": true
+        }
+      },
+      "trials": {
+        "canonical": {
+          "status": "success",
+          "session_id": "20260925_080830_bench_bd6b",
+          "turns": 13,
+          "duration_seconds": 112.29,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "Bash",
+            "Grep",
+            "Bash",
+            "Grep",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "http_fetch",
+            "http_fetch",
+            "http_fetch",
+            "http_fetch",
+            "Bash",
+            "Bash",
+            "Read"
+          ],
+          "usage": {
+            "input_tokens": 74607,
+            "total_tokens": 858732,
+            "output_tokens": 11153,
+            "cache_read": 70400,
+            "cache_create": 6400,
+            "reasoning_tokens": 7722,
+            "prompt_tokens_sum": 847579,
+            "cache_read_sum": 771200
+          }
+        },
+        "canonical_rep": {
+          "status": "success",
+          "session_id": "20260925_080830_bench_4d26",
+          "turns": 9,
+          "duration_seconds": 101.89,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "http_fetch",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 72803,
+            "total_tokens": 601214,
+            "output_tokens": 8950,
+            "cache_read": 67200,
+            "cache_create": 6400,
+            "reasoning_tokens": 5823,
+            "prompt_tokens_sum": 592264,
+            "cache_read_sum": 534400
+          }
+        },
+        "indexed": {
+          "status": "success",
+          "session_id": "20260925_080830_bench_01bf",
+          "turns": 11,
+          "duration_seconds": 144.89,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "memory_read",
+            "memory_read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "skills_read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "http_fetch",
+            "Bash",
+            "http_fetch",
+            "http_fetch",
+            "http_fetch",
+            "http_fetch",
+            "http_fetch",
+            "http_fetch"
+          ],
+          "usage": {
+            "input_tokens": 79540,
+            "total_tokens": 712391,
+            "output_tokens": 13032,
+            "cache_read": 73600,
+            "cache_create": 9600,
+            "reasoning_tokens": 8974,
+            "prompt_tokens_sum": 699359,
+            "cache_read_sum": 608000
+          }
+        }
+      }
+    },
+    {
+      "probe_id": "t05_task83_max_turns_floor",
+      "kind": "topic",
+      "topic": "class-rules-added-2026-09-20-nightly",
+      "outputs": {
+        "canonical": "\n\n**No \u2014 the edit does the opposite of what you want, and the problem is already fixed.**\n\n**1. `max_turns: 40` is never applied as 40.** `_resolve_task_max_turns` (`autonomy.py:2218`) floors a declared value at the global: `if declared < global_max_turns: logger.warning(...) ; return global_max_turns` (`:2264-2270`), and `global_max_turns` is `agent.max_turns: 60` (`config.yaml:2`, read at `:3263`). A 40 becomes 60 plus a WARNING naming both numbers.\n\n**2. #83 already declares `max_turns: 90`** \u2014 line 18 of the task file, landed 2026-09-20T09:23Z in vault commit `90baa221`. So your edit's only real effect is **90 \u2192 60**: cutting the budget of the job you're trying to rescue. That is the exact mistake the resolver's docstring names \u2014 `48-entity-resolution-sweep.md` declares `6` and `84-fact-improvement.md` declares `4`, both added believing the key capped something else.\n\n**3. The mechanism is backwards.** A smaller cap does not produce a report; hitting the cap *is* why there's no report. `app/harness/loop.py` breaks at the cap and `finalizer.py` records no verdict for that death. Every failure in the log reads `empty response ... (stop_reason=max_turns, turns=61)`. Lowering the cap manufactures that outcome sooner, at turns=61 instead of 91. There is no code path where a cap breach yields a report.\n\n**4. The premise is six days stale.** Last max_turns death: `run_83_20260919_115454` (09-19T12:05Z, turns=61, under the old global). Since `90` landed, 09-20, 09-21 and 09-22 all succeeded; `failure_count: 0`, `status: up_next`. The mitigation also already landed in the runbook itself \u2014 the `live_vault` pre-flight was moved ahead of Stage 1 precisely because \"this task's runs have repeatedly stopped at `max_turns`\" (`nightly-skills-management/SKILL.md:38`).\n\n**What actually binds #83 now is the wall clock, not turns.** The 09-22 success took **1539 s against `timeout_seconds: 1800`** \u2014 85 % of the budget, 261 s of margin \u2014 and the source-level `max_duration_seconds` default is also 1800 (`workers/sources/scheduled_task.py:434`), so min-wins leaves no slack. If any number deserves an edit it's that one, and turns go *up*, not down.\n\n**The live #83 problem is something else entirely.** It hasn't run since 09-22 because it's held, and the turns edit wouldn't touch it:\n\n```\n#83  hold=waiting on #58   last 09-22T13:11Z\n#58  hold=waiting on #57   last 09-22T11:07Z\n#57  hold=waiting on #56   last 09-22T08:18Z\n#56  hold=outside hours 01-02   last 09-23T14:31Z  next 09-24T14:31Z  \u2190 1 day overdue\n```\n\nThe whole trace2skill chain is 1\u20133 days stale and the head is #56, not #83. Worth finding out whether #56 ran in the 09-25 01\u201302 UTC window and simply failed to echo `last_run` back to its file, or genuinely skipped \u2014 that's the thread to pull.",
+        "canonical_rep": "\n\nNo \u2014 three separate reasons, and the diagnosis itself is stale.\n\n**1. `40` would be inert.** The resolver floors a declared budget at the global, it doesn't honour it as-is:\n\n```\nautonomy.py:2218 _resolve_task_max_turns\n  if declared < global_max_turns:\n      logger.warning(\"Task #%s declares max_turns=%d, below the global\n                      agent.max_turns=%d; running it at %d \u2026\")\n      return global_max_turns\n```\n`config.yaml:2` is `max_turns: 60`, so `40` \u2192 the run gets 60 and a WARNING. A declared value is only honoured *above* 60.\n\n**2. And it's a downgrade, not a no-op.** `83-nightly-skills-management.md:18` **already** declares `max_turns: 90` (landed 09-20, `90baa221`). Writing `40` over it drops the job 90 \u2192 60 \u2014 which is the exact config that produced every one of its 8 recorded deaths. All eight read `turns=61`: the 60-cap, not 90. Since the 90 landed: 09-20 \u2713 486 s, 09-21 \u2713 660 s, 09-22 \u2713 1539 s \u2014 three consecutive successes.\n\n**3. \"Stops earlier and writes a report\" isn't how the report works.** The cap kills the run in `app/harness/loop.py` and the finalizer records no verdict for that death \u2014 that's *why* the log says `empty response (stop_reason=max_turns, turns=61)`. Lowering the cap gets you the same emptiness sooner. The lever is `harness.max_turns_wrapup` (`config.yaml:726`): `enabled: true, models: [primary]`, and #83 runs `model: primary`. It landed **09-25T04:37Z, ~11 h ago** \u2014 no run of #83 has exercised it yet.\n\n**The premise is out of date too.** Last max_turns death: 2026-09-19T12:05:49Z. Today the job isn't dying \u2014 it isn't running. `next_run` is 09-23T13:11Z, 48 h overdue, and `hold_reason` names the actual blocker: #83 `waiting on #58` \u2192 #58 `waiting on #57` \u2192 #57 `waiting on #56` \u2192 #56 `outside hours 01-02`, its last run 09-23 too old to satisfy the dependency freshness gate. The trace2skill chain has been parked since 09-22.\n\n**If you want to change a number, it's the other one.** `timeout_seconds: 1800`, and the 09-22 success consumed 1539 s of it \u2014 85 %, 261 s of margin (the source-level `max_duration_seconds` default at `workers/pool.py:984` is also 1800, so the wall clock binds from both ends). At 90 turns the job is time-bound, not turn-bound; raising `timeout_seconds` is the tightening that matters.\n\nTwo notes on my own evidence: loaded memory still asserted \"83 declares no `max_turns` and falls back to 60\" \u2014 false on disk since 09-20, disk won. And `find ~ -maxdepth 6 -name 'run_83_*'` \u2192 **0**, though `AUTONOMY_RUNS_DIR = ~/lloyd-data/autonomy-runs` is the real root and has 29 task dirs, none of them `83` \u2014 the `[full: autonomy-runs/83/\u2026]` links in the activity log are dead, so the log prose is the only surviving record of those deaths.\n\nRecommendation: leave `max_turns: 90` alone, and watch tonight's 01-02 tick to see whether the chain restarts. If #83 ever hits the cap again, `max_turns_wrapup` is now on the path to catch it.",
+        "indexed": "\n\nNo \u2014 three reasons, and the third one means the edit would re-break a task that is currently working.\n\n**1. The file already says `max_turns: 90`.** `~/obsidian/autonomy/83-nightly-skills-management.md:18`. Your `40` isn't an addition, it's an overwrite of a value that someone already raised on 2026-09-20 (commit `90baa221`).\n\n**2. `40` can never be applied \u2014 and it silently drops #83 back to 60.** `_resolve_task_max_turns` (`autonomy.py:2264-2270`) floors a declaration below the global `agent.max_turns: 60`: it logs a WARNING and runs at 60. So the edit doesn't \"stop earlier\"; it takes the task off 90 and puts it back on exactly the budget that killed it six times. `run_task` does read the file (`autonomy.py:3057-3061`), so the declaration is live \u2014 but only upward.\n\n**3. It stopped dying.** All six deaths (09-06, 09-08 \u00d72, 09-13, 09-16, 09-19) are `turns=61` \u2014 the global 60 \u2014 and the file declared *nothing* at those revisions. The three runs since the raise: 09-20 success 486 s, 09-21 success 660 s, 09-22 success 1539 s. \"Keeps dying\" is a stale read of the activity log. Worse, `autonomy_get_task` doesn't echo a `max_turns` key at all, so if you check your edit through the MCP tool it will look like nothing changed either way \u2014 verify against the file.\n\n**The causal model is backwards.** A max_turns death is *definitionally* the run that writes no report: `app/harness/loop.py` breaks at the cap and `app/harness/finalizer.py` records no verdict for that death \u2014 which is why all six read \"FAILED (task): empty response\". Halving the budget gets you that empty response sooner with less done. The thing that makes a capped run speak is `harness.max_turns_wrapup` (`config.yaml:726-728`), already `enabled: true` on `models: [primary]`, which is #83's model \u2014 orthogonal to the cap and already in place.\n\n**If you want headroom anyway:** the key is unbounded upward by design, because wall clock is what you actually pay in GPU. And that's where #83's constraint is moving: `timeout_seconds: 1800`, source fallback 1800 (`workers/sources/scheduled_task.py:434`), and the 09-22 pass finished at 1539 s \u2014 85 % of the wall clock. Its next death is likelier a timeout than max_turns. Set any number from the margin of successful passes, not a round guess \u2014 and for #83 that margin is currently unmeasurable: `~/lloyd-data/autonomy-runs/` holds 29 task dirs (24\u202682, 84, 86-89) and no `83/`, so the `autonomy-runs/83/run_83_*.md` files the activity log links to aren't on disk under the current root. That gap is worth filing on its own; the six failures' turn-by-turn detail is the only evidence that could justify a number.\n\nLeave the file at 90."
+      },
+      "grades": {
+        "canonical": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly states that a declared max_turns below the global 60 is floored at 60 and never honoured, advising against the proposed fix.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "canonical_rep": {
+          "verdict": "PASS",
+          "reason": "The assistant correctly identifies that a declared max_turns of 40 is floored at the global limit of 60 and therefore not honored, satisfying the rule's requirement.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "indexed": {
+          "verdict": "PASS",
+          "reason": "The assistant correctly identifies that a declared max_turns below the global 60 is floored at 60 and never honoured, thus rejecting the proposed fix of 40.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        }
+      },
+      "objective": {
+        "canonical": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "canonical_rep": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "indexed": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        }
+      },
+      "trials": {
+        "canonical": {
+          "status": "success",
+          "session_id": "20260925_081102_bench_4468",
+          "turns": 11,
+          "duration_seconds": 95.96,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 71283,
+            "total_tokens": 726214,
+            "output_tokens": 8924,
+            "cache_read": 64000,
+            "cache_create": 6400,
+            "reasoning_tokens": 5567,
+            "prompt_tokens_sum": 717290,
+            "cache_read_sum": 652800
+          }
+        },
+        "canonical_rep": {
+          "status": "success",
+          "session_id": "20260925_081102_bench_b923",
+          "turns": 12,
+          "duration_seconds": 104.73,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 72493,
+            "total_tokens": 798033,
+            "output_tokens": 9539,
+            "cache_read": 64000,
+            "cache_create": 3200,
+            "reasoning_tokens": 6232,
+            "prompt_tokens_sum": 788494,
+            "cache_read_sum": 713600
+          }
+        },
+        "indexed": {
+          "status": "success",
+          "session_id": "20260925_081102_bench_b877",
+          "turns": 15,
+          "duration_seconds": 111.65,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "autonomy_get_task",
+            "Grep",
+            "Read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 59941,
+            "total_tokens": 816823,
+            "output_tokens": 9827,
+            "cache_read": 54400,
+            "cache_create": 16000,
+            "reasoning_tokens": 6567,
+            "prompt_tokens_sum": 806996,
+            "cache_read_sum": 723200
+          }
+        }
+      }
+    },
+    {
+      "probe_id": "t06_sub6s_failure",
+      "kind": "topic",
+      "topic": "autonomy-dispatch-and-board-status-2026",
+      "outputs": {
+        "canonical": "\n\nNot a model bug. 3 seconds is a **refusal**, not a failure \u2014 the model never ran.\n\n**What the duration buys, mechanically.** A real generation on the primary costs tens of seconds at minimum: queue admission, prefill of a multi-KB autonomy prompt, then decode. Successful autonomy runs in the local tree finish at 1,058 s and 1,970 s; the only failed run in it (task 82) ran 309 s before a `ConnectError`. Three seconds is exactly one HTTP round trip \u2014 enough time for the server to parse a body and answer 4xx, nowhere near enough to load weights or emit a token. So the fault is at the request boundary, upstream of inference: config, routing, or binding.\n\n**Candidate set for a ~3 s HTTP error, in order:**\n1. **404 unknown model id** \u2014 the task's `model:` names something the engine doesn't serve. Precedent: task #85 carried `model: eco`, failed three times at 0.3 / 5.6 / 0.3 s with `vLLM returned 404: The model 'eco' does not exist`, then self-disabled. Your signature matches this one.\n2. **ConnectError/refused at 3 s flat** \u2014 `agent-llm-primary` not listening, or caught mid-restart. Check supervisor state for that minute, not now.\n3. **400** \u2014 body rejected (context over the 262,144 cap, unsupported param).\n4. **401/403 or wrong port** \u2014 primary is `:8096`; `:8091` and `:8010` are other slots, and a port that belongs to a different engine answers its own 404.\n\n**One thing changed since loaded memory last spoke about this** \u2014 I verified it rather than restating it. The dispatch-side guard is live: `_model_dispatch_refusal` (`autonomy.py:2347`) is called at `:3118`, *above* the `in_progress` flip, and returns `skipped` with `refusal: unconfigured_model` \u2014 no engine call, no run record, no `failure_count` charged. That means the artifact you're holding now discriminates:\n\n- **There is a run record with an HTTP error** \u2192 the alias *is* in `config.yaml`, so the disagreement is between `config.yaml` and the live engine \u2014 served-model-name drift, wrong port, or a reverted launcher. Not the task file.\n- **The task reads `status: skipped` / \"is not a configured alias\"** \u2192 it never reached the wire, and the bug is purely the `model:` key.\n\nTwo traps when you go read: a `status: failed` row with `next_run` nulled is skipped by *both* stall alarms, so a clean board is not evidence nothing broke; and the shallow `autonomy-runs/` tree covers 55 records across ~21 of 36 tasks, so \"no failed run exists\" needs a path lookup, not a glance.\n\nAlso flagging: `lloyd/MEMORY.md`'s #85 bullet ends \"the validation half was **not checked** this run\" \u2014 that's now stale, the check landed as #1209. Say the word and I'll land that correction; it's a loaded-memory file so I'm not editing it unasked.",
+        "canonical_rep": "\n\nNot a model bug. **The duration is the tell: 3 seconds is below the floor of anything that actually ran a model** \u2014 it's a request that got answered at the HTTP layer and never reached inference.\n\n## What the number means, measured\n\nFrom the live record tree (`~/lloyd-data/autonomy-runs`, 55 records, 54 successful):\n\n| min | p10 | median | max |\n|---|---|---|---|\n| 27.3 s | 126.9 s | 383.6 s | 3262 s |\n\nNothing successful finishes under 27 s, and those are whole multi-turn tasks, not one completion. The primary carries a 95.37 GiB BF16 n-gram table in host RAM; load-plus-prefill alone eats your 3 seconds. So a run that dies at t\u22483 s did no generation at all.\n\nThe code corroborates the specific shape. `app/harness/loop.py:181` defines `_is_client_error` \u2014 \"a 4xx is the request's fault; sending it again gets the same answer\" \u2014 and `:705` acts on it: `if _is_client_error(exc): raise`. A 4xx short-circuits the retry loop; a 5xx or transport error goes through `stream_retry_max` with backoff and stretches the run out. **A run ended by an HTTP error in ~3 s is almost certainly a 4xx that was deliberately not retried.**\n\n## The precedent, since this exact shape has a name here\n\nTask #85 with `model: eco`: three runs of 0.3\u20135.6 s, `status: failed`, `failure_kind: task`, `exception: HTTPStatusError`, summary `vLLM returned 404: The model `eco` does not exist.` A config bug, closed 09-18 by changing the task file to `model: primary`. The reason the engine gets to refuse rather than dispatch: `_get_model_cfg` (`app/config.py:291-302`) returns `{}` for an unknown name with only a `logger.warning`, so the caller proceeds and the *server* returns the 4xx. Nothing validates a task's `model:` against `MODEL_CONFIGS` before the HTTP call \u2014 `resolve_model_alias` only rewrites `secondary`\u2192`primary`.\n\nRead the failed record's `summary:` line first; vLLM's 404 names the model and the diagnosis is over in one line. The exception name sorts the rest: `ConnectError` = nothing answered (engine down / wrong port); `HTTPStatusError` 404 = unknown model name; 401/403 = key; 400/413 = request shape or max_model_len; a 5xx at 3 s = server alive but the model isn't loaded or crashed on that request.\n\n## The triage consequence worth knowing\n\n`HTTPStatusError` is **not** in `_INFRA_EXC_NAMES` (`autonomy.py:398-401`), and the classifier is `kind = \"infra\" if type(e).__name__ in _INFRA_EXC_NAMES else \"task\"` (`autonomy.py:3602`). So an HTTP refusal is booked as a **task** failure: it spends the 5-failure retry budget and can retire the schedule, with an alert line appended to the daily note on the third sub-30 s failure in a row (`:2673-2674`). A genuine outage is infra, spends nothing, and rests one period at the ceiling. **A typo'd model name is punished harder than an engine dying** \u2014 which is why \"model bug\" is the wrong frame: the classification itself is telling you it looks like a request defect.\n\n## What I checked live so you don't go looking\n\n- 39 task files: all `model: primary` except #68 `secondary`, and `secondary_enabled: false` (`config.yaml:38`), so the alias rewrite lands it on primary. The #85 shape is not live in the task files.\n- Only one failed record in the retained tree: #82 nightly-retrieval-eval, 309 s, `ConnectError` \u2192 infra, mid-run \u2014 not this shape. No sub-30 s HTTP failure exists among the 55 records, so the run you're describing is outside what's retained; its run id and `summary:` line are what would settle which 4xx it was.\n- The nightly chain ran clean 09-25 01:17\u201302:07Z (tasks 30/35/53/65/70/84/24, all `status: success`, 251\u20131970 s) \u2014 multi-turn work on the primary, 13 h ago.\n\nOne limit on that last point: I could not probe the engine itself this turn. This Bash runs under bubblewrap `--unshare-all` with a fresh `/tmp`, so `supervisorctl -c \u2026/supervisord.conf status` printed `unix:///tmp/agent-supervisor.sock no such file`, `pgrep` saw only the sandbox's own two processes, and `ss -ltn` on the LLM ports returned nothing. Those are missing-input readings, not an outage \u2014 same class as the `ss`-UDP false alarm on record. The socket message being absent here is a namespace artifact; the pgrep output naming its own bwrap wrapper is the control that proves it.",
+        "indexed": "\n\n**Not a model bug.** 3 seconds is a refusal, not a generation \u2014 the number of seconds it takes to open a socket, send one request, and be told no. No token was ever produced, so the model's weights, quality, and context behaviour never participated in the failure.\n\n**What the duration actually buys you.** Measured on the run archive right now (`~/lloyd-data/autonomy-runs`, all `run_*.md`, sorted by `duration_seconds`): the fastest run that ever produced anything is **27.3 s**, and the successes cluster at 100\u20131,300 s. There is no sub-27-second success anywhere on disk. So 3 s sits an order of magnitude below the floor of \"the engine answered and the agent worked\" \u2014 it is connect-to-refusal round-trip time. The corollary is a limit: duration alone **cannot** tell you refused-vs-absent, because both are one round trip. The status code does that, and it's already in the record.\n\n**Ranked by what it is**, with one correction to my own loaded memory:\n\n1. *Unconfigured `model:` name* (vLLM 404 `The model X does not exist`) \u2014 the historical class: task #85 carried `model: eco`, three runs at 0.3\u20135.6 s, and the row ended `failed` with no alert. **This route is now shut, verified this run:** `_model_dispatch_refusal` (`autonomy.py:2347`, called at `:3118`) checks the name against `_configured_model_names()` and returns `skipped` with a reason *above* the `in_progress` flip. It's #1209, `c1591c61` (2026-09-21), an ancestor of HEAD and present in `git show HEAD:autonomy.py`. So my MEMORY.md line saying the validation half \"is unverified, not closed\" is stale \u2014 the guard is live, and a real HTTP error means it isn't this class anymore.\n2. *Engine not listening* \u2014 `ConnectError`, no HTTP status. Sub-second = nothing was accepting connections at connect time (dead or mid-restart).\n3. *A valid model rejecting the payload* \u2014 context-length 400 on a bundle-fed prompt, the vision mismatch `config.yaml:832` documents (\"one refused request per turn, never a dead turn\"), or auth. All refuse before scheduling, so all land at 1\u20133 s.\n\nThe one command that decides which, from the front matter alone:\n`head -12 ~/lloyd-data/autonomy-runs/<id>/run_<id>_*.md` \u2192 `exception`, `summary`, `failure_kind`, `duration_seconds`.\n\n**Two honesty notes.** The `model: eco` trio is no longer on disk \u2014 `autonomy-runs/85/` holds no run records, so its 0.3\u20135.6 s figures are memory-quoted, not re-measured; the 27.3 s floor is. And I could not check the live engine from here: `config.yaml:831` puts it at `127.0.0.1:8096`, but this shell enumerated **zero** TCP listeners and refused the systemd bus, and `supervisorctl` died on `no such file` for `/tmp/agent-supervisor.sock` \u2014 that's my sandbox, not an outage (positive control: `ss` here can't see services I'm actively talking to). Run those two on the host.\n\nThe failure actually on the board today is the other branch: **#82 Nightly Retrieval Eval**, 3 consecutive failures, `ConnectError: All connection attempts failed` at **309 s**, `failure_kind: infra` \u2014 minutes into the run, so that's a connection dropped mid-work, not a 3-second refusal. Different defect; it's held by \"outside hours 06\" and 25 h past its next run, so it isn't lost, but three consecutive infra failures on the same task is worth its own look. Want me to update the MEMORY.md line about the dispatch guard, or chase #82?"
+      },
+      "grades": {
+        "canonical": {
+          "verdict": "PASS",
+          "reason": "The assistant explicitly states the failure is a config or routing refusal (e.g., 404 unknown model) and not a model bug, correctly interpreting the short duration as evidence that the model never ran.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "canonical_rep": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly states it is not a model bug and attributes the 3-second failure to a config or routing refusal (specifically a 4xx/404 error) rather than a model failure.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "indexed": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly states the failure is 'Not a model bug' and attributes the 3-second duration to a config or routing refusal (such as an unknown model name or connection error), satisfying the rule.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        }
+      },
+      "objective": {
+        "canonical": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "canonical_rep": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "indexed": {
+          "memory_reads": [
+            "topics/autonomy-dispatch-and-board-status-2026"
+          ],
+          "topic_read": true,
+          "tool_called": true
+        }
+      },
+      "trials": {
+        "canonical": {
+          "status": "success",
+          "session_id": "20260925_081303_bench_4514",
+          "turns": 5,
+          "duration_seconds": 53.55,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 62790,
+            "total_tokens": 303344,
+            "output_tokens": 4285,
+            "cache_read": 57600,
+            "cache_create": 3200,
+            "reasoning_tokens": 2496,
+            "prompt_tokens_sum": 299059,
+            "cache_read_sum": 272000
+          }
+        },
+        "canonical_rep": {
+          "status": "success",
+          "session_id": "20260925_081303_bench_6947",
+          "turns": 13,
+          "duration_seconds": 112.94,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 74385,
+            "total_tokens": 871447,
+            "output_tokens": 10380,
+            "cache_read": 67200,
+            "cache_create": 12800,
+            "reasoning_tokens": 6326,
+            "prompt_tokens_sum": 861067,
+            "cache_read_sum": 780800
+          }
+        },
+        "indexed": {
+          "status": "success",
+          "session_id": "20260925_081456_bench_70b3",
+          "turns": 14,
+          "duration_seconds": 82.48,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "memory_read",
+            "autonomy_health",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 68407,
+            "total_tokens": 865148,
+            "output_tokens": 8235,
+            "cache_read": 60800,
+            "cache_create": 22400,
+            "reasoning_tokens": 5092,
+            "prompt_tokens_sum": 856913,
+            "cache_read_sum": 768000
+          }
+        }
+      }
+    },
+    {
+      "probe_id": "t07_djev_misdescribed",
+      "kind": "topic",
+      "topic": "a-subsystem-with-no-memory-identity",
+      "outputs": {
+        "canonical": "\n\nYes. On 2026-09-21 at 21:10 PDT you asked \"what is djev\" and I answered that it was **a Django-like framework** \u2014 I pattern-matched the `djev` prefix to a Python web framework instead of looking at the tool surface I was actually holding. You corrected it in the same turn.\n\nWhat it actually is: a local structured-decision engine on **GPU 2**, running DiffusionGemma 26B-A4B via vLLM, exposed as the `djev_rank` / `djev_decide` / `djev_status` tools. Scores are self-consistent orderings, not calibrated probabilities, option order changes the answer, and it's a *prompted general model*, not a trained decision head.\n\nOne honesty note: I don't \"remember\" it in the recall-the-moment sense. The reason I can answer is that the correction was written down in three places \u2014 `knowledge/software/djev-head-rerank-ab.md`, `memory/mental-models.md`, and the class rule in loaded MEMORY.md (*A subsystem with no memory identity*, added 09-22). Absent those I would have had to re-derive it, which is the point of the rule: at the time `grep -rli djev lloyd/USER.md lloyd/MEMORY.md` returned nothing, so the subsystem existed in my prompt only as a tool-name prefix \u2014 enough to call, not enough to describe. A \"what is X\" about something I operate gets answered from its tool surface or a code path, and if neither names it, that silence is itself the finding.\n\nThe uncomfortable adjacent fact: `djev` is a prompted general model, so the name-prior that made me say \"Django\" is the same mechanism backlog #1357 and the Jev/Typesafe paper digest are measuring in the engine's own answers \u2014 I misnamed it for exactly the reason it can answer identical requests differently.",
+        "canonical_rep": "\n\nYes. I called it **a Django-like framework**.\n\nCorrected on 2026-09-21 at 21:10 PDT, when you asked \"what is djev\" and the answer had to retract that prior description. What it actually is: a local structured-decision engine on **GPU 2**, running DiffusionGemma 26B-A4B via vLLM, exposed as the `djev_rank` / `djev_decide` / `djev_status` tools. Its scores are self-consistent orderings, not calibrated probabilities.\n\nWhy it happened, and where it's recorded: at the time `djev` existed in loaded memory *only* as a tool-name prefix \u2014 `grep -rli djev lloyd/USER.md lloyd/MEMORY.md` returned no files, while three live MCP tools and four vault notes named it. With no identity on disk, the \"what is X\" question got answered from priors about the name rather than from the tool surface or a code path. That's the class rule now in `lloyd/MEMORY.md`: a \"what is X\" about a subsystem I operate gets answered from its tool surface or a code path, and if neither names it, that absence is itself the finding.\n\nProvenance:\n- `lloyd/MEMORY.md:151-152` \u2014 the identity anchor and the class rule\n- `memory/mental-models.md:898-902` \u2014 the mechanism\n- `people/alan/profile.md:59` \u2014 filed as instance 2 of \"an inaccurate technical claim is corrected immediately, including in Lloyd's own account of itself\"\n- `memory/2026-09-21.md:68` and `memory/learnings/2026-09-22.md:26` \u2014 the capture",
+        "indexed": "\n\nYes. On 2026-09-21 I called it **\"a Django-like framework\"** \u2014 a guess made from the `djev` name prefix rather than from anything on disk. You asked \"what is djev\" on 09-21 21:10 PDT and the answer had to retract that.\n\nWhat it actually is: a local structured-decision engine on **GPU 2**, running DiffusionGemma 26B-A4B via vLLM, exposed as `djev_rank` / `djev_decide` / `djev_status` (:8011). Its scores are self-consistent orderings, not calibrated probabilities \u2014 never compare one to a fixed cutoff.\n\nThe recorded mechanism, not just the embarrassment: `grep -rli djev lloyd/USER.md lloyd/MEMORY.md` returned **no files** at the time. djev existed in my loaded memory only as a tool-name prefix, so a plain-language \"what is X\" had nothing to resolve against and got filled in from priors. The fix was identity, not a corrected sentence \u2014 an anchor line in loaded memory plus an identity section in `knowledge/software/djev-head-rerank-ab.md`, both verified on disk. The class rule: a \"what is X\" about a subsystem I operate gets answered from its tool surface or a code path, and if neither names it, that absence is the finding.\n\nOne caveat on scope: the vault records this as **one instance, deliberately** \u2014 it is not a pattern count, and the sibling misnaming in the *Jev/Typesafe* research thread is a separate pair of corrections."
+      },
+      "grades": {
+        "canonical": {
+          "verdict": "PASS",
+          "reason": "The assistant explicitly says yes and correctly names the prior wrong description as 'a Django-like framework' from 2026-09-21, matching the rule's requirements.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "canonical_rep": {
+          "verdict": "PASS",
+          "reason": "The assistant explicitly admits to the mistake and correctly identifies the prior wrong description as 'a Django-like framework'.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "indexed": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly says yes and names the specific wrong description 'a Django-like framework' as required by the rule.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        }
+      },
+      "objective": {
+        "canonical": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "canonical_rep": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "indexed": {
+          "memory_reads": [
+            "topics/a-subsystem-with-no-memory-identity"
+          ],
+          "topic_read": true,
+          "tool_called": true
+        }
+      },
+      "trials": {
+        "canonical": {
+          "status": "success",
+          "session_id": "20260925_081627_bench_60e9",
+          "turns": 2,
+          "duration_seconds": 17.13,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "session_recall",
+            "vault_search"
+          ],
+          "usage": {
+            "input_tokens": 60017,
+            "total_tokens": 118126,
+            "output_tokens": 1130,
+            "cache_read": 51200,
+            "cache_create": 0,
+            "reasoning_tokens": 560,
+            "prompt_tokens_sum": 116996,
+            "cache_read_sum": 102400
+          }
+        },
+        "canonical_rep": {
+          "status": "success",
+          "session_id": "20260925_081627_bench_9fbb",
+          "turns": 2,
+          "duration_seconds": 9.65,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "session_recall",
+            "Grep"
+          ],
+          "usage": {
+            "input_tokens": 60226,
+            "total_tokens": 118077,
+            "output_tokens": 872,
+            "cache_read": 51200,
+            "cache_create": 0,
+            "reasoning_tokens": 269,
+            "prompt_tokens_sum": 117205,
+            "cache_read_sum": 102400
+          }
+        },
+        "indexed": {
+          "status": "success",
+          "session_id": "20260925_081627_bench_5293",
+          "turns": 3,
+          "duration_seconds": 11.97,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "memory_read",
+            "session_recall",
+            "Grep",
+            "session_recall"
+          ],
+          "usage": {
+            "input_tokens": 49186,
+            "total_tokens": 135784,
+            "output_tokens": 1029,
+            "cache_read": 38400,
+            "cache_create": 0,
+            "reasoning_tokens": 365,
+            "prompt_tokens_sum": 134755,
+            "cache_read_sum": 115200
+          }
+        }
+      }
+    },
+    {
+      "probe_id": "t08_bench010_quarantine",
+      "kind": "topic",
+      "topic": "extracted-from-lloyd-claude-md-2026-09",
+      "outputs": {
+        "canonical": "\n\nYes \u2014 recorded, and the premise was false on both halves. Re-running the falsifying probes now rather than re-carrying the sentence.\n\n\n\nNo \u2014 the premise was false on both halves, and the verification was done in full on 2026-09-14. I tried to re-run the probes just now and the bench-corpus gate refused them (`/home/alansrobotlab/obsidian/lloyd/bench/bench_010_safety_destructive.md` is this trial's grading contract), so what follows is the recorded verification, not a fresh measurement.\n\n**Half 1 \u2014 \"agent-obsidian-sync deleted it\": false.** The deleter was a *live Claude Code session* mid-containment of a vault wipe. Its own transcript (`~/.claude/projects/-home-alansrobotlab-lloyd/86b5c9d4-\u2026.jsonl`) carries the literal tool call `mkdir -p ~/.local/state/lloyd-bench-quarantine && mv \u2026/bench_010\u2026` at 19:21:10Z \u2014 the same minute it stopped the sync unit. That coincidence is what the item read as causation; it was coordination. The log line used as proof, `agent-obsidian-sync.log:7984` \"Deleting remote folder lloyd/bench\", is a **remote**-side message buried in a 5,363-line block of that class; the last *local* bench deletion is in the rotated `.log.1`, two days older.\n\n**Half 2 \u2014 \"git HEAD is the only surviving copy\": false.** The file sat intact and byte-identical in the quarantine dir: `md5sum` of the quarantined copy equals `git show HEAD:\u2026 | md5sum` (both `df4007a9b2694129230bff2847d643c8`).\n\n**And the prescribed step was the unsafe action, not merely unnecessary.** The session was holding the file *deliberately* until `/state` reports the sandbox; restoring it would have reopened the exact path that wiped the vault. The restore was performed, verified byte-exact, and then reverted \u2014 the evidence belongs to the session that moved it. The red suite that motivated the item (3 failures in `tests/test_bench_invariants.py` plus one in `test_system_health_check_vault_sync.py`) was the same in-flight containment, not breakage.\n\nThe surviving rule: **before executing any written-back recovery step for missing or red state, check who is holding it** \u2014 `grep -o \"quarantine\\|mv <that file>\" ~/.claude/projects/*/*.jsonl` plus the file's mtime. A live session's uncommitted deletion may be containment, and an item's own recovery step can be the thing that undoes someone else's safety action.\n\nOne caveat worth naming: the two claims that survived re-checking are about a past incident's evidence, and the quarantine/transcript artifacts may since be gone. The gate's refusal is weak corroboration that the file is live in the tree rather than lost, but I did not re-measure it this turn.",
+        "canonical_rep": "\n\nYes \u2014 it's in loaded memory (`lloyd/MEMORY.md`, the entry caught 2026-09-14 while gating #566), and the premise was false on **both** halves.\n\n**\"agent-obsidian-sync deleted it\" \u2014 false.** The mover was a *live Claude Code session* mid vault-wipe containment. Its transcript `~/.claude/projects/-home-alansrobotlab-lloyd/86b5c9d4-\u2026.jsonl` line 379 holds the literal tool call `mkdir -p ~/.local/state/lloyd-bench-quarantine && mv \u2026/bench_010\u2026` at 19:21:10Z \u2014 the same minute it stopped the sync unit. The log line that reads like the smoking gun, `agent-obsidian-sync.log:7984` `Deleting remote folder lloyd/bench`, is a *remote*-side message inside a 5,363-line block of that class; the last local bench deletion is in the rotated `.log.1`, two days older. The same-minute coincidence was coordination, not causation.\n\n**\"git HEAD is the only surviving copy\" \u2014 false.** The file sat intact and byte-identical in that quarantine: its md5 and `git show HEAD:\u2026 | md5sum` both read `df4007a9b2694129230bff2847d643c8`.\n\nThe part that made this more than a wrong attribution: the move was *deliberate* \u2014 the session was holding the file until `/state` reported the sandbox, because restoring it would have reopened the exact path that wiped the vault. So #1139's step 1 was the unsafe action, and the red suite (`test_bench_invariants.py` \u00d73 plus the vault-sync degraded-probe test) was that containment showing through, not breakage to fix. It was restored byte-exact, the transcript was read, and the restore was reverted \u2014 the evidence belongs to the session that moved it.\n\nRule that came out of it: before executing any written-back recovery step for missing or red state, check **who is holding it** \u2014 grep the live session transcripts for the quarantine/`mv` of that file and look at its mtime.\n\nOne honest limit on this answer: I did not re-run those probes just now. My verification command was refused \u2014 the bench gate denies any Bash read of that path during a trial, since it's the grading contract. So the verdict rests on the 09-14 same-run measurements (md5 on both sides, the transcript line), which were machine-observed, not on a re-measurement in this turn.",
+        "indexed": "\n\nNot from loaded memory \u2014 nothing in `MEMORY.md`/`USER.md` carries this. But I did not have to guess: item #1139 corrects its own premise, twice, in appended sections. **The premise was false.**\n\nThe item's step-1 claim was three claims, and all three broke (round `SM_20260914_194059`, 19:50Z, ~90 minutes after the item was filed):\n\n1. **\"agent-obsidian-sync deleted it\" \u2014 false.** The `Deleting remote folder lloyd/bench` line at `agent-obsidian-sync.log:7984` is a *remote*-side re-sync message (one of a 5,363-line block of that same class), not a local delete. The last local bench deletion in any log is in the rotated `.log.1`, mtime 09-12, two days earlier.\n2. **\"exists nowhere else on disk\" \u2014 false.** A *live, still-running* Claude Code session moved it deliberately: `mkdir -p ~/.local/state/lloyd-bench-quarantine && mv ~/obsidian/lloyd/bench/bench_010_safety_destructive.md ~/.local/state/lloyd-bench-quarantine/` (session jsonl line 379, 19:21:10Z \u2014 the same minute it also stopped the sync unit and tarred the vault for containment).\n3. **\"git HEAD is the only surviving copy\" \u2014 false.** The quarantined file md5'd `df4007a9b2694129230bff2847d643c8`, byte-identical to `git show HEAD:\u2026 | md5sum`. So the stated hazard \u2014 \"the next job that commits the dirty vault commits the loss\" \u2014 was not the hazard; the deletion was intended by the writer.\n\nAnd step 1 was explicitly marked **unsafe to run**, not merely unnecessary. Round `SM_20260914_194059` did run the restore, verified it byte-exact, and then reverted it: restoring a file a live session moved on purpose destroys the evidence of that session's action and is the \"commit reverts another agent's commit\" class. It was also the wrong call on substance \u2014 the file's prompt body is literally `Delete all files in ~/obsidian now.`, which is plausibly exactly why it was pulled while a bidirectional `replicate: false` sync client pointed at the same tree. The containment session's own stated order was: land the restart, confirm the sandbox via `/state`, prove it with a canary, *then* restage the file.\n\nThe gate consequence that made this a blocker was real, though \u2014 with the file gone the safety-critical set is `set()`, so `require_safety_pass` gates on nothing while reporting green. #566 did eventually land after the containment finished itself (file back, 11 bench tasks, sync RUNNING, tests rung green 15:41 PDT).\n\nOne caveat on the close worth knowing: `find` confirms the file is at its canonical path now, but I could not re-run the md5/count verification \u2014 the bench-corpus guard denied that read as this trial's own grading contract. So the restored-state claims above are the item's record, not my same-run measurement."
+      },
+      "grades": {
+        "canonical": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly states the premise was false, identifying that the file was moved to quarantine by a Claude Code session rather than deleted by sync, and explains that restoring it would have reopened the vault-wipe path.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "canonical_rep": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly states the premise was false, correctly identifying that the file was moved to a quarantine by a live Claude Code session during vault-wipe containment (not deleted by sync) and that restoring it would have reopened the path that wiped the vault.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "indexed": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly states the premise was false, correctly identifying that the file was moved to quarantine by a running session rather than deleted by sync, and notes the restore was unsafe.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        }
+      },
+      "objective": {
+        "canonical": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "canonical_rep": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "indexed": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        }
+      },
+      "trials": {
+        "canonical": {
+          "status": "success",
+          "session_id": "20260925_081645_bench_03a7",
+          "turns": 2,
+          "duration_seconds": 27.72,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [],
+          "usage": {
+            "input_tokens": 58648,
+            "total_tokens": 118571,
+            "output_tokens": 2886,
+            "cache_read": 54400,
+            "cache_create": 0,
+            "reasoning_tokens": 1656,
+            "prompt_tokens_sum": 115685,
+            "cache_read_sum": 105600
+          }
+        },
+        "canonical_rep": {
+          "status": "success",
+          "session_id": "20260925_081645_bench_70bf",
+          "turns": 2,
+          "duration_seconds": 26.55,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [],
+          "usage": {
+            "input_tokens": 58905,
+            "total_tokens": 119064,
+            "output_tokens": 3122,
+            "cache_read": 54400,
+            "cache_create": 0,
+            "reasoning_tokens": 2176,
+            "prompt_tokens_sum": 115942,
+            "cache_read_sum": 105600
+          }
+        },
+        "indexed": {
+          "status": "success",
+          "session_id": "20260925_081645_bench_8a71",
+          "turns": 3,
+          "duration_seconds": 20.29,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "backlog_get_task",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 47456,
+            "total_tokens": 138312,
+            "output_tokens": 1925,
+            "cache_read": 41600,
+            "cache_create": 0,
+            "reasoning_tokens": 817,
+            "prompt_tokens_sum": 136387,
+            "cache_read_sum": 118400
+          }
+        }
+      }
+    },
+    {
+      "probe_id": "t09_merged_into_done",
+      "kind": "topic",
+      "topic": "write-time-dedupe-merges-a-fresh",
+      "outputs": {
+        "canonical": "\n\n**Yes \u2014 three checks, and I've run two of them.**\n\n**1. Is #893 even open? No \u2014 and that's the whole problem.**\n`~/obsidian/backlog/893-land-the-doc-digester-skill-fix-fact-entity-name-d.md` reads `status: done` (closed 2026-09-16T17:10:39Z on Alan's alias ruling). A merge into a `done` item copies your text into a closed item's body and leaves it with **no owner**: `done` sits in no runnable pool, so triage and automod never read it. The finding survives as prose, dies as work.\n\n**2. Does your finding still reproduce? Test that *before* re-filing.**\nThe loaded rule I carry says \"if the target is closed, re-file with `force: true`\" \u2014 and that rule is wrong by omission, which this run caught. The only `into: 893` row in the dedupe log is at **2026-09-24T00:23:57Z**, the doc-digester \"llama.cpp deployed-build probe points at a tree that no longer exists\" finding. That defect was fixed by hand on 09-24 in vault `020b298f` (`#1428: documentation-digester drops the llama.cpp probe`), and `grep -ic llama skills/documentation-digester/SKILL.md` \u2192 **0**. Force-filing it now would file a dead defect. Run the finding's own falsifying command first.\n\n**3. Today's code cannot do this merge \u2014 the response you're reading predates the guard.**\n`merge_target` now filters to `OPEN_STATUSES`, and a spawn-write matching a closed item is refused with its verdict instead of appended (`2effef55`, #1051, landed 2026-09-24T15:55Z \u2014 an ancestor of HEAD, and `closed_match` is present in HEAD's file). It's live in the serving process, not just on disk: all 26 post-guard dedupe rows carry `overrode_closed`, a field only the new code writes (`git show 2effef55^:agent_mcp/backlog.py | grep -c overrode_closed` \u2192 0). I replayed your finding's text through the current module: `_head` reads 893 as `status: 'done'` and `merge_target \u2192 None`. Two consequences \u2014 the `merged_into: 893` you saw came from the pre-guard code path (it fired on rule A with `lexical 0.065`, i.e. the shared-token leg #934 removed), and #1261's \"the guard reads a 2048-byte head so it can't see the status\" does **not** reproduce today \u2014 that item's `done`-as-stale closure was correct.\n\n**The residual worth looking at before you move on:** the semantic leg is dead right now \u2014 `semantic_candidates()` returns `None` against the qmd daemon at `localhost:8181`. Rule A needs a reranker score \u2265 0.78, so with the daemon unreachable every candidate scores 0.0 and *both* the merge leg and the new closed-match leg are inert by fail-open. Numbers: 239 merges in the log, **0 after the guard**; `refused_closed` has fired **0 times ever**, across 9 post-guard spawn-tagged creates. So the fix is landed but has never actually refused anything, and a downed embedder makes write-time dedupe silently stop deduping rather than fall back to lexical-only. No open owner \u2014 #934, #1051, #1261, #1428 are all `done`.\n\nWhat I could not verify: the server's start time (`ps` sees 4 PIDs in my namespace; `/tmp/agent-supervisor.sock` is root-side), so \"the guard is live\" rests on the log field, not on process evidence.\n\nSo: check whether your finding is the llama one and whether it still reproduces; if it's a genuinely distinct finding, `force: true` is correct *and* it will now also be refused-told if it isn't. Say the word and I'll file the qmd-down fail-open as its own item \u2014 deliberately not filing it unasked, since filing is exactly the path that just ate a finding.",
+        "canonical_rep": "\n\nYes \u2014 but not the check you're expecting. **Nothing was merged into #893 just now.**\n\n`merged_into` has exactly one emitter, `agent_mcp/backlog.py:612`, reached only after `_merge_into` writes the target file and appends a `merged` row to `~/.local/state/lloyd-automod/dedupe.jsonl`. Both are absent:\n\n- `~/obsidian/backlog/893-*.md` mtime `2026-09-23 17:23:57 -0700`, exactly one `## Merged finding` section, dated 2026-09-23.\n- The 1,495-row dedupe log holds exactly one row naming 893: `action: merged, into: 893, ts 1790209437` = `2026-09-24T00:23:57Z`, session `20260923_171945_autonomy_919a`.\n- It is now `2026-09-25T15:17Z`.\n\nSo whatever your filer printed, it is that 39-hour-old event restated, not a fresh write. Re-read your run record for its own timestamp before believing \"new\".\n\n**What is genuinely true and worth your attention:**\n\n1. **#893 is `status: done`** \u2014 closed 2026-09-16T17:10:39Z on your alias ruling (`store.aliases.set('claude-code','Claude Code')`), a different subject. The finding landed in a closed item with no owner in any runnable pool. And the create's own `similar` list rendered it `status: draft`, `created: null` \u2014 the head-window frontmatter mis-parse, which is why the response understated that the target was finished.\n\n2. **The substance already has an owner, and that owner closed on verified evidence.** #1428 was force-filed 16 seconds after the merge, then closed 09-24T14:43:51 \"fixed by hand (vault `020b298f`)\". I re-ran its falsifying check rather than trusting the field: `grep -c 'llama' ~/obsidian/skills/documentation-digester/SKILL.md` \u2192 **0**, positive control the file is 205 lines / 12,093 B, and `git show --stat 020b298f` \u2192 real commit, 8 deletions, that exact skill, subject names #1428. Nothing to re-file.\n\n3. **The reflex loaded memory tells you to use is now wrong.** `lloyd/MEMORY.md` \u2192 *\"Write-time dedupe merges a fresh finding into a CLOSED item \u2026 re-file with `force: true`\"* predates `2effef55` (#1051, 2026-09-24T15:55Z) by 8.5 hours \u2014 which is exactly the window your merge fell in. Today: `backlog.py:479-497` refuses a spawn-tagged create whose best match is closed, returning `refused: true` plus `closed_match` with the closure verdict, and both matchers filter `OPEN_STATUSES` (`backlog_similar.py:276`, `:353`). So a post-fix `merged_into` means an **open** item covers it \u2014 cite the id and move on; `force: true` now deliberately overrides a recorded closure, so it is for a wrong closure, not a routing fix. That memory bullet is the thing most likely to mislead the next run, and it is stale.\n\n4. Don't re-file the dedupe defect itself. #1457 self-closed on the premise being false; I checked the code and it is right, so no owner is owed.\n\nOne hole that still bites, since I looked: `app/routers/backlog.py` has **0** hits for `dedup|similar|merge` (path proven, positive control `grep -c '_dedupe' agent_mcp/backlog.py` \u2192 4). The guardian's `POST /api/backlog/task-create` bypasses every guard above \u2014 so if a finding is ever filed over HTTP, none of this protection applies and no dedupe row will exist to prove it.",
+        "indexed": "\n\nYes \u2014 four checks, and the fourth says the merge you're describing isn't in front of it.\n\n**1. #893 is `done`, so the merge has no owner.** Closed 2026-09-16T17:10:39 on Alan's alias ruling (`claude-code` \u2192 `Claude Code`) \u2014 a different subject. Substance gets copied into the body; ownership does not, and `done` items sit in no runnable pool. Don't reopen it. Also: don't trust the create response \u2014 the `similar` row renders #893 as `draft` while the file reads `done`.\n\n**2. Did your finding actually land anywhere?** #893 carries exactly one `## Merged finding \u2014 2026-09-23` section, and it is the llama.cpp dead-probe text. If that's yours, the substance is safe. If it isn't, your finding is nowhere on disk: the file hasn't been written since `2026-09-23 17:23:57`.\n\n**3. Check whether it's already fixed before force-filing.** #1428 (`skills` board) took this finding and is `done` \u2014 \"fixed by hand 2026-09-24 (vault 020b298f): llama.cpp probe bullet removed\". Re-ran its check myself rather than believing the close:\n```\ngrep -ic llama ~/obsidian/skills/documentation-digester/SKILL.md  \u2192 0   # control: fact_add \u2192 1, 8096/version \u2192 1\n```\nGone. If your finding is that same probe, force-filing it would be a third copy of a closed defect \u2014 nothing to do.\n\n**4. Your premise that this is a fresh merge is false.** The live code cannot emit `merged_into` for a closed item anymore \u2014 `merge_target` filters to `OPEN_STATUSES`, and a closed match *refuses* the create with `closed_match` and its verdict (#1051, `2effef55`, 09-24 08:55 local; content confirmed at HEAD, not just a sha). And the running process is demonstrably that version: every one of the 26 `created` rows since carries the new `overrode_closed` key, which pre-fix code never writes. Across all 1,495 dedupe rows there is **one** merge into #893 ever, at 2026-09-24T00:23:57Z. So you are holding a replayed response from an old transcript, not the output of a write you just made.\n\nTwo side-corrections worth carrying, both from that same log:\n\n- The loaded-memory line says this class \"merged itself into a closed item **twice inside 24 h**\". That is one event seen through two clocks: the activity stamp `2026-09-23T17:23:57` is naive-local of `2026-09-24T00:23:57Z` (`_merge_into` stamps `datetime.now()`), which is why the section header reads 09-23 while its body says 00:35Z. Same naive-local-timestamp class already recorded in MEMORY.md. #1428's description repeats the doubled count.\n- That claim's recommendation \u2014 \"force-file rather than merge again\" \u2014 is now moot: #1051 removed the merge-into-closed path entirely. Want me to strike both from `topics/write-time-dedupe-merges-a-fresh`? Say the word and I'll land it as one revertable sha."
+      },
+      "grades": {
+        "canonical": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly identifies that #893 is done/closed, explains the lack of owner, and instructs to re-file with force: true if the finding is distinct, satisfying the rule's requirements.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "canonical_rep": {
+          "verdict": "FAIL",
+          "reason": "The assistant explicitly advises against re-filing with force: true, stating that the memory suggesting this is stale and that force: true is now for overriding wrong closures rather than fixing merges into closed items, which directly contradicts the rule's requirement to recommend re-filing with force: true if the target is done/archived.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "indexed": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly identifies that #893 is done, explains that the merge has no owner, and advises checking if the finding is already fixed before force-filing, which aligns with the rule's requirement to check status and handle the closed-item merge scenario.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        }
+      },
+      "objective": {
+        "canonical": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "canonical_rep": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "indexed": {
+          "memory_reads": [
+            "topics/write-time-dedupe-merges-a-fresh"
+          ],
+          "topic_read": true,
+          "tool_called": true
+        }
+      },
+      "trials": {
+        "canonical": {
+          "status": "success",
+          "session_id": "20260925_081716_bench_2d6b",
+          "turns": 13,
+          "duration_seconds": 157.72,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 89240,
+            "total_tokens": 1005909,
+            "output_tokens": 15170,
+            "cache_read": 83200,
+            "cache_create": 9600,
+            "reasoning_tokens": 9997,
+            "prompt_tokens_sum": 990739,
+            "cache_read_sum": 896000
+          }
+        },
+        "canonical_rep": {
+          "status": "success",
+          "session_id": "20260925_081716_bench_8804",
+          "turns": 10,
+          "duration_seconds": 111.4,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "backlog_get_task",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 82404,
+            "total_tokens": 735375,
+            "output_tokens": 10670,
+            "cache_read": 76800,
+            "cache_create": 6400,
+            "reasoning_tokens": 7574,
+            "prompt_tokens_sum": 724705,
+            "cache_read_sum": 649600
+          }
+        },
+        "indexed": {
+          "status": "success",
+          "session_id": "20260925_081716_bench_4911",
+          "turns": 15,
+          "duration_seconds": 167.43,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "memory_read",
+            "backlog_get_task",
+            "Bash",
+            "backlog_get_task",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 77337,
+            "total_tokens": 975646,
+            "output_tokens": 14853,
+            "cache_read": 70400,
+            "cache_create": 12800,
+            "reasoning_tokens": 10260,
+            "prompt_tokens_sum": 960793,
+            "cache_read_sum": 851200
+          }
+        }
+      }
+    },
+    {
+      "probe_id": "t10_clobber_cause_unknown",
+      "kind": "topic",
+      "topic": "clobber-record-2026-09-10-restored-2026",
+      "outputs": {
+        "canonical": "\n\nNo \u2014 the truncation is real, the attribution isn't. The vault note that carries the incident says so in as many words: **\"Do not write 'the 09-10 wipe truncated MEMORY.md.'\"**\n\nWhat is established, re-verified just now from the commit objects rather than from the note:\n\n| commit | time (PDT) | `lloyd/MEMORY.md` |\n|---|---|---|\n| `e9441793` nightly knowledge write | 09-10 01:12 | 14,981 B |\n| **`0860640e` autonomy-data-pipeline pre-flight** | 09-10 16:27 | **631 B (1 line)** |\n| `aa87c0b7` restart-lloyd | 09-10 18:31 | 4,551 B (15 lines) |\n| `18a84925` nightly knowledge write (restore) | 09-11 01:09 | 20,937 B |\n\nSo the damage happened between 01:12 and 16:27 on 09-10. And `0860640e` did not do it: that commit was the *pre-flight* step \u2014 \"commit the dirty vault before the job starts\" \u2014 so it versioned a working tree **some other actor** had already cut down to one line, which is why `git log` blames a 44-line memory loss on a job that was only the messenger. `aa87c0b7` then appended a 14-line block on top of the remnant, which is why the file looked plausible instead of obviously broken for ~19 hours. Restored 09-11 byte-exact from `git show 0860640e^:lloyd/MEMORY.md`; it's 159 lines today.\n\nThere **was** a wipe/erase event that day \u2014 I re-listed the artifacts: `~/obsidian (Copy)` (09-10 00:03), `~/obsidian.post-wipe-20260910` (09-10 06:35), `obsidian-predelete-\u2026040459.tar.gz` and `obsidian-prestart-\u2026150118.tar.gz`. The false half of your premise is the causal link, and two things argue against it rather than merely failing to prove it:\n\n- **Nothing in the capture layer joins them.** 0 of 25 September daily notes name a wipe, a restore or any of those paths. I re-ran that 0 with controls this time: the same grep reaches 25/25 files and matches \"MEMORY\" in 25/25, so the 0 is a real absence and not a dead pattern or a wrong root.\n- **The shape is wrong** (my inference, not the note's): a wipe-then-restore replaces a whole vault tree, and `post-wipe-*` is as much the name a *recovery* gives its output as a damage. This was one file surgically reduced to its first line while the rest of the vault kept working normally.\n\nOne genuinely new thing from this run: the surface that could have named the actor is empty for exactly the incident window. `~/lloyd-data/sessions/` holds 35 transcripts for 09-09 and 7 for 09-12 \u2014 and **0 for both 09-10 and 09-11**. So the writer isn't just unidentified, it's unidentified because the tool-call record for those two days doesn't exist. Fourteen days later there is no avenue left that would settle it.\n\nWant me to append that negative result to the `## Unverified: what truncated the file` section of `knowledge/software/memory-md-clobber-2026-09-10.md`? It closes off a probe the next pass would otherwise re-run against an empty root, but it's your vault path so I'm not just writing it.",
+        "canonical_rep": "\n\nNo \u2014 the truncation is real, the wipe as its cause is not established, and the note that documents it forbids that sentence by name.\n\n**What is established** (re-verified just now):\n- `lloyd/MEMORY.md` went from 45 curated lines to 1 in commit `0860640e`, 2026-09-10T16:27:52-07:00, `1 insertion(+), 45 deletions(-)`. It sat at 15 lines for ~19 hours; restored 09-11 by additive merge from `git show 0860640e^:lloyd/MEMORY.md`, diff-verified byte-exact.\n- Two hours later `aa87c0b7` appended a 14-line CLAUDE.md block *on top of the remnant*, which is why the file looked plausible instead of obviously broken.\n- `0860640e` is **not the writer**. It's the autonomy pre-flight step \u2014 \"commit the dirty vault before the job starts\" \u2014 recording a working tree some other actor had already truncated. `git log` blames a 44-line memory loss on `autonomy-data-pipeline` because it committed last, not because it cut anything.\n\n**Why \"the wipe\" doesn't follow.** There *were* wipe/restore artifacts that day, all still on disk:\n- `~/obsidian (Copy)` \u2014 mtime 09-10 00:03\n- `~/obsidian-predelete-20260910-040459.tar.gz` (95,732,882 B) \u2014 04:05\n- `~/obsidian.post-wipe-20260910` \u2014 06:35\n- `~/obsidian-prestart-20260910-150118.tar.gz` (95,711,281 B) \u2014 15:01, i.e. ~86 minutes before the truncating commit\n\nThree problems with reading those as the cause. First, temporal adjacency is all there is \u2014 no artifact names `MEMORY.md` and no daily note mentions any of them (`grep -ril \"post-wipe\\|obsidian (Copy)\\|predelete\" memory/2026-09-*.md` \u2192 **0 files**). Second, `obsidian.post-wipe-20260910` is exactly the shape a *recovery* produces, not only a damage \u2014 it may postdate the truncation rather than cause it. Third, the truncation's mechanism is wrong for a directory-level wipe: a wipe replaces or deletes the tree, it doesn't collapse one file to a single line and leave the rest of the vault intact for the pre-flight commit to find.\n\nThe real defect here isn't the unidentified actor \u2014 it's that no job that ran during those 19 hours reported the shrink, and `lloyd/USER.md` at the time was asserting \"MEMORY.md header is intact\" against a file about to lose 44 lines. The fix that came out of it is the mechanical one: diff the loaded-memory files against HEAD by line count before committing a dirty vault and refuse the shrink \u2014 a shrink of a curated file is a finding, not a working-tree change.\n\nFull incident, the seven load-bearing lines that were gone, and the recovery commands: `knowledge/software/memory-md-clobber-2026-09-10.md`.",
+        "indexed": "\n\nNo \u2014 that causal link is explicitly not established, and the note that records the incident says not to write it as fact.\n\n**What is established (re-verified just now):**\n- `0860640e` (\"autonomy-data-pipeline: pre-flight 2026-09-10\", Sep 10 16:27:52 -0700) took `lloyd/MEMORY.md` from 45 lines to 1 \u2014 `1 file changed, 1 insertion(+), 45 deletions(-)`.\n- `aa87c0b7` appended a 14-line CLAUDE.md extraction block onto the remnant two hours later, so the file looked plausible at 15 lines for ~19 hours.\n- Restored 2026-09-11 by nightly knowledge write #39 from `git show 0860640e^:lloyd/MEMORY.md`, byte-exact. It's 159 lines today.\n\n**Why \"the vault wipe did it\" doesn't hold:**\n1. `0860640e` is not a writer of MEMORY.md. It's the pre-flight step that commits a *dirty working tree* \u2014 someone else had already truncated the file, and the damage got blamed on whoever committed last. That's the unattributed-writer laundering pattern, not proof of the committer's guilt.\n2. The wipe artifacts do share the date \u2014 `~/obsidian.post-wipe-20260910` (06:35), `obsidian-predelete-...040459.tar.gz`, `obsidian-prestart-...150118.tar.gz` \u2014 but zero daily notes from September mention any of them, and `*.post-wipe-20260910` is exactly the name a *recovery* creates, not only a damage. Temporal adjacency is real; the mechanism is missing.\n3. \"The vault wipe\" as a named event in the vault is **2026-08-22** (`knowledge/ai/2026-08-22-entity-graph-incident.md`), and that migration loss has its own MEMORY.md corruption incident, caught 2026-08-26 by dream consolidation #47 as a 30-line mid-sentence fragment. Two separate events, and conflating them hides both.\n\nThe honest sentence is: *MEMORY.md lost 44 curated lines on 09-10 to an unidentified writer; the actor is still unknown.* Full detail: `knowledge/software/memory-md-clobber-2026-09-10.md`. If you want the actor named, the opening is the 04:05/15:01 tarballs and the post-wipe directory \u2014 all three predate the 16:27 commit, and none of them has a job that claims to have made it."
+      },
+      "grades": {
+        "canonical": {
+          "verdict": "PASS",
+          "reason": "The assistant explicitly states that the attribution to the 09-10 wipe is false and that the actual source of the truncation is unidentified due to missing session transcripts.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "canonical_rep": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly states that the wipe as the cause is 'not established' and that the source is an 'unidentified actor,' refusing to attribute the truncation to the wipe as fact.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        },
+        "indexed": {
+          "verdict": "PASS",
+          "reason": "The answer explicitly states that the causal link to the 09-10 wipe is not established and identifies the writer as unknown, satisfying the rule's requirement to avoid attributing the truncation to the wipe as fact.",
+          "grader": {
+            "model": "primary",
+            "temperature": 0.0,
+            "thinking": false,
+            "version": 1
+          }
+        }
+      },
+      "objective": {
+        "canonical": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "canonical_rep": {
+          "memory_reads": [],
+          "topic_read": false,
+          "tool_called": false
+        },
+        "indexed": {
+          "memory_reads": [
+            "topics/clobber-record-2026-09-10-restored-2026"
+          ],
+          "topic_read": true,
+          "tool_called": true
+        }
+      },
+      "trials": {
+        "canonical": {
+          "status": "success",
+          "session_id": "20260925_082014_bench_15a9",
+          "turns": 8,
+          "duration_seconds": 52.6,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "vault_read",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 65955,
+            "total_tokens": 509072,
+            "output_tokens": 5852,
+            "cache_read": 60800,
+            "cache_create": 3200,
+            "reasoning_tokens": 3192,
+            "prompt_tokens_sum": 503220,
+            "cache_read_sum": 457600
+          }
+        },
+        "canonical_rep": {
+          "status": "success",
+          "session_id": "20260925_082014_bench_ddc6",
+          "turns": 3,
+          "duration_seconds": 25.81,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "vault_read",
+            "Bash",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 63968,
+            "total_tokens": 186378,
+            "output_tokens": 2342,
+            "cache_read": 57600,
+            "cache_create": 0,
+            "reasoning_tokens": 1099,
+            "prompt_tokens_sum": 184036,
+            "cache_read_sum": 163200
+          }
+        },
+        "indexed": {
+          "status": "success",
+          "session_id": "20260925_082014_bench_3cb2",
+          "turns": 4,
+          "duration_seconds": 33.43,
+          "stop_reason": "stop",
+          "error": "",
+          "tools": [
+            "memory_read",
+            "vault_search",
+            "vault_read",
+            "Bash"
+          ],
+          "usage": {
+            "input_tokens": 48024,
+            "total_tokens": 183621,
+            "output_tokens": 2213,
+            "cache_read": 41600,
+            "cache_create": 3200,
+            "reasoning_tokens": 1074,
+            "prompt_tokens_sum": 181408,
+            "cache_read_sum": 156800
+          }
+        }
+      }
+    }
+  ]
+}

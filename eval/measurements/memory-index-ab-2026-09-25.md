@@ -68,3 +68,30 @@ primary lock held:
         t10_clobber_cause_unknown
 
 Deploy if (c) reads ≥ 8/10.
+
+## Re-run with the tightened topic probes (2026-09-25, Alan's option b)
+
+`--only` the 10 topic probes, all three arms, pool paused. Raw:
+`eval/baselines/memory-index-ab-topics-rerun-2026-09-25.json`.
+
+| criterion | result |
+|---|---|
+| (a) net loss within A/A noise | ok — net lost 0, A/A discordant 2 |
+| (b) no feedback ruling lost | ok (no feedback probes in this subset) |
+| (c) topic probes answered via `memory_read` | **miss again — 7/10** |
+
+Per probe on the indexed arm: t01, t04, t06, t07, t09, t10 read the right
+topic file and passed; t03 passed after reading MEMORY.md, not a topic file;
+t05 and t08 passed with no read at all; t02 read its topic file and still
+failed — and `canonical` failed it too, so t02 is a hard probe, not an index
+loss. Answer quality stays non-inferior (indexed 9/10, canonical 9/10,
+A/A 9/10).
+
+**Not deployed** — option b's bar was ≥ 8/10 and this is 7/10 for the second
+time. The ceiling, `render_all`, the vault and the skills patch are
+unchanged. What the two runs say together: the indexed arm answers as well
+as today's file at half the prompt, but the model does not reliably go to
+the topic file even when the fact lives only there (t05 and t08 were
+answered by searching elsewhere). Whether that matters is the open
+question for Alan; the pull path works when used (6 of 6 reads hit the
+right file).
