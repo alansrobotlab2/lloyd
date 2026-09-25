@@ -99,7 +99,6 @@ import random  # noqa: E402
 import re  # noqa: E402
 import secrets  # noqa: E402
 import signal  # noqa: E402
-import sqlite3  # noqa: E402
 import statistics  # noqa: E402
 import subprocess  # noqa: E402
 import sys  # noqa: E402
@@ -813,7 +812,7 @@ def interp_ttft(ttft: dict[str, Any], tokens: int) -> float | None:
 # ---------------------------------------------------------------------------
 
 
-def _peak(row: sqlite3.Row) -> int:
+def _peak(row: dict) -> int:
     peak = int(row["input_tokens"] or 0)
     comp = row["compaction"]
     if comp:
@@ -850,17 +849,10 @@ def cost_side(db_path: Path, *, new_trigger_tokens: int | None, current_trigger_
     soak_since = (now - timedelta(days=soak_days)).strftime("%Y-%m-%dT%H:%M:%S")
     if not Path(db_path).exists():
         return {"error": f"{db_path} not found"}
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(usage)")}
-        sel = ["ts", "session_id", "input_tokens", "duration_ms"]
-        sel += [c if c in cols else f"NULL AS {c}" for c in
-                ("compaction", "prefix_misses", "reprefill_tokens")]
-        rows = conn.execute(f"SELECT {', '.join(sel)} FROM usage WHERE ts >= ?",
-                            (since,)).fetchall()
-    finally:
-        conn.close()
+    import usage_store
+    rows = usage_store.read_rows_readonly(
+        db_path, ["ts", "session_id", "input_tokens", "duration_ms",
+                  "compaction", "prefix_misses", "reprefill_tokens"], since)
 
     def ts(r) -> float:
         return datetime.strptime(r["ts"][:19], "%Y-%m-%dT%H:%M:%S").timestamp()

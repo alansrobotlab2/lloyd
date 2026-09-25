@@ -336,6 +336,26 @@ def record_usage(
     conn.commit()
 
 
+def read_rows_readonly(db_path, columns: list[str], since_ts: str) -> list[dict]:
+    """`usage` rows at or after `since_ts`, opened read-only (`mode=ro`).
+
+    For offline readers (eval/run_context_rot_eval.py's cost side) that must
+    never write to — or migrate — a live usage.db, and that `eval/` may not
+    open with sqlite3 itself (tests/test_counterfactual_eval.py). A column the
+    file does not carry yet reads as None rather than failing the query.
+    """
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        have = {r[1] for r in conn.execute("PRAGMA table_info(usage)")}
+        sel = [c if c in have else f"NULL AS {c}" for c in columns]
+        rows = conn.execute(f"SELECT {', '.join(sel)} FROM usage WHERE ts >= ?",
+                            (since_ts,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
+
+
 def _since(hours: Optional[float] = None, days: Optional[float] = None) -> str:
     """ISO timestamp for N hours/days ago."""
     delta = timedelta(hours=hours or 0, days=days or 0)
