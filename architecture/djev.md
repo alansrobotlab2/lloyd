@@ -1478,6 +1478,51 @@ Inner Voice pre-screen (296 calls a week). Rewrite selection (oracle ceiling
 is causal, last-token pooled). Attention-based in-context reranking (ICLR 2025)
 fits a bidirectional model but needs attention read out of the vLLM patch.
 
+## 14. Candidate replacements: decider-35b-a3b and decider-4b v2.1 (2026-09-25)
+
+[Mapika/decider](https://github.com/Mapika/decider) models answer the same `POST /v1/systemone` request shape as djev, with a
+different readout: the prompt ends at `Answer: (` and the answer is the softmax of the option-letter logits at one position,
+at the checkpoint's fitted temperature. No diffusion, no canvas. Two are staged, both Qwen3.5 hybrids (Gated DeltaNet +
+every fourth layer full attention):
+
+| | decider-35b-a3b v1 | decider-4b v2.1 |
+|---|---|---|
+| base | Qwen3.5-35B-A3B-Base, 3B active | Qwen3.5-4B-Base, dense |
+| checkpoint here | `Mapika/decider-35b-a3b-nvfp4`, 19.6 GiB | `Mapika/decider-4b`, bf16, 7.8 GiB |
+| runs on the 3090 as | weight-only NVFP4 Marlin, **not** the build its card measured | exactly as published |
+| temperature | 1.08 | per type: choice 1.110, noul 1.560, score 1.287 |
+| repo's own tables (bf16, B300) | ahead on accuracy and calibration | ~2.5 points behind on the regression set |
+| JevBench public hard tier | 0.676 (djev 0.676) | 0.649 |
+
+`4b-v2` (decider-4b v2, the same repo at `49564dd`, one global T 1.935) is staged too: JevBench v1.4.2 ranks it #1 with 34.7%
+sealed accuracy, against 31.5% for the 35B, so the repo's own tables favour the 35B and the independent board does not. Nothing here assumes either beats
+djev on Lloyd's traffic; the recall eval decides.
+
+- **Setup** `agent-services/setup/setup-decider.sh [--variant 35b|4b|4b-v2|all]`: one venv `.venvs/vllm-decider` (vLLM 0.29.0,
+  decider-ai 1.5.0 `--no-deps`, upstream's install), each checkpoint pinned by Hub revision under `agent-services/llm/models/`.
+  Step 5 checks the card through `nvidia-smi` and NVML only — a CUDA context on a GPU 2 that djev holds is an OOM.
+- **Launch** `VARIANT=35b|4b|4b-v2 agent-services/bin/start-decider.sh` → `:8012`, program `agent-decider` (`VARIANT=` in its
+  `environment=`, `autostart=false`, no config flag, unknown to the boot reconcile). GPU 2 holds one tenant: stop djev first.
+  The launcher's header carries both 24 GiB budgets.
+- **Bake-off, 2026-09-25** (`eval/djev/bakeoff.py`, results under `~/lloyd-data/eval/djev/bakeoff-2026-09-25/`): identical
+  requests, one at a time, on GPU 2. Recall = 86 frozen pools of the gold set, top 20; JevBench = its 231 public items and
+  its own scoring; voice = the 46 addressee cases at 0.7.
+
+  | arm | recall MRR / p50 | JevBench hard / all / p50 | voice FA, missed / AUC / p50 |
+  |---|---|---|---|
+  | djev, no thinking | 0.287 / 356 ms | 0.694 / 0.844 / 320 ms | 0, 2 / 0.992 / 304 ms |
+  | djev, think 512 | 0.332 / 4,279 ms | 0.712 / 0.857 / 2,163 ms | 1, 0 / 0.987 / 1,791 ms |
+  | decider-4b v2.1 | 0.284 / 3,671 ms | 0.658 / 0.831 / 47 ms | 5, 2 / 0.941 / 39 ms |
+  | decider-4b v2 | 0.281 / 3,682 ms | 0.667 / 0.835 / 47 ms | 4, 1 / 0.952 / 38 ms |
+  | decider-35b | 0.281 / 3,656 ms | 0.640 / 0.805 / 80 ms | 0, 8 / 0.977 / 79 ms |
+
+  No arm's accuracy difference from djev is outside its 95% paired interval. Thinking moves accuracy up and costs 6-12x
+  at 512 tokens; at 4096 (stopped after 26 recalls) thoughts closed on their own at ~1,950 tokens and a recall took
+  12.9 s p50, which rules it out for Lloyd's latency. The deciders are 4-8x faster on single decisions and 10x slower
+  on recall in this request shape (isolated levels: ~128 rows a recall), and weaker on voice. Kept: djev, no thinking.
+- **Not a drop-in.** decider sends no `diagnostics`, so `app/djev.py` would read `label_mass` 0. A `score` question with
+  isolated levels is one row per level, so a 32-candidate recall is ~128 rows; the request shape is part of the measurement.
+
 ## Review log
 
 - **2026-09-25 — refreshed against HEAD `cd72bc92`.** Checked the client,

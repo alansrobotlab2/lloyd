@@ -69,6 +69,7 @@ _LAUNCHERS = frozenset({
     "start-qwen38-flash-next.sh",   # agent-llm-primary
     "start-secondary.sh",           # agent-llm-secondary
     "start-djev.sh",                # agent-djev — the GPU 2 recall ranker
+    "start-decider.sh",             # agent-decider — djev's candidate, same card
     "start-qwen3-tts.sh",           # agent-tts
     "start-livekit-server.sh",      # agent-livekit-server
     "start-obsidian-sync.sh",       # agent-obsidian-sync
