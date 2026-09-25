@@ -53,11 +53,12 @@ ordered: the fleet runs 24 through 86 with gaps where tasks were retired.
 
 Function is what a job means to do; **write authority is what it is permitted to
 do when nobody is watching**, and it is the axis worth checking first before
-changing any of these. Four tiers, and they do not follow the function groups:
+changing any of these. Five tiers, and they do not follow the function groups:
 
 | Tier | Jobs | |
 |---|---|---|
-| Writes durable state unattended | #68 #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 | 21 |
+| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 | 20 |
+| Injects expiring context unattended | #68 | 1 |
 | Proposes; an operator applies | #48 #67 #84 | 3 |
 | Reports only | #60 #82 #70 #78 #80 #36 #85 #86 | 8 |
 | Acts on the fleet itself | #76 | 1 |
@@ -74,7 +75,7 @@ not:
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
   apparatus. `workers/evidence.py` is the correction and `autonomy.py` is where
   its pilot set lives (`EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40})`,
-  `autonomy.py:710`) — 4 of the 21, and not one claim has yet been verified by it
+  `autonomy.py:710`) — 4 of the 20, and not one claim has yet been verified by it
   (#902).
 - **Nothing watches the deciders.** #65, #35 and #77 all direct future effort —
   what gets researched, what reaches `up_next`, what gets archived — and no job
@@ -134,9 +135,11 @@ mechanism and apply to every edge above:
 
 ## Ingest: #68, #30, #53
 
-What the outside world did while nobody was looking. All three write into
-`knowledge/`; #68 is the only job in the fleet whose output is a *conversation*
-rather than a file, and the only one that runs on the **secondary** engine.
+What the outside world did while nobody was looking. #30 and #53 write into
+`knowledge/`; #68 writes no vault file at all — it is the only job in the fleet
+whose output is a *conversation* (an inject that expires) rather than a file,
+which is why it has a write tier of its own, and the only one that runs on the
+**secondary** engine.
 
 | ID | Freq | Role |
 |----|------|---|

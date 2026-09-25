@@ -286,13 +286,25 @@ def test_86_appears_in_exactly_one_write_authority_tier():
         f"may this job do when nobody is watching', so it must sit in exactly one")
 
 
+def test_68_is_not_counted_as_a_durable_writer():
+    """#1505. #68's output is an inject into a live session (an entry with a
+    TTL) plus its own 24 h dedup state; it writes no vault file. The tier
+    table is the doc's answer to "what may write while nobody is watching", so
+    counting an injector there hides where the durable exposure really is.
+    """
+    tiers = _table(TIERS_HEADER)
+    hits = [t for t, (ids, _) in tiers.items() if "#68" in ids]
+    assert hits == ["Injects expiring context unattended"], (
+        f"#68 is in {hits or 'no tier'}; its job writes no durable state")
+
+
 def test_every_tier_row_count_equals_the_ids_listed_beside_it():
     """Clause 4, second half. The `| N |` column is a hand-typed count of the cell
     beside it — exactly the shape this item exists to stop: a number true when it
     was written and untrue now, with nothing able to see the difference.
     """
     tiers = _table(TIERS_HEADER)
-    assert len(tiers) == 4, f"expected the four documented tiers, parsed {list(tiers)}"
+    assert len(tiers) == 5, f"expected the five documented tiers, parsed {list(tiers)}"
     bad = {t: (len(ids), n) for t, (ids, n) in tiers.items() if n is None or int(n) != len(ids)}
     assert not bad, (
         "tier rows whose count column disagrees with their own id list "
