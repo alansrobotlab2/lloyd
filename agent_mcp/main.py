@@ -51,6 +51,7 @@ from starlette.routing import Route
 
 from agent_mcp import (
     _change_ledger,
+    _injection_probe,
     _subagent_registry,
     aggregator_auth,
     _task_registry,
@@ -639,6 +640,23 @@ async def call_tool(name: str, arguments: dict, meta: Any = None):
             raise
         if effect.key:
             await _tool_effects.finish(effect.key, *_effect_text(result))
+        # P10 seam 2: instruction-shaped text in what a background session
+        # just read. After the effect ledger, so a replay stores the tool's own
+        # result and never the probe's warning. `apply` never raises; the
+        # guard around it is for the classification above it.
+        if name in _injection_probe.PROBED_TOOLS and sid:
+            try:
+                from app.harness.service_control import is_background_session
+                background = is_background_session(sid, parent_of=_safety_parent_of)
+                parent = ((_safety_parent_of(sid) if sid.startswith("task:")
+                           else None) or sid) if background else sid
+            except Exception:  # noqa: BLE001
+                background, parent = False, sid
+            if background:
+                result = await _injection_probe.apply(
+                    name, result, session_id=sid, is_background=True,
+                    call_id=call_id if isinstance(call_id, str) else "",
+                    log_session=parent)
         return result
     finally:
         _task_registry.current_session_id.reset(token)

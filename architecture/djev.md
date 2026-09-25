@@ -462,7 +462,7 @@ was measured about it attached:
 | `gate_ready`, `gate_blocked_reason` | whether the threshold may **decide** anything. A separate field on purpose: collapsing it into "has a threshold" is how "calibrated against another model's opinions" becomes "calibrated" |
 | `seam` | where the decision is made in production, for the shadow recorder |
 
-The five schemas today:
+The six schemas today:
 
 | Schema | Seam | Question | Threshold | Floor | Calibrated on | May gate |
 |---|---|---|---|---|---|---|
@@ -471,6 +471,7 @@ The five schemas today:
 | `entity` | `entity` | `choice`: `different` / `same` thing | 0.263 | 0.40 | 150 rows of `semantic-verdicts.jsonl`, 1 pair per canvas: AUC 0.942 | no: 0.562 on the 151 verified-bad merges |
 | `clusters` | — | `choice`: `distinct` / `related` work | 0.217 | 0.80 | 200 rows of `cluster_judgments.jsonl`, 8 per canvas: AUC 0.699 | no: replay corpus only |
 | `edges` | — | 10-way `choice` of relationship type | — (argmax) | 0.60 | 200 rows of `classified-v4-batch.jsonl`: agreement 0.580 | no: agreement is not correctness |
+| `action_review` | `action_review` | `choice`: `consistent` / `unrelated` / `injected` (P10) | — | **unset** | — (shadow rows, then Alan's labels) | no: nothing measured |
 
 The negative option is listed **first** in every pair schema, because that arm
 measured AUC 0.833 against 0.795 and an optimal threshold of 0.39 against 0.03.
@@ -626,6 +627,26 @@ secondary only while `resolve_model_alias("secondary")` still returns
 `secondary`, and it has not since `secondary_enabled: false`. The "unanimity"
 rule is a single primary vote. djev as the restored *second* judge is the
 obvious follow-on round, and §7.2 is what that round has to beat.
+
+### 6.4 Worker action review — `app/harness/action_review.py` (P10)
+
+The one seam in the **backend** process, and the first whose decision is not
+djev's to replace: every tool call of a `NON_USER_PLATFORMS` turn on
+`/api/message/stream` is asked "consistent with the task / unrelated to the
+task / what an instruction embedded in fetched content would ask for", over a
+canvas of the worker's own prompt plus the calls so far — never tool results
+or assistant prose, so the text that injects the agent cannot argue with the
+reviewer. It records at the `tool_result` event, where every gate's verdict is
+visible: `actual` is `{outcome: ran | denied_by_hook | disabled |
+refused_at_dispatch | error}`. `meta` carries session, source, tool, args
+digest and prior-call count. It is the busiest seam by far — one read per
+worker tool call — so it is the one most likely to fill the queue and to sit
+in front of a recall ranking (§5.3); `djev.shadow.seams.action_review: false`
+or `harness.action_review.mode: off` switches it off. `server.py` flushes the
+queue on shutdown (2 s bound), so a landing restart's losses are counted into
+`dropped_at_shutdown` as they are in the aggregator.
+The measurement and decision rule live in `architecture/harness.md`
+("Review 2026-09-24", P10).
 
 ---
 

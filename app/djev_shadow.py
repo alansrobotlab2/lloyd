@@ -103,7 +103,10 @@ DEFAULTS: dict[str, Any] = {
 #: Per-seam switches live under `djev.shadow.seams`. A seam absent from the
 #: config is ON: adding a seam and forgetting its flag must not be the same as
 #: switching it off, which is the failure mode of every allow-list default.
-SEAMS = ("rerank", "dedupe", "entity")
+#: `action_review` (P10) is the one seam recorded from the BACKEND process —
+#: every worker tool call, `app/harness/action_review.py` — which is why
+#: `server.py` flushes this queue on shutdown too.
+SEAMS = ("rerank", "dedupe", "entity", "action_review")
 
 _lock = threading.Lock()
 _queue: "queue.Queue[_Job] | None" = None

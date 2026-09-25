@@ -357,6 +357,18 @@ app.on_event("startup")(_engine_pressure.start)
 app.on_event("shutdown")(_engine_pressure.stop)
 
 
+@app.on_event("shutdown")
+def _flush_djev_shadow() -> None:
+    """P10's action-review seam records from this process, so drain its
+    shadow queue on the way down like the aggregator does; what is left past
+    the bound is counted onto the next process's first row, not lost silently."""
+    try:
+        from app import djev_shadow
+        djev_shadow.flush(2.0)
+    except Exception:  # noqa: BLE001 — shutdown must not raise
+        pass
+
+
 @app.on_event("startup")
 async def _start_file_watcher() -> None:
     """Attach the running event loop to the IDE file watcher and rebind

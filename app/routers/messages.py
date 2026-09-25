@@ -95,6 +95,7 @@ from app.routers._messages_subliminal import (
 )
 from app.harness.policy import GRANT_MINT_TOOL, install_policy_hook
 from app.tool_bans import WORKER_AUTOMOD_BAN
+from app.harness.action_review import install_action_review_hook
 from app.routers._messages_thinking import _build_thinking_entry
 from app.transcript_entries import (
     build_assistant_text_entry,
@@ -509,6 +510,21 @@ def _tool_surface(platform: str) -> str:
     else, a new chat whose file is not written yet included, is a chat.
     """
     return "worker" if platform in sessions_io.NON_USER_PLATFORMS else "chat"
+
+
+def _install_action_review(hooks: HookRegistry, *, platform: str, text: str,
+                           source: str, session_id: str):
+    """P10 — the action reviewer, shadow only (`harness.action_review.mode`).
+
+    Worker turns only: they are the ones that read untrusted text with nobody
+    watching. It is handed `text` — the worker's own prompt, not the prefetched
+    context — and taps the calls; it cannot change any call's outcome. Returns
+    the reviewer, or None where it is not installed.
+    """
+    if platform not in sessions_io.NON_USER_PLATFORMS:
+        return None
+    return install_action_review_hook(hooks, user_prompt=text, source=source,
+                                      session_id=session_id)
 
 
 def _authority_scope_for(session_id: str, data: dict) -> str:
@@ -2133,6 +2149,8 @@ async def post_message_stream(request: Request):
     install_skill_dispatch_hook(
         iv_hooks, already_injected=injected_skill_names(prefetched_text),
     )
+    _install_action_review(iv_hooks, platform=turn_platform, text=text,
+                           source=_turn_source, session_id=session_id)
 
     options = RunOptions(
         model=model,

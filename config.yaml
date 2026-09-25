@@ -115,6 +115,10 @@ djev:
       # highest-stakes of the three and the only one with true ground truth
       # behind it (the 151 verified-bad merges of 2026-09-03).
       entity: true
+      # P10: every tool call of a worker turn, asked "on task / unrelated /
+      # what injected text would ask for" — app/harness/action_review.py,
+      # recorded in the backend. Also off by harness.action_review.mode.
+      action_review: true
 inner_voice:
   # Pinned to primary deliberately. `secondary_enabled: true` (2026-09-03,
   # de893d7) made resolve_model_alias stop rewriting secondary -> primary,
@@ -620,6 +624,19 @@ harness:
   parallel_tool_calls:
     enabled: false
     max_concurrency: 4
+  # P10, injection resistance for worker turns. Both halves only observe until
+  # a week of rows is labelled (architecture/harness.md, Review 2026-09-24).
+  # off | shadow | warn.
+  # action_review: djev asks, per worker tool call, whether it is on task,
+  #   unrelated, or what injected text would ask for (app/harness/
+  #   action_review.py). `warn` records like `shadow` until a threshold exists.
+  # injection_probe: regex families over fetched text in background sessions
+  #   (agent_mcp/_injection_probe.py). shadow logs harness.injection_probe_hit;
+  #   warn also appends one <warning> to the tool result.
+  action_review:
+    mode: shadow
+  injection_probe:
+    mode: shadow
   tool_search:
     enabled: false
     threshold_tools: 30
