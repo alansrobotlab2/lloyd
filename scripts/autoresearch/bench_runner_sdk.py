@@ -304,6 +304,7 @@ def build_options(
     sandbox_stateful_tools: bool = True,
     hooks: Any | None = None,
     priority: int = AUTORESEARCH_PRIORITY,
+    system_append: str = "",
 ) -> Any:
     """Build the `RunOptions` for one trial.
 
@@ -313,6 +314,11 @@ def build_options(
     plus the bench-specific deltas: sandboxed stateful tools, background
     priority, a fresh hook registry with the production safety gate, and
     progressive tool disclosure pinned off (#427).
+
+    `system_append` (#678) is text appended to the built system prompt: the
+    operator-level tool policy a constraint-conflict task plants, so the
+    constraint sits where a real one would rather than in the user's message.
+    Empty (the default, and every existing caller) leaves the prompt as built.
     """
     from app.config import _get_model_env, _resolve_model_name
     from app.harness import HookRegistry, RunOptions, install_default_safety_hook
@@ -355,10 +361,14 @@ def build_options(
     harness_kwargs = dict(_get_harness_kwargs())
     harness_kwargs["tool_search_enabled"] = False
 
+    system_prompt = build_system_prompt(overlay_dir=overlay_dir)
+    if system_append:
+        system_prompt = system_prompt.rstrip() + "\n\n" + system_append.strip() + "\n"
+
     return RunOptions(
         model=resolved,
         base_url=model_env.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8096"),
-        system_prompt=build_system_prompt(overlay_dir=overlay_dir),
+        system_prompt=system_prompt,
         max_turns=max_agent_turns,
         permission_mode="bypassPermissions",
         mcp_servers=_get_mcp_servers(),
@@ -484,8 +494,11 @@ async def run_trial(
     prefetched_text: str | None = None,
     extra_disallowed: list[str] | None = None,
     probe_prompt: str = "",
+    system_append: str = "",
 ) -> dict[str, Any]:
     """One (variant × task) trial through the harness. Returns a trace.
+
+    `system_append` is forwarded to `build_options` (#678's planted policy).
 
     `probe_prompt` is the planted positive control (#651): text appended to the
     task's own prompt whose only job is to make the trial go looking for how it
@@ -562,7 +575,7 @@ async def run_trial(
     options = build_options(
         model=model, overlay_dir=overlay_dir, session_id=session_id,
         max_agent_turns=max_agent_turns, hooks=hooks,
-        extra_disallowed=extra_disallowed,
+        extra_disallowed=extra_disallowed, system_append=system_append,
     )
     # Read back off what was built rather than restating the pin (#427). A pin
     # that is later changed, or overridden by a caller, then shows up in the

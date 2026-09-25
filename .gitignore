@@ -64,6 +64,8 @@ __pycache__/
 # (#1268): the comparator's threshold is that file, so it must be tracked.
 !eval/engine_output/*.json
 !eval/engine_output/*/*.json
+# …and the constraint-conflict suite's per-engine baselines (#678).
+!eval/constraint_conflict/baselines/*.json
 
 # ─── Secrets ────────────────────────────────────────
 .env
