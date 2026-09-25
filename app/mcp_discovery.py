@@ -245,8 +245,33 @@ def _get_harness_kwargs() -> dict:
         out["finalizer_max_tokens"] = int(fin["max_tokens"])
     if "timeout_seconds" in fin:
         out["finalizer_timeout_s"] = float(fin["timeout_seconds"])
+    echo = harness.get("echo_guard") or {}
+    if echo.get("mode") in ("nudge", "tool_choice"):
+        out["echo_guard_mode"] = str(echo["mode"])
+    out.update(max_turns_wrapup_kwargs())
     out.update(intra_turn_compaction_kwargs())
     return out
+
+
+def max_turns_wrapup_kwargs() -> dict:
+    """`harness.max_turns_wrapup`, resolved to the engines it may run on (P6).
+
+    `models` names the slots whose engine is verified to honour
+    `tool_choice: "none"` with the tools array present. Resolved here to base
+    URLs because the loop only knows the URL it was handed, and a Task child
+    or a turn on another slot must get a per-call answer from the same list.
+    A slot not listed — the llama.cpp secondary today — never wraps up.
+    """
+    cfg = ((CONFIG.get("harness") or {}).get("max_turns_wrapup") or {})
+    if not cfg.get("enabled"):
+        return {}
+    models = CONFIG.get("models") or {}
+    urls = tuple(
+        str((models.get(alias) or {}).get("base_url") or "").rstrip("/")
+        for alias in (cfg.get("models") or [])
+    )
+    urls = tuple(u for u in urls if u)
+    return {"max_turns_wrapup": bool(urls), "max_turns_wrapup_base_urls": urls}
 
 
 def intra_turn_compaction_kwargs() -> dict:

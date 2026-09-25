@@ -93,6 +93,46 @@ _ECHO_GUARD_NUDGE = (
 
 _MAX_ECHO_GUARD_REPROMPTS = 1
 
+# `harness.echo_guard.mode: tool_choice` (P6a) answers the same trip without
+# the nudge: the attempt is discarded and the identical request goes out again
+# with `tool_choice: "required"`. Ships as "nudge" until `"required"` is
+# measured against the qwen3_xml parser — vLLM satisfies it with a JSON
+# grammar, not the model's own XML tool format.
+
+
+# ---------------------------------------------------------------------------
+# Max-turns wrap-up (P6b)
+# ---------------------------------------------------------------------------
+#
+# A run that reaches `max_turns` used to end on whatever its last iteration
+# said — usually the preamble of a tool call it never got to make. When the
+# engine is one verified to honour `tool_choice: "none"` with the tools array
+# present (vLLM with qwen3_xml; `finalizer.py` sends the same request shape
+# for the same reason), the loop asks once more with tools off. The tools
+# array is identical, so the prompt is a cache hit plus one user message.
+
+_MAX_TURNS_WRAPUP_PROMPT = (
+    "You have used all {n} iterations and cannot call tools now. In a few "
+    "sentences: what was done, what was not, where the work stands and the "
+    "next step."
+)
+
+
+def _wrapup_applies(options: RunOptions) -> bool:
+    """True when this run may spend one toolless request at its budget.
+
+    Per call, by engine: a llama.cpp slot is not verified to honour
+    `tool_choice: "none"`, and a Task child or a turn on another slot carries
+    its own `base_url`.
+    """
+    if not getattr(options, "max_turns_wrapup", False):
+        return False
+    if int(options.max_turns or 0) <= 0:
+        return False
+    allowed = {str(u).rstrip("/") for u in
+               (getattr(options, "max_turns_wrapup_base_urls", ()) or ())}
+    return str(options.base_url or "").rstrip("/") in allowed
+
 
 def _looks_like_unexecuted_command(text: str) -> bool:
     """True if `text` contains a fenced shell block (a likely echoed command)."""
@@ -342,6 +382,13 @@ async def run_query(
         # iteration in hand ended on one that could not be retried.
         stream_retries = 0
         broken_stream = False
+        # P6: the `tool_choice` the NEXT request carries when it is not
+        # "auto" (the echo guard's "required"); consumed by that request.
+        forced_tool_choice: str | None = None
+        # P6b: "" -> "requested" (wrap-up message appended, the toolless
+        # request is owed) -> "done". A retry of the wrap-up request (context
+        # overflow) re-enters as "requested" and does not append again.
+        wrapup_state = ""
         # Initialised before the loop: a turn that breaks on its first check
         # (cancelled, max_turns=0) never assigns it, and the finalizer below
         # runs on every exit path.
@@ -366,7 +413,28 @@ async def run_query(
             num_turns += 1
             if num_turns > options.max_turns:
                 stop_reason = "max_turns"
-                break
+                if (
+                    wrapup_state == ""
+                    and _wrapup_applies(options)
+                    and not (options.cancel_event is not None
+                             and options.cancel_event.is_set())
+                ):
+                    wrapup_state = "requested"
+                    chat_messages.append({
+                        "role": "user",
+                        "content": _MAX_TURNS_WRAPUP_PROMPT.format(
+                            n=options.max_turns),
+                    })
+                    meter.observe_append(chat_messages)
+                    logger.info(
+                        "loop: max_turns=%d reached — one toolless wrap-up "
+                        "request (session=%s)", options.max_turns, session_id,
+                    )
+                elif wrapup_state != "requested":
+                    break
+                # No drain, no anchor on the wrap-up request: the budget
+                # anchor would repeat what the wrap-up message already says.
+                prelude_done_for = num_turns
 
             if options.cancel_event is not None and options.cancel_event.is_set():
                 stop_reason = "cancelled"
@@ -495,6 +563,11 @@ async def run_query(
             # `duration_ms` keeps covering the whole iteration.
             request_started_at = time.perf_counter()
             first_chunk_at: float | None = None
+            # P6: a stream retry or an overflow recovery re-sends with the
+            # same choice; it is consumed once the request completes, below.
+            request_tool_choice = (
+                "none" if wrapup_state == "requested"
+                else (forced_tool_choice or "auto"))
             try:
                 async for chunk in stream_chat(
                     base_url=options.base_url,
@@ -516,6 +589,7 @@ async def run_query(
                     # per-iteration cache series name the same iteration.
                     session_id=options.session_id,
                     iteration=num_turns,
+                    tool_choice=request_tool_choice,
                 ):
                     # Usage chunk arrives as the last event when
                     # stream_options.include_usage=True. vLLM emits it
@@ -720,10 +794,21 @@ async def run_query(
                 )
                 yield events.thinking_done(thinking_text, duration_ms=thinking_ms)
 
+            forced_tool_choice = None   # P6: the request that used it is in
             tool_calls_committed = [] if broken_stream else _commit_tool_calls(
                 tool_calls_acc, summary_tools=summary_tools,
                 finish_reason=finish_reason or "",
             )
+            if wrapup_state == "requested" and tool_calls_committed:
+                # The engine was told "none"; a call that arrives anyway is
+                # never dispatched, and never reaches history or the events,
+                # where it would be a tool call with no result.
+                logger.warning(
+                    "loop: wrap-up request returned %d tool call(s) despite "
+                    "tool_choice=none — dropped (session=%s)",
+                    len(tool_calls_committed), session_id,
+                )
+                tool_calls_committed = []
 
             iteration_ended_at = time.perf_counter()
             iteration_duration_ms = int((iteration_ended_at - iteration_started_at) * 1000)
@@ -789,6 +874,13 @@ async def run_query(
             if options.hooks is not None:
                 await options.hooks.fire_on_event(asst_evt)
             observer_injected = len(chat_messages) > chat_msgs_len_before_hook
+
+            if wrapup_state == "requested":
+                # The one toolless answer is in; nothing continues past it,
+                # an observer inject included. `stop_reason` is still
+                # "max_turns", so INCOMPLETE and the finalizer skip hold.
+                wrapup_state = "done"
+                break
 
             if not tool_calls_committed:
                 if broken_stream:
@@ -856,6 +948,30 @@ async def run_query(
                     and "Bash" not in current_disallowed
                 ):
                     echo_guard_reprompts += 1
+                    if getattr(options, "echo_guard_mode", "nudge") == "tool_choice":
+                        # P6a: discard the attempt and re-send the request
+                        # byte-identical but for `tool_choice: "required"`.
+                        # `observer_injected` is False here (that branch
+                        # continued above), so the last message is this
+                        # iteration's assistant turn.
+                        chat_messages.pop()
+                        meter.observe_append(chat_messages)
+                        if assistant_text:
+                            accumulated_text = accumulated_text[
+                                : len(accumulated_text) - len(assistant_text)]
+                        yield events.iteration_retry(
+                            reason="echo_guard",
+                            attempt=echo_guard_reprompts,
+                            discarded_text_chars=len(assistant_text),
+                            discarded_thinking_chars=len(thinking_text),
+                        )
+                        forced_tool_choice = "required"
+                        logger.info(
+                            "loop: echo-guard reissue #%d with tool_choice="
+                            "required (iter=%d)", echo_guard_reprompts, num_turns,
+                        )
+                        num_turns -= 1
+                        continue
                     chat_messages.append({"role": "user", "content": _ECHO_GUARD_NUDGE})
                     logger.info(
                         "loop: echo-guard re-prompt #%d — assistant emitted a shell "
@@ -1115,6 +1231,7 @@ async def run_query(
             tool_calls_captioned=caption_present,
             structured=structured,
             structured_error=structured_error,
+            wrapped_up=wrapup_state == "done",
         )
         yield result_done_evt
         if options.hooks is not None:

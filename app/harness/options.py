@@ -28,6 +28,21 @@ class RunOptions:
 
     # Loop control
     max_turns: int = 60
+    # P6 (b): at the budget, one more request with `tool_choice: "none"` and
+    # a user message asking where the work stands, so a run killed by its
+    # iteration cap reports instead of ending on a preamble. `stop_reason`
+    # stays `max_turns` and the finalizer still skips. Applies only when
+    # `base_url` is in `max_turns_wrapup_base_urls` — the engines verified to
+    # honour `"none"` with the tools array present (vLLM/qwen3_xml, see
+    # `finalizer.py`); an empty tuple means none is, i.e. off. Fed from
+    # `harness.max_turns_wrapup` by `mcp_discovery.max_turns_wrapup_kwargs`.
+    max_turns_wrapup: bool = False
+    max_turns_wrapup_base_urls: tuple[str, ...] = ()
+    # P6 (a): how the echo guard answers a fenced shell block with no tool
+    # call. "nudge" appends a user message (the behaviour since it landed);
+    # "tool_choice" discards the attempt and re-sends the identical request
+    # with `tool_choice: "required"`. Fed from `harness.echo_guard.mode`.
+    echo_guard_mode: str = "nudge"
     permission_mode: str = "bypassPermissions"
     disallowed_tools: list[str] = field(default_factory=list)
 

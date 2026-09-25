@@ -710,3 +710,36 @@ ignores both new `done` fields; `_common.run_prompt_in_session` maps
 `stop_reason: "error"` back to `None`, which its callers read as "never
 completed" (autocode's `infra_failed`), exactly as an errored turn read before,
 and appends the error to `errors`. Pins: `tests/test_messages_errored_turn_usage.py`.
+
+### P6 — `tool_choice` levers
+
+`client.stream_chat(..., tool_choice="auto")` sends the value only beside a
+non-empty `tools` array. The template renders `tools`, not `tool_choice`, so a
+forced value changes what the engine may emit and leaves the prompt
+byte-identical — the property the finalizer already relies on for `"none"`.
+
+- **(a) Echo guard** — `harness.echo_guard.mode`: `nudge` (shipped, the old
+  behaviour) or `tool_choice`. In `tool_choice` mode a fenced shell block with
+  no tool call (and no observer inject) is discarded: the assistant message is
+  popped, `iteration_retry(reason="echo_guard")` takes its deltas back off
+  every consumer, and the identical request goes out with `"required"` without
+  spending an iteration. Stays `nudge` until `"required"` is measured: vLLM
+  satisfies it with a JSON grammar, not qwen3_xml's own format.
+- **(b) Max-turns wrap-up** — `harness.max_turns_wrapup: {enabled, models}`.
+  At the budget the loop appends one user message ("You have used all N
+  iterations…") and sends one more request with `"none"`; the answer ends
+  `response_text`, a tool call in it is dropped (never dispatched, never in
+  history or events), `stop_reason` stays `max_turns` (INCOMPLETE, finalizer
+  skip unchanged), and `result.wrapped_up` is true (P11's `wrapped_up`
+  column). No drain or budget anchor runs on that request. **Per engine**:
+  `models` resolves to base URLs (`mcp_discovery.max_turns_wrapup_kwargs`) and
+  the loop wraps up only when the run's own `base_url` is listed. Shipped
+  `[primary]`: vLLM 0.28.1 honours `"none"` with tools present
+  (`exclude_tools_when_tool_choice_none` false, no tool parser attached —
+  verified for `finalizer.py`). The llama.cpp secondary is not verified and is
+  left out; add it only after checking `none` there. Task children splat the
+  same kwargs, so a child that exhausts its budget returns its wrap-up as
+  `response` marked `truncated`. Not wired into `_worker_run_options`
+  (`run_prompt_on_primary`), whose `TurnResult.ok` reads non-empty text as
+  success. Pins: `app/harness/tests/test_tool_choice_levers.py`,
+  `tests/test_task_subagent_answer.py::test_a_wrapped_up_budget_run_returns_its_summary_marked_truncated`.

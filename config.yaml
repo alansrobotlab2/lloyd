@@ -667,6 +667,20 @@ harness:
   mcp_pool:
     discovery_ttl_s: 300
     per_tool_timeouts: true
+
+  # P6, tool_choice levers (architecture/harness.md, Review 2026-09-24).
+  # echo_guard.mode: nudge = append a "call the tool" user message (today);
+  #   tool_choice = discard the attempt, re-send it with tool_choice=required.
+  #   Stays nudge until `required` is measured against qwen3_xml.
+  # max_turns_wrapup: at max_turns, one toolless (tool_choice=none) request
+  #   asking where the work stands; stop_reason stays max_turns. `models` are
+  #   the slots verified to honour `none` with tools present — vLLM only; the
+  #   llama.cpp secondary is not verified, so it is left out.
+  echo_guard:
+    mode: nudge
+  max_turns_wrapup:
+    enabled: true
+    models: [primary]
   # P10, injection resistance for worker turns. Both halves only observe until
   # a week of rows is labelled (architecture/harness.md, Review 2026-09-24).
   # off | shadow | warn.

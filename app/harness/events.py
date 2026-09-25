@@ -107,6 +107,7 @@ class NormalizedEvent(TypedDict, total=False):
     tool_calls_captioned: int
     structured: dict[str, Any] | None
     structured_error: str
+    wrapped_up: bool
 
     # stream_raw
     raw: str
@@ -303,6 +304,7 @@ def result(
     tool_calls_captioned: int = 0,
     structured: dict | None = None,
     structured_error: str = "",
+    wrapped_up: bool = False,
 ) -> NormalizedEvent:
     """`tool_calls_*` count only tools whose schema carried the injected
     `summary` parameter — the caption rate for this turn. It is reported
@@ -328,6 +330,10 @@ def result(
         # refused" from "the turn died at its budget and has no verdict".
         "structured": structured,
         "structured_error": structured_error,
+        # P6b: the run hit `max_turns` and spent one toolless request asking
+        # where the work stands; `response_text` ends with that answer.
+        # `stop_reason` still says `max_turns`.
+        "wrapped_up": bool(wrapped_up),
     }
 
 

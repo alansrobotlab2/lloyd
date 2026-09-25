@@ -155,3 +155,41 @@ def test_recursion_cap_still_holds(monkeypatch):
     finally:
         builtin_task._task_depth.reset(token)
     assert "recursion limit" in json.loads(out)["error"]
+
+
+def test_a_wrapped_up_budget_run_returns_its_summary_marked_truncated(monkeypatch):
+    """P6b end to end: the REAL loop, a child that never stops calling tools.
+
+    At its budget the loop asks once, toollessly, where the work stands; that
+    answer is the child's terminal iteration, so it becomes `response` with no
+    change in `_task` — and `truncated` still says the budget ran out, because
+    `stop_reason` stays `max_turns`.
+    """
+    from app import mcp_discovery
+    from app.harness.tests._replay import (
+        ReplayEngine, ReplayPool, Step, install, tool_call,
+    )
+
+    url = "http://127.0.0.1:8096"
+    engine = ReplayEngine([
+        Step(tool_calls=[tool_call("c1", "Read", path="/a")]),
+        Step(tool_calls=[tool_call("c2", "Read", path="/b")]),
+        Step(text="Read /a and /b; the race is in _apply_lever, not yet fixed."),
+    ])
+    install(monkeypatch, engine, ReplayPool())
+    monkeypatch.setattr(mcp_discovery, "max_turns_wrapup_kwargs", lambda: {
+        "max_turns_wrapup": True, "max_turns_wrapup_base_urls": (url,)})
+    monkeypatch.setattr(
+        builtin_task, "_load_subagent_profile",
+        lambda t: {"system_prompt": "", "max_turns": 2,
+                   "disallowed_tools": [], "model": "primary", "base_url": url},
+    )
+    res = json.loads(asyncio.run(builtin_task._task(
+        {"prompt": "review the thing", "description": "d"})))
+
+    assert "error" not in res, res
+    assert res["response"].startswith("Read /a and /b; the race")
+    assert res["truncated"] is True
+    assert res["stop_reason"] == "max_turns"
+    assert res["tools_used"] == ["Read", "Read"]
+    assert engine.requests[-1].kwargs["tool_choice"] == "none"

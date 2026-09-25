@@ -102,8 +102,15 @@ async def stream_chat(
     chunk_timeout_s: float = 0.0,
     session_id: str = "",
     iteration: int | None = None,
+    tool_choice: str = "auto",
 ) -> AsyncIterator[dict[str, Any]]:
     """Stream raw OpenAI-format chunks from vLLM.
+
+    `tool_choice` (P6) is sent only beside a non-empty `tools` array, which
+    is what makes it a cache-safe lever: the template renders `tools`, not
+    `tool_choice`, so `"none"` / `"required"` change what the engine may emit
+    and leave the rendered prompt byte-identical (the finalizer relies on the
+    same property for `"none"`).
 
     `session_id` and `iteration` exist only for the #581 component manifest:
     this is the streaming send site every agent-loop iteration passes through,
@@ -138,7 +145,7 @@ async def stream_chat(
     }
     if tools:
         payload["tools"] = tools
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = tool_choice or "auto"
     if extra_body:
         payload.update(extra_body)
     if priority is not None:

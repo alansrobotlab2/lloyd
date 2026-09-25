@@ -276,7 +276,7 @@ async def _task(args: dict[str, Any]) -> str:
     # a Task — the one execution context with no human watching the
     # stream. Same reasoning that puts the safety hook here.
     from app.config import CONFIG
-    from app.mcp_discovery import _get_disallowed_tools
+    from app.mcp_discovery import _get_disallowed_tools, max_turns_wrapup_kwargs
 
     disallowed = list(_get_disallowed_tools())
     for name in profile["disallowed_tools"]:
@@ -407,6 +407,11 @@ async def _task(args: dict[str, Any]) -> str:
             ((CONFIG.get("harness") or {}).get("parallel_tool_calls") or {})
             .get("max_concurrency", 4)
         )),
+        # P6b: a child that exhausts its budget asks once, toollessly, where
+        # the work stands; that text becomes `final_text` below, marked
+        # `truncated` because `stop_reason` stays `max_turns`. Decided per
+        # call against the child's own `base_url`.
+        **max_turns_wrapup_kwargs(),
     )
 
     # On a resume the follow-up is appended to the STORED list, which is then
