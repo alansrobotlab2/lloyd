@@ -189,6 +189,22 @@ evening agreed in direction with a smaller step: MRR +0.022 [−0.024, +0.070],
 NDCG@10 +0.017 [−0.015, +0.053], 12 better / 10 worse, 658 → 555 ms. Adopted on
 equal-or-better accuracy plus the ~100 ms.
 
+### 3.6 Each fusion leg fused 100 deep (#1475, fork `079c9c9`)
+
+Global fusion cut both legs to the candidate limit (20) before RRF: the lexical
+leg fetched 200 hits and fused 20, so a document at lexical rank 21 got nothing
+from that leg however high the vector leg put it. `QMD_FUSION_DEPTH=100` in the
+daemon's conf fuses both legs 100 deep. The pool djev ranks is unchanged in
+size; only which rows reach it moves. Paired against depth 20, production recall:
+
+| pin | doc_hit | MRR [95%] | NDCG@10 | latency |
+|---|---|---|---|---|
+| 1 | +0.012 | +0.034 [−0.023, +0.093], 26/22 | +0.031 | 572 → 572 ms |
+| 2 (fresh snapshot) | +0.012 | +0.039 [−0.018, +0.096], 25/21 | +0.030 | 566 → 572 ms |
+
+Same direction on every metric on both pins at flat latency; depth 200 was no
+better (MRR +0.027). Adopted on the same bar as §3.5.
+
 ## 4. What was measured and not kept
 
 | idea | result | why it stays out |

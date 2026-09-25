@@ -38,10 +38,12 @@ every measured change — is `architecture/retrieval.md`.
 
 What the fork adds over upstream, newest first. `WORKLOG.md` covers the 09-07
 and 09-19 work in §6–7 and the two 2026-09-21 changes (fork commits `fa71e57`
-and `db52729`) in §8, and the 2026-09-24 cache fix (`d01b049`) in §9:
+and `db52729`) in §8, the 2026-09-24 cache fix (`d01b049`) in §9, and the
+2026-09-25 fusion depth (`079c9c9`) in §10:
 
 | change | what it does | since |
 |---|---|---|
+| `QMD_FUSION_DEPTH` (#1475) | under global fusion each leg is fused this deep instead of cut to the candidate limit before RRF; unset keeps the old cut. Lloyd serves 100 | 2026-09-25 |
 | a re-index keeps `llm_cache` (#1366) | `qmd update`, `qmd collection add` and SDK `update()` no longer empty the rerank cache; keys are content-addressed, the prune to 1,000 newest bounds it | 2026-09-24 |
 | `update` counts pending against the configured model | the hint printed pending against the built-in default, so a non-default embed model read every hash as unembedded — 10,745 of them — on every watcher cycle | 2026-09-21 |
 | `lexMode: "or"` | a lex search ORs its terms; AND stays the default | 2026-09-21 |
@@ -148,7 +150,9 @@ supervisord program agent-qmd-daemon
   - `QMD_RERANK_CONTEXT_SIZE=2048` — enough for that window, ~0.9 GB less VRAM;
   - `QMD_RERANK_PARALLELISM=4` — NOT a speed knob: 4/8/16 contexts measure the
     same, the cross-encoder is compute-bound on the 3090;
-  - `QMD_LLM_IDLE_TIMEOUT_MS=0` — models stay resident.
+  - `QMD_LLM_IDLE_TIMEOUT_MS=0` — models stay resident;
+  - `QMD_FUSION_DEPTH=100` — each global-fusion leg fused 100 deep, not 20
+    (`architecture/retrieval.md` §3.6).
 
 ## 4. The API Lloyd uses
 
