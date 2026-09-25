@@ -900,6 +900,10 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     # per iteration from the same numbers the stats rows carry, logged as
     # `brain1.prefix_miss`, and summed onto the turn's usage row.
     miss_tracker = _prefix_miss.TurnMissTracker.for_turn(session_id, turn.turn_id)
+    # P11: TTFT, tool latency and error classes, how the turn ended, and the
+    # harness events it fired — folded by the same object the background
+    # recorder uses (app/turn_usage.py), so the two rows cannot drift.
+    turn_telemetry = turn_usage.TurnTelemetry()
 
     def _miss_log(name: str, data: dict) -> None:
         _event_log.log_event(session_id, name, data, turn_id=turn.turn_id)
@@ -1135,6 +1139,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     try:
         async for evt in run_query(harness_messages, options):
             etype = evt["type"]
+            turn_telemetry.note(evt)
 
             if first_event and etype not in ("system",):
                 logger.info(
@@ -1402,6 +1407,7 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         # landed after this event is still in the row. None of
                         # the three chat writers decides what fired.
                         compaction=compaction_turn,
+                        **turn_telemetry.row(),
                     )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")
@@ -2534,11 +2540,13 @@ async def post_message(request: Request):
         # Same miss accounting as the streaming path (app/prefix_miss.py):
         # this endpoint is the third writer of a usage row.
         miss_tracker = _prefix_miss.TurnMissTracker.for_turn(session_id)
+        turn_telemetry = turn_usage.TurnTelemetry()  # P11, as the streaming path
 
         def _miss_log(name: str, data: dict) -> None:
             _event_log.log_event(session_id, name, data)
 
         async for evt in run_query(messages, options):
+            turn_telemetry.note(evt)
             if evt["type"] == "text_delta":
                 full_response += evt["text"]
             elif evt["type"] == "assistant_message":
@@ -2592,6 +2600,7 @@ async def post_message(request: Request):
                         # leaving it unwired would leave the runs that fire the
                         # relief ladder hardest unrecorded.
                         compaction=compaction_turn,
+                        **turn_telemetry.row(),
                     )
                 except Exception as ue:
                     logger.warning(f"Failed to record usage: {ue}")

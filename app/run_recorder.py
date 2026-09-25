@@ -132,6 +132,9 @@ class _RunRecorder:
         # its own message list and never calls `load_and_compact_session`, so
         # there is no decision to record, and NULL for that half is the truth.
         self.compaction = _compaction_record.start_turn(session_id, turn_id)
+        # P11: the same fold the chat path uses (app/turn_usage.py), so a
+        # background row and a chat row carry the same telemetry columns.
+        self.telemetry = turn_usage.TurnTelemetry()
 
     # -- helpers ---------------------------------------------------------
     async def _append(self, entries: list[dict]) -> None:
@@ -180,6 +183,7 @@ class _RunRecorder:
                 # session id (#1078). Read at insert time, so passes that land
                 # after the `result` event are in the row too.
                 compaction=self.compaction,
+                **self.telemetry.row(),
             )
         except Exception as exc:      # noqa: BLE001 — accounting is not the run
             logger.warning("run_recorder: usage row failed for %s: %s",
@@ -203,6 +207,7 @@ class _RunRecorder:
 
     async def handle(self, evt: dict) -> None:
         etype = evt.get("type")
+        self.telemetry.note(evt)
         if etype == "text_delta":
             self.text += evt.get("text", "") or ""
 

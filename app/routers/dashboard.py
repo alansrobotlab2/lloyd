@@ -902,6 +902,13 @@ def _usage() -> dict[str, Any]:
         # the 09-09 stall's signature, counted from the turns' own usage rows.
         "prefix_misses_1h": usage_store.prefix_miss_summary(hours=1),
         "prefix_misses_24h": usage_store.prefix_miss_summary(hours=24),
+        # Harness telemetry (P11): how turns ended, how long the engine took to
+        # start answering, and how tool calls failed. Each counts only the
+        # rows that carry the measurement, and says how many that was.
+        "stop_reasons_24h": usage_store.stop_reason_breakdown(hours=24),
+        "tool_errors_24h": usage_store.tool_error_breakdown(hours=24),
+        "ttft_24h": usage_store.ttft_summary(hours=24),
+        "reasoning_tokens_24h": usage_store.reasoning_tokens_summary(hours=24),
     }
 
 

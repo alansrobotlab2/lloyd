@@ -132,6 +132,65 @@ def _init_schema(conn: sqlite3.Connection):
     # returning a record for any pass that ran a rung.
     if "compaction" not in usage_cols:
         conn.execute("ALTER TABLE usage ADD COLUMN compaction TEXT")
+    # Harness telemetry (review 2026-09-24, P11): how the turn ended, how long
+    # the engine took to start answering, what its tools cost and how they
+    # failed. Additive on the same path as the columns above, for the same
+    # reason. NULL = unmeasured — every row before this landed — never zero.
+    for col, kind in _TELEMETRY_COLUMNS:
+        if col not in usage_cols:
+            conn.execute(f"ALTER TABLE usage ADD COLUMN {col} {kind}")
+
+
+# (column, SQL type), in insert order. `tool_errors_by_class` is a JSON object
+# {class: count}; the classes are `app.harness.events.TOOL_ERROR_CLASSES`.
+_TELEMETRY_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("stop_reason", "TEXT"),
+    ("reasoning_tokens", "INTEGER"),
+    ("ttft_ms_first", "INTEGER"),
+    ("ttft_ms_max", "INTEGER"),
+    ("tool_calls", "INTEGER"),
+    ("tool_errors", "INTEGER"),
+    ("tool_errors_by_class", "TEXT"),
+    ("tool_ms_total", "INTEGER"),
+    ("stream_retries", "INTEGER"),
+    ("overflow_recoveries", "INTEGER"),
+    ("hook_raised", "INTEGER"),
+    ("wrapped_up", "INTEGER"),
+)
+
+
+def _telemetry_values(values: Mapping[str, Any]) -> tuple:
+    """The telemetry kwargs in column order, normalised, never raising.
+
+    A count that is not an int is stored NULL rather than failing the insert:
+    this sits inside the writers' `try`, and a raise there drops the whole
+    token row with it.
+    """
+    out: list[Any] = []
+    for col, kind in _TELEMETRY_COLUMNS:
+        value = values.get(col)
+        if value is None:
+            out.append(None)
+        elif col == "tool_errors_by_class":
+            if isinstance(value, str):
+                out.append(value)
+            elif isinstance(value, Mapping):
+                try:
+                    out.append(json.dumps(
+                        {str(k): int(v) for k, v in value.items()},
+                        sort_keys=True))
+                except (TypeError, ValueError):
+                    out.append(None)
+            else:
+                out.append(None)
+        elif kind == "TEXT":
+            out.append(str(value))
+        else:
+            try:
+                out.append(int(value))
+            except (TypeError, ValueError):
+                out.append(None)
+    return tuple(out)
 
 
 def _skills_column(
@@ -231,6 +290,7 @@ def record_usage(
     prefix_misses: Optional[int] = None,
     skills: Optional[Sequence[Mapping[str, Any]]] = None,
     compaction: Any = None,
+    **telemetry: Any,
 ):
     """Insert a single usage record.
 
@@ -248,20 +308,30 @@ def record_usage(
     tokens each removed. Like the two dimensions above, nothing here decides
     what fired — it stores what the turn's own writer saw, and NULL means that
     writer measured nothing.
+
+    `**telemetry` takes the P11 columns (`_TELEMETRY_COLUMNS`), which both
+    writers produce with `app.turn_usage.TurnTelemetry.row()`. An unknown key
+    is a caller's typo and raises, like any other bad keyword would.
     """
+    unknown = set(telemetry) - {c for c, _ in _TELEMETRY_COLUMNS}
+    if unknown:
+        raise TypeError(f"record_usage: unknown telemetry column(s) {sorted(unknown)}")
+    tel_cols = ", ".join(c for c, _ in _TELEMETRY_COLUMNS)
+    tel_marks = ", ".join("?" for _ in _TELEMETRY_COLUMNS)
     conn = _conn()
     conn.execute(
-        """INSERT INTO usage
+        f"""INSERT INTO usage
            (session_id, model, input_tokens, output_tokens,
             cache_create, cache_read, cost_usd,
             duration_ms, duration_api_ms, num_turns,
-            reprefill_tokens, prefix_misses, skills, compaction)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            reprefill_tokens, prefix_misses, skills, compaction,
+            {tel_cols})
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {tel_marks})""",
         (session_id, model, input_tokens, output_tokens,
          cache_create, cache_read, cost_usd,
          duration_ms, duration_api_ms, num_turns,
          reprefill_tokens, prefix_misses, _skills_column(skills),
-         _compaction_column(compaction)),
+         _compaction_column(compaction), *_telemetry_values(telemetry)),
     )
     conn.commit()
 
@@ -324,6 +394,114 @@ def prefix_miss_summary(hours: float = 24) -> dict:
              COALESCE(SUM(reprefill_tokens), 0)              AS reprefill_tokens,
              COALESCE(MAX(reprefill_tokens), 0)              AS worst_turn_reprefill
            FROM usage WHERE ts >= ?""",
+        (_since(hours=hours),),
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def stop_reason_breakdown(hours: float = 24) -> list[dict]:
+    """How turns ended over a window, most common first (P11).
+
+    Only rows that carry a `stop_reason` count: older rows are unmeasured,
+    and folding them in as "unknown" would drown the window's real mix in
+    history. `turns_measured` beside it is the same guard `prefix_miss_summary`
+    keeps.
+    """
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT stop_reason,
+                  COUNT(*)                          AS turns,
+                  COALESCE(SUM(wrapped_up), 0)      AS wrapped_up
+             FROM usage
+            WHERE ts >= ? AND stop_reason IS NOT NULL
+         GROUP BY stop_reason
+         ORDER BY turns DESC, stop_reason""",
+        (_since(hours=hours),),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def tool_error_breakdown(hours: float = 24) -> dict:
+    """Tool calls, failures and failures by class over a window (P11).
+
+    The by-class tally is summed in Python over the JSON column for the
+    reason `skill_breakdown` gives: `json_each` is a build option, and a day
+    is hundreds of rows.
+    """
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT tool_calls, tool_errors, tool_errors_by_class, tool_ms_total
+             FROM usage
+            WHERE ts >= ? AND tool_calls IS NOT NULL""",
+        (_since(hours=hours),),
+    ).fetchall()
+    by_class: dict[str, int] = {}
+    calls = errors = ms = 0
+    for row in rows:
+        calls += int(row["tool_calls"] or 0)
+        errors += int(row["tool_errors"] or 0)
+        ms += int(row["tool_ms_total"] or 0)
+        raw = row["tool_errors_by_class"]
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for cls, n in parsed.items():
+            try:
+                by_class[str(cls)] = by_class.get(str(cls), 0) + int(n)
+            except (TypeError, ValueError):
+                continue
+    return {
+        "turns_measured": len(rows),
+        "tool_calls": calls,
+        "tool_errors": errors,
+        "tool_ms_total": ms,
+        "by_class": dict(sorted(by_class.items(), key=lambda kv: (-kv[1], kv[0]))),
+    }
+
+
+def ttft_summary(hours: float = 24) -> dict:
+    """Time to first token over a window (P11): the first iteration's TTFT
+    per turn (the cold prefill of the turn's history) and the worst of any
+    iteration. Percentiles in Python — SQLite has none built in."""
+    conn = _conn()
+    rows = conn.execute(
+        """SELECT ttft_ms_first, ttft_ms_max, reasoning_tokens
+             FROM usage
+            WHERE ts >= ? AND ttft_ms_first IS NOT NULL""",
+        (_since(hours=hours),),
+    ).fetchall()
+    firsts = sorted(int(r["ttft_ms_first"]) for r in rows)
+    maxes = [int(r["ttft_ms_max"]) for r in rows if r["ttft_ms_max"] is not None]
+
+    def _pct(values: list[int], q: float) -> Optional[int]:
+        if not values:
+            return None
+        idx = min(len(values) - 1, max(0, int(round(q * (len(values) - 1)))))
+        return values[idx]
+
+    return {
+        "turns_measured": len(firsts),
+        "first_p50_ms": _pct(firsts, 0.5),
+        "first_p90_ms": _pct(firsts, 0.9),
+        "max_ms": max(maxes) if maxes else None,
+    }
+
+
+def reasoning_tokens_summary(hours: float = 24) -> dict:
+    """Reasoning tokens over a window, against the output they are part of."""
+    conn = _conn()
+    row = conn.execute(
+        """SELECT COUNT(reasoning_tokens)            AS turns_measured,
+                  COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                  COALESCE(SUM(CASE WHEN reasoning_tokens IS NOT NULL
+                                    THEN output_tokens ELSE 0 END), 0)
+                                                     AS output_tokens
+             FROM usage WHERE ts >= ?""",
         (_since(hours=hours),),
     ).fetchone()
     return dict(row) if row else {}

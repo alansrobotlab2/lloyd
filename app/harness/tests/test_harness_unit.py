@@ -181,6 +181,78 @@ def test_merge_usage_ignores_non_int():
     assert out == {"input_tokens": 5}
 
 
+def test_merge_usage_keeps_reasoning_tokens():
+    """P11: the reasoning share arrives nested, like the cache hits did, and
+    the int-only loop skipped it. It is kept as its own key, never folded into
+    `output_tokens` (it is already inside that count), and the cross-iteration
+    fold sums it."""
+    from app.harness.loop import _accumulate_iteration_usage
+
+    chunk = {"prompt_tokens": 100, "completion_tokens": 40,
+             "completion_tokens_details": {"reasoning_tokens": 30}}
+    one = _merge_usage({}, chunk)
+    assert one["reasoning_tokens"] == 30
+    assert one["output_tokens"] == 40
+    total = _accumulate_iteration_usage(_accumulate_iteration_usage({}, one), one)
+    assert total["reasoning_tokens"] == 60
+    # A details block without the count, or a null one, adds no key.
+    assert "reasoning_tokens" not in _merge_usage(
+        {}, {"completion_tokens_details": {"reasoning_tokens": None}})
+    assert "reasoning_tokens" not in _merge_usage(
+        {}, {"completion_tokens_details": None})
+
+
+def test_tool_result_carries_duration_and_error_class():
+    ok = events.tool_result(call_id="c", name="Read", content="x",
+                            duration_ms=42, handshake_ms=3)
+    assert ok["duration_ms"] == 42 and ok["handshake_ms"] == 3
+    assert "error_class" not in ok
+    # Unmeasured is absent, never zero: a deny never reached the MCP call.
+    denied = events.tool_result(call_id="c", name="Bash", content="no",
+                                is_error=True, error_class="denied")
+    assert denied["error_class"] == "denied"
+    assert "duration_ms" not in denied and "handshake_ms" not in denied
+    # A failure with no class named is the tool's own failure.
+    bare = events.tool_result(call_id="c", name="Bash", content="boom", is_error=True)
+    assert bare["error_class"] == "tool_error"
+    assert set(events.TOOL_ERROR_CLASSES) >= {
+        "denied", "disabled", "parse_error", "transport", "mcp_error",
+        "cancelled", "dispatch_failed", "tool_error"}
+
+
+def test_every_error_class_the_loop_sets_is_a_known_class():
+    import inspect
+    import re
+
+    from app.harness import loop
+
+    src = inspect.getsource(loop)
+    used = set(re.findall(r'error_class="([a-z_]+)"', src))
+    used |= set(re.findall(r'return "([a-z_]+_error)"', src))
+    assert used, "the loop names no error classes"
+    assert used <= set(events.TOOL_ERROR_CLASSES)
+
+
+def test_result_stop_reason_literal_matches_what_the_loop_emits():
+    """Every `stop_reason = "<x>"` the loop assigns is in the Literal, plus the
+    engine finish_reasons a terminal iteration passes through (`stop`,
+    `length`, `tool_calls`). `context_exhausted` was emitted for months while
+    missing from it."""
+    import inspect
+    import re
+    import typing
+
+    from app.harness import loop
+
+    literal = set(typing.get_args(
+        events.NormalizedEvent.__annotations__["stop_reason"]))
+    src = inspect.getsource(loop)
+    assigned = set(re.findall(r'\bstop_reason = "([a-z_]+)"', src))
+    assert "context_exhausted" in assigned
+    assert assigned <= literal, assigned - literal
+    assert {"stop", "length", "tool_calls", "stream_error", "error"} <= literal
+
+
 # ---------------------------------------------------------------------------
 # Tool schema translation
 # ---------------------------------------------------------------------------

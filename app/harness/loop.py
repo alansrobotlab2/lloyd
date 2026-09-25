@@ -420,6 +420,11 @@ async def run_query(
                 )
 
             request_msgs_len = len(chat_messages)
+            # P11: the request's own clock starts here, after the pre-request
+            # relief above, so a relief pass never reads as a slow prefill.
+            # `duration_ms` keeps covering the whole iteration.
+            request_started_at = time.perf_counter()
+            first_chunk_at: float | None = None
             try:
                 async for chunk in stream_chat(
                     base_url=options.base_url,
@@ -447,6 +452,8 @@ async def run_query(
                     # with choices=[]. Fold into per-iteration only;
                     # cross-iteration total is computed once we know
                     # this iteration is final (after the stream loop).
+                    if first_chunk_at is None:
+                        first_chunk_at = time.perf_counter()
                     if usage := chunk.get("usage"):
                         iteration_usage = _merge_usage(iteration_usage, usage)
 
@@ -529,6 +536,19 @@ async def run_query(
                     report.get("freed_tokens", 0),
                     ", ".join(report.get("rungs") or []) or "nothing",
                 )
+                # P11: one event per recovery, the countable twin of the
+                # stream_raw below (which is for the transcript's forensics).
+                _log_harness_event(
+                    session_id, "harness.overflow_recovered",
+                    {
+                        "attempt": context_overflow_recoveries,
+                        "iteration": num_turns,
+                        "requested_input_tokens": exc.requested_input_tokens,
+                        "freed_tokens": report.get("freed_tokens", 0),
+                        "rungs": list(report.get("rungs") or []),
+                    },
+                    turn_id=getattr(options, "turn_id", "") or None,
+                )
                 yield events.stream_raw(
                     "",
                     error=(
@@ -591,7 +611,12 @@ async def run_query(
                 finish_reason=finish_reason or "",
             )
 
-            iteration_duration_ms = int((time.perf_counter() - iteration_started_at) * 1000)
+            iteration_ended_at = time.perf_counter()
+            iteration_duration_ms = int((iteration_ended_at - iteration_started_at) * 1000)
+            ttft_ms, request_ms, cache_ratio = _request_timing(
+                request_started_at, first_chunk_at, iteration_ended_at,
+                iteration_usage,
+            )
             last_iteration_usage = iteration_usage
             total_usage = _accumulate_iteration_usage(total_usage, iteration_usage)
             # The engine just reported the real size of the prompt it
@@ -609,6 +634,9 @@ async def run_query(
                 iteration=num_turns,
                 finish_reason=finish_reason or "stop",
                 context=meter.snapshot() if meter.measured else None,
+                ttft_ms=ttft_ms,
+                request_ms=request_ms,
+                cache_ratio=cache_ratio,
             )
             yield asst_evt
             accumulated_text += assistant_text
@@ -805,6 +833,7 @@ async def run_query(
                                 name=call["function"]["name"],
                                 content=f"Tool dispatch failed: {exc}",
                                 is_error=True,
+                                error_class="dispatch_failed",
                             )
 
                 tasks = [asyncio.create_task(_run_one(tc)) for tc in pending]
@@ -1154,7 +1183,39 @@ def _merge_usage(acc: dict[str, int], chunk: dict[str, Any]) -> dict[str, int]:
             out["cache_read"] = cached
         if isinstance(created := details.get("created_cache_tokens"), int):
             out["cache_create"] = created
+    # The reasoning share of the completion, nested the same way (P11). A
+    # subset of `output_tokens`, never added to it; `_accumulate_iteration_
+    # usage` sums it across iterations like any other non-peak count.
+    cdetails = chunk.get("completion_tokens_details")
+    if isinstance(cdetails, dict):
+        if isinstance(rt := cdetails.get("reasoning_tokens"), int) \
+                and not isinstance(rt, bool):
+            out["reasoning_tokens"] = rt
     return out
+
+
+def _request_timing(
+    request_started_at: float, first_chunk_at: float | None,
+    ended_at: float, usage: dict[str, Any],
+) -> tuple[int | None, int | None, float | None]:
+    """`(ttft_ms, request_ms, cache_ratio)` for one iteration (P11).
+
+    TTFT is None when no chunk arrived at all — a stream that produced
+    nothing has no first token, and a zero would read as an instant one.
+    The cache ratio is None without a prompt size to divide by, and clamped
+    at 1.0 for the reason `_accumulate_iteration_usage` clamps the turn row.
+    """
+    ttft_ms = (
+        max(0, int((first_chunk_at - request_started_at) * 1000))
+        if first_chunk_at is not None else None
+    )
+    request_ms = max(0, int((ended_at - request_started_at) * 1000))
+    prompt = usage.get("input_tokens")
+    cached = usage.get("cache_read")
+    cache_ratio: float | None = None
+    if isinstance(prompt, int) and prompt > 0 and isinstance(cached, int):
+        cache_ratio = round(min(1.0, max(0, cached) / prompt), 4)
+    return ttft_ms, request_ms, cache_ratio
 
 
 # The sink moved to `app.harness.telemetry` (X1) so modules below the loop
@@ -2385,7 +2446,8 @@ async def _pre_dispatch(
 
     if args_dict.get("__parse_error__"):
         msg = _parse_failure_text(args_dict, meter=meter)
-        return events.tool_result(call_id=call_id, name=raw_name, content=msg, is_error=True)
+        return events.tool_result(call_id=call_id, name=raw_name, content=msg, is_error=True,
+                                  error_class="parse_error")
 
     effective_disallowed = (
         runtime_disallowed
@@ -2396,7 +2458,7 @@ async def _pre_dispatch(
         return events.tool_result(
             call_id=call_id, name=raw_name,
             content=f"Tool {name!r} is disabled by configuration.",
-            is_error=True,
+            is_error=True, error_class="disabled",
         )
 
     # ToolSearch — intercept locally, no MCP round-trip. The matched tools
@@ -2468,6 +2530,7 @@ async def _pre_dispatch(
             return events.tool_result(
                 call_id=call_id, name=raw_name,
                 content=f"Tool call denied: {reason}", is_error=True,
+                error_class="denied",
             )
 
     return None
@@ -2494,6 +2557,10 @@ async def _execute_tool_call(
     args_dict = tc["_args_dict"]
     call_id = tc["id"]
     dispatch_args = dict(args_dict)
+    # P11: the MCP call's wall time, cancel race included — what the model
+    # waited. Taken here, not around the await, so every exit below can
+    # report it with one subtraction.
+    call_started_at = time.perf_counter()
     try:
         # Race the MCP call against options.cancel_event so an in-flight
         # tool (long-running Bash, slow MCP server) doesn't block the
@@ -2578,7 +2645,8 @@ async def _execute_tool_call(
                 return events.tool_result(
                     call_id=call_id, name=name,
                     content=f"Tool {name!r} cancelled by user.",
-                    is_error=True,
+                    is_error=True, error_class="cancelled",
+                    duration_ms=_ms_since(call_started_at),
                 )
     except ToolDispatchError as exc:
         if options.hooks is not None:
@@ -2591,6 +2659,7 @@ async def _execute_tool_call(
             )
         return events.tool_result(
             call_id=call_id, name=name, content=str(exc), is_error=True,
+            error_class="transport", duration_ms=_ms_since(call_started_at),
         )
     except Exception as exc:
         logger.exception("loop: unexpected dispatch failure on %s", name)
@@ -2605,7 +2674,10 @@ async def _execute_tool_call(
         return events.tool_result(
             call_id=call_id, name=name,
             content=f"Tool dispatch failed: {exc}", is_error=True,
+            error_class="dispatch_failed",
+            duration_ms=_ms_since(call_started_at),
         )
+    call_ms = _ms_since(call_started_at)
 
     # Tool-result post-processing — applies in this order:
     #   1) empty-result fallback: some local models treat "" as a stop
@@ -2670,7 +2742,41 @@ async def _execute_tool_call(
         is_error=is_error,
         raw_chars=raw_chars,
         images=image_refs or None,
+        duration_ms=call_ms,
+        handshake_ms=_handshake_ms(result),
+        error_class=_result_error_class(result) if is_error else None,
     )
+
+
+def _ms_since(started_at: float) -> int:
+    return max(0, int((time.perf_counter() - started_at) * 1000))
+
+
+def _handshake_ms(result: dict[str, Any]) -> int | None:
+    """The pool's per-call session handshake, when it reports one (P12).
+
+    Optional by construction: a pool that carries no `timing` — today's, and
+    every test double — yields None, and the event omits the key.
+    """
+    timing = result.get("timing") if isinstance(result, dict) else None
+    if isinstance(timing, dict):
+        value = timing.get("handshake_ms")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return int(value)
+    return None
+
+
+def _result_error_class(result: dict[str, Any]) -> str:
+    """`mcp_error` for a protocol-level refusal, else `tool_error`.
+
+    `MCPPool.call_tool` answers an `MCPError` from a live server with this
+    exact prefix rather than raising, so the prefix is the only mark it
+    leaves; anything else flagged is_error is the tool reporting a failure.
+    """
+    content = result.get("content") if isinstance(result, dict) else None
+    if isinstance(content, str) and content.startswith("MCP error calling "):
+        return "mcp_error"
+    return "tool_error"
 
 
 # ---------------------------------------------------------------------------

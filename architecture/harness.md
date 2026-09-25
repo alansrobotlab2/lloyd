@@ -458,3 +458,57 @@ sliced off its recovery sentence. No session id, a failed write, or
   directory too; `sweep_session_spills` ages the rest.
 - `tests/test_transcript_entries.py` pins the four shaping cases, the switch,
   the delete and the two writers agreeing on a 10k pointer.
+
+### P11 — harness telemetry
+
+The loop measured almost nothing about itself: no time to first token, no tool
+latency, no reason a tool call failed, and `completion_tokens_details` (the
+reasoning count) was dropped by `_merge_usage` exactly as the cache hits once
+were. Now:
+
+- **`assistant_message`** carries `ttft_ms`, `request_ms` and `cache_ratio`.
+  The request clock starts after the pre-request relief pass
+  (`request_started_at`, just after `request_msgs_len`), so relief shows in
+  `duration_ms` (still the whole iteration) and never as a slow prefill. No
+  chunk at all is `ttft_ms: None`; no reported prompt is `cache_ratio: None`.
+- **`tool_result`** carries `duration_ms` (the MCP call, cancel race
+  included), `handshake_ms` when the pool reports `result["timing"]` (P12 adds
+  it; absent until then) and `error_class` on every failure:
+  `parse_error`/`disabled`/`denied` from `_pre_dispatch`,
+  `transport`/`dispatch_failed`/`cancelled` from `_execute_tool_call`'s exits,
+  `mcp_error` for a protocol refusal (the pool's `MCP error calling` prefix),
+  `tool_error` for the tool's own failure. `events.TOOL_ERROR_CLASSES` is the
+  list. An early return that never reached MCP has no `duration_ms` — absent,
+  not zero.
+- **`result.stop_reason`**'s Literal now names every value the loop emits,
+  including `context_exhausted` (emitted for months, missing from it),
+  `length` and `tool_calls` (a terminal iteration's own finish reason) and
+  `stream_error` (D7). `test_result_stop_reason_literal_matches_what_the_loop_emits`
+  greps the loop's assignments against it.
+- **`_merge_usage`** keeps `reasoning_tokens`; `_accumulate_iteration_usage`
+  sums it.
+- **`harness.overflow_recovered`** is written once per overflow recovery.
+  `telemetry.log_harness_event` also bumps a per-turn tally bound by
+  `telemetry.bind_event_counts()`; that is how `harness.hook_raised` (D5) and
+  `harness.stream_retried` (D7) reach the usage row without either emitter
+  knowing a row exists (hooks and parallel tool tasks inherit the context, so
+  they share the dict).
+- **`app/turn_usage.py::TurnTelemetry`** folds a turn's events into the new
+  `usage.db` columns — `stop_reason, reasoning_tokens, ttft_ms_first,
+  ttft_ms_max, tool_calls, tool_errors, tool_errors_by_class (JSON),
+  tool_ms_total, stream_retries, overflow_recoveries, hook_raised,
+  wrapped_up` — for all three writers (streaming chat, the sync endpoint,
+  `run_recorder`), so they cannot drift (`tests/test_turn_usage.py` drives the
+  chat router and the recorder over one stream and compares the rows).
+  `partial_row()` is the running peak-prompt / summed-output total D12 books
+  for a turn that dies before `result`. Columns are additive in
+  `usage_store._init_schema`; NULL is unmeasured, never zero.
+- **Queries and dashboard**: `usage_store.stop_reason_breakdown`,
+  `tool_error_breakdown`, `ttft_summary`, `reasoning_tokens_summary`, served as
+  `stop_reasons_24h`, `tool_errors_24h`, `ttft_24h`, `reasoning_tokens_24h` by
+  `dashboard._usage`; the Tokens panel shows a turn-endings strip and a TTFT /
+  tool-error line under the prefix-miss line.
+
+Verify on live traffic:
+`sqlite3 ~/lloyd-data/usage.db "select stop_reason,count(*) from usage where ts>datetime('now','-1 day') group by 1"`
+and `grep -h '"harness\.' ~/lloyd-data/event_logs/*.events.jsonl | jq -r .event | sort | uniq -c`.

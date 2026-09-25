@@ -9,6 +9,7 @@ import {
   type BackgroundTask, type DashboardSnapshot, type GpuInfo,
   type RecentSession, type SubagentRun, type UsageBucket, type VllmEngine,
   type WorkersState, type EnginePressure, type PrefixMissSummary,
+  type StopReasonRow, type TtftSummary, type ToolErrorSummary,
 } from '../../api'
 import { useMcUi, useReportMcFocus } from '../../contexts/McUiContext'
 import { cn } from '@/lib/utils'
@@ -1615,6 +1616,8 @@ export default function DashboardPage() {
               </span>
             </div>
             <PrefixMissLine summary={usage.prefix_misses_24h} />
+            <StopReasonStrip rows={usage.stop_reasons_24h} />
+            <TtftToolLine ttft={usage.ttft_24h} tools={usage.tool_errors_24h} />
             <DailyTokenBars daily={usage.daily} />
           </Panel>
         )}
@@ -1639,6 +1642,74 @@ function PrefixMissLine({ summary }: { summary?: PrefixMissSummary }) {
       <span className={cn('ml-auto font-mono tabular-nums', TONE_TEXT[tone])}>
         {misses} in {measured} measured turn{measured === 1 ? '' : 's'}
         {misses > 0 && ` · ${compact(summary.reprefill_tokens)} re-prefilled`}
+      </span>
+    </div>
+  )
+}
+
+/** How the last day's turns ended (P11). One stacked bar, widths by count:
+ *  a clean `stop` is the calm hue and every other ending is labelled, since
+ *  the rare endings (max_turns, error, context_exhausted) are the point. */
+const STOP_REASON_FILL: Record<string, string> = {
+  stop: 'bg-emerald-400/60',
+  tool_calls: 'bg-emerald-400/60',
+  cancelled: 'bg-slate-400/60',
+  max_turns: 'bg-amber-400/80',
+  length: 'bg-amber-400/80',
+  context_exhausted: 'bg-amber-400/80',
+  error: 'bg-rose-400/80',
+  stream_error: 'bg-rose-400/80',
+}
+
+function StopReasonStrip({ rows }: { rows?: StopReasonRow[] }) {
+  if (!rows || rows.length === 0) return null
+  const total = rows.reduce((n, r) => n + (r.turns ?? 0), 0)
+  if (total <= 0) return null
+  return (
+    <div className="mb-2 text-[10px]">
+      <div className="mb-1 flex h-1.5 overflow-hidden rounded-[4px] bg-muted">
+        {rows.map(r => (
+          <div
+            key={r.stop_reason}
+            className={cn('h-full', STOP_REASON_FILL[r.stop_reason] ?? 'bg-violet-400/60')}
+            style={{ width: `${(r.turns / total) * 100}%` }}
+            title={`${r.stop_reason}: ${r.turns}`}
+          />
+        ))}
+      </div>
+      <div className="flex flex-wrap gap-x-2 text-muted-foreground">
+        <span>Turn endings (24h)</span>
+        {rows.map(r => (
+          <span key={r.stop_reason} className="font-mono tabular-nums">
+            {r.stop_reason} {r.turns}
+            {r.wrapped_up > 0 && ` (${r.wrapped_up} wrapped up)`}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** First-token latency and tool failures over the last day (P11). The
+ *  measured-turn counts ride along for the reason PrefixMissLine's does. */
+function TtftToolLine({ ttft, tools }: { ttft?: TtftSummary; tools?: ToolErrorSummary }) {
+  if (!ttft && !tools) return null
+  const errors = tools?.tool_errors ?? 0
+  const calls = tools?.tool_calls ?? 0
+  const tone: Tone = errors > 0 ? 'warn' : calls > 0 ? 'good' : 'idle'
+  const secs = (ms: number | null | undefined) =>
+    ms == null ? '—' : ms >= 10_000 ? `${Math.round(ms / 1000)}s` : `${(ms / 1000).toFixed(1)}s`
+  const classes = Object.entries(tools?.by_class ?? {})
+    .map(([cls, n]) => `${cls} ${n}`).join(', ')
+  return (
+    <div className="mb-2 flex items-center gap-1.5 text-[10px]">
+      <span className={cn('h-1.5 w-1.5 flex-shrink-0 rounded-full', TONE_FILL[tone])} />
+      <span className="text-muted-foreground">
+        TTFT p50 {secs(ttft?.first_p50_ms)} · p90 {secs(ttft?.first_p90_ms)}
+      </span>
+      <span className={cn('ml-auto font-mono tabular-nums', TONE_TEXT[tone])} title={classes || undefined}>
+        {errors} tool error{errors === 1 ? '' : 's'} in {calls} call{calls === 1 ? '' : 's'}
+        {classes && ` · ${classes}`}
       </span>
     </div>
   )

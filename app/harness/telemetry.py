@@ -11,10 +11,33 @@ that names it moves.
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 from typing import Any
 
 logger = logging.getLogger("lloyd-harness-telemetry")
+
+# Per-turn tallies of the events written here (P11). A turn's usage writer
+# binds a dict (`bind_event_counts`) before it drives `run_query`, and every
+# `log_harness_event` in that context bumps it — including ones from hooks and
+# parallel tool tasks, which inherit the context and so share the same dict.
+# That is how `harness.hook_raised` (hooks.py) and `harness.stream_retried`
+# reach the usage row without either module knowing a row exists. Counted
+# before the session check: a bare `run_query` caller with no session still
+# has a turn whose row wants the number.
+_event_counts: contextvars.ContextVar[dict[str, int] | None] = \
+    contextvars.ContextVar("lloyd_harness_event_counts", default=None)
+
+
+def bind_event_counts() -> dict[str, int]:
+    """Start counting harness events for the current context; return the dict.
+
+    The binding is left in place rather than reset: the writers that call
+    this own the turn's task, and the next turn binds a fresh dict over it.
+    """
+    counts: dict[str, int] = {}
+    _event_counts.set(counts)
+    return counts
 
 
 def log_harness_event(
@@ -31,6 +54,9 @@ def log_harness_event(
     session; the relief record passes the run's own, so one firing can be
     attributed to the turn that needed it (#1078).
     """
+    counts = _event_counts.get()
+    if counts is not None:
+        counts[event] = counts.get(event, 0) + 1
     if not session_id:
         return
     try:

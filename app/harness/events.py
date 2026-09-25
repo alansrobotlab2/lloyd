@@ -71,6 +71,11 @@ class NormalizedEvent(TypedDict, total=False):
     # tool_result
     content: str
     is_error: bool
+    # P11: wall time of the MCP call (absent on an early return that never
+    # reached it), the per-call session handshake inside that when the pool
+    # reports one, and why the call failed (absent on success).
+    handshake_ms: int
+    error_class: str
 
     # thinking_done / assistant_message / result
     duration_ms: int
@@ -80,9 +85,21 @@ class NormalizedEvent(TypedDict, total=False):
     thinking: str
     iteration: int
     finish_reason: str  # vLLM's stop reason for THIS iteration: "stop" | "tool_calls" | "length" | ...
+    # P11: request start (after relief) to first chunk / to stream end, and
+    # this iteration's cache_read over its prompt. None = not measured.
+    ttft_ms: int | None
+    request_ms: int | None
+    cache_ratio: float | None
 
     # result
-    stop_reason: Literal["stop", "tool_calls", "max_turns", "cancelled", "error"]
+    # Every value `run_query` can put here. `length` and `tool_calls` arrive
+    # as the engine's own finish_reason on a terminal iteration;
+    # `context_exhausted` is the terminal-inject guard; `stream_error` is a
+    # broken stream (D7). Pinned against the loop's source by
+    # test_harness_unit.py::test_result_stop_reason_literal_matches_what_the_loop_emits.
+    stop_reason: Literal["stop", "tool_calls", "length", "max_turns",
+                         "cancelled", "error", "context_exhausted",
+                         "stream_error"]
     usage: dict[str, int]
     num_turns: int
     response_text: str
@@ -154,9 +171,22 @@ def tool_call(
     }
 
 
+# Why a tool call failed, one word each (P11). Set at the site that knows:
+# the gates in `_pre_dispatch` and the three failure exits of
+# `_execute_tool_call`. `tool_error` is the tool itself answering is_error;
+# `mcp_error` is the server refusing the call at the protocol level.
+TOOL_ERROR_CLASSES = (
+    "denied", "disabled", "parse_error", "transport", "mcp_error",
+    "cancelled", "dispatch_failed", "tool_error",
+)
+
+
 def tool_result(*, call_id: str, name: str, content: str, is_error: bool = False,
                 raw_chars: int | None = None,
-                images: list[dict] | None = None) -> NormalizedEvent:
+                images: list[dict] | None = None,
+                duration_ms: int | None = None,
+                handshake_ms: int | None = None,
+                error_class: str | None = None) -> NormalizedEvent:
     """One tool call's result, as the model is about to be shown it.
 
     ``raw_chars`` is how long ``content`` was BEFORE the caller's spill
@@ -186,6 +216,18 @@ def tool_result(*, call_id: str, name: str, content: str, is_error: bool = False
     # never base64. Absent when the tool returned none.
     if images:
         evt["images"] = list(images)
+    # P11 telemetry. Each key is absent rather than zero when unmeasured: a
+    # hook deny never reached the MCP call, and `0 ms` would read as a fast
+    # one. An is_error result with no class is a `tool_error` — the tool
+    # itself answered with a failure — so every failed result carries one.
+    if duration_ms is not None:
+        evt["duration_ms"] = max(0, int(duration_ms))
+    if handshake_ms is not None:
+        evt["handshake_ms"] = max(0, int(handshake_ms))
+    if is_error and not error_class:
+        error_class = "tool_error"
+    if error_class:
+        evt["error_class"] = error_class
     return evt
 
 
@@ -199,6 +241,9 @@ def assistant_message(
     iteration: int = 0,
     finish_reason: str = "stop",
     context: dict[str, Any] | None = None,
+    ttft_ms: int | None = None,
+    request_ms: int | None = None,
+    cache_ratio: float | None = None,
 ) -> NormalizedEvent:
     """Emitted at end of each agent-loop iteration.
 
@@ -223,6 +268,13 @@ def assistant_message(
     tools — harness will loop), ``"length"`` (max_tokens hit — also a
     terminal state). IV uses this to distinguish "primary done" from
     "primary mid-thought" on text-only iterations.
+
+    P11: ``ttft_ms`` is the request going out (after any relief pass, which
+    ``duration_ms`` still includes) to the first chunk coming back — the
+    prefill, for a request that queued nowhere. ``request_ms`` is the same
+    start to the end of the stream. ``cache_ratio`` is this iteration's
+    ``cache_read / input_tokens``. Each is None when it could not be
+    measured: no chunk arrived, or the engine reported no prompt size.
     """
     return {
         "type": "assistant_message",
@@ -234,6 +286,9 @@ def assistant_message(
         "iteration": iteration,
         "finish_reason": finish_reason,
         "context": context,
+        "ttft_ms": ttft_ms,
+        "request_ms": request_ms,
+        "cache_ratio": cache_ratio,
     }
 
 

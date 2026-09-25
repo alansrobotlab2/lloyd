@@ -1690,9 +1690,10 @@ authority — these keys are not the OpenAI wire names):
 - `tool_call` — `{type, call_id, name, args_json, args_dict, summary}` — tool
   invocation. `summary` is the model's own one-liner for the transcript;
   it is absent from `args_json`/`args_dict` (see "Tool-call summaries").
-- `tool_result` — `{type, call_id, name, content, is_error}` — tool result
+- `tool_result` — `{type, call_id, name, content, is_error}` (+ `duration_ms`,
+  `handshake_ms`, `error_class` when known, P11) — tool result
 - `assistant_message` — `{type, text, tool_calls, thinking, usage,
-  duration_ms, iteration, finish_reason}` — one agent-loop iteration.
+  duration_ms, iteration, finish_reason, ttft_ms, request_ms, cache_ratio}` — one agent-loop iteration.
   `usage` and `duration_ms` are per-iteration, not per-turn.
 - `result` — `{type, stop_reason, usage, num_turns, duration_ms,
   response_text}` — turn complete

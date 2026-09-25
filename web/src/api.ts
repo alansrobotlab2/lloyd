@@ -2184,6 +2184,40 @@ export interface DashboardUsage {
    *  on a backend that predates them. */
   prefix_misses_1h?: PrefixMissSummary
   prefix_misses_24h?: PrefixMissSummary
+  /** Harness telemetry (P11, usage_store.py). Each counts only rows that
+   *  carry the measurement. Absent on a backend that predates them. */
+  stop_reasons_24h?: StopReasonRow[]
+  tool_errors_24h?: ToolErrorSummary
+  ttft_24h?: TtftSummary
+  reasoning_tokens_24h?: ReasoningTokensSummary
+}
+
+export interface StopReasonRow {
+  stop_reason: string
+  turns: number
+  wrapped_up: number
+}
+
+export interface ToolErrorSummary {
+  turns_measured: number
+  tool_calls: number
+  tool_errors: number
+  tool_ms_total: number
+  /** error class → count; classes are app/harness/events.py TOOL_ERROR_CLASSES */
+  by_class: Record<string, number>
+}
+
+export interface TtftSummary {
+  turns_measured: number
+  first_p50_ms: number | null
+  first_p90_ms: number | null
+  max_ms: number | null
+}
+
+export interface ReasoningTokensSummary {
+  turns_measured: number
+  reasoning_tokens: number
+  output_tokens: number
 }
 
 export interface PrefixMissSummary {
