@@ -2014,14 +2014,6 @@ workers:
       max_duration_seconds: 1800
       max_turns: 40
       batch: 3
-      # OFF for unattended turns since 2026-09-12 (plan: senses-not-supervision,
-      # cut 1). Measured effect on rounds was negative: #874 abandoned at
-      # iteration 38 with 44 min left on an invented premise, 16 false
-      # repetition fires in one day, an inject into #875 with no room to
-      # answer. Stall rescue, budget and context pressure are deterministic
-      # anchors now; the gate is the real check. Stays on for chat, where a
-      # human reads it and its value was measured there.
-      inner_voice: false
       channels: [ai-engineer, discover-ai]
       # Items this source files (tag `youtube-eval`) are loop output, like a
       # `spawned-by-*` item (Alan, 2026-09-14): held out of single-item
