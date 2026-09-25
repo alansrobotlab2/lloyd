@@ -545,7 +545,7 @@ async def run_eval(queries: list[dict], *, arms: tuple[str, ...], max_turns: int
         system_prompt = prompts.get(arm) or system_prompt_for(arm)
         return RunOptions(model=alias, base_url=base_url, system_prompt=system_prompt,
                           max_turns=max_turns, mcp_servers=DEFAULT_LLOYD_MCP_SERVERS,
-                          disallowed_tools=disallowed, env=env, session_id=sid,
+                          disallowed_tools=disallowed, session_id=sid,
                           surface="chat", priority=priority, hooks=hooks, **hkw)
 
     # Probed once per distinct system prompt: an arm is charged past its own.
