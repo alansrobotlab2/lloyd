@@ -27,6 +27,11 @@ Event types:
     stream_raw        — escape hatch for chunks we couldn't normalize
                         (e.g. malformed qwen3_xml tool_calls); carries
                         the raw line so callers can persist for forensics
+    iteration_retry   — the iteration just streamed is being discarded and
+                        re-requested; carries how many text / thinking
+                        characters of it were already yielded as deltas,
+                        so a consumer can take them back off what it
+                        accumulated (review 2026-09-24, X2)
 
 Event constructors below are thin helpers — they exist so call sites
 read clearly (`events.text_delta("hi")`) without the TypedDict noise.
@@ -46,6 +51,7 @@ class NormalizedEvent(TypedDict, total=False):
         "assistant_message",
         "result",
         "stream_raw",
+        "iteration_retry",
     ]
 
     # system
@@ -88,6 +94,12 @@ class NormalizedEvent(TypedDict, total=False):
     # stream_raw
     raw: str
     error: str
+
+    # iteration_retry
+    reason: str
+    attempt: int
+    discarded_text_chars: int
+    discarded_thinking_chars: int
 
 
 def system(*, session_id: str, model: str) -> NormalizedEvent:
@@ -266,3 +278,48 @@ def result(
 
 def stream_raw(raw: str, error: str = "") -> NormalizedEvent:
     return {"type": "stream_raw", "raw": raw, "error": error}
+
+
+def iteration_retry(
+    *,
+    reason: str,
+    attempt: int,
+    discarded_text_chars: int = 0,
+    discarded_thinking_chars: int = 0,
+) -> NormalizedEvent:
+    """The iteration in flight is thrown away and requested again.
+
+    The loop has already yielded that iteration's `text_delta` /
+    `thinking_delta` events, and every consumer appends them to a running
+    buffer. The counts are the characters of each kind that were yielded
+    for the discarded attempt — only the tail of the current iteration, never
+    earlier ones — so a consumer trims exactly that many off the end of its
+    buffer and the retried attempt streams into the gap. `reason` names the
+    trigger (`stream_stalled`, `echo_guard`, ...) and `attempt` counts from 1.
+    """
+    return {
+        "type": "iteration_retry",
+        "reason": reason,
+        "attempt": attempt,
+        "discarded_text_chars": max(0, int(discarded_text_chars or 0)),
+        "discarded_thinking_chars": max(0, int(discarded_thinking_chars or 0)),
+    }
+
+
+def trim_discarded(text: str, thinking: str, evt: NormalizedEvent) -> tuple[str, str]:
+    """Take an `iteration_retry`'s discarded deltas back off two buffers.
+
+    The one definition every consumer that accumulates deltas uses, so the
+    chat router and the background recorder cannot come to disagree about
+    what a retried iteration leaves behind. Clamped at the buffer's length: a
+    consumer that flushed part of the attempt already (a thinking phase that
+    reached `thinking_done`) holds less than was discarded, and must end at
+    empty, never raise.
+    """
+    n_text = max(0, int(evt.get("discarded_text_chars") or 0))
+    n_think = max(0, int(evt.get("discarded_thinking_chars") or 0))
+    if n_text:
+        text = text[: max(0, len(text) - n_text)]
+    if n_think:
+        thinking = thinking[: max(0, len(thinking) - n_think)]
+    return text, thinking

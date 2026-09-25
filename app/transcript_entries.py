@@ -34,6 +34,10 @@ every historical session on disk predates them and must keep reading the same:
     `TOOL_RESULT_MAX_CHARS + len("...(truncated)")`. A path holding only the
     truncated string cannot recover it, so absence is the answer it gives,
     never `0` and never the cap.
+  * `turn_id` on a user, tool-call or tool-result row is omitted when the
+    writer does not know it. It names the turn that wrote the row, so a
+    reader can group a turn's rows without inferring the boundary from
+    roles (review 2026-09-24, X3); rows written before it read the same.
 """
 
 from __future__ import annotations
@@ -131,7 +135,8 @@ def build_tool_call(call_id: str, name: str, args_json: str,
 
 
 def build_tool_call_entry(tool_call: dict, *, timestamp: str,
-                          stats: dict[str, Any] | None = None) -> dict:
+                          stats: dict[str, Any] | None = None,
+                          turn_id: str = "") -> dict:
     """The assistant row that carries one tool call.
 
     Per-iteration LLM usage belongs here rather than on the result row — the
@@ -146,13 +151,16 @@ def build_tool_call_entry(tool_call: dict, *, timestamp: str,
     }
     if stats:
         entry["stats"] = dict(stats)
+    if turn_id:
+        entry["turn_id"] = turn_id
     return entry
 
 
 def build_tool_result_entry(call_id: str, result: str, *, timestamp: str,
                             is_error: bool | None = None,
                             raw_chars: int | None = None,
-                            images: list[dict] | None = None) -> dict:
+                            images: list[dict] | None = None,
+                            turn_id: str = "") -> dict:
     """The `role="tool"` row. `result` is already truncated.
 
     `raw_chars` is the length the tool's answer had before the harness
@@ -173,6 +181,8 @@ def build_tool_result_entry(call_id: str, result: str, *, timestamp: str,
         "timestamp": timestamp,
         "stats": stats,
     }
+    if turn_id:
+        row["turn_id"] = turn_id
     # Screenshots: refs to files under `<sid>.tool-results/`, never base64
     # (app/harness/tool_images.py). Omitted when there are none, so every
     # pre-existing row reads the same.
@@ -213,7 +223,7 @@ def build_thinking_entry(turn_id: str, text: str, duration_ms: int, seq: int,
 
 
 def build_user_entry(text: str, *, timestamp: str, source: str = "",
-                     entry_id: str = "") -> dict:
+                     entry_id: str = "", turn_id: str = "") -> dict:
     """The prompt row a background run opens its transcript with.
 
     A transcript whose first row is the model answering is unreadable — the
@@ -229,4 +239,6 @@ def build_user_entry(text: str, *, timestamp: str, source: str = "",
     }
     if source and source != "user":
         entry["source"] = source
+    if turn_id:
+        entry["turn_id"] = turn_id
     return entry

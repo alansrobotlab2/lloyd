@@ -82,6 +82,12 @@ def _events():
         # agree with the other one, so agreeing would prove nothing (#1052).
         {"type": "tool_result", "call_id": "c1", "name": "Bash",
          "content": "a\nb", "is_error": False, "raw_chars": 81_234},
+        # A discarded attempt (X2): both writers must take it back off the
+        # final answer, or the row reads "ThreeTwo files.".
+        {"type": "thinking_delta", "text": "hmm"},
+        {"type": "text_delta", "text": "Three"},
+        {"type": "iteration_retry", "reason": "stream_stalled", "attempt": 1,
+         "discarded_text_chars": 5, "discarded_thinking_chars": 3},
         {"type": "text_delta", "text": "Two files."},
         {"type": "result", "stop_reason": "stop", "num_turns": 2,
          "duration_ms": 400, "response_text": "Two files.",
@@ -121,6 +127,9 @@ def _chat_entries(events: list[dict]) -> list[dict]:
             text += evt["text"]
         elif t == "thinking_delta":
             thinking += evt["text"]
+        elif t == "iteration_retry":
+            from app.harness.events import trim_discarded
+            text, thinking = trim_discarded(text, thinking, evt)
         elif t == "thinking_done":
             thinking, thinking_ms = evt["text"], int(evt["duration_ms"])
             written.append(te.build_thinking_entry(
@@ -155,7 +164,7 @@ def _chat_entries(events: list[dict]) -> list[dict]:
             persisted.add(evt["call_id"])
             written.extend(_tool_pair(tc, result_str=result, timestamp="T",
                                       iteration_stats=iteration_stats,
-                                      evt=evt))
+                                      evt=evt, turn_id="turn1"))
         elif t == "result":
             usage = evt["usage"]
             # The same mapper `messages.py` applies inline (#859), so this
@@ -221,6 +230,32 @@ def test_both_writers_produce_identical_entries(recorder_sessions):
     recorded = _recorder_entries(events, recorder_sessions)
     chat = _chat_entries(events)
     assert _normalise(recorded) == _normalise(chat)
+    # X3: every row the turn wrote names it, the tool pair included.
+    assert all(e.get("turn_id") == "turn1"
+               or e.get("thinking", {}).get("turn_id") == "turn1"
+               for e in recorded), recorded
+    assert recorded[-1]["content"][0]["text"] == "Two files."
+
+
+def test_rows_carry_the_turn_that_wrote_them_and_omit_it_when_unknown():
+    """X3. A reader grouping a turn's rows reads the id off the row instead of
+    inferring the boundary from roles. A writer with no turn id writes exactly
+    what it wrote before, so every session on disk reads the same."""
+    tc = te.build_tool_call("c1", "Bash", "{}")
+    assert te.build_tool_call_entry(tc, timestamp="T", turn_id="t9")["turn_id"] == "t9"
+    assert te.build_tool_result_entry("c1", "out", timestamp="T",
+                                      turn_id="t9")["turn_id"] == "t9"
+    assert te.build_user_entry("hi", timestamp="T", turn_id="t9")["turn_id"] == "t9"
+    assert "turn_id" not in te.build_tool_call_entry(tc, timestamp="T")
+    assert "turn_id" not in te.build_tool_result_entry("c1", "out", timestamp="T")
+    assert "turn_id" not in te.build_user_entry("hi", timestamp="T")
+
+    from app.routers.messages import _tool_pair
+    pair = _tool_pair(tc, result_str="out", timestamp="T", iteration_stats={},
+                      turn_id="t9")
+    assert [r["turn_id"] for r in pair] == ["t9", "t9"]
+    assert all("turn_id" not in r for r in _tool_pair(
+        tc, result_str="out", timestamp="T", iteration_stats={}))
 
 
 def test_an_assistant_entry_names_the_turn_that_wrote_it():

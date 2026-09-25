@@ -215,3 +215,47 @@ something in the second one first.
   which closes the connection and aborts the request in vLLM.
   `chunk_timeout_s` still bounds only the gap after the first line.
   `test_stream_stall.py::test_a_cancel_during_prefill_ends_the_stream_promptly`.
+
+### X1 — one event sink
+
+`app/harness/telemetry.py::log_harness_event(session_id, event, data, *,
+turn_id=None)` is the harness's event sink. It imports nothing from the
+harness, so modules the loop imports (`hooks.py`, `mcp_pool.py`, the
+compaction state) can record events without importing `loop`.
+`loop._log_harness_event` is an alias of it; nothing that names the old symbol
+moved.
+
+### X2 — `iteration_retry`
+
+`events.iteration_retry(reason, attempt, discarded_text_chars,
+discarded_thinking_chars)` says the iteration in flight is thrown away and
+requested again, and how many characters of each kind it had already yielded
+as deltas. `events.trim_discarded` is the one trim: `messages.py` applies it
+to `full_response` / `accumulated_thinking`, forwards a `retry` SSE frame and
+logs `harness.iteration_retry`; `run_recorder` trims its own buffers the same
+way. The browser ignores the frame today (`api.ts`'s SSE switch has no
+default arm). Nothing emits the event yet: the stream retry (D7) and the echo
+guard's `tool_choice` mode (P6a) will. `tests/test_iteration_retry.py`.
+
+### X3 — `turn_id` on every row
+
+The user row (`_run_turn`, and the recorder's opening row), the tool-call row
+and the tool-result row now carry the `turn_id` of the turn that wrote them,
+as the assistant text and thinking rows already did. `build_tool_call_entry`,
+`build_tool_result_entry` and `build_user_entry` take an optional `turn_id`
+and omit the key when it is empty, so a caller without one writes what it
+wrote before. `tests/test_transcript_entries.py`.
+
+### X4 — `app/tool_bans.py`
+
+`WORKER_AUTOMOD_BAN` and `WORKER_GRANT_MINT_BAN` live in stdlib-only
+`app/tool_bans.py`, readable from the aggregator without importing the worker
+package; `workers/sources/_common.py` re-exports the same tuples and the chat
+router imports them from `app/`.
+
+### X5, X6 — decisions only
+
+The transcript pointer for a tool result is `maybe_spill`'s
+`<persisted-output>` block, with no second marker (X5). The persisted
+compaction record is a top-level `data["compaction"]` key written after
+`messages`, never a message row (X6).

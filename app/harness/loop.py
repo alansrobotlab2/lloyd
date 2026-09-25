@@ -42,6 +42,7 @@ from app.harness.events import NormalizedEvent
 from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS, MCPPool, get_or_open_pool
 from app.harness.options import RunOptions
 from app.harness.policy import current_effect_scope, normalize_tool_name
+from app.harness.telemetry import log_harness_event
 from app.harness.tool_schema import (
     add_summary_param,
     build_tool_list,
@@ -1154,28 +1155,9 @@ def _merge_usage(acc: dict[str, int], chunk: dict[str, Any]) -> dict[str, int]:
     return out
 
 
-def _log_harness_event(
-    session_id: str, event: str, data: dict[str, Any],
-    *, turn_id: str | None = None,
-) -> None:
-    """Append one event to the session's event log, or give up quietly.
-
-    Lazy and guarded: `app.harness` is importable without a full app
-    bootstrap (bench scripts and `app/harness/tests` rely on that), and a
-    turn must never die because its diagnostics could not be written.
-
-    `turn_id` is optional because most callers here have only ever had a
-    session; the relief record passes the run's own, so one firing can be
-    attributed to the turn that needed it (#1078).
-    """
-    if not session_id:
-        return
-    try:
-        from app import event_log
-
-        event_log.log_event(session_id, event, data, turn_id=turn_id)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("loop: could not log %s: %s", event, exc)
+# The sink moved to `app.harness.telemetry` (X1) so modules below the loop
+# can emit events without importing it; the alias keeps every caller as is.
+_log_harness_event = log_harness_event
 
 
 def _record_anchor_fires(

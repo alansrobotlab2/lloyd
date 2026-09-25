@@ -38,6 +38,7 @@ from app.harness import (
     install_skill_dispatch_hook,
 )
 from app.harness.context_meter import ContextMeter, context_window_for
+from app.harness.events import trim_discarded
 from app.harness.skill_dispatch import injected_skill_names, skill_deliveries
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
@@ -93,7 +94,7 @@ from app.routers._messages_subliminal import (
     _build_subliminal_entry,
 )
 from app.harness.policy import GRANT_MINT_TOOL, install_policy_hook
-from workers.sources._common import WORKER_AUTOMOD_BAN
+from app.tool_bans import WORKER_AUTOMOD_BAN
 from app.routers._messages_thinking import _build_thinking_entry
 from app.transcript_entries import (
     build_assistant_text_entry,
@@ -770,7 +771,8 @@ def _build_notification_drain(session_id: str, turn_id: str):
 
 
 def _tool_pair(call: dict, *, result_str: str, timestamp: str,
-               iteration_stats: dict, evt: dict | None = None) -> list[dict]:
+               iteration_stats: dict, evt: dict | None = None,
+               turn_id: str = "") -> list[dict]:
     """The tool-call row and its tool-result row, in wire order.
 
     One builder for the three places that write a pair, so the row shape
@@ -785,15 +787,17 @@ def _tool_pair(call: dict, *, result_str: str, timestamp: str,
     call_id = call["call_id"]
     if evt is None:
         result_row = build_tool_result_entry(call_id, result_str,
-                                             timestamp=timestamp)
+                                             timestamp=timestamp,
+                                             turn_id=turn_id)
     else:
         result_row = build_tool_result_entry(
             call_id, result_str, timestamp=timestamp,
             is_error=bool(evt.get("is_error", False)),
             raw_chars=evt.get("raw_chars"),
-            images=evt.get("images"))
+            images=evt.get("images"), turn_id=turn_id)
     return [
-        build_tool_call_entry(call, timestamp=timestamp, stats=iteration_stats),
+        build_tool_call_entry(call, timestamp=timestamp, stats=iteration_stats,
+                              turn_id=turn_id),
         result_row,
     ]
 
@@ -904,6 +908,10 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
     }
     if turn.source != "user":
         user_msg["source"] = turn.source
+    # Which turn this prompt opened (X3): every row the turn writes carries
+    # the same id, so a reader can group them without inferring the boundary.
+    if turn.turn_id:
+        user_msg["turn_id"] = turn.turn_id
     await _append_messages(session_id, [user_msg])
 
     # #306: Capture ephemeral context injection (prefetch block, ambient
@@ -1147,6 +1155,20 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     accumulated_thinking += thinking_text
                     await _emit(turn, "thinking_delta", {"text": thinking_text})
 
+            elif etype == "iteration_retry":
+                # The loop threw away the attempt that streamed these deltas
+                # and is requesting the iteration again (X2). Take them back
+                # off the buffers the text rows are built from, and tell the
+                # browser, which has painted them into the live bubble.
+                full_response, accumulated_thinking = trim_discarded(
+                    full_response, accumulated_thinking, evt)
+                retry_payload = {k: evt.get(k) for k in (
+                    "reason", "attempt", "discarded_text_chars",
+                    "discarded_thinking_chars")}
+                await _emit(turn, "retry", dict(retry_payload))
+                _event_log.log_event(session_id, "harness.iteration_retry",
+                                     retry_payload, turn_id=turn.turn_id)
+
             elif etype == "thinking_done":
                 thinking_text = evt.get("text", "")
                 accumulated_thinking = thinking_text
@@ -1305,7 +1327,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                     await _append_messages(session_id, _tool_pair(
                         tc, result_str=result_str,
                         timestamp=datetime.now().isoformat(),
-                        iteration_stats=current_iteration_stats, evt=evt))
+                        iteration_stats=current_iteration_stats, evt=evt,
+                        turn_id=turn.turn_id))
 
             elif etype == "result":
                 usage = evt.get("usage") or {}
@@ -1441,7 +1464,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         tail.extend(_tool_pair(
                             tc, result_str=results_by_id.get(cid, ""),
                             timestamp=end_ts,
-                            iteration_stats=current_iteration_stats))
+                            iteration_stats=current_iteration_stats,
+                            turn_id=turn.turn_id))
 
                 # Ambient turns only: if the agent called `ambient_decide`
                 # to opt out of surfacing, write a muted breadcrumb instead
@@ -1600,7 +1624,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
                         tail.extend(_tool_pair(
                             tc, result_str=results_by_id.get(cid, ""),
                             timestamp=err_ts,
-                            iteration_stats=current_iteration_stats))
+                            iteration_stats=current_iteration_stats,
+                            turn_id=turn.turn_id))
                 stream_stats["peak_input_tokens"] = last_turn_input
                 if full_response.strip():
                     tail.append(build_assistant_text_entry(

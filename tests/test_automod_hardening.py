@@ -163,9 +163,16 @@ def test_worker_turns_cannot_drive_the_loop():
     whole job is ingesting untrusted text. The backlog worker was told not to
     use them in its PROMPT, which is not a control.
     """
-    src = (ROOT / "workers" / "sources" / "_common.py").read_text()
+    # The names live in `app/tool_bans.py` since X4 (2026-09-24); `_common`
+    # re-exports them, and must hand out the same tuples, not a copy that
+    # could drift.
+    src = (ROOT / "app" / "tool_bans.py").read_text()
     for tool in ("automod_start", "automod_gate", "automod_land", "automod_rollback"):
         assert tool in src, f"{tool} is not disallowed for worker turns"
+    import app.tool_bans as TB
+    import workers.sources._common as C
+    assert C.WORKER_AUTOMOD_BAN is TB.WORKER_AUTOMOD_BAN
+    assert C.WORKER_GRANT_MINT_BAN is TB.WORKER_GRANT_MINT_BAN
 
 
 def test_subagents_cannot_drive_the_loop():

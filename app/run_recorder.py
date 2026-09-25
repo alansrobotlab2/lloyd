@@ -58,6 +58,7 @@ from app import event_log as _event_log
 from app import compaction_record as _compaction_record
 from app import prefix_miss as _prefix_miss
 from app import turn_usage
+from app.harness.events import trim_discarded
 from app.sessions_io import _append_messages
 from app.transcript_entries import (
     build_assistant_text_entry,
@@ -185,7 +186,8 @@ class _RunRecorder:
         if prompt:
             await self._append([build_user_entry(
                 prompt, timestamp=datetime.now().isoformat(),
-                source=self.source or "background")])
+                source=self.source or "background",
+                turn_id=self.turn_id or "")])
         self._log("brain1.user_prompt_received", {
             "prompt": prompt, "prompt_chars": len(prompt),
             "source": self.source,
@@ -202,6 +204,15 @@ class _RunRecorder:
 
         elif etype == "thinking_delta":
             self.thinking += evt.get("text", "") or ""
+
+        elif etype == "iteration_retry":
+            # The attempt that streamed those deltas was discarded (X2).
+            self.text, self.thinking = trim_discarded(
+                self.text, self.thinking, evt)
+            self._log("harness.iteration_retry", {
+                k: evt.get(k) for k in ("reason", "attempt",
+                                        "discarded_text_chars",
+                                        "discarded_thinking_chars")})
 
         elif etype == "thinking_done":
             text = evt.get("text", "") or ""
@@ -286,7 +297,8 @@ class _RunRecorder:
                 ts = datetime.now().isoformat()
                 await self._append([
                     build_tool_call_entry(tc, timestamp=ts,
-                                          stats=self.iteration_stats),
+                                          stats=self.iteration_stats,
+                                          turn_id=self.turn_id or ""),
                     # `raw_chars` comes straight off the event and is
                     # absent on anything that predates it, which reads as
                     # unknown downstream — not as a small result.
@@ -294,7 +306,8 @@ class _RunRecorder:
                         call_id, result, timestamp=ts,
                         is_error=bool(evt.get("is_error", False)),
                         raw_chars=evt.get("raw_chars"),
-                        images=evt.get("images")),
+                        images=evt.get("images"),
+                        turn_id=self.turn_id or ""),
                 ])
 
         elif etype == "result":
@@ -358,8 +371,10 @@ class _RunRecorder:
             self.persisted_pairs.add(cid)
             result = self.results_by_id.get(cid, "")
             tail.append(build_tool_call_entry(tc, timestamp=ts,
-                                              stats=self.iteration_stats))
-            tail.append(build_tool_result_entry(cid, result, timestamp=ts))
+                                              stats=self.iteration_stats,
+                                              turn_id=self.turn_id or ""))
+            tail.append(build_tool_result_entry(cid, result, timestamp=ts,
+                                                turn_id=self.turn_id or ""))
         return tail
 
     async def close_interrupted(self, reason: str) -> None:
