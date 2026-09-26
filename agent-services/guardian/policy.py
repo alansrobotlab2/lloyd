@@ -204,8 +204,23 @@ def _data_root_module(repo: str):
         return None
 
 
-def kg_db_path(repo: str = REPO, fallback_root: str = DATA_ROOT) -> str:
-    """Where the knowledge-graph store the tripwire counts lives.
+#: Which of the two branches of `kg_db_path` answered, returned as its second half
+#: and stored in `KG_DB_SOURCE`. The reason `evaluate_data_damage` builds and the
+#: staging probe both print it. It exists because on the deployed box the resolver
+#: and the fallback name the SAME file — the fallback root and the production data
+#: root are both `/home/alansrobotlab/lloyd-data` — so no printed path can ever
+#: show which branch ran, and a probe that only prints a path proves nothing about
+#: the branch it is nominally testing (#1525, review of round SM_20260926_073331).
+KG_SOURCE_RESOLVER = "resolver"
+KG_SOURCE_FALLBACK = "fallback-literal"
+
+
+def kg_db_path(repo: str = REPO,
+               fallback_root: str = DATA_ROOT) -> tuple[str, str]:
+    """Where the knowledge-graph store the tripwire counts lives, and who said so.
+
+    Returns `(path, source)` with `source` one of `KG_SOURCE_RESOLVER` or
+    `KG_SOURCE_FALLBACK`.
 
     Restating `_pipeline/vault-derived/kg.sqlite` against `DATA_ROOT` was the
     defect: the data root moved to `~/lloyd-data` on 2026-09-22, and a copy of a
@@ -218,17 +233,22 @@ def kg_db_path(repo: str = REPO, fallback_root: str = DATA_ROOT) -> str:
     watchdog that dies because its resolver is missing or refuses
     (`DataRootMissing` on a production root with no marker) is worse than one
     counting against a path it can name. `datawatch.py:133` sets the precedent
-    for degrading rather than raising, and the caller says out loud which store it
-    read.
+    for degrading rather than raising. The second return value is what stops that
+    deliberate degradation from being invisible: the caller says out loud which
+    store it read *and* which rule named it.
     """
     resolver = _data_root_module(repo)
     if resolver is not None:
         try:
-            return str(resolver.kg_store_for_tree(__import__("pathlib").Path(repo)))
+            return (str(resolver.kg_store_for_tree(__import__("pathlib").Path(repo))),
+                    KG_SOURCE_RESOLVER)
         except Exception:  # noqa: BLE001 - DataRootMissing and anything like it
             pass
-    return str(__import__("pathlib").Path(fallback_root) / _KG_DB_RELPATH)
-KG_DB = kg_db_path()
+    return (str(__import__("pathlib").Path(fallback_root) / _KG_DB_RELPATH),
+            KG_SOURCE_FALLBACK)
+
+
+KG_DB, KG_DB_SOURCE = kg_db_path()
 VAULT_ROOT = "/home/alansrobotlab/obsidian"
 
 # ── Vault tripwire (every tick, not only while observing) ──────────────────

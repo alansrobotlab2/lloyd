@@ -386,6 +386,145 @@ def test_a_missing_path_is_reported_as_no_path(tmp_path, monkeypatch):
     assert "no path given" in why, why
 
 
+def test_the_unreadable_reason_says_which_branch_named_the_path(tmp_path, monkeypatch):
+    """The reason carries the branch that produced the path, not just the path.
+
+    On the deployed box the resolver and the fallback literal name the SAME file —
+    the fallback root and the production data root are both
+    `/home/alansrobotlab/lloyd-data` — so a printed path alone can never tell "the
+    data root moved" apart from "the resolver could not be loaded", which are two
+    incidents with two different fixes. `policy.kg_db_path` returns the branch
+    beside the path precisely so this line can say which one the watchdog was in.
+    """
+    import guardian as G
+
+    missing = str(tmp_path / "moved-away" / "kg.sqlite")
+    g, current = _damage_guardian(
+        tmp_path, monkeypatch, kg_db=missing,
+        current={"kg_rows": 1000, "vault_files": 400})
+
+    monkeypatch.setattr(G.policy, "KG_DB_SOURCE", G.policy.KG_SOURCE_FALLBACK)
+    hit, why = g.evaluate_data_damage(current)
+    assert hit is False and "UNREADABLE" in why, why
+    assert G.policy.KG_SOURCE_FALLBACK in why, (
+        f"a degraded path was reported as if the resolver had answered: {why!r}")
+
+    monkeypatch.setattr(G.policy, "KG_DB_SOURCE", G.policy.KG_SOURCE_RESOLVER)
+    hit2, why2 = g.evaluate_data_damage(current)
+    assert hit2 is False and G.policy.KG_SOURCE_RESOLVER in why2, why2
+    assert G.policy.KG_SOURCE_FALLBACK not in why2, (
+        f"the branch label is a constant, not an appendage: {why2!r}")
+
+
+def _observing_guardian(tmp_path, monkeypatch, *, kg_db: str, store_rows: int | None):
+    """A Guardian inside an observation window whose liveness is healthy.
+
+    `restart: False` so the error leg is skipped and only the data leg can fire:
+    the error log belongs to services a non-restarting landing never restarted,
+    and this test is about the store read. `store_rows=None` means no file at
+    that path at all — what a moved data root leaves behind.
+
+    The four subsystem probes `tick()` runs before its decision
+    (`drain_logs`, `check_vault`, `check_data`, `check_memory`) are stubbed, not
+    left running: `check_data` acts on the machine's real data root, and on a box
+    whose tripwire is armed it writes the halt marker, pauses workers and pages —
+    none of which a store-read test is entitled to do. The one leg under test is
+    the data-damage evaluation, which is called directly by `tick()` and stays
+    real.
+    """
+    import time
+    import types
+
+    import guardian as G
+
+    store = tmp_path / "kg.sqlite"
+    if store_rows is not None:
+        _kg_store(store, store_rows)
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "state"),
+        guardian_state=str(tmp_path / "gstate"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0,
+    )
+    g = G.Guardian(args)
+    current = {"commit": "b" * 40, "errors_until_ts": time.time() + 600,
+               "restart": False, "kg_rows": 1000, "vault_files": 400}
+    monkeypatch.setattr(g.state, "current", lambda: current)
+    monkeypatch.setattr(g.state, "is_broken", lambda: False)
+    monkeypatch.setattr(g.state, "pause_remaining", lambda cap: 0.0)
+    monkeypatch.setattr(g, "collect", lambda: {"now": NOW, "supervisord": "ok",
+                                              "procs": {}, "probes": {}})
+    monkeypatch.setattr(g, "evaluate_liveness", lambda snap: (False, "healthy"))
+    monkeypatch.setattr(g, "heartbeat", lambda *a, **k: None)
+    monkeypatch.setattr(g, "drain_logs", lambda: None)
+    monkeypatch.setattr(g, "check_vault", lambda: None)
+    monkeypatch.setattr(g, "check_data", lambda: None)
+    monkeypatch.setattr(g, "check_memory", lambda: None)
+    rolled: list = []
+
+    def _record_rollback(*a, **k):
+        # Records the call and returns the bool the real `do_rollback` returns. A
+        # one-line lambda wrapping a mutating call would return that call's own
+        # truthiness, which no reader can check and no assertion here reads: every
+        # assertion below looks at `rolled`, never at this bool.
+        rolled.append(a)
+        return True
+
+    monkeypatch.setattr(g, "do_rollback", _record_rollback)
+    monkeypatch.setattr(G.policy, "KG_DB", kg_db)
+    monkeypatch.setattr(G, "count_vault_files", lambda root: 400)
+
+    lines: list = []
+    monkeypatch.setattr(G, "log", lambda msg: lines.append(msg))
+    return g, rolled, lines
+
+
+def test_an_unreadable_graph_reaches_the_journal_and_rolls_back_nothing(tmp_path,
+                                                                       monkeypatch):
+    """Clause 3's second half, one level up: the tick call site.
+
+    `evaluate_data_damage` returned the right reason and `tick()` read it only
+    under `if damaged:`, so the unreadable verdict — the one thing that would
+    have shown a moved root — died in a local, and the journal carried neither
+    `data intact` nor a warning: silence, which is what made the original defect
+    unseeable. `count_kg_rows`'s docstring promises the path reaches the log
+    line; this node is what makes that promise checkable. No rollback either
+    way: a store this process cannot open is not evidence that the promoted
+    commit deleted rows.
+    """
+    import guardian as G
+
+    missing = str(tmp_path / "moved-away" / "kg.sqlite")
+    g, rolled, lines = _observing_guardian(tmp_path, monkeypatch,
+                                           kg_db=missing, store_rows=None)
+
+    assert g.tick() == "observing"
+    assert rolled == [], "an unreadable store must not revert a promotion"
+    unreadable = [ln for ln in lines if "inconclusive" in ln]
+    assert unreadable, f"the store read was never logged; the tick said: {lines!r}"
+    assert G.KG_UNREADABLE_MARK in unreadable[0], unreadable[0]
+    assert missing in unreadable[0], (
+        f"the log line must name the store it could not open: {unreadable[0]!r}")
+
+
+def test_a_counted_graph_stays_silent_in_the_journal(tmp_path, monkeypatch):
+    """The control: the log line has to be about the unreadable read, not about
+    observing. 950 rows against a 1000-row baseline is inside the 5% floor, so
+    the tick is healthy and must add no data line at all — otherwise the node
+    above would pass on an unconditional log and `observing` would always look
+    like a store that could not be read."""
+    import guardian as G
+
+    g, rolled, lines = _observing_guardian(tmp_path, monkeypatch,
+                                           kg_db=str(tmp_path / "kg.sqlite"),
+                                           store_rows=950)
+
+    assert g.tick() == "observing"
+    assert rolled == []
+    assert not [ln for ln in lines if G.KG_UNREADABLE_MARK in ln], lines
+    assert not [ln for ln in lines if "data" in ln], lines
+
+
 # ---------------------------------------------------------------------------
 # normalize
 # ---------------------------------------------------------------------------
@@ -433,10 +572,9 @@ def _guardian(tmp_path, monkeypatch, *, current, head, lkg):
     monkeypatch.setattr(g, "heartbeat", lambda *a, **k: None)
 
     # Each stub records its own call and nothing else. Every assertion below
-    # reads `rolled` / `alerts`; the bools are there only because the real
-    # methods return bool, and a truthy lambda tail (`append(x) or True`) reads
-    # like an assertion that cannot fail — it is neither, so the return is
-    # written out instead.
+    # reads `rolled` / `alerts`; the bools are there only because the real methods
+    # return bool, so they are written out as defs with an explicit return rather
+    # than wrapped in a lambda whose value a reader would have to reason about.
     rolled: list = []
     alerts: list = []
 
@@ -671,8 +809,15 @@ def test_no_test_reaches_the_users_screen(tmp_path, monkeypatch):
     import notify
 
     seen: list[list[str]] = []
-    monkeypatch.setattr(notify, "_run",
-                        lambda cmd, timeout=5.0: seen.append(list(cmd)) or True)
+
+    def _record_run(cmd, timeout=5.0):
+        # Records the command it was handed. The bool mirrors what the real `_run`
+        # returns once it has spawned something; nothing here reads it, because the
+        # node below asserts on the command list, not the bool.
+        seen.append(list(cmd))
+        return True
+
+    monkeypatch.setattr(notify, "_run", _record_run)
     (tmp_path / "obsidian" / "memory").mkdir(parents=True)
     n = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
                         vault_root=str(tmp_path / "obsidian"),
@@ -694,8 +839,15 @@ def test_the_room_channels_are_switches_not_dead_code(tmp_path, monkeypatch):
     import notify
 
     seen: list[list[str]] = []
-    monkeypatch.setattr(notify, "_run",
-                        lambda cmd, timeout=5.0: seen.append(list(cmd)) or True)
+
+    def _record_run(cmd, timeout=5.0):
+        # Records the command and reports success, which is the real `_run`'s
+        # answer once `notify-send` has been spawned — the `res[... ] is True`
+        # assertions below are only reachable through that return value.
+        seen.append(list(cmd))
+        return True
+
+    monkeypatch.setattr(notify, "_run", _record_run)
     monkeypatch.setenv("LLOYD_DESKTOP_ALERTS", "1")
     monkeypatch.setenv("LLOYD_JOURNAL_ALERTS", "1")
     monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus")

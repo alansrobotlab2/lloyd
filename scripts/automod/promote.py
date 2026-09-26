@@ -465,9 +465,23 @@ def wait_idle(max_wait: float | None = None, *, drain: bool = True,
 
 
 def count_kg_rows() -> int | None:
+    """The `kg_rows` baseline the guardian's data-damage tripwire compares against.
+
+    The ROOT stays `production_data_root()` on purpose: this is a reader that means
+    production whatever `HOME` or `LLOYD_DATA` the promotion's own environment
+    carries. What changed is that the LAYOUT under that root now comes from
+    `app.data_root.KG_DB_RELATIVE` through `kg_store_for_root`, the one spelling.
+    It used to be restated here as `_pipeline/vault-derived/kg.sqlite` — the third
+    copy of that string #1525 counted: the watchdog had its own, `app.paths` had the
+    constant. Two hands spelling one layout means the baseline side and the live
+    side of one `data_damage` comparison can silently name different stores, so the
+    two answers are compared in
+    `tests/test_data_home.py::test_the_promoter_and_the_watchdog_name_one_kg_store`.
+    """
     import sqlite3
+    from app.data_root import kg_store_for_root
     from app.paths import production_data_root
-    db = production_data_root() / "_pipeline" / "vault-derived" / "kg.sqlite"
+    db = kg_store_for_root(production_data_root())
     if not db.exists():
         return None
     try:

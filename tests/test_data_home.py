@@ -635,10 +635,14 @@ def test_the_guardian_kg_path_follows_lloyd_data(tmp_path, monkeypatch):
     root = tmp_path / "guardian-data"
     monkeypatch.setenv("LLOYD_DATA", str(root))
 
-    got = policy.kg_db_path(repo=str(ROOT), fallback_root=str(tmp_path / "unused-fb"))
+    got, src = policy.kg_db_path(repo=str(ROOT),
+                                 fallback_root=str(tmp_path / "unused-fb"))
 
     assert got == str(root / "_pipeline" / "vault-derived" / "kg.sqlite")
     assert "unused-fb" not in got, "a resolved answer must not name the fallback root"
+    assert src == policy.KG_SOURCE_RESOLVER, (
+        f"the watchdog followed LLOYD_DATA but reported {src!r}: the label it "
+        "prints is what tells a moved root from an unloadable resolver")
 
 
 def test_the_guardian_asks_the_resolver_instead_of_restating_the_layout(tmp_path):
@@ -654,10 +658,11 @@ def test_the_guardian_asks_the_resolver_instead_of_restating_the_layout(tmp_path
         '    return pathlib.Path("/resolver/answered/this/kg-4242.sqlite")\n',
         encoding="utf-8")
 
-    got = policy.kg_db_path(repo=str(repo), fallback_root=str(tmp_path / "fb"))
+    got, src = policy.kg_db_path(repo=str(repo), fallback_root=str(tmp_path / "fb"))
 
     assert got == "/resolver/answered/this/kg-4242.sqlite", got
     assert "fb" not in got, "the fallback root leaked into a resolved answer"
+    assert src == policy.KG_SOURCE_RESOLVER, src
 
 
 def test_the_resolver_and_app_paths_spell_the_store_from_one_constant():
@@ -680,9 +685,10 @@ def test_the_guardian_falls_back_when_the_resolver_is_not_there(tmp_path):
     gone = str(tmp_path / "no-such-repo")
 
     assert policy._data_root_module(gone) is None
-    got = policy.kg_db_path(repo=gone, fallback_root=str(tmp_path / "fallback-data"))
+    got, src = policy.kg_db_path(repo=gone, fallback_root=str(tmp_path / "fallback-data"))
 
     assert got == str(store)
+    assert src == policy.KG_SOURCE_FALLBACK, src
     assert G.count_kg_rows(got) == (7, str(store)), (
         "the fallback path has to be one the counter can actually read")
 
@@ -697,8 +703,10 @@ def test_the_guardian_falls_back_when_the_resolver_raises_on_import(tmp_path):
     store = _guardian_fallback_store(tmp_path)
 
     assert policy._data_root_module(str(repo)) is None
-    assert policy.kg_db_path(repo=str(repo),
-                             fallback_root=str(tmp_path / "fallback-data")) == str(store)
+    got, src = policy.kg_db_path(repo=str(repo),
+                                 fallback_root=str(tmp_path / "fallback-data"))
+    assert got == str(store)
+    assert src == policy.KG_SOURCE_FALLBACK, src
 
 
 def test_the_guardian_falls_back_when_the_resolver_refuses_the_root(tmp_path):
@@ -718,10 +726,84 @@ def test_the_guardian_falls_back_when_the_resolver_refuses_the_root(tmp_path):
         encoding="utf-8")
     store = _guardian_fallback_store(tmp_path)
 
-    got = policy.kg_db_path(repo=str(repo), fallback_root=str(tmp_path / "fallback-data"))
+    got, src = policy.kg_db_path(repo=str(repo), fallback_root=str(tmp_path / "fallback-data"))
 
     assert got == str(store), "a refusing resolver must not take the tripwire down"
+    assert src == policy.KG_SOURCE_FALLBACK, src
     assert G.count_kg_rows(got)[0] == 7
+
+
+def test_the_promoter_and_the_watchdog_name_one_kg_store(tmp_path, monkeypatch):
+    """The two sides of one `data_damage` comparison, compared (#1525).
+
+    The baseline is written by `scripts/automod/promote.py::count_kg_rows` and the
+    live count is taken by the watchdog's `policy.kg_db_path`. Until this round the
+    promoter spelled the layout by hand (`production_data_root() / "_pipeline" /
+    "vault-derived" / "kg.sqlite"`) while the watchdog asked the resolver: the same
+    asymmetry that made the two VAULT counters read a `git gc` repack as a 6.7 %
+    note loss twice (#537, #1206), which was only fixed by unifying them into
+    `vaultwatch.measure`. Full unification of the KG counters is still owed — the
+    promoter counts with its own sqlite handle and ignores `LLOYD_DATA` by design,
+    being a reader that means production. What is pinned here is the part that can
+    rot silently: the store both sides count comes from ONE constant, so editing the
+    layout cannot move one side and leave the other behind.
+
+    Latent, not firing: both spellings named the same existing 90 MB store the day
+    this was written. That is exactly why an equality test is worth having — the
+    drift is invisible to every other check until the comparison mis-fires.
+    """
+    import sqlite3 as sq
+    from app import data_root
+    from scripts.automod import promote as P
+
+    live = data_root.live_checkout()
+    assert not data_root.tree_is_worktree(live), (
+        f"{live} looks like a linked worktree, so rule 3 gives the watchdog a"
+        " tree-local root and this comparison would be pinning a difference the"
+        " resolver intends")
+    prod = data_root.production_data_root()
+    expected = str(data_root.kg_store_for_root(prod))
+    assert Path(expected).is_file(), (
+        f"{expected} is not on disk: with no store to name there is nothing to"
+        " compare, and a passing node here would prove nothing")
+
+    # The watchdog's side, with no LLOYD_DATA in the way: the deploy shape.
+    monkeypatch.delenv("LLOYD_DATA", raising=False)
+    watched, _src = policy.kg_db_path(repo=str(live), fallback_root=str(prod))
+    assert watched == expected, watched
+
+    # The promoter's side, read out of the URI it actually opens rather than out
+    # of a path expression this test could write wrong. The fake connect records
+    # and refuses, so nothing here touches the live store. Its signature is
+    # `sqlite3.connect`'s own — the database is positional and `uri=True` is a
+    # keyword — because a fake that mismatched would die inside the `try` here,
+    # have its TypeError swallowed into a None, and leave this node asserting on
+    # an empty list for the wrong reason.
+    opened: list[str] = []
+
+    def _probe(database, *_args, **_kw):
+        opened.append(database)
+        raise sq.OperationalError("probe: the live store stays closed")
+
+    monkeypatch.setattr(sq, "connect", _probe)
+    assert P.count_kg_rows() is None, (
+        "the probe refused, so a count from the real store would be a lie")
+    assert opened == [f"file:{expected}?mode=ro"], (
+        f"the promoter opened {opened!r} while the watchdog counts {expected!r}")
+
+    # And its spelling is the shared constant's, not a string of its own: move the
+    # constant and point the promoter at a root of this test's, and the URI it
+    # opens moves with the constant. Nothing here writes near the live root.
+    fake_root = tmp_path / "promoter-root"
+    (fake_root / "probe-layout").mkdir(parents=True)
+    (fake_root / "probe-layout" / "kg.sqlite").write_bytes(b"")
+    monkeypatch.setattr(data_root, "KG_DB_RELATIVE", Path("probe-layout/kg.sqlite"))
+    monkeypatch.setattr(paths, "production_data_root", lambda: fake_root)
+    opened.clear()
+    assert P.count_kg_rows() is None            # the probe still refuses
+    assert opened == [f"file:{fake_root / 'probe-layout' / 'kg.sqlite'}?mode=ro"], (
+        f"the promoter answered {opened!r} after KG_DB_RELATIVE moved, so it is"
+        " still spelling the layout somewhere of its own")
 
 
 def test_the_resolver_the_guardian_loads_still_refuses_an_unmarked_root(tmp_path,

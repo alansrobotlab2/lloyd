@@ -54,6 +54,14 @@ import memwatch          # noqa: E402
 from supervisor import SupervisorClient, SupervisordUnreachable  # noqa: E402
 
 
+#: The head of the reason `evaluate_data_damage` gives when the KG store could
+#: not be counted, and the prefix the tick call site matches on to decide that
+#: the verdict has to reach the journal even though nothing was damaged. One
+#: constant on both sides: the guard and its reader cannot drift apart, which is
+#: the same rule that took the path out of `policy.KG_DB` (#1525).
+KG_UNREADABLE_MARK = "knowledge graph UNREADABLE"
+
+
 def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} [guardian] {msg}", flush=True)
 
@@ -381,11 +389,17 @@ class Guardian:
         # data root had moved out from under a restated path, reached the journal
         # as "data intact". The vault tripwire above is still the thing that stops
         # a lost store being shrugged off; this only names which store it could not
-        # read, and still rolls back nothing.
+        # read, and still rolls back nothing. The branch that NAMED the path goes
+        # in too, because the resolver and the fallback agree on the deployed box:
+        # `fallback-literal` in this line means the resolver was not loadable,
+        # which is a different incident from a root that moved.
         if rows_now is None:
-            return False, ("knowledge graph UNREADABLE"
+            where = kg_read or "no path given"
+            if kg_read:
+                where += f" (path from the {policy.KG_DB_SOURCE} branch)"
+            return False, (KG_UNREADABLE_MARK
                            + (" (no baseline written yet)" if not before_rows else "")
-                           + f": {kg_read or 'no path given'}")
+                           + f": {where}")
         return False, "data intact"
 
     # ── rollback ───────────────────────────────────────────────────────
@@ -1229,6 +1243,15 @@ class Guardian:
                 log(f"data damage: {why}")
                 self.do_rollback("data_damage", why)
                 return "rolling_back"
+            # The unreadable verdict is not damage and must not roll anything
+            # back, but it is also not a healthy store, and until here it was
+            # silent either way: the reason came back in `why` and this call site
+            # read it only under `if damaged:`, which is the shape of the original
+            # #1525 complaint — a store the watchdog could not open presented
+            # itself as an intact one. `count_kg_rows`'s docstring promises the
+            # path reaches the log; this is the line that keeps that promise.
+            if why.startswith(KG_UNREADABLE_MARK):
+                log(f"data check inconclusive: {why}")
             return "observing"
 
         self.maybe_settle(current)

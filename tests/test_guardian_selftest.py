@@ -543,7 +543,15 @@ def test_a_passing_selftest_keeps_the_daily_cadence(cold_stack, monkeypatch):
     cold_stack.maybe_selftest()
     assert cold_stack.selftest_ok is True
     calls = []
-    monkeypatch.setattr(ST, "run", lambda *a, **k: calls.append(1) or True)
+
+    def _record_run(*a, **k):
+        # Records that `run` was reached, and returns None. The real one hands back
+        # a CompletedProcess, but the path under test never reads a value from it —
+        # the assertion below is on `calls` — so the stub returns nothing rather than
+        # whatever a lambda built out of `append` would leak into the caller.
+        calls.append(1)
+
+    monkeypatch.setattr(ST, "run", _record_run)
     cold_stack.last_selftest -= policy.SELFTEST_RETRY_SECONDS + 1
     cold_stack.maybe_selftest()
     assert calls == [], "a healthy guardian re-ran its selftest on the retry clock"
@@ -600,39 +608,88 @@ def test_a_raising_selftest_is_named_in_the_page_too(cold_stack, monkeypatch):
 
 # ── the KG tripwire still works from the staged snapshot (#1525) ─────────────
 
-#: What the driver prints, and the three environments it prints it under. The
-#: `repo` values are the two a deployed watchdog can actually be in: the live
-#: checkout, whose resolver answers; and a snapshot that points at a tree with no
-#: `app/data_root.py`, which is the branch that must degrade rather than die.
+#: What the driver prints, and the four environments it prints it under.
+#:
+#: The snapshot dir is all that sits on sys.path, but `policy.REPO` is a literal
+#: naming the checkout (`policy.py:97`), so `kg_db_path()` loads `app/data_root.py`
+#: from that checkout and not from the snapshot — which has no `app/` anyway,
+#: because `guardian-stage.sh` copies only `agent-services/guardian/*.py`. That is
+#: why the driver prints `SOURCE` beside `KG_DB`: on the deploy box the resolver
+#: branch and the fallback branch name the SAME file, so a printed path cannot tell
+#: them apart and a probe that printed only a path could not say which branch it had
+#: exercised. `SOURCE` is the subprocess reporting its own branch, and every case
+#: below asserts it. Where a case needs to FORCE a branch rather than observe one,
+#: it goes through `repo=` — rewriting the REPO literal in a copy of the staged
+#: files is the only knob that reaches the loader from here, since the snapshot has
+#: no `app/` of its own to take away.
 KG_PROBE = (
     "import sys, os\n"
     "sys.path.insert(0, os.environ['KG_SNAP'])\n"
     "import policy, guardian as G\n"
-    "print('KG_DB', policy.KG_DB)\n"
-    "print('COUNT', *G.count_kg_rows(policy.KG_DB))\n"
+    "p, src = policy.kg_db_path()\n"
+    "print('KG_DB', p)\n"
+    "print('SOURCE', src)\n"
+    "if os.environ.get('KG_COUNT') == '1':\n"
+    "    print('COUNT', *G.count_kg_rows(p))\n"
 )
 
 
-def _kg_probe(tmp_path: Path, *, snapshot: Path, repo: Path,
-              data_root: Path | None = None):
+def _probe_line(stdout: str, prefix: str) -> str:
+    """The one line of `stdout` that starts with `prefix`, minus its label.
+
+    Asserting there is exactly one keeps a dropped print from reading as an absent
+    assertion: `if "COUNT" in stdout` would pass on a probe that printed nothing.
+    """
+    hits = [ln for ln in stdout.splitlines() if ln.startswith(prefix + " ")]
+    assert len(hits) == 1, f"expected exactly one {prefix!r} line, got {stdout!r}"
+    return hits[0][len(prefix) + 1:]
+
+
+def _kg_probe(tmp_path: Path, *, snapshot: Path,
+              data_root: Path | None = None, count: bool = False,
+              repo: Path | None = None):
     """Run the real `policy` + `guardian` under system python3, with only the
     snapshot dir on sys.path — which is what `%h/.local/state/lloyd-guardian/bin`
     is when the unit execs it.
 
-    `data_root` is `LLOYD_DATA` when a case wants an explicit root, and absent
-    when the case is testing what the resolver derives with none — a worktree
-    checkout (`tests/conftest.py:63`) keeps its data inside the tree, so the
-    second case below expects the store under `repo/.lloyd-data`, which is a
-    different answer from `repo` itself and so still proves the resolver ran.
+    `data_root` is `LLOYD_DATA` when a case wants an explicit root, and absent when
+    the case is testing what `policy` derives with none. `count=True` asks the
+    driver to open whatever it resolved; only the cases whose root is a temp
+    directory do that, so no case here opens the machine's real 90 MB graph.
+
+    `repo` points the REPO literal at a tree of the caller's, in a COPY of the
+    snapshot left under `tmp_path` and used as that run's snapshot. It is the only
+    knob that reaches the choice of branch from here — the snapshot has no `app/` to
+    take away, so removing it means pointing at a tree that has none. The rewrite
+    happens on a copy because editing the working tree's own `policy.py` would leave
+    a made-up home path in the file the unit stages next. There is no
+    `LLOYD_GUARDIAN_REPO` in this environment either, because nothing under
+    `agent-services/` reads that variable: a probe that set it would look like it was
+    choosing a checkout while resolving the same live one. The three state variables
+    below are all real — `policy.py:249`, `vaultwatch.py:47` and `memwatch.py:261`
+    read them — and they are what keeps this subprocess off the machine's own
+    guardian state.
     """
+    snap = snapshot
+    if repo is not None:
+        import re
+        import shutil
+        snap = tmp_path / f"snap-repo-{repo.name}"
+        shutil.copytree(snapshot, snap)
+        src = (snap / "policy.py").read_text()
+        out = re.sub(r'^REPO = ".*"$', f'REPO = "{repo}"', src, count=1, flags=re.M)
+        assert out != src, (f'no `REPO = "<literal>"` line to point at {repo}, so '
+                            "this case cannot reach the fallback branch")
+        (snap / "policy.py").write_text(out)
     env = {k: str(v) for k, v in {
         "PATH": "/usr/bin:/bin", "HOME": tmp_path / "kg-home",
-        "KG_SNAP": snapshot,
-        "LLOYD_GUARDIAN_REPO": repo,
+        "KG_SNAP": snap,
         "LLOYD_GUARDIAN_STATE": tmp_path / "kg-gstate",
         "LLOYD_AUTOMOD_STATE": tmp_path / "kg-astate"}.items()}
     if data_root is not None:
         env["LLOYD_DATA"] = str(data_root)
+    if count:
+        env["KG_COUNT"] = "1"
     return subprocess.run(["/usr/bin/python3", "-c", KG_PROBE],
                           cwd=str(tmp_path), capture_output=True, text=True,
                           env=env, timeout=60)
@@ -646,10 +703,22 @@ def test_the_staged_snapshot_boots_with_the_kg_tripwire_and_passes_staging(tmp_p
     `agent-services/guardian/*.py`). A `policy.py` that raised on import would not
     fail a test: it would fail the boot, and the gate would refuse the candidate,
     keeping the previous watchdog in charge with one journal line as the trace. So
-    both halves are run against the staged tree — `selftest.py --profile staging`
-    still exits 0, and the snapshot imports and counts a real store under either
-    answer the resolver can give: the resolved one, and the fallback for a snapshot
-    pointing at a tree that has no `app/data_root.py`."""
+    both halves run against the staged tree — `selftest.py --profile staging` still
+    exits 0, and the snapshot resolves, and where the root is a temp dir counts, in
+    four shapes, each asserting the branch it claims to be in:
+
+    1. a root named by `LLOYD_DATA`, store present → the resolver, and the count of
+       three rows comes back through the copy systemd would exec;
+    2. a root that holds no store → still the resolver, and the answer is `None`
+       beside the path it tried, which is the moved-root case;
+    3. no root named at all, the shape the unit boots in → the resolver naming the
+       production store, which is the assertion this file could not make before
+       `kg_db_path` reported its branch, because the fallback prints the same path;
+    4. a repo with no `app/data_root.py` → the fallback literal, the branch nothing
+       but a REPO rewrite can force from a snapshot that has no `app/` to remove.
+
+    `SOURCE` is the subprocess reporting its own branch. `tests/test_data_home.py`
+    is where each branch is instead *made* to answer, by a stand-in resolver."""
     proc = _run_selftest("staging", tmp_path)
     assert proc.returncode == 0, (
         "the stage gate would refuse this candidate and keep the pre-change "
@@ -665,33 +734,72 @@ def test_the_staged_snapshot_boots_with_the_kg_tripwire_and_passes_staging(tmp_p
     con.commit()
     con.close()
 
-    # Snapshot pointing at itself: no app/data_root.py there at all, so this is the
-    # fallback branch, and the file it names is still the one that exists.
-    r = _kg_probe(tmp_path, snapshot=snap, data_root=tmp_path / "kg-data", repo=snap)
+    # 1. The deploy shape with a root named: staged files, no repo on sys.path, a
+    # store of three rows under $LLOYD_DATA. The count has to come back through the
+    # copy systemd would exec, and the branch has to say the resolver answered.
+    r = _kg_probe(tmp_path, snapshot=snap, data_root=tmp_path / "kg-data",
+                  count=True)
     assert r.returncode == 0, f"the snapshot failed to import: {r.stderr}"
-    assert f"KG_DB {store}" in r.stdout, r.stdout
-    assert "COUNT 3 " in r.stdout, r.stdout
+    assert _probe_line(r.stdout, "KG_DB") == str(store), r.stdout
+    assert _probe_line(r.stdout, "SOURCE") == "resolver", r.stdout
+    assert _probe_line(r.stdout, "COUNT") == f"3 {store}", r.stdout
 
-    # Same snapshot, now pointed at a tree that HAS the resolver, with a root set:
-    # the counted file moves to that root, which is the fallback's shape and not
-    # the resolver's — the fallback would name `repo/_pipeline/...` inside the tree.
-    other = tmp_path / "resolver-data"
-    r2 = _kg_probe(tmp_path, snapshot=snap, repo=ROOT, data_root=other)
-    assert r2.returncode == 0, f"the resolver branch failed to import: {r2.stderr}"
-    got = [ln for ln in r2.stdout.splitlines() if ln.startswith("KG_DB ")][0][6:]
-    assert got == str(other / "_pipeline" / "vault-derived" / "kg.sqlite"), (
-        f"the watchdog counted {got!r} with LLOYD_DATA={other}: it is answering its "
-        "in-tree literal, not the resolver")
+    # 2. A root that names no store: the watchdog still answers, and answers with
+    # `None` and the path it tried rather than a number or an exception. This is
+    # the moved-root case — the store is elsewhere, the count is unavailable, and
+    # the only thing the tripwire is entitled to say is that it could not read.
+    other = tmp_path / "no-store-here"
+    missing = other / "_pipeline" / "vault-derived" / "kg.sqlite"
+    r2 = _kg_probe(tmp_path, snapshot=snap, data_root=other, count=True)
+    assert r2.returncode == 0, f"the missing-store probe failed to import: {r2.stderr}"
+    got = _probe_line(r2.stdout, "KG_DB")
+    assert got == str(missing), (
+        f"the watchdog counted {got!r} with LLOYD_DATA={other}: the staged policy "
+        "did not follow the root it was given")
     assert not got.startswith(str(ROOT)), (
         f"{got} is inside the code tree — the pre-#1525 spelling")
-    assert "COUNT None" in r2.stdout, (
+    assert _probe_line(r2.stdout, "SOURCE") == "resolver", r2.stdout
+    assert _probe_line(r2.stdout, "COUNT") == f"None {missing}", (
         "a store that is not there reports no count and the path it tried: "
         f"{r2.stdout}")
 
-    # And with no root set at all the call still has to answer — a resolver that
-    # raises must not take the import down with it.
-    r3 = _kg_probe(tmp_path, snapshot=snap, repo=ROOT)
+    # 3. No root named at all — the shape the unit actually boots in. It must be
+    # the RESOLVER naming the production store, not the fallback happening to print
+    # the same string: on this box the fallback root and the production data root
+    # are both `/home/alansrobotlab/lloyd-data`, so before `kg_db_path` returned its
+    # branch this case could only check that a path was printed. It counts nothing,
+    # which is deliberate — the store it resolves is the machine's real 90 MB graph,
+    # and case 1 already proved the count path through a copy of these same files.
+    # A real dependency on the deployment, then: a production root that lost its
+    # marker sends the watchdog down the fallback for real, and this node fails.
+    from app import data_root
+    prod = data_root.production_data_root()
+    assert (prod / data_root.DATA_ROOT_MARKER).is_file(), (
+        f"{prod} carries no {data_root.DATA_ROOT_MARKER}: rule 2 refuses this box, "
+        "so the watchdog is on its fallback literal and the deploy shape cannot be"
+        " told apart from the degrade here")
+    r3 = _kg_probe(tmp_path, snapshot=snap)
     assert r3.returncode == 0, (
         f"policy/guardian failed to import from the snapshot with no LLOYD_DATA: "
         f"{r3.stderr}")
-    assert r3.stdout.startswith("KG_DB /"), r3.stdout
+    assert _probe_line(r3.stdout, "SOURCE") == "resolver", (
+        "the watchdog booted with no LLOYD_DATA and never reached its resolver")
+    assert _probe_line(r3.stdout, "KG_DB") == str(
+        prod / data_root.KG_DB_RELATIVE), r3.stdout
+
+    # 4. The branch nothing else in this file can force: a repo with no
+    # `app/data_root.py`, reached by rewriting the REPO literal in a copy of the
+    # staged files. The watchdog falls back to its literal, imports, counts, and
+    # says which it did. Note the path is the SAME string case 1 printed from the
+    # resolver — same LLOYD_DATA, same layout — which is exactly why the assertion
+    # that distinguishes these two runs has to be on SOURCE.
+    norepo = tmp_path / "repo-without-a-resolver"
+    norepo.mkdir()
+    r4 = _kg_probe(tmp_path, snapshot=snap, data_root=tmp_path / "kg-data",
+                   count=True, repo=norepo)
+    assert r4.returncode == 0, (
+        f"a missing resolver has to degrade, not stop the boot: {r4.stderr}")
+    assert _probe_line(r4.stdout, "SOURCE") == "fallback-literal", r4.stdout
+    assert _probe_line(r4.stdout, "KG_DB") == str(store), r4.stdout
+    assert _probe_line(r4.stdout, "COUNT") == f"3 {store}", (
+        "the fallback has to be a path the counter can still read: " f"{r4.stdout}")
