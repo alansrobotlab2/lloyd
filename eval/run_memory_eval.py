@@ -27,6 +27,17 @@ final answer:
                 `sessions` collection holds the set's dev sessions —
                 `export-sessions --out DIR` writes them in the chat-export
                 shape; against the live index they do not exist
+  sleep_notes     #1516's next-session channel: the same confidence-ordered facts
+                the `prefetch` arm renders, written through
+                `app.next_session_notes` and drained back the way a morning turn
+                drains it, so they arrive inside `<next-session-notes>` instead of
+                `<facts>`. Same retrieval, different transport, position and cap —
+                which is what makes it a measurement of the channel rather than of
+                retrieval. The run gives the arm a store of its own in `--out-dir`;
+                it never writes the live one. Whether the channel is kept is the
+                paired-bootstrap CI against `prefetch` in `multi_session` and
+                `knowledge_update`, over a full v1 run, and no line in this file
+                presumes which way that comes out.
 
 What is scored, per answer, and why three numbers rather than one:
 
@@ -61,6 +72,10 @@ Usage (quality run: shared primary lock; the primary answers every question):
     flock -s ~/.local/state/lloyd-automod/primary.lock \
       .venvs/lloyd/bin/python eval/run_memory_eval.py run --arms closed_book,history,prefetch \
       --label baseline-2026-09-25 [--holdout]
+    # #1516's deployment decision: the channel against today's prefetch arm
+    flock -s ~/.local/state/lloyd-automod/primary.lock \\
+      .venvs/lloyd/bin/python eval/run_memory_eval.py run --arms prefetch,sleep_notes \\
+      --label sleep-notes-2026-09-26
     .venvs/lloyd/bin/python eval/run_memory_eval.py verify
     .venvs/lloyd/bin/python eval/run_memory_eval.py prefetch-retrieval   # no model: rider-1 retrieval A/B
     .venvs/lloyd/bin/python eval/run_memory_eval.py export-sessions --out DIR
@@ -93,7 +108,12 @@ SET_ROOT = HERE / "memory_eval"
 DEFAULT_VERSION = "v1"
 CATEGORIES = ("single_session", "multi_session", "knowledge_update", "temporal", "preference")
 REQUIRED_FIELDS = ("id", "category", "prompt", "asked_on", "probe", "accept", "source")
-ARMS = ("closed_book", "history", "prefetch", "prefetch_rel", "recall", "recall_episodic")
+#: #1516: the next-session channel, measured against the per-turn prefetch arm.
+#: One name, because the arm id appears in the arm list, the comparison pairs and
+#: the store redirect, and a copy that drifts would compare two different arms.
+SLEEP_NOTES_ARM = "sleep_notes"
+ARMS = ("closed_book", "history", "prefetch", "prefetch_rel", "recall",
+        "recall_episodic", SLEEP_NOTES_ARM)
 #: The `vault_recall` arms (#1485): the tool's documents for the question, with
 #: the episodic floor off / on. They need a qmd index whose `sessions`
 #: collection holds the set's sessions (`export-sessions`, then a prepared pin);
@@ -538,6 +558,37 @@ def prefetch_blocks(q: Question) -> dict:
             "facts_conf": conf, "facts_rel": rel, "prefetch_ms": round(ms, 1)}
 
 
+def sleep_notes_block(prompt: str, fact_lines: list[str]) -> str:
+    """`fact_lines` carried by the #1516 channel, ready to be the arm's user turn.
+
+    The pair is a delivery comparison, not a retrieval one: `prefetch` shows the
+    confidence-ordered facts inside the per-turn `<context>` block, and this arm
+    shows the same lines inside `<next-session-notes>`, off the same one prefetch
+    call. Everything else about the question — the seed, the model, the judge — is
+    the same byte, so whatever the pair measures is the channel.
+
+    It measures a real cost, because the channel is a real channel. The note is
+    written through `app.next_session_notes` and drained back the way a morning
+    turn drains it, so the renderer's `NEXT_SESSION_CONTENT_MAX` applies: material
+    the prefetch block would have carried in full can be truncated here, and the
+    truncation lands in `evidence_in_context` exactly where a reader would feel it.
+    A gain for this arm is not assumed anywhere in this file — the ship/no-ship
+    call is the paired-bootstrap CI over a run, which is why the arm exists.
+    """
+    import prefetch as pf
+    from app import next_session_notes as nsn
+
+    nsn.write_next_session_note(
+        source="eval:lloydmemeval",
+        summary="LloydMemEval sleep-note: facts retrieved for this question",
+        content="\n".join(fact_lines))
+    notes = nsn.drain_next_session_notes()
+    if not notes:
+        return prompt
+    block = pf._format_context([], [], notes=notes, show_skill_hint=False)
+    return f"{block}\n\n{prompt}" if block else prompt
+
+
 def session_export_id(sid: str, date: str) -> str:
     """A chat-shaped id (`YYYYMMDD_HHMMSS_<tag>`, three parts like a real chat)
     for one synthetic session, deterministic in its sid."""
@@ -618,7 +669,7 @@ def build_messages(q: Question, arm: str, pool: list[Question], blocks: dict | N
     if arm == "history":
         system += ("\n\nYour earlier conversations with Alan, oldest first:\n\n"
                    + history_block(q, pool))
-    elif arm in ("prefetch", "prefetch_rel") or arm in RECALL_ARMS:
+    elif arm in ("prefetch", "prefetch_rel", SLEEP_NOTES_ARM) or arm in RECALL_ARMS:
         user = blocks[arm]
     elif arm != "closed_book":
         raise ValueError(f"unknown arm {arm!r}")
@@ -807,12 +858,26 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
     ms = load_set(Path(args.set), view="all" if args.holdout else "tuning")
     judge_model = DJEV_JUDGE_MODEL if args.judge == "djev" else "rules"
     check_judge(ms.generator_model, judge_model)
-    if any(a.startswith("prefetch") for a in arms) and blocks_fn is None:
+    want_facts = any(a.startswith("prefetch") for a in arms) or SLEEP_NOTES_ARM in arms
+    if want_facts and blocks_fn is None:
         os.environ.setdefault("LLOYD_FACTS_ROOT", str(Path(args.corpus) / "facts"))
         os.environ.setdefault("LLOYD_KG_DB", str(Path(args.corpus) / "kg.sqlite"))
     blocks_fn = blocks_fn or prefetch_blocks
     recall_fn = recall_fn or recall_blocks
     use_recall = any(a in RECALL_ARMS for a in arms)
+    # The #1516 arm writes through the live channel module, whose default path is
+    # the running tree's data root. A benchmark that left a "what to know today"
+    # note standing there would hand it to the next real chat turn if the run died
+    # between writing and draining, so the run gets a store of its own in its own
+    # out-dir unless the caller named one first.
+    sleep_store = ""
+    if SLEEP_NOTES_ARM in arms:
+        from app import next_session_notes as nsn
+        out_dir = Path(args.out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        sleep_store = str(out_dir / f"sleep-notes-store-{os.getpid()}.json")
+        os.environ.setdefault(nsn.STORE_PATH_ENV, sleep_store)
+        sleep_store = os.environ[nsn.STORE_PATH_ENV]
 
     legs = [("dev", ms.dev)] + ([("holdout", ms.holdout)] if args.holdout else [])
     if args.limit:
@@ -831,9 +896,16 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
     for leg, qs in legs:
         for q in qs:
             blocks = None
-            if any(a.startswith("prefetch") for a in arms):
+            if want_facts:
                 blocks = blocks_fn(q)
                 prefetch_meta[q.id] = {k: blocks[k] for k in ("facts_conf", "facts_rel", "prefetch_ms")}
+                if SLEEP_NOTES_ARM in arms:
+                    # Off the SAME retrieval, so the pair prices the channel and
+                    # nothing else: the arm's only advantage would be that a note
+                    # is already there when the turn opens, and its only cost is
+                    # the renderer's cap on what a note may carry.
+                    blocks = {**blocks, SLEEP_NOTES_ARM: sleep_notes_block(
+                        q.prompt, list(blocks.get("facts_conf") or []))}
             if use_recall:
                 rb = recall_fn(q)
                 blocks = {**(blocks or {}), **rb}
@@ -883,12 +955,16 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
                   "settles": "mixed / unmatched answers" if use_djev else "nothing (rules only)"},
         "arms": arms, "min_category_n": MIN_CATEGORY_N, "wall_s": wall,
         "prefetch_corpus": os.environ.get("LLOYD_FACTS_ROOT"),
+        # Which file the #1516 arm's notes went through, so a reader can tell a
+        # run that used the channel from one that only named it, and can see for
+        # itself that it was never the live one.
+        "sleep_notes_store": sleep_store or None,
     }
     dev_rows = [r for r, j in zip(rows, jobs) if j["leg"] == "dev"]
     report["dev"] = {arm: summarize_arm([r for r in dev_rows if r["arm"] == arm]) for arm in arms}
     comps = []
     for a, b in (("closed_book", "history"), ("closed_book", "prefetch"), ("prefetch", "prefetch_rel"),
-                 ("recall", "recall_episodic")):
+                 ("recall", "recall_episodic"), (SLEEP_NOTES_ARM, "prefetch")):
         if a in arms and b in arms:
             for metric in ("correct_strict", "correct", "evidence_in_context"):
                 comps.append(compare(dev_rows, a, b, metric))

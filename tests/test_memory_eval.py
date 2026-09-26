@@ -316,3 +316,108 @@ def test_render_recall_is_the_bare_question_without_documents():
     assert M.render_recall("q?", []) == "q?"
     out = M.render_recall("q?", [{"path": "sessions/a.md", "snippet": "x\n  y"}])
     assert out == "<vault_recall>\n- sessions/a.md: x y\n</vault_recall>\n\nq?"
+
+
+# ── #1516: the sleep_notes arm answers through the next-session channel ─────
+#
+# The item's measurement half is a transport comparison: the same facts
+# `prefetch` renders inside the per-turn `<context>` block, delivered instead
+# through the file-backed channel a nightly pass writes to. So the retrieval leg
+# is planted here (`blocks_fn`) and the engine is faked — what is under test is
+# that the arm really goes through `app.next_session_notes` and that the
+# existing arm-vs-arm path emits its paired-bootstrap row per category.
+# Whether the channel is worth keeping is a CI over a real GPU run, which is a
+# human call (`--arms prefetch,sleep_notes`); nothing below presumes an answer.
+
+def _facts_blocks(lines):
+    def blocks(q):
+        return {"prefetch": M.splice_facts(q.prompt, q.prompt, lines),
+                "prefetch_rel": M.splice_facts(q.prompt, q.prompt, lines),
+                "facts_conf": list(lines), "facts_rel": list(lines), "prefetch_ms": 1.0}
+    return blocks
+
+
+def test_the_sleep_notes_arm_answers_through_the_channel(tmp_path, monkeypatch):
+    from app import next_session_notes as nsn
+
+    store = tmp_path / "run-store.json"
+    monkeypatch.setenv(nsn.STORE_PATH_ENV, str(store))
+    root = make_set(tmp_path, {"multi_session": 22, "knowledge_update": 22})
+    lines = ["- [A] Relay listens on port 8182 (Relay/Relay-state.md#s000)"]
+    turns: list[str] = []
+
+    def answer_for(messages):
+        turn = messages[-1]["content"]
+        turns.append(turn)
+        return ACTS if "<next-session-notes>" in turn else "no idea"
+
+    rep = M.run(["--set", str(root), "--arms", f"prefetch,{M.SLEEP_NOTES_ARM}",
+                 "--judge", "rules", "--label", "s", "--out-dir", str(tmp_path / "runs")],
+                complete=_fake_complete(answer_for), primary=("http://x", "fake"),
+                blocks_fn=_facts_blocks(lines))
+    art = json.loads(Path(rep["_path"]).read_text())
+
+    assert M.SLEEP_NOTES_ARM == "sleep_notes" and M.SLEEP_NOTES_ARM in M.ARMS, (
+        "the runner refuses `--arms sleep_notes`, so the comparison cannot be run")
+    # Both transports reached the model, and the notes arm reached it through the
+    # store: the note is the channel's own envelope, carrying the same fact line
+    # the prefetch arm renders inside `<facts>`.
+    assert any("<next-session-notes>" in t and "8182" in t for t in turns), turns[:1]
+    assert any("<facts>" in t for t in turns), turns[:1]
+    assert art["dev"]["sleep_notes"]["multi_session"]["correct"]["rate"] == 1.0
+    assert art["dev"]["prefetch"]["multi_session"]["correct"]["rate"] == 0.0
+    # The producer named a store, so the run used it, and it drained what it
+    # wrote: a benchmark that left a note standing would hand it to a real turn.
+    assert art["sleep_notes_store"] == str(store)
+    assert json.loads(store.read_text())["notes"] == []
+
+
+def test_the_channel_row_is_paired_against_prefetch_per_category(tmp_path, monkeypatch):
+    """The ship/no-ship number the item asks for, in the shape that decides it:
+    one paired-bootstrap row for `sleep_notes` vs `prefetch` in every category,
+    `multi_session` and `knowledge_update` among them — the two the item names.
+    """
+    from app import next_session_notes as nsn
+
+    monkeypatch.setenv(nsn.STORE_PATH_ENV, str(tmp_path / "store.json"))
+    root = make_set(tmp_path, {"multi_session": 22, "knowledge_update": 22})
+    rep = M.run(["--set", str(root), "--arms", f"prefetch,{M.SLEEP_NOTES_ARM}",
+                 "--judge", "rules", "--label", "s", "--out-dir", str(tmp_path / "runs")],
+                complete=_fake_complete(lambda m: "no idea"),
+                primary=("http://x", "fake"),
+                blocks_fn=_facts_blocks(["- [A] Relay listens on port 8182"]))
+    art = json.loads(Path(rep["_path"]).read_text())
+    rows = [c for c in art["dev_comparisons"]
+            if c["a"] == M.SLEEP_NOTES_ARM and c["b"] == "prefetch"]
+
+    assert {c["metric"] for c in rows} == {"correct_strict", "correct", "evidence_in_context"}
+    correct = next(c for c in rows if c["metric"] == "correct")["by_category"]
+    for cat in ("multi_session", "knowledge_update"):
+        cell = correct[cat]
+        assert cell["n"] == 22, (cat, cell)
+        assert "ci" in cell and len(cell["ci"]) == 2, (cat, cell)
+        assert cell["a"] == 0.0 and cell["b"] == 0.0, (cat, cell)
+
+
+def test_a_run_names_the_channel_store_it_used_inside_its_own_out_dir(tmp_path, monkeypatch):
+    """A run that does not name a store still must not write the live channel:
+    its notes go to a file in its own `--out-dir`, and the artifact says which.
+    """
+    from app import next_session_notes as nsn
+
+    monkeypatch.delenv(nsn.STORE_PATH_ENV, raising=False)
+    root = make_set(tmp_path, {"multi_session": 1})
+    out = tmp_path / "runs"
+    rep = M.run(["--set", str(root), "--arms", M.SLEEP_NOTES_ARM, "--judge", "rules",
+                 "--label", "s", "--out-dir", str(out)],
+                complete=_fake_complete(lambda m: "no idea"), primary=("http://x", "fake"),
+                blocks_fn=_facts_blocks(["- [A] Relay listens on port 8182"]))
+    art = json.loads(Path(rep["_path"]).read_text())
+
+    used = Path(art["sleep_notes_store"])
+    assert used.parent == out, art["sleep_notes_store"]
+    # Not `nsn.store_path()`: the run set the override, so that call reports the
+    # run's own file back and the check could never fail. The comparison is with
+    # the name the channel carries when nothing overrides it — the file a real
+    # morning turn reads.
+    assert used != nsn.DATA_ROOT / nsn.FILE_NAME, "the run pointed the arm at the live channel"

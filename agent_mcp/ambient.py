@@ -66,7 +66,8 @@ async def list_tools():
                 "'notable' runs an agent turn that may stay silent via "
                 "ambient_decide(surface=false); 'urgent' runs a turn framed to "
                 "surface it now, so use it sparingly. An empty session_id means "
-                "the user's most recent chat; with no active chat it is a no-op."
+                "the user's most recent chat; with none, it waits in the "
+                "next-session channel (#1516)."
             ),
             inputSchema={
                 "type": "object",
@@ -183,9 +184,35 @@ async def _tool_session_inject_context(args: dict) -> list[TextContent]:
 
     session_id = await _resolve_session_id(args.get("session_id") or "")
     if not session_id:
+        # Nothing resolves to a session that is open. This used to be the whole
+        # answer — "skipped", and the signal was gone — which is right for a
+        # signal addressed to a session and wrong for the case a nightly pass
+        # actually has: at 03:00 there is no session to name, and there will be
+        # one at 08:00. So an unaddressed producer now falls through to the
+        # file-backed next-session channel (#1516), which needs no session and
+        # outlives this process.
+        #
+        # The two facts that make that the right door, and the reason it is not
+        # the ambient queue: the queue is keyed by session id, so with none it
+        # cannot be written at all; and its default deadline is 3600 s, so a note
+        # queued at 03:00 would be reclaimed by ~04:00 — hours before the turn
+        # that was supposed to read it.
+        status, body = await _post_json("/api/next-session-note", {
+            "source": source,
+            "summary": summary,
+            "content": (args.get("content") or "").strip(),
+            "dedup_key": (args.get("dedup_key") or source).strip(),
+            "ttl_seconds": int(args.get("ttl_seconds") or 0) or None,
+        })
         return text_result(json.dumps({
-            "skipped": True,
-            "reason": "no active user session",
+            "ok": 200 <= status < 300,
+            "status": status,
+            "channel": "next-session",
+            "priority": priority,
+            "reason": ("no user session was open to deliver to, so this went to the "
+                       "next-session channel: the first chat turn reads it and the "
+                       "store holds it for 24 h"),
+            "server_response": body,
         }))
 
     content = (args.get("content") or "").strip()

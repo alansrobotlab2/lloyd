@@ -37,6 +37,13 @@ from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords, strip_qmd_
 from prompt_builder import PROMPT_BUDGET_CHARS, prompt_token_estimate, skills_push_enabled
 from app.event_log import log_event
 from app.sessions_io import ambient_clock_stamp
+# The next-session channel (#1516). The drain itself is imported inside
+# `_prefetch_prepare` beside the ambient one; the two caps are imported here
+# because this module is the only place text gets charged before it reaches a
+# turn, and the numbers belong to the store that sets them — a second copy here
+# is what drifts. The memory eval's `sleep_notes` arm exists to price exactly
+# this charge against the per-turn prefetch arm.
+from app.next_session_notes import NEXT_SESSION_CONTENT_MAX, NEXT_SESSION_SUMMARY_MAX
 
 logger = logging.getLogger("lloyd.prefetch")
 
@@ -1171,7 +1178,8 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
                     session_results: list[dict] = None,
                     ambient_entries: list = None,
                     backlog_refs: list[str] = None,
-                    show_skill_hint: bool = True) -> str:
+                    show_skill_hint: bool = True,
+                    notes: list = None) -> str:
     parts = []
 
     # Ambient prefetch drain — background signals from autonomy/cron/etc.
@@ -1209,6 +1217,42 @@ def _format_context(skills: list[tuple[float, dict]], fact_lines: list[str],
             "reference them only if naturally relevant to what they're saying now.\n"
             + "\n".join(amb_lines)
             + "\n</ambient-signals>"
+        )
+
+    # Next-session notes (#1516) — what a nightly pass left for tomorrow, drained
+    # off a file by whichever turn opens first. Beside the ambient drain and inside
+    # the same `<context>` envelope, because that is where the architecture puts
+    # dynamic context: position 0 is frozen for the turn (`architecture/harness.md`)
+    # and all dynamic context is prepended to the *user message*
+    # (`architecture/subliminal.md`). Never a system-prompt change, and nothing
+    # above this line reaches one.
+    if notes:
+        note_lines = []
+        for note in notes:
+            summary = note.summary[:NEXT_SESSION_SUMMARY_MAX]
+            if len(note.summary) > NEXT_SESSION_SUMMARY_MAX:
+                summary += " [... truncated]"
+            line = f"- **[{note.source}]** {summary}"
+            stamp = ambient_clock_stamp(note.enqueued_at)
+            if stamp:
+                # #1197 one night later: a nightly brief with no clock in its
+                # context composes its own date, and nothing strips a composed
+                # date. This is the server's reading of when the note was written.
+                line += f"\n  _written: {stamp}_"
+            if note.content:
+                body = note.content[:NEXT_SESSION_CONTENT_MAX]
+                if len(note.content) > NEXT_SESSION_CONTENT_MAX:
+                    body += " [… truncated]"
+                line += f"\n  > {body}"
+            note_lines.append(line)
+        parts.append(
+            "<next-session-notes>\n"
+            "A background pass left these notes for the next session, and this turn is "
+            "the first to read them — the channel holds them exactly once, so they will "
+            "not appear again. The user did NOT ask for them; use them only where they "
+            "bear on what is being asked now.\n"
+            + "\n".join(note_lines)
+            + "\n</next-session-notes>"
         )
 
     # Skills: the first goes in as a full body, the second as an excerpt only
@@ -1316,14 +1360,19 @@ def _read_plan_mode(session_id: str | None) -> bool:
 
 def _prefetch_prepare(text: str, session_id: str | None,
                       plan_mode: bool | None) -> tuple | None:
-    """Cheap, loop-thread-safe half of prefetch: ambient drain, focus
-    update, plan-mode flag. Returns None when there is nothing to do
-    (message too short and no ambient entries), else the tuple that
-    `_prefetch_run` consumes.
+    """Cheap, loop-thread-safe half of prefetch: the two background drains, focus
+    update, plan-mode flag. Returns None when there is nothing to do (message too
+    short, nothing drained), else the tuple that `_prefetch_run` consumes:
+    `(ambient_entries, notes, focus, plan_mode_active)`.
 
     Kept on the caller's thread on purpose: the ambient queue is mutated
-    by producers on the event loop, and the focus tracker's turn counter
-    should advance in request order.
+    by producers on the event loop, the focus tracker's turn counter
+    should advance in request order, and the next-session channel (#1516) holds a
+    note for exactly one turn — drained twice, it delivers twice.
+
+    Both drains run before the length guard, for the same reason: a producer that
+    already decided a signal was worth showing should not be suppressed by a
+    threshold that exists to skip *retrieval* on short messages.
     """
     # Drain ambient queue FIRST — even a short message should surface
     # queued background context. Don't let the MIN_MESSAGE_LEN guard
@@ -1336,7 +1385,19 @@ def _prefetch_prepare(text: str, session_id: str | None,
         except Exception:
             ambient_entries = []  # Non-fatal
 
-    if len(text.strip()) < MIN_MESSAGE_LEN and not ambient_entries:
+    # Then the next-session channel (#1516): a file, not a per-session dict, so a
+    # note written at 03:00 by a pass that had no session to name is still here at
+    # 08:00. Not swallowed into silence the way the ambient drain is — a note no
+    # turn received is a signal nobody would learn went missing (#910), so an I/O
+    # fault here says so.
+    try:
+        from app.next_session_notes import drain_next_session_notes
+        notes = drain_next_session_notes() or []
+    except Exception:
+        logger.warning("next-session notes: drain failed", exc_info=True)
+        notes = []
+
+    if len(text.strip()) < MIN_MESSAGE_LEN and not ambient_entries and not notes:
         return None
 
     # Update conversation focus tracker
@@ -1347,10 +1408,11 @@ def _prefetch_prepare(text: str, session_id: str | None,
     if plan_mode is None:
         plan_mode = _read_plan_mode(session_id)
 
-    return ambient_entries, focus, bool(plan_mode)
+    return ambient_entries, notes, focus, bool(plan_mode)
 
 
-def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
+def _prefetch_run(text: str, ambient_entries: list, notes: list,
+                  focus: SessionFocus | None,
                   plan_mode: bool,
                   session_id: str | None = None) -> str:
     """Blocking half of prefetch: budgeted parallel search + formatting.
@@ -1514,7 +1576,8 @@ def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
     context = _format_context(injectable, facts_result, vault_result,
                               session_result, ambient_entries=ambient_entries,
                               backlog_refs=backlog_result,
-                              show_skill_hint=not is_continuation)
+                              show_skill_hint=not is_continuation,
+                              notes=notes)
 
     # IDE state — what folder/file the user has open in the IDE tab. Tiny,
     # always-fresh, helps the agent answer "what file am I looking at?"
@@ -1559,7 +1622,11 @@ def _prefetch_run(text: str, ambient_entries: list, focus: SessionFocus | None,
 # splices in after the render. Explicit on purpose: a section not named here is
 # one whose cost nobody measures, and it is still paid for on every turn.
 CONTEXT_SECTION_TAGS = (
-    "ambient-signals", "skill", "backlog-refs", "facts",
+    # #1516: the next-session channel's part sits beside `ambient-signals` in the
+    # block, so it is priced beside it here too. A part missing from this tuple is
+    # not merely unlabelled — `injected_section_sizes` measures only what is named,
+    # and a section whose cost nobody measures is one nobody ever trims.
+    "ambient-signals", "next-session-notes", "skill", "backlog-refs", "facts",
     "vault-context", "recent-sessions", "skill-hint", "ide_state",
 )
 

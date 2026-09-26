@@ -317,7 +317,9 @@ def test_a_turn_reclaims_its_own_session_through_the_real_prefetch_caller():
 
     assert prepared is not None, (
         "the short-message guard suppressed a signal the producer already queued")
-    ambient, _focus, _plan_mode = prepared
+    # 4-tuple since #1516 drained the next-session channel here as well; this
+    # test's claim is about the ambient signal, which is still the first element.
+    ambient, _notes, _focus, _plan_mode = prepared
     assert [e.source for e in ambient] == ["still-live"], (
         "the turn received the expired signal, or lost the live one")
     assert not _key_holds_entries("turn"), "the turn's drain left an empty list under the key"

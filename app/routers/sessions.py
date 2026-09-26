@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 
 from app import sessions_io
 from app.date_fidelity import refusal_detail
+from app.next_session_notes import write_next_session_note
 from app.paths import SESSIONS_DIR
 from app.sessions_io import (
     HEAD_PLATFORM_WINDOW,
@@ -1250,6 +1251,67 @@ async def inject_ambient_prefetch(session_id: str, request: Request):
     )
     result = enqueue_ambient_prefetch(session_id, entry)
     return JSONResponse(result)
+
+
+@router.post("/api/next-session-note")
+async def api_next_session_note(request: Request):
+    """Queue one note for whichever chat turn comes next (#1516).
+
+    No session id in the path, and no 404/409 for not having one — that absence is
+    the whole reason this door exists. The `/inject-prefetch` door above delivers to
+    a session that is already open: it 404s on an unknown id and 409s a platform
+    session with "ambient signals are not queued where nobody reads them". Both are
+    right there, and together they make the overnight case impossible: a nightly
+    pass at 03:00 has no chat session to name, and the resolution that might find
+    one for it is documented to answer None when nothing qualifies, which its own
+    tool documents as a producer no-op (`session_inject_context`).
+
+    So this writes through `app.next_session_notes`: a file under the data root,
+    bounded and expiring on the numbers that module declares, drained once by
+    `prefetch._prefetch_prepare` and rendered inside the prefetched `<context>`
+    block. Delivery is not this door's business, and nothing on it touches the
+    system prompt — position 0 is frozen for the turn (`architecture/harness.md`).
+
+    The date guard carries over, because target-less delivery does not lower the bar
+    for what arrives: `app.date_fidelity.refusal_detail`, the same #1149 matcher
+    `/inject-prefetch` applies to its own summary and content. A nightly brief
+    inventing its own day is #1197 wearing this item's hat — the producer that
+    delivers to no one still has a clock problem, and the note it writes is read by
+    a human the next morning.
+    """
+    data = await request.json()
+    source = (data.get("source") or "").strip()
+    summary = (data.get("summary") or "").strip()
+    if not source:
+        raise HTTPException(status_code=400, detail="source is required")
+    if not summary:
+        raise HTTPException(status_code=400, detail="summary is required")
+
+    content = (data.get("content") or "").strip()
+    refusal = refusal_detail([summary, content])
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
+
+    try:
+        ttl_raw = data.get("ttl_seconds")
+        ttl = None if ttl_raw in (None, "") else int(ttl_raw)
+    except (TypeError, ValueError):
+        # An unparseable ttl is a bug in the caller, not a value to guess at.
+        raise HTTPException(status_code=400,
+                            detail=f"ttl_seconds must be an integer, got {data.get('ttl_seconds')!r}")
+
+    result = write_next_session_note(
+        source=source,
+        summary=summary,
+        content=content,
+        dedup_key=(data.get("dedup_key") or "").strip(),
+        ttl_seconds=ttl,
+    )
+    # No event log here: `app.event_log.log_event` is per-session, and the whole
+    # point of this door is that there is no session to write against. The store
+    # itself logs what it dropped at delivery time, which is the moment a human
+    # would ask about.
+    return JSONResponse({"ok": True, **result})
 
 
 @router.get("/api/sessions/active")
