@@ -480,6 +480,18 @@ def _entity_seeding_off_in_tests(monkeypatch):
     monkeypatch.setenv("LLOYD_ENTITY_SEEDING", "0")
 
 
+@pytest.fixture(autouse=True)
+def _fact_write_gate_off_in_tests(monkeypatch):
+    """Fact writes in tests never ask the live djev (#1487).
+
+    `knowledge_graph.write_gate.mode` is `noop` in the live config, and every
+    `_fact_add` would otherwise put a djev read in front of a fixture's write.
+    The gate's own tests arm it with `monkeypatch.setenv(gate.MODE_ENV, …)` and a
+    fake `djev.ask_sync`, which overrides this.
+    """
+    monkeypatch.setenv("LLOYD_FACT_WRITE_GATE", "off")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _isolate_djev_shadow(tmp_path_factory):
     """No test appends a row to the log the djev floors are calibrated from.

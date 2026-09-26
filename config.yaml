@@ -2122,9 +2122,13 @@ knowledge_graph:
   # (skip restatements, never expire) | on (also supersede: expire the one fact
   # the new one contains). Measured 2026-09-25 on 400 held-out writes
   # (eval/measurements/fact-write-gate-2026-09-25.md): 77 NOOPs, 76 right;
-  # 3 UPDATEs, 3 safe. Off until Alan's ship call — see the write-up.
+  # 3 UPDATEs, 3 safe. `noop` since 2026-09-25 on Alan's ship call: it only
+  # skips restatements (76/77 right, Wilson [0.930, 0.998]; acts on ~20% of
+  # writes) and never expires a fact. `on` stays off until `shadow`-style data
+  # shows supersedes are safe at n > 3. Cost: ~340 ms p50 djev per asked write,
+  # on the slot that also ranks recalls. Kill switch: LLOYD_FACT_WRITE_GATE=off.
   write_gate:
-    mode: "off"
+    mode: "noop"
 
 # Query → entity seeding beyond the lexical extractor (#1486, app/entity_linker.py).
 # On since 2026-09-25 on a paired pinned-corpus measurement (86 queries):

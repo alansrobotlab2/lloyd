@@ -186,7 +186,11 @@ def test_noop_mode_never_expires_and_shadow_mode_never_skips(tree, monkeypatch):
 # ── the switch ──────────────────────────────────────────────────────────────
 
 def test_off_is_the_default_and_asks_nothing(tree, monkeypatch):
+    # The CODE default: no env, no config key. The live config ships `noop`,
+    # which is the next test's business, so hide it here.
+    import app.config
     monkeypatch.delenv(gate.MODE_ENV, raising=False)
+    monkeypatch.setattr(app.config, "CONFIG", {})
     fake = Djev(RESTATED)
     monkeypatch.setattr(djev, "ask_sync", fake)
     _add(OLD)
@@ -194,9 +198,11 @@ def test_off_is_the_default_and_asks_nothing(tree, monkeypatch):
     assert fake.calls == []
 
 
-def test_config_default_is_off_and_an_unknown_mode_reads_off(monkeypatch):
+def test_config_ships_noop_and_an_unknown_mode_reads_off(monkeypatch):
+    # `noop` is the measured-safe mode (76/77 NOOPs right on 400 held-out
+    # writes); `on` also expires facts and had 3 samples — not shipped (#1487).
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text())
-    assert cfg["knowledge_graph"]["write_gate"]["mode"] == "off"
+    assert cfg["knowledge_graph"]["write_gate"]["mode"] == "noop"
     monkeypatch.setenv(gate.MODE_ENV, "yes-please")
     assert gate.mode() == "off"
 
