@@ -62,26 +62,40 @@ is a floor, and the id it names carries the date it was the newest.
 
 Function is what a job means to do; **write authority is what it is permitted to
 do when nobody is watching**, and it is the axis worth checking first before
-changing any of these. Five tiers, covering every job the table above names, and
-they do not follow the function groups:
+changing any of these. Five tiers, covering every job the table above names. They
+do not follow the function groups, and the top row is the least uniform of them:
+writing a nightly reflection report, consolidating the skills library and
+rewriting the entity store are all "durable state", and they sit side by side —
+the row answers the permission question, never the size question:
 
 | Tier | Jobs | |
 |---|---|---|
-| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #87 #88 #89 | 23 |
+| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #87 #88 #89 · #48 | 24 |
 | Injects expiring context unattended | #68 | 1 |
-| Proposes; an operator applies | #48 #67 #84 | 3 |
+| Proposes; an operator applies | #67 #84 | 2 |
 | Reports only | #60 #82 #70 #78 #80 #36 #85 #86 #90 | 9 |
 | Acts on the fleet itself | #76 | 1 |
+
+The rows answer "may it write while nobody is watching", not "how much may it
+write". **#48 is in the top tier because it does write** — aliases, edge
+rewrites and moved fact files, every night — and what holds that to name-shape
+variants is the guard rail layer described under
+[Canonicalize](#canonicalize-48-67-84), not the tier; its two group mates, #67
+and #84, stay in the propose row because they stop at a file of proposals.
 
 Two consequences the function grouping makes visible and the chain grouping did
 not:
 
-- **The group with the most write authority has the least verification, and the
-  group with the most verification is forbidden from writing.** Canonicalize
-  carries the semantic gates, the unanimous-verdict rule and the guard rails
-  that downgrade a questionable merge to alias-only — and all three of its jobs
-  run in plan mode, because the 2026-08-22 wipe (12,131 edges) and the
-  2026-09-03 151-merge incident were both unattended applies. Distil writes
+- **The most heavily verified group is the only one whose verification is what
+  stands between a scheduled run and a write, and the group with the most write
+  authority has the least of it.** Canonicalize carries the semantic gates, the
+  unanimous-verdict rule and the guard rails that downgrade a questionable merge
+  to alias-only — and #48's scheduled run *applies*: nightly, unattended, the
+  mechanical CASE/PUNCT tiers, under the #990 ruling. So the rails are the
+  boundary there rather than a plan-mode default, and the 2026-08-22 wipe
+  (12,131 edges) and the 2026-09-03 151-merge incident — both unattended applies
+  — are why the rails are strict rather than advisory. #67 and #84 propose into
+  a file and stop. Distil writes
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
   apparatus. `workers/evidence.py` is the correction and the scheduler module
   `autonomy.py` is where its pilot set lives (`EVIDENCE_PILOT_TASK_IDS =
@@ -559,10 +573,14 @@ signals, trace2skill reads the tool-call record, and #54 reads the vault itself.
 
 ## Build the graph: #24, #51, #74
 
-The only three jobs that write to the edge store. #24 produces entities and
-`mentions` edges; #51 adds co-access edges from the trajectory record; #74
-re-types what #24 left untyped, after [Canonicalize](#canonicalize-48-67-84) has
-settled the names underneath.
+What each of these writes is the grouping, not whether it writes: #24 produces
+entities and `mentions` edges; #51 adds co-access edges from the trajectory
+record; #74 re-types what #24 left untyped, after
+[Canonicalize](#canonicalize-48-67-84) has settled the names underneath. These
+are the only jobs that **create** edges and entities. #48 writes the same store
+unattended every night too — it rewrites edges onto the surviving name, writes
+aliases and moves fact files — but it creates no entity and no relation, only a
+decision about which of two names an existing pair always should have shared.
 
 | ID | Freq | Depends | Role |
 |----|------|---------|---|
@@ -588,23 +606,40 @@ it. See [[knowledge-graph]].
 ## Canonicalize: #48, #67, #84
 
 Make what is already stored agree with itself — one name per entity, no
-contradictory claims. **All three run in plan mode and write nothing to the fact
-tree.** That is the group's defining property, not an accident of scheduling.
+contradictory claims. **What this group may change is a name, never a fact**, and
+within that boundary its write authority is not uniform: #67 and #84 propose into
+a file and stop, while **#48 applies the mechanical tiers unattended every
+night**, by Alan's ruling on #990 (2026-09-16, reaffirmed 2026-09-24). That
+asymmetry is the group's defining property, not an accident of scheduling.
 
 | ID | Freq | Depends | Role |
 |----|------|---------|---|
-| #48 | daily | #24 | Name-shape clustering; `CASE`/`PUNCT` merge on shape, suffix pairs only on a unanimous definition-based verdict from the semantic gate. Reports a plan |
+| #48 | daily | #24 | Name-shape clustering; **applies** the `CASE`/`PUNCT` shape merges unattended (`--apply --tiers CASE,PUNCT`), one transaction per run. Suffix pairs never apply on schedule: they need a unanimous definition-based verdict from the semantic gate *and* a human to pass the tier |
 | #67 | weekly | — | LLM-judges the pairs string rules cannot — differently-spelled names, abbreviations, path variants. ~40 min/run. Writes `semantic-proposals-latest.jsonl` for #48's review list; strict guard rails downgrade questionable merges to alias-only |
 | #84 | daily | — | Fact-quality pass: reads the corrections log and recent-write drift, pairs contradictions, reports which claims an independent reason condemns |
 
-**Nothing here moves fact files unattended.** #48 is the one that could — it is
-the sweep that merges — but it never passes `--apply`, so its scheduled form
-reports a plan and stops. #67 proposes into a JSONL and stops too; its own
-`--apply` was retired 2026-09-04. #84 runs in plan mode and writes nothing;
-applying is an operator act. The only unattended writes to the edge store come
-from [Build the graph](#build-the-graph-24-51-74). That split is deliberate: the
+**#48 moves fact files unattended, and only for the tiers that are mechanical.**
+Step 3 of `skills/entity-resolution-sweep/SKILL.md` — the prompt the scheduler
+loads for this job — ends the run with `--apply --tiers CASE,PUNCT`, on the
+reasoning that a case or punctuation variant of one name is a mechanical merge
+rather than a claim about meaning. One transaction writes the aliases and every
+edge rewrite, then moves the fact files, behind the degraded-graph refusal
+(`--allow-degraded` is never passed), the high-value-name exclusion, a store
+backup and an apply report. The 2026-09-25 run record reads "Applied —
+CASE,PUNCT only (3 merges) … 4 edges rewritten, 3 aliases written, 3 dirs moved,
+Entities 11,992 → 11,989", and the four records before it end the same way — 30
+merges and 705 fact files moved, then 111, then 6 — each one naming the suffix
+queue it deliberately left alone. What stays a human act is every merge that
+*claims a meaning*:
+`SUFFIX_SAFE` is never passed to `--apply` on schedule, so the gate-approved
+suffix queue waits on a person — 17 clusters on 2026-09-24, 19 on 2026-09-25,
+growing while nobody runs them. #67 proposes into a JSONL and stops; its own
+`--apply` was retired 2026-09-04. #84 reports and writes nothing; applying is an
+operator act. The rails are the whole point of the arrangement, since the
 2026-08-22 wipe (12,131 edges) and the 2026-09-03 151-merge incident were both
-unattended applies.
+unattended applies — and the symbol-variant names (`C` / `C++` / `C#`) that the
+first automatic apply merged, and a revert then undid, are why the line sits at
+*mechanical* rather than at *whatever the judge approves*.
 
 **#84 exits 2 rather than report zero** when the graph cannot be read — the
 monitor rule it shares with #60, stated under

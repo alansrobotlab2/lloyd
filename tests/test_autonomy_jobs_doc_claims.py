@@ -927,3 +927,248 @@ def test_every_groups_heading_row_link_and_id_list_agree():
         elif href.group(1) != want:
             bad.append(f"{name}: row links #{href.group(1)}, heading slugs to {want}")
     assert not bad, f"group membership out of step with its own heading: {bad}"
+
+
+# ── #1524 — Canonicalize: what it may change, and what #48 actually writes ────
+
+CANON_HEADER = "Canonicalize"
+BUILD_HEADER = "Build the graph"
+PROPOSES_TIER = "Proposes; an operator applies"
+DURABLE_TIER = "Writes durable state unattended"
+
+#: The tiers a scheduled #48 run is told to `--apply`, exactly as step 3 of
+#: `skills/entity-resolution-sweep/SKILL.md` orders them (Alan's ruling on #990,
+#: 2026-09-16, reaffirmed 2026-09-24). Every other merge claims a meaning and so
+#: stays a human act — which is the half of the boundary this file cannot derive
+#: and has to read across.
+MECHANICAL_TIERS = {"CASE", "PUNCT"}
+
+
+def _group_section(name: str) -> str:
+    """One job group's own section, found through the matcher arch-review uses.
+
+    Per section because #1524's defect is a claim asserted twice — once in
+    §Build the graph, once in §Canonicalize, two separate review units — and true
+    in neither. Checking "somewhere in the doc" would let one section's correct
+    wording excuse the other's false one, which is the shape of the bug.
+    """
+    from workers.sources import arch_review as A
+    span = A.find_section(_text(), name)
+    assert span, f"architecture/autonomy-jobs.md lost its `## {name}` group heading"
+    return _flat("\n".join(_text().splitlines()[span[0] - 1:span[1]]))
+
+
+def test_canonicalize_says_48_applies_the_mechanical_tiers_unattended():
+    """Clause 1. §Canonicalize asserted "All three run in plan mode and write
+    nothing to the fact tree" and, of #48, that "it never passes `--apply`, so its
+    scheduled form reports a plan and stops". Neither has been true since #990:
+    step 3 of the job's own skill prompt ends the scheduled run with `--apply
+    --tiers CASE,PUNCT`, and the run records through 2026-09-25 each end in an
+    apply — 30 merges and 705 fact files moved, then 111, then 6, then 3 merges
+    with 4 edges rewritten and 3 aliases written.
+
+    #67 and #84 are left alone because their half is true: #67's own `--apply` was
+    retired 2026-09-04 and its four 2026-09-23 proposals were all guard-downgraded
+    to alias-only with 0 merges; #84 passed no `--apply` on 2026-09-25. The test
+    therefore pins that they still read as proposing, so the fix cannot be
+    "Canonicalize writes" either.
+    """
+    canon = _group_section(CANON_HEADER)
+    for dead in ("never passes `--apply`",
+                 "run in plan mode and write nothing",
+                 "Nothing here moves fact files unattended"):
+        assert dead not in canon, (
+            f"§Canonicalize still carries {dead!r}. It is not a nuance but the "
+            f"sentence an operator reads before deciding whether a nightly write into "
+            f"kg.sqlite needs watching")
+    m = re.search(
+        r"#48[^.]*?\bappl(?:y|ies|ied)\b[^.]*?CASE[^.]*?"
+        r"\b(unattended|nightly|every night)\b", canon, re.I)
+    assert m, (
+        "§Canonicalize never says, in one sentence, that #48 *applies* CASE/PUNCT "
+        "*unattended*. What runs on schedule is `--apply --tiers CASE,PUNCT` with "
+        "nobody watching, and both halves are the point: 'merges' without "
+        "'unattended' describes an operator act")
+    assert re.search(r"unattended|every night|nightly", canon, re.I) and \
+        re.search(r"never\s+\w+[^.]{0,40}SUFFIX|SUFFIX[^.]{0,40}\b(?:human|person)\b"
+                  r"|(?:human|person)[^.]{0,40}SUFFIX", canon, re.I), (
+        "the section never marks the suffix tier a human act, so it states the apply "
+        "without its bound and reads as 'Canonicalize merges whatever the judge likes'")
+    # The true half, pinned so the fix cannot overshoot. The group's role row for
+    # #67 also says "Proposes", so a loose `#67 … proposes` search would pass on
+    # the table while the prose was rewritten; these two bind the dated facts in
+    # the paragraph instead.
+    assert re.search(r"#67[^.]*\bretired\b", canon, re.I), (
+        "#67's plan-only status is a dated fact — its own `--apply` was retired "
+        "2026-09-04 — and the paragraph that just gained #48's apply is where a "
+        "reader learns the other two did not follow it")
+    assert re.search(r"#84[^.]*operator act", canon, re.I), (
+        "#84 writes nothing and applying is an operator act; if that has been "
+        "rewritten to match #48, the fix has overshot a falsehood into a true "
+        "sentence")
+
+
+def test_canonicalize_names_the_authority_for_the_apply():
+    """Clause 2. An unattended nightly write against the edge store has to be
+    attributable on the page, not inferable: #1524's own open question is whether
+    Alan retires the #990 ruling and sends #48 back to plan-only, and a reader
+    cannot ask that question of a doc that never names the ruling.
+    """
+    canon = _group_section(CANON_HEADER)
+    assert "#990" in canon, (
+        "the apply is described with no authority behind it. A reader who finds "
+        "an unattended `--apply` against kg.sqlite needs to know it is a decision "
+        "someone made, and this item's needs-human half is precisely whether that "
+        "decision still stands")
+    assert re.search(r"Alan[^.]{0,60}#990", canon), (
+        "`#990` is in the section but not attributed to the person who ruled: the "
+        "item says the choice is Alan's, not a doc edit's, and provenance is the "
+        "part that lets a later pass reopen it")
+    assert re.search(r"#990[^.]{0,40}2026-09-16", canon), (
+        "the ruling is undated. It is a 2026-09-16 ruling reaffirmed 2026-09-24, and "
+        "an undated permission in a document whose counts all carry dates is the "
+        "sentence that quietly stops being true")
+
+
+def test_the_functions_paragraph_makes_the_guard_rails_the_boundary():
+    """Clause 3. §The functions explained Canonicalize's strict gates by saying
+    "all three of its jobs run in plan mode", and called the group "forbidden from
+    writing". Both framing moves are now false, and they were the load-bearing
+    half of the doc's argument for the Build-the-graph / Canonicalize split.
+    """
+    funcs = _functions_section()
+    assert "run in plan mode" not in funcs and "forbidden from writing" not in funcs, (
+        "§The functions still explains the group's gating with plan mode. The group "
+        "applies nightly; the gates are what bounds it, and saying otherwise is how "
+        "the split keeps getting re-justified by a reason that no longer holds")
+    assert "Canonicalize carries" in funcs, "the Canonicalize bullet has been rewritten away"
+    bullet = funcs.split("Canonicalize carries", 1)[1].split("Distil writes", 1)[0]
+    assert "guard rails" in bullet, (
+        "the bullet no longer names the rails, so the paragraph has lost the thing "
+        "clause 3 asks it to credit as the boundary")
+    assert re.search(r"#48.{0,120}?\bappl", bullet, re.I) and "unattended" in bullet, (
+        "the paragraph does not say the scheduled run applies unattended, which is "
+        "the fact that made 'plan mode' false in the first place")
+    assert "#990" in bullet, "the paragraph attributes the apply to nothing"
+    assert re.search(r"2026-08-22 wipe|2026-09-03 151-merge", bullet) and \
+        re.search(r"(why the rails|rails are strict|boundary)", bullet, re.I), (
+        "the two incidents are the reason the rails exist; the paragraph has to keep "
+        "citing them as the reason the rails are strict, or it has swapped one false "
+        "explanation for silence")
+
+
+def test_build_the_graph_groups_by_what_each_job_writes():
+    """Clause 4. §Build the graph opened "The only three jobs that write to the
+    edge store", which is what made the invariant look like a property of the
+    store rather than of these three jobs — and #48 writes the same store nightly.
+    The grouping is kept, but on the axis that is actually true: these three
+    *create* entities and edges, #48 re-points existing ones.
+    """
+    build = _group_section(BUILD_HEADER)
+    assert "The only three jobs that write to the edge store" not in build, (
+        "the sentence is back, and it is the one that let §Canonicalize's false "
+        "claim read as corroborated by a second section")
+    assert re.search(r"only jobs that \*{0,2}creat", build, re.I), (
+        "the section no longer states what its three jobs uniquely do, so the "
+        "grouping has lost its criterion instead of gaining a true one")
+    assert re.search(r"#48[^.]*unattended", build, re.I), (
+        "#48 is not named as an unattended writer of the store here, so a reader "
+        "who comes to this section for the store's writers still misses it")
+    assert re.search(r"alias", build, re.I) and re.search(r"no entity|creates no", build, re.I), (
+        "the section must name both halves: that #48 writes aliases and edge "
+        "rewrites, and that it creates no entity or relation — otherwise the "
+        "distinction it rests on is only implied")
+
+
+def test_48_is_tiered_apart_from_the_two_jobs_that_only_propose():
+    """Clause 5. The tier table is the doc's answer to "what may write while
+    nobody is watching", and it tiered #48 with #67 and #84 under "Proposes; an
+    operator applies" — internally consistent, since every row's count equalled
+    its own id list, and false all the same. That is the blind spot this file
+    documents elsewhere: its checks are deliberately internal, so nothing here
+    could see a row that no longer describes the fleet.
+    """
+    tiers = _table(TIERS_HEADER)
+    assert len(tiers) == 5, (
+        f"the table now has {len(tiers)} tiers; the five are the doc's own claim "
+        f"(\"Five tiers, covering every job the table above names\"), and adding a "
+        f"row is a decision about the taxonomy, not where #48 belongs")
+
+    def tier_of(job: str) -> list[str]:
+        return [t for t, (ids, _) in tiers.items() if job in ids]
+
+    assert tier_of("#48") == [DURABLE_TIER], (
+        f"#48 is tiered in {tier_of('#48') or 'no tier'}; it applies CASE/PUNCT "
+        f"nightly, so it writes durable state unattended, and it belongs in exactly "
+        f"one tier")
+    for job in ("#67", "#84"):
+        assert tier_of(job) == [PROPOSES_TIER], (
+            f"{job} is tiered in {tier_of(job)}; its plan-only status is accurate "
+            f"(#67's `--apply` was retired 2026-09-04, #84 passed none) and moving it "
+            f"is the opposite error to the one #1524 fixes")
+    for tier in (DURABLE_TIER, PROPOSES_TIER):
+        ids, n = tiers[tier]
+        assert n is not None and int(n) == len(ids), (
+            f"'| {tier} |' counts {n} for {len(ids)} ids — the row this change "
+            f"edited is the row whose count must have moved with it")
+    grouped = {i for ids, _ in _table(FUNCTIONS_HEADER).values() for i in ids}
+    tiered = [i for ids, _ in tiers.values() for i in ids]
+    assert len(tiered) == len(set(tiered)) and set(tiered) == grouped, (
+        "moving #48 between tiers must not change which jobs the table covers: "
+        f"{sorted(set(grouped) ^ set(tiered))}")
+
+
+def test_the_sweep_skill_and_the_doc_agree_on_which_tiers_apply():
+    """The process boundary the defect sits on. §Canonicalize's claim is about
+    what the job is *instructed* to do, and that instruction lives in the vault:
+    `skills/entity-resolution-sweep/SKILL.md` is loaded as the prompt, and this
+    document itself (§The skill is the job) says a vault edit takes effect on the
+    next run with no deploy and no gate. So the doc can be made true here and
+    falsified from the vault tomorrow, by a job that cannot see this file.
+
+    Read across the boundary rather than around it, for the reason
+    `board_presence.py` gives for the board: a skip when the vault is absent is a
+    green that certifies nothing, and the vault is on every box that runs this
+    suite.
+    """
+    import board_presence
+
+    skill = board_presence.vault_root() / "skills" / "entity-resolution-sweep" / "SKILL.md"
+    assert skill.is_file(), (
+        f"{skill} is unreadable, and the claim pinned here — that §Canonicalize "
+        f"describes the tiers #48 is told to apply — is a claim about that file")
+    raw = skill.read_text()
+    # Line by line, deliberately: `--apply` and `--tiers` sit on the same line
+    # whenever the instruction is an instruction, and a match allowed to cross a
+    # line break would pair a bare `--apply` with the next command's `--tiers` and
+    # read an order that the skill never gave.
+    ordered = {t for ln in raw.splitlines() if "--apply" in ln and "--tiers" in ln
+               for m in [re.search(r"--tiers\s+([A-Z_,]+)", ln)] if m
+               for t in m.group(1).split(",")}
+    assert ordered == MECHANICAL_TIERS, (
+        f"the skill orders `--apply --tiers {sorted(ordered)}` and this file records "
+        f"{sorted(MECHANICAL_TIERS)}. If the ruling changed, the doc and this constant "
+        f"change with it; if it did not, the skill did and that is the bigger question")
+    text = _flat(raw)
+    # Tight on purpose: the skill's own prose elsewhere says suffix clusters get
+    # "surfaced for human" review, and a wide `SUFFIX … human` window matches that
+    # and reports a human-only *apply* that is not stated there.
+    assert re.search(r"never\s+(?:pass|apply)[^.]{0,40}SUFFIX"
+                     r"|SUFFIX[^.]{0,40}\b(?:human|operator)\b", text, re.I), (
+        "the skill no longer says a suffix apply is a human act or never happens on "
+        "schedule. That exclusion is the half of §Canonicalize's sentence this test "
+        "can re-derive and the doc cannot, and it is the bound the #990 ruling stops "
+        "at")
+    canon = _group_section(CANON_HEADER)
+    for tier in sorted(MECHANICAL_TIERS):
+        assert tier in canon, (
+            f"the skill applies {tier} unattended and §Canonicalize never names it: "
+            f"a section describing a write by its category is describing a write "
+            f"nobody can bound")
+    assert re.search(r"SUFFIX", canon), (
+        "§Canonicalize never names the tier that stays a human act, so the reader "
+        "cannot tell an approved-and-waiting merge from one that will never happen")
+    assert "#48" not in _table(TIERS_HEADER)[PROPOSES_TIER][0], (
+        "the tier table has #48 back under 'Proposes; an operator applies' while the "
+        "skill still orders a scheduled apply — the pairing that made the doc false, "
+        "and now red on the skill's side of the boundary too")
