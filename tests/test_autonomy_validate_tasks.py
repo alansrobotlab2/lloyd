@@ -39,7 +39,7 @@ def test_a_frequency_outside_the_domain_with_no_runs_per_day_warns_naming_the_fi
     assert "24-pipeline.md: frequency '6x-daily'" in out, out
     assert "runs_per_day" in out and "never dispatch" in out, out
     # The warning names the domain it was checked against.
-    from autonomy import FREQUENCY_INTERVALS
+    from app.autonomy import FREQUENCY_INTERVALS
     for word in FREQUENCY_INTERVALS:
         assert word in out, (word, out)
 
@@ -67,7 +67,7 @@ def test_a_resolvable_schedule_raises_no_frequency_warning(tmp_path, fields):
 
 def test_the_check_reads_the_scheduler_domain_not_a_copy():
     src = (ROOT / "scripts" / "autonomy" / "validate_tasks.py").read_text()
-    assert "from autonomy import FREQUENCY_INTERVALS" in src
+    assert "from app.autonomy import FREQUENCY_INTERVALS" in src
     assert '"every-15min"' not in src, "the linter must not restate the vocabulary"
 
 

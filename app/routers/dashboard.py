@@ -627,7 +627,7 @@ def _hold_is_a_miss(row: dict[str, Any], fm: dict[str, Any], now) -> bool:
     if not row.get("blocked"):
         return True
     try:
-        import autonomy
+        from app import autonomy
     except Exception:
         return False
     if str(row["blocked"]).strip() in autonomy.DISPATCH_STOPPING_STATUSES:
@@ -693,7 +693,7 @@ def _autonomy() -> dict[str, Any]:
         # rather than hiding one.
         classifier = "naive"
         try:
-            import autonomy
+            from app import autonomy
 
             # The one shared `depends_on` resolution set (#870), read from THIS
             # caller's directory — which is why `dependency_resolution_set`
@@ -991,7 +991,7 @@ def _usage() -> dict[str, Any]:
     engines — distinct from the vLLM counters, which are per-engine and
     reset on restart.
     """
-    import usage_store
+    from app import usage_store
 
     return {
         "last_hour": usage_store.summary(hours=1),

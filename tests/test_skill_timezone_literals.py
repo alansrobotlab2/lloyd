@@ -86,7 +86,7 @@ def _active_skills() -> dict[str, str]:
     are the archive, quarantined skills are out of circulation. The rule judges
     the corpus that actually gets loaded.
     """
-    from prompt_builder import _is_quarantined_skill
+    from app.prompt_builder import _is_quarantined_skill
 
     out: dict[str, str] = {}
     for root in SKILLS_DIRS:

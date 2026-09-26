@@ -18,7 +18,7 @@ import logging
 
 import pytest
 
-import prompt_builder
+from app import prompt_builder
 from app.routers.messages import _turn_budget
 from app.sessions_io import NON_USER_PLATFORMS
 

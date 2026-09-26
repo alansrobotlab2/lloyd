@@ -51,7 +51,7 @@ import httpx
 LLOYD_HOME = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(LLOYD_HOME))
 
-import usage_store  # noqa: E402
+from app import usage_store  # noqa: E402
 from app.inner_voice import observer as obs_mod  # noqa: E402
 
 # The values production passes: 12 s for spawned non-terminal judgments

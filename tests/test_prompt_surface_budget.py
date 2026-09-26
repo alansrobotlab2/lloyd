@@ -7,7 +7,7 @@ of its bytes in the gate stack, 29% of its nonblank lines were prohibitions, and
 `MEMORY.md` had been overwritten with a byte-for-byte copy of the operating
 contract — so every turn paid ~4.4K duplicate tokens and *nothing in the code
 could see it*: `grep -n "PROMPT_BUDGET|prompt_chars|len(system_prompt)"
-prompt_builder.py prefetch.py` returned zero hits. The trim that closed the item
+app/prompt_builder.py app/prefetch.py` returned zero hits. The trim that closed the item
 (vault `010d233`) only holds if something pins it, and the mechanism that made
 the mess — autoresearch's promote path writing `SOUL.md`/`MEMORY.md` in the vault
 directly, no gate, no test — is still live. These tests are the only check
@@ -34,9 +34,9 @@ from pathlib import Path
 
 import pytest
 
-import prompt_builder as pb
-import prompt_surface as ps
-from prompt_surface import (
+from app import prompt_builder as pb
+from app import prompt_surface as ps
+from app.prompt_surface import (
     DUPLICATE_CONTRACT_CEILING,
     GATE_HEADS,
     GATE_STACK_CEILING,
@@ -46,7 +46,7 @@ from prompt_surface import (
 
 VAULT = Path.home() / "obsidian" / "lloyd"
 SOUL = VAULT / "SOUL.md"
-LLOYD_REPO = Path(pb.__file__).parent
+LLOYD_REPO = Path(pb.__file__).parents[1]
 
 # Two marks, and the second is the one that matters. `skipif` keeps these from
 # failing where the vault is absent; `live_vault` lets the automod gate exclude
@@ -169,10 +169,10 @@ def test_memory_md_is_not_a_copy_of_the_contract(memory_text, soul_text):
 @live_vault
 def test_anti_compliance_frame_lives_in_exactly_one_place(soul_text):
     """#465 — the same six rules shipped in Python and in the vault, diverged."""
-    code = (LLOYD_REPO / "prompt_builder.py").read_text(encoding="utf-8")
+    code = (LLOYD_REPO / "app" / "prompt_builder.py").read_text(encoding="utf-8")
     total = code.count("Certainly") + soul_text.count("Certainly")
     assert total == 1, (
-        f"'Certainly' appears {total}x across prompt_builder.py and SOUL.md; the "
+        f"'Certainly' appears {total}x across app/prompt_builder.py and SOUL.md; the "
         "no-blanket-agreement rule must be stated once, in the vault copy the "
         "promotion path can actually edit"
     )
@@ -350,14 +350,14 @@ def test_duplicate_run_detection_spans_blank_lines():
 # ── prefetch: the other half of the turn (#466) ─────────────────────────────
 
 def test_prefetch_shares_the_budget_constant():
-    import prefetch
+    from app import prefetch
 
     src = Path(prefetch.__file__).read_text(encoding="utf-8")
     assert "PROMPT_BUDGET_CHARS" in src, "prefetch does not reference the budget"
 
 
 def test_log_turn_prompt_budget_reports_totals_vs_budget(caplog):
-    import prefetch
+    from app import prefetch
 
     with caplog.at_level(logging.INFO, logger=prefetch.logger.name):
         prefetch.log_turn_prompt_budget(

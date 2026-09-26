@@ -50,7 +50,7 @@ from pathlib import Path
 
 # The ceilings themselves, and the refusal wording, live in `prompt_surface` — one
 # definition shared by every writer and by the reporting tests (#1010).
-from prompt_surface import memory_ceiling, size_error
+from app.prompt_surface import memory_ceiling, size_error
 
 # The directory `prompt_builder._load_memories` reads the two names from. The guard
 # fires on a path only when it resolves INTO this directory, which is what keeps a

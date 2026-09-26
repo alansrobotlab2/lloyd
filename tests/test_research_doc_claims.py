@@ -210,7 +210,7 @@ def test_the_generator_checks_the_code_before_calling_something_broken():
 
 def test_the_generator_task_has_room_to_finish():
     """900s auto-disabled it on 2026-09-04 after three consecutive timeouts."""
-    import autonomy
+    from app import autonomy
 
     task = autonomy._parse_task_file(autonomy._find_task_file(65))
     assert task and task["skill_name"] == "research-queue-generator"
@@ -226,7 +226,7 @@ def test_the_generator_task_has_room_to_finish():
 def test_the_generator_description_is_what_the_model_actually_reads():
     """`_build_task_prompt` renders the skill and the `description` field, and
     never the markdown body — so a stale description is a stale prompt."""
-    import autonomy
+    from app import autonomy
 
     task = autonomy._parse_task_file(autonomy._find_task_file(65))
     desc = task["description"]
@@ -237,7 +237,7 @@ def test_the_generator_description_is_what_the_model_actually_reads():
 def test_the_deep_dive_task_is_retired_not_still_scheduled():
     """It runs as the `deep-research` worker source now. Two schedulers for one
     skill would research two topics a day and record one."""
-    import autonomy
+    from app import autonomy
 
     assert autonomy._find_task_file(52) is None, "#52 is still dispatchable"
     archived = VAULT / "autonomy" / "_archived" / "52-deep-dive-research.md"
@@ -376,7 +376,7 @@ def _undelivered_tool_names(prompt: str, region: str, tools: frozenset[str]) -> 
 def _prompt_and_region(path: Path) -> tuple[str, str]:
     """Build this task's real prompt with the real loaders, and take the region
     of its body that would be ordering work."""
-    import autonomy
+    from app import autonomy
 
     task = autonomy._parse_task_file(path)
     assert task, f"{path.name} does not parse — the guard cannot read it"
@@ -589,20 +589,36 @@ def test_both_task_writers_stamp_the_body_contract(tmp_path, monkeypatch):
     assert "second write" in again, "the update path stopped appending its note"
 
 
+def test_an_older_wording_of_the_contract_is_replaced_not_stacked():
+    """The line cites a module path, and that path moved once already (repo root
+    to `app/`). Code and vault cannot change in the same instant, so a write made
+    between the two must upgrade the old line where it stands — the pin above
+    wants exactly one contract, as the first line."""
+    from agent_mcp._shared import TASK_BODY_CONTRACT, with_body_contract
+
+    old = TASK_BODY_CONTRACT.replace("`~/lloyd/app/autonomy.py`", "`~/lloyd/autonomy.py`")
+    assert old != TASK_BODY_CONTRACT
+    body = f"\n{old}\n\n# Task\n\n- 2026-09-26 activity\n"
+    out = with_body_contract(body)
+    assert out.count(TASK_BODY_CONTRACT) == 1 and old not in out, out[:300]
+    assert out == body.replace(old, TASK_BODY_CONTRACT)
+    assert with_body_contract(out) == out
+
+
 def test_the_scheduler_writers_keep_the_contract_when_they_rewrite_a_task(
         tmp_path, monkeypatch):
     """The two writers above stamp, and the scheduler's two re-writers neither
     stamp nor strip — they paste the body back verbatim, and this pins that they
     keep doing it.
 
-    `autonomy._update_task_field` (`autonomy.py:189`) and
-    `autonomy._append_activity_log` (`autonomy.py:203`) are by volume the most
+    `autonomy._update_task_field` (`app/autonomy.py:189`) and
+    `autonomy._append_activity_log` (`app/autonomy.py:203`) are by volume the most
     frequent writers of these 32 files: every dispatched run writes its status,
     failure count and activity note through them, and they are not the MCP tool
     or the HTTP route, so they never reach `with_body_contract`. They survive
     today only because each re-emits the front matter and reattaches `parts[2]`
     untouched — a refactor that rebuilt the body from the parsed dict instead
-    (`_parse_task_file` stores it at `fm["body"]`, `autonomy.py:151`) would drop
+    (`_parse_task_file` stores it at `fm["body"]`, `app/autonomy.py:151`) would drop
     the line from all 32 files in one scheduler tick, and the corpus pin above
     would then blame whoever's round happened to run next.
 
@@ -611,7 +627,7 @@ def test_the_scheduler_writers_keep_the_contract_when_they_rewrite_a_task(
     line and is still present exactly once. A re-stamping rewriter fails the
     count; a body-rebuilding one fails the first line.
     """
-    import autonomy
+    from app import autonomy
     from agent_mcp._shared import TASK_BODY_CONTRACT
 
     task_dir = tmp_path / "autonomy"

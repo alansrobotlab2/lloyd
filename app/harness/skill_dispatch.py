@@ -1,7 +1,7 @@
 """Dispatch-time skill delivery — the matched SKILL.md at the tool call, not only at turn start (#536).
 
-Lloyd already has a skill injector. `prefetch.py` scores the *turn text* once,
-before the turn, and injects the winner's body (`prefetch.py:40-42` thresholds,
+Lloyd already has a skill injector. `app/prefetch.py` scores the *turn text* once,
+before the turn, and injects the winner's body (`app/prefetch.py:40-42` thresholds,
 `_search_skills`, rendered in `_format_context`). What it structurally cannot do
 is key on the tool the agent is about to call: on a boilerplate worker prompt
 the turn-text match has nothing protocol-shaped to match on, so the rule that
@@ -20,7 +20,7 @@ This module is the second injector, and it is deliberately not a replacement:
   non-error `ToolSearch` result the loop already produces
   (`app/harness/loop.py:1501`), not the deny shape (`loop.py:1536-1540`), which
   comes back `is_error=True` and is booked into `tool_errors`
-  (`autonomy.py:912`, `:927`) — the very number this feature is meant to
+  (`app/autonomy.py:912`, `:927`) — the very number this feature is meant to
   improve. That second PreToolUse outcome is what `HookRegistry.fire_pre_tool_use`
   now recognises alongside `deny`;
 * it is **default-off**, one rule set, and it yields: a safety deny outranks a
@@ -338,8 +338,8 @@ _SKILL_TAG_RE = re.compile(r'<skill(?:-dispatch)? name="([^"]+)"')
 
 #: How a skill body reached the turn, as recorded on that turn's usage row
 #: (#783). `prefetch` is a full body `_format_context` injects at turn start
-#: (`prefetch.py:933`); `prefetch_excerpt` is its `excerpt="true"` variant
-#: (`prefetch.py:941`) — one line of a protocol is not the protocol, so they are
+#: (`app/prefetch.py:933`); `prefetch_excerpt` is its `excerpt="true"` variant
+#: (`app/prefetch.py:941`) — one line of a protocol is not the protocol, so they are
 #: two routes and never one count. `dispatch` and `skills_read` name the routes
 #: that have no writer yet: dispatch is default-off (`enabled()` reads a
 #: `harness.skill_dispatch` key `config.yaml` does not carry) and `skills_read`
@@ -446,7 +446,7 @@ def injected_skill_names(context_text: str) -> set[str]:
     """Skills the turn-start prefetch already injected into this turn.
 
     Parses the `<skill name="...">` blocks `_format_context` renders
-    (`prefetch.py:933/:941`) rather than reaching into prefetch's internals, so
+    (`app/prefetch.py:933/:941`) rather than reaching into prefetch's internals, so
     this keeps working if the injector changes shape and cannot accidentally
     diverge from what actually landed in the prompt. It is the name-only
     projection of `skill_deliveries` — one parser, and the usage row and the IV

@@ -93,7 +93,7 @@ def ledger_rows(text: str) -> list[dict]:
 
 
 def status(memories_dir: Path) -> dict:
-    from prompt_surface import memory_ceiling
+    from app.prompt_surface import memory_ceiling
     report = {}
     for name, ledger_name in LEDGERS.items():
         path = memories_dir / name

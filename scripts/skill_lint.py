@@ -67,7 +67,7 @@ from agent_mcp.skills import iter_active_skills, skill_roots  # noqa: E402
 # say about each skill, so it reads the index's own description rule and clip
 # rather than restating them (a second rule is how the index and the Skills page
 # drifted before #1294).
-from prompt_builder import (  # noqa: E402
+from app.prompt_builder import (  # noqa: E402
     _skills_index_settings, clip_skill_description, skill_index_description)
 
 #: Category name of the P5 bucket, used as the table row and the payload key.

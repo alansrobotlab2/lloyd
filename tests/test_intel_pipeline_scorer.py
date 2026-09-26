@@ -2361,7 +2361,7 @@ def test_autonomy_task_30_still_parses_as_scheduler_config():
     """
     if not AUTONOMY_TASK_30.exists():
         pytest.skip(f"no vault checkout at {AUTONOMY_TASK_30.parent}")
-    import autonomy
+    from app import autonomy
 
     parsed = autonomy._parse_task_file(AUTONOMY_TASK_30)
     assert parsed is not None, "the scheduler's parser returns nothing for task 30"

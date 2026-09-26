@@ -458,7 +458,7 @@ def test_a_real_bug_in_enrichment_is_not_swallowed_along_with_the_outage(monkeyp
 def test_the_per_turn_ambient_path_still_survives_an_outage(monkeypatch):
     """The seam this change crosses and deliberately does not fix.
 
-    `prefetch.py:664` is the qmd call with all the traffic — it runs inside
+    `app/prefetch.py:664` is the qmd call with all the traffic — it runs inside
     every turn — and it keeps both of its collapse paths (`if not results:
     return []` at :667 and `except Exception: return []` at :679). Making that
     caller distinguish failure from emptiness is #407's merged finding, not this
@@ -466,7 +466,7 @@ def test_the_per_turn_ambient_path_still_survives_an_outage(monkeypatch):
     not turn a dead daemon into an exception inside prompt assembly. Pinned so
     the eventual fix reads as a deliberate change to this assertion.
     """
-    import prefetch
+    from app import prefetch
 
     _daemon_fails(monkeypatch, TimeoutError("timed out"))
     assert prefetch._search_vault("guardian rollback policy ledger") == []

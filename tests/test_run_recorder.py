@@ -31,7 +31,7 @@ import sqlite3
 
 import pytest
 
-import autonomy
+from app import autonomy
 
 
 @pytest.fixture
@@ -71,14 +71,14 @@ def _events(store_dir):
 def usage_db(tmp_path, monkeypatch):
     """An isolated `usage.db`. The recorder writes one on every run, and this
     file's existing tests never asserted on it, so nothing isolated it before."""
-    import usage_store
+    from app import usage_store
 
     monkeypatch.setattr(usage_store, "DB_PATH", tmp_path / "usage.db")
     return tmp_path / "usage.db"
 
 
 def _usage_row(db, session_id: str) -> dict:
-    import usage_store
+    from app import usage_store
 
     usage_store._conn().commit()
     rows = list(sqlite3.connect(db).execute(
@@ -97,7 +97,7 @@ def _relieve_midrun(session_id: str, *, turn_id: str = "run-threaded",
     open, which is when a pass actually happens.
 
     `turn_id` is set on the options the way both real background callers set it —
-    `autonomy.py:2886` passes `turn_id=run_id` into `RunOptions`, and
+    `app/autonomy.py:2886` passes `turn_id=run_id` into `RunOptions`, and
     `workers/sources/_common.py:482` assigns `options.turn_id = run_id` — because
     the emit site reads the turn off `options`, not off the recorder. An earlier
     copy of this helper left it unset and then asserted the event carried no turn,
@@ -182,7 +182,7 @@ def test_the_relief_event_for_an_unattended_run_names_its_session(
         yield {"type": "text_delta", "text": "x"}
         # Same id on both sides, which is what production does: the caller that
         # hands `turn_id` to `record_events` is the one that put it on the
-        # RunOptions the relief pass then reads (`autonomy.py:2886`,
+        # RunOptions the relief pass then reads (`app/autonomy.py:2886`,
         # `workers/sources/_common.py:482`).
         _relieve_midrun(sid, turn_id=run_id, reason="overflow")
         yield {"type": "result", "stop_reason": "stop", "num_turns": 1,
@@ -552,7 +552,7 @@ def _stub_autonomy(monkeypatch, tmp_path, task, stream, *, write_records=False):
     monkeypatch.setattr(harness, "run_query", _run_query)
     monkeypatch.setattr(harness, "RunOptions", Opts)
     monkeypatch.setattr(mcp_pool, "DEFAULT_LLOYD_MCP_SERVERS", {}, raising=False)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "SYS")
     return captured
 
 

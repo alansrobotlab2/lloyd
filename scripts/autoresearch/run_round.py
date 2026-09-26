@@ -117,7 +117,7 @@ def post_promotion_check(
     *before* the record, but its verdict is reported in the section the record
     produced, because one section per round is what a reader follows.
     """
-    import prompt_surface
+    from app import prompt_surface
 
     from .promote import contract_shape_fields
 

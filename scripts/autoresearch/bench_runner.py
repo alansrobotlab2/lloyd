@@ -143,7 +143,7 @@ def _run_one_sync(
     """Blocking single-task runner. Thread-safe: no shared mutable state."""
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-    from prompt_builder import build_system_prompt
+    from app.prompt_builder import build_system_prompt
 
     started = time.time()
     trace: dict[str, Any] = {

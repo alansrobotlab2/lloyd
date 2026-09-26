@@ -12,7 +12,7 @@ model.
 
 So they are a harness hook now, installed beside `install_default_safety_hook`
 on the chat path (`messages._run_turn` and the sync route), on direct worker
-turns (`workers/sources/_common.py`), on scheduled tasks (`autonomy.py`) and
+turns (`workers/sources/_common.py`), on scheduled tasks (`app/autonomy.py`) and
 inside every `Task` subagent (`agent_mcp/builtin_task.py`). No LLM, no session
 flag. The judgment itself stays in `app/inner_voice/guards.py` as pure
 functions; only the wiring moved.
@@ -258,7 +258,7 @@ class TurnGuardState:
             return
         tid = self._tid()
         try:
-            from usage_store import record_inner_voice_observation
+            from app.usage_store import record_inner_voice_observation
 
             # Off the event loop, like the observer's rows: a commit here
             # would stall the primary's stream for as long as the disk takes.

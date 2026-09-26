@@ -82,7 +82,7 @@ def test_positives_without_negatives_fail_the_run(monkeypatch, capsys):
     monkeypatch.setattr(A, "load_spec", lambda *a, **k: {"skills": {TEA: {}}, "extra_records": []})
     monkeypatch.setattr(A, "load_records", lambda *a, **k: only_pos)
     monkeypatch.setattr(A, "base_skills", lambda: _inventory("steep oolong leaves"))
-    monkeypatch.setattr("prefetch._get_skills_cached", lambda: _inventory("steep oolong leaves"))
+    monkeypatch.setattr("app.prefetch._get_skills_cached", lambda: _inventory("steep oolong leaves"))
     assert ev.main([]) == 1
     assert "positives and no negatives" in capsys.readouterr().err
     assert A.contract_errors(A.build_cases(only_pos, [TEA])) == [
@@ -110,7 +110,7 @@ def test_the_baseline_lives_under_the_data_root():
 
 def test_activation_is_what_prefetch_injects(monkeypatch):
     """Top skill at the first threshold, the second only at SKILL_THRESHOLD_SECOND."""
-    import prefetch
+    from app import prefetch
     a, b = {"name": "a"}, {"name": "b"}
     monkeypatch.setattr(prefetch, "_search_skills",
                         lambda toks, skills=None: [(9.0, a), (prefetch.SKILL_THRESHOLD_SECOND - 0.1, b)])

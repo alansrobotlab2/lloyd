@@ -139,7 +139,7 @@ from app.paths import VAULT_ROOT as VAULT  # noqa: E402
 
 def arm_prompt(rendered: str, query: str, arm: str) -> str:
     """The user message one arm sends, from the ONE rendering of its query."""
-    from prefetch import drop_sections
+    from app.prefetch import drop_sections
 
     if arm == ARM_SUPPRESSED:
         return query
@@ -191,7 +191,7 @@ def system_prompt_for(arm: str) -> str:
     what flipping those keys in config.yaml would send.
     """
     from app.config import CONFIG
-    from prompt_builder import build_system_prompt
+    from app.prompt_builder import build_system_prompt
 
     variant = SYSTEM_VARIANTS.get(arm)
     if variant is None:
@@ -525,7 +525,7 @@ async def run_eval(queries: list[dict], *, arms: tuple[str, ...], max_turns: int
     from app.harness import HookRegistry, RunOptions, install_default_safety_hook
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
-    from prefetch import prefetch_context, split_injected
+    from app.prefetch import prefetch_context, split_injected
 
     # Asked of the running aggregator, not assumed from this checkout: a
     # `pt-eval-` id is only a sandbox if the aggregator serving it enforces one.

@@ -381,7 +381,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
                 "summary": f"#{topic_id} recovered an existing note: {topic[:60]}",
                 "meta": {"topic_id": topic_id, "result": "written", "recovered": True}}
 
-    import autonomy
+    from app import autonomy
     skill = await asyncio.to_thread(autonomy._load_skill_content, SKILL)
     if not skill:
         return await give_up_or_retry(f"skill {SKILL} not found", {"skill_missing": True})

@@ -51,7 +51,7 @@ def turn_tail(todos: list[dict] | None = None, plan: dict | None = None,
     """The text a turn appends to its user message, or "". Never raises."""
     parts: list[str] = []
     try:
-        import prompt_builder as pb
+        from app import prompt_builder as pb
 
         if pb.session_state_layout() == "user_tail":
             block = pb.build_session_state_block(todos, plan, goal)

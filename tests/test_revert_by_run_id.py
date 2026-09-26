@@ -28,7 +28,7 @@ import os
 import pytest
 import yaml
 
-import autonomy
+from app import autonomy
 from agent_mcp import _change_ledger as CL
 
 WRITES = ["knowledge/note-a.md", "knowledge/note-b.md", "lloyd/MEMORY.md"]
@@ -74,7 +74,7 @@ def _stub_run(monkeypatch, tmp_path, task):
     import app.harness.mcp_pool as mcp_pool
     monkeypatch.setattr(harness, "RunOptions", Opts)
     monkeypatch.setattr(mcp_pool, "DEFAULT_LLOYD_MCP_SERVERS", {}, raising=False)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "SYS")
 
 
 def _dead_run_that_wrote(monkeypatch, tmp_path, names):
@@ -229,7 +229,7 @@ def test_autonomy_reverts_only_from_the_explicit_entry_point():
     One test can show that a timeout did not revert; only a read of the module
     can show that NOTHING on the failure side can. Before #963 the only revert
     caller in the tree was the aggregator's HTTP route, and the gap the item
-    names was that no in-process caller existed; after it, `autonomy.py` holds
+    names was that no in-process caller existed; after it, `app/autonomy.py` holds
     exactly one call to `_change_ledger.revert(`, and it sits inside
     `revert_run_writes` — nowhere near `_record_failure`.
 
@@ -242,7 +242,7 @@ def test_autonomy_reverts_only_from_the_explicit_entry_point():
 
     src = (Path(autonomy.__file__)).read_text()
     assert src.count("_change_ledger.revert(") == 1, (
-        "exactly one revert call site in autonomy.py, and it is the entry point")
+        "exactly one revert call site in app/autonomy.py, and it is the entry point")
     entry_point = src.split("def revert_run_writes", 1)[1].split("\ndef ", 1)[0]
     assert "_change_ledger.revert(" in entry_point
     failure_path = src.split("async def _record_failure", 1)[1].split(

@@ -24,7 +24,7 @@ class _Resp:
 @pytest.fixture
 def engine(monkeypatch):
     """Queue replies; record every request body and the url it went to."""
-    import prompt_builder
+    from app import prompt_builder
 
     posted: list[tuple[str, dict]] = []
     replies: list = []

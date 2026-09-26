@@ -19,7 +19,7 @@ The rule: front matter runs from the opening fence line to the first *line* that
 is exactly `---`. A `---` that is part of a longer line — inside a quoted scalar,
 in a code fence, in a markdown rule — does not end the block. This is the rule
 CLAUDE.md states ("front matter is bounded by its closing `---`") and the one
-`prompt_builder.py` and `workers/sources/bench_mine.py` already approximate with
+`app/prompt_builder.py` and `workers/sources/bench_mine.py` already approximate with
 `content.find("\\n---\\n", 3)`.
 
 It is not merely tidier than the substring split; it is the only rule that can be

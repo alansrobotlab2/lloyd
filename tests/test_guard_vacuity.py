@@ -580,7 +580,7 @@ def test_every_site_names_a_file_that_exists_and_a_line_it_has(guards):
 
 
 @pytest.mark.parametrize("needle", [
-    "autonomy.py",                                    # the dependency gate
+    "app/autonomy.py",                                # the dependency gate
     "scripts/automod/gate.py",                        # the pytest floors
     "scripts/memory/entity-resolution-sweep.py",      # merge tier + baseline
     "scripts/memory/kg_rebuild.py",                   # the coverage gate

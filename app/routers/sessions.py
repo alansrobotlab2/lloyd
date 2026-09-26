@@ -752,7 +752,7 @@ async def create_session(request: Request):
     # sweeps both trees on every run, so a rename there fails here rather than as
     # a side panel that can no longer start a conversation. In-process callers
     # pass the kwarg instead of the body and are unaffected by this check:
-    # `workers/sources/_common.py:409`/`:620` (`worker`), `autonomy.py:1956`/
+    # `workers/sources/_common.py:409`/`:620` (`worker`), `app/autonomy.py:1956`/
     # `:2108` (`autonomy`), `scripts/autoresearch/bench_runner_sdk.py:513`
     # (`worker`).
     platform = body.get("platform") or "mission-control"

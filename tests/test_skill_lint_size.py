@@ -66,7 +66,7 @@ def test_the_threshold_is_a_named_constant_of_100_lines():
 
 
 def test_chat_cut_matches_the_injector():
-    import prefetch
+    from app import prefetch
     assert sl.CHAT_SKILL_CUT == prefetch.SKILL_BODY_MAX
 
 
@@ -225,7 +225,7 @@ def test_turn_start_context_books_the_capped_size_by_route(monkeypatch):
     cut at the injector's limit and flagged truncated, the runner-up is booked
     under the excerpt route — so a report can put the capped route beside the
     two uncapped ones."""
-    import prefetch
+    from app import prefetch
     from app import event_log, skill_embed
     seen = []
     monkeypatch.setattr(event_log, "log_event",
@@ -247,7 +247,7 @@ def test_every_uncapped_route_is_wired_at_its_call_site():
     a whole SKILL.md; each call site books it under its own route, and the chat
     path books the capped injection. Read off the source so a refactor that drops
     a call fails here rather than going quiet in the event log."""
-    autonomy_src = (ROOT / "autonomy.py").read_text()
+    autonomy_src = (ROOT / "app" / "autonomy.py").read_text()
     worker_src = (ROOT / "workers" / "sources" / "deep_research.py").read_text()
     chat_src = (ROOT / "app" / "routers" / "messages.py").read_text()
     assert "route=ROUTE_AUTONOMY_TASK" in autonomy_src

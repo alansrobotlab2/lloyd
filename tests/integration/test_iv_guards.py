@@ -517,7 +517,7 @@ def test_observation_rows_keep_the_local_naive_writer_clock():
     seconds of LOCAL `datetime.now()`, carrying no UTC offset.
 
     The durable half of #835 — stamping the column in UTC — is deliberately NOT taken.
-    `usage_store.py:339-342` records that SQLite's UTC-naive `CURRENT_TIMESTAMP` would
+    `app/usage_store.py:339-342` records that SQLite's UTC-naive `CURRENT_TIMESTAMP` would
     "be mis-parse[d] as local time and shift observations into the future by the local
     TZ offset" in the frontend timeline merge, so moving the writer is a `web/src`
     change and belongs to another item. If this test fails, that merge is already
@@ -530,7 +530,7 @@ def test_observation_rows_keep_the_local_naive_writer_clock():
     import sqlite3
     from datetime import datetime, timedelta
 
-    import usage_store
+    from app import usage_store
 
     with tempfile.TemporaryDirectory() as td:
         scratch = Path(td) / "usage.db"
@@ -565,7 +565,7 @@ def test_observation_rows_keep_the_local_naive_writer_clock():
     parsed = datetime.fromisoformat(stored)
     assert parsed.tzinfo is None, (
         f"created_at={stored!r} now carries an offset; the frontend timeline merge "
-        "reads this column as local time (usage_store.py:339-342)")
+        "reads this column as local time (app/usage_store.py:339-342)")
     skew = abs((datetime.now() - parsed).total_seconds())
     assert skew < 120, (
         f"created_at={stored!r} is {skew:.0f}s from local datetime.now(): the writer "

@@ -235,7 +235,7 @@ def test_the_iteration_warning_comes_from_one_builder_for_both_paths(monkeypatch
     """
     import inspect
 
-    import autonomy
+    from app import autonomy
     from app.routers import messages as M
     monkeypatch.setattr(M, "_load_session_todos", lambda sid: [])
 

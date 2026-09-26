@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import agent_mcp.autonomy as MCP
 # The scheduler is the reader whose loss this item is about, so the proof that a
 # refusal preserved a task's schedule is that the scheduler still reads it.
-import autonomy as SCHED
+from app import autonomy as SCHED
 
 # Broken for the same reason real ones are: an agent wrote `name: a: b`. The
 # four load-bearing lines below are the ones the acceptance clause names —
@@ -151,7 +151,7 @@ def test_the_scheduler_still_reads_the_window_and_the_chain_after_the_refusal(au
     Before the fix this read `preferred_hours=[]`, `depends_on=None`,
     `model=''` — i.e. a task dispatched outside its window and off its chain.
     """
-    import autonomy as SCHED
+    from app import autonomy as SCHED
     path = _write(autonomy_dir, BROKEN)
     _add_activity(autonomy_dir)
     task = SCHED._parse_task_file(path)

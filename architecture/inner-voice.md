@@ -60,7 +60,7 @@ second call fills in what the first did not know. Installed at:
 | chat: stream, ambient, voice | `app/routers/messages.py::_run_turn` (all three routes pass through it) |
 | chat: sync route | `app/routers/messages.py` beside the safety hook |
 | direct worker turns | `workers/sources/_common.py::_worker_run_options` |
-| scheduled tasks | `autonomy.py::run_task` |
+| scheduled tasks | `app/autonomy.py::run_task` |
 | `Task` subagents | `agent_mcp/builtin_task.py`, after the skill deliverer and grant gate |
 | any observed turn | `install_observer` calls it too, so a bare registry still gets them |
 

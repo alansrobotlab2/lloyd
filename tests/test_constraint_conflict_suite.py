@@ -408,7 +408,7 @@ def test_write_baseline_writes_json_and_trials(tmp_path, suite):
 
 def _patch_off_vault(monkeypatch):
     import app.mcp_discovery as mcp_disc
-    import prompt_builder
+    from app import prompt_builder
 
     monkeypatch.setattr(prompt_builder, "build_system_prompt", lambda **kw: "SYSTEM PROMPT UNDER TEST")
     monkeypatch.setattr(mcp_disc, "_get_mcp_servers", lambda: dict(DEFAULT_LLOYD_MCP_SERVERS))

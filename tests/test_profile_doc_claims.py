@@ -27,14 +27,14 @@ from pathlib import Path
 
 import pytest
 
-import prefetch as PF
+from app import prefetch as PF
 from agent_mcp.vault import _vault_recall_base as _vault_recall
 from app import data_root as DR
 from app import paths as P
 from app.kg_store import configure, store
 from workers.sources import automod_regression as ARE
 
-ROOT = Path(inspect.getsourcefile(PF)).resolve().parent
+ROOT = Path(inspect.getsourcefile(PF)).resolve().parents[1]
 PROFILE = ROOT / "eval" / "lloyd_profile.md"
 AI_ENGINEER_SKILL = Path.home() / "obsidian" / "skills" / "ai-engineer-monitor" / "SKILL.md"
 
@@ -91,13 +91,13 @@ def test_prefetch_is_not_credited_with_graph_expansion():
 def test_the_graph_arm_sits_where_the_profile_puts_it():
     """The code half of the same claim, so the prose cannot drift either way.
 
-    `prefetch.py` is the path that runs before every turn; if a graph leg is
+    `app/prefetch.py` is the path that runs before every turn; if a graph leg is
     ever added to it this test goes red on purpose — the paragraph the idea
     generator reads would then be wrong again, in the opposite direction.
     """
     source = inspect.getsource(PF)
     assert "kg_store" not in source, (
-        "prefetch.py now imports the knowledge-graph module; the profile's "
+        "app/prefetch.py now imports the knowledge-graph module; the profile's "
         "never-imports-`app.kg_store` clause and this test both have to be "
         "re-read before either is trusted"
     )

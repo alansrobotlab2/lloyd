@@ -325,7 +325,7 @@ def build_options(
     from app.harness import HookRegistry, RunOptions, install_default_safety_hook
     from app.harness.bench_corpus import install_bench_corpus_hook
     from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs, _get_mcp_servers
-    from prompt_builder import build_system_prompt
+    from app.prompt_builder import build_system_prompt
 
     resolved = _resolve_model_name(model)
     model_env = _get_model_env(resolved) or {}

@@ -10,7 +10,7 @@ Storage layout:
     <DATA_ROOT>/event_logs/blobs/<sha256>.txt          # large fields by hash
 
 Why:
-    The SQLite table `inner_voice_observations` (usage.db, `usage_store.py`)
+    The SQLite table `inner_voice_observations` (usage.db, `app/usage_store.py`)
     captures decision summaries — what triggered, what action, what reason,
     at what cost. It discards prompts, raw responses, intermediate parse
     failures, and the causal chain between observation → lever → outcome.

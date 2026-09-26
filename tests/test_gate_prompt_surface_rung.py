@@ -38,14 +38,28 @@ def _gate(changed, item_id=None):
 
 
 @pytest.mark.parametrize("path", [
-    "prompt_builder.py",
-    "prefetch.py",
+    "app/prompt_builder.py",
+    "app/prefetch.py",
     "lloyd/SOUL.md",
     "lloyd/MEMORY.md",
     "lloyd/USER.md",
 ])
 def test_the_rung_fires_on_a_prompt_surface_path(path):
     assert _gate([path])._touches_prompt_surface() is True
+
+
+@pytest.mark.parametrize("path", [
+    "app/prompt_builder.py",
+    "app/prefetch.py",
+    "lloyd/SOUL.md",
+])
+def test_a_prompt_surface_edit_is_never_answered_by_reuse(path):
+    """The reuse rule and the trigger must read one list. `_reuse_rule` used to
+    spell the two paths out and match them exactly, so when the modules moved
+    from the repo root into `app/` the trigger (which also matches basenames)
+    kept firing while the reuse rule stopped recognising the edit — a round
+    that changed the prompt would have been handed an earlier head's score."""
+    assert G.Gate._reuse_rule("prompt_surface", [path]) is None
 
 
 @pytest.mark.parametrize("path", [
@@ -81,7 +95,7 @@ def test_a_regression_fails_the_rung(monkeypatch):
             stderr="")
     monkeypatch.setattr(G, "_run", _fake_run)
 
-    ok, msg, data = _gate(["prompt_builder.py"]).rung_prompt_surface()
+    ok, msg, data = _gate(["app/prompt_builder.py"]).rung_prompt_surface()
     assert ok is False
     assert data["compare_exit"] == 1
     assert "regression" in msg
@@ -98,7 +112,7 @@ def test_exit_2_is_not_a_pass(monkeypatch):
                                      stderr="")
     monkeypatch.setattr(G, "_run", _fake_run)
 
-    ok, msg, _ = _gate(["prefetch.py"]).rung_prompt_surface()
+    ok, msg, _ = _gate(["app/prefetch.py"]).rung_prompt_surface()
     assert ok is False
     assert "nothing to compare" in msg
 
@@ -112,7 +126,7 @@ def test_an_unknown_nonzero_exit_also_fails(monkeypatch):
         return types.SimpleNamespace(returncode=rc, stdout="new failure mode",
                                      stderr="")
     monkeypatch.setattr(G, "_run", _fake_run)
-    ok, _, data = _gate(["prompt_builder.py"]).rung_prompt_surface()
+    ok, _, data = _gate(["app/prompt_builder.py"]).rung_prompt_surface()
     assert ok is False
     assert data["compare_exit"] == 3
 
@@ -133,7 +147,7 @@ def test_exit_3_is_named_as_instrument_failure_not_a_regression(monkeypatch):
                                      stderr="")
     monkeypatch.setattr(G, "_run", _fake_run)
 
-    ok, msg, _ = _gate(["prefetch.py"]).rung_prompt_surface()
+    ok, msg, _ = _gate(["app/prefetch.py"]).rung_prompt_surface()
     assert ok is False
     assert "3=INSTRUMENT FAILURE" in msg
     assert "re-run both sides" in msg
@@ -147,7 +161,7 @@ def test_a_clean_comparison_passes(monkeypatch):
         return types.SimpleNamespace(returncode=0, stdout="no regression vs item9",
                                      stderr="")
     monkeypatch.setattr(G, "_run", _fake_run)
-    ok, msg, data = _gate(["prompt_builder.py"]).rung_prompt_surface()
+    ok, msg, data = _gate(["app/prompt_builder.py"]).rung_prompt_surface()
     assert ok is True
     assert data["compare_exit"] == 0
     assert "no regression" in msg
@@ -163,7 +177,7 @@ def test_the_eval_runs_from_the_live_tree_not_the_worktree(monkeypatch):
         cwds.append(kw.get("cwd"))
         return types.SimpleNamespace(returncode=0, stdout="ok", stderr="")
     monkeypatch.setattr(G, "_run", _fake_run)
-    _gate(["prompt_builder.py"]).rung_prompt_surface()
+    _gate(["app/prompt_builder.py"]).rung_prompt_surface()
     assert cwds and all(c == G.LIVE_ROOT for c in cwds), cwds
 
 
@@ -177,11 +191,11 @@ def test_the_label_names_the_item_when_there_is_one(monkeypatch):
         return types.SimpleNamespace(returncode=0, stdout="ok", stderr="")
     monkeypatch.setattr(G, "_run", _fake_run)
 
-    _gate(["prompt_builder.py"], item_id=377).rung_prompt_surface()
+    _gate(["app/prompt_builder.py"], item_id=377).rung_prompt_surface()
     assert labels and all(x == "item377" for x in labels)
 
     labels.clear()
-    _gate(["prompt_builder.py"]).rung_prompt_surface()
+    _gate(["app/prompt_builder.py"]).rung_prompt_surface()
     assert labels and all(x.startswith("gate-SM_") for x in labels)
 
 

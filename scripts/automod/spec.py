@@ -47,16 +47,12 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     "tests/**",
     "scripts/**",
     "architecture/**",
-    "prompt_builder.py",
-    # Root-level loaded-prompt machinery, same shape as the two below. Added
-    # 2026-09-18 (#1242): #1069's entire fix is this file, and three rounds
-    # (SM_20260911_190850, SM_20260914_114935, SM_20260918_145241) wrote it and
-    # were refused at rung 0 for the unlisted path — an item the implement pool
-    # could never close, whatever the attempt.
-    "prompt_surface.py",
-    "autonomy.py",
-    "prefetch.py",
-    "usage_store.py",
+    # The one module left at the repo root: the backend entrypoint supervisord
+    # runs by path. `prompt_builder`, `prompt_surface`, `autonomy`, `prefetch`
+    # and `usage_store` used to sit beside it and each needed its own line here;
+    # #1242 was three rounds (SM_20260911_190850, SM_20260914_114935,
+    # SM_20260918_145241) refused at rung 0 because one of them was never
+    # listed. They live in `app/` now, so `app/**` above covers them.
     "server.py",
     "requirements.txt",
     "requirements.lock",
@@ -74,7 +70,7 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     "README.md",
     # Also #1073: the item's contract puts the dependency decision in SETUP.md,
     # and this path was unlisted, so no round could have landed it — the same
-    # defect #1242 fixed for `prompt_surface.py` above, found the same way.
+    # defect #1242 was for the root-level `prompt_surface.py`, found the same way.
     "SETUP.md",
     # #1449 / #1444 (2026-09-24): the wake-miss corpus writer, and only that
     # file — never a directory glob. `agent-services/**` would admit every

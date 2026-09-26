@@ -547,7 +547,7 @@ def splice_facts(rendered: str, question: str, fact_lines: list[str]) -> str:
 def prefetch_blocks(q: Question) -> dict:
     """The two prefetch renderings for one question, off one prefetch call:
     the confidence-ordered `<facts>` (today) and the relevance-ordered one."""
-    import prefetch as pf
+    from app import prefetch as pf
     t0 = time.monotonic()
     rendered = pf.prefetch_context(q.prompt)
     ms = (time.monotonic() - t0) * 1000
@@ -575,7 +575,7 @@ def sleep_notes_block(prompt: str, fact_lines: list[str]) -> str:
     A gain for this arm is not assumed anywhere in this file — the ship/no-ship
     call is the paired-bootstrap CI over a run, which is why the arm exists.
     """
-    import prefetch as pf
+    from app import prefetch as pf
     from app import next_session_notes as nsn
 
     nsn.write_next_session_note(
@@ -1022,7 +1022,7 @@ def prefetch_retrieval(argv: list[str] | None = None) -> dict:
     args = ap.parse_args(argv)
     os.environ.setdefault("LLOYD_FACTS_ROOT", str(Path(args.corpus) / "facts"))
     os.environ.setdefault("LLOYD_KG_DB", str(Path(args.corpus) / "kg.sqlite"))
-    import prefetch as pf
+    from app import prefetch as pf
     from stats import paired_bootstrap_ci
     ms = load_set(Path(args.set), view="all" if args.holdout else "tuning")
     qs = ms.holdout if args.holdout else ms.dev

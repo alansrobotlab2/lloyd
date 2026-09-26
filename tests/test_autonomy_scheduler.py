@@ -1,4 +1,4 @@
-"""Autonomy scheduler contract (autonomy.py + workers).
+"""Autonomy scheduler contract (app/autonomy.py + workers).
 
 Pins the fixes from the 2026-09-03 fleet audit, which found ~73 GPU-hours a
 week burned on failed runs. Each test names the failure mode it prevents.
@@ -18,7 +18,7 @@ import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import autonomy  # noqa: E402
+from app import autonomy  # noqa: E402
 
 
 def _iso(**delta):
@@ -72,7 +72,7 @@ def aut(tmp_path, monkeypatch):
     skill = tmp_path / "SKILL.md"
     skill.write_text("# test skill\nDo the thing.\n")
     monkeypatch.setattr(autonomy, "_SKILL_FOR_TESTS", str(skill), raising=False)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "sys", raising=False)
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "sys", raising=False)
     return autonomy
 
 
@@ -200,7 +200,7 @@ async def test_max_retries_disables_task_and_alerts_once(aut, monkeypatch):
 #     cycle instead of ending the schedule until a human edits the file.
 #
 # The pre-change behaviour is re-readable at commit a7bb8744 (`git show
-# a7bb8744:autonomy.py`): `_failure_cooldown_seconds` returned 600.0 s at
+# a7bb8744:app/autonomy.py`): `_failure_cooldown_seconds` returned 600.0 s at
 # failure_count 1 for `weekly`, `daily` and `hourly` alike, and
 # `_write_run_record` was never handed the failure count, so no record could
 # say which attempt it was. Both claims name that commit rather than a corpus
@@ -493,7 +493,7 @@ async def test_the_rearm_alert_actually_reaches_the_async_post(aut, monkeypatch)
 async def test_a_failed_run_record_carries_the_attempt_number(aut, monkeypatch):
     """A record used to say nothing about which attempt it was. `_record_failure`
     already had the count in hand but handed `_write_run_record` only
-    `failure_kind` (`git show a7bb8744:autonomy.py`, the extra dict in that call),
+    `failure_kind` (`git show a7bb8744:app/autonomy.py`, the extra dict in that call),
     which is why #78's five runs on 2026-09-08/09 had to be reassembled by hand
     from five timestamps."""
     started = dt.datetime.now(dt.timezone.utc)
@@ -774,7 +774,7 @@ async def test_the_fifth_infra_failure_holds_the_task_and_names_the_ceiling(
 
     # Both holds live at one instant — the only state that can see which gate is
     # consulted FIRST. Everything above runs after the cooldown was served, so
-    # with `hold_reason`'s two gates swapped (`autonomy.py:1374-1377`) the string
+    # with `hold_reason`'s two gates swapped (`app/autonomy.py:1374-1377`) the string
     # a person reads would silently become "failure cooldown" and every assertion
     # above would still pass. Here the cooldown is genuinely live as well, so the
     # reason is a choice between two explanations that are both TRUE of the task,
@@ -1614,7 +1614,7 @@ async def test_paused_upstream_never_both_holds_and_dispatches(aut, monkeypatch)
     behaviour rather than on a missing function: the board's set is assembled the
     way the endpoint assembled it (`every parsed task file, whatever its status`)
     and passed in positionally. Pre-fix, run against the base commit's
-    autonomy.py, the assertion below fires: the scheduler returned the dependent
+    app/autonomy.py, the assertion below fires: the scheduler returned the dependent
     — a `paused` upstream was invisible to the set dispatch resolved against, so
     the lookup missed it and read as satisfied — while the same call stack
     returned `waiting on #1` for it. Verified that way, not asserted."""
@@ -2770,7 +2770,7 @@ async def test_the_artifact_evidence_survives_the_queue_meta_json_round_trip(
     are the only things the health exemption keys on, and they reach the health
     report as a string. `pool.py:683` writes `json.dumps(meta, default=str)`,
     `queue.list_runs_joined` returns that column, and `compute_health`
-    `json.loads` it (`autonomy.py:1904`). A nested dict serialising to a non-dict on
+    `json.loads` it (`app/autonomy.py:1904`). A nested dict serialising to a non-dict on
     the far side would silently drop the exemption and reclassify the run back to
     a failure, so the round trip is run for real with the bytes the recorder
     actually produced.
@@ -2780,7 +2780,7 @@ async def test_the_artifact_evidence_survives_the_queue_meta_json_round_trip(
                                     declared=art, artifact=art, nbytes=9000)
 
     blob = json.dumps(out["meta"], default=str)        # pool.py:683
-    meta = json.loads(blob)                            # autonomy.py:1904
+    meta = json.loads(blob)                            # app/autonomy.py:1904
     assert isinstance(meta.get("output_artifact"), dict), blob
     assert meta["output_artifact"]["bytes"] == 9000, meta
     assert meta["status_basis"] == "artifact"

@@ -272,7 +272,7 @@ def test_the_writer_and_the_reader_name_one_event_type():
     and the reader keeps returning `no_telemetry` over a store that is actually
     full, which is indistinguishable from "nobody prefetched anything".
     """
-    import prefetch
+    from app import prefetch
 
     assert prefetch.SKILL_MATCH_EVENT == SKILL_MATCH_EVENT == "prefetch.skill_match"
 
@@ -291,7 +291,7 @@ def test_pull_arm_still_reports_offers(tmp_path, monkeypatch):
     are still written — every one `landed: false` — so the pull arm's
     telemetry says what the turn was offered and that none of it was pushed.
     The model's own `skills_read` then shows up as `loaded_by_read`."""
-    import prefetch
+    from app import prefetch
     from app.config import CONFIG
 
     monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", tmp_path)

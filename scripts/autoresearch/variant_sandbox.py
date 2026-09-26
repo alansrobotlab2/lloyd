@@ -2,7 +2,7 @@
 
 Each variant becomes a directory under `_pipeline/research/variants/<variant_id>/`
 containing the overridden files. The bench runner points LLOYD_OVERLAY_DIR at
-this directory; `prompt_builder.py` reads from the overlay and falls through to
+this directory; `app/prompt_builder.py` reads from the overlay and falls through to
 the canonical vault for any file the variant did not override.
 
 For the baseline (unmodified) evaluation, we materialize a "baseline" variant

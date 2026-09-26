@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import pytest
 
-import prompt_builder as pb
+from app import prompt_builder as pb
 
 
 @pytest.fixture

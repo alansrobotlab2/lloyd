@@ -874,7 +874,7 @@ def test_architecture_states_the_loop_axis_and_stops_naming_the_check_behavioura
     assert "pre" in bullet and "landing" in bullet, \
         "the §13 loop bullet does not mark the surviving check as pre-landing only"
     assert "prompt_surface" in sec13, "§13 does not name the loop-side check that does exist"
-    for name in ("prompt_builder.py", "prefetch.py", "SOUL.md", "MEMORY.md", "USER.md"):
+    for name in ("app/prompt_builder.py", "app/prefetch.py", "SOUL.md", "MEMORY.md", "USER.md"):
         assert name in sec13, f"{name} is a prompt-surface path §13 does not name"
     # The last-known-good `eval` slot is the reader's endpoint: §13 has to say
     # what it covers and that a carried-over number is not this commit's.

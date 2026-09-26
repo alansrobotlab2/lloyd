@@ -794,7 +794,7 @@ def test_the_new_ledger_event_is_invisible_to_the_existing_readers(world):
 #
 # Triage 2026-09-17: `contract_refusals()` computed the gate-stack and prohibition
 # ratios and handed the caller a list of error strings, so the numbers were thrown
-# away — outside `prompt_surface.py` the only readers of those ratios were tests, and
+# away — outside `app/prompt_surface.py` the only readers of those ratios were tests, and
 # no drift record existed on any route. Live SOUL.md sat at 45.3 % / 19.3 % against
 # ceilings of 50 % / 25 %, and the 65 promotion snapshots show the gate share running
 # 39.0 % → 23.7 % → 63.6 %. This record is what makes that series observable; the
@@ -846,7 +846,7 @@ def live_contract(tmp_path, monkeypatch):
     form the guard suite uses: it moves one target and leaves the rest of the dict (and
     every other test in the module) alone.
     """
-    import prompt_surface
+    from app import prompt_surface
 
     from scripts.autoresearch import promote as promote_mod
 
@@ -1005,7 +1005,7 @@ def test_the_shape_block_says_so_when_the_contract_cannot_be_measured(world, tmp
     sentence. A section that vanished would make "the record is new", "the identity file
     is unreadable" and "the record is missing" one invisible state, and the second is an
     incident."""
-    import prompt_surface
+    from app import prompt_surface
     from scripts.autoresearch import promote as promote_mod
 
     gone = tmp_path / "prompts" / "SOUL.md"          # never created: unreadable

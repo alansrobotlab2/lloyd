@@ -44,7 +44,7 @@ import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import autonomy  # noqa: E402
+from app import autonomy  # noqa: E402
 
 # One pinned instant for every case, through the single clock indirection #813
 # introduced. The freshness bound is `interval / 2`, so a case near it is only
@@ -67,7 +67,7 @@ def aut(tmp_path, monkeypatch):
     autonomy.AUTONOMY_DIR.mkdir()
     monkeypatch.setattr(autonomy, "_fail_closed_found", {}, raising=False)
     monkeypatch.setattr(autonomy, "_utcnow", lambda: PIN)
-    monkeypatch.setattr("prompt_builder.build_system_prompt",
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt",
                         lambda **_kw: "sys", raising=False)
     return autonomy
 

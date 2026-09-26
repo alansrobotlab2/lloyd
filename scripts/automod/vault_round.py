@@ -147,7 +147,7 @@ import json, sys
 from pathlib import Path
 paths = json.loads(sys.argv[1]); vault = Path(sys.argv[2]); errs = []
 if any(p.startswith(("lloyd/", "skills/")) for p in paths):
-    from prompt_builder import build_system_prompt
+    from app.prompt_builder import build_system_prompt
     prompt = build_system_prompt()
     if not isinstance(prompt, str) or len(prompt) < 500:
         errs.append("system prompt failed to build or came back empty")
@@ -190,7 +190,7 @@ if skills:
             errs.append(f"skills/{name}: {defect}")
 tasks = [p for p in paths if p.startswith("autonomy/") and p.endswith(".md")]
 if tasks:
-    from autonomy import _parse_task_file
+    from app.autonomy import _parse_task_file
     for p in tasks:
         f = vault / p
         if f.exists() and _parse_task_file(f) is None:
@@ -239,7 +239,7 @@ def contract_errors(paths: list[str]) -> list[str]:
     if not any(p in CONTRACT_PATHS for p in paths):
         return []
     try:
-        import prompt_surface
+        from app import prompt_surface
     except ImportError as exc:  # pragma: no cover - repo is always importable
         return [f"prompt_surface unavailable, cannot check the contract: {exc}"]
     errs = prompt_surface.check_paths(

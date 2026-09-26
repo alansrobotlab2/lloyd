@@ -488,7 +488,7 @@ def get_active_session_id(max_age_hours: float = 24.0) -> Optional[str]:
 # Ambient prefetch queue (task #295, Mechanism 1)
 #
 # Producers push entries here for priority=`ambient` injections. On the
-# user's next turn, `prefetch.py` drains pending entries for the target
+# user's next turn, `app/prefetch.py` drains pending entries for the target
 # session and appends them to the <context> block. No SDK turn is fired;
 # this is the cheap passive path.
 # ---------------------------------------------------------------------------

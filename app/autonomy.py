@@ -81,7 +81,7 @@ AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 from app.paths import AUTONOMY_RUNS_DIR  # anchored to DATA_ROOT
 from app.run_acceptance import GRADE_KEY as _ACCEPTANCE_GRADE_KEY, DispatchTrace, grade_run
 from app.silent_sentinel import is_silent_response, run_is_silent
-LLOYD_HOME = Path(__file__).parent
+from app.paths import LLOYD_HOME  # the checkout root, not this file's directory
 
 def recover_stuck_tasks() -> list:
     """Reset tasks stuck in_progress past their timeout, and rearms retired ones.
@@ -3442,7 +3442,7 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         from app.harness import run_query, RunOptions
         from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
         from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
-        from prompt_builder import build_system_prompt
+        from app.prompt_builder import build_system_prompt
 
         system_prompt = build_system_prompt(platform="autonomy")
 

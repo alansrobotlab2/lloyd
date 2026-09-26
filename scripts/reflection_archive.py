@@ -11,7 +11,7 @@ words: "A Read-before-Write discipline that preserves a file only while the
 reader remembers to copy it is not a retention policy."
 
 The obvious instrument — a test that reads ``~/obsidian/skills`` — is the wrong
-place for the *enforcement*, for the reason ``prompt_surface.py`` documents:
+place for the *enforcement*, for the reason ``app/prompt_surface.py`` documents:
 that tree is state no round under test controls, so on the gate's hard `tests`
 rung it punishes the next author for the previous writer's wording. Round
 ``SM_20260912_155333`` learned the other half of the same lesson: marked

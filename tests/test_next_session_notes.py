@@ -36,8 +36,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import prefetch
-import prompt_builder as pb
+from app import prefetch
+from app import prompt_builder as pb
 from app import next_session_notes as nsn
 from app import paths
 from app import sessions_io as sio

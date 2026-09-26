@@ -166,7 +166,7 @@ def test_a_paused_task_is_held_not_overdue(vault):
 
 def test_a_nightly_task_outside_its_window_is_held(vault, monkeypatch):
     """A daily job pinned to 03:00 is past due for most of every day."""
-    import autonomy
+    from app import autonomy
 
     monkeypatch.setattr(autonomy, "_local_hour", lambda: 14)
     _task(vault, "nightly", status="up_next", next_run=_iso(hours=-9),
@@ -230,7 +230,7 @@ def test_the_classifier_names_itself(vault):
 
 
 def test_hold_windows_collapse_runs_but_keep_gaps():
-    import autonomy
+    from app import autonomy
 
     assert autonomy._hour_windows([23, 0, 1, 2, 3, 4]) == "00-04,23"
     assert autonomy._hour_windows([6]) == "06"

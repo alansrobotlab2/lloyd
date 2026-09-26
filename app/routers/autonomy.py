@@ -29,7 +29,7 @@ from app.paths import AUTONOMY_RUNS_DIR as _AUTONOMY_RUNS_DIR
 async def autonomy_run(request: Request):
     """Run a task immediately. Bypasses due-checks, but not the in-progress guard."""
     try:
-        from autonomy import run_task, run_trigger
+        from app.autonomy import run_task, run_trigger
         data = await request.json()
         task_id = data.get("task_id")
         if not task_id:
@@ -247,7 +247,7 @@ async def autonomy_tasks(status: str = "", tag: str = ""):
     # board used to derive "overdue" from elapsed/interval alone, which paints
     # a nightly job red for the eighteen hours a day it is not allowed to run.
     try:
-        import autonomy as _a
+        from app import autonomy as _a
 
         # One resolution input, shared with dispatch (#870). This endpoint used to
         # assemble its own `everything` — every parsed task regardless of status,
@@ -359,7 +359,7 @@ async def autonomy_task_write(request: Request):
         # Arming a slot-bound task while its slot is off is refused with 409 — the
         # same answer the eval gives with `EXIT_SLOT_DISABLED = 7` (#1555). Park it,
         # reprioritise it, reschedule it: those all still write.
-        from autonomy import slot_arm_block
+        from app.autonomy import slot_arm_block
         blocked = slot_arm_block(task, str(task.get("status") or ""))
         if blocked:
             raise HTTPException(status_code=409, detail=blocked)
@@ -378,7 +378,7 @@ async def autonomy_task_write(request: Request):
         # (#1128) — the two stamps were correct and wrong in the same request.
         # `now` is true UTC too now, so the two agree; the separate read stays
         # because an audit stamp should be the moment the note is written.
-        from autonomy import append_activity_line, status_change_note
+        from app.autonomy import append_activity_line, status_change_note
         status_note = status_change_note(prior_status, task.get("status"))
         if status_note:
             stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -426,7 +426,7 @@ async def autonomy_health(days: int = 7):
         return JSONResponse(
             {"error": f"work queue unavailable: {e}", "days": days}, status_code=503)
 
-    import autonomy as _autonomy
+    from app import autonomy as _autonomy
     # ONE clock reading, used both to bound the query and to date the verdict.
     # The window used to come from `datetime.now` while `compute_health` read
     # `_utcnow()`, so the two edges of the same window were two instants; the
@@ -509,7 +509,7 @@ async def start_autonomy_ticker():
         logger.info("autonomy.ticker_enabled=false → skipping stuck-task recovery")
         return
     try:
-        from autonomy import recover_stuck_tasks
+        from app.autonomy import recover_stuck_tasks
         recovered = recover_stuck_tasks()
         if recovered:
             logger.info("Autonomy startup: recovered %d stuck task(s): %s", len(recovered), recovered)

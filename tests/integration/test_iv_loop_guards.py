@@ -1114,7 +1114,7 @@ def _record_here(monkeypatch) -> list:
     rec = lambda **kw: (rows.append(kw), len(rows))[1]  # noqa: E731
     monkeypatch.setattr(obs_mod, "record_inner_voice_observation", rec)
     # The turn guards write through `usage_store` directly.
-    import usage_store
+    from app import usage_store
     monkeypatch.setattr(usage_store, "record_inner_voice_observation", rec)
     return rows
 

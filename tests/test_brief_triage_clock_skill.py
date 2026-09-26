@@ -140,7 +140,7 @@ def test_the_stamp_the_skill_promises_is_the_stamp_the_server_sends():
     assert "server clock when queued" in body
     assert "server_clock=" in body
 
-    import prefetch
+    from app import prefetch
     from app.routers import messages as M
     from app.sessions_io import AmbientPrefetchEntry, ambient_clock_stamp
 

@@ -102,7 +102,7 @@ def test_the_embedding_arm_did_not_land():
 
 def test_the_scorer_imports_the_production_matcher(monkeypatch):
     """The lexical arm is prefetch's own function, not a copy of it."""
-    import prefetch
+    from app import prefetch
     ev = _load()
     seen = []
     monkeypatch.setattr(prefetch, "_search_skills",

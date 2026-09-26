@@ -170,7 +170,7 @@ REPORT_ONLY = ("latency_ms_avg", "n_queries")
 # `prompt_surface` (`scripts/automod/gate.py`, `rung_prompt_surface`), which runs
 # `eval/run_tool_choice_eval.py` then `eval/compare_tool_choice.py` — but ONLY
 # pre-landing, and ONLY when the diff touches one of five path names:
-# `prompt_builder.py`, `prefetch.py`, and the vault `SOUL.md`, `MEMORY.md`,
+# `app/prompt_builder.py`, `app/prefetch.py`, and the vault `SOUL.md`, `MEMORY.md`,
 # `USER.md`. So a loop-side change that is not one of those five has no
 # pre-landing check and no post-landing one. `AXIS_*` below carries that into the
 # measurement itself, because this file's output lands in the LKG record's `eval`
@@ -201,7 +201,7 @@ AXIS_MEASURES = ("retrieval quality, paired A/B: the promotion's parent and the 
 AXIS_DOES_NOT_MEASURE = (
     "agent-loop behaviour: no armed metric observes a tool call, a turn count or a "
     "model decision — the only loop-side check is the PRE-landing gate rung "
-    "`prompt_surface`, and only for prompt_builder.py / prefetch.py / SOUL.md / "
+    "`prompt_surface`, and only for app/prompt_builder.py / app/prefetch.py / SOUL.md / "
     "MEMORY.md / USER.md",
     "graph edge quality: expiring 70% of the active edge set moved no metric, "
     "armed or reported",

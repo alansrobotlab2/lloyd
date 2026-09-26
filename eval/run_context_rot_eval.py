@@ -849,7 +849,7 @@ def cost_side(db_path: Path, *, new_trigger_tokens: int | None, current_trigger_
     soak_since = (now - timedelta(days=soak_days)).strftime("%Y-%m-%dT%H:%M:%S")
     if not Path(db_path).exists():
         return {"error": f"{db_path} not found"}
-    import usage_store
+    from app import usage_store
     rows = usage_store.read_rows_readonly(
         db_path, ["ts", "session_id", "input_tokens", "duration_ms",
                   "compaction", "prefix_misses", "reprefill_tokens"], since)

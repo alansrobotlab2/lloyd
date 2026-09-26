@@ -8,7 +8,7 @@ Then `Path.home()/"lloyd"` and `app.paths.LLOYD_HOME` are the same directory,
 and `LLOYD_HOME.parent/"obsidian"` (what `prompt_builder` uses) and
 `$HOME/obsidian` are the same directory. One lever neutralizes the sessions
 dir, `autonomy-runs/`, the task registry, `workers.db`, the vault paths, and —
-critically — `autonomy.py`'s `AUTONOMY_DIR`, which is a hardcoded
+critically — `app/autonomy.py`'s `AUTONOMY_DIR`, which is a hardcoded
 `Path.home()/"obsidian"/"autonomy"` that no config key reaches
 (`config.yaml`'s `autonomy.task_dir` is dead config; nothing reads it). With
 an empty scratch autonomy dir, `recover_stuck_tasks()` finds nothing to

@@ -519,7 +519,7 @@ RECALL_SEED_TOP_K = 10
 # n=20; at that size a paired MRR gap is uncertain to about +-0.11 (scaled from
 # the +-0.06 measured at n=87, #1335), so 0.16 is clear of it, if not by much. The old docstring's "rarely changes top-1"
 # was measured against a daemon that never turned it off. Prefetch still
-# skips it explicitly (prefetch.py) because it runs inside a latency budget.
+# skips it explicitly (app/prefetch.py) because it runs inside a latency budget.
 RECALL_QMD_RERANK = True
 
 # Canonical-source prefixes for graph_lookup boost. When a graph-derived

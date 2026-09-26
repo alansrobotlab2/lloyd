@@ -391,7 +391,7 @@ async def test_autonomy_blocked_agrees_with_dispatch_at_one_instant(
     """
     import datetime as dt
 
-    import autonomy
+    from app import autonomy
     from app.routers import autonomy as autonomy_router
 
     when = dt.datetime(2026, 9, 11, 12, 0, 0, tzinfo=dt.timezone.utc)
@@ -477,7 +477,7 @@ async def test_autonomy_board_gates_against_the_directory_it_lists(
     """
     import datetime as dt
 
-    import autonomy
+    from app import autonomy
     from app.routers import autonomy as autonomy_router
 
     when = dt.datetime(2026, 9, 11, 12, 0, 0, tzinfo=dt.timezone.utc)
@@ -741,10 +741,10 @@ async def test_the_board_reports_a_parked_upstreams_hold_over_http(
 
     `blocked` is asserted in the shape the endpoint actually returns:
     `hold_reason`'s {"kind", "by"} dict is flattened to "waiting on #1" / "paused"
-    by the handler (autonomy.py:229-233), so the finding text is NOT in the HTTP
+    by the handler (app/autonomy.py:229-233), so the finding text is NOT in the HTTP
     payload. Claiming otherwise here would pin a shape the API does not have.
     """
-    import autonomy
+    from app import autonomy
     from app.routers import autonomy as autonomy_router
 
     listed_dir = tmp_path / "listed"
@@ -937,7 +937,7 @@ def health_env(tmp_path, monkeypatch):
     """
     import datetime as dt
 
-    import autonomy as A
+    from app import autonomy as A
     from app.routers import autonomy as autonomy_router
     from workers.queue import WorkQueue
 

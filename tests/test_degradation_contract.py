@@ -342,7 +342,7 @@ def test_the_blinded_set_covers_every_consumer_that_reads_a_missing_input():
     for ref in ("skills/system-health-check/system_health_check.py::check_voice_media",
                 "skills/system-health-check/system_health_check.py::check_endpoints",
                 "app/kg_store.py::KGStore",
-                "autonomy.py::_is_task_due"):
+                "app/autonomy.py::_is_task_due"):
         assert ref in _BY_CONSUMER, f"{ref} reads an input that can go missing but has no row"
     assert "skills/dream-consolidation/SKILL.md::LOCK_MISSING" in _BY_CONSUMER, (
         "the gate that passed on a missing lock must itself be in the banned set")

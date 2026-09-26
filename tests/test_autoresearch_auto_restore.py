@@ -373,7 +373,8 @@ def test_a_loader_failure_leaves_the_promoted_contract_in_place_and_says_so(env,
     put back, the round is told, and the promotion is *not* marked undone."""
     stub = env.root / "fallback-checkout"
     stub.mkdir()
-    (stub / "prompt_builder.py").write_text(
+    (stub / "app").mkdir()
+    (stub / "app" / "prompt_builder.py").write_text(
         "def build_system_prompt(*a, **k):\n    return 'stub'\n", encoding="utf-8")
     monkeypatch.setattr(vault_round, "LLOYD_HOME", stub)
     promote_a_bad_variant(env)

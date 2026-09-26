@@ -12,7 +12,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query
 
-import usage_store
+from app import usage_store
 from app import event_log
 from app.paths import SESSIONS_DIR
 

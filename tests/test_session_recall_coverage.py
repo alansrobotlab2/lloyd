@@ -283,9 +283,9 @@ def test_a_hit_in_an_assistant_turn_reports_that_turn(indexed):
 def test_prefetch_scores_and_renders_the_widened_index(indexed):
     """`prefetch` imports the index and the scorer, so it gets whole turns too.
 
-    `_search_recent_sessions` builds the same index (`prefetch.py:842`) and
-    scores it with the same `_score_session` (`prefetch.py:861`) to render the
-    per-turn `<recent-sessions>` block. Nothing in `prefetch.py` changed, so this
+    `_search_recent_sessions` builds the same index (`app/prefetch.py:842`) and
+    scores it with the same `_score_session` (`app/prefetch.py:861`) to render the
+    per-turn `<recent-sessions>` block. Nothing in `app/prefetch.py` changed, so this
     is the test that crosses that module boundary rather than a grep.
 
     The marker sits in the LAST turn of a session whose text runs past the old
@@ -296,7 +296,7 @@ def test_prefetch_scores_and_renders_the_widened_index(indexed):
     the ranking and the rendered line below deterministic rather than a property
     of directory order.
     """
-    import prefetch
+    from app import prefetch
 
     long_messages: list[dict] = [_turn(0, "user", _pad(120))]
     for n in range(1, 24):

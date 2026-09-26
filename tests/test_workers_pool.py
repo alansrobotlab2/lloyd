@@ -719,7 +719,7 @@ async def _starving_alerts(q, monkeypatch, tmp_path):
     `next_run` scan has anything to name. That isolation is load-bearing here —
     the alternative is a tick that scans and re-arms the LIVE board.
     """
-    import autonomy
+    from app import autonomy
     import workers.sources.scheduled_task as st
     monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tmp_path / "tasks")
     monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "runs")

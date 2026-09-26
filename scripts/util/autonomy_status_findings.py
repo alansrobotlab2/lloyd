@@ -2,7 +2,7 @@
 """Name autonomy task-status transitions sitting in a staged tree, before commit.
 
 Item #1127. A task file whose `status` moves into `draft` or `paused` stops
-dispatching: `_all_runnable_tasks` (`autonomy.py:323`) drops everything outside
+dispatching: `_all_runnable_tasks` (`app/autonomy.py:323`) drops everything outside
 `("up_next", "in_progress", "failed")`, and the queue's own source
 (`workers/sources/scheduled_task.py:174`) skips anything that is not `up_next`.
 Nothing anywhere named such a change before the commit that carried it, so vault
@@ -41,7 +41,7 @@ from pathlib import Path
 
 # The two values that stop a job dispatching, so a reader can tell a clobber from
 # a claim without opening the file. This is `autonomy.DISPATCH_STOPPING_STATUSES`
-# spelled out rather than imported on purpose: `autonomy.py` pulls `yaml`,
+# spelled out rather than imported on purpose: `app/autonomy.py` pulls `yaml`,
 # `agent_mcp._shared` and `app.paths` at module level, and this script runs under
 # whatever interpreter a shell happens to have (`/usr/bin/python3` on this box has
 # no `mcp`, so importing `autonomy` there raises ModuleNotFoundError).

@@ -770,7 +770,7 @@ def _path_operand_text(command: str) -> str:
       pattern chased three times, not a directory being looked at.
     * anything else (`cat`, `sed`, `wc`, `pytest`, …) — an operand is a path
       when it looks like one (carries a `/`, or is a `~` hop). A bare
-      `prompt_builder.py` handed to pyflakes names a module the call is about,
+      `app/prompt_builder.py` handed to pyflakes names a module the call is about,
       and stays eligible.
     * a filter flag's operand (`--exclude-dir=X`, `grep -v X`, `-g GLOB`) is
       boilerplate in every stage.

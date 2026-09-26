@@ -211,7 +211,7 @@ def reached(monkeypatch, tmp_path):
         calls.append(("autonomy/run", task_id))
         return {"ok": True, "task_id": task_id}
 
-    monkeypatch.setattr("autonomy.run_task", _fake_run_task)
+    monkeypatch.setattr("app.autonomy.run_task", _fake_run_task)
 
     def _fake_set_drain(on, ttl_s=180.0):  # noqa: ARG001
         calls.append(("automod/drain", on))

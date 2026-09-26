@@ -505,7 +505,7 @@ def test_the_retention_skill_table_states_the_sweep_age():
 def test_extraction_skill_still_loads(skill: str):
     """The pin must not be satisfiable by a file the loader can no longer parse —
     front matter that stops parsing means the skill is not advertised at all."""
-    from prompt_builder import _is_quarantined_skill
+    from app.prompt_builder import _is_quarantined_skill
 
     path = _skill_file(skill)
     assert path is not None, f"skills/{skill}/SKILL.md is not installed"

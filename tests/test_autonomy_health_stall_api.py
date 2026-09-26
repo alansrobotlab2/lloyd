@@ -28,7 +28,7 @@ import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import autonomy as A
+from app import autonomy as A
 from app.routers import autonomy as ROUTER
 
 # A settled instant, so the elapsed arithmetic in the assertions below is a
@@ -275,7 +275,7 @@ def test_an_idle_task_is_marked_unobserved_rather_than_clean(client, autonomy_di
     Both rows used to carry the hard-coded `"fail_rate": 0.0, "silent_rate":
     0.0` literal, byte-identical in shape to a task that ran and passed. The
     payload already uses `null` for the unobserved case elsewhere —
-    `refuted_or_insufficient_rate` at `autonomy.py:3012`, and `stalled[].fail_rate`
+    `refuted_or_insufficient_rate` at `app/autonomy.py:3012`, and `stalled[].fail_rate`
     for a task with no in-window row — which is the precedent this follows. A
     row WITH runs keeps its numeric rates: the change marks no observation, it
     does not soften a measurement.

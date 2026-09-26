@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-import prompt_surface as ps
+from app import prompt_surface as ps
 
 from scripts.automod import gate as G
 
@@ -580,7 +580,7 @@ def test_the_reporting_copy_asserts_the_paste_through_the_module():
     """No private copy of the #464 invariant may live in the reporting file.
 
     `9ca4fc6` rewrote the local `_h1()` inside `test_prompt_surface_budget.py` and
-    never touched `prompt_surface.py`, which is how the reporting group passed 7/7
+    never touched `app/prompt_surface.py`, which is how the reporting group passed 7/7
     over two writers that refused every real file pair for two days (#1069). A
     reimplementation in the report cannot fail when the module breaks.
     """
@@ -613,7 +613,7 @@ def test_both_writers_call_the_shared_invariants(path, fn):
 # ratios. Triage 2026-09-17 found that `check_contract` computed both ratios and
 # handed the caller only error strings, so nothing recorded them, and that the
 # MEMORY.md blind spot is real: both ceilings are computed on the SOUL.md text
-# (`prompt_surface.py:168`, `:187` at triage), so a MEMORY-only overlay that
+# (`app/prompt_surface.py:168`, `:187` at triage), so a MEMORY-only overlay that
 # doubles its own gate stack trips nothing. Clause 5 closes the recording half;
 # ceiling-ing MEMORY.md is a scope call a person has to make.
 # ──────────────────────────────────────────────────────────────────────────────
@@ -894,7 +894,7 @@ def test_the_contract_paths_are_exactly_the_files_the_prompt_loads():
     """
     from scripts.automod import vault_round as VR
 
-    import prompt_builder as pb
+    from app import prompt_builder as pb
 
     loaded = {f"lloyd/{name}" for name in pb._memory_files_for("mission-control")}
     assert set(VR.CONTRACT_PATHS) == loaded | {"lloyd/SOUL.md"}, VR.CONTRACT_PATHS

@@ -2262,7 +2262,7 @@ export interface DashboardUsage {
    *  on a backend that predates them. */
   prefix_misses_1h?: PrefixMissSummary
   prefix_misses_24h?: PrefixMissSummary
-  /** Harness telemetry (P11, usage_store.py). Each counts only rows that
+  /** Harness telemetry (P11, app/usage_store.py). Each counts only rows that
    *  carry the measurement. Absent on a backend that predates them. */
   stop_reasons_24h?: StopReasonRow[]
   tool_errors_24h?: ToolErrorSummary

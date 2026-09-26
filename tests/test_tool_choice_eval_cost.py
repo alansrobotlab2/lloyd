@@ -33,7 +33,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import prompt_builder  # noqa: E402
+from app import prompt_builder  # noqa: E402
 
 EVAL = ROOT / "eval"
 QUERIES = EVAL / "tool_choice_queries.yaml"
@@ -419,7 +419,7 @@ def test_the_runner_does_not_define_its_own_chars_per_token():
     assert not re.search(r"^CHARS_PER_TOKEN\s*=", src, re.M), (
         "the eval re-declared the chars/token constant; import "
         "prompt_builder.prompt_token_estimate instead (#875 clause 7)")
-    assert "from prompt_builder import prompt_token_estimate" in src
+    assert "from app.prompt_builder import prompt_token_estimate" in src
 
 
 def test_estimator_and_budget_share_the_same_number():
@@ -448,7 +448,7 @@ def _fake_search_legs(monkeypatch, hits):
     """Stub the three search legs `run()` calls. The legs hit qmd and the vector
     index; the fields the eval reads off their return value are `file`, so one
     canned hit is enough to make the script run end to end without a vault."""
-    import prefetch
+    from app import prefetch
 
     monkeypatch.setattr(prefetch, "_search_vault_lex",
                         lambda q, focus, deadline=None: list(hits))
@@ -596,7 +596,7 @@ def test_the_end_to_end_run_writes_the_join_into_its_own_artifact(tmp_path, monk
     # injected-token halves are computed by the runner, not asserted.
     context_block = ('<context>\n<skill name="web-search" score="9.9">b</skill>'
                      '\n</context>\n')
-    monkeypatch.setattr("prefetch.prefetch_context",
+    monkeypatch.setattr("app.prefetch.prefetch_context",
                         lambda prompt, **kw: context_block + prompt)
 
     async def fake_first_tool_call(prefetched, options, timeout):
@@ -690,7 +690,7 @@ def test_deleting_the_cost_line_from_run_eval_breaks_the_artifact(tmp_path, monk
                 "uncached_prompt_tokens": 100}
 
     monkeypatch.setattr(broken, "_first_tool_call", fake_first_tool_call)
-    monkeypatch.setattr("prefetch.prefetch_context",
+    monkeypatch.setattr("app.prefetch.prefetch_context",
                         lambda prompt, **kw: "<context>x</context>" + prompt)
     records, _ = asyncio.run(broken.run_eval(
         [{"id": "x", "category": "public-search", "prompt": "p",

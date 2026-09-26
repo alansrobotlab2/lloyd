@@ -231,7 +231,7 @@ def _memory_section(memory_md: str) -> str:
 def check_arms(canonical: Path, indexed: Path, build=None) -> dict[str, dict[str, int]]:
     """Raise unless the two prompts differ only in their MEMORY.md section."""
     if build is None:
-        from prompt_builder import build_system_prompt as build
+        from app.prompt_builder import build_system_prompt as build
     a = build(overlay_dir=canonical)
     b = build(overlay_dir=indexed)
     ca = _memory_section((canonical / "MEMORY.md").read_text(encoding="utf-8"))

@@ -518,7 +518,7 @@ cancel_event=...)` when the task opted in.
 - **It closes in a `finally`**, however the run ends, and a failure to attach
   logs a warning and runs the task unobserved: watching is not the run.
 
-Importing a router helper into `autonomy.py` is a layering smell, accepted
+Importing a router helper into `app/autonomy.py` is a layering smell, accepted
 rather than relocated — the alternative is a second definition of how a turn
 is watched.
 
@@ -663,7 +663,7 @@ transcripts stay on disk for 30 days, openable by id.
 | `app/run_recorder.py` | the passthrough recorder, kill switch |
 | `app/transcript_entries.py` | every transcript row's shape |
 | `app/sessions_io.py` | `create_session`, `new_background_session_id`, `is_background_session_name`, `is_user_session`, `is_conversation_session`, `known_platforms`, `current_run_sessions` |
-| `autonomy.py` | `run_task` wiring, `_task_inner_voice`, observer attach |
+| `app/autonomy.py` | `run_task` wiring, `_task_inner_voice`, observer attach |
 | `workers/sources/_common.py` | `run_prompt_on_primary` wiring, `source_inner_voice`, `grant_scope` in the payload |
 | `workers/pool.py` | `session_ids` on every run row |
 | `workers/queue.py` | `run_rollup_by_source` |

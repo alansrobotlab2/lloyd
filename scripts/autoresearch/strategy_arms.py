@@ -189,7 +189,7 @@ def run_arm_trial(
         "error": "",
     }
     try:
-        from prompt_builder import build_system_prompt
+        from app.prompt_builder import build_system_prompt
         system_prompt = build_system_prompt(overlay_dir=overlay_dir)
         text = _ARM_FNS[arm](trace, budget, task, system_prompt, model,
                              adviser_model, timeout_seconds)

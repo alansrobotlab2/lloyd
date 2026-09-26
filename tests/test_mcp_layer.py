@@ -745,7 +745,7 @@ def test_a_declared_grant_reopens_the_seam(tmp_path, monkeypatch):
 # the shipped #40 block and then syncs it itself, from the tuple it named. Both
 # are a mock AT the seam clause 4 names — "sync_task_grants materialises it at
 # dispatch". What neither touches is the dispatcher: `run_task` takes the block
-# out of `_parse_task_file`'s output (`autonomy.py:1860` and `:1868`), syncs it
+# out of `_parse_task_file`'s output (`app/autonomy.py:1860` and `:1868`), syncs it
 # into `default_store()`, and installs the hook three statements later
 # (`:1881-1882`). A `grants` key lost between the parse and the sync, or an
 # install that ran before the sync, left both green while the task whose only
@@ -788,7 +788,7 @@ def _grant_dispatch_env(monkeypatch, tmp_path, frontmatter: str):
     store, so the hook resolves `default_store()` itself, and that resolver reads
     this variable. The cache is the resolver's own, so it is cleared the way a
     cold dispatcher process would find it."""
-    import autonomy as AUT
+    from app import autonomy as AUT
 
     from app.harness import policy
 
@@ -819,7 +819,7 @@ def _grant_dispatch_env(monkeypatch, tmp_path, frontmatter: str):
     monkeypatch.setattr(AUT, "_write_run_record", lambda *a, **k: tmp_path / "r.md")
     monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", tmp_path / "sessions")
     monkeypatch.setattr("app.run_recorder.recording_enabled", lambda: False)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "SYS")
 
     captured: dict = {}
 
@@ -850,7 +850,7 @@ def test_run_task_materialises_the_declared_grant_before_arming_the_hook(
     installed holding the scope that row is addressed to."""
     import asyncio
 
-    import autonomy as AUT
+    from app import autonomy as AUT
 
     captured, store = _grant_dispatch_env(monkeypatch, tmp_path, _GRANT_BLOCK)
     out = asyncio.run(AUT.run_task(40))
@@ -907,7 +907,7 @@ def test_run_task_refuses_to_dispatch_a_task_whose_grants_block_is_malformed(
     which happened."""
     import asyncio
 
-    import autonomy as AUT
+    from app import autonomy as AUT
 
     broken = _GRANT_BLOCK.replace("expires_at: '2099-01-01T00:00:00Z'",
                                   "expires_at: not-a-date")

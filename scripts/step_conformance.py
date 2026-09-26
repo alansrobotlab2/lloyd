@@ -19,7 +19,7 @@ Two rules this deliberately does NOT do:
   a false positive). There is no mail, HTTP or notification import in this file on purpose,
   and `tests/test_step_conformance.py` pins that.
 * **It does not re-implement the dependency gate.** That is #558's decision, live at
-  `autonomy.py::_is_dependency_met`. Where the 09-08 inversion shows up here it shows up as
+  `app/autonomy.py::_is_dependency_met`. Where the 09-08 inversion shows up here it shows up as
   a *missing consumption step in a trace* — the structural signature — never as a verdict
   about whether a task was allowed to run.
 

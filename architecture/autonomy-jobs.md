@@ -98,8 +98,8 @@ not:
   a file and stop. Distil writes
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
   apparatus. `workers/evidence.py` is the correction and the scheduler module
-  `autonomy.py` is where its pilot set lives (`EVIDENCE_PILOT_TASK_IDS =
-  frozenset({38, 42, 39, 40})` at `autonomy.py:2362` in that module, pinned by
+  `app/autonomy.py` is where its pilot set lives (`EVIDENCE_PILOT_TASK_IDS =
+  frozenset({38, 42, 39, 40})` at `app/autonomy.py:2362` in that module, pinned by
   `tests/test_worker_evidence.py`) — 4 of the 23 jobs that write durable state
   unattended. The pilot has verdicts now: since
   #945 copied each run's `claims` key through `workers/sources/scheduled_task.py`
@@ -360,7 +360,7 @@ graph "restored to 12,131 relationships" against a same-night health report
 reading zero; counts of 96/21 where disk held 121/64; a 13,503-byte file called
 "307KB". `workers/evidence.py` is the structural fix and its pilot set is exactly
 this chain — `EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40})`
-(`autonomy.py:2362`, not inside the verifier's own file, and pinned there by
+(`app/autonomy.py:2362`, not inside the verifier's own file, and pinned there by
 `tests/test_worker_evidence.py:653`), a literal frozenset so
 widening it is a change someone reads. The verifier is **stdlib-only and never
 LLM-judged**, because a model grading its own claims is the narration this
@@ -1040,7 +1040,7 @@ decide what gets worked on next.
   `model:` blind spot, `workers/evidence.py`'s three-state contract, the
   groundskeeper queue (31,291 / 27,399 / 58.4 / 18,176 log rows), and the empty
   `autonomy-runs/33` and `/34`. Five statements were wrong and are corrected: the
-  pilot frozenset is in `autonomy.py:710` and not `workers/evidence.py`; the
+  pilot frozenset is in `app/autonomy.py:710` and not `workers/evidence.py`; the
   evidence pilot has verified **nothing** (0 bundles across 22 piloted runs,
   `claims_checked: 0` over 713) because `scheduled_task.py` drops the `claims` key
   before `pool.py` reads it (#902); the reflection windows are offset pairwise, not

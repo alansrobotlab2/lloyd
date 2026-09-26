@@ -23,7 +23,7 @@ the table's real schema, rows in the live `T` format — and pins:
    usage example is a full timestamp rather than a bare date.
 
 The writer is deliberately untouched: `created_at` stays local-naive because the
-frontend timeline merge reads it as local time (`usage_store.py:339-342`), and clause 5
+frontend timeline merge reads it as local time (`app/usage_store.py:339-342`), and clause 5
 of the acceptance lives in `tests/integration/test_iv_guards.py`
 (`test_observation_rows_keep_the_local_naive_writer_clock`).
 

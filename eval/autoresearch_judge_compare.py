@@ -122,7 +122,7 @@ def _tasks() -> list[dict[str, Any]]:
 # ── generate ─────────────────────────────────────────────────────────────────
 
 def generate(draws: int, model: str) -> None:
-    from prompt_builder import build_system_prompt
+    from app.prompt_builder import build_system_prompt
     from scripts.autoresearch.bench_runner import DEFAULT_MAX_TOKENS, chat_completion
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)

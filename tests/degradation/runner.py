@@ -733,11 +733,11 @@ def _probe_dependency(row):
     *which* gate answered, not just that something did.
     """
     args = row.get("args", {})
-    autonomy, is_task_due = resolve_consumer("autonomy.py::_is_task_due")
+    autonomy, is_task_due = resolve_consumer("app/autonomy.py::_is_task_due")
     resolution_set = getattr(autonomy, "dependency_resolution_set", None)
     board = getattr(autonomy, "_all_board_tasks", None)
     if resolution_set is None or board is None:
-        raise RowError("autonomy.py no longer exposes dependency_resolution_set and "
+        raise RowError("app/autonomy.py no longer exposes dependency_resolution_set and "
                        "_all_board_tasks; #870 moved this seam and the adapter has to "
                        "move with it rather than pass on a guess")
     with fixture_root("autonomy") as root:

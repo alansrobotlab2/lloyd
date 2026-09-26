@@ -69,7 +69,7 @@ def baseline_path() -> Path:
 
 def lexical_top5(turn: str) -> list[str]:
     """The production lexical selection, imported rather than reimplemented."""
-    import prefetch
+    from app import prefetch
     # The injectable set, as before #435 widened `_search_skills` to every offer.
     scored = prefetch._injectable_skills(
         prefetch._search_skills(prefetch._query_tokens(turn)))
@@ -92,7 +92,7 @@ def with_pseudo_queries(arm: Arm, path: str | Path | None, weight: float = 3.0,
     """Run `arm` with prefetch reading this pseudo-query index; `None` = as is."""
     if not path:
         return arm
-    import prefetch
+    from app import prefetch
     from agent_mcp import skills as S
     path = Path(path)
 
@@ -132,7 +132,7 @@ def djev_rerank_arm(k: int = 16, chars: int = 400, pool: str = "injectable") -> 
     """
     import time as _t
 
-    import prefetch
+    from app import prefetch
     from app import djev
 
     def arm(turn: str) -> list[str]:

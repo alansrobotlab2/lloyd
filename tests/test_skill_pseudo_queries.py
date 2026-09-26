@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-import prefetch
+from app import prefetch
 from agent_mcp import skills as S
 
 ROOT = Path(__file__).resolve().parent.parent

@@ -240,7 +240,7 @@ def test_the_recorder_counts_a_miss_and_puts_it_on_the_usage_row(announced):
     """End to end through `app/run_recorder.py`: the event log carries the
     miss, the usage row carries the count, the transcript's final stats carry
     both numbers. conftest points all three stores at scratch files."""
-    import usage_store
+    from app import usage_store
     from app import event_log
     from app.run_recorder import record_events
     from app.sessions_io import SESSIONS_DIR, create_session

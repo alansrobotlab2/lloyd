@@ -26,16 +26,16 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 @pytest.mark.parametrize("path", [
     "app/harness/loop.py", "agent_mcp/facts.py", "workers/pool.py",
-    "tests/test_x.py", "eval/run_eval.py", "server.py", "autonomy.py",
-    "prompt_builder.py", "prompt_surface.py", "scripts/memory/kg_rebuild.py",
+    "tests/test_x.py", "eval/run_eval.py", "server.py", "app/autonomy.py",
+    "app/prompt_builder.py", "app/prompt_surface.py", "scripts/memory/kg_rebuild.py",
 ])
 def test_ordinary_code_is_allowed(path):
-    """`prompt_surface.py` joined this list on 2026-09-18 (#1242). It is the
-    same shape of file as `prompt_builder.py` — root-level, loaded-prompt
-    machinery — but was never enumerated, so item #1069, whose entire fix is
-    that module, was unimplementable by any round: three rounds wrote the fix
-    and were refused at rung 0 (SM_20260911_190850, SM_20260914_114935,
-    SM_20260918_145241)."""
+    """The prompt machinery is ordinary code under `app/**`. It used to sit at
+    the repo root with one allow-list line per file, and `prompt_surface.py`
+    was never enumerated, so item #1069, whose entire fix is that module, was
+    unimplementable by any round: three rounds wrote the fix and were refused
+    at rung 0 (SM_20260911_190850, SM_20260914_114935, SM_20260918_145241)
+    (#1242)."""
     assert spec.classify(path) == "allowed"
 
 
@@ -232,7 +232,7 @@ def test_scope_accepts_a_diff_whose_fix_is_prompt_surface():
     `['prompt_surface.py']` (SM_20260911_190850, SM_20260914_114935,
     SM_20260918_145241)."""
     ok, reason, buckets = spec.check_scope(
-        ["prompt_surface.py", "tests/test_prompt_surface_guard.py"])
+        ["app/prompt_surface.py", "tests/test_prompt_surface_guard.py"])
     assert ok, reason
     assert reason == "in scope"
     assert not buckets["unlisted"] and not buckets["protected"]
@@ -251,8 +251,13 @@ def test_admitting_prompt_surface_did_not_widen_anything_else():
     assert spec.classify("some/random/thing.txt") == "unlisted"
     assert spec.classify("scripts/automod/spec.py") == "protected"
     assert spec.requires_drill(["scripts/automod/spec.py"])
-    ok, reason, _ = spec.check_scope(["prompt_surface.py", "Makefile"])
+    ok, reason, _ = spec.check_scope(["app/prompt_surface.py", "Makefile"])
     assert not ok and "outside the writable set" in reason
+    # The root-level names the modules had before they moved into `app/` are
+    # no longer granted: a new module written there is refused, not admitted.
+    for gone in ("prompt_surface.py", "prompt_builder.py", "autonomy.py",
+                 "prefetch.py", "usage_store.py"):
+        assert spec.classify(gone) == "unlisted", gone
 
 
 def test_a_second_interpreter_reaches_the_same_verdict_as_rung_0():
@@ -275,8 +280,8 @@ def test_a_second_interpreter_reaches_the_same_verdict_as_rung_0():
     """
     probe = (
         "from scripts.automod import spec; "
-        "print(spec.classify('prompt_surface.py')); "
-        "print(spec.check_scope(['prompt_surface.py', "
+        "print(spec.classify('app/prompt_surface.py')); "
+        "print(spec.check_scope(['app/prompt_surface.py', "
         "'tests/test_prompt_surface_guard.py'])[0:2])"
     )
     out = subprocess.run([sys.executable, "-c", probe], cwd=REPO_ROOT,

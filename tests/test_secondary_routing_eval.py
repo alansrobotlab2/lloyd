@@ -638,7 +638,7 @@ def test_a_nightly_autonomy_task_runs_the_eval():
 
 
 def test_that_nightly_task_is_one_the_scheduler_will_actually_run():
-    """`autonomy.py:433` refuses a task with no skill_name — "it will NEVER
+    """`app/autonomy.py:433` refuses a task with no skill_name — "it will NEVER
     run" — so a task file alone is not a nightly run."""
     import yaml
 
@@ -661,7 +661,7 @@ def test_the_task_dispatches_only_when_there_is_a_slot_to_measure():
     """The dispatch rule and the instrument's rule have to be one rule.
 
     Runnable while an engine exists to compare against; a status in
-    `DISPATCH_STOPPING_STATUSES` (`autonomy.py:218` — `draft` or `paused`, the
+    `DISPATCH_STOPPING_STATUSES` (`app/autonomy.py:218` — `draft` or `paused`, the
     two values the scheduler drops) while it does not. Asserted as a pair
     rather than as one literal so it goes red in both directions: a slot
     re-armed without re-arming the job stops being measured nightly, and a
@@ -670,7 +670,7 @@ def test_the_task_dispatches_only_when_there_is_a_slot_to_measure():
     """
     import yaml
 
-    import autonomy
+    from app import autonomy
     from app import llm_slots
 
     runners = [p for p in AUTONOMY_DIR.glob("*.md")

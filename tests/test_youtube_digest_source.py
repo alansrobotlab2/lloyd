@@ -719,7 +719,7 @@ def test_the_protocol_reaches_the_prompt_through_the_loader_at_build_time(tmp_pa
         seen.append(slug)
         return "PROTOCOL FROM THE VAULT SKILL"
 
-    monkeypatch.setattr("autonomy._load_skill_content", fake_load)
+    monkeypatch.setattr("app.autonomy._load_skill_content", fake_load)
     prompt = Y.build_prompt(_meta(tmp_path), [])
 
     assert seen == [Y.SKILL], f"expected one load of {Y.SKILL!r}, got {seen}"
@@ -786,7 +786,7 @@ async def test_a_missing_skill_fails_the_run_before_the_session(tmp_path, backlo
                 "num_turns": 1, "errors": []}
 
     monkeypatch.setattr(Y, "run_prompt_in_session", fake_session)
-    monkeypatch.setattr("autonomy._load_skill_content", lambda slug: content)
+    monkeypatch.setattr("app.autonomy._load_skill_content", lambda slug: content)
 
     result = await Y.execute(_item({"channel": "discover-ai", "video_id": "abc123"}))
 

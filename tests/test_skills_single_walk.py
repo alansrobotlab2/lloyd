@@ -45,7 +45,7 @@ from pathlib import Path
 import pytest
 
 import agent_mcp.skills as skills_mod
-import prompt_builder as pb
+from app import prompt_builder as pb
 from app.routers.mc_ui import _summarize_skills
 from app.routers.skills import get_skills
 

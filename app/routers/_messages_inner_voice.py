@@ -20,7 +20,7 @@ import json
 import logging
 from typing import Any, Awaitable, Callable
 
-import usage_store
+from app import usage_store
 from app import event_log as _event_log
 from app.harness import HookRegistry
 from app.paths import SESSIONS_DIR

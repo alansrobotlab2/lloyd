@@ -50,7 +50,7 @@ def _model_health_url(model: str) -> str:
     if not model or model in ("primary", "null", "none"):
         return _VLLM_HEALTH_URL
     try:
-        import autonomy
+        from app import autonomy
         base = autonomy._get_model_env(model).get("ANTHROPIC_BASE_URL")
         if base:
             return base.rstrip("/") + "/health"
@@ -126,13 +126,13 @@ def _unparseable_task_files() -> list[str]:
     """Task files the scheduler cannot parse (invisible to dispatch).
 
     Reads `autonomy.AUTONOMY_DIR`, the one directory constant the scans beside it
-    already use (`recover_stuck_tasks` at autonomy.py:96, `_find_task_file` at
+    already use (`recover_stuck_tasks` at app/autonomy.py:96, `_find_task_file` at
     :161), rather than spelling `Path.home() / "obsidian" / "autonomy"` a second
     time: the value is the same in production — that is how the constant is
-    defined, at autonomy.py:77 — and the indirection is what lets a test point the
+    defined, at app/autonomy.py:77 — and the indirection is what lets a test point the
     real scan at a scratch fleet instead of the live board it would alert about."""
     import re
-    import autonomy
+    from app import autonomy
     d = autonomy.AUTONOMY_DIR
     bad = []
     for p in d.glob("*.md"):
@@ -163,7 +163,7 @@ def _grossly_overdue(queue: WorkQueue) -> list:
     it forever is what turned this alarm into noise. A task that is due, this
     stale, and NOT in the queue means the dispatch path itself is broken (the
     2026-05-28 silent stall this was built for)."""
-    import autonomy
+    from app import autonomy
     # One resolution set and one instant, the same pair `get_due_tasks` uses
     # (#870): this used to hand `_is_task_due` the runnable set to resolve
     # `depends_on` with, so a `paused` upstream was invisible here too and the
@@ -225,7 +225,7 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
 
     The instant is `autonomy._utcnow()`, like the alarm beside it, so one clock
     pin moves both."""
-    import autonomy
+    from app import autonomy
     now = autonomy._utcnow()
     resolution = autonomy.dependency_resolution_set()
     active = _active_task_ids(queue)
@@ -351,7 +351,7 @@ def _operator_pause_clause(queue: WorkQueue) -> str:
 
 
 def _parse_iso_safe(value):
-    import autonomy
+    from app import autonomy
     return autonomy._parse_iso(value)
 
 
@@ -438,8 +438,8 @@ async def _scan_unparseable_task_files(loop) -> None:
 
 
 async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
-    import autonomy
-    from autonomy import get_due_tasks
+    from app import autonomy
+    from app.autonomy import get_due_tasks
 
     loop = asyncio.get_event_loop()
 
@@ -573,9 +573,9 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
 
 
 async def execute(item: QueueItem) -> dict[str, Any]:
-    from autonomy import run_task, run_trigger
+    from app.autonomy import run_task, run_trigger
     from app.discord_notify import _discord_notify_task_complete
-    from autonomy import _find_task_file, _parse_task_file
+    from app.autonomy import _find_task_file, _parse_task_file
 
     task_id = item.payload.get("task_id")
     if task_id is None:
@@ -585,7 +585,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # vLLM wedges — without this wait they burn all attempts in ~90s of
     # ConnectErrors. Poll briefly for recovery before spending an attempt.
     loop = asyncio.get_event_loop()
-    from autonomy import _find_task_file as _ftf, _parse_task_file as _ptf
+    from app.autonomy import _find_task_file as _ftf, _parse_task_file as _ptf
     _t = _ptf(_ftf(task_id)) if _ftf(task_id) else None
     health_url = _model_health_url((_t or {}).get("model"))
     for _ in range(18):  # up to 90s

@@ -47,7 +47,7 @@ from pathlib import Path
 
 import pytest
 
-import prompt_builder as pb
+from app import prompt_builder as pb
 from agent_mcp.skills import _parse_frontmatter
 from scripts.autoresearch.common import load_bench_tasks, load_config
 

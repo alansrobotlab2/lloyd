@@ -297,7 +297,7 @@ def _stub_legs(monkeypatch, *, calls: list, noise: bool = True):
     is right to hush; the stub keeps that behaviour so "quiet" is tested against a
     leg that actually talks, not a silent one.
     """
-    import prefetch
+    from app import prefetch
 
     def lex(query, focus, deadline=None):
         calls.append(query)
@@ -359,7 +359,7 @@ def test_a_run_that_raises_still_leaves_the_disable_level_as_it_was(
     """
     mod, collector = script
     calls: list = []
-    import prefetch
+    from app import prefetch
 
     def boom(query, focus, deadline=None):
         calls.append(query)

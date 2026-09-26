@@ -152,7 +152,7 @@ def _surface(tmp_path: Path) -> Path:
 
 
 def _build(overlay_dir):
-    from prompt_builder import build_system_prompt
+    from app.prompt_builder import build_system_prompt
     return build_system_prompt(include_skills_index=False, overlay_dir=overlay_dir)
 
 

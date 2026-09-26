@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import prompt_builder as pb  # noqa: E402
+from app import prompt_builder as pb  # noqa: E402
 from app import memory_snapshot, prefix_miss, prompt_layout  # noqa: E402
 from app.config import CONFIG  # noqa: E402
 from app.routers._messages_subliminal import (  # noqa: E402

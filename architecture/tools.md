@@ -240,7 +240,7 @@ advertising has three consequences in `app/harness/tool_schema.py::build_tool_li
    no dispatch-affecting field back to tier 1, so an unattended turn needs a
    grant to re-arm or park a task and does not need one to write an activity
    note. It is installed for worker sources (`workers/sources/_common.py`),
-   autonomy task turns (`autonomy.py`), and the ambient and sync dispatch
+   autonomy task turns (`app/autonomy.py`), and the ambient and sync dispatch
    paths — not only "background". Every hook here keys on the bare tool name,
    which `loop._pre_dispatch` resolves from whatever the model emitted, so
    the legacy `mcp__lloyd-mcp__` spelling reaches them too (#727). The bench

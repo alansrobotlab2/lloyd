@@ -31,7 +31,7 @@ import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import autonomy as A
+from app import autonomy as A
 from app import llm_slots
 from app.routers import autonomy as ROUTER
 
@@ -212,9 +212,9 @@ def test_the_guard_is_called_by_the_writers_and_by_nobody_else():
                    for part in p.relative_to(REPO_ROOT).parts)
         and "slot_arm_block(" in p.read_text(encoding="utf-8")
     )
-    # One definition (`autonomy.py`) and two call sites, both write surfaces.
-    assert callers == ["agent_mcp/autonomy.py", "app/routers/autonomy.py",
-                       "autonomy.py"], callers
+    # One definition (`app/autonomy.py`) and two call sites, both write surfaces.
+    assert callers == ["agent_mcp/autonomy.py", "app/autonomy.py",
+                       "app/routers/autonomy.py"], callers
 
 
 def test_the_declaration_survives_a_degraded_parse():

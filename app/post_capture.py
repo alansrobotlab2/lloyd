@@ -437,7 +437,7 @@ def _append_daily_note(session_id: str, summary: str,
 async def _maybe_extract_focus(session_id: str):
     """Background: extract conversation topics via secondary model for focus tracking."""
     try:
-        from prefetch import _get_session_focus, FOCUS_EXTRACT_INTERVAL  # noqa: F401
+        from app.prefetch import _get_session_focus, FOCUS_EXTRACT_INTERVAL  # noqa: F401
 
         focus = _get_session_focus(session_id)
         if not focus or not focus.needs_topic_extraction():

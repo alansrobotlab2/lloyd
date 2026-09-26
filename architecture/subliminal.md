@@ -501,8 +501,8 @@ reference them only if naturally relevant to what they're saying now.
 workflow, call skills_search before proceeding.</skill-hint>
 <ide_state>
   open_folder: /home/alansrobotlab/lloyd
-  visible_file: prefetch.py
-  open_tabs: [prefetch.py, config.yaml]
+  visible_file: app/prefetch.py
+  open_tabs: [app/prefetch.py, config.yaml]
 </ide_state>
 </context>
 
@@ -668,8 +668,8 @@ Tier-2 topic extraction (above).
 
 | File | Purpose |
 |------|---------|
-| `~/lloyd/prefetch.py` | Prefetch layer: 5-worker parallel search under a hard budget, `SessionFocus`, context formatting, IDE state |
-| `~/lloyd/prompt_builder.py` | System prompt assembly (SOUL.md + memories + skills index + goal/plan/todos + turn discipline) |
+| `~/lloyd/app/prefetch.py` | Prefetch layer: 5-worker parallel search under a hard budget, `SessionFocus`, context formatting, IDE state |
+| `~/lloyd/app/prompt_builder.py` | System prompt assembly (SOUL.md + memories + skills index + goal/plan/todos + turn discipline) |
 | `~/lloyd/app/routers/messages.py` | Integration: prefetch call, 20-turn memory nudge, subliminal persistence, post-session task dispatch |
 | `~/lloyd/app/routers/voice.py` | Same prefetch call on the voice path |
 | `~/lloyd/app/routers/_messages_subliminal.py` | #306 injected-prefix extraction, classification, and `role="subliminal"` entry shaping |
@@ -779,7 +779,7 @@ with the genuinely correct answer, never an easier target.
 - **2026-03-28:** Phase 3.5 — `context` plugin hook added to OpenClaw core,
   subliminal migrated to ephemeral injection
 - **2026-04-05:** Lloyd migration — system moved off OpenClaw; subliminal replaced
-  by `prefetch.py`
+  by `app/prefetch.py`
 - **2026-04-14:** Active Memory (#289) — vault search added as a third parallel
   worker, conversation focus tracking, inline fact extraction, memory nudge
 - **2026-04-20:** qmd `searchVec` patch + embedding LRU cache; `PREFETCH_BUDGET_MS`
@@ -810,9 +810,9 @@ with the genuinely correct answer, never an easier target.
   per-leg hybrid queries, the single-term ladder floor fix, a 150 ms soft
   wait with lex carry-over, and reserved carried slots — merged doc_hit
   0.25 → 0.55–0.60
-- **2026-09-08:** `ANTICOMPLIANCE_DIRECTIVE` deleted from `prompt_builder.py`
+- **2026-09-08:** `ANTICOMPLIANCE_DIRECTIVE` deleted from `app/prompt_builder.py`
   (#465 — SOUL.md's own copy is the only one now); `log_turn_prompt_budget`
-  added to `prefetch.py` so the injected half of the turn is measured against
+  added to `app/prefetch.py` so the injected half of the turn is measured against
   `PROMPT_BUDGET_CHARS` beside the system half (#466)
 - **2026-09-11:** audited against the code again. Corrected: the fact tree
   moved out of the vault to `_pipeline/vault-derived/facts/`; the secondary

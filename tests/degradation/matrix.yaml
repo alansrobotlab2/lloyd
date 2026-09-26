@@ -327,7 +327,7 @@ rows:
   # vacuously satisfied and #39/#40 fired with nothing upstream.
   - id: D-DEP-UPSTREAM-PAUSED
     dependency: autonomy-task-42
-    consumer: autonomy.py::_is_task_due
+    consumer: app/autonomy.py::_is_task_due
     fault: the upstream task a dependent names is paused and so absent from the runnable set
     injection: fixture-state
     probe: dependency
@@ -345,7 +345,7 @@ rows:
 
   - id: D-DEP-DANGLING-REF
     dependency: autonomy-task-file
-    consumer: autonomy.py::_is_task_due
+    consumer: app/autonomy.py::_is_task_due
     fault: depends_on names a task id whose file does not exist at all
     injection: fixture-state
     probe: dependency
@@ -365,7 +365,7 @@ rows:
       non_healthy: true
       reported: held
     incident: backlog/558-treat-an-unresolvable-depends-on-as-not-met-so-a-p.md
-    fixed_by: "#558 ruling, in autonomy.py::_is_dependency_met"
+    fixed_by: "#558 ruling, in app/autonomy.py::_is_dependency_met"
 
   # ---------------------------------------------------------------- kg store
   - id: D-KG-STORE-UNOPENABLE

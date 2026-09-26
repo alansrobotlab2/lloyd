@@ -159,7 +159,7 @@ async def run_case(case: dict, index: int, *, max_turns: int, rep: int) -> dict:
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
     from app.paths import VAULT_ROOT
-    from prompt_builder import build_system_prompt
+    from app.prompt_builder import build_system_prompt
     from scripts.automod import backlog as B, state as S
     from workers.sources.autotriage import parse_verdict, render_prompt
 

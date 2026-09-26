@@ -75,9 +75,9 @@ def _no_platform_state(monkeypatch, tmp_path):
     and the model env. Only the config's per-source wall clock is wanted here,
     so the other two are stubbed exactly as `tests/unit/test_grant_policy.py`
     does — the anchor is not about them."""
-    import prompt_builder
+    from app import prompt_builder
 
-    import autonomy
+    from app import autonomy
     monkeypatch.setattr(prompt_builder, "build_system_prompt",
                         lambda *a, **k: "WORKER SYSTEM PROMPT")
     monkeypatch.setattr(autonomy, "_get_model_env", lambda *a, **k: {})

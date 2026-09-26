@@ -317,7 +317,7 @@ def test_delivery_is_a_non_error_tool_result(stub_body):
     """The crux of #738, and the reason the deliverer could not reuse deny.
 
     Before this change the only PreToolUse outcome beyond pass was `deny`, and
-    `_pre_dispatch` answers a deny with `is_error=True` — which `autonomy.py`
+    `_pre_dispatch` answers a deny with `is_error=True` — which `app/autonomy.py`
     books into `tool_errors`. A protocol card that makes the fleet look sicker
     than it is would be measured out of existence.
     """
@@ -412,7 +412,7 @@ def test_deny_beats_deliver_regardless_of_registration_order(stub_body):
 
 
 def test_already_injected_skill_is_not_delivered_again(stub_body):
-    """prefetch.py put this body in the prompt before the turn started; a second
+    """app/prefetch.py put this body in the prompt before the turn started; a second
     copy in the same turn is pure prompt cost."""
     hooks = _install(HookRegistry(), already_injected={"youtube-transcript"})
     out = _run(hooks.fire_pre_tool_use(

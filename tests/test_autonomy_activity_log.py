@@ -22,7 +22,7 @@ import re
 
 import pytest
 
-import autonomy
+from app import autonomy
 
 #: The instant the pinned clock stamps its first append with. `_append_activity_log`
 #: formats `datetime.datetime.now(timezone.utc)` into every entry, and the
@@ -31,7 +31,7 @@ import autonomy
 T0 = datetime.datetime(2026, 9, 24, 9, 0, tzinfo=datetime.timezone.utc)
 
 # A run summary is markdown prose and the failure note truncates it by
-# characters (`f"Run … FAILED ({kind}): {summary[:280]}"`, autonomy.py), so a
+# characters (`f"Run … FAILED ({kind}): {summary[:280]}"`, app/autonomy.py), so a
 # note routinely arrives carrying line breaks. This is that note.
 MULTI_LINE_NOTE = (
     "Traceback (most recent call last):\n"

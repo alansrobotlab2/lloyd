@@ -306,7 +306,7 @@ async def _one_run(*, keep: int, max_turns: int,
     from app.harness.loop import run_query
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
-    from prompt_builder import build_system_prompt
+    from app.prompt_builder import build_system_prompt
 
     config = _yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
     models = config.get("models") or {}

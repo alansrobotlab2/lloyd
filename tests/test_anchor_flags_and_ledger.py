@@ -71,7 +71,7 @@ def test_budget_flag_false_silences_both_budget_clocks(harness_cfg, clock, monke
 
 
 def test_budget_flag_false_silences_the_autonomy_task_anchor(harness_cfg, clock):
-    import autonomy
+    from app import autonomy
 
     harness_cfg["budget_anchor"] = {"enabled": False}
     anchor = autonomy._build_task_anchor(1000, 20)

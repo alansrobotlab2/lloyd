@@ -25,8 +25,8 @@ sys.path.insert(0, str(ROOT / "eval"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import agent_mcp.skills as skills_mod  # noqa: E402
-import prefetch  # noqa: E402
-import prompt_builder as pb  # noqa: E402
+from app import prefetch  # noqa: E402
+from app import prompt_builder as pb  # noqa: E402
 from app.config import CONFIG  # noqa: E402
 
 #: The real ranker, captured before the fixture stubs it out.

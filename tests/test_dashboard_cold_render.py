@@ -224,7 +224,7 @@ async def test_the_usage_section_publishes_by_skill_24h_beside_by_model_24h():
     literally, because the frontend types it (`web/src/api.ts:2014`) and the
     clause is that its shape and rows do not change.
     """
-    import usage_store
+    from app import usage_store
     from app.harness import skill_dispatch as sd
 
     usage_store.record_usage(

@@ -188,7 +188,7 @@ def test_a_numeric_row_never_ranks_at_the_task_id_score(world):
     number, so on `what is task 294 about` it `_bump`ed the pure-digit
     directory to 10.0 — the ceiling of the whole function, tied with the
     canonical `Task #294` row (branch 2's full-name bonus tops out at
-    `5.0 + min(len / 20, 2.0)` = 7.0). At `prefetch.py`'s budget of
+    `5.0 + min(len / 20, 2.0)` = 7.0). At `app/prefetch.py`'s budget of
     `FACT_MAX_ENTITIES = 2` that tie spent half the injected facts on a row
     that is a directory name, not an entity."""
     root, _ = world

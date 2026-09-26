@@ -90,7 +90,7 @@ def _quiet_logging(level: int = logging.CRITICAL) -> Iterator[None]:
 
 
 with _quiet_logging():
-    import prefetch  # noqa: E402
+    from app import prefetch  # noqa: E402
 
 
 def _norm(s: str) -> str:

@@ -20,7 +20,8 @@ MCP aggregator (`agent_mcp/`). Backend FastAPI + SSE, frontend React (Vite).
 
 ```
 ~/lloyd/                  code only
-├── server.py  config.yaml  prompt_builder.py  autonomy.py  usage_store.py
+├── server.py  config.yaml   server.py is the only module at the root; code goes in a package
+├── app/                  prompt_builder, prefetch, autonomy, usage_store, paths, config, …
 ├── app/harness/          agent loop: loop.py, client.py, options.py, events.py, hooks.py, mcp_pool.py, tool_schema.py
 ├── app/routers/          API routes (messages.py = the chat/worker turn path, dashboard.py)
 ├── agent_mcp/            aggregator: builtin_bash/fs/task + domain modules

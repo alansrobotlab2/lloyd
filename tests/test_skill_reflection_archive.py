@@ -163,7 +163,7 @@ def _active_skills() -> dict[str, str]:
     the index advertises it — a skill being un-listed is not a licence to lose a
     report.
     """
-    from prompt_builder import _is_quarantined_skill
+    from app.prompt_builder import _is_quarantined_skill
 
     out: dict[str, str] = {}
     for root in SKILLS_DIRS:

@@ -649,7 +649,7 @@ def candidate_shape(overlay_dir: Path) -> dict[str, Any]:
     MEMORY.md is a scope call a person has to make.
     """
     try:
-        import prompt_surface
+        from app import prompt_surface
     except ImportError:  # pragma: no cover - repo is always importable
         return {"surface": None, "gate_share": None, "prohibition_ratio": None}
     for name in SHAPE_SURFACES:
@@ -686,7 +686,7 @@ def contract_shape_fields(overlay_dir: Path | None) -> dict[str, Any]:
     soul = CANONICAL_PROMPTS.get("SOUL.md")
     if soul is not None:
         try:
-            import prompt_surface
+            from app import prompt_surface
 
             live = prompt_surface.contract_shape(
                 soul.read_text(encoding="utf-8", errors="replace")
@@ -738,7 +738,7 @@ def shape_ratchet_refusals(
     could check.
     """
     try:
-        import prompt_surface
+        from app import prompt_surface
     except ImportError as exc:  # pragma: no cover - repo is always importable
         return [f"prompt_surface unavailable, refusing to promote blind: {exc}"]
 
@@ -832,7 +832,7 @@ def contract_refusals(overlay_dir: Path, shape_history: list[dict[str, Any]] | N
     rounds; every other check in this function is answerable from the overlay.
     """
     try:
-        import prompt_surface
+        from app import prompt_surface
     except ImportError as exc:  # pragma: no cover - repo is always importable
         return [f"prompt_surface unavailable, refusing to promote blind: {exc}"]
     soul = _prospective(overlay_dir, "SOUL.md")

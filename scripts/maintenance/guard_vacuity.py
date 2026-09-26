@@ -370,7 +370,7 @@ def build_guards(autonomy, ers, kgr, gate_mod, shc, promote_mod, common):
     guards: list[Guard] = []
     NOW = datetime(2026, 9, 19, 0, 0, 0, tzinfo=timezone.utc)  # pinned: one probe, one instant
 
-    # 1 ── autonomy.py `_is_dependency_met` → DISPATCH of a dependent task.
+    # 1 ── app/autonomy.py `_is_dependency_met` → DISPATCH of a dependent task.
     def dep_task(**over):
         t = {"id": "500", "status": "up_next", "frequency": "daily",
              "depends_on": "499", "last_run": "2026-09-18T20:00:00+00:00"}
@@ -386,7 +386,7 @@ def build_guards(autonomy, ers, kgr, gate_mod, shc, promote_mod, common):
         return PASS if autonomy._is_dependency_met(p["task"], p["board"], now=NOW) else BLOCK
 
     guards.append(Guard(
-        site_file="autonomy.py", site_needle="def _is_dependency_met",
+        site_file="app/autonomy.py", site_needle="def _is_dependency_met",
         symbol="_is_dependency_met", action="dispatch",
         scope_for="#559",
         note="mutant = 'satisfied' made total: the branch that used to return it "
@@ -423,7 +423,7 @@ def build_guards(autonomy, ers, kgr, gate_mod, shc, promote_mod, common):
                        status_class=True),
         ]))
 
-    # 2 ── autonomy.py `_all_runnable_tasks` → what DISPATCH may pick up.
+    # 2 ── app/autonomy.py `_all_runnable_tasks` → what DISPATCH may pick up.
     def runnable_real(p):
         board = [dict(t) for t in p]
         for t in board:
@@ -432,7 +432,7 @@ def build_guards(autonomy, ers, kgr, gate_mod, shc, promote_mod, common):
                           for t in autonomy._all_runnable_tasks(board)) else BLOCK
 
     guards.append(Guard(
-        site_file="autonomy.py", site_needle="def _all_runnable_tasks",
+        site_file="app/autonomy.py", site_needle="def _all_runnable_tasks",
         symbol="_all_runnable_tasks", action="dispatch",
         note="mutant = admit every board task: the filter objects to neither "
              "status nor authority, which is the always-safe reading for a filter",
@@ -455,12 +455,12 @@ def build_guards(autonomy, ers, kgr, gate_mod, shc, promote_mod, common):
                        "the human's, so an unreadable one is held, not run"),
         ]))
 
-    # 3 ── autonomy.py `_grant_block_errors` → DISPATCH under declared authority.
+    # 3 ── app/autonomy.py `_grant_block_errors` → DISPATCH under declared authority.
     def grants_real(p):
         return BLOCK if autonomy._grant_block_errors(p["task"], Path(p["path"])) else PASS
 
     guards.append(Guard(
-        site_file="autonomy.py", site_needle="def _grant_block_errors",
+        site_file="app/autonomy.py", site_needle="def _grant_block_errors",
         symbol="_grant_block_errors", action="dispatch",
         note="mutant = no errors ever, so the task runs under an authority the "
              "loader could not read",
@@ -831,7 +831,7 @@ def build_guards(autonomy, ers, kgr, gate_mod, shc, promote_mod, common):
 def _modules():
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    import autonomy
+    from app import autonomy
     from scripts.automod import gate as gate_mod
     from scripts.autoresearch import common, promote as promote_mod
     import scripts.service_health_check as shc

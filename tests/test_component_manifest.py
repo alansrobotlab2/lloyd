@@ -102,7 +102,7 @@ def _note_real_components(session_id: str, tmp_path: Path) -> dict:
     in this file on purpose — whether they load depends on what is under the
     vault, and that is not what these clauses are about.
     """
-    import prompt_builder
+    from app import prompt_builder
 
     prompt_builder.build_system_prompt(session_id=session_id,
                                        overlay_dir=_overlay(tmp_path),
@@ -671,7 +671,7 @@ def test_a_component_dict_reaches_the_line_only_through_prompt_builder(monkeypat
     record #520 needs. This test drives the two sides for real: prompt_builder
     builds, the loop sends, the line carries the components prompt_builder named.
     """
-    import prompt_builder
+    from app import prompt_builder
 
     # One call, no call between: it returns the rendered prompt AND hands the
     # same named dict to the registry, so each recorded body must be found in
@@ -703,7 +703,7 @@ def test_a_session_prompt_builder_never_built_is_reported_unrecorded(monkeypatch
     real one. This is the shape every non-chat worker has until it opts in, and
     the reason the field exists at all.
     """
-    import prompt_builder
+    from app import prompt_builder
 
     prompt_builder.build_system_prompt(session_id="other-session",
                                        overlay_dir=_overlay(tmp_path))

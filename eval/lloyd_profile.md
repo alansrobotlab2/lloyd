@@ -80,7 +80,7 @@ projects. It also modifies its own code through a gated loop.
   is the automatic one: before each turn it pulls candidate vault context into
   the prompt from a fixed set of legs — skills, facts, vault lexical, vault
   hybrid (`qmd`, a local hybrid BM25 + embedding index over the vault), recent
-  sessions, backlog refs — and it has **no graph arm**: `prefetch.py` never
+  sessions, backlog refs — and it has **no graph arm**: `app/prefetch.py` never
   imports `app.kg_store`, and its fact leg is a name→facts lookup ordered by
   confidence, not a walk over neighbours. **`vault_recall`** is the tool that
   does graph seed-and-expand over that store (neighbour expansion plus

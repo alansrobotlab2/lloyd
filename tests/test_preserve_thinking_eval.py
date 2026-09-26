@@ -219,7 +219,7 @@ def _script_engine(monkeypatch, turns=SCRIPT, *,
     pool = _FakePool()
     monkeypatch.setattr("app.harness.loop._build_pool", _build_pool)
     monkeypatch.setattr("app.harness.loop.stream_chat", engine)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda *a, **k: "SYS")
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda *a, **k: "SYS")
     monkeypatch.setattr("app.mcp_discovery._get_disallowed_tools", lambda *a, **k: set())
     monkeypatch.setattr("app.mcp_discovery._get_harness_kwargs",
                         lambda *a, **k: {"tool_search_enabled": False})

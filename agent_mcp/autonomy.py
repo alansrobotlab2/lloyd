@@ -562,19 +562,19 @@ def _handle_write(params: dict) -> str:
         # `secondary_enabled: false` in force, which is a sweep of one engine twice
         # billed to the primary. Parking is never refused, so a job can always be
         # stopped from this tool.
-        from autonomy import slot_arm_block
+        from app.autonomy import slot_arm_block
         blocked = slot_arm_block(task_dict, str(task_dict.get("status") or ""))
         if blocked:
             return json.dumps({"error": blocked})
         task_dict["updated_at"] = now
         # Two notes can land on this one write: the caller's own `activity_note`,
         # and the one this tool OWES when it moves `status` — `draft`/`paused` are
-        # never dispatched (`autonomy.py:323`,
+        # never dispatched (`app/autonomy.py:323`,
         # `workers/sources/scheduled_task.py:174`), and before #1127 an
         # `autonomy_write_task(status=...)` could park a task with no line naming
         # either value anywhere. Not a block: a status change is a legitimate
         # write, it just now has to say so in the task's own markdown.
-        from autonomy import append_activity_line, status_change_note
+        from app.autonomy import append_activity_line, status_change_note
         notes = [n for n in (
             status_change_note(prior_status, task_dict.get("status")),
             params.get("activity_note", ""),
@@ -630,7 +630,7 @@ def _handle_delete(params: dict) -> str:
                 return _refuse_broken(BrokenFrontmatterError(
                     f"task #{task_id} frontmatter only parsed by regex fallback; "
                     "refusing to rewrite it (fix the file's YAML first)"))
-            from autonomy import append_activity_line, status_change_note
+            from app.autonomy import append_activity_line, status_change_note
             prior_status = task.get("status")
             now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             task["status"] = "draft"
@@ -721,7 +721,7 @@ async def _handle_run(params: dict) -> str:
         from app.paths import LLOYD_HOME as lloyd_home
         if str(lloyd_home) not in sys.path:
             sys.path.insert(0, str(lloyd_home))
-        from autonomy import run_task, run_trigger
+        from app.autonomy import run_task, run_trigger
         with run_trigger("mcp"):
             result = await run_task(task_id)
         return json.dumps(result)

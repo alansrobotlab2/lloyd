@@ -23,7 +23,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-import usage_store
+from app import usage_store
 from app.config import (
     CONFIG,
     _model_base_url,
@@ -56,7 +56,7 @@ from app.sessions_io import (
 )
 from app.post_capture import _post_session_capture, _maybe_extract_focus
 from app.session_titles import maybe_title_session
-from prefetch import prefetch_context_async, log_turn_prompt_budget
+from app.prefetch import prefetch_context_async, log_turn_prompt_budget
 from app.compaction import load_and_compact_session
 from app import event_log as _event_log  # Inner Voice — agent-side event capture
 from app import compaction_record as _compaction_record  # which context policy fired

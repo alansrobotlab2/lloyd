@@ -31,7 +31,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import autonomy as A  # noqa: E402
+from app import autonomy as A  # noqa: E402
 from app.harness.policy import GrantStore, sync_task_grants  # noqa: E402
 from app.harness.policy import validate_task_grants  # noqa: E402
 
@@ -128,7 +128,7 @@ def test_grants_is_in_the_recovery_field_list():
 
     assert "grants" in AUTONOMY_TASK_FIELDS, (
         "a degraded task file would recover with no authorization block")
-    src = (ROOT / "autonomy.py").read_text()
+    src = (ROOT / "app" / "autonomy.py").read_text()
     start = src.index("def _parse_task_file")
     body = src[start:src.index("def ", start + 10)]
     assert "fallback_fields=AUTONOMY_TASK_FIELDS" in body, (

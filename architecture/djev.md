@@ -1076,7 +1076,7 @@ The replay stays after #1361: it costs nothing, and any boot without
 **The model is told in its system prompt, not only in the tool descriptions**
 (2026-09-25). In the first four days djev was called from one session of ~900,
 and from no worker turn: a description is read at call time, after the model
-has already decided to reason a ranking out in tokens. `prompt_builder.py`
+has already decided to reason a ranking out in tokens. `app/prompt_builder.py`
 carries a constant "Fast decisions" paragraph beside the web-lookup and
 code-navigation ones, on chat and worker turns both. It names the shapes that
 pay (rank, shortlist, classify, triage several things against stated
@@ -1242,7 +1242,7 @@ Tests: `tests/test_djev_client.py`, `test_djev_tools.py`,
 | `agent_mcp/vault.py` | the recall ranker (§8.1), the rerank arm and the `rerank` seam |
 | `agent_mcp/backlog.py`, `scripts/memory/entity_semantic_gate.py`, `app/harness/action_review.py` | the `dedupe`, `entity` and `action_review` seams |
 | `agent-services/voice/addressee.py`, `scripts/voice/addressee_eval.py` | the voice addressee gate and its labelled eval (§6.5) |
-| `prompt_builder.py` | the "Fast decisions" paragraph (§9.1) |
+| `app/prompt_builder.py` | the "Fast decisions" paragraph (§9.1) |
 | `app/harness/service_control.py` | refuses a background turn's restart or hand-boot of the engine |
 | `scripts/service_health_check.py` | `SERVICES["agent-djev"]` declares `"port": 8011`, so a supervisor `RUNNING` line with no listener behind it shows up as a red probe, and `_switched_off()` reads `llm_slots.slots()` so a `djev.enabled: false` verdict is not an outage |
 | `eval/djev/schemas.py`, `eval/djev/replay.py`, `eval/djev/calibration_ladder.py` | the registry, calibration, and the gate ladder |

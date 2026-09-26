@@ -302,7 +302,7 @@ body**, with lines like `- **2026-03-08 18:05** — Moved to in_review (Lloyd)`.
 204 files still carry that section and the vocabulary it was written in; the
 newest is #365. No live backlog reader or writer touches it — it is inert text
 in the body now. The heading form survives for a different file type
-altogether: `autonomy.py::_append_activity_log` and `agent_mcp/autonomy.py`
+altogether: `app/autonomy.py::_append_activity_log` and `agent_mcp/autonomy.py`
 still append to a `## Activity Log` heading in `~/obsidian/autonomy/*.md`,
 which is where a reader coming from an old description of this system will
 find the parser they were looking for.

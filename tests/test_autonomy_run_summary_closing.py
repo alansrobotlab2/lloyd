@@ -35,13 +35,13 @@ from pathlib import Path
 import pytest
 import yaml
 
-import autonomy
+from app import autonomy
 from workers.pool import normalize_result
 from workers.queue import QueueItem, WorkQueue
 
 # The tree whose source the text assertions below read — the checkout that
 # `autonomy` was imported from, never the process cwd.
-_REPO = Path(autonomy.__file__).resolve().parent
+_REPO = Path(autonomy.__file__).resolve().parents[1]
 
 CAP = autonomy.RUN_SUMMARY_CAP
 assert CAP == 300, "one constant, and it is the cap the live ledger was pinned to"
@@ -182,7 +182,7 @@ def run_driver(monkeypatch, tmp_path):
         monkeypatch.setattr(harness_mod, "run_query", _run_query)
         monkeypatch.setattr(harness_mod, "RunOptions", Opts)
         monkeypatch.setattr(mcp_pool, "DEFAULT_LLOYD_MCP_SERVERS", {}, raising=False)
-        monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
+        monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "SYS")
         monkeypatch.setattr("app.run_recorder.recording_enabled", lambda: False)
         monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", tmp_path / "sessions")
         return captured
@@ -241,17 +241,17 @@ def test_a_report_ending_in_a_table_keeps_its_verdict_row(run_driver):
 
 def test_the_one_slice_of_final_response_goes_through_the_named_constant():
     r"""Clause 3, asserted with the clause's own grep. `grep -n "final_response\["
-    autonomy.py` must show a slice, and every line it shows must
+    app/autonomy.py` must show a slice, and every line it shows must
     reach the cap through `RUN_SUMMARY_CAP`. No `[:200]` / `[:300]` survives, and
     300 is still the one length every consumer of the ledger field trims to."""
-    src = (_REPO / "autonomy.py").read_text(encoding="utf-8")
+    src = (_REPO / "app" / "autonomy.py").read_text(encoding="utf-8")
     lines = [ln for ln in src.splitlines()
              if re.search(r"final_response\[[^\]]*\]", ln)]
     assert len(lines) == 1, f"expected exactly one slice of final_response, got {lines}"
     assert "RUN_SUMMARY_CAP" in lines[0], \
         "the surviving slice must use the named constant, not a literal"
     for literal in ("[:200]", "[:300]"):
-        assert literal not in src, f"the old {literal} cap is still in autonomy.py"
+        assert literal not in src, f"the old {literal} cap is still in app/autonomy.py"
     assert src.count("RUN_SUMMARY_CAP") >= 2   # defined once, used by both helpers
     assert autonomy.RUN_SUMMARY_CAP == 300
 
@@ -260,7 +260,7 @@ def test_every_summary_writer_in_autonomy_calls_a_helper_not_a_slice():
     """Both writers are reached through `_outcome_summary` / `_failure_summary`; the
     counts are exact so a future writer cannot re-add a literal slice unnoticed. The
     failure path head-slices an error string through the SAME constant."""
-    src = (_REPO / "autonomy.py").read_text(encoding="utf-8")
+    src = (_REPO / "app" / "autonomy.py").read_text(encoding="utf-8")
     assert src.count("_outcome_summary(final_response)") == 2   # record + preview
     # Four since #1085, and the fourth is a new CALLER of the existing helper,
     # not a new way to build a summary: the infra-ceiling alert. What makes this
@@ -600,7 +600,7 @@ async def test_the_discord_helper_posts_a_mention_and_drops_the_sentinel(monkeyp
 
 def test_no_reader_of_the_sentinel_uses_a_substring():
     """Four sites, one predicate: none may test the token by containment."""
-    for rel in ("autonomy.py", "app/discord_notify.py",
+    for rel in ("app/autonomy.py", "app/discord_notify.py",
                 "workers/sources/scheduled_task.py"):
         src = (_REPO / rel).read_text(encoding="utf-8")
         assert not re.search(r'"\[SILENT\]"\s+(not\s+)?in\b', src), rel

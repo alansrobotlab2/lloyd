@@ -39,7 +39,7 @@ import asyncio
 import pytest
 import yaml
 
-import autonomy
+from app import autonomy
 
 NARRATION = ("Now let me classify the hits against prefs and dedup state.\n\n"
              "**Calendar:** nothing in the window.")
@@ -126,7 +126,7 @@ def harness(monkeypatch, tmp_path):
         monkeypatch.setattr(harness_mod, "run_query", _run_query)
         monkeypatch.setattr(harness_mod, "RunOptions", Opts)
         monkeypatch.setattr(mcp_pool, "DEFAULT_LLOYD_MCP_SERVERS", {}, raising=False)
-        monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
+        monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "SYS")
         monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", tmp_path / "sessions")
         return captured
 

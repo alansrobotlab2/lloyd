@@ -177,7 +177,7 @@ class _RunRecorder:
         if stop_reason is not None:
             telemetry["stop_reason"] = stop_reason
         try:
-            import usage_store
+            from app import usage_store
             usage_store.record_usage(
                 session_id=self.session_id,
                 model=self.model or "primary",

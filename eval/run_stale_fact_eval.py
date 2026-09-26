@@ -493,7 +493,7 @@ def dispatch(name: str, args: dict, dirs: SimpleNamespace) -> str:
 def render(probe: Probe, dirs: SimpleNamespace, arm: str) -> list[dict]:
     """The messages a trial sends: system (SOUL + memory), the probe, and a
     `fact_get` exchange on the entity answered from THIS arm's store."""
-    import prompt_builder
+    from app import prompt_builder
     soul = prompt_builder._load_soul(None) or ""
     system = soul
     memories = prompt_builder._load_memories(dirs.memories, soul=soul, files=("MEMORY.md",))

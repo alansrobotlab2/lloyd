@@ -38,7 +38,7 @@ import sqlite3
 
 import pytest
 
-import usage_store
+from app import usage_store
 from app.compaction_record import (
     TurnCompaction,
     current,
@@ -52,7 +52,7 @@ from app.compaction_record import (
 def store(tmp_path, monkeypatch):
     """An isolated usage database, opened through the module's real path.
 
-    `_conn()` reopens when `DB_PATH` moves (usage_store.py:22-27), which is the
+    `_conn()` reopens when `DB_PATH` moves (app/usage_store.py:22-27), which is the
     seam every test in this area uses; there is no cache to clear by hand.
     """
     db = tmp_path / "usage.db"
@@ -767,7 +767,7 @@ def _relief_events(session_id: str) -> list[dict]:
 
 def _raw_compactions(store, session_id: str) -> list:
     """Every compaction record this session's usage rows carry, parsed (None = NULL)."""
-    import usage_store
+    from app import usage_store
 
     usage_store._conn().commit()
     return [None if v is None else json.loads(v) for (v,) in
@@ -776,7 +776,7 @@ def _raw_compactions(store, session_id: str) -> list:
 
 
 def _row(store, session_id: str):
-    import usage_store
+    from app import usage_store
 
     usage_store._conn().commit()
     rows = list(sqlite3.connect(store).execute(

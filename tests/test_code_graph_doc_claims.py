@@ -21,10 +21,10 @@ from pathlib import Path
 
 import pytest
 
-import prompt_builder as pb
+from app import prompt_builder as pb
 from agent_mcp import code_graph as CG
 
-ROOT = Path(pb.__file__).resolve().parent
+ROOT = Path(pb.__file__).resolve().parents[1]
 VAULT_SKILL = Path.home() / "obsidian" / "skills" / "automod-change-own-code" / "SKILL.md"
 
 GRAPH_TOOL_RE = re.compile(r"\bgraph_[a-z_]+")

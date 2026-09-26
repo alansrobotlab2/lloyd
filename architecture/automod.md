@@ -1937,7 +1937,7 @@ Three rails keep the verdict honest without trusting the model:
   `partial`. A lazy grader cannot pass a round. The path is *normalised*
   before it is judged (`normalize_evidence_path`): the schema asks for a bare
   worktree-relative file and graders write `app/x.py:164`,
-  `scripts/a.py:224,253`, `autonomy.py::_pin`, `~/obsidian/…`, or an absolute
+  `scripts/a.py:224,253`, `app/autonomy.py::_pin`, `~/obsidian/…`, or an absolute
   path into the review snapshot that has since been removed — every one of the
   first four backfill rows had a `met` downgraded for a path that was real. A
   line suffix, a trailing symbol or anchor, and a dead absolute prefix whose
@@ -2741,7 +2741,7 @@ The canary runs with `HOME=<round>/home` and its worktree at
 and `$HOME/obsidian` the same directory.
 
 One lever neutralizes the sessions dir, `autonomy-runs/`, the task registry,
-`workers.db`, the vault paths, and `autonomy.py`'s `AUTONOMY_DIR` — which no
+`workers.db`, the vault paths, and `app/autonomy.py`'s `AUTONOMY_DIR` — which no
 config key reaches (`autonomy.task_dir` in config.yaml is dead; nothing reads
 it), so an empty scratch vault is what makes `recover_stuck_tasks()` a no-op.
 
@@ -3343,8 +3343,8 @@ decision — `eval/run_eval.py` issues no model request, so a change that droppe
 turn accounting left all seven metrics unmoved and produced a clean report which
 then became the promotion's quality baseline. Not "nothing observes the loop":
 the gate runs a scored loop-side check (`prompt_surface`, §4) — but only
-*pre*-landing, and only for the five path names `prompt_builder.py`,
-`prefetch.py`, `SOUL.md`, `MEMORY.md`, `USER.md`. A loop-side change outside
+*pre*-landing, and only for the five path names `app/prompt_builder.py`,
+`app/prefetch.py`, `SOUL.md`, `MEMORY.md`, `USER.md`. A loop-side change outside
 those five has no check at either end, which is why §13 states it and why the
 measurement artifact itself now carries the claim (`axis`: what it measured, and
 the two axes it did not).
@@ -3918,7 +3918,7 @@ from `denied.json` first).
   `last_known_good.json`'s `eval` slot as the promotion's quality baseline. Not
   "nothing observes the loop": the gate's `prompt_surface` rung scores tool
   choice, but only *pre*-landing and only when the diff names one of five paths
-  (`prompt_builder.py`, `prefetch.py`, `SOUL.md`, `MEMORY.md`, `USER.md`), so a
+  (`app/prompt_builder.py`, `app/prefetch.py`, `SOUL.md`, `MEMORY.md`, `USER.md`), so a
   tool-set or compaction change has no loop-side check at either end. Arming a
   post-landing loop-side axis needs a measured noise band first — a loop-side
   measurement carries variance the retrieval eval contributes none of, so

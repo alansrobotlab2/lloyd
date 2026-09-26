@@ -421,7 +421,7 @@ def _isolate_usage_store(tmp_path_factory, monkeypatch):
     `usage_store._conn` reopens when `DB_PATH` moves, so the per-thread
     connection cache cannot carry a test's writes into the next one's file.
     """
-    monkeypatch.setattr("usage_store.DB_PATH",
+    monkeypatch.setattr("app.usage_store.DB_PATH",
                         tmp_path_factory.mktemp("usage") / "usage.db")
 
 

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-import usage_store
+from app import usage_store
 from app.harness import loop as loop_mod
 from app.harness.hooks import HookRegistry
 from app.harness.options import RunOptions
@@ -295,7 +295,7 @@ def test_the_observer_does_not_judge_an_iteration_a_guard_answered(rows, monkeyp
 @pytest.mark.parametrize("path", [
     "app/routers/messages.py",       # stream, ambient, voice (via _run_turn), sync
     "workers/sources/_common.py",    # direct worker turns
-    "autonomy.py",                   # scheduled tasks
+    "app/autonomy.py",               # scheduled tasks
     "agent_mcp/builtin_task.py",     # Task subagents
     "app/inner_voice/observer.py",   # anything that attaches an observer
 ])

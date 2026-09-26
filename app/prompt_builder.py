@@ -99,7 +99,10 @@ def log_prompt_size(
 # already diverged, and only the vault one reachable by the promotion path
 # (#465). They now live in one place: `## Anti-Compliance Directive` in SOUL.md.
 
-LLOYD_HOME = Path(__file__).parent
+# The checkout root, from the one resolver. This module used to sit at the repo
+# root and spell it `Path(__file__).parent`, which silently became `app/` when it
+# moved into the package.
+from app.paths import LLOYD_HOME
 
 # Anchor paths to the repo location rather than Path.home() so they resolve
 # regardless of who/where the process runs as.
@@ -123,7 +126,7 @@ _CANON_MEMORIES_DIR = LLOYD_HOME.parent / "obsidian" / "lloyd"
 # survive `agent_mcp` being unimportable. The wrapper is gone because surviving it
 # meant *silently advertising a different set of skills*: the fallback re-derived
 # the roots from `LLOYD_HOME` and re-spelled the quarantine set, and nothing could
-# see that it had taken over. `prefetch.py:29` has imported this module
+# see that it had taken over. `app/prefetch.py:29` has imported this module
 # unconditionally all along, and every runtime path that builds a prompt imports
 # `prefetch`, so the fallback protected a path that does not exist.
 from agent_mcp import skills as _skills_module
@@ -822,7 +825,7 @@ def _note_overflow_once(filename: str, mode: str) -> bool:
 
 def _bound_memory_render(filename: str, raw: str, content: str) -> str:
     """`content`, or its entry-aligned cut plus a marker when the file is over."""
-    from prompt_surface import memory_ceiling
+    from app.prompt_surface import memory_ceiling
 
     ceiling = memory_ceiling(filename)
     size = len(raw.encode("utf-8"))

@@ -379,7 +379,7 @@ def test_the_loop_stamps_rpc_deny_on_bash_calls_only(monkeypatch, on):
 
 
 def test_the_prompt_is_bytewise_today_when_off(monkeypatch):
-    import prompt_builder as PB
+    from app import prompt_builder as PB
     from app.harness import rpc_policy
 
     monkeypatch.setattr(rpc_policy, "_block", lambda: {})

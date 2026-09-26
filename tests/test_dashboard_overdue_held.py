@@ -89,7 +89,7 @@ def test_a_hold_two_periods_past_next_run_is_overdue_not_held(vault, monkeypatch
     prints `blocked`, and an operator who is told "overdue" without the "why"
     cannot tell a window that never opened from a dependency that died.
     """
-    import autonomy
+    from app import autonomy
 
     _outside_nightly_window(monkeypatch, autonomy)
     _task(vault, "knowledge-analysis", status="up_next",
@@ -110,7 +110,7 @@ def test_a_sub_period_hold_inside_the_off_hours_is_still_held(vault, monkeypatch
     """The 3x-at-midday false alarm the split exists to suppress stays
     suppressed: a daily job whose window is 03:00 is past its `next_run` for
     most of every day, which is 9 h of a declared 24 h period, not a miss."""
-    import autonomy
+    from app import autonomy
 
     _outside_nightly_window(monkeypatch, autonomy)
     _task(vault, "nightly-miner", status="up_next",
@@ -158,7 +158,7 @@ def test_the_bound_is_the_tasks_own_period_not_a_fixed_number_of_hours(vault,
     two wrong whichever way it were set, which is why the health route scores
     `gap_ratio` against the declared period too.
     """
-    import autonomy
+    from app import autonomy
 
     _outside_nightly_window(monkeypatch, autonomy)
     _task(vault, "fifteen-minute", status="up_next", frequency="every-15min",
@@ -184,7 +184,7 @@ def test_the_dashboard_agrees_with_the_health_routes_past_next_run_predicate(vau
     the bound — which is exactly how #68 came to score `fail_rate 0.0` beside
     an alert naming it as the fleet's worst stall.
     """
-    import autonomy
+    from app import autonomy
 
     _outside_nightly_window(monkeypatch, autonomy)
     long_hold = _task(vault, "past-a-period", status="up_next",

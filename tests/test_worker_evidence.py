@@ -27,7 +27,7 @@ from pathlib import Path
 
 import pytest
 
-import autonomy
+from app import autonomy
 from workers import evidence
 from workers.evidence import (CHECK_KINDS, gaps_key, gaps_prompt,
                               parse_claims_block, parse_gap_list,
@@ -703,7 +703,7 @@ def test_run_task_appends_the_evidence_section_to_the_pilot_prompt(monkeypatch,
     monkeypatch.setattr(harness, "run_query", _boom)
     monkeypatch.setattr(harness, "RunOptions", Opts)
     monkeypatch.setattr(mcp_pool, "DEFAULT_LLOYD_MCP_SERVERS", {}, raising=False)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "SYS")
     monkeypatch.setattr(autonomy, "_write_run_record", lambda *a, **k: None)
     monkeypatch.setattr(autonomy, "_append_activity_log", lambda *a, **k: None)
 
@@ -745,7 +745,7 @@ def test_a_pilot_run_that_emitted_no_claims_still_carries_a_bundle(monkeypatch,
     monkeypatch.setattr(harness, "run_query", _quiet)
     monkeypatch.setattr(harness, "RunOptions", Opts)
     monkeypatch.setattr(mcp_pool, "DEFAULT_LLOYD_MCP_SERVERS", {}, raising=False)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "SYS")
     monkeypatch.setattr(autonomy, "_write_run_record", lambda *a, **k: None)
     monkeypatch.setattr(autonomy, "_append_activity_log", lambda *a, **k: None)
 

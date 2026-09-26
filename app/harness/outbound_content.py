@@ -780,7 +780,7 @@ GATE_ARM_POINTS: tuple[str, ...] = (
     "app/harness/safety.py",                       # the floor every turn takes
     "agent_mcp/builtin_task.py",                   # Task subagent turns
     "app/routers/turn_options.py",                 # every chat/ambient/flush/voice turn (P13.4)
-    "autonomy.py",                                 # autonomy task turns
+    "app/autonomy.py",                             # autonomy task turns
     "workers/sources/_common.py",                  # every worker slot (worker + task)
     "scripts/autoresearch/bench_runner_sdk.py",    # the scored bench path
     "eval/run_preserve_thinking_eval.py",          # live eval, real MCP tools
@@ -846,7 +846,7 @@ def _attr(name: ast.expr | None) -> str:
 
 
 def _package_files(root: Path) -> Iterable[tuple[str, Path]]:
-    # Top level first: `autonomy.py` is a dispatch path and lives at the root,
+    # Top level first: `app/autonomy.py` is a dispatch path and lives at the root,
     # so a scan that only walked packages would have called the autonomy
     # runner unarmed-by-attribution — the failure mode this whole function is
     # here to prevent, wearing its opposite.

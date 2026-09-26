@@ -40,7 +40,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import autonomy as SCHED
+from app import autonomy as SCHED
 from app.routers import autonomy as ROUTER
 
 BROKEN = """---

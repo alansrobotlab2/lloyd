@@ -145,7 +145,7 @@ def test_each_sibling_has_an_index_line_inside_the_chat_cut(name, vault_git):
 @pytest.mark.live_vault
 @pytest.mark.parametrize("name", sl.SPILL_SAMPLE)
 def test_hard_constraints_stay_in_the_body(name, vault_git):
-    import prefetch
+    from app import prefetch
     before = _before(name)
     text, _ = _now(name)
     body = _norm(_body(text))

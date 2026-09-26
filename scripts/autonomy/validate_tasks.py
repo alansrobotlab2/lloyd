@@ -47,7 +47,7 @@ import yaml
 # from the map it lints against. `None` means the check could not run.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 try:
-    from autonomy import FREQUENCY_INTERVALS  # noqa: E402
+    from app.autonomy import FREQUENCY_INTERVALS  # noqa: E402
 except Exception:  # noqa: BLE001 — a linter with no scheduler beside it
     FREQUENCY_INTERVALS = None
 # The grader's own reading of an `acceptance:` block (#623), for the same reason.
@@ -210,7 +210,7 @@ def main() -> int:
             if not skill and not spath:
                 warnings.append(f"{p.name}: runnable but has no skill_name/skill_path")
         # Existence, not just presence: a name that resolves to no SKILL.md fails
-        # at dispatch with "Skill not found" (autonomy.py:1435). Checked for every
+        # at dispatch with "Skill not found" (app/autonomy.py:1435). Checked for every
         # status, not just runnable ones — a parked task is precisely where a bad
         # value waits unnoticed until the day it is re-armed.
         for key in ("skill_name", "skill_path"):

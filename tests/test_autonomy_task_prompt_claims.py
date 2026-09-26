@@ -1,6 +1,6 @@
 """An autonomy task may only instruct tools its rendered prompt delivers (#463).
 
-`_build_task_prompt` (`autonomy.py:674`, sole caller `:968`) builds a worker's
+`_build_task_prompt` (`app/autonomy.py:674`, sole caller `:968`) builds a worker's
 prompt from the task's SKILL.md and its front-matter `description`, and never
 from the markdown **body**. That makes the body a human-facing document that
 looks like a specification: the `3. Fact Store Consolidation` phase in
@@ -78,7 +78,7 @@ from pathlib import Path
 
 import pytest
 
-import autonomy
+from app import autonomy
 
 live_vault = pytest.mark.live_vault
 
@@ -146,7 +146,7 @@ _ACTIVITY_LOG_RE = re.compile(r"(?m)^#{1,4}\s*Activity Log\b")
 def _instructions(text: str) -> str:
     """The instruction region of a task body: everything above `## Activity Log`.
 
-    The runner appends that log itself (`_append_activity_log`, `autonomy.py:172`,
+    The runner appends that log itself (`_append_activity_log`, `app/autonomy.py:172`,
     called at `:1303-1315`), one line per run, so a tool name appearing there is a
     historical statement about a past run, not an instruction this run failed to
     receive. Scanning it would turn the tests red on a writer's changelog with no
@@ -380,7 +380,7 @@ def test_the_prompt_is_built_from_the_skill_and_description_never_the_body():
     If #951 ever makes bodies live, this goes red — which is the signal to
     revisit this item, not to delete the assertion.
     """
-    import autonomy
+    from app import autonomy
 
     task = {"id": 999, "name": "seam probe", "skill_name": "probe",
             "description": "Consolidates prose memory.",
@@ -444,7 +444,7 @@ def _drive_one_run(monkeypatch, tmp_path, *, task, skill_text):
     monkeypatch.setattr(harness, "run_query", _run_query)
     monkeypatch.setattr(harness, "RunOptions", Opts)
     monkeypatch.setattr(mcp_pool, "DEFAULT_LLOYD_MCP_SERVERS", {}, raising=False)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "SYS")
     monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", tmp_path / "sessions")
     monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", tmp_path / "events")
     monkeypatch.setattr("app.event_log.BLOBS_DIR", tmp_path / "events" / "blobs")
@@ -462,7 +462,7 @@ def test_the_runner_delivers_the_skill_and_records_what_it_delivered(monkeypatch
     value of `_build_task_prompt`.
 
     The prior cut stopped at that return value, and #463's gate review named the
-    gap: built prompt → worker turn (`autonomy.py:1119` builds the message list,
+    gap: built prompt → worker turn (`app/autonomy.py:1119` builds the message list,
     `:1146` hands it to the engine) → the record's `## Prompt`, none of it
     asserted. This drives the real `run_task` and asserts on all three:
 
@@ -478,7 +478,7 @@ def test_the_runner_delivers_the_skill_and_records_what_it_delivered(monkeypatch
     assert out.get("messages"), "run_task never reached the engine"
 
     # `content` must be a plain string before any `in` below means anything.
-    # `run_task` appends strings (autonomy.py:1140) and the session writer later
+    # `run_task` appends strings (app/autonomy.py:1140) and the session writer later
     # replaces them with block dicts, so on a different message shape these
     # assertions would be testing membership in a list of dicts — always false,
     # and the first two would then fail for the wrong reason while the third
@@ -487,7 +487,7 @@ def test_the_runner_delivers_the_skill_and_records_what_it_delivered(monkeypatch
     delivered = out["messages"][0]["content"]
     assert isinstance(delivered, str) and delivered, (
         f"engine message content is {type(delivered).__name__}, not the string the "
-        "assertions below assume — re-read autonomy.py:1140 before trusting any of "
+        "assertions below assume — re-read app/autonomy.py:1140 before trusting any of "
         "them")
     assert out["messages"][0]["role"] == "user"
     assert "## Phase 1 — Orient" in delivered, (
@@ -501,7 +501,7 @@ def test_the_runner_delivers_the_skill_and_records_what_it_delivered(monkeypatch
         "(see #951 before changing this)")
 
     # The un-truncated artefact. #463's own post-land human check greps a run
-    # record's `## Prompt`, and that field is `prompt[:500]` (`autonomy.py:1205`,
+    # record's `## Prompt`, and that field is `prompt[:500]` (`app/autonomy.py:1205`,
     # `:1225`, `:1252`, `:1265`) — a window, on #47's real prompt, that reaches
     # about a tenth of the way into its skill. The session store keeps the WHOLE
     # user row, which is the only on-disk artefact an ABSENCE claim can be made
@@ -555,7 +555,7 @@ def test_the_runner_delivers_the_skill_and_records_what_it_delivered(monkeypatch
     # (#463's review, attempt 2/2: with only the prefix check, the node never asks
     # whether the window covers the skill at all). On today's prompt the marker
     # starts at index 480 of a 500-char window — a margin of 20 characters. Growth in
-    # the silent-hint preamble at `autonomy.py:948` past that margin reddens THIS
+    # the silent-hint preamble at `app/autonomy.py:948` past that margin reddens THIS
     # node, and this is the message that says so.
     assert SKILL_MARKER in head, (
         "the record's prompt head no longer reaches the delivered skill — it is a "
@@ -572,8 +572,8 @@ def test_every_fact_tool_the_dream_task_claims_reaches_the_prompt():
 
     This is the seam test for the vault→prompt boundary: `_parse_task_file`,
     `_load_skill_content` and `_build_task_prompt` are the same three calls the
-    scheduler makes at `autonomy.py:968`, run here against the real files."""
-    import autonomy
+    scheduler makes at `app/autonomy.py:968`, run here against the real files."""
+    from app import autonomy
 
     task = autonomy._parse_task_file(TASK_FILE)
     assert task, "#47 stopped parsing as an autonomy task"

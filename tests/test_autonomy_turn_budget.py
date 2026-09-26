@@ -57,7 +57,7 @@ from pathlib import Path
 
 import pytest
 
-import autonomy
+from app import autonomy
 
 GLOBAL_MAX_TURNS = 60                  # config.yaml:2 `agent.max_turns`
 
@@ -120,7 +120,7 @@ def _stub_run(monkeypatch, task: dict, tmp_path: Path) -> dict:
     monkeypatch.setattr(harness, "run_query", _run_query)
     monkeypatch.setattr(harness, "RunOptions", Opts)
     monkeypatch.setattr(mcp_pool, "DEFAULT_LLOYD_MCP_SERVERS", {}, raising=False)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "SYS")
     return captured
 
 
@@ -257,7 +257,7 @@ def test_max_turns_is_in_the_scheduler_fallback_field_list():
     unlisted key is silently lost from exactly the task files that are already in
     trouble.
 
-    This used to grep the tuple out of autonomy.py's source. #1014 moved the
+    This used to grep the tuple out of app/autonomy.py's source. #1014 moved the
     list into `agent_mcp._shared.AUTONOMY_TASK_FIELDS`, shared by all three
     readers, so the assertion is on the constant itself — the real object the
     parser is handed — plus that the scheduler still passes that constant rather

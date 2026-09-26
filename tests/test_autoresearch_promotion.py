@@ -1061,7 +1061,8 @@ def test_the_fresh_interpreter_loader_check_runs_inside_a_rollback(vault_prompts
 
     stub = tmp_path / "fallback-checkout"
     stub.mkdir()
-    (stub / "prompt_builder.py").write_text(
+    (stub / "app").mkdir()
+    (stub / "app" / "prompt_builder.py").write_text(
         "def build_system_prompt(*a, **k):\n    return 'stub'\n", encoding="utf-8")
     monkeypatch.setattr(V, "LLOYD_HOME", stub)
 
@@ -1158,7 +1159,7 @@ def contract_fixture(prose: int = CANDIDATE_PROSE) -> str:
     fixture that failed the load-bearing check would refuse for the wrong reason and
     the ratchet's own words would still be in the list, unverifiable.
     """
-    import prompt_surface
+    from app import prompt_surface
 
     gate = "".join(
         f"## {head}\n{label}: {marker}\n"
@@ -1190,7 +1191,7 @@ def _seed_shape_history(cfg, gate_shares, prohibition_ratio=None, surface="SOUL.
     refused has to hold the other one still. `first_day` lets a caller add a row that
     predates rows already on the ledger, which appending alone cannot express.
     """
-    import prompt_surface
+    from app import prompt_surface
 
     if prohibition_ratio is None:
         prohibition_ratio = prompt_surface.contract_shape(RATCHET_SOUL)["prohibition_ratio"]
@@ -1217,7 +1218,7 @@ def _shape_refusals(result):
 def test_a_candidate_whose_gate_stack_rises_across_three_shapes_is_refused(isolated_prompts, tmp_path):
     """Clause 2: three recorded rises in order, both still under their ceilings, is a
     refusal — the case no absolute ceiling can reach."""
-    import prompt_surface
+    from app import prompt_surface
 
     cfg = make_cfg(tmp_path)
     gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
@@ -1243,7 +1244,7 @@ def test_a_rising_prohibition_ratio_refuses_on_its_own_metric(isolated_prompts, 
     """The second ceiling is guarded by the same rule. Both metrics are named in one
     refusal list, so a test that only ever climbed one would pass with the other
     metric never wired."""
-    import prompt_surface
+    from app import prompt_surface
 
     cfg = make_cfg(tmp_path)
     shape = prompt_surface.contract_shape(RATCHET_SOUL)
@@ -1270,7 +1271,7 @@ def test_a_plateau_between_two_rises_does_not_reset_the_streak(isolated_prompts,
     """Clause 3 at the promotion boundary. The 2026-09-04→05 run in the snapshots was
     52.9 % → 63.0 % → 63.6 % → 63.6 %: a repeated value inside a climb must contribute
     neither a rise nor a reset, or the rule breaks on the most common real shape."""
-    import prompt_surface
+    from app import prompt_surface
 
     cfg = make_cfg(tmp_path)
     gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
@@ -1286,7 +1287,7 @@ def test_a_flat_or_falling_series_produces_no_shape_refusal(isolated_prompts, tm
     """Clause 3: a plateau is not a rise, and a fall is not a rise. The shape refusals
     must be silent while the promotion still goes through — asserting their absence by
     name, not by an empty list a broken check would also produce."""
-    import prompt_surface
+    from app import prompt_surface
 
     cfg = make_cfg(tmp_path)
     gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
@@ -1311,7 +1312,7 @@ def test_too_few_recorded_shapes_cannot_refuse_anything(isolated_prompts, tmp_pa
     """The rule needs the run counting the candidate, so a ledger with one prior shape
     is not evidence of a climb. A ratchet that fired on a single data point would
     refuse every candidate from the second round onward."""
-    import prompt_surface
+    from app import prompt_surface
 
     cfg = make_cfg(tmp_path)
     gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
@@ -1343,7 +1344,7 @@ def test_a_candidate_over_a_ceiling_is_refused_by_the_ceiling_and_not_also_the_r
     absolute refusal is the one that names bytes and line counts; layering a trend
     complaint on top would let a reader think the series, not the size, was the
     problem."""
-    import prompt_surface
+    from app import prompt_surface
 
     cfg = make_cfg(tmp_path)
     bloated_text = contract_fixture(prose=4)
@@ -1365,7 +1366,7 @@ def test_a_history_row_missing_the_metric_does_not_fabricate_a_rise(isolated_pro
     carry no value for the metric. They are skipped rather than read as zero — a zero
     would be a fall that masks a climb — and a run assembled from the usable rows alone
     still refuses, because dropping a row must not require the neighbour rows to move."""
-    import prompt_surface
+    from app import prompt_surface
 
     cfg = make_cfg(tmp_path)
     gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
@@ -1401,7 +1402,7 @@ def test_a_history_in_the_wrong_file_order_is_still_read_in_time_order(isolated_
     compares a candidate against the *newest* recorded shapes, and a row replayed out of
     order (a restore, a backfill) must not reorder the series into a climb. Sorting on
     `created_at` is what makes the rule's answer independent of file position."""
-    import prompt_surface
+    from app import prompt_surface
 
     cfg = make_cfg(tmp_path)
     gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
@@ -1432,7 +1433,7 @@ def test_a_row_with_no_timestamp_cannot_place_itself_inside_the_run(isolated_pro
     unorderable value that defaulted to "newest" or "oldest" would let an untrusted
     field forge a climb. Dropping it instead costs the run a value, which refuses
     nothing — the safe direction."""
-    import prompt_surface
+    from app import prompt_surface
 
     cfg = make_cfg(tmp_path)
     gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
@@ -1478,7 +1479,7 @@ def test_a_memory_only_history_cannot_refuse_a_soul_candidate(isolated_prompts, 
     surface recorded. Pooling them would let a MEMORY.md-only round — the file the
     nightly writers actually grow, and the one no ceiling covers — refuse a SOUL.md
     candidate on numbers that never described it."""
-    import prompt_surface
+    from app import prompt_surface
 
     cfg = make_cfg(tmp_path)
     gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]
@@ -1504,7 +1505,7 @@ def test_a_memory_only_candidate_is_never_ratcheted_on_the_soul_series(isolated_
     with a SOUL-bearing candidate DOES refuse (the control below), which is what makes
     the memory-only pass a verdict about the surface and not an absent check.
     """
-    import prompt_surface
+    from app import prompt_surface
 
     cfg = make_cfg(tmp_path)
     gate = prompt_surface.contract_shape(RATCHET_SOUL)["gate_share"]

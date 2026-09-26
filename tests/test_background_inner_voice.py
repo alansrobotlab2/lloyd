@@ -21,7 +21,7 @@ import json
 
 import pytest
 
-import autonomy
+from app import autonomy
 
 
 @pytest.fixture
@@ -76,7 +76,7 @@ def test_the_frontmatter_key_survives_the_degraded_parser():
     is broken, and only listed fields survive. A task whose file needed that
     repair must not silently lose its opt-in.
 
-    This used to grep the field tuple out of autonomy.py's source. #1014 moved
+    This used to grep the field tuple out of app/autonomy.py's source. #1014 moved
     the list into `agent_mcp._shared.AUTONOMY_TASK_FIELDS`, the one list all
     three readers pass, so the assertion is on that constant — the object the
     extractor actually receives — plus that the scheduler still passes it."""
@@ -114,7 +114,7 @@ def _stub(monkeypatch, tmp_path, task, stream):
     monkeypatch.setattr(harness, "run_query", _run_query)
     monkeypatch.setattr(harness, "RunOptions", Opts)
     monkeypatch.setattr(mcp_pool, "DEFAULT_LLOYD_MCP_SERVERS", {}, raising=False)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "SYS")
     return captured
 
 

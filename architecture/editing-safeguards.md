@@ -66,7 +66,7 @@ before assuming a layer can be turned off — or that it is installed.
   `turn_id` is what switches the whole thing on, so until 2026-09-10 every
   background run left no pre-images and no undo — the gap that made an
   autonomy task both the prime suspect in the vault wipe and impossible to
-  clear. Both background paths mint one now (`autonomy.py`,
+  clear. Both background paths mint one now (`app/autonomy.py`,
   `workers/sources/_common.py`); a bare `run_query` caller still has none.
   A failed autonomy run's record names the scope and the count read from that
   turn's index, and `autonomy.revert_run_writes(session_id, run_id)` is the

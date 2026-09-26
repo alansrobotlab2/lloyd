@@ -12,7 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import prefetch  # noqa: E402
+from app import prefetch  # noqa: E402
 from agent_mcp import transcript_self_hit as tsh  # noqa: E402
 
 PROBE = ("E2E harness check (Claude Code verifying today's landings; no action needed "

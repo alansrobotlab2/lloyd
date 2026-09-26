@@ -67,7 +67,7 @@ from app.atomic_io import atomic_write_text  # noqa: F401  (re-export for agent_
 # Why no Result envelope:
 #   The original audit (#340 background) proposed
 #   {"ok": bool, "data": ..., "error": ..., "code": ...}. PR 4's callsite
-#   audit found zero programmatic consumers (prefetch.py uses internal
+#   audit found zero programmatic consumers (app/prefetch.py uses internal
 #   helpers below the json layer; post_capture.py discards the return).
 #   The only "consumer" is the LLM agent reading the JSON visually, where
 #   verbosity is a tax. We get the type-safety, single-dumps, and code-
@@ -451,7 +451,7 @@ AUTONOMY_TASK_FIELDS: tuple[str, ...] = (
 
 #: Backlog #951: an autonomy task file's markdown body is documentation plus the
 #: machine-written activity log — it is NOT an instruction channel.
-#: `_build_task_prompt` (`autonomy.py`) renders the task's `skill_name` SKILL.md
+#: `_build_task_prompt` (`app/autonomy.py`) renders the task's `skill_name` SKILL.md
 #: and its front-matter `description` and never reads the body below, so a step
 #: that lives only there reaches no run. That is not hypothetical: #47 carried a
 #: `Fact Store Consolidation` phase ordering the run to call tools its prompt
@@ -471,9 +471,14 @@ AUTONOMY_TASK_FIELDS: tuple[str, ...] = (
 TASK_BODY_CONTRACT = (
     "> **This body is documentation and the machine-written activity log — not an "
     "instruction channel.** It is not delivered to the worker: `_build_task_prompt` "
-    "(`~/lloyd/autonomy.py`) renders only the `skill_name` SKILL.md and the front-matter "
+    "(`~/lloyd/app/autonomy.py`) renders only the `skill_name` SKILL.md and the front-matter "
     "`description`, so a step that lives only below this line reaches no run."
 )
+
+
+#: What every wording of the contract line has opened with; how an older one is found.
+_TASK_BODY_CONTRACT_OPENING = "> **This body is documentation and the machine-written activity log"
+assert TASK_BODY_CONTRACT.startswith(_TASK_BODY_CONTRACT_OPENING)
 
 
 def with_body_contract(body: str) -> str:
@@ -491,6 +496,15 @@ def with_body_contract(body: str) -> str:
     text = body or ""
     if TASK_BODY_CONTRACT in text:
         return text
+    # An earlier wording of the line (the module it cites moved, say) is
+    # replaced where it stands rather than stacked under a second copy: the
+    # vault and the code cannot change in the same instant, and a write in
+    # between would otherwise leave two contracts, the first one stale.
+    lines = text.split("\n")
+    for i, line in enumerate(lines):
+        if line.startswith(_TASK_BODY_CONTRACT_OPENING):
+            lines[i] = TASK_BODY_CONTRACT
+            return "\n".join(lines)
     return f"\n{TASK_BODY_CONTRACT}\n\n{text.lstrip(chr(10))}"
 
 

@@ -18,8 +18,8 @@ from pathlib import Path
 
 import pytest
 
-import prompt_builder
-import prompt_surface as ps
+from app import prompt_builder
+from app import prompt_surface as ps
 from app import memory_ceiling as ceiling
 from app import uptake
 

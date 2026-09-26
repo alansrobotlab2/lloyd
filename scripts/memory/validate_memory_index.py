@@ -45,7 +45,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import prompt_surface as ps  # noqa: E402
+from app import prompt_surface as ps  # noqa: E402
 from app import memory_ceiling as mc  # noqa: E402
 
 #: Longest legal index line, in characters. An index line is a pointer with a

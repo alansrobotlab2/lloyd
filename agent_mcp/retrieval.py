@@ -401,7 +401,7 @@ _NUMERIC_SEED_NAME_RE = re.compile(r"#?\d+")
 # about` → `[('Task #294', 10.0), ('294', 10.0)]`, the maximum the function
 # produces) and branch 2's full-name bonus, 5.15 for a 3-character name
 # (`tell me about 294` → `[('294', 5.15), …]`, above every other competitor's
-# 0.5). At `prefetch.py`'s `FACT_MAX_ENTITIES = 2` either one put a directory
+# 0.5). At `app/prefetch.py`'s `FACT_MAX_ENTITIES = 2` either one put a directory
 # name into a seed slot and half of the injected facts came from a row that is
 # an id, not an entity — 3 of the 6 lines `_search_facts` returned for that
 # query were `294`'s YAML-scanner facts, about a different subject entirely.
@@ -596,7 +596,7 @@ def extract_entities_from_query(query: str, *, semantic: Optional[bool] = None,
         #
         # What the fold can cost at a width, stated exactly, because every reader
         # downstream cuts this list at one (`RECALL_SEED_TOP_K` in `vault.py`,
-        # `FACT_MAX_ENTITIES` in `prefetch.py`) and the tie-break then orders equal
+        # `FACT_MAX_ENTITIES` in `app/prefetch.py`) and the tie-break then orders equal
         # scores by name length and edge count. The canonical is scored *identically
         # to the alias surface that earned it*, never above it, so the fold cannot
         # seat a canonical over a better-matched seed: the name it displaces, when it

@@ -117,7 +117,7 @@ def test_execute_adds_segment_to_the_note_the_turn_wrote(tmp_path, monkeypatch):
         return {"session_id": "s1", "text": f"RESULT: written\nNOTE: {path}\n"
                 "DUPLICATE_OF:\nFACTS: 3\nSOURCES: 4\n", "structured": None}
 
-    import autonomy
+    from app import autonomy
     monkeypatch.setattr(DR, "_store", lambda: _Store())
     monkeypatch.setattr(DR, "run_prompt_in_session", fake_run)
     monkeypatch.setattr(DR, "_vault_dirty_paths", lambda: set())

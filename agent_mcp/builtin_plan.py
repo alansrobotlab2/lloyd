@@ -46,7 +46,7 @@ logger = logging.getLogger("lloyd-builtin-plan")
 
 
 # Vault location for plan markdown files. Resolved relative to the
-# Lloyd repo root via the same convention as prompt_builder.py
+# Lloyd repo root via the same convention as app/prompt_builder.py
 # (LLOYD_HOME.parent / "obsidian"). Created on first use.
 _LLOYD_HOME = Path(__file__).resolve().parent.parent
 _PLANS_DIR = _LLOYD_HOME.parent / "obsidian" / "plans"

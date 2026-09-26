@@ -71,7 +71,7 @@ DUPLICATE_CONTRACT_CEILING = 0.10
 # grows. `lloyd/USER.md` reached 95,302 B, 75 % of the whole system prompt, in five
 # nights of appends that nothing refused, and `lloyd/MEMORY.md` independently went
 # 4,551 B → 21,025 B in the same fortnight (#507). Nothing could refuse: on
-# 2026-09-12 `grep -n CEILING prompt_surface.py` returned three ratio constants and
+# 2026-09-12 `grep -n CEILING app/prompt_surface.py` returned three ratio constants and
 # no byte constant, and both automated prompt writers took SOUL.md and MEMORY.md
 # only, while `autoresearch/common.py::_canonical_prompt_paths` had been handing the
 # search a writable USER.md the whole time (#1010).

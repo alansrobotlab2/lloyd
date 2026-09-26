@@ -293,7 +293,7 @@ def test_a_turn_reclaims_its_own_session_through_the_real_prefetch_caller():
 
     Every drain test above calls the drain directly — that is the function #910
     changed, but it is not the seam a turn crosses. The call site
-    (`prefetch.py:1046-1050`) imports the drain inside the function body, wraps
+    (`app/prefetch.py:1046-1050`) imports the drain inside the function body, wraps
     it in `except Exception: ambient_entries = []`, and returns None when the
     message is short and nothing drained. Three failure modes live only under
     that caller and are invisible to a direct call: a key resurrected after the
@@ -307,7 +307,7 @@ def test_a_turn_reclaims_its_own_session_through_the_real_prefetch_caller():
     second — with the session now empty — returning None is the reclaimed
     signal staying reclaimed instead of resurfacing next turn.
     """
-    import prefetch  # conftest puts the repo root on sys.path
+    from app import prefetch  # conftest puts the repo root on sys.path
 
     now = datetime.now(timezone.utc).timestamp()
     sio.enqueue_ambient_prefetch("turn", _signal("still-live", at=now, ttl=7200))

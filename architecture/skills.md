@@ -88,7 +88,7 @@ mechanisms rather than one with options.
 
 ### 1. The index, in the system prompt
 
-`prompt_builder._load_skills_index` (`prompt_builder.py:1010`) walks an optional
+`prompt_builder._load_skills_index` (`app/prompt_builder.py:1010`) walks an optional
 overlay root (`<overlay>/skills`, when `LLOYD_OVERLAY_DIR` is set — the
 autoresearch bench runner passes one; what it may put there is bounded by
 `_canonical_prompt_paths()` in `scripts/autoresearch/common.py`, today
@@ -115,7 +115,7 @@ would read as "call something to load these"; what actually happens is surface
 
 `include_skills_index` defaults to `True` and every production caller takes the
 default (`app/routers/turn_options.py::build_turn_options`, the one builder
-for chat, ambient, flush and voice turns since P13.4, and `autonomy.py:1605`). The `False` branch is for tests
+for chat, ambient, flush and voice turns since P13.4, and `app/autonomy.py:1605`). The `False` branch is for tests
 that assert on the rest of the prompt.
 
 **A quarantined skill is excluded from the index, and that is not cosmetic.**
@@ -133,9 +133,9 @@ YAML — because this runs for every skill on every prompt build.
 
 ### 2. The turn-start injector (prefetch)
 
-`prefetch.py` scores the *user's message* against every skill and injects the
+`app/prefetch.py` scores the *user's message* against every skill and injects the
 winner's body into a `<context>` block ahead of the turn. Thresholds
-(`prefetch.py:41-44`):
+(`app/prefetch.py:41-44`):
 
 | | value |
 |---|---|
@@ -179,7 +179,7 @@ prefetch legs; it is ~1 ms now. And the skill list is rebuilt only when a
 exists for one logged failure: "full systems check" picked `claude-sdk-check`
 over `system-health-check` because "systems" ≠ "system".
 
-This surface is **chat-path only**. `autonomy.py` builds its own prompt and
+This surface is **chat-path only**. `app/autonomy.py` builds its own prompt and
 never calls prefetch, so a scheduled task gets its skill from surface 4
 instead.
 
@@ -198,7 +198,7 @@ carrying the matched `SKILL.md`, and the model re-issues the call informed.
 
 **`is_error=False` is the entire point of the second outcome.** The same
 intercept expressed as a deny comes back `is_error=True` and is booked into
-`tool_errors` (appended at `autonomy.py:1792`, reported at `:1807`) — the very
+`tool_errors` (appended at `app/autonomy.py:1792`, reported at `:1807`) — the very
 number this feature exists to improve, so a deny would make the fleet look
 sicker exactly where it is being taught something.
 `HookRegistry.fire_pre_tool_use` recognises
@@ -265,7 +265,7 @@ a deliver in both registration orders.
 ### 4. Autonomy, by name
 
 A scheduled task binds its skill in frontmatter: `skill_name` (a slug) or
-`skill_path`. `autonomy._load_skill_content` (`autonomy.py:931`) resolves a
+`skill_path`. `autonomy._load_skill_content` (`app/autonomy.py:931`) resolves a
 value containing `/` or ending `.md` as a path, and anything else as
 `~/obsidian/skills/<slug>/SKILL.md`; the body is pasted into the task prompt
 under "Follow the skill instructions below" (`:976`).

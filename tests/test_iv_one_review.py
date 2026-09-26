@@ -32,7 +32,7 @@ def calls(monkeypatch):
 
     monkeypatch.setattr(obs, "_call_observer", recording)
     monkeypatch.setattr(obs, "record_inner_voice_observation", lambda **kw: 1)
-    import usage_store
+    from app import usage_store
     monkeypatch.setattr(usage_store, "record_inner_voice_observation", lambda **kw: 1)
     return got
 

@@ -63,7 +63,7 @@ from app.harness.skill_dispatch import injected_skill_names
 from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs, _get_mcp_servers
 from app.paths import SESSIONS_DIR
 from app.sessions_io import read_session_fields
-from prompt_builder import build_system_prompt
+from app.prompt_builder import build_system_prompt
 
 TurnKind = Literal["stream", "ambient", "flush", "voice"]
 KINDS: tuple[str, ...] = ("stream", "ambient", "flush", "voice")

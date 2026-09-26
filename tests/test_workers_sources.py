@@ -992,7 +992,7 @@ def test_the_turn_budget_sits_strictly_under_the_pool_cap(monkeypatch):
 def test_the_margin_leaves_room_to_cancel_the_turn_and_persist_it():
     """Larger than `autonomy._POOL_TIMEOUT_MARGIN`, because this path has to
     reach the backend over HTTP on its way out."""
-    import autonomy
+    from app import autonomy
     assert C.POOL_TIMEOUT_MARGIN_SECONDS > autonomy._POOL_TIMEOUT_MARGIN
 
 

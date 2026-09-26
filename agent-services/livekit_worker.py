@@ -76,7 +76,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # is who owns that location — the same module the four scripts which read the
 # corpus import, so writer and readers cannot name different places (#1444).
 # Appended rather than inserted at the front: this tree holds top-level modules
-# (`autonomy.py`, `prefetch.py`, `server.py`) that would shadow a package of the
+# (`app/autonomy.py`, `app/prefetch.py`, `server.py`) that would shadow a package of the
 # same name for everything else this unit imports.
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))

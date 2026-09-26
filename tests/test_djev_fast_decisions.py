@@ -21,7 +21,7 @@ import asyncio
 import json
 import re
 
-import prompt_builder as pb
+from app import prompt_builder as pb
 from agent_mcp import djev as tools
 from app import djev
 from app.harness.tool_search import _gist

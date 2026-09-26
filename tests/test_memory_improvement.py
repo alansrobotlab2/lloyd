@@ -1624,7 +1624,7 @@ def _improvement_tasks() -> list[tuple[Path, dict]]:
 
 def test_the_improvement_pass_is_armed_on_a_schedule():
     """#376 asks for a *scheduled* consumer. `up_next` is the only status the
-    scheduler dispatches (autonomy.py:419), so a task sitting in `draft` is a
+    scheduler dispatches (app/autonomy.py:419), so a task sitting in `draft` is a
     description of a feature, not one."""
     tasks = _improvement_tasks()
     assert tasks, "no autonomy task runs the fact-improvement skill"

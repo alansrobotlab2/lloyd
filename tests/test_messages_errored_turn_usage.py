@@ -19,7 +19,7 @@ import json
 
 import pytest
 
-import usage_store
+from app import usage_store
 
 
 def _copy(monkeypatch):

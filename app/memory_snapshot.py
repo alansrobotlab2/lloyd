@@ -58,7 +58,7 @@ def snapshot_path(session_id: str) -> Path:
 
 def live_memories(platform: str = "") -> str:
     """What `build_system_prompt` would render as the memory body right now."""
-    import prompt_builder as pb
+    from app import prompt_builder as pb
 
     overlay = pb._resolve_overlay(None)
     return pb._load_memories(

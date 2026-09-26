@@ -2259,7 +2259,7 @@ def test_overlap_itself_scores_hand_counted_grams():
 def _note_block(title, path="", excerpt=""):
     """One persisted `<vault-context>` block in production's own form.
 
-    `prefetch.py` writes `- **<title>** (score: N, file: <vault path>): <excerpt>`
+    `app/prefetch.py` writes `- **<title>** (score: N, file: <vault path>): <excerpt>`
     and `_messages_subliminal.py:144` stores that line verbatim; both the path and
     the excerpt are in the string the reader used to throw away.
     """

@@ -651,7 +651,7 @@ build`, restart the daemon.
 **The client side of this is not optional.** `agent_mcp/vault.py` sends
 `rerank: true` by default (`RECALL_QMD_RERANK`). With the fork honouring
 `skipRerank`, sending it costs 0.16 MRR on `vault_recall`; that constant's
-comment carries the measurement. `prefetch.py` skips the reranker on purpose,
+comment carries the measurement. `app/prefetch.py` skips the reranker on purpose,
 inside its latency budget.
 
 Two traps here, both verified on a clean 2026-08-22 rebuild:
@@ -780,7 +780,7 @@ here said `unavailable`; that applied to 2.0.1 and no longer does.
 
 The vault lives at `~/obsidian` and is Lloyd's long-term memory. It holds
 `lloyd/SOUL.md`, `lloyd/MEMORY.md`, and `lloyd/USER.md`, which
-`prompt_builder.py` assembles into the system prompt on every turn.
+`app/prompt_builder.py` assembles into the system prompt on every turn.
 
 ```bash
 npm install -g obsidian-headless

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-import usage_store
+from app import usage_store
 from app.inner_voice import ab
 
 ROOT = Path(__file__).resolve().parents[1]

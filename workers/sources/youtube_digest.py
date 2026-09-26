@@ -281,7 +281,7 @@ def load_skill() -> str:
     `~/obsidian/skills/<slug>/SKILL.md`. Read per call and never cached — the
     whole point of the move is that a vault edit changes the next run.
     """
-    import autonomy
+    from app import autonomy
 
     text = autonomy._load_skill_content(SKILL) or ""
     if not text.strip():

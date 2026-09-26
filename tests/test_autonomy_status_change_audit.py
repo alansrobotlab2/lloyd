@@ -4,7 +4,7 @@ non-scheduler writer records it: backlog #1127.
 Two halves, and the split is the point.
 
 The commit side: `status: draft` and `status: paused` are dispatch kill switches
-— `_all_runnable_tasks` (`autonomy.py:323`) keeps only
+— `_all_runnable_tasks` (`app/autonomy.py:323`) keeps only
 `("up_next", "in_progress", "failed")`, and the queue's own source
 (`workers/sources/scheduled_task.py:174`) skips anything that is not `up_next` —
 yet no rung anywhere named such a transition before it was committed. Vault commit
@@ -42,7 +42,7 @@ import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import autonomy as A
+from app import autonomy as A
 from app.routers import autonomy as ROUTER
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

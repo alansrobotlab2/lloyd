@@ -328,7 +328,7 @@ def test_the_alert_reaches_the_autonomy_runner(tmp_path):
     exit status is a tool result and the task's own exit code is the agent's turn — 0
     whether or not anything was wrong. The one automated consumer that exists is
     `autonomy._detect_silent_failures`, applied to the run's terminal block
-    (`autonomy.py:2268-2270`), whose patterns include `exit code [1-9]`. So this runs the
+    (`app/autonomy.py:2268-2270`), whose patterns include `exit code [1-9]`. So this runs the
     real pipeline three ways — breach / one-night-flagged / healthy — feeds each run's
     actual stdout to that production detector, and requires that only the breach trips
     it. A breach that only moved an exit code nobody reads would pass every other test
@@ -336,7 +336,7 @@ def test_the_alert_reaches_the_autonomy_runner(tmp_path):
     which is why it is asserted here rather than documented.
     """
     sys.path.insert(0, str(ROOT))
-    from autonomy import _detect_silent_failures
+    from app.autonomy import _detect_silent_failures
 
     since = _iso(NOW_LOCAL - datetime.timedelta(hours=26))
     # 10 observations each, one of them carrying an `error`, so dropped/llm_calls is
@@ -661,7 +661,7 @@ def test_breach_exits_2_when_the_recent_median_is_over_the_bound(tmp_path):
     this run's 1.0: median 0.20 > the 0.05 bound, so exit 2. Exit status rather than a
     sentence because the autonomy runner consumes exit codes reliably —
     `scripts/skill_verdicts.py:633` and `scripts/validate_handoff.py:70` use 2 for a
-    refusal for the same reason, and `_detect_silent_failures` (`autonomy.py:27-33`) only catches
+    refusal for the same reason, and `_detect_silent_failures` (`app/autonomy.py:27-33`) only catches
     prose it has been told to look for.
     """
     repo = _make_repo(tmp_path)
@@ -872,8 +872,8 @@ def test_task_file_frontmatter_parses_and_is_schedulable():
     """Clause 1: frontmatter parses as YAML, house style, and can actually dispatch.
 
     Same style as `60-knowledge-health-report.md`. `status: up_next` and a
-    resolvable `skill_name` are checked because `autonomy.py:1145-1157` skips a task with no
-    `skill_name` forever, and `RUNNABLE_STATUSES` (`autonomy.py:542`) never dispatches a status
+    resolvable `skill_name` are checked because `app/autonomy.py:1145-1157` skips a task with no
+    `skill_name` forever, and `RUNNABLE_STATUSES` (`app/autonomy.py:542`) never dispatches a status
     outside up_next/in_progress/failed — a task file that parses but never
     dispatches would satisfy the clause's grep and still measure nothing.
     """
@@ -932,7 +932,7 @@ def test_task_body_invokes_the_grader_with_an_explicit_window():
 def test_prompt_the_scheduler_builds_contains_a_runnable_command(tmp_path):
     """The command the *runner* sees is the command that works — executed end to end.
 
-    This is the seam #460 would otherwise miss. `autonomy.py:1333-1353` builds a run's
+    This is the seam #460 would otherwise miss. `app/autonomy.py:1333-1353` builds a run's
     prompt from the frontmatter `description` plus the skill file: the markdown
     **body is not in it**. A task whose procedure lives only in the body passes
     clause 1's grep and then leaves the model to improvise, which is how a scheduled
@@ -940,7 +940,7 @@ def test_prompt_the_scheduler_builds_contains_a_runnable_command(tmp_path):
     real loader, take the pipeline out of it, run it under a HOME aimed at a fixture
     repo, and require a row.
     """
-    import autonomy
+    from app import autonomy
 
     task = autonomy._parse_task_file(_task_file())
     assert task and not task.get("_yaml_broken"), "task file must parse cleanly"

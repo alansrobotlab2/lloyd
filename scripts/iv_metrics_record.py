@@ -56,8 +56,8 @@ gets here through an agent's Bash tool, so 2 is that tool call's result; the run
 status is the agent's turn, which exits 0 whether or not the series breached. What
 closes that seam is not this script — it is the printed verdict line, which on a breach
 contains the literal text `exit code 2`, which is what `_detect_silent_failures`
-(`autonomy.py:27-33`, regex at `:30`) scans a run's terminal block for
-(`autonomy.py:2268-2270`). Quote the line and the run is flagged, and the task's
+(`app/autonomy.py:27-33`, regex at `:30`) scans a run's terminal block for
+(`app/autonomy.py:2268-2270`). Quote the line and the run is flagged, and the task's
 `description`, which is what `_build_task_prompt` injects, is what tells the agent to
 quote it. See `EXIT_BREACH` for why the number is in the prose.
 
@@ -414,7 +414,7 @@ def _verdict(row: dict, rates: list, malformed: int) -> tuple[bool, str]:
         # agent's Bash tool, so 2 is that tool's result, not the task's, and the
         # run's own exit status is the agent's turn — which completes successfully
         # whether or not anything was wrong. The one automated surface that exists
-        # is `_detect_silent_failures` (`autonomy.py:27-33`, regex at `:30`) scanning the run's
+        # is `_detect_silent_failures` (`app/autonomy.py:27-33`, regex at `:30`) scanning the run's
         # terminal block for `exit code [1-9]`. So the verdict line has to name its own
         # exit code, and the task tells the agent to quote this line verbatim: the
         # alert then survives an agent that describes the night in calm prose,
@@ -423,7 +423,7 @@ def _verdict(row: dict, rates: list, malformed: int) -> tuple[bool, str]:
     elif row["flagged"]:
         # Deliberately without the token above: one bad night is a report, not a
         # fault, and a run whose summary trips the failure detector when nothing is
-        # sustained is how indicators get ignored (autonomy.py:36-43 records 33 false
+        # sustained is how indicators get ignored (app/autonomy.py:36-43 records 33 false
         # positives in a week doing exactly that).
         parts[0] = "flagged (not sustained) " + parts[0]
     return breach, " | ".join(parts)
@@ -473,7 +473,7 @@ def announce_breach(row: dict) -> bool:
     This is the whole point of #1145: the reaching-a-person part is CODE's job. The
     recorder's exit 2 is a Bash tool result inside an agent turn, the turn exits 0
     either way, and the only thing upstream ever read was the literal text `exit code
-    2` in the run's terminal block (`autonomy.py:2268-2270`, `_detect_silent_failures`) — so a
+    2` in the run's terminal block (`app/autonomy.py:2268-2270`, `_detect_silent_failures`) — so a
     run that paraphrased the verdict lost the breach. Whatever the nightly report says,
     the toast goes out.
     """
@@ -680,7 +680,7 @@ def main(argv: list[str] | None = None) -> int:
         # which is 0 either way. Two things happen now, and neither depends on the
         # run's wording:
         #   * the verdict line printed above carries the literal text `exit code 2`,
-        #     which `_detect_silent_failures` (`autonomy.py:27-33`, regex at `:30`)
+        #     which `_detect_silent_failures` (`app/autonomy.py:27-33`, regex at `:30`)
         #     matches out of the run's terminal block — that is the report-side half, and it
         #     still needs the agent to quote the line;
         #   * and if this breach is the FIRST row of a run of them, one guardian

@@ -35,7 +35,7 @@ from app.sessions_io import (
     enqueue_turn,
     set_last_user_session,
 )
-from prefetch import prefetch_context_async
+from app.prefetch import prefetch_context_async
 
 
 router = APIRouter()

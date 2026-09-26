@@ -41,7 +41,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import autonomy as SCHED
+from app import autonomy as SCHED
 from agent_mcp._shared import AUTONOMY_TASK_FIELDS
 from app.routers import autonomy as ROUTER
 import agent_mcp.autonomy as MCP

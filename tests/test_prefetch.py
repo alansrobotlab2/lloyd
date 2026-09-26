@@ -1,4 +1,4 @@
-"""Tests for prefetch.py + the #306 subliminal capture helpers.
+"""Tests for app/prefetch.py + the #306 subliminal capture helpers.
 
 Hermetic: every worker that would touch disk, qmd, or the facts store is
 monkeypatched. Run:
@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import prefetch  # noqa: E402
+from app import prefetch  # noqa: E402
 from agent_mcp import session as session_mod  # noqa: E402
 from agent_mcp import vault as vault_mod  # noqa: E402
 from agent_mcp.skills import _score_skill, _skill_token_sets, _tokenize  # noqa: E402

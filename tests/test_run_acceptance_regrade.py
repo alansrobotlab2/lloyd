@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-import autonomy
+from app import autonomy
 from app.run_acceptance import (DispatchTrace, acceptance_problems, grade_run,
                                 trace_from_transcript)
 from scripts.autonomy import regrade_runs

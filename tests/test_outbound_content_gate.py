@@ -403,7 +403,7 @@ def test_a_tier2_schedule_write_is_scanned_but_its_run_record_is_not(
     # the grant gate's to refuse, and the reason names the scope, the tool and
     # the field. Order is the same on both paths, because both call
     # `install_policy_hook` before `install_outbound_content_gate`
-    # (`workers/sources/_common.py`, in `_worker_run_options`; `autonomy.py`, in
+    # (`workers/sources/_common.py`, in `_worker_run_options`; `app/autonomy.py`, in
     # `run_task`), and `fire_pre_tool_use` returns the FIRST deny in
     # registration order (`app/harness/hooks.py`). So an ungranted schedule write
     # that also carries a key is refused by the grant gate and never reaches this
@@ -873,7 +873,7 @@ def test_the_finder_follows_a_registry_through_a_helper(tmp_path):
     A grep can only say 'hooks is passed and the module mentions an installer'.
     This asks whether the specific name the build received had an installer
     called on it — in that scope, in a scope that lexically encloses it, or at
-    module level. Module level is what `autonomy.py:1633` needs: `run_task` is a
+    module level. Module level is what `app/autonomy.py:1633` needs: `run_task` is a
     method, the registry is a closure cell in the enclosing function, and a
     same-scope-only rule reports the autonomy dispatch path as a hole that does
     not exist.

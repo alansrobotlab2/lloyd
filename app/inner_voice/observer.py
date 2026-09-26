@@ -42,7 +42,7 @@ from app.inner_voice.lever_tools import (
 )
 from app.paths import SESSIONS_DIR
 from app.sessions_io import mutate_session
-from usage_store import record_inner_voice_observation
+from app.usage_store import record_inner_voice_observation
 
 logger = logging.getLogger("lloyd-iv-observer")
 

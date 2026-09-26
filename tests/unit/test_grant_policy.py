@@ -256,9 +256,9 @@ def test_no_renewal_endpoint_renewal_is_a_new_row(store):
 def _worker_env(monkeypatch):
     """Make `_worker_run_options` hermetic: it reads the live config, the
     system prompt builder and the model env, none of which the gate is about."""
-    import prompt_builder
+    from app import prompt_builder
     monkeypatch.setattr(prompt_builder, "build_system_prompt", lambda *a, **k: "sys")
-    import autonomy
+    from app import autonomy
     monkeypatch.setattr(autonomy, "_get_model_env", lambda *a, **k: {})
     return None
 
@@ -438,7 +438,7 @@ def test_autonomy_run_task_installs_the_gate():
     so the hook has to be installed there too, not only on worker turns."""
     import inspect
 
-    import autonomy
+    from app import autonomy
     src = inspect.getsource(autonomy.run_task)
     assert "install_policy_hook" in src, "run_task must gate its own turn"
     assert "grant_create" in src or "GRANT_MINT_TOOL" in src
@@ -463,7 +463,7 @@ def _write_task(aut, task_id, **fm):
 
 @pytest.fixture
 def aut(tmp_path, monkeypatch):
-    import autonomy
+    from app import autonomy
     monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tmp_path / "autonomy")
     monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "runs")
     autonomy.AUTONOMY_DIR.mkdir()
@@ -828,7 +828,7 @@ def test_the_shipped_nightly_rearm_grant_materialises_and_reopens_the_write(tmp_
     day it starts denying the nightly, and `#534` deliberately gives the run no
     way to extend it.
     """
-    import autonomy
+    from app import autonomy
 
     path = _real_task_40()
     task = autonomy._parse_task_file(path)

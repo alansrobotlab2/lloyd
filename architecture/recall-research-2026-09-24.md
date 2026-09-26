@@ -50,7 +50,7 @@ definition of "anchored" in this doc; §4 states the scratch harness's stricter
 number beside it (#1502).
 
 **Who calls recall.** About 24 times a week, all workers, never chat. Chat gets
-memory through `prefetch.py`'s `<context>` prefix on the user message (300 ms
+memory through `app/prefetch.py`'s `<context>` prefix on the user message (300 ms
 budget) and through whatever the model chooses to Read or Grep.
 
 **The subliminal channel** carries every automatic recall: a byte-stable system
@@ -62,7 +62,7 @@ nothing. A hard `/compact` discarded the subliminal rows until D11 (2026-09-24);
 longer rewrites the messages.
 
 **Sessions.** qmd's `sessions` collection is searched by prefetch but not by
-`vault_recall` (`sessions` is in `prefetch.py:132` `VAULT_COLLECTIONS`, not in
+`vault_recall` (`sessions` is in `app/prefetch.py:132` `VAULT_COLLECTIONS`, not in
 `VAULT_SEGMENTS`); `session_recall` is token overlap over seven days, five results
 (`agent_mcp/session.py:534-535`). The "cut at 5,000 chars" this line carried is the
 state **#1090 removed**: the corpus is now the whole lowercased user+assistant turn
@@ -91,12 +91,12 @@ layer, and the rate has not changed that.
 
 **Memory in the prompt** (re-measured 2026-09-25). SOUL.md 7,047 B + MEMORY.md
 20,466 B + USER.md 16,368 B ride whole into every turn: **43,881 B, under** the
-80,000-char `PROMPT_BUDGET_CHARS` tripwire (`prompt_builder.py:38`), which still only
+80,000-char `PROMPT_BUDGET_CHARS` tripwire (`app/prompt_builder.py:38`), which still only
 logs. The 73 KB-at-a-73,728-byte-ceiling state this line described no longer runs:
 MEMORY.md is a typed index over 24 topic files under `~/obsidian/lloyd/memory/`,
 pulled on demand by `memory_read(file="topics/<slug>")` (vault `1a72649f`, deployed
 `ab60a9d0`), and its ceiling is `MEMORY_MD_INDEX_CEILING_BYTES = 25_600`
-(`prompt_surface.py:115`), enforced on every writer through
+(`app/prompt_surface.py:115`), enforced on every writer through
 `app/memory_ceiling.py:memory_write_error` — topic files cap at 32,768 B. So P6's
 (#1488) "core + retrieved archive" half shipped, under another pass's numbering
 (#1500 narrows the item to what is genuinely left). The line that is now tight is
@@ -181,7 +181,7 @@ rebuild, pair-judge, calibration ladder).
 
 ## 4. Measured the same day
 
-**P2, the subliminal vector leg (#1482, landed).** `prefetch.py` sequenced the
+**P2, the subliminal vector leg (#1482, landed).** `app/prefetch.py` sequenced the
 lex+vec leg after the lex leg, expected it to take 1.1–3.0 s and carried its hits
 to the next turn. On the 86-query `eval/run_prefetch_eval.py`, run twice, it takes
 **52 ms p50 / 57 ms p90** after the lex leg: the fork's in-memory `VecIndex`

@@ -149,7 +149,7 @@ def _run(coro):
 
 @pytest.fixture
 def rows(monkeypatch):
-    import usage_store
+    from app import usage_store
     got: list[dict] = []
     monkeypatch.setattr(usage_store, "record_inner_voice_observation",
                         lambda **kw: (got.append(kw), len(got))[1])

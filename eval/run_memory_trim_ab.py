@@ -282,7 +282,7 @@ def verify_arms(canonical: Path, restored: dict[str, Path], probes: list[Probe],
                 build=None) -> dict[str, int]:
     """Build every arm's system prompt the way a trial does and check equality."""
     if build is None:
-        from prompt_builder import build_system_prompt as build
+        from app.prompt_builder import build_system_prompt as build
     base = build(overlay_dir=canonical)
     sizes = {"canonical": len(base)}
     for p in probes:

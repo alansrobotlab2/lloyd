@@ -345,8 +345,7 @@ def test_report_keeps_selection_quality_apart_from_judgement_quality(tmp_path, m
 # --- clause 6: offline only, no live write path reads a judge score -----------
 
 def test_the_judging_harness_is_not_wired_into_any_write_path():
-    roots = ["workers", "app", "scripts", "server.py", "prefetch.py",
-             "prompt_builder.py", "autonomy.py"]
+    roots = ["workers", "app", "scripts", "server.py"]
     needles = ("durable_write_judge", "build_corpus", "judge_one",
                "durable_write_judge.judge")
     hits = []

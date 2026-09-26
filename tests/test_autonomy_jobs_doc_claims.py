@@ -30,7 +30,7 @@ literal rotted inside three days exactly as its own docstring predicted. It is n
 a floor ("24 through 90 or beyond"), which no new task id can falsify, and it is
 still the only `N through M` in `architecture/`. Every count the doc does type
 carries the date it was true, and each is pinned to something re-derivable — the
-pilot frozenset's line number against `autonomy.py` itself, the evidence verdicts
+pilot frozenset's line number against `app/autonomy.py` itself, the evidence verdicts
 against the code path that writes them and against their own internal arithmetic,
 the no-dependency count against the `depends_on` arrows the doc draws and §Distil's
 own fleet size, and both membership tables against each other and against the four
@@ -629,13 +629,13 @@ def test_the_bare_spelling_still_appears_on_exactly_twelve_lines():
 
 
 def test_the_pilot_frozenset_citation_resolves_to_the_line_it_names():
-    """#1520 clause 1. §The functions cited `autonomy.py:710`, which is
+    """#1520 clause 1. §The functions cited `app/autonomy.py:710`, which is
     `RUN_SUMMARY_CAP = 300` inside the comment about tail-slicing a run summary —
     nothing to do with evidence — while the frozenset it meant is at
-    `autonomy.py:2104`, where §Distil has pointed since #1102. A reader who walked
+    `app/autonomy.py:2104`, where §Distil has pointed since #1102. A reader who walked
     to 710 came back concluding the pilot was documented somewhere it is not.
 
-    The expectation is `autonomy.py` itself, not a remembered number: the line the
+    The expectation is `app/autonomy.py` itself, not a remembered number: the line the
     prose names must BE the definition, with the members the prose quotes, and the
     test file it calls a pin must assert that set. So the citation cannot rot the
     way its predecessor did — the code moving under the prose fails here first.
@@ -644,14 +644,14 @@ def test_the_pilot_frozenset_citation_resolves_to_the_line_it_names():
     assert "`EVIDENCE_PILOT_TASK_IDS" in funcs, (
         "§The functions no longer names the pilot frozenset literally")
     window = funcs[funcs.index("`EVIDENCE_PILOT_TASK_IDS"):][:320]
-    cited = re.search(r"`autonomy\.py:(\d+)`", window)
-    assert cited, f"the pilot sentence cites no autonomy.py line: {window[:160]!r}"
+    cited = re.search(r"`app/autonomy\.py:(\d+)`", window)
+    assert cited, f"the pilot sentence cites no app/autonomy.py line: {window[:160]!r}"
     line = int(cited.group(1))
-    src = (ROOT / "autonomy.py").read_text().splitlines()
+    src = (ROOT / "app" / "autonomy.py").read_text().splitlines()
     at = re.fullmatch(r"EVIDENCE_PILOT_TASK_IDS = frozenset\(\{([0-9, ]+)\}\)",
                       src[line - 1].strip())
     assert at, (
-        f"the doc cites `autonomy.py:{line}` for the pilot frozenset, and that line "
+        f"the doc cites `app/autonomy.py:{line}` for the pilot frozenset, and that line "
         f"reads {src[line - 1].strip()!r} — follow the citation and you learn about "
         f"run-summary slicing instead of the pilot")
     quoted = re.search(r"frozenset\(\{([0-9, ]+)\}\)", window).group(1)
@@ -664,8 +664,8 @@ def test_the_pilot_frozenset_citation_resolves_to_the_line_it_names():
     assert re.search(r"EVIDENCE_PILOT_TASK_IDS == frozenset\(\{38, 42, 39, 40\}\)", pin), (
         "the doc says tests/test_worker_evidence.py pins the pilot set, and that file "
         "no longer asserts it — the citation has become a promise nothing keeps")
-    assert "autonomy.py:710" not in _live_prose(), (
-        "`autonomy.py:710` is still cited in current prose; only the dated 2026-09-12 "
+    assert "app/autonomy.py:710" not in _live_prose(), (
+        "`app/autonomy.py:710` is still cited in current prose; only the dated 2026-09-12 "
         "§Review log entry may carry it, as the error that was corrected there")
 
 
@@ -774,7 +774,7 @@ def test_the_dated_review_log_entry_keeps_what_was_true_that_day():
     log = _review_log()
     assert re.match(r"\s*- \*\*2026-09-12", log), (
         f"the §Review log's first entry is no longer the dated 2026-09-12 one: {log[:60]!r}")
-    assert "autonomy.py:710" in log, (
+    assert "app/autonomy.py:710" in log, (
         "the 2026-09-12 entry's record of the wrong citation has been 'corrected' — "
         "that rewrite is a false history, and clause 1 depends on it staying put")
     assert "verified **nothing**" in log, (

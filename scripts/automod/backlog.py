@@ -5226,7 +5226,7 @@ def _open_deferral_targets(rows: list[dict], item_id: int, open_ids: set[int]) -
     its clause to it, and ends. That reads as `spent`, and the second life used
     to follow within one housekeeping tick — so the item was re-triaged on a
     tree that still had the obstacle in it. #1069 (2026-09-18) deferred to
-    #1242 at 15:33Z because `prompt_surface.py` was outside every round's
+    #1242 at 15:33Z because `app/prompt_surface.py` was outside every round's
     writable set; it was re-triaged at 15:58Z, the triage correctly found that
     path unwritable and wrote a `human-only:` contract citing #1242; #1242
     landed at 17:43Z; and the item sat in `draft`, high priority, its work on a

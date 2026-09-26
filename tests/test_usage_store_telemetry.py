@@ -11,7 +11,7 @@ import sqlite3
 
 import pytest
 
-import usage_store
+from app import usage_store
 
 
 def _old_schema_db(path):

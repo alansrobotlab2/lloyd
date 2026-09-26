@@ -2946,7 +2946,7 @@ async def _pre_dispatch(
                 # is being held back so the matched SKILL.md reaches the model
                 # before the action, not after it. `is_error=False` is the whole
                 # point of this second outcome: the same intercept expressed as a
-                # deny lands in `tool_errors` (autonomy.py:912/:927) and would
+                # deny lands in `tool_errors` (app/autonomy.py:912/:927) and would
                 # make the fleet look sicker precisely where it is being taught
                 # something. Shape matches the synthetic ToolSearch result above.
                 return events.tool_result(

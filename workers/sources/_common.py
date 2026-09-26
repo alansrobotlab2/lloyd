@@ -318,8 +318,8 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
     from app.harness import RunOptions
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from app.mcp_discovery import intra_turn_compaction_kwargs
-    from prompt_builder import build_system_prompt
-    from autonomy import _get_model_env
+    from app.prompt_builder import build_system_prompt
+    from app.autonomy import _get_model_env
 
     # The landing drain applies to worker turns too. The promoter idles the
     # backend and then restarts it; a worker job that starts in that gap is

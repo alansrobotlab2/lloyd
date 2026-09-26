@@ -136,7 +136,7 @@ def _patch_off_vault(monkeypatch):
     """Keep the test off the real vault/config: the runner builds its system
     prompt and MCP server list through these two module-level seams."""
     import app.mcp_discovery as mcp_disc
-    import prompt_builder
+    from app import prompt_builder
 
     monkeypatch.setattr(prompt_builder, "build_system_prompt",
                         lambda **kw: "SYSTEM PROMPT UNDER TEST")
@@ -972,7 +972,7 @@ def test_turn_start_injection_is_recorded_from_the_text_the_trial_was_handed(mon
     it — the same reason #427 reads `tool_search_enabled` off the built options
     instead of restating the pin.
 
-    Two bodies in one block is the normal shape: `prefetch.py` injects its top
+    Two bodies in one block is the normal shape: `app/prefetch.py` injects its top
     scorer plus anything the `<context>` block carries.
     """
     tr = _quiet_trial(monkeypatch, (

@@ -25,7 +25,7 @@ import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import autonomy  # noqa: E402
+from app import autonomy  # noqa: E402
 
 PDT = dt.timezone(dt.timedelta(hours=-7))
 NIGHT = [22, 23, 0, 1, 2, 3, 4]          # #38, #42: 05:00-11:59Z
@@ -322,7 +322,7 @@ async def test_every_completion_path_writes_the_windowed_next_run(
     MCP tool share (see `test_every_production_caller_names_itself`)."""
     skill = tmp_path / "SKILL.md"
     skill.write_text("# skill\nDo it.\n")
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "sys",
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "sys",
                         raising=False)
 
     async def _rq(messages, options):

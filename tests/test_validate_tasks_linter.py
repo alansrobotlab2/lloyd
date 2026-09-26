@@ -286,7 +286,7 @@ def test_the_model_check_accepts_exactly_what_the_dispatch_loader_resolves(
     `model: eco` reached the primary's endpoint under a name it does not serve.
     If its matching rule ever moves, this is what says the linter moved with it.
     """
-    import autonomy
+    from app import autonomy
     from scripts.autonomy import validate_tasks as vt
 
     (tmp_path / "config.yaml").write_text(SEAM_CONFIG)
@@ -302,7 +302,7 @@ def test_the_skill_check_resolves_exactly_what_the_dispatch_loader_loads(
     Covers both branches of the loader: the path branch (`/` or `.md`), which
     never falls back to a slug, and the slug branch against a skills root.
     """
-    import autonomy
+    from app import autonomy
     from scripts.autonomy import validate_tasks as vt
 
     vault = tmp_path / "obsidian"

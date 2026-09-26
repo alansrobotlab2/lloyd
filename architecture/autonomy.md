@@ -51,7 +51,7 @@ extension, the idler daemon):
 
 | reader | what it does |
 |---|---|
-| `autonomy.py` | task-file CRUD, the due predicates, `run_task`, `compute_health` |
+| `app/autonomy.py` | task-file CRUD, the due predicates, `run_task`, `compute_health` |
 | `workers/sources/scheduled_task.py` | enqueues what is due; executes a claimed item |
 | `app/routers/autonomy.py` | `/api/autonomy/{run,tasks,task-write,task-delete,health,runs}` |
 | `agent_mcp/autonomy.py` | seven `autonomy_*` MCP tools |
@@ -157,8 +157,8 @@ Five steps, three processes, and the seams are where it has gone wrong.
    real agent turn through `run_query`.
 5. **The records.** Four of them, joined — see above.
 
-`autonomy.py` owns 1, 2 and 4; `workers/sources/scheduled_task.py` owns 3 and
-the health gates around it. Nothing schedules inside `autonomy.py` any more,
+`app/autonomy.py` owns 1, 2 and 4; `workers/sources/scheduled_task.py` owns 3 and
+the health gates around it. Nothing schedules inside `app/autonomy.py` any more,
 which is what its docstring means by scheduling having moved to the unified
 work queue.
 
@@ -202,7 +202,7 @@ therefore said nothing.
 Both readers call it rather than restating it — `/api/autonomy/tasks` per row
 as `blocked`, and `dashboard._autonomy` to split past-due rows into `overdue`
 (nothing holds it) and `held` (something does). The dashboard reports
-`classifier: "naive"` when `import autonomy` failed and every past-due task is
+`classifier: "naive"` when `from app import autonomy` failed and every past-due task is
 being called overdue again, because a downgrade that looks like success is the
 failure this split exists to prevent. Note that the dependency gate resolves
 `depends_on` against the set it is handed, and since #558 a dependency it
@@ -466,7 +466,7 @@ learns to skip.
 Resolution is one iteration — a single tool call longer than the remaining
 budget still overruns. That is the accepted limit: the failure being fixed is
 twenty short iterations past the stopping point, not one long one. The module
-lives in `app/` rather than privately in `autonomy.py` because the automod
+lives in `app/` rather than privately in `app/autonomy.py` because the automod
 worker turn needs identical behaviour, and two copies of "how close is the
 deadline" drift in the direction nobody is watching.
 `tests/test_autonomy_budget_anchor.py` pins it, including that `run_task` wires

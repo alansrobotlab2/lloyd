@@ -150,5 +150,5 @@ def test_a_failing_drafter_costs_the_merge_not_the_recall(monkeypatch):
 
 def test_prefetch_does_not_reach_the_merge():
     """The merge is the recall TOOL's; prefetch has its own 300 ms path."""
-    src = (ROOT / "prefetch.py").read_text()
+    src = (ROOT / "app" / "prefetch.py").read_text()
     assert "topics_merge" not in src and "_vault_recall(" not in src

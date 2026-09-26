@@ -21,7 +21,7 @@ import sqlite3
 import pytest
 import yaml
 
-import autonomy
+from app import autonomy
 from app.run_acceptance import (DispatchTrace, false_completion_rate, grade_run,
                                 parse_acceptance)
 from workers.pool import WorkerPool, normalize_result
@@ -168,7 +168,7 @@ def real_run(monkeypatch, tmp_path):
         monkeypatch.setattr(harness_mod, "run_query", _run_query)
         monkeypatch.setattr(harness_mod, "RunOptions", Opts)
         monkeypatch.setattr(mcp_pool, "DEFAULT_LLOYD_MCP_SERVERS", {}, raising=False)
-        monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "SYS")
+        monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "SYS")
         monkeypatch.setattr("app.sessions_io.SESSIONS_DIR", tmp_path / "sessions")
         monkeypatch.setattr(scheduled_task, "_vllm_healthy", lambda *a, **k: True)
         monkeypatch.setattr(sources, "get_sources_config", lambda: {})

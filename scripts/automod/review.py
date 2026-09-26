@@ -1154,7 +1154,7 @@ def _citation_tokens(text: str) -> list[str]:
 def _path_candidates(token: str) -> list[str]:
     """A token, plus that token with a symbol or anchor trimmed off.
 
-    `autonomy.py::_pin`, `autonomy.py:_pin`, `autonomy.py#L377`: the whole
+    `app/autonomy.py::_pin`, `app/autonomy.py:_pin`, `app/autonomy.py#L377`: the whole
     token is tried first, then the path alone.
     """
     first = token.strip().strip("`'\"()[],;")
@@ -1214,11 +1214,13 @@ def _resolve_in_worktree(cand: str, worktree: Path) -> str:
         return ""
     if (worktree / rel).exists():
         return rel
-    # #1252: this checkout keeps `autonomy.py`, `prompt_builder.py` and six
+    # #1252: the checkout used to keep `autonomy.py`, `prompt_builder.py` and
     # other modules at the REPO ROOT, while the grader's mental model is a
-    # package — so it writes the true module as `app/autonomy.py`. The claim
-    # is accurate and the path is not, and that is how four mutation-verified
-    # `met`s were downgraded on 2026-09-19 (#832). Retry with the leading
+    # package — so it wrote the true module as `app/autonomy.py`. The claim
+    # was accurate and the path was not, and that is how four mutation-verified
+    # `met`s were downgraded on 2026-09-19 (#832). Those modules live in `app/`
+    # now, so the grader's guess is simply right; this fallback stays for a
+    # citation of any other file by a wrong leading segment. Retry with the leading
     # segment stripped, but only HERE, after the path as written missed, and
     # only ONE segment deep: a citation that exists as written still wins, so
     # `app/x.py` keeps resolving to `app/x.py` wherever both exist, and a

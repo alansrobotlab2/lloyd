@@ -41,7 +41,7 @@ sys.path.insert(0, str(HERE))
 from run_prefetch_eval import _quiet_logging  # noqa: E402
 
 with _quiet_logging():
-    import prefetch  # noqa: E402
+    from app import prefetch  # noqa: E402
     from agent_mcp.transcript_self_hit import drop_self_hits  # noqa: E402
 
 ANCHOR_HITS = 3

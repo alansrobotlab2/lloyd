@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 
-import usage_store
+from app import usage_store
 from app.harness import events as E
 from app.harness import telemetry
 from app.turn_usage import TurnTelemetry

@@ -52,7 +52,7 @@ import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import autonomy as A
+from app import autonomy as A
 from app.routers import autonomy as ROUTER
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

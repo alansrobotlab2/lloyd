@@ -1921,7 +1921,7 @@ def main(argv: list[str] | None = None) -> int:
         print("refusing: run with LLOYD_DATA set to --data-root (scratch), "
               "so spills and event logs stay out of production", file=sys.stderr)
         return 2
-    from prompt_builder import build_system_prompt
+    from app.prompt_builder import build_system_prompt
     system_prompt = build_system_prompt()
     discovered = _load_discovered(Path(a.tools_snapshot))
     sizes = [int(x) for x in a.sizes.split(",")]

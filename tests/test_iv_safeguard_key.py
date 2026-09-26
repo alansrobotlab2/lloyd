@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import usage_store  # noqa: E402
+from app import usage_store  # noqa: E402
 
 # The table as it stood before #770: 17 columns, no key.
 _OLD_SCHEMA = """CREATE TABLE inner_voice_observations (

@@ -16,7 +16,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import prefetch  # noqa: E402
+from app import prefetch  # noqa: E402
 
 
 def _load_eval():

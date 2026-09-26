@@ -100,7 +100,7 @@ def _contract_refusals(variant_dir: Path) -> list[str]:
     if not soul.exists():
         return []
     try:
-        import prompt_surface
+        from app import prompt_surface
     except ImportError:
         return []
     def _text(name: str) -> str | None:

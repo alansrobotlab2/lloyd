@@ -129,7 +129,7 @@ _rpc.set_server_port(PORT)
 
 # memory.py was split into facts/vault/session in #340 PR 5. The legacy
 # memory module remains as a backward-compat re-export shim for callers
-# (prefetch.py, app/post_capture.py) but is NOT in MODULES — including it
+# (app/prefetch.py, app/post_capture.py) but is NOT in MODULES — including it
 # would double-register every tool.
 MODULES = [
     # Built-in tool replicas (formerly provided by claude-agent-sdk)

@@ -49,7 +49,7 @@ from app.memory_ceiling import (
     topic_path,
     topic_slug,
 )
-from prompt_surface import ENTRY_TYPES
+from app.prompt_surface import ENTRY_TYPES
 
 # ── Constants ────────────────────────────────────────────────────────────────
 
@@ -345,7 +345,7 @@ def _load_session_index(max_days: int = 14) -> dict:
     by turn in message order, and `turns` is one (message index, role, start,
     end) row per turn with `corpus[start:end]` equal to that turn's own text.
     Both belong to `_load_session_index` rather than to `_session_recall`
-    because `prefetch.py:842` builds this same index and scores it with the
+    because `app/prefetch.py:842` builds this same index and scores it with the
     same `_score_session` to render the per-turn `<recent-sessions>` block —
     the recall tool is not the only consumer of what is indexed here.
 
@@ -460,7 +460,7 @@ def _score_session(session: dict, query_tokens: set) -> float:
 
     Reads `corpus`, which since #1090 is the session's whole turn text rather
     than a head-truncated digest — so this scores more, not differently, and
-    `prefetch.py` needs no change to get the wider coverage.
+    `app/prefetch.py` needs no change to get the wider coverage.
     """
     corpus = session.get("corpus", "")
     if not corpus or not query_tokens:

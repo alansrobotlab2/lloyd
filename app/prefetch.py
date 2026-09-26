@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-prefetch.py — Automatic context prefetch layer.
+app/prefetch.py — Automatic context prefetch layer.
 
 Extracts keywords from the user message, searches skills, facts, backlog
 refs, recent sessions, and vault documents in parallel, then prepends a
@@ -34,7 +34,7 @@ from agent_mcp.facts import (
 )
 from agent_mcp.session import _load_session_index, _score_session
 from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords, strip_qmd_snippet
-from prompt_builder import PROMPT_BUDGET_CHARS, prompt_token_estimate, skills_push_enabled
+from app.prompt_builder import PROMPT_BUDGET_CHARS, prompt_token_estimate, skills_push_enabled
 from app.event_log import log_event
 from app.sessions_io import ambient_clock_stamp
 # The next-session channel (#1516). The drain itself is imported inside

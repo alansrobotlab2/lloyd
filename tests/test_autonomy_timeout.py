@@ -3,7 +3,7 @@
 Why this file exists
 --------------------
 Two timeout caps apply to every autonomy run — the task's frontmatter
-`timeout_seconds` (`autonomy.py`) and the work source's
+`timeout_seconds` (`app/autonomy.py`) and the work source's
 `max_duration_seconds` (`workers/pool.py`). The recorded rule is "both apply,
 min wins", and the correction log spent a cycle discovering that the *opposite*
 belief ("frontmatter timeout_seconds is not read") had been written into memory
@@ -12,7 +12,7 @@ as fact.
 The incident that fixed is worth keeping pinned: when the two values were
 **equal**, the pool timer won the race and cancelled the coroutine before its
 own handler ran — no run record, no activity-log line, and the task left
-`in_progress` on disk. `autonomy.py:682` now subtracts a margin for exactly that
+`in_progress` on disk. `app/autonomy.py:682` now subtracts a margin for exactly that
 reason.
 
 `AUTONOMY_DIR` is `~/obsidian/autonomy` — a protected vault path — so every test
@@ -27,16 +27,16 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-import autonomy
+from app import autonomy
 from workers import pool as worker_pool
 
-DEFAULT_TASK_TIMEOUT = 1800          # autonomy.py's `or 1800` fallback
+DEFAULT_TASK_TIMEOUT = 1800          # app/autonomy.py's `or 1800` fallback
 MARGIN = autonomy._POOL_TIMEOUT_MARGIN
 POOL_DEFAULT = worker_pool._DEFAULT_MAX_DURATION_SECONDS
 
 
 def resolve_timeout(declared: int, max_duration: int | None) -> int:
-    """Mirrors autonomy.py:676-683 verbatim.
+    """Mirrors app/autonomy.py:676-683 verbatim.
 
     A copy, not an import: the expression is inline inside `run_task`, which
     needs the whole harness to invoke. Extracting it is the right refactor and

@@ -766,8 +766,8 @@ class Gate:
                 return "only tests and docs in the delta"
             return None
         if name == "prompt_surface":
-            if any(p in ("prompt_builder.py", "prefetch.py")
-                   or p.rsplit("/", 1)[-1] in ("SOUL.md", "MEMORY.md", "USER.md")
+            if any(p in Gate.PROMPT_SURFACE_PATHS
+                   or p.rsplit("/", 1)[-1] in Gate.PROMPT_SURFACE_VAULT
                    for p in delta):
                 return None
             return "no prompt-surface path in the delta"
@@ -1260,7 +1260,7 @@ class Gate:
     # tests are green, tsc is clean, the canary boots, and the model has
     # quietly stopped reaching for `http_search`.
     PROMPT_SURFACE_PATHS = (
-        "prompt_builder.py", "prefetch.py",
+        "app/prompt_builder.py", "app/prefetch.py",
     )
     PROMPT_SURFACE_VAULT = ("SOUL.md", "MEMORY.md", "USER.md")
 

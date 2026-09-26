@@ -154,7 +154,7 @@ def _active_skill_files() -> list[Path]:
     Mirrors prompt_builder._load_skills_index: dot-prefixed directories are
     the archive and are excluded, as are quarantined skills.
     """
-    from prompt_builder import _is_quarantined_skill
+    from app.prompt_builder import _is_quarantined_skill
 
     out: list[Path] = []
     seen: set[str] = set()
@@ -422,7 +422,7 @@ _PY_IN_COMMAND = re.compile(r"(?:^|[\s/])((?:eval|app|tests|scripts)/[A-Za-z0-9_
 
 #: The marker left where something was cut short. `clip_skill_description` says so
 #: of itself — "cut to at most `max_chars` characters, the cut marked with `…`"
-#: (`prompt_builder.py:992-996`) — and `scripts/skill_lint.py:822` puts that clipped
+#: (`app/prompt_builder.py:992-996`) — and `scripts/skill_lint.py:822` puts that clipped
 #: string into a table cell of the report it emits, which is a document this guard
 #: scans. `...` is the same event typed by a human.
 CLIP_MARKERS = ("\N{HORIZONTAL ELLIPSIS}", "...")
@@ -1403,7 +1403,7 @@ def test_a_clipped_path_quotation_is_not_read_as_a_phantom(tmp_path, monkeypatch
     file, and reddens three nodes on a real tree with no defect in it.
 
     `clip_skill_description` cuts a description to a character budget and marks the
-    cut with `…` (`prompt_builder.py:992-996`); `scripts/skill_lint.py:822` writes
+    cut with `…` (`app/prompt_builder.py:992-996`); `scripts/skill_lint.py:822` writes
     that clipped string into a cell of `~/obsidian/autonomy/skill-lint-report.md`,
     which is an autonomy task file and therefore in this guard's own corpus. On
     2026-09-25 the report's `service-health-check` row clipped mid-path and left
@@ -1420,7 +1420,7 @@ def test_a_clipped_path_quotation_is_not_read_as_a_phantom(tmp_path, monkeypatch
     must survive: a real path is still not a violation, and an absent file named in
     full is still exactly one.
     """
-    from prompt_builder import clip_skill_description
+    from app.prompt_builder import clip_skill_description
 
     real = "agent-services/supervisor/supervisord.conf"
     absent = "eval/a_script_only_a_clipped_quotation_names_1531.py"

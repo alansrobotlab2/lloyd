@@ -25,7 +25,7 @@ import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import autonomy  # noqa: E402
+from app import autonomy  # noqa: E402
 
 PIN = dt.datetime(2026, 9, 24, 8, 0, 0, tzinfo=dt.timezone.utc)
 UP_LAST = PIN - dt.timedelta(hours=50, minutes=42)      # the measured 50.7 h
@@ -42,7 +42,7 @@ def aut(tmp_path, monkeypatch):
     skill = tmp_path / "SKILL.md"
     skill.write_text("# test skill\nDo the thing.\n")
     monkeypatch.setattr(autonomy, "_SKILL_FOR_TESTS", str(skill), raising=False)
-    monkeypatch.setattr("prompt_builder.build_system_prompt", lambda **_kw: "sys",
+    monkeypatch.setattr("app.prompt_builder.build_system_prompt", lambda **_kw: "sys",
                         raising=False)
     monkeypatch.setattr(autonomy, "_utcnow", lambda: PIN)
     return autonomy

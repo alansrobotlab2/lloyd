@@ -29,7 +29,7 @@ class _Resp:
 @pytest.fixture
 def stub_engine(monkeypatch):
     """Answer every chat completion with the queued bodies, in order."""
-    import prompt_builder
+    from app import prompt_builder
 
     posted: list[dict] = []
     replies: list = []

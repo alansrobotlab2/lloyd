@@ -65,7 +65,7 @@ def build_cases(records: Iterable[dict], skills: Iterable[str]) -> dict[str, lis
 
 def injected(turn: str, skills: list[dict] | None = None) -> list[str]:
     """The skills prefetch would inject for this turn, winner first."""
-    import prefetch
+    from app import prefetch
     if len(turn.strip()) < prefetch.MIN_MESSAGE_LEN:
         return []
     # `_search_skills` returns the whole offer set since #435; the injection

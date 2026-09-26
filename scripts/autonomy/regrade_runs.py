@@ -33,7 +33,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-import autonomy  # noqa: E402
+from app import autonomy  # noqa: E402
 from app import paths  # noqa: E402
 from app.run_acceptance import GRADED, grade_run, trace_from_transcript  # noqa: E402
 

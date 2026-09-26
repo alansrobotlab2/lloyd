@@ -16,7 +16,7 @@ of them was a bug in the change under test:
     vault, which an hourly job rewrites — a tripwire on a hard rung, armed by
     a writer that is not a round at all.
   * and the near-miss that motivated this file: the fix for the second one
-    introduced `prompt_surface.py`, imported by tracked tests. Committing the
+    introduced `app/prompt_surface.py`, imported by tracked tests. Committing the
     importers without `git add`-ing the module would have broken the rung in
     every worktree — the same shape a third time, in the change that was
     cleaning up the second.
@@ -128,7 +128,7 @@ def test_the_guard_actually_resolves_local_modules():
     """A guard that silently matched nothing would be indistinguishable from a
     clean repo, and this one's whole job is to notice an absence."""
     tracked = set(_tracked_python_files())
-    assert _local_target("prompt_builder", tracked) == "prompt_builder.py"
+    assert _local_target("app.prompt_builder", tracked) == "app/prompt_builder.py"
     assert _local_target("scripts.automod.backlog", tracked) == "scripts/automod/backlog.py"
     # External packages and stdlib resolve nowhere in the repo.
     assert _local_target("pytest", tracked) is None
@@ -161,7 +161,7 @@ def test_it_reads_head_not_the_working_tree():
     somebody else's desk state.
     """
     tracked = _tracked_python_files()
-    sample = "prompt_builder.py"
+    sample = "app/prompt_builder.py"
     assert sample in tracked
     assert _committed(sample) is not None
     assert _committed("definitely/not/a/path.py") is None

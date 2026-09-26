@@ -98,7 +98,7 @@ def main() -> int:
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
     with _quiet_logging():
-        import prefetch
+        from app import prefetch
         out: dict = {}
         for name, turns in sets().items():
             rows = []

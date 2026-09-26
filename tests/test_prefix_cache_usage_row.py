@@ -54,7 +54,7 @@ from app.harness.loop import (                     # noqa: E402
 )
 from app.harness.options import RunOptions         # noqa: E402
 from app.turn_usage import turn_usage_row          # noqa: E402
-import usage_store                                 # noqa: E402
+from app import usage_store                                 # noqa: E402
 
 
 def _script_module():

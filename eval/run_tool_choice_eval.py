@@ -67,7 +67,7 @@ sys.path.insert(0, str(LLOYD_HOME))
 # copy of this arithmetic — a second `CHARS_PER_TOKEN = 4` living in the eval —
 # is what let an eval's size number and the `PROMPT_BUDGET` line drift apart
 # while both still printed "tokens".
-from prompt_builder import prompt_token_estimate  # noqa: E402
+from app.prompt_builder import prompt_token_estimate  # noqa: E402
 
 HTTP_TOOLS = {"http_search", "http_fetch", "http_request"}
 BROWSER_PREFIX = "browser_"
@@ -206,8 +206,8 @@ async def run_eval(queries: list[dict], *, timeout: float, model: str | None) ->
     from app.harness import RunOptions
     from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
     from app.mcp_discovery import _get_disallowed_tools, _get_harness_kwargs
-    from prefetch import prefetch_context
-    from prompt_builder import build_system_prompt
+    from app.prefetch import prefetch_context
+    from app.prompt_builder import build_system_prompt
 
     config = _yaml.safe_load((LLOYD_HOME / "config.yaml").read_text()) or {}
     # Resolve the tool surface exactly the way the chat router does

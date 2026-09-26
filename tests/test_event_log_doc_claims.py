@@ -28,7 +28,7 @@ _DROP_TABLE = re.compile(r"DROP TABLE IF EXISTS\s+(\w+)")
 
 
 def _dropped_tables() -> set[str]:
-    src = (ROOT / "usage_store.py").read_text(encoding="utf-8")
+    src = (ROOT / "app" / "usage_store.py").read_text(encoding="utf-8")
     dropped = set(_DROP_TABLE.findall(src))
     assert {"inner_voice_critiques", "inner_voice_interventions"} <= dropped, (
         f"the store no longer drops the legacy tables this test is about: {dropped}")

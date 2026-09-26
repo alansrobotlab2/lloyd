@@ -12,7 +12,7 @@ here rather than asserted in prose:
 
 * **NULL, not an empty list, for "no skill".** A turn that delivered no skill and
   a turn whose writer never learned to record one have to stay distinguishable,
-  the same rule `prefix_misses` follows (`usage_store.py:184-190`).
+  the same rule `prefix_misses` follows (`app/usage_store.py:184-190`).
 * **Token-denominated, never dollars.** `cost_usd` is written `0.0` at every
   write site (`app/routers/messages.py` 1199/2287 as read at triage, and
   `app/run_recorder.py`), so a per-skill cost in dollars would read 0 for every
@@ -34,7 +34,7 @@ import ast
 import json
 import sqlite3
 
-import usage_store
+from app import usage_store
 from app.harness import skill_dispatch as sd
 
 #: The `usage` table as it stood before #783: the 14 columns of
@@ -72,12 +72,12 @@ def _real_prefetch_text(first_body: str = "body\n",
 
     Every route assertion below reads this, so the markup is `prefetch`'s and not
     a copy: the attribute that separates `prefetch` from `prefetch_excerpt` is
-    written at `prefetch.py:941` and nowhere else in this file. A hand-written
+    written at `app/prefetch.py:941` and nowhere else in this file. A hand-written
     fixture would keep passing after a renderer change that dropped or renamed
     `excerpt="true"` — the recorded route would silently call every excerpt a
     full body, which is the mislabel this column exists to remove.
     """
-    import prefetch
+    from app import prefetch
 
     return prefetch._format_context(
         [
@@ -172,7 +172,7 @@ def test_a_bare_skill_name_is_refused_rather_than_stored_as_garbage():
 
 def test_an_existing_usage_db_keeps_every_row_and_gains_nulls(tmp_path, monkeypatch):
     """The column arrives through the additive `ALTER TABLE` path
-    (`usage_store.py:103-106`), so a live `usage.db` is never recreated.
+    (`app/usage_store.py:103-106`), so a live `usage.db` is never recreated.
     Reproduced from the real file: 3 rows written under the old DDL by plain
     sqlite3, then handed to the store, which must keep them and add the column."""
     db = tmp_path / "usage-legacy.db"
