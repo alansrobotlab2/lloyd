@@ -1215,3 +1215,230 @@ def test_the_sweep_apply_row_bounds_the_transaction_and_names_the_resumable_half
     assert "--resume" in skill_flat, (
         "the skill — the prompt the job actually runs from — names no way to finish a "
         "killed apply, so the operator improvises a re-run and loses the edge trail")
+
+
+#: ── #1566: what §Queue the work credits its three jobs with ──────────────────
+#
+#: The doc's own §Queue the work opened by crediting the group with archiving —
+#: "what gets researched, what reaches `up_next` on the kanban at
+#: `~/obsidian/backlog/`, **what gets archived**" — and its #77 row spelled that
+#: out as the job's role: "Archive stale and done tasks, clear draft clutter,
+#: reprioritize what remains". The skill #77 binds forbids exactly that ("never
+#: archives, edits, or deletes tasks"; "Do not touch any files. Report only."), so
+#: the function named a doer and had none. The consequence was measured on the
+#: board, not on the page: two weekly runs (2026-09-08, 2026-09-15) each used
+#: their report to rediscover that nobody retires the closed items, and a
+#: report-only job cannot file the finding it has found. #1566 is now the number
+#: that holds the decision, in the doc and in the skill both.
+#:
+#: These four nodes read across the same boundary the sweep tests above do — the
+#: doc says what a job is, the vault skill is what makes it so — and they keep the
+#: agreement in both directions: the row may not exceed the skill, and the skill's
+#: owner line may not go missing from the side the doc points at.
+QUEUE_HEADER = "Queue the work"
+QUEUE_TABLE = "| ID | Freq | Role |"
+HYGIENE_SKILL = "skills/weekly-backlog-hygiene/SKILL.md"
+
+#: A sentence about archiving is only allowed into this section if it says the
+#: archiving does *not* happen. Four words, each visibly a negation, so what is
+#: being permitted stays readable rather than becoming a matcher nobody can
+#: re-derive.
+NEGATORS = ("no ", "not ", "nothing", "never")
+
+#: The reports the skill's bash script actually emits, read off its `echo` lines
+#: (`=== Stale drafts (not updated in 30+ days) ===` &c). The role row is allowed
+#: to name these and nothing else that implies a write.
+HYGIENE_REPORTS = ("status", "stale draft", "duplicate id", "duplicate title")
+
+
+def _sentences(text: str) -> list[str]:
+    """Prose cut into sentences, with the doc's 88-column wraps rejoined."""
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", _flat(text)) if s.strip()]
+
+
+def _role_cell(header: str, job: str) -> str:
+    """The Role cell of `job`'s row in the table that starts with `header`."""
+    lines = _text().splitlines()
+    # Every copy of the header, not `lines.index`'s first one: the doc spells
+    # `| ID | Freq | Role |` identically in three sections, so a first-match lookup
+    # reads a different group's table and reports `no row for #77` while the real
+    # row sits unexamined two hundred lines below.
+    starts = [i for i, ln in enumerate(lines) if ln.strip() == header]
+    assert starts, f"architecture/autonomy-jobs.md has no `{header}` table at all"
+    found = []
+    for i in starts:
+        for line in lines[i + 2:]:                          # header, then |---| rule
+            if not line.startswith("|"):
+                break
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if cells[0] == job:
+                assert len(cells) == 3, (
+                    f"{job}'s row under a {header!r} table has {len(cells)} cells, not "
+                    f"ID/Freq/Role — the reader can no longer tell which column is the role")
+                found.append(cells[2])
+    assert len(found) == 1, (
+        f"{job} has {len(found)} role rows in the doc's {len(starts)} ID/Freq/Role "
+        f"tables. One job described twice is the double-assertion defect #1524 "
+        f"pinpointed, and the test cannot tell which copy a reader believes")
+    return found[0]
+
+
+def _hygiene_skill() -> str:
+    """#77's prompt, read from the live vault — the surface that makes the doc true.
+
+    Read rather than skipped when absent, for the reason `board_presence.py` gives
+    for the board: a green that certifies nothing is worse than a red, and the
+    vault is on every box that runs this suite.
+    """
+    import board_presence
+
+    path = board_presence.vault_root() / Path(HYGIENE_SKILL)
+    assert path.is_file(), (
+        f"{path} is unreadable, and clauses 2 and 4 pinned here are claims about "
+        f"that file, not about this one")
+    return path.read_text()
+
+
+def test_queue_the_work_credits_no_job_with_archiving_backlog_items():
+    """Clause 1. §Queue the work said the group decides "what gets archived" and
+    §Measure repeated it ("#65, #35 and #77 all direct future effort — what gets
+    researched, what reaches `up_next`, what gets archived"). No job in the fleet
+    retires a closed backlog item: `sweep_autonomy_runs`
+    (`scripts/groundskeeper/retention-sweep.py:368`) prunes logs, sessions and run
+    records; `app/backlog_move.py` records a status move without touching a path;
+    and the only writer that removes a backlog file is `backlog_task_delete`
+    (`app/routers/backlog.py:754`), which deletes rather than archives and is
+    wired to no job. So the phrase is not a shorthand for something true.
+    """
+    section = _group_section(QUEUE_HEADER)
+    flat = _flat(section)
+    assert "what gets archived" not in flat, (
+        "§Queue the work is back to crediting the group with archiving. The clause "
+        "this replaces is #1566's whole premise, and the phrase appears in two "
+        "sections, so fix §Measure too")
+    assert "what gets archived" not in _text(), (
+        "the false group claim survives somewhere else in the doc; it is one claim, "
+        "stated twice, and #1566 removes both")
+    for sentence in _sentences(section):
+        if "archiv" not in sentence.lower():
+            continue
+        assert any(n in sentence.lower() for n in NEGATORS), (
+            f"an unnegated archiving sentence is back in §Queue the work: "
+            f"{sentence!r}. Every such sentence here has to say the archiving does "
+            f"not happen, because no job performs it")
+    # The positive half of the clause: the row now states the job's real work.
+    row = _role_cell(QUEUE_TABLE, "#77")
+    assert "report-only" in row.lower(), (
+        "the #77 role row no longer says what the job is: a report-only census")
+    for report in HYGIENE_REPORTS:
+        assert report in row.lower(), (
+            f"the #77 row no longer names {report!r}, one of the four reports the "
+            f"job's own script emits — the row is describing a job nobody runs")
+
+
+def test_the_77_role_row_agrees_with_the_skill_it_binds():
+    """Clause 2, across the process boundary the defect sits on. §Queue the work's
+    #77 row promised "Archive stale and done tasks, clear draft clutter,
+    reprioritize what remains" while `skills/weekly-backlog-hygiene/SKILL.md` —
+    loaded whole as the run's prompt — forbids archiving, editing and deleting, and
+    closes with "Do not touch any files. Report only." A doc row and a prompt may
+    not disagree about what a job is: the row is what a reader believes, the prompt
+    is what the run does, and the gap between them is where two weekly runs lost
+    their reports.
+    """
+    skill_flat = _flat(_hygiene_skill())
+    # What the skill forbids, taken from the skill rather than typed here, so the
+    # row is checked against the prohibition rather than against this test's memory.
+    m = re.search(r"never\s+([a-z, ]+?)\s+tasks", skill_flat, re.I)
+    assert m, (
+        f"{HYGIENE_SKILL} no longer states its forbidden verbs as "
+        f"'never <verbs> tasks'; this test reads the list from that sentence and "
+        f"refuses to guess it")
+    forbidden = [v.strip(" .") for v in re.split(r",|\bor\b", m.group(1)) if v.strip(" .")]
+    assert forbidden, (
+        f"no verbs parsed out of {HYGIENE_SKILL}'s own 'never … tasks' clause, so "
+        f"there is nothing to check the #77 row against")
+    row = _role_cell(QUEUE_TABLE, "#77").lower()
+    for verb in forbidden:
+        stem = verb.rstrip("s").replace("delete", "delet").replace("modif", "modif")
+        assert re.search(rf"{stem}\w* nothing", row) or "touches no file" in row, (
+            f"the skill forbids {verb!r} and the #77 row neither negates it nor "
+            f"carries the blanket 'Touches no file'. The row is one edit away from "
+            f"the claim that made this item")
+    assert "files nothing" in row, (
+        "the row dropped the filing prohibition. #77 does not file the finding it "
+        "finds either — that is the half #1566 is about, and the run of 2026-09-15 "
+        "declined to file precisely because of it")
+    assert re.search(r"[Dd]o not touch any files", skill_flat), (
+        f"{HYGIENE_SKILL} no longer says a run may touch no file, which is the "
+        f"sentence 'Touches no file' in the row is answering")
+    for report in HYGIENE_REPORTS:
+        assert report in skill_flat.lower(), (
+            f"the row still promises {report!r}, which the script stopped emitting")
+
+
+def test_queue_the_work_names_an_owner_for_the_closed_pile():
+    """Clause 3. The finding outlives the false claim if nothing replaces it: with
+    the archiving sentence deleted and no owner named, §Queue the work leaves a
+    reader holding an unowned TODO, which is the state that produced #1566 in the
+    first place. The section now states the absence plainly and names the item that
+    holds the decision, and this node pins both halves plus the citations the
+    paragraph leans on, so a paragraph cannot stay green while its own references
+    rot.
+    """
+    flat = _flat(_group_section(QUEUE_HEADER))
+    assert re.search(r"\bno job retires a closed item off the board\b", flat, re.I), (
+        "§Queue the work no longer says plainly that retiring a closed item is "
+        "performed by no job. Deleting the false archiving sentence without stating "
+        "this is what leaves the TODO unowned")
+    assert re.search(r"backlog #1566", flat), (
+        "the closed pile has no named owner in the section a reader finds it in. "
+        "#1566 is where the archive-or-accept decision lives; name it")
+    assert re.search(r"#1566[^.]{0,200}\bdecision\b", flat, re.I), (
+        "#1566 is named but not as the decision's home, which is the difference "
+        "between an owner and a cross-reference")
+    # The paragraph's own evidence, re-checked rather than trusted.
+    root = ROOT
+    router = (root / "app" / "routers" / "backlog.py").read_text()
+    assert "async def backlog_task_delete" in router, (
+        "app/routers/backlog.py no longer defines backlog_task_delete, the one "
+        "writer that removes a backlog file — the paragraph cites it as deleting "
+        "rather than archiving")
+    assert "archiv" not in (root / "app" / "backlog_move.py").read_text().lower(), (
+        "app/backlog_move.py gained an archiving route, and §Queue the work's "
+        "'no job retires a closed item' needs to be re-read against it")
+    page = (root / "web" / "src" / "components" / "pages" / "BacklogPage.tsx").read_text()
+    m_win = re.search(r"const DONE_WINDOW_DAYS = (\d+)", page)
+    assert m_win, (
+        "BacklogPage.tsx no longer defines DONE_WINDOW_DAYS, the 7-day window the "
+        "paragraph cites as the reason nothing downstream feels the pile")
+    assert m_win.group(1) == "7", (
+        f"the board's done-window is {m_win.group(1)} days, not the 7 the paragraph "
+        f"cites — it still reads as a hiding window, so update the number")
+
+
+def test_the_hygiene_skill_points_the_closed_pile_at_its_owner():
+    """Clause 4, on the other side of the boundary. #77 is report-only three times
+    over, so it cannot file the closed pile or land it; the only durable instruction
+    it carries is this skill, and until it named an owner every run re-reported the
+    pile as a fresh finding (2026-09-08, 2026-09-15). The doc's pointer and the
+    skill's line are one fix in two surfaces, and this node is what stops the doc
+    claiming an owner the prompt never tells the run to cite.
+    """
+    skill = _hygiene_skill()
+    flat = _flat(skill)
+    assert "#1566" in flat, (
+        f"{HYGIENE_SKILL} names no owner for the closed pile, so a run reports it as "
+        f"a new unowned finding again — the loop #1566 exists to close")
+    owner = [s for s in _sentences(flat) if "#1566" in s and "owner" in s.lower()]
+    assert owner, (
+        "#1566 is mentioned in the skill but never as the owner of the finding; a "
+        "bare cross-reference does not tell a run what to write in its report")
+    assert re.search(r"cite\s+\*{0,2}owner #1566\*{0,2}[^.]{0,160}instead of reporting",
+                     flat, re.I), (
+        "the skill no longer instructs the run to cite owner #1566 in place of "
+        "re-listing the pile. Naming the item is decoration; the instruction is the "
+        "fix")
+    assert "what gets archived" not in flat and "Archive stale" not in flat, (
+        "the skill has taken on the archiving role the doc just gave up. It is "
+        "report-only; the owner it names is #1566, not itself")

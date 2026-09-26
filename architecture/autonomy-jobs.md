@@ -110,7 +110,8 @@ not:
   them verified and none refuted is the state to write down, and it is the weaker
   claim: a pilot that has never rejected a claim has not yet shown that it can.
 - **Nothing watches the deciders.** #65, #35 and #77 all direct future effort —
-  what gets researched, what reaches `up_next`, what gets archived — and no job
+  what gets researched, what reaches `up_next`, and how the board reads when it is
+  counted (#77 touches no file: see §Queue the work) — and no job
   in Measure covers decision quality. #76 watches task *health*, which is a
   different question.
 
@@ -656,8 +657,8 @@ monitor rule it shares with #60, stated under
 ## Queue the work: #65, #35, #77
 
 Three jobs that decide what future effort goes to — what gets researched, what
-reaches `up_next` on the kanban at `~/obsidian/backlog/`, what gets archived.
-Nothing in the fleet measures how well they decide. The board-side half is
+reaches `up_next` on the kanban at `~/obsidian/backlog/`, and how the board reads
+when it is counted. Nothing in the fleet measures how well they decide. The board-side half is
 measured since #904 — `scripts/automod/board_decisions.py`, surfaced through
 `board_health.decisions` (dashboard backlog panel, the steward's
 `<board_health>` block) and `round board-decisions`: every promotion into
@@ -670,7 +671,7 @@ row); #65's registry conversion is still unmeasured.
 |----|------|---|
 | #65 | daily | Propose 5–8 research topics into `research.db` via `research_propose`, from the knowledge health report, session-distill gaps, open backlog and the last two daily notes |
 | #35 | daily | Promote 2–4 high-priority inbox items into `up_next`; target queue size 8–12; skip when `up_next` is at capacity unless critical/high blockers exist |
-| #77 | weekly | Archive stale and done tasks, clear draft clutter, reprioritize what remains |
+| #77 | weekly | Report-only census of the board — tally by status, flag stale drafts (>30 days untouched), duplicate ids, duplicate titles. Touches no file: archives nothing, edits nothing, deletes nothing, files nothing; every candidate it names is the user's act |
 
 **#65 feeds the `deep-research` worker and no longer reads or writes any queue
 file** — [[research-pipeline]] is the registry it proposes into and the source
@@ -681,6 +682,25 @@ unique and cost 1.02M tokens a night to read.
 loop's own triage and implement passes are worker sources, not autonomy tasks,
 and run under [[automod]]'s gates — see [[backlog]] for the board itself and the
 quarantine rule that keeps the loop from eating what it files.
+
+**No job retires a closed item off the board, and that gap has an owner.** #77's
+census on 2026-09-26 counted 1,488 `status: done` files of 1,507 in
+`~/obsidian/backlog/` (98.7% terminal, no `archived/` directory of any kind), with
+665 of them completed on or after 2026-09-20 — roughly 110 a day arriving. Nothing
+moves one out: `scripts/groundskeeper/retention-sweep.py` prunes logs, sessions and
+run records, never a backlog file; `app/backlog_move.py` is a status-move *recorder*
+("One definition of 'record a backlog status move'") and never touches a path; the
+only writer in the tree that removes a backlog file is `backlog_task_delete`
+(`app/routers/backlog.py:754`), which deletes rather than archives and is wired to
+no job. The board hides the pile after `DONE_WINDOW_DAYS = 7`
+(`web/src/components/pages/BacklogPage.tsx:571`), so nothing downstream feels it
+either. Archiving ~1,488 files is a bulk human-gated move in a protected path, and
+naming a job that may thereafter move board files is a scope call, so **it is not an
+autonomy task's to make: backlog #1566 is where that decision lives**, and a run
+that reports the pile cites it (`skills/weekly-backlog-hygiene/SKILL.md`, the prompt
+#77 runs, says the same). The older reading of this section — that the archiving
+happens and that #77 does it — is not true, and these are the sentences that
+replaced it.
 
 ---
 
