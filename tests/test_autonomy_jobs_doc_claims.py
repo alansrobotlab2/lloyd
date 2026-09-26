@@ -23,10 +23,18 @@ internal check cannot go stale the way a hand-copied roster does, and it still
 fails the moment two of the doc's own statements disagree, which is exactly how
 this bug presented: the bound said 85, the newest job said 86.
 
-The one external expectation pinned here is the item's own: the bound reads "24
-through 86", and it is the only such bound in `architecture/`. That literal moves
-when the fleet does — deliberately, because a doc saying "24 through 86" while a
-task 87 exists is the defect this file exists to stop.
+The numbering note is the exception that proves the rule. It read "the fleet runs
+24 through 86", a hand-typed ceiling, and a ceiling is false the moment the fleet
+grows: #1102 set it to 86 and tasks #87–#90 were created on 2026-09-24/25, so the
+literal rotted inside three days exactly as its own docstring predicted. It is now
+a floor ("24 through 90 or beyond"), which no new task id can falsify, and it is
+still the only `N through M` in `architecture/`. Every count the doc does type
+carries the date it was true, and each is pinned to something re-derivable — the
+pilot frozenset's line number against `autonomy.py` itself, the evidence verdicts
+against the code path that writes them and against their own internal arithmetic,
+the no-dependency count against the `depends_on` arrows the doc draws and §Distil's
+own fleet size, and both membership tables against each other and against the four
+newest jobs.
 
 A second contract joined this file with item #1521 (2026-09-26): the
 `_pipeline/` shorthand. The doc spells the prefix bare on twelve table and prose
@@ -65,6 +73,25 @@ _WORDS = {
     "fourteen": 14, "fifteen": 15, "sixteen": 16, "seventeen": 17, "eighteen": 18,
     "nineteen": 19, "twenty": 20, "twenty-one": 21, "thirty": 30, "thirty-one": 31,
     "thirty-two": 32, "thirty-three": 33, "forty": 40,
+}
+
+#: The four jobs created 2026-09-24 and 2026-09-25 that neither membership table
+#: listed: #87 #88 #89 (`research-agent`, one arXiv paper each → one knowledge
+#: note) and #90 (`corpus-shape-trend`, the shape metrics over four nightly
+#: corpora). Their absence was invisible to
+#: `test_every_job_has_one_function_and_exactly_one_write_tier` because it
+#: cross-checks the two tables against *each other*: symmetric omission passes.
+NEW_JOBS = ("#87", "#88", "#89", "#90")
+DIGESTS = ("#87", "#88", "#89")
+
+#: The ten `depends_on` edges, as the wiring diagram's parent ─► child arrows.
+#: Verified parent-by-parent on 2026-09-26: 74→48, 48→24, 39→42, 58→57, 42→38,
+#: 40→39, 83→58, 47→40, 51→56, 57→56 (child→parent), i.e. these ten pairs
+#: read the other way round.
+TEN_EDGES = {
+    ("#38", "#42"), ("#42", "#39"), ("#39", "#40"), ("#40", "#47"),
+    ("#56", "#57"), ("#57", "#58"), ("#58", "#83"), ("#56", "#51"),
+    ("#24", "#48"), ("#48", "#74"),
 }
 
 
@@ -129,6 +156,51 @@ def _count(flat: str, pattern: str, what: str) -> tuple[int, int, str]:
     return _WORDS[m.group(1).lower()], _WORDS[m.group(2).lower()], m.group(0)
 
 
+def _num(tok: str) -> int:
+    """A count written either way the doc writes them: `36` or `thirty-six`."""
+    return int(tok) if tok.isdigit() else _WORDS[tok.lower()]
+
+
+def _functions_section() -> str:
+    """§The functions and its three subsections, prose flattened.
+
+    Stops at the first job-group heading so a claim checked "in §The functions" is
+    not silently satisfied by the same words in a group section — §Distil, three
+    sections on, states the pilot frozenset and the fleet size too, and the whole
+    defect #1520 is about is those two sections disagreeing.
+    """
+    return _flat(_text().split("## The functions", 1)[1].split("\n## Ingest", 1)[0])
+
+
+def _diagram_edges() -> set[tuple[str, str]]:
+    """The arrows of the wiring diagram, as `{(parent, child)}`.
+
+    The doc's answer to "how many jobs declare a dependency" is the sentence these
+    arrows belong to, so reading the count off the diagram is reading it off the
+    doc rather than off a constant — and a count that disagrees with its own diagram
+    is a defect on either side. The lookahead keeps every hop of a chain: `#38 ─►
+    #42 ─► #39` has to yield two edges, and a plain findall would eat `#42` in the
+    first match and lose the second. The `──►` in the annotation column never
+    matches, because no `#id` precedes it.
+    """
+    after = _text().split("Ten `depends_on` edges exist", 1)[1]
+    block = after.split("```", 2)[1]
+    assert block.startswith("\n#"), f"the wiring block is not a fenced diagram: {block[:40]!r}"
+    return {(f"#{a}", f"#{b}") for a, b in re.findall(r"#(\d+)\s+─►\s+(?=#(\d+))", block)}
+
+
+def _review_log() -> str:
+    """The dated §Review log, which records what was true on the day it says."""
+    log = _text().split("## Review log", 1)
+    assert len(log) == 2, "architecture/autonomy-jobs.md has no §Review log to keep history in"
+    return log[1]
+
+
+def _live_prose() -> str:
+    """Everything except the §Review log: the part a reader takes as current."""
+    return _text().split("## Review log", 1)[0]
+
+
 # ── clause 1 — #86 has an entry, and it states the four contract points ───────
 
 
@@ -171,31 +243,78 @@ def test_the_86_entry_states_its_frequency_its_subject_and_its_two_prohibitions(
             f"the #86 entry never states {why}; no /{probe}/ in {body[:300]!r}")
 
 
-# ── clause 2 — the bound, and nothing else typing the fleet's size ────────────
+# ── clause 4 — the numbering note floors the range, and nothing else types it ─
 
 
-def test_the_fleet_bound_reads_24_through_86():
-    """Clause 2, first half. `:38` is the last hand-typed fleet bound in the doc
-    set and it named a ceiling one job below the newest live task.
+def _numbering_note() -> str:
+    m = re.search(r"^ordered: (.+)$", _text(), re.M)
+    assert m, "the numbering note no longer starts a line with `ordered: `"
+    return m.group(1)
+
+
+def test_the_fleet_bound_floors_the_range_at_the_newest_task():
+    """Clause 4, first half. This node was `test_the_fleet_bound_reads_24_through_86`
+    and asserted that literal; #1520 retires the literal, so the name goes with it.
+
+    The note is the last hand-typed fleet bound in the doc set. At base it read "24
+    through 86" — a ceiling one job below the newest live task, which is the
+    inference that made #86 invisible (#1102). #1102 repaired the string to 86, and
+    #87, #88, #89 and #90 were created on 2026-09-24 and 2026-09-25, so the repaired
+    literal was false within three days: a ceiling is re-falsified by every task
+    someone files. What is asserted now is a floor — the range must reach at least
+    the newest live id and must say it stops nowhere ("or beyond") — which is true
+    for every fleet that will ever succeed this one.
     """
-    assert "the fleet runs 24 through 86" in _text(), (
-        "the numbering note still bounds the fleet short of its newest task — the "
-        "inference that made #86 invisible to every reader of this doc")
+    note = _numbering_note()
+    ranges = re.findall(r"\b(\d+) through (\d+)\b", note)
+    assert len(ranges) == 1, f"expected exactly one id range in the numbering note: {note!r}"
+    low, high = int(ranges[0][0]), int(ranges[0][1])
+    assert low == 24, f"the note's range starts at {low}, not 24 — 24 is the oldest live task id"
+    # The ceiling to beat is read off the doc's own membership tables, not typed
+    # here: clause 5 requires the newest four jobs to be listed, so a job added to
+    # the tables raises this floor without anyone remembering to raise a constant —
+    # and a job omitted from the tables is clause 5's failure, not this one's silence.
+    newest = max(int(i[1:]) for i in
+                 [j for ids, _ in _table(FUNCTIONS_HEADER).values() for j in ids])
+    assert high >= newest, (
+        f"{note!r} tops out at {high} while the membership tables list job #{newest} "
+        f"— the defect #1102 closed for 86 and #1520 for 90")
+    assert "or beyond" in note, (
+        f"{note!r} states a ceiling again: it is false the day after the next job is "
+        f"filed, which is what let '24 through 86' rot twice")
 
 
 def test_no_second_fleet_bound_appears_anywhere_in_architecture():
-    """Clause 2, second half: repairing one bound must not seed others. Every
+    """Clause 4, second half: repairing one bound must not seed others. Every
     `N through M` in `architecture/` is enumerated, so an integer copied into
     `index.md` — whose "each of the 32 scheduled jobs" count rotted inside three
     days — fails here instead of in next month's arch review.
+
+    What is pinned is the *number* of typed ranges, their file, and that the one
+    range travels with its date; not which line it lands on. The doc wraps near 88
+    columns, so a rewrap is not a defect and an exact-string pin would fail on
+    formatting — that is how a bound comes to look "not our problem" and stop being
+    checked.
     """
     found = {md.name: [ln.strip() for ln in md.read_text().splitlines()
                        if re.search(r"\b\d+\s+through\s+\d+\b", ln)]
              for md in sorted(ARCH_DIR.glob("*.md"))}
     found = {k: v for k, v in found.items() if v}
-    assert found == {"autonomy-jobs.md": [
-        "ordered: the fleet runs 24 through 86 with gaps where tasks were retired."]}, (
-        f"a fleet bound is typed somewhere it was not before, or reads differently: {found}")
+    assert set(found) == {"autonomy-jobs.md"}, (
+        f"a fleet id range is typed somewhere it was not before: {found}")
+    lines = found["autonomy-jobs.md"]
+    assert len(lines) == 1, (
+        f"autonomy-jobs.md now types {len(lines)} id ranges: {lines} — one bound is "
+        f"the agreed shape, a second one is a second thing to rot")
+    assert "or beyond" in lines[0], (
+        f"the one id range reads {lines[0]!r} without the floor wording, so it is a "
+        f"ceiling again — or some other sentence has taken the numbering note's place")
+    near = _flat(_text()).split("or beyond", 1)[1][:160]
+    assert "tasks were retired" in near, (
+        f"the sentence after 'or beyond' is no longer the numbering note: {near[:80]!r}")
+    assert re.search(r"\(\d{4}-\d{2}-\d{2}\)", near), (
+        f"the typed range carries no date near it: {near[:80]!r} — an id that reaches "
+        f"90 is a measurement of one day, and the day has to travel with it")
     # The same integer can also arrive wearing a validator's clothes: this doc
     # used to close the #85 entry with "all 33 task files pass them", which read
     # as a test result and was the fleet size, correct only until task 87.
@@ -504,3 +623,307 @@ def test_the_bare_spelling_still_appears_on_exactly_twelve_lines():
     assert len(bare) == 12, (
         f"{len(bare)} lines spell `_pipeline/` without the root, not the 12 the "
         f"triage counted: {bare}")
+
+
+# ── #1520 clause 1 — the pilot citation resolves to the code it cites ────────
+
+
+def test_the_pilot_frozenset_citation_resolves_to_the_line_it_names():
+    """#1520 clause 1. §The functions cited `autonomy.py:710`, which is
+    `RUN_SUMMARY_CAP = 300` inside the comment about tail-slicing a run summary —
+    nothing to do with evidence — while the frozenset it meant is at
+    `autonomy.py:2104`, where §Distil has pointed since #1102. A reader who walked
+    to 710 came back concluding the pilot was documented somewhere it is not.
+
+    The expectation is `autonomy.py` itself, not a remembered number: the line the
+    prose names must BE the definition, with the members the prose quotes, and the
+    test file it calls a pin must assert that set. So the citation cannot rot the
+    way its predecessor did — the code moving under the prose fails here first.
+    """
+    funcs = _functions_section()
+    assert "`EVIDENCE_PILOT_TASK_IDS" in funcs, (
+        "§The functions no longer names the pilot frozenset literally")
+    window = funcs[funcs.index("`EVIDENCE_PILOT_TASK_IDS"):][:320]
+    cited = re.search(r"`autonomy\.py:(\d+)`", window)
+    assert cited, f"the pilot sentence cites no autonomy.py line: {window[:160]!r}"
+    line = int(cited.group(1))
+    src = (ROOT / "autonomy.py").read_text().splitlines()
+    at = re.fullmatch(r"EVIDENCE_PILOT_TASK_IDS = frozenset\(\{([0-9, ]+)\}\)",
+                      src[line - 1].strip())
+    assert at, (
+        f"the doc cites `autonomy.py:{line}` for the pilot frozenset, and that line "
+        f"reads {src[line - 1].strip()!r} — follow the citation and you learn about "
+        f"run-summary slicing instead of the pilot")
+    quoted = re.search(r"frozenset\(\{([0-9, ]+)\}\)", window).group(1)
+    assert (sorted(quoted.replace(" ", "").split(","))
+            == sorted(at.group(1).replace(" ", "").split(","))), (
+            f"the doc quotes {quoted} at the line it cites, which defines {at.group(1)}")
+    assert "`tests/test_worker_evidence.py`" in window, (
+        f"the pilot sentence no longer names the test that pins the set: {window[:160]!r}")
+    pin = (ROOT / "tests" / "test_worker_evidence.py").read_text()
+    assert re.search(r"EVIDENCE_PILOT_TASK_IDS == frozenset\(\{38, 42, 39, 40\}\)", pin), (
+        "the doc says tests/test_worker_evidence.py pins the pilot set, and that file "
+        "no longer asserts it — the citation has become a promise nothing keeps")
+    assert "autonomy.py:710" not in _live_prose(), (
+        "`autonomy.py:710` is still cited in current prose; only the dated 2026-09-12 "
+        "§Review log entry may carry it, as the error that was corrected there")
+
+
+# ── #1520 clause 2 — the evidence state, dated, and its mechanism still on disk ─
+
+
+def test_the_evidence_state_in_the_functions_is_dated_and_self_consistent():
+    """#1520 clause 2. §The functions said not one claim had been verified (#902).
+    #945 then copied each run's `claims` key into the dict the pool records
+    (`workers/sources/scheduled_task.py`), so verdicts have been written since: on
+    2026-09-26 `GET /api/autonomy/health?days=7` reported 22 claims checked, 22
+    verified, 0 refuted and 0 insufficient over 4 runs that carried a bundle — #38
+    twice for 11 claims, #39 once for 6, #40 once for 5. `runs_with_bundle` counts
+    runs, not tasks, so the breakdown has to reconcile with both totals, which is
+    the arithmetic the first draft of this round's own sentence got wrong (it named
+    three tasks under a total of four runs).
+
+    Those counts are not fixture-able from a unit test — the route reads
+    `workers.db`, and its seven-day window moves every night — so pinning their
+    magnitude would only guarantee a red suite on a day when nothing was wrong.
+    What is pinned is what makes a typed count trustworthy without being able to
+    re-run it: the sentence carries the date it was true, its arithmetic closes
+    (checked = verified + refuted + insufficient; the per-task runs sum to the
+    declared runs and the per-task claims to the checked total; no task contributes
+    more runs than the total has), the sentence's claim of never having rejected a
+    claim is allowed to stand exactly while its own numbers say so — never asserted
+    as a permanent property of the pilot, which would make its first correct
+    rejection a failing test — and the code path that produces verdicts at all is
+    still in the tree.
+    """
+    funcs = _functions_section()
+    m = re.search(
+        r"On (\d{4}-\d{2}-\d{2})(.+?from (\d+) runs that carried a bundle: )"
+        r"([^.;]*\.)", funcs)
+    assert m, (
+        "§The functions no longer states the pilot's evidence state as a dated "
+        "sentence running '... N runs that carried a bundle: #NN n runs n claims'. "
+        "It must not go back to an undated claim about what the pilot has or has "
+        "not verified")
+    middle, runs, breakdown = m.group(2), int(m.group(3)), m.group(4)
+    counts = re.search(
+        r"(\d+) claims checked, (\d+) verified, (\d+) refuted and (\d+) insufficient",
+        middle)
+    assert counts, f"the dated evidence sentence names no four counts: {middle!r}"
+    checked, verified, refuted, insufficient = (int(x) for x in counts.groups())
+    assert checked == verified + refuted + insufficient, (
+        f"{checked} checked but {verified} verified + {refuted} refuted + "
+        f"{insufficient} insufficient = {verified + refuted + insufficient}")
+    # Not `assert refuted == 0`: that would freeze today's production state as an
+    # invariant and turn the pilot's first correct rejection into a red suite. What
+    # is asserted is that the sentence's claim and its own numbers cannot part
+    # company — so the rejection, when it lands, costs an edit to one sentence.
+    never_rejected = bool(re.search(
+        r"none refuted|never\s+rejected a claim", funcs[m.start():m.start() + 600]))
+    assert not never_rejected or (refuted == 0 and insufficient == 0), (
+        f"the sentence claims the pilot has never rejected a claim while its own "
+        f"numbers read {refuted} refuted and {insufficient} insufficient — one "
+        f"direction only: dropping the claim is always allowed, keeping it costs the "
+        f"zeros, so the first real rejection asks for an edit to one sentence rather "
+        f"than a failing suite")
+    per_task = re.findall(r"#(\d+) (\d+) runs? (\d+) claims?", breakdown)
+    assert per_task, f"the breakdown names no task with its runs and claims: {breakdown!r}"
+    assert len(per_task) <= runs, (
+        f"'{runs} runs that carried a bundle' broken out over {len(per_task)} tasks: "
+        f"{breakdown!r} — a task cannot contribute a run that did not happen")
+    assert sum(int(r) for _, r, _ in per_task) == runs, (
+        f"the per-task runs in {breakdown!r} sum to "
+        f"{sum(int(r) for _, r, _ in per_task)}, not the {runs} runs declared — the "
+        f"route's `runs_with_bundle` counts runs, and #38 has shipped two bundled "
+        f"runs to 39's and 40's one, so a breakdown that forgets the second quietly "
+        f"describes a different fleet of runs than the total does")
+    assert sum(int(c) for _, _, c in per_task) == checked, (
+        f"the per-task claims {breakdown!r} do not sum to the {checked} checked")
+    src = (ROOT / "workers" / "sources" / "scheduled_task.py").read_text()
+    assert re.search(r'if "claims" in result:\s*\n\s*out\["claims"\] = result\["claims"\]',
+                     src), (
+        "the doc attributes the verdicts to the #945 passthrough in "
+        "workers/sources/scheduled_task.py and that copy is gone: the counts would "
+        "stop being written and this doc would keep quoting them")
+
+
+def test_no_live_sentence_revives_the_refuted_zero_verdict_claim():
+    """#1520 clause 2, negative half. The falsified claim — the pilot has verified
+    nothing — is refuted by the route and #902 is done, so those words may survive
+    only where they were recorded as a correction, never in prose a reader takes as
+    current.
+    """
+    live = _live_prose()
+    for pattern, why in (
+        (r"not one claim has yet been verified", "the #902 state that #945 refuted"),
+        (r"verified \*\*nothing\*\*", "the same claim in the shape the 2026-09-12 review left it"),
+        (r"pilot has verified nothing", "the same claim in plain prose"),
+    ):
+        assert not re.search(pattern, live), (
+            f"a current sentence asserts {why} again; only the dated §Review log may")
+
+
+def test_the_dated_review_log_entry_keeps_what_was_true_that_day():
+    """#1520 clause 2's out-of-scope half, as a rail rather than a comment. The
+    2026-09-12 entry records the state at `28abecf073ee`, the wrong line number and
+    the zero verdicts included, because that is what was true then. Sweeping it
+    "consistent with the fix" would manufacture a September in which the pilot had
+    verified claims, which never happened; the entry is dated precisely so a later
+    reader can tell when each claim held.
+    """
+    log = _review_log()
+    assert re.match(r"\s*- \*\*2026-09-12", log), (
+        f"the §Review log's first entry is no longer the dated 2026-09-12 one: {log[:60]!r}")
+    assert "autonomy.py:710" in log, (
+        "the 2026-09-12 entry's record of the wrong citation has been 'corrected' — "
+        "that rewrite is a false history, and clause 1 depends on it staying put")
+    assert "verified **nothing**" in log, (
+        "the 2026-09-12 entry's record of the zero verdicts has been 'corrected'; it "
+        "was true at 28abecf073ee and must stay readable as what it was")
+
+
+# ── #1520 clause 3 — one fleet size, and the ten edges that must not move ─────
+
+
+def test_the_no_dependency_count_is_the_fleet_minus_the_edges_the_doc_draws():
+    """#1520 clause 3. §The functions said "22 of the 32 tasks declare no
+    dependency at all" while §Distil said "Ten of the fleet's 36 jobs" — two fleet
+    sizes in one document on the same day, and the live route says 36 parsed tasks
+    with 10 declaring `depends_on`.
+
+    The count is derived, not remembered: it has to equal §Distil's denominator
+    minus the `depends_on` arrows this very section draws three lines above it, and
+    travel with the date it was taken. Three statements that must be edited together
+    is the point — a fleet that grows makes all three fail at once instead of
+    leaving one section quietly ahead.
+    """
+    funcs = _functions_section()
+    m = re.search(r"\b(\w+) of the (\w+) tasks\b[^.]*\.", funcs)
+    assert m, "§The functions no longer counts the jobs that declare no dependency"
+    said, without, fleet = m.group(0), _num(m.group(1)), _num(m.group(2))
+    distil = re.search(r"[Tt]en of the fleet's (\d+) jobs", _text())
+    assert distil, (
+        "§Distil no longer counts its share of the fleet, so §The functions has "
+        "nothing left to be made to agree with")
+    assert fleet == int(distil.group(1)), (
+        f"'{said}' counts a fleet of {fleet} and §Distil counts {distil.group(1)} — "
+        f"two sections of one document disagreeing on the fleet size is the defect "
+        f"#1520 is about, whichever of them the live route has outgrown")
+    edges = _diagram_edges()
+    assert len(edges) == fleet - without, (
+        f"'{said}': {fleet} − {without} = {fleet - without}, but this section's own "
+        f"wiring diagram draws {len(edges)} `depends_on` arrows ({sorted(edges)}). "
+        f"Neither number can be bumped alone: the denominator has to move with the "
+        f"arrows, the arrows have to move with the diagram, and §Distil has to agree "
+        f"on the denominator. `GET /api/autonomy/tasks` is the live view — measured "
+        f"on 2026-09-26 at 36 parsed tasks and 10 declaring `depends_on` — so "
+        f"re-measure it before editing any of the three.")
+    assert re.search(r"\(\d{4}-\d{2}-\d{2}\)", said), f"'{said}' carries no date"
+
+
+def test_the_wiring_sentence_and_its_diagram_still_declare_the_ten_verified_edges():
+    """#1520 clause 3, the half that must NOT change. The ten edges were re-checked
+    parent-by-parent on 2026-09-26 — 74→48, 48→24, 39→42, 58→57, 42→38, 40→39,
+    83→58, 47→40, 51→56, 57→56 — so both the sentence and its arrows stay exactly as
+    they are. A count that is right deserves the same protection as one that is
+    wrong: this fails if the diagram loses an arrow, gains one, or the sentence's
+    number stops matching the picture it introduces.
+    """
+    funcs = _functions_section()
+    assert re.search(r"Ten `depends_on` edges exist and \*\*three of them now cross a "
+                     r"function boundary\*\*", funcs), (
+        "the sentence naming the ten edges and their three cross-function hops has "
+        "been edited; #1520 says leave it, because ten is still correct")
+    assert _diagram_edges() == TEN_EDGES, (
+        f"the wiring diagram draws {sorted(_diagram_edges())}, not the ten verified "
+        f"edges {sorted(TEN_EDGES)}")
+
+
+# ── #1520 clause 5 — the four newest jobs are in both tables ─────────────────
+
+
+def test_the_four_newest_jobs_are_listed_once_in_each_membership_table():
+    """#1520 clause 5. #87, #88, #89 (`research-agent`, one arXiv paper each) and
+    #90 (`corpus-shape-trend`) were created 2026-09-24 and 2026-09-25 and have run
+    since — two runs each for the digests, one for #90, all green — yet neither
+    table listed them, and the five tier rows still added up (20/1/3/8/1 = 33)
+    against a 36-task fleet.
+
+    `test_every_job_has_one_function_and_exactly_one_write_tier` could not see it:
+    it compares the tables with each other, so a job missing from both is symmetric
+    and passes. This names the four ids and requires exactly one row apiece in each
+    table, because a count in a header cell is not a membership check.
+    """
+    funcs, tiers = _table(FUNCTIONS_HEADER), _table(TIERS_HEADER)
+    grouped = [i for ids, _ in funcs.values() for i in ids]
+    tiered = [i for ids, _ in tiers.values() for i in ids]
+    for job in NEW_JOBS:
+        assert grouped.count(job) == 1, (
+            f"{job} appears {grouped.count(job)} times in the function table; the one "
+            f"document that says what each scheduled job is for is silent, or double, "
+            f"about a live task")
+        assert tiered.count(job) == 1, (
+            f"{job} appears {tiered.count(job)} times in the write-authority table, "
+            f"which is the doc's answer to what that job may do unattended")
+
+
+def test_the_four_newest_jobs_sit_in_the_group_and_tier_their_output_belongs_to():
+    """#1520 clause 5's judgement, pinned the way #86's placement is. #87 #88 #89
+    read one outside document — an arXiv paper — and write one knowledge note into
+    `knowledge/`, which is what Ingest is for, and that note is durable state, so
+    they sit in the unattended-writer tier beside #30 and #53. #90 measures the
+    shape of four nightly-written corpora and appends one dated metrics row per run,
+    which is what #82 and #86 do when they record a trend: Reports only, under the
+    Bound entropy group whose #78/#80 pair is this doc's report-only half of bounding
+    growth. The choice of group is arguable; that each job has exactly one group and
+    one tier is not.
+    """
+    funcs, tiers = _table(FUNCTIONS_HEADER), _table(TIERS_HEADER)
+
+    def tier_of(job: str) -> list[str]:
+        return [t for t, (ids, _) in tiers.items() if job in ids]
+
+    ingest = next(v for k, v in funcs.items() if k.startswith("[Ingest]"))
+    assert all(job in ingest[0] for job in DIGESTS), (
+        f"the digests {list(DIGESTS)} are not all in the Ingest row, which lists "
+        f"{ingest[0]} — an outside document in, a vault note out, is that group")
+    bound = next(v for k, v in funcs.items() if k.startswith("[Bound entropy]"))
+    assert "#90" in bound[0], f"#90 is not in the Bound entropy row, which lists {bound[0]}"
+    for job in DIGESTS:
+        assert tier_of(job) == ["Writes durable state unattended"], (
+            f"{job} is in {tier_of(job) or 'no tier'}; it writes a knowledge note into "
+            f"the vault with nobody watching, which is what that tier means")
+    assert tier_of("#90") == ["Reports only"], (
+        f"#90 is in {tier_of('#90') or 'no tier'}; outside its own metrics row it "
+        f"changes nothing, the same position #82 and #86 hold")
+
+
+def test_every_groups_heading_row_link_and_id_list_agree():
+    """One rule over all seven groups, so a job can be added without the doc
+    quietly breaking around it. The Measure case is pinned for one group by
+    `test_the_functions_table_row_and_every_anchor_follow_the_group_heading`;
+    widening Ingest for #87–#89 and Bound entropy for #90 is the same edit in two
+    more places, and the failure looks the same from the outside — the row reads
+    fine, the heading still names the old members, and every link into the group
+    lands nowhere. The expected anchor is derived from the heading each time, never
+    typed, and `workers/sources/arch_review.py` keys a group off the heading's text
+    before the first `:` — which is why decorating a heading with more ids is safe
+    and renaming it is not.
+    """
+    text, funcs = _text(), _table(FUNCTIONS_HEADER)
+    bad = []
+    for label, (ids, _) in funcs.items():
+        name = label.split("]")[0].lstrip("[").strip()
+        m = re.search(rf"^## {re.escape(name)}: (.+)$", text, re.M)
+        if not m:
+            bad.append(f"{name}: no `## {name}: ...` group heading")
+            continue
+        if ids != _ids(m.group(1)):
+            bad.append(f"{name}: row lists {ids}, heading lists {_ids(m.group(1))}")
+        href = re.search(r"\]\(#([^)]*)\)", label)
+        want = _slug(f"{name}: {m.group(1)}")
+        if not href:
+            bad.append(f"{name}: row links to no anchor")
+        elif href.group(1) != want:
+            bad.append(f"{name}: row links #{href.group(1)}, heading slugs to {want}")
+    assert not bad, f"group membership out of step with its own heading: {bad}"

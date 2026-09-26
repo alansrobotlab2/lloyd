@@ -39,32 +39,38 @@ job is for, what it reads and writes, what it must not do, and what has already
 gone wrong with it.
 
 Jobs are numbered by their task id and that numbering is historical, not
-ordered: the fleet runs 24 through 86 with gaps where tasks were retired.
+ordered: ids run 24 through 90 or beyond, with gaps where tasks were retired
+(2026-09-26). Which ids are live is `GET /api/autonomy/tasks`'s business, not
+this document's. Typing a ceiling here has been wrong twice inside a week: the
+bound stopped at 85 while 86 was already running nightly, #1102 corrected it to
+86, and #87–#90 overtook that correction inside three days. So the range above
+is a floor, and the id it names carries the date it was the newest.
 
 ## The functions
 
 | Function | Jobs | What it is for |
 |---|---|---|
-| [Ingest](#ingest-68-30-53) | #68 #30 #53 | turn outside signal into internal state |
+| [Ingest](#ingest-68-30-53-87-88-89) | #68 #30 #53 · #87 #88 #89 | turn outside signal into internal state |
 | [Distil](#distil-38-42-39-40-47--56-57-58-83--54) | #38 #42 #39 #40 #47 · #56 #57 #58 #83 · #54 | read what we already have, write something more useful than the sum of it |
 | [Build the graph](#build-the-graph-24-51-74) | #24 #51 #74 | turn documents and trajectories into facts and typed edges |
 | [Canonicalize](#canonicalize-48-67-84) | #48 #67 #84 | make what is already stored agree with itself |
 | [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
-| [Bound entropy](#bound-entropy-79-81-78-80) | #79 #81 #78 #80 | stop the stores rotting or growing without limit |
+| [Bound entropy](#bound-entropy-79-81-78-80-90) | #79 #81 #78 #80 · #90 | stop the stores rotting or growing without limit |
 | [Measure](#measure-60-82-70-36-76-85-86) | #60 #82 #70 #36 #76 #85 #86 | say whether any of it is working |
 
 ### Write authority is the fault line
 
 Function is what a job means to do; **write authority is what it is permitted to
 do when nobody is watching**, and it is the axis worth checking first before
-changing any of these. Five tiers, and they do not follow the function groups:
+changing any of these. Five tiers, covering every job the table above names, and
+they do not follow the function groups:
 
 | Tier | Jobs | |
 |---|---|---|
-| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 | 20 |
+| Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #87 #88 #89 | 23 |
 | Injects expiring context unattended | #68 | 1 |
 | Proposes; an operator applies | #48 #67 #84 | 3 |
-| Reports only | #60 #82 #70 #78 #80 #36 #85 #86 | 8 |
+| Reports only | #60 #82 #70 #78 #80 #36 #85 #86 #90 | 9 |
 | Acts on the fleet itself | #76 | 1 |
 
 Two consequences the function grouping makes visible and the chain grouping did
@@ -77,10 +83,18 @@ not:
   run in plan mode, because the 2026-08-22 wipe (12,131 edges) and the
   2026-09-03 151-merge incident were both unattended applies. Distil writes
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
-  apparatus. `workers/evidence.py` is the correction and `autonomy.py` is where
-  its pilot set lives (`EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40})`,
-  `autonomy.py:710`) — 4 of the 20, and not one claim has yet been verified by it
-  (#902).
+  apparatus. `workers/evidence.py` is the correction and the scheduler module
+  `autonomy.py` is where its pilot set lives (`EVIDENCE_PILOT_TASK_IDS =
+  frozenset({38, 42, 39, 40})` at `autonomy.py:2104` in that module, pinned by
+  `tests/test_worker_evidence.py`) — 4 of the 23 jobs that write durable state
+  unattended. The pilot has verdicts now: since
+  #945 copied each run's `claims` key through `workers/sources/scheduled_task.py`
+  into the pool, `workers/pool.py` grades the claims as the run record is
+  written. On 2026-09-26 `GET /api/autonomy/health?days=7` reported 22 claims
+  checked, 22 verified, 0 refuted and 0 insufficient, from 4 runs that carried a
+  bundle: #38 2 runs 11 claims, #39 1 run 6 claims, #40 1 run 5 claims. All of
+  them verified and none refuted is the state to write down, and it is the weaker
+  claim: a pilot that has never rejected a claim has not yet shown that it can.
 - **Nothing watches the deciders.** #65, #35 and #77 all direct future effort —
   what gets researched, what reaches `up_next`, what gets archived — and no job
   in Measure covers decision quality. #76 watches task *health*, which is a
@@ -105,7 +119,8 @@ canonicalizing**, which is exactly why #74 declares `depends_on: 48` — it must
 re-type edges only after the names under them have settled. Under the chain
 grouping those three jobs sat in one list and the alternation was invisible.
 
-22 of the 32 tasks declare no dependency at all.
+26 of the 36 tasks (2026-09-26) declare no dependency at all: ten jobs name a
+parent, one each, and those ten are exactly the arrows drawn above.
 
 ### Two holes in the wiring
 
@@ -137,19 +152,22 @@ mechanism and apply to every edge above:
 
 ---
 
-## Ingest: #68, #30, #53
+## Ingest: #68, #30, #53, #87, #88, #89
 
-What the outside world did while nobody was looking. #30 and #53 write into
-`knowledge/`; #68 writes no vault file at all — it is the only job in the fleet
-whose output is a *conversation* (an inject that expires) rather than a file,
-which is why it has a write tier of its own, and the only one that runs on the
-**secondary** engine.
+What the outside world did while nobody was looking. #30, #53 and the three paper
+digests #87 #88 #89 write into `knowledge/`; #68 writes no vault file at all — it
+is the only job in the fleet whose output is a *conversation* (an inject that
+expires) rather than a file, which is why it has a write tier of its own, and the
+only one that runs on the **secondary** engine.
 
 | ID | Freq | Role |
 |----|------|---|
 | #68 | every 15 min | Calendar + unread mail, filtered and classified, injected as ambient context |
 | #30 | 3×/day | GitHub releases/issues and YouTube RSS → keyword pre-filter → scorer → high-scoring items to the vault |
 | #53 | daily | Changelogs and release notes for the stack; compare each source's latest version against last-checked; only process actual changes, then write `knowledge/stack-updates/YYYY-MM-DD-<source>.md` |
+| #87 | daily | arXiv 2609.26758 read in full → exactly one knowledge note. One-off research digest dispatched interactively on 2026-09-24 |
+| #88 | daily | arXiv 2609.26532, same shape |
+| #89 | daily | arXiv 2609.26550, same shape |
 
 ### #68 — the name outlived the job
 
@@ -625,10 +643,10 @@ quarantine rule that keeps the loop from eating what it files.
 
 ---
 
-## Bound entropy: #79, #81, #78, #80
+## Bound entropy: #79, #81, #78, #80, #90
 
 Stop the stores rotting or growing without limit. The group splits on write
-authority: #79 and #81 delete and rebuild, #78 and #80 only report what they
+authority: #79 and #81 delete and rebuild, #78, #80 and #90 only report what they
 find.
 
 | ID | Freq | Writes? | Role |
@@ -637,6 +655,7 @@ find.
 | #79 | weekly | yes | Retention: delete `_pipeline/tasks` background-bash logs over 30 days, gzip session transcripts inactive 90+ days |
 | #78 | weekly | no | Broken backlinks, unreferenced notes, stale skill references, broken cross-links → a cleanup report |
 | #80 | weekly | no | OKF v0.1 conformance — `validate_okf.py` catches pages with no non-empty `type` or unparseable frontmatter |
+| #90 | daily | no | Shape of four nightly-written corpora — daily notes, `USER.md`/`MEMORY.md`, `SKILL.md` bodies, trajectory rows: counts, length p95, distinct-key ratio, duplicate and self-reference rate — appended to `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json` and diffed against the previous run |
 
 **#81 is the one with a measured payoff**: orphaned chunks had grown the index to
 24 GB and vec queries to 700 ms, and orphans displace real results, so it buys
@@ -653,6 +672,18 @@ this, `groundskeeper-survey.py`, and `groundskeeper-weekly-summary.py`.
 report-only by design: neither has ever been asked to fix what it names, and the
 reports have no scheduled consumer, which puts them in the same position as three
 of the seven jobs in Measure.
+
+**#90 bounds growth the stores themselves cannot see.** #79 and #81 free bytes,
+and a memory file or a skills library can grow past its usefulness while every
+file on disk stays small. So #90 measures shape rather than size — daily notes,
+`USER.md`/`MEMORY.md`, `SKILL.md` bodies and trajectory rows, each by count,
+length p95, distinct-key ratio, duplicate rate and self-reference rate — writes
+one dated row per run under `~/lloyd-data/_pipeline/metrics/`, diffs it against
+the last, and exits 2 only when a metric crosses its provisional threshold or a
+sentence newly recurs across items. Exit 0 prints `corpus shape: no finding`;
+either way it changes nothing outside its own series, which is why it sits in
+this group and in the Reports-only tier rather than in Measure, where the other
+trend recorders are. `scripts/maintenance/corpus_shape.py` is #90.
 
 ---
 
