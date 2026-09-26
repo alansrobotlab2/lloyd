@@ -712,11 +712,53 @@ def test_skill_states_the_measured_pool_limit_and_timeout():
         f"{VAULT_SKILL} is absent, and clause 11 of #879 is a claim about that "
         "file — refusing to treat an unchecked claim as a pass")
     text = VAULT_SKILL.read_text(encoding="utf-8")
-    assert "566,170" in text
-    assert "--limit 2000" in text
+    # #1560 rewrote §Scheduling posture so the pool/head figures are DATED and
+    # re-measurable: a literal count asserted here went red the week the figures
+    # were correctly re-measured (45,228 / 658 replaced 567,123 / 5,235, and the
+    # head at 658 is smaller than one slice, so no fixed pair count is the bound
+    # either). What the section commits to is the mechanism, so that is what this
+    # pins: a measurement carrying its date, the command that regenerates it, and
+    # a bound expressed as seconds of the task window at a measured rate.
+    assert re.search(r"Measured 20\d\d-\d\d-\d\d", text), (
+        "the section states pool/head figures with no measurement date, so the next "
+        "reader cannot tell a current figure from a stale one (#1560)")
+    assert "--skip-judge" in text and "--min-score" in text, (
+        "the section names no command for re-measuring the head, which is what made "
+        "the old figures un-refreshable: the figure must be regenerated, not inherited")
     assert "timeout_seconds: 3000" in text
-    for stale in ("65K", "65k", "--limit 4000", "3600s"):
+    # `\s+`, not a space: this file is prose-wrapped at ~79 columns, so a phrase
+    # that is present can still be split across two lines.
+    assert re.search(r"remaining\s+window\s+seconds", text), (
+        "the weekly slice is not justified as a share of the task window, so a "
+        "pair count is once again standing in for a time budget")
+    assert "contention" in text and "~0.5" in text and "7-11" in text, (
+        "throughput is not stated as contention-dependent with both measured rates "
+        "(~0.5 s/pair idle, 7-11 s/pair while `primary` is saturated)")
+    assert "--limit 2000" in text
+    for stale in ("65K", "65k", "--limit 4000", "3600s",
+                  "566,170", "5,235", "567,123", "3 weekly runs"):
         assert stale not in text, f"skill still carries {stale!r}"
+
+
+def test_the_skill_contract_tests_are_never_excluded_from_the_run():
+    """#1569 clause 2: green had to come from the fix, not from stepping around it.
+
+    These two tests read `~/obsidian` directly, so they are the one place a live
+    claim about the skill gets checked. They are NOT excluded by the gate's marker
+    today — collected 58 equals selected 58 for this file — and that is what this
+    pins: if a future red is answered by marking either node `live_vault`, the run
+    goes green with the contract never read. So: no skip/xfail marker on either
+    node, and neither marked `live_vault`.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    for name in ("test_skill_states_the_measured_pool_limit_and_timeout",
+                 "test_skill_says_propose_only_and_drops_the_shrinking_pool_claim"):
+        m = re.search(r"((?:@[^\n]*\n)*)def " + name, src)
+        assert m, f"{name} is gone; a red test was deleted rather than fixed"
+        decorators = m.group(1)
+        assert "skip" not in decorators and "xfail" not in decorators \
+            and "live_vault" not in decorators and "filterwarnings" not in decorators, (
+            f"{name} carries a marker that would let it pass unchecked: {decorators!r}")
 
 
 def test_skill_says_propose_only_and_drops_the_shrinking_pool_claim():
