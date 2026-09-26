@@ -1439,6 +1439,21 @@ def _warn_missing_artifact_bypass(dependent: dict, dep_task: dict) -> None:
         dep_task.get("last_run") or "never")
 
 
+def _stale_bypass_hours(dependent: dict) -> Optional[float]:
+    """The DEPENDENT's declared `stale_bypass_hours`, or None when it declares none.
+
+    One parse for the rule (`_dependency_bypassed`) and for the sentence printed
+    about it (`_bypass_hold_detail`), so the refusal cannot describe a bound
+    different from the one that was applied. Absent, blank, zero or unparseable
+    all mean the same thing: no bound declared, and therefore no fail-forward
+    path at all, however long the dependent waits."""
+    try:
+        hours = float(dependent.get("stale_bypass_hours") or 0)
+    except (TypeError, ValueError):
+        return None
+    return hours if hours > 0 else None
+
+
 def _dependency_bypassed(dependent: dict, dep_task: dict,
                          dep_last_run: Optional[datetime.datetime],
                          now: datetime.datetime) -> bool:
@@ -1451,6 +1466,16 @@ def _dependency_bypassed(dependent: dict, dep_task: dict,
     whose own `depends_on` is null, is read by nothing, which is why the
     #38→#42 edge had no fail-forward path at all and a completed 12,700-byte
     report stalled the nightly chain ~10 h on 2026-09-10/11.
+
+    WHICH CLOCK IT ANSWERS (#1538): "has the UPSTREAM gone N hours without a
+    success", measured from `dep_last_run` and from nothing else. It is NOT a
+    cap on how long the DEPENDENT has been waiting. #42's own `next_run` was
+    75.5 h in the past when its 36 h bound was reached, and the stall alert
+    quoted `hours_past_next_run` beside `stale_bypass_hours` as if they were one
+    clock, which is how four days of correct alarms came to describe a fault in
+    this elapsed check when the fault was in the ORDER of the gate that calls it
+    (`_dependency_refusal`). A dependent that declares no bound has no
+    fail-forward path at all, however many cycles it misses.
 
     TWO BRANCHES THAT ARE DELIBERATELY DIFFERENT. An upstream that HAS RUN is
     bypassed only once `now` sits further past its `last_run` than the
@@ -1482,11 +1507,8 @@ def _dependency_bypassed(dependent: dict, dep_task: dict,
     declares nothing keeps the elapsed-time rule alone, which is every case #814
     and #870 pinned.
     """
-    try:
-        bypass_hours = float(dependent.get("stale_bypass_hours") or 0)
-    except (TypeError, ValueError):
-        return False
-    if bypass_hours <= 0:
+    bypass_hours = _stale_bypass_hours(dependent)
+    if bypass_hours is None:
         return False
     if str(dep_task.get("status", "")).strip() == "in_progress":
         return False
@@ -1504,18 +1526,108 @@ def _dependency_bypassed(dependent: dict, dep_task: dict,
     return True
 
 
+def _fmt_hours(value: float) -> str:
+    """`36` for a declared bound, `12.5` for a fractional one. No false .0."""
+    return f"{value:g}"
+
+
+def _bypass_hold_detail(dependent: dict, dep_task: dict,
+                        dep_last_run: Optional[datetime.datetime],
+                        now: datetime.datetime,
+                        all_tasks: list[dict], _seen: frozenset) -> str:
+    """Why the dependent is STILL held although a `stale_bypass_hours` was declared.
+
+    '' when no bound was declared at all, which is every refusal that predates
+    #1538: those keep printing the bare `waiting on #N` and this function is not
+    asked. Otherwise it names WHICH refusal this is, because for four days one
+    identical `waiting on #38` stood for two completely different states and 48
+    correct stall alerts could not tell a reader which clock had not run out
+    (#1538 clause 4):
+
+    * INSIDE the declared window — the upstream's last success is younger than
+      the bound, so the elapsed check is the only thing holding the dependent and
+      it releases on its own at the bound; and
+    * PAST the declared window — the elapsed check has run out and something ELSE
+      still suppresses the bypass: the upstream is `in_progress`, or (#1437) its
+      declared `output_artifact` is not on disk. The in-window prediction is
+      appended when the upstream is due this very tick, which is the difference
+      between "the chain is one run behind" and "the chain is lost".
+
+    The never-ran branch gets no in-window suffix: `_upstream_due_in_window`
+    measures elapsed time from a `last_run` that does not exist there, and
+    guessing at it would print a prediction the elapsed gates cannot support.
+    """
+    bound = _stale_bypass_hours(dependent)
+    if bound is None:
+        return ""
+    uid = dep_task.get("id")
+    age = (None if dep_last_run is None
+           else (now - dep_last_run).total_seconds() / 3600.0)
+    inside = age is not None and age <= bound
+    if inside:
+        head = (f"inside its {_fmt_hours(bound)} h stale_bypass window: "
+                f"#{uid} ran {age:.1f} h ago")
+    elif age is None:
+        head = (f"stale_bypass {_fmt_hours(bound)} h window applies, but "
+                f"#{uid} has never had a successful run")
+    else:
+        head = f"stale_bypass {_fmt_hours(bound)} h passed"
+    parts = [head]
+    if not inside:
+        if str(dep_task.get("status", "")).strip() == "in_progress":
+            parts.append(f"#{uid} is in_progress")
+        elif _upstream_artifact_on_disk(dep_task, dep_last_run, now) == "":
+            parts.append(f"#{uid}'s declared output_artifact is not on disk")
+        if dep_last_run is not None and _upstream_due_in_window(
+                dep_task, dep_last_run, all_tasks, now, _seen):
+            parts.append(f"#{uid} is due in its window this tick")
+    return "; ".join(parts)
+
+
+def _bypass_decision(dependent: dict, dep_task: dict,
+                     dep_last_run: Optional[datetime.datetime],
+                     now: datetime.datetime,
+                     all_tasks: list[dict], _seen: frozenset,
+                     _explain: bool) -> Optional[str]:
+    """The fail-forward verdict as a refusal: None when released, else detail.
+
+    Shared by the three paths that reach `_dependency_bypassed` (no task file,
+    dispatch-blocked upstream, upstream older than the freshness rule) so no
+    path can describe its own hold better than the others."""
+    if _dependency_bypassed(dependent, dep_task, dep_last_run, now):
+        return None
+    if not _explain:
+        return ""
+    return _bypass_hold_detail(dependent, dep_task, dep_last_run, now,
+                               all_tasks, _seen)
+
+
 def _upstream_due_in_window(dep_task: dict, dep_last_run: datetime.datetime,
                             all_tasks: list[dict], now: datetime.datetime,
                             seen: frozenset) -> bool:
     """Will the scheduler dispatch this windowed upstream on this very tick?
 
-    Asked only for a window pair whose upstream still owes this cycle a run
-    (`_window_dependency_fresh` False), before the `stale_bypass_hours`
-    override is consulted. The upstream's own gates, in `_is_task_due`'s
-    order, at `now`: `up_next`, no rest or cooldown, its elapsed-due instant
-    passed, inside its window, and its own `depends_on` met. That last one
-    recurses up the chain; `seen` stops a cycle, which then reads as "not
-    about to run" so the override stays reachable."""
+    A PREDICTION ABOUT THE NEXT TICK, asked from `_bypass_hold_detail` so a held
+    dependent's `hold_reason` can say whether its upstream is about to run or is
+    nowhere near running. It is not a gate on the dependent any more: until #1538
+    this same question was asked inside `_dependency_refusal` one step BEFORE the
+    `stale_bypass_hours` override and answered `return False`, which is what made
+    a declared bound unreachable in exactly the hours the dependent is allowed to
+    run — #42 held with #38's last success 36.1 h and 38.5 h old against a 36 h
+    bound, four cycles, #39 behind it. The decision it used to make is now made
+    by `_dependency_bypassed`; what it is still worth is the sentence.
+
+    The upstream's own gates, in `_is_task_due`'s order, at `now`: `up_next`, no
+    rest or cooldown, its elapsed-due instant passed, inside its window, its own
+    `depends_on` met, and no successful run record for the current period. The
+    last one is #1538 clause 3: every other gate reads only the task FILE, so a
+    `last_run` a vault sweep reverted (#1296) makes them say "about to run" about
+    a task the run record on disk says has already run this period — and
+    predicting a dispatch the scheduler will veto is not merely useless, it is
+    the claim the alert then prints. On 2026-09-24 `queue` holds no row for #38 at
+    all while every in-window probe of #42 read "upstream due in-window".
+    `depends_on` recurses up the chain; `seen` stops a cycle, which then reads as
+    "not about to run"."""
     dep_id = str(dep_task.get("id", ""))
     if dep_id in seen:
         return False
@@ -1529,13 +1641,41 @@ def _upstream_due_in_window(dep_task: dict, dep_last_run: datetime.datetime,
         return False
     if _first_in_window_at_or_after(hours, now) != now:
         return False
-    return _is_dependency_met(dep_task, all_tasks, now=now, _seen=seen)
+    if not _is_dependency_met(dep_task, all_tasks, now=now, _seen=seen):
+        return False
+    # Last, exactly as in `_is_task_due`, so the run-record scan is paid only for
+    # an upstream everything else already called about-to-run.
+    return not _already_ran_this_period(dep_task, now=now)
 
 
 def _is_dependency_met(task: dict, all_tasks: list[dict], *,
                        now: Optional[datetime.datetime] = None,
                        _seen: frozenset = frozenset()) -> bool:
     """Is `task`'s `depends_on` satisfied right now?
+
+    The boolean projection of `_dependency_refusal`, which is where every rule
+    and its history is documented. Dispatch asks this form; only `hold_reason`
+    asks the explained one.
+    """
+    return _dependency_refusal(task, all_tasks, now=now, _seen=_seen) is None
+
+
+def _dependency_refusal(task: dict, all_tasks: list[dict], *,
+                        now: Optional[datetime.datetime] = None,
+                        _seen: frozenset = frozenset(),
+                        _explain: bool = False) -> Optional[str]:
+    """Why `task`'s `depends_on` is NOT satisfied right now; None when it is.
+
+    THE DEPENDENCY GATE. `None` means dispatch may run `task`; a string means it
+    may not, and that string is the detail `hold_reason` puts inside
+    `waiting on #N` — '' is the pre-#1538 bare refusal, printed when the
+    dependent declares no `stale_bypass_hours` for the detail to describe.
+
+    `_explain` is False for dispatch and for every recursive call and True only
+    from `hold_reason`: a detail costs a run-record scan of the upstream plus a
+    stat of its artifact, the caller that decides reads neither, and building it
+    during the recursion is super-linear in chain length — how a diagnostic
+    becomes a per-tick cost.
 
     `all_tasks` is the resolution set — pass `dependency_resolution_set()` in
     production; a test passes the tasks it means to exist. `now` is the instant
@@ -1562,12 +1702,27 @@ def _is_dependency_met(task: dict, all_tasks: list[dict], *,
     one status that IS accepted with a warning-free pass is `failed`: dispatch
     will not run it again, its last SUCCESS still names a real artifact, and the
     freshness rule below is what decides whether that artifact is usable.
+
+    THE OVERRIDE BEATS THE IN-WINDOW PREDICTION (#1538). When the upstream still
+    owes this cycle a run, the gate used to ask "is it inside its window and due
+    this very tick?" and `return False` before ever consulting the bound. That
+    question is right about the danger — releasing now dispatches the dependent
+    BESIDE its upstream, on the previous cycle's file — and it was asked at the
+    one place a declared bound could not answer back, so the bound held nothing:
+    at 2026-09-25 05:00Z #42 was 38.5 h past #38's last run and at 2026-09-27
+    07:00Z 36.1 h past, both against its own `stale_bypass_hours: 36`, both
+    inside the only hours it may run. The bound is an owner's explicit decision
+    to forward on the previous cycle's input; a prediction about the next tick
+    does not overrule a decision. What still protects the chain is the bound's own
+    elapsed check: at the same instant with #38's last success 35.0 h old the
+    dependent IS still held, so the race the prediction guarded against remains
+    impossible unless the dependent's own file said forwarding is acceptable.
     """
     if now is None:
         now = _utcnow()
     dep_id = task.get("depends_on")
     if not dep_id or str(dep_id).strip().lower() in ("null", "none", ""):
-        return True
+        return None
     dep_id = str(dep_id).strip()
     dep_task = None
     for t in all_tasks:
@@ -1581,18 +1736,20 @@ def _is_dependency_met(task: dict, all_tasks: list[dict], *,
         # signal there is — hence the synthetic dep_task, which
         # `_dependency_bypassed` reads for its `in_progress` guard alone.
         _warn_fail_closed(task, dep_id, "no task file answers this depends_on id")
-        return _dependency_bypassed(task, {"id": dep_id, "status": "unknown"},
-                                    None, now)
+        return _bypass_decision(task, {"id": dep_id, "status": "unknown"},
+                                None, now, all_tasks, _seen, _explain)
     blockers = _dispatch_blockers(dep_task)
     if blockers:
         _warn_fail_closed(task, dep_id, "; ".join(blockers))
-        return _dependency_bypassed(task, dep_task,
-                                    _parse_iso(dep_task.get("last_run")), now)
+        return _bypass_decision(task, dep_task,
+                                _parse_iso(dep_task.get("last_run")), now,
+                                all_tasks, _seen, _explain)
     _clear_fail_closed(task, dep_id)
     dep_last_run = _parse_iso(dep_task.get("last_run"))
     if not dep_last_run:
         # Never succeeded — still eligible for a stale bypass.
-        return _dependency_bypassed(task, dep_task, None, now)
+        return _bypass_decision(task, dep_task, None, now, all_tasks, _seen,
+                                _explain)
     # Freshness gate: the dependency must have completed within the current
     # scheduling cycle (half this task's interval), not just "since my last
     # run". Without this, yesterday's upstream run satisfies the gate and the
@@ -1619,21 +1776,19 @@ def _is_dependency_met(task: dict, all_tasks: list[dict], *,
     fresh = _window_dependency_fresh(task, dep_task, dep_last_run, now)
     if fresh is None:
         fresh = (now - dep_last_run).total_seconds() <= interval / 2
-    elif not fresh and _upstream_due_in_window(
-            dep_task, dep_last_run, all_tasks, now,
-            _seen | {str(task.get("id", ""))}):
-        # The upstream is inside its window and due this very tick, so the
-        # output this cycle consumes is about to exist: a bypass now would
-        # dispatch the dependent BESIDE its upstream on the previous cycle's
-        # file. On 2026-09-25 05:00Z that is #42 next to #38, 38.5 h past
-        # #38's last run and so past its 36 h `stale_bypass_hours`.
-        return False
     if not fresh:
-        return _dependency_bypassed(task, dep_task, dep_last_run, now)
+        # Not fresh: this cycle's input is not on hand, so the only question left
+        # is the owner's — has the upstream gone longer without a success than the
+        # dependent's declared bound tolerates? Nothing else gets a vote here
+        # (#1538; see THE OVERRIDE BEATS THE IN-WINDOW PREDICTION above).
+        return _bypass_decision(task, dep_task, dep_last_run, now, all_tasks,
+                                _seen | {str(task.get("id", ""))}, _explain)
     my_last_run = _parse_iso(task.get("last_run"))
     if not my_last_run:
-        return True
-    return dep_last_run > my_last_run
+        return None
+    # This cycle's output is already consumed (`_upstream_artifact_on_disk`'s
+    # counterpart in time): the bare refusal, unchanged since before #1538.
+    return None if dep_last_run > my_last_run else ""
 
 
 _HHMM_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})")
@@ -1987,8 +2142,18 @@ def hold_reason(task: dict, all_tasks: list[dict], *,
         return _infra_rest_reason(task)
     if _in_failure_cooldown(task, now):
         return "failure cooldown"
-    if not _is_dependency_met(task, all_tasks, now=now):
-        return f"waiting on #{task.get('depends_on')}"
+    # The explained projection of the SAME gate `_is_task_due` consults, so the
+    # board can name which dependency refusal this is without owning a second
+    # definition of due-ness (#870). A dependent whose upstream is 20 h into a 36 h
+    # `stale_bypass_hours` and one whose bound has run out but whose bypass is
+    # suppressed by an `in_progress` upstream both used to print
+    # `waiting on #N`, and the 48 stall alerts that fired for #42 across
+    # 2026-09-23..26 therefore could not tell a reader which of the two the chain
+    # was in (#1538). An empty detail keeps the bare string exactly as it was.
+    refusal = _dependency_refusal(task, all_tasks, now=now, _explain=True)
+    if refusal is not None:
+        return (f"waiting on #{task.get('depends_on')}"
+                + (f" ({refusal})" if refusal else ""))
     if not _is_preferred_hour(task):
         window = _hour_windows(_effective_preferred_hours(task) or [])
         return f"outside hours {window}" if window else "outside hours"

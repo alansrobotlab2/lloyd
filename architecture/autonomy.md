@@ -234,10 +234,23 @@ trajectory running 57 before 56. What "fresh" means depends on the windows:
   dependent's interval, straddled the window whenever a dependent's window
   opened before its upstream's: in the healthy chain it needed a bypass over
   21.9 h to stay safe and after a slip one under 21.0 h to release, so no
-  `stale_bypass_hours` could serve both. When the upstream is owed, is inside
-  its own window and is due on this very tick (`_upstream_due_in_window`, its
-  own `depends_on` included), the bypass is not consulted either: it would
-  dispatch the dependent beside its upstream on the previous cycle's file.
+  `stale_bypass_hours` could serve both. When the upstream is owed, a dependent
+  that declares no `stale_bypass_hours` waits the whole window; one that declares
+  it is released by the bound alone (#1538). Until then the gate also asked
+  `_upstream_due_in_window` — is the upstream inside its own window and due on this
+  very tick? — and held before the bound was consulted, which made a declared bound
+  unreachable in exactly the hours its dependent may run: #42 sat from
+  2026-09-22T05:16:36Z through four cycles with #38's last success 36.1 h and 38.5 h
+  old against `stale_bypass_hours: 36`, #39 starved behind it, `failure_count: 0`
+  the whole time. The bound is the owner's decision to forward on the previous
+  cycle's file, so a prediction about the next tick no longer overrules it. What
+  still refuses is the bound's own elapsed check (upstream 35.0 h old against a
+  36 h bound: held, so the race the prediction guarded against stays impossible),
+  an upstream `in_progress`, and #1437's requirement that a declared
+  `output_artifact` be on disk. `_upstream_due_in_window` survives as the sentence
+  in `hold_reason`, and now applies `_already_ran_this_period` as `_is_task_due`
+  does, so a reverted `last_run` cannot make it predict a dispatch the scheduler
+  will veto (#1296).
 - **Otherwise** (either side windowless, or a sub-daily dependent): the
   upstream must have succeeded within **half this task's interval**, as
   before.
@@ -259,6 +272,18 @@ fires, so a genuinely-dead upstream forwards on stale input rather than
 retiring the chain — and the bypass still refuses while the upstream is
 `in_progress`, which is why a wrong-id misconfiguration cannot use the bypass to
 dispatch both tasks on top of each other.
+
+The gate is `_dependency_refusal`, which answers *why not* — `None` when the
+dependent may run, else the detail `hold_reason` puts inside `waiting on #N`.
+`_is_dependency_met` is its boolean projection, and dispatch calls only that, so
+the detail (a run-record scan plus an artifact stat) is built only for the board
+and for the stall alert, never on the per-tick path (#1538). The detail matters
+because one bare string used to stand for two opposite states: 48 alarms naming
+#42 fired over three days, each reading `held: waiting on #38`, and none could say
+whether the chain was one run behind (`inside its 36 h stale_bypass window: #38
+ran 14.5 h ago`, which releases by itself at the bound) or lost (`stale_bypass
+36 h passed; #38 is in_progress`, which does not). A dependent that declares no
+bound prints the bare `waiting on #N` exactly as before.
 
 `stale_bypass_hours` is principle 3 made real, and for a long time it was not:
 the field was set on the reflection chain and described in this document as

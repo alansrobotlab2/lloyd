@@ -79,6 +79,12 @@ def reason(aut, t, board, now):
     return aut.hold_reason(t, board, now=now)
 
 
+def _upstream_due(aut, up, up_last, board, now, seen):
+    """The in-window "the upstream dispatches this very tick" prediction, with
+    the dependent already in `seen` exactly as the gate calls it."""
+    return aut._upstream_due_in_window(up, up_last, board, now, seen)
+
+
 def _record(aut, task_id, run_id, completed_at):
     d = aut.AUTONOMY_RUNS_DIR / str(task_id)
     d.mkdir(parents=True, exist_ok=True)
@@ -135,9 +141,14 @@ def test_the_reflection_chain_runs_in_its_next_window_after_the_slip(
 
     # 05:00Z: #38 owes this window a run, so #42 waits for it (the old rule
     # waited too — for 14.5 h of a 12 h bound, then for a 36 h bypass that
-    # opened after the window closed).
+    # opened after the window closed). The refusal names the bound that will
+    # release it (#1538 clause 4); `bypass=False` keeps the bare string, since
+    # with no bound declared there is no bound to name.
     now = at(aut, monkeypatch, Z(24, 5, 0))
-    assert reason(aut, b[42], board, now) == "waiting on #38"
+    assert reason(aut, b[42], board, now) == (
+        "waiting on #38" if not bypass else
+        f"waiting on #38 (inside its {b[42]['stale_bypass_hours']:g} h "
+        "stale_bypass window: #38 ran 14.5 h ago)")
     complete(b[38], Z(24, 5, 20))
 
     now = at(aut, monkeypatch, Z(24, 5, 21))
@@ -237,7 +248,10 @@ def test_the_same_window_healthy_chain_holds_until_the_upstream_ran(
     b = by_id(board)
     now = at(aut, monkeypatch, Z(23, 5, 0))
     assert due(aut, b[38], board, now) is True
-    assert reason(aut, b[42], board, now) == "waiting on #38"
+    # 23.9 h after #38 ran: inside this dependent's own 36 h bound, so the
+    # refusal says which clock has not run out (#1538 clause 4).
+    assert reason(aut, b[42], board, now) == (
+        "waiting on #38 (inside its 36 h stale_bypass window: #38 ran 23.9 h ago)")
     complete(b[38], Z(23, 5, 4))
     now = at(aut, monkeypatch, Z(23, 5, 5))
     assert due(aut, b[42], board, now) is True
@@ -363,14 +377,26 @@ def test_sub_daily_windowed_tasks_keep_the_elapsed_rule(aut):
     assert aut._next_run_after(t, Z(24, 9)) == Z(24, 15)
 
 
-# ── The override does not race an upstream that is about to run ─────────────
+# ── A declared bound outranks a prediction about the next tick (#1538) ──────
+#
+# `test_a_bypass_waits_for_an_upstream_due_in_its_window_this_tick` pinned the
+# opposite rule and is replaced by the two tests below. That test was added by
+# #1526 on 2026-09-26 08:20Z — twenty minutes before #1538's own triage
+# (08:46Z) measured what the rule it pinned did to #42: with #38 `up_next` and
+# due in the shared window, the short-circuit ran BEFORE `stale_bypass_hours` was
+# consulted, so the bound was unreachable in exactly the hours the dependent may
+# run and #42 stayed frozen from 2026-09-22T05:16:36Z through four cycles, #39
+# behind it. Both tests keep what that one was actually protecting — the
+# `in_progress` race and the healthy chain — and give up only the claim that a
+# prediction can overrule a bound the owner declared.
 
-def test_a_bypass_waits_for_an_upstream_due_in_its_window_this_tick(
+def test_the_bound_releases_the_dependent_inside_the_shared_window(
         aut, monkeypatch, tmp_path):
-    """The live board on 2026-09-25 05:00Z: #38 last ran 38.5 h ago, past #42's
-    36 h `stale_bypass_hours`, and its declared artifact is on disk — so the
-    override alone would dispatch #42 beside #38, on 09-23's signals. #38 is
-    due in its window on this tick, so #42 waits for it instead."""
+    """#1538 clause 1. A daily dependent declaring `stale_bypass_hours: 36`
+    sharing its upstream's window, upstream `up_next` and due inside that window,
+    its last successful run older than the bound: the dependent is released to
+    dispatch at an in-window instant past its own `next_run` (it was held
+    here — the refusal came back as `waiting on #38`)."""
     art = tmp_path / "signals-latest.md"
     art.write_text("x" * 4096)
     board = [task(38, hours=NIGHT, last=Z(23, 14, 31, 42), output_artifact=str(art)),
@@ -378,13 +404,55 @@ def test_a_bypass_waits_for_an_upstream_due_in_its_window_this_tick(
                   stale_bypass_hours=36)]
     b = by_id(board)
     now = at(aut, monkeypatch, Z(25, 5, 0))
+    # The upstream is due this very tick, and the dependent is 38.47 h past its
+    # own bound (05:00Z 09-25 minus #38's last completion 14:31:42Z 09-23) with
+    # its upstream's artifact on disk. That is the acceptance instant: released,
+    # not `waiting on #38`.
     assert due(aut, b[38], board, now) is True
-    assert reason(aut, b[42], board, now) == "waiting on #38"
+    assert 38.47 < (now - Z(23, 14, 31, 42)).total_seconds() / 3600 < 38.48
+    assert reason(aut, b[42], board, now) is None
+    assert due(aut, b[42], board, now) is True, (
+        "#42 was held at this instant for four cycles with failure_count 0")
+    # What that rule was genuinely for is still held: an upstream RUNNING is an
+    # artifact in progress, and no bound forwards onto one.
     b[38]["status"] = "in_progress"
-    assert reason(aut, b[42], board, now) == "waiting on #38"
+    assert reason(aut, b[42], board, now) == (
+        "waiting on #38 (stale_bypass 36 h passed; #38 is in_progress)")
+    assert due(aut, b[42], board, now) is False
+    # And the healthy chain still runs in order once the upstream completes.
     b[38]["status"] = "up_next"
     complete(b[38], Z(25, 5, 20))
     now = at(aut, monkeypatch, Z(25, 5, 21))
+    assert due(aut, b[42], board, now) is True
+
+
+def test_the_same_upstream_still_holds_the_dependent_inside_the_bound(
+        aut, monkeypatch, tmp_path):
+    """#1538 clause 2, the purpose clause for weakening the gate. Same board one
+    hour earlier in the upstream's elapsed clock — #38 `up_next`, due this tick
+    in the shared window, last run 35.0 h ago, one hour INSIDE #42's 36 h bound —
+    and the dependent is still held: the chain cannot dispatch it beside an
+    upstream that is about to write this cycle's file."""
+    art = tmp_path / "signals-latest.md"
+    art.write_text("x" * 4096)
+    board = [task(38, hours=NIGHT, last=Z(24, 19, 0), output_artifact=str(art)),
+             task(42, hours=NIGHT, dep=38, last=Z(22, 5, 16, 36),
+                  stale_bypass_hours=36)]
+    b = by_id(board)
+    now = at(aut, monkeypatch, Z(26, 6, 0))      # 23:00 local: inside both windows
+    assert (now - Z(24, 19, 0)).total_seconds() / 3600 == 35.0
+    assert due(aut, b[38], board, now) is True, (
+        "the upstream must be due in-window here, or this pins nothing")
+    assert reason(aut, b[42], board, now) == (
+        "waiting on #38 (inside its 36 h stale_bypass window: #38 ran 35.0 h ago)")
+    assert due(aut, b[42], board, now) is False
+    # Two hours into the same window the same upstream, two hours older, is
+    # released with the upstream still due and still unwritten — the bound is the
+    # whole difference, not the prediction about the next tick.
+    now = at(aut, monkeypatch, Z(26, 8, 0))      # 01:00 local
+    assert (now - Z(24, 19, 0)).total_seconds() / 3600 == 37.0
+    assert due(aut, b[38], board, now) is True
+    assert reason(aut, b[42], board, now) is None
     assert due(aut, b[42], board, now) is True
 
 
@@ -396,6 +464,53 @@ def test_the_override_still_forwards_when_the_upstream_will_not_run(
     b = by_id(board)
     now = at(aut, monkeypatch, Z(25, 5, 0))
     assert due(aut, b[42], board, now) is True
+
+
+def test_the_in_window_prediction_applies_the_upstreams_run_record(
+        aut, monkeypatch, tmp_path):
+    """#1538 clause 3. The "the upstream will dispatch this very tick"
+    prediction read only the task FILE, while `_is_task_due` also drops an
+    upstream with a successful run record for the current period (#1296 reverted
+    #38's `last_run` from 09-25T18:53Z to 09-22T05:16Z while `runs/` still held
+    the 09-25 success). An upstream the run record says already ran its period
+    cannot be the one about to write this cycle's file.
+
+    Predicted from the file alone, and the refusal on a held dependent says its
+    upstream is due in its window this tick; with the run record on disk, the same
+    probes do not claim it. On 2026-09-24 `queue` holds no row for #38 at all
+    while every in-window probe of #42 read "upstream due in-window"."""
+    art = tmp_path / "signals-latest.md"
+    art.write_text("x" * 4096)
+    board = [task(38, hours=NIGHT, last=Z(24, 19, 0), output_artifact=str(art)),
+             task(42, hours=NIGHT, dep=38, last=Z(22, 5, 16, 36),
+                  stale_bypass_hours=36)]
+    b = by_id(board)
+    now = at(aut, monkeypatch, Z(26, 8, 0))      # 01:00 local, 37 h past the bound
+    seen = frozenset({"42"})
+    up_last = Z(24, 19, 0)
+    assert _upstream_due(aut, b[38], up_last, board, now, seen) is True, (
+        "fixture: the file alone says #38 is about to dispatch")
+    # Hold the dependent on the artifact clause so the refusal reports the
+    # prediction, and it does.
+    art.unlink()
+    assert reason(aut, b[42], board, now) == (
+        "waiting on #38 (stale_bypass 36 h passed; #38's declared output_artifact "
+        "is not on disk; #38 is due in its window this tick)")
+    assert _upstream_due(aut, b[38], up_last, board, now, seen) is True
+
+    # The same instant with a SUCCESSFUL #38 run from the current period on disk,
+    # two hours before this probe and 35 h newer than the `last_run` the reverted
+    # file still shows — the #1296 shape exactly.
+    _record(aut, 38, "run_38_20260926_055934", Z(26, 6, 0))
+    assert _upstream_due(aut, b[38], up_last, board, now, seen) is False, (
+        "an upstream whose run record says it already ran this period is still "
+        "predicted as dispatching")
+    assert reason(aut, b[42], board, now) == (
+        "waiting on #38 (stale_bypass 36 h passed; #38's declared output_artifact "
+        "is not on disk)")
+    # And `_is_task_due` agrees, which is the point of the clause: the prediction
+    # is no stronger than the gate it predicts.
+    assert due(aut, b[38], board, now) is False
 
 
 def test_a_dependency_cycle_cannot_recurse(aut, monkeypatch):
@@ -514,28 +629,56 @@ def test_the_starved_chain_releases_at_its_window_opening(aut, monkeypatch):
             assert due(aut, b[tid], board, now) is True, (label, tid)
 
 
-def test_the_release_still_waits_while_56_is_due_inside_its_own_window(
+def test_the_bound_releases_even_while_56_is_due_inside_its_own_window(
         aut, monkeypatch):
-    """#1526 clause 3 — the valve at `autonomy.py:1622-1629` survives the fix.
+    """#1538 clause 1 on the #56 → #51 edge, replacing #1526's clause-3 valve.
 
     At 01:00 and 02:00 local (08:00Z, 09:00Z) #56 sits inside its own
-    `preferred_hours` and is elapsed-due, so dispatching #51/#57 now would run
-    them beside the upstream on the previous cycle's output — the inversion the
-    valve exists to stop. The bound is past at both instants (41.5 h and 42.5 h),
-    so they hold only because the valve suppresses it. These are the same probes
-    the two tests above release at 23:00 / 03:00 / 04:30: a fix that stopped
-    holding here has traded a dead leg for a wrong-data race.
-    """
+    `preferred_hours` and is elapsed-due, so dispatching #51/#57 there runs them
+    beside the upstream on the previous cycle's output. #1526 clause 3 held them
+    at both instants for exactly that reason; #1538 reverses it, because the bound
+    they declare is an owner's decision to forward on that previous cycle's file
+    and #42 sat 98+ h at `failure_count: 0` behind this same valve with #38
+    `up_next`. The bound is past at both probes (41.5 h and 42.5 h against the
+    live 12 h), so what the valve decided here is now decided by the bound.
+
+    What the valve was for is pinned twice over rather than dropped: the race is
+    impossible inside the bound
+    (`test_the_same_upstream_still_holds_the_dependent_inside_the_bound`), and
+    both refusals below still hold at these very instants — an upstream
+    `in_progress` is an artifact being written, and a dependent that declared no
+    bound has no fail-forward path at all."""
     bound = float(_live_bypass_bound(51))
     board = _starved_board(bound)
     board[0]["last_run"] = Z(23, 14, 31, 29).isoformat()
     b = by_id(board)
     for label, probe in (("01:00 local", Z(25, 8, 0)), ("02:00 local", Z(25, 9, 0))):
-        assert (probe - Z(23, 14, 31, 29)).total_seconds() / 3600 > bound, label
+        age_h = (probe - Z(23, 14, 31, 29)).total_seconds() / 3600
+        assert age_h > bound, (label, age_h)
         now = at(aut, monkeypatch, probe)
         assert due(aut, b[56], board, now) is True, f"#56 must be due at {label}"
         for tid in (51, 57):
-            assert reason(aut, b[tid], board, now) == "waiting on #56", (label, tid)
+            assert reason(aut, b[tid], board, now) is None, (
+                f"#{tid} held at {label}: {age_h:.1f} h after #56 last ran, past "
+                f"its own {bound:g} h bound, while #56 is due in-window — the "
+                "#42 starvation shape")
+            assert due(aut, b[tid], board, now) is True, (label, tid)
+
+    now = at(aut, monkeypatch, Z(25, 9, 0))
+    b[56]["status"] = "in_progress"
+    for tid in (51, 57):
+        assert reason(aut, b[tid], board, now) == (
+            f"waiting on #56 (stale_bypass {bound:g} h passed; "
+            "#56 is in_progress)"), tid
+        assert due(aut, b[tid], board, now) is False, tid
+    b[56]["status"] = "up_next"
+    for tid in (51, 57):
+        b[tid].pop("stale_bypass_hours")
+    assert reason(aut, b[51], board, now) == "waiting on #56", (
+        "a dependent with no declared bound forwards on nothing, and the bare "
+        "refusal it has always printed must not gain a clause about a bound it "
+        "does not declare")
+    assert due(aut, b[51], board, now) is False
 
 
 def test_a_completion_starved_past_the_close_releases_that_same_window(
@@ -564,8 +707,11 @@ def test_a_completion_starved_past_the_close_releases_that_same_window(
         for tid in (51, 57):
             got = reason(aut, b[tid], board, now)
             if label == "23:00 local":
-                assert got == "waiting on #56", (
-                    f"#{tid} released at {label} on an upstream only 10.8 h old")
+                assert got == (
+                    f"waiting on #56 (inside its {bound:g} h stale_bypass window: "
+                    "#56 ran 10.8 h ago)"), (
+                    f"#{tid} released at {label} on an upstream only 10.8 h old, "
+                    "and the refusal must name the bound that keeps it held")
             else:
                 assert got is None, f"#{tid} still held at {label}: {bound} h does not open this window"
             assert due(aut, b[tid], board, now) is (got is None), (label, tid)

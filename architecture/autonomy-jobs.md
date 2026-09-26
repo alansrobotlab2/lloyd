@@ -99,7 +99,7 @@ not:
   `lloyd/USER.md`, `config.yaml` and the skills library with none of that
   apparatus. `workers/evidence.py` is the correction and the scheduler module
   `autonomy.py` is where its pilot set lives (`EVIDENCE_PILOT_TASK_IDS =
-  frozenset({38, 42, 39, 40})` at `autonomy.py:2104` in that module, pinned by
+  frozenset({38, 42, 39, 40})` at `autonomy.py:2269` in that module, pinned by
   `tests/test_worker_evidence.py`) — 4 of the 23 jobs that write durable state
   unattended. The pilot has verdicts now: since
   #945 copied each run's `claims` key through `workers/sources/scheduled_task.py`
@@ -360,7 +360,7 @@ graph "restored to 12,131 relationships" against a same-night health report
 reading zero; counts of 96/21 where disk held 121/64; a 13,503-byte file called
 "307KB". `workers/evidence.py` is the structural fix and its pilot set is exactly
 this chain — `EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40})`
-(`autonomy.py:2104`, not inside the verifier's own file, and pinned there by
+(`autonomy.py:2269`, not inside the verifier's own file, and pinned there by
 `tests/test_worker_evidence.py:653`), a literal frozenset so
 widening it is a change someone reads. The verifier is **stdlib-only and never
 LLM-judged**, because a model grading its own claims is the narration this

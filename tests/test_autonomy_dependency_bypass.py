@@ -52,12 +52,14 @@ def board(aut, *ids):
     return [aut._parse_task_file(aut._find_task_file(i)) for i in ids]
 
 
-def _chain(aut, tmp_path, *, declared=True, up_last=UP_LAST):
+def _chain(aut, tmp_path, *, declared=True, up_last=UP_LAST, next_run=None):
     tmpl = str(tmp_path / "reflection" / "knowledge-handoff-{date}.md")
     write_task(aut, 42, last_run=up_last.isoformat() if up_last else "",
+               next_run=next_run.isoformat() if next_run else None,
                output_artifact=tmpl if declared else None)
     write_task(aut, 39, depends_on=42, stale_bypass_hours=36,
-               last_run=(PIN - dt.timedelta(days=2)).isoformat())
+               last_run=(PIN - dt.timedelta(days=2)).isoformat(),
+               next_run=next_run.isoformat() if next_run else None)
     return tmpl
 
 
@@ -81,7 +83,14 @@ def test_a_bypass_onto_a_handoff_that_is_not_on_disk_holds_and_says_so(
     tasks = board(aut, 42, 39)
     assert aut._is_dependency_met(tasks[1], tasks, now=PIN) is False, (
         "the fail-forward released #39 onto a handoff nothing ever wrote")
-    assert aut.hold_reason(tasks[1], tasks, now=PIN) == "waiting on #42"
+    # #1538 clause 4, the second of the two refusals: the bound HAS run out (50.7 h
+    # against 36 h) and something else is holding the dependent. Before #1538 this
+    # line printed the same bare `waiting on #42` as the inside-the-window case
+    # pinned by `test_inside_the_bypass_window_nothing_changes`, which is how four
+    # days of #42 stall alerts could not name the branch (#1538).
+    assert aut.hold_reason(tasks[1], tasks, now=PIN) == (
+        "waiting on #42 (stale_bypass 36 h passed; "
+        "#42's declared output_artifact is not on disk)")
     aut._is_dependency_met(tasks[1], tasks, now=PIN)
     lines = _bypass_warnings(caplog)
     assert len(lines) == 1 and "#42" in lines[0] and "#39" in lines[0], lines
@@ -125,11 +134,55 @@ def test_an_upstream_declaring_no_artifact_keeps_the_elapsed_time_rule(aut, tmp_
 
 def test_inside_the_bypass_window_nothing_changes(aut, tmp_path):
     """20 h after the upstream: past interval/2, short of 36 h. Held as before,
-    and not on the artifact's account (no missing-artifact warning)."""
+    and not on the artifact's account (no missing-artifact warning).
+
+    #1538 clause 4, the first of the two refusals: the held reason now says so in
+    words, where it used to be the same `waiting on #42` the past-bound case
+    printed. The VERDICT is byte-identical to the one above — `_is_dependency_met`
+    is False here and there — which is the whole reason the strings were needed."""
     _chain(aut, tmp_path, up_last=PIN - dt.timedelta(hours=20))
     tasks = board(aut, 42, 39)
     assert aut._is_dependency_met(tasks[1], tasks, now=PIN) is False
     assert autonomy._missing_artifact_bypass_warned == {}
+    assert aut.hold_reason(tasks[1], tasks, now=PIN) == (
+        "waiting on #42 (inside its 36 h stale_bypass window: #42 ran 20.0 h ago)")
+
+
+def test_the_two_dependency_refusals_are_distinguishable_in_the_stall_alert(
+        aut, tmp_path):
+    """#1538 clause 4, the half that reaches a person.
+
+    48 stall alarms naming #42 fired between 2026-09-23 22:44 and 2026-09-26 01:47
+    local, each with the right hours and each reading `held: waiting on #38`, and
+    none of them could say whether the chain was one run behind (inside the bound,
+    releases by itself at the bound) or lost (bound run out, something else still
+    refusing). That is why this item had to guess between two candidate branches.
+
+    Drives the real alert route — `_next_run_stalled` builds `hold` from
+    `autonomy.hold_reason` and `_nextrun_alert_message` prints it through
+    `_hold_note` — over one board carrying both states at once: #39 behind a #42
+    whose 50.7 h silence is past its 36 h bound with the declared handoff absent,
+    and #45 behind a #44 that stopped 20.0 h ago, inside its bound."""
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    two_days = PIN - dt.timedelta(days=2)
+    _chain(aut, tmp_path, next_run=two_days)      # #42 → #39, upstream 50.7 h quiet
+    tmpl44 = str(tmp_path / "reflection" / "signals-{date}.md")
+    write_task(aut, 44, last_run=(PIN - dt.timedelta(hours=20)).isoformat(),
+               output_artifact=tmpl44)
+    write_task(aut, 45, depends_on=44, stale_bypass_hours=36,
+               last_run=two_days.isoformat(), next_run=two_days.isoformat())
+
+    stalled = {int(e["id"]): e for e in st._next_run_stalled(
+        WorkQueue(tmp_path / "alert.db"))}
+    assert {39, 45} <= set(stalled), (
+        "neither dependent reached the alert, so the strings below would pass on "
+        f"an empty message: {sorted(stalled)}")
+    msg = st._nextrun_alert_message([stalled[39], stalled[45]])
+    assert "#44 ran 20.0 h ago" in msg, msg
+    assert "stale_bypass 36 h passed; #42's declared output_artifact is not on disk" in msg, msg
+    assert msg.count("waiting on #") == 2, msg
 
 
 def test_a_never_run_upstream_that_declares_an_artifact_holds(aut, tmp_path):

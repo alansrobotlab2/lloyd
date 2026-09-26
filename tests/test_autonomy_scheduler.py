@@ -1537,9 +1537,15 @@ async def test_gate_is_a_function_of_its_inputs(aut, monkeypatch):
     # The two in-body wall-clock reads are gone; one indirection replaced them.
     # Read the CALLS, not the text: `_utcnow`'s own docstring quotes the literal,
     # and a source-text assertion would fail on someone rewording a comment.
-    tree = ast.parse(inspect.getsource(aut._is_dependency_met))
-    calls = [ast.unparse(node.func) for node in ast.walk(tree)
-             if isinstance(node, ast.Call) and node.func is not None]
+    # #1538 split the gate in two — `_is_dependency_met` is the boolean projection
+    # and `_dependency_refusal` holds the body that reads the instant — so walk
+    # both, which keeps the rule over the whole dependency path instead of over
+    # one name.
+    calls: list[str] = []
+    for fn in (aut._is_dependency_met, aut._dependency_refusal):
+        tree = ast.parse(inspect.getsource(fn))
+        calls += [ast.unparse(node.func) for node in ast.walk(tree)
+                  if isinstance(node, ast.Call) and node.func is not None]
     assert "datetime.datetime.now" not in calls, calls
     assert "_utcnow" in calls, calls
 
