@@ -2022,6 +2022,48 @@ replays every graded review under today's rules without asking a model; at
 landing it re-decided 18 of 22 recorded refusals as passes (14 without the
 step-2 approximation it prints) and turned no recorded pass into a refusal.
 
+### 4.5e The review is graded beside the tests rung (2026-09-25)
+
+The ladder ran `tests` (p50 ~150 s, p90 ~520 s with the wait on
+`gate-tests.lock`) and then `review` (a grading turn, p50 ~280 s) one after
+the other, although the grader needs nothing the suite computes before it can
+start. What it takes from `tests` is three things: the counts, which only
+colour one prompt line; `pre_existing_failures`; and whether the rung was
+green. The last two are applied in Python by `parse_review` *after* the
+grader answers. So `Gate.run` now starts the grade (`_start_review_prefetch`,
+a daemon thread) the moment the tests rung starts, and the review rung joins
+it with the real tests result — a passing gate is shorter by about
+min(tests, review), ~150 s, on ~570 reviews a week.
+
+- **The rung's decisions are one function.** `_review_prepare` is the
+  contract, head, attempt, patch-id reuse, same-head refusal and the caps;
+  it writes no event and spends nothing (its one write, orphaning another
+  round's stale amendments, is idempotent), so the prefetch and the rung
+  both call it. An early answer starts no grade.
+- **A prefetch is joined only when it answered the question the rung
+  asks**: head, patch-id, attempt, clause text and pending amendments all
+  unchanged (`_review_key`), and **no pre-existing failures** — the grader
+  was told of none, and the prompt is where it is told, so that case is
+  graded again serially, exactly as before. Either way `parse_review` gets
+  the real `tests_passed` and failure set. The `review` event and the rung
+  data carry `review_concurrent`, and `review_prefetch_discarded` names why
+  one was thrown away.
+- **A gate that stops before review records nothing.** A red `tests` or
+  `prompt_surface`, or an exception: no `review` event, no attempt, the
+  prefetch's checkout (`review-<head>-prefetch`, its own scratch dir) dropped
+  and its backend turn cancelled best effort (`review.cancel_grader`). A turn
+  not yet streaming may run to its end on the primary and go nowhere; that
+  cost is accepted.
+- **The prompt says what is true.** With no counts the grader is told the
+  suite is running beside it and joined afterwards, and not to run the
+  whole suite. Its `run_tests.sh` now uses the gate's own
+  `TESTS_MARK_EXPR` (it said `not live_vault` alone).
+
+The rung's `seconds` is the time it waited for the join, not the grade's
+length; the event's `seconds` is still the grade's, plus `rung_wait_s`.
+`automod.gate.concurrent_review: false` is the serial ladder.
+`tests/test_gate_concurrent_review.py` pins all of it.
+
 ### 4.1 pyflakes is a diff, not a bar
 
 The tree carries hundreds of pre-existing findings — 215 unique ones measured

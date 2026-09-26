@@ -60,6 +60,7 @@ import re
 import shutil
 from collections import Counter
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -533,6 +534,49 @@ def _gate_cfg(key: str, default):
         return default
 
 
+class _ReviewPrefetch:
+    """One grading turn started beside the tests rung (`Gate._start_review_prefetch`).
+
+    The snapshot it graded is owned here until the rung joins it (the rung's
+    post step drops it) or the gate throws it away (`abandon`). The lock
+    closes the one race that matters: a thread still creating its checkout
+    when the gate gives up must drop that checkout itself, or it leaks.
+    """
+
+    def __init__(self, key: dict):
+        self.key = key
+        self.done = threading.Event()
+        self.bundle: dict | None = None
+        self.error: BaseException | None = None
+        self.thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._abandoned = False
+        self._snapshot: Path | None = None
+        self._session_id = ""
+
+    def adopt_snapshot(self, snap: Path | None) -> bool:
+        """False when the gate already gave up: the caller drops `snap`."""
+        with self._lock:
+            if self._abandoned:
+                return False
+            self._snapshot = snap
+            return True
+
+    def set_session(self, session_id: str) -> None:
+        with self._lock:
+            self._session_id = session_id
+            late = self._abandoned
+        if late:
+            Gate._cancel_grader(session_id)
+
+    def abandon(self) -> tuple[Path | None, str]:
+        """Mark it thrown away; hand back the snapshot to drop and the session."""
+        with self._lock:
+            self._abandoned = True
+            snap, self._snapshot = self._snapshot, None
+            return snap, self._session_id
+
+
 class Gate:
     def __init__(self, round_id: str, worktree: Path, base: str, *,
                  live_root: Path | None = None, skip_smoke: bool = False,
@@ -872,13 +916,21 @@ class Gate:
         ladder = [(n, self._serialized(n, f)) for n, f in ladder]
         self._canary: C.Canary | None = None
         self._canary_lock: S.Lock | None = None
+        self._review_prefetch = None
         try:
             for name, fn in ladder:
+                if name == "tests":
+                    # The review's grading turn starts now and is joined at
+                    # the review rung (`_take_review_prefetch`).
+                    self._start_review_prefetch()
                 if not self._rung(name, fn):
                     self.report.ok = False
                     return self.report
             self.report.ok = True
         finally:
+            # A gate that stopped before the review rung judged nothing: the
+            # prefetch leaves no event and spends no attempt.
+            self._discard_review_prefetch("the gate stopped before the review rung")
             if getattr(self, "_canary", None):
                 try:
                     self._canary.stop()
@@ -1741,6 +1793,236 @@ class Gate:
         - **The event carries `head`**, so `backlog.review_disagreement` can
           tell two refusals of one commit from two refusals of two.
         """
+        ctx = self._review_prepare()
+        if isinstance(ctx, tuple):
+            # Answered without a grading turn (no item, reuse, same head,
+            # exhausted). A prefetch cannot normally exist here — its own
+            # prepare would have answered the same way — but if the ledger
+            # moved under it, its grade answers a question nobody is asking.
+            self._discard_review_prefetch("the rung answered without grading")
+            return ctx
+        from scripts.automod import backlog as _B
+        from scripts.automod import review as RV
+        contract, head, attempt = ctx["contract"], ctx["head"], ctx["attempt"]
+        changed, changed_tests, pre = ctx["changed"], ctx["changed_tests"], ctx["pre"]
+        test_counts = next((r.data for r in self.report.rungs if r.name == "tests"), {}) or {}
+        # Failures the tests rung passed over because they predate the round:
+        # the grader is told, and a `met` that leans on one does not stand.
+        pre_existing_failures = [str(n) for n in (test_counts.get("pre_existing_failures") or [])]
+        rung_started = time.time()
+        bundle, concurrent, discarded = self._take_review_prefetch(ctx, pre_existing_failures)
+        if bundle is None:
+            started = time.time()
+            snapshot, snap_note = self._review_snapshot(head)
+            try:
+                bundle = self._review_call(ctx, snapshot, snap_note, started,
+                                           test_counts=test_counts,
+                                           pre_existing_failures=pre_existing_failures)
+            except BaseException:
+                self._drop_snapshot(snapshot)
+                raise
+        res, snapshot, started = bundle["res"], bundle["snapshot"], bundle["started"]
+        grade_root, base_event = bundle["grade_root"], bundle["base_event"]
+        # Whether the grade ran beside the tests rung, on every review row and
+        # in the rung data, so the scorecard can tell the two paths apart and
+        # a discarded prefetch says why.
+        base_event["review_concurrent"] = concurrent
+        if concurrent:
+            base_event["rung_wait_s"] = round(time.time() - rung_started, 1)
+        if discarded:
+            base_event["review_prefetch_discarded"] = discarded
+        concurrency = {"review_concurrent": concurrent,
+                       **({"review_prefetch_discarded": discarded} if discarded else {})}
+        # The tree the grader's citations are validated against, recorded so a
+        # refusal states what it graded: the round that was refused on
+        # `agent_mcp/facts.py:520-540` (a write path, not a test) and a landing
+        # at `08a4f4f0` (not an object) left no way for the next reader to
+        # re-run either check.
+        validated = {"review_validated_head": head, "review_validated_worktree": str(grade_root),
+                     **concurrency}
+        parsed = None
+        try:
+            if not res["ok"]:
+                S.append_event({**base_event, "ok": False, "blocking": False,
+                                "error": str(res.get("error") or "")[:400]})
+                return False, (f"review could not run: {res.get('error')} — the grader, not the "
+                               f"diff; neither the item's attempt nor a review attempt is spent"), {
+                                   "external_blocker": True, "external_failures": [],
+                                   "external_reason": "grader unreachable",
+                                   "retry_after_s": 120,
+                                   "review_session": res.get("session_id"), **concurrency}
+            parsed = RV.parse_review(res["structured"], worktree=grade_root,
+                                     changed_tests=changed_tests, n_clauses=len(contract["clauses"]),
+                                     # A suite-level or unchanged-test `met`
+                                     # stands only on a green tests rung. Read
+                                     # off the REAL rung even when the grade
+                                     # ran beside it: that is what makes the
+                                     # prefetch safe to join.
+                                     tests_passed=any(r.name == "tests" and r.ok
+                                                      for r in self.report.rungs),
+                                     changed_paths=changed,
+                                     # Every commit the grader cites is asked of
+                                     # the round's own repo, and the `def test_`
+                                     # delta the round really added is the
+                                     # deterministic answer to "this diff adds
+                                     # no test".
+                                     repo=self.live,
+                                     added_tests=RV.def_test_delta(grade_root, self.base, changed),
+                                     pre_existing_failures=set(pre_existing_failures))
+        finally:
+            self._drop_snapshot(snapshot)
+        tree_note = (f" (citations validated against {head[:8] or 'the working tree'} "
+                     f"in {grade_root})")
+        if parsed and parsed.get("unreliable"):
+            # The grader's own evidence is not in the tree it was handed, so
+            # this text is not a judgment of the diff: it is the same shape as
+            # an unreachable grader, and it spends no attempt (#1442).
+            reasons = "; ".join(parsed["unreliable"])
+            S.append_event({**base_event, "ok": False, "blocking": False,
+                            "unreliable": parsed["unreliable"],
+                            # The clause entries carry their own
+                            # `citation_unresolved` markers, so the record shows
+                            # WHICH citation failed, not just that one did.
+                            "clauses": parsed["clauses"],
+                            "error": f"review unreliable: {reasons}"[:400],
+                            "session_id": res.get("session_id"),
+                            "seconds": round(time.time() - started, 1)})
+            return False, ("review is unreliable"
+                           f"{tree_note}: the findings cite evidence that does not exist where "
+                           f"the grader said it looked — {reasons}. The item keeps its attempt and "
+                           f"no review attempt is spent; gate again (the grader may answer) and "
+                           f"report the citation if it repeats"), {
+                               "external_blocker": True, "external_failures": [],
+                               "external_reason": "grader cited evidence not in the graded tree",
+                               "retry_after_s": 120,
+                               "review_unreliable": parsed["unreliable"],
+                               "review_session": res.get("session_id"), **validated}
+        if parsed is None:
+            S.append_event({**base_event, "ok": False, "blocking": False,
+                            "error": "structured review unusable"})
+            return False, "review returned an unusable object; the item keeps its attempt", {
+                "external_blocker": True, "external_failures": [],
+                "external_reason": "grader returned an unusable object",
+                "retry_after_s": 120,
+                "review_session": res.get("session_id"), **concurrency}
+        if parsed.get("clauses_unreadable"):
+            unread = parsed["clauses_unreadable"]
+            keys = ", ".join(unread.get("keys") or []) or "(no readable keys on any entry)"
+            S.append_event({**base_event, "ok": False, "blocking": False,
+                            "error": f"review clause entries unreadable: {unread['entries']} "
+                                     f"entries, no usable 1-based `clause` index; "
+                                     f"keys on them: {keys[:300]}"})
+            # The synthesized "not addressed by the grader" partials are a
+            # statement about the grader's key names, not about the diff. On
+            # SM_20260916_032218, SM_20260922_100227 and SM_20260924_104224
+            # refusing on them spent an attempt of two on rounds the second
+            # reader had actually approved, and told the author to change code
+            # that was already graded `met`. An unreadable verdict is the same
+            # kind of event as the unusable object above: the rail failed, so
+            # nothing is charged and nothing is named for the author to change.
+            why = (f"review verdict could not be read: {unread['entries']} clause entries "
+                   f"came back and none carried a usable 1-based `clause` index (keys found "
+                   f"on them: {keys[:300]}); no clause was graded, so this is the grading "
+                   f"rail and not a judgment of the diff — gate again; the item keeps its "
+                   f"attempt")
+            return False, why, {
+                "external_blocker": True, "external_failures": [],
+                "external_reason": "grader's clause entries carried no usable clause index",
+                "retry_after_s": 120,
+                "review_session": res.get("session_id"), **concurrency}
+        amendments = contract.get("amendments") or []
+        kind, findings = RV.decide(parsed, pre, amendments=amendments,
+                                   attempt=attempt, policy=RV.seams_policy())
+        S.append_event({**base_event, "ok": True, "premise": parsed["premise"],
+                        "clauses": parsed["clauses"], "test_honesty": parsed["test_honesty"],
+                        "seams_unverified": [s["seam"] if isinstance(s, dict) else s
+                                             for s in parsed["seams_unverified"]],
+                        "seams_untestable": [s["seam"] for s in parsed["seams_unverified"]
+                                             if isinstance(s, dict)
+                                             and not s.get("testable_before_landing", True)],
+                        # The whole judgment per seam. The two lists above
+                        # lose `actionable_in_round` and `same_as_prior`, so
+                        # re-deciding a recorded review had to guess them.
+                        "seams": [s for s in parsed["seams_unverified"] if isinstance(s, dict)],
+                        "downgraded": parsed["downgraded"], "summary": parsed["summary"],
+                        "amendments_ok": parsed.get("amendments_ok", True),
+                        "amendments_note": parsed.get("amendments_note", ""),
+                        "blocking": kind != "pass", "kind": kind,
+                        "findings": findings[:2000]})
+        self._settle_amendments(amendments, parsed, kind)
+        if kind == "unsound":
+            return False, f"review: premise unsound{tree_note} — {findings}", {
+                "review_premise_unsound": True, "review_summary": findings[:800],
+                "review_session": res.get("session_id"), **validated}
+        if kind == "retry":
+            contract_refusal = any(c.get("verdict") == "unsatisfiable" for c in parsed["clauses"])
+            if contract_refusal:
+                nxt = ("this refusal spends no attempt — amend the unsatisfiable clause(s) "
+                       "with automod_amend_clause, fix anything else it names, commit if "
+                       "needed, and gate again")
+                shown = f"{attempt - 1}/{RV.REVIEW_MAX_PER_ROUND} spent"
+            else:
+                nxt = ("fix what it names, commit, and gate again"
+                       if attempt < RV.REVIEW_MAX_PER_ROUND else
+                       "abort and report — the item comes back with these findings and your branch")
+                shown = f"{attempt}/{RV.REVIEW_MAX_PER_ROUND}"
+            return False, (f"review sent it back ({shown}; {nxt}){tree_note}: {findings}"), {
+                "review_retry": True, "review_findings": findings[:1500],
+                "review_attempt": attempt, "review_session": res.get("session_id"), **validated}
+        # On a PASS, record the grader's `post_landing` clauses onto the item.
+        # Written here rather than by the implementer because it is a fact the
+        # grader established about a change that is about to land, not a claim
+        # the author made about its own work.
+        marked: list[int] = []
+        for c in parsed["clauses"]:
+            if c["verdict"] != "post_landing":
+                continue
+            try:
+                if _B.mark_clause_post_landing(self.item_id, int(c["clause"]),
+                                               note=c.get("note") or "",
+                                               round_id=self.round_id):
+                    marked.append(int(c["clause"]))
+            except Exception as exc:  # noqa: BLE001 — a mark is not the gate
+                print(f"[warn] could not mark clause {c['clause']} post_landing: {exc}")
+        if marked:
+            S.append_event({"event": "gate", "round_id": self.round_id,
+                            "rung": "review", "ok": True, "skipped": False,
+                            "post_landing_clauses": marked, "item_id": self.item_id,
+                            "detail": "clauses marked observable only after landing"})
+        # Everything a pass did not refuse on is still something the grader
+        # said. It goes onto the item — the prompt promises the grader an
+        # untestable seam is recorded there — and into the rung data, so
+        # `gate.json` and the landing report carry it too.
+        advisory_seams = [s["seam"] if isinstance(s, dict) else str(s)
+                          for s in parsed["seams_unverified"]]
+        advisory_findings = [f"{h['file']}:{h['line']}: {h['problem']}"
+                             for h in list(pre) + list(parsed["test_honesty"])]
+        try:
+            _B.note_review_advisories(self.item_id, self.round_id,
+                                      advisory_seams, advisory_findings)
+        except Exception as exc:  # noqa: BLE001 — a note is not the gate
+            print(f"[warn] could not record review advisories: {exc}")
+        return True, (f"review: {RV.summarize_clauses(parsed)} of {len(contract['clauses'])} "
+                      f"clause(s); {parsed['summary'][:160]}"), {
+                          "review_session": res.get("session_id"),
+                          "clauses": parsed["clauses"], "review_attempt": attempt,
+                          "post_landing_clauses": marked,
+                          "advisory_seams": advisory_seams,
+                          "advisory_findings": advisory_findings,
+                          "amendments_ratified": [a.get("clause") for a in amendments],
+                          **validated}
+
+    def _review_prepare(self):
+        """Everything the review rung decides before it asks a grader.
+
+        Returns the rung's finished answer as a `(ok, detail, data)` tuple
+        when no grading turn is owed — no item, no clauses, the hard cap, a
+        reused patch-id, the same head refused, the attempt cap — or else a
+        dict of what a grade and its judgment need. Appends no ledger event
+        and spends nothing, so the prefetch beside the tests rung can call it
+        and the rung can call it again: the one write, orphaning another
+        round's stale amendments, is idempotent.
+        """
         if not self.item_id:
             return True, "SKIPPED (no backlog item bound to this round — no contract to grade)", {
                 "skipped": True, "reason": "no item"}
@@ -1860,212 +2142,178 @@ class Gate:
         changed_tests = TP.pick_test_files(changed, self.worktree)
         pre = RV.honesty_prechecks(self.worktree, self.base, changed,
                                    n_clauses=len(contract["clauses"]))
-        test_counts = next((r.data for r in self.report.rungs if r.name == "tests"), {}) or {}
-        # Failures the tests rung passed over because they predate the round:
-        # the grader is told, and a `met` that leans on one does not stand.
-        pre_existing_failures = [str(n) for n in (test_counts.get("pre_existing_failures") or [])]
-        started = time.time()
-        snapshot, snap_note = self._review_snapshot(head)
+        return {"contract": contract, "head": head, "attempt": attempt,
+                "patch_id": patch_id, "pending_amendments": pending_amendments,
+                "item_history": item_history, "changed": changed,
+                "changed_tests": changed_tests, "pre": pre}
+
+    @staticmethod
+    def _review_key(ctx: dict) -> dict:
+        """What a prefetched grade must still agree with to be joined."""
+        return {"head": ctx["head"], "patch_id": ctx["patch_id"], "attempt": ctx["attempt"],
+                "clauses": list(ctx["contract"]["clauses"]),
+                "amendments": [(a.get("clause"), a.get("now"))
+                               for a in ctx["pending_amendments"]]}
+
+    def _review_call(self, ctx: dict, snapshot: Path | None, snap_note: str, started: float, *,
+                     test_counts: dict, pre_existing_failures: list[str],
+                     scratch_dir: Path | None = None, on_session=None) -> dict:
+        """The grading turn itself, and the `review` event it will be recorded
+        under. Leaves `snapshot` for the caller to drop."""
+        from scripts.automod import review as RV
+        head, pending_amendments = ctx["head"], ctx["pending_amendments"]
         grade_root = snapshot or self.worktree
-        # The tree the grader's citations are validated against, recorded so a
-        # refusal states what it graded: the round that was refused on
-        # `agent_mcp/facts.py:520-540` (a write path, not a test) and a landing
-        # at `08a4f4f0` (not an object) left no way for the next reader to
-        # re-run either check.
-        validated = {"review_validated_head": head, "review_validated_worktree": str(grade_root)}
         base_event = {"event": "review", "round_id": self.round_id, "item_id": self.item_id,
-                      "attempt": attempt, "head": head, "grader_model": "primary",
-                      "snapshot": bool(snapshot), "snapshot_note": snap_note, "prechecks": pre,
+                      "attempt": ctx["attempt"], "head": head, "grader_model": "primary",
+                      "snapshot": bool(snapshot), "snapshot_note": snap_note,
+                      "prechecks": ctx["pre"],
                       "validated_head": head, "validated_worktree": str(grade_root),
                       # A refusal shown an amendment is a judgment of a new
                       # contract; `backlog.review_disagreement` reads this so
                       # it does not count the amended pass as a repeat.
-                      "patch_id": patch_id,
+                      "patch_id": ctx["patch_id"],
                       "amendments_shown": [a.get("clause") for a in pending_amendments]}
+        kwargs = dict(round_id=self.round_id, worktree=grade_root, base=self.base,
+                      contract=ctx["contract"], changed_paths=ctx["changed"],
+                      test_counts=test_counts,
+                      python=self.python, child_env=self._child_env(grade_root),
+                      scratch_dir=scratch_dir or (W.round_dir(self.round_id) / "gate-state"),
+                      # The item's recent reviews across rounds, so the
+                      # grader judges repeats itself (`same_as_prior`)
+                      # rather than the ledger inferring them by head.
+                      prior_reviews=ctx["item_history"],
+                      pre_existing_failures=pre_existing_failures)
+        if on_session is not None:
+            kwargs["on_session"] = on_session
+        res = RV.grade(**kwargs)
+        base_event.update({"session_id": res.get("session_id"),
+                           "seconds": round(time.time() - started, 1),
+                           # Waits the grader sat out because another
+                           # round was landing. On the scorecard, so a
+                           # grader that is chronically unavailable is a
+                           # number rather than a story.
+                           "retries": int(res.get("retries") or 0),
+                           "waited_s": float(res.get("waited_s") or 0.0)})
+        return {"res": res, "snapshot": snapshot, "started": started,
+                "grade_root": grade_root, "base_event": base_event}
+
+    # ── the review graded beside the tests rung ───────────────────────
+    # The grader needs nothing the tests rung computes before it can start:
+    # the suite's counts only colour one prompt line, and the two things that
+    # decide a verdict — a green rung, and which failures predate the round —
+    # are applied in Python by `parse_review` AFTER the grader answers. So
+    # the grading turn (p50 ~280 s) starts when the suite (p50 ~150 s) does,
+    # and is joined to the real tests result when the review rung is reached.
+    # `automod.gate.concurrent_review: false` is the serial ladder exactly.
+
+    def _start_review_prefetch(self) -> None:
+        """Start the review's grading turn in a daemon thread, if owed."""
+        self._review_prefetch = None
+        if not self.item_id or not _gate_cfg("concurrent_review", True):
+            return
         try:
-            res = RV.grade(round_id=self.round_id, worktree=grade_root, base=self.base,
-                           contract=contract, changed_paths=changed, test_counts=test_counts,
-                           python=self.python, child_env=self._child_env(grade_root),
-                           scratch_dir=W.round_dir(self.round_id) / "gate-state",
-                           # The item's recent reviews across rounds, so the
-                           # grader judges repeats itself (`same_as_prior`)
-                           # rather than the ledger inferring them by head.
-                           prior_reviews=item_history,
-                           pre_existing_failures=pre_existing_failures)
-            base_event.update({"session_id": res.get("session_id"),
-                               "seconds": round(time.time() - started, 1),
-                               # Waits the grader sat out because another
-                               # round was landing. On the scorecard, so a
-                               # grader that is chronically unavailable is a
-                               # number rather than a story.
-                               "retries": int(res.get("retries") or 0),
-                               "waited_s": float(res.get("waited_s") or 0.0)})
-            if not res["ok"]:
-                S.append_event({**base_event, "ok": False, "blocking": False,
-                                "error": str(res.get("error") or "")[:400]})
-                return False, (f"review could not run: {res.get('error')} — the grader, not the "
-                               f"diff; neither the item's attempt nor a review attempt is spent"), {
-                                   "external_blocker": True, "external_failures": [],
-                                   "external_reason": "grader unreachable",
-                                   "retry_after_s": 120,
-                                   "review_session": res.get("session_id")}
-            parsed = RV.parse_review(res["structured"], worktree=grade_root,
-                                     changed_tests=changed_tests, n_clauses=len(contract["clauses"]),
-                                     # A suite-level or unchanged-test `met`
-                                     # stands only on a green tests rung.
-                                     tests_passed=any(r.name == "tests" and r.ok
-                                                      for r in self.report.rungs),
-                                     changed_paths=changed,
-                                     # Every commit the grader cites is asked of
-                                     # the round's own repo, and the `def test_`
-                                     # delta the round really added is the
-                                     # deterministic answer to "this diff adds
-                                     # no test".
-                                     repo=self.live,
-                                     added_tests=RV.def_test_delta(grade_root, self.base, changed),
-                                     pre_existing_failures=set(pre_existing_failures))
-        finally:
-            self._drop_snapshot(snapshot)
-        tree_note = (f" (citations validated against {head[:8] or 'the working tree'} "
-                     f"in {grade_root})")
-        if parsed and parsed.get("unreliable"):
-            # The grader's own evidence is not in the tree it was handed, so
-            # this text is not a judgment of the diff: it is the same shape as
-            # an unreachable grader, and it spends no attempt (#1442).
-            reasons = "; ".join(parsed["unreliable"])
-            S.append_event({**base_event, "ok": False, "blocking": False,
-                            "unreliable": parsed["unreliable"],
-                            # The clause entries carry their own
-                            # `citation_unresolved` markers, so the record shows
-                            # WHICH citation failed, not just that one did.
-                            "clauses": parsed["clauses"],
-                            "error": f"review unreliable: {reasons}"[:400],
-                            "session_id": res.get("session_id"),
-                            "seconds": round(time.time() - started, 1)})
-            return False, ("review is unreliable"
-                           f"{tree_note}: the findings cite evidence that does not exist where "
-                           f"the grader said it looked — {reasons}. The item keeps its attempt and "
-                           f"no review attempt is spent; gate again (the grader may answer) and "
-                           f"report the citation if it repeats"), {
-                               "external_blocker": True, "external_failures": [],
-                               "external_reason": "grader cited evidence not in the graded tree",
-                               "retry_after_s": 120,
-                               "review_unreliable": parsed["unreliable"],
-                               "review_session": res.get("session_id"), **validated}
-        if parsed is None:
-            S.append_event({**base_event, "ok": False, "blocking": False,
-                            "error": "structured review unusable"})
-            return False, "review returned an unusable object; the item keeps its attempt", {
-                "external_blocker": True, "external_failures": [],
-                "external_reason": "grader returned an unusable object",
-                "retry_after_s": 120,
-                "review_session": res.get("session_id")}
-        if parsed.get("clauses_unreadable"):
-            unread = parsed["clauses_unreadable"]
-            keys = ", ".join(unread.get("keys") or []) or "(no readable keys on any entry)"
-            S.append_event({**base_event, "ok": False, "blocking": False,
-                            "error": f"review clause entries unreadable: {unread['entries']} "
-                                     f"entries, no usable 1-based `clause` index; "
-                                     f"keys on them: {keys[:300]}"})
-            # The synthesized "not addressed by the grader" partials are a
-            # statement about the grader's key names, not about the diff. On
-            # SM_20260916_032218, SM_20260922_100227 and SM_20260924_104224
-            # refusing on them spent an attempt of two on rounds the second
-            # reader had actually approved, and told the author to change code
-            # that was already graded `met`. An unreadable verdict is the same
-            # kind of event as the unusable object above: the rail failed, so
-            # nothing is charged and nothing is named for the author to change.
-            why = (f"review verdict could not be read: {unread['entries']} clause entries "
-                   f"came back and none carried a usable 1-based `clause` index (keys found "
-                   f"on them: {keys[:300]}); no clause was graded, so this is the grading "
-                   f"rail and not a judgment of the diff — gate again; the item keeps its "
-                   f"attempt")
-            return False, why, {
-                "external_blocker": True, "external_failures": [],
-                "external_reason": "grader's clause entries carried no usable clause index",
-                "retry_after_s": 120,
-                "review_session": res.get("session_id")}
-        amendments = contract.get("amendments") or []
-        kind, findings = RV.decide(parsed, pre, amendments=amendments,
-                                   attempt=attempt, policy=RV.seams_policy())
-        S.append_event({**base_event, "ok": True, "premise": parsed["premise"],
-                        "clauses": parsed["clauses"], "test_honesty": parsed["test_honesty"],
-                        "seams_unverified": [s["seam"] if isinstance(s, dict) else s
-                                             for s in parsed["seams_unverified"]],
-                        "seams_untestable": [s["seam"] for s in parsed["seams_unverified"]
-                                             if isinstance(s, dict)
-                                             and not s.get("testable_before_landing", True)],
-                        # The whole judgment per seam. The two lists above
-                        # lose `actionable_in_round` and `same_as_prior`, so
-                        # re-deciding a recorded review had to guess them.
-                        "seams": [s for s in parsed["seams_unverified"] if isinstance(s, dict)],
-                        "downgraded": parsed["downgraded"], "summary": parsed["summary"],
-                        "amendments_ok": parsed.get("amendments_ok", True),
-                        "amendments_note": parsed.get("amendments_note", ""),
-                        "blocking": kind != "pass", "kind": kind,
-                        "findings": findings[:2000]})
-        self._settle_amendments(amendments, parsed, kind)
-        if kind == "unsound":
-            return False, f"review: premise unsound{tree_note} — {findings}", {
-                "review_premise_unsound": True, "review_summary": findings[:800],
-                "review_session": res.get("session_id"), **validated}
-        if kind == "retry":
-            contract_refusal = any(c.get("verdict") == "unsatisfiable" for c in parsed["clauses"])
-            if contract_refusal:
-                nxt = ("this refusal spends no attempt — amend the unsatisfiable clause(s) "
-                       "with automod_amend_clause, fix anything else it names, commit if "
-                       "needed, and gate again")
-                shown = f"{attempt - 1}/{RV.REVIEW_MAX_PER_ROUND} spent"
-            else:
-                nxt = ("fix what it names, commit, and gate again"
-                       if attempt < RV.REVIEW_MAX_PER_ROUND else
-                       "abort and report — the item comes back with these findings and your branch")
-                shown = f"{attempt}/{RV.REVIEW_MAX_PER_ROUND}"
-            return False, (f"review sent it back ({shown}; {nxt}){tree_note}: {findings}"), {
-                "review_retry": True, "review_findings": findings[:1500],
-                "review_attempt": attempt, "review_session": res.get("session_id"), **validated}
-        # On a PASS, record the grader's `post_landing` clauses onto the item.
-        # Written here rather than by the implementer because it is a fact the
-        # grader established about a change that is about to land, not a claim
-        # the author made about its own work.
-        marked: list[int] = []
-        for c in parsed["clauses"]:
-            if c["verdict"] != "post_landing":
-                continue
+            ctx = self._review_prepare()
+        except Exception as exc:  # noqa: BLE001 — the rung will ask again, serially
+            print(f"[warn] review prefetch not started: {type(exc).__name__}: {exc}")
+            return
+        if isinstance(ctx, tuple):
+            return  # the rung answers without a grade; nothing to start
+        pf = _ReviewPrefetch(self._review_key(ctx))
+        head = ctx["head"]
+
+        def _body():
             try:
-                if _B.mark_clause_post_landing(self.item_id, int(c["clause"]),
-                                               note=c.get("note") or "",
-                                               round_id=self.round_id):
-                    marked.append(int(c["clause"]))
-            except Exception as exc:  # noqa: BLE001 — a mark is not the gate
-                print(f"[warn] could not mark clause {c['clause']} post_landing: {exc}")
-        if marked:
-            S.append_event({"event": "gate", "round_id": self.round_id,
-                            "rung": "review", "ok": True, "skipped": False,
-                            "post_landing_clauses": marked, "item_id": self.item_id,
-                            "detail": "clauses marked observable only after landing"})
-        # Everything a pass did not refuse on is still something the grader
-        # said. It goes onto the item — the prompt promises the grader an
-        # untestable seam is recorded there — and into the rung data, so
-        # `gate.json` and the landing report carry it too.
-        advisory_seams = [s["seam"] if isinstance(s, dict) else str(s)
-                          for s in parsed["seams_unverified"]]
-        advisory_findings = [f"{h['file']}:{h['line']}: {h['problem']}"
-                             for h in list(pre) + list(parsed["test_honesty"])]
+                started = time.time()
+                # Its own checkout and its own scratch dir: a discarded
+                # prefetch whose grader is still running must not share a
+                # tree or a `run_tests.sh` with the serial grade that
+                # replaces it.
+                snap, note = self._review_snapshot(head, suffix="-prefetch")
+                if not pf.adopt_snapshot(snap):
+                    self._drop_snapshot(snap)
+                    return
+                pf.bundle = self._review_call(
+                    ctx, snap, note, started, test_counts={}, pre_existing_failures=[],
+                    scratch_dir=W.round_dir(self.round_id) / "gate-state" / "review-prefetch",
+                    on_session=pf.set_session)
+            except BaseException as exc:  # noqa: BLE001 — reported at the join
+                pf.error = exc
+            finally:
+                pf.done.set()
+
+        # Daemon, never an executor: `concurrent.futures` workers are joined
+        # at interpreter exit, and a gate that stopped at `tests` must not sit
+        # out a five-minute grading turn before its process can end.
+        t = threading.Thread(target=_body, name=f"review-prefetch-{self.round_id}", daemon=True)
+        pf.thread = t
+        self._review_prefetch = pf
+        t.start()
+        print(f"[info] review grading started beside the tests rung ({head[:8]})")
+
+    def _take_review_prefetch(self, ctx: dict, pre_existing_failures: list[str]):
+        """`(bundle, concurrent, discard_reason)` for the rung to judge.
+
+        `bundle` is None when there is no usable prefetch and the rung must
+        grade serially; `discard_reason` then says why one was thrown away.
+        """
+        pf = getattr(self, "_review_prefetch", None)
+        self._review_prefetch = None
+        if pf is None:
+            return None, False, ""
+        if pre_existing_failures:
+            # The grader was not told which failures predate the round, and
+            # the prompt is where it is told — so grade again, as today.
+            why = (f"the tests rung passed over {len(pre_existing_failures)} pre-existing "
+                   f"failure(s) the prefetched grader was not told about")
+        else:
+            now = self._review_key(ctx)
+            moved = [k for k in now if now[k] != pf.key.get(k)]
+            why = f"{', '.join(moved)} changed since it started" if moved else ""
+        if not why:
+            # No timeout beyond the grade's own: `RV.grade` is bounded, and a
+            # serial grade would wait exactly as long.
+            pf.done.wait()
+            if pf.error is not None:
+                why = f"it raised {type(pf.error).__name__}: {str(pf.error)[:200]}"
+            elif pf.bundle is None:
+                why = "it produced nothing"
+            else:
+                return pf.bundle, True, ""
+        self._abandon_prefetch(pf)
+        print(f"[info] review prefetch discarded: {why}")
+        return None, False, why
+
+    def _discard_review_prefetch(self, why: str) -> None:
+        """Throw a prefetch away without recording anything.
+
+        The gate stopped before the review rung (a red `tests` or
+        `prompt_surface`, or an exception), or the rung answered without a
+        grade: no `review` event is written and no attempt is spent, because
+        nothing was judged. The grader's backend turn is cancelled best
+        effort; one that was not yet streaming may run to its own end on the
+        live backend and its answer goes nowhere. That is accepted — it costs
+        the primary one grading turn, never a verdict.
+        """
+        pf = getattr(self, "_review_prefetch", None)
+        self._review_prefetch = None
+        if pf is None:
+            return
+        self._abandon_prefetch(pf)
+        print(f"[info] review prefetch discarded: {why}")
+
+    def _abandon_prefetch(self, pf: "_ReviewPrefetch") -> None:
+        snap, session_id = pf.abandon()
+        self._drop_snapshot(snap)
+        if session_id and not pf.done.is_set():
+            self._cancel_grader(session_id)
+
+    @staticmethod
+    def _cancel_grader(session_id: str) -> None:
         try:
-            _B.note_review_advisories(self.item_id, self.round_id,
-                                      advisory_seams, advisory_findings)
-        except Exception as exc:  # noqa: BLE001 — a note is not the gate
-            print(f"[warn] could not record review advisories: {exc}")
-        return True, (f"review: {RV.summarize_clauses(parsed)} of {len(contract['clauses'])} "
-                      f"clause(s); {parsed['summary'][:160]}"), {
-                          "review_session": res.get("session_id"),
-                          "clauses": parsed["clauses"], "review_attempt": attempt,
-                          "post_landing_clauses": marked,
-                          "advisory_seams": advisory_seams,
-                          "advisory_findings": advisory_findings,
-                          "amendments_ratified": [a.get("clause") for a in amendments],
-                          **validated}
+            from scripts.automod import review as RV
+            RV.cancel_grader(session_id)
+        except Exception as exc:  # noqa: BLE001 — best effort
+            print(f"[warn] could not cancel the prefetched grader {session_id}: {exc}")
 
     def _patch_id(self) -> str:
         """`git patch-id --stable` of this round's whole diff, or "".
@@ -2087,7 +2335,7 @@ class Gate:
             print(f"[warn] could not compute a patch-id: {exc}")
             return ""
 
-    def _review_snapshot(self, head: str) -> tuple[Path | None, str]:
+    def _review_snapshot(self, head: str, suffix: str = "") -> tuple[Path | None, str]:
         """A detached checkout of `head` for the grader to read and test.
 
         The worktree is the author's, and on 2026-09-11 the author kept
@@ -2100,7 +2348,7 @@ class Gate:
         """
         if not head:
             return None, "no head to snapshot; graded the working tree"
-        wt = W.round_dir(self.round_id) / "gate-state" / f"review-{head[:12]}"
+        wt = W.round_dir(self.round_id) / "gate-state" / f"review-{head[:12]}{suffix}"
         shutil.rmtree(wt, ignore_errors=True)
         r = W.git(self.live, "worktree", "add", "--detach", "-q", str(wt), head)
         if r.returncode != 0 or not wt.exists():

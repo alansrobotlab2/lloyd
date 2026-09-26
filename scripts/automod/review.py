@@ -56,6 +56,7 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import shlex
 import subprocess
 import time
 import urllib.error
@@ -540,6 +541,20 @@ def build_prompt(*, contract: dict, diff: str, diff_truncated: bool,
     clauses = "\n".join(f"{i}. {c}" for i, c in enumerate(contract["clauses"], 1))
     counts = ", ".join(f"{k}={v}" for k, v in test_counts.items()
                        if k in ("passed", "failed", "skipped", "collected")) or "unknown"
+    # Empty counts: the gate started this review beside its tests rung
+    # (`gate.Gate._start_review_prefetch`), so the suite has not finished yet.
+    # Say what is true — and keep the grader from running a second full suite
+    # on a machine already running one.
+    suite = (f"The full suite already ran on this worktree: {counts}. "
+             if test_counts else
+             "The full suite is running beside this review in the gate, and its result is "
+             "joined to your verdict afterwards: do not run the whole suite; run only the "
+             "tests you need to check a clause. ")
+    # The same fact for the one rule that leans on it: a suite-level or
+    # outside-the-diff `met` stands only on a green tests rung, which
+    # `parse_review` enforces in Python either way.
+    rung_state = ("it already did" if test_counts else
+                  "the gate checks that after you answer, and such a `met` falls if it did not")
     amendments = _amendments_block(list(contract.get("amendments") or []))
     human = _human_clauses_block(list(contract.get("human_clauses") or []))
     prior = _prior_reviews_block(prior_reviews or [])
@@ -566,7 +581,7 @@ because the default root is the live tree, not this change.
 </diff>
 
 Test files this diff changed or added: {', '.join(changed_tests) or 'none'}.
-The full suite already ran on this worktree: {counts}. {pre}To run a test yourself, \
+{suite}{pre}To run a test yourself, \
 the ONLY way is:
 
     {run_tests} <pytest node id or file>
@@ -583,7 +598,7 @@ its node id. If no changed test exercises it, the clause is at most `partial` \
 — with three exceptions, the only shapes of evidence besides a changed test \
 that stand as `met`: a suite-level run cited as `tests/ -k <expr>` that you \
 `ran`, an existing test outside this diff that you `ran` (both hold only \
-because the gate's tests rung already passed on this commit), and, for a \
+because the gate's tests rung passes on this commit — {rung_state}), and, for a \
 clause about something the change removed, an evidence_path naming the \
 deleted file marked `(deleted)` beside a node in a changed test file.
 3. Read the code path the clause names. Note the file and line that satisfies \
@@ -706,7 +721,15 @@ def backend_url(root: Path | None = None) -> str:
 
 def write_run_tests(scratch: Path, *, worktree: Path, python: Path, env: dict) -> Path:
     """The one way the grader may run pytest: cwd, interpreter and scratch
-    state baked in, so a grader-run suite cannot write live automod state."""
+    state baked in, so a grader-run suite cannot write live automod state.
+
+    The marker expression is the tests rung's own (`gate.TESTS_MARK_EXPR`),
+    imported rather than restated: it said `not live_vault` alone until
+    2026-09-25, so a grader's `tests/ -k …` run collected the
+    `fault_injection` rows the gate's suite excludes by design. Imported here,
+    not at module top — the gate imports this module lazily, and the gate is
+    the only caller, so it is already loaded."""
+    from scripts.automod.gate import TESTS_MARK_EXPR
     scratch.mkdir(parents=True, exist_ok=True)
     script = scratch / "run_tests.sh"
     exports = "\n".join(f"export {k}={json.dumps(str(v))}" for k, v in sorted(env.items()))
@@ -714,7 +737,7 @@ def write_run_tests(scratch: Path, *, worktree: Path, python: Path, env: dict) -
         "#!/bin/sh\n# Written by the automod review rung. Runs pytest against the round's\n"
         "# worktree with the gate's own interpreter and scratch state.\n"
         f"{exports}\ncd {json.dumps(str(worktree))} || exit 2\n"
-        f"exec {json.dumps(str(python))} -m pytest -q -p no:cacheprovider -m 'not live_vault' \"$@\"\n",
+        f"exec {json.dumps(str(python))} -m pytest -q -p no:cacheprovider -m {shlex.quote(TESTS_MARK_EXPR)} \"$@\"\n",
         encoding="utf-8")
     script.chmod(0o755)
     return script
@@ -748,8 +771,13 @@ def grade(*, round_id: str, worktree: Path, base: str, contract: dict,
           timeout: float = REVIEW_TIMEOUT_S, model: str = "primary",
           max_turns: int = REVIEW_MAX_TURNS,
           prior_reviews: list[dict] | None = None,
-          pre_existing_failures: list[str] | None = None) -> dict:
+          pre_existing_failures: list[str] | None = None,
+          on_session=None) -> dict:
     """One grading turn on the live backend, for a code round. Never raises.
+
+    `on_session(session_id)` is called once the grader's session exists and
+    before its turn is posted, so a caller that gives up on the grade can
+    cancel the turn (`cancel_grader`).
 
     Returns `{ok, error, session_id, structured, structured_error, text,
     stop_reason, duration_s}`. `ok` is whether a structured object came back;
@@ -766,7 +794,25 @@ def grade(*, round_id: str, worktree: Path, base: str, contract: dict,
                           pre_existing_failures=pre_existing_failures)
     return run_grader(prompt=prompt, item_id=contract["id"], round_id=round_id,
                       backend=backend, sessions_dir=sessions_dir, timeout=timeout,
-                      model=model, max_turns=max_turns)
+                      model=model, max_turns=max_turns, on_session=on_session)
+
+
+def cancel_grader(session_id: str, *, backend: str | None = None, timeout: float = 10.0) -> bool:
+    """Ask the live backend to stop a grading turn. Best effort; never raises.
+
+    For a grade the gate started beside its tests rung and then threw away
+    (the suite failed, or the grader was not told about a pre-existing
+    failure): nothing will read its answer, and the primary is shared.
+    """
+    backend = (backend or backend_url()).rstrip("/")
+    req = urllib.request.Request(f"{backend}/api/sessions/{session_id}/cancel", data=b"{}",
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=timeout) as resp:
+            return resp.status < 400
+    except Exception:
+        return False
 
 
 # A clause whose subject is the landing itself. #955: `land()` grades BEFORE it
@@ -978,7 +1024,8 @@ def _is_unavailable(error: str) -> bool:
 def run_grader(*, prompt: str, item_id: int, round_id: str, backend: str | None = None,
                sessions_dir: Path | None = None, timeout: float = REVIEW_TIMEOUT_S,
                model: str = "primary", max_turns: int = REVIEW_MAX_TURNS,
-               unavailable_wait_s: float = DEFAULT_UNAVAILABLE_WAIT_S) -> dict:
+               unavailable_wait_s: float = DEFAULT_UNAVAILABLE_WAIT_S,
+               on_session=None) -> dict:
     """POST one grading turn to the live backend and collect its `done`.
 
     **Retries an unavailable backend, and only before the stream opens.** A
@@ -997,6 +1044,11 @@ def run_grader(*, prompt: str, item_id: int, round_id: str, backend: str | None 
     from app.paths import production_data_root
     sessions_dir = Path(sessions_dir or (production_data_root() / "sessions"))
     session_id = write_session(sessions_dir, item_id=item_id, round_id=round_id, model=model)
+    if on_session is not None:
+        try:
+            on_session(session_id)
+        except Exception:  # noqa: BLE001 — a callback never costs the grade
+            pass
     report: dict = {"ok": False, "error": "", "session_id": session_id, "structured": None,
                     "structured_error": "", "text": "", "stop_reason": None, "duration_s": 0.0,
                     "retries": 0, "waited_s": 0.0}

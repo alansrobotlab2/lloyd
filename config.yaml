@@ -1327,6 +1327,14 @@ automod:
     # item that the next round takes, closed by the gate on the first full
     # green run at a descendant base. false = pass and record, file nothing.
     file_red_tree: true
+    # The review's grading turn (p50 ~280 s) starts beside the `tests` rung
+    # (p50 ~150 s) instead of after it: the grader needs nothing the suite
+    # computes, and the green rung and pre-existing failures are applied to
+    # its answer in Python afterwards. A prefetch is thrown away (no event, no
+    # attempt) when the gate stops before review or the commit or contract
+    # moved, and re-graded serially when the rung passed over pre-existing
+    # failures the grader must be told about. false = the serial ladder.
+    concurrent_review: true
   # The review rung's policy knobs. The rung refused 86% of the rounds it
   # graded over 2026-09-11 and the two largest contributors were both
   # findings that are real and usually unfixable INSIDE the round.

@@ -366,6 +366,10 @@ error-shaped lines.
   from the implementer), and a deferral that names no id is `not_met`. Runs
   after `tests`, before `venv`; skipped (recorded) only when no item is
   bound to the round.
+- **The review is graded beside the tests rung** (2026-09-25,
+  `automod.gate.concurrent_review`): the grade starts with the suite and is
+  joined to the real tests result, discarded (no event, no attempt) if the gate
+  stops first, and re-graded serially over pre-existing failures. §4.5e.
 - **The review verdict has to reach the author, and for the rung's first
   eighteen hours it did not.** 18 rounds, 17 aborts, 0 landings on
   2026-09-11, every one ending "already sent back 2 times" with the model
