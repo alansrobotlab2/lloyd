@@ -215,7 +215,12 @@ facts@6ms vault@140ms` shows when each one arrived.
   against the query — task-id dispatch first (`#299`, `backlog_18` →
   `Task #N`), then verbatim-name substring, then squared token overlap
   normalized by both token counts, with deterministic tie-breaks →
-  `_get_facts_sync(entity)` → drop expired/invalidated → sort by confidence.
+  `_get_facts_sync(entity)` → drop expired/invalidated → sort by confidence
+  (or, with `prefetch.facts.rank: relevance`, by `retrieval.fact_score`
+  against the query's tokens with confidence as the tie-break — the zero-read
+  scorer `fact_get`'s query path uses; no usable token falls back to the
+  confidence order; #1482 rider 1, measured on LloydMemEval, see
+  `eval/measurements/lloydmemeval-2026-09-25.md`).
   Both helpers live in `agent_mcp/retrieval.py` since the #340 module split
   and are re-exported from `agent_mcp/facts.py` under their old underscore
   names, which is what prefetch still imports.

@@ -1478,6 +1478,15 @@ prefetch:
   # and MRR diff 0.000); the 4 E2E probe re-runs lost their echo 4/4 and all
   # still made the Read call. eval/measurements/transcript-self-hit-2026-09-25.md
   exclude_self_transcripts: true
+  # #1482 rider 1: order each entity's <facts> lines by query relevance
+  # (retrieval.fact_score, zero reads, confidence as tie-break; no usable token
+  # falls back to confidence). `confidence` is the old order. ON since
+  # 2026-09-25 on LloydMemEval v1 (dev n=267, paired): answer correct
+  # 0.296 -> 0.416, +0.120 [+0.071, +0.172]; gold in the block 0.532 -> 0.648;
+  # holdout 16/66 -> 29/66. Cost: ~6.5 ms per hub entity (3.5k facts) inside
+  # the parallel facts worker. eval/measurements/lloydmemeval-2026-09-25.md.
+  facts:
+    rank: relevance
 workers:
   db_path: ${LLOYD_DATA}/workers.db
   enabled: true

@@ -1470,3 +1470,105 @@ def test_reported_offers_are_capped_at_skill_report_top_k(monkeypatch, tmp_path)
 
     assert [row["data"]["skill"] for row in _skm_events(tmp_path, "cap-session")] == [
         f"sk{i:02d}" for i in range(8)], "the cap is what reaches the log, not just the slice"
+
+
+# ── #1482 rider 1: the <facts> block ordered by query relevance ─────────────
+
+def _relevance_facts_tree(tmp_path, monkeypatch, facts):
+    """One entity, `Harbor Relay`, carrying `facts` (dicts with fact/id/confidence)."""
+    import yaml
+    import agent_mcp._shared as shared
+    from agent_mcp import retrieval, facts as facts_mod
+
+    facts_root = tmp_path / "facts"
+    facts_root.mkdir()
+    for mod in (shared, retrieval, facts_mod):
+        monkeypatch.setattr(mod, "FACTS_ROOT", facts_root)
+    shared._invalidate_entity_dirs_cache()
+    retrieval.invalidate_fact_file_cache()
+    retrieval._entity_index_cache = None
+    d = facts_root / "Harbor Relay"
+    d.mkdir()
+    fm = {"type": "facts", "entity": "Harbor Relay", "category": "state", "facts": facts}
+    (d / "Harbor Relay-state.md").write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n")
+    return facts_root
+
+
+_HARBOR = [
+    {"fact": "Harbor Relay was rewritten in Rust last spring.", "id": "s001", "confidence": 0.99},
+    {"fact": "Harbor Relay is owned by the platform group.", "id": "s002", "confidence": 0.98},
+    {"fact": "Harbor Relay ships nightly builds.", "id": "s003", "confidence": 0.97},
+    {"fact": "Harbor Relay listens on port 7443 for TLS clients.", "id": "s004", "confidence": 0.60},
+    {"fact": "Harbor Relay stores its port map in etcd.", "id": "s005", "confidence": 0.70},
+    {"fact": "Harbor Relay's admin port is 9090.", "id": "s006", "confidence": 0.50},
+]
+
+
+def test_facts_relevance_order_keeps_the_matching_fact_and_drops_the_offtopic_one(
+        tmp_path, monkeypatch):
+    """Clause 1. The on-topic fact (confidence 0.60) sits below three
+    off-topic ones by confidence, so today's order never shows it; relevance
+    ranks it in and drops the highest-confidence off-topic fact. Two facts with
+    EQUAL overlap are ordered by confidence."""
+    _relevance_facts_tree(tmp_path, monkeypatch, [dict(f) for f in _HARBOR])
+    q = "which port does Harbor Relay listen on for tls clients"
+    today = prefetch._search_facts(q, rank="confidence")
+    assert not any("7443" in b for b in today), f"control: confidence order must miss it: {today}"
+    ranked = prefetch._search_facts(q, rank="relevance")
+    assert any("7443" in b for b in ranked), ranked
+    assert not any("rewritten in Rust" in b for b in ranked), ranked
+    assert len(ranked) == prefetch.FACT_MAX_PER_ENTITY
+
+    # tie-break: "port" is the only distinguishing token and both port facts
+    # carry it, so the 0.70 fact precedes the 0.60 one
+    ranked2 = prefetch._search_facts("Harbor Relay port", rank="relevance")
+    idx = {k: next(i for i, b in enumerate(ranked2) if k in b) for k in ("etcd", "7443")}
+    assert idx["etcd"] < idx["7443"], ranked2
+
+
+def test_facts_relevance_adds_no_read(tmp_path, monkeypatch):
+    """Clause 2. At most FACT_MAX_ENTITIES `_get_facts_sync` calls and no
+    daemon or model call: the ranking is computed from the facts in hand."""
+    _relevance_facts_tree(tmp_path, monkeypatch, [dict(f) for f in _HARBOR])
+    calls = []
+    real = prefetch._get_facts_sync
+
+    def counting(entity, *a, **k):
+        calls.append(entity)
+        return real(entity, *a, **k)
+
+    def forbidden(*a, **k):
+        raise AssertionError("ranking the facts block must not call a daemon or model")
+
+    monkeypatch.setattr(prefetch, "_get_facts_sync", counting)
+    monkeypatch.setattr(prefetch, "_qmd_daemon_search", forbidden)
+    import app.djev as djev
+    monkeypatch.setattr(djev, "ask_sync", forbidden)
+    out = prefetch._search_facts("which port does Harbor Relay listen on", rank="relevance")
+    assert out and 1 <= len(calls) <= prefetch.FACT_MAX_ENTITIES, calls
+
+
+def test_facts_relevance_fails_open_without_usable_tokens(tmp_path, monkeypatch):
+    """Clause 3. A query with no usable token (empty, or every term a
+    stopword/too short) keeps today's confidence-descending order, and the
+    real path still returns FACT_MAX_PER_ENTITY facts for the entity."""
+    _relevance_facts_tree(tmp_path, monkeypatch, [dict(f) for f in _HARBOR])
+    from agent_mcp.retrieval import fact_query_tokens
+    for q in ("what is the", ""):
+        assert fact_query_tokens(q) == []
+        rows = [dict(f) for f in _HARBOR]
+        assert prefetch._rank_entity_facts(rows, fact_query_tokens(q), "relevance") == \
+            sorted(rows, key=lambda f: f["confidence"], reverse=True)
+    today = prefetch._search_facts("tell me about Harbor Relay", rank="confidence")
+    ranked = prefetch._search_facts("tell me about Harbor Relay", rank="relevance")
+    assert ranked == today and len(ranked) == prefetch.FACT_MAX_PER_ENTITY
+
+
+def test_facts_rank_mode_reads_config_and_defaults_to_confidence(monkeypatch):
+    import app.config as cfg
+    monkeypatch.setitem(cfg.CONFIG, "prefetch", {"facts": {"rank": "relevance"}})
+    assert prefetch._facts_rank_mode() == "relevance"
+    monkeypatch.setitem(cfg.CONFIG, "prefetch", {"facts": {"rank": "bogus"}})
+    assert prefetch._facts_rank_mode() == "confidence"
+    monkeypatch.setitem(cfg.CONFIG, "prefetch", {})
+    assert prefetch._facts_rank_mode() == "confidence"

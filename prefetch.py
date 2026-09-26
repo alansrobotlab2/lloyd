@@ -29,7 +29,9 @@ from pathlib import Path
 from agent_mcp.skills import (SKILLS_DIRS, _iter_skills, _score_skill, _query_tokens,
                               pseudo_query_index)
 from agent_mcp._shared import _ENTITY_STOPWORDS
-from agent_mcp.facts import _extract_entities_from_query, _get_facts_sync
+from agent_mcp.facts import (
+    _extract_entities_from_query, _fact_query_tokens, _fact_score, _get_facts_sync,
+)
 from agent_mcp.session import _load_session_index, _score_session
 from agent_mcp.vault import _qmd_daemon_search, _qmd_strip_stopwords, strip_qmd_snippet
 from prompt_builder import PROMPT_BUDGET_CHARS, prompt_token_estimate, skills_push_enabled
@@ -761,15 +763,52 @@ def _search_backlog_refs(text: str) -> list[str]:
     return lines
 
 
-def _search_facts(query: str) -> list[str]:
-    """Return fact bullet lines for top matching entities."""
+def _facts_rank_mode() -> str:
+    """`prefetch.facts.rank` — how each entity's facts are ordered before the
+    top `FACT_MAX_PER_ENTITY` are taken (#1482 rider 1).
+
+    `confidence` (the default, and every failure) is today's order;
+    `relevance` ranks by `fact_score` against the turn's query tokens, with
+    confidence as the tie-break. Anything else reads as `confidence`.
+    """
+    try:
+        from app.config import CONFIG
+
+        val = (((CONFIG.get("prefetch") or {}).get("facts") or {}).get("rank", "confidence"))
+    except Exception:  # noqa: BLE001
+        return "confidence"
+    return "relevance" if val == "relevance" else "confidence"
+
+
+def _rank_entity_facts(facts: list[dict], tokens: list[str], mode: str) -> list[dict]:
+    """Order one entity's facts for the `<facts>` block.
+
+    Relevance is the zero-read scorer `vault_recall`'s fact leg already uses
+    (`retrieval.fact_score`: the fraction of query tokens in the fact's text),
+    computed over the facts already in hand — no store, daemon or model read.
+    Confidence breaks ties, and the sort is stable, so equal-overlap facts keep
+    today's order. No usable query token (empty, or every term a stopword)
+    fails open to today's confidence order.
+    """
+    by_conf = sorted(facts, key=lambda f: f.get("confidence", 0.0), reverse=True)
+    if mode != "relevance" or not tokens:
+        return by_conf
+    return sorted(by_conf, key=lambda f: -_fact_score(f, tokens))
+
+
+def _search_facts(query: str, rank: str | None = None) -> list[str]:
+    """Return fact bullet lines for top matching entities.
+
+    `rank` overrides `prefetch.facts.rank` (the eval renders both orders off
+    one query); None reads the config.
+    """
     lines = []
+    mode = rank or _facts_rank_mode()
+    tokens = _fact_query_tokens(query) if mode == "relevance" else []
     entity_matches = _extract_entities_from_query(query)[:FACT_MAX_ENTITIES]
     for entity, _ in entity_matches:
         result = _get_facts_sync(entity)
-        facts = result.get("facts", [])
-        # Sort by confidence descending, take top N
-        facts.sort(key=lambda f: f.get("confidence", 0.0), reverse=True)
+        facts = _rank_entity_facts(list(result.get("facts", [])), tokens, mode)
         for f in facts[:FACT_MAX_PER_ENTITY]:
             fact_text = f.get("fact", "").strip()
             conf = f.get("confidence", 0.0)
