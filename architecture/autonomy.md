@@ -441,6 +441,66 @@ deadline" drift in the direction nobody is watching.
 `tests/test_autonomy_budget_anchor.py` pins it, including that `run_task` wires
 it to the resolved timeout.
 
+#### The second clock: iterations (moved from CLAUDE.md, 2026-09-25)
+
+A run is bounded by **two** clocks, and for years it was warned about neither,
+then about one. Beside the wall clock (`asyncio.timeout(timeout_seconds)` in
+`autonomy.run_task`) is the iteration clock, `RunOptions.max_turns`
+(`agent.max_turns`, 60), which `app/harness/loop.py` enforces and
+`app/harness/finalizer.py` records **no verdict for at all**. The chat path has
+warned at 75%/90% of `max_turns` since `_build_state_anchor` landed, but that
+warning was a closure inside that function, so `run_task` — which calls
+`run_query` directly — had nothing to import and passed no `state_anchor`.
+
+20 scheduled-task runs between 2026-09-04 and 09-18 died at
+`stop_reason=max_turns, turns=61`. Six of those predate the wall-clock anchor
+(`af038eb`, 2026-09-08 20:21 −07:00); of the 14 after it, every one finished its
+61 iterations below 70% of its own clamped timeout — the shortest at 269 s, the
+longest at 2059 s against a 2499 s level — so the warning that did exist could
+not have fired on a single one (#1061). So `_build_task_anchor(timeout,
+max_turns)` is now the single `RunOptions.state_anchor`, carrying both clocks:
+70%/90% of the resolved wall-clock budget, plus 75%/90% of `max_turns` in the
+chat path's exact `<budget>Iteration N of M` wording. Both builders live in
+`app/deadline_anchor` — `build_deadline_anchor` and `build_iteration_anchor`,
+joined by `compose_state_anchors`.
+
+**One callable, and it is not `None` just because the wall clock is absent.**
+The harness takes exactly one `state_anchor`, and `app/harness/loop.py` calls it
+inside a `try` that swallows what it raises and logs a warning — so a composed
+anchor that misbehaves fails the same way a missing one does: a warning nobody
+hears and no run record. A task with `timeout_seconds: 0` has no wall clock but
+still has a turn cap and still dies on it, so `_build_task_anchor` returns an
+iteration-only anchor there, and `None` only when neither budget exists. (The
+70% level is computed from `timeout`, never `declared_timeout`: the pool clamps
+the frontmatter value to `max_duration - _POOL_TIMEOUT_MARGIN`.)
+
+#### The skills matter as much as the mechanism
+
+A budget only helps a task that knows when it is done. All three of the
+2026-09-08 deaths had an unbounded step:
+
+- **#80** named `okf_migrate.py --apply` as the repair path without saying "not
+  from this task", and its last successful report *ended in a question* ("Want
+  me to run the migrate pass?"). Nobody answers an autonomy report, so the next
+  three runs went looking for their own permission to act. Its runs also spent
+  time diagnosing a bubblewrap sandbox that did not exist then (nothing in
+  `agent_mcp/builtin_bash.py` sandboxed anything; the bench/eval sandbox in
+  `agent_mcp/_tool_sandbox.py` came 2026-09-14 and applies to bench sessions
+  only).
+- **#78** Step 2 asked the model to hand-filter "unreferenced notes" — but only
+  711 of 4,448 vault files contain a wikilink at all, so the sweep returned
+  ~3,600 files, 84% of the vault. Its Step 3 was `[! -f "$file" ]`, which is not
+  valid shell: it raises `[!: command not found` every iteration and has never
+  detected a missing skill.
+- **#24** Step 1 ran `nightly_extraction.py` in the foreground. The Bash tool
+  defaults to 120 s and caps at 600 s; that script's last seven real runs took
+  545–1666 s, so the call *cannot* complete and the model improvises a `nohup`.
+  On 2026-09-08 the improvised run finished fine 40 minutes later — the task had
+  already timed out, so `files_processed=133 facts=4969 failed=1048` was
+  reported to nobody. (Those 1048 were one incident, not 1048 problems: the
+  extractor talks to the primary on :8096 and that engine restarted mid-run, so
+  every remaining document raised `Connection refused`. Unhashed files retry.)
+
 ## The task file
 
 Read by the scheduler, and therefore worth getting right:

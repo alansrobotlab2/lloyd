@@ -253,6 +253,66 @@ stay `running` forever, and since `claim_next` counts `claimed|running`
 toward the quota, a source with `max_inflight: 1` was then switched off
 permanently and silently.
 
+### The poisoned pile
+
+(Moved from CLAUDE.md on 2026-09-25.) An item that fails
+`workers.max_attempts` times lands in state `poisoned`, and nothing in the pool
+ever looks at a poisoned row again. That is right for a queue and wrong for a
+fleet: the pile is the only place a systemic failure shows up, and an unbounded
+pile of untriaged rows reads the same as a healthy one. `workers/maintenance.py`
+sweeps it on `workers.maintenance.interval_seconds` (default 900s), plus once at
+pool boot. Each poisoned row is classified from its error string:
+
+| Class | Examples | Outcome |
+|---|---|---|
+| transient | `TimeoutError`, dropped connection, 503 | **revived** — one more claim, after a delay |
+| structural | `unknown source`, `KeyError`, bad payload | **quarantined** — terminal, needs a human |
+
+An error matching neither is treated as structural. Retrying an unclassified
+error spends GPU-hours on a guess; quarantining it costs a line in a report.
+
+Two things veto a revive, both about the item in front of the sweep, for the
+reason task #76's activity log already records — *"a weekly reset that does not
+fix the cause just re-poisons"*: the item's `max_revives` budget is spent
+(tracked in the row's own `triage_json`, so it survives a re-poisoning); or an
+equivalent item is already open, because `mark_failed` NULLs `dedup_key` on
+poison and a revive therefore cannot coalesce against what the source
+re-enqueued.
+
+The `(source, signature)` tally — poisonings across sweeps, kept in
+`watermarks`, pruned after `tally_retention_days` — **escalates but does not
+veto** (#1295). It counts how often a cause fired, which says nothing about the
+row being triaged, and one fleet-wide event stamps the same error string on
+every row it catches: on 2026-09-20, 13 self-mod landings restarted the backend
+between 00:35Z and 05:57Z, three `bench-mine` claims died inside two of those
+windows, and the shared tally quarantined all three with `class: transient`
+printed beside a reason denying transience. A recurring signature still produces
+one `escalations` entry per sweep — `logger.error`, the report's `## Escalations`
+section, `runs.meta_json` — which is the only surface that says a source is
+churning once its items are being revived instead of quarantined.
+
+Three design choices that are load-bearing:
+
+- **It runs from the pool's scheduler loop, not as a work source.** A source
+  that repairs the queue has to be claimed by a free worker slot, and slots
+  hold jobs for up to an hour — it would be starved exactly when the queue is
+  backed up. The scheduler loop is a separate asyncio task on a 60s tick.
+- **It is deterministic — no model call.** Autonomy task #76 (Queue Health
+  Check) is the model-driven analyst on top, and its own log argues for a floor
+  underneath it: it timed out at 600s on three of its last six runs, because
+  reaching a model needs the primary engine, a free worker slot and a healthy
+  queue — the three things in doubt when items are poisoning.
+- **`quarantined` is a distinct state, not a flag on `poisoned`.** The
+  dashboard's `poisoned_total` is an alarm; one that also counts every row
+  already triaged stops being an alarm. Quarantined rows show as `+Nq` beside
+  it.
+
+A sweep that changed nothing records only its timestamp — at a 15-minute
+cadence, a run row per tick would be 96 "nothing poisoned" rows a day burying
+the handful that mean something. A sweep that acted writes
+`autonomy-runs/queue-maintenance/sweep_<ts>.md` and a `runs` row, and logs
+ERROR per escalation.
+
 ---
 
 ## 3. What a source is
@@ -451,8 +511,8 @@ what it reads, what it writes, and the measured state of it.
 | source | prio | what it does | turn path |
 |---|---|---|---|
 | `scheduled-task` | 10–70 | runs `~/obsidian/autonomy/*.md` via `autonomy.run_task` | its own, recorded; IV per task |
-| `autotriage` | 55 | triages one backlog item, or consolidates one cluster | session, IV off |
-| `autocode` | 40 | one gated automod round per confirmed item | session, IV off |
+| `autotriage` | 55 | triages one backlog item, or consolidates one cluster | session, IV on (since 2026-09-25) |
+| `autocode` | 40 | one gated automod round per confirmed item | session, IV on (since 2026-09-25) |
 | `backlog-cluster` | 65 | nightly clustering of the open board for the above | none (numpy, off-loop) |
 | `arch-review` | 62 | one `architecture/` doc or one functional group: check it against the tree, edit it, file the rest | session, IV off |
 | `board-steward` | 68 | one board pass: proposed moves and the next item for `autocode`, recorded beside the state machine's | session (primary), IV off |
@@ -499,7 +559,12 @@ abandoned at iteration 38 with 44 minutes left on an invented premise,
 sixteen false repetition fires in a day), and the stall-rescue, budget and
 context-pressure anchors now do deterministically what the observer used to
 attempt. Observation stays on for chat, where a human reads it and its
-value was measured there. A `scheduled-task` run is watched when its task
+value was measured there. **Since 2026-09-25 `autocode` and `autotriage` are
+back on** (config.yaml sets `inner_voice: true` on both), on Alan's rule to fix
+the harms inside Inner Voice rather than switch it off: a PLATFORM/round note in
+every worker review and a rail that rewrites any "deliver the report" inject
+([[inner-voice]] § "Workers"). The override file wins over config.yaml for this
+key. The other session sources stay off. A `scheduled-task` run is watched when its task
 file says `inner_voice: true`, which beats the fleet default
 `autonomy.inner_voice` (off).
 
@@ -526,6 +591,48 @@ again is simply not. That source puts the topic back in its own registry with
 a `not_before`, and its `interval_seconds` is the retry cadence.
 `architecture/research-pipeline.md` is the long version, including why the
 markdown checklist it replaced could not hold an outcome.
+
+**`youtube-digest`: the script fetches, a session judges.** [[workers-jobs]] §5
+is its long version; what follows was CLAUDE.md's and is not stated there.
+Two channels are tracked for new agent and model techniques — AI Engineer
+(`@aiDotEngineer`) and Discover AI (`@code4AI`). Each new video becomes a vault
+note under `knowledge/youtube/<Channel>/` **and** an answer to one question:
+does it hold anything that would improve Lloyd? When it does, a draft backlog
+item is filed, tagged `youtube-eval` and `<channel-key>`.
+`scripts/youtube_channel_monitor.py` keeps `seen.json` per channel under
+`~/.local/share/<channel>/` and writes the transcript, metadata and link
+enrichment into a bundle with `--fetch`; `workers/sources/youtube_digest.py`
+runs one real session per video through `run_prompt_in_session`. Before
+2026-09-08 autonomy task #75 did all of it inside the script with a direct POST
+to the model and thinking off — nothing of it was a transcript anyone could
+read, which is why it moved (Alan's rule: unattended judging runs as a visible
+session). Task #75 is paused; the old name `ai-engineer-monitor.py` is a shim
+onto `--channel ai-engineer`, and the script path (`--process-one`) still works
+as an operator fallback.
+
+- **The eval rule is Alan's**: open source may be proposed for direct
+  adoption, a commercial product never is (only the aspects worth recreating
+  locally are named), and a paper becomes a bounded experiment.
+  `eval/lloyd_profile.md` is the rubric's picture of Lloyd — keep it current
+  when the stack changes, or the eval will propose what already exists.
+- **Disk decides**, and the verdict is stored on the `seen.json` row and
+  projected into `~/obsidian/projects/lloyd/channel-eval/<channel>.md` after
+  every run.
+- **Tracked from a date means a floor.** `--since-days N` registers the window
+  and records the oldest video in it as `floor_video_id`; the new-video walk
+  stops there. Without it a channel is crawled back through its whole history
+  one video at a time, which is what happened to AI Engineer (628 notes).
+  `--since-days N --requeue` also puts completed videos in the window back
+  through the session so they get the eval.
+- **Transcripts are wrapped at 100 columns**, because the Read tool pages by
+  line and a 40-minute talk arrives as one 60 kB line.
+- **The toolbox** denies `Bash`, `Edit`, `Task`, the automod tools and every
+  queue writer; `Read`, `Write` and `backlog_write_task` stay because they are
+  the job, and vault writes outside `knowledge/`, `backlog/` and the report
+  directory are reported.
+- Inner Voice is **off** for this source (`inner_voice: false` in config.yaml).
+  CLAUDE.md said "Inner Voice on" until 2026-09-25; that predated the
+  2026-09-12 cut and was stale.
 
 `scheduled-task` carries the most traffic by far, and two of its behaviours
 are load-bearing. It gates on the health of **the model each task pins**, not

@@ -18,7 +18,7 @@ backed by a router under `app/routers/`.
 | Tab | Backed by | Notes |
 |---|---|---|
 | `dashboard` | `GET /api/dashboard` (`app/routers/dashboard.py`) | one aggregated snapshot every 2 s; sections degrade independently |
-| `chat` | `/api/message/stream` (SSE), `/api/sessions` | the primary conversation; thinking rows, tool bubbles with captions |
+| `chat` | `/api/message/stream` (SSE, read with `fetch` + `ReadableStream`, not `EventSource`), `/api/sessions` | the primary conversation; thinking rows, tool bubbles with captions |
 | `background` | `GET /api/background/sessions`, `GET /api/workers/health` | every session the machine ran for itself, apart from chat history |
 | `inner_voice` | `app/routers/inner_voice.py` | the observer's timeline for any IV-enabled session |
 | `workers` | `app/routers/workers.py` | queue depth, slots, runs, pause/enable, pending review |
@@ -63,14 +63,39 @@ the exception list can go away, is the follow-on this item leaves to a person.
 
 ## The dashboard
 
-One endpoint rather than one per panel, because the page is open all day, and
-`DashboardPage` polls it every `POLL_MS` (2 s). Sections and their sources are
-tabled in `CLAUDE.md` § "Mission Control dashboard" — twelve of them (the
-twelfth, `network`, is #628's egress destination inventory), and
-`tests/test_dashboard_doc_claims.py` asserts that table's section names
-against the `_gather(...)` call in `app/routers/dashboard.py`, so the count
-here and the table are one fact a run can re-measure. Rules that keep the
-endpoint honest:
+The `dashboard` tab is first in the sidebar and the desktop landing tab.
+One endpoint rather than one per panel, because the page is open all day —
+eight requests per tick times however many tabs are open is real load on a box
+whose job is holding a 262k-token KV cache steady — and `DashboardPage` polls
+it every `POLL_MS` (2 s). Sections are gathered concurrently and **degrade
+independently**: a wedged supervisord turns one panel into an error string and
+leaves the rest live. A dashboard is most useful when something is broken, so
+it must not be the second thing to break.
+
+The sections and their sources — twelve of them (the twelfth, `network`, is
+#628's egress destination inventory) — are the table below. CLAUDE.md
+§ "Mission Control dashboard" carries a copy with shortened source cells, and
+`tests/test_dashboard_doc_claims.py` asserts that copy's section names (and a
+non-empty source for each, `_automod` in `dashboard.py` for `automod`) against
+the `_gather(...)` call in `app/routers/dashboard.py`, so the count here and the
+table are one fact a run can re-measure.
+
+| Section | Source |
+|---|---|
+| `host` | `app/host_metrics.py` — psutil + `nvidia-smi` (2s cache) |
+| `vllm` | `app/vllm_metrics.py` — scrapes `<base_url>/metrics` per configured model |
+| `primary` | `sessions_io.active_sessions_snapshot()` + `session_titles` |
+| `recent` | the last chats to stop talking — bounded scan of `sessions/` |
+| `agents` | **the lloyd-mcp process**, over loopback (`GET :8500/state`) |
+| `services` | `app/supervisor_client.py` |
+| `workers` | `workers.queue` + `workers.pool` — pool slots, per-source depth, recent runs |
+| `autonomy` | `~/obsidian/autonomy/*.md` frontmatter + the pool's in-flight `scheduled-task` jobs |
+| `backlog` | `~/obsidian/backlog/*.md` frontmatter |
+| `automod` | `app/routers/dashboard.py::_automod` — the loop's scorecard (`scripts/automod/scorecard.py`) over the last 7 days plus its live round state, cached at `_SCORECARD_TTL_S` |
+| `network` | `agent_mcp/egress.py::network_report` — where `http_fetch`/`http_request`/`http_search`/`browser_navigate` went over 7 days, per destination and per scope (#628; the table is `egress_events` in `workers.db`) |
+| `usage` | `usage_store` |
+
+Rules that keep the endpoint honest:
 
 - the expensive sections are cached and the live ones never are: the vault
   walks (`autonomy`, `backlog`) at `_VAULT_SCAN_TTL_S` 10 s, the
@@ -106,6 +131,103 @@ endpoint honest:
   `app/aggregator_config.py` (`route` / `auth_headers_for`) rather than from
   a hand-written origin (#1053).
 
+### The traps behind those rules
+
+Moved here from CLAUDE.md on 2026-09-25, when that file went back to being an
+index; the wording is the incident record, kept whole.
+
+**`recent` is the cached section with a trap.** A session JSON carries its
+whole transcript (100 files, 7.5 MB when this was written), so the scan is
+bounded twice: only the newest `_RECENT_CANDIDATES` files by **mtime** are
+opened, and the parse is cached for 10 s. The mtime window is safe only because
+mtime is never *earlier* than `last_active` — background writers (the titler,
+post-session capture, TodoWrite) push a file's mtime later than its last real
+message, so mtime can promote a stale chat but never demote a fresh one out of
+the window. The rows are then sorted on `last_active`, which is what
+`GET /api/sessions` sorts on too. The live filter — dropping sessions with a
+running or queued turn, which the panel beside it already shows — is applied
+outside that cache: cache the expensive scan, never the cheap freshness.
+
+**Overdue is not "next up."** `_autonomy` splits scheduled tasks on `next_run`
+vs now and returns them as separate lists. Sorting them together ascending and
+labelling the head "next up" is how a fleet whose ticker is months behind
+renders as a healthy schedule — the most overdue task lands exactly where the
+soonest one belongs. Likewise `completed` is excluded from worker "open" counts
+(`_OPEN_STATES`): it dominates the depth table and would bury the handful of
+items actually waiting.
+
+**And overdue is not "held."** `hold_reason` returns the first gate that bites
+(`"paused"`, `"waiting on #42"`, `"outside hours 00-04,23"`, `"no skill"`) or
+`None`, and both `_autonomy` and `GET /api/autonomy/tasks` call that one
+function rather than restating the gates — a second private definition of
+"due" is what this fixed. On 2026-09-06 the dashboard showed six overdue while
+the scheduler considered none of them late: four nightly jobs outside their
+window and two paused. A nightly task is past due for the eighteen hours a day
+it is not allowed to run, so the counter was never zero and therefore said
+nothing. The dependency gate resolves `depends_on` against whatever set it is
+handed, and since #558 an id with no task file behind it, or an upstream
+dispatch would not run, is *not met* — so it must always be handed the
+**whole** board. Handed a status-filtered list
+(`/api/autonomy/tasks?status=up_next`) the gate cannot see an upstream that is
+`paused`, `in_progress` or `failed`, so every such row reads as `waiting on #N`
+and the board invents a hold that does not exist.
+
+**Front matter is bounded by its closing `---`, not by a byte count.**
+`_frontmatter` reads in 4 KB chunks up to a 64 KB ceiling and stops at a
+line-anchored `^---$`. The previous flat 3000-byte prefix silently dropped five
+backlog items, and the selection was causal rather than random: an item grows
+its `activity_log` precisely by being worked on, so the two it hid were the two
+that were `in_progress` — the board reported zero. A cap that hides whatever is
+most active is the worst possible reading of "bounded". Splitting on bare
+`"---"` is the matching trap: it also fires inside quoted log prose and
+truncates the block somewhere plausible. A block that parses to a list or a
+string returns `{}`, since the caller's first move is `.get`.
+
+**The aggregator owns the agent-side panels.** It owns the `Task` tool and
+spawns `Bash(run_in_background=true)` children, so the backend has no handle on
+either; `agent_mcp/main.py` exposes `GET :8500/state` beside `/health`, and
+adding a new agent-side live panel means extending that route, not the backend.
+`background_tasks` there carries `active` **and** `recent`. `list_active`
+filters on `status == "running"`, so before that a background bash left the
+dashboard the instant it exited — a task that died three seconds in was
+indistinguishable from one that never started. `list_recent` is bounded by its
+limit rather than by eviction: `_records` is kept whole so a later
+`get(task_id)` can still hand the model an output path to Read. A finished
+row's `elapsed_s` is measured against `finished_at`, not `now`, or a task that
+ran for two seconds reads as hours old by evening.
+
+**Workers are not in that panel.** The worker pool lives in the backend
+(`workers.queue` + `workers.pool`, rendered by `WorkersPanel`). A worker job
+whose prompt calls `Task` does put subagent rows in the agents panel — via
+`workers/sources/_common.py::run_prompt_on_primary` — but anonymously: nothing
+on the row says which worker source it came from.
+
+**A subagent row opens before the run.** `agent_mcp/_subagent_registry.py`
+opens it before the Task run loop starts — a `Task` blocks its caller for
+minutes, so a row created on completion would only ever describe runs that no
+longer need watching. Closing it is the subtle part: `finish` is idempotent and
+first-writer-wins, so a blanket `finally: finish("cancelled")` runs *before* the
+success path and silently stamps every completed run cancelled. Each exit path
+closes the row with its own real status; `tests/test_task_registry_wiring.py`
+pins that.
+
+**Not every engine is vLLM.** A llama.cpp slot publishes `llamacpp:`
+Prometheus names; `vllm_metrics._translate_llamacpp` renames them into the vLLM
+vocabulary so one snapshot path and one dashboard card serve both, reports KV
+occupancy and TTFT as `None` rather than `0`, treats a reachable server as
+`awake`, and names the model from a `/props` probe cached per engine lifetime —
+[[infrastructure]] § "The secondary is single-tenant by design" is the long
+version.
+
+**Counters vs. gauges.** vLLM exposes both. Gauges (`num_requests_running`,
+`kv_cache_usage_perc`) are read straight. Counters (`prompt_tokens_total`,
+`prefix_cache_hits_total`) are monotonic since engine boot and their absolute
+value says nothing useful, so `vllm_metrics` keeps the previous scrape per
+engine and reports a rate. A counter that goes backwards (engine restarted)
+yields `None`, never a number — otherwise a restart renders as a one-second
+spike of the engine's entire history. An unreachable engine drops its baseline
+for the same reason.
+
 ## Sessions, titles, activity
 
 `app/sessions_io.py` is the writer for every session that goes through it
@@ -125,24 +247,98 @@ state the loop never reads back, so an unchanged state is dropped and the
 streaming path can call it per token; it is read off the pure in-memory queue
 snapshot, which is also the automod promoter's idle gate.
 
+The long version, moved from CLAUDE.md on 2026-09-25:
+
+- **Every surface that names a session renders its title** — the chat history
+  list, the chat header, the dashboard's agent panel, the Inner Voice picker —
+  and the timestamp id survives as the element's `title=` tooltip.
+  `app/session_titles.py` owns it end to end.
+- **Titles are written off the primary's path.** `_sync_secondary_title`
+  (`app/secondary_models.py`) is fired and forgotten off turn completion
+  beside `_post_session_capture`. It was written for the single-tenant
+  llama.cpp secondary (`--parallel 1`), where agent turns already queued;
+  since `secondary_enabled: false` (2026-09-20) `secondary_models` routes it to
+  the primary. Either way `should_title` re-titles on a **geometric** schedule
+  — after the 1st real user message, then the 3rd, the 9th, the 27th —
+  recorded in `title_at_count`, because a per-turn title call would put a model
+  call in a shared queue for a label nobody asked to be refreshed.
+- **`clean_title` is strict on purpose and `""` is a normal outcome.** A bad
+  title is worse than none: the id at least identifies the row, while
+  `Here is a title for the conversation` just looks like a bug. Consumers share
+  one fallback chain — `web/src/lib/sessionLabel.ts`, title → preview → id — so
+  a session never reads as two different sessions in two panels.
+- **`title_for` caches on a TTL, not on mtime.** The session JSON is rewritten
+  on every appended message, so an mtime-keyed cache would re-parse a
+  multi-megabyte transcript on every 2-second dashboard poll — the exact cost
+  the cache exists to avoid. `invalidate` closes the staleness window when a
+  title is written.
+- **Live activity** is `SessionTurn.activity` (`{kind, label, detail, at}`),
+  surfaced through `active_sessions_snapshot`. "Busy" is equally true of a turn
+  prefilling 160k tokens, one four minutes into a `Bash` build, and one wedged
+  on a dead engine; this line is what tells them apart. Writing it is a no-op
+  when nothing is running and again when the state is unchanged.
+- **The snapshot stays pure in-memory queue state** — as the promoter's idle
+  gate, a disk read there would put the filesystem in front of a restart
+  decision. Titles are joined on in `_primary_state`, off the loop via
+  `asyncio.to_thread`.
+- **Each row on the agent panel opens the session in the Inner Voice tab**,
+  through the same `setPendingFocus` + `setCurrentTab` pair the agent's
+  `mc_navigate` uses, so `InnerVoicePage` never has to know who asked. Two
+  things that panel taught:
+  - *A page that applies incoming focus must not race its own list fetch.*
+    `loadSessions` used to read `selectedSession` out of its closure to decide
+    whether to default to the newest session. On mount that closure captures
+    `null`, the fetch resolves *after* the focus has been applied, and the
+    stale `null` overwrites it — so every row on the dashboard opened the same
+    chat. Use the functional updater
+    (`setSelectedSession(prev => prev ?? list[0].session_id)`) and keep the
+    callback's deps empty; anything else reintroduces the race.
+  - *The Inner Voice picker holds only IV-enabled sessions*, but focus can
+    point anywhere. A `Select` whose value matches no option renders an empty
+    trigger, so the picker carries an out-of-list selection in as its own
+    option and names it from `/api/sessions/{id}/meta`.
+
 ## The agent's view of the UI
 
 `agent_mcp/mission_control_ui.py` lets a turn navigate the user
 (`mc_navigate`) and read where they are (`mc_get_state`); the frontend
 reports through `POST /api/mc/state`. `_summarize_browser` never carries the
 screenshot or the accessibility tree — the summary goes into the model's
-context on every move.
+context on every move. `screenshot_b64` and `snapshot` are ~124 KB of base64
+plus 8 KB of accessibility tree; it reads
+`browser_router.latest_frame_summary()`, which exists to make leaving them out
+the default rather than a thing each caller remembers.
+
+Why the tab lists are tested (the incident, from CLAUDE.md): until
+`tests/test_mc_tab_parity.py` nothing made them agree, and drift is silent in
+the worst direction. `browser` was in the `Page` union and in none of the other
+three, so a user sitting on that tab made `POST /api/mc/state` return 400 — and
+`useMcStateSync` swallows the failure *after* recording the payload as sent.
+The mirror kept serving whichever tab they came from, so `mc_get_state`
+answered confidently and **wrongly** for as long as they stayed there; not
+"Lloyd doesn't know", which he could have said. `dashboard` was missing from
+two of the three, the quieter half: the backend had carried a
+`_summarize_dashboard` all along for a tab the agent was refused and the
+frontend would have ignored.
 
 ## The Browser tab, and the guard that was never called
 
-The panel mirrors the agent's Chromium, and its **URL bar** is the one
+The panel mirrors the agent's Chromium (`app/routers/browser.py` + the frames
+`agent_mcp/browser.py` pushes), and its **URL bar** is the one
 control: `POST /api/browser/navigate`, which the backend proxies to the
 aggregator's own `/browser/navigate` — Playwright runs in that process, the
 same seam the dashboard crosses to read `/state`. Deliberately not an MCP
 call, because the user typing a URL is not the agent using a tool, and
 dispatching it as one would write a `browser_navigate` into the transcript
 that the model never made. The frame it pushes is tagged `url_bar` so the tab
-can say who drove it.
+can say who drove it. `navigate_from_ui` completes a scheme-less host to
+`https://`, detecting the scheme by `://` rather than by the bare colon — the
+colon alone reads the whole of `localhost:8080` as a scheme, and on this box
+that is the first thing anybody types. `browser_navigate` stays strict, because
+an agent omitting the scheme has made a mistake worth seeing. Everything else
+on the page stays read-only, and not for want of a route: the ref overlay has
+nothing to send, since the tool surface has no "click pixel (x,y)" and the a11y
+tree is gone by render time.
 
 `_is_private_host` was defined on 2026-04-11 and called from nowhere until
 2026-09-09 (`b7e2f69`, "wire the SSRF guard that was never called"). #278's
@@ -159,12 +355,21 @@ browses Lloyd's own dashboard, and an injected prompt that wants loopback
 holds Bash already; the LAN is what this closes — the router, the NAS, the
 printer. The check is on **resolved** addresses (`_resolve_addrs`,
 `lru_cache`d, which also blunts DNS rebinding by holding the first answer), so
-`2130706433` and `::ffff:127.0.0.1` are classified the way the resolver sees
-them and a name like `router.local` is classified at all. Route interception
+`2130706433`, `0x7f000001` and `::ffff:127.0.0.1` are classified the way
+`getaddrinfo` — and Chromium — sees them (all 127.0.0.1), which is every
+encoding that beat the old regex list, and a name like `router.local` is
+classified at all. The policy mirrors `http_request` rather than `http_fetch`,
+and the browser is not the weak link for loopback: an injected prompt that
+wants it has Bash and the whole MCP surface already. Route interception
 does not see redirects — `route.continue_()` hands the request to Chromium,
-which follows a 3xx internally — so `_enforce_landing` asks where the page
-actually ended up and blanks it on a hit, which needs no enumeration of lanes
-and so also catches a meta-refresh. `_browser_snapshot` and `_browser_evaluate`
+which follows a 3xx internally — and that is measured, not assumed: against a
+loopback server that 302s to this box's own LAN address the handler fires
+exactly once, for the first hop, while the redirected request arrives only as a
+`request` event. So the interceptor covers a clicked link and a subresource,
+and `_enforce_landing` asks where the page actually ended up and blanks it on a
+hit, which needs no enumeration of lanes and so also catches a meta-refresh and
+a `window.location`; leaving the page parked would let the next
+`browser_snapshot` read it and the state mirror push a screenshot of it. `_browser_snapshot` and `_browser_evaluate`
 call it; `_capture_state` checks directly, or a screenshot of a LAN device
 would be pushed to Mission Control. `browser.block_private_hosts: false` or
 `LLOYD_BROWSER_BLOCK_PRIVATE=0` turns it off, the env winning.
@@ -209,7 +414,7 @@ it is accepted. See [[infrastructure]].
 
 ## Related
 
-[[harness]], [[background-runs]], [[workers]], [[inner-voice]].
+[[harness]], [[background-runs]], [[workers]], [[inner-voice]], [[desktop]] (the Desktop tab and its lease), [[infrastructure]] (model slots, llama.cpp metrics).
 
 ## Review log
 

@@ -67,8 +67,9 @@ to it; only a level-2 heading ends it.
 failures park it for `retry_spacing_seconds` (6 h). There is no churn trigger
 and no backoff — the picklist is read from disk at call time, and at
 `daily_max: 4` a board this size is a first
-pass in about a week
-days, and a review a month per unit after that. `daily_max` is counted from
+pass in about a week, and a review a month per unit after that. No count of
+units is restated in prose for the same reason: the first one that was went
+stale the same day. `daily_max` is counted from
 `arch_review` ledger events rather than from the state file, because the ledger
 is what survives the state file being deleted.
 
@@ -243,6 +244,8 @@ stops being near zero means a bound is wrong rather than that the model is.
 
 The ledger event is `arch_review` in `promotions.jsonl`, one per completed
 review.
+
+Kill switch: `workers.sources.arch-review.enabled`.
 
 ## 6. What it does not do
 

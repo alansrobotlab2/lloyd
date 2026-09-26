@@ -46,6 +46,12 @@ fallback: djev does not answer ──► the whole recall re-runs on the cross-e
   `qmd_health`. See `architecture/qmd.md`.
 - **Tests never reach the live djev.** `tests/conftest.py` pins the recall to
   `"qmd"`; `tests/test_recall_djev_ranker.py` opts in with djev stubbed.
+- **The prefetch hybrid leg lands on the same turn** (2026-09-24, #1482
+  `d9ac3e59`): it costs ~55 ms after the lex leg now, not 1.1–3.0 s, so
+  `_prefetch_run` waits for it and fuses it with the lex hits; carry-over to the
+  next turn is only the busy-daemon fallback. The whole recall stack was
+  reviewed that day against the frontier — `architecture/recall-research-2026-09-24.md`,
+  items #1480–#1495.
 
 ## 2. How it is measured
 

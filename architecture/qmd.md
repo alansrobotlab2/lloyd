@@ -223,7 +223,9 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   model switch.
 - **A rerank that could not run says so.** No VRAM for a ranking context used to
   be an HTTP 200 with fusion-order results; `meta.reranked` is false, the daemon
-  counts it, and `app/qmd_health.py` logs and announces it.
+  counts it and never caches a fallback score, and `app/qmd_health.py` logs and
+  announces it. Read the counts at `/state.qmd` on the aggregator or
+  `curl localhost:8181/health`.
 
 ## 6. Eval pins
 
@@ -249,12 +251,18 @@ the build rather than the setting is what changed.
   2026-09-25 with `QMD_FUSION_DEPTH=100`: 119–140 ms warm. The first query
   after a daemon restart pays ~2 s of embedding-model load.
 - **Cross-encoder**: ~56 rows/s on a quiet 3090 — 40 rows ≈ 1.8 s, 240 rows ≈
-  5–7 s under the GPU's normal load. The recall no longer pays it except on its
-  fallback path; djev orders the pool on GPU 2 instead.
+  5–7 s under the GPU's normal load. A rerank costs rows × window, so at loop
+  depth 4 several 240-row recalls queued on one daemon for 20–60 s each, past
+  the 15 s client timeout — that is what moved the recall off it. The recall no
+  longer pays it except on its fallback path; djev orders the pool on GPU 2
+  instead (on the 87-query pinned eval ~0.5 s against ~2.2 s, equivalent on
+  every metric; [[retrieval]] §3.1). SETUP.md Part 6 is how to build and revert
+  the fork; `qmd/WORKLOG.md` section 7 is the fork's own long version.
 - **Any write to the index** used to force a full blocking rebuild of the
-  in-memory vector index on the next query (+0.85 s); since the incremental
+  in-memory vector index on the next query (+0.85 s, ~1 s at 37k vectors); since the incremental
   refresh it is ~165 ms for a small change.
-- **Measurement traps**: a TTS restart runs a ~4 min compile that pins GPU 0 and
+- **Measurement traps** — do not time qmd while something else owns GPU 0, and
+  read `meta.phases` and `nvidia-smi` before believing a number: a TTS restart runs a ~4 min compile that pins GPU 0 and
   makes qmd read 4× slow; an eval pin on GPU 0 does the same to production;
   repeated query text is answered from the rerank cache in ~0.1–0.25 s (a fresh
   cross-encoder recall of the same shape: ~7 s cold, ~4 s rerank), and since

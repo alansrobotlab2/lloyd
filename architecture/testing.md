@@ -186,6 +186,58 @@ g._child_env = lambda root=None, **_kw: {}
 Same class: a fake Gate built with `Gate.__new__` skips `__init__`, so every
 attribute the method under test reads has to be planted by hand.
 
+## A test about untracked state may not require that state to be present
+
+(Moved from CLAUDE.md § Tools, 2026-09-25.) The end-to-end test in
+`tests/test_tool_overrides.py` asserted `(ROOT / "data/tool_overrides.yaml").exists()`
+with `ROOT` resolved from `__file__` — so in an automod worktree it demanded a
+file that is, by design, never checked out. `data/` has no tracked contents at
+all, so it failed for **every round from `d11ad8c` onward, whatever the diff
+under test**, and the `tests` rung was a hard rung: three rounds aborted on it
+in fifteen hours while filing fourteen new backlog items and landing nothing.
+The loop's only drain was blocked by a test asserting that a deliberately
+untracked file had been checked out. It now *writes* the file through the real
+writer — `app.paths.LLOYD_HOME` resolves from `__file__` too, so the writer and
+the test address the same tree in a worktree — and asserts git never sees it,
+which is also the stronger check: the old form could only observe a file
+somebody else had already written and reverted. The `.<pid>.tmp` sibling
+`atomic_write_text` lands before renaming is ignored and asserted too. Why the
+file is untracked at all is [[tools]] §8.
+
+## A gate rung must not depend on the wall clock
+
+Two `tests/test_guardian_speak.py` tests asserted that an alert dispatches
+voice, while `speak.dispatch` consults `in_quiet_hours` against the real clock
+and a 23→07 default window — so they failed whenever the gate ran overnight,
+which is when the unattended loop runs. Rounds gated at 23:52 and 04:07
+failed; the same code at 08:13 did not. They pin the policy off explicitly now
+(`_AWAKE`), as the tests that are *about* quiet hours already pinned it on.
+
+## An assertion that cannot fail pins nothing
+
+`x == [] or True` shipped in the effect ledger's first cut (#544, 2026-09-10)
+through every gate rung, and the round that wrote it declared its acceptance
+`deferred` to an empty list. It is one of the two reasons the gate grew a
+review rung that refuses a test that cannot fail ([[automod]] §4.5;
+[[editing-safeguards]] has the effect-ledger side).
+
+## Frontend unit tests: vitest, run by the gate
+
+`web/` had no test runner until 2026-09-17, so a frontend clause had no node a
+gate could grade — #1199's mount cascade and its unconditional 15 s poll were
+held open as a human clause for exactly that reason, and `package.json` is a
+build input the loop may not land. Alan's call: add one. `npm test` is
+`vitest run`; tests sit beside what they test as `src/**/*.test.ts(x)`;
+`web/vitest.config.ts` is deliberately not `vite.config.ts`, which reads TLS
+certs and loads the Monaco/Tailwind plugins at import. The gate's `frontend`
+rung runs it after `vite build` and a failure fails the rung. No config or no
+binary is a skip that says so (`vitest SKIPPED (…)`, `vitest: None` on the
+event), never a pass: `node_modules` is untracked, and a tree that gained the
+dependency before anyone ran `npm install` in `~/lloyd/web` must neither fail
+every frontend round nor read as tested. A triage clause on the `frontend`
+surface can name a `web/src/**.test.ts` file the way a code clause names
+`tests/<file>.py`.
+
 ## Guard vacuity
 
 `scripts/maintenance/guard_vacuity.py` probes production guards by running each

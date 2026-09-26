@@ -81,6 +81,38 @@ perfectly healthy engine with §3 undone. That is exactly the failure §3.1
 asserts against, and the precedent is real: on 2026-09-06 an automod rollback
 reverted the *secondary's* launcher under the same alias and port.
 
+### 1.1 Slots: identity, the other cards, and who a subagent talks to
+
+(From CLAUDE.md's "Model slots", 2026-09-25; [[infrastructure]] § "Model slots"
+carries the slot table and the identity probe in full.)
+
+- **`models.<alias>` is only the endpoint.** What answers there is decided by
+  the supervisord program's `environment=MODEL=...` and its start script — three
+  places that drift. The 2026-09-06 drift above was `agent-llm-secondary.conf`
+  reverted to a launcher branch serving a 4B under the 35B's alias and port.
+  `models.<alias>.expect_model` is what catches it, and a slot with no
+  `expect_model` reports `unchecked`, so **update it whenever a slot's occupant
+  changes** or the check is inert. `expect_kv_cache_dtype` /
+  `expect_kv_pool_tokens_min` are the same idea one level down (§3.1).
+- **The two venvs.** `start-qwen38-flash-next.sh` adapts to whichever
+  `VLLM_VENV` names: `vllm-qwen38-flash-next` (the PLE-offload-worker build, the
+  script's own fallback default) and `vllm-flash-next-main` (vLLM main, UVA
+  offload — what `agent-llm-primary.conf` serves since 2026-09-10).
+- **The secondary (`:8091`, Qwen3.6-35B-A3B UD-Q3_K_XL, llama.cpp,
+  `--parallel 1` because llama.cpp divides `--ctx-size` across slots and the
+  full 256K window was the point) is off since 2026-09-20** —
+  `secondary_enabled: false`, and `app/secondary_models.py` routes its jobs
+  (titles, post-session and voice summaries) to the primary. GPU 2 runs djev
+  instead: not a chat slot, absent from `models:` and `resolve_model_alias`,
+  nothing routes a turn to it. Rank with it, never gate on a fixed cutoff —
+  [[djev]].
+- **Subagents inherit the calling turn's model.** `subagents.<type>.model: ''`
+  means "whatever spawned me"; the harness ships it in the MCP request `_meta`
+  (`lloyd/model`, `lloyd/base_url`), since `Task` runs in the aggregator process
+  and has no other way to know. Pin an alias there to override. An empty
+  `base_url` resolves from `models:` for the chosen model — *not* from
+  `default_model_base_url()`, which always returns the primary's endpoint.
+
 ## 2. The card underneath it
 
 GPU 1, an RTX PRO 6000 Blackwell Workstation Edition, 96 GB. It is clamped
@@ -480,7 +512,12 @@ investigation hit:
 
 `app/engine_pressure.py` supplies the "was anything else running" half: one
 task scrapes /metrics every 5 s into a five-minute ring through a stateless
-parser, so the dashboard's own rate baseline is undisturbed.
+parser, so the dashboard's own rate baseline is undisturbed. It serves all
+three readers (the announcement, the KV gate, the dashboard), and the
+dashboard's KV meter carries the ring's 5-minute p90 against a 65% line. The
+gauge counts blocks *referenced by running requests*; a paused turn's cached
+prefix sits in the free remainder, which is where it has to survive until its
+next iteration.
 
 ### 6.3 Keep prefixes alive
 
@@ -496,7 +533,7 @@ parser, so the dashboard's own rate baseline is undisturbed.
   resident at once. The KV gate above is. That trade is deliberate; §10 carries
   the bar re-stated for this shape and the first day counted at it
   (2026-09-23): KV sat well under the gate and the misses came anyway.
-- **The compaction wall** moved from 0.8/0.6 to 0.72/0.52 of the 210k
+- **The compaction wall** (`compaction.microcompact`) moved from 0.8/0.6 to 0.72/0.52 of the 210k
   threshold — trigger ≈168k → 151k, target ≈126k → 109k. The target moved with
   the trigger so the band stays 0.2 wide: every compaction rewrites the middle
   of the prompt and forces a cold re-prefill of what follows, so a narrower

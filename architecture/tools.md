@@ -801,6 +801,36 @@ directly misses both the overrides and `${VAR}` expansion. Routes:
 `POST /api/tool-toggle`, and `GET`/`POST /api/tool-discovery`, in
 `app/routers/tools.py`.
 
+**Why the override file must stay untracked** (the long version).
+`save_tool_overrides` replaced dumping the entire CONFIG back over config.yaml
+on every toggle, because config.yaml is tracked and a tracked file rewritten
+by a UI click leaves the live tree dirty — which `scripts/automod/gate.py` and
+`promote.py` both refuse. Until 2026-09-07 the override file was tracked too,
+so the escape hatch had the defect it was built to avoid: one click on the
+Tools page dirtied the tree and silently stopped the self-modification loop
+until someone hand-committed the result (`4fb1ccd`, `2ef86c7` are that
+happening). Untracked alone is not enough — `git status --porcelain` lists
+new files as well — so it needs the `.gitignore` rule beside it, and the
+`.<pid>.tmp` sibling `atomic_write_text` lands before renaming is ignored too
+(a write killed in between would otherwise leave a stray that dirties the tree
+exactly as the tracked file used to, one filename over).
+`tests/test_tool_overrides.py` pins both halves; how that test itself once
+blocked every round is in [[testing]] ("A test about untracked state").
+
+Because a fresh clone has no override file, **config.yaml is the state a
+rebuild boots into**, so it has to keep describing what is actually served. It
+claimed `tool_search.enabled: true` for an unknown stretch while the override
+served `false`. The `disabled_tools` half of the drift warning dates from the
+2026-09-04 `browser_screenshot` incident; `harness.tool_search` was a bare
+`.update()` until the warning was added for it too, and `enabled` decides
+whether the model is handed the whole catalog (131 tools then) or a baseline
+plus ToolSearch. Agreement stays silent because the Tools page rewrites the
+whole block on every toggle, so warning on it would fire each boot and stop
+meaning anything.
+
+Disabled tools reach the loop as `RunOptions.disallowed_tools` in the
+`mcp__<server>__<tool>` form.
+
 `Bash` disabled this way is blocked under both spellings at **advertise** time
 (`tool_schema.build_tool_list` matches the bare name and
 `mcp__<server>__<bare>`) and at **dispatch**: `loop._pre_dispatch` resolves
@@ -871,6 +901,43 @@ these two connect.
   Grep stays right for string keys, route paths and config names.
 - **`graphify-out/` is gitignored, unanchored,** because a build inside a round
   would otherwise dirty the tree the gate refuses.
+- **It is not a second MCP server, deliberately.** graphify ships
+  `graphify-mcp` and mounting it would have been one config line, but Lloyd
+  advertises every server's tools under bare names and `build_tool_list`
+  raises on a cross-server collision; Task subagents pin
+  `DEFAULT_LLOYD_MCP_SERVERS` and would never see it;
+  `tests/test_mcp_layer.py` needs every configured server discoverable at
+  test time, including inside a worktree where no second daemon is running;
+  `agent-services/supervisor/**` is a protected automod path, so Lloyd could
+  never repair the program running it; and graphify-mcp has no `affected`,
+  which is the one query a change actually needs.
+- **Why `root` cannot be inferred:** `round_start` ledger rows carry no
+  session id. When the answer is about the live tree and a worktree is open,
+  the header says so.
+- **What the ignore rule has to cover.** Both `scripts/automod/gate.py` and
+  `promote.py` refuse a dirty tree, so an unignored build would abort the
+  round on its own map. `*.json` at the top of `.gitignore` hid `graph.json`
+  by accident; `GRAPH_REPORT.md`, `graph.html`, `.graphify_root` and the
+  ~64k-file `cache/ast/**` were covered by nothing until `graphify-out/` was
+  ignored unanchored.
+- **Ambiguity is an answer, not an error:** `main` matches 88 nodes here, and
+  a listing with ids lets the model pick where an error makes it guess again.
+- **No `enabled` flag.** The kill switch is
+  `mcp_servers.lloyd-mcp.disabled_tools` (§8).
+- **The vault half is held as a patch.** The `automod-change-own-code`
+  skill's blast-radius step lives at
+  `scripts/maintenance/vault-automod-skill-blast-radius.patch`, not in the
+  vault, until `code_graph` is deployed. The vault is a live shared tree with
+  no PR path, so editing it lands *immediately* — while the graph tools it
+  names only exist after lloyd-mcp restarts on the merged code. An edited
+  skill in that gap tells every automod round to call a tool that returns
+  "Unknown tool" and makes its own quality gate 4 unsatisfiable. Apply it
+  after the restart with
+  `git -C ~/obsidian apply scripts/maintenance/vault-automod-skill-blast-radius.patch`.
+  `tests/test_code_graph_doc_claims.py::test_automod_skill_maps_the_radius_between_opening_and_working`
+  fails with that command until it is applied; it carries `live_vault`, so the
+  automod gate (`-m "not live_vault"`) excludes it and no round is failed by a
+  vault someone else has not updated yet.
 - Config under `code_graph:`: `graphify_bin`, `auto_refresh`,
   `refresh_timeout_s` 120, `min_refresh_interval_s` 30, `max_cached_roots` 4,
   `max_lines` 60. The same queries run *passively* on every interface-changing
@@ -967,6 +1034,29 @@ no tool, route or UI verb calls either one (#1135), so a hung `Task` holds its
 distinct because they call for different next moves. `_sanitise` drops a trailing assistant message whose
 tool calls were never answered, the one invalid shape a cancel can leave and
 the one every engine rejects on replay.
+
+**Resuming, in detail** (the long version CLAUDE.md used to carry). `Task`
+used to start from nothing on every call — right for a fire-and-forget
+fan-out, wrong when a subagent burns its budget mid-investigation and the only
+follow-up is to pay for the whole investigation again (a fresh prompt, a cold
+KV cache, and no memory of the forty tool results it just collected).
+
+- **`run_query` ignores `messages` when `chat_messages_handle` is non-empty**
+  (`loop.py`). So a resume appends the follow-up to the *stored list* and
+  passes that as the handle. Sending it as `messages` would drop it silently.
+- **`current_parent_model` is deliberately not consulted** on a resume:
+  moving a half-finished conversation to another engine re-prefills all of it.
+- **`task_id` is stable across continuations; `run_id` is not.** The
+  dashboard shows one row per *run*, and a resume is a new run of the same
+  task, linked by `continuation_of`.
+- **Every exit path stores as well as closes.** One `_close` helper, because
+  there are five exits and a run that closed its row without storing is a
+  `task_id` the model was told about and cannot use. `CancelledError` stores
+  and re-raises.
+- The three refusal reasons are `unknown or evicted`, `expired` and
+  `still running`.
+- `SubagentRecord.to_dict` never exposes `chat_messages`; the dashboard row
+  gets `task_id` and `continuation_of` only.
 
 A subagent's writes land on the parent's turn in the change ledger, and it
 inherits its parent's bench sandbox and effect scope. It still has to Read

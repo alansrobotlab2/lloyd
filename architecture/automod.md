@@ -372,12 +372,12 @@ that and a lost round, in order:
    responder.
 3. **`reap_abandoned_rounds`**, the backstop: a round this source opened,
    still open, nothing under observation, its session idle, is aborted with
-   its branch kept and the item told where the work is. How long it waits
-   follows `autocode.inner_voice`. Observed, twenty minutes after the turn
-   ended, on the scheduler tick — at turn end it would have raced #278's
-   rescue and thrown away 875 lines the gate then passed. Unobserved (since
-   2026-09-12), no wait: nothing can rescue the round, and `_run_and_record`
-   reaps it the moment the turn ends (see §3.2d). Either way it never reaps a
+   its branch kept and the item told where the work is — after its three
+   rescues (§3.2g) decline. It used to wait twenty minutes while the source
+   was observed, for #278's post-turn follow-up; that follow-up was retired
+   with IV R2, and since 2026-09-25 the wait is its own key,
+   `abandon_grace_seconds`, default 0, whatever `autocode.inner_voice` says:
+   `_run_and_record` reaps the moment the turn ends (see §3.2d). It never reaps a
    round whose detached gate (`gate.running`) or landing (`land.running`) is
    still alive — protections the twenty minutes used to provide by accident.
 
@@ -449,6 +449,10 @@ and the loop rewrites only statuses it has a ledger opinion about. The one
 exception is an untriaged item parked in `up_next` — nothing can pull it from
 there, so it goes back to `draft`, where triage looks.
 
+Since 2026-09-14 the first spend is sent back through triage once instead of
+parking (`retriage_spent_items`, §3.2d), and only the second parks for a
+human. Kill switch: `workers.sources.autocode.status_pipeline`.
+
 **A status outside that vocabulary is invisible to the loop and open on the
 board**, and the pass above is structurally unable to fix it: `set_status` and
 `reconcile_statuses` both reach items through `open_items`, which filters *on
@@ -484,6 +488,14 @@ working. `close_settled_items` runs on every implement poll: for each
 settled promotion (or vault landing) whose item is still open and not yet
 marked, it writes `automod_landed: <sha>` and an activity line, and sets
 `status: done` **only when every clause said `met`**.
+A vault round lands on its own `vault_land`, with no window, so the join is
+`settled → promoted → finished` for code and the `vault_land` row for the
+vault. `deferred` with an id is the honest answer for a check that needs
+traffic or a nightly run (#520 → #618). Kill switch for the finalizer:
+`workers.sources.autocode.structured_outcome`, carried in the queue payload
+like the budgets; the closer itself has had no switch since 2026-09-24
+(`close_on_settle` retired with `reopen_reverted` and
+`unfold_spent_umbrellas`).
 
 **A landing a rollback took off `main` is not a landing, whatever the row
 names** (2026-09-21). `rollback_succeeded` names one commit: the promotion the
@@ -636,7 +648,9 @@ umbrellas — and none of them deletes anything.
   (tags; parent and its status; `spawn_origin` off the ledger's
   `backlog_triage.spawned`/`backlog_implement.spawned`/`arch_review.filed`
   rows; the group `keep` with its date; `prior_triage_spawned`, `incomplete`
-  rows included; the count of `## Findings` sections). `findings_appended` is
+  rows included; the count of `## Findings` sections). A triage's append is
+  headed `## Findings (triage …)`. The weekend cuts above had taken implement
+  filings from 45 to ~1 a day and missed this one. `findings_appended` is
   counted off the file before `record_verdict` rewrites it, and the overshoot
   tolerance lost its `+1` with the overflow item.
 - **Spawn accounting is mechanical**: `max_item_id()` before the turn, and
@@ -667,7 +681,8 @@ self-spawned count and `over_bound`, which should read 0. Kill switch
 `scripts/automod/cluster.py` groups the open drafts by three signals already
 on disk, deterministically and offline: cosine over the chunk-0 vectors qmd
 keeps for the `backlog` collection (read through qmd's own bundled
-`vec0.so`, 0.12 s for the board; chunk 0 only, because mean-pooling pulls
+`vec0.so` at `qmd/node_modules/sqlite-vec-linux-x64/`, falling back to the
+live tree's copy because `node_modules` is not checked in; 0.12 s for the board; chunk 0 only, because mean-pooling pulls
 long items toward the corpus centroid); shared file paths named in
 backticks, by basename; and a common `parent`, parsed from the prose first
 line and persisted to frontmatter once. A shared parent is an edge on its
@@ -686,7 +701,12 @@ Since 2026-09-14 it also rebuilds a used-up file early — at least
 `exhausted_min_age_seconds` (2 h) old, with nothing `select_cluster` would
 take — and the ledger row carries `trigger: nightly|exhausted`;
 `clusterable_items` leaves out ids a group triage already judged, so a
-rebuild offers only fresh items.
+rebuild offers only fresh items (left in, they re-form the same groups and
+hide the fresh items peeled in with them). The trigger: on 2026-09-13 the
+night's 31 clusters were gone by mid-morning and group triage sat idle all
+day. `round cluster --no-judge` prints without writing. Every path default
+resolves at call time: a default bound at import made the first test run
+write to the real state dir.
 First live run: 53 clusters over 322 of 407 drafts, 200 pairs judged, 291
 parents persisted.
 
@@ -695,7 +715,9 @@ before it takes a single item (`backlog.select_cluster`: re-validated
 against disk, ids a group run already judged dropped, duplicate pairs kept
 together, largest surviving cluster, `group_min_items` 2 /
 `group_max_items` 4, 8 until 2026-09-14). One turn, `GROUP_PROMPT`, `GROUP_TRIAGE_SCHEMA` built
-from `RETIRING`/`SURFACES`, per-item verdicts:
+from `RETIRING`/`SURFACES` (no `maxLength`), per-item verdicts. Quarantine does
+not apply: the question is consolidation, and a one-day-old item can be a
+duplicate of last week's.
 
 - `duplicate_of #t` → `done`, `duplicate_of` in frontmatter, a `stale`
   triage row. Chains resolve to the terminal survivor against the verdicts
@@ -712,7 +734,7 @@ from `RETIRING`/`SURFACES`, per-item verdicts:
 - The **umbrella** the turn filed (tags `umbrella`, `spawned-by-triage`) is
   confirmed through `record_verdict` exactly like any confirmed item —
   `up_next`, `acceptance_clauses` on disk, ≤`MAX_CLAUSES` (6) — plus `members`. Two
-  folds minimum: one fold is a keep. No umbrella on disk turns every fold
+  folds minimum: one fold is a keep, and an umbrella over one item is a copy. No umbrella on disk turns every fold
   into a keep and records `umbrella_missing`.
 
 One `backlog_triage` row per member and one `backlog_group_triage` summary
@@ -726,13 +748,14 @@ umbrella #858, three kept. Kill switch
 
 **Implement stays one item per round**, so the gate, the review rung and
 the rollback unit are untouched. An umbrella is an ordinary confirmed item
-whose prompt carries `<member>` blocks and whose review contract appends the
+whose prompt carries `<member>` blocks (`_members_block`) and whose review
+contract appends the
 members as context under its own clauses. When it settles `met`,
 `close_settled_items` closes every still-open member with "landed via
 umbrella #u" and an `item_closed {by: umbrella}` event
 (`close_members_on_settle`); `not_met`, `deferred` and no-outcome leave them
-folded; `unnecessary` closes the umbrella but tags it `needs-human` with the
-members still folded — a wrong `unnecessary` on six findings is the one
+folded; `unnecessary` or `rejected` closes the umbrella but tags it
+`needs-human` with the members still folded — a wrong `unnecessary` on six findings is the one
 claim the loop should not make alone. `backlog.unfold_umbrella(id, reason)`
 is the human escape hatch; `unfold_spent_umbrellas` applies it to every open
 umbrella whose attempt is spent (§3.2d). Scorecard row 11 counts all of it; folds and
@@ -748,7 +771,8 @@ hold inline (up_next, not grouped, acceptance present, not human-only, not
 spent), extracted so the gate counts exactly what autocode would take — and
 `implement_pool_bound`: `max(implement_pool_floor, landed_items_trailing(7))`.
 The trailing count is **distinct items** with a settled code landing or an ok
-`vault_land`, not rows, because a re-offered item lands repeatedly. At or
+`vault_land`, not rows, because a re-offered item lands repeatedly (rows
+overcount about 3x, #487). At or
 above the bound the run was `skipped` with both numbers in the summary and no
 ledger row; group triage kept running, since it is net negative on open
 items. `implement_pool_floor` (20) and `spawn_cap` ride in the queue payload
@@ -820,7 +844,8 @@ reviews. Five changes, each with a switch.
   covers a `skipped` run that took milliseconds and a round shorter than the
   interval.
 - *The reaper's grace.* See §3.2 item 3. The grace existed for the observer's
-  ambient follow-up, which cannot come with `autocode.inner_voice: false`, and
+  ambient follow-up, which cannot come (with the observer off, and since IV R2
+  with it on — the grace is `abandon_grace_seconds` now, default 0), and
   27 of 136 turns ended with the round open. `_run_and_record` calls the
   reaper (off the event loop) after the `finished` row and in the
   `TurnTimeout` branch, passing the session that just ended so its own
@@ -892,7 +917,9 @@ marker (a landed `met` item owing human clauses is a person's), fewer than
 `RETRIAGE_CAP` (1) prior re-triages. It is moved to `draft`, tagged
 `re-triage`, loses `needs-human` and `review-disagreement`, and gets a
 `backlog_retriage` row with the refused round, the review's findings, its last
-per-clause verdicts and `unmet_twice`. That row is a **mark**:
+per-clause verdicts and `unmet_twice`; the refused `acceptance_clauses` come
+off the item (front matter wins in `acceptance_clauses_of`) and ride the row
+as `previous_clauses`. That row is a **mark**:
 `retriage_marks` feeds `triaged_ids`, `confirmed_verdicts` (and through it
 `held_confirmations`), `incomplete_counts`, `implement_outcomes`,
 `review_events_for_item`, `last_review_all_met` and the review rung's
@@ -906,6 +933,14 @@ human `reopen_item` now — it reset only the latest row, so a reopened item's
 first new round could already be past every re-offer cap. While a re-triage is
 still owed, a review disagreement is not announced as "needs you". Switch
 `workers.sources.autocode.retriage_spent`.
+
+**The reconciler's spent park reads the same two rules** (2026-09-24). It
+used to hand every spent item to `draft` + `needs-human` the moment the ledger
+said `spent`: an item `items_with_unfinished_rounds` names now stays
+`in_progress`, and one whose second life is owed
+(`backlog.second_life_owed`, not waiting on an open deferral target) goes to
+`draft` untagged. 95 of a week's 103 hand-offs had been undone, median 13 min;
+replayed, 72 are withheld and none that stuck.
 
 **What the first review of this section found** (same day, before landing).
 `spent` is not "over": `implement_outcomes` reads it for a turn in flight, for
@@ -923,8 +958,8 @@ read an empty detail and never fired; it runs after it. The enqueue asks the
 queue for a live round row (`WorkQueue.has_live`) before the two-second board
 walk. With the chamber, a wait that ends with `current.json` clear but no
 `settled` row for the commit waited on is a rollback, not a settle, and
-preflight rebases `--onto <live> <base>` so a reset-away base is never
-replayed. Smaller: dropped clause text is kept (row and item), the writers
+preflight rebases `--onto <live> <base>` (`W.rebase_onto(upstream=)`) so a
+reset-away base is never replayed. Smaller: dropped clause text is kept (row and item), the writers
 coerce string `tags`, a zombie child's marker reads dead, the reaper reaps
 nothing when it cannot read the session snapshot, and a YouTube filing merged
 into another item verifies.
@@ -943,7 +978,7 @@ string.
 ### 3.2e The sweep: switching gears to read the whole board once
 
 **The measurement (2026-09-15, 7 d of `promotions.jsonl` and `workers.db`).**
-Triage was not the slow part: 50–66 single runs a day at 216 s each, 73%
+The board held 560 open items. Triage was not the slow part: 50–66 single runs a day at 216 s each, 73%
 `confirmed`. Implement was: 178 rounds ended, 57 promoted (32%), the first
 review refusing 74%, 88 h of 168 h idle between implement turns, ~10.6
 distinct items landed a day (5 of them vault). Confirmations therefore
@@ -1073,6 +1108,18 @@ tail waits in the open. Four moves, each with a switch:
   `folded` row is not a verdict, so it goes back to `draft` untriaged where
   the sweep reads it, and it does not re-cluster (`group_triaged_ids`). An
   attempted, landing or landed umbrella is not touched.
+- *Umbrellas back on* (2026-09-16, `autotriage.form_umbrellas`). Measured
+  after the sweep (rounds since 09-11, hours from `round_start` to landing or
+  abort): singles landed 30 of 96 rounds and closed 0.51 items per
+  round-hour; umbrellas landed 5 of 21 and closed **1.47** per round-hour
+  (the umbrella plus 2–3 members each, rounds no longer); YouTube-digest
+  proposals landed 2 of 29, 0.13. Landing rate per round is the wrong gauge
+  for a grouping change — count items resolved per round-hour. Two things had
+  to change with the flag: a `keep` recorded while folding was off is not a
+  sameness verdict (`group_triaged_ids(binding_only=True)`,
+  `UMBRELLAS_OFF_SINCE`), or the sweep's runs would have struck 286 of 404
+  open drafts from clustering for good; and the `backlog_group_triage`
+  summary row now carries `form_umbrellas`.
 
 `round sweep-status` reports `board_health.sweep` (`unswept`, `swept`,
 `parked`, `worth`), worth × size over the open items and the last batches.
@@ -1104,12 +1151,100 @@ clause, 27 with every clause met and only a skip-pattern precheck blocking.
 | skip precheck | `review._skip_is_conditional` | conditional → advisory; unconditional → blocking |
 | external landing failure | `backlog._external_budget_left` | capped on its own count |
 
+Alan's call on 2026-09-17: 2 and 2 while the board is caught up, 1 and 1
+afterwards. What the rows above mean in practice:
+
+- **One number, three uses.** `max_inflight` sets the claim cap, the queue
+  rows offered (slot keys `autocode:round`, `autocode:round:1`; slot 0 keeps
+  the bare key so a row queued across the landing restart still coalesces),
+  and how many owned worktrees `_loop_is_free` tolerates. `workers.slots`
+  below rounds + triages + 1 queues a scheduled task behind them. A change
+  needs a backend restart.
+- **Landings queue rather than die.** A second landing used to die on
+  `LockHeld` with a gated round; it now waits on `round._land_lock` and
+  re-checks the chamber AFTER taking the lock, because the winner's promotion
+  was written while it waited. The suite and canary locks are
+  `gate-tests.lock` and `gate-canary.lock` in the state dir (the drill reuses
+  the canary ports): a port collision would have spent a review attempt on a
+  round that did nothing wrong.
+- **Phase 1 of a landing runs in `round.land` BEFORE the automod lock, never
+  inside `promote`.** `round start` takes the same lock, and the first
+  concurrent landing held it while waiting for a turn that then got
+  `LockHeld` from `automod_start`: #1204's landing sat 15 minutes on #1210's
+  turn, which gave up having done nothing (Lloyd's own #1215). What keeps a
+  NEW round from starting during the wait is `autocode._rounds_about_to_land`
+  — a passed `gate.json` or a live land marker on an open round — because
+  `current.json` does not read `landing` until the promoter is running;
+  #1204's gate passed at 17:03:34 and the free slot was claimed at 17:03:53.
+- **Rounds get 250 iterations, and are told so.** 26 of 176 finished turns in
+  the week died at `max_turns`; #1210 spent 151 in 23 minutes of steady
+  9-second steps with 37 minutes of clock left and no gate run. The wall
+  clock is the bound that means something (`agent.max_turns_ceiling_worker`
+  300). The pacing block had been formatted with the code default rather
+  than the payload's budget.
+- **A turn is credited with its own round.** `_round_opened_since` took the
+  latest `round_start` since the turn began; with two turns that is the
+  other one's, and a `finished` row naming it hands the reaper a live round.
+- **Triage claims what it reads.** A triage turn writes nothing on its item
+  until it ends, so a second run's selection would take the same item,
+  cluster or sweep batch. The claim is in memory because both runs live in
+  the backend (a restart that loses it kills the turns too); `triage_pool`,
+  `sweep_pool` and `select_cluster` honour it, and a cluster with any claimed
+  member is skipped whole, or what is left of it forms a second group over
+  the theme the first is filing an umbrella for. Selection spans several
+  awaits, so `_claiming` is held from the top of `execute` until the claim.
+
+Three things that cost #1199 and #1204 the night of 2026-09-17, fixed with it:
+
+- **A conditional skip is advisory.** 27 of the week's 134 review refusals
+  had every clause graded `met` and were refused by the `pytest.skip` /
+  skip-marker patterns alone — a `live_vault` test skipping without a vault,
+  a loader test skipping without libyaml — while the grader, reading the
+  same line, called it advisory. #1204 was refused three times that way at
+  five of five met. `skipif`, and a `pytest.skip(` whose nearest shallower
+  line opens a branch, go to the grader as advisory; a bare
+  `@pytest.mark.skip` or a skip as a test's first statement still blocks.
+- **The idle budget does not burn on a pool job.** #1204 then passed all
+  nine rungs and its landing gave up at 900 s with `harness_runs=1`:
+  scheduled task #74, ~37 min every night, finished 112 s later. With the
+  pool paused a job in flight is a bounded wait, so `idle_max_wait_s` counts
+  only time the pool is EMPTY and the backend still busy (a chat turn, a
+  leaked counter); `idle_hard_max_wait_s` (4500, above the longest worker
+  `max_duration_seconds`) bounds the whole wait. Those keys had been in
+  config.yaml and read by nothing.
+- **An external landing failure has its own count.** `external` was capped
+  on the item's attempts, which #1204's refusals had already used, so a
+  finished, graded change read as `spent` and went back to triage.
+  `_external_budget_left` caps a `land_failed` on the item's external landing
+  failures instead; a red tree is still capped on attempts.
+
 What a second round costs: the second landing waits for the first's
 observation window (the chamber), then rebases onto it and re-gates. So depth
 2 is a pipeline, not a doubling — the gain is the gate time and the idle time
 that now overlap another round's turn. Going back to 1 and 1 is two numbers
 in config.yaml (and `slots` back to 3) and a backend restart; nothing else
 changes shape. `tests/test_loop_depth.py` pins all of it.
+
+### 3.2f.1 A landing killed from outside is not a verdict (2026-09-17)
+
+#1179's turn ran `timeout 120 … -m scripts.automod.round land SM_…` in the
+foreground of its own Bash instead of calling `automod_land`. A landing waits
+for the backend to go idle and that turn was what kept it busy, so `timeout`
+sent SIGTERM at 120 s. Python's default SIGTERM skips `finally`: the land
+marker named a dead pid, nothing reached the ledger, the reaper closed the
+round one second after the turn ended, and a change with nine green rungs and
+a kept branch read as `spent`. Three layers, because each alone leaves the
+next incident open:
+
+| layer | where | rule |
+|---|---|---|
+| the Bash guard refuses it | `app/harness/service_control.py` (background sessions only) | `round land` in any spelling, `--dry-run` excepted, with a message that names `automod_land` and says to end the turn. A person's CLI landing is untouched. The old allow-list had `round gate && round land` in it |
+| a signalled landing says so | `round._die_loudly_on_signal` | SIGTERM/SIGHUP become `LandingKilled`, after writing an external `land_failed` with `killed_by_signal`; `land`'s `finally` then clears the marker |
+| gate passed, nothing landed, nothing recorded → `external` | `backlog.gate_passed_unlanded_rounds` | the round's last gate event is an ok `drill` (the ladder's last rung), with no promotion and no `land_failed`. Capped on its own count. The re-offer tells the round to resume the branch, gate, and call `automod_land`. Replayed over the live ledger it changes two verdicts, #1179 and an already-closed #1190 |
+
+`tests/test_landing_killed.py` pins all three, the second with a real child
+process and a real SIGTERM. (The handlers `round.land` installs are also why
+a test's process must get them back — §4.3.)
 
 ### 3.2g Between the gate and `main`: a finished change is not lost
 
@@ -1191,7 +1326,12 @@ one round per item and one turn per pool job, so every per-round invariant
 holds. Ledger: `slot`, `chain` and `continues_session` on `started`, `slot`,
 `chain`, `continuable` on `finished` — compare chained and fresh rounds on
 iterations to first gate and landing rate before widening it. The session
-keeps its first item's title.
+keeps its first item's title. Switch `workers.sources.autocode.continue_session`.
+
+**A change to who may call the aggregator must list its callers by
+`mcp_servers:` URL too.** #1053 missed `app/mcp_discovery.py`, which never
+names the port; the Tools page and one LIVE-service test went red on `main`
+the moment it landed, and its own gate could not see it.
 
 The reaper's 20-minute grace no longer follows `autocode.inner_voice`. It
 waited for the observer's post-turn follow-up, which R2 of the IV plan retired
@@ -1632,6 +1772,32 @@ which is also the natural home for dependency changes and guardian edits.
 
 **Friction worth knowing:** nightly jobs commit directly to live `main`, so
 `main` is written from two directions and the sandbox needs regular rebasing.
+
+### 3.3a A hand merge onto live `main` is followed by a restart, and is never refused
+
+Alan, 2026-09-17, #1218's second clause. `git merge --ff-only` moves the tree,
+not the process: the backend and the aggregator keep serving the commit they
+booted on until something restarts them. On 2026-09-17 a hand fast-forward at
+17:49Z left `/health.commit` at `88a3d89e` for 80 minutes while `main`
+carried the fix for the landing deadlock the loop was then sitting in, and
+#1218 was filed against a bug that was already fixed on disk. The rule:
+
+- One branch, squashed to ONE commit (§6.1), fast-forwarded with `git fetch`
+  + `git merge --ff-only`. Not `git pull --ff-only`: the production checkout
+  has `pull.rebase=true`, so a pull refuses on any dirty tree.
+- If the merge touches anything the backend or the aggregator imports, follow
+  it with `round restart` (`--only lloyd-backend` when `agent_mcp/` is
+  untouched) — or let the next landing's restart pick it up, and SAY which.
+  What runs fresh per invocation needs neither: `scripts/automod/gate.py`,
+  `promote.py`, `round.py`, the test suite, docs.
+- Afterwards `/health.commit` must equal `git rev-parse HEAD` (or differ only
+  by docs, tests and files neither service has loaded — `round bless` checks
+  exactly this). That equality is the check; a merge that "should be live" is
+  not.
+- It is a rule for people and for Claude Code, not a refusal in code: every
+  loop fix on 2026-09-17 reached production as a hand merge, several of them
+  to unblock the landing path itself, and a guard that refused merges outside
+  that path would have refused its own repair.
 
 ---
 
@@ -2655,6 +2821,37 @@ squash and 3, and stops: no window. The flush later does 2 and 4 once for the
 whole batch and writes the one record. An eager landing (a venv,
 `agent-services/`) still does all of it inline, carrying the batch.
 
+### 6.1 One commit on main per landing (2026-09-17)
+
+Until 2026-09-17 the promoter fast-forwarded a round's whole working history
+onto `main` — #1204 put eight commits there, most of them `test(#1204): …`
+fix-ups answering a review — and hand work from `~/lloyd-sandbox` arrived the
+same way. Alan's rule: work on a branch, squash when it is promoted.
+
+- **The loop** (`automod.landing.squash`, default on): `promote` calls
+  `W.squash_onto` after the LAST gate and before `merge --ff-only`. It is
+  `reset --soft <live HEAD>` plus one commit, and it is only kept when the new
+  commit's tree equals the gated HEAD's — otherwise the branch is reset back
+  and the round lands as it was gated. What was tested is what lands, byte
+  for byte; only its history differs. A one-commit round is left alone, a
+  branch not on top of live is left for the fast-forward to refuse, and
+  uncommitted edits in the worktree stop it (a soft reset would sweep them
+  in).
+- **The record is rewritten before the merge.** `current.json`'s `commit` is
+  what the guardian rolls back by and what `/health.commit` is verified
+  against, so it must name the squashed sha; `squashed_from` carries the
+  gated one. The review's ledger reuse is keyed on patch-id, which a squash
+  does not change.
+- **The working history is kept** at `refs/automod/rounds/<round>` — outside
+  `refs/heads`, so it shows in no branch list and gc never takes it — and the
+  child subjects ride in the squashed commit's body, with the round id and
+  deduplicated `Co-Authored-By` trailers. The subject is the round's title.
+- **Hand work**: one branch per change in the sandbox, squashed to one commit
+  before the `merge --ff-only` command is handed over (§3.3a).
+
+`tests/test_landing_squash.py` pins it, including a squash sabotaged into a
+different tree restoring the branch.
+
 **The observation window starts at step 4, not step 1.** The idle gate may
 legitimately wait fifteen minutes; a window started early would be mostly
 spent before the build existed. The record is written in state `landing` with
@@ -2864,6 +3061,27 @@ used to sit there too; since 2026-09-22 they live in `~/lloyd-data`,
 If rollback fails twice, services are left **stopped** and `BROKEN` is
 written. With no human in the loop, an honestly-dead system is safer than an
 autonomous agent running half-reverted code.
+
+**Which target: the promotion's own, never the LKG first.**
+`gstate.rollback_target(current)` prefers the `rollback_target` that
+`current.json` recorded at landing time, then its `parent`, and only then the
+LKG pointer. The LKG is a blunt fallback because it advances *only when a
+promotion settles*: two rollbacks in a row strand it wherever it last settled
+while HEAD keeps moving with ordinary human commits, so every rollback that
+does not settle makes the next one wider (the 26-commit incident, §9.1).
+`HEAD == last-known-good` never rolls back: everything broken with nothing
+promoted is infrastructure, not a bad change.
+
+**Which tape: the log cursor moves on every tick.** `Guardian.drain_logs()`
+runs at the top of `tick()`, above every early return, and `evaluate_errors`
+reads the buffer it fills. Errors are still *judged* only inside a window;
+what changed (after §9.1) is that the tape always moves. The paused path
+additionally **discards** its buffer rather than skipping it, because the
+promoter holds that pause across its own supervisord restart and the window
+for that very deploy opens seconds later. The log is
+`~/lloyd-data/logs/server.err`, never `server.log`: `basicConfig` writes to
+stderr, so `server.log` is uvicorn's access log and holds zero error-shaped
+lines.
 
 ---
 
@@ -3395,6 +3613,83 @@ whoever refroze next. The regeneration command is written in two places —
 `requirements.txt` lines 4-5 send a reader to that header. Both copies now pass
 a `--exclude` for every package `requirements-dev.txt` names, and the unfiltered
 form appears nowhere (`tests/test_automod_doc_claims.py` pins both).
+
+### 10.1 A worker turn may not restart, stop or hand-boot a service
+
+`app/harness/service_control.py`, the fourth check in
+`safety.check_bash_command`, so the harness hook and aggregator dispatch
+both. On 2026-09-17 an autocode turn, continued by hand after its round was
+reaped, ran `round restart --only agent-llm-primary` from Bash to fix a grader
+that had returned empty output: five minutes of no primary, every turn in
+flight killed including its own, and the round it had just reopened left with
+no owner.
+
+- Refused for **background sessions only** (a four-part id, or a `task:*`
+  child of one) and only for state-changing verbs: `supervisorctl status`,
+  `systemctl status` and `round status` stay allowed; a chat session is never
+  refused, since a person restarting the stack from Mission Control is the
+  intended operator.
+- Parsed like `protected_paths`, not pattern-matched
+  (`grep 'supervisorctl restart' CLAUDE.md` is an argument to grep), and read
+  inside `bash -c` / `python -c` one-liners.
+- **Hand-booting a launcher counts** (#1363, 2026-09-22):
+  `MOE_BACKEND=triton bash agent-services/bin/start-djev.sh` is that program's
+  own `command=` with a bespoke environment, so it is a production engine
+  restart on whatever card the engine holds — which is why the djev kernel
+  bisect (#1361) is an Alan-attended window and not a round. The guarded
+  launcher set is every `.sh` the supervisor's `conf.d` names, and the test
+  derives that corpus from the confs so the set cannot fall behind the tree
+  again the way it did (7 supervised launchers, 1 of them guarded, so a
+  hand-boot of the djev launcher was answered ALLOWED).
+- **`round land` from Bash is refused too** (§3.2f.1).
+
+`tests/test_service_control_guard.py` pins the incident command.
+
+That same continued turn opened `SM_20260917_003459` after its `finished` row
+was written; the reaper keys on implement rows, so nothing could close it and
+`_loop_is_free` read the loop as busy until a human aborted it. `round_start`
+now carries `opened_by` (`tool` from `automod_start` with the calling session,
+`cli` from the command line) and the reaper's second pass aborts a
+tool-opened round that no implement row names once its opener session is
+quiet and it is `ORPHAN_ROUND_MIN_AGE_SECONDS` (10 min) old. A person's CLI
+round, or a row with no `opened_by`, is never touched. Two prompt rules came
+from #1199 the same night: a review refusal with fewer than 25 iterations left
+is `automod_abort` (branch kept, the re-offer resumes with the findings), not a
+fix — #1199 spent two rounds of 151 iterations editing after a late refusal and
+calling `automod_land` on a refused gate; and triage may not write a clause
+pinning an invariant the tree does not already hold (its clause 3 demanded
+byte-identical files from a writer that round-trips YAML), so a "no
+regression" clause is worded against today's behaviour.
+
+### 10.2 The qmd fork is a second tree the gate never touches
+
+`~/lloyd/qmd` is a separate clone — upstream `tobi/qmd`, our branch `lloyd`
+pushed to `origin` = `alansrobotlab2/qmd` — that the outer repo ignores:
+`.gitignore` carries `/qmd/`, `git ls-files qmd` is empty, and there is no
+`.gitmodules`, so it is not a submodule. Consequence: it appears in no round's
+worktree, no diff bucket, no promotion record, and no rollback — the
+guardian's `stash push -u` / `reset --hard` / `clean -fd` all leave an ignored
+path standing. Production still answers the vector leg of retrieval from it:
+`agent-qmd-daemon` serves `~/lloyd/qmd/dist/cli/qmd.js` on :8181. So an edit
+to `qmd/src/**` made from a round crosses a boundary no rung watches: the gate
+never builds it and never runs the fork's own suite over it, the review diff
+cannot see it, and a rollback cannot revert it.
+
+**A round must not edit `qmd/**`; fork changes are human-landed**: the fork's
+own build, then the fork's own suite, then commit on branch `lloyd`, then push
+to `origin`. `python -m scripts.qmd_fork_landing` answers whether a fork sha is
+in that state: it runs `node scripts/build.mjs` and `node scripts/test-all.mjs`
+in the fork, prints its branch and HEAD sha, and exits non-zero on a failing
+step, a dirty working tree, or commits its upstream never received
+(`tests/test_qmd_fork_landing.py` pins each). It checks git state *before* the
+steps, because the build writes `dist/` — the directory the daemon serves — so
+a dirty fork is refused without ever being compiled into it, and it names the
+`node` and `bun` it resolved before any step output, because the fork's suite
+spawns `bun` by bare name (`test-all.mjs:37`) and a missing bun is an
+environment verdict, not a red fork. Teaching the gate to build and test the
+fork as a second tree — fork sha in the promotion record, a revert target for
+the guardian — is #854's route (a), a human decision, and not implemented.
+[[qmd]] carries the fork's own side of this.
 
 ---
 

@@ -14,8 +14,10 @@ turn against a local OpenAI-compatible engine, dispatches tool calls through
 the MCP aggregator, and yields normalised events that the chat router, the
 worker pool and the autonomy scheduler all consume the same way.
 
-`CLAUDE.md` § "Agent Harness" carries the operational detail and the scar
-tissue; this doc is the map.
+This doc is the map and, since 2026-09-25, the long version too: `CLAUDE.md`
+§ "Agent Harness" keeps one line per rule and points here, and the
+mechanism, the incidents and the measurements are under "The long versions"
+below.
 
 ## Modules
 
@@ -196,6 +198,433 @@ The harness also carries its own unit suite *inside the package*, at
 `test_tool_search.py`, `test_loop_tool_search.py`, `test_harness_unit.py`.
 Both directories run under `pytest`; a change to `loop.py` usually breaks
 something in the second one first.
+
+## The long versions (moved from CLAUDE.md, 2026-09-25)
+
+CLAUDE.md keeps one line and a pointer per rule; the mechanism, the incidents
+and the measurements behind each one live here.
+
+### The event stream
+
+`run_query(messages: list[dict], options: RunOptions) -> AsyncIterator[NormalizedEvent]`.
+The constructors in `app/harness/events.py` are the authority, and these keys
+are not the OpenAI wire names:
+
+- `system` — `{type, session_id, model}` — turn opened.
+- `text_delta` — `{type, text}` — streaming text chunk.
+- `thinking_delta` — `{type, text}` — reasoning content chunk.
+- `thinking_done` — `{type, text, duration_ms}` — reasoning phase complete.
+  `duration_ms` spans the first reasoning chunk to the last, not the
+  iteration's wall clock, which also covers prefill and the answer written
+  afterwards. It reaches the chat's collapsed thinking panel as `reasoning_ms`
+  on that phase's own `role="thinking"` row (see "The thinking trace" below),
+  so the header reads the same on reload as it did live — the event lands
+  *after* that iteration's text, so the browser opens the row on the first
+  *delta* and measures the timestamps itself until the real number arrives.
+- `tool_call` — `{type, call_id, name, args_json, args_dict, summary}` — tool
+  invocation. `summary` is the model's own one-liner for the transcript; it is
+  absent from `args_dict` and kept in `args_json` (see "Tool-call summaries").
+- `tool_result` — `{type, call_id, name, content, is_error}` (+ `duration_ms`,
+  `handshake_ms`, `error_class` when known, P11).
+- `assistant_message` — `{type, text, tool_calls, thinking, usage,
+  duration_ms, iteration, finish_reason, ttft_ms, request_ms, cache_ratio}` —
+  one agent-loop iteration. `usage` and `duration_ms` are per-iteration, not
+  per-turn.
+- `result` — `{type, stop_reason, usage, num_turns, duration_ms,
+  response_text}` — turn complete.
+- `stream_raw` — `{type, raw, error}` — raw SSE line on parse failure.
+
+### The position-0 rule (mid-turn state)
+
+The system prompt is built once per turn and inserted at index 0; the loop
+only ever appends. That keeps the whole prompt prefix KV-cached across every
+iteration, so a 160k-token turn re-prefills nothing. The cost is that anything
+rendered into the system prompt — `<active_todos>`, the plan, the goal — is
+frozen at turn start. **Never refresh the system prompt mid-turn**; re-anchor
+by appending instead (`RunOptions.state_anchor`, mirroring
+`notification_drain`). A turn that creates its own todo list would otherwise
+never see it again — see `app/routers/messages.py::_build_state_anchor`.
+Across turns, P1's `harness.prompt_layout` switches move that state and memory
+edits to the user message's tail (§P1 below).
+
+### Preserved thinking and the two reasoning keys
+
+Assistant messages carry their reasoning back into history under **both**
+`reasoning` and `reasoning_content`, bounded to
+`harness.preserve_thinking_iterations` recent iterations. Qwen3.8-Flash-Next
+renders it into each prior turn's `<think>` block; dropping it showed the model
+turn after turn in which it had apparently thought nothing. A/B it with
+`eval/run_preserve_thinking_eval.py` before changing the window.
+
+The two spellings are not redundant — the engines disagree, and each one
+ignores the other's field *silently*:
+
+| Engine | Reads | Ignores |
+|---|---|---|
+| vLLM 0.28 (primary) | `reasoning` | `reasoning_content` |
+| llama.cpp (secondary, Qwen3.6) | `reasoning_content` | `reasoning` |
+
+vLLM accepts both on the wire but only populates the template from
+`reasoning` (`entrypoints/chat_utils.py:2000`); Qwen3.6's own
+`chat_template.jinja:91` reads `reasoning_content` and never looks at
+`reasoning`. Sending one spelling preserves thinking on one engine and quietly
+discards it on the other, which is the exact failure this mechanism exists to
+prevent. The builder is `_assistant_message_for_history`. `_prune_reasoning`
+must drop the pair together or the token bound stops bounding anything.
+`tests/test_preserved_thinking.py` pins both halves; llama.cpp's
+`POST /apply-template` will show you the rendered prompt if you need to
+re-verify.
+
+Scope is **intra-turn only**: history is rebuilt from the session JSON on each
+user turn (`load_and_compact_session`), which does not carry per-iteration
+reasoning, so the window resets at every turn boundary. That is where the cost
+was anyway — the motivating turn ran 52 iterations inside one turn.
+
+### An empty tool pool is the worst failure in the system
+
+`client.stream_chat` omits `tools` from the request when the list is falsy, so
+vLLM never engages the `qwen3_xml` tool parser. The model still reads its
+whole toolbox in the system prompt, reasons its way to "call Bash", and then
+has no channel to emit a tool call on. What comes out is an empty message, or
+the call written as prose (`{"name":"Bash","input":...}` — an Anthropic shape
+that appears nowhere in this repo), or invented tool *output*. Nothing in the
+stream says "no tools"; it reads exactly like the model having forgotten how
+to use them, and Inner Voice's only lever — injecting more text — cannot help,
+because the intent was never missing, the capability was.
+
+`MCPPool.open()` used to log a warning, `continue`, and set `_opened = True`
+even when its only server failed discovery. `get_or_open_pool` caches
+process-wide and short-circuits on `_opened`, so one transient error (the
+aggregator restarting) pinned an empty pool for the life of the backend.
+`open()` now raises `ToolDiscoveryError` when discovery yields nothing, which
+makes `get_or_open_pool`'s **existing** eviction path fire so the next caller
+re-discovers — the recovery already existed, nothing ever failed loudly enough
+to trigger it. A *partial* failure still degrades gracefully; that is what the
+`continue` is for. `run_query` refuses a turn whose pool advertised nothing.
+
+Two things this cost on 2026-09-06, both invisible as tool failures: a
+30-minute chat where Lloyd narrated `sqlite3` commands instead of running
+them, and four `domain-research` jobs killed at the 600s cap — a toolless
+research job cannot research, so it spins until the timer. The same job
+finished in 17s once tools came back. `tests/test_mcp_pool_discovery_failure.py`
+pins it. The tell in the log is `no server claims tool '_BackgroundTaskDrain'`
+firing right after `mcp_pool: failed to discover` — the drain shares the pool,
+so it is the cheapest early warning that every turn has gone toolless.
+
+### Stream stalls
+
+`harness.stream_chunk_timeout_seconds` bounds the gap *between* SSE lines once
+the engine has started producing, raising `StreamStalledError`. It
+deliberately does **not** bound time-to-first-line: prefill emits no bytes,
+and the secondary runs llama.cpp with `--parallel 1`, so a queued request
+legitimately sits silent for as long as the one ahead of it.
+`client.stream_chat` sets httpx `read=None`, so without this a wedged engine
+mid-generation hangs the turn until the client gives up. The key existed from
+the start and was read by nothing until 2026-09-06. A broken stream is retried
+once while no tool-call delta arrived, else ends `stream_error` (§D7,
+`harness.stream_retry`). A turn that raises or is cancelled still books its
+tokens, once, from the running totals (§D12).
+
+### Concurrent tool dispatch (read-only batches only)
+
+`harness.parallel_tool_calls.enabled` lets one iteration's tool calls overlap.
+A batch qualifies only when **every** call in it is annotated `readOnlyHint`
+(or is a parse error, or ToolSearch). One `Bash`, `Edit`, `Write` or mutating
+MCP tool makes the whole batch sequential, byte-for-byte the old path.
+
+Read-only-only is not caution, it is the only classification available that
+is not a guess. `mcp_pool._list_tools` carries `annotations` through, so
+qualification comes from the server's own hint rather than a second private
+list of names — the pattern `agent_mcp/annotations.py` was written to replace.
+A server that sets no hints qualifies nothing, which is that file's contract.
+`Bash(cat …)` serialises its batch: classifying shell commands as read-only is
+the guessing game the safety hook deliberately refuses to play.
+
+Since P13.3 this is ONE path for every batch (`loop._dispatch_batch`),
+concurrency 1 unless the batch qualifies; at 1 it is the old sequential loop
+exactly (§P13.1-3). Three phases, and each one exists for a reason:
+
+- **Phase 1 runs in wire order and stays sequential.** `_pre_dispatch` covers
+  the parse error, the disabled-tool gate, the ToolSearch intercept (which
+  mutates the shared `LoadedToolSet`) and the hook deny. Every `tool_call`
+  event is yielded here, which is why both frames reach the UI before the
+  first result. (Since P13.3 a batch wider than the semaphore announces a call
+  when it is admitted, not all up front — §P13.1-3.)
+- **Phase 2 overlaps only `_execute_tool_call`,** under a
+  `Semaphore(max_concurrency)`. No `TaskGroup`: it cancels its siblings on the
+  first exception, and one tool failing is a `tool_result`, not a reason to
+  abandon the batch. Results are yielded as they land — the frontend and
+  `messages.py` key on `call_id` — and a `finally` cancels outstanding tasks
+  if the generator is closed mid-batch.
+- **Phase 3 writes history in wire order** regardless of who finished first,
+  so the replayed conversation matches the assistant message's own
+  `tool_calls` array.
+
+Caption bookkeeping also runs in wire order (`_account_captions`): the ratchet
+is about the *first miss*, and the first call to come back is arbitrary.
+
+`MCPPool._invoke` takes a per-server lock on the stdio path — one
+`ClientSession` over one pair of pipes, and two concurrent `call_tool`s
+interleave their JSON-RPC frames. The HTTP path opens a session per call and
+is unlocked. The lock map outlives `_reopen`.
+
+Subagents read the same config keys (`builtin_task`), since a Task is the
+fan-out case this exists for and constructs its own `RunOptions`.
+
+Ships **off**. Soak checklist before flipping it: `mcp_pool:` warnings,
+`[iv.observer] inject` placement in transcripts, and
+`harness.empty_terminal_iteration` counts.
+
+`lloyd_rpc` (P9, ships off, `harness.rpc.enabled`) is the other way a turn
+makes several read-only calls for one engine round trip — §P9.
+
+### Tool naming
+
+Built-in tools (Bash, Read, Write, Edit, Grep, Glob, Task) are advertised to
+vLLM under bare names. This keeps session JSON and SOUL.md deny rules working
+unchanged. Disabled tools are enforced via `RunOptions.disallowed_tools` as
+`mcp__<server>__<tool>`; the bare-name aliasing in `tool_schema.py` blocks
+both the bare and namespaced form at advertise and dispatch time, so
+disabling `Bash` via `mcp_servers.lloyd-mcp.disabled_tools: [Bash]` blocks
+the model from calling either `Bash` or `mcp__lloyd-mcp__Bash`
+([[tools]] §8 has the #727 dispatch-side normalisation).
+
+### Tool-call summaries
+
+Every advertised tool carries one extra string parameter, `summary`: a short
+phrase the model writes saying what the call is doing ("Reading server.py",
+"Restarting the backend"). The collapsed tool bubble in the chat and Inner
+Voice transcripts renders it as **`ToolName`** — summary, which is the whole
+point — a wall of `Bash`, `Bash`, `Read`, `Bash` says nothing about what a
+50-iteration turn actually did.
+
+It is display metadata riding in the one channel a tool call has — its
+arguments — which makes *where it is removed* the whole design:
+
+- **`tool_schema.add_summary_param`** injects it and returns *which tools got
+  it*. That return value is load-bearing: `session_inject_context` already has
+  a required top-level `summary` of its own (1 of the 129 tools advertised
+  when this landed), and popping that one before dispatch would delete a real
+  argument. Injection **replaces** the `parameters` object rather than
+  mutating it — it arrives as the very `inputSchema` dict held in
+  `MCPPool.discovered`, which is process-shared for the life of the pool, so
+  an in-place write would make the *next* turn read `summary` back as the
+  tool's own parameter, skip injection, and stop stripping.
+- **`loop._commit_tool_calls`** lifts the value onto the tool call's
+  `_summary` and pops it from `_args_dict` — and *only* from there. The two
+  records of a call deliberately disagree: `_args_dict` is what reaches MCP
+  and the tool's handler — nothing validates `args` against the inputSchema,
+  so a leaked `summary` is not rejected — an unknown key is handed to the
+  handler (and read as a real argument by a tool that has one), while
+  `arguments` is what gets replayed to the engine and is **the only record of
+  this call the model will ever see again**. **Stripping the caption from
+  `arguments` too is what broke the first cut of this**, and it broke it
+  invisibly: session `20260907_184351_ivec8d` shows the first call of each
+  tool name carrying a summary and every repeat carrying none — 5/5 vs 0/31.
+  The schema said `required`; the model's own most recent example of that
+  tool said otherwise, and the example won. A few-shot channel you are
+  writing into cannot be edited for brevity. It costs ~10 tokens per
+  historical tool call to keep, which is the price of the field working past
+  its first use.
+- **`summary` is injected first** in `properties` and in `required`. Property
+  order is the order the schema is shown to the model and roughly the order it
+  emits arguments in, so a caption placed after Bash's `command` is one
+  written after a 40-line heredoc.
+- `messages.py` persists it on the tool call (omitted when empty, so every
+  pre-existing session reads the same), puts it on the `tool_start` SSE frame
+  so the live bubble has it before the result lands, and prefers it over
+  `tool_activity_detail` for the dashboard's live activity line.
+- The transcript's expanded **Arguments** block hides the key, because that
+  block shows what was *dispatched* and the header already shows the caption.
+  It is dropped only when the header is rendering it, so a tool with a real
+  `summary` parameter of its own still shows it there.
+
+The Inner Voice observer reads the caption in two of its three tool-call
+inputs, and the third exclusion is deliberate:
+
+- **`build_assistant_message_summary`** renders
+  `Bash — Checking root disk usage` per call instead of
+  `['Bash','Bash','Bash']`. The observer's job is judging whether the primary
+  is still on the user's request, and a wall of identical names is the least
+  informative possible input for that. `observer_prompt._tool_call_labels`
+  accepts all three shapes a caption arrives in — `_summary` (live harness
+  event), `summary` (rebuilt from session JSON), and `summary` inside the raw
+  `arguments` string.
+- **`build_pretool_event_summary`** states it before the arguments: the
+  caption is what the primary *said* it was doing and the arguments are what
+  it actually did, so the two disagreeing is the signal. (This path is dormant
+  while `pretool_llm_enabled: false`.)
+- **`guards.tool_call_signature` must never see it.** `exact` is the full
+  `key=value` rendering for every tool but Bash, so a caption in the args
+  makes two byte-identical calls compare as different — and rewording is
+  exactly what a looping model does. This is why `fire_pre_tool_use` carries
+  the caption as its own `tool_summary` key rather than merging it into
+  `tool_input`: `tool_input` is what safety matching and the repetition guard
+  read, and it stays clean. `tests/test_tool_call_summaries.py` pins all three.
+
+**No tool may ask for the caption twice.** `Bash` used to declare a
+`description` argument — "Short human-readable description (informational
+only)" — and `Task` a `description`, "Short label for the task
+(informational)". Both restated, one key later in the same object, exactly
+what the injected `summary` asks for, and a model answers that question once.
+On 2026-09-07 it began answering into the wrong half: sessions
+`20260907_235236_backlogs_a8fd` and `20260908_000804_backlogi_3828` emitted
+`{"command": ..., "description": "check"}` for 49 consecutive Bash calls with
+no `summary` on any of them, and the chat rendered 49 bare `Bash` rows.
+**Nothing errored**, because `description` was a real Bash argument — the
+caption was not dropped, it was filed where only a background task would read
+it.
+
+What makes an ambiguous schema expensive here is the ratchet described above:
+`arguments` is replayed as history, so the first miss becomes the model's own
+most recent example of calling that tool and the session locks into it.
+Across the 16 sessions since the feature landed, every one whose *first* Bash
+call carried a summary stayed above 95%; both that missed stayed below 26%.
+One field decides a whole session, which is why the fix is to delete the
+competing field rather than to reword it.
+
+The two tools still need their label — a background-task row and a subagent
+row are both read by a human later — so the caption travels the way the
+session id and the calling turn's model already do: in the request's `_meta`,
+as `lloyd/summary`, lifted into `_task_registry.current_call_summary` by
+`agent_mcp/main.py::call_tool`. It must not be handed back through `args`
+instead: that is what reaches the tool's handler unvalidated, and it is what
+the repetition guard hashes. `tests/test_tool_call_summaries.py` pins that
+Bash and Task advertise no second caption field, and that the caption reaches
+MCP through `_meta` only.
+
+`harness.tool_call_summaries: false` removes the parameter from every schema;
+the UI falls back to the bare tool name. Worth reaching for if a model ever
+starts spending its tool-call budget on the caption.
+
+### The thinking trace
+
+The harness has always emitted one `thinking_done` per agent-loop iteration.
+The router kept almost none of them: a single `accumulated_thinking` buffer
+held the current phase, each new phase **replaced** it (`messages.py`, not
+`+=`), and it only reached disk on an iteration that produced both tool calls
+*and* non-empty text. A tool-only iteration — the common shape — never
+flushed, so a forty-iteration turn persisted exactly one reasoning phase, the
+last one, and the chat could only ever show that. On the verification turn for
+this feature the first phase was the one that chose both tool calls and wrote
+no text at all: precisely what used to be discarded.
+
+Each phase is now its own message entry, `role="thinking"`, built by
+`app/routers/_messages_thinking.py`:
+
+```json
+{"id": "think_<turn>_<seq>", "role": "thinking", "content": [],
+ "reasoning": "…", "reasoning_ms": 11800,
+ "thinking": {"chars": 3201, "iteration": 7, "turn_id": "…"}}
+```
+
+- **Ordering is free, and that is why it is written on `thinking_done`.** The
+  loop yields that event before `_commit_tool_calls` and before the
+  `assistant_message` that flushes a text segment, so appending there lands
+  the thought ahead of the tool and text rows it produced. No sorting logic;
+  Inner Voice's timeline sorts on `timestamp` and slots it in for free.
+- **The role is what keeps reasoning out of the transcripts, and it is the
+  only thing that does.** Every producer generated from a session log branches
+  on role first — the vault exporter and `_build_capture_transcript` in
+  `app/post_capture.py`, `session_titles.build_transcript`, the
+  `scripts/memory/*` renderers, `scripts/extract-trajectories.py`,
+  `session_recall`'s corpus — and none has a `"thinking"` case. Measured, not
+  assumed: change the role to `assistant` and six of the seven leak; leave the
+  role alone and filling `content` leaks from none. `content` stays empty as a
+  *second* layer, against a future producer that walks content without
+  checking role. Do not read the empty content as the reason this works and
+  conclude the role is free to change. `tests/test_thinking_trace_transcripts.py`
+  pins both directions.
+- **It never re-enters the prompt.** `thinking` is not one of compaction's
+  conversation roles, so the rows are dropped before
+  `_prepare_messages_for_harness` is reached. Preserved thinking
+  (`loop._assistant_message_for_history`) is a separate, in-flight mechanism
+  and is untouched.
+- **A hard compaction discards the trace**, exactly as it already discards
+  `subliminal` rows — the rewrite sets `data["messages"]` to the
+  conversation-only set. The event log's `brain1.thinking_block_emitted` stays
+  the durable record. Called out at that site so it does not read as a bug.
+- **`accumulated_thinking` is cleared when a phase is flushed**, so what
+  remains at the cancel and error paths is only a phase that streamed deltas
+  and never reached `thinking_done` — which is exactly what those paths should
+  still attach to their own message. Nothing is lost to a cancel
+  mid-reasoning, and no phase is written twice.
+- **`seq` rides on the SSE frame only when the trace is on.** That is how the
+  browser knows a row is going to be persisted for this phase; without it, it
+  withdraws its provisional row and falls back to hanging the reasoning off
+  the assistant bubble. The kill switch therefore changes live rendering and
+  reload rendering together rather than leaving them disagreeing.
+
+The UI is one component — `ChatPanel`'s `ThinkingRow`, which the chat, the
+right-hand chat sidebar and the Inner Voice timeline all mount, so none of
+them needed its own work. The row must be handled **above** `MessageRow`'s
+content guard: it has no content blocks and would be dropped before it
+rendered. It opens on the first `thinking_delta` and ticks locally, because
+`thinking_done` arrives after the iteration's text and a row created there
+would sort below the answer it preceded; `makeThinkingTracker` holds that
+bookkeeping in one place because the file's two stream handlers are
+near-duplicates and drift between them is the standing hazard there.
+
+`harness.thinking_trace.enabled: false` restores the old behaviour.
+
+### Structured verdicts (the finalizer)
+
+Worker verdicts used to be parsed out of `VERDICT:` / `SURFACE:` lines by
+regex. That works until a turn words it slightly differently, and then a
+`confirmed` is recorded as `unverifiable` and an item is retired for a
+formatting reason.
+
+`RunOptions.final_schema` asks the loop for one extra completion after the
+turn ends, restating its conclusion as a JSON object
+(`app/harness/finalizer.py`). Four things decide whether it is worth having:
+
+- **The extra request must send the identical `tools` array with
+  `tool_choice: "none"`.** Qwen renders the tools array inside the system
+  message, so dropping it diverges the rendered prompt at token 41 of 1536 —
+  2.7% in — and everything after that is a cache miss. Measured in the
+  production shape (four tools-bearing iterations on a 180k conversation, then
+  one finalizer): keeping tools reuses 177,600 of 180,068 tokens and takes
+  1.19 s; dropping them reuses nothing and takes **25.00 s**. 21x, for one
+  object. `eval/measurements/finalizer-2026-09-08.md` has the runs, and the
+  two ways to measure this wrongly — `cached_tokens` reads 0 for the first two
+  requests of any prefix on this engine, and an alternating A/B ends up
+  caching both shapes, which is not what production does.
+- **It is skipped unless `stop_reason` is `stop`/`end_turn`.** Forcing a
+  verdict out of a turn that died at `max_turns` recreates the failure
+  `INCOMPLETE` was added to fix. The reason is reported as `structured_error`,
+  so a caller can tell "the turn never reached a verdict" from "the model
+  refused to produce one".
+- **The regex stays.** The finalizer can be skipped or can fail, and a verdict
+  pipeline with no fallback turns a transient engine error into a lost triage.
+  `parse_verdict(text, structured)` prefers the object when its verdict is
+  known and records `source`; the ledger carries `verdict_source` and
+  `structured_error` so a finalizer that quietly stopped working does not look
+  exactly like one that is working.
+- **The budget is the whole completion, thinking included.** The grammar
+  applies only after `</think>`, so reasoning tokens are spent before the
+  object starts. At `finalizer_max_tokens: 1024`, 14 of the first 34 triage
+  verdicts (41%) came back as well-formed JSON cut mid-string inside
+  `check`/`evidence` — 13 of them `confirmed`, the verbose verdicts that
+  matter — and every one was recorded `output is not JSON`, the same message a
+  model writing prose would get. The default is 4096 now, `finalizer.py` names
+  a truncation as one (`finish_reason: length`, or an unclosed `{`), and the
+  ledger carries `finalizer_tokens` per verdict so the budget is a number
+  beside the failure rather than a regex rate to be inferred.
+
+`TRIAGE_VERDICT_SCHEMA` is built from `VERDICTS`/`SURFACES` rather than
+restated — one list, or a new verdict lands in the grammar and not the
+validator. It carries **no `maxLength`**: that is enforced by the guided
+decoder, so the model would stop mid-sentence at the limit rather than write
+something shorter. The clamps stay in Python, after the fact.
+
+The router honours `final_schema` only for a session whose platform is in
+`sessions_io.NON_USER_PLATFORMS`. A chat turn that quietly ran a second
+completion under a grammar would be paying tokens for something nobody reads.
+
+Every triage turn asks for the object; its kill switch
+(`autotriage.structured_verdict`) was retired on 2026-09-24 with
+`close_on_settle`, `reopen_reverted` and `unfold_spent_umbrellas`, all on
+since landing.
 
 ## Review 2026-09-24
 

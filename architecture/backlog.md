@@ -103,7 +103,8 @@ nothing migrated what was already on disk.
   there is nothing on disk to correct.
 
 `backlog.rescue_off_vocabulary` walks by **board** rather than by status (it
-uses `all_items`, the one reader that ignores `OPEN_STATUSES`) and runs at the
+uses `all_items`, the one reader that ignores `OPEN_STATUSES`; an Alfie item
+with an unusual status is not this loop's to rewrite) and runs at the
 top of every reconcile, before the main pass, so a rescued item is judged in
 that same pass. The mapping is deliberately lopsided: only the legacy words
 already known to be terminal reach `done`, and everything else becomes
@@ -232,7 +233,8 @@ rule that expired drafts would switch the board off rather than bound it.
 tags `spawned-by-autocode` + `blocker`) and nothing read that tag but
 write-time dedupe, so a blocker was quarantined — no triage, no contract, never
 `up_next` — and then expired, orphaning the clause. On 2026-09-14, 13 of 101
-quarantined drafts were blockers. `live_blockers(ledger)` returns
+quarantined drafts were blockers, four of them in front of items already in
+`up_next`. `live_blockers(ledger)` returns
 `{blocker_id: blocked_id}` for open, un-grouped blockers whose blocked item is
 open or cannot be named; the target is the item's own "Blocks #N" (title, then
 first body line), else the `backlog_implement` row whose `spawned` names it,
@@ -252,7 +254,9 @@ A live blocker:
 
 Once the blocked item closes the blocker is an ordinary self-spawn again,
 quarantined and expirable — deliberately not closed, since the finding can be
-real without the item that surfaced it. `tests/test_backlog_blockers.py`.
+real without the item that surfaced it (#987, a bench with live Bash, was
+filed as a blocker of a retrieval item). `untriaged` in `board_health`'s
+`live_blockers` should drain to 0. `tests/test_backlog_blockers.py`.
 
 `triage_pool` returns the held count alongside the candidates, so a pass with
 nothing to do can say *which* nothing it means. "Every open backlog item has
@@ -404,6 +408,9 @@ that id. A human's write is only ever advised (`similar`). `umbrella` and
 merge or not, is logged to `~/.local/state/lloyd-automod/dedupe.jsonl` so the
 threshold can be tuned from data rather than from the three points measured
 when it landed.
+`tests/conftest.py::_isolate_backlog_dedupe` keeps every test out of the live
+`dedupe.jsonl` and off the qmd daemon: before it, 656 of the file's 1004 rows
+were fixtures.
 
 **Both rules judge open items only, and a closed match is refused, not merged
 or re-filed** (#1051). Appending to a `done` item hides the finding from every

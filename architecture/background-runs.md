@@ -286,7 +286,8 @@ and runs from cron with no venv), and the same test pins that the two agree.
 
 ### The id shape is a fast path — and in the chat listings, it decides
 
-A background id has four underscore-separated parts; a chat's has three
+A background id has four underscore-separated parts
+(`20260910_120001_autocode_9f2a`); a chat's has three
 (`<ts>_<6hex>` from the chat path, `<ts>_iv<4hex>` from `POST /api/sessions/create`).
 `sessions_io.is_background_session_name` tells them apart without opening the
 file, and at ~300 background sessions a day against ~10 chats (measured over
@@ -430,20 +431,26 @@ override with a literal reads as broken the one time somebody uses it.
 
 | source | `inner_voice` | why |
 |---|---|---|
-| `autocode` | false | rewrites production — was `true`, see below |
-| `autotriage` | false | judges items the loop will then implement |
+| `autocode` | **true** since 2026-09-25 | rewrites production — was `true`, off 2026-09-12, back on with the worker harms fixed inside Inner Voice |
+| `autotriage` | **true** since 2026-09-25 | judges items the loop will then implement; back on with `autocode` |
 | `youtube-digest` | false | evaluates untrusted transcripts and files backlog items from them |
 | `deep-research` | false | a human reads the note before anything acts on it |
 | `arch-review` | false | reviews docs and edits the one doc it was given (`f80c9d0`) |
 | `board-steward` | false | moves backlog statuses (`6d59b7c`); unset until #1015, so it was observed |
 
-**All six are off** — five since 2026-09-12 (`97a86cc`, cut 1 of
-senses-not-supervision), `board-steward` since #1015 — pinned by
+**All six were off** from 2026-09-12 (`97a86cc`, cut 1 of
+senses-not-supervision; `board-steward` since #1015), pinned by
 `tests/test_background_inner_voice.py`:
 the observer's measured effect on unattended turns was negative — round 874
 abandoned at iteration 38 on an invented premise, sixteen false repetition
 fires in one day — and what it provided there is now done by the context
-anchors and the gate. Recording is untouched: all of these are still real
+anchors and the gate. **Since 2026-09-25 `autocode` and `autotriage` are on
+again** (Alan: fix it inside Inner Voice, don't switch it off): every worker
+review carries a PLATFORM/round note and a rail rewrites any "deliver the
+report" inject — [[inner-voice]] § "Workers: back on for autocode and
+autotriage". The override file wins over config.yaml for this key. The
+deterministic turn guards (`app/harness/turn_guards.py`) run on every turn
+regardless of the switch. Recording is untouched: all of these are still real
 sessions in the Background tab.
 
 These are the sources that call `run_prompt_in_session`, and only a turn that
@@ -567,11 +574,14 @@ installs:
 because a gate that guesses wrong denies real work. What it gates is email,
 calendar, contacts, tasks and `autonomy_delete_task`.
 
-**It is therefore not vault protection.** Only `app/harness/safety.py`'s
-destructive-Bash patterns stand between an unattended turn and `rm -rf`, and
-auditing those against `rm -rf ~/obsidian`, `tar … && rm -rf` chains and any
-non-Bash deletion path is the open follow-up from the incident that started
-this.
+**It is therefore not vault protection.** When this was written only
+`app/harness/safety.py`'s destructive-Bash patterns stood between an
+unattended turn and `rm -rf`, and auditing them was the open follow-up. That
+follow-up closed on 2026-09-14: vault protection is now four layers below any
+hook — the bench/eval tool sandbox, `app/harness/protected_paths.py` enforced
+at the aggregator's dispatch as well as the hook, the guardian's
+`vaultwatch.py` tripwire, and 15-minute snapshots — [[vault-protection]] is the
+long version. The grant gate is still none of them.
 
 ---
 

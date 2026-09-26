@@ -269,6 +269,21 @@ reason. supervisorctl is still the tool for everything else, and is what that
 command wraps. Never restart the primary twice in quick succession
 ([[vllm]] §8).
 
+A leg it stopped is always started again. Ctrl-C between the stop and the
+start is held until the program is back (2026-09-24, when one interrupt left
+the backend STOPPED), any failure is a `restart_failed` ledger row naming what
+was `left_stopped`, and the idle wait refuses at once on a backend supervisord
+holds stopped (start it, or `--skip-idle`) instead of waiting out its budget.
+The `agent-llm-primary` leg (moved from CLAUDE.md, 2026-09-25): it stops the
+engine, waits on the host-RAM floor above for the previous boot's 95.37 GiB
+BF16 n-gram table to be released, runs `supervisorctl reread` and `update` so
+an edited `environment=` in `agent-llm-primary.conf` is picked up, starts it,
+and waits up to 20 minutes for `/health` while refreshing the lease. Every
+turn in flight dies with the engine and is re-offered as `infra`, so do it
+once, with the reason on the ledger. The `MemAvailable` floors cannot prevent
+a kill — a boot consumes what they measure — they only confirm the last
+engine's table was released.
+
 ### `startsecs` is a tier, not a formality
 
 supervisord marks a program RUNNING once `startsecs` elapses, and after that
@@ -414,20 +429,33 @@ that directory or it will not exist in the pinned snapshot.
   reach the loop — so spending the venv buys the presence EQ (scipy) at no
   cost to the property the rule protects. A wrecked venv costs a duller
   voice, never an alert. Shaping degrades in tiers — the EQ needs scipy, the
-  WSOLA speed only numpy — and logs which tier ran, because a silent
-  downgrade is indistinguishable from success.
+  WSOLA speed only numpy, so a system-python fallback still fixes the pace —
+  and logs which tier ran, because a silent downgrade is indistinguishable
+  from success. The first cut of this module called `OutputShaper.enabled()`
+  — it is a `@property` — and shipped *unshaped* audio while looking
+  perfectly healthy.
 - **Quiet hours gate the clock, and only the sound.**
   `guardian.voice.quiet_hours` in config.yaml (enabled, 23→07,
   `allow_critical: false`) withholds speech; the toast, journal, ledger,
   vault note and backlog task all still fire, so nothing is lost — it is
   waiting in the morning. That is what makes it safe to default on. The
   window is checked **before** the repeat suppression, which records as it
-  decides: recording a quiet-hours drop would spend the hourly slot on an
-  utterance nobody heard. The key sits under `guardian.voice` and **not**
+  decides (`should_speak`): recording a quiet-hours drop would spend the
+  hourly slot on an utterance nobody heard, and the 08:00 repeat of an 03:00
+  alert would then stay silent for the wrong reason. `allow_critical: true`
+  lets a rollback wake you anyway. A window that wraps midnight is the normal
+  shape, and `start == end` means *no* window rather than a full day of
+  silence. Only alerts are gated by the hour. The key sits under `guardian.voice` and **not**
   `livekit.tts`, and the split is load-bearing — `livekit_worker` reads the
   latter, and a voice conversation that went mute at 23:00 because an alert
   policy leaked into it would be a real bug.
 - **`LLOYD_VOICE_ALERTS=0`** keeps every other channel and drops only speech.
+  `tests/conftest.py` sets it for every test — otherwise `pytest tests/`
+  talks to the room from a process that outlives the test.
+- **Voice sits below the `external` gate**, like the vault note and the
+  backlog task: the drill runs a real guardian against a throwaway repo, and
+  a rehearsal that announces a rollback out loud is indistinguishable from a
+  production incident to anyone in the room.
 
 `config.yaml`'s `livekit.tts` stays the single source for the voice.
 `agent-services/bin/sync-voice-config.py` pushes it into `voice.json` in the
