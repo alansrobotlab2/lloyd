@@ -35,10 +35,13 @@ call, no cache, the same ledger always yields the same bank.
 The bank file is a derived cache under `app.paths.REASONING_BANK_PATH`; the
 ledger is the source of truth and `refresh` rebuilds it whole.
 
-Injection into the implement prompt is `workers.sources.autocode.reasoning_bank`
-and ships OFF: the offline measurement (eval/measurements/reasoningbank-2026-09-25.md)
-cannot say whether a round told these things lands more often; only a live A/B
-can, and that is a human's call.
+Injection into the implement prompt is `workers.sources.autocode.reasoning_bank`:
+`off` (the code default), `on`, or `ab`. The offline measurement
+(eval/measurements/reasoningbank-2026-09-25.md) cannot say whether a round told
+these things lands more often; `ab` is the live A/B that can (arm assignment,
+the markers on the ledger and `ab-report` are at the bottom of this module):
+
+    python -m scripts.automod.reasoning_bank ab-report [--since ISO] [--json]
 """
 from __future__ import annotations
 
@@ -478,3 +481,434 @@ def item_query(name: str, clauses: Iterable[str], body: str = "") -> str:
     appended `## Findings` sections cut (those are a round's own output)."""
     body = re.split(r"(?m)^##\s+Findings", body or "", maxsplit=1)[0]
     return " ".join([name or "", *[str(c) for c in clauses or []], body[:4000]])
+
+
+def fit_block(items: list[dict], max_chars: int) -> str:
+    """`render_block` held under `max_chars`: the grader's words shrink first
+    (they are the example, the lesson is the advice), then items drop from the
+    end (the least frequent cause). "" when not even one item fits."""
+    items = [dict(d) for d in items]
+    block = render_block(items)
+    detail = DETAIL_CHARS
+    while block and len(block) > max_chars and detail > 60:
+        detail -= 30
+        for d in items:
+            d["detail"] = _clean(d.get("detail") or "", detail)
+            if d.get("fix"):
+                d["fix"] = _clean(d["fix"], detail)
+        block = render_block(items)
+    while items and len(block) > max_chars:
+        items.pop()
+        block = render_block(items)
+    return block
+
+
+# --- the live A/B (#1489) --------------------------------------------------
+#
+# `workers.sources.autocode.reasoning_bank: ab` splits implement rounds into
+# two arms. `control` gets no block; `common_causes` gets the `prior` block
+# (the three most frequent refusal causes, recomputed from the ledger through
+# the hourly bank cache), capped at `AB_MAX_BLOCK_CHARS`. The arm is written on
+# the `backlog_implement started` row BEFORE the turn and copied onto the
+# round's `round_start` row by `round.start`, so an analysis can join from
+# either side. `ab_report` is the reading; `architecture/automod.md` §3.2j and
+# eval/measurements/reasoningbank-2026-09-25.md carry the protocol.
+
+SETTINGS = ("off", "on", "ab")
+ARMS = ("control", "common_causes")
+ARM_SALT = "rb-ab-v1"
+#: A fresh assignment follows the hash unless the hashed arm is already this
+#: many rounds ahead, in which case the lagging arm is taken. Deterministic
+#: given the ledger; keeps the split within a few rounds of even.
+BALANCE_SLACK = 3
+#: ~530 tokens at the ~3.1 chars/token the primary's tokenizer gave the
+#: rendered block offline (1626 chars = 521 tokens on the 09-25 ledger).
+AB_MAX_BLOCK_CHARS = 1650
+#: Below this many done rounds in either arm the report says `insufficient`.
+AB_MIN_N_PER_ARM = 50
+#: The stop rule: this many done rounds per arm (a ~0.16 landed-rate MDE at the
+#: 09-19..25 pooled rate of 0.60), or `AB_MAX_DAYS`, whichever comes first.
+AB_TARGET_N_PER_ARM = 150
+AB_MAX_DAYS = 10
+AB_MDE = 0.15
+AB_RESAMPLES = 4000
+
+
+def setting(value) -> str:
+    """`reasoning_bank` read as off | on | ab. The key shipped as a bool, so
+    `true`/`false` keep their meaning; anything unrecognised is `off`."""
+    if value is True:
+        return "on"
+    if value is None or value is False:
+        return "off"
+    v = str(value).strip().lower()
+    if v in ("on", "true", "yes", "1"):
+        return "on"
+    if v == "ab":
+        return "ab"
+    return "off"
+
+
+def hash_arm(key: str) -> str:
+    """The arm a key hashes to. Stable across processes (never `hash()`)."""
+    import hashlib
+    h = hashlib.sha256(f"{ARM_SALT}:{key}".encode()).digest()
+    return ARMS[h[0] & 1]
+
+
+def implement_rows(events: Iterable[dict]) -> list[dict]:
+    return [e for e in events if isinstance(e, dict) and e.get("event") == "backlog_implement"]
+
+
+def _chain_arm(rows: list[dict], session_id: str) -> tuple[str, str] | None:
+    """(arm, cluster) of the turn that last ran in `session_id`, if it had one."""
+    fin = next((r for r in reversed(rows)
+                if r.get("session_id") == session_id and r.get("phase") == "finished"), None)
+    if fin is None:
+        return None
+    item, ts = _int(fin.get("item_id")), _ts(fin)
+    for r in reversed(rows):
+        if (r.get("phase") == "started" and _int(r.get("item_id")) == item
+                and _ts(r) <= ts and r.get("reasoning_bank_arm") in ARMS):
+            return r["reasoning_bank_arm"], str(r.get("reasoning_bank_cluster")
+                                                or r.get("reasoning_bank_arm_key") or "")
+    return None
+
+
+def assign_arm(events: Iterable[dict], item_id: int, *,
+               continues_session: str | None = None) -> dict:
+    """The arm for the next implement round of `item_id`.
+
+    The unit is the item-round: key `<item>:<attempt>`, the attempt being how
+    many `started` rows the item already has, so a re-offer is a new draw and
+    the assignment can be re-derived from the ledger. A round that CONTINUES a
+    warm session (`continue_session`) inherits that session's arm — the
+    earlier prompt, block or no block, is in its history, so a fresh draw would
+    contaminate both arms — and shares its cluster, which the report resamples
+    by. A fresh draw follows `hash_arm` unless that arm leads by
+    `BALANCE_SLACK`.
+    """
+    rows = implement_rows(events)
+    attempt = sum(1 for r in rows if r.get("phase") == "started"
+                  and _int(r.get("item_id")) == int(item_id))
+    key = f"{int(item_id)}:{attempt}"
+    if continues_session:
+        inherited = _chain_arm(rows, continues_session)
+        if inherited:
+            return {"arm": inherited[0], "key": key, "cluster": inherited[1] or key,
+                    "how": "chain"}
+    counts = Counter(r["reasoning_bank_arm"] for r in rows
+                     if r.get("phase") == "started" and r.get("reasoning_bank_arm") in ARMS)
+    arm = hash_arm(key)
+    other = ARMS[1 - ARMS.index(arm)]
+    how = "hash"
+    if counts[arm] - counts[other] >= BALANCE_SLACK:
+        arm, how = other, "balance"
+    return {"arm": arm, "key": key, "cluster": key, "how": how}
+
+
+def arm_for_round(events: Iterable[dict], item_id: int | None) -> dict:
+    """The fields `round.start` copies onto `round_start`: the arm of the item's
+    open implement turn (its latest implement row is a `started` carrying one),
+    or {} — a CLI round, an item not in the A/B, a turn already ended."""
+    if item_id is None:
+        return {}
+    last = None
+    for r in implement_rows(events):
+        if _int(r.get("item_id")) == int(item_id):
+            last = r
+    if not last or last.get("phase") != "started" or last.get("reasoning_bank_arm") not in ARMS:
+        return {}
+    return {"reasoning_bank_arm": last["reasoning_bank_arm"],
+            "reasoning_bank_arm_key": last.get("reasoning_bank_arm_key")}
+
+
+# --- the A/B reading -------------------------------------------------------
+
+_END_PHASES = ("finished", "infra_failed", "skipped")
+
+
+def ab_units(events: list[dict], since_ts: float | None = None) -> list[dict]:
+    """One unit per armed `started` row, joined to its end row and round.
+
+    A unit is `open` (no end row yet), `excluded` (`skipped`: a landing drain
+    refused it; `infra_failed`: the turn never ran — neither is an attempt; or
+    a later `started` with no end between), or `done`, carrying: landed (a
+    promotion of its round, or a vault landing), refusals (blocking review rows
+    on its round), resolved (the item closed between this start and its next
+    one — `item_landed closed` or an autocode `item_closed` — or the round
+    reported `rejected` / `unnecessary`), hours (start to end of the turn)."""
+    promoted, refusals, causes = set(), Counter(), {}
+    closes: dict[int, list[float]] = {}
+    round_arm: dict[str, str] = {}
+    for e in events:
+        ev = e.get("event")
+        rid = e.get("round_id")
+        if ev == "promoted" and rid:
+            promoted.add(rid)
+        elif ((ev == "item_landed" and e.get("closed"))
+              or (ev == "item_closed" and e.get("by") == "autocode")):
+            # Item-scoped, not round-scoped: a vault landing's `item_landed`
+            # names no round. Credited to the attempt it falls inside.
+            if _int(e.get("item_id")) is not None:
+                closes.setdefault(_int(e.get("item_id")), []).append(_ts(e))
+        elif ev == "review" and rid and e.get("ok") and e.get("blocking"):
+            refusals[rid] += 1
+            causes.setdefault(rid, Counter()).update(
+                classify_cause(r["text"]) for r in _refusals(e))
+        elif ev == "round_start" and rid and e.get("reasoning_bank_arm") in ARMS:
+            round_arm[rid] = e["reasoning_bank_arm"]
+    rows = implement_rows(events)
+    units = []
+    for i, r in enumerate(rows):
+        if r.get("phase") != "started" or r.get("reasoning_bank_arm") not in ARMS:
+            continue
+        if since_ts is not None and _ts(r) < since_ts:
+            continue
+        item = _int(r.get("item_id"))
+        end = next((x for x in rows[i + 1:] if _int(x.get("item_id")) == item
+                    and x.get("phase") in _END_PHASES + ("started",)), None)
+        nxt = next((_ts(x) for x in rows[i + 1:] if _int(x.get("item_id")) == item
+                    and x.get("phase") == "started"), float("inf"))
+        u = {"arm": r["reasoning_bank_arm"], "item_id": item, "ts": _ts(r),
+             "key": r.get("reasoning_bank_arm_key"),
+             "cluster": str(r.get("reasoning_bank_cluster") or r.get("reasoning_bank_arm_key")
+                            or f"{item}@{_ts(r)}")}
+        if end is None:
+            u["state"] = "open"
+        elif end.get("phase") != "finished":
+            u["state"] = "excluded"
+        else:
+            rid = end.get("round_id")
+            outcome = end.get("outcome") if isinstance(end.get("outcome"), dict) else {}
+            acc = str(outcome.get("acceptance") or "")
+            landed = bool(rid and rid in promoted) or bool(end.get("vault_commits"))
+            closed = any(_ts(r) <= t < nxt for t in closes.get(item, ()))
+            u.update({
+                "state": "done", "round_id": rid, "landed": landed,
+                "refusals": refusals.get(rid, 0) if rid else 0,
+                "resolved": closed or acc in ("rejected", "unnecessary"),
+                "pending_settle": landed and not closed and acc == "met",
+                "hours": max(0.0, (_ts(end) - _ts(r)) / 3600.0),
+                "causes": dict(causes.get(rid, {})) if rid else {},
+                "round_arm_matches": round_arm.get(rid) in (None, u["arm"]) if rid else True,
+            })
+        units.append(u)
+    return units
+
+
+def _cluster_boot(groups: dict[str, list[list[dict]]], stat, *, seed: int,
+                  n: int = AB_RESAMPLES) -> tuple[float | None, float | None]:
+    """Percentile 95% CI of `stat({arm: units})`, resampling whole clusters
+    within each arm. None when an arm has fewer than two clusters."""
+    import random
+    arms = [a for a in groups if groups[a]]
+    if not arms or len(arms) < len(groups) or any(len(groups[a]) < 2 for a in arms):
+        return None, None
+    rng = random.Random(seed)
+    vals = []
+    for _ in range(n):
+        draw = {a: [u for _ in range(len(groups[a]))
+                    for u in groups[a][rng.randrange(len(groups[a]))]] for a in arms}
+        v = stat(draw)
+        if v is not None:
+            vals.append(v)
+    if len(vals) < n // 2:
+        return None, None
+    vals.sort()
+    return vals[int(0.025 * (len(vals) - 1))], vals[int(0.975 * (len(vals) - 1))]
+
+
+def _rate(us, k):
+    return sum(1 for u in us if u[k]) / len(us) if us else None
+
+
+def _mean(us, k):
+    return sum(u[k] for u in us) / len(us) if us else None
+
+
+def _per_hour(us):
+    h = sum(u["hours"] for u in us)
+    return sum(1 for u in us if u["resolved"]) / h if h > 0 else None
+
+
+def n_for_mde(p: float, mde: float, *, z_a: float = 1.959964, z_b: float = 0.841621) -> int:
+    """Rounds per arm to detect a proportion moving `p` → `p + mde` (two-sided
+    alpha 0.05, power 0.8). Ignores clustering, so it is a floor."""
+    p2 = min(max(p + mde, 0.0), 1.0)
+    d = abs(p2 - p)
+    if d <= 0:
+        return 0
+    pbar = (p + p2) / 2
+    num = (z_a * math.sqrt(2 * pbar * (1 - pbar))
+           + z_b * math.sqrt(p * (1 - p) + p2 * (1 - p2))) ** 2
+    return int(math.ceil(num / d ** 2))
+
+
+def ab_report(events: list[dict], *, since_ts: float | None = None, now: float | None = None,
+              min_n: int = AB_MIN_N_PER_ARM, target_n: int = AB_TARGET_N_PER_ARM,
+              max_days: float = AB_MAX_DAYS,
+              mde: float = AB_MDE, seed: int | None = None) -> dict:
+    """Per-arm outcomes of the live A/B with intervals, and a verdict line.
+
+    Per arm over `done` units: rounds; landed rate (Wilson — optimistic when
+    chains cluster); review refusals per round; items resolved per round-hour
+    (the gauge CLAUDE.md names for anything that changes how rounds go), both
+    with cluster-bootstrap CIs. Differences are `common_causes − control`,
+    cluster-bootstrapped (a warm-session chain is one cluster). Below `min_n`
+    done rounds in either arm the verdict is `insufficient`, whatever the
+    intervals say."""
+    from eval.stats import SEED, wilson_ci
+    seed = SEED if seed is None else seed
+    now = time.time() if now is None else now
+    got = ab_units(events, since_ts)
+    start = min((u["ts"] for u in got), default=None)
+    done = [u for u in got if u["state"] == "done"]
+    by_arm = {a: [u for u in done if u["arm"] == a] for a in ARMS}
+    clusters: dict[str, dict[str, list[dict]]] = {a: {} for a in ARMS}
+    for u in done:
+        clusters[u["arm"]].setdefault(u["cluster"], []).append(u)
+    groups = {a: list(clusters[a].values()) for a in ARMS}
+    begin = since_ts if since_ts is not None else start
+    out: dict = {"since": begin,
+                 "days": round((now - begin) / 86400, 2) if begin else 0.0,
+                 "min_n": min_n, "target_n": target_n, "max_days": max_days,
+                 "mde": mde, "arms": {},
+                 "open": sum(1 for u in got if u["state"] == "open"),
+                 "excluded": sum(1 for u in got if u["state"] == "excluded"),
+                 "round_arm_mismatches": sum(1 for u in done if not u["round_arm_matches"])}
+    for i, a in enumerate(ARMS):
+        us = by_arm[a]
+        k = sum(1 for u in us if u["landed"])
+        lo, hi = wilson_ci(k, len(us)) if us else (None, None)
+        g = {a: groups[a]}
+        out["arms"][a] = {
+            "rounds": len(us), "clusters": len(groups[a]),
+            "landed": k, "landed_rate": _rate(us, "landed"), "landed_ci": [lo, hi],
+            "refusals_per_round": _mean(us, "refusals"),
+            "refusals_ci": list(_cluster_boot(g, lambda d, a=a: _mean(d[a], "refusals"),
+                                              seed=seed + i)),
+            "resolved": sum(1 for u in us if u["resolved"]),
+            "round_hours": round(sum(u["hours"] for u in us), 2),
+            "resolved_per_round_hour": _per_hour(us),
+            "resolved_per_round_hour_ci": list(_cluster_boot(
+                g, lambda d, a=a: _per_hour(d[a]), seed=seed + 10 + i)),
+            "pending_settle": sum(1 for u in us if u["pending_settle"]),
+            "causes": dict(sum((Counter(u["causes"]) for u in us), Counter())),
+        }
+    c, t = ARMS
+
+    def diff(f):
+        def s(d):
+            x, y = f(d[c]), f(d[t])
+            return None if x is None or y is None else y - x
+        pt = s(by_arm)
+        lo, hi = _cluster_boot(groups, s, seed=seed + 20)
+        return {"diff": pt, "lo": lo, "hi": hi,
+                "excludes_zero": lo is not None and hi is not None and (lo > 0 or hi < 0)}
+
+    out["diff"] = {"landed_rate": diff(lambda us: _rate(us, "landed")),
+                   "refusals_per_round": diff(lambda us: _mean(us, "refusals")),
+                   "resolved_per_round_hour": diff(_per_hour)}
+    pooled = _rate(done, "landed")
+    out["n_needed_per_arm"] = n_for_mde(pooled if pooled is not None else 0.4, mde)
+    n_min = min(len(by_arm[a]) for a in ARMS)
+    out["stop_rule_met"] = n_min >= target_n or out["days"] >= max_days
+    if n_min < min_n:
+        out["verdict"] = (f"insufficient: {n_min} done rounds in the smaller arm, "
+                          f"need >= {min_n} per arm ({out['days']:g} of {max_days:g} days)")
+    else:
+        d, dl = out["diff"]["resolved_per_round_hour"], out["diff"]["landed_rate"]
+        if d["excludes_zero"] and d["diff"] > 0 and not (dl["excludes_zero"] and dl["diff"] < 0):
+            out["verdict"] = "common_causes wins on items resolved per round-hour"
+        elif d["excludes_zero"] and d["diff"] < 0:
+            out["verdict"] = "common_causes loses on items resolved per round-hour"
+        else:
+            out["verdict"] = "no measured difference (the resolved-per-round-hour interval includes zero)"
+    return out
+
+
+def _fmt(x, nd=3):
+    return "-" if x is None else f"{x:.{nd}f}"
+
+
+def _ci(pair, nd=3):
+    return f"[{_fmt(pair[0], nd)}, {_fmt(pair[1], nd)}]"
+
+
+def format_report(r: dict) -> str:
+    since = (datetime.fromtimestamp(r["since"], timezone.utc).strftime("%Y-%m-%d %H:%MZ")
+             if r.get("since") else "(no armed rounds yet)")
+    lines = [f"ReasoningBank live A/B (#1489) since {since}, {r['days']:g} days; "
+             f"open {r['open']}, excluded {r['excluded']} (skipped/infra), "
+             f"round_start arm mismatches {r['round_arm_mismatches']}", ""]
+    lines.append(f"{'arm':<14} {'rounds':>6} {'clus':>5} {'landed':>14} {'95% CI':>14} "
+                 f"{'refusals/rd':>11} {'95% CI':>14} {'resolved/rd-h':>13} {'95% CI':>16}")
+    for a, s in r["arms"].items():
+        lr = f"{s['landed']}/{s['rounds']}={_fmt(s['landed_rate'], 2)}"
+        lines.append(
+            f"{a:<14} {s['rounds']:>6} {s['clusters']:>5} {lr:>14} {_ci(s['landed_ci'], 2):>14} "
+            f"{_fmt(s['refusals_per_round'], 2):>11} {_ci(s['refusals_ci'], 2):>14} "
+            f"{_fmt(s['resolved_per_round_hour']):>13} {_ci(s['resolved_per_round_hour_ci']):>16}")
+    lines.append("")
+    for k, d in r["diff"].items():
+        lines.append(f"common_causes - control, {k}: {_fmt(d['diff'])} {_ci((d['lo'], d['hi']))}")
+    for a, s in r["arms"].items():
+        top = ", ".join(f"{c} {n}" for c, n in Counter(s["causes"]).most_common(5)) or "none"
+        lines.append(f"refusal causes, {a}: {top}"
+                     + (f"; {s['pending_settle']} landed, not yet settled"
+                        if s["pending_settle"] else ""))
+    lines += ["", f"n per arm for a {r['mde']:+.2f} landed-rate MDE (alpha .05, power .8, "
+                  f"unclustered floor): {r['n_needed_per_arm']}",
+              f"stop rule (>= {r['target_n']} done rounds per arm, or {r['max_days']:g} days): "
+              f"{'MET' if r['stop_rule_met'] else 'not yet'}",
+              f"verdict: {r['verdict']}"]
+    return "\n".join(lines)
+
+
+def _read_ledger(path: Path, contains: str | None = None) -> list[dict]:
+    """The ledger's rows; with `contains`, only lines carrying that substring
+    are parsed (the arm assignment runs on the event loop: ~0.2 s for the
+    whole 19k-row ledger, a few ms for its implement rows)."""
+    out = []
+    with open(path) as fh:
+        for line in fh:
+            if contains is not None and contains not in line:
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(d, dict):
+                out.append(d)
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+    ap = argparse.ArgumentParser(prog="python -m scripts.automod.reasoning_bank")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    rep = sub.add_parser("ab-report", help="per-arm outcomes of the live A/B (#1489)")
+    rep.add_argument("--ledger", type=Path, default=None)
+    rep.add_argument("--since", default=None, help="ISO time; default: the first armed round")
+    rep.add_argument("--min-n", type=int, default=AB_MIN_N_PER_ARM)
+    rep.add_argument("--target-n", type=int, default=AB_TARGET_N_PER_ARM)
+    rep.add_argument("--max-days", type=float, default=AB_MAX_DAYS)
+    rep.add_argument("--mde", type=float, default=AB_MDE)
+    rep.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+    if args.ledger is None:
+        from scripts.automod import state as S
+        args.ledger = S.LEDGER_PATH
+    since = None
+    if args.since:
+        since = datetime.fromisoformat(args.since.replace("Z", "+00:00")).timestamp()
+    r = ab_report(_read_ledger(args.ledger), since_ts=since, min_n=args.min_n,
+                  target_n=args.target_n,
+                  max_days=args.max_days, mde=args.mde)
+    print(json.dumps(r, indent=2, default=str) if args.json else format_report(r))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

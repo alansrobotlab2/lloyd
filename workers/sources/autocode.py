@@ -1625,11 +1625,14 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # computed after it was always empty. 0 of the 92 autocode sessions on
     # record to 2026-09-13 had ever been told they were a re-offer: no
     # `from_branch`, no findings, no clause verdicts, every one a fresh start.
-    reoffer = _reoffer_for(candidate.id) + _strategy_block(candidate, triage)
     # Before the `started` row too: `_warm_session` reads this slot's latest
-    # turn, and this attempt's own row would otherwise be it.
+    # turn, and this attempt's own row would otherwise be it. And before the
+    # strategy block: under the #1489 A/B a warm continuation inherits the
+    # arm of the session it continues.
     slot = getattr(item, "dedup_key", None)
     warm = await _warm_session(slot)
+    strategy, arm_fields = _strategy_for(candidate, triage, warm)
+    reoffer = _reoffer_for(candidate.id) + strategy
 
     # Recorded BEFORE the turn. `implemented_ids` counts any event for the
     # item, so this is what makes it one attempt per item: a turn that crashes
@@ -1638,7 +1641,7 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     started = time.time()
     S.append_event({"event": "backlog_implement", "item_id": candidate.id,
                     "phase": "started", "name": candidate.name[:200],
-                    "budget": budget, "slot": slot,
+                    "budget": budget, "slot": slot, **arm_fields,
                     **({"continues_session": warm["session_id"], "chain": warm["chain"],
                         "history_tokens": warm["history_tokens"]} if warm else {})})
     B.set_status(candidate.id, "in_progress", "automod round starting")
@@ -1833,10 +1836,11 @@ def _reoffer_for(item_id: int) -> str:
 def _strategy_block(candidate, triage) -> str:
     """Lessons from the review rung's refusals on similar items (#1489), or "".
 
-    `workers.sources.autocode.reasoning_bank`, default OFF. The offline replay
+    `workers.sources.autocode.reasoning_bank: on` (code default `off`; `ab` is
+    the live A/B, `_strategy_for`). The offline replay
     (eval/measurements/reasoningbank-2026-09-25.md) could only ask whether the
     injected lessons would have named a later refusal's cause; whether a round
-    told them lands more often needs a live A/B, which is a human's call.
+    told them lands more often is what the A/B measures.
     `reasoning_bank_mode`: `prior` (default — the most frequent refusal causes,
     which named a refusal's cause more often offline) or `similar` (item
     similarity, which did no better than random). Never the item's own rounds —
@@ -1844,25 +1848,71 @@ def _strategy_block(candidate, triage) -> str:
     A failure costs the block, never the round.
     """
     cfg = _source_cfg(NAME)
-    if not bool(cfg.get("reasoning_bank", False)):
+    from scripts.automod import reasoning_bank as RB
+    if RB.setting(cfg.get("reasoning_bank", False)) != "on":
         return ""
+    return _bank_block(candidate, triage, cfg,
+                       mode=str(cfg.get("reasoning_bank_mode", "prior")))
+
+
+def _bank_block(candidate, triage, cfg: dict, *, mode: str,
+                max_chars: int | None = None) -> str:
+    """The rendered block for one mode; "" on any failure."""
     try:
         from scripts.automod import backlog as B, reasoning_bank as RB, state as S
         bank = RB.refresh_if_stale(
             S.LEDGER_PATH,
             max_age_days=float(cfg.get("reasoning_bank_max_age_days",
                                        RB.DEFAULT_MAX_AGE_DAYS)))
-        query = RB.item_query(candidate.name, B.acceptance_clauses_of(triage),
-                              getattr(candidate, "body", "") or "")
         k = int(cfg.get("reasoning_bank_k", RB.DEFAULT_K))
-        if str(cfg.get("reasoning_bank_mode", "prior")) == "similar":
+        if mode == "similar":
+            query = RB.item_query(candidate.name, B.acceptance_clauses_of(triage),
+                                  getattr(candidate, "body", "") or "")
             items = RB.retrieve(bank, query, k=k, exclude_item=int(candidate.id))
         else:
             items = RB.prior_items(bank, k=k, exclude_item=int(candidate.id))
+        if max_chars is not None:
+            return RB.fit_block(items, max_chars)
         return RB.render_block(items)
     except Exception as exc:  # noqa: BLE001 — advice is not the round
         logger.warning("#%s: reasoning bank unavailable: %s", candidate.id, exc)
         return ""
+
+
+def _strategy_for(candidate, triage, warm: dict | None = None) -> tuple[str, dict]:
+    """(block, fields for the `started` row) under `reasoning_bank`: off | on | ab.
+
+    `off` and `on` are exactly `_strategy_block`, with no fields. `ab` is the
+    live A/B (#1489): `RB.assign_arm` picks `control` (no block) or
+    `common_causes` (the `prior` block, capped at `RB.AB_MAX_BLOCK_CHARS`,
+    ~530 tokens) per item-round — a warm continuation inherits its session's
+    arm — and the arm rides on the `started` row, from which `round.start`
+    copies it onto `round_start`. The block goes into the `{reoffer}` slot of
+    the turn's USER message, never the system prompt or a tool description,
+    so the cached prefix is the same in both arms. An assignment that fails
+    records no arm (the report never sees the round) and injects nothing.
+    """
+    cfg = _source_cfg(NAME)
+    from scripts.automod import reasoning_bank as RB
+    if RB.setting(cfg.get("reasoning_bank", False)) != "ab":
+        return _strategy_block(candidate, triage), {}
+    try:
+        from scripts.automod import state as S
+        a = RB.assign_arm(RB.implement_rows(
+                              RB._read_ledger(S.LEDGER_PATH, contains='"backlog_implement"')),
+                          int(candidate.id),
+                          continues_session=(warm or {}).get("session_id"))
+    except Exception as exc:  # noqa: BLE001 — the round runs unarmed
+        logger.warning("#%s: reasoning-bank arm not assigned: %s", candidate.id, exc)
+        return "", {}
+    fields = {"reasoning_bank_arm": a["arm"], "reasoning_bank_arm_key": a["key"],
+              "reasoning_bank_cluster": a["cluster"], "reasoning_bank_arm_how": a["how"]}
+    if a["arm"] != "common_causes":
+        return "", fields
+    block = _bank_block(candidate, triage, cfg, mode="prior",
+                        max_chars=RB.AB_MAX_BLOCK_CHARS)
+    fields["reasoning_bank_block_chars"] = len(block)
+    return block, fields
 
 
 async def _run_and_record(item, candidate, triage, budget, started,

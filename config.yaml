@@ -1828,12 +1828,16 @@ workers:
       # turn before it pauses the pool. 2 (Alan, 2026-09-24, once the board was
       # cleared by hand; it was 4 during the 09-18 catch-up). Needs a backend restart.
       max_inflight: 2
-      # ReasoningBank (#1489): lessons from the review rung's refusals on similar
-      # items, injected beside the re-offer banner. OFF: the offline replay
-      # (eval/measurements/reasoningbank-2026-09-25.md) cannot say a round lands
-      # more often with it; turning it on is a live A/B, a human call. Mode
-      # `prior` (the most frequent refusal causes) beat `similar` offline.
-      reasoning_bank: false
+      # ReasoningBank (#1489): lessons from the review rung's refusals, injected
+      # beside the re-offer banner. off | on | ab (code default off). `ab` is the
+      # live A/B Alan approved 2026-09-25: each item-round is `control` (nothing)
+      # or `common_causes` (the three most frequent refusal causes, <=~530
+      # tokens), the arm recorded on the implement `started` row and on
+      # `round_start`. Read it with `python -m scripts.automod.reasoning_bank
+      # ab-report`; stop at 150 done rounds per arm or 10 days, then set this
+      # to `on` (a measured gain) or `off` (eval/measurements/reasoningbank-2026-09-25.md).
+      # `reasoning_bank_mode` applies to `on` only; `ab` always tests `prior`.
+      reasoning_bank: ab
       reasoning_bank_mode: prior
       max_duration_seconds: 3600
       # 150, not 100 — the code's own default and its reason

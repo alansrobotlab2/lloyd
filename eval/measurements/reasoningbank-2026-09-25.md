@@ -2,9 +2,10 @@
 
 **Verdict: landed OFF. Retrieval by item similarity is rejected; a static
 "most frequent refusal causes" paragraph did better offline, but whether ANY
-lesson block makes rounds land more often needs a live A/B, which is a human's
-call.** `workers.sources.autocode.reasoning_bank: false` ships off, with
-`reasoning_bank_mode: prior` as the mode that A/B should try first.
+lesson block makes rounds land more often needs a live A/B.** Alan approved
+it the same day: `workers.sources.autocode.reasoning_bank: ab` (code default
+still `off`) splits rounds into `control` and `common_causes` — protocol and
+stop rule under "The live A/B" below.
 
 ## What was built
 
@@ -116,20 +117,59 @@ Sensitivity, cutoff 2026-09-21 (n = 40): `sim` recall 22/40 = 0.55 [0.40, 0.69],
 3. **What offline cannot answer**: whether a round shown the lessons avoids the
    refusal. "The lesson names the cause" is necessary, not sufficient.
 
-## What a live A/B needs (owed by a human)
+## The live A/B (approved by Alan 2026-09-25; runs once the pool resumes)
 
-- Turn on `workers.sources.autocode.reasoning_bank` with
-  `reasoning_bank_mode: prior`, alternating per round (e.g. by round parity or
-  item id parity) for a week — ~100 rounds at the recent rate; the refusal-rate
-  difference detectable at that n is roughly ±0.15, so a smaller effect needs
-  longer.
-- Outcomes from scorecard rows already tracked: first-review refusal rate,
-  landings per round, items resolved per round-hour (rows 9/14), and the
-  refusal-cause mix per arm (this module's `classify_cause` over the review
-  rows) — the specific prediction is fewer `unpinned` / `half_missing` /
-  `unfalsifiable_test` refusals in the on arm.
-- The ledger needs an arm marker on `backlog_implement started` (not written
-  today) so the analysis does not have to re-derive the assignment.
+Built and armed in config (`workers.sources.autocode.reasoning_bank: ab`); it
+starts at the first implement round after the backend next restarts on this
+commit (config is read at boot) with the worker pool resumed.
+`architecture/automod.md` §3.2j is the mechanism.
+
+**Protocol.**
+
+- **Unit**: one implement round (item-round). **Arms**: `control` (no block)
+  vs `common_causes` (the `prior` block — the three most frequent refusal
+  causes, recomputed from the ledger through the hourly bank cache, capped at
+  1,650 chars ≈ 530 tokens). The block rides in the user message's `{reoffer}`
+  slot; the system prompt and tool descriptions are identical in both arms.
+- **Assignment**: sha256 of `<item>:<attempt>` (salt `rb-ab-v1`), with a
+  balance cap of 3; a warm-session continuation inherits its session's arm and
+  cluster (no cross-arm contamination through history). Deterministic and
+  recorded: `reasoning_bank_arm` on the `backlog_implement started` row and on
+  the round's `round_start`.
+- **Outcomes** (`python -m scripts.automod.reasoning_bank ab-report`):
+  primary — items resolved per round-hour (CLAUDE.md's gauge for anything that
+  changes how rounds go); secondary — landed rate, blocking review refusals per
+  round, and the refusal-cause mix (the specific prediction is fewer
+  `unpinned` / `half_missing` / `unfalsifiable_test` refusals in the treatment
+  arm). `skipped` (drain-refused) and `infra_failed` turns are excluded, not
+  counted as rounds. CIs: Wilson for the per-arm landed rate, a cluster
+  bootstrap (4,000 resamples, clusters = warm-session chains) for everything
+  else and for every `common_causes − control` difference.
+- **Stop rule**: 150 done rounds per arm, or 10 days from the first armed
+  round, whichever comes first. The report says `insufficient` below 50 per
+  arm and names no winner.
+- **Decision**: `on` if resolved-per-round-hour is up with its interval clear
+  of zero and the landed rate not significantly down; `off` if it is down or
+  the interval includes zero (the block costs ~530 tokens a round, so "no
+  difference" is not a win). Then the item closes, `rejected` with the numbers
+  or deployed.
+
+**Power, measured on the ledger (A/A replay).** The assignment replayed over
+the real 7 days to 2026-09-25 with no injection (483 done rounds, 237 vs 246):
+landed 144/237 = 0.61 [0.54, 0.67] vs 145/246 = 0.59 [0.53, 0.65], difference
+−0.018 [−0.105, +0.069]; refusals/round 0.24 vs 0.27, difference +0.03
+[−0.06, +0.12]; resolved per round-hour 1.09 vs 0.99, difference −0.10
+[−0.31, +0.11]. No false difference, and it sets the scale: at 150 per arm the
+landed-rate MDE is ~0.16 (two-proportion, α 0.05, power 0.8, at the pooled
+0.60) and a resolved-per-round-hour difference needs to be ~25% of baseline to
+clear its interval. The offline prediction (a lesson names the cause in ~50%
+of refused rounds after the audit's correction, ~40% of rounds are refused)
+bounds a realistic landed-rate effect well under that, so the likely honest
+outcome is "no measured difference" → `off`.
+
+**When it concludes.** 09-19..24 ran 69–100 finished implement turns a day
+(depth 4, then 2); 09-14..18 ran 18–39. 300 done rounds is therefore ~3–5
+days at the recent rate and hits the 10-day cap at the slower one.
 
 ## Reproduce
 

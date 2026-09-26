@@ -141,10 +141,20 @@ def start(goal: str, *, base: str | None = None, force: bool = False,
         # `opened_by` / `session_id` (2026-09-17): the reaper closes a round a
         # tool opened whose session has gone quiet and that no implement row
         # names; a round a person opened from the CLI is theirs to close.
+        # The #1489 ReasoningBank A/B arm of the implement turn opening this
+        # round, copied off its `started` row so either row joins the analysis.
+        arm: dict = {}
+        if item_id:
+            try:
+                from scripts.automod import reasoning_bank as RB
+                arm = RB.arm_for_round(S.read_events(limit=2000), int(item_id))
+            except Exception:  # noqa: BLE001 — bookkeeping, never the round
+                arm = {}
         S.append_event({"event": "round_start", "round_id": rid, "base": base,
                         "goal": goal[:500], "worktree": str(wt),
                         "opened_by": opened_by, **({"session_id": session_id} if session_id else {}),
                         **({"item_id": int(item_id)} if item_id else {}),
+                        **arm,
                         **resumed,
                         **({"live_dirty_paths": dirty[:20]} if dirty else {})})
         out_d = {"round_id": rid, "worktree": str(wt), "base": base,

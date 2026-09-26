@@ -1566,6 +1566,40 @@ zero-turn gaps, `infra_failed` within 3 minutes of a flush (must stay 0), and
 any `rollback_succeeded` with `batch > 1`. `tests/test_land_train.py`,
 `tests/test_guardian_rollback.py` (batch), `tests/test_loop_depth.py` (train).
 
+### 3.2j The ReasoningBank A/B: lessons from refusals, measured live (#1489, 2026-09-25)
+
+`scripts/automod/reasoning_bank.py` distils the review rung's refusals into
+dated strategy items (cause, lesson, the grader's words). Offline, retrieving
+them by item similarity was no better than random, and a static paragraph of
+the three most frequent causes named a held-out refusal's cause best (recall
+0.78, n = 64; eval/measurements/reasoningbank-2026-09-25.md). Whether a round
+told it lands more often is a live question, so
+`workers.sources.autocode.reasoning_bank` is `off | on | ab` (code default
+`off`, config `ab` since 2026-09-25):
+
+- **Arms.** `control` gets nothing; `common_causes` gets the `prior` block
+  (recomputed from the ledger through the hourly bank cache, held under
+  `AB_MAX_BLOCK_CHARS` ≈ 530 tokens). It goes into the implement prompt's
+  `{reoffer}` slot, the turn's USER message — never the system prompt or a tool
+  description, so both arms share the cached prefix.
+- **Assignment** (`assign_arm`): per item-round, key `<item>:<attempt>`,
+  sha256-hashed, with a balance cap (`BALANCE_SLACK` 3) — deterministic and
+  re-derivable from the ledger. A warm continuation (`continue_session`)
+  inherits the arm and cluster of the session it continues, because the
+  earlier prompt is in its history; the report resamples by that cluster.
+- **Markers.** `reasoning_bank_arm` / `_arm_key` / `_cluster` / `_arm_how` on
+  the `backlog_implement started` row (written before the turn), and
+  `reasoning_bank_arm` / `_arm_key` copied onto the round's `round_start` by
+  `round.start` (`arm_for_round`). A CLI round carries none.
+- **Reading.** `python -m scripts.automod.reasoning_bank ab-report [--json]`:
+  per arm, done rounds, landed rate (Wilson), review refusals per round and
+  items resolved per round-hour (cluster bootstrap), the
+  `common_causes − control` differences, the refusal-cause mix, and the n per
+  arm a 0.15 landed-rate MDE needs. Under 50 done rounds in either arm it says
+  `insufficient`. **Stop rule:** 150 done rounds per arm or 10 days, whichever
+  first; then `on` only if resolved-per-round-hour is up with the landed rate
+  not down (the house rule), else `off`. `tests/test_reasoning_bank.py`.
+
 ### 3.3 For humans (this repo's development)
 
 `/home/alansrobotlab/lloyd` is production. Non-trivial work belongs in the
