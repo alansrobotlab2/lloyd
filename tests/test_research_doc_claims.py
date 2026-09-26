@@ -605,6 +605,78 @@ def test_an_older_wording_of_the_contract_is_replaced_not_stacked():
     assert with_body_contract(out) == out
 
 
+def test_a_contract_line_that_grew_extra_prose_is_reclaimed_not_left_alone(
+        tmp_path, monkeypatch):
+    """#1570: the one edit that could redden the pin above and leave every writer
+    unable to undo it.
+
+    #1563's round appended its "SKILL.md is authoritative" sentence to the END of
+    #74's contract line. The grown line keeps the `_TASK_BODY_CONTRACT_OPENING`
+    prefix AND keeps the contract as a substring, so both tests `with_body_contract`
+    used to make called it fine, while the pin — which compares the WHOLE first
+    line — was red on that file alone. And because `with_body_contract` is exactly
+    what the two writers call on every re-emit, the file stayed red through every
+    write it received, so the failure reached the next round's `tests` rung as a
+    base failure nobody's diff caused (item #1570, at `bf9e61a6`).
+
+    Asserted at both ends of the seam, since the pin reads bytes on disk and not
+    a return value: the helper's output, then a real `autonomy_write_task` update
+    (`_handle_write` → `_parse_task_file`, which stores `parts[2]` verbatim →
+    `_write_task_file`) into a temp directory. The appended sentence has to
+    survive the reclaim — a repair that reclaimed the line by deleting the
+    author's prose would satisfy the pin and destroy the documentation the body
+    exists to hold, which is not a fix.
+    """
+    from agent_mcp import autonomy as MCP
+    from agent_mcp._shared import TASK_BODY_CONTRACT, with_body_contract
+
+    extra = ("**The authoritative surface for run-to-run operational knowledge is "
+             "`skills/kg-mention-classifier/SKILL.md`**, which that builder splices "
+             "in whole and uncapped (#1563).")
+    grown = f"\n{TASK_BODY_CONTRACT} {extra}\n\n# Task\n\n- 2026-09-26 activity\n"
+
+    # The shape the pin fails on, and the control that says this fixture has it.
+    assert next(ln for ln in grown.splitlines() if ln.strip()).strip() \
+        != TASK_BODY_CONTRACT, "fixture does not reproduce a grown line"
+
+    out = with_body_contract(grown)
+    opened = next(ln for ln in out.splitlines() if ln.strip())
+    assert opened.strip() == TASK_BODY_CONTRACT, f"first line left as: {opened[:200]!r}"
+    assert out.count(TASK_BODY_CONTRACT) == 1, out[:300]
+    assert extra in out, "the reclaim deleted the prose that had been appended"
+    assert with_body_contract(out) == out, "the reclaim is not idempotent"
+
+    task_dir = tmp_path / "autonomy"
+    task_dir.mkdir(parents=True)
+    # Before the fixture is written, not before the call: with the module global
+    # still pointing at `~/obsidian/autonomy` the writer would hunt the LIVE task
+    # directory for #991, and a fixture id that happened to exist there would be
+    # rewritten in the vault by a test run.
+    monkeypatch.setattr(MCP, "AUTONOMY_DIR", task_dir)
+    path = task_dir / "991-grown-line.md"
+    path.write_text("---\nid: 991\nname: Grown line\nstatus: up_next\n"
+                    "description: Reddened the pin at base (#1570).\n"
+                    "skill_name: some-skill\n---\n" + grown, encoding="utf-8")
+
+    import json
+    result = json.loads(MCP._handle_write(
+        {"id": 991, "description": "touched by the writer"}))
+    assert "error" not in result, f"the writer refused the write: {result}"
+
+    written = path.read_text(encoding="utf-8")
+    assert "touched by the writer" in written, "the writer did not rewrite the file"
+    body = _body_of(path)
+    opened = next(ln for ln in body.splitlines() if ln.strip())
+    assert opened.strip() == TASK_BODY_CONTRACT, f"writer left: {opened[:200]!r}"
+    assert body.count(TASK_BODY_CONTRACT) == 1, body[:300]
+    assert extra in body, "the writer's reclaim deleted the appended prose"
+    # The writer prepends its own blank line before the body it was handed, so
+    # compare the body's own bytes rather than the file's: what the helper
+    # returned is what landed, one leading newline aside.
+    assert body.lstrip("\n") == out.lstrip("\n"), \
+        "the bytes on disk are not the helper's repair"
+
+
 def test_the_scheduler_writers_keep_the_contract_when_they_rewrite_a_task(
         tmp_path, monkeypatch):
     """The two writers above stamp, and the scheduler's two re-writers neither

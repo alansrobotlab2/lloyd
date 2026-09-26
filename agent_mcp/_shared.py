@@ -492,19 +492,48 @@ def with_body_contract(body: str) -> str:
     directory, so an unstamped create is a red suite at base for the next round
     that touches it. Idempotent by design — the scheduler's own front-matter
     writers re-emit a body they read back and must not double-stamp it.
+
+    "Already does" is the pin's own predicate — the body's first non-blank line,
+    stripped, equal to the whole contract — and not a substring test. It used to
+    be `TASK_BODY_CONTRACT in text`, which could not see the one edit that went
+    wrong today (#1570): #1563's round appended its own sentence to the END of
+    the contract line, and that line kept both the `_TASK_BODY_CONTRACT_OPENING`
+    prefix and the contract as a substring, so the substring test returned it
+    unchanged and the older-wording branch below claimed it too, while the pin —
+    which compares the whole first line — was red on that file. A grown line is
+    now reclaimed: the contract is restored on its own line and the prose that
+    was appended to it is kept on a blockquote line underneath, so the repair
+    loses nobody's sentence and stays a no-op the next time it runs.
     """
     text = body or ""
-    if TASK_BODY_CONTRACT in text:
-        return text
-    # An earlier wording of the line (the module it cites moved, say) is
-    # replaced where it stands rather than stacked under a second copy: the
-    # vault and the code cannot change in the same instant, and a write in
-    # between would otherwise leave two contracts, the first one stale.
     lines = text.split("\n")
     for i, line in enumerate(lines):
-        if line.startswith(_TASK_BODY_CONTRACT_OPENING):
-            lines[i] = TASK_BODY_CONTRACT
+        # Compared on the left-stripped text, so an indented contract line is
+        # still recognised — the pin strips before it compares, and a writer that
+        # failed to see one would stack a second copy under it.
+        bare = line.lstrip()
+        if not bare.startswith(_TASK_BODY_CONTRACT_OPENING):
+            continue
+        if bare.strip() == TASK_BODY_CONTRACT:
+            return text
+        if bare.startswith(TASK_BODY_CONTRACT):
+            # Grown, not stale: restore the contract alone, then keep what was
+            # appended to it as its own quote line, markdown-continuous with the
+            # contract above. Byte-identical to how #74 was repaired in the
+            # vault (`7b81008`), so a writer touching that file changes nothing.
+            extra = bare[len(TASK_BODY_CONTRACT):].strip()
+            if extra:
+                lines[i:i + 1] = [TASK_BODY_CONTRACT,
+                                  extra if extra.startswith(">") else f"> {extra}"]
+            else:
+                lines[i] = TASK_BODY_CONTRACT
             return "\n".join(lines)
+        # An earlier wording of the line (the module it cites moved, say) is
+        # replaced where it stands rather than stacked under a second copy: the
+        # vault and the code cannot change in the same instant, and a write in
+        # between would otherwise leave two contracts, the first one stale.
+        lines[i] = TASK_BODY_CONTRACT
+        return "\n".join(lines)
     return f"\n{TASK_BODY_CONTRACT}\n\n{text.lstrip(chr(10))}"
 
 
