@@ -126,7 +126,44 @@ def test_is_alias_noise_rule():
 def test_degraded_reason():
     assert ers.degraded_reason(2, 7260) is not None
     assert ers.degraded_reason(3789, 7260) is None
-    assert ers.degraded_reason(5, 0) is None          # no baseline yet → nothing to compare
+    # #1557 replaced `assert ers.degraded_reason(5, 0) is None  # no baseline yet →
+    # nothing to compare`. That assertion pinned the hole: with `baseline <= 0`
+    # returning None first, a missing or unparseable graph-baseline.json disarmed
+    # the guard for the whole run — and `update_baseline` bootstraps
+    # `baseline := active` before the guard is consulted, so the run never learns.
+    # 2026-09-22 is that run on disk: baseline_active_edges 0, 30 merges applied,
+    # 0 edges rewritten, safety reading "not degraded".
+    # An empty store refuses with no baseline to measure against, and the message
+    # names the graph as empty/unmeasurable rather than calling it healthy.
+    reason = ers.degraded_reason(0, 0)
+    assert reason is not None, "a 0-edge store must never be measurable as healthy"
+    assert "empty or unmeasurable" in reason
+    assert "--allow-degraded" in reason
+    # The refusal is a fact about the store, not about the file: it stands with a
+    # baseline on disk too, and it does not stand just because the floor is gone.
+    assert ers.degraded_reason(0, 50_837) is not None
+    assert ers.degraded_reason(5, 0) is None       # a non-empty store, no floor: labelled, not refused
+
+
+def test_safety_record_labels_an_unmeasured_guard_apart_from_a_clean_one():
+    """`not degraded` and `unmeasured` were the same string on the report that
+    moved 30 fact dirs (#1557); they are now different labels, and the store's own
+    count rides with them."""
+    measured = ers.safety_record(True, False, None, {}, None, active_edges=50_908)
+    assert measured["degraded_graph"] == "not degraded"
+    assert measured["active_edges"] == 50_908
+    assert measured["baseline_measured"] is True
+    unmeasured = ers.safety_record(True, False, None, {}, None,
+                                   active_edges=0, measured=False)
+    assert unmeasured["degraded_graph"] != "not degraded"
+    assert unmeasured["degraded_graph"].startswith("unmeasured")
+    assert unmeasured["active_edges"] == 0
+    assert unmeasured["baseline_measured"] is False
+    # an explicit override outranks the label: a bypass is never reported as a
+    # guard that simply could not see
+    bypassed = ers.safety_record(True, True, None, {}, "graph is empty or unmeasurable",
+                                 active_edges=0, measured=False)
+    assert bypassed["degraded_graph"] == "bypassed: --allow-degraded"
 
 def test_update_baseline_keeps_the_max(tmp_path):
     p = tmp_path / "b.json"
@@ -137,7 +174,9 @@ def test_update_baseline_keeps_the_max(tmp_path):
 
 # ── end to end on a temp tree ────────────────────────────────────────────────
 
-def _tree(tmp_path):
+def _tree(tmp_path, edges: int = 2):
+    """The mergeable fixture tree; `edges=0` is the 2026-09-22 store — the same
+    entities and fact dirs, no graph under them, so every degree is 0."""
     root = tmp_path / "facts"
     for name in ("vLLM", "vllm", "Intel", "Intel Pipeline"):
         d = root / name; d.mkdir(parents=True)
@@ -148,8 +187,10 @@ def _tree(tmp_path):
     st = KGStore(db)
     for n in ("vLLM", "vllm", "Intel", "Intel Pipeline"):
         st.entities.register(n)
-    st.edges.add({"source": "vLLM", "target": "Ray", "type": "mentions"}, origin="test")
-    st.edges.add({"source": "vllm", "target": "Ray", "type": "mentions"}, origin="test")
+    if edges >= 1:
+        st.edges.add({"source": "vLLM", "target": "Ray", "type": "mentions"}, origin="test")
+    if edges >= 2:
+        st.edges.add({"source": "vllm", "target": "Ray", "type": "mentions"}, origin="test")
     st.close()
     return root, db
 
@@ -172,6 +213,56 @@ def test_apply_refuses_on_a_degraded_graph(tmp_path):
     r2 = _run(root, db, out, "--apply", "--allow-degraded")
     assert r2.returncode == 0, r2.stdout + r2.stderr
     assert not (root / "vllm").exists()
+
+def test_apply_refuses_a_store_with_no_active_edges_even_with_no_baseline(tmp_path):
+    """#1557, the shape that already fired. `entity-merges-applied-2026-09-22-
+    20260922T204831Z.json` records `store_before.edges_active: 0` and no
+    `graph-baseline.json` on disk, and the guard answered `baseline <= 0 → None`:
+    30 fact dirs moved, 0 edges rewritten, and the report's own `safety` block said
+    `"not degraded"`. The store's own count refuses now, so losing the baseline
+    file can no longer disarm the check — the 09-22 run came from
+    `--apply --tiers CASE,PUNCT` under `SUPERVISOR_PROCESS_NAME=lloyd-mcp` with no
+    `--allow-degraded` in its argv, which is what makes an automated refusal the
+    behaviour that matters here."""
+    root, db = _tree(tmp_path, edges=0); out = tmp_path / "out"; out.mkdir()
+    assert not (out / "graph-baseline.json").exists(), "the fixture seeded the very file that went missing"
+
+    r = _run(root, db, out, "--apply")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "REFUSING --apply" in r.stdout
+    assert "empty or unmeasurable" in r.stdout, r.stdout
+    assert "[no baseline on disk before this run" in r.stdout, r.stdout
+    assert (root / "vllm").exists()                          # no fact dir moved
+    assert (root / "Intel Pipeline").exists()
+    assert not list(out.glob("entity-merges-applied-*.json"))   # nothing claimed an apply
+    st = KGStore(db)
+    assert st.aliases.resolve("vllm") is None                 # nothing rewritten
+    st.close()
+
+    # the override stays explicit — and says which store it overrode for
+    r2 = _run(root, db, out, "--apply", "--allow-degraded")
+    assert r2.returncode == 0, r2.stdout + r2.stderr
+    safety = _applied_report(out)["safety"]
+    assert safety["active_edges"] == 0, safety
+    assert safety["baseline_measured"] is False, safety
+    assert safety["degraded_graph"] == "bypassed: --allow-degraded", safety
+
+def test_a_store_with_edges_and_no_baseline_file_still_applies_and_says_unmeasured(tmp_path):
+    """The other half of #1557: no floor is not the same finding as an empty store.
+    Two active edges and no `graph-baseline.json` must still complete — every
+    fixture apply in this file runs that way, so an over-broad refusal would fail
+    them all — and the report must own up to the guard not having measured."""
+    root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    assert not (out / "graph-baseline.json").exists()
+    r = _run(root, db, out, "--apply")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (root / "vllm").exists()
+    safety = _applied_report(out)["safety"]
+    assert safety["degraded_graph"].startswith("unmeasured"), safety
+    assert safety["baseline_measured"] is False, safety
+    assert safety["active_edges"] == 2, safety
+    # and the floor it had no opinion about is now recorded for the next run
+    assert json.loads((out / "graph-baseline.json").read_text())["active_edges"] == 2
 
 def test_apply_writes_aliases_and_stamps_the_ledger(tmp_path):
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
@@ -479,12 +570,20 @@ def test_the_backfilled_aliases_exclude_the_permanent_noise_shapes(tmp_path):
 
 
 def test_a_clean_apply_does_not_report_itself_as_bypassed(tmp_path):
-    """The other half: `safety` must not read as bypassed when nothing was."""
+    """The other half: `safety` must not read as bypassed when nothing was.
+
+    Seeded with a baseline on disk (2 active edges, the store's own count) so this
+    actually exercises the name it carries. Without the file the run is not clean,
+    it is unmeasured — #1557 — and `test_a_store_with_edges_and_no_baseline_file_
+    still_applies_and_says_unmeasured` is the test for that case."""
     root, db = _tree(tmp_path); out = tmp_path / "out"; out.mkdir()
+    (out / "graph-baseline.json").write_text(json.dumps({"active_edges": 2}))
     assert _run(root, db, out, "--apply").returncode == 0
     safety = _applied_report(out)["safety"]
     assert safety["allow_degraded"] is False
     assert safety["degraded_graph"] == "not degraded"
+    assert safety["baseline_measured"] is True
+    assert safety["active_edges"] == 2
 
 
 def test_a_kill_between_the_transaction_and_the_report_leaves_no_dangling_pointer(tmp_path, monkeypatch):

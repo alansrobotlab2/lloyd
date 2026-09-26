@@ -619,28 +619,44 @@ def build_guards(autonomy, ers, kgr, gate_mod, shc, promote_mod, common):
 
     # 8 ── entity-resolution-sweep.py `degraded_reason` → `--apply` (a MERGE).
     def degraded_real(p):
-        return BLOCK if ers.degraded_reason(p["active"], p["baseline"]) else PASS
+        # `measured` is only ever passed by the class that needs it (the 2026-09-22
+        # shape); every other class keeps the guard's own default of a measured floor.
+        return BLOCK if ers.degraded_reason(p["active"], p["baseline"],
+                                            measured=p.get("measured", True)) else PASS
 
     guards.append(Guard(
         site_file="scripts/memory/entity-resolution-sweep.py", site_needle="def degraded_reason",
         symbol="degraded_reason",
         action="merge (--apply)",
-        note="mutant = never degraded. update_baseline:1170 is max-only, so the "
-             "destructive direction is closed; what survives is provenance — the "
-             "baseline is written by a job in the same family that reads it, which is "
-             "Deliverable 3's independent-reference ask",
+        note="mutant = never degraded. update_baseline is max-only, so a shrinking "
+             "baseline cannot disarm the guard; what #1557 closed is the other side — "
+             "the file bootstraps itself to the current count when it is missing, so a "
+             "lost baseline used to leave the whole run unmeasured while the report read "
+             "\"not degraded\". `empty_store_no_baseline` is the witness for that shape. "
+             "What still survives is provenance: the baseline is written by a job in the "
+             "same family that reads it, which is Deliverable 3's independent-reference ask",
         real=degraded_real, mutant=lambda p: PASS,
         classes=[
             InputClass("baseline_zero", PASS, {"active": 50908, "baseline": 0},
-                       "no recorded baseline: nothing to compare against, so nothing "
-                       "to refuse — and load_baseline returns 0 for an unreadable "
-                       "file, which is the same verdict from a corrupt reference"),
+                       "no recorded baseline over a full store: nothing to compare "
+                       "against, so nothing to refuse. Distinct from "
+                       "empty_store_no_baseline below — the same 0 in the file means a "
+                       "lost reference here and an empty graph there, and only the "
+                       "store's own count tells them apart"),
             InputClass("healthy_growth", PASS, {"active": 50908, "baseline": 50837},
                        "the live pair at probe time"),
             InputClass("degraded_shrink", BLOCK, {"active": 2, "baseline": 50837},
                        "the 2026-09-03 graph: 2 active edges against 50,837"),
             InputClass("just_under_half", BLOCK, {"active": 25417, "baseline": 50837},
                        "one edge under DEGRADED_FRACTION"),
+            InputClass("empty_store_no_baseline", BLOCK,
+                       {"active": 0, "baseline": 0, "measured": False},
+                       "the 2026-09-22 apply that fired: "
+                       "entity-merges-applied-2026-09-22-20260922T204831Z.json carries "
+                       "baseline_active_edges 0, store_before.edges_active 0 and "
+                       "safety.degraded_graph 'not degraded' across 30 applied merges "
+                       "with 0 edges rewritten — the guard had no floor and the report "
+                       "said it had checked"),
         ]))
 
     # 9/10 ── kg_rebuild.py — the coverage floors → the rebuild SWAP (a LAND). Each

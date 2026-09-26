@@ -597,6 +597,34 @@ def test_a_symbol_the_item_named_by_name_is_in_the_inventory(symbol, guards):
     assert symbol in {g.symbol for g in guards}
 
 
+def test_the_degraded_graph_guard_has_a_witness_for_the_2026_09_22_apply(guards, report):
+    """#1557. This harness carried `baseline_zero` (50,908 edges, expect PASS) as
+    the only zero-baseline class, so the shape that actually fired had no witness:
+    `entity-merges-applied-2026-09-22-20260922T204831Z.json` records 0 active edges,
+    no baseline on disk, `safety.degraded_graph: "not degraded"`, 30 merges applied
+    and 0 edges rewritten. A BLOCK owed there and a BLOCK given is the difference
+    between a harness that scored the hole and one that green-lit it, so the class
+    must be present, must owe BLOCK, and the real guard must actually refuse it."""
+    g = next(g for g in guards if g.symbol == "degraded_reason")
+    rows = {r["class"]: r for r in g.results}
+    assert "empty_store_no_baseline" in rows, sorted(rows)
+    row = rows["empty_store_no_baseline"]
+    assert row["expect"] == gv.BLOCK, row
+    assert row["real"] == gv.BLOCK, "the guard still green-lights a 0-edge store"
+    assert row["status"] == "witnessed", row       # mutant=PASS, so this BLOCK is a real refusal
+    # the class the fix had to leave alone: a full store with a lost floor is not a
+    # refusal, or the first run against any new store would refuse itself
+    assert rows["baseline_zero"]["real"] == gv.PASS, rows["baseline_zero"]
+    # and the harness still runs to completion, printing the verdict it now owes
+    assert report["rc"] == 0, report["stderr"][-2000:]
+    printed = [m for ln in report["lines"] if (m := CLASS_RE.match(ln))
+               and m["cls"] == "empty_store_no_baseline"]
+    assert len(printed) == 1 and printed[0]["guard"] == gv.BLOCK, printed
+    tail = report["stdout"].split("FINDINGS", 1)
+    assert len(tail) == 1 or "empty_store_no_baseline" not in tail[1], \
+        "the guard's BLOCK and the witness's BLOCK disagree"
+
+
 def test_the_corrected_gate_path_is_used_not_the_item_mistake(report):
     """#636's own proving command named `scripts/selfmod/gate.py`, which does not
     exist; the report must carry the real path and never the wrong one."""

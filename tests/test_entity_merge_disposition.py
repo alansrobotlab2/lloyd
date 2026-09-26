@@ -182,6 +182,17 @@ def test_a_real_sweep_apply_is_the_disposition_the_audit_reports(tmp_path):
     db, out = tmp_path / "kg.sqlite", tmp_path / "mg"; out.mkdir()
     (out / "entity-merges-reverted-20260903T174108Z.json").write_text(
         json.dumps({"plan": [{"variant": "vllm", "canonical": "vLLM"}]}))
+    # One active edge, seeded on purpose (#1557). This fixture used to hand the
+    # sweep a store holding four registered entities and no edge at all, which is
+    # the 2026-09-22 condition clause 1 now refuses: `--apply` against 0 active
+    # edges exits 3 instead of merging names across a graph that cannot contradict
+    # it. What is under test here is the audit's join onto a report a run really
+    # wrote, so the apply has to be a real one — a measurable store gets it.
+    st = KGStore(db)
+    st.entities.register("vLLM"); st.entities.register("vllm")
+    st.edges.add({"source": "vLLM", "target": "Ray", "type": "mentions"}, origin="test")
+    assert len(st.edges.active()) == 1, "the fixture store seeded no edge to measure"
+    st.close()
     r = subprocess.run([sys.executable, str(SWEEP), "--facts-dir", str(root), "--db", str(db),
                         "--out-dir", str(out), "--no-gate", "--apply"],
                        capture_output=True, text=True, timeout=180)

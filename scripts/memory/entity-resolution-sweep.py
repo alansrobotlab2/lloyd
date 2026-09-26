@@ -1179,9 +1179,44 @@ def update_baseline(active: int, path: Path | None = None) -> int:
     return current
 
 
-def degraded_reason(active: int, baseline: int, fraction: float = DEGRADED_FRACTION) -> str | None:
-    """Why --apply must refuse, or None."""
+def degraded_reason(active: int, baseline: int, fraction: float = DEGRADED_FRACTION,
+                    *, measured: bool = True) -> str | None:
+    """Why --apply must refuse, or None.
+
+    An empty store refuses whatever the baseline file says (#1557). Before this,
+    the guard opened with `if baseline <= 0: return None`, so a missing or
+    unparseable `graph-baseline.json` disarmed it for the whole run — and
+    `update_baseline` is max-only and bootstraps `baseline := active` three lines
+    before the guard is consulted, so `degraded_reason(active, active)` can never
+    fire and the freshly written floor is whatever the degraded count happened to
+    be. The 2026-09-22 apply is that shape on disk:
+    `entity-merges-applied-2026-09-22-20260922T204831Z.json` carries
+    `baseline_active_edges: 0`, `safety.degraded_graph: "not degraded"`, 30 applied
+    merges and `rewritten_edges: 0`, against a 77,824-byte store backup where the
+    three following nights' backups are 78 MB, 78 MB and 87 MB. A store with no
+    active edges is the 2026-09-03 condition in its limit case — every entity at
+    degree 0, every variant indistinguishable from every other — and it is a fact
+    about the store, so it does not need the baseline file to be knowable.
+
+    `measured` says whether a floor was on disk before this run wrote one. It
+    only changes the wording: the refusal is the same either way, and a caller
+    that cannot know still gets the honest message.
+    """
+    if active <= 0:
+        floor = ("and no baseline was on disk before this run, so there was no recorded "
+                 "count to compare against either" if not measured else
+                 f"and the recorded baseline of {baseline:,} active edges says nothing "
+                 "about a store that now holds none")
+        return (f"graph is empty or unmeasurable: {active:,} active edges. Every entity "
+                f"looks disconnected and every name looks like a variant of every other, "
+                f"which is the shape that fused 151 entities on 2026-09-03 and moved 30 "
+                f"fact dirs on 2026-09-22 while rewriting 0 edges, {floor}. Point --db at "
+                f"the real store and restore the graph, or pass --allow-degraded if you "
+                f"have reviewed the plan by hand.")
     if baseline <= 0:
+        # No floor recorded and a store that does hold edges: nothing to compare
+        # against, so nothing to refuse — but this is `unmeasured`, not healthy,
+        # and safety_record labels it as such rather than "not degraded".
         return None
     if active < baseline * fraction:
         return (f"graph is degraded: {active:,} active edges is below {fraction:.0%} of the "
@@ -1192,7 +1227,8 @@ def degraded_reason(active: int, baseline: int, fraction: float = DEGRADED_FRACT
 
 
 def safety_record(no_gate: bool, allow_degraded: bool, gate, plan: dict,
-                  degraded: str | None) -> dict:
+                  degraded: str | None, *, active_edges: int | None = None,
+                  measured: bool = True) -> dict:
     """What the apply report must say about the checks that actually ran.
 
     The 2026-09-03 apply that fused 151 distinct entities is hard to audit
@@ -1202,6 +1238,20 @@ def safety_record(no_gate: bool, allow_degraded: bool, gate, plan: dict,
     parsed, so a later reader never has to reconstruct it from a shell history
     line — and `--no-gate` / `--allow-degraded` are visible as `true` when they
     were used instead of merely absent.
+
+    `degraded_graph` must also never read `"not degraded"` for a run the guard
+    could not measure (#1557). The 2026-09-22 report put `baseline_active_edges:
+    0` and `store_before.edges_active: 0` on either side of `"degraded_graph":
+    "not degraded"` — three facts that are only legible to a reader who already
+    knows 0 means "unmeasured" — because with no baseline file the guard returned
+    `None`, which this function rendered as a clean verdict. So `measured` is
+    stated, and the store's own active-edge count is carried beside it as
+    `active_edges`: a guarded apply, a bypassed one and an unmeasured one are
+    distinguishable from the `safety` block alone.
+
+    Both new parameters are keyword-only and default to the *measured* case, so
+    the existing positional callers and the unit calls that pin the gate verdict
+    keep their meaning: a caller that says nothing is a caller that measured.
     """
     gs = plan.get("gate_stats") or {}
     if no_gate:
@@ -1223,10 +1273,15 @@ def safety_record(no_gate: bool, allow_degraded: bool, gate, plan: dict,
         # looking for the caller: there is none, by design — this is the branch
         # that keeps a future caller from lying.
         degraded_note = "degraded (would have refused)"
+    elif not measured:
+        degraded_note = ("unmeasured: no graph baseline was on disk before this run, so the "
+                         "degraded-graph guard had no floor to compare against — the count "
+                         "below is the store's own, not a verdict about it")
     else:
         degraded_note = "not degraded"
     return {"no_gate": bool(no_gate), "allow_degraded": bool(allow_degraded),
-            "gate_verdict": verdict, "degraded_graph": degraded_note}
+            "gate_verdict": verdict, "degraded_graph": degraded_note,
+            "active_edges": active_edges, "baseline_measured": bool(measured)}
 
 
 def main() -> int:
@@ -1279,9 +1334,16 @@ def main() -> int:
     plan["tiers_allowed"] = sorted(allowed_tiers)
 
     baseline_path = out_dir / "graph-baseline.json"   # lives with the plans/reports it guards
+    # Whether the guard has a floor is only knowable BEFORE `update_baseline` runs:
+    # it bootstraps `baseline := active` when the file is missing or unparseable, so
+    # afterwards a lost baseline is indistinguishable from a graph that legitimately
+    # sits at its own count. That lost distinction is what let 2026-09-22 apply 30
+    # merges while the report said "not degraded" (#1557).
+    baseline_measured = baseline_path.is_file() and load_baseline(baseline_path) > 0
     baseline = update_baseline(len(active_edges), baseline_path)
     print(f"  Store:           {args.db}")
-    print(f"  Baseline:        {baseline:,} active edges (now {len(active_edges):,})")
+    print(f"  Baseline:        {baseline:,} active edges (now {len(active_edges):,})"
+          + ("" if baseline_measured else "  [no baseline on disk before this run — guard unmeasured]"))
     gs = plan.get("gate_stats") or {}
     if gs.get("asked"):
         print(f"  Semantic gate:   {gs['asked']} suffix pairs judged — {gs['same']} clusters SAME, {gs['review']} to review")
@@ -1318,7 +1380,7 @@ def main() -> int:
         print(f"(dry-run — pass --apply to execute {plan['safe_clusters']} SAFE merges)")
         return 0
 
-    reason = degraded_reason(len(active_edges), baseline)
+    reason = degraded_reason(len(active_edges), baseline, measured=baseline_measured)
     if reason and not args.allow_degraded:
         print(f"\nREFUSING --apply: {reason}")
         return 3
@@ -1375,7 +1437,9 @@ def main() -> int:
     # to tell a guarded apply from a bypassed one from the report alone.
     report_to_save["applied_clusters"] = plan.get("safe_clusters", len(plan["safe_merges"]))
     report_to_save["applied_merges"] = len(report["variant_to_canonical"])
-    report_to_save["safety"] = safety_record(args.no_gate, args.allow_degraded, gate, plan, reason)
+    report_to_save["safety"] = safety_record(
+        args.no_gate, args.allow_degraded, gate, plan, reason,
+        active_edges=len(active_edges), measured=baseline_measured)
     report_to_save["alias_provenance"] = {"origin": "sweep", "report_path": str(apply_out)}
     report_to_save["baseline_active_edges"] = baseline
     report_to_save["store_backup"] = str(store_bak)
