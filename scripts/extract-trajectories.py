@@ -920,16 +920,93 @@ def trajectory_date_key(traj: dict) -> str:
         return datetime.now(tz=LOCAL_TZ).strftime("%Y-%m-%d")
 
 
-def append_trajectories(trajectories: list[dict]) -> None:
-    """Append trajectories to date-bucketed output files.
+def _row_tool_count(entry: dict) -> int:
+    """Tool calls carried by a trajectory row, for the supersede comparison.
 
-    Idempotent per session_key: entries whose session_key already exists
-    in the target file are skipped (dedup-on-write). Backfill re-covers
-    sessions a prior run already wrote (watermark/late-end timing) and a
-    plain append produced byte-identical duplicate pairs (08-28/08-29
-    defect, 6th cycle). session_key is unique per session, so dedup is
-    safe.
+    `parse_session` writes `tool_count` alongside a `tools` array of the same
+    length; the fallback covers a row written before the field existed, and a
+    row with neither counts 0, so any fresh parse with real traffic supersedes
+    it rather than being read as an improvement over nothing.
     """
+    count = entry.get("tool_count")
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    tools = entry.get("tools")
+    if isinstance(tools, list):
+        return len(tools)
+    return 0
+
+
+def _read_bucket(out_path: Path):
+    """Read one date bucket into (lines, position_by_key, count_by_key, dupe_keys).
+
+    `lines` keeps every line verbatim, blank and unparseable ones included, so a
+    rewrite reproduces the rows it did not touch byte for byte. A key holding
+    more than one row goes to `dupe_keys` and is dropped from `position_by_key`:
+    the single-row invariant cannot be restored there without deleting a row,
+    and the legacy pre-2026-08-28 buckets whose duplicate counts are pinned by
+    tests/test_trajectory_extraction.py are exactly those files. `count_by_key`
+    holds the largest count seen for a key.
+    """
+    lines: list[str] = []
+    position_by_key: dict[str, int] = {}
+    count_by_key: dict[str, int] = {}
+    dupe_keys: set[str] = set()
+    if not out_path.exists():
+        return lines, position_by_key, count_by_key, dupe_keys
+    with open(out_path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            lines.append(raw)
+            stripped = raw.strip()
+            if not stripped:
+                continue
+            try:
+                entry = json.loads(stripped)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            key = entry.get("session_key") or ""
+            if not key:
+                continue
+            count = _row_tool_count(entry)
+            if key in position_by_key:
+                dupe_keys.add(key)
+                if count > count_by_key[key]:
+                    count_by_key[key] = count
+            else:
+                position_by_key[key] = len(lines) - 1
+                count_by_key[key] = count
+    for key in dupe_keys:
+        position_by_key.pop(key, None)
+    return lines, position_by_key, count_by_key, dupe_keys
+
+
+def append_trajectories(trajectories: list[dict]) -> dict:
+    """Append trajectories to date-bucketed files, replacing a row only with a
+    fuller one.
+
+    Idempotent per session_key and monotone in payload: an entry whose key is
+    already in the target bucket is skipped unless the fresh parse carries more
+    tool calls than the stored row, which is then rewritten in place. Membership
+    alone used to be the test, so a session still RUNNING when the nightly scan
+    passed kept its partial snapshot forever — the 2026-09-26 probe counted 9
+    such rows inside the `--days 2` window (worst `20260925_120928_archreview_a44b`
+    at 17 of 55 calls) and 14 inside the miner's own 7-day horizon (worst
+    `20260923_072544_autocode_d8d8` at 22 of 137). Nothing downstream recovers
+    the missing calls: the miner iterates the row's own `tools` array
+    (mine-trajectories.py:865, :1072, :1923) and only re-joins the session file
+    for `session_class` (`effective_session_class`, :504).
+
+    Skipping on membership was the 08-28/08-29 dedup fix (6th cycle of the
+    duplicate-pair defect, 26% entry inflation), so a supersede is the ONLY
+    licence to write over existing bytes: a bucket receiving no superseded key
+    is still opened in append mode, and a bucket that already holds duplicate
+    keys — the five legacy pre-2026-08-28 files — is never rewritten at all.
+
+    Returns {"appended", "superseded", "buckets_rewritten"} for the run log.
+    """
+    stats = {"appended": 0, "superseded": 0, "buckets_rewritten": 0}
     # Group by date
     by_date: dict[str, list[dict]] = {}
     for traj in trajectories:
@@ -938,25 +1015,54 @@ def append_trajectories(trajectories: list[dict]) -> None:
 
     for date_key, items in by_date.items():
         out_path = OUTPUT_DIR / f"{date_key}.jsonl"
-        existing_keys: set[str] = set()
-        if out_path.exists():
-            with open(out_path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        existing_keys.add(json.loads(line).get("session_key", ""))
-                    except (ValueError, KeyError):
-                        pass
-        with open(out_path, "a", encoding="utf-8") as fh:
-            for item in items:
-                key = item.get("session_key", "")
-                if key and key in existing_keys:
-                    continue
-                if key:
-                    existing_keys.add(key)
-                fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+        lines, position_by_key, count_by_key, dupe_keys = _read_bucket(out_path)
+        n_read = len(lines)
+        appended_here = 0
+        superseded_here = 0
+        for item in items:
+            key = item.get("session_key") or ""
+            line = json.dumps(item, ensure_ascii=False) + "\n"
+            if not key:
+                # No key to dedup on: append, as before (parse_session always
+                # sets one, so this is the malformed-input path).
+                lines.append(line)
+                appended_here += 1
+                continue
+            fresh = _row_tool_count(item)
+            if key in position_by_key:
+                if fresh > count_by_key[key]:
+                    lines[position_by_key[key]] = line
+                    count_by_key[key] = fresh
+                    superseded_here += 1
+                continue
+            if key in dupe_keys:
+                continue
+            position_by_key[key] = len(lines)
+            count_by_key[key] = fresh
+            lines.append(line)
+            appended_here += 1
+
+        if superseded_here == 0:
+            # Nothing replaced: the append-only path, so the file's existing
+            # bytes stay an exact prefix of what follows.
+            if appended_here:
+                with open(out_path, "a", encoding="utf-8") as fh:
+                    for line in lines[n_read:]:
+                        fh.write(line)
+                stats["appended"] += appended_here
+            continue
+
+        # A supersede needs a rewrite (an append can never shrink a line), so
+        # rebuild this one bucket atomically with every other line untouched.
+        tmp_path = out_path.with_name(f".{out_path.name}.rw.{os.getpid()}")
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            for line in lines:
+                fh.write(line if line.endswith("\n") else line + "\n")
+        os.replace(tmp_path, out_path)
+        stats["appended"] += appended_here
+        stats["superseded"] += superseded_here
+        stats["buckets_rewritten"] += 1
+    return stats
 
 
 def rewrite_trajectories(trajectories: list[dict]) -> None:
@@ -1186,7 +1292,11 @@ def main() -> None:
         if args.full:
             rewrite_trajectories(trajectories)
         else:
-            append_trajectories(trajectories)
+            written = append_trajectories(trajectories)
+            print(f"  Appended: {written['appended']}  "
+                  f"Replaced with fuller re-parse: {written['superseded']}  "
+                  f"Buckets rewritten: {written['buckets_rewritten']}",
+                  file=sys.stderr)
 
     # Update watermark
     now = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")

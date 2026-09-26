@@ -246,6 +246,168 @@ def test_rewrite_mode_replaces_the_bucket(isolated_output):
     assert keys == ["new"]
 
 
+# ── supersede-on-update (#1539) ──────────────────────────────────────────────
+#
+# Dedup-on-write keyed on membership, so a session that was still RUNNING while
+# the nightly extractor scanned it was written with a partial `tool_count` and
+# then skipped by every later run: the 2026-09-26 probe counted 9 such rows
+# inside the `--days 2` window (worst `20260925_120928_archreview_a44b` at 17 of
+# 55 calls) and 14 inside the miner's own 7-day horizon (worst
+# `20260923_072544_autocode_d8d8` at 22 of 137). The miner iterates the row's own
+# `tools` array (mine-trajectories.py:865, :1072, :1923), so nothing downstream
+# re-joins the session file and recovers the missing calls.
+
+def row(key, ts, n, tag="stored"):
+    """A trajectory row shaped like `parse_session`'s output: `tool_count` plus
+    the matching `tools` array. `tag` tells one parse's payload from another's,
+    so a test can prove *which* parse survived."""
+    return {"session_key": key, "timestamp": ts,
+            "tool_count": n, "tools": [{"name": f"{tag}#{i}"} for i in range(n)]}
+
+
+def bucket_rows(path):
+    """The parseable rows of a bucket, in file order, skipping blank and
+    unparseable lines the way the extractor's own reader does."""
+    out = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            out.append(parsed)
+    return out
+
+
+def test_a_fuller_reparse_replaces_the_partial_row(isolated_output):
+    """Clause 1: the frozen partial snapshot. A re-parse carrying more tool
+    calls ends with exactly ONE row for that key, and that row is the fresh
+    payload — not the 17-call stub the run logged mid-session."""
+    target = isolated_output / "2026-09-04.jsonl"
+    et.append_trajectories([row("s1", "2026-09-04T18:00:00Z", 17, tag="partial")])
+    et.append_trajectories([row("s1", "2026-09-04T18:00:00Z", 55, tag="complete")])
+    rows = bucket_rows(target)
+    assert [r["session_key"] for r in rows].count("s1") == 1
+    assert rows[0]["tool_count"] == 55
+    assert [t["name"] for t in rows[0]["tools"]] == [
+        f"complete#{i}" for i in range(55)]
+
+
+def test_a_superseded_row_keeps_its_position_in_the_bucket(isolated_output):
+    """The replace substitutes the line where it was read, so a rewritten bucket
+    still reads in the order it was written."""
+    target = isolated_output / "2026-09-04.jsonl"
+    et.append_trajectories([row("a", "2026-09-04T18:00:00Z", 1),
+                            row("b", "2026-09-04T18:01:00Z", 2),
+                            row("c", "2026-09-04T18:02:00Z", 3)])
+    et.append_trajectories([row("b", "2026-09-04T18:01:00Z", 9, tag="fresh")])
+    rows = bucket_rows(target)
+    assert [r["session_key"] for r in rows] == ["a", "b", "c"]
+    assert rows[1]["tool_count"] == 9
+
+
+def test_supersede_falls_back_to_the_tools_array_without_tool_count(isolated_output):
+    """A stored row predating the `tool_count` field still carries `tools`; the
+    comparison must read the array rather than see 0 and call the fresh parse
+    'not an improvement'."""
+    target = isolated_output / "2026-09-04.jsonl"
+    target.write_text(json.dumps({"session_key": "s1",
+                                  "timestamp": "2026-09-04T18:00:00Z",
+                                  "tools": [{"name": "t0"}]},
+                                 ensure_ascii=False) + "\n", encoding="utf-8")
+    et.append_trajectories([row("s1", "2026-09-04T18:00:00Z", 6, tag="fresh")])
+    rows = bucket_rows(target)
+    assert len(rows) == 1 and rows[0]["tool_count"] == 6
+
+
+def test_a_smaller_or_equal_reparse_never_shrinks_the_stored_row(isolated_output):
+    """Clause 2: a re-parse that reads a session file mid-write comes back
+    shorter. The stored payload survives it byte for byte — and so it does for an
+    equal count, which is a re-read, not an update."""
+    target = isolated_output / "2026-09-04.jsonl"
+    et.append_trajectories([row("s1", "2026-09-04T18:00:00Z", 7, tag="stored")])
+    before = target.read_bytes()
+    et.append_trajectories([row("s1", "2026-09-04T18:00:00Z", 4, tag="truncated")])
+    assert target.read_bytes() == before
+    et.append_trajectories([row("s1", "2026-09-04T18:00:00Z", 7, tag="equal")])
+    assert target.read_bytes() == before
+    assert [t["name"] for t in bucket_rows(target)[0]["tools"]][0] == "stored#0"
+
+
+def test_one_batch_can_replace_stale_and_append_at_once(isolated_output):
+    """A nightly batch mixes all three cases: a fuller re-parse (replace), a
+    shorter one (drop) and a key the bucket has never seen (append)."""
+    target = isolated_output / "2026-09-04.jsonl"
+    et.append_trajectories([row("s1", "2026-09-04T18:00:00Z", 3)])
+    et.append_trajectories([row("s1", "2026-09-04T18:00:00Z", 12, tag="fresh"),
+                            row("s1", "2026-09-04T18:00:00Z", 5, tag="stale"),
+                            row("s2", "2026-09-04T19:00:00Z", 2)])
+    assert [(r["session_key"], r["tool_count"]) for r in bucket_rows(target)] == [
+        ("s1", 12), ("s2", 2)]
+
+
+def test_a_superseded_bucket_keeps_every_other_row_and_gains_no_dupe(isolated_output):
+    """Clause 4: rewriting to replace one row may not lose or duplicate another.
+    Four rows in, four rows out, same keys in the same order, and a row this
+    batch did not mention still holds the payload it was written with."""
+    target = isolated_output / "2026-09-04.jsonl"
+    et.append_trajectories([row(f"s{i}", f"2026-09-04T18:0{i}:00Z", i)
+                            for i in range(4)])
+    et.append_trajectories([row("s1", "2026-09-04T18:01:00Z", 40, tag="fresh"),
+                            row("s3", "2026-09-04T18:03:00Z", 40, tag="fresh")])
+    rows = bucket_rows(target)
+    assert [r["session_key"] for r in rows] == ["s0", "s1", "s2", "s3"]
+    assert len({r["session_key"] for r in rows}) == 4
+    assert [r["tool_count"] for r in rows] == [0, 40, 2, 40]
+    assert [t["name"] for t in rows[2]["tools"]] == ["stored#0", "stored#1"]
+
+
+def test_a_bucket_with_no_superseded_key_keeps_its_non_canonical_bytes(isolated_output):
+    """Clause 3: only an actual replace may touch a bucket's existing bytes. The
+    rows here are deliberately NOT in `json.dumps` form (compact separators) and
+    the file carries a blank and an unparseable line, so an implementation that
+    rewrote whenever a key merely matched — re-dumping every row, or dropping
+    junk — breaks the prefix assertion while still reporting the right row count.
+    `test_append_never_rewrites_existing_bytes` covers the canonical form."""
+    target = isolated_output / "2026-09-04.jsonl"
+    original = ('{"session_key":"s1","timestamp":"2026-09-04T18:00:00Z",'
+                '"tool_count":7}\n\nthis is not json\n')
+    target.write_text(original, encoding="utf-8")
+    et.append_trajectories([row("s1", "2026-09-04T18:00:00Z", 7, tag="equal"),
+                            row("s2", "2026-09-04T19:00:00Z", 2)])
+    after = target.read_bytes()
+    assert after.startswith(original.encode("utf-8"))
+    assert json.loads(after.decode("utf-8").splitlines()[-1])["session_key"] == "s2"
+
+
+def test_a_bucket_already_holding_duplicate_keys_is_never_rewritten(isolated_output):
+    """The five legacy pre-2026-08-28 buckets hold repeated session_keys and
+    `test_pre_fix_duplicate_buckets_are_frozen_not_growing` pins their exact
+    (rows, distinct) pairs. Replacing a key that has two rows would have to drop
+    one to keep the single-row invariant, which would change those pairs, so a
+    supersede landing in such a bucket is skipped and the file stays byte-equal."""
+    target = isolated_output / "2026-08-22.jsonl"
+    dup = json.dumps(row("s1", "2026-08-22T18:00:00Z", 3, tag="legacy"),
+                     ensure_ascii=False)
+    target.write_text(dup + "\n" + dup + "\n", encoding="utf-8")
+    before = target.read_bytes()
+    et.append_trajectories([row("s1", "2026-08-22T18:00:00Z", 99, tag="fresh")])
+    assert target.read_bytes() == before
+
+
+def test_append_reports_the_rows_it_replaced(isolated_output):
+    """The nightly run prints this, so the log says how many partial rows were
+    repaired. A silent replace is exactly what let the freeze run unnoticed from
+    08-28 to 09-26."""
+    et.append_trajectories([row("s1", "2026-09-04T18:00:00Z", 3)])
+    stats = et.append_trajectories([row("s1", "2026-09-04T18:00:00Z", 9, tag="fresh"),
+                                    row("s2", "2026-09-04T19:00:00Z", 1),
+                                    row("s1", "2026-09-04T18:00:00Z", 2)])
+    assert stats == {"appended": 1, "superseded": 1, "buckets_rewritten": 1}
+
+
 # ── live-data integrity guard ────────────────────────────────────────────────
 
 def test_production_buckets_since_the_fix_have_no_duplicate_keys():
