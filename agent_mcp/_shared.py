@@ -441,6 +441,12 @@ AUTONOMY_TASK_FIELDS: tuple[str, ...] = (
     # nothing to validate on a file whose YAML broke. Recovery must be able to
     # see a block sequence, hence `_recover_block_field` below.
     "grants",
+    # #1555, and the second field whose loss fails OPEN like `grants` above: a task
+    # recovered without `requires_slot` reads as one that declares no slot, so
+    # `slot_arm_block` finds nothing to refuse and a broken file hands back the
+    # arming right the declaration was there to withhold — onto an engine that is
+    # switched off. #85's park exists because flipping that slot OOMs GPU 2.
+    "requires_slot",
 )
 
 #: Backlog #951: an autonomy task file's markdown body is documentation plus the

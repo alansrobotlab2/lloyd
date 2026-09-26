@@ -112,6 +112,13 @@ def _parse_task_file(path: Path) -> dict | None:
             "stale_bypass_hours": frontmatter.get("stale_bypass_hours"),
             "expected_error_patterns": frontmatter.get("expected_error_patterns") or [],
             "cron_id": frontmatter.get("cron_id"),
+            # #1555. Read-side half only, but the half that decides whether the
+            # guard fires: the UPDATE path below asks the projected dict for
+            # `requires_slot`, and a task whose declaration this projection dropped
+            # would read exactly like one that declares no slot — the fails-open
+            # shape again, one layer in. `_write_task_file` starts from the file's
+            # PRIOR frontmatter, so the key already survives the write untouched.
+            "requires_slot": frontmatter.get("requires_slot"),
             "type": frontmatter.get("type", "autonomy"),
             # Carried through deliberately, not incidental: `_write_task_file`
             # refuses a record that only reached us by regex fallback, and the
@@ -548,6 +555,17 @@ def _handle_write(params: dict) -> str:
             task_dict["auto_advance"] = params["auto_advance"]
         if "preemptible" in params:
             task_dict["preemptible"] = params["preemptible"]
+        # Arming a task whose measurement surface is an optional LLM slot is refused
+        # while that slot is switched off — the writer-side half of the refusal the
+        # eval already makes with `EXIT_SLOT_DISABLED = 7` (#1555). #85 went
+        # `draft -> up_next` here-equivalent by an unattributed write with
+        # `secondary_enabled: false` in force, which is a sweep of one engine twice
+        # billed to the primary. Parking is never refused, so a job can always be
+        # stopped from this tool.
+        from autonomy import slot_arm_block
+        blocked = slot_arm_block(task_dict, str(task_dict.get("status") or ""))
+        if blocked:
+            return json.dumps({"error": blocked})
         task_dict["updated_at"] = now
         # Two notes can land on this one write: the caller's own `activity_note`,
         # and the one this tool OWES when it moves `status` — `draft`/`paused` are

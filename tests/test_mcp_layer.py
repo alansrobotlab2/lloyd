@@ -954,8 +954,28 @@ RETIRED_TOOLS = frozenset({
 # chars/4 via `app.compaction.estimate_tokens`, over the OpenAI-shaped JSON the
 # harness actually sends. Measured 20,524 at the 2026-09-23 trim (104 tools);
 # the primary's own tokenizer read 20,582, so the estimate is within 1% on this
-# JSON. The ceiling is ~10% over,
-# so growth past it is a conscious raise with a reason, not a slow creep.
+# JSON. The ceiling is ~10% over, so growth past it is a conscious raise with a
+# reason, not a slow creep.
+#
+# It went red on main on 2026-09-26 at 22,516 — sixteen tokens over. The ceiling
+# stays, because the sibling guard on the same surface states the rule for raising
+# it (`tests/test_tool_schema_budget.py`: "Raise it on purpose, with the new figure,
+# when a tool surface is deliberately grown; do not raise it to make a red run go
+# green"), and this growth was nobody's decision: 20,524 measured at `ed78a3a9`
+# (2026-09-23) to 22,516, +1,992 in three days, `git diff --numstat ed78a3a9..HEAD
+# -- agent_mcp/` net +4,113 lines over 38 files — ordinary landings, no offender to
+# point at. So the catalog came down instead of the ceiling going up: 83 estimated
+# tokens removed from `SetGoal`'s description, which restated its own `text`
+# parameter (the schema already says "Max 4000 chars") and its own result string
+# ("Inner voice enabled for this session ... Call ClearGoal to abandon"). Nothing
+# an agent needed went away; measured now 22,433 over 104 tools.
+#
+# The remaining room is 67 estimated tokens — 0.3%. That is the point: the next
+# landing that grows any description trips this line, and by then the question is not
+# which sentence to cut but whether ~22.4k tokens of schemas on every chat and
+# session-backed worker turn is the budget while `harness.tool_search` is off by
+# decision (#456). Re-arm it, cap per-tool descriptions, or raise this number with a
+# stated budget — all three are human calls, recorded on item #1555.
 INTERNAL_CATALOG_TOKEN_CEILING = 22_500
 
 

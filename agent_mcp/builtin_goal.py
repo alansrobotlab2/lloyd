@@ -106,19 +106,10 @@ async def _clear_goal(_args: dict[str, Any]) -> str:
 
 _SET_DESC = """Set a session-level persistent goal (the /goal slash command).
 
-The goal is a verifiable end condition (e.g. "all tests in test/auth pass and lint is clean", "the haiku about supervisord is saved to /tmp/h.txt"). After each turn the inner-voice observer evaluates the conversation against the goal; if unmet, it queues a follow-up turn with a short reason; if met, it marks the goal achieved and stops looping.
+The goal is a verifiable end condition (e.g. "all tests in test/auth pass and lint is clean", "the haiku about supervisord is saved to /tmp/h.txt"). After each turn the inner-voice observer evaluates the conversation against the goal; if unmet, it queues a follow-up turn with a short reason; if met, it marks the goal achieved and stops looping. One goal per session: setting one replaces the prior.
 
 ## When to use
-Long-horizon tasks where the user can articulate "done" better than they can specify each step. Bug hunts, feature builds, refactors with a clear acceptance criterion.
-
-## Args
-- `text` (required, string, max 4000 chars): the goal text. Single goal per session — setting a new goal replaces the prior one.
-
-## Side effects
-- Stores `session.goal = {text, set_at, achieved_at, attempts}`.
-- Auto-enables inner voice (`session.inner_voice=true`, `session.inner_voice_evaluate_user_turns=true`) so the loop runs.
-
-Use `ClearGoal` to abandon."""
+Long-horizon tasks where the user can articulate "done" better than they can specify each step. Bug hunts, feature builds, refactors with a clear acceptance criterion."""
 
 
 _CLEAR_DESC = """Clear the session's persistent goal (the /clear-goal slash command).

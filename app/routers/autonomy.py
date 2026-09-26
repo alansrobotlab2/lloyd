@@ -93,6 +93,10 @@ def _autonomy_parse(path: Path) -> dict | None:
             "name": fm.get("name", ""),
             "description": fm.get("description", ""),
             "status": fm.get("status", "draft"),
+            # #1555: same read-side half as `agent_mcp/autonomy.py` — the task-write
+            # route asks the projected dict for `requires_slot` before it arms, and
+            # a projection that dropped the key would arm the task anyway.
+            "requires_slot": fm.get("requires_slot"),
             "priority": fm.get("priority", "medium"),
             "frequency": fm.get("frequency") or None,
             "scheduled_at": _to_iso(fm.get("scheduled_at")),
@@ -350,6 +354,15 @@ async def autonomy_task_write(request: Request):
                      "max_retries", "depends_on", "preferred_hours", "cron_id", "runs_per_day"):
             if key in data:
                 task[key] = data[key]
+        # The second of the two status-write surfaces, guarded identically
+        # (`agent_mcp/autonomy.py`): a guard on one of two writers is not a guard.
+        # Arming a slot-bound task while its slot is off is refused with 409 — the
+        # same answer the eval gives with `EXIT_SLOT_DISABLED = 7` (#1555). Park it,
+        # reprioritise it, reschedule it: those all still write.
+        from autonomy import slot_arm_block
+        blocked = slot_arm_block(task, str(task.get("status") or ""))
+        if blocked:
+            raise HTTPException(status_code=409, detail=blocked)
         task["created"] = task.get("created_at") or task.get("created", "")
         task["updated"] = now
         # A status change from outside the scheduler records itself in the task's

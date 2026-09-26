@@ -4517,3 +4517,47 @@ def compute_health(rows: list[dict], tasks: list[dict], days: int,
         # "healthy" about a job that had not run in ~50 cycles (#1121).
         "stalled": stalled,
     }
+
+
+def slot_arm_block(task: dict | None, new_status: str) -> Optional[str]:
+    """Refusal reason if arming `task` to `new_status` would dispatch it onto an
+    optional LLM slot that is switched off; None when nothing blocks the write.
+
+    A task that declares `requires_slot: <program>` exists to measure *that* engine
+    against the primary, and `app.llm_slots.is_enabled` is the one authority on
+    whether the program is meant to be running. Both status writers ignored it:
+    vault commit `a6c363d6` parked #85 (`Secondary Routing Eval`) with its reason in
+    the message — "#1328 uninstalled the secondary engine, so there is no slot to
+    measure; flipping the flag now OOMs GPU 2" — and an unattributed write four days
+    later moved it `draft -> up_next` with `secondary_enabled: false` still in force
+    (#1555). With the slot off, `resolve_model_alias('secondary')` answers `primary`,
+    so the run is 120 trials against the engine it claims to compare, on the box's
+    main model, next to a loaded 95 GiB table.
+
+    This one BLOCKS where `status_change_note` only reports, because the two
+    situations differ: reporting is right for a transition a human may legitimately
+    make (`up_next` -> `in_progress` is a job claiming its own task), and arming a
+    slot-bound task is not one. The measurement script already refuses from the other
+    side — `eval/secondary_routing_eval.py` returns `EXIT_SLOT_DISABLED = 7` when the
+    slot is off (pinned by `test_a_disabled_secondary_slot_exits_7_before_the_first_
+    request`), and the task's own body calls that "the job being parked, not a
+    failure". Only the writers lacked it, and there is no bypass key: a bypass is
+    what un-parking it looked like.
+    """
+    if str(new_status or "").strip() not in RUNNABLE_STATUSES:
+        return None  # parking is never blocked, whatever the slot says
+    slot = str((task or {}).get("requires_slot") or "").strip()
+    if not slot:
+        return None
+    from app import llm_slots
+
+    if llm_slots.is_enabled(slot):
+        return None
+    flag = next((f for f, prog, _on in llm_slots.slots() if prog == slot), slot)
+    return (
+        f"task #{(task or {}).get('id')} declares `requires_slot: {slot}` and "
+        f"`{flag}` is false, so that engine is not booted: arming it would dispatch "
+        f"the job onto the slot it exists to measure (the eval itself exits 7 on "
+        f"that). Boot the engine or set `{flag}: true` — which needs the GPU headroom "
+        f"the park noted — and it arms normally."
+    )
