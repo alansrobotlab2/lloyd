@@ -932,13 +932,48 @@ function AutomodRow({ label, value, sub, tone = 'idle' }: {
   )
 }
 
+/** ~"18m" for the pending-restart line; seconds under a minute. */
+function fmtAgeShort(s: number | null | undefined): string {
+  if (s == null || !isFinite(s)) return '—'
+  if (s < 60) return `${Math.round(s)}s`
+  if (s < 3600) return `${Math.round(s / 60)}m`
+  return `${(s / 3600).toFixed(1)}h`
+}
+
+/** The land train, live (never behind the scorecard's cache): landings
+ *  merged but not yet running, and whether chat is paused for the restart
+ *  right now. Rendered only while there is something to say. */
+function PendingRestartLine({ pr }: { pr: NonNullable<AutomodState['pending_restart']> }) {
+  if (pr.error) return null // the scorecard rows still render; nothing live to say
+  const n = pr.entries?.length ?? 0
+  if (!pr.draining && !pr.flushing && !(pr.restart_needed ?? 0)) return null
+  const tone: Tone = pr.draining ? 'warn' : 'accent'
+  const text = pr.draining
+    ? `restarting — chat paused (~${fmtAgeShort(pr.drain_remaining_s)})`
+    : pr.flushing
+      ? `restart running — ${n} landing${n === 1 ? '' : 's'} in the batch`
+      : `${pr.restart_needed}/${n} pending landing${n === 1 ? '' : 's'} awaiting restart · oldest ${fmtAgeShort(pr.oldest_age_s)}`
+  const titles = (pr.entries ?? []).map(e => `${e.round_id ?? '?'} ${e.title ?? ''}`.trim()).join('\n')
+  return (
+    <div className={cn('mb-1.5 flex items-center gap-1.5 rounded border px-2 py-1 text-[10px]',
+      pr.draining ? 'border-amber-400/40' : 'border-border')}
+      title={`${pr.flush_why ?? ''}${titles ? `\n${titles}` : ''}`.trim() || undefined}>
+      <span className={cn('h-1.5 w-1.5 flex-shrink-0 animate-pulse rounded-full', TONE_FILL[tone])} />
+      <span className={cn('truncate', TONE_TEXT[tone])}>⟳ {text}</span>
+    </div>
+  )
+}
+
 function AutomodPanel({ automod }: { automod: AutomodState }) {
   const a = automod.acceptance, r = automod.review, s = automod.spawn
   const b = automod.bookkeeping, p = automod.verdict_plumbing, t = automod.throughput
   const defects = b.nameless_deferrals + b.stranded_landings + b.bare_aborts
+  const pr = automod.pending_restart
   const state = automod.broken ? 'BROKEN' : automod.halted ? 'halted'
+    : pr?.draining ? 'restarting'
     : automod.current?.state ? `${automod.current.state}` : automod.enabled === false ? 'off' : 'idle'
   const stateTone: Tone = automod.broken ? 'crit' : automod.halted ? 'warn'
+    : pr?.draining ? 'warn'
     : automod.current?.state ? 'accent' : 'idle'
   return (
     <Panel>
@@ -953,6 +988,7 @@ function AutomodPanel({ automod }: { automod: AutomodState }) {
           </span>
         </span>
       </div>
+      {pr && <PendingRestartLine pr={pr} />}
       <div className="space-y-1">
         <AutomodRow label="Acceptance met" value={pctOrDash(a.hit_rate)}
           sub={`${a.met}/${a.with_outcome} landed`}

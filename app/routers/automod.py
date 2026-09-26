@@ -107,6 +107,27 @@ def drain_admits(session_id: str, *, busy: bool | None = None) -> bool:
         return False
 
 
+def landing_refusal():
+    """The 503 a turn gets while the drain is armed (`/api/message/stream`).
+
+    The detail string is parsed downstream — `run_prompt_in_session` raises
+    `DrainActive` on "is landing a code update" and the review grader reads
+    the `retry in Ns` hint out of it — so its shape is a contract; never
+    reword it. `X-Lloyd-Landing` is the machine-readable form the web client
+    keys on to hold the refused message and resend it when the drain clears
+    (`api.ts::streamMessage`), and `Retry-After` carries the same hint for
+    anything generic.
+    """
+    from fastapi import HTTPException
+    remaining = drain_remaining()
+    return HTTPException(
+        status_code=503,
+        detail=f"Lloyd is landing a code update; retry in {remaining:.0f}s.",
+        headers={"Retry-After": str(max(1, round(remaining))),
+                 "X-Lloyd-Landing": "1"},
+    )
+
+
 def _is_loopback(request: Request) -> bool:
     host = getattr(getattr(request, "client", None), "host", "") or ""
     return host in ("127.0.0.1", "::1", "localhost")
@@ -147,7 +168,20 @@ async def post_loaded(request: Request):
 
 @router.get("/api/automod/drain")
 async def get_drain():
-    return JSONResponse({"draining": drain_active(), "remaining_s": round(drain_remaining(), 1)})
+    """The drain flag, plus what the land train holds. The web client polls
+    this while it is holding a 503'd message (`X-Lloyd-Landing`), so the flag
+    must answer even when the automod state dir cannot — the extras are
+    best-effort. Two small file reads; fine at a client's poll cadence."""
+    out = {"draining": drain_active(), "remaining_s": round(drain_remaining(), 1)}
+    try:
+        from scripts.automod import state as S
+        entries = S.read_pending()
+        out["pending"] = len(entries)
+        out["restart_needed"] = sum(1 for e in entries if e.get("restart"))
+        out["flushing"] = bool(S.flush_in_progress())
+    except Exception:  # noqa: BLE001 — the flag alone is still an answer
+        pass
+    return JSONResponse(out)
 
 
 @router.get("/api/automod/status")

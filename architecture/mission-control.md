@@ -91,7 +91,7 @@ table are one fact a run can re-measure.
 | `workers` | `workers.queue` + `workers.pool` — pool slots, per-source depth, recent runs |
 | `autonomy` | `~/obsidian/autonomy/*.md` frontmatter + the pool's in-flight `scheduled-task` jobs |
 | `backlog` | `~/obsidian/backlog/*.md` frontmatter |
-| `automod` | `app/routers/dashboard.py::_automod` — the loop's scorecard (`scripts/automod/scorecard.py`) over the last 7 days plus its live round state, cached at `_SCORECARD_TTL_S` |
+| `automod` | `app/routers/dashboard.py::_automod` — the loop's scorecard (`scripts/automod/scorecard.py`) over the last 7 days plus its live round state, cached at `_SCORECARD_TTL_S`; the land train's `pending_restart` rides on it OUTSIDE the cache (§ "Pending restarts and the chat drain") |
 | `network` | `agent_mcp/egress.py::network_report` — where `http_fetch`/`http_request`/`http_search`/`browser_navigate` went over 7 days, per destination and per scope (#628; the table is `egress_events` in `workers.db`) |
 | `usage` | `usage_store` |
 
@@ -227,6 +227,55 @@ engine and reports a rate. A counter that goes backwards (engine restarted)
 yields `None`, never a number — otherwise a restart renders as a one-second
 spike of the engine's entire history. An unreachable engine drops its baseline
 for the same reason.
+
+## Pending restarts and the chat drain
+
+With the land train on (`automod.landing.defer_restart`,
+`architecture/automod.md` §3.2i), landings merge without restarting and wait
+on `pending_restart.json` for a flush. Two surfaces make that state — and the
+minute or two when the flush's drain refuses chat — visible instead of
+confusing (2026-09-26: Alan hit a silent 503 wall mid-conversation and had no
+way to know a restart was queued):
+
+- **The dashboard**: `_pending_restart()` in `app/routers/dashboard.py` rides
+  on the `automod` section on every 2 s poll, deliberately OUTSIDE the
+  scorecard's 60 s cache — "chat is paused" lagging a minute is useless for
+  an event that lasts one or two. It carries the pending entries (round, title,
+  short sha, age, whether each needs a restart), the flush marker,
+  `flush_due`'s why, the live drain flag, and a derived `stage`
+  (`chat-paused` > `flushing` > `pending`). It is file-cheap by construction:
+  `flush_due` is "two small files and a marker", and the git-walking
+  `_live_pending` belongs to the flush itself, never to a 2 s poll. It
+  degrades to the drain flag plus an `error` field, never the section — the
+  flag is in-process and cannot fail with the state dir.
+  `PendingRestartLine` in `DashboardPage.tsx` renders it: amber pulse and
+  "chat paused" while draining, otherwise the pending count and oldest age.
+- **Chat holds the message instead of erroring.** The 503 the drain puts in
+  front of `/api/message/stream` is minted by
+  `app/routers/automod.py::landing_refusal` — its detail string is a contract
+  (three parsers read it: `DrainActive` in `workers/sources/_common.py`, the
+  review grader's `_is_unavailable` and `_retry_delay`), so the
+  machine-readable form for the web client is the `X-Lloyd-Landing` header,
+  plus `Retry-After`. `api.ts::streamMessage` keys on the header, tells the
+  UI once through `onLandingWait` (ChatPanel renders a status bubble, not an
+  error), then polls `GET /api/automod/drain` every 2.5 s until
+  `draining: false` and re-POSTs the identical request. A poll the backend
+  does not answer is the reboot itself, so a failed fetch means keep waiting;
+  a no-restart flush clears the flag without a reboot, so the flag — never a
+  new `boot_id` — is the resend condition. The 503 fires before the turn
+  exists, so a resend can never double-send; a stream that died mid-turn is
+  NOT retried. Stop aborts the hold through the same `AbortController`, and
+  the whole hold gives up after 10 minutes. `GET /api/automod/drain` carries
+  `pending`/`restart_needed`/`flushing` beside the flag, best-effort — the
+  flag must answer even when the state dir cannot.
+  `tests/test_pending_restart_visibility.py` pins the refusal's shape to all
+  of its parsers; `web/src/api.test.ts` pins the hold, the mid-reboot wait,
+  the plain-503 non-hold, and the abort.
+
+The refusal window itself shrank on the same day: `wait_idle` arms the drain
+only once the paused pool is empty (`architecture/automod.md` § "The drain is
+armed once the pool is empty"), so the hold is normally the quiet polls plus
+the reboot, not the pool wait.
 
 ## Sessions, titles, activity
 

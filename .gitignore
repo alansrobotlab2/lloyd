@@ -14,6 +14,10 @@ __pycache__/
 
 # ─── Build output ───────────────────────────────────
 /web/dist/
+# `tsc -b` drops incremental-state files beside the tsconfigs; running a
+# type-check by hand must not dirty the tree (they nearly rode into a hand
+# landing on 2026-09-26).
+*.tsbuildinfo
 /agent-services/benchmarks/
 
 # ─── Runtime state ──────────────────────────────────

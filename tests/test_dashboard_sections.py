@@ -1080,3 +1080,79 @@ def test_the_network_section_is_one_of_the_gathered_sections(vault, queue, egres
 
     failed = asyncio.run(dash._gather("network", _boom()))[1]
     assert failed == {"error": "RuntimeError: egress db unreadable"}, failed
+
+
+# ---------------------------------------------------------------------------
+# The land train on the dashboard: live, never cached. The scorecard half of
+# the automod section rides a 60 s TTL, which is fine for a report card and
+# useless for "chat is paused right now" — an event that lasts a minute or
+# two. `_pending_restart` is read on every poll, and it is file-cheap by
+# construction: `flush_due` is two small files and a marker, and the
+# git-walking `_live_pending` belongs to the flush itself.
+
+
+def _train(monkeypatch, entries, *, flushing=False, due=(False, "nothing pending")):
+    monkeypatch.setattr("scripts.automod.state.read_pending", lambda: entries)
+    monkeypatch.setattr("scripts.automod.state.flush_in_progress",
+                        lambda: {"pid": 1} if flushing else None)
+    monkeypatch.setattr("scripts.automod.promote.flush_due", lambda rif=None, **k: due)
+
+
+def test_pending_restart_names_the_waiting_landings(monkeypatch):
+    import time as _time
+    now = _time.time()
+    _train(monkeypatch, [
+        {"round_id": "SM_1", "title": "a", "commit": "c" * 40, "restart": True,
+         "merged_ts": now - 600},
+        {"round_id": "SM_2", "title": "b", "commit": "d" * 40, "restart": False,
+         "merged_ts": now - 60},
+    ], due=(False, "1 landing(s) wait for a restart"))
+    from app.routers import automod as A
+    A.set_drain(False)
+    out = dash._pending_restart()
+    assert out["draining"] is False
+    assert [e["round_id"] for e in out["entries"]] == ["SM_1", "SM_2"]
+    assert out["restart_needed"] == 1 and out["entries"][0]["commit"] == "c" * 8
+    assert 590 < out["oldest_age_s"] < 700
+    assert out["stage"] == "pending" and out["flush_why"]
+
+
+def test_pending_restart_stage_is_chat_paused_while_the_drain_is_armed(monkeypatch):
+    _train(monkeypatch, [])
+    from app.routers import automod as A
+    A.set_drain(True, 30)
+    try:
+        out = dash._pending_restart()
+        assert out["stage"] == "chat-paused" and out["draining"] is True
+        assert out["drain_remaining_s"] > 0
+    finally:
+        A.set_drain(False)
+
+
+def test_pending_restart_degrades_to_the_drain_flag_alone(monkeypatch):
+    def boom():
+        raise OSError("state dir gone")
+    monkeypatch.setattr("scripts.automod.state.read_pending", boom)
+    out = dash._pending_restart()
+    assert "draining" in out and "error" in out and "entries" not in out
+
+
+def test_the_drain_flag_is_never_a_minute_stale(monkeypatch):
+    """'Chat paused' must lag the poll, not the scorecard cache."""
+    monkeypatch.setattr("scripts.automod.scorecard.compute",
+                        lambda since_days=7.0: {"since_days": 7})
+    monkeypatch.setattr("scripts.automod.state.read_current", lambda: {})
+    monkeypatch.setattr("scripts.automod.state.is_enabled", lambda: False)
+    monkeypatch.setattr("scripts.automod.state.is_halted", lambda: False)
+    monkeypatch.setattr("scripts.automod.state.is_broken", lambda: False)
+    _train(monkeypatch, [])
+    from app.routers import automod as A
+    A.set_drain(False)
+    first = dash._automod()
+    A.set_drain(True, 30)
+    try:
+        second = dash._automod()
+    finally:
+        A.set_drain(False)
+    assert first["pending_restart"]["draining"] is False
+    assert second["pending_restart"]["draining"] is True

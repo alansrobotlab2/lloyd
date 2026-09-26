@@ -221,6 +221,12 @@ bookkeeping (journal, toast, voice). Re-announcing a recorded state through
 - Observation window: `automod.landing.errors_window_s` (300) restarted,
   `errors_window_unrestarted_s` (120), clamped to [60, 3600]; the guardian
   holds no copy of the number (§3.2h 7a).
+- **Chat is refused only at the tail of a landing**: `wait_idle` arms the
+  drain once the paused pool is empty, never during the pool wait; the web
+  client holds a 503'd message and resends it, and Mission Control shows
+  pending restarts live (`architecture/mission-control.md` § "Pending
+  restarts and the chat drain"). The 503's detail string is parsed by three
+  callers — change `landing_refusal`, never the string.
 - Every promotion is measured by the detached regression check, against its
   own parent; a regression must reproduce before a rollback is requested.
   Anything that restarts djev or the qmd daemon holds `regression.lock`

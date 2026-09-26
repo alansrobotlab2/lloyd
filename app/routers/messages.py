@@ -2088,14 +2088,11 @@ async def post_message_stream(request: Request):
     # mandatory TTL, so a promoter that dies here cannot wedge the endpoint.
     # A review grader is let through while another turn is still running:
     # the landing is waiting on that turn and that turn is waiting on this
-    # grader (`drain_admits`).
-    from app.routers.automod import drain_active, drain_admits, drain_remaining
+    # grader (`drain_admits`). The refusal's shape is a contract shared with
+    # three parsers and the web client — `landing_refusal` is its one home.
+    from app.routers.automod import drain_active, drain_admits, landing_refusal
     if drain_active() and not drain_admits(session_id):
-        raise HTTPException(
-            status_code=503,
-            detail=(f"Lloyd is landing a code update; retry in "
-                    f"{drain_remaining():.0f}s."),
-        )
+        raise landing_refusal()
 
     # ------- /compact slash command (Layer D) -------------------------
     if text.split()[0].lower() == "/compact":

@@ -1138,6 +1138,7 @@ export default function ChatPanel({
       let segmentCounterG = 0
       let streamingStartedG = false
       let settledG = false
+      let landingNoticeShownG = false
       let accumulatedThinkingG = ''
       // Live duration: the harness only reports it on `thinking_done`,
       // which lands *after* the iteration's text, so the panel would show
@@ -1258,6 +1259,19 @@ export default function ChatPanel({
           setSending(false)
           setThinking(false)
         },
+        onLandingWait: () => {
+          // Not an error: streamMessage is holding the message and will
+          // resend it itself when the drain clears. One notice per message;
+          // the spinner stays up and Stop still aborts the wait.
+          if (settledG || landingNoticeShownG) return
+          landingNoticeShownG = true
+          setMessages(prev => [...prev, {
+            id: `msg_${Date.now()}_landing`,
+            role: 'assistant' as const,
+            content: [{ type: 'text' as const, text: '⟳ *Lloyd is restarting to apply a code update — your message will be sent automatically when he\'s back (usually under a minute).*' }],
+            timestamp: new Date().toISOString(),
+          }])
+        },
         onAborted: () => { thinkTrackerG.discard(); setSending(false); setThinking(false) },
       })
       return
@@ -1307,6 +1321,7 @@ export default function ChatPanel({
     let segmentCounter = 0
     let streamingStarted = false
     let settled = false
+    let landingNoticeShown = false
     let accumulatedThinking = ''
     // See the goal path above: `thinking_done` (which carries the
     // harness's own measurement) arrives after the iteration's text, so
@@ -1504,6 +1519,20 @@ export default function ChatPanel({
         setSending(false)
         setQueueState(null)
         inputRef.current?.focus()
+      },
+      onLandingWait: () => {
+        // Not an error and not settled: streamMessage is holding the
+        // message and will resend it itself when the drain clears. One
+        // notice per message (the resend can meet the restart's own
+        // drain); the spinner stays up and Stop still aborts the wait.
+        if (settled || landingNoticeShown) return
+        landingNoticeShown = true
+        setMessages(prev => [...prev, {
+          id: `msg_${Date.now()}_landing`,
+          role: 'assistant' as const,
+          content: [{ type: 'text' as const, text: '⟳ *Lloyd is restarting to apply a code update — your message will be sent automatically when he\'s back (usually under a minute).*' }],
+          timestamp: new Date().toISOString(),
+        }])
       },
       onAborted: () => {
         if (settled) return

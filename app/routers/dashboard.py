@@ -896,7 +896,12 @@ _SCORECARD_TTL_S = 60.0
 def _automod() -> dict[str, Any]:
     """The unattended loop's scorecard for the last 7 days (scripts/automod/
     scorecard.py) plus its live state. `compute` is read-only and stdlib; a
-    failure here is this section's error string and nothing else's."""
+    failure here is this section's error string and nothing else's.
+
+    The land train's pending restarts ride on the section OUTSIDE the cache:
+    "chat is paused" lagging up to a minute behind is useless for an event
+    that lasts one or two, and all of it is two small state files plus an
+    in-process flag."""
     from scripts.automod import scorecard, state as S
 
     def _scan() -> dict[str, Any]:
@@ -906,7 +911,51 @@ def _automod() -> dict[str, Any]:
                 "current": {"round_id": current.get("round_id"), "state": current.get("state")},
                 "halted": bool(S.is_halted()), "broken": bool(S.is_broken())}
 
-    return _cached("automod", _SCORECARD_TTL_S, _scan)
+    out = dict(_cached("automod", _SCORECARD_TTL_S, _scan))
+    out["pending_restart"] = _pending_restart()
+    return out
+
+
+def _pending_restart() -> dict[str, Any]:
+    """The land train and the chat drain, live: the entries waiting for a
+    restart (`pending_restart.json`), the flush marker, whether new chat
+    turns are being 503'd right now, and `flush_due`'s why — all file-cheap
+    by construction (`flush_due` is "two small files and a marker"; the
+    git-walking `_live_pending` belongs to the flush itself, never here).
+    Degrades to `draining` plus an `error` field, not the whole section:
+    the drain flag is in-process and cannot fail with the state dir."""
+    from app.routers.automod import drain_active, drain_remaining
+    out: dict[str, Any] = {"draining": drain_active(),
+                           "drain_remaining_s": round(drain_remaining(), 1)}
+    try:
+        from scripts.automod import promote as P, state as S
+        now = time.time()
+        entries = S.read_pending()
+        restart_needed = sum(1 for e in entries if e.get("restart"))
+        flushing = bool(S.flush_in_progress())
+        due, why = P.flush_due(None)
+        stamps = [float(e.get("merged_ts") or now) for e in entries]
+        out.update({
+            "entries": [{
+                "round_id": e.get("round_id"), "title": e.get("title"),
+                "commit": str(e.get("commit") or "")[:8],
+                "restart": bool(e.get("restart")),
+                "age_s": round(now - float(e.get("merged_ts") or now), 1),
+            } for e in entries],
+            "restart_needed": restart_needed,
+            "oldest_age_s": round(now - min(stamps), 1) if stamps else None,
+            "flushing": flushing,
+            "flush_due": bool(due), "flush_why": why,
+            # The acute phase wins: draining means chat is refusing turns
+            # right now, whoever armed it (a flush, an eager landing, a
+            # human `round restart`).
+            "stage": ("chat-paused" if out["draining"] else
+                      "flushing" if flushing else
+                      "pending" if restart_needed else None),
+        })
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = str(exc)[:200]
+    return out
 
 
 def _network() -> dict[str, Any]:

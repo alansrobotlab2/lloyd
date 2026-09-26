@@ -952,18 +952,56 @@ export const api = {
       onError?: (detail: string) => void
       onAborted?: () => void
       onQueueState?: (state: QueueState) => void
+      /** The backend refused the turn with 503 + `X-Lloyd-Landing`: it is
+       *  applying a code update (automod landing/flush). streamMessage holds
+       *  the message and resends it itself once the drain clears — this
+       *  callback only exists so the UI can say so instead of erroring.
+       *  It may fire more than once per message (the resend can meet the
+       *  restart's own drain); dedupe in the handler. */
+      onLandingWait?: (detail: string) => void
     },
     model?: string,
     think?: string,
   ): AbortController {
     const controller = new AbortController()
-    fetch(`${API_BASE}/message/stream`, {
+    // How long a message refused during a landing is held before giving up.
+    // The drain-late promoter keeps the refusal window to roughly the quiet
+    // polls plus the reboot, but an eager landing (venv, agent-services/)
+    // still drains up to its idle budget, so hold generously.
+    const landingDeadline = Date.now() + 10 * 60_000
+    const sleep = (ms: number) => new Promise<void>((resolve) => {
+      const t = setTimeout(resolve, ms)
+      controller.signal.addEventListener('abort', () => { clearTimeout(t); resolve() }, { once: true })
+    })
+    const attempt = (): Promise<void> => fetch(`${API_BASE}/message/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, client_id: clientId, session_id: sessionId, ...(model ? { model } : {}), ...(think ? { think } : {}) }),
       signal: controller.signal,
     }).then(async (response) => {
       if (!response.ok || !response.body) {
+        if (response.status === 503 && response.headers.get('X-Lloyd-Landing')) {
+          // Hold the message and poll the drain flag until it clears. A
+          // no-restart flush clears it without a reboot, so the flag — not
+          // a new boot — is the resend condition; a poll the backend does
+          // not answer is the reboot itself, so a failed fetch means keep
+          // waiting. The 503 fired before the turn existed, so a resend
+          // can never double-send.
+          let detail = ''
+          try { detail = String((await response.json())?.detail ?? '') } catch { /* body optional */ }
+          callbacks.onLandingWait?.(detail)
+          while (Date.now() < landingDeadline && !controller.signal.aborted) {
+            await sleep(2500)
+            if (controller.signal.aborted) break
+            try {
+              const poll = await fetch(`${API_BASE}/automod/drain`, { signal: controller.signal })
+              if (poll.ok && !(await poll.json()).draining) return attempt()
+            } catch { /* backend mid-restart: keep waiting */ }
+          }
+          if (controller.signal.aborted) callbacks.onAborted?.()
+          else callbacks.onError?.(detail || 'Lloyd is still applying a code update; try again in a minute.')
+          return
+        }
         try {
           const errData = await response.json()
           callbacks.onError?.(errData.detail || `HTTP ${response.status}`)
@@ -1015,6 +1053,7 @@ export const api = {
       if (err.name === 'AbortError') callbacks.onAborted?.()
       else callbacks.onError?.(err.message)
     })
+    attempt()
     return controller
   },
 
@@ -2406,6 +2445,33 @@ export interface BoardDecisions {
 // scripts/automod/scorecard.py, last 7 days. Every rate is null when its
 // denominator is zero — "0%" for a loop that has not run is the reading the
 // panel exists to prevent.
+/** One merged-but-not-yet-running landing on the land train. */
+export interface PendingRestartEntry {
+  round_id?: string | null
+  title?: string | null
+  commit?: string
+  restart?: boolean
+  age_s?: number
+}
+
+/** The land train + chat drain, live on every dashboard poll (never behind
+ *  the scorecard's 60 s cache). `stage`: 'chat-paused' = the drain is
+ *  refusing turns right now; 'flushing' = a flush process is running;
+ *  'pending' = landings are waiting for a restart. Degrades to the drain
+ *  fields plus `error` when the automod state dir cannot be read. */
+export interface PendingRestart {
+  draining: boolean
+  drain_remaining_s: number
+  entries?: PendingRestartEntry[]
+  restart_needed?: number
+  oldest_age_s?: number | null
+  flushing?: boolean
+  flush_due?: boolean
+  flush_why?: string
+  stage?: 'chat-paused' | 'flushing' | 'pending' | null
+  error?: string
+}
+
 export interface AutomodState {
   computed_at: string
   since_days: number
@@ -2414,6 +2480,8 @@ export interface AutomodState {
   current?: { round_id?: string | null; state?: string | null }
   halted?: boolean
   broken?: boolean
+  // Absent on a backend older than this field: render nothing, never throw.
+  pending_restart?: PendingRestart
   acceptance: { landed: number; with_outcome: number; met: number; hit_rate: number | null }
   audit: { rounds_compared: number; author_met: number; grader_met: number; delta: number | null }
   review: { rounds_graded: number; refusals: number; rounds_refused: number; fixed_in_turn: number

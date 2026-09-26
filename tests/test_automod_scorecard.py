@@ -250,6 +250,10 @@ def test_since_parses_days_hours_and_weeks():
 
 
 def test_the_dashboard_section_is_the_same_row_cached(monkeypatch, tmp_path):
+    """The scorecard half is computed once per TTL — the row moves per
+    round, not per poll. The section is no longer the cached dict ITSELF:
+    `pending_restart` rides on a fresh wrapper every call, outside the
+    cache, so "chat is paused" cannot lag a minute behind the poll."""
     from app.routers import dashboard as D
     from scripts.automod import state as S
 
@@ -263,7 +267,11 @@ def test_the_dashboard_section_is_the_same_row_cached(monkeypatch, tmp_path):
     first = D._automod()
     second = D._automod()
     assert first["current"] == {"round_id": "SM_X", "state": "observing"} and first["enabled"] is True
-    assert second is first and len(calls) == 1, "cached: the row moves per round, not per poll"
+    assert len(calls) == 1, "cached: the row moves per round, not per poll"
+    scorecard_part = lambda row: {k: v for k, v in row.items() if k != "pending_restart"}  # noqa: E731
+    assert scorecard_part(second) == scorecard_part(first)
+    assert "pending_restart" in first and "pending_restart" in second, \
+        "the land train's live block rides on every poll"
 
 
 def test_the_round_cli_has_the_subcommand():
