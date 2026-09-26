@@ -223,10 +223,10 @@ instruction rather than by accident.
 
 ## Distil: #38 #42 #39 #40 #47 · #56 #57 #58 #83 · #54
 
-Ten of the fleet's thirty-two jobs, and the largest concentration of unattended
-write authority in it. Two chains and one straggler: reflection turns the day's
-*signals* into memory and config, trace2skill turns the *tool-call record* into
-skills, and #54 turns the vault's existing notes into new ones.
+Ten of the fleet's 36 jobs (2026-09-26), and the largest concentration of
+unattended write authority in it. Two chains and one straggler: reflection turns
+the day's *signals* into memory and config, trace2skill turns the *tool-call
+record* into skills, and #54 turns the vault's existing notes into new ones.
 
 ### The reflection chain: #38 → #42 → #39 → #40 (+#47)
 
@@ -272,31 +272,44 @@ happened.
 
 The recurring failure is looping on "one last verification pass" until the turn
 limit kills the run. #42 is the reference implementation: a machine-checkable
-output contract plus a validator it runs against itself, and a hard rule to write
-the handoff **by turn 40** and treat having written it as being done — added
-2026-09-08 after three consecutive failures, one of which burned 61 turns and
-2.5 M tokens with `tool_errors: 0`, doing entirely voluntary work. #38 carries
+output contract plus a validator it runs against itself, and — since 2026-09-18 —
+a **skeleton written before the first deep read**, amended in place, so a run
+killed anywhere after it leaves a consumable handoff rather than nothing. The
+"write the handoff by a fixed turn number" rule that stood there from 2026-09-08
+was **deleted** on that date because a run cannot see its own turn count, so it
+was uncheckable prose and the only real backstop was the cap plus an auto-retry:
+#42 was killed anyway on 2026-09-14 (`run_42_20260914_050447`) with
+`stop_reason: max_turns`, `num_turns: 61`, the artifact landing 39 ms before
+termination and the cycle still recorded FAILED — the same 61 turns and 2.5 M
+tokens spent on `tool_errors: 0` voluntary work that motivated the rule. What
+replaced it is three facts the run can read, not a number it cannot. #38 carries
 the same budget in **minutes**, because its turn limit was never what killed it:
 Phase 2 dies at 1809–1826 s against a 1800 s cap while healthy runs take
 181–639 s. Raising the ceiling is the wrong lever — the 600→1800 s raise on
 2026-09-01 enlarged the burn rather than making overruns rarer.
 
-**The windows are offset pairwise, not disjoint, since 2026-09-09.** All four sat
-on 22–04 against `workers.slots: 2`, so #39 could be claimed in the hours #42 was
-still writing the handoff it was about to read. Now #38 and #42 take 22–01, #39
-takes 01–04 and #40 02–04: no job shares a window with the one whose *output* it
-consumes, but hour 01 is still offered to both #42 and #39 and 02–04 to both #39
-and #40. What orders those pairs is the freshness half of `depends_on`, not the
+**The pairwise offset has since been undone, so the clock orders nothing.** All
+four once sat on 22–04 against `workers.slots: 2`, so #39 could be claimed in the
+hours #42 was still writing the handoff it was about to read; the 2026-09-09 fix
+narrowed #38 and #42 to 22–01. Read off the task files on 2026-09-26, both of them
+declare 22, 23 and 0–4 again, #39 declares 1–4 and #40 2–4 — every pair that
+consumes another's output now shares that output's whole window — and
+`workers.slots` is 6 (since 2026-09-18), not the 2 the windows were sized
+against. What orders the chain is the freshness half of `depends_on`, not the
 clock — which is the correct division of labour, and the reason the two holes
-above matter more than any window edit. The offset is also why the chain spans
-about four hours end to end while the jobs themselves are minutes.
+above matter more than any window edit. The jobs are minutes (2026-09-26, the 78 h
+the route holds: #38 avg 445 s, #39 367 s, #40 335 s, against `timeout_seconds`
+1800 / 2400 / 1800), so whatever span the chain shows end to end is scheduling
+latency, not work.
 
 Two tool-shaped rules, both learned expensively. `Write` refuses to overwrite a
 file it has not read this session, so a Phase 0 skeleton write is *refused on
 every run* — `signals-latest.md` always exists from the night before. And the
 vault tools reject anything under `~/lloyd/` with `PATH_ESCAPE`, so every
 `_pipeline/` artifact in this chain is written with `Write` at an absolute path,
-never `vault_write`.
+never `vault_write` — and the root this document spells bare is
+`~/lloyd-data/_pipeline/`, since runtime data left the code tree (`6426668b`);
+the skills all quote it in full.
 
 **A `-latest` overwrite keeps a dated copy, and the directory is checked for it.**
 `scripts/reflection_archive.py` refuses a governed skill that drops its archive
@@ -312,8 +325,9 @@ defect was never a crash, it was a confident number: a handoff reporting the
 graph "restored to 12,131 relationships" against a same-night health report
 reading zero; counts of 96/21 where disk held 121/64; a 13,503-byte file called
 "307KB". `workers/evidence.py` is the structural fix and its pilot set is exactly
-this chain — `EVIDENCE_PILOT_TASK_IDS = {38, 42, 39, 40}` (`autonomy.py:710`, not
-inside the verifier's own file), a literal frozenset so
+this chain — `EVIDENCE_PILOT_TASK_IDS = frozenset({38, 42, 39, 40})`
+(`autonomy.py:2104`, not inside the verifier's own file, and pinned there by
+`tests/test_worker_evidence.py:653`), a literal frozenset so
 widening it is a change someone reads. The verifier is **stdlib-only and never
 LLM-judged**, because a model grading its own claims is the narration this
 replaces one layer up; and **a claim that cannot be evaluated is `insufficient`,
@@ -321,14 +335,21 @@ never `verified`**. Whatever failed to verify is carried into the next run of
 that task through the queue's watermarks, not written back into the
 human-edited task file.
 
-**No scheduled run has ever gone through it.** `run_task` attaches the parsed
-claims block to its result for a piloted task, and `workers/sources/scheduled_task.py`
-rebuilds the dict it hands the pool without a `claims` key, so `workers/pool.py`
-reads an out-of-scope source every time: 0 bundles across the 22 piloted runs in
-the window to 2026-09-12, and `claims_checked: 0` over 713 fleet runs. Read the
-paragraph above as the design and backlog **#902** as the reason it is inert —
-which also means #714's prediction of a first window full of `insufficient` gaps
-cannot come true either, because the runs never reach the verifier.
+**The bundle was severed one hop short of the verifier; #945 closed that.**
+`run_task` attaches the parsed claims block to its result for a piloted task, but
+`workers/sources/scheduled_task.py` rebuilt the dict it hands the pool as a
+hand-written whitelist with no `claims` key on it, so `workers/pool.py` read an
+out-of-scope source every time: 0 bundles across the 22 piloted runs in the window
+to 2026-09-12, and `claims_checked: 0` over 713 fleet runs — which is also why
+#714's prediction of a first window full of `insufficient` gaps could not come
+true. The key is copied now when the model emitted one, and the pilot reports:
+measured 2026-09-26 over the 78 h the route holds, **22 claims checked, 22
+verified, 0 refuted, 0 insufficient, across 4 bundled runs** (#38 11, #39 6, #40
+5). #42 has no row because it did not run in that window. What is left is
+coverage, not plumbing — 68 of those 72 runs carry no bundle at all, because only
+these four tasks emit a claims block. #902 (coverage: 4 of the fleet's
+unattended writers) and #945 (this severance) are both closed; the first
+`insufficient` verdict is still unobserved.
 
 **#47 Dream Consolidation** is the weekly synthesizer on the tail. It does not
 re-read raw sessions — that is the chain's job — it merges near-duplicate topics
@@ -342,15 +363,14 @@ Earlier documentation, and #40's own data-load, referenced a prompt audit and a
 behavior test writing `prompt-audit-issues.md`, `prompt-audit-latest.md`,
 `test-failures.md` and `test-results-latest.md`. **No autonomy task has ever
 written any of them.** `skills/nightly-prompt-audit/` and
-`skills/nightly-behavior-test/` are on disk and no task file's `skill_name` names
-either. #40's data load no longer reads them and says so inline, which stopped
-every run rediscovering their absence and narrating it — but the rest of that
-skill was never cleaned up, so `### Prompt Audit & Behavior Test Issues` still
-instructs the job to treat their findings as signals and Phase 3 still asks for
-those headings in the changelog. Expect them empty; that is the skill talking
-about jobs that were never built, not a gap. `_pipeline/reflection/propagation-log.md`
-is the same shape — #40's data load calls it "Job 2's propagation log" and
-nothing has ever written it.
+`skills/nightly-behavior-test/` sit on disk at `status: archived` (2026-09-19,
+#900), so neither is retrievable, and no task file's `skill_name` names either.
+That skill has since been cleaned up: #40's data load now lists all four files,
+both skills and `propagation-log.md` under "Three things earlier versions of this
+skill told you to read do not exist", and tells the run not to read, wait for, or
+report a gap about them. The `### Prompt Audit & Behavior Test Issues` heading and
+its Phase 3 changelog asks are gone, so a run can no longer produce an empty
+section for jobs that were never built.
 
 The numbering inside the skills never converged and is not worth trusting: the
 four self-label "Job 1 of 3", "Job 2a of 4", "Job 2b of 4" and "Job 5 of 5".
@@ -367,7 +387,7 @@ skills, and maintains the library.
 |----|-------|---|
 | #56 | `trajectory-extraction` | tool-call trajectories from every session (worker + main) into one JSONL per day at `_pipeline/trajectories/<date>.jsonl`; watermark-gated and incremental |
 | #57 | `trajectory-skill-mining` | 7-day window over those trajectories for error and success patterns, grouped into skill candidates with metadata. Installs **new** skill dirs only; defers existing ones to #83 |
-| #58 | `nightly-skill-consolidation` | groups dated candidate snapshots, proposes patches to existing skills, flags new candidates; auto-applies at confidence ≥ 0.85 and sessions ≥ 5 |
+| #58 | `nightly-skill-consolidation` | groups dated candidate snapshots, drops any pattern with a terminal verdict in the ledger, filters to `sessions >= 3`, proposes patches to existing skills and flags new candidates. It **applies nothing itself** since 2026-09-19 (#719): a proposal lands in `proposed/` with `applied: false` and #83 Stage 6 is the only task allowed to land it, so the confidence ≥ 0.85 AND sessions ≥ 5 floor is #83's decision rule, quoted by words in both files |
 | #83 | `nightly-skills-management` | the lifecycle pass: evaluate, create/update, review drafts, dedup the library, regenerate `memory/skills-index.md` |
 
 #56 is also the input to #51 — the one edge that leaves this function group. The
@@ -456,11 +476,16 @@ and re-enabled as #83 only once the skill could state the rules that prevent it:
    `{"error": ...}`. Patterns mined from older sessions describe a signalling bug
    that has since been fixed.
 
-**Two linters enforce rule 4 and both exempt this chain by name.**
-`tests/test_skill_tool_names.py` (`ALLOWED_TO_MENTION`) and
-`scripts/skill_lint.py` (`PHANTOM_EXEMPT`) let `nightly-skills-management`,
+**Two linters enforce rule 4, and each carries a seven-name exemption list of
+which three entries are this chain.**
+`tests/test_skill_tool_names.py:137` (`ALLOWED_TO_MENTION`) and
+`scripts/skill_lint.py:276` (`PHANTOM_EXEMPT`) let `nightly-skills-management`,
 `trajectory-skill-mining` and `nightly-skill-consolidation` write the phantom
-names down, because their job is to say those names are not real. The test's
+names down, because their job is to say those names are not real. The same two
+lists now also carry `web-search-and-fetch`, `create-hermes-plugin`,
+`autonomy-task-diagnosis` and `pipeline-dispatch`, each exempt for a reason
+unrelated to this chain — and they are hand-maintained in two different files,
+with nothing pinning them equal. The test's
 `KNOWN_UNFIXED` debt ledger is **empty** — the 91 skills that carried a phantom
 name have been rewritten or archived — and a new entry there is a regression, not
 a grandfathering.
@@ -475,9 +500,12 @@ a grandfathering.
   `status: "draft"` variant a string grep misses.
 - **Flagging is not withdrawal.** A low-quality skill marked `status: needs-review`
   stays in circulation. `_QUARANTINE_STATUSES` is
-  `{inactive, archived, disabled, retired, quarantined}` (`agent_mcp/skills.py`),
-  and `prompt_builder._is_quarantined_skill` imports that same set precisely so
-  the advertised index and the readable set cannot drift — so a needs-review skill
+  `{inactive, archived, disabled, retired, quarantined}` (`agent_mcp/skills.py:87`),
+  and since #1294 `prompt_builder._is_quarantined_skill` is a plain alias of that
+  module's `is_quarantined_skill_file` — one spelling of the rule, where
+  `prompt_builder` used to re-scan the front matter against its own copy of the
+  set and an equality assertion in one test was the only thing holding the two in
+  step. So a needs-review skill
   keeps appearing in `<available_skills>` and keeps being retrievable until
   somebody acts on it.
 
