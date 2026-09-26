@@ -344,7 +344,7 @@ async def list_tools():
                 "agent_id": {"type": "string", "description": "Filter by agent_id"},
             },
         }),
-        Tool(name="autonomy_write_task", description="Use for tracked or recurring work that must outlive this turn; for a one-off subtask use Task instead. Create or update (upsert) autonomy task. If id omitted → CREATE, if id provided → UPDATE.", inputSchema={
+        Tool(name="autonomy_write_task", description="Use only for recurring work; a one-off that outlives this turn goes to backlog_write_task, a subtask to Task. Every task re-runs on its frequency until its file is deleted — there is no run-once. Create or update (upsert) autonomy task. If id omitted → CREATE, if id provided → UPDATE.", inputSchema={
             "type": "object",
             "properties": {
                 "id": {"type": "integer", "description": "Task ID to update (0 for create)"},

@@ -15,6 +15,12 @@ timestamp: '2026-09-13T00:00:00'
 
 ## Overview
 
+**Autonomy is for recurring work only.** There is no run-once task: every
+task re-dispatches on its `frequency` until its file is deleted, and `done` is not a
+scheduler status. A one-off goes on the backlog, where autocode works it and closes
+it on its clauses. (2026-09-24: three one-off arXiv digests, #87–#89, were filed
+here with `frequency: daily` and re-ran daily until deleted 2026-09-26.)
+
 A scheduled task is a markdown file. `~/obsidian/autonomy/NN-slug.md` carries a
 skill name, a frequency and a set of gates in its frontmatter; the
 `scheduled-task` worker source reads that directory every 60 s, asks
