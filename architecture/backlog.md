@@ -147,8 +147,8 @@ actually on disk:
 | `priority` | enum | `low` \| `medium` \| `high`. Both writers default `low` since 2026-09-16, and the loop's every pool sorts on it ahead of the sweep's rank (`scripts/automod/backlog.py::priority_key`); `none`, absent or unknown reads as `low`; `high` means "next": triage takes it before anything else and never holds it, the next round takes it first, and within `high` the newest wins. `round priority-backfill` writes `low` onto files that have none. Before that day MCP stamped `medium` and the HTTP route `none`, and nothing read either. |
 | `tags` | list | Coerced through `app/backlog_tags.py::normalize_tags` — see below. |
 | `blocked` / `assigned` | bool | Free-text filters on `backlog_tasks`; no machine acts on them. |
-| `created` / `updated` | ISO datetime | `updated` is stamped by every writer. |
-| `completed` | ISO datetime | Written when a writer sets `done`. |
+| `created` / `updated` | ISO datetime | `updated` is stamped by every writer. Naive **UTC** from `LOCAL_STAMP_CUTOVER` (2026-09-26T04:00), from `app/backlog_move.py::now_stamp` — below it, naive *local*: see "One clock, and where the old one stopped". |
+| `completed` | ISO datetime | Written when a writer sets `done`. Always naive UTC — only the shared recorder and the automod closers ever wrote it, on both sides of the cut-off. |
 | `position` | int | `id * 1000` at creation; the board's manual ordering. |
 | `type` / `segment` | string | Both `backlog`. OKF conformance — see below. |
 | `activity_log` | list | The audit trail. See "The activity log". |
@@ -306,6 +306,53 @@ altogether: `autonomy.py::_append_activity_log` and `agent_mcp/autonomy.py`
 still append to a `## Activity Log` heading in `~/obsidian/autonomy/*.md`,
 which is where a reader coming from an old description of this system will
 find the parser they were looking for.
+
+## One clock, and where the old one stopped
+
+Every backlog stamp is naive UTC with microseconds, from
+`app/backlog_move.py::now_stamp()`. Naive rather than offset-bearing because
+`_fm_date` compares calendar dates in the value's own zone, and a population
+mixing `+00:00` with bare stamps is the thing it cannot judge consistently — so
+the fix for two clocks was never "add a `Z`", it was one call site. Four surfaces
+wrote `datetime.now()` (naive **local**) until #1517: `app/routers/backlog.py`'s
+non-status save and its create, `agent_mcp/backlog.py::add_activity` and its
+`_handle_write` — the `backlog_write_task` path, the busiest writer the board has —
+and `scripts/automod/backlog.py::new_item`, inside the very module whose closers
+wrote UTC. This box is `America/Los_Angeles` (-0700), so the two populations were
+seven hours apart and a file touched forty seconds apart could carry an
+`activity_log` whose two lines disagreed with the file's own mtime: measured at
+triage, 985 of the 1,249 files with an `activity_log` hold a stamp more than an hour
+ahead of `st_mtime`.
+
+The writers could be switched; the readers could not, and that is the part that
+makes this a cut-over rather than a rename. `LOCAL_STAMP_CUTOVER`
+(`2026-09-26T04:00`) is the instant the switch happened, and
+`app/backlog_move.py::utc_instant(value, legacy_local=…)` is the only reader that
+knows it: a naive stamp **below** the cut-off is read in the machine's local clock,
+because that is what wrote it, and **at or above** it in UTC. Pre-existing rows are
+grandfathered — nobody rewrote ~1,000 live board files; whether to backfill them is
+an open `needs-human` decision on #1517. The direction of the old error is what
+makes the rule safe this far west of Greenwich: local numerals always run *behind*
+the UTC numerals for the same instant, so a legacy row is below the cut-off
+permanently and a new row can never fall below it. The case the rule cannot judge is
+a legacy writer still running between the cut-off and this change's promotion: its
+rows read as UTC and look seven hours old.
+
+Both readers carry the flag deliberately rather than a blanket reading, because each
+one has already been wrong in the other direction. `board_flow` read `created` local
+for *every* row from 2026-09-14, which put a row created seconds earlier seven hours
+in the future and outside the 24-hour net it belonged in; before 2026-09-14 it read
+everything as UTC, which put every creation seven hours before every close.
+`_done_date`'s `updated:`/`updated_at:`/mtime rungs feed `?done_since=`, a date the
+front end took from `toISOString()`, and seven hours is enough to move a date: an
+item closed at 06:00 UTC was cut as if it had closed the previous evening.
+
+`completed:` is the one field read as UTC on both sides of the cut-off, and passing
+it with `legacy_local` would be a bug: it was written in UTC by `record_status_move`
+and by this module's closers before either writer changed, so re-reading it as local
+would move every closed item seven hours *forward* to fix nothing. The display
+strings `_row_from` builds (`created_at`, `updated_at`) are a separate question —
+they are rendered by the front end, which parses a bare stamp in the viewer's zone.
 
 ## Malformed YAML degrades, but never round-trips
 
@@ -542,11 +589,14 @@ were `ready`.
   rest: a confirmed item with empty acceptance, a human-only one, a spent one.
 - `flow` (`board_flow`, no ledger) counts `created` in and `completed`, else
   `updated`, out on closed items, over 24 h and 7 d. A closed file untouched
-  for a week is skipped on mtime without being parsed. Stamps are read in
-  their writer's clock: `created` (MCP store, Mission Control router) and a
-  `completed`-less `updated` as naive local time, `completed` (automod's
-  closers) as naive UTC. Until 2026-09-14 all were read as UTC, which on this
-  box shifted the inflow window seven hours earlier than the outflow window.
+  for a week is skipped on mtime without being parsed. Each stamp is read in the
+  clock it was written in — `app/backlog_move.py::utc_instant`, and see "One
+  clock, and where the old one stopped": naive UTC above the cut-off, naive local
+  below it for `created` and a `completed`-less `updated`, `completed` UTC either
+  side. Until 2026-09-14 all were read as UTC, which on this box shifted the
+  inflow window seven hours earlier than the outflow window; from 2026-09-14 to
+  #1517 `created` was read local for every row, which pushed each *new* creation
+  seven hours into the future and out of the 24-hour net.
 - `implement_pool` is `{ready, bound, floor}` — the single-item triage depth
   gate's numbers (`implement_pool_bound`, [[automod]] §3.2c).
 

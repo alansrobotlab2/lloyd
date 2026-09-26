@@ -51,6 +51,7 @@ try:  # ~15x faster than the pure-Python loader; all input is our own files
 except ImportError:  # pragma: no cover
     from yaml import SafeLoader as _YamlLoader  # type: ignore
 
+from app.backlog_move import now_stamp, utc_instant
 from app.backlog_status import (
     CLOSED_ALIASES,
     CLOSED_STATUSES,
@@ -937,7 +938,7 @@ def orphan_stale_amendments(item_id: int, round_id: str) -> list[int]:
     fm, body = _split_frontmatter(path.read_text(encoding="utf-8"))
     records = fm.get(AMENDMENTS_KEY) or []
     clauses = list(fm.get("acceptance_clauses") or [])
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    stamp = now_stamp()
     orphaned: list[int] = []
     quoted: list[str] = []
     for a in records:
@@ -1054,7 +1055,7 @@ def amend_clause(item_id: int, clause: int, text: str, reason: str, *,
                          f"{round_id}; only a clause the grader marked unsatisfiable may be amended")
     if any(int(a.get("clause") or 0) == idx for a in pending_amendments(fm)):
         raise ValueError(f"clause {idx} is already amended and awaiting the next review")
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    stamp = now_stamp()
     old = clauses[idx - 1]
     clauses[idx - 1] = text
     fm["acceptance_clauses"] = clauses
@@ -1083,7 +1084,7 @@ def settle_amendments(item_id: int, round_id: str, *, ratified: bool,
         return []
     fm, body = _split_frontmatter(path.read_text(encoding="utf-8"))
     clauses = list(fm.get("acceptance_clauses") or [])
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    stamp = now_stamp()
     settled: list[int] = []
     for a in fm.get(AMENDMENTS_KEY) or []:
         if not isinstance(a, dict) or a.get("state") != "pending":
@@ -1309,7 +1310,7 @@ def update_frontmatter(path: Path, updates: dict, *, activity: str = "",
         changed = True
     if not changed and not activity:
         return False
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    stamp = now_stamp()
     if activity:
         log = list(fm.get("activity_log") or [])
         log.append(f"**{stamp}** — {activity}")
@@ -2884,7 +2885,7 @@ def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
     fm, body = _split_frontmatter(text)
     if _unparsed_guard(item.path, text, fm, "close_landed"):
         return None
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    stamp = now_stamp()
     where = f"round {round_id}" if round_id else "a vault round"
     entry = (f"**{stamp}** — automod landed as `{commit[:8]}` ({where}, "
              f"{'settled' if round_id else 'committed'} {settled_at}). "
@@ -3883,7 +3884,7 @@ def note_item(item_id: int, text: str) -> bool:
             fm, body = _split_frontmatter(raw)
             if _unparsed_guard(item.path, raw, fm, "note_item"):
                 return False
-            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+            stamp = now_stamp()
             log = list(fm.get("activity_log") or [])
             log.append(f"**{stamp}** — {text}")
             fm["activity_log"] = log
@@ -4458,12 +4459,23 @@ def ready_confirmed(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARD
     return ready
 
 
-def _iso_ts(value, *, naive_local: bool = False) -> float | None:
-    """An ISO stamp as epoch seconds. A naive stamp is UTC unless
-    `naive_local` says its writer used the machine's local clock — the board
-    has both: `agent_mcp/backlog.py` and the Mission Control router write
-    `created`/`updated` with `datetime.now()`, and every closer in this module
-    writes `completed`/`updated` in UTC."""
+def _iso_ts(value, *, legacy_local: bool = False) -> float | None:
+    """An ISO stamp as epoch seconds, dated in the clock its writer used.
+
+    An aware stamp answers in its own zone. A naive one answers in UTC, except
+    under `legacy_local`, which is for the board's `created`/`updated` fields:
+    `app/backlog_move.LOCAL_STAMP_CUTOVER` is where those stopped being the
+    machine's local clock, and a naive stamp below it was written by a surface that
+    has since been retired — Mission Control's router, `agent_mcp`'s
+    `backlog_write_task` path, and `new_item` in this very module. Before #1517 this
+    read them local without asking when they were written, which read a row written
+    change seven hours into the future and dropped it out of the 24-hour net; the
+    cut-off is what lets the two populations coexist without rewriting either.
+
+    `completed:` never passes with the flag. The `done` stamp was UTC on both sides
+    of the cut-off, so re-reading it as local would move every closed item forward
+    by the offset instead.
+    """
     s = str(value or "").strip()
     if not s:
         return None
@@ -4471,9 +4483,7 @@ def _iso_ts(value, *, naive_local: bool = False) -> float | None:
         dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
         return None
-    if dt.tzinfo is None:
-        dt = dt.astimezone() if naive_local else dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
+    return utc_instant(dt, legacy_local=legacy_local).timestamp()
 
 
 def landed_items_trailing(ledger: Path, days: float = 7, *, now: float | None = None) -> int:
@@ -4746,7 +4756,7 @@ def tag_item(item_id: int, *, add: tuple[str, ...] = (), remove: tuple[str, ...]
             if new == tags and isinstance(fm.get("tags"), list):
                 return False
             fm["tags"] = new
-            fm["updated"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+            fm["updated"] = now_stamp()
             item.path.write_text(
                 f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
                 f"---\n{body}", encoding="utf-8")
@@ -4790,7 +4800,7 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
     if _unparsed_guard(item.path, text, fm, "record_verdict"):
         return None
 
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")
+    stamp = now_stamp()
     entry = f"**{stamp}** — autotriage: **{verdict}**. {evidence.strip()}"
     if check:
         entry += f" Check: `{check}`"
@@ -5342,18 +5352,23 @@ def board_flow(boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
     for a week cannot have closed inside the week and is skipped on mtime
     without being parsed.
 
-    Each stamp is read in its writer's clock. `created` comes from the MCP
-    store or the Mission Control router, in naive local time; `completed` only
-    ever from this module's closers, in naive UTC; a closed item with no
-    `completed` was closed by one of the local-time writers, so its `updated`
-    is local too. Until 2026-09-14 all three were read as UTC, which on this
-    box put every creation seven hours before every close — the 24-hour net
-    compared two different days.
+    Each stamp is read in the clock it was written in. Since #1517 every writer
+    stamps naive UTC (`app/backlog_move.now_stamp()`), so `created` and a
+    `completed`-less `updated` are UTC from `LOCAL_STAMP_CUTOVER`; below the cut-off
+    they are the machine's local time, because the surfaces that wrote them — the MCP
+    store, the Mission Control router, this module's own `new_item` — stamped the box
+    clock. `completed` is UTC on both sides of the cut-off: only this module and the
+    shared recorder ever wrote it. Before 2026-09-14 all three were read as UTC, which
+    on this box put every creation seven hours before every close — the 24-hour net
+    compared two different days; from 2026-09-14 to #1517 `created` was read local for
+    every row including a UTC one, which put each new creation seven hours in the
+    future and outside the net it belonged in. Both halves are why this is a cut-off
+    and not a switch.
     """
     now = time.time() if now is None else now
     everything = items if items is not None else all_items(boards, backlog_dir=backlog_dir)
     widest = now - 7 * 86400
-    created_ts = [t for t in (_iso_ts(i.created, naive_local=True) for i in everything)
+    created_ts = [t for t in (_iso_ts(i.created, legacy_local=True) for i in everything)
                   if t is not None]
     closed_ts: list[float] = []
     for i in everything:
@@ -5368,7 +5383,7 @@ def board_flow(boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
         if fm.get("completed"):
             t = _iso_ts(fm.get("completed"))
         else:
-            t = _iso_ts(fm.get("updated"), naive_local=True)
+            t = _iso_ts(fm.get("updated"), legacy_local=True)
         if t is not None:
             closed_ts.append(t)
 
@@ -5761,8 +5776,9 @@ def new_item(name: str, body: str = "", *, priority: str = DEFAULT_PRIORITY,
     module never had.
 
     Front matter mirrors `app/routers/backlog.py::backlog_task_create` (the OKF
-    `type`, `segment`, `position = id * 1000`, naive-local `created`), and the id
-    is `max + 1` on disk. The file is created with `O_EXCL`, so two writers that
+    `type`, `segment`, `position = id * 1000`, and `created` on the store's one
+    clock — `app/backlog_move.now_stamp()`, naive UTC, since #1517), and the id is
+    `max + 1` on disk. The file is created with `O_EXCL`, so two writers that
     allocate the same id do not overwrite each other: the loser takes the next.
     """
     root = backlog_dir or BACKLOG_DIR
@@ -5777,7 +5793,10 @@ def new_item(name: str, body: str = "", *, priority: str = DEFAULT_PRIORITY,
             if m:
                 top = max(top, int(m.group(1)))
         item_id = top + 1
-        now = datetime.now().isoformat()
+        # The same clock the closers in this module have always written
+        # (#1517): an item filed here used to be born in the machine's local
+        # zone and closed in UTC, so the pair disagreed by seven hours.
+        now = now_stamp()
         fm = {"type": "backlog", "segment": "backlog", "status": status,
               "priority": _level(priority, PRIORITY_LEVELS) or DEFAULT_PRIORITY,
               "board": board, "blocked": False, "assigned": False,

@@ -434,15 +434,25 @@ def test_force_creates_past_a_closed_match_and_names_it(board, monkeypatch):
 
 
 def test_a_human_write_or_a_weak_closed_match_is_only_advised(board, monkeypatch):
-    """The refusal applies the merge rules to the loop's writes only: a
-    person's create and a closed neighbour below rule A both create."""
+    """The refusal applies the merge rules to the loop's writes only: a person's
+    create is never merged, and a closed neighbour below rule A never overrides.
+
+    The weak write does not create, and that is #1517 rather than a regression: the
+    human's own item is seconds old and the text is the same, so rule B
+    (`recent_window_seconds: 600` + `recent_lexical_min`) fires on it, which is what
+    `test_an_open_match_still_merges_ahead_of_a_closed_one` asks an open match to do.
+    Rule B could not fire here before #1517 because this path stamped `created` with
+    `datetime.now()` — naive local, seven hours of wrong to the other side of the
+    window — so no item this tool wrote ever looked new. `overrode_closed` is still
+    absent: the closed neighbour at 0.5 stays below rule A.
+    """
     _closed(board, autotriage_retired="already_done")
     _vec(monkeypatch, [{"id": 10, "score": 0.9}])
     human = _write({"name": SAME[0], "description": SAME[1], "board": "lloyd"})
     assert human["created"] is True and "overrode_closed" not in human
     _vec(monkeypatch, [{"id": 10, "score": 0.5}])
     weak = _write(_spawn(SAME[0] + " again", SAME[1]))
-    assert weak["created"] is True and "overrode_closed" not in weak
+    assert weak["merged_into"] == human["task_id"] and "overrode_closed" not in weak
 
 
 def test_an_open_match_still_merges_ahead_of_a_closed_one(board, monkeypatch):

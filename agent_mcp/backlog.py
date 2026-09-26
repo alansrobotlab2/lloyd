@@ -17,6 +17,7 @@ from mcp.types import Tool
 
 from agent_mcp._shared import parse_frontmatter_text, text_result
 from agent_mcp import backlog_similar as SIM
+from app.backlog_move import now_stamp
 from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import SPAWN_TAG_PREFIX, normalize_tags
 from app import frontmatter as FM
@@ -93,7 +94,12 @@ def save_task(task: dict) -> bool:
 
 
 def add_activity(task: dict, message: str) -> dict:
-    now = datetime.now().isoformat()
+    # One `now` feeds both the `**…**` line and `updated:`, so both come from the
+    # store's single clock (#1517). This is the path `backlog_write_task` takes —
+    # the busiest writer on the board — and until here it stamped the machine's
+    # local zone while every status move on the same file stamped UTC, seven hours
+    # apart, so the two entries in one `activity_log` disagreed about their order.
+    now = now_stamp()
     activity = task.get("activity_log", [])
     if isinstance(activity, str):
         activity = [activity]
@@ -268,7 +274,9 @@ def _handle_get(args: dict) -> str:
 
 def _handle_write(args: dict) -> str:
     task_id = args.get("task_id")
-    now = datetime.now().isoformat()
+    # The one clock, for both `created` on a create and `updated` on any
+    # write (#1517); `add_activity` below stamps from the same helper.
+    now = now_stamp()
     creating = task_id is None
     similar: list[dict] = []
 
@@ -595,7 +603,10 @@ def _merge_into(target: dict, args: dict, similar: list[dict]) -> str | None:
     name = str(args.get("name") or "").strip()
     description = str(args.get("description") or "").strip()
     who = f"session {sid}" if sid else "an automod session"
-    stamp = datetime.now().strftime("%Y-%m-%d")
+    # The merged-finding heading is a date on a board file too, so it is the
+    # same day the store says it is (#1517) — the local/UTC variant of the
+    # split showed up as a heading a day off near midnight.
+    stamp = now_stamp()[:10]
     section = (f"\n\n## Merged finding — {stamp}\n\n"
                f"_Filed as \"{name}\" by {who}; merged here by write-time dedupe "
                f"(rule {target.get('rule')}, score {target.get('score')}, lexical "

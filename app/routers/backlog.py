@@ -23,7 +23,7 @@ the list (`DESC_SNIPPET_CHARS`) with the full text behind
 import logging
 import re
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -31,7 +31,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agent_mcp._shared import parse_frontmatter_text
-from app.backlog_move import record_status_move
+from app.backlog_move import now_stamp, record_status_move, utc_instant
 from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import NEEDS_HUMAN_TAG, normalize_tags
 from app import frontmatter as FM
@@ -484,13 +484,25 @@ def _done_date(path: Path, fm: dict) -> datetime | None:
     touched the file", and every activity-log append bumps the mtime. Here the
     two are distinguishable, which is what lets the docstring above say which
     one each row was judged by.
+
+    Every rung answers in **naive UTC numerals**, because the caller compares the
+    result against `?done_since=`, a date the front end took from
+    `toISOString()` (#1517). That is a change for two of the three: a
+    `completed`-less `updated:` written before `LOCAL_STAMP_CUTOVER` was naive
+    *local*, and `st_mtime` came back through `fromtimestamp()` in the machine's
+    zone too. Both sat seven hours — enough to move the calendar date — on the far
+    side of a cut-off that never moved with them, so an item closed at 06:00 UTC
+    read as finished the previous evening and was cut from a window it belonged in.
+    `completed:` is the one field read untouched: it was UTC on both sides of the
+    cut-off, and re-reading it as local would move every closed item forward.
     """
     for key in ("completed", "updated", "updated_at"):
         parsed = _fm_date(fm.get(key))
         if parsed is not None:
-            return parsed
+            # UTC numerals, because `done_since` is a UTC date.
+            return utc_instant(parsed, legacy_local=key != "completed").replace(tzinfo=None)
     try:
-        return datetime.fromtimestamp(path.stat().st_mtime)
+        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).replace(tzinfo=None)
     except OSError:                         # vanished between the scan and here
         return None
 
@@ -655,12 +667,14 @@ async def backlog_task_update(request: Request):
     if "assigned_to_agent" in data:
         fm["assigned"] = data["assigned_to_agent"]
     if not status_recorded:
-        # A recorded move already stamped `updated:` with the same clock as the
-        # activity-log line that narrates it; stamping again here with a second
-        # `now` — a different zone, since the recorder writes UTC and this route
-        # has always written local — would leave a move whose own entry and whose
-        # `updated:` disagree about when it happened.
-        fm["updated"] = datetime.now().isoformat()
+        # A recorded move already stamped `updated:` through `now_stamp()` with the
+        # same clock as the activity-log line that narrates it; stamping again here
+        # with a second `now` would leave a move whose own entry and whose
+        # `updated:` disagree about when it happened. Until #1517 this line also
+        # stamped the *machine's* clock while the recorder stamped UTC — seven
+        # hours apart here, and the reason a board file could carry two stamps whose
+        # order contradicts the file's own mtime.
+        fm["updated"] = now_stamp()
     _write_task_file(filepath, fm, body)
     return JSONResponse({"success": True, "description_ignored": description_ignored})
 
@@ -699,7 +713,11 @@ async def backlog_task_create(request: Request):
         board_name = id_to_name.get(data.get("board_id"), "default")
     else:
         board_name = board_name.strip()
-    now = datetime.now().isoformat()
+    # One stamp for both dates, on the store's clock (#1517). This was
+    # `datetime.now()`, so an item created here had a naive-local birth date while
+    # its first status move — recorded by the shared helper, which writes UTC — was
+    # stamped seven hours later on the same file.
+    now = now_stamp()
     create_status = data.get("status", "draft")
     if create_status not in _VALID_STATUSES:
         raise HTTPException(status_code=400, detail=f"Invalid status '{create_status}'. Must be one of: {', '.join(sorted(_VALID_STATUSES))}")

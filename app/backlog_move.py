@@ -46,13 +46,77 @@ from app.backlog_tags import normalize_tags
 #: consistently, UTC because that is what the loop has always written.
 _STAMP = "%Y-%m-%dT%H:%M:%S.%f"
 
+#: The instant from which that sentence is true of *every* backlog writer (#1517).
+#:
+#: Until it, the board had two clocks. `app/routers/backlog.py` (both its save
+#: paths), `agent_mcp/backlog.py` (`add_activity` and `_handle_write` — the
+#: `backlog_write_task` path, the busiest writer on the board) and
+#: `scripts/automod/backlog.py::new_item` stamped `created`/`updated` with
+#: `datetime.now()`: naive **local** time. This module and the automod closers
+#: stamped naive UTC. On this box (America/Los_Angeles, PDT, -0700) the two differ
+#: by seven hours, so one file touched forty seconds apart can carry
+#: `**2026-09-26T02:48:18**` above `**2026-09-25T19:49:05.757813**` and read as
+#: though the earlier stamp came second; measured at triage, 985 of the 1,249 board
+#: files with an `activity_log` hold a stamp more than an hour ahead of their own
+#: `st_mtime`.
+#:
+#: A naive stamp below this value is therefore read in the machine's local clock
+#: and a stamp at or above it in UTC — which lets the readers date a row in the
+#: clock its writer used without rewriting the ~1,000 files the retired writers
+#: left (backfill vs grandfather is a person's call, on #1517). The value is the
+#: instant this change was authored, in naive UTC, and the direction of the old
+#: error is what makes that safe: a naive-local stamp's numerals always run
+#: *behind* the UTC numerals for the same instant this far west of Greenwich, so
+#: every legacy row falls below the cut-off permanently and nothing the new code
+#: writes can. The one case the cut-off cannot judge is a legacy writer still
+#: running between this instant and this change's promotion: its rows are read as
+#: UTC and look seven hours older than they are, inside a 24-hour window, until the
+#: next day sweeps them past it.
+LOCAL_STAMP_CUTOVER = datetime(2026, 9, 26, 4, 0)
+
 #: The status that means the item is finished, and therefore dated.
 DONE = "done"
 
 
 def now_stamp() -> str:
-    """The timestamp this module writes into `updated:` and `completed:`."""
+    """The one stamp every backlog writer writes: `created:`, `updated:`,
+    `completed:` and an `activity_log` line all come from here.
+
+    Naive UTC, `LOCAL_STAMP_CUTOVER` onward. One call per write, so a move and the
+    log line that narrates it cannot disagree about when they happened.
+    """
     return datetime.now(timezone.utc).strftime(_STAMP)
+
+
+def utc_instant(value: datetime, *, legacy_local: bool = False) -> datetime:
+    """The instant a board stamp means, as an aware UTC `datetime` (#1517).
+
+    Every reader that judges a stamp against a UTC-derived clock goes through here,
+    because the store's stamps are naive and a naive stamp has no zone to read: an
+    aware value is converted from its own zone; a naive one is UTC, except under
+    `legacy_local` for a value *below* `LOCAL_STAMP_CUTOVER`, which was written by a
+    surface that stamped the machine's local clock and is read in that zone. At or
+    above the cut-off a naive stamp is UTC already and comes back with its instant
+    unchanged — post-change rows are never shifted, which is the whole point of the
+    cut-off.
+
+    Callers spell the result however their comparison needs it: `.timestamp()` for
+    an instant (`board_flow`'s 24-hour net) or `.replace(tzinfo=None)` for calendar
+    dates in UTC (`?done_since=`). Both are right only because this returns an aware
+    value — `.timestamp()` on a *naive* one would silently re-assume the local zone.
+
+    `completed:` must not come through with `legacy_local=True`: it was written in
+    UTC on both sides of the cut-off (this module, and the closers in
+    `scripts/automod/backlog.py`), so reading it as local would move every closed
+    item the other way instead of fixing anything.
+    """
+    if value.tzinfo is not None:
+        return value.astimezone(timezone.utc)
+    if legacy_local and value < LOCAL_STAMP_CUTOVER:
+        # `astimezone()` on a naive datetime assumes the machine's local zone —
+        # exactly the reading the retired writers earned.
+        return value.astimezone(timezone.utc)
+    return value.replace(tzinfo=timezone.utc)
 
 
 def record_status_move(
