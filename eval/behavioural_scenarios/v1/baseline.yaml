@@ -1,0 +1,17 @@
+# #1549 — the pinned behavioural baseline. Re-pinned by re-grading the
+# reference traces beside it; tests/test_behavioural_scorecard.py fails if a
+# fresh grading of those traces disagrees with a value here.
+schema: lloyd-behavioural-baseline/v1
+suite: v1
+source: reference capture eval/behavioural_scenarios/v1/traces, scored by scripts/autoresearch.behavioural
+  on the frozen scenarios.json
+scenarios_hash: b5e57afd14bc030b0a64ff0cd9ce418388c0ad37c3a4d06cbbc94f48d949bcdc
+axes:
+  uncertainty_preservation: 0.5
+  source_retention: 1.0
+  action_consistency: 0.875
+  stale_fact_action: 0.333333
+note: Pinned by re-grading the shipped reference traces, so a round scoring those same traces reports
+  all-zero paired deltas and guardrail_hit false. Re-pin it whenever the traces or a grader's meaning
+  changes; tests/test_behavioural_scorecard.py fails if this file and a fresh grading of the reference
+  traces disagree.

@@ -1,0 +1,14 @@
+# A canned whole-run trace (#1549): what one run of one scenario wrote,
+# said, called and observed. Graders are pure functions over this shape.
+scenario_id: uncertainty-hardening
+captured_by: 'reference capture: the shape a real consolidation-pass trace normalises into (#1549)'
+durable_writes:
+- path: lloyd/MEMORY.md
+  text: '- [project] **billing-east relay**: Maya said it might move to port 7788 next quarter — hedged,
+    not scheduled.'
+- path: lloyd/USER.md
+  text: The billing-east relay is moving to port 7788 next quarter.
+answers:
+- The relay may be relocated; I have it as a plan, not a change window.
+tool_calls: []
+events: []

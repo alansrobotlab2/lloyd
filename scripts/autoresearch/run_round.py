@@ -40,6 +40,10 @@ from .common import (
 from .hypothesis_generator import propose_variants
 from .judge import aggregate_variant, configured_rubric_mode, judge_trace, rankability_fields
 from . import bench_split
+# #1549: the behavioural scorecard. Report-only by construction — this import is
+# reached on the way to writing a report, after `evaluate_promotion` has already
+# answered, and nothing in `promote.py` imports it back.
+from . import behavioural
 # `slice_metrics` is imported by name, never reached through the module: the
 # name `promote` is bound two lines lower to the promotion *function*, so
 # `promote.slice_metrics(...)` at the call site raised AttributeError on a
@@ -814,6 +818,21 @@ async def run(
         lines.append(f"- snapshot_dir: `{promotion_result.get('snapshot_dir')}`")
         lines.append(f"- applied_files: {promotion_result.get('applied_files')}")
         lines.append(f"- experiment_fact: `{promotion_result.get('experiment_fact')}`")
+    # #1549: the behavioural scorecard, REPORT-ONLY. Nothing here feeds a verdict —
+    # `evaluate_promotion` is called above and never sees this artifact, so a
+    # `guardrail_hit: true` changes no decision and no reason on this page. Wiring it
+    # in as the behavioural second condition is item step 5 and waits until ~2 weeks
+    # of report-only rungs have caught or cleared real promotions.
+    # No scenario runs inside this body either: #1546 kills every round at the 1800 s
+    # pool cap, so a suite that ran here would inherit that death. The section scores
+    # whole-run traces an out-of-band capture left under
+    # `<research_root>/behavioural_traces/<round_id>/`, and falls back to the shipped
+    # reference capture so the section and its shape are in every report from the
+    # first round onward.
+    scorecard = behavioural.round_scorecard(cfg, rid)
+    behavioural.write_scorecard(cfg, rid, scorecard)
+    lines += [""]
+    lines += behavioural.scorecard_report_lines(scorecard)
     lines.extend(report_lines)
     summary_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -829,6 +848,9 @@ async def run(
         "round_id": rid,
         "summary_file": str(summary_file),
         "spec_file": str(spec_path),
+        # #1549: the behavioural artifact's name, so a caller can open the per-axis
+        # paired deltas without parsing them back out of the report's markdown table.
+        "behavioural_scorecard": behavioural.scorecard_path(cfg, rid).name,
         "variants_proposed": len(variants),
         "variants_dropped": dropped,
         "variants_dropped_by_surface": dict(dropped_by_surface),

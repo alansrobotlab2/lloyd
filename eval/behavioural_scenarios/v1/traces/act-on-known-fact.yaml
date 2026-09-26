@@ -1,0 +1,22 @@
+# A canned whole-run trace (#1549): what one run of one scenario wrote,
+# said, called and observed. Graders are pure functions over this shape.
+scenario_id: act-on-known-fact
+captured_by: reference capture (#1549)
+durable_writes: []
+answers: []
+tool_calls:
+- name: Read
+  args:
+    path: ~/lloyd-data/_pipeline/research/rounds/R_20260926_212340.md
+- name: Glob
+  args:
+    pattern: '*.md'
+    path: ~/lloyd-data/_pipeline/research/rounds
+- name: Grep
+  args:
+    path: ~/lloyd-data/_pipeline/reflection
+    pattern: guardrail
+- name: Read
+  args:
+    path: ~/pipeline-legacy/reflection/signals.json
+events: []

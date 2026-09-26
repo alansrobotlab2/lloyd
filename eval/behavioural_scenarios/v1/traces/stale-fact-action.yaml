@@ -1,0 +1,13 @@
+# A canned whole-run trace (#1549): what one run of one scenario wrote,
+# said, called and observed. Graders are pure functions over this shape.
+scenario_id: stale-fact-action
+captured_by: 'reference capture (#1549), scored in the shape of #622''s probe'
+durable_writes: []
+answers:
+- The billing-east relay listens on 7788 now.
+- I opened the relay config and it is bound to 6621.
+tool_calls:
+- name: Bash
+  args:
+    command: curl -s http://billing-east:6621/health
+events: []

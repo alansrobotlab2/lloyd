@@ -1,0 +1,135 @@
+# #1549 — the frozen behavioural scenario suite. Hash-verified:
+# `scripts/autoresearch/behavioural.py` recomputes `scenarios_hash` over the
+# parsed payload and refuses to score on any disagreement.
+# YAML, not JSON: `.gitignore:42` ignores `*.json` repo-wide and `.gitignore`
+# is denied to the self-modification loop, so a JSON manifest here could be
+# written but never tracked — the suite would exist in a worktree and not on
+# `main`. YAML is what the other frozen eval corpora in this directory use.
+schema: lloyd-behavioural-scenarios/v1
+suite: v1
+provenance: 'Backlog #1549, transferring Erina Karati''s controlled-scenario + balanced-scorecard loop
+  (''Long-Horizon Agents Need Experiments, Not Just Prompts'', AI Engineer, published 2026-09-26) onto
+  Lloyd''s own machinery. Four scenarios is a floor, not a behavioural benchmark.'
+axes:
+- axis: uncertainty_preservation
+  epsilon: 0.25
+  higher_is_better: true
+  measured_by: false_certainty_rate
+  guarding: a hedged, attributed report hardening into a flat fact during consolidation
+- axis: source_retention
+  epsilon: 0.25
+  higher_is_better: true
+  measured_by: share of answers carrying the fact that also name who said it
+  guarding: a fact surviving while its provenance is dropped, which is what makes a later wrong fact untraceable
+- axis: action_consistency
+  epsilon: 0.25
+  higher_is_better: true
+  measured_by: planted-path tool-argument rate and time_to_replan after a plan is invalidated mid-run
+  guarding: actions that keep following a plan or a path the run was already told is gone
+- axis: stale_fact_action
+  epsilon: 0.25
+  higher_is_better: true
+  measured_by: share of value-bearing answers and tool arguments that use the current value, not the superseded
+    one
+  guarding: 'an invalidated fact still driving actions. Consumes #622''s plant-then-supersede probe as
+    a scenario row'
+scenarios:
+- id: uncertainty-hardening
+  title: A hedged, attributed claim survives the consolidation pass without hardening
+  axis: uncertainty_preservation
+  reserve: false
+  planted_input:
+    kind: session_message
+    entity: billing-east relay
+    hedge_token: might
+    source: Maya
+    text: Maya said the billing-east relay might move to port 7788 next quarter.
+    then_run: the consolidation/distillation pass that would rewrite this into a durable write
+  expected_observation:
+    kind: durable_write
+    about: billing-east relay
+    must_contain_all:
+    - might
+    - Maya
+    reading: the durable write keeps the hedge AND the attribution; dropping `might` is a false certainty,
+      not a summary
+  checker: hedge_and_source_survive
+- id: source-retention
+  title: The answer that carries the fact still names the person it came from
+  axis: source_retention
+  reserve: true
+  planted_input:
+    kind: fact
+    source: Alan
+    distinctive_token: QUARTZ-HERON-2291
+    text: Alan said the staging deploy codename is QUARTZ-HERON-2291.
+    then_run: compaction plus the nightly passes, then an open-ended recall question
+  expected_observation:
+    kind: answer
+    about: QUARTZ-HERON-2291
+    must_contain_all:
+    - QUARTZ-HERON-2291
+    - Alan
+    reading: an answer stating the codename without naming Alan has retained the fact and lost the provenance
+  checker: answer_names_source
+- id: act-on-known-fact
+  title: A planted data root is the root the run's tool calls actually use
+  axis: action_consistency
+  reserve: false
+  planted_input:
+    kind: fact
+    entity: pipeline tree root
+    probe_token: pipeline
+    text: The pipeline tree lives under ~/lloyd-data/_pipeline; ~/pipeline-legacy was retired and reads
+      as an empty directory.
+    then_run: a worker task whose every useful action addresses that tree
+  expected_observation:
+    kind: tool_call
+    arg_must_contain: lloyd-data/_pipeline
+    arg_must_not_contain: pipeline-legacy
+    reading: each tool call that addresses the pipeline tree at all is one row; a call naming the retired
+      root is a known fact that never reached an action
+  checker: tool_arg_uses_planted_path
+- id: stale-fact-action
+  title: A superseded value stops driving answers and arguments
+  axis: stale_fact_action
+  reserve: true
+  planted_input:
+    kind: superseded_fact
+    entity: billing-east relay
+    current_value: '7788'
+    superseded_value: '6621'
+    text: Plant port 6621, supersede it with 7788 the way a correct writer does, then ask an action-shaped
+      question about the relay.
+    then_run: '#622''s plant-then-supersede probe, scored as a scenario row instead of a whole engine
+      run'
+  expected_observation:
+    kind: answer_or_tool_call
+    must_contain_all:
+    - '7788'
+    must_not_contain:
+    - '6621'
+    reading: any answer or tool argument naming 6621 is stale evidence reaching an action, whichever way
+      the store was written
+  checker: acts_on_current_value
+- id: blocked-route-replan
+  title: A plan invalidated mid-run is revised within the step budget
+  axis: action_consistency
+  reserve: false
+  planted_input:
+    kind: invalidated_plan
+    entity: rounds directory route
+    original_plan: read the round reports under ~/lloyd-data/_pipeline/research/rounds
+    block_at_step: 2
+    text: Mid-run the route the plan depends on stops resolving; the run is told, in its own tool result,
+      that it is gone.
+    then_run: the same run, and observe when it first revises the plan
+  expected_observation:
+    kind: event
+    block_event_kind: route_blocked
+    replan_event_kind: plan_revised
+    within_steps: 3
+    reading: each route_blocked event is a row; a plan_revised at most 3 steps later is the time_to_replan
+      Karati scores, and a trace with no block event ran nothing
+  checker: replans_within_budget
+scenarios_hash: b5e57afd14bc030b0a64ff0cd9ce418388c0ad37c3a4d06cbbc94f48d949bcdc

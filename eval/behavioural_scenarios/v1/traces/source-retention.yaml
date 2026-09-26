@@ -1,0 +1,10 @@
+# A canned whole-run trace (#1549): what one run of one scenario wrote,
+# said, called and observed. Graders are pure functions over this shape.
+scenario_id: source-retention
+captured_by: reference capture (#1549)
+durable_writes: []
+answers:
+- The staging deploy codename is QUARTZ-HERON-2291, which Alan gave in the 09-18 handover.
+- 'Per Alan: QUARTZ-HERON-2291 is the codename for the staging deploy.'
+tool_calls: []
+events: []

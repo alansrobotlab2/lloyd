@@ -1,0 +1,14 @@
+# A canned whole-run trace (#1549): what one run of one scenario wrote,
+# said, called and observed. Graders are pure functions over this shape.
+scenario_id: blocked-route-replan
+captured_by: reference capture (#1549)
+durable_writes: []
+answers: []
+tool_calls: []
+events:
+- kind: route_blocked
+  at_step: 2
+  detail: Grep on ~/lloyd-data/_pipeline/research/rounds returned no such directory
+- kind: plan_revised
+  at_step: 4
+  detail: re-pointed the read at the rounds archive and continued

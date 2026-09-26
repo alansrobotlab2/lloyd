@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.autoresearch import promote
+from scripts.autoresearch import behavioural, promote
 from scripts.autoresearch.common import (
     AutoresearchConfig, AutoresearchPaths, load_bench_tasks)
 
@@ -2071,3 +2071,115 @@ def test_post_promotion_dates_its_ledger_figures():
     i = doc.index("30,953")
     assert re.search(r"\b20\d\d-\d\d-\d\d\b", doc[max(0, i - 120):i]), doc[i - 120:i + 40]
     assert "appeared 65" in doc and "appears 65" not in doc
+
+
+# ── #1549 clause 5: the behavioural scorecard is report-only ─────────────────
+#
+# Item step 4 puts a behavioural scorecard in the round report; step 5 is what
+# will eventually hang it on the gate as a second condition, and it has not
+# happened. Until the report-only rung has caught or cleared real promotions, a
+# `guardrail_hit: true` must cost a variant nothing — not its verdict, and not
+# one character of the reason string the ledger keys on (`insufficient_win_fraction
+# (X.XX < Y.YY` is matched out of a 552-row census, so a reason that grew a
+# behavioural clause would silently blind that census as well as the decision).
+
+def _guardrail_scorecard(tmp_path: Path) -> dict:
+    """A scorecard whose `uncertainty_preservation` axis has fallen off a cliff.
+
+    Built from the shipped reference traces with one durable write swapped for a
+    hardened one, so the trip is the instrument's own arithmetic and not a
+    hand-written `guardrail_hit: true`.
+    """
+    traces = behavioural.load_traces(behavioural.REFERENCE_TRACES_DIR)
+    assert len(traces) == 5, traces
+    traces["uncertainty-hardening"] = {
+        "scenario_id": "uncertainty-hardening",
+        "durable_writes": [{"path": "lloyd/MEMORY.md",
+                            "text": "billing-east relay is moving to port 7788 next quarter"}],
+        "answers": [], "tool_calls": [], "events": []}
+    manifest = behavioural.load_manifest()
+    scorecard = behavioural.build_scorecard(
+        manifest=manifest, traces=traces, baseline=behavioural.load_pinned_baseline(),
+        scenarios_digest=manifest["_scenarios_hash"], trace_source="clause 5 probe")
+    assert scorecard["guardrail_hit"] is True, scorecard
+    return scorecard
+
+
+# Every decision shape the gate can produce: the accept path, and a refusal from
+# each leg in front of the win-fraction test. Report-only has to hold for all of
+# them, because the leg that a behavioural veto would be inserted at is precisely
+# the one a future reader cannot predict.
+_DECISION_SHAPES: list[tuple[str, list[float], list[float]]] = [
+    ("targeted_no_gain", [0.4] * 11, [0.4] * 6 + [0.9] * 5),
+    ("heldout_decline", [0.4] * 6 + [0.4] * 5, [0.6] * 6 + [0.1] * 5),
+    ("small_gain_promotes", [0.4] * 11, [0.41] * 6 + [0.45] * 5),
+    ("dominated_variant", [0.4] * 6 + [0.6] * 5, [0.3] * 6 + [0.2] * 5),
+]
+
+
+@pytest.mark.parametrize("label,base_scores,var_scores", _DECISION_SHAPES)
+def test_a_guardrail_hit_scorecard_changes_neither_the_verdict_nor_the_reason(
+        cfg, tmp_path, label, base_scores, var_scores):
+    """Same (should_promote, reason) with and without a tripped scorecard present.
+
+    The scorecard is written where a round leaves one — `rounds/<id>.behavioural_
+    scorecard.json`, on the same cfg the gate is handed — so the assertion is
+    about the gate reading its own round directory, not about a function that was
+    never given the file.
+    """
+    base, var = scored(base_scores, var_scores)
+    without = promote.evaluate_promotion(cfg, base, var)
+
+    behavioural.write_scorecard(cfg, "R_clause5", _guardrail_scorecard(tmp_path))
+    assert (cfg.paths.rounds_dir / "R_clause5.behavioural_scorecard.json").exists()
+
+    with_scorecard = promote.evaluate_promotion(cfg, base, var)
+    assert with_scorecard == without, (
+        f"{label}: a report-only scorecard moved the gate — "
+        f"{without!r} became {with_scorecard!r}")
+
+
+def test_the_promotion_gate_takes_no_behavioural_input_at_all(cfg):
+    """The report-only guarantee as a signature, which is stronger than behaviour.
+
+    A parameter that could receive a scorecard is a parameter a later commit can
+    start honouring; its absence is what makes step 5 a change to the gate rather
+    than a config flip.
+    """
+    import inspect
+
+    params = list(inspect.signature(promote.evaluate_promotion).parameters)
+    assert params == ["cfg", "baseline_summary", "variant_summary", "split",
+                      "require_full_slice"], params
+    assert not [p for p in params if "scorecard" in p or "behavioural" in p]
+    # The accept path is reached here too: `dominates` and `win_fraction` are the
+    # two numbers a behavioural leg would most plausibly be folded into, and the
+    # call below only returns True if it walked past both.
+    base, var = scored([0.4] * 11, [0.41] * 6 + [0.45] * 5)
+    assert promote.evaluate_promotion(cfg, base, var)[0] is True
+
+
+def test_promote_py_never_names_the_behavioural_instrument():
+    """No import, so no reachable channel: `promote.py` cannot see a scorecard
+    even through module state. The positive control beside the absence is the
+    point — a pattern that is empty against the wrong file looks identical to a
+    pattern that is empty against the right one for the right reason."""
+    src = (ROOT / "scripts" / "autoresearch" / "promote.py").read_text(encoding="utf-8")
+    assert "evaluate_promotion" in src, "positive control: the gate's own file is in hand"
+    assert "slice_metrics" in src, "positive control: the read is not empty"
+    for name in ("behavioural", "guardrail", "scenarios_hash"):
+        assert name not in src, f"promote.py names `{name}`, so a scorecard is reachable"
+
+
+def test_a_refused_behavioural_instrument_still_leaves_the_gate_alone(cfg):
+    """The refused instrument is the shape most likely to be mistaken for a
+    veto: no axes scored, `guardrail_hit: None`. The gate's output for a round
+    whose instrument could not load has to be the gate's output full stop."""
+    from scripts.autoresearch import behavioural as behavioural
+
+    base, var = scored([0.4] * 11, [0.41] * 6 + [0.45] * 5)
+    without = promote.evaluate_promotion(cfg, base, var)
+    refused = behavioural.refused_scorecard("scenarios_hash mismatch", round_id="R_clause5")
+    behavioural.write_scorecard(cfg, "R_clause5", refused)
+    assert refused["guardrail_hit"] is None and refused["denominator"] == 0
+    assert promote.evaluate_promotion(cfg, base, var) == without
