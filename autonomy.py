@@ -1381,6 +1381,30 @@ def _warn_never_ran_bypass(dependent: dict, dep_task: dict,
 
 _missing_artifact_bypass_warned: dict = {}
 
+_no_input_bypass_warned: dict = {}
+
+# How far PAST its declared bound a dependent tolerates an ABSENT upstream
+# artifact before the bound is taken literally (#1551, 2026-09-26).
+#
+# TWO RULES THAT DISAGREE BY CONSTRUCTION. `stale_bypass_hours` is the owner's
+# decision to forward on the previous cycle's input; #1437 added that a bypass
+# also needs that input on disk, because a run that consumes nothing spends a
+# primary-model cycle to produce nothing. Inside the bound the two agree. Past it
+# they do not: the bound says "stale input is acceptable", the artifact check says
+# "none is not", and a file that never comes back makes the bound unreachable
+# forever. That is what happened to #39 — `knowledge-handoff-{date}.md` went
+# missing with the 2026-09-22 data-home move, #42's `last_run` has not moved since
+# 2026-09-22T05:16:36Z, and the `HELD past its stale_bypass_hours` warning has
+# printed on every scheduler pass since, 33 of them in the current log tail.
+#
+# So the hold needs a horizon of its own, and 24 h is what makes it a horizon
+# rather than a second bound: it is one full daily cycle past the dependent's own
+# window, which is the honest amount of time to give a chain to produce the file
+# before concluding it is not coming. Past it, an absent file cannot hold a task
+# that declared a fail-forward bound: the dependent forwards on nothing, loudly
+# (`_warn_no_input_bypass`), which is the state the bound was written to authorise.
+MISSING_ARTIFACT_GRACE_HOURS = 24.0
+
 
 def _upstream_artifact_on_disk(dep_task: dict,
                                dep_last_run: Optional[datetime.datetime],
@@ -1437,6 +1461,43 @@ def _warn_missing_artifact_bypass(dependent: dict, dep_task: dict) -> None:
         "Fail-forward means running on stale input, not on none (#1437).",
         dependent.get("id"), dep_task.get("id"), dep_task.get("output_artifact"),
         dep_task.get("last_run") or "never")
+
+
+def _warn_no_input_bypass(dependent: dict, dep_task: dict,
+                          bypass_hours: float, age_hours: float) -> None:
+    """Once per (dependent, upstream) episode: released, and forwarding on NOTHING.
+
+    #1551. Past `stale_bypass_hours` + `MISSING_ARTIFACT_GRACE_HOURS` the missing
+    artifact stops holding the dependent, and this line is the only record that
+    what just dispatched is consuming no input at all. It is deliberately NOT the
+    #1437 hold sentence it grew out of: that one means WILL NOT dispatch and this
+    one means IS dispatching, and on 2026-09-26 33 copies of the single hold
+    string were the only surface describing two opposite states. Both name the
+    artifact, because the file is what is missing either way.
+
+    Deduplicated and ledger-cleared exactly like `_warn_missing_artifact_bypass`,
+    for the same reason: the scheduler re-answers this every 60 s tick. The ledger
+    is dropped the moment the state is no longer a past-the-horizon release — the
+    upstream produced its file, or ran again and pulled the dependent back inside
+    the horizon — so a chain that recovers and then loses its input again warns
+    again.
+    """
+    key = (str(dependent.get("id", "")), str(dep_task.get("id", "")))
+    if _no_input_bypass_warned.get(key):
+        return
+    _no_input_bypass_warned[key] = True
+    logger.warning(
+        "Task #%s is FORWARDING past its stale_bypass_hours with NO input on "
+        "disk: upstream #%s declares output_artifact %r and no candidate for its "
+        "last run (%s) is on disk. Its last run is %.1f h old, %s h past the "
+        "declared %s h bound and past the %s h artifact grace, so the absent file "
+        "no longer holds this dependent (#1437 holds it up to bound + %s h): this "
+        "run consumes NOTHING (#1551).",
+        dependent.get("id"), dep_task.get("id"), dep_task.get("output_artifact"),
+        dep_task.get("last_run") or "never", age_hours,
+        _fmt_hours(round(age_hours - bypass_hours, 1)), _fmt_hours(bypass_hours),
+        _fmt_hours(MISSING_ARTIFACT_GRACE_HOURS),
+        _fmt_hours(MISSING_ARTIFACT_GRACE_HOURS))
 
 
 def _stale_bypass_hours(dependent: dict) -> Optional[float]:
@@ -1506,6 +1567,19 @@ def _dependency_bypassed(dependent: dict, dep_task: dict,
     dependent is held and a warning names the missing file. An upstream that
     declares nothing keeps the elapsed-time rule alone, which is every case #814
     and #870 pinned.
+
+    AND THE HOLD HAS TO END (#1551). That requirement is bounded by
+    `MISSING_ARTIFACT_GRACE_HOURS`: past the dependent's own bound plus that grace,
+    an absent artifact releases anyway, with `_warn_no_input_bypass` saying so in
+    words no one can mistake for a stale forward. Without the horizon the two
+    rules disagree by construction and the artifact always wins — a file that
+    never comes back makes a declared `stale_bypass_hours` unreachable for the
+    rest of the chain's life, which is exactly how #39 came to sit 4 days past its
+    36 h bound while the board reported `failure_count: 0`. Two states are NOT
+    released by it, because neither is an absent file: an upstream that is
+    `in_progress` (an artifact being written is not a missing one), and a dependent
+    that declared no bound at all — no bound means no fail-forward, so there is
+    nothing to bound, and the grace horizon never opens a door nobody opened.
     """
     bypass_hours = _stale_bypass_hours(dependent)
     if bypass_hours is None:
@@ -1513,11 +1587,24 @@ def _dependency_bypassed(dependent: dict, dep_task: dict,
     if str(dep_task.get("status", "")).strip() == "in_progress":
         return False
     key = (str(dependent.get("id", "")), str(dep_task.get("id", "")))
-    if dep_last_run is not None:
+    age_s = (None if dep_last_run is None
+             else (now - dep_last_run).total_seconds())
+    if age_s is not None:
         _never_ran_bypass_warned.pop(key, None)
-        if (now - dep_last_run).total_seconds() <= bypass_hours * 3600:
+        if age_s <= bypass_hours * 3600:
             return False
     if _upstream_artifact_on_disk(dep_task, dep_last_run, now) == "":
+        if age_s is not None and age_s > (
+                bypass_hours + MISSING_ARTIFACT_GRACE_HOURS) * 3600:
+            # Past the horizon the owner's bound outranks the missing file: hold
+            # any longer and a declared fail-forward becomes a permanent block
+            # (#1551). The two ledgers swap here — the hold episode is over, the
+            # no-input episode has begun.
+            _missing_artifact_bypass_warned.pop(key, None)
+            _warn_no_input_bypass(dependent, dep_task, bypass_hours,
+                                  age_s / 3600.0)
+            return True
+        _no_input_bypass_warned.pop(key, None)
         _warn_missing_artifact_bypass(dependent, dep_task)
         return False
     _missing_artifact_bypass_warned.pop(key, None)
@@ -1552,6 +1639,12 @@ def _bypass_hold_detail(dependent: dict, dep_task: dict,
       declared `output_artifact` is not on disk. The in-window prediction is
       appended when the upstream is due this very tick, which is the difference
       between "the chain is one run behind" and "the chain is lost".
+
+    The second of those two is only reachable for `MISSING_ARTIFACT_GRACE_HOURS`
+    after the bound (#1551): past bound + grace the absent artifact releases the
+    dependent instead, so a detail naming it is never asked, and what this function
+    prints past the horizon is the `in_progress` case alone. It never contradicts
+    the release — it is called only when `_dependency_bypassed` said NO.
 
     The never-ran branch gets no in-window suffix: `_upstream_due_in_window`
     measures elapsed time from a `last_run` that does not exist there, and
