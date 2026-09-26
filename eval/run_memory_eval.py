@@ -19,6 +19,14 @@ final answer:
   prefetch_rel  as `prefetch`, with the `<facts>` block ordered by query
                 relevance instead of confidence (#1482 rider 1); every other
                 byte of the block is the `prefetch` arm's
+  recall        the documents `vault_recall` returns for the question (top 10,
+                path + snippet), no history — the tool Lloyd calls to look
+                something up (#1485)
+  recall_episodic  as `recall` with the episodic floor on (chat transcripts,
+                qmd `sessions`, floor 1). Both need a qmd index whose
+                `sessions` collection holds the set's dev sessions —
+                `export-sessions --out DIR` writes them in the chat-export
+                shape; against the live index they do not exist
 
 What is scored, per answer, and why three numbers rather than one:
 
@@ -55,6 +63,8 @@ Usage (quality run: shared primary lock; the primary answers every question):
       --label baseline-2026-09-25 [--holdout]
     .venvs/lloyd/bin/python eval/run_memory_eval.py verify
     .venvs/lloyd/bin/python eval/run_memory_eval.py prefetch-retrieval   # no model: rider-1 retrieval A/B
+    .venvs/lloyd/bin/python eval/run_memory_eval.py export-sessions --out DIR
+    .venvs/lloyd/bin/python eval/run_memory_eval.py recall-retrieval [--out F]  # no model: #1485 A/B
 """
 from __future__ import annotations
 
@@ -83,7 +93,13 @@ SET_ROOT = HERE / "memory_eval"
 DEFAULT_VERSION = "v1"
 CATEGORIES = ("single_session", "multi_session", "knowledge_update", "temporal", "preference")
 REQUIRED_FIELDS = ("id", "category", "prompt", "asked_on", "probe", "accept", "source")
-ARMS = ("closed_book", "history", "prefetch", "prefetch_rel")
+ARMS = ("closed_book", "history", "prefetch", "prefetch_rel", "recall", "recall_episodic")
+#: The `vault_recall` arms (#1485): the tool's documents for the question, with
+#: the episodic floor off / on. They need a qmd index whose `sessions`
+#: collection holds the set's sessions (`export-sessions`, then a prepared pin);
+#: against the live index the synthetic sessions do not exist.
+RECALL_ARMS = ("recall", "recall_episodic")
+RECALL_LIMIT = 10
 #: A category with fewer answered questions than this is reported
 #: `insufficient` rather than as a rate: at n=20 one question is five points
 #: and the Wilson interval is ~40 points wide.
@@ -522,6 +538,72 @@ def prefetch_blocks(q: Question) -> dict:
             "facts_conf": conf, "facts_rel": rel, "prefetch_ms": round(ms, 1)}
 
 
+def session_export_id(sid: str, date: str) -> str:
+    """A chat-shaped id (`YYYYMMDD_HHMMSS_<tag>`, three parts like a real chat)
+    for one synthetic session, deterministic in its sid."""
+    h = int(hashlib.sha256(f"lme-export:{sid}".encode()).hexdigest(), 16)
+    hhmmss = f"{9 + h % 11:02d}{(h >> 8) % 60:02d}{(h >> 16) % 60:02d}"
+    return f"{date.replace('-', '')}_{hhmmss}_me{format((h >> 24) % 65536, '04x')}"
+
+
+def render_session_export(s: dict) -> tuple[str, str]:
+    """(relative path, markdown) of one synthetic session in the shape
+    `app/post_capture._export_session_markdown` writes a chat into the qmd
+    `sessions` collection: `<date>/<id>.md`, `# id`, `# iso`, `user:`/`lloyd:`."""
+    sid_x = session_export_id(s["sid"], s["date"])
+    t = sid_x.split("_")[1]
+    iso = f"{s['date']}T{t[:2]}:{t[2:4]}:{t[4:]}-07:00"
+    lines = [f"# {sid_x}", f"# {iso}", "# model: primary", ""]
+    who = {"user": "user", "assistant": "lloyd"}
+    for turn in s.get("turns") or []:
+        lines.append(f"{who.get(turn['role'], turn['role'])}: {turn['text']}")
+    return f"{s['date']}/{sid_x}.md", "\n".join(lines) + "\n"
+
+
+def export_sessions(qs: list[Question], out: Path) -> dict[str, str]:
+    """Write every session of `qs` under `out` as a chat export. Returns
+    {sid: relative path}. Tuning view only: the holdout leg is never exported."""
+    out.mkdir(parents=True, exist_ok=True)
+    mapping: dict[str, str] = {}
+    for q in qs:
+        for s in q.episode.get("sessions") or []:
+            rel, text = render_session_export(s)
+            p = out / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text)
+            mapping[s["sid"]] = rel
+    return mapping
+
+
+def render_recall(question: str, docs: list[dict]) -> str:
+    """The question under the documents `vault_recall` returned for it."""
+    if not docs:
+        return question
+    body = "\n".join(f"- {d.get('path', '')}: {' '.join(str(d.get('snippet', '')).split())}"
+                     for d in docs)
+    return f"<vault_recall>\n{body}\n</vault_recall>\n\n{question}"
+
+
+def recall_blocks(q: Question) -> dict:
+    """`vault_recall` for the question with the episodic floor off and on
+    (the module override, so both arms run in one process on one index)."""
+    from agent_mcp import vault as V
+    out: dict = {"recall_docs": {}, "recall_ms": {}}
+    prev = V.RECALL_EPISODIC_FLOORS
+    try:
+        for arm, on in (("recall", False), ("recall_episodic", True)):
+            V.RECALL_EPISODIC_FLOORS = on
+            t0 = time.monotonic()
+            res = V._vault_recall({"query": q.prompt, "limit": RECALL_LIMIT, "include_facts": False})
+            out["recall_ms"][arm] = round((time.monotonic() - t0) * 1000, 1)
+            docs = (res.get("documents") or []) if isinstance(res, dict) else []
+            out["recall_docs"][arm] = [d.get("path", "") for d in docs]
+            out[arm] = render_recall(q.prompt, docs)
+    finally:
+        V.RECALL_EPISODIC_FLOORS = prev
+    return out
+
+
 def gold_in(q: Question, text: str) -> bool:
     """RETRIEVAL: every gold value (or the grounding fact's text) is in `text`."""
     if all(_any(text, forms) for forms in q.gold):
@@ -536,7 +618,7 @@ def build_messages(q: Question, arm: str, pool: list[Question], blocks: dict | N
     if arm == "history":
         system += ("\n\nYour earlier conversations with Alan, oldest first:\n\n"
                    + history_block(q, pool))
-    elif arm in ("prefetch", "prefetch_rel"):
+    elif arm in ("prefetch", "prefetch_rel") or arm in RECALL_ARMS:
         user = blocks[arm]
     elif arm != "closed_book":
         raise ValueError(f"unknown arm {arm!r}")
@@ -703,7 +785,7 @@ def judge_agreement(rows: list[dict]) -> dict:
 
 
 def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=None,
-        blocks_fn=None) -> dict:
+        blocks_fn=None, recall_fn=None) -> dict:
     ap = argparse.ArgumentParser()
     ap.add_argument("--set", default=str(SET_ROOT / DEFAULT_VERSION))
     ap.add_argument("--arms", default="closed_book,history,prefetch")
@@ -729,6 +811,8 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
         os.environ.setdefault("LLOYD_FACTS_ROOT", str(Path(args.corpus) / "facts"))
         os.environ.setdefault("LLOYD_KG_DB", str(Path(args.corpus) / "kg.sqlite"))
     blocks_fn = blocks_fn or prefetch_blocks
+    recall_fn = recall_fn or recall_blocks
+    use_recall = any(a in RECALL_ARMS for a in arms)
 
     legs = [("dev", ms.dev)] + ([("holdout", ms.holdout)] if args.holdout else [])
     if args.limit:
@@ -743,12 +827,17 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
 
     jobs: list[dict] = []
     prefetch_meta: dict[str, dict] = {}
+    recall_meta: dict[str, dict] = {}
     for leg, qs in legs:
         for q in qs:
             blocks = None
             if any(a.startswith("prefetch") for a in arms):
                 blocks = blocks_fn(q)
                 prefetch_meta[q.id] = {k: blocks[k] for k in ("facts_conf", "facts_rel", "prefetch_ms")}
+            if use_recall:
+                rb = recall_fn(q)
+                blocks = {**(blocks or {}), **rb}
+                recall_meta[q.id] = {"docs": rb["recall_docs"], "ms": rb["recall_ms"]}
             seed = int(hashlib.sha256(q.id.encode()).hexdigest()[:8], 16)
             for arm in arms:
                 msgs = build_messages(q, arm, qs, blocks)
@@ -798,7 +887,8 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
     dev_rows = [r for r, j in zip(rows, jobs) if j["leg"] == "dev"]
     report["dev"] = {arm: summarize_arm([r for r in dev_rows if r["arm"] == arm]) for arm in arms}
     comps = []
-    for a, b in (("closed_book", "history"), ("closed_book", "prefetch"), ("prefetch", "prefetch_rel")):
+    for a, b in (("closed_book", "history"), ("closed_book", "prefetch"), ("prefetch", "prefetch_rel"),
+                 ("recall", "recall_episodic")):
         if a in arms and b in arms:
             for metric in ("correct_strict", "correct", "evidence_in_context"):
                 comps.append(compare(dev_rows, a, b, metric))
@@ -811,6 +901,8 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
         report["holdout_reserve_rule"] = RESERVE_RULE
     report["rows"] = dev_rows
     report["prefetch"] = {i: m for i, m in prefetch_meta.items() if qmap[i].leg == "dev"}
+    if use_recall:
+        report["recall"] = {i: m for i, m in recall_meta.items() if qmap[i].leg == "dev"}
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"lloydmemeval-{args.label}.json"
@@ -887,6 +979,59 @@ def prefetch_retrieval(argv: list[str] | None = None) -> dict:
     return out
 
 
+def evidence_hits(q: Question, paths: list[str]) -> tuple[bool, bool]:
+    """(any, all) of the question's evidence sessions among `paths`."""
+    by_sid = {s["sid"]: session_export_id(s["sid"], s["date"])
+              for s in q.episode.get("sessions") or []}
+    want = [by_sid[e] for e in q.evidence if e in by_sid]
+    got = [any(w in p for p in paths) for w in want]
+    return (any(got), bool(got) and all(got))
+
+
+def recall_retrieval(argv: list[str] | None = None) -> dict:
+    """#1485's retrieval half with no model: per dev question, `vault_recall`
+    with the episodic floor off vs on — evidence session(s) in the top
+    `RECALL_LIMIT` documents, and every gold value in their snippets. Run
+    against a qmd index holding the exported sessions (`export-sessions`)."""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--set", default=str(SET_ROOT / DEFAULT_VERSION))
+    ap.add_argument("--out", default="")
+    args = ap.parse_args(argv)
+    from stats import paired_bootstrap_ci
+    ms = load_set(Path(args.set), view="tuning")
+    rows = []
+    for q in ms.dev:
+        rb = recall_blocks(q)
+        r = {"id": q.id, "category": q.category, "ms": rb["recall_ms"], "docs": rb["recall_docs"]}
+        for arm in RECALL_ARMS:
+            anyh, allh = evidence_hits(q, rb["recall_docs"][arm])
+            r[f"{arm}_any"], r[f"{arm}_all"] = anyh, allh
+            r[f"{arm}_gold"] = gold_in(q, rb[arm])
+        rows.append(r)
+    out = {"n": len(rows), "leg": "dev", "limit": RECALL_LIMIT, "by_category": {}}
+    for cat in CATEGORIES + ("all",):
+        rs = [r for r in rows if cat == "all" or r["category"] == cat]
+        if not rs:
+            continue
+        row = {"n": len(rs)}
+        for m in ("any", "all", "gold"):
+            a = [float(r[f"recall_{m}"]) for r in rs]
+            b = [float(r[f"recall_episodic_{m}"]) for r in rs]
+            ci = paired_bootstrap_ci(a, b) if len(rs) >= 2 else None
+            row[m] = {"off": round(sum(a) / len(rs), 4), "on": round(sum(b) / len(rs), 4),
+                      "diff": round(ci["diff"], 4) if ci else None,
+                      "ci": [round(ci["lo"], 4), round(ci["hi"], 4)] if ci else None}
+        out["by_category"][cat] = row
+    for arm in RECALL_ARMS:
+        lat = sorted(r["ms"][arm] for r in rows)
+        out[f"{arm}_ms_p50"] = lat[len(lat) // 2] if lat else None
+    out["rows"] = rows
+    if args.out:
+        Path(args.out).write_text(json.dumps(out, indent=1) + "\n")
+    print(json.dumps({k: v for k, v in out.items() if k != "rows"}, indent=1))
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv.pop(0) if argv and not argv[0].startswith("-") else "run"
@@ -904,7 +1049,20 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "prefetch-retrieval":
         prefetch_retrieval(argv)
         return 0
-    raise SystemExit(f"unknown command {cmd!r} (run | verify | prefetch-retrieval)")
+    if cmd == "recall-retrieval":
+        recall_retrieval(argv)
+        return 0
+    if cmd == "export-sessions":
+        ap = argparse.ArgumentParser()
+        ap.add_argument("--set", default=str(SET_ROOT / DEFAULT_VERSION))
+        ap.add_argument("--out", required=True)
+        a = ap.parse_args(argv)
+        ms = load_set(Path(a.set), view="tuning")
+        mapping = export_sessions(ms.dev, Path(a.out))
+        print(f"exported {len(mapping)} dev sessions to {a.out}")
+        return 0
+    raise SystemExit(f"unknown command {cmd!r} (run | verify | prefetch-retrieval | "
+                     "recall-retrieval | export-sessions)")
 
 
 if __name__ == "__main__":

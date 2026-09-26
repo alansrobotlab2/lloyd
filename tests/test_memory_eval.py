@@ -267,3 +267,52 @@ def test_splice_facts_replaces_only_the_facts_section():
     assert out.index("<facts>") < out.index("<vault-context>") and out.endswith(q)
     assert M.splice_facts(q, q, []) == q
     assert M.splice_facts(q, q, ["- [A] f"]).startswith("<context>\n<facts>")
+
+
+# ── #1485: the vault_recall arms ────────────────────────────────────────────
+
+def test_exported_sessions_look_like_chat_exports_and_are_found_by_id(tmp_path):
+    root = make_set(tmp_path, {"multi_session": 2})
+    ms = M.load_set(root)
+    mapping = M.export_sessions(ms.dev, tmp_path / "exp")
+    assert len(mapping) == 2 and not any("holdout" in s for s in mapping)
+    rel = mapping[ms.dev[0].evidence[0]]
+    text = (tmp_path / "exp" / rel).read_text()
+    stem = Path(rel).stem
+    assert rel.startswith("2026-08-10/20260810_") and len(stem.split("_")) == 3
+    assert text.startswith(f"# {stem}\n# 2026-08-10T") and "\nuser: the relay moved" in text
+    assert "\nlloyd: noted" in text
+    q = ms.dev[0]
+    assert M.evidence_hits(q, [f"sessions/{rel}", "knowledge/x.md"]) == (True, True)
+    assert M.evidence_hits(q, ["knowledge/x.md"]) == (False, False)
+
+
+def test_recall_arms_carry_the_documents_and_are_compared(tmp_path):
+    root = make_set(tmp_path, {"multi_session": 22})
+    seen = []
+
+    def fake_recall(q):
+        seen.append(q.id)
+        docs_on = [{"path": "sessions/x.md", "snippet": "the relay moved to port 8182"}]
+        return {"recall": M.render_recall(q.prompt, []),
+                "recall_episodic": M.render_recall(q.prompt, docs_on),
+                "recall_docs": {"recall": [], "recall_episodic": ["sessions/x.md"]},
+                "recall_ms": {"recall": 1.0, "recall_episodic": 2.0}}
+    out = tmp_path / "runs"
+    rep = M.run(["--set", str(root), "--arms", "recall,recall_episodic", "--judge", "rules",
+                 "--label", "r", "--out-dir", str(out)],
+                complete=_fake_complete(lambda m: ACTS if "<vault_recall>" in m[-1]["content"] else "no idea"),
+                primary=("http://x", "fake"), recall_fn=fake_recall)
+    assert len(seen) == 22
+    art = json.loads(Path(rep["_path"]).read_text())
+    assert art["dev"]["recall_episodic"]["multi_session"]["correct"]["rate"] == 1.0
+    assert art["dev"]["recall"]["multi_session"]["correct"]["rate"] == 0.0
+    assert any(c["metric"] == "correct" and "recall_episodic" in json.dumps(c)
+               for c in art["dev_comparisons"])
+    assert art["recall"][seen[0]]["docs"]["recall_episodic"] == ["sessions/x.md"]
+
+
+def test_render_recall_is_the_bare_question_without_documents():
+    assert M.render_recall("q?", []) == "q?"
+    out = M.render_recall("q?", [{"path": "sessions/a.md", "snippet": "x\n  y"}])
+    assert out == "<vault_recall>\n- sessions/a.md: x y\n</vault_recall>\n\nq?"

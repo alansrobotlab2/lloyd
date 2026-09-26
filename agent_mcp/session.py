@@ -536,15 +536,31 @@ def _match_evidence(session: dict, query_tokens: set,
 # the chat (JSON era, n=10) hit@5 0.9 tokens vs 0.8 qmd, diff -0.1 [-0.4, +0.2],
 # at 0.7 ms vs 62 ms p50. Its 0.72-vs-0 win on older chats (n=32) is only the
 # 2026-09-22 wipe: those chats' JSON is gone and their exports survived.
-SESSION_RECALL_BACKEND = "tokens"
+# The switch is `retrieval.session_recall.backend` in config.yaml, read by
+# `session_recall_backend()`; the constant is a test/eval override (None = read
+# config). Anything but "qmd" is the token scorer.
+SESSION_RECALL_BACKEND: str | None = None
 _SESSION_QMD_OVERFETCH = 4
+
+
+def session_recall_backend() -> str:
+    """"tokens" or "qmd" (#1485). Fails closed to the token scorer."""
+    if SESSION_RECALL_BACKEND is not None:
+        return "qmd" if SESSION_RECALL_BACKEND == "qmd" else "tokens"
+    try:
+        from app.config import CONFIG
+        block = (((CONFIG or {}).get("retrieval") or {}).get("session_recall") or {})
+        return "qmd" if isinstance(block, dict) and block.get("backend") == "qmd" else "tokens"
+    except Exception:  # noqa: BLE001
+        return "tokens"
 _SESSION_ID_RE = re.compile(r"^(\d{8})_(\d{6})_")
 
 
 def _session_recall_qmd(query: str, days: int, limit: int) -> dict:
     from agent_mcp import _task_registry
     from agent_mcp.transcript_self_hit import note_path, self_hit_reason
-    from agent_mcp.vault import RECALL_LEX_MODE, _qmd_daemon_search, strip_qmd_snippet
+    from agent_mcp.vault import (RECALL_LEX_MODE, _qmd_daemon_search, is_chat_transcript,
+                                 strip_qmd_snippet)
 
     rows = _qmd_daemon_search(query, max(limit, 1) * _SESSION_QMD_OVERFETCH, ["sessions"],
                               skip_rerank=True, legs=("lex", "vec"), lex_mode=RECALL_LEX_MODE)
@@ -558,6 +574,9 @@ def _session_recall_qmd(query: str, days: int, limit: int) -> dict:
         stem = Path(rel).stem
         m = _SESSION_ID_RE.match(stem)
         if not m or m.group(1) < cutoff or stem in seen:
+            continue
+        # A background run's export is not a conversation (#1485: 475 of 670).
+        if not is_chat_transcript(rel):
             continue
         if self_hit_reason(query, r, sid):
             continue
@@ -585,7 +604,7 @@ def _session_recall(params: dict) -> dict:
     query = params.get("query", "").strip()
     if not query:
         return _err("query is required", ErrorCode.MISSING_PARAM, sessions=[])
-    if SESSION_RECALL_BACKEND == "qmd":
+    if session_recall_backend() == "qmd":
         try:
             return _session_recall_qmd(query, int(params.get("days", 7)),
                                        int(params.get("limit", 5)))

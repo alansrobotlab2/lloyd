@@ -2149,3 +2149,16 @@ retrieval:
       enabled: true            # Qwen3-Embedding-0.6B over `name (kind): top facts`
       k: 3                     # seeds appended after the lexical RECALL_SEED_TOP_K
       min_score: 0.0
+  # Chat transcripts (qmd `sessions`, chat ids only) as a vault_recall floor —
+  # ON since 2026-09-25 (#1485, agent_mcp/vault.py). Pinned doc gold (n=79, djev
+  # fresh both arms): doc_hit +0.000 [-0.051, +0.051], MRR +0.031 [-0.001, +0.066],
+  # +9.5 ms p50. LloydMemEval v1 dev with the set's sessions indexed (n=267):
+  # correct_strict 0.146 -> 0.434, +0.288 [+0.232, +0.348]; multi_session (n=48)
+  # 0.021 -> 0.292, +0.271 [+0.146, +0.396]. 33 real past-chat questions (live):
+  # doc_hit 0 -> 0.727 [+0.576, +0.879]. session_recall stays on the token scorer:
+  # where both can see the chat (n=10) hit@5 0.9 -> 0.8 [-0.4, +0.2] at ~100x the
+  # latency. eval/measurements/episodic-recall-2026-09-25.md has the rest.
+  recall:
+    episodic_floors: true
+  session_recall:
+    backend: tokens            # tokens | qmd

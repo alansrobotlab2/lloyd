@@ -208,7 +208,7 @@ def recall(query: str, episodic: bool, k: int) -> tuple[list[str], float, str | 
     except Exception as e:  # noqa: BLE001
         paths, err = [], f"{type(e).__name__}: {e}"
     finally:
-        vault_mod.RECALL_EPISODIC_FLOORS = False
+        vault_mod.RECALL_EPISODIC_FLOORS = None
     return paths, (time.perf_counter() - t0) * 1000, err
 
 
@@ -218,7 +218,7 @@ def session_recall(query: str, backend: str, days: int, limit: int) -> tuple[lis
     try:
         res = session_mod._session_recall({"query": query, "days": days, "limit": limit})
     finally:
-        session_mod.SESSION_RECALL_BACKEND = "tokens"
+        session_mod.SESSION_RECALL_BACKEND = None
     return ([s.get("session_id", "") for s in res.get("sessions") or []],
             (time.perf_counter() - t0) * 1000)
 

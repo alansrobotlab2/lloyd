@@ -478,6 +478,9 @@ def _entity_seeding_off_in_tests(monkeypatch):
     `entity_linker.seeding_config` or clear the variable for their subprocess.
     """
     monkeypatch.setenv("LLOYD_ENTITY_SEEDING", "0")
+    # #1485: the episodic floor too, so recall tests keep the request they pin
+    # whatever `retrieval.recall.episodic_floors` says; its own tests override.
+    monkeypatch.setenv("LLOYD_RECALL_EPISODIC", "0")
 
 
 @pytest.fixture(autouse=True)

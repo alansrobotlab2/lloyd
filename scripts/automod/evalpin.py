@@ -207,9 +207,13 @@ def production_payload(text: str) -> dict:
     # may be an older tree, which only knows a pool.
     if hasattr(V, "recall_doc_leg_shape"):
         shape = V.recall_doc_leg_shape()
+        # #1485: the episodic floors name collections outside the segments
+        # (`sessions`), appended exactly as `_qmd_daemon_search` appends them,
+        # so the floor that names them survives the filter below.
+        extra = [c for c in (shape.get("extra") or []) if c not in V.VAULT_SEGMENTS]
         payload = {"searches": [{"type": "lex", "query": text}, {"type": "vec", "query": text}],
                    "limit": int(shape["limit"]), "candidateLimit": int(shape["candidateLimit"]),
-                   "collections": list(V.VAULT_SEGMENTS), "rerank": bool(shape["rerank"])}
+                   "collections": list(V.VAULT_SEGMENTS) + extra, "rerank": bool(shape["rerank"])}
         if shape.get("lexMode") and shape["lexMode"] != "and":
             payload["lexMode"] = shape["lexMode"]
         if getattr(V, "RECALL_QMD_FUSION", "collection") == "global":
@@ -366,6 +370,52 @@ def reap_stale(port: int = PIN_PORT, name: str = PIN_INDEX_NAME, *, wait: float 
     return reaped
 
 
+def snapshot_collections(con) -> dict[str, int]:
+    """Active documents per collection in an open qmd index.
+
+    What the pin can answer from is this, not the pin's `<name>.yml`: qmd's
+    `/query` filters on `documents.collection`, and `VACUUM INTO` copies every
+    collection the live index holds. The yml only rewrites `store_collections`
+    (paths, contexts, defaults) — `collections: {}` empties that table and
+    leaves every document searchable. So "does the pin have `sessions`" is
+    asked here, of the snapshot itself (#1485)."""
+    rows = con.execute("select collection, count(*) from documents where active = 1 "
+                       "group by collection").fetchall()
+    return {str(c): int(n) for c, n in rows}
+
+
+def missing_collections(provenance: dict, wanted) -> list[str]:
+    """Collections a request names that the snapshot holds no document of.
+    Empty when the snapshot's collections are unknown (an older qmd schema):
+    unknown is not missing."""
+    have = provenance.get("collections")
+    if not isinstance(have, dict):
+        return []
+    return [c for c in wanted if not have.get(c)]
+
+
+def pin_config_report(name: str = PIN_INDEX_NAME, *, config_dir: Path | None = None) -> dict:
+    """How the pin's `<name>.yml` compares with production's `index.yml`:
+    the collections it declares and the embed model it names. Recorded, not
+    enforced — the embed model must match (the pin serves production's
+    vectors); the collection list only shapes `store_collections`."""
+    import yaml
+    d = Path(config_dir or os.environ.get("QMD_CONFIG_DIR") or (Path.home() / ".config" / "qmd"))
+    out: dict = {"path": str(d / f"{name}.yml")}
+    try:
+        pin = yaml.safe_load((d / f"{name}.yml").read_text()) or {}
+        live = yaml.safe_load((d / "index.yml").read_text()) or {}
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = repr(exc)
+        return out
+    pc, lc = pin.get("collections") or {}, live.get("collections") or {}
+    out["collections_match"] = pc == lc
+    out["missing_collections"] = sorted(set(lc) - set(pc))
+    out["embed_match"] = ((pin.get("models") or {}).get("embed")
+                          == (live.get("models") or {}).get("embed"))
+    return out
+
+
 def snapshot(name: str = PIN_INDEX_NAME) -> dict:
     """Freeze the live qmd index into a named copy. Returns its provenance.
 
@@ -394,6 +444,7 @@ def snapshot(name: str = PIN_INDEX_NAME) -> dict:
         raise PinError(f"VACUUM INTO produced no file at {dest}")
 
     docs = None
+    per_collection: dict[str, int] | None = None
     try:
         c = sqlite3.connect(f"file:{dest}?mode=ro", uri=True, timeout=30)
         try:
@@ -403,6 +454,7 @@ def snapshot(name: str = PIN_INDEX_NAME) -> dict:
                 if candidate in names:
                     docs = c.execute(f"select count(*) from {candidate}").fetchone()[0]
                     break
+            per_collection = snapshot_collections(c)
         finally:
             c.close()
     except Exception:
@@ -412,6 +464,7 @@ def snapshot(name: str = PIN_INDEX_NAME) -> dict:
         "index": str(dest),
         "bytes": dest.stat().st_size,
         "documents": docs,
+        "collections": per_collection,
         "snapshot_seconds": round(time.time() - started, 2),
         "taken_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "source": str(LIVE_INDEX),
@@ -487,6 +540,19 @@ class PinnedCorpus:
 
         self.workdir.mkdir(parents=True, exist_ok=True)
         self.provenance = snapshot(self.name)
+        self.provenance["pin_config"] = pin_config_report(self.name)
+        # Every collection production's recall names must be in the snapshot,
+        # or the pin judges a request production does not send (#1485: the
+        # episodic floor names `sessions`, outside the vault segments).
+        try:
+            wanted = production_payload(WARM_QUESTIONS[0]).get("collections") or []
+        except Exception:  # noqa: BLE001 — warm_up reports an unbuildable request
+            wanted = []
+        missing = missing_collections(self.provenance, wanted)
+        if missing:
+            self.discard()
+            raise PinError(f"snapshot holds no document of {missing}, which production's "
+                           f"recall names; the pin cannot judge that request")
 
         # Production's program environment LAST, so what it says wins: the three
         # CUDA variables are the floor the pin always had, for a conf that

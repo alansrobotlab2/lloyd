@@ -267,7 +267,11 @@ because a broken label misses in every arm.
   `_qmd_daemon_search`, `_qmd_post`, `qmd_file`, `_djev_rank_recall`, `_vault_recall`
 - `app/djev.py` — `rank(chars=, samples=, max_n=)`
 - `app/qmd_health.py` — rerank and ranker fallbacks, counted and announced
-- `scripts/automod/evalpin.py` — `production_payload` mirrors the doc leg
+- `scripts/automod/evalpin.py` — `production_payload` mirrors the doc leg,
+  including #1485's episodic floor (`retrieval.recall.episodic_floors`: the
+  `sessions` collection joins the request's collections and `collectionFloor`);
+  `PinnedCorpus` refuses a snapshot holding no document of a collection that
+  request names (`snapshot_collections`, `missing_collections`)
 - `qmd/src/store.ts` (fork) — `buildFTS5Query(query, mode)`, `searchFTSAcross`, `structuredSearch` options
 - `app/entity_linker.py`, `app/qwen3_embed.py`, `agent_mcp/retrieval.py::recall_seeds` — entity seeding (#1486)
 - `eval/vault_recall_queries.yaml` — the gold set; `tests/test_eval_corpus_guard.py` guards it

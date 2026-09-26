@@ -231,7 +231,13 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
 
 `scripts/automod/evalpin.PinnedCorpus` snapshots the index (`VACUUM INTO`) and
 serves it from a second daemon on its own port with production's program
-environment, so an eval measures a frozen corpus. A pin shares GPU 0 with
+environment, so an eval measures a frozen corpus. The snapshot carries every
+collection (`/query` filters on `documents.collection`); the pin's
+`~/.config/qmd/evalpin.yml` only shapes `store_collections` and names the
+models. Since #1485 (2026-09-25) it is a copy of `index.yml` (it was
+`collections: {}`), `PinnedCorpus` refuses a snapshot missing a collection
+production's recall names, and `pin_config_report` records any drift between the
+two files in the pin's provenance. A pin shares GPU 0 with
 production; the regression runner's pins ran 42% of wall time on 2026-09-21 and
 slowed production's reranks ~1.8×. Experiments use their own index name and port
 (`reap_stale` matches only its own), and prepared snapshots (a re-embedded or

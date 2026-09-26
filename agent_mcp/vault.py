@@ -278,7 +278,7 @@ RECALL_DJEV_SAMPLES = 1
 RECALL_DJEV_TIMEOUT_S = 4.0
 
 
-# ── Episodic floors (#1485, OFF) ─────────────────────────────────────────────
+# ── Episodic floors (#1485, ON since 2026-09-25 via config) ──────────────────
 #
 # Chat transcripts (qmd `sessions`) are indexed but outside `VAULT_SEGMENTS`, so
 # no recall could reach "what did we decide about X last week". On, the doc leg
@@ -292,14 +292,42 @@ RECALL_DJEV_TIMEOUT_S = 4.0
 # past chats, doc_hit 0.000 -> 0.697 [+0.55, +0.85]; on the 79-query doc gold set
 # doc_hit +0.000 [-0.063, +0.076], MRR -0.014 [-0.059, +0.032] (an A/A of today's
 # recall moved MRR -0.016: djev does not repeat itself); p50 +30 ms. Adding
-# `autonomy-runs` too (head 16) cost doc MRR -0.041 [-0.082, -0.004]. Not flipped:
-# the regression pin (`scripts/automod/evalpin.py`, `~/.config/qmd/evalpin.yml`)
-# has no `sessions` collection and does not send `extra`, so every later
-# promotion would be judged against a request production no longer sends, and
-# the question set is synthetic — P0 (#1480) is the measurement that should flip it.
-RECALL_EPISODIC_FLOORS = False
+# `autonomy-runs` too (head 16) cost doc MRR -0.041 [-0.082, -0.004].
+#
+# Flipped on the second pass (same write-up), once the pin sent the request
+# (below) and only chat transcripts survive (`RECALL_EPISODIC_CHAT_ONLY`): on the
+# pinned 79-query gold set, both arms fresh djev, doc_hit +0.000 [-0.051, +0.051],
+# MRR +0.031 [-0.001, +0.066], +9.5 ms p50 (unfiltered, the background exports
+# had cost doc_hit -0.025 [-0.076, +0.025]); on LloydMemEval v1 dev with its
+# sessions indexed, correct_strict +0.288 [+0.232, +0.348] (n=267), multi_session
+# +0.271 [+0.146, +0.396] (n=48); 33 real past-chat questions 0 -> 0.727.
+#
+# The switch is `retrieval.recall.episodic_floors` in config.yaml, read by
+# `recall_episodic_floors()` — the one reader the doc leg and
+# `scripts/automod/evalpin.production_payload` share, so the regression pin
+# warms and judges exactly the request production sends. The pin's snapshot is
+# a VACUUM INTO of the whole live index, so it carries the `sessions` documents,
+# and `PinnedCorpus` refuses a snapshot missing any collection the request names.
+# `RECALL_EPISODIC_FLOORS` is a test/eval override (None = read config);
+# `LLOYD_RECALL_EPISODIC=0` forces it off (tests/conftest.py sets it).
+RECALL_EPISODIC_FLOORS: Optional[bool] = None
+RECALL_EPISODIC_KILL_ENV = "LLOYD_RECALL_EPISODIC"
 RECALL_EPISODIC_FLOOR = {"sessions": 1}
 RECALL_EPISODIC_DJEV_HEAD = 18
+
+
+def recall_episodic_floors() -> bool:
+    """Whether the recall doc leg names the episodic floors (#1485). Fails closed."""
+    if RECALL_EPISODIC_FLOORS is not None:
+        return bool(RECALL_EPISODIC_FLOORS)
+    if os.environ.get(RECALL_EPISODIC_KILL_ENV, "").strip() == "0":
+        return False
+    try:
+        from app.config import CONFIG
+        block = (((CONFIG or {}).get("retrieval") or {}).get("recall") or {})
+        return bool(block.get("episodic_floors", False)) if isinstance(block, dict) else False
+    except Exception:  # noqa: BLE001 — no config means today's request
+        return False
 
 
 def recall_reranker() -> str:
@@ -316,7 +344,7 @@ def recall_reranker() -> str:
 def recall_doc_leg_shape(reranker: str | None = None) -> dict:
     """What the recall's document leg asks qmd for. The one definition the doc
     leg and `scripts/automod/evalpin.production_payload` both read."""
-    episodic = RECALL_EPISODIC_FLOORS
+    episodic = recall_episodic_floors()
     # Off, the shape is today's dict exactly — no `extra` key at all.
     extra = {"extra": list(RECALL_EPISODIC_FLOOR)} if episodic else {}
     if (reranker or recall_reranker()) == "djev":
@@ -1830,8 +1858,26 @@ def _djev_shadow_rerank(documents: list[dict], query: str) -> None:
         logger.debug("djev rerank shadow: %s", e)
 
 
+#: #1485: the qmd `sessions` collection is not only chats. On 2026-09-25 it held
+#: 670 exports of which 179 were three-part chat ids; 475 were four-part
+#: background runs (347 `youtubed`, 54 `backlogs`, autocode, autotriage, deep
+#: research — exported there before `sessions-background/` existed) and 16 were
+#: e2e fixtures. A recall about "what did we discuss" must not answer from the
+#: machine talking to itself (`sessions_io.is_user_session`'s rule), and on the
+#: doc gold set those transcripts were what displaced gold documents. Only a
+#: chat-shaped id (`YYYYMMDD_HHMMSS_<tag>`) survives. Eval override.
+RECALL_EPISODIC_CHAT_ONLY = True
+_CHAT_TRANSCRIPT_RE = re.compile(r"^\d{8}_\d{6}_[^_]+$")
+
+
+def is_chat_transcript(path: str) -> bool:
+    """A `sessions/` export whose id is a chat's (three parts, date_time_tag)."""
+    return bool(_CHAT_TRANSCRIPT_RE.match(Path(str(path or "")).stem))
+
+
 def _drop_recall_self_hits(query: str, documents: list[dict]) -> list[dict]:
-    """The recall's documents without a transcript echoing `query` (#1511/#1485).
+    """The recall's documents without a transcript echoing `query` (#1511/#1485),
+    and without a transcript that is not a chat (`RECALL_EPISODIC_CHAT_ONLY`).
 
     Only a `sessions/` path is ever judged, so with the episodic floors off (no
     transcript can reach the pool) this returns `documents` unchanged.
@@ -1841,8 +1887,15 @@ def _drop_recall_self_hits(query: str, documents: list[dict]) -> list[dict]:
     from agent_mcp import _task_registry
     from agent_mcp.transcript_self_hit import self_hit_reason
     sid = str(_task_registry.current_session_id.get("") or "") or None
-    return [d for d in documents
-            if not self_hit_reason(query, {"file": d.get("path"), "snippet": d.get("snippet")}, sid)]
+
+    def keep(d: dict) -> bool:
+        path = str(d.get("path") or "")
+        if not path.startswith("sessions/"):
+            return True
+        if RECALL_EPISODIC_CHAT_ONLY and not is_chat_transcript(path):
+            return False
+        return not self_hit_reason(query, {"file": path, "snippet": d.get("snippet")}, sid)
+    return [d for d in documents if keep(d)]
 
 
 def _vault_recall(params: dict, *, seed_top_k: int | None = None,
