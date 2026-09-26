@@ -361,17 +361,25 @@ def wait_idle(max_wait: float | None = None, *, drain: bool = True,
     the way down land inside the window the error-rate detector is watching —
     so the promotion is reverted for the damage its own landing caused.
 
-    **The drain comes first.** Without it, idle is a lottery against the worker
-    pool: a research or distill job starts every few minutes, three quiet
-    polls in a row never arrive, and the budget runs out. The first landing of
-    the unattended era (SM_20260907_233449) spent its whole 900 s watching
-    `harness_runs` flicker between 1 and 2 and never drained at all — the
-    drain used to be armed only AFTER idle, which is the one moment it is no
-    longer needed. Armed here, nothing new starts (chat turns and worker jobs
-    both honour it), what is in flight finishes, and zero arrives. It is
-    re-armed every `DRAIN_REFRESH_SECONDS` because its TTL is shorter than this
-    wait, and released on give-up so a failed landing does not leave the
-    backend refusing turns for another three minutes.
+    **The drain is armed once the pool is empty, not before.** It must be up
+    before quiet polls are counted — the first landing of the unattended era
+    (SM_20260907_233449) spent its whole 900 s watching `harness_runs` flicker
+    between 1 and 2 because the drain was armed only AFTER idle, which is the
+    one moment it is no longer needed. But armed from the first poll it closed
+    chat for the whole pool wait: on 2026-09-26 an eager landing 503'd every
+    user turn for 23 minutes while it waited out one worker job, and the drain
+    bought nothing that whole time — the PAUSE is what stops new jobs, and a
+    job already in flight neither asks the endpoint nor honours the flag. So
+    while the paused pool still has jobs in flight, chat stays open; the
+    moment it reads empty the drain is armed, and no quiet poll is counted on
+    an iteration that did not first arm it — the race the flag exists for (a
+    turn arriving between the last quiet poll and `stopProcess`) stays closed.
+    A turn admitted during the pool wait burns the quiet budget once the drain
+    arms; the cheap failure is a `FlushNotStarted` retried at the next
+    trigger, and a user turn outranking the loop's restart is the intended
+    order. The drain is re-armed every `DRAIN_REFRESH_SECONDS` because its TTL
+    is shorter than this wait, and released on give-up so a failed landing
+    does not leave the backend refusing turns for another three minutes.
 
     **And the worker pool is paused, not merely drained.** The drain makes a
     dispatched worker job *fail* — each refusal counts an attempt, and three
@@ -402,9 +410,6 @@ def wait_idle(max_wait: float | None = None, *, drain: bool = True,
     busiest = ""
     armed_at = 0.0
     while time.time() < min(deadline, started + hard_max):
-        if drain and time.time() - armed_at >= DRAIN_REFRESH_SECONDS:
-            set_drain(True, ttl)
-            armed_at = time.time()
         status, body = _get(f"{BACKEND}/health")
         if status == 200 and body:
             turns = body.get("turns") or {}
@@ -418,12 +423,21 @@ def wait_idle(max_wait: float | None = None, *, drain: bool = True,
             # its pinned qmd daemon did not, and the promotion went unmeasured
             # (8 of 17 measured on 2026-09-18). With the pool paused by this
             # promoter a job in flight is finite, exactly as a harness job is.
-            jobs_quiet = pool_in_flight() if (pause_pool and not busy) else None
-            if not busy and jobs_quiet:
+            jobs = pool_in_flight() if pause_pool else None
+            # Chat stays open while a paused pool's job is what we are waiting
+            # on (see the docstring); the drain is armed the moment the pool
+            # reads empty — always before a quiet poll is counted, because
+            # every path to `quiet += 1` passes this arming first. `None`
+            # (the backend cannot say) arms: failing open here would count
+            # quiet polls with the endpoint still admitting turns.
+            if drain and not jobs and time.time() - armed_at >= DRAIN_REFRESH_SECONDS:
+                set_drain(True, ttl)
+                armed_at = time.time()
+            if not busy and jobs:
                 quiet = 0
                 deadline = time.time() + max_wait
                 busiest = "no turn in flight; waiting on pool job(s): " + ", ".join(
-                    sorted({str(j.get("source")) for j in jobs_quiet}))
+                    sorted({str(j.get("source")) for j in jobs}))
             elif not busy:
                 quiet += 1
                 if quiet >= quiet_needed:
@@ -432,7 +446,6 @@ def wait_idle(max_wait: float | None = None, *, drain: bool = True,
                 quiet = 0  # a turn appearing resets the counter
                 busiest = (f"active={turns.get('active')} queued={turns.get('queued')} "
                            f"harness_runs={turns.get('harness_runs')}")
-                jobs = pool_in_flight() if pause_pool else None
                 if jobs:
                     # A paused pool's job in flight is finite: wait it out.
                     deadline = time.time() + max_wait

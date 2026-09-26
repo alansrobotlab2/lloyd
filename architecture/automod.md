@@ -340,17 +340,33 @@ denied to session-less worker turns. `not_code` is now reserved for
 `external` — hardware, robots, third-party services — and vault items get
 real verdicts.
 
-**Drain first, then wait for idle.** The promoter used to poll for three
-consecutive quiet ticks and only *then* arm the drain — the one moment it is
-no longer needed. Against a worker pool that starts a research or distill job
-every few minutes, three quiet polls in a row never arrive: the first landing
-of the unattended era (SM_20260907_233449, the frontend rung's proof round)
-spent its entire 900 s budget watching `harness_runs` flicker between 1 and 2
-and never drained at all. The hand-driven rounds only ever landed because
-the pool was quieter then. `wait_idle` now arms the drain before its first
-poll (chat turns and worker jobs both honour it, so nothing new starts and
-what is in flight finishes), re-arms it inside its 180 s TTL, and releases it
-on give-up so a failed landing does not leave the backend refusing turns.
+**The drain is armed once the pool is empty — before any quiet poll, never
+during the pool wait.** The promoter used to poll for three consecutive quiet
+ticks and only *then* arm the drain — the one moment it is no longer needed.
+Against a worker pool that starts a research or distill job every few
+minutes, three quiet polls in a row never arrive: the first landing of the
+unattended era (SM_20260907_233449, the frontend rung's proof round) spent
+its entire 900 s budget watching `harness_runs` flicker between 1 and 2 and
+never drained at all. The fix over-corrected: armed before the FIRST poll,
+the drain closed chat for the entire budget-exempt pool wait, and on
+2026-09-26 an eager landing 503'd every user turn for 23 minutes while it
+waited out one worker job — 907 s more on a natural-gap flush the same night.
+The drain was buying nothing there: the *pause* is what stops new jobs, and a
+job already in flight neither posts to `/api/message/stream` nor reads the
+flag. So `wait_idle` now leaves chat open while the paused pool still has
+jobs in flight and arms the drain on the first empty-pool look — every path
+that counts a quiet poll passes the arming first (pinned by
+`tests/test_automod_promote.py`, including at `idle_quiet_polls: 1`), so the
+race the flag exists for, a turn arriving between the last quiet poll and
+`stopProcess`, stays closed. The cost: a chat turn admitted during the pool
+wait burns the quiet budget once the drain arms, and an unlucky long one
+fails the flush — `FlushNotStarted`, nothing restarted, entries retried at
+the next trigger — which is the right order: the user's turn outranks the
+loop's restart. The drain is re-armed inside its 180 s TTL and released on
+give-up so a failed landing does not leave the backend refusing turns. The
+web client's side of the same event — holding a 503'd message and resending
+it when the drain clears — is `architecture/mission-control.md` § "Pending
+restarts and the chat drain".
 
 **A turn that dies at its budget is not the end of the round.** The second
 unattended implement attempt on #278 (session `20260908_000804_backlogi_3828`)

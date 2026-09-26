@@ -232,11 +232,12 @@ def test_idle_gate_gives_up_rather_than_landing_into_a_busy_backend(monkeypatch)
 
 
 
-def test_the_idle_wait_drains_first_and_keeps_the_drain_armed(monkeypatch):
+def test_the_drain_is_armed_before_quiet_polls_and_kept_through_success(monkeypatch):
     """SM_20260907_233449 spent its whole 900 s budget watching harness_runs
     flicker while the worker pool kept starting jobs, and never drained: the
-    drain was armed only after idle. Now it is armed before the first poll,
-    refreshed inside its TTL, and released on give-up."""
+    drain was armed only after idle. With the pool empty it is armed on the
+    first look — always before a quiet poll is counted — and success leaves
+    it up for the landing."""
     monkeypatch.setattr(P, "pool_paused", lambda: True)   # a human's pause: untouched
     calls: list[tuple] = []
     monkeypatch.setattr(P, "set_drain", lambda on, ttl=P.DRAIN_TTL: calls.append(("drain", on)) or True)
@@ -244,7 +245,7 @@ def test_the_idle_wait_drains_first_and_keeps_the_drain_armed(monkeypatch):
                  + [{"active": 0, "queued": 0, "harness_runs": 0}] * 3)
 
     def fake_get(url, timeout=5.0):
-        if url.endswith("/api/workers/status"):      # the quiet path asks the pool too
+        if url.endswith("/api/workers/status"):      # every iteration asks the pool
             return 200, {"pool": {"in_flight": {}}}
         calls.append(("poll",))
         return 200, {"turns": next(polls)}
@@ -252,8 +253,56 @@ def test_the_idle_wait_drains_first_and_keeps_the_drain_armed(monkeypatch):
     monkeypatch.setattr(P, "IDLE_POLL_SECONDS", 0.0)
     ok, why = P.wait_idle(max_wait=30)
     assert ok, why
-    assert calls[0] == ("drain", True), "armed before the first poll"
+    first_drain = calls.index(("drain", True))
+    assert calls[:first_drain].count(("poll",)) == 1, "armed on the first empty-pool look"
     assert ("drain", False) not in calls, "success leaves the drain to the landing"
+
+
+def test_the_idle_wait_leaves_chat_open_while_a_pool_job_is_in_flight(monkeypatch):
+    """Armed from the first poll, the drain closed chat for the whole pool
+    wait — 23 minutes on 2026-09-26, an eager landing waiting out one worker
+    job — while the pause was already stopping new jobs. Chat stays open
+    until the paused pool reads empty; the drain is armed on that first
+    empty look, before any quiet poll is counted."""
+    monkeypatch.setattr(P, "pool_paused", lambda: True)   # a human's pause: untouched
+    calls: list[tuple] = []
+    monkeypatch.setattr(P, "set_drain", lambda on, ttl=P.DRAIN_TTL: calls.append(("drain", on)) or True)
+    pool = iter([{"j1": {"source": "research"}}] * 2 + [{}] * 10)
+    polls = iter([{"active": 0, "queued": 0, "harness_runs": 0}] * 12)
+
+    def fake_get(url, timeout=5.0):
+        if url.endswith("/api/workers/status"):
+            return 200, {"pool": {"in_flight": next(pool)}}
+        calls.append(("poll",))
+        return 200, {"turns": next(polls)}
+    monkeypatch.setattr(P, "_get", fake_get)
+    monkeypatch.setattr(P, "IDLE_POLL_SECONDS", 0.0)
+    ok, why = P.wait_idle(max_wait=30)
+    assert ok, why
+    first_drain = calls.index(("drain", True))
+    assert calls[:first_drain].count(("poll",)) == 3, \
+        "no drain while `research` was in flight; armed on the first empty look"
+    assert ("drain", False) not in calls, "success leaves the drain to the landing"
+
+
+def test_even_a_single_quiet_poll_is_counted_only_behind_an_armed_drain(monkeypatch):
+    """`idle_quiet_polls: 1` must not open the race the flag exists for (a
+    turn arriving between the last quiet poll and stopProcess): the arming
+    precedes the count inside one iteration, so even an immediately idle
+    backend returns with the drain already up."""
+    monkeypatch.setattr(P, "pool_paused", lambda: True)
+    monkeypatch.setattr(P, "idle_quiet_polls", lambda: 1)
+    calls: list = []
+    monkeypatch.setattr(P, "set_drain", lambda on, ttl=P.DRAIN_TTL: calls.append(on) or True)
+
+    def fake_get(url, timeout=5.0):
+        if url.endswith("/api/workers/status"):
+            return 200, {"pool": {"in_flight": {}}}
+        return 200, {"turns": {"active": 0, "queued": 0, "harness_runs": 0}}
+    monkeypatch.setattr(P, "_get", fake_get)
+    monkeypatch.setattr(P, "IDLE_POLL_SECONDS", 0.0)
+    ok, _ = P.wait_idle(max_wait=5)
+    assert ok and calls == [True], "armed exactly once, before the only quiet poll"
 
 
 def test_the_idle_wait_releases_the_drain_when_it_gives_up(monkeypatch):
