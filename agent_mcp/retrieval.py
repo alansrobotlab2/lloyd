@@ -724,6 +724,24 @@ def semantic_seed_k() -> int:
     return int(sem.get("k", 0)) if sem.get("enabled") else 0
 
 
+def semantic_seeding_record() -> dict:
+    """The semantic seeding this process would serve, as a record for an artifact.
+
+    `{"enabled": bool, "k": int}`, where `k` is the EFFECTIVE width — the same
+    number `semantic_seed_k()` returns and the same one `recall_seeds()` slices
+    at — so a switch that reads `enabled: true` with `k: 0` records as off,
+    because that is what it does: it adds no seeds. The field describes what a
+    run was scored with, not how the flag is spelled.
+
+    Here rather than re-derived by the eval for #1486's own reason: the recall
+    that ran and the artifact that records the run read ONE accessor, so a
+    baseline cannot report a seeding different from the seeds it scored (#1547
+    is that rule applied to the record instead of the slice).
+    """
+    k = semantic_seed_k()
+    return {"enabled": k > 0, "k": k}
+
+
 def recall_seeds(query: str, seed_top_k: int) -> list[str]:
     """The seed list `vault_recall` uses — and the eval records — at `seed_top_k`.
 

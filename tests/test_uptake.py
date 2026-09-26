@@ -605,14 +605,32 @@ def test_every_row_matches_the_declared_contract_hermetically():
 
 # ---------------------------------------------------------------- gate ------
 
-def _mk_baseline(path: Path, label: str, doc_hr: float, ndcg: float, *, prod=True, limit=20):
+#: Sentinel for "this night has no `semantic_seeding` key at all" (#1547) —
+#: distinct from a night that records `{"enabled": False, "k": 0}`.
+_NO_SEEDING = object()
+
+
+def _mk_baseline(path: Path, label: str, doc_hr: float, ndcg: float, *, prod=True,
+                 limit=20, seeding=_NO_SEEDING):
+    """One baseline artifact, at the shape `run_eval.py` actually writes.
+
+    `seeding` is omitted (not written as null) by default because that is the
+    shape of every nightly on disk before #1547: the key is ABSENT, and absent
+    is the state the gate must not read as "seeding was off".
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({
+    doc = {
         "label": label, "ran_at": "2026-09-09T06:00:00+00:00", "limit": limit,
         "matches_production_defaults": prod, "graph_rerank": False,
         "summary": {"overall": {"n_queries": limit, "doc_hit_rate": doc_hr,
                                 "ndcg10": ndcg, "entity_hit_rate": 0.5}},
-    }))
+    }
+    # Top level, spread the way `main()` spreads `build_run_config(args)` — the
+    # reader's half of the seam pinned writer-side in
+    # tests/test_eval_scorer.py::test_the_seeding_record_lands_at_the_artifact_top_level_the_reader_reads.
+    if seeding is not _NO_SEEDING:
+        doc["semantic_seeding"] = seeding
+    path.write_text(json.dumps(doc))
 
 
 def _mk_night(d: Path, i: int, label: str, doc_hr: float, ndcg: float, **kw) -> None:
@@ -672,6 +690,81 @@ def test_retrieval_gate_ignores_nights_it_cannot_compare(tmp_path):
     assert gate["nights"] == 2
     assert gate["nights_in_shape"] == 2
     assert gate["doc_hit_rate"]["floor"] == pytest.approx(0.75)
+
+
+def test_a_seeding_on_night_is_never_banded_with_an_unrecorded_one(tmp_path):
+    """#1547 clauses 3 and 4: the comparability shape carries the recorded seeding.
+
+    #1486 changed the SEED DEFINITION the entity scores are built from, and did it
+    between two nights that share `limit: 20` and both read
+    `matches_production_defaults: true` — so `nightly-20260925` (seeding off) and
+    `nightly-20260926` (seeding on) landed in one shape and one band while
+    `entity_hit_rate` moved 0.337 -> 0.500, `entity_recall_avg` 0.384 -> 0.579 and
+    `anchorless_query_count` 25 -> 16 across them. The fixture is those two files:
+    same limit, both production-config, one recording `k: 3` and one holding no
+    key at all — and no key is NOT a claim that seeding was off, it is the absence
+    of a measurement, which is why it is its own band rather than `k=0`. The
+    published pool is one night, not two.
+    """
+    d = tmp_path / "baselines"
+    _mk_night(d, 1, "nightly-20260925", 0.90, 0.55)          # pre-#1547: no key
+    _mk_night(d, 2, "nightly-20260926", 0.88, 0.54,
+              seeding={"enabled": True, "k": 3})
+
+    gate = uptake.retrieval_gate(baselines_dir=d)
+    assert gate["nights"] == 1, f"a k=3 night banded with an unrecorded one: {gate}"
+    assert gate["nights_in_shape"] == 1, gate
+    assert gate["shape"]["semantic_seeding"] == "enabled=True,k=3", gate["shape"]
+    assert gate["latest"]["label"] == "nightly-20260926", gate
+    for metric in ("doc_hit_rate", "ndcg10"):
+        # The band's denominator has to say one as well, or the separation stops
+        # being visible one level down where the floor is quoted.
+        assert gate[metric]["n_nights"] == 1, (metric, gate[metric])
+
+
+def test_the_published_shape_names_the_seeding_its_band_was_computed_over(tmp_path):
+    """#1547 clause 4, second half: a one-night or excluded-night pool has to be
+    readable as a regime boundary rather than as lost data.
+
+    Shape is still chosen MODALLY — an odd newest night must not set the
+    reference, which is what `test_retrieval_gate_ignores_nights_it_cannot_compare`
+    pins for a 40-query arm — so three pre-#1547 nights plus one recording `k: 3`
+    band as the three unrecorded nights and the newest night is excluded on
+    regime. That exclusion is only honest if the block says which seeding the band
+    was computed over: `nights: 3` beside `semantic_seeding: "unrecorded"` names
+    it, where a shape block that stopped at `limit` would leave a reader to
+    discover it by diffing the directory. (Whether the pre-2026-09-26 entity-side
+    nights should be annotated as pre-re-base or dropped from the published
+    window instead is a person's call, carried on #1547.)
+    """
+    d = tmp_path / "baselines"
+    for i, lab in enumerate(("nightly-20260923", "nightly-20260924",
+                             "nightly-20260925")):
+        _mk_night(d, i, lab, 0.90 - 0.02 * i, 0.55 - 0.01 * i)
+    _mk_night(d, 3, "nightly-20260926", 0.86, 0.53,
+              seeding={"enabled": True, "k": 3})
+
+    gate = uptake.retrieval_gate(baselines_dir=d)
+    assert gate["shape"]["semantic_seeding"] == uptake.SEEDING_SHAPE_UNRECORDED
+    assert gate["nights"] == 3, gate
+    assert gate["nights_in_shape"] == 3, gate
+    assert gate["latest"]["label"] == "nightly-20260925", (
+        "the k=3 night is excluded from the unrecorded band; the shape block is "
+        "what says so, and `latest` must not quietly claim the newest night")
+
+    # A night recording seeding OFF is a third regime, not a synonym for the
+    # unrecorded one: pooling them would invent the measurement it lacks. The
+    # recorded night is the NEWEST here on purpose — with one night per shape the
+    # modal choice breaks on mtime, so this also pins that a recorded `k=0` beats
+    # an unrecorded night rather than merging with it.
+    off = tmp_path / "off"
+    _mk_night(off, 1, "nightly-20261001", 0.90, 0.55)          # no key
+    _mk_night(off, 2, "nightly-20261002", 0.88, 0.54,
+              seeding={"enabled": False, "k": 0})
+    g2 = uptake.retrieval_gate(baselines_dir=off)
+    assert g2["shape"]["semantic_seeding"] == "enabled=False,k=0", g2["shape"]
+    assert g2["nights"] == 1 and g2["nights_in_shape"] == 1, g2
+    assert g2["latest"]["label"] == "nightly-20261002", g2
 
 
 def test_the_band_window_excludes_nights_older_than_the_window(tmp_path):
@@ -975,14 +1068,32 @@ def test_live_nightly_band_is_a_capped_window_of_the_real_files():
 
     def newest_values(metric: str) -> list[float]:
         """The same pool from the other direction: nightly, production-config,
-        this shape's `limit`, newest first, capped at M — read off the files and
-        sorted by mtime here, not returned by the function under test."""
+        this shape's `limit` AND its `semantic_seeding`, newest first, capped at M
+        — read off the files and sorted by mtime here, not returned by the
+        function under test.
+
+        The seeding term is part of the model as of #1547, not a nicety: the gate
+        bands by it now, so a recomputation that stopped at `limit` would describe
+        a different set of files than the one the band came over and the
+        `n_nights`/`min`/`max` equality checks below would be comparing the gate
+        against a pool it never used, red the first night that records a seeding.
+        The token is re-derived here from the documented shape rather than read
+        back through `uptake._seeding_shape_key`, so a producer whose token
+        drifts from the published one is caught by this and not by itself.
+        """
         rows = []
         for p in baselines.glob("nightly-*.json"):
             doc = json.loads(p.read_text())
             if doc.get("limit") != gate["shape"]["limit"]:
                 continue
             if not bool(doc.get("matches_production_defaults")):
+                continue
+            rec = doc.get("semantic_seeding")
+            token = (uptake.SEEDING_SHAPE_UNRECORDED
+                     if not isinstance(rec, dict) or not isinstance(rec.get("k"), int)
+                     or isinstance(rec.get("k"), bool)
+                     else f"enabled={bool(rec.get('enabled'))},k={rec['k']}")
+            if token != gate["shape"]["semantic_seeding"]:
                 continue
             v = ((doc.get("summary") or {}).get("overall") or {}).get(metric)
             if isinstance(v, (int, float)):

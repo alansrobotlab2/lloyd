@@ -1577,6 +1577,34 @@ def _metrics_of(doc: dict) -> dict | None:
     return None
 
 
+#: What a night that predates the `semantic_seeding` field is banded as (#1547).
+#: Its own token and not a stand-in for `k=0`: a night that recorded nothing does
+#: not thereby record that seeding was off, and pooling it with a seeding-off
+#: night would be inventing the measurement the file does not have.
+SEEDING_SHAPE_UNRECORDED = "unrecorded"
+
+
+def _seeding_shape_key(doc: dict) -> str:
+    """The semantic seeding a night recorded, as one token, for run shape (#1547).
+
+    `enabled=True,k=3` / `enabled=False,k=0` for a night that says, and
+    `SEEDING_SHAPE_UNRECORDED` for one that does not. Three distinct values on
+    purpose: #1486 moved `entity_hit_rate` 0.337 -> 0.500 and
+    `anchorless_query_count` 25 -> 16 overnight while leaving every document
+    metric flat, so an on-night and an off-night in one band would publish a
+    tolerance measured across a step the gate is supposed to detect. A field the
+    producer may yet rename is read tolerantly and never guessed at: a
+    non-dict, or an unparsable `k`, is `unrecorded`.
+    """
+    rec = doc.get("semantic_seeding")
+    if not isinstance(rec, dict):
+        return SEEDING_SHAPE_UNRECORDED
+    k = rec.get("k")
+    if isinstance(k, bool) or not isinstance(k, int):
+        return SEEDING_SHAPE_UNRECORDED
+    return f"enabled={bool(rec.get('enabled'))},k={k}"
+
+
 def retrieval_gate(baselines_dir: Path | str | None = None,
                    metrics: Sequence[str] = ("doc_hit_rate", "ndcg10")) -> dict[str, Any]:
     """A non-regression gate read from what the eval actually does at rest.
@@ -1587,10 +1615,17 @@ def retrieval_gate(baselines_dir: Path | str | None = None,
     night it ran, not by the change under test. This returns newest-value minus
     the observed spread of comparable nights, so the tolerance is measured.
 
-    Comparability is by run shape (`limit`, `matches_production_defaults`), not
-    by filename: folding a 40-query or rerank-on night into the spread would
-    widen the band with somebody else's experiment. Only a `nightly-*.json` is a
-    night at all (#1220). The rest of the directory is one-off runs — A/B arms,
+    Comparability is by run shape (`limit`, `matches_production_defaults`,
+    `semantic_seeding`), not by filename: folding a 40-query or rerank-on night
+    into the spread would widen the band with somebody else's experiment. The
+    third term is #1547: #1486 changed the SEED DEFINITION the entity scores are
+    built from — not a CLI knob, so invisible to `matches_production_defaults`,
+    which compares six parsed args against six `RECALL_*` constants — and the two
+    nightlies either side of it both read `matches_production_defaults: true`
+    while `entity_hit_rate` moved 0.337 -> 0.500. A night that predates the field
+    bands as `unrecorded`, so a step never hides inside a band; the published
+    `shape` block names the token the band was computed over. Only a
+    `nightly-*.json` is a night at all (#1220). The rest of the directory is one-off runs — A/B arms,
     `kg-rebuild` before/after snapshots, an item's scale check — each scored
     against whatever store happened to be standing the minute it ran, so a
     directory whose last night had gone used to report a band computed entirely
@@ -1606,9 +1641,13 @@ def retrieval_gate(baselines_dir: Path | str | None = None,
     regime in the sample. So the reader can tell the two counts apart: `nights`
     is what the band was computed over, `nights_in_shape` how many nights were
     comparable at all, and every metric block repeats the pair as
-    `window_nights`/`n_nights` because `scripts/uptake_probe.py` copies metric
-    blocks whole into the uptake table and drops any top-level key it does not
-    name.
+    `window_nights`/`n_nights` so a band cannot travel without its denominator.
+    (This paragraph used to say the probe "drops any top-level key it does not
+    name", which was inverted by #1220: `scripts/uptake_probe.py` copies every
+    top-level key but `GATE_TABLE_EXCLUDED_KEYS` — the baselines path — so a new
+    field like `shape.semantic_seeding` reaches
+    `eval/uptake/uptake-<date>.json` unaided and does not have to be parked
+    inside a metric block.)
 
     A latest of 1.0 and a band of 0 both mean the published floor discriminates
     nothing — one is a rate saturated at its ceiling, the other a pool with no
@@ -1658,7 +1697,8 @@ def retrieval_gate(baselines_dir: Path | str | None = None,
     shapes: dict[Any, list] = {}
     for r in basis:
         shapes.setdefault((r[2].get("limit"),
-                           bool(r[2].get("matches_production_defaults"))), []).append(r)
+                           bool(r[2].get("matches_production_defaults")),
+                           _seeding_shape_key(r[2])), []).append(r)
     shape, comparable = max(shapes.items(), key=lambda kv: (len(kv[1]), kv[1][0][0]))
     # Newest first: `rows` was sorted by mtime descending and `shapes` was filled
     # in that order, so the front slice is the newest M nights of this shape.
@@ -1667,7 +1707,12 @@ def retrieval_gate(baselines_dir: Path | str | None = None,
 
     out: dict[str, Any] = {
         "baselines_dir": str(d),
-        "shape": {"limit": shape[0], "matches_production_defaults": shape[1]},
+        # Which band this is, named in full: a reader who is told `nights: 1`
+        # must be able to see that it is one because the seeding regime is
+        # single-member, not because the pool was lost (#1547).
+        "shape": {"limit": shape[0],
+                  "matches_production_defaults": shape[1],
+                  "semantic_seeding": shape[2]},
         # Two counts, because the window makes them different quantities: the
         # band is computed over `nights`, drawn from `nights_in_shape` comparable
         # nights. One number is what let a 14-night sample read as a 7-night one.

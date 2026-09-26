@@ -753,6 +753,41 @@ def test_the_sizing_block_records_the_approved_re_base_point(tmp_path, capsys):
         f"({len(corpus)} queries)")
 
 
+def test_the_sizing_block_names_the_semantic_seeding_re_base(tmp_path, capsys):
+    """#1547 clause 5: the 2026-09-26 seeding step is a named re-base point, so a
+    reader is told not to compare entity-side values across it.
+
+    #1486 (`dbfde750`) landed semantic seeding of entity queries at 2026-09-25
+    16:57 PDT — between the 09-25 and 09-26 nights — and moved the entity leg
+    alone: entity_hit_rate 0.337 -> 0.500, entity_recall_avg 0.384 -> 0.579 and
+    anchorless_query_count 25 -> 16, while doc_hit_rate 0.640 -> 0.628 and
+    doc_recall_avg 0.572 -> 0.572 held. Both nights stamped
+    `matches_production_defaults: true`, because that conjunction compares six
+    parsed args against six `RECALL_*` constants and a config-sourced knob has
+    neither side of a term (#1547), so the step was invisible to the one field a
+    nightly reader is told to consult. The paragraph is the other place it can be
+    said. Asserted on the tokens a reader searches for, and on the measured step,
+    not on one long sentence a later edit may re-flow.
+    """
+    d = _write_paired_window(tmp_path, BIG_WINDOW_N)
+    assert main(["--baselines", str(d), "--reps", "200", "--no-claims"]) == 0
+    sizing = capsys.readouterr().out.split("POWER / QUERY-COUNT SIZING")[1]
+    for required in ("#1486", "dbfde750", "2026-09-26", "semantic seeding",
+                     "fourth re-base point"):
+        assert required in sizing, f"{required!r} missing from the sizing block"
+    assert "entity_hit_rate 0.337 -> 0.500" in sizing, (
+        "the re-base must carry the measured entity-side step, or a reader "
+        "cannot tell a regime boundary from a corpus change")
+    assert "doc_recall_avg 0.572 -> 0.572" in sizing, (
+        "the paragraph must say the document leg crosses the boundary, or the "
+        "warning is read as covering every metric in the report")
+    # BESIDE the other three, not instead of them: dropping a named re-base to
+    # fit a new one would un-inform the reader who needed the old one.
+    for other in ("#1319", "2026-09-21", "#1354", "2026-09-24",
+                  "second re-base point", "third re-base point"):
+        assert other in sizing, f"{other!r} re-base lost from the paragraph"
+
+
 
 
 def test_the_audit_reads_the_live_tree_from_a_worktree(tmp_path, monkeypatch):

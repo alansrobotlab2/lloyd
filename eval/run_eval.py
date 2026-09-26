@@ -49,7 +49,10 @@ from agent_mcp.vault import (
     _vault_recall,
 )
 from agent_mcp.facts import _extract_entities_from_query
-from agent_mcp.retrieval import recall_seeds as _recall_seeds, semantic_seed_k as _semantic_seed_k
+from agent_mcp.retrieval import (
+    recall_seeds as _recall_seeds, semantic_seed_k as _semantic_seed_k,
+    semantic_seeding_record as _semantic_seeding_record,
+)
 from app.kg_store import StoreUnavailable, store
 from app.paths import EVAL_BASELINES_DIR, VAULT_FACTS_ROOT, VAULT_KG_DB
 # The absolute latency ceiling for THIS run's context, read from the one module
@@ -1223,6 +1226,20 @@ def build_run_config(args: argparse.Namespace) -> dict:
     for a `--no-graph` run. Folding it into the conjunction instead would label
     every nightly run a non-production configuration, which is a different claim
     from the honest one.
+
+    `semantic_seeding` is a second field of that same shape, for a knob that
+    cannot be a conjunction term at all: #1486 (`dbfde750`, 2026-09-25) made the
+    seed list the scores are built from union the lexical head with up to `k`
+    semantic seeds, and it is read from `retrieval.entity_seeding.semantic`
+    through `semantic_seed_k()`, not from argparse and not from a `RECALL_*`
+    constant. So there is no parsed value to compare, and a term comparing the
+    accessor with itself would be #1000 again. What the artifact owes the reader
+    is not a parity verdict but the configuration itself — which is also what
+    #843 was missing when the conjunction had no seed count: a night can now be
+    asked which seeding defined its `seeds_extracted` instead of being assumed
+    to have used today's. The night of 2026-09-25 (seeding off) and the night of
+    2026-09-26 (seeding on) both read `matches_production_defaults: true` and
+    are not comparable on the entity leg — that is what this field is for.
     """
     expand_graph = not args.no_graph
     return {
@@ -1238,6 +1255,16 @@ def build_run_config(args: argparse.Namespace) -> dict:
         # artifact itself: a baseline can now be asked how many seeds it scored
         # with instead of being assumed to have used the current constant.
         "seed_top_k": args.seed_top_k,
+        # The OTHER half of what the seeds were (#1547): `seed_top_k` is the
+        # lexical width, and since #1486 the seed list is that head UNIONED with
+        # up to `k` semantic seeds, so `seed_top_k: 10` no longer says how many
+        # seeds a record holds. Read through production's own accessor, so the
+        # artifact and the recall under test cannot report different seedings.
+        # A sibling field, never a term of the conjunction below: the
+        # conjunction's shape is `args.<knob> == RECALL_<KNOB>`, and this knob is
+        # neither parsed nor a constant — `expand_graph_matches_production` above
+        # is the precedent for a knob that config owns.
+        "semantic_seeding": _semantic_seeding_record(),
         "djev_rerank": args.djev_rerank,
         "djev_rerank_top": args.djev_rerank_top,
         "matches_production_defaults": (

@@ -908,3 +908,167 @@ def test_matches_production_defaults_never_claims_graph_parity():
     # graph has to stay expanded, which is precisely why the claim moved to its
     # own field instead of into the conjunction.
     assert "expand_graph=not args.no_graph," in inspect.getsource(ev.main)
+
+
+# ── #1547: the seeding the run scored with, recorded as a sibling field ──────
+
+def test_the_run_config_records_the_semantic_seeding_it_scored_with(monkeypatch):
+    """#1547 clauses 1 and 2: a baseline can be asked which seeding defined its
+    seeds, and the answer is a SIBLING field, not a seventh parity term.
+
+    #1486 (`dbfde750`, landed 2026-09-25 16:57 PDT) made `seeds_extracted` the
+    lexical head UNIONED with up to `k` semantic seeds. The nightly of 09-25
+    (seeding off) and the nightly of 09-26 (seeding on) both stamped
+    `matches_production_defaults: true` while `entity_hit_rate` moved 0.337 ->
+    0.500, `entity_recall_avg` 0.384 -> 0.579 and `anchorless_query_count` 25 ->
+    16, with the document leg flat — because the knob lives in
+    `retrieval.entity_seeding.semantic` and the conjunction compares six parsed
+    args against six `RECALL_*` constants, so a config-sourced knob has neither
+    side of a term. A seventh term would compare `semantic_seed_k()` with itself,
+    which is #1000's defect: `expand_graph_matches_production` is the precedent
+    for a knob config owns, and the sibling is the only satisfiable shape.
+    """
+    import yaml
+
+    import agent_mcp.retrieval as ret
+
+    def cfg():
+        return ev.build_run_config(ev.build_parser().parse_args([]))
+
+    # The plumbing in both directions: the field reports production's accessor
+    # and it moves when the accessor moves. A hard-coded `{"enabled": True,
+    # "k": 3}` passes the box-config assert below and fails here.
+    monkeypatch.setattr(ret, "semantic_seed_k", lambda: 0)
+    assert cfg()["semantic_seeding"] == {"enabled": False, "k": 0}, (
+        "seeding off must record off, and `k: 0` is what `enabled: false` costs")
+    monkeypatch.setattr(ret, "semantic_seed_k", lambda: 2)
+    assert cfg()["semantic_seeding"] == {"enabled": True, "k": 2}
+    monkeypatch.undo()
+
+    # Unpatched: what THIS box serves, cross-checked against the config FILE
+    # rather than against the accessor, so the record cannot be true merely by
+    # agreeing with the same function it reads.
+    sem = yaml.safe_load((ROOT / "config.yaml").read_text()) \
+        ["retrieval"]["entity_seeding"]["semantic"]
+    assert (sem.get("enabled"), sem.get("k")) == (True, 3), (
+        f"the box's own seeding configuration moved off enabled: true / k: 3 "
+        f"(config.yaml: {sem}); update this test's expectation with it")
+    assert cfg()["semantic_seeding"] == {"enabled": True, "k": 3}, (
+        "the default nightly run must record enabled: true, k: 3 — the run "
+        f"recorded {cfg()['semantic_seeding']}")
+
+    # Clause 2, the half that keeps the fix from being a widening.
+    assert cfg()["matches_production_defaults"] is True, (
+        "recording the seeding must not relabel every nightly a non-production "
+        "configuration; that is the `expand_graph` mistake")
+    body = inspect.getsource(ev.build_run_config).split("return {", 1)[1]
+    assert '"semantic_seeding": _semantic_seeding_record(),' in body, (
+        "the record must come from production's accessor, the one definition "
+        "`recall_seeds()` slices at")
+    conjunction = body.split('"matches_production_defaults": (', 1)[1]
+    conjunction = conjunction.split("),", 1)[0]
+    terms = [ln.strip() for ln in conjunction.splitlines()
+             if "==" in ln and not ln.strip().startswith("#")]
+    assert len(terms) == 6, f"the parity conjunction grew a term: {terms}"
+    assert "semantic" not in conjunction, (
+        "semantic seeding is back inside the conjunction, where it can only be "
+        "a knob compared with itself (#1000)")
+
+
+def test_the_seeding_record_reaches_a_real_artifact_and_a_real_reader(tmp_path):
+    """#1547 clause 1, at the real seam: another process writes the bytes, and
+    `app.uptake.retrieval_gate` — a different process's reader — bands on them.
+
+    `eval/run_eval.py` runs as a subprocess exactly as the nightly does, into a
+    `LLOYD_DATA` root this test owns, on a one-query corpus. The precedent is
+    `tests/test_eval_ci_reporting.py::test_a_baseline_the_real_writer_produced_loads_in_the_real_reader`,
+    which pins the `ci95` field the same way; a fixture asserting the shape of
+    `main()`'s `out` dict would only have proved that a string is in a source
+    file. Two claims, both read off the written file:
+
+    1. `semantic_seeding` is a TOP-LEVEL key of the artifact and equals what
+       production's accessor reports in this process — the subprocess read the
+       same `config.yaml`, so agreement is a cross-process fact and not the same
+       function agreeing with itself. It is absent from `summary.overall`,
+       because a nested landing would be invisible to the reader, and no
+       `run_config` wrapper exists to nest it in.
+    2. The real reader bands that real file as its own seeding regime: pointed at
+       the directory, the gate's published `shape` names `enabled=True,k=3` (or
+       whatever this box's config says), and dropping a keyless pre-#1547 night
+       beside it leaves the pool at one night. `nightly-`-prefixed label so the
+       file counts as a night at all (#1220).
+    """
+    import json
+    import os
+    import subprocess
+
+    from agent_mcp.retrieval import semantic_seeding_record
+
+    label = "nightly-seamprobe1547"
+    data = tmp_path / "data"
+    queries = tmp_path / "q.yaml"
+    queries.write_text("queries:\n"
+                       "  - id: seam-probe\n    query: what is lloyd\n"
+                       "    category: single\n    expect_entities: [Lloyd]\n"
+                       "    expect_docs: [lloyd]\n")
+    store, facts = tmp_path / "kg.sqlite", tmp_path / "facts"
+    facts.mkdir()
+    env = dict(os.environ, PYTHONPATH=str(ROOT), LLOYD_DATA=str(data),
+               LLOYD_KG_DB=str(store), LLOYD_FACTS_ROOT=str(facts),
+               LLOYD_VOICE_ALERTS="0")
+    subprocess.run([sys.executable, "-c",
+                    f"from app.kg_store import KGStore; KGStore({str(store)!r}).close()"],
+                   cwd=ROOT, env=env, capture_output=True, check=True)
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "eval" / "run_eval.py"),
+         "--queries", str(queries), "--label", label, "--allow-empty-corpus"],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    out_dir = data / "eval" / "baselines"
+    written = sorted(out_dir.glob(f"*{label}*.json"))
+    assert len(written) == 1, written
+    blob = json.loads(written[0].read_text())
+
+    rec = semantic_seeding_record()
+    assert blob["semantic_seeding"] == rec, (
+        f"the subprocess wrote {blob.get('semantic_seeding')!r} and production's "
+        f"accessor says {rec!r} in this process: the artifact and the recall "
+        "would be reporting different seedings")
+    assert set(blob["semantic_seeding"]) == {"enabled", "k"}, (
+        "the record must say both things the reader bands by, not one")
+    overall = blob["summary"]["overall"]
+    assert "semantic_seeding" not in overall and "run_config" not in blob, (
+        "the field landed nested, where retrieval_gate never looks")
+
+    import app.uptake as uptake
+
+    gate = uptake.retrieval_gate(baselines_dir=out_dir)
+    assert gate["shape"]["semantic_seeding"] == f"enabled={rec['enabled']},k={rec['k']}", (
+        gate["shape"])
+    assert gate["nights"] == 1, gate
+    (out_dir / "nightly-20260925-keyless.json").write_text(json.dumps({
+        "label": "nightly-20260925-keyless", "limit": blob["limit"],
+        "matches_production_defaults": True,
+        "summary": {"overall": {"n_queries": 20, "doc_hit_rate": 0.62,
+                                "ndcg10": 0.57}}}))
+    assert uptake.retrieval_gate(baselines_dir=out_dir)["nights"] == 1, (
+        "a real #1547 artifact banded with a pre-#1547 night")
+
+
+def test_the_artifact_spread_is_the_only_place_the_seeding_is_written():
+    """#1547 clause 1, the shape of the write: the flat landing comes from the
+    `**build_run_config(args)` spread inside `main()`'s `out` dict and nowhere
+    else, so there is one source for the field the reader bands by.
+    """
+    out_block = inspect.getsource(ev.main).split("out = {", 1)[1].split("\n    }", 1)[0]
+    assert "**build_run_config(args)," in out_block, (
+        "the run config is no longer spread into the artifact's top level, so "
+        "`semantic_seeding` would not reach a reader")
+    assert '"semantic_seeding"' not in out_block, (
+        "the field is restated at the call site instead of coming from "
+        "build_run_config, which is a second source for the same knob")
+    cfg = ev.build_run_config(ev.build_parser().parse_args([]))
+    assert isinstance(cfg["semantic_seeding"], dict)
+    assert set(cfg["semantic_seeding"]) == {"enabled", "k"}, (
+        "the record must say both things the reader bands by, not one")
