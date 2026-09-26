@@ -43,6 +43,17 @@ SAFETY CONTRACT — this runs unattended:
     `model_change_suspected` and declines to embed; verify the switch was
     deliberate and run `qmd embed` by hand. A refused guard exits 0 — it is the
     check working, not a failed job — and is a report entry like drift.
+  * A run whose embed did not embed says so (#1545). `qmd embed` exits 0 having
+    written nothing whenever another live process holds
+    ~/.cache/qmd/.qmd-embed.lock — the watcher holds it most of the day — and
+    again when it finds nothing pending, so `rc == 0` never answered "did the
+    vectors arrive". The embed's own last output line now rides in `actions`,
+    `embed_ok` requires that it said it worked, the `after` block re-reads pending
+    after the actions (AFTER_PENDING_RETRIES tries), and an `after` that is the
+    same measurement as `before` on a run that asked for an embed is recorded as
+    `embed_did_not_land` instead of reading as "nothing changed" — which is how
+    the 2026-09-26 05:00Z run came to print `embed_ok: true` and a byte-identical
+    before/after pair for a subprocess that embedded nothing in 0.3 s.
   * Exit code is non-zero only when the daemon is left unhealthy — a failed
     prune with a healthy daemon is a warning, not a page. Every run probes for it,
     including one that decided there was nothing to do (#958): before that, the
@@ -183,6 +194,78 @@ QMD_ENV = {
     "LD_LIBRARY_PATH": "/usr/lib:/opt/cuda/lib64",
     "QMD_VEC_BACKEND": "bit",
 }
+
+
+#: Post-action pending re-read (#1545). `inspect_index()` reports no pending
+#: figure, so before this the job's own report could not show the number it was
+#: launched to move: `pending_embeddings()` was called exactly once, before any
+#: action. Three tries five seconds apart is bounded on purpose — a wedged embed
+#: must not turn a nightly job into a hang — and long enough to cover the case
+#: the 2026-09-26 run had: the watcher embedding under its own lock while this
+#: process was still alive.
+AFTER_PENDING_RETRIES = 3
+AFTER_PENDING_SLEEP_S = 5
+
+#: Substrings that mean "`qmd embed` exited 0 and wrote no vectors". All three are
+#: early returns in `vectorIndex()` (the fork's `src/cli/qmd.ts`): the embed-lock
+#: skip at :2173-2178 printing `EMBED_LOCK_BUSY_MESSAGE`
+#: (`src/cli/embed-lock.ts:99-100`), the nothing-pending case at :2187-2191, and
+#: no-text-to-embed at :2240. The lock skip is this job's *normal* outcome — the
+#: watcher holds `~/.cache/qmd/.qmd-embed.lock` most of the day, which is exactly
+#: why "pending is never zero while the loop is writing" (header above). So
+#: `rc == 0` on the embed leg answers "the process finished", never "the vectors
+#: arrived", and the run's own report is the only surface that could say so.
+EMBED_NO_WORK_MARKERS = (
+    "Another embed process is already running",
+    "already have embeddings",
+    "No non-empty documents to embed",
+)
+
+
+def _last_line(out: str) -> str:
+    """The subprocess's own last non-empty sentence, or ""."""
+    lines = [ln.strip() for ln in (out or "").splitlines() if ln.strip()]
+    return lines[-1] if lines else ""
+
+
+def embed_did_work(rc: int, out: str) -> bool:
+    """True only when `qmd embed` both exited 0 and did not say it skipped.
+
+    rc 0 is necessary and not sufficient: see EMBED_NO_WORK_MARKERS. The exit code
+    is still checked first, so a crash reads False without parsing its output.
+    """
+    if rc != 0:
+        return False
+    return not any(marker in out for marker in EMBED_NO_WORK_MARKERS)
+
+
+def pending_after_action(retries: int = AFTER_PENDING_RETRIES,
+                         sleep: float = AFTER_PENDING_SLEEP_S) -> int:
+    """Re-read pending now that the actions have run, retrying while it is nonzero.
+
+    `sleep` and `retries` are parameters so a test can pin the bound without
+    waiting five seconds per try. -1 (unreadable) keeps being retried: it is not
+    zero, and a run that cannot finish measuring says so rather than reporting a
+    clean zero it never saw.
+    """
+    pend = pending_embeddings()
+    for attempt in range(retries - 1):
+        if pend == 0:
+            break
+        time.sleep(sleep)
+        pend = pending_embeddings()
+    return pend
+
+
+def snapshots_identical(before: dict, after: dict) -> bool:
+    """True when the two index reads are the same measurement.
+
+    `after` carries `pending_embeddings`, which `before` cannot (the pre-run figure
+    lives at the top of the report), so comparing the blocks whole would find a
+    difference on every run and the check would prove nothing.
+    """
+    a = {k: v for k, v in after.items() if k != "pending_embeddings"}
+    return a == before
 
 
 def _sh(cmd: list[str], timeout: int, env: dict | None = None) -> tuple[int, str]:
@@ -613,8 +696,15 @@ def main() -> int:
         if need_embed:
             t = time.time()
             rc, out = _sh(["/usr/bin/node", str(QMD_CLI), "embed"], 5400, env=QMD_ENV)
-            report["actions"].append(f"embed rc={rc} in {time.time()-t:.0f}s")
-            report["embed_ok"] = rc == 0
+            # Its own sentence rides in the report, the way the cleanup line beside
+            # it already carries one (#1545). That sentence — "Another embed process
+            # is already running. Skipping." — is the only thing that ever says the
+            # rc 0 was not an embed, and throwing it away is what let the 2026-09-26
+            # run write `embed_ok: true` for a subprocess that embedded nothing.
+            report["actions"].append(
+                f"embed rc={rc} in {time.time()-t:.0f}s :: {_last_line(out)}"
+            )
+            report["embed_ok"] = embed_did_work(rc, out)
     finally:
         healthy = daemon_healthy()
         if not healthy:
@@ -625,7 +715,42 @@ def main() -> int:
             healthy = daemon_healthy()
         report["daemon_healthy"] = healthy
 
+    # Measured after the actions, and in a unit this report could not carry
+    # before (#1545): `inspect_index()` has no pending key, so `after` could not
+    # show the number the run was launched to move.
     report["after"] = inspect_index()
+    report["after"]["pending_embeddings"] = pending_after_action()
+    if need_embed:
+        identical = snapshots_identical(before, report["after"])
+        # Indexed, not defaulted: `need_embed` is what put the branch above in
+        # this run, so a missing key is a bug to crash on, not a False to report.
+        embed_ok = report["embed_ok"]
+        residual = report["after"]["pending_embeddings"]
+        # An identical pair on an embed run is the unfalsifiable reading — it is
+        # indistinguishable from "there was nothing to do" — so it never gets to
+        # stand without a verdict beside it, whoever caused it.
+        if identical or not embed_ok:
+            reasons = []
+            if identical:
+                reasons.append("the after snapshot is the same measurement as the "
+                               "before snapshot")
+            if not embed_ok:
+                reasons.append("the embed subprocess did not report work done (its "
+                               "own sentence is in `actions`)")
+            report["embed_did_not_land"] = {
+                "after_equals_before": identical,
+                "embed_ok": embed_ok,
+                "residual_pending_embeddings": residual,
+                "because": reasons,
+                "what_it_means": ("an embed was asked for and nothing this run "
+                                  "measured moved. The usual cause is the embed "
+                                  "lock: the qmd watcher holds "
+                                  "~/.cache/qmd/.qmd-embed.lock most of the day "
+                                  "and embeds the pending documents on its own "
+                                  "cycle, so the subprocess this run spawned "
+                                  "skipped. That is a no-work skip, not an "
+                                  "embedding the report may claim."),
+            }
     report["elapsed_s"] = round((datetime.now() - started).total_seconds(), 1)
 
     _write_report(report, started)
@@ -663,7 +788,12 @@ def _emit(r: dict, as_json: bool) -> None:
               f"   capacity verdict {r.get('need_capacity')}")
     elif v.get("error"):
         print(f"  vec0 occupancy    not measured: {v['error']}")
-    print(f"  pending embeds    {r.get('pending_embeddings')}")
+    # Both figures, on one line (#1545): the pre-run count alone is the number
+    # the job decided on, and a reader comparing two nightly reports cannot tell
+    # a cleared backlog from a skipped embed without what it became.
+    pend_after = (a or {}).get("pending_embeddings")
+    print(f"  pending embeds    {r.get('pending_embeddings')}"
+          + (f"  →  {pend_after}" if pend_after is not None else ""))
     g = r.get("embed_guard")
     if g:
         # The denominator has to be printed with the number: pending counts
@@ -675,6 +805,15 @@ def _emit(r: dict, as_json: bool) -> None:
               + (f"  → REFUSED (model_change_suspected); configured embed model "
                  f"{g['configured_embed_model']}" if g["tripped"] else ""))
     print(f"  prune needed      {r.get('need_prune')}   embed needed {r.get('need_embed')}")
+    ndl = r.get("embed_did_not_land")
+    if ndl:
+        # The pair of index reads above can look identical and mean two opposite
+        # things; this line is which one it means, with the count still owed (#1545).
+        print(f"  embed             did not land — {ndl['residual_pending_embeddings']} "
+              f"embeds still pending"
+              + (" after the run, and after equals before"
+                 if ndl["after_equals_before"] else "")
+              + ("" if ndl["embed_ok"] else "; the embed subprocess reported no work done"))
     cd = r.get("config_drift")
     if cd:
         if cd.get("note"):

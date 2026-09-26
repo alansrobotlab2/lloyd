@@ -23,9 +23,12 @@ no qmd at all and cannot go red because somebody hand-edited their config.
 from __future__ import annotations
 
 import json
+import re
 import sys
+import time
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -422,6 +425,12 @@ def _guard_run(monkeypatch, tmp_path, *, pending: int, documents: int,
     monkeypatch.setattr(m, "pending_embeddings", lambda: pending)
     calls = _StubSh()
     monkeypatch.setattr(m, "_sh", calls)
+    # #1545 put a bounded re-read of `pending_embeddings` after the mutating
+    # section, and that loop sleeps between tries. The wait is not what any case
+    # here is about — same reasoning, and the same patch, as
+    # test_qmd_maintenance_health.py:277 — so the real sleep is replaced by a
+    # no-op rather than slowing every mutating run in this file.
+    monkeypatch.setattr(time, "sleep", lambda *_: None)
     monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py"])
     rc = m.main()
     reports = sorted((tmp_path / "reflection").glob("qmd-index-maintenance-*.json"))
@@ -649,3 +658,268 @@ def test_the_footprint_counts_the_wal_and_shm(monkeypatch, tmp_path):
     assert out["index_bytes"] == main_size + 5300 > main_size
     assert out["footprint"] == {"total": main_size + 5300, "main": main_size,
                                 "wal": 5000, "shm": 300}
+
+
+# --- #1545: an embed that did no work must not be reported as one ------------
+# The task #81 run of 2026-09-26 05:00Z wrote
+# `_pipeline/reflection/qmd-index-maintenance-2026-09-26.json` with `actions:
+# ["embed rc=0 in 0s"]`, `embed_ok: true`, `elapsed_s: 0.3`, `pending_embeddings:
+# 4` — and an `after` block byte-identical to `before` (`vectors_total 33010`,
+# `index_bytes 1105788304`), while the index itself had moved on (33,081 vectors
+# by 12:18Z the same day, read-only). Two faults, both in the report and neither
+# in the index:
+#
+#   * `qmd embed` exits **0 having done no work** whenever another live process
+#     holds `~/.cache/qmd/.qmd-embed.lock` — which the watcher does most of the
+#     day, since this job's own header says pending is never zero while the loop
+#     is writing (`qmd/src/cli/qmd.ts:2173-2178` prints
+#     `EMBED_LOCK_BUSY_MESSAGE` from `qmd/src/cli/embed-lock.ts:99-100` and
+#     returns), and again when nothing is pending (`qmd.ts:2187-2191`). A skip is
+#     this branch's *normal* outcome. The embed branch threw its stdout away —
+#     unlike the cleanup branch beside it, which keeps its last line — so every
+#     skip printed as `rc=0` and became `embed_ok: true`. The timing says no
+#     embed happened: one standalone `qmd status` alone costs 0.209 s against the
+#     whole run's 0.3 s, which did not leave the subprocess enough time to boot
+#     node, load `Qwen3-Embedding-0.6B-Q8_0.gguf`, and embed 57 chunks.
+#   * The report could not show pending moving at all. `pending_embeddings()` ran
+#     exactly once, before any action, and `inspect_index()` returns no pending
+#     key, so `after` could not contain one. "Identical before/after" and "there
+#     was nothing to do" were the same sentence to whoever read it.
+#
+# Every case here runs with `_sh`, `inspect_index`, `pending_embeddings` and
+# `time.sleep` stubbed: no node process, no live index, no daemon, no wait.
+
+#: What `qmd embed` prints when the watcher holds the embed lock, verbatim from
+#: `EMBED_LOCK_BUSY_MESSAGE` (`qmd/src/cli/embed-lock.ts:99-100`), rc 0.
+EMBED_LOCK_BUSY = "Another embed process is already running. Skipping.\n"
+#: The other silent rc-0 no-work path (`qmd/src/cli/qmd.ts:2187-2191`).
+EMBED_ALREADY_DONE = "✓ All content hashes already have embeddings.\n"
+#: And the third, when the pending hashes turn out to have no text
+#: (`qmd.ts:2240`): rc 0, nothing written.
+EMBED_NO_DOCS = "✓ No non-empty documents to embed.\n"
+#: What an embed that actually embedded looks like (`qmd.ts:2244`).
+EMBED_LANDED = "✓ Done! Embedded 57 chunks from 4 documents in 0:12\n"
+
+#: The 2026-09-26 05:00Z `before` block, field for field, as the dated report
+#: recorded it. `documents` is what keeps the #1367 guard's ratio at 0.0003, and
+#: `orphan_ratio` is far under both prune triggers, so every case below reaches
+#: the mutating section on the embed leg alone.
+BEFORE_0926 = {
+    "index_bytes": 1_105_788_304,
+    "footprint": {"total": 1_105_788_304, "main": 550_739_968,
+                  "wal": 553_966_992, "shm": 1_081_344},
+    "vectors_total": 33_010, "vectors_orphaned": 52, "documents": 11_942,
+    "vec0": {"chunks": 69, "allocated_slots": 70_656, "live_rows": 33_010,
+             "occupancy": 0.4672, "allocated_mib": 276.0, "dead_mib": 147.1},
+    "vectors_live": 32_958, "orphan_ratio": 0.0016,
+}
+#: What the same index looked like with the 57 chunks in it: +57 live vectors,
+#: the WAL checkpointed down to the main file, and the orphans still there. Only
+#: the vector count and the file size need to move for `after` to differ.
+AFTER_0926_LANDED = {
+    **BEFORE_0926,
+    "index_bytes": 1_105_112_704,
+    "footprint": {"total": 1_105_112_704, "main": 1_105_112_704,
+                  "wal": 0, "shm": 0},
+    "vectors_total": 33_067, "vectors_live": 33_015,
+    "vec0": {**BEFORE_0926["vec0"], "live_rows": 33_067},
+}
+
+#: `pending embeds   4  →  0` — the pre-run and post-run figures on one line.
+PENDING_LINE = re.compile(r"pending embeds\s+(\d+)\s+→\s+(\d+)")
+
+
+class _EmbedSh:
+    """Answers the subprocesses a mutating run issues, with `qmd embed` configured.
+
+    The claim under test is what the report says about the *embed subprocess's
+    own output*, so the stub is what puts that output there: `embed` answers
+    `embed_rc`/`embed_out`, everything else (the health probe's curl) answers rc 0
+    so the daemon-health path stays inert-but-plausible.
+    """
+
+    def __init__(self, embed_out: str, embed_rc: int = 0):
+        self.embed_out, self.embed_rc = embed_out, embed_rc
+        self.cmds: list[list[str]] = []
+
+    def __call__(self, cmd, timeout, env=None):
+        c = [str(x) for x in cmd]
+        self.cmds.append(c)
+        if c[0].endswith("node") and "embed" in c:
+            return self.embed_rc, self.embed_out
+        return 0, "stubbed"
+
+    def qmd(self, verb: str) -> list[list[str]]:
+        return [c for c in self.cmds if c[0].endswith("node") and verb in c]
+
+
+def _embed_run(monkeypatch, tmp_path, *, embed_out: str, embed_rc: int = 0,
+               pending: list[int], snapshots: list[dict]):
+    """Run `main()` through the mutating section with nothing real behind it.
+
+    `pending` is the sequence `pending_embeddings()` hands back — its first value
+    is the pre-run count, the rest are the post-action re-reads — and `snapshots`
+    is the sequence `inspect_index()` hands back (`before`, then `after`). Both
+    raise rather than repeat if the run asks more times than the case supplies,
+    because "how many times did it re-read" *is* one of the claims.
+
+    Returns `(rc, report, calls, slept)`: the report re-read off the dated file
+    the run wrote (not from memory, so a key that never reaches JSON fails), and
+    the seconds `time.sleep` was asked to wait, which pins the re-read's waits
+    without paying them.
+    """
+    t, l = _pair(tmp_path, live=LIVE_WITH_MODELS)
+    monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
+    monkeypatch.setattr(m, "LIVE_CONFIG", l)
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+
+    shapes, pends, slept = list(snapshots), list(pending), []
+
+    def next_snapshot():
+        assert shapes, "inspect_index() was called more times than this case supplies"
+        return dict(shapes.pop(0))
+
+    def next_pending():
+        assert pends, (
+            "pending_embeddings() was called more times than this case supplies "
+            "tries for — the re-read count is itself one of the claims")
+        return pends.pop(0)
+
+    monkeypatch.setattr(m, "inspect_index", next_snapshot)
+    monkeypatch.setattr(m, "pending_embeddings", next_pending)
+    calls = _EmbedSh(embed_out, embed_rc)
+    monkeypatch.setattr(m, "_sh", calls)
+    monkeypatch.setattr(time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(sys, "argv", ["qmd_index_maintenance.py"])
+    rc = m.main()
+    reports = sorted((tmp_path / "reflection").glob("qmd-index-maintenance-*.json"))
+    assert len(reports) == 1, f"expected exactly one dated report, got {reports}"
+    return rc, json.loads(reports[0].read_text()), calls, slept
+
+
+# --- clause 1: the embed subprocess's own words reach the dated JSON ---------
+
+def test_the_embed_action_keeps_the_subprocess_s_own_last_line(monkeypatch, tmp_path):
+    """The sentence that explains the rc 0 has to be on disk, not discarded.
+
+    The cleanup branch beside it already keeps its last output line
+    (`cleanup rc=… :: …`); the embed branch did not, which is why a run whose
+    embed said "Another embed process is already running. Skipping." left a
+    reader with only `embed rc=0 in 0s` to go on.
+    """
+    rc, report, calls, _ = _embed_run(
+        monkeypatch, tmp_path, embed_out=EMBED_LOCK_BUSY,
+        pending=[4, 4, 4, 4], snapshots=[BEFORE_0926, dict(BEFORE_0926)])
+    assert len(calls.qmd("embed")) == 1
+    embed_actions = [a for a in report["actions"] if a.startswith("embed rc=")]
+    assert len(embed_actions) == 1, report["actions"]
+    assert "Another embed process is already running. Skipping." in embed_actions[0], (
+        embed_actions[0])
+
+
+# --- clause 2: rc 0 alone is not a successful embed --------------------------
+
+@pytest.mark.parametrize("embed_out,ok", [
+    (EMBED_LOCK_BUSY, False),      # the lock skip: the nightly normal case
+    (EMBED_ALREADY_DONE, False),   # nothing pending after all
+    (EMBED_NO_DOCS, False),        # pending hashes with no text to embed
+    (EMBED_LANDED, True),          # work done: must still read as a pass
+])
+def test_embed_ok_reports_whether_the_subprocess_did_work_not_just_its_exit_code(
+        monkeypatch, tmp_path, embed_out, ok):
+    """`embed_ok = rc == 0` was a false claim on every skipped embed.
+
+    Three of `qmd embed`'s exits are rc 0 with nothing written, so the exit code
+    cannot answer "did the vectors arrive" — and the landed case has to stay
+    True, or the fix is just an alarm.
+    """
+    _, report, _, _ = _embed_run(
+        monkeypatch, tmp_path, embed_out=embed_out,
+        pending=[4, 0, 0, 0], snapshots=[BEFORE_0926, dict(AFTER_0926_LANDED)])
+    assert report["embed_ok"] is ok, (embed_out.strip(), report["embed_ok"])
+
+
+def test_a_non_zero_embed_still_records_embed_ok_false(monkeypatch, tmp_path):
+    """The old path's one honest case must not regress: rc != 0 is False."""
+    _, report, _, _ = _embed_run(
+        monkeypatch, tmp_path, embed_out="some node crash\n", embed_rc=1,
+        pending=[4, 4, 4, 4], snapshots=[BEFORE_0926, dict(BEFORE_0926)])
+    assert report["embed_ok"] is False
+
+
+# --- clause 3: the after block measures pending after the actions ------------
+
+def test_the_after_block_carries_a_pending_count_measured_after_the_actions(
+        monkeypatch, tmp_path, capsys):
+    """Before this, `after` had no pending key at all: the report could not show
+    the number the run was launched to move, because the only read sat before any
+    action. Here the first post-action read still sees 4 (the watcher is writing
+    under the same lock) and the second sees 0.
+    """
+    _, report, _, slept = _embed_run(
+        monkeypatch, tmp_path, embed_out=EMBED_LANDED,
+        pending=[4, 4, 0], snapshots=[BEFORE_0926, dict(AFTER_0926_LANDED)])
+    assert report["pending_embeddings"] == 4, "the pre-run figure stays where it was"
+    assert report["after"]["pending_embeddings"] == 0
+    assert slept == [m.AFTER_PENDING_SLEEP_S], (
+        f"the still-nonzero first re-read should wait once, got {slept}")
+    hit = PENDING_LINE.search(capsys.readouterr().out)
+    assert hit, "the emitted run must print both pending figures on one line"
+    assert hit.groups() == ("4", "0"), hit.groups()
+
+
+def test_the_post_action_pending_re_read_is_bounded_and_reports_what_it_saw(
+        monkeypatch, tmp_path):
+    """A retry with no ceiling is a nightly job that hangs on a wedged daemon.
+
+    The embed was skipped here, so pending never moves: the run spends
+    `AFTER_PENDING_RETRIES` post-action reads, waits between them rather than in
+    a busy loop, and reports the residual 3 rather than the pre-run 4 or a zero it
+    never measured.
+    """
+    _, report, _, slept = _embed_run(
+        monkeypatch, tmp_path, embed_out=EMBED_LOCK_BUSY,
+        pending=[4, 3, 3, 3], snapshots=[BEFORE_0926, dict(BEFORE_0926)])
+    assert report["after"]["pending_embeddings"] == 3
+    assert len(slept) == m.AFTER_PENDING_RETRIES - 1, slept
+    assert all(s == m.AFTER_PENDING_SLEEP_S for s in slept), slept
+
+
+# --- clause 4: an identical pair never goes unexplained ----------------------
+
+def test_an_embed_run_whose_after_equals_before_says_the_embed_did_not_land(
+        monkeypatch, tmp_path, capsys):
+    """The 2026-09-26 shape exactly: an embed asked for, an `after` block
+    indistinguishable from `before`, and a report that read as "nothing
+    changed" — the one sentence that must not be sayable.
+    """
+    _, report, _, _ = _embed_run(
+        monkeypatch, tmp_path, embed_out=EMBED_LOCK_BUSY,
+        pending=[4, 4, 4, 4], snapshots=[BEFORE_0926, dict(BEFORE_0926)])
+    assert report["after"]["pending_embeddings"] == 4
+    verdict = report["embed_did_not_land"]
+    assert verdict["after_equals_before"] is True
+    assert verdict["embed_ok"] is False
+    assert verdict["residual_pending_embeddings"] == 4
+    printed = capsys.readouterr().out
+    line = [l for l in printed.splitlines() if "did not land" in l]
+    assert line, printed
+    assert "4" in line[0], "the verdict has to carry the pending still outstanding"
+
+
+def test_an_embed_that_landed_carries_no_not_landed_verdict(monkeypatch, tmp_path,
+                                                            capsys):
+    """The verdict must be able to stay silent, or it is noise and gets ignored.
+
+    Same run shape with the embed actually embedding: `after` differs from
+    `before`, `embed_ok` is True, pending went 4 → 0, and nothing on disk or on
+    stdout claims the embed failed.
+    """
+    _, report, _, _ = _embed_run(
+        monkeypatch, tmp_path, embed_out=EMBED_LANDED,
+        pending=[4, 0], snapshots=[BEFORE_0926, dict(AFTER_0926_LANDED)])
+    assert report["embed_ok"] is True
+    assert report["after"]["pending_embeddings"] == 0
+    assert report["after"] != report["before"]
+    assert "embed_did_not_land" not in report, report
+    assert "did not land" not in capsys.readouterr().out
