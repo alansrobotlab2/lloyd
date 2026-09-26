@@ -261,6 +261,10 @@ class RunOptions:
     # may be cleared except these. From `compaction.microcompact.
     # non_compactable_tools` via `app.mcp_discovery`.
     intra_turn_microcompact_non_compactable: tuple[str, ...] | None = None
+    # #1514: cleared-result markers (rung 1 and rung 4) also name the
+    # session's own record, `sessions/<sid>.json` + `<sid>.tool-results/`.
+    # From `compaction.microcompact.name_session_record`.
+    intra_turn_microcompact_name_session_record: bool = False
 
     # ---- context pressure -------------------------------------------------
     # Live view of how much of the window this turn has spent. Caller-owned

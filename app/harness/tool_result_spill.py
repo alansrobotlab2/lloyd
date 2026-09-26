@@ -12,6 +12,13 @@ block containing:
   * a short preview (first ``PREVIEW_CHARS`` chars, cut at a newline)
   * a "...(more)" marker
 
+Where a result that has been *cleared* is described — microcompaction's
+marker and relief rung 4's notice, both built on this module's
+``persist_for_compaction`` — the free route back is the session's own
+record: ``sessions/<session_id>.json`` and ``sessions/<session_id>.tool-results/``
+(:func:`session_record_route`, #1514). Those markers carry it when
+``compaction.microcompact.name_session_record`` is on.
+
 This solves two problems at once:
 
   1. **Context overflow.** A 250KB Grep result no longer crowds out the
@@ -235,6 +242,60 @@ def persist_for_compaction(
     return path
 
 
+#: The tool that searches a directory tree for a phrase. Named here for the
+#: same reason as ``READ_TOOL``: a route is only a route if the turn owns it.
+GREP_TOOL = "Grep"
+
+
+def session_record_paths(session_id: str) -> tuple[Path, Path]:
+    """``(sessions/<session_id>.json, sessions/<session_id>.tool-results/)``.
+
+    The session's own record, and the directory every spilled, cleared and
+    truncated result of the session lands in (this module's ``_spill_dir``).
+    """
+    return SESSIONS_DIR / f"{session_id}.json", _spill_dir(session_id)
+
+
+def session_record_route(session_id: str, disallowed=None) -> str:
+    """The free route back to a cleared result (#1514): the session's own record.
+
+    A cleared tool result has already left the prompt, but it has not left the
+    machine. Two copies of it are on disk before any marker is written:
+
+      * ``sessions/<session_id>.tool-results/`` — the file this module (or
+        microcompaction's ``persist_for_compaction``, or relief rung 4) wrote
+        it to, one file per call;
+      * ``sessions/<session_id>.json`` — the transcript row written when the
+        result landed (the whole result, or a ``<persisted-output>`` pointer
+        into the directory above when it was over 2,000 chars, D1).
+
+    A marker that names only the one per-call file says *where one result
+    is*; it does not tell a model that has lost track of *which* result held a
+    fact that the whole record is searchable. This sentence does, with no new
+    tool and no new permission — it is the baseline #1481's
+    ``recall_observation(id)`` has to beat. It names the transcript only when
+    it exists (a ``task:*`` subagent writes none, only a spill directory), and
+    it offers only a tool the reading turn owns: ``Grep`` over both, else
+    ``Read`` of the transcript, else nothing — a route the turn's deny list
+    refuses is the #1066 false promise again.
+
+    Returned as one clause ending in a newline-free sentence, or ``""``.
+    """
+    if not session_id:
+        return ""
+    record, spill = session_record_paths(session_id)
+    has_record = record.is_file()
+    if not tool_is_denied(GREP_TOOL, disallowed):
+        where = (f"{record} (the conversation) and {spill}/ (every spilled or "
+                 f"cleared result)" if has_record else f"{spill}/")
+        return (f"This session's own record is on disk: Grep {where} for a "
+                f"phrase you no longer have in context.")
+    if not tool_is_denied(READ_TOOL, disallowed) and has_record:
+        return (f"This session's own record is on disk at {record}; Read it "
+                f"for text you no longer have in context.")
+    return ""
+
+
 def fallback_for_empty_result(content: str | None, tool_name: str) -> str:
     """Replace empty/whitespace-only tool results with an explicit
     "no output" marker. Some local models (notably qwen3-derived) treat
@@ -253,7 +314,10 @@ __all__ = [
     "PERSISTED_OUTPUT_CLOSING_TAG",
     "maybe_spill",
     "READ_TOOL",
+    "GREP_TOOL",
     "recovery_notice",
+    "session_record_paths",
+    "session_record_route",
     "tool_is_denied",
     "persist_for_compaction",
     "fallback_for_empty_result",

@@ -94,6 +94,7 @@ from app.harness.tool_result_spill import (
     PERSISTED_OUTPUT_TAG,
     READ_TOOL,
     persist_for_compaction,
+    session_record_route,
     tool_is_denied,
 )
 
@@ -160,7 +161,7 @@ def _args_digest(raw_args: Any, cap: int = 120) -> str:
 
 def _cleared_marker(
     tool_name: str, raw_args: Any, size: int, path: Any = None,
-    read_denied: bool = False,
+    read_denied: bool = False, route: str = "",
 ) -> str:
     """Build a marker that says what was cleared and where it went.
 
@@ -175,17 +176,20 @@ def _cleared_marker(
         return CLEARED_MARKER
     digest = _args_digest(raw_args)
     head = f"{tool_name} {digest}".strip()
+    # #1514: the session's own record, only when the caller asked for it
+    # (`name_session_record`) and only where the content was saved.
+    tail = f" {route}" if route and path is not None else ""
     if path is not None and read_denied:
         return (
             f"[{head} — {size:,} chars cleared from context; full content at "
             f"{path}. The Read tool is not available on this turn, so that "
             f"path cannot be opened from here — re-run the call with a "
-            f"narrower query for the part you need.]"
+            f"narrower query for the part you need.{tail}]"
         )
     if path is not None:
         return (
             f"[{head} — {size:,} chars cleared from context; "
-            f"full content at {path}. Read that path if you need it again.]"
+            f"full content at {path}. Read that path if you need it again.{tail}]"
         )
     return (
         f"[{head} — {size:,} chars of output cleared from context. "
@@ -286,6 +290,7 @@ def microcompact(
     legacy_count_rule: bool = True,
     disallowed_tools: Iterable[str] | None = None,
     non_compactable_tools: Iterable[str] | None = None,
+    name_session_record: bool = False,
 ) -> tuple[list[dict], int]:
     """Replace stale compactable tool results with a cleared marker.
 
@@ -320,6 +325,9 @@ def microcompact(
         ``compactable_tools`` is ignored and every tool's result may be
         cleared except these (bare or namespaced). ``None`` keeps the
         allow-list. See ``DEFAULT_NON_COMPACTABLE``.
+      name_session_record: #1514, off by default. A marker for content that
+        was saved also names the session's own record
+        (``tool_result_spill.session_record_route``).
 
     Recoverability: with ``session_id`` set, each result is written to
     the session's spill dir before its content leaves the prompt, and the
@@ -338,6 +346,8 @@ def microcompact(
     # One lookup for the whole pass: every marker this pass writes answers
     # the same question about the same tool menu.
     read_denied = tool_is_denied(READ_TOOL, disallowed_tools)
+    route = (session_record_route(session_id, disallowed_tools)
+             if name_session_record and session_id else "")
 
     # Pass 1: build tool_call_id → tool_name map. Assistant messages
     # carry tool_calls; we trust that mapping over any name on the tool
@@ -448,7 +458,10 @@ def microcompact(
         # the <persisted-output> block, destroying the only route back to
         # the content.
         if PERSISTED_OUTPUT_TAG in text:
-            out.append(_replace_tool_content(msg, _persisted_block_only(text)))
+            new_text = _persisted_block_only(text)
+            if route:
+                new_text = f"{new_text} {route}"
+            out.append(_replace_tool_content(msg, new_text))
             cleared += 1
             continue
 
@@ -472,7 +485,7 @@ def microcompact(
         out.append(_replace_tool_content(
             msg,
             _cleared_marker(tool_name, tc_id_to_args.get(cid), len(text), path,
-                            read_denied=read_denied),
+                            read_denied=read_denied, route=route),
         ))
         cleared += 1
 

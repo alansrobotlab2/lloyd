@@ -315,6 +315,11 @@ def intra_turn_compaction_kwargs() -> dict:
         out["intra_turn_microcompact_non_compactable"] = tuple(
             str(x) for x in mc["non_compactable_tools"]
         )
+    # #1514, off unless config turns it on (the turn-start pass in
+    # `app.compaction` reads the same key).
+    if "name_session_record" in mc:
+        out["intra_turn_microcompact_name_session_record"] = bool(
+            mc["name_session_record"])
     out.update(context_relief_kwargs())
     return out
 

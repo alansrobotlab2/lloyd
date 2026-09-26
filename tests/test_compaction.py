@@ -1152,6 +1152,44 @@ def _stub(module, name, replacement):
     return _undo
 
 
+
+# ---------------------------------------------------------------------------
+# #1514 — the free route.
+# ---------------------------------------------------------------------------
+
+
+def _planted_pairs(n: int, first_line: str, chars: int = 6_000) -> list[dict]:
+    """`n` Read pairs; result 0 opens with a distinctive first line."""
+    msgs = _tool_pairs(n, chars=chars)
+    body = first_line + "\n" + ("filler line for the planted result\n" * (chars // 35))
+    msgs[1] = dict(msgs[1], content=body)
+    return msgs
+
+
+def test_the_session_record_is_named_where_a_cleared_result_is_described(
+        tmp_path, monkeypatch):
+    """#1514: with `name_session_record` the marker names sessions/<sid>.json
+    and the spill dir; off, it does not; a turn with Grep and Read denied is
+    not offered the route."""
+    from app.harness import microcompact as mc
+    from app.harness.tool_result_spill import session_record_route
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR", tmp_path)
+    (tmp_path / "s.json").write_text("{}")
+    route = session_record_route("s")
+    assert f"{tmp_path}/s.json" in route and f"{tmp_path}/s.tool-results/" in route
+    assert session_record_route("s", ["Grep", "Read"]) == ""
+    assert "Read it" in session_record_route("s", ["Grep"])
+    msgs = _planted_pairs(20, "HEAD")
+    est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
+    on, _ = mc.microcompact(msgs, token_budget=1, estimate_fn=est, keep_recent_tools=5,
+                            session_id="s", legacy_count_rule=False,
+                            name_session_record=True)
+    assert route in _marker_text(on[1])
+    off, _ = mc.microcompact(msgs, token_budget=1, estimate_fn=est, keep_recent_tools=5,
+                             session_id="s", legacy_count_rule=False)
+    assert "s.json" not in _marker_text(off[1])
+
+
 _TESTS = [
     test_estimate_tokens_returns_int,
     test_estimate_tokens_empty_string,

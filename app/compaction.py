@@ -676,6 +676,9 @@ async def load_and_compact_session(
                 disallowed_tools=disallowed_tools,
                 # Deny mode wins when configured; None keeps `tools`.
                 non_compactable_tools=mc_cfg.get("non_compactable_tools"),
+                # #1514 (off by default); the in-turn pass reads the same key
+                # through `mcp_discovery.intra_turn_compaction_kwargs`.
+                name_session_record=bool(mc_cfg.get("name_session_record", False)),
             )
         except Exception as e:  # noqa: BLE001
             logger.warning("microcompact pre-pass failed: %s", e)

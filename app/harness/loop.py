@@ -1857,6 +1857,8 @@ def _relieve_context(
                 disallowed_tools=list(
                     getattr(options, "disallowed_tools", None) or []
                 ),
+                name_session_record=bool(getattr(
+                    options, "intra_turn_microcompact_name_session_record", False)),
             )
             if truncated:
                 meter.resync(chat_messages)
@@ -2068,6 +2070,8 @@ def _intra_turn_microcompact(
         # marker on a long turn, and the turn that clears most is the one
         # with `Read` denied (#1066).
         disallowed_tools=list(getattr(options, "disallowed_tools", None) or []),
+        name_session_record=bool(getattr(
+            options, "intra_turn_microcompact_name_session_record", False)),
         **_rung_one_tool_selection(options),
     )
     if cleared:
@@ -3340,9 +3344,13 @@ def _truncate_largest_tool_results(
     session_id: str = "",
     min_chars: int = 4096,
     disallowed_tools: list[str] | None = None,
+    name_session_record: bool = False,
 ) -> tuple[int, int]:
     """Replace the largest tool-result message contents with a truncation
     notice until at least ``target_chars`` of content has been freed.
+
+    ``name_session_record`` (#1514) appends the session's own record to a
+    notice whose content was saved — the same clause rung 1's marker carries.
 
     Operates in-place on ``chat_messages`` (each dict's ``content`` field
     is overwritten). Returns ``(num_truncated, total_chars_freed)``.
@@ -3368,8 +3376,13 @@ def _truncate_largest_tool_results(
     turn). A failed spill still truncates — this rung runs when the
     alternative is the request being rejected outright — but says so.
     """
-    from app.harness.tool_result_spill import persist_for_compaction
+    from app.harness.tool_result_spill import (
+        persist_for_compaction,
+        session_record_route,
+    )
 
+    route = (session_record_route(session_id, disallowed_tools)
+             if name_session_record and session_id else "")
     candidates: list[tuple[int, int]] = []   # (size, message_index)
     for i, msg in enumerate(chat_messages):
         if msg.get("role") != "tool":
@@ -3429,6 +3442,8 @@ def _truncate_largest_tool_results(
                 if read_denied else
                 "Read that path if you need it again.]"
             )
+            if route:
+                recovery = recovery[:-1] + f" {route}]"
             notice = (
                 f"[harness: tool result cleared under context pressure — "
                 f"{original_size:,} chars, full content at {path}. "

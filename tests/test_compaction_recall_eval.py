@@ -519,3 +519,81 @@ def test_dry_run_sizes_the_flush_and_shows_the_summary_firing(corpus, tmp_path, 
     assert row["status"] == "dry", row.get("reason")
     assert row["fired"]["summarize_outcome"] == "summarized"
     assert 0 < row["flush"]["history_rows"] < row["flush"]["rows_total"]
+
+
+# --- #1514 / #1481: the self-record and observation arms ----------------------
+
+def _two_sessions(tmp_path):
+    sess = tmp_path / "sessions"
+    (sess / "mine.tool-results").mkdir(parents=True)
+    (sess / "mine.json").write_text(json.dumps(
+        {"messages": [{"role": "tool", "content": "billing-east listens on port 7185 now"}]},
+        indent=2))
+    (sess / "mine.tool-results" / "call_1.txt").write_text("codename `MINE-1`")
+    (sess / "other.json").write_text(json.dumps(
+        {"messages": [{"role": "tool", "content": "billing-east listens on port 7999 now"}]},
+        indent=2))
+    return sess
+
+
+def test_the_pool_sees_only_its_own_session_record(tmp_path):
+    """The leak this fixes: every arm's and seed's record shares the scratch
+    root, each planting a different port, and a Grep used to see them all."""
+    sess = _two_sessions(tmp_path)
+    pool = R.EvalPool([], {}, tmp_path, tree_root=tmp_path / "tree", session_id="mine")
+    out = asyncio.run(pool.call_tool("Grep", {"pattern": "billing-east"}))
+    assert "7185" in out["content"] and "7999" not in out["content"]
+    assert asyncio.run(pool.call_tool("Read", {"file_path": str(sess / "other.json")}))["is_error"]
+    assert not asyncio.run(pool.call_tool("Read", {"file_path": str(sess / "mine.json")}))["is_error"]
+    # `path` is honoured: a directory, a file, and one outside the roots.
+    out = asyncio.run(pool.call_tool("Grep", {"pattern": "codename",
+                                              "path": str(sess / "mine.tool-results")}))
+    assert "MINE-1" in out["content"]
+    out = asyncio.run(pool.call_tool("Grep", {"pattern": "billing", "path": str(sess)}))
+    assert "7185" in out["content"] and "7999" not in out["content"]
+    out = asyncio.run(pool.call_tool("Grep", {"pattern": "root", "path": "/etc"}))
+    assert out["content"] == "No matches found"
+    # Without a session id the pool behaves as it always did.
+    legacy = R.EvalPool([], {}, tmp_path, tree_root=tmp_path / "tree")
+    out = asyncio.run(legacy.call_tool("Grep", {"pattern": "billing-east"}))
+    assert "7185" in out["content"] and "7999" in out["content"]
+
+
+def test_the_new_arms_reach_the_wire(corpus, tmp_path, monkeypatch):
+    """Through run_one with a scripted engine: `self_record` names the session
+    record on the wire and `tool_clear` does not — the arms differ in exactly
+    their switch."""
+    root, files = corpus
+    s = R.build_session(3, 50_000, 0.5, root=root, corpus=files)
+    monkeypatch.setattr(R, "_metrics", lambda base_url: {})
+    seen: dict[str, dict] = {}
+
+    def fake_for(arm):
+        async def fake_stream(**kw):
+            eb = kw.get("extra_body") or {}
+            if eb.get("max_tokens") == 1:
+                yield {"choices": [], "usage": {"prompt_tokens": 100}}
+                return
+            wire = json.dumps(kw.get("messages"))
+            seen[arm] = {"tools": [t["function"]["name"] for t in kw.get("tools") or []],
+                         "stub": "[observation call_" in wire,
+                         "record": f"pt-eval-c600-{s.key}-{arm}.json" in wire}
+            yield {"choices": [{"delta": {"content": "CODENAME: x\nPORT: 1"}}]}
+            yield {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+            yield {"choices": [], "usage": {"prompt_tokens": 1000, "completion_tokens": 5}}
+        return fake_stream
+
+    disc = [("lloyd-mcp", [{"name": n, "description": n,
+                            "inputSchema": {"type": "object", "properties": {}}}
+                           for n in ("Read", "Grep", "Bash")])]
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path / "d"))
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR",
+                        tmp_path / "d" / "sessions")
+    for arm in ("tool_clear", "self_record"):
+        monkeypatch.setattr("app.harness.loop.stream_chat", fake_for(arm))
+        row = asyncio.run(R.run_one(s, arm, discovered=disc, system_prompt="sys",
+                                    data_root=tmp_path / "d", base_url="http://stub",
+                                    max_turns=3))
+        assert row["fired"]["turn_start_freed"] > 0, row.get("reason")
+    assert seen["self_record"]["record"] and not seen["tool_clear"]["record"]
+

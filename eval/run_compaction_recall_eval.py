@@ -52,8 +52,15 @@ arm's `compaction:` block, `_prepare_messages_for_harness`, and
 against the live primary. Only the tool pool is local (`EvalPool`): the
 real tool schemas, snapshotted once from the aggregator, served by
 in-process stubs — Read serves the synthetic files, this tree's files and
-the spill files microcompaction wrote; Grep searches the same; everything
-else answers "not available in this evaluation". No tool can change the
+the probe session's OWN record (its session JSON and the spill files
+microcompaction wrote); Grep searches the same and honours `path`;
+everything else
+answers "not available in this evaluation". Until 2026-09-25 Read and Grep
+saw every session under the scratch root — the other arms' and seeds'
+records, each planting a different codename and port — so a Grep for
+`billing-east` could answer with a stranger's facts; runs before that date
+carry that leak, and it fell on the arms that searched most (`tool_clear`
+Grepped in every failing row of the 2026-09-24 baseline). No tool can change the
 machine, so no sandboxed session is needed, and the ids are `pt-eval-*`
 anyway.
 
@@ -82,6 +89,12 @@ ARMS
               trigger/target 0.2/0.1 at turn start and in turn, no
               summarize (`mode: truncate`), the rest of the relief ladder
               off. The video's blunt preset.
+  self_record #1514's FREE route: `tool_clear` plus one clause in every
+              cleared-result marker naming the session's own record
+              (`sessions/<sid>.json`, `sessions/<sid>.tool-results/`). No new
+              tool. The baseline #1481's `recall_observation` must beat.
+  production_self_record
+              the same switch at production's thresholds.
   raised      trigger/target 0.9/0.7 at both passes: fire later, keep more.
   trigger90   trigger 0.9, target 0.52: fire later, clear as far as today.
   summary_legacy     summarize layer, regenerate-every-turn 9-section summary.
@@ -248,6 +261,28 @@ ARMS: dict[str, dict[str, Any]] = {
         # in a probe turn of plain Reads.
         "options": {"intra_turn_microcompact_trigger_fraction": 0.2,
                     "intra_turn_microcompact_target_fraction": 0.1},
+        "expects_fire": True,
+    },
+    # #1514: the FREE route. `tool_clear` exactly, plus one clause in every
+    # cleared-result marker naming the session's own record
+    # (`sessions/<sid>.json` + `<sid>.tool-results/`,
+    # `tool_result_spill.session_record_route`). No new tool, no new
+    # permission — the baseline #1481's `recall_observation` has to beat.
+    "self_record": {
+        "compaction": {"mode": "truncate",
+                       "microcompact": {"trigger_fraction": 0.2,
+                                        "target_fraction": 0.1,
+                                        "name_session_record": True}},
+        "options": {"intra_turn_microcompact_trigger_fraction": 0.2,
+                    "intra_turn_microcompact_target_fraction": 0.1,
+                    "intra_turn_microcompact_name_session_record": True},
+        "expects_fire": True,
+    },
+    # The same switch at production's thresholds: what flipping it on
+    # would actually change. Run beside `production`.
+    "production_self_record": {
+        "compaction": {"microcompact": {"name_session_record": True}},
+        "options": {"intra_turn_microcompact_name_session_record": True},
         "expects_fire": True,
     },
     # The candidate the first three arms pointed at: production's mechanism
@@ -766,11 +801,21 @@ def decide(text: str, planted: Planted,
 # ---------------------------------------------------------------------------
 
 class EvalPool:
-    """Real tool schemas, stub handlers. Nothing here can change the machine."""
+    """Real tool schemas, stub handlers. Nothing here can change the machine.
+
+    `session_id` (the probe's own `pt-eval-*` id) scopes what Read and Grep
+    see under `spill_root`: only that session's own record —
+    `sessions/<sid>.json` and `sessions/<sid>.tool-results/` — never the other
+    arms' and sessions' records that share the scratch root, each of which
+    plants a DIFFERENT codename and port (#1514: a Grep across them answered
+    with a stranger's facts). Without it the pool behaves as it always did.
+    Grep honours a `path` argument (file or directory), as the real one does.
+    """
 
     def __init__(self, discovered: list, files: dict[str, str],
                  spill_root: Path, tree_root: Path = ROOT,
-                 planted: Planted | None = None, memory: bool = False) -> None:
+                 planted: Planted | None = None, memory: bool = False,
+                 session_id: str = "") -> None:
         self._discovered = discovered
         # P3 arm only: the memory tools answer (writes are recorded in
         # `saved`, never written). Every other arm keeps refusing them.
@@ -780,25 +825,62 @@ class EvalPool:
         self.spill_root = spill_root
         self.tree_root = tree_root
         self.planted = planted
+        self.session_id = session_id
         self.calls: list[tuple[str, dict]] = []
         # Which planted facts a tool result handed back to the model: the
         # re-retrieval the video says compaction forces.
         self.recovered: set[str] = set()
+        # Which facts came back through which route (#1514/#1481): the
+        # session's own record (Read/Grep naming `<sid>`), `recall_observation`,
+        # or a plain tool call.
+        self.recovered_via: dict[str, set[str]] = {}
 
     async def call_tool(self, name: str, args: dict, **kw) -> dict:
         out = await self._call(name, args, **kw)
         p = self.planted
         if p is not None and not out.get("is_error"):
             text = str(out.get("content") or "")
+            got = set()
             if p.passphrase in text:
-                self.recovered.add("distinctive")
+                got.add("distinctive")
             if f"listens on port {p.port} now" in text:
-                self.recovered.add("ambiguous")
+                got.add("ambiguous")
+            self.recovered |= got
+            if got:
+                self.recovered_via.setdefault(self._route(name, args), set()).update(got)
         return out
+
+    def _route(self, name: str, args: dict) -> str:
+        bare = name.rsplit("__", 1)[-1]
+        if bare == "recall_observation":
+            return "recall_observation"
+        target = str((args or {}).get("file_path") or (args or {}).get("path") or "")
+        sid = self.session_id
+        if sid and f"{sid}.json" in target:
+            return "session_record"          # #1514's route: the transcript
+        if sid and f"{sid}.tool-results" in target:
+            # One named file is what every clear marker already offers; a
+            # search of the directory is the record route.
+            return "spill_file" if bare == "Read" else "session_record"
+        return bare
 
     @property
     def discovered(self):
         return self._discovered
+
+    def _own(self, rp: Path) -> bool:
+        """Under `spill_root`, only this session's own record is visible."""
+        if not self.session_id:
+            return True
+        sess = (self.spill_root / "sessions").resolve()
+        return rp == sess / f"{self.session_id}.json" or \
+            rp.parent == sess / f"{self.session_id}.tool-results"
+
+    def _allowed(self, rp: Path) -> bool:
+        spill = self.spill_root.resolve()
+        if rp.is_relative_to(spill):
+            return self._own(rp)
+        return rp.is_relative_to(self.tree_root.resolve())
 
     def _lookup(self, path: str) -> str | None:
         if path in self.files:
@@ -806,15 +888,38 @@ class EvalPool:
         for k, v in self.files.items():
             if path.endswith(k):
                 return v
-        p = Path(path).expanduser()
-        for base in (self.spill_root, self.tree_root):
-            try:
-                rp = p.resolve()
-                if rp.is_file() and rp.is_relative_to(base.resolve()):
-                    return rp.read_text(errors="replace")
-            except (OSError, ValueError):
-                continue
+        try:
+            rp = Path(path).expanduser().resolve()
+            if rp.is_file() and self._allowed(rp):
+                return rp.read_text(errors="replace")
+        except (OSError, ValueError):
+            pass
         return None
+
+    def _grep_pool(self, path: str) -> dict[str, str]:
+        """What a Grep searches: `path` when given (a file, or a directory this
+        pool may read), else the session's files plus its own record."""
+        if path:
+            text = self._lookup(path)
+            if text is not None:
+                return {path: text}
+            try:
+                rp = Path(path).expanduser().resolve()
+            except (OSError, ValueError):
+                return {}
+            if not rp.is_dir():
+                return {}
+            out: dict[str, str] = {}
+            for fp in sorted(rp.rglob("*"))[:2000]:
+                if fp.is_file() and self._allowed(fp.resolve()):
+                    out[str(fp)] = fp.read_text(errors="replace")
+            return out
+        pool = dict(self.files)
+        if self.spill_root.exists():
+            for sp in sorted(self.spill_root.rglob("*")):
+                if sp.is_file() and self._own(sp.resolve()):
+                    pool[str(sp)] = sp.read_text(errors="replace")
+        return pool
 
     async def _call(self, name: str, args: dict, **_kw) -> dict:
         bare = name.rsplit("__", 1)[-1]
@@ -835,11 +940,7 @@ class EvalPool:
             except re.error:
                 rx = re.compile(re.escape(pat))
             hits: list[str] = []
-            pool = dict(self.files)
-            for sp in sorted(self.spill_root.rglob("*")) if self.spill_root.exists() else []:
-                if sp.is_file():
-                    pool[str(sp)] = sp.read_text(errors="replace")
-            for k, v in pool.items():
+            for k, v in self._grep_pool(str(args.get("path") or "")).items():
                 hits += [f"{k}:{n + 1}:{ln}" for n, ln in enumerate(v.splitlines())
                          if rx.search(ln)]
             return {"content": "\n".join(hits[:200]) or "No matches found",
@@ -1335,8 +1436,10 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
     sessions_dir = data_root / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
     path = sessions_dir / f"{sid}.json"
+    # indent=2 is how `sessions_io` writes a session: one row field per line,
+    # so a Grep of the record (#1514's route) returns a message, not the file.
     path.write_text(json.dumps({"session_id": sid, "platform": "mission-control",
-                                "messages": session.messages}))
+                                "messages": session.messages}, indent=2))
     row: dict[str, Any] = {"session": session.key, "arm": arm, "seed": session.seed,
                            "depth": session.depth, "target_tokens": session.target_tokens,
                            "est_tokens": session.est_tokens, "session_sha256": session.sha256}
@@ -1426,8 +1529,8 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
             row.update(status="dry", fired=pre, warmup={"warmup": True, **winfo})
             return row
 
-        pool = EvalPool(discovered, session.files, data_root,
-                        planted=session.planted)
+        pool = EvalPool(discovered, session.files,
+                        data_root, planted=session.planted, session_id=sid)
         log: list[dict] = []
         before: dict[str, float] = {}
         sampler = _Sampler(base_url)
@@ -1488,6 +1591,11 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
         valid=(not err) and valid_for_arm(arm, f),
         tool_calls=len(pool.calls), tool_names=[n for n, _ in pool.calls],
         recovered_via_tool=sorted(pool.recovered), wall_s=round(wall, 2),
+        recovered_via={k: sorted(v) for k, v in pool.recovered_via.items()},
+        recall_calls=sum(1 for n, _ in pool.calls if n == "recall_observation"),
+        record_calls=sum(1 for n, a in pool.calls
+                         if pool._route(n, a) == "session_record"),
+        spill_reads=sum(1 for n, a in pool.calls if pool._route(n, a) == "spill_file"),
         ttft_first_s=iters[0]["ttft_s"] if iters else None,
         ttft_s=[x.get("ttft_s") for x in iters],
         prompt_tokens=[x.get("prompt_tokens") for x in iters],
@@ -1558,6 +1666,21 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
                                                        .get("planted_saved") or {}).get(f))
                             for f in ("distinctive", "ambiguous")},
             "preemptions_delta": sum(r.get("preemptions_delta") or 0 for r in kept),
+            # #1514 / #1481: which route the facts came back through, and how
+            # often each route was used, per turn.
+            "mean_recall_calls": (sum(r.get("recall_calls") or 0 for r in kept)
+                                  / len(kept)) if kept else None,
+            "mean_record_calls": (sum(r.get("record_calls") or 0 for r in kept)
+                                  / len(kept)) if kept else None,
+            "mean_spill_reads": (sum(r.get("spill_reads") or 0 for r in kept)
+                                 / len(kept)) if kept else None,
+            "recovered_via": {
+                route: {f: sum(1 for r in kept
+                               if f in ((r.get("recovered_via") or {}).get(route) or []))
+                        for f in ("distinctive", "ambiguous")}
+                for route in sorted({k for r in kept for k in (r.get("recovered_via") or {})})},
+            "planted_on_wire_at_answer": sum(
+                1 for r in kept if (r.get("planted_on_wire") or [None])[-1]),
             "drop_reasons": _count(r.get("reason") for r in all_rows
                                    if r.get("status") == "dropped"),
             "warmup": _count((r.get("warmup") or {}).get("status") for r in all_rows
@@ -1604,6 +1727,7 @@ def paired(rows: list[dict[str, Any]], base: str = "production") -> dict[str, An
         "wall_s": lambda r: float(r.get("wall_s") or 0.0),
         "ttft_total_s": lambda r: float(sum(x for x in (r.get("ttft_s") or []) if x)),
         "tool_calls": lambda r: float(r.get("tool_calls") or 0),
+        "ttft_first_s": lambda r: float(r.get("ttft_first_s") or 0.0),
         "turn_start_wall_s": lambda r: float(r.get("turn_start_wall_s") or 0.0),
         "summary_codename": lambda r: float(bool((r.get("summary_has") or {}).get("codename"))),
         "summary_port_now": lambda r: float(bool((r.get("summary_has") or {}).get("port_now"))),
@@ -1754,6 +1878,10 @@ def _write(out_path: Path, a, sessions, system_prompt, rows):
             for t in sorted({r.get("target_tokens") for r in rows if r.get("target_tokens")})},
         # The D2 pair: persisted against legacy, over the sessions both kept.
         "paired_vs_summary_legacy": paired(rows, base="summary_legacy"),
+        # #1514 / #1481: the free route against the arm it amends, and the new
+        # tool against the free route it has to beat.
+        "paired_vs_tool_clear": paired(rows, base="tool_clear"),
+        "paired_vs_self_record": paired(rows, base="self_record"),
         "rows": rows,
     }
     out_path.write_text(json.dumps(doc, indent=1, default=str))
