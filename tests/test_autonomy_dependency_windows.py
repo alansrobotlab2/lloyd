@@ -429,3 +429,152 @@ def test_a_cycle_whose_hand_off_is_older_than_half_a_day_still_runs(
     complete(b[2], probe + dt.timedelta(minutes=10))
     later = at(aut, monkeypatch, probe + dt.timedelta(minutes=20))
     assert reason(aut, b[2], board, later) == "waiting on #1", "consumed once"
+
+
+# ── #1526: #51 / #57 fail forward when #56 is starved past their close ──────
+
+# Captured at import: the `aut` fixture re-points `autonomy.AUTONOMY_DIR` at a tmp
+# board, and clause 1 is a claim about the files the scheduler actually reads.
+LIVE_BOARD_DIR = autonomy.AUTONOMY_DIR
+
+
+def _live_bypass_bound(tid):
+    """`stale_bypass_hours` as the live board declares it, for task `tid`."""
+    path = next(iter(LIVE_BOARD_DIR.glob(f"{tid}-*.md")), None)
+    assert path is not None, f"no task file for #{tid} under {LIVE_BOARD_DIR}"
+    return (autonomy._parse_task_file(path) or {}).get("stale_bypass_hours")
+
+
+# The night the pool starved #56: queue row 515 `enqueued_at 2026-09-25T08:00:33Z`
+# (inside #56's own 08:00-09:59Z window) and `claimed_at 2026-09-25T19:10:40Z` —
+# 11 h 10 m of starvation, so the run finished at 19:14:12Z, 7 h 14 m after
+# #51/#57's window had closed at 12:00Z. Its record
+# `autonomy-runs/56/run_56_20260925_191040.md` carries `in_window: false`.
+LATE_AT = Z(25, 19, 14, 12)
+
+
+def _starved_board(bound):
+    """#51 and #57 as the live files declare them, with #56 as it ran."""
+    return [
+        task(56, hours=[1, 2], last=LATE_AT),
+        task(51, hours=LATE, dep=56, last=Z(22, 8, 20, 7),
+             **({"stale_bypass_hours": bound} if bound else {})),
+        task(57, hours=LATE, dep=56, last=Z(22, 8, 18, 53),
+             **({"stale_bypass_hours": bound} if bound else {})),
+    ]
+
+
+def test_the_starved_leg_declares_its_fail_forward_and_56_does_not():
+    """#1526 clause 1. #56 has no `depends_on`, so a bound on it is read by
+    nothing; #51 and #57 are the tasks the pool has been holding since
+    2026-09-22, and each must declare one short enough to fire on this edge.
+
+    The ceiling is not the clause's 30 h but the arithmetic of the night that
+    broke: a completion that lands 7 h 14 m past the dependents' close is
+    16 h 45 m old at that close, so a bound above it cannot open that window at
+    all — 24 h (the reflection chain's value, where the upstream's slip is a
+    night) holds the chain for a whole further day. 12 h is shipped; over 17 h
+    fails this clause and re-creates the outage.
+    """
+    assert _live_bypass_bound(56) is None, "#56 has no depends_on: a bound is noise"
+    for tid in (51, 57):
+        raw = _live_bypass_bound(tid)
+        assert raw is not None, f"#{tid} declares no stale_bypass_hours"
+        assert 0 < float(raw) <= 17, (
+            f"#{tid} declares {raw} h: a starved completion is only 16.75 h old at "
+            "the window's close, so that bound never opens this window")
+
+
+def test_the_starved_chain_releases_at_its_window_opening(aut, monkeypatch):
+    """#1526 clause 2 — the three instants the triage replayed, at the bound read
+    off the live board.
+
+    #56's last completion was 2026-09-23T14:31:29Z, so at 23:00 local on 09-24
+    (06:00Z on the 25th, when #51/#57's window opens) it is 39.5 h old — past the
+    declared bound at the opening, not merely near it. Before #1526 neither task
+    declared a bound, and `test_an_upstream_that_never_gets_its_window_keeps_the_
+    dependent_waiting` above pins what that means: `waiting on #56` at every hour
+    of every window, four windows on the row with no run, #58 and #83 down behind
+    them.
+    """
+    bound = float(_live_bypass_bound(51))
+    board = _starved_board(bound)
+    board[0]["last_run"] = Z(23, 14, 31, 29).isoformat()
+    b = by_id(board)
+    assert (Z(25, 6, 0) - Z(23, 14, 31, 29)).total_seconds() / 3600 > bound
+
+    for label, probe in (("23:00 local", Z(25, 6, 0)),      # window opens 06:00Z
+                         ("03:00 local", Z(25, 10, 0)),
+                         ("04:30 local", Z(25, 11, 30))):   # closes 12:00Z
+        now = at(aut, monkeypatch, probe)
+        for tid in (51, 57):
+            assert reason(aut, b[tid], board, now) is None, (
+                f"#{tid} still held at {label}: the declared bound does not open "
+                "inside the window, so the starved leg stays down")
+            assert due(aut, b[tid], board, now) is True, (label, tid)
+
+
+def test_the_release_still_waits_while_56_is_due_inside_its_own_window(
+        aut, monkeypatch):
+    """#1526 clause 3 — the valve at `autonomy.py:1622-1629` survives the fix.
+
+    At 01:00 and 02:00 local (08:00Z, 09:00Z) #56 sits inside its own
+    `preferred_hours` and is elapsed-due, so dispatching #51/#57 now would run
+    them beside the upstream on the previous cycle's output — the inversion the
+    valve exists to stop. The bound is past at both instants (41.5 h and 42.5 h),
+    so they hold only because the valve suppresses it. These are the same probes
+    the two tests above release at 23:00 / 03:00 / 04:30: a fix that stopped
+    holding here has traded a dead leg for a wrong-data race.
+    """
+    bound = float(_live_bypass_bound(51))
+    board = _starved_board(bound)
+    board[0]["last_run"] = Z(23, 14, 31, 29).isoformat()
+    b = by_id(board)
+    for label, probe in (("01:00 local", Z(25, 8, 0)), ("02:00 local", Z(25, 9, 0))):
+        assert (probe - Z(23, 14, 31, 29)).total_seconds() / 3600 > bound, label
+        now = at(aut, monkeypatch, probe)
+        assert due(aut, b[56], board, now) is True, f"#56 must be due at {label}"
+        for tid in (51, 57):
+            assert reason(aut, b[tid], board, now) == "waiting on #56", (label, tid)
+
+
+def test_a_completion_starved_past_the_close_releases_that_same_window(
+        aut, monkeypatch):
+    """#1526's acceptance: the pool-latency night, not merely the wedged one.
+
+    This is the night that actually broke: #56 completed at 19:14:12Z on 09-25,
+    7 h 14 m after the dependents' close, so their next window (06:00Z-11:59Z on
+    09-26) starts with an upstream that is 10 h 46 m old — fresh by any daily
+    measure, and not owed again until 09-27. The elapsed rule therefore calls it
+    this cycle's output and holds the window; only the declared bound forwards
+    it, and only once the upstream is a day-and-a-half of nothing. With the
+    shipped 12 h that is 03:00 and 04:30 local, 3-4.5 h before the close: the
+    leg runs the very night it was starved. Strip the bound and all three
+    instants hold, which is the outage this item is about.
+    """
+    bound = float(_live_bypass_bound(51))
+    board = _starved_board(bound)
+    b = by_id(board)
+    held_at = ("23:00 local", "03:00 local", "04:30 local")
+    probes = (Z(26, 6, 0), Z(26, 10, 0), Z(26, 11, 30))
+    assert (probes[0] - LATE_AT).total_seconds() / 3600 < bound < (probes[1] - LATE_AT).total_seconds() / 3600
+
+    for label, probe in zip(held_at, probes):
+        now = at(aut, monkeypatch, probe)
+        for tid in (51, 57):
+            got = reason(aut, b[tid], board, now)
+            if label == "23:00 local":
+                assert got == "waiting on #56", (
+                    f"#{tid} released at {label} on an upstream only 10.8 h old")
+            else:
+                assert got is None, f"#{tid} still held at {label}: {bound} h does not open this window"
+            assert due(aut, b[tid], board, now) is (got is None), (label, tid)
+
+    stripped = _starved_board(None)
+    bs = by_id(stripped)
+    for label, probe in zip(held_at, probes):
+        now = at(aut, monkeypatch, probe)
+        for tid in (51, 57):
+            assert reason(aut, bs[tid], stripped, now) == "waiting on #56", (
+                f"#{tid} released at {label} with no bound declared — this test "
+                "would pass whatever the board says")
