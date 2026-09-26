@@ -3174,9 +3174,13 @@ literal, because a seventh reader written next month is how this comes back.
   a literal until this landed, which is to say it was not a setting; no
   session-backed source passes the argument now, because a per-source switch a
   caller can override with a literal reads as broken the one time somebody
-  uses it. Off for every source since 2026-09-12 (the observer's measured
-  effect on rounds was negative); the deterministic turn guards run on
-  every turn regardless (`app/harness/turn_guards.py`). The key is set only on sources that can be observed at all
+  uses it. Off for every source from 2026-09-12 on three incidents, and ON
+  again for `autocode` and `autotriage` since 2026-09-25 with the harms fixed
+  inside Inner Voice (Alan: fix it there, don't switch it off): a
+  PLATFORM/round note in every worker review and a rail that rewrites any
+  "deliver the report" inject (`architecture/inner-voice.md`, "Workers"). The
+  override file wins over config.yaml for this key. The deterministic turn
+  guards run on every turn regardless (`app/harness/turn_guards.py`). The key is set only on sources that can be observed at all
   — the observer is wired in `app/routers/messages.py` and nowhere else, so it
   means nothing on a `run_prompt_on_primary` source, and `/api/workers/health`
   reports it tri-state rather than inviting a knob nothing reads. UI-mutable

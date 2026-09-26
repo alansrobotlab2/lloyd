@@ -1306,12 +1306,17 @@ def test_a_chat_session_is_still_refused_without_the_observer(monkeypatch, tmp_p
     assert gate is not None
 
 
-def test_the_unattended_sources_ship_with_the_observer_off():
-    """The switch itself, pinned: cut 1 is a config change and a config
-    change can be reverted by a UI toggle without anyone noticing."""
+def test_the_unattended_sources_ship_with_the_observer_where_it_was_decided():
+    """The switch itself, pinned: a config change can be reverted by a UI
+    toggle without anyone noticing. Off for every unattended source from cut
+    1 (2026-09-12); back on for autocode and autotriage on 2026-09-25 once its
+    harms there were fixed in Inner Voice itself (the worker note and the
+    report-ask rail in `app/inner_voice/observer.py`)."""
     from app.config import CONFIG
     src = CONFIG["workers"]["sources"]
-    for name in ("autocode", "autotriage", "arch-review", "youtube-digest"):
+    for name in ("autocode", "autotriage"):
+        assert src[name].get("inner_voice") is True, name
+    for name in ("arch-review", "youtube-digest"):
         assert src[name].get("inner_voice") is False, name
 
 

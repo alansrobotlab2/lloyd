@@ -1555,7 +1555,29 @@ def _build_event_user_prompt(
         prior_turn_interventions=state.prior_turn_interventions,
         iteration_pressure_note=_iteration_pressure_note(state),
         context_pressure_note=_context_pressure_note(state),
+        worker_note=_worker_note(state),
     )
+
+
+def _is_worker_turn(state: ObserverState) -> bool:
+    """`sessions_io.NON_USER_PLATFORMS` is the one definition of a turn no
+    human reads; the turn guards read the same set."""
+    try:
+        from app.sessions_io import NON_USER_PLATFORMS
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(state.platform) and state.platform in NON_USER_PLATFORMS
+
+
+def _round_open(state: ObserverState) -> bool:
+    return bool(getattr(state.guards, "round_open", False))
+
+
+def _worker_note(state: ObserverState) -> str:
+    if not _is_worker_turn(state):
+        return ""
+    return _prompt.build_worker_note(platform=state.platform, source=state.source,
+                                     round_open=_round_open(state))
 
 
 # ---------------------------------------------------------------------------
@@ -1918,7 +1940,9 @@ def _apply_decision_guards(
     # iteration lets the turn die with work undone. Upgrade to inject.
     if is_terminal and decision.action == "ambient":
         if not (decision.content or "").strip():
-            decision.content = _guards.STALL_RESCUE_CONTENT
+            decision.content = (
+                _guards.stall_rescue_content(unattended=True, round_open=_round_open(state))
+                if _is_worker_turn(state) else _guards.STALL_RESCUE_CONTENT)
         decision.reason = (
             (decision.reason or "")
             + " [stall-rescue: ambient→inject so the loop continues]"
@@ -1926,6 +1950,39 @@ def _apply_decision_guards(
         decision.action = "inject"
         decision.bypass_budget = True
         decision.safeguard = "stall_rescue_ambient"
+
+    # A worker turn is never asked for a report (2026-09-25). The harness
+    # finalizer collects its outcome, and "deliver the final report now" is
+    # the inject that abandoned #874 at iteration 38 with 44 minutes left.
+    # The prompt says so (`build_worker_note`); this is the rail under it, the
+    # deterministic half R5 retired with the unattended profile and that
+    # switching the observer back on for autocode/autotriage needs again. With
+    # a round open the nudge becomes the round's own next step; with none, a
+    # report ask has nothing correct to say and is dropped.
+    if (
+        decision.action == "inject"
+        and _is_worker_turn(state)
+        and _guards.asks_for_report(decision.content or "")
+    ):
+        asked = decision.content
+        if _round_open(state):
+            decision.content = _guards.UNATTENDED_ROUND_OPEN_CONTENT
+            decision.reason = ((decision.reason or "")
+                               + " [worker: a report ask became the round's next step]").strip()
+        else:
+            decision.action = "noop_worker_report"
+            decision.reason = ((decision.reason or "")
+                               + " [worker: the harness collects the outcome; "
+                               "a report ask is dropped]").strip()
+        decision.safeguard = "worker_content"
+        _event_log.log_event(
+            state.session_id, "inner_voice.worker_report_ask_rewritten",
+            {"trigger": trigger, "asked": asked, "action": decision.action,
+             "round_open": _round_open(state)},
+            turn_id=state.turn_id,
+        )
+        if decision.action != "inject":
+            return
 
     if (
         decision.action == "inject"

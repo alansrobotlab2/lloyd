@@ -1216,7 +1216,8 @@ async def _run_turn(session_id: str, turn: SessionTurn, q: SessionQueue) -> None
         plan_artifact=_load_session_plan(session_id),
         persistent_goal=_load_session_goal(session_id),
         # The session's own identity, already resolved above for the grant
-        # gate. What makes the observer's unattended profile possible at all:
+        # gate. What gives a worker review its PLATFORM/round note and the
+        # report-ask rail (`observer._worker_note`, `_apply_decision_guards`):
         # "deliver the final report" is right for a chat and wrong for a
         # round, and only the platform tells the two apart.
         platform=run_platform, source=run_source,

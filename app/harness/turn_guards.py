@@ -59,6 +59,8 @@ _FAULT_ANNOUNCE_COOLDOWN_S = 1800.0
 _last_fault_announce: float = 0.0
 
 _ROUND_OPEN_TOOLS = frozenset({"automod_start"})
+# How many times one turn is told its round is still open (`round_gate_due`).
+ROUND_GATE_MAX_FIRES = 2
 _ROUND_CLOSE_TOOLS = frozenset({"automod_land", "automod_abort"})
 
 
@@ -148,7 +150,8 @@ class TurnGuardState:
     round_open: bool = False
     todo_write_seen: bool = False
     todo_gate_fired: bool = False
-    round_gate_fired: bool = False
+    round_gate_fires: int = 0
+    tool_calls_at_round_fire: int = 0
     failure_tools_fired: set[str] = field(default_factory=set)
     last_iteration: int = 0
     sequence: int = 0
@@ -171,6 +174,25 @@ class TurnGuardState:
     @property
     def unattended(self) -> bool:
         return _is_unattended(self.platform)
+
+    @property
+    def round_gate_fired(self) -> bool:
+        return self.round_gate_fires > 0
+
+    def round_gate_due(self) -> bool:
+        """The open-round nudge: once, and once more only after new work.
+
+        Until 2026-09-25 it fired once per turn. A turn that answered it with a
+        few tool calls and then stopped again with the round still open was
+        told nothing the second time — and with the observer off, nothing
+        else could tell it. A second stop straight after the nudge, with no
+        tool call between, is a model that heard it and chose to stop; saying
+        it again would only restate it.
+        """
+        if self.round_gate_fires >= ROUND_GATE_MAX_FIRES:
+            return False
+        return (self.round_gate_fires == 0
+                or self.tool_calls_seen > self.tool_calls_at_round_fire)
 
     def next_sequence(self) -> int:
         """Shared with the observer's rows, so one turn's rows sort."""
@@ -395,9 +417,10 @@ def install_turn_guards(
             return
         if (
             cfg.get("round_open", True) and state.unattended and state.round_open
-            and not state.round_gate_fired
+            and state.round_gate_due()
         ):
-            state.round_gate_fired = True
+            state.round_gate_fires += 1
+            state.tool_calls_at_round_fire = state.tool_calls_seen
             await state.fire(
                 guard="round_open", trigger="assistant_message",
                 reason="deterministic: unattended turn ending with a round open",

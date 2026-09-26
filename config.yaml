@@ -1719,19 +1719,21 @@ workers:
       group_max_turns: 120
       # Inner Voice. Every background run is RECORDED regardless
       # (`harness.background_recording`); this is whether the observer
-      # watches. It runs on the primary at priority 1 and spends a
-      # goal-extraction call plus a critique per turn, so it is on only
-      # where the judgement is worth a second opinion. Meaningful only
-      # for a source that runs through `run_prompt_in_session` — the
-      # observer is wired in the chat endpoint and nowhere else.
-      # OFF for unattended turns since 2026-09-12 (plan: senses-not-supervision,
-      # cut 1). Measured effect on rounds was negative: #874 abandoned at
-      # iteration 38 with 44 min left on an invented premise, 16 false
-      # repetition fires in one day, an inject into #875 with no room to
-      # answer. Stall rescue, budget and context pressure are deterministic
-      # anchors now; the gate is the real check. Stays on for chat, where a
-      # human reads it and its value was measured there.
-      inner_voice: false
+      # watches. Meaningful only for a source that runs through
+      # `run_prompt_in_session` — the observer is wired in the chat endpoint
+      # and nowhere else. Its review runs one priority step behind the turn.
+      # OFF from 2026-09-12 (senses-not-supervision cut 1) on three incidents:
+      # #874 abandoned at iteration 38 on an invented "working tree clean",
+      # 16 false repetition fires on round-id polling, an inject at 241k
+      # tokens. ON again 2026-09-25 (Alan: fix it in Inner Voice rather than
+      # switch it off), with each cause fixed there: polling tools and round
+      # ids exempt from the repetition guard (09-11), a terminal-only review
+      # that reads the whole trajectory and skips under the context floor
+      # (IV R2), and for workers a PLATFORM/round note in every review plus a
+      # rail that rewrites any "deliver the report" inject into the round's
+      # next step (`observer._worker_note`, `_apply_decision_guards`). The
+      # override file `data/tool_overrides.yaml` wins over this key.
+      inner_voice: true
       # Runs as a real session through /api/message/stream, so it has Inner
       # Voice and a transcript. Budgets are measured, not guessed: the three
       # hand-driven triages took 45, 65 and 76 iterations and 8-30 minutes.
@@ -1839,20 +1841,12 @@ workers:
       # means something; this one now sits past it for a turn of small steps.
       # Under agent.max_turns_ceiling_worker (300), or it is clamped.
       max_turns: 250
-      # On: this source rewrites production. See `autotriage.inner_voice`.
-      # OFF for unattended turns since 2026-09-12 (plan: senses-not-supervision,
-      # cut 1). Measured effect on rounds was negative: #874 abandoned at
-      # iteration 38 with 44 min left on an invented premise, 16 false
-      # repetition fires in one day, an inject into #875 with no room to
-      # answer. Stall rescue, budget and context pressure are deterministic
-      # anchors now; the gate is the real check. Stays on for chat, where a
-      # human reads it and its value was measured there.
-      # The abandoned-round reaper's grace follows this key (2026-09-14): 20
-      # minutes while an observer could still send #278's rescue, none while
-      # it is off — a round the turn left open is then closed the moment the
-      # turn ends, unless its gate or landing is still running. Turning this
-      # back on brings the grace back with it.
-      inner_voice: false
+      # See `autotriage.inner_voice`: off 2026-09-12, on again 2026-09-25 with
+      # the worker note (an open round's only correct ending is commit, gate,
+      # land or abort) and the report-ask rail. The reaper's grace no longer
+      # follows this key (`abandon_grace_seconds`, default 0): the post-turn
+      # follow-up it waited for was retired by IV R2.
+      inner_voice: true
       # The rescue the observer used to make (#278: "if the gate passed, land
       # it"), done by the reaper since 2026-09-18: a round whose gate PASSED at
       # the commit it still holds, and whose turn is over, is landed rather

@@ -155,6 +155,36 @@ UNATTENDED_ROUND_OPEN_CONTENT = (
 )
 
 
+# An observer inject that asks a worker turn for a report, a summary or a final
+# answer. On a worker the harness finalizer collects the outcome, so the ask
+# is always wrong there — and it is the exact inject that ended #874 with 44
+# minutes left. Deliberately broad: the cost of a false match is a nudge
+# rewritten to the round's own next step, or dropped when no round is open.
+_ASKS_FOR_REPORT = re.compile(
+    r"\b(deliver|write|give|produce|provide|post|send|present|wrap\s+up)\b"
+    r"[^.?!\n]{0,60}?\b(report|summary|write-?up|answer|conclusion|results?)\b"
+    r"|\bfinal\s+(report|summary|answer)\b",
+    re.IGNORECASE,
+)
+
+
+_NEGATED_BEFORE = re.compile(r"\b(not|never|no|without)\s*$|n't\s*$", re.IGNORECASE)
+
+
+def asks_for_report(text: str) -> bool:
+    """True when an inject asks the primary to report, summarise or answer.
+
+    A negated ask is not one: `UNATTENDED_ROUND_OPEN_CONTENT` itself says "Do
+    not write a report", and reading that as a report ask would drop the one
+    nudge the rail exists to deliver.
+    """
+    text = text or ""
+    for m in _ASKS_FOR_REPORT.finditer(text):
+        if not _NEGATED_BEFORE.search(text[max(0, m.start() - 12):m.start()]):
+            return True
+    return False
+
+
 def stall_rescue_content(*, unattended: bool, round_open: bool) -> str:
     """The words for a stall rescue, chosen by who reads the turn."""
     if unattended and round_open:

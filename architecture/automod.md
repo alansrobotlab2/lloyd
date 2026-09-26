@@ -194,8 +194,8 @@ way the three hand-driven rounds ran. `run_prompt_in_session` in
 unobserved one, and it must not be used for anything that judges or changes
 this code. (It stopped being session-less on 2026-09-10 — every background run
 records a transcript now — but a transcript is not an observer.) Whether the
-observer watches is `workers.sources.<name>.inner_voice`, `true` for both of
-these sources, and since the same date the chat endpoint installs the #534
+observer watches is `workers.sources.<name>.inner_voice` — `false` for both
+from 2026-09-12 to 09-25 and `true` again since (inner-voice.md, "Workers"), and since the same date the chat endpoint installs the #534
 grant gate on their sessions by platform. Before that, the two sources that
 rewrite this repo were among the four session-backed workers that ran
 ungated. `architecture/background-runs.md` is the long version.

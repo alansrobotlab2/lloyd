@@ -590,6 +590,47 @@ def build_iteration_pressure_note(
     )
 
 
+def build_worker_note(*, platform: str, source: str = "", round_open: bool = False) -> str:
+    """What the observer must know about a turn nobody reads.
+
+    The IV plan's R5 (2026-09-24) deleted the platform note along with the
+    unattended profile, because no worker was observed any more. Switching the
+    observer back on for autocode and autotriage (2026-09-25) without it would
+    have recreated #874 exactly: the vault prompt says nothing about workers,
+    rounds or the finalizer, and its pressure notes say "deliver the answer" —
+    the inject that abandoned a healthy round at iteration 38 with 44 minutes
+    left, on a confabulated "working tree clean".
+
+    `round_open` is the turn guards' own reading (`TurnGuardState.round_open`:
+    set by a successful `automod_start`, cleared by `automod_land` /
+    `automod_abort`), so the observer and the guard can never disagree about it.
+    """
+    who = f"{platform} (source={source})" if source else platform
+    lines = [
+        f"PLATFORM: {who}. No human reads this session. The harness collects "
+        f"the turn's outcome itself with a structured finalizer after the turn "
+        f"ends, so a report, a summary or a final answer is NEVER the thing to "
+        f"ask for here — never inject 'deliver the report', and where a note "
+        f"above says 'deliver the answer', read it as the step below.",
+        "Assert nothing about the working tree, commits, tests or the gate "
+        "unless a trajectory line in front of you shows it.",
+    ]
+    if round_open:
+        lines.append(
+            "AN AUTOMOD ROUND IS OPEN in this turn. Its only correct ending is: "
+            "commit the work in the worktree, call automod_gate (then "
+            "automod_gate_wait — repeated waits are the protocol, not a loop), "
+            "then automod_land on a pass or automod_abort. A primary that is "
+            "stopping, or still exploring late in the turn, with the round open "
+            "and no gate called: inject exactly that. A primary that is gating "
+            "or waiting on the gate: noop.")
+    else:
+        lines.append(
+            "No automod round is open. If the primary is finishing its work, "
+            "noop — letting the turn end is correct.")
+    return "\n".join(lines)
+
+
 def build_context_pressure_note(
     used: int, window: int, fraction: float,
 ) -> str:
@@ -674,6 +715,7 @@ def build_user_prompt_for_event(
     prior_turn_interventions: list[dict[str, Any]] | None = None,
     iteration_pressure_note: str = "",
     context_pressure_note: str = "",
+    worker_note: str = "",
 ) -> str:
     """Assemble the per-event user prompt the observer evaluates."""
     budget_line = (
@@ -702,6 +744,10 @@ def build_user_prompt_for_event(
     todos_section = f"\n{todos_block}\n" if todos_block else ""
     persistent_goal_block = _format_persistent_goal(persistent_goal)
     persistent_goal_section = f"{persistent_goal_block}\n\n" if persistent_goal_block else ""
+    # Late, beside the pressure notes it overrides: it changes as a round
+    # opens and closes, and the long USER REQUEST at the top stays a stable,
+    # cacheable prefix across a turn's reviews.
+    worker_section = f"\n{worker_note}\n" if worker_note else ""
     return (
         f"USER REQUEST:\n{user_request}\n\n"
         f"{persistent_goal_section}"
@@ -714,7 +760,8 @@ def build_user_prompt_for_event(
         f"{primary_text_so_far or '(none yet)'}\n"
         f"{prior_section}"
         f"{pressure_section}"
-        f"{context_section}\n"
+        f"{context_section}"
+        f"{worker_section}\n"
         f"EVENT UNDER REVIEW:\n{event_summary}\n\n"
         f"{budget_line}\n\n"
         f"{UNTRUSTED_RULE}\n"

@@ -211,11 +211,12 @@ def test_the_loop_and_the_observer_read_one_floor():
 # the unattended profile, retired (IV plan R5)
 #
 # The observer's own unattended profile — deterministic terminal words, the
-# unattended cancel gate, the PLATFORM note — was deleted on 2026-09-24. The
-# observer has been off for every worker since 09-12, and the words a worker
-# turn needs now come from the turn guards, which run on every turn
-# (tests/test_turn_guards.py). What stays here is what still applies to any
-# observed turn.
+# unattended cancel gate, the PLATFORM note — was deleted on 2026-09-24, while
+# the observer was off for every worker. Its words moved to the turn guards,
+# which run on every turn (tests/test_turn_guards.py). When the observer came
+# back on for autocode and autotriage (2026-09-25) a narrower note and rail came
+# back with it (tests/test_iv_worker_observer.py). What stays here is what
+# still applies to any observed turn.
 # ---------------------------------------------------------------------------
 
 def _state(**kw) -> O.ObserverState:

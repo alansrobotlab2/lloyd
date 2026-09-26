@@ -328,22 +328,28 @@ def _session_backed_sources():
     return found
 
 
-def test_every_session_backed_source_is_unobserved_in_the_shipped_config():
-    """All off since cut 1 of senses-not-supervision (2026-09-12). The
-    observer's measured effect on unattended turns was negative — #874
-    abandoned at iteration 38 on an invented premise, sixteen false
-    repetition fires in a day — and what it provided there is done by the
-    anchors and the gate now. Recording is untouched: every one of these is
-    still a real session in the Background tab.
+#: Session-backed sources the observer watches in the shipped config. Off for
+#: all of them from cut 1 of senses-not-supervision (2026-09-12) — #874
+#: abandoned at iteration 38 on an invented premise, sixteen false repetition
+#: fires in a day — and back on for these two on 2026-09-25, after the causes
+#: were fixed in Inner Voice rather than by switching it off: the round-id and
+#: polling exemptions in the repetition guard (09-11), the terminal-only review
+#: that reads the whole trajectory (R2), and the worker note and report-ask
+#: rail (`observer._worker_note`, `_apply_decision_guards`).
+OBSERVED_SOURCES = {"autocode", "autotriage"}
 
-    Resolved through `source_inner_voice` against the real config, so a new
-    session source with no key fails here rather than opting itself in."""
+
+def test_only_the_named_session_backed_sources_are_observed_in_the_shipped_config():
+    """Resolved through `source_inner_voice` against the real config, so a new
+    session source with no key fails here rather than opting itself in.
+    Recording is untouched either way: every one of these is a real session
+    in the Background tab."""
     from workers.sources import _common as C
 
     sources = _session_backed_sources()
     assert {"autocode", "autotriage", "board-steward"} <= set(sources), sources
     for name in sources:
-        assert C.source_inner_voice(name) is False, name
+        assert C.source_inner_voice(name) is (name in OBSERVED_SOURCES), name
 
 
 def test_no_call_site_bakes_its_own_answer_in():

@@ -241,6 +241,33 @@ Event log: `inner_voice.observer_injected` (with `deterministic`, `guard`),
 - The `result` judgment, `tool_result` sampling, `ambient` / `clarify` as
   model levers, `unattended_*` sampling config.
 
+## Workers: back on for autocode and autotriage (2026-09-25)
+
+Off for every worker from 2026-09-12 on three incidents: #874 abandoned at
+iteration 38 on "deliver the final report now" and a confabulated "working
+tree clean"; 16 repetition fires in a day on round-id polling; an inject at
+241k tokens. None was a controlled measurement, and the cut also removed the
+one intervention the recovered record shows helping — "the primary stopped
+before finishing" — which R1 later restored as turn guards. Alan's rule
+(09-25): fix what got in the way inside Inner Voice, don't switch it off. So:
+
+| 09-12 harm | fixed by |
+|---|---|
+| round-id polling read as a loop | polling tools and `SM_…` ids exempt in the repetition guard (09-11) |
+| inject with no room to answer | the terminal review skips under the context floor (R2) |
+| confabulated state from fragments | the review reads the whole trajectory and 8k of terminal text (R2) |
+| "deliver the final report" on a worker | `observer._worker_note` → `observer_prompt.build_worker_note` in every worker review: PLATFORM, no human reader, the finalizer collects the outcome, and — from the turn guards' own `round_open` — whether a round is open and its only correct ending (commit, `automod_gate`, `automod_gate_wait`, land or abort). It is placed late in the prompt, beside the pressure notes it overrides |
+| the same, if the model ignores the note | `_apply_decision_guards` rewrites any inject `guards.asks_for_report` matches on a worker turn: to `UNATTENDED_ROUND_OPEN_CONTENT` with a round open, to `noop_worker_report` without one (safeguard `worker_content`, event `inner_voice.worker_report_ask_rewritten`). Negated asks ("do not write a report") are not asks |
+
+R5 had deleted exactly these two with the unattended profile, because no
+worker was observed then; re-enabling without them would have recreated #874.
+Alongside: the `round_open` turn guard may fire a second time when the turn did
+more work after the first nudge and stopped again (`ROUND_GATE_MAX_FIRES` 2),
+and the autocode reaper's 20-minute grace no longer follows `inner_voice` — it
+waited for the post-turn follow-up R2 retired (`abandon_grace_seconds`, 0).
+Worker sessions are not in the `iv-chat-1` A/B; a round's outcome with the
+observer on reads off the automod ledger joined by `session_id`.
+
 ## Known defects
 
 - **Guard races under `async_nonterminal`** (09-04 review A4): two async
