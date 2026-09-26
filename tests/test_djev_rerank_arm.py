@@ -340,7 +340,7 @@ def test_the_arm_and_the_shadow_are_exclusive():
     """With the arm ON djev IS the decision, and a row comparing djev's
     ordering against djev's ordering is not an observation."""
     import inspect
-    src = inspect.getsource(vault._vault_recall)
+    src = inspect.getsource(vault._vault_recall_base)
     i = src.index("elif djev_rerank:")
     block = src[i:i + 500]
     assert "_djev_rerank_pool" in block and "elif reranker is None:" in block

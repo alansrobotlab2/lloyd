@@ -230,6 +230,21 @@ lexically (width 13) moves nothing. Rule-regenerated aliases
 (`scripts/memory/regenerate_aliases.py`, 2,100 rows on a copy) moved nothing on
 the gold set. `eval/measurements/entity-anchoring-2026-09-25.md`.
 
+### 3.8 Topic phrases fused into the fact leg of `vault_recall` (#1456)
+
+**Measured and left off** (`vault_recall.topics_merge: off`; the code default is `off` too). The
+focus extractor drafts up to 3 topic phrases beside the raw recall, each phrase
+runs the fact leg only, and the fact lists are RRF-fused (k=60) to one recall's
+length; documents are untouched and prefetch never sees it. Pinned corpus,
+86-query dev set, djev replayed: fact_entity_recall **+0.083 [+0.030, +0.152]**
+(6/0, n=66), entity_recall +0.073 [+0.015, +0.136]; holdout 2 wins, 0 losses on
+every entity metric; +43 ms p50 / +346 ms p95. The `full` shape (documents fused
+too) gained doc_hit +0.093 [+0.023, +0.163] at ~+1.05 s a recall. **On top of §3.7's
+entity seeding the "facts" gain is gone**: fact_entity_recall −0.030 [−0.083, +0.008]
+(1/3), entity_hit 0.000, at +492 ms p50 — seeding already reaches the entities the
+phrases added, and each topic recall pays the seeding embedder. Off; revisit only with
+facts-only topic recalls that skip semantic seeds. `eval/measurements/recall-topics-merge-2026-09-25.md`.
+
 ## 4. What was measured and not kept
 
 | idea | result | why it stays out |

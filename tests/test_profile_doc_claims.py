@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 import prefetch as PF
-from agent_mcp.vault import _vault_recall
+from agent_mcp.vault import _vault_recall_base as _vault_recall
 from app import data_root as DR
 from app import paths as P
 from app.kg_store import configure, store

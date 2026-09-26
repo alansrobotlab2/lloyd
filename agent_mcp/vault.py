@@ -1898,9 +1898,14 @@ def _drop_recall_self_hits(query: str, documents: list[dict]) -> list[dict]:
     return [d for d in documents if keep(d)]
 
 
-def _vault_recall(params: dict, *, seed_top_k: int | None = None,
-                  reranker: str | None = None) -> dict:
+def _vault_recall_base(params: dict, *, seed_top_k: int | None = None,
+                       reranker: str | None = None, facts_only: bool = False) -> dict:
     """Combined recall over documents, entity facts and graph neighbours.
+
+    `facts_only` (keyword-only, never read from `params`) skips the document,
+    code-grep and graph-lookup legs and the ranker: the topics merge
+    (`_vault_recall`, #1456) needs only the fact leg of each topic phrase, and a
+    fact read is local while a document recall is a qmd request plus a djev read.
 
     `params` is what the `vault_recall` tool receives — `call_tool` hands this
     handler the client's argument dict raw — so every retrieval knob read out of it is agent-settable.
@@ -1989,7 +1994,7 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
     # the other legs as before.
     _early_search = None
     _early_pool = None
-    if semantic_seed_k():
+    if semantic_seed_k() and not facts_only:
         _early_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         _early_search = _early_pool.submit(_do_search)
 
@@ -2193,10 +2198,12 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
 
     try:
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-            search_fut = _early_search if _early_search is not None else pool.submit(_do_search)
+            _nothing = lambda: []  # noqa: E731 — a leg `facts_only` skips
+            search_fut = (pool.submit(_nothing) if facts_only else
+                          _early_search if _early_search is not None else pool.submit(_do_search))
             facts_fut = pool.submit(_do_facts)
-            grep_fut = pool.submit(_do_code_grep)
-            graph_lookup_fut = pool.submit(_do_graph_lookup)
+            grep_fut = pool.submit(_nothing if facts_only else _do_code_grep)
+            graph_lookup_fut = pool.submit(_nothing if facts_only else _do_graph_lookup)
             raw_results = search_fut.result()
             facts, graph_facts, fact_reads = facts_fut.result()
             grep_results = grep_fut.result()
@@ -2276,7 +2283,9 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
         # which seam cannot fire and what would lift it, and
         # `tests/test_djev_rerank_arm.py` runs the recall and counts recorder
         # calls instead of reading for the call.
-        if ranker == "djev":
+        if facts_only:
+            pass  # no documents to order, and no ranker verdict to record
+        elif ranker == "djev":
             ranked = _djev_rank_recall(documents, query)
             if ranked is None:
                 from app import qmd_health
@@ -2331,6 +2340,158 @@ def _vault_recall(params: dict, *, seed_top_k: int | None = None,
     finally:
         if _early_pool is not None:
             _early_pool.shutdown(wait=False)
+
+
+# ── Topic phrases merged into the recall (#1456, default off) ────────────────
+#
+# #1164 measured a "topics" arm: the focus extractor prefetch already runs
+# (`app.secondary_models._sync_secondary_focus_extraction`) drafts short topic
+# phrases from the query, each phrase is recalled, and the lists are fused with
+# the raw query's by reciprocal-rank fusion (k=60), cut to one recall's length so
+# the union cannot win on length. fact_entity_recall +0.068 [+0.015, +0.129] on
+# the 86-query dev set. It cannot fit prefetch's 300 ms, so it lives HERE, on the
+# `vault_recall` tool path only; prefetch is untouched.
+#
+# Two shapes, because the gain is on the FACT leg and the fact leg is local:
+#   "facts"  each phrase runs the fact leg only (no qmd request, no djev read);
+#            facts, graph facts and neighbours are fused, documents are the raw
+#            query's exactly. The draft runs beside the raw recall.
+#   "full"   each phrase is a whole recall, documents fused too (the #1164 arm);
+#            every phrase costs a qmd request and a djev read, and djev serves
+#            one request at a time (MAX_SEQS=1), so the reads queue.
+# The measurement and the verdict are in
+# `eval/measurements/recall-topics-merge-2026-09-25.md`.
+#
+# `vault_recall.topics_merge` in config.yaml, read at call time: "off" (the
+# default), "facts" or "full". Never read from `params`: a stray key must not
+# put an LLM call in front of a recall.
+RECALL_TOPICS_MERGE_DEFAULT = "off"
+RECALL_TOPICS_MODES = ("off", "facts", "full")
+RECALL_TOPICS_MAX = 3         # #1164's cap; the extractor returns up to 5
+RECALL_TOPICS_RRF_K = 60
+
+
+def recall_topics_merge_mode() -> str:
+    """The configured mode, or "off" for anything missing or unrecognised."""
+    try:
+        from app.config import CONFIG
+        mode = str(((CONFIG.get("vault_recall") or {}).get("topics_merge"))
+                   or RECALL_TOPICS_MERGE_DEFAULT).strip().lower()
+    except Exception:  # noqa: BLE001 — no config means production's default
+        mode = RECALL_TOPICS_MERGE_DEFAULT
+    return mode if mode in RECALL_TOPICS_MODES else "off"
+
+
+def _draft_recall_topics(query: str) -> list[str]:
+    """Topic phrases for `query`, at most `RECALL_TOPICS_MAX`. `[]` on any failure:
+    the merge is an addition to a recall, never a reason to fail one."""
+    try:
+        from app.secondary_models import _sync_secondary_focus_extraction
+        out, seen = [], set()
+        for t in _sync_secondary_focus_extraction(query) or []:
+            t = str(t).strip()
+            if t and t.lower() not in seen and t.lower() != query.strip().lower():
+                seen.add(t.lower())
+                out.append(t)
+        return out[:RECALL_TOPICS_MAX]
+    except Exception as e:  # noqa: BLE001
+        logger.debug("recall topics draft failed: %s", e)
+        return []
+
+
+def _fuse_topic_lists(lists: list[list[dict]], key, *, k: int = RECALL_TOPICS_RRF_K,
+              cap: int | None = None) -> list[dict]:
+    """Reciprocal-rank fusion, first occurrence kept, cut to the longest input.
+
+    The same fusion as `eval/self_question.rrf_fuse` (the instrument that
+    measured it): ties break on first appearance with the raw list first, so
+    with no extra lists the output IS the raw list.
+    """
+    scores: dict = {}
+    first: dict = {}
+    order: dict = {}
+    for li, lst in enumerate(lists):
+        for rank, item in enumerate(lst or [], start=1):
+            kk = key(item)
+            scores[kk] = scores.get(kk, 0.0) + 1.0 / (k + rank)
+            if kk not in first:
+                first[kk] = item
+                order[kk] = (li, rank)
+    ranked = sorted(scores, key=lambda kk: (-scores[kk], order[kk]))
+    if cap is None:
+        cap = max((len(lst or []) for lst in lists), default=0)
+    return [first[kk] for kk in ranked[:cap]]
+
+
+def _fact_fuse_key(f: dict) -> tuple:
+    return (str(f.get("entity") or "").lower(), str(f.get("id") or f.get("fact") or ""))
+
+
+def merge_topic_recalls(raw: dict, extra: list[dict], *, documents: bool) -> dict:
+    """`raw` with each list fused against the topic recalls in `extra`.
+
+    `documents=False` keeps the raw query's documents exactly (the "facts" mode:
+    the topic recalls never ran a document leg). Every other key of `raw` is kept.
+    """
+    allr = [raw] + [e for e in extra if isinstance(e, dict) and "error" not in e]
+    if len(allr) == 1:
+        return raw
+
+    def lists(field):
+        return [r.get(field) or [] for r in allr]
+
+    out = dict(raw)
+    if documents:
+        out["documents"] = _fuse_topic_lists(lists("documents"), lambda d: str(d.get("path") or ""))
+    out["facts"] = _fuse_topic_lists(lists("facts"), _fact_fuse_key)
+    for field, key in (("graph_expanded_facts", _fact_fuse_key),
+                       ("graph_neighbors_used",
+                        lambda n: str(n.get("entity") or "").lower())):
+        fused = _fuse_topic_lists(lists(field), key)
+        if fused:
+            out[field] = fused
+    return out
+
+
+def _vault_recall(params: dict, *, seed_top_k: int | None = None,
+                  reranker: str | None = None) -> dict:
+    """`vault_recall`: the combined recall (`_vault_recall_base`), plus the topics
+    merge when `vault_recall.topics_merge` asks for it (#1456, default off).
+
+    With the merge off this IS the base recall, call for call. The fallback
+    recursion (`reranker="qmd"`) always goes straight to the base, so a djev miss
+    never drafts twice.
+    """
+    mode = recall_topics_merge_mode() if reranker is None else "off"
+    query = str(params.get("query", "") or "").strip()
+    if mode == "off" or not query:
+        return _vault_recall_base(params, seed_top_k=seed_top_k, reranker=reranker)
+    import time as _time
+    t0 = _time.perf_counter()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        # The draft (a primary call, ~0.2 s) runs beside the raw recall (~0.5 s).
+        draft_fut = ex.submit(_draft_recall_topics, query)
+        raw = _vault_recall_base(params, seed_top_k=seed_top_k)
+        topics = draft_fut.result()
+    if not isinstance(raw, dict) or "error" in raw or not topics:
+        return raw
+    facts_only = mode == "facts"
+    sub = {k: v for k, v in params.items() if k != "query"}
+
+    def _one(t: str) -> dict:
+        try:
+            return _vault_recall_base({**sub, "query": t}, seed_top_k=seed_top_k,
+                                      facts_only=facts_only)
+        except Exception as e:  # noqa: BLE001 — one phrase is never the recall
+            logger.debug("recall topic %r failed: %s", t, e)
+            return {}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(topics)) as ex:
+        extra = list(ex.map(_one, topics))
+    out = merge_topic_recalls(raw, extra, documents=not facts_only)
+    out["topics_merge"] = {"mode": mode, "topics": topics,
+                           "ms": round((_time.perf_counter() - t0) * 1000, 1)}
+    return out
 
 
 # ── MCP registration ─────────────────────────────────────────────────────────

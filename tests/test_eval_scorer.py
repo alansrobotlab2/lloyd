@@ -273,7 +273,7 @@ def test_vault_recall_still_falls_back_to_the_same_constants():
     move it and no definition-time binding can freeze the number. `params.get`
     for this one would be the defect, not the fix."""
     from agent_mcp import vault
-    src = inspect.getsource(vault._vault_recall)
+    src = inspect.getsource(vault._vault_recall_base)
     for param, const in KNOBS.items():
         if param == "seed_top_k":
             assert f'params.get("{param}"' not in src, (
@@ -840,7 +840,7 @@ def test_expand_graph_default_is_named_by_one_production_constant():
         "expanding the graph by default, re-read "
         "tests/test_eval_corpus_guard.py::"
         "test_the_written_baseline_never_claims_graph_parity_it_lacks first")
-    src = inspect.getsource(vault._vault_recall)
+    src = inspect.getsource(vault._vault_recall_base)
     assert 'params.get("expand_graph", RECALL_EXPAND_GRAPH)' in src, (
         "_vault_recall defaults the knob from a literal again, so the constant "
         "can drift from what production actually serves")

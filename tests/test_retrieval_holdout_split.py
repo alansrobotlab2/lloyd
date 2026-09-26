@@ -208,6 +208,9 @@ READERS_ALLOWED = {
     "eval/vault_recall_holdout_queries.yaml",
     "eval/vault_recall_holdout_manifest.json",
     ".gitignore",
+    # Holdout-leg drivers: they set HOLDOUT_LEG_ENV and hand the leg to
+    # run_eval.py, which enforces the rule; they keep aggregates only (#1412).
+    "eval/recall_topics_merge.py",             # #1456
 }
 
 

@@ -1495,6 +1495,15 @@ prefetch:
   # the parallel facts worker. eval/measurements/lloydmemeval-2026-09-25.md.
   facts:
     rank: relevance
+# #1456: the focus extractor's topic phrases merged into the vault_recall TOOL
+# (never prefetch). off | facts | full; the code default is off. Alone, "facts"
+# measured fact_entity_recall +0.083 [+0.030, +0.152] on the pinned 86-query dev
+# set, but on top of #1486's entity seeding (live 2026-09-25) it adds nothing:
+# -0.030 [-0.083, +0.008] (1 win / 3 losses), +492 ms p50 / +1,476 ms p95, since
+# every topic recall then runs the seeding embedder. OFF.
+# eval/measurements/recall-topics-merge-2026-09-25.md
+vault_recall:
+  topics_merge: "off"
 workers:
   db_path: ${LLOYD_DATA}/workers.db
   enabled: true

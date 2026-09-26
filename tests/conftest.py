@@ -464,6 +464,11 @@ def _recall_ranked_by_qmd_in_tests(monkeypatch):
     """
     import agent_mcp.vault as _vault
     monkeypatch.setattr(_vault, "RECALL_RERANKER", "qmd")
+    # Same reason, other engine: config.yaml turns the topics merge on (#1456),
+    # which drafts on the LIVE primary. `tests/test_recall_topics_merge.py` sets
+    # the mode itself through config, which this block only defaults.
+    monkeypatch.setitem(__import__("app.config", fromlist=["CONFIG"]).CONFIG,
+                        "vault_recall", {"topics_merge": "off"})
     yield
 
 
