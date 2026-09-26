@@ -593,6 +593,51 @@ def _duplicate_effects_suppressed() -> int | None:
         return None
 
 
+def _hold_is_a_miss(row: dict[str, Any], fm: dict[str, Any], now) -> bool:
+    """Whether a past-due row's hold still counts as a schedule behaving.
+
+    Three answers, in the order the questions are asked:
+
+    * No hold reason at all, and its `next_run` has passed. That is the
+      definition of overdue, unchanged since the split was written.
+    * A hold reason that IS a dispatch-stopping status. `hold_reason` answers a
+      non-`up_next` task with its status verbatim, so a `blocked` of `draft` or
+      `paused` here means a person parked the task — the same two values the
+      scheduler reads as its kill switch (`autonomy.DISPATCH_STOPPING_STATUSES`).
+      Exempt however long the park runs: bounding these would light the alarm
+      permanently over parks that are rulings rather than slips (#68 is one of
+      them, by name), which is the exact failure the split exists to suppress.
+    * Anything else — outside its hours, waiting on an upstream, `no skill`,
+      a failure cooldown — is bounded by the task's OWN period, measured by
+      `autonomy.next_run_gap`'s `past_next_run`, the predicate #1121 unified
+      between the scheduler's stall scan and `compute_health`. `next_run` is
+      the reference because it is written at completion, so a backlog longer
+      than one interval is a whole extra period that went by without a
+      dispatch; and a row that is past due and has not run has been held for
+      all of that backlog, because the instant the hold lifted the scheduler
+      would have dispatched it.
+
+    An unmeasurable hold stays `held`: with no recognised `frequency`
+    `next_run_gap` yields no interval, and inventing a period for a task the
+    scheduler cannot pace is a guess about someone else's cadence. The
+    classifier downgrade is untouched by any of this — it leaves `blocked`
+    None, which is the first answer, so a scheduler that will not import
+    surfaces rows instead of hiding them.
+    """
+    if not row.get("blocked"):
+        return True
+    try:
+        import autonomy
+    except Exception:
+        return False
+    if str(row["blocked"]).strip() in autonomy.DISPATCH_STOPPING_STATUSES:
+        return False
+    try:
+        return bool(autonomy.next_run_gap(fm, now=now)["past_next_run"])
+    except Exception:
+        return False
+
+
 def _autonomy() -> dict[str, Any]:
     """Scheduled-task fleet: what is due, what is running, what is broken.
 
@@ -678,10 +723,24 @@ def _autonomy() -> dict[str, Any]:
         # one at midday, is past its next_run for most of every day; calling
         # that overdue keeps the counter permanently lit and buries the task
         # that really did miss its window.
-        now_iso = datetime.now(timezone.utc).isoformat()
-        past_due = [r for r in upcoming if (r["next_run"] or "") < now_iso]
-        overdue = [r for r in past_due if not r["blocked"]]
-        held = [r for r in past_due if r["blocked"]]
+        #
+        # That was the whole rule, and it left `held` bounded by nothing: a
+        # hold of nine hours and a hold of four days were filed in the same
+        # bucket as equally normal. Measured live 2026-09-26 03:00Z this
+        # endpoint answered `overdue_count: 0, held_count: 9` with #42 sitting
+        # inside `held` at 93.7 h — 3.91 of its own declared periods — past
+        # the next_run it never got to refresh, on the hold string "outside
+        # hours 00-04,22-23". So a hold is now bounded by one period of the
+        # task that declares it, and past the bound it is a miss that keeps
+        # its reason: `_hold_is_a_miss`.
+        now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        past_due = [(r, fm) for r, fm in scheduled
+                    if (r["next_run"] or "") < now_iso]
+        overdue: list[dict[str, Any]] = []
+        held: list[dict[str, Any]] = []
+        for row, fm in past_due:
+            (overdue if _hold_is_a_miss(row, fm, now) else held).append(row)
         pending = [r for r in upcoming if (r["next_run"] or "") >= now_iso]
         overdue.sort(key=lambda r: r["next_run"] or "")        # worst first
         held.sort(key=lambda r: r["next_run"] or "")           # worst first

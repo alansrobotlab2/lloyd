@@ -202,7 +202,14 @@ def test_a_task_with_no_skill_can_never_run_and_says_so(vault):
     that silence should end."""
     _task(vault, "orphan", status="up_next", next_run=_iso(days=-5), skill_name="")
     out = dash._autonomy()
-    assert out["held"][0]["blocked"] == "no skill"
+    # #1519 clause 1 moved this row, and only this row, out of `held`. Five
+    # days past a `daily` cadence is five of the task's own periods, and the
+    # clause is that a hold which has outlived its period is a miss that keeps
+    # its reason — so the bucket changed and the assertion about the reason did
+    # not. `held[0]` here was pinning the pre-#1519 rule that a hold of any
+    # length is normal, which is the behaviour #1519's acceptance says is wrong.
+    assert out["overdue"][0]["blocked"] == "no skill"
+    assert out["held"] == []
 
 
 def test_an_unheld_past_due_task_is_still_overdue(vault):
