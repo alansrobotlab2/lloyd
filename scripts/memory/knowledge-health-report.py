@@ -361,14 +361,18 @@ def stale_coverage(entities: dict) -> tuple[int, int]:
     return unevaluable, active_total
 
 
-def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7) -> dict:
+def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7,
+                    baseline_path=None) -> dict:
     """Contamination, near-duplicate clusters and regrowth.
 
-    Delegates to `kg_hygiene.snapshot`, which is the measured definition of
-    all three. This module had its own re-implementation of each — same
-    intent, different code — so the report and `kg_health --json` could
-    disagree about the same tree and there was no way to tell which was
-    right. The shapes the report renders are kept.
+    Delegates to `kg_hygiene`, which is the measured definition of all three.
+    This module had its own re-implementation of each — same intent, different
+    code — so the report and `kg_health --json` could disagree about the same
+    tree and there was no way to tell which was right. The shapes the report
+    renders are kept, including `regrowth_line`: the one phrase kg_hygiene
+    formats for every human surface, counts AND the baseline they are a delta
+    against, so this row can no longer print `1 of 12027 new dirs` with the
+    12,027 being the whole store (#1535).
     """
     import importlib.util
     here = Path(__file__).resolve().parent
@@ -382,7 +386,7 @@ def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7) -> di
     detail = kg_hygiene.contamination(root)
     c = {k: v for k, v in detail.items() if k != "items"}
     n = kg_hygiene.near_duplicates(root)
-    r = kg_hygiene.regrowth(root, regrowth_days)
+    r = kg_hygiene.regrowth(root, regrowth_days, baseline_path=baseline_path)
     contaminated = [(item["dir"], tag, slot["facts"])
                     for item in detail["items"]
                     for tag, slot in item["foreign"].items()]
@@ -404,8 +408,13 @@ def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7) -> di
         "near_dup_dirs": n["dirs"],
         "near_dup_tiers": n["by_tier"],
         "regrown": regrown,
+        # None when no baseline exists, which is the point: the alternative was
+        # the store's own size wearing a growth number (#1535).
         "new_dirs": r["new_dirs"],
         "regrowth_days": r["days"],
+        "regrowth_line": kg_hygiene.describe(r),
+        "baseline_at": r.get("baseline_at"),
+        "dirs_at_baseline": r.get("dirs_at_baseline"),
         "provenance": kg_hygiene.provenance_coverage(root),
     }
 
@@ -676,7 +685,13 @@ def generate_report(
         lines.append(f"| Contaminated entity dirs (facts tagged with another entity) | {hygiene['contaminated_dirs']} |")
         lines.append(f"| Foreign facts | {hygiene['foreign_facts']} |")
         lines.append(f"| Near-duplicate name clusters | {hygiene['near_dup_clusters']} ({hygiene['near_dup_dirs']} dirs; {hygiene['near_dup_tiers']}) |")
-        lines.append(f"| Near-duplicates born in the last {hygiene['regrowth_days']} days | {len(hygiene['regrown'])} of {hygiene['new_dirs']} new dirs |")
+        # kg_hygiene's own phrase, reference and all. The row this replaces said
+        # "born in the last 7 days | 51 of 12027 new dirs", where 12,027 was the
+        # entire store and the window covered it because a rebuild had re-dated
+        # every file (#1535). `.get` because a caller that hand-builds a hygiene
+        # dict (the stale-facts tests do) must not turn a missing reference into
+        # a bare number.
+        lines.append(f"| Near-duplicate dirs coined since the baseline | {hygiene.get('regrowth_line') or 'not measured: no baseline was named'} |")
         lines.append(f"| Provenance coverage (created_at and source_doc) | {_provenance_cell(hygiene.get('provenance'))} |")
         dup_cell = ("not measured" if duplicate_id_files is None
                     else str(duplicate_id_files))
@@ -889,7 +904,11 @@ def main():
     print(f"  Stale unevaluable: {stale_unevaluable[0]:,} of {stale_unevaluable[1]:,} active facts "
           f"carry no usable date")
     print(f"  Contaminated dirs: {hygiene['contaminated_dirs']} ({hygiene['foreign_facts']} foreign facts)")
-    print(f"  Near-dup clusters: {hygiene['near_dup_clusters']}; regrown in {hygiene['regrowth_days']}d: {len(hygiene['regrown'])}")
+    # Not "regrown in 7d": with #1535 the count is a delta against the stored
+    # entity-dir baseline, so the stdout line prints kg_hygiene's own phrase,
+    # which carries the date that delta runs from.
+    print(f"  Near-dup clusters: {hygiene['near_dup_clusters']}; regrowth: "
+          f"{hygiene.get('regrowth_line') or 'not measured: no baseline was named'}")
     # On its own line, right under the name-cluster line, because the two are
     # different measurements and the #499 trend is read from this one.
     print(f"  Exact-duplicate fact rows (facts_idx.text_hash): {_fact_duplicate_cell(fact_dups)}")

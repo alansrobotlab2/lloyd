@@ -26,6 +26,12 @@ Usage:
   python scripts/memory/kg_health.py --json -o FILE  # write snapshot to FILE
                                                      # (name FILE per run, in UTC:
                                                      # kg-health-<date -u +%Y-%m-%dT%H%M%SZ>.json)
+
+A run that writes a snapshot ALSO rolls the entity-directory baseline forward
+after it (`kg_hygiene.write_baseline`), because that file is what the hygiene
+`regrowth` section diffs `new_dirs` against — the reference has to move with the
+snapshots it feeds, and an inspection (`--json` to stdout) must not move it
+(#1535). `--no-baseline-update` skips it; `--baseline FILE` points at another.
 """
 from __future__ import annotations
 
@@ -146,7 +152,7 @@ def degree_buckets(edges: list[dict[str, Any]]) -> dict[str, int]:
 # ── Snapshot ─────────────────────────────────────────────────────────────────
 
 
-def build_snapshot() -> dict[str, Any]:
+def build_snapshot(baseline_path=None) -> dict[str, Any]:
     root = VAULT_FACTS_ROOT
     if not root.exists():
         raise SystemExit(f"facts root not found: {root}")
@@ -222,7 +228,7 @@ def build_snapshot() -> dict[str, Any]:
         # Cross-entity contamination, near-duplicate clusters, duplicate regrowth
         # (kg_hygiene.py). Added 2026-09-03 after 63 directories were found holding
         # facts about a different entity and nothing had measured it.
-        "hygiene": _hygiene_section(),
+        "hygiene": _hygiene_section(baseline_path),
         "fact_categories": dict(
             collections.Counter(categories).most_common()
         ),
@@ -243,14 +249,34 @@ def _latent_relationship_entities(st) -> int:
     return len(with_prose - sourced)
 
 
-def _hygiene_section() -> dict[str, Any]:
+def _kg_hygiene():
+    """kg_hygiene sits beside this script, not in the package."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import kg_hygiene
+    return kg_hygiene
+
+
+def _hygiene_section(baseline_path=None) -> dict[str, Any]:
     try:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
-        import kg_hygiene
-        snap = kg_hygiene.snapshot(VAULT_FACTS_ROOT, days=7)
+        snap = _kg_hygiene().snapshot(VAULT_FACTS_ROOT, days=7, baseline_path=baseline_path)
+        # Passed through whole, not reshaped: `regrowth` carries the baseline it
+        # diffed against (`dirs_at_baseline`, `baseline_at`, `no_baseline_reason`)
+        # and the snapshot is the only place a reader can check its number
+        # against (#1535 clause 3). Filtering keys here is what made the field
+        # unreadable once already.
         return {k: v for k, v in snap.items() if k in ("contamination", "near_duplicates", "regrowth")}
     except Exception as e:  # never let hygiene break the health snapshot
         return {"error": f"{type(e).__name__}: {e}"}
+
+
+def _regrowth_cell(r: dict[str, Any]) -> str:
+    """`kg_hygiene.describe`, with a failure that still refuses to print a bare
+    count: `of 12027 new dirs` with no reference beside it is the #1535 defect,
+    so even the error path says the reference is missing rather than omitting it."""
+    try:
+        return _kg_hygiene().describe(r)
+    except Exception as e:
+        return f"not measured: the regrowth reference could not be rendered ({type(e).__name__}: {e})"
 
 
 def _pct(n: int, total: int) -> float:
@@ -284,7 +310,10 @@ def print_summary(s: dict[str, Any]) -> None:
         print("hygiene")
         print(f"  contaminated dirs         {c['dirs']:>8,}   ({c['foreign_facts']} facts about another entity)")
         print(f"  near-duplicate clusters   {n['clusters']:>8,}   {n['by_tier']}")
-        print(f"  near-dup regrowth {r['days']}d      {r['near_dup_new']:>8,}   of {r['new_dirs']} new dirs")
+        # The reference belongs beside the number, not in a footnote: the line
+        # this replaces read "51 of 12027 new dirs", where 12027 was the whole
+        # store and nothing on the page said so (#1535 clause 5).
+        print(f"  near-dup regrowth         {_regrowth_cell(r)}")
     print()
     print(f"  names >=5 words          {ent['names_5plus_words']:>8,}"
           f"   ({ent['names_5plus_words_pct']}%)  <- Phase 1 target")
@@ -302,18 +331,47 @@ def print_summary(s: dict[str, Any]) -> None:
                 print(f"    {gr['degree_distribution'][k]:>6,}  degree {k}")
 
 
+def _advance_baseline(baseline_path=None) -> None:
+    """Roll the regrowth reference forward to the directory set just snapshotted.
+
+    Only a run that WRITES a snapshot advances it. Advancing on `--json` to
+    stdout — someone poking at the numbers — would reset the reference under the
+    next scheduled run and report zero growth, which is how an instrument ends up
+    measuring the last thing that touched it.
+
+    A warning, not a failed run: the snapshot is already on disk, and the next
+    run then diffs against the older reference — a bigger number, still honest,
+    still labelled with the date it is a delta from.
+    """
+    try:
+        rec = _kg_hygiene().write_baseline(VAULT_FACTS_ROOT, baseline_path)
+        print(f"advanced entity-dir baseline {rec['path']} "
+              f"({rec['dirs']:,} dirs at {rec['captured_at']})", file=sys.stderr)
+    except Exception as e:
+        print(f"WARNING: entity-dir baseline not advanced: {type(e).__name__}: {e}",
+              file=sys.stderr)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Knowledge-graph health snapshot (#380)")
     ap.add_argument("--json", action="store_true", help="emit raw JSON")
     ap.add_argument("-o", "--output", type=Path, help="write JSON snapshot to FILE")
+    ap.add_argument("--baseline", type=Path, default=None,
+                    help="entity-dir baseline file regrowth diffs against (default: kg_hygiene.BASELINE_PATH)")
+    ap.add_argument("--no-baseline-update", action="store_true",
+                    help="do not roll the entity-dir baseline forward after writing a snapshot")
     args = ap.parse_args()
 
-    snapshot = build_snapshot()
+    snapshot = build_snapshot(baseline_path=args.baseline)
 
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(snapshot, indent=2))
         print(f"wrote {args.output}", file=sys.stderr)
+        # After the snapshot, so the `new_dirs` it holds is the delta from the
+        # reference that existed when this run started.
+        if not args.no_baseline_update:
+            _advance_baseline(args.baseline)
 
     if args.json:
         print(json.dumps(snapshot, indent=2))

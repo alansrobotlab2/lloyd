@@ -1,6 +1,7 @@
 """knowledge-health-report.py — the Hygiene section computed from loaded facts."""
 import importlib.util
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -23,24 +24,32 @@ def _facts(root, name, cat, items):
     return p
 
 
+def _kg_hygiene():
+    """kg_hygiene by the path `compute_hygiene` imports it under, so the
+    baseline seeded here is the one the report reads."""
+    sys.path.insert(0, str(ROOT / "scripts" / "memory"))
+    import kg_hygiene
+    return kg_hygiene
+
+
 def test_hygiene_from_loaded_entities(tmp_path):
     root = tmp_path / "facts"
     _facts(root, "Intel", "state", [("Intel", "chips"), ("Intel Pipeline System", "scans arxiv")])
     _facts(root, "vLLM", "state", [("vLLM", "serves")])
-    old = _facts(root, "vllm", "state", [("vllm", "lowercase twin")])
     _facts(root, "Alfie", "state", [("Alfie", "robot")])
+    base = tmp_path / "baseline.json"
+    _kg_hygiene().write_baseline(root, base)
+    # the lowercase twin appears after the reference, next to its month-old sibling
+    _facts(root, "vllm", "state", [("vllm", "lowercase twin")])
     now = datetime.now(timezone.utc)
-    # vLLM is a month old; its lowercase twin was born yesterday
-    for f in (root / "vLLM").glob("*.md"):
-        os.utime(f, (now.timestamp() - 30 * 86400,) * 2)
-    os.utime(old, (now.timestamp() - 86400,) * 2)
 
     entities = khr.load_entities(root)
-    h = khr.compute_hygiene(entities, now)
+    h = khr.compute_hygiene(entities, now, baseline_path=base)
     assert h["contaminated"] == [("Intel", "Intel Pipeline System", 1)]
     assert h["contaminated_dirs"] == 1 and h["foreign_facts"] == 1
     assert h["near_dup_clusters"] == 1 and h["near_dup_dirs"] == 2
     assert h["near_dup_tiers"] == {"SAFE": 1}
+    assert h["new_dirs"] == 1 and h["dirs_at_baseline"] == 3
     assert [(n, o) for n, o, _ in h["regrown"]] == [("vllm", "vLLM")]
 
     report = khr.generate_report(khr.compute_entity_stats(entities),
@@ -57,21 +66,27 @@ def test_hygiene_section_is_optional(tmp_path):
     assert "## Hygiene" not in report
 
 
-def test_hygiene_regrowth_uses_fact_created_at(tmp_path):
+def test_hygiene_regrowth_is_a_baseline_diff_not_a_created_at_window(tmp_path):
+    """Both files were written just now and their `created_at` says so, which is
+    the state the 2026-09-23 rebuild left the live tree in: every directory
+    dated inside the window, `new_dirs` equal to the store's own size (#1535).
+    The reference is the stored directory set, so exactly one directory is
+    new here — the twin created after it."""
     root = tmp_path / "facts"
     now = datetime.now(timezone.utc)
-    old_iso = (now.replace(microsecond=0) - __import__("datetime").timedelta(days=40)).isoformat()
-    new_iso = (now.replace(microsecond=0) - __import__("datetime").timedelta(days=1)).isoformat()
+    fresh_iso = now.replace(microsecond=0).isoformat()
     a = _facts(root, "vLLM", "state", [("vLLM", "serves")])
+    base = tmp_path / "baseline.json"
+    _kg_hygiene().write_baseline(root, base)
     b = _facts(root, "vllm", "state", [("vllm", "twin")])
-    for p, iso in ((a, old_iso), (b, new_iso)):
+    for p in (a, b):
         fm = yaml.safe_load(p.read_text().split("---")[1])
         for f in fm["facts"]:
-            f["created_at"] = iso
+            f["created_at"] = fresh_iso                  # rebuilt: every fact re-dated today
         p.write_text(f"---\n{yaml.dump(fm, sort_keys=False)}---\n\nbody\n")
-    # both files were written just now — mtime would call both "new"
-    h = khr.compute_hygiene(khr.load_entities(root), now)
-    assert h["new_dirs"] == 1
+
+    h = khr.compute_hygiene(khr.load_entities(root), now, baseline_path=base)
+    assert h["new_dirs"] == 1 and h["dirs_at_baseline"] == 1
     assert [(n, o) for n, o, _ in h["regrown"]] == [("vllm", "vLLM")]
 
 
@@ -193,7 +208,12 @@ def test_the_script_prints_the_fact_level_total(tmp_path):
 def _hygiene(**over):
     h = {"contaminated_dirs": 0, "foreign_facts": 0, "near_dup_clusters": 0,
          "near_dup_dirs": 0, "near_dup_tiers": {}, "regrown": [], "new_dirs": 0,
-         "regrowth_days": 7, "contaminated": []}
+         "regrowth_days": 7, "contaminated": [],
+         # #1535: the phrase kg_hygiene formats, counts AND reference, which is
+         # what the regrowth row renders.
+         "regrowth_line": "0 of 0 new dirs (baseline 2026-09-26T07:27:00+00:00 "
+                          "over 12,027 dirs)",
+         "baseline_at": "2026-09-26T07:27:00+00:00", "dirs_at_baseline": 12027}
     h.update(over)
     return h
 
@@ -234,3 +254,75 @@ def test_duplicate_fact_id_row_is_present_at_zero_and_nonzero():
         row = _row(_report(_hygiene(), duplicate_id_files=n),
                    "Files with duplicate fact IDs")
         assert row.endswith(f"| {n} |"), row
+
+
+# ── #1535 clause 5: the reference is printed beside the number ────────────────
+
+
+def test_the_regrowth_row_prints_the_reference_beside_the_number(tmp_path):
+    root = tmp_path / "facts"
+    _facts(root, "Intel", "state", [("Intel", "chips")])
+    _facts(root, "vLLM", "state", [("vLLM", "serves")])
+    _facts(root, "Alfie", "state", [("Alfie", "robot")])
+    base = tmp_path / "baseline.json"
+    _kg_hygiene().write_baseline(root, base)
+    _facts(root, "vllm", "state", [("vllm", "twin")])
+    h = khr.compute_hygiene(khr.load_entities(root), datetime.now(timezone.utc),
+                            baseline_path=base)
+
+    row = _row(_report(h), "Near-duplicate dirs coined")
+    assert "1 of 1 new dirs" in row, row
+    assert h["baseline_at"] in row, row              # the moment the reference was taken
+    assert "over 3 dirs" in row, row                 # and how big it was
+    assert "7 days" not in row, row                  # the window bounds nothing
+
+
+def test_the_regrowth_row_says_not_measured_without_a_baseline(tmp_path):
+    root = tmp_path / "facts"
+    _facts(root, "Intel", "state", [("Intel", "chips")])
+    _facts(root, "vllm", "state", [("vllm", "twin")])
+    _facts(root, "Alfie", "state", [("Alfie", "robot")])
+    h = khr.compute_hygiene(khr.load_entities(root), datetime.now(timezone.utc),
+                            baseline_path=tmp_path / "absent.json")
+    assert h["new_dirs"] is None
+
+    row = _row(_report(h), "Near-duplicate dirs coined")
+    assert "not measured" in row, row
+    assert "absent.json" in row, row                 # says which file is missing
+    assert "of 3 new dirs" not in row, row           # never the store's own size
+
+
+def test_a_hygiene_dict_with_no_reference_cannot_print_a_bare_count():
+    """The row used to be composed from the raw keys — `{len(regrown)} of
+    {new_dirs} new dirs` — so whatever a caller left in `new_dirs` was printed
+    as fact with nothing beside it. 12,027 is the number #1535 was filed on: the
+    entire entity store, rendered as `51 of 12027 new dirs` and read as a week's
+    growth. Given counts and no reference, the row now prints no number at all."""
+    h = _hygiene(new_dirs=12027, near_dup_clusters=51,
+                 regrown=[("vllm", "vLLM", "CASE")] * 51)
+    del h["regrowth_line"]
+
+    row = _row(_report(h), "Near-duplicate dirs coined")
+    assert "not measured" in row, row
+    assert "12027" not in row and "12,027" not in row, row
+    assert "51" not in row, row
+
+
+def test_stdout_prints_the_reference_next_to_the_regrowth_count(tmp_path):
+    """The stdout recap used to read `regrown in 7d: 1` — the same number with
+    even less context than the table row above it. It prints kg_hygiene's
+    phrase, which carries the reference or the reason there isn't one."""
+    root = tmp_path / "facts"
+    _facts(root, "Intel", "state", [("Intel", "chips")])
+    env = {**os.environ, "LLOYD_FACTS_ROOT": str(root)}
+    script = str(ROOT / "scripts" / "memory" / "knowledge-health-report.py")
+    proc = subprocess.run([sys.executable, script, "--output-dir", str(tmp_path),
+                           "--facts-dir", str(root), "--no-alarm-exit"],
+                          capture_output=True, text=True, timeout=300, env=env, cwd=str(ROOT))
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    lines = [ln for ln in proc.stdout.splitlines() if "regrowth" in ln]
+    assert len(lines) == 1, proc.stdout[-1500:]
+    # No baseline exists in the scratch data root this run is given, so the
+    # honest rendering is the reason, not a directory count.
+    assert "not measured" in lines[0] and "no baseline file at" in lines[0], lines[0]
+    assert "regrown in" not in proc.stdout, proc.stdout
