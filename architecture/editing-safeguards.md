@@ -377,7 +377,7 @@ pins all of it, including the probe.
 
 `agent_mcp/code_graph.py` answers "who calls this" and "what breaks if I
 change it" from graphify's AST extraction of a tree
-(`<root>/graphify-out/graph.json`, gitignored, ~15 s to build). Six tools:
+(`~/lloyd-data/code-graph/<tree>/graph.json`, ~15 s to build). Six tools:
 `graph_explain`, `graph_affected`, `graph_path`, `graph_hubs`,
 `graph_status`, `graph_refresh`. `root` is explicit (`LLOYD_HOME`, an `SM_…`
 round id, or a path) and never inferred; staleness is commit mismatch *or* an

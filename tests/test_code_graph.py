@@ -65,7 +65,10 @@ def _graph_doc(commit="c0ffee", edges_key="links"):
 
 
 @pytest.fixture(autouse=True)
-def _clean_module_state():
+def _clean_module_state(tmp_path, monkeypatch):
+    # Every test gets its own graph store: graphs live under the data root now,
+    # keyed by tree, and one test's graph must not answer for another's tree.
+    monkeypatch.setattr(CG, "CODE_GRAPH_DIR", tmp_path / "code-graph-store")
     CG._CACHE.clear()
     CG._LOCKS.clear()
     CG._LAST_REFRESH.clear()
@@ -77,9 +80,8 @@ def _clean_module_state():
 
 
 def _write_graph(root: Path, doc: dict) -> Path:
-    out = root / CG.GRAPH_DIRNAME
-    out.mkdir(parents=True, exist_ok=True)
-    gp = out / CG.GRAPH_FILENAME
+    gp = CG.graph_path_for(root)
+    gp.parent.mkdir(parents=True, exist_ok=True)
     gp.write_text(json.dumps(doc))
     return gp
 
@@ -494,8 +496,9 @@ def _record_exec(monkeypatch, doc_after=None, root=None, rc=0, hang=False):
 
     real_exec = asyncio.create_subprocess_exec
 
-    async def fake(*argv, cwd=None, stdout=None, stderr=None, start_new_session=False):
-        seen.append({"argv": list(argv), "cwd": cwd,
+    async def fake(*argv, cwd=None, env=None, stdout=None, stderr=None,
+                   start_new_session=False):
+        seen.append({"argv": list(argv), "cwd": cwd, "env": env,
                      "start_new_session": start_new_session})
         if argv[0] == "git":
             return await real_exec(
@@ -518,6 +521,8 @@ async def test_refresh_runs_update_then_cluster_only_in_its_own_session(repo, mo
     assert steps[0][1:] == ["update", str(repo), "--no-cluster"]
     assert steps[1][1:] == ["cluster-only", str(repo), "--no-label", "--no-viz"]
     assert all(s["start_new_session"] for s in seen if s["argv"][0] != "git")
+    assert {s["env"]["GRAPHIFY_OUT"] for s in seen if s["argv"][0] != "git"} \
+        == {str(CG.graph_dir_for(repo))}
 
 
 async def test_refresh_timeout_kills_the_process_group(repo, monkeypatch):
@@ -614,7 +619,10 @@ def test_module_never_blocks_the_loop_with_subprocess_run():
 
 
 def test_graphify_out_is_ignored_by_gitignore_not_info_exclude():
-    """A build must not dirty the tree — the automod gate refuses a dirty one."""
+    """A build must not dirty the tree — the automod gate refuses a dirty one.
+
+    `refresh` writes under the data root now, but graphify's default is still
+    `<tree>/graphify-out`, so a hand-run `graphify update .` lands there."""
     from app.paths import LLOYD_HOME
     r = subprocess.run(
         ["git", "-C", str(LLOYD_HOME), "check-ignore", "-v",
@@ -624,3 +632,85 @@ def test_graphify_out_is_ignored_by_gitignore_not_info_exclude():
     source = r.stdout.split(":")[0]
     assert source.endswith(".gitignore"), \
         f"ignored by {source!r}, which a fresh clone or worktree would not have"
+
+
+# ── where the graph lives (the data root, keyed by tree) ────────────────────
+
+def test_a_graph_lives_under_the_data_root_keyed_by_its_tree(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    assert CG.graph_dir_for(a).parent == CG.CODE_GRAPH_DIR
+    assert CG.graph_dir_for(a) != CG.graph_dir_for(b)
+    assert not str(CG.graph_path_for(a)).startswith(str(a) + "/")
+
+
+def test_a_symlinked_path_to_a_tree_names_the_same_graph(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "link").symlink_to(real)
+    assert CG.graph_dir_for(tmp_path / "link") == CG.graph_dir_for(real)
+
+
+def test_refresh_points_graphify_at_the_store_and_leaves_the_tree_clean(
+        repo, monkeypatch):
+    """Both graphify calls get GRAPHIFY_OUT, the graph lands there with its
+    `root` file, and nothing appears in the tree — a new untracked directory
+    there is what `stray_in_tree` and the automod gate both object to."""
+    seen = []
+
+    async def _fake(argv, *, cwd=None, timeout=30.0, env=None):
+        seen.append((argv[1], (env or {}).get("GRAPHIFY_OUT")))
+        if argv[1] == "update":
+            out = Path(env["GRAPHIFY_OUT"])
+            head = _git(repo, "rev-parse", "HEAD").stdout.strip()
+            (out / "graph.json").write_text(json.dumps(_graph_doc(head)))
+        return 0, "", ""
+
+    monkeypatch.setattr(CG, "_exec_or_timeout", _fake)
+    monkeypatch.setattr(CG, "_binary", lambda: "graphify")
+    before = sorted(p.name for p in repo.iterdir())
+    result = asyncio.run(CG.refresh(repo, force=True))
+
+    want = str(CG.graph_dir_for(repo))
+    assert seen == [("update", want), ("cluster-only", want)], seen
+    assert "error" not in result, result
+    assert (CG.graph_dir_for(repo) / CG.ROOT_FILENAME).read_text().strip() \
+        == os.path.realpath(repo)
+    assert sorted(p.name for p in repo.iterdir()) == before
+
+
+def test_prune_drops_only_the_graphs_of_trees_that_are_gone(tmp_path):
+    live, gone = tmp_path / "live", tmp_path / "gone"
+    live.mkdir(); gone.mkdir()
+    for root in (live, gone):
+        d = CG.graph_dir_for(root)
+        d.mkdir(parents=True)
+        (d / CG.ROOT_FILENAME).write_text(os.path.realpath(root) + "\n")
+        (d / CG.GRAPH_FILENAME).write_text("{}")
+    foreign = CG.CODE_GRAPH_DIR / "not-written-by-refresh"
+    foreign.mkdir()
+    gone_dir = CG.graph_dir_for(gone)
+    gone.rmdir()
+
+    removed = CG._prune_orphans()
+
+    assert removed == [os.path.realpath(tmp_path) + "/gone"]
+    assert not gone_dir.exists()
+    assert CG.graph_path_for(live).is_file()
+    assert foreign.is_dir(), "a directory refresh did not write is not its to delete"
+
+
+def test_a_build_without_a_commit_stamp_says_so(repo, monkeypatch):
+    """Out of the tree, graphify's own fallback cannot find the repo, so the
+    stamp comes only from `cluster-only`; a build that lost it must not pass
+    silently as fresh-looking-but-always-stale."""
+    async def _fake(argv, *, cwd=None, timeout=30.0, env=None):
+        if argv[1] == "update":
+            (Path(env["GRAPHIFY_OUT"]) / "graph.json").write_text(
+                json.dumps(_graph_doc("")))
+        return (0 if argv[1] == "update" else 1), "", "boom"
+
+    monkeypatch.setattr(CG, "_exec_or_timeout", _fake)
+    monkeypatch.setattr(CG, "_binary", lambda: "graphify")
+    result = asyncio.run(CG.refresh(repo, force=True))
+    assert "built_at_commit" in result.get("warning", ""), result

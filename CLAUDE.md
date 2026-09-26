@@ -336,7 +336,8 @@ Every tool, built-ins included, lives in the lloyd-mcp aggregator.
 `agent_mcp/code_graph.py` answers "who calls this / what breaks" from
 graphify's AST graph via `graph_explain`, `graph_affected`, `graph_path`,
 `graph_hubs`, `graph_status`, `graph_refresh`. `root` is explicit, never
-inferred; `graphify-out/` must stay gitignored; it is blind across HTTP and
+inferred; graphs live in `~/lloyd-data/code-graph/<tree>/` (`CODE_GRAPH_DIR`,
+a cache datawatch skips); it is blind across HTTP and
 MCP seams (keep Grep for strings). No `enabled` flag — the kill switch is
 `disabled_tools`. The vault skill's blast-radius step is held as a patch;
 after lloyd-mcp restarts on the merged code apply it:

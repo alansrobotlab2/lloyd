@@ -412,7 +412,8 @@ def _rel_to(root: str, edited: str) -> str:
 def _root_for(cg: Any, edited: str, fallback_root: str) -> str:
     """The tree whose graph describes this file.
 
-    Nearest `graphify-out/` above it, so an automod worktree — where the
+    Nearest directory above it that has a graph (`code_graph.graph_path_for`,
+    keyed by tree under the data root), so an automod worktree — where the
     round ran `graph_refresh` — gets its own graph rather than the live
     checkout's. Otherwise the live checkout, but only for a file actually
     inside it: answering about a tree the file is not in would name callers

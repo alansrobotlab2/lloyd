@@ -13,6 +13,13 @@ import time as _time
 import pytest
 
 from agent_mcp import _edit_diagnostics as D, builtin_fs as FS
+from agent_mcp import code_graph as CG
+
+
+@pytest.fixture(autouse=True)
+def _own_graph_store(tmp_path_factory, monkeypatch):
+    """Graphs live under the data root keyed by tree; each test gets its own store."""
+    monkeypatch.setattr(CG, "CODE_GRAPH_DIR", tmp_path_factory.mktemp("code-graph-store"))
 
 SID = "20260908_130000_diag"
 
@@ -398,9 +405,9 @@ def _fixture_repo(tmp_path, graph=None):
     (root / "pkg" / "core.py").write_text(CORE)
     (root / "pkg" / "api.py").write_text(API)
     (root / "pkg" / "cli.py").write_text(CLI)
-    (root / "graphify-out").mkdir(exist_ok=True)
-    (root / "graphify-out" / "graph.json").write_text(
-        json.dumps(graph if graph is not None else _fixture_graph()))
+    gp = CG.graph_path_for(root)
+    gp.parent.mkdir(parents=True, exist_ok=True)
+    gp.write_text(json.dumps(graph if graph is not None else _fixture_graph()))
     return root
 
 
@@ -550,7 +557,7 @@ async def test_a_stub_or_non_python_write_adds_no_rail(bound, repo):
 
 
 async def test_a_module_with_no_graph_anywhere_adds_no_rail(bound, tmp_path):
-    """No graphify-out up the tree, and no live fallback root either."""
+    """No graph for any tree above it, and no live fallback root either."""
     root = tmp_path / "elsewhere"
     root.mkdir()
     (root / "solo.py").write_text("def only():\n    return 1\n")

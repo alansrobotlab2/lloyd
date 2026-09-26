@@ -76,8 +76,14 @@ class Snapshot:
                    top=dict(d.get("top") or {}), inode=d.get("inode"))
 
 
-def measure(root: str, now: float | None = None) -> Snapshot | None:
-    """Count files under `root`, per top-level folder. None if root is gone."""
+def measure(root: str, now: float | None = None, *,
+            skip_top: frozenset[str] = frozenset()) -> Snapshot | None:
+    """Count files under `root`, per top-level folder. None if root is gone.
+
+    `skip_top` names top-level folders that are not counted at all: a
+    rebuildable cache inside a watched root (datawatch's `code-graph`) is not
+    data, and one emptying must not read as a folder being wiped.
+    """
     try:
         st = os.stat(root)
     except OSError:
@@ -89,7 +95,7 @@ def measure(root: str, now: float | None = None) -> Snapshot | None:
         try:
             with os.scandir(d) as it:
                 for e in it:
-                    if e.name in SKIP_DIRS:
+                    if e.name in SKIP_DIRS or (bucket is None and e.name in skip_top):
                         continue
                     try:
                         is_dir = e.is_dir(follow_symlinks=False)
@@ -142,6 +148,8 @@ class VaultWatch:
     """The guardian-side state machine: history, latch, persistence."""
 
     what = "vault"
+    #: Top-level folders `measure` does not count (none, for the vault).
+    skip_top: frozenset[str] = frozenset()
     state_file = STATE_FILE
     marker_file = MARKER_FILE
 
@@ -182,7 +190,7 @@ class VaultWatch:
     def tick(self, now: float | None = None) -> tuple[str | None, Snapshot | None]:
         """Measure and judge. Returns (new trip reason, snapshot). A latched
         trip returns (None, snap): it has already been acted on."""
-        snap = measure(self.root, now)
+        snap = measure(self.root, now, skip_top=self.skip_top)
         if self.tripped():
             return None, snap
         why = self.judge(snap)
@@ -225,7 +233,7 @@ class VaultWatch:
             self.marker.unlink()
         except FileNotFoundError:
             pass
-        snap = measure(self.root)
+        snap = measure(self.root, skip_top=self.skip_top)
         self.history = [snap] if snap else []
         if snap:
             self._persist(snap)

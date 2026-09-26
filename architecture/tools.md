@@ -413,7 +413,7 @@ Pinned by `tests/test_autonomy_config_write.py`, `tests/test_tool_sandbox.py`,
 `tests/test_memory_improvement.py`. One name in the class is still open by
 decision, not oversight: `browser_screenshot` is in `READ_ONLY` (`annotations.py:75`)
 and its handler `mkdir`s the screenshot directory and writes a PNG on every call
-(`browser.py:664-671`). It is a derived artifact, like the `graphify-out/` cache
+(`browser.py:664-671`). It is a derived artifact, like the code graph's cache
 `annotations.py` explicitly justifies a few lines above — but that comment covers
 only `graph_*`, and `_retry_safe` re-sends it, so a dropped transport leaves two
 PNGs. Low severity: no vault state, no authority, and the duplicate is
@@ -872,7 +872,7 @@ kill switch for a module's tools is `disabled_tools`.
 
 ### Code graph
 
-`agent_mcp/code_graph.py` reads `<root>/graphify-out/graph.json`, a
+`agent_mcp/code_graph.py` reads `~/lloyd-data/code-graph/<tree>/graph.json`, a
 deterministic AST extraction built with no LLM calls. It answers the structural
 questions a grep cannot: who calls this, what breaks if I change it, how do
 these two connect.
@@ -899,8 +899,15 @@ these two connect.
 - **It is blind across process seams.** There is no edge from the backend to
   the aggregator over HTTP, or from `run_query` into a tool handler over MCP.
   Grep stays right for string keys, route paths and config names.
-- **`graphify-out/` is gitignored, unanchored,** because a build inside a round
-  would otherwise dirty the tree the gate refuses.
+- **The graph lives under the data root, keyed by tree** (`CODE_GRAPH_DIR`,
+  2026-09-26). `refresh` sets `GRAPHIFY_OUT` to the tree's directory there, so
+  graphify's graph, manifest and AST cache never enter the tree; a `root` file
+  beside each graph lets every build prune the graphs of trees that are gone.
+  graphify stamps `built_at_commit` from the tree `cluster-only` is given — its
+  own fallback asks the output directory's parent, which is not a repo out
+  here — so a build whose clustering failed says so (`warning`) rather than
+  reading stale forever. It is a cache: a nested subvolume the hourly data
+  snapshots skip, uncounted by datawatch (`architecture/data-home.md`).
 - **It is not a second MCP server, deliberately.** graphify ships
   `graphify-mcp` and mounting it would have been one config line, but Lloyd
   advertises every server's tools under bare names and `build_tool_list`
@@ -914,9 +921,11 @@ these two connect.
 - **Why `root` cannot be inferred:** `round_start` ledger rows carry no
   session id. When the answer is about the live tree and a worktree is open,
   the header says so.
-- **What the ignore rule has to cover.** Both `scripts/automod/gate.py` and
-  `promote.py` refuse a dirty tree, so an unignored build would abort the
-  round on its own map. `*.json` at the top of `.gitignore` hid `graph.json`
+- **What the ignore rule has to cover.** `refresh` no longer writes in the
+  tree, but a hand-run `graphify update .` still defaults to
+  `<tree>/graphify-out/`, and both `scripts/automod/gate.py` and `promote.py`
+  refuse a dirty tree, so an unignored build would abort the round on its own
+  map. `*.json` at the top of `.gitignore` hid `graph.json`
   by accident; `GRAPH_REPORT.md`, `graph.html`, `.graphify_root` and the
   ~64k-file `cache/ast/**` were covered by nothing until `graphify-out/` was
   ignored unanchored.

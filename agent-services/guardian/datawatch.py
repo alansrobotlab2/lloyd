@@ -92,7 +92,8 @@ KNOWN_GOOD_TOPLEVEL = frozenset({
     ".venvs",
     ".vscode",
     "__pycache__",
-    "graphify-out",    # the code graph's per-tree cache (`agent_mcp/code_graph.py`)
+    "graphify-out",    # graphify's default output, only from a hand-run build now
+                       # (`code_graph.refresh` writes to `CODE_GRAPH_DIR`)
     "qmd",             # the qmd fork: its own clone, ignored by `.gitignore`
     "node_modules",
     "llama.cpp",       # vendored trees; neither one is gitignored
@@ -175,8 +176,16 @@ def stray_in_tree(tree: str = TREE) -> list[str]:
                   or (n in kept and under(untracked, n)))
 
 
+#: Top-level folders of the data root that are rebuildable caches, not data:
+#: never counted, so one emptying (a forced rebuild, a prune) cannot trip.
+#: `code-graph` is the code graph's per-tree store (`app.paths.CODE_GRAPH_DIR`),
+#: a nested subvolume the hourly snapshots skip for the same reason.
+CACHE_DIRS = frozenset({"code-graph"})
+
+
 class DataWatch(V.VaultWatch):
     what = "data"
+    skip_top = CACHE_DIRS
     state_file = "data_watch.json"
     marker_file = "data-tripped.json"
 
@@ -209,7 +218,7 @@ def snapshot_gate(root: str = DATA_ROOT, state_dir: Path = V.GUARDIAN_STATE) -> 
         return False, f"data tripwire is set ({marker.get('reason')})"
     if not os.path.isfile(os.path.join(root, ROOT_MARKER)):
         return False, f"{root} has no {ROOT_MARKER}"
-    snap = V.measure(root)
+    snap = V.measure(root, skip_top=CACHE_DIRS)
     if snap is None:
         return False, f"{root} does not exist"
     if w.history:
@@ -312,7 +321,7 @@ def main(argv: list[str]) -> int:
     cmd = argv[1] if len(argv) > 1 else "status"
     w = DataWatch()
     if cmd == "status":
-        snap = V.measure(w.root)
+        snap = V.measure(w.root, skip_top=CACHE_DIRS)
         print(json.dumps({"armed": w.armed, "tripped": w.tripped(),
                           "last_good": w.history[-1].to_dict() if w.history else None,
                           "now": snap.to_dict() if snap else None,

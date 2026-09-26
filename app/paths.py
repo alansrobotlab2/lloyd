@@ -101,6 +101,10 @@ EVAL_BASELINES_DIR = DATA_ROOT / "eval" / "baselines"
 VOICE_PROFILES_DIR = DATA_ROOT / "voice_profiles"
 # Supervisor program logs for the engines and services (was agent-services/logs).
 SERVICE_LOGS_DIR = DATA_ROOT / "logs" / "services"
+# The code graph's per-tree cache (`agent_mcp/code_graph.py`; was `<tree>/graphify-out`).
+# Rebuildable, so it is a nested btrfs subvolume the hourly snapshots do not
+# descend into, and datawatch does not count it (`datawatch.CACHE_DIRS`).
+CODE_GRAPH_DIR = DATA_ROOT / "code-graph"
 
 VAULT_ROOT = Path.home() / "obsidian"
 

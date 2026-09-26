@@ -218,6 +218,31 @@ def test_the_watch_trips_on_a_wipe_a_swap_and_a_lost_marker(tmp_path):
     assert why and "disappeared" in why
 
 
+def test_the_code_graph_cache_emptying_is_not_a_wipe(tmp_path):
+    """`code-graph/` is a rebuildable cache inside the data root: a forced
+    rebuild or a prune may empty it, and that must never latch the tripwire
+    (pool paused, promotions halted, critical alert) — while a real data folder
+    emptying the same way still trips."""
+    import shutil as _sh
+    root = _data_root(tmp_path / "lloyd-data")
+    graphs = root / "code-graph" / "home__me__lloyd" / "cache"
+    graphs.mkdir(parents=True)
+    for i in range(400):
+        (graphs / f"{i}.json").write_text("{}")
+    w = DW.DataWatch(str(root), tmp_path / "gstate")
+    snap = w.tick(now=1000.0)[1]
+    assert "code-graph" not in snap.top, "the cache is counted as data"
+    _sh.rmtree(root / "code-graph")
+    assert w.tick(now=1005.0)[0] is None
+    ok, why = DW.snapshot_gate(str(root), tmp_path / "gstate")
+    assert ok, why
+
+    for f in list((root / "sessions").iterdir()):
+        f.unlink()
+    why, _ = w.tick(now=1010.0)
+    assert why, "emptying a real data folder no longer trips"
+
+
 @pytest.fixture
 def guardian(tmp_path, monkeypatch):
     root = _data_root(tmp_path / "lloyd-data")

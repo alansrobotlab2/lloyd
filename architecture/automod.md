@@ -1838,9 +1838,10 @@ Two things about it that are easy to get wrong:
   a tool handler (MCP). Grep is still the right tool for string keys, route
   paths and config names.
 
-`graphify-out/` is gitignored unanchored so a worktree inherits the rule; a
-build there would otherwise dirty the tree, and both `gate.py` and
-`promote.py` refuse a dirty tree — the round would abort on its own map.
+The code graph is built outside the tree (`~/lloyd-data/code-graph/<tree>/`,
+`architecture/tools.md` §9), so a `graph_refresh` inside a round cannot dirty
+the worktree that `gate.py` and `promote.py` refuse when dirty.
+`graphify-out/` stays gitignored, unanchored, for a hand-run `graphify`.
 
 ## 4. The gate
 

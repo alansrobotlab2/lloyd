@@ -56,9 +56,28 @@ had in the tree, so a path `~/lloyd/X` became `~/lloyd-data/X`:
 
 Some things stay in the tree because they are code, build output or a
 rebuildable cache, not data: `.venvs/`, `qmd/`, model weights, `node_modules`,
-`web/dist`, `graphify-out/` and `__pycache__`. `graphify-out/` is per tree on
-purpose, because `code_graph` answers questions about one root. Automod and
-guardian state was already outside the tree, in `~/.local/state/lloyd-*`.
+`web/dist` and `__pycache__`. Automod and guardian state was already outside
+the tree, in `~/.local/state/lloyd-*`.
+
+The code graph moved the other way on 2026-09-26: it used to be graphify's
+default `<tree>/graphify-out/` and is now `app.paths.CODE_GRAPH_DIR`
+(`~/lloyd-data/code-graph/<tree>/`), one directory per tree named for the
+tree's real path, so a round's worktree still gets its own graph. It is a
+rebuildable cache inside the data root, so two things keep it from behaving
+like data:
+
+- **It is a nested btrfs subvolume.** A snapshot of `~/lloyd-data` does not
+  descend into one, so the hourly snapshots do not carry ~185 MB of AST cache
+  that every rebuild rewrites. Create it once with
+  `btrfs subvolume create ~/lloyd-data/code-graph` (as the user; no root
+  needed); a plain directory also works and is simply snapshotted.
+- **datawatch does not count it** (`datawatch.CACHE_DIRS`). Emptying it — a
+  forced rebuild, a prune, `rm -rf` to start over — would otherwise read as a
+  top-level folder being wiped and latch the tripwire.
+
+Each build prunes the graphs of trees that no longer exist
+(`code_graph._prune_orphans`, keyed by the `root` file beside each graph);
+in the tree, a worktree's graph used to go with the worktree.
 
 ## One resolver: `app.paths.DATA_ROOT`
 

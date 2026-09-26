@@ -63,7 +63,7 @@ READ_ONLY: frozenset[str] = frozenset({
     "research_list", "research_stats", "research_next",
     # Mission control
     "mc_get_state",
-    # Code graph. These may fill the gitignored `graphify-out/` cache on
+    # Code graph. These may fill the graph cache (`<data root>/code-graph/`) on
     # first use, which is derived state and not part of the tree — and plan
     # mode is exactly when a blast-radius question needs answering, so
     # classifying them as writers would put the map behind the gate that

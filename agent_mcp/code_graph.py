@@ -42,6 +42,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -51,12 +52,14 @@ from typing import Any
 from mcp.types import Tool
 
 from agent_mcp._shared import text_result
-from app.paths import LLOYD_HOME
+from app.paths import CODE_GRAPH_DIR, LLOYD_HOME
 
 logger = logging.getLogger("lloyd-code-graph")
 
-GRAPH_DIRNAME = "graphify-out"
 GRAPH_FILENAME = "graph.json"
+#: Written beside each graph: the tree it describes, which is how `_prune_orphans`
+#: tells a live tree's graph from one whose worktree is gone.
+ROOT_FILENAME = "root"
 
 # Relations that propagate a change. A reverse walk over these answers
 # "what breaks if I change this".
@@ -115,7 +118,8 @@ def _binary() -> str:
 
 
 async def _exec(argv: list[str], *, cwd: str | None = None,
-                timeout: float = 30.0) -> tuple[int, str, str]:
+                timeout: float = 30.0,
+                env: dict[str, str] | None = None) -> tuple[int, str, str]:
     """Run a command off the loop. Returns (rc, stdout, stderr).
 
     rc is -1 when the binary is missing and -2 on timeout, so callers can
@@ -123,7 +127,7 @@ async def _exec(argv: list[str], *, cwd: str | None = None,
     """
     try:
         proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=cwd,
+            *argv, cwd=cwd, env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -150,9 +154,10 @@ async def _exec(argv: list[str], *, cwd: str | None = None,
 
 
 async def _exec_or_timeout(argv: list[str], *, cwd: str | None = None,
-                           timeout: float = 30.0) -> tuple[int, str, str]:
+                           timeout: float = 30.0,
+                           env: dict[str, str] | None = None) -> tuple[int, str, str]:
     try:
-        return await _exec(argv, cwd=cwd, timeout=timeout)
+        return await _exec(argv, cwd=cwd, timeout=timeout, env=env)
     except asyncio.TimeoutError:
         return -2, "", f"{argv[0]}: timed out after {timeout}s"
 
@@ -199,8 +204,46 @@ def resolve_root(root: str | None) -> Path:
     return Path(os.path.realpath(expanded))
 
 
+def graph_dir_for(root: Path) -> Path:
+    """Where the graph of `root` lives: one directory per tree under the data root.
+
+    It used to be graphify's default, `<root>/graphify-out/`. The code tree holds
+    code only (`architecture/data-home.md`), and a tree's graph is keyed by the
+    tree's real path so an automod worktree still gets its own graph, not the
+    live checkout's.
+    """
+    key = os.path.realpath(str(root)).strip("/").replace("/", "__") or "_"
+    return CODE_GRAPH_DIR / key
+
+
 def graph_path_for(root: Path) -> Path:
-    return root / GRAPH_DIRNAME / GRAPH_FILENAME
+    return graph_dir_for(root) / GRAPH_FILENAME
+
+
+def _prune_orphans() -> list[str]:
+    """Drop the graphs of trees that no longer exist; returns what it removed.
+
+    In the tree, a worktree's graph was deleted with the worktree. Out here
+    nothing does that, so every build sweeps: a graph whose recorded root is not
+    a directory any more goes. One with no `root` file was not written by
+    `refresh` and is left alone.
+    """
+    removed: list[str] = []
+    try:
+        entries = list(os.scandir(CODE_GRAPH_DIR))
+    except OSError:
+        return removed
+    for e in entries:
+        if not e.is_dir(follow_symlinks=False):
+            continue
+        try:
+            root = Path(e.path, ROOT_FILENAME).read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if root and not os.path.isdir(root):
+            shutil.rmtree(e.path, ignore_errors=True)
+            removed.append(root)
+    return removed
 
 
 # ---------------------------------------------------------------------------
@@ -523,8 +566,18 @@ async def refresh(root: Path, *, force: bool = False) -> dict:
                     "edges": again.n_edges, "seconds": 0.0,
                     "note": "already fresh (rebuilt while this call waited)",
                 }
+        out_dir = graph_dir_for(root)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / ROOT_FILENAME).write_text(
+                os.path.realpath(key) + "\n", encoding="utf-8")
+        except OSError as exc:
+            return {"error": f"cannot create the graph directory {out_dir}: {exc}"}
+        # graphify reads GRAPHIFY_OUT once at import; an absolute path moves its
+        # graph, manifest and AST cache out of the tree it is describing.
+        env = {**os.environ, "GRAPHIFY_OUT": str(out_dir)}
         rc, out, err = await _exec_or_timeout(
-            [b, "update", key, "--no-cluster"], cwd=key, timeout=timeout)
+            [b, "update", key, "--no-cluster"], cwd=key, timeout=timeout, env=env)
         if rc == -1:
             return {"error": f"graphify binary not found at {b}; "
                              f"set code_graph.graphify_bin in config.yaml"}
@@ -535,7 +588,7 @@ async def refresh(root: Path, *, force: bool = False) -> dict:
                              f"{(err or out).strip()[:400]}"}
         rc2, out2, err2 = await _exec_or_timeout(
             [b, "cluster-only", key, "--no-label", "--no-viz"],
-            cwd=key, timeout=timeout)
+            cwd=key, timeout=timeout, env=env)
         if rc2 == -2:
             return {"error": f"graphify cluster-only timed out after {timeout}s"}
         if rc2 not in (0, -1):
@@ -545,10 +598,14 @@ async def refresh(root: Path, *, force: bool = False) -> dict:
         _LAST_REFRESH[key] = time.time()
         _CACHE.pop(key, None)
         entry = await load_graph(root)
+        pruned = await asyncio.to_thread(_prune_orphans)
+        if pruned:
+            logger.info("code_graph: pruned the graphs of %d gone tree(s): %s",
+                        len(pruned), pruned)
 
     if entry is None:
         return {"error": f"graphify wrote no readable graph under {key}"}
-    return {
+    result = {
         "root": key,
         "built_at_commit": entry.built_at_commit,
         "previous_commit": previous,
@@ -556,6 +613,14 @@ async def refresh(root: Path, *, force: bool = False) -> dict:
         "edges": entry.n_edges,
         "seconds": round(time.monotonic() - started, 1),
     }
+    if not entry.built_at_commit:
+        # `cluster-only` stamps the commit from the tree it is given. graphify's
+        # fallback asks the output directory's parent, which out here is not a
+        # repo, so a build whose clustering failed carries none and would read
+        # stale on every call until the next clean one.
+        result["warning"] = ("graph carries no built_at_commit (clustering "
+                             "failed?); it will read stale until a clean rebuild")
+    return result
 
 
 async def ensure_graph(root: Path, *, allow_refresh: bool = True
