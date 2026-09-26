@@ -181,28 +181,135 @@ def fact_leg_read_nothing(records: list[dict], corpus: dict) -> bool:
                           int((corpus or {}).get("facts") or 0))
 
 
+#: The legs a scored entity can come from, weakest-last. `seed` is NOT retrieval:
+#: `seeds_extracted` is what the QUERY named (`recall_seeds()`), so an entity
+#: carried only by that leg is the scorer being handed part of its own answer —
+#: #1548, measured on `nightly-20260926`, where every one of the 43 `entity_hit`
+#: queries matched an entity the seed leg held, and the field that used to
+#: present "entities retrieval returned" led with those same seeds.
+#: The other three are what retrieval returned: the entity a returned fact was
+#: fetched for, the entity a graph-expanded fact was fetched for, and the graph
+#: neighbours the walk used.
+ENTITY_LEG_ORDER = ("seed", "fact", "graph_expanded_fact", "graph_neighbor")
+#: The retrieval half of that tuple — an entity in one of these was returned.
+RETRIEVAL_LEGS = ENTITY_LEG_ORDER[1:]
+
+
+def _entity_legs(result: dict,
+                 seeds: list[str] | None = None) -> dict[str, list[str]]:
+    """The run's entity names grouped by the LEG each came from, in signal order.
+
+    Deduped WITHIN a leg only (case-insensitively, original case preserved, same
+    rule as `_entities_in_result`), and an entity that came from two legs appears
+    in BOTH lists. That duplication is the point: the union below dedupes ACROSS
+    legs, so in the union a seed hides the fact that also carried the entity, and
+    nothing in the artifact could say which leg satisfied a matched entity. Keys
+    are `ENTITY_LEG_ORDER`; every key is always present, possibly empty.
+    """
+    raw = {
+        "seed": [str(s or "").strip() for s in (seeds or [])],
+        "fact": [str(f.get("entity", "") or "").strip()
+                 for f in (result.get("facts", []) or [])],
+        "graph_expanded_fact": [str(f.get("entity", "") or "").strip()
+                                for f in (result.get("graph_expanded_facts", []) or [])],
+        "graph_neighbor": [str(n.get("entity", "") or "").strip()
+                           if isinstance(n, dict) else str(n or "").strip()
+                           for n in (result.get("graph_neighbors_used", []) or [])],
+    }
+    out: dict[str, list[str]] = {}
+    for leg in ENTITY_LEG_ORDER:
+        seen: set[str] = set()
+        out[leg] = [e for e in raw[leg] if e and not (e.lower() in seen or seen.add(e.lower()))]
+    return out
+
+
+def _retrieval_entities(result: dict) -> list[str]:
+    """Entities retrieval carried — fact, graph-expanded fact, graph neighbour.
+
+    The seed leg excluded, so this is what `result_summary.fact_entities_top10`
+    is supposed to mean and did not: that field used to be the first ten of
+    `_entities_in_result(result, seeds)`, which is the seed leg FIRST, so on the
+    2026-09-26 baseline its first seven entries were byte-identical to
+    `seeds_extracted`, and an audit that intersected matched entities with it
+    (as this item's own proving command did) was reading the query's own extracted
+    entities as retrieval output. Order and dedupe rule as `_entity_legs`, minus
+    the seed leg.
+    """
+    legs = _entity_legs(result)
+    seen: set[str] = set()
+    return [e for leg in RETRIEVAL_LEGS for e in legs[leg]
+            if not (e.lower() in seen or seen.add(e.lower()))]
+
+
 def _entities_in_result(result: dict, seeds: list[str] | None = None) -> list[str]:
     """Union of entity signals: seeds extracted from query, fact entities,
     graph_expanded facts entities, and graph_neighbors_used. Order = signal
-    strength (seeds first)."""
-    seen, out = set(), []
-    for e in (seeds or []):
-        e = str(e or "").strip()
-        if e and e.lower() not in seen:
-            seen.add(e.lower()); out.append(e)
-    for f in result.get("facts", []) or []:
-        e = str(f.get("entity", "") or "").strip()
-        if e and e.lower() not in seen:
-            seen.add(e.lower()); out.append(e)
-    for f in result.get("graph_expanded_facts", []) or []:
-        e = str(f.get("entity", "") or "").strip()
-        if e and e.lower() not in seen:
-            seen.add(e.lower()); out.append(e)
-    for n in result.get("graph_neighbors_used", []) or []:
-        e = str(n.get("entity", "") or "").strip()
-        if e and e.lower() not in seen:
-            seen.add(e.lower()); out.append(e)
+    strength (seeds first).
+
+    This is the list `entity_hit` is graded against, which is exactly the defect
+    #1548 files: a gold entity the QUERY named scores as a hit with no fact,
+    expanded fact or neighbour carrying it. It stays the graded list — the
+    retrieval-carried rate (#1548 clause 2) is a SECOND aggregate beside it, not a
+    rename of this one, because renaming the trended number would silently re-base
+    every published floor. Ask `_entity_legs` which leg carried a hit, and
+    `_retrieval_entities` what retrieval returned.
+    """
+    seen: set[str] = set()
+    return [e for leg in ENTITY_LEG_ORDER for e in _entity_legs(result, seeds)[leg]
+            if not (e.lower() in seen or seen.add(e.lower()))]
+
+
+def _entity_leg_attribution(legs: dict[str, list[str]],
+                            expected_raw: list[str]) -> dict[str, dict]:
+    """For each gold entity `entity_hit` counted: WHICH LEG satisfied it (#1548 clause 1).
+
+    `{gold_label: {"legs": [..], "retrieval_satisfied": bool}}`, keyed by the same
+    `_norm`'d gold label `entities_matched` reports. Satisfaction is decided the way
+    `entity_hit` decides it — `_entity_pair_satisfied` over the gold's spelling and
+    its store canonical, against the same `_norm`'d pairs — but PER LEG, so a gold
+    entity a returned fact carries says `["fact"]` and one the query's own extracted
+    seed carries says `["seed"]`. `_entity_legs` keeps the legs apart for precisely
+    this; the union in `_entities_in_result` cannot answer the question, because
+    seeds come FIRST there and its case-insensitive dedupe then drops the
+    fact-carried copy of any entity a seed also named — which is the whole of #1548.
+
+    A gold entity that is not a hit is not a key: there is nothing to attribute. A
+    key with `"legs": []` is possible and honest — a match can come from a leg's
+    canonical while its raw name matches nothing — and `retrieval_satisfied` is then
+    false, which is right: nothing in the result carried it.
+    """
+    def pairs(es):
+        return [(_norm(e), _norm(_entity_canonical(e))) for e in es]
+
+    per_leg = {leg: pairs(legs.get(leg, [])) for leg in ENTITY_LEG_ORDER}
+    all_pairs = [pr for leg in ENTITY_LEG_ORDER for pr in per_leg[leg]]
+    out: dict[str, dict] = {}
+    for ent in expected_raw:
+        ent_n, ent_c = _norm(ent), _norm(_entity_canonical(ent))
+        if not _entity_pair_satisfied(ent_n, ent_c, all_pairs):
+            continue
+        hit_legs = [leg for leg in ENTITY_LEG_ORDER
+                    if _entity_pair_satisfied(ent_n, ent_c, per_leg[leg])]
+        out[ent_n] = {"legs": hit_legs,
+                      "retrieval_satisfied": any(l in RETRIEVAL_LEGS for l in hit_legs)}
     return out
+
+
+def _retrieval_entity_hit(rec: dict) -> bool:
+    """Did a fact, a graph-expanded fact or a graph neighbour carry this hit?
+
+    Reads the record rather than the result, so the same call works on a record
+    this version wrote and on one an older run wrote: the scorer's boolean is
+    preferred, and a record with neither it nor `scoring.entity_legs` — every
+    artifact on disk before #1548 — counts as NOT carried. That is the honest
+    reading of an unattributed hit, and it is the same rule #1547 set for an
+    unrecorded seeding: absence is not a measurement, and it is never a guess.
+    """
+    sc = rec.get("scoring") or {}
+    if "entity_hit_retrieval_carried" in sc:
+        return bool(sc["entity_hit_retrieval_carried"])
+    attrib = sc.get("entity_legs") or {}
+    return any((v or {}).get("retrieval_satisfied") for v in attrib.values())
 
 
 def _doc_paths(result: dict) -> list[str]:
@@ -337,6 +444,7 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
     expected_entities = [_norm(e) for e in expected_raw]
     expected_doc_raw = [str(d) for d in (query_spec.get("expect_docs") or [])]
     expected_docs = [_norm(d) for d in expected_doc_raw]
+    legs = _entity_legs(result, seeds)
     got_raw = _entities_in_result(result, seeds)
     got_paths_raw = _doc_paths(result)
     got_entities = [_norm(e) for e in got_raw]
@@ -358,6 +466,10 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
 
     entity_matches = [exp for exp, exp_canon in zip(expected_entities, expected_canon)
                       if _entity_pair_satisfied(exp, exp_canon, got_pairs)]
+    # Computed once, recorded twice below: the per-entity legs and the query's
+    # boolean are the same call, so the artifact can never carry a mark that
+    # disagrees with its own attribution.
+    entity_legs_attrib = _entity_leg_attribution(legs, expected_raw)
     doc_matches = [exp for exp in expected_docs
                    if _doc_pair_satisfied(exp, got_docs)]
 
@@ -393,6 +505,18 @@ def _score(query_spec: dict, result: dict, seeds: list[str] | None = None) -> di
         "ndcg10": round(ndcg10, 4),
         "fact_entity_recall": fact_entity_recall,
         "entities_matched": entity_matches,
+        # WHICH LEG satisfied each matched entity (#1548), keyed by the `_norm`'d
+        # gold label: `legs` names the entries of `ENTITY_LEG_ORDER`
+        # (`seed`/`fact`/`graph_expanded_fact`/`graph_neighbor`) that carry it. Without it the
+        # artifact cannot say whether `entity_hit` came from retrieval or from the
+        # query naming its own gold entity, and `entity_hit_rate` reads as retrieval
+        # when the seed extractor is what produced it.
+        "entity_legs": entity_legs_attrib,
+        # The one boolean the aggregate needs: THIS query's hit was carried by
+        # retrieval, not by the query's own seeds. `any()` over the attribution
+        # above, so the mark and the rate cannot disagree (#1548).
+        "entity_hit_retrieval_carried": any(
+            (v or {}).get("retrieval_satisfied") for v in entity_legs_attrib.values()),
         # Which of the query's expected entities came back through the FACT
         # pool. `fact_entity_recall` is the average of this list's length, and an
         # average cannot say which entity moved; this says which, so
@@ -556,7 +680,7 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
                 "n_fact_reads_failed": int(result.get("n_fact_reads_failed") or 0),
                 "fact_read_first_error": result.get("fact_read_first_error"),
                 "doc_paths_top10": _doc_paths(result)[:10],
-                "fact_entities_top10": _entities_in_result(result, seeds)[:10],
+                "fact_entities_top10": _retrieval_entities(result)[:10],
                 "neighbors": [
                     {"entity": n.get("entity"), "weight": n.get("weight")}
                     for n in (result.get("graph_neighbors_used") or [])[:5]
@@ -638,6 +762,13 @@ def _attach_counterfactual(rec: dict, spec: dict, result: dict, seeds: list[str]
 # arithmetic and nothing to collect.
 CI_METRICS = {
     "entity_hit_rate": ("entity_hit", "wilson"),
+    # The same denominator, the narrower numerator: only the hits a fact, a
+    # graph-expanded fact or a graph neighbour carried. It exists because
+    # `entity_hit_rate` alone is satisfiable by the query's own extracted seeds
+    # (#1548), so a reader who takes it as "what retrieval returned" is reading the
+    # seed extractor. Trend THIS one for retrieval quality; the gap between the two
+    # is the seed-carried share, and it is reported, not hidden.
+    "entity_hit_rate_retrieval_carried": ("entity_hit_retrieval_carried", "wilson"),
     "doc_hit_rate": ("doc_hit", "wilson"),
     "entity_recall_avg": ("entity_recall", "bootstrap"),
     "doc_recall_avg": ("doc_recall", "bootstrap"),
@@ -886,6 +1017,15 @@ def summarize(records: list[dict]) -> dict:
         "anchorless_query_count": len(anchorless),
         "anchorless_query_ids": anchorless,
         "entity_hit_rate": avg([1.0 if r["scoring"]["entity_hit"] else 0.0 for r in records]),
+        # #1548: retrieval-only, by construction — a hit counts here only if a
+        # fact, a graph-expanded fact or a graph neighbour carried a matched
+        # entity. <= `entity_hit_rate` on any record set, and the difference is
+        # exactly the queries whose only matched entity came from `seeds_extracted`
+        # (or from nothing at all, which is the same reading: retrieval did not
+        # carry it). Read alongside `fact_entity_recall_avg`, whose denominator is
+        # the fact leg and which therefore cannot be seed-inflated either.
+        "entity_hit_rate_retrieval_carried": avg(
+            [1.0 if _retrieval_entity_hit(r) else 0.0 for r in records]),
         "doc_hit_rate": avg([1.0 if r["scoring"]["doc_hit"] else 0.0 for r in records]),
         "entity_recall_avg": avg([r["scoring"]["entity_recall"] for r in records]),
         "doc_recall_avg": avg([r["scoring"]["doc_recall"] for r in records]),
@@ -922,6 +1062,8 @@ def summarize(records: list[dict]) -> dict:
         per_cat[cat] = {
             "n": len(rs),
             "entity_hit_rate": avg([1.0 if r["scoring"]["entity_hit"] else 0.0 for r in rs]),
+            "entity_hit_rate_retrieval_carried": avg(
+                [1.0 if _retrieval_entity_hit(r) else 0.0 for r in rs]),
             "doc_hit_rate": avg([1.0 if r["scoring"]["doc_hit"] else 0.0 for r in rs]),
             "entity_recall_avg": avg([r["scoring"]["entity_recall"] for r in rs]),
             "mrr_doc": avg([r["scoring"]["rr_doc"] for r in rs]),
@@ -1111,6 +1253,13 @@ def print_table(records: list[dict], summary: dict) -> None:
     # stated reason, and a nightly reader comparing the two trend lines compares
     # two unknown sets. The run's own `n_queries` is the out-of-total, so the
     # fraction also names which corpus was scored.
+    # The entity leg's two rates on one line, because `entity_hit_rate` on its own
+    # is satisfiable by the query's own extracted seeds (#1548) and the delta table
+    # above prints it as the entity number. The gap IS the seed-carried share.
+    _rc = o.get("entity_hit_rate_retrieval_carried")
+    print(f"         entity leg: hit={_fmt_rate(o.get('entity_hit_rate'))} "
+          f"of which retrieval-carried={_fmt_rate(_rc)} "
+          f"(the rest came only from `seeds_extracted`)")
     mv, pn = o.get("counterfactual_moved_rate"), o.get("counterfactual_pinned_rate")
     total = o.get("n_queries", 0)
     print(f"         counterfactual: moved={_fmt_rate(mv)} "

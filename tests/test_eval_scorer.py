@@ -54,6 +54,282 @@ def test_norm_treats_separators_as_equivalent():
     assert ev._norm("Knowledge-Graph") == ev._norm("knowledge_graph")
 
 
+# ── #1548: which leg carried the entity hit ──────────────────────────────────
+#
+# `_entities_in_result` puts the query's own extracted seeds FIRST, so a gold
+# entity the seed extractor happened to name satisfies `entity_hit` with nothing
+# retrieval returned. Triage measured that on the live series: every one of the 14
+# miss->hit flips between nightly-20260925 and nightly-20260926 (entity_hit_rate
+# 0.337 -> 0.500) was carried by `seeds_extracted`, and none by a returned fact
+# alone. These tests pin the attribution that makes the two legs separable from the
+# artifact itself.
+
+CARIED_BY_FACT = "KG Maintenance Tasks"
+CARIED_BY_EXPANDED = "Graph v4 Classifier"
+CARIED_BY_NEIGHBOUR = "Alertmanager"
+SEED_ONLY_GOLD = "Knowledge Graph"
+
+
+def _legged_result() -> dict:
+    """One retrieval output with an entity on each of the three retrieval legs.
+
+    `entity` is the key `agent_mcp.vault._vault_recall` emits
+    (`{**fact, "entity": <resolved>}`), which is the key `_entities_in_result`
+    reads, so a leg that is not populated here is absent from the union too.
+    """
+    return {
+        "facts": [{"entity": CARIED_BY_FACT, "text": "t"}],
+        "graph_expanded_facts": [{"entity": CARIED_BY_EXPANDED}],
+        "graph_neighbors_used": [{"entity": CARIED_BY_NEIGHBOUR, "weight": 1.0}],
+        "documents": [{"path": "knowledge/kg.md"}],
+    }
+
+
+def _record(qid: str, spec: dict, result: dict, seeds: list[str]) -> dict:
+    """A scored record, shaped like the one `main()` writes."""
+    return {"id": qid, "query": spec["query"], "category": spec.get("category", "entity"),
+            "seeds_extracted": seeds, "result_summary": {}, "error": None,
+            "latency_ms": 10.0, "scoring": ev._score(spec, result, seeds=seeds)}
+
+
+def test_each_matched_entity_records_which_leg_satisfied_it():
+    """#1548 clause 1: the artifact can tell a seed-carried hit from a
+    retrieval-carried one, per matched entity, not just per query.
+
+    Four gold entities: one carried only by the query's own seed, and one by each
+    of the three retrieval legs. The seed says `["seed"]` with
+    `retrieval_satisfied` false and the retrieval legs name themselves. Without
+    this the two cases are the same number in the artifact — which is the defect.
+    `CARIED_BY_FACT` is ALSO in the seed list, on purpose: an entity retrieval
+    returned and the extractor happened to name is carried by retrieval
+    (`["seed", "fact"]`), so a fix that subtracted the seed leg out of the
+    retrieval legs would report `["seed"]` here and quietly under-credit the
+    nights where retrieval agrees with the query.
+    """
+    spec = {"id": "legs", "query": "how good is the knowledge graph",
+            "expect_entities": [SEED_ONLY_GOLD, CARIED_BY_FACT,
+                                CARIED_BY_EXPANDED, CARIED_BY_NEIGHBOUR],
+            "expect_docs": ["knowledge/kg.md"]}
+    sc = ev._score(spec, _legged_result(),
+                   seeds=[SEED_ONLY_GOLD, "Graph", CARIED_BY_FACT])
+    attrib = sc["entity_legs"]
+    assert set(attrib) == {ev._norm(e) for e in spec["expect_entities"]}, attrib
+    assert attrib[ev._norm(SEED_ONLY_GOLD)] == {
+        "legs": ["seed"], "retrieval_satisfied": False}, attrib
+    assert attrib[ev._norm(CARIED_BY_FACT)] == {
+        "legs": ["seed", "fact"], "retrieval_satisfied": True}, attrib
+    assert attrib[ev._norm(CARIED_BY_EXPANDED)] == {
+        "legs": ["graph_expanded_fact"], "retrieval_satisfied": True}, attrib
+    assert attrib[ev._norm(CARIED_BY_NEIGHBOUR)] == {
+        "legs": ["graph_neighbor"], "retrieval_satisfied": True}, attrib
+    # An expected entity that matched nothing is not attributed at all: there is
+    # no leg to name, and inventing one would be the guess this field exists to
+    # avoid.
+    miss = ev._score({"id": "m", "query": "q", "expect_entities": ["Nonexistent Entity"],
+                      "expect_docs": []}, _legged_result(), seeds=["Graph"])
+    assert miss["entity_legs"] == {}, miss
+    assert miss["entity_hit"] is False and miss["entity_hit_retrieval_carried"] is False
+
+
+def test_summarize_reports_the_retrieval_carried_rate_beside_the_seeded_one():
+    """#1548 clause 2: `summary.overall.entity_hit_rate_retrieval_carried` counts
+    a query as a hit only when a fact, a graph-expanded fact or a graph neighbour
+    carried a matched entity, and the gap to `entity_hit_rate` is exactly the
+    seed-carried queries.
+
+    Three records over the SAME retrieval output: one hit the query's seed handed
+    it, one hit a returned fact carried, one miss. `entity_hit_rate` cannot tell
+    that set from a set of two retrieval-carried hits — the retrieval-carried rate
+    can (1/3 vs 2/3), and that is the number the entity leg means.
+    """
+    result = _legged_result()
+    seed_rec = _record("seed-only", {"id": "a", "query": "q", "category": "entity",
+                                     "expect_entities": [SEED_ONLY_GOLD],
+                                     "expect_docs": []},
+                       result, seeds=[SEED_ONLY_GOLD])
+    fact_rec = _record("fact-carried", {"id": "b", "query": "q", "category": "entity",
+                                        "expect_entities": [CARIED_BY_FACT],
+                                        "expect_docs": []},
+                       result, seeds=["Unrelated Seed"])
+    miss_rec = _record("miss", {"id": "c", "query": "q", "category": "entity",
+                                "expect_entities": ["Nonexistent Entity"],
+                                "expect_docs": []},
+                       result, seeds=["Unrelated Seed"])
+    assert seed_rec["scoring"]["entity_hit"] and fact_rec["scoring"]["entity_hit"]
+    assert seed_rec["scoring"]["entity_hit_retrieval_carried"] is False
+    assert fact_rec["scoring"]["entity_hit_retrieval_carried"] is True
+
+    s = ev.summarize([seed_rec, fact_rec, miss_rec])["overall"]
+    n = s["n_queries"]
+    assert n == 3
+    # `avg()` rounds to 3 dp, as every rate in this artifact does.
+    assert s["entity_hit_rate"] == pytest.approx(2 / 3, abs=0.001)
+    assert s["entity_hit_rate_retrieval_carried"] == pytest.approx(1 / 3, abs=0.001)
+    assert s["entity_hit_rate_retrieval_carried"] <= s["entity_hit_rate"]
+    # The gap IS the seed-only query count, on this record set and on any other:
+    # multiplying back out is how a reader checks it without re-scoring.
+    seed_only = sum(1 for r in (seed_rec, fact_rec, miss_rec)
+                    if r["scoring"]["entity_hit"]
+                    and not r["scoring"]["entity_hit_retrieval_carried"])
+    assert round((s["entity_hit_rate"] - s["entity_hit_rate_retrieval_carried"]) * n) \
+        == seed_only == 1
+    # Clause 3 of the item: the two legs are reported side by side, so a reader
+    # comparing them need not conflate them. `fact_entity_recall_avg`'s
+    # denominator is the fact leg and cannot be seed-inflated.
+    assert s["fact_entity_recall_avg"] == pytest.approx(1 / 3, abs=0.001)
+
+
+def test_widening_the_seed_list_cannot_move_the_retrieval_carried_rate():
+    """#1548 clause 3: the same retrieval output, scored twice, narrow seeds then
+    seeds widened with an extra gold-naming seed.
+
+    `entity_hit_rate` goes UP (0.5 -> 1.0) because the widened list names the gold
+    entity, which is exactly the self-fulfilling credit the item is about; the
+    retrieval-carried rate does not move, because nothing retrieval returned
+    changed. A scorer that deduped seeds into the fact leg, or computed the
+    retrieval rate off the seeded union, would show 0.5 -> 1.0 here too.
+    """
+    result = _legged_result()
+    spec_seed_only = {"id": "g", "query": "how good is the knowledge graph",
+                      "category": "entity", "expect_entities": [SEED_ONLY_GOLD],
+                      "expect_docs": []}
+    spec_fact = {"id": "f", "query": "what maintenance tasks does the kg need",
+                 "category": "entity", "expect_entities": [CARIED_BY_FACT],
+                 "expect_docs": []}
+    narrow = [spec_seed_only, spec_fact], ["Graph"]
+    wide = [spec_seed_only, spec_fact], ["Graph", SEED_ONLY_GOLD]
+
+    out = {}
+    for label, (specs, seeds) in zip(("narrow", "wide"), (narrow, wide)):
+        recs = [_record(s["id"], s, result, seeds) for s in specs]
+        out[label] = (recs, ev.summarize(recs)["overall"])
+    (narrow_recs, narrow_s), (wide_recs, wide_s) = out["narrow"], out["wide"]
+
+    assert narrow_recs[0]["scoring"]["entity_hit"] is False
+    assert wide_recs[0]["scoring"]["entity_hit"] is True, (
+        "the widened seed must be what flips the seeded hit, or the test proves "
+        "nothing about the seed leg")
+    assert wide_recs[0]["scoring"]["entity_legs"][ev._norm(SEED_ONLY_GOLD)] == {
+        "legs": ["seed"], "retrieval_satisfied": False}
+    assert narrow_s["entity_hit_rate"] == pytest.approx(0.5, abs=0.001)
+    assert wide_s["entity_hit_rate"] == pytest.approx(1.0, abs=0.001)
+    assert (narrow_s["entity_hit_rate_retrieval_carried"]
+            == wide_s["entity_hit_rate_retrieval_carried"]
+            == pytest.approx(0.5, abs=0.001)), (
+        "identical retrieval output, identical retrieval-carried rate — a rate that "
+        "moved here is reading the seed list")
+
+
+def test_the_written_artifact_separates_the_seed_leg_from_the_retrieval_leg(tmp_path,
+                                                                            monkeypatch):
+    """#1548 clauses 1, 2 and 4, at the process boundary: the bytes on disk.
+
+    `ev.main` runs in-process with the recall and the seed extractor replaced by a
+    fixture, and the baseline file it writes is read back. The fixture is the
+    defect itself: the extractor names the gold entity `Nightly Retrieval Eval`
+    (as `recall_seeds` did for four of the fourteen flipped queries on
+    2026-09-26, incl. `nightly-cannot-tell`), while retrieval returns only
+    `ObserverState`. In the file the run wrote, that query must say
+
+      scoring.entity_legs     {"nightly retrieval eval": {"legs": ["seed"],
+                                                          "retrieval_satisfied": false}}
+      scoring.entity_hit / _retrieval_carried   true / false
+      result_summary.fact_entities_top10        ["ObserverState"]  (no gold, no seed)
+      summary.overall.entity_hit_rate                       1.0
+      summary.overall.entity_hit_rate_retrieval_carried     0.0
+
+    Unit-level asserts on `_score` cannot catch the wiring this pins: a
+    `result_summary` that keeps calling the seeded union, or a `summarize` whose
+    new key reads the wrong field, leaves every unit test green.
+    """
+    gold, returned = "Nightly Retrieval Eval", "ObserverState"
+    monkeypatch.setattr(ev, "_recall_seeds", lambda q, k: [gold])
+    monkeypatch.setattr(ev, "_semantic_seed_k", lambda: 1)
+
+    def fake_recall(params, **kw):
+        return {"entities": [], "facts": [{"entity": returned, "text": "t",
+                                           "source": "memory/x.md"}],
+                "documents": [{"path": "memory/daily/2026-09-26.md"}],
+                "graph_expanded_facts": [], "graph_neighbors_used": [],
+                "fact_read_coverage": {"attempted": 1, "read": 1},
+                "graph_expansion": {}}
+
+    def fake_store():
+        class _S:
+            def stats(self):
+                return {"entities_total": 1, "edges_total": 1, "edges_active": 1,
+                        "aliases": 0, "facts": 1}
+            def resolve(self, text):
+                return text
+            def active_edges(self):
+                return []
+            def neighbours(self, *a, **k):
+                return {}
+        return _S()
+
+    qf = tmp_path / "q.yaml"
+    qf.write_text(
+        "queries:\n"
+        "  - id: seed-carried\n"
+        "    query: what did the nightly eval find\n"
+        "    category: entity\n"
+        f"    expect_entities: [{gold}]\n"
+        "    expect_docs: [memory/daily/2026-09-26.md]\n")
+    out = tmp_path / "baselines"
+    monkeypatch.setattr(ev, "_vault_recall", fake_recall)
+    monkeypatch.setattr(ev, "store", fake_store)
+    monkeypatch.setattr(ev, "EVAL_BASELINES_DIR", out)
+    monkeypatch.setattr(ev, "LLOYD_CODE_ROOT", tmp_path)
+    argv = ["--queries", str(qf), "--label", "nightly-legs",
+            "--allow-empty-corpus"]
+    monkeypatch.setattr(sys, "argv", ["run_eval.py"] + argv)
+    assert ev.main() == 0
+    written = next(iter(sorted(out.glob("nightly-legs-*.json"))))
+    blob = json.loads(written.read_text())
+    rec = blob["records"][0]
+    assert rec["seeds_extracted"] == [gold], rec["seeds_extracted"]
+    assert rec["scoring"]["entity_hit"] is True, "fixture: the seed leg scores it a hit"
+    assert rec["scoring"]["entity_hit_retrieval_carried"] is False
+    # Keyed by the `_norm`'d gold label — the same spelling `entities_matched`
+    # uses, so the two fields index the same entity.
+    assert rec["scoring"]["entity_legs"][ev._norm(gold)] == {
+        "legs": ["seed"], "retrieval_satisfied": False}, rec["scoring"]["entity_legs"]
+    top10 = rec["result_summary"]["fact_entities_top10"]
+    assert top10 == [returned], top10
+    assert gold not in " ".join(top10), (
+        "the field that says what retrieval returned is seeded again, which is the"
+        " half of #1548 the item's own proving command tripped over")
+    overall = blob["summary"]["overall"]
+    assert overall["entity_hit_rate"] == 1.0
+    assert overall["entity_hit_rate_retrieval_carried"] == 0.0, (
+        "the artifact reports a retrieval gain it did not measure")
+    # The rate is registered in CI_METRICS, so it travels with an interval and a
+    # denominator like the rate it accompanies, instead of being a bare number.
+    assert "entity_hit_rate_retrieval_carried" in ev.CI_METRICS
+
+
+def test_fact_entities_top10_is_retrieval_only():
+    """#1548 clause 4: the artifact's "entities retrieval returned" field must not
+    lead with the query's own seeds.
+
+    Before this it was `_entities_in_result(result, seeds)[:10]`, so an entity
+    present ONLY in `seeds_extracted` appeared in it, and the field that reads like
+    retrieval output was the seed extractor's output — which is how the item's own
+    proving command came back reading seeds as answers. The entity on each
+    retrieval leg is still there, in leg order, and the seed-only one never is.
+    """
+    seeds = [SEED_ONLY_GOLD, "Graph", CARIED_BY_FACT]
+    got = ev._retrieval_entities(_legged_result())
+    assert got == [CARIED_BY_FACT, CARIED_BY_EXPANDED, CARIED_BY_NEIGHBOUR], got
+    assert ev._norm(SEED_ONLY_GOLD) not in {ev._norm(e) for e in got}
+    # A seed that also names a retrieval entity stays: it IS in the result. The
+    # exclusion is of seed-only names, not of seeds.
+    assert CARIED_BY_FACT in got
+    assert ev._entities_in_result(_legged_result(), seeds=seeds)[:1] == [SEED_ONLY_GOLD], (
+        "positive control: the seeded union still leads with the seed, so the two "
+        "fields are genuinely different functions and not one renamed")
+
+
 # ── the record the nightly compare step reads ────────────────────────────────
 
 def test_summarize_shape_matches_what_the_skill_globs(tmp_path):
