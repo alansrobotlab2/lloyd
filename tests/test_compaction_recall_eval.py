@@ -626,3 +626,34 @@ def test_the_new_arms_reach_the_wire(corpus, tmp_path, monkeypatch):
     assert seen["observation"]["stub"] and not seen["tool_clear"]["stub"]
     assert seen["self_record"]["record"] and not seen["tool_clear"]["record"]
 
+
+# --- #1499: the rung-4 arms ----------------------------------------------------
+
+def test_a_rung4_arm_is_valid_only_when_rung_4_fired():
+    f = {"turn_start_freed": 0, "relief_freed": 900, "relief_rungs": ["reasoning"]}
+    assert not R.valid_for_arm("rung4", f)
+    f["relief_rungs"] = ["reasoning", "truncate"]
+    assert R.valid_for_arm("rung4", f) and R.valid_for_arm("rung4_lossy", f)
+    rec = {"relief": [{"rungs": ["reasoning:2", "truncate:5"], "freed_tokens": 9,
+                       "truncated_chars_freed": 40}]}
+    assert R.fired(rec)["relief_rungs"] == ["reasoning", "truncate"]
+    assert R.fired(rec)["truncated_chars_freed"] == 40
+    # Rung 1 is held off by naming every tool the probe uses.
+    assert set(R.ARMS["rung4"]["options"]["intra_turn_microcompact_non_compactable"]) \
+        >= {"Read", "Grep", "Bash"}
+    assert R.ARMS["rung4_lossy"].get("rung4_lossy") is True
+
+
+def test_the_relief_event_carries_what_rungs_3_and_4_cut(monkeypatch):
+    from app.harness import loop as L
+    seen = {}
+    monkeypatch.setattr(L, "_log_harness_event",
+                        lambda sid, name, data, **kw: seen.update(data))
+
+    class _O:
+        session_id = "s"
+        turn_id = "t"
+    L._record_relief_pass(_O(), {"reason": "intra_turn", "rungs": ["truncate:3"],
+                                 "freed_tokens": 10, "truncated_chars_freed": 4000,
+                                 "argument_chars_freed": 12})
+    assert seen["truncated_chars_freed"] == 4000 and seen["argument_chars_freed"] == 12

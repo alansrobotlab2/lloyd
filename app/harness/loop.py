@@ -1973,7 +1973,11 @@ def _record_relief_pass(
         "freed_tokens": int(report.get("freed_tokens") or 0),
         "iteration": iteration,
     }
-    for key in ("used_before", "used_after", "target", "passes", "rearm"):
+    # The two char counts say what rung 3 and rung 4 actually cut (#1499 step
+    # 1): the usage record kept them, the event — the one that survives a
+    # turn with no usage row — did not.
+    for key in ("used_before", "used_after", "target", "passes", "rearm",
+                "argument_chars_freed", "truncated_chars_freed"):
         value = report.get(key)
         if isinstance(value, int) and not isinstance(value, bool):
             data[key] = value

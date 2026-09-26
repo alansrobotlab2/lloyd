@@ -1728,3 +1728,47 @@ a negative result is a clean `rejected`):
   layer") forbids by construction: Alan's call on how it is run.
 - **P10** — a labelling week (200 calls, hand-labelled) before any threshold
   is written and `warn` is considered.
+
+## Cleared tool results: where they go and how they come back (#1514, #1481, #1499)
+
+A cleared result has left the prompt but not the machine. Every rung that drops
+tool content spills it first and names the file: rung 1 (microcompact, turn start
+and in turn), rung 3 (argument bodies) and rung 4 (truncation), all through
+`tool_result_spill.persist_for_compaction` into `sessions/<sid>.tool-results/`.
+The transcript row written when the result landed is in `sessions/<sid>.json`
+(whole, or a D1 pointer into the same directory). Rung 2 (preserved reasoning) is
+the one rung with no in-band handle; its reasoning is persisted as
+`role="thinking"` rows in that same record.
+
+- **The free route (#1514).** `tool_result_spill.session_record_route(sid, deny)`
+  is the one sentence naming both paths, offering Grep, else Read, else nothing
+  (a route the turn's deny list refuses is #1066's false promise).
+  `compaction.microcompact.name_session_record` appends it to rung 1's and rung 4's
+  markers — **off**: measured on the #600 harness it lowered ambiguous recall
+  (−0.25 [−0.45, −0.10] vs `tool_clear`, n = 20) for ~250 chars per marker.
+- **Observation stubs (#1481).** `compaction.microcompact.observation_stubs`
+  (+ `observation_head_chars`, 400) makes a clear leave `[observation <id> — call
+  — N chars cleared …]` plus a verbatim head, never a paraphrase; the id is the
+  spill file's stem, and `recall_observation(id)` (`agent_mcp/recall_observation.py`,
+  `READ_ONLY`) returns the file — only from the calling session's own spill
+  directory, never a path, a symlink out, or another session's id. **Off**: no
+  recall gain over `tool_clear` (+0.05/+0.05, ns) for +1.0 s TTFT per turn.
+  `loop._open_turn` hides the tool from any turn whose relief writes no stubs, so
+  with the switch off the catalog is byte-identical to before.
+- **Re-relief is idempotent (on, unconditionally).** `_is_cleared_stub` keeps an
+  already-reduced `<persisted-output>` block and a stub out of both selections, so
+  a second pass over its own output changes no byte and counts no clear. Before,
+  every pass re-reduced every old pointer (one duplicate `[preview dropped …]`
+  line, then a clear counted on each pass): 35 of the 60 relief passes naming rung
+  1 in `usage.db` freed 0 tokens.
+- **Relief events carry what rungs 3 and 4 cut** (`argument_chars_freed`,
+  `truncated_chars_freed`), as the usage record already did (#1499 step 1).
+- **The #600 harness had a cross-session leak** until 2026-09-25: its stub Grep
+  searched every arm's and seed's session record, each planting a different port.
+  `tool_clear`'s 12/20 was mostly that; fixed, it is 17/20 and 19/20.
+
+`eval/measurements/cleared-results-2026-09-25.md` has the numbers; the arms are
+`self_record`, `observation`, `production_self_record`, `production_observation`,
+`rung4`, `rung4_lossy`, `rung4_self_record`. Tests: `tests/test_compaction.py`
+(stubs, idempotence, the route), `tests/test_recall_observation.py`,
+`tests/test_compaction_recall_eval.py`.

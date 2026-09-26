@@ -97,6 +97,10 @@ ARMS
               and `recall_observation(id)` advertised.
   production_self_record / production_observation
               the same two switches at production's thresholds.
+  rung4 / rung4_lossy / rung4_self_record
+              #1499: relief rung 4 (truncation) is the rung that drops the
+              planted result — today's spill-first rung, the pre-2026-09-11
+              lossy one, and today's with #1514's clause.
   raised      trigger/target 0.9/0.7 at both passes: fire later, keep more.
   trigger90   trigger 0.9, target 0.52: fire later, clear as far as today.
   summary_legacy     summarize layer, regenerate-every-turn 9-section summary.
@@ -242,6 +246,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+#: Every tool a probe session uses. Naming them all non-compactable holds
+#: relief rung 1 off, so a later rung is the one that acts (#1499's arms).
+_ALL_FILLER_TOOLS = ("Read", "Grep", "Bash", "Glob", "Edit", "Write",
+                     "recall_observation")
+
 ARMS: dict[str, dict[str, Any]] = {
     "none": {
         "compaction": {"mode": "truncate", "microcompact": {"enabled": False}},
@@ -303,6 +312,40 @@ ARMS: dict[str, dict[str, Any]] = {
         "compaction": {"microcompact": {"observation_stubs": True}},
         "options": {"intra_turn_microcompact_observation_stubs": True},
         "expects_fire": True,
+    },
+    # #1499: relief rung 4 (`_truncate_largest_tool_results`) as the rung
+    # that drops the planted result. Rung 1 is held off by naming every tool
+    # the session uses non-compactable, the turn-start pass is off, and the
+    # target is low enough (0.3) that rung 4 reaches results the planted
+    # one's size. `rung4` is today's rung (it spills first and the notice
+    # names the file, since 2026-09-11); `rung4_lossy` is the rung before
+    # that — no spill, "re-run narrower" — which is what #1499 describes;
+    # `rung4_self_record` adds #1514's clause to the notice.
+    "rung4": {
+        "compaction": {"mode": "truncate", "microcompact": {"enabled": False}},
+        "options": {"intra_turn_microcompact_trigger_fraction": 0.72,
+                    "intra_turn_microcompact_target_fraction": 0.3,
+                    "intra_turn_microcompact_non_compactable": _ALL_FILLER_TOOLS},
+        "expects_fire": True,
+        "expects_rung": "truncate",
+    },
+    "rung4_lossy": {
+        "compaction": {"mode": "truncate", "microcompact": {"enabled": False}},
+        "options": {"intra_turn_microcompact_trigger_fraction": 0.72,
+                    "intra_turn_microcompact_target_fraction": 0.3,
+                    "intra_turn_microcompact_non_compactable": _ALL_FILLER_TOOLS},
+        "expects_fire": True,
+        "expects_rung": "truncate",
+        "rung4_lossy": True,
+    },
+    "rung4_self_record": {
+        "compaction": {"mode": "truncate", "microcompact": {"enabled": False}},
+        "options": {"intra_turn_microcompact_trigger_fraction": 0.72,
+                    "intra_turn_microcompact_target_fraction": 0.3,
+                    "intra_turn_microcompact_non_compactable": _ALL_FILLER_TOOLS,
+                    "intra_turn_microcompact_name_session_record": True},
+        "expects_fire": True,
+        "expects_rung": "truncate",
     },
     # The candidate the first three arms pointed at: production's mechanism
     # with the wall moved toward the window. The in-turn trigger is measured
@@ -1173,6 +1216,10 @@ def fired(record: dict[str, Any] | None) -> dict[str, Any]:
         "summarize_outcome": str(ts.get("summarize_outcome") or ""),
         "relief_freed": int(sum(int(r.get("freed_tokens") or 0) for r in relief)),
         "relief_passes": len(relief),
+        "relief_rungs": sorted({str(g).split(":")[0] for r in relief
+                                for g in (r.get("rungs") or [])}),
+        "truncated_chars_freed": int(sum(int(r.get("truncated_chars_freed") or 0)
+                                         for r in relief)),
     }
 
 
@@ -1195,6 +1242,11 @@ def valid_for_arm(arm: str, f: dict[str, Any]) -> bool:
         # A summary-format arm whose summarize layer did not replace a block
         # (under threshold, a summariser that failed and fell back to
         # truncation, or a re-applied record) measured neither format.
+        return False
+    rung = ARMS[arm].get("expects_rung")
+    if rung and rung not in (f.get("relief_rungs") or []):
+        # #1499's arms measure what one rung drops; a run where that rung
+        # never fired measured something else.
         return False
     return freed > 0 if ARMS[arm]["expects_fire"] else freed == 0
 
@@ -1582,6 +1634,14 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
         async def _pool(_o):
             return pool
         real_build, real_stream = L._build_pool, L.stream_chat
+        real_truncate = L._truncate_largest_tool_results
+        if spec.get("rung4_lossy"):
+            # #1499's counterfactual: rung 4 as it was before 2026-09-11 — no
+            # session id reaches it, so nothing is spilled and the notice can
+            # only say "re-run the call with a narrower query".
+            def _lossy(msgs, **kw):
+                return real_truncate(msgs, **{**kw, "session_id": ""})
+            L._truncate_largest_tool_results = _lossy
         L._build_pool = _pool
         L.stream_chat = _make_stream_wrapper(real_stream, warm_hist, log, warm_done,
                                              needle=session.planted.passphrase,
@@ -1597,6 +1657,7 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
             err = f"{type(e).__name__}: {e}"
         finally:
             L._build_pool, L.stream_chat = real_build, real_stream
+            L._truncate_largest_tool_results = real_truncate
             await sampler.stop()
         wall = time.monotonic() - t0
         after = _metrics(base_url)
