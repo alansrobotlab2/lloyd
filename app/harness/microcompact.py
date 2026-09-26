@@ -93,7 +93,9 @@ from typing import Any, Callable, Iterable
 from app.harness.tool_result_spill import (
     PERSISTED_OUTPUT_TAG,
     READ_TOOL,
+    _generate_preview,
     persist_for_compaction,
+    session_record_paths,
     session_record_route,
     tool_is_denied,
 )
@@ -236,21 +238,145 @@ def _tool_result_text(message: dict) -> str:
     return ""
 
 
+#: The line a reduced ``<persisted-output>`` block ends with. A block that
+#: already carries it is a stub, and reducing it again is what made this pass
+#: non-idempotent (#1481: 175 -> 236 -> 236 chars, a duplicated notice line,
+#: and ``cleared += 1`` on every relief pass for a result cleared long ago —
+#: each rewrite a message the engine had already cached).
+PREVIEW_DROPPED = "[preview dropped — Read the path above for the full content]"
+
+#: How every observation stub (#1481) begins. Selection skips a result whose
+#: text starts with it, so a stub is never cleared twice.
+OBSERVATION_STUB_PREFIX = "[observation "
+
+#: Default bound on a stub's verbatim head, in chars (~100 tokens). The stub
+#: stays in the prompt for the rest of the turn and every later one, so this
+#: is bytes paid per clear (`compaction.microcompact.observation_head_chars`).
+DEFAULT_OBSERVATION_HEAD_CHARS = 400
+
+_SAVED_TO = "Full output saved to: "
+
+
+def _is_cleared_stub(text: str) -> bool:
+    """Whether a tool result is already what a clear leaves behind.
+
+    Two shapes: a ``<persisted-output>`` block reduced to its header, and an
+    observation stub. Neither is selected again — re-reducing one rewrites a
+    cached message for nothing and books a clear that freed nothing (#1481).
+    A plain cleared marker needs no rule: it is far under
+    ``min_chars_to_clear`` and carries no tag, so no selection reaches it.
+    """
+    if text.startswith(OBSERVATION_STUB_PREFIX):
+        return True
+    return PERSISTED_OUTPUT_TAG in text and PREVIEW_DROPPED in text
+
+
 def _persisted_block_only(text: str) -> str:
     """Reduce a spilled result to its header, dropping the inline preview.
 
     The ``<persisted-output>`` block carries the size and file path in its
     first lines and then up to ``PREVIEW_CHARS`` of content. Once the
     result is stale the preview is the waste; the path is the point.
+
+    Idempotent: a block that is already reduced comes back unchanged.
     """
     start = text.find(PERSISTED_OUTPUT_TAG)
-    if start == -1:
+    if start == -1 or _is_cleared_stub(text):
         return text
     head = text[start:]
     lines = head.splitlines()
     # Tag line + the "Full output saved to: <path>" line are what matter.
     keep = [ln for ln in lines[:3] if ln.strip()]
-    return "\n".join(keep) + "\n[preview dropped — Read the path above for the full content]"
+    return "\n".join(keep) + "\n" + PREVIEW_DROPPED
+
+
+def _pointer_path(text: str) -> str:
+    """The path a ``<persisted-output>`` block names, or ``""``."""
+    at = text.find(_SAVED_TO)
+    if at == -1:
+        return ""
+    return text[at + len(_SAVED_TO):].split("\n", 1)[0].strip()
+
+
+def _pointer_size(text: str, pointer: str) -> int:
+    """The original size a pointer block states (``…, 12,345 chars)``), else
+    the file's size, else 0."""
+    import re
+
+    m = re.search(r"([0-9][0-9,]*) chars\)", text)
+    if m:
+        return int(m.group(1).replace(",", ""))
+    try:
+        from pathlib import Path
+
+        return Path(pointer).stat().st_size
+    except OSError:
+        return 0
+
+
+def _pointer_preview(text: str) -> str:
+    """The verbatim preview a ``<persisted-output>`` block carries, or ``""``.
+
+    ``maybe_spill`` writes ``Preview (first N):\\n<preview>`` followed by
+    ``\\n...\\n`` or ``\\n`` and the recovery sentence. The preview is a prefix
+    of the spilled file, so a head cut from it is a head of the original.
+    """
+    at = text.find("Preview (first ")
+    nl = text.find("\n", at) if at != -1 else -1
+    if nl == -1:
+        return ""
+    body = text[nl + 1:]
+    for end in ("\n...\n", "\nRead the full file", "\nThe Read tool is not"):
+        cut = body.find(end)
+        if cut != -1:
+            return body[:cut]
+    return body
+
+
+def observation_id_for_path(path: Any, session_id: str) -> str:
+    """The observation id of a file in ``session_id``'s spill directory.
+
+    An id is the file's stem — the (sanitised) tool-call id it was written
+    under — and only a file directly inside that session's own
+    ``sessions/<session_id>.tool-results/`` has one; ``""`` otherwise.
+    `agent_mcp/recall_observation.py` resolves an id back the same way.
+    """
+    if not path or not session_id:
+        return ""
+    from pathlib import Path
+
+    try:
+        p = Path(str(path))
+        if p.parent.resolve() != session_record_paths(session_id)[1].resolve():
+            return ""
+    except (OSError, ValueError):
+        return ""
+    return p.stem
+
+
+def _observation_stub(
+    obs_id: str, tool_name: str, raw_args: Any, size: int, head_src: str,
+    head_chars: int, route: str = "",
+) -> str:
+    """What a cleared result leaves behind with observation stubs on (#1481).
+
+    An addressable id, the call that made it, and a bounded VERBATIM head of
+    the original — never a paraphrase (CliffCompaction: truncate only). The
+    plain marker says only *where* the content went, so the model has to
+    re-read a result to learn whether it needs it; the head says *what* it
+    was, and ``recall_observation(id=…)`` returns the rest.
+    """
+    head, _more = _generate_preview(head_src or "", max(0, int(head_chars)))
+    call = f"{tool_name} {_args_digest(raw_args)}".strip() or "tool result"
+    lines = [
+        f"{OBSERVATION_STUB_PREFIX}{obs_id} — {call} — {size:,} chars cleared "
+        f"from context. Its first {len(head):,} chars, verbatim:",
+        head,
+        f"… recall_observation(id=\"{obs_id}\") returns the full text.",
+    ]
+    if route:
+        lines.append(route)
+    return "\n".join(lines) + "]"
 
 
 def _replace_tool_content(message: dict, new_text: str) -> dict:
@@ -290,6 +416,8 @@ def microcompact(
     legacy_count_rule: bool = True,
     disallowed_tools: Iterable[str] | None = None,
     non_compactable_tools: Iterable[str] | None = None,
+    observation_stubs: bool = False,
+    observation_head_chars: int = DEFAULT_OBSERVATION_HEAD_CHARS,
     name_session_record: bool = False,
 ) -> tuple[list[dict], int]:
     """Replace stale compactable tool results with a cleared marker.
@@ -325,9 +453,18 @@ def microcompact(
         ``compactable_tools`` is ignored and every tool's result may be
         cleared except these (bare or namespaced). ``None`` keeps the
         allow-list. See ``DEFAULT_NON_COMPACTABLE``.
+      observation_stubs: #1481, off by default. A cleared result — fresh, or
+        a spilled pointer block — becomes an observation stub (an id, the
+        call, a verbatim head of at most ``observation_head_chars``) that
+        ``recall_observation(id)`` resolves. Needs ``session_id``; without
+        one, or when the id cannot be derived, the old marker is written.
       name_session_record: #1514, off by default. A marker for content that
         was saved also names the session's own record
         (``tool_result_spill.session_record_route``).
+
+    Whatever the switches, a result a previous pass already cleared is never
+    selected again (``_is_cleared_stub``): a second pass over its own output
+    changes no byte and counts no clear.
 
     Recoverability: with ``session_id`` set, each result is written to
     the session's spill dir before its content leaves the prompt, and the
@@ -348,6 +485,7 @@ def microcompact(
     read_denied = tool_is_denied(READ_TOOL, disallowed_tools)
     route = (session_record_route(session_id, disallowed_tools)
              if name_session_record and session_id else "")
+    stubs = bool(observation_stubs and session_id)
 
     # Pass 1: build tool_call_id → tool_name map. Assistant messages
     # carry tool_calls; we trust that mapping over any name on the tool
@@ -394,6 +532,13 @@ def microcompact(
     # 200-byte result with it makes the prompt LARGER while losing the
     # content. The spill-aware pass below is exempt — a spilled result is
     # over the 50 KB spill threshold by definition.
+    # A result a previous pass already cleared is a candidate for neither
+    # rule: re-clearing a stub frees nothing and rewrites a message the
+    # engine has cached (#1481).
+    candidates = [
+        idx for idx in candidates
+        if not _is_cleared_stub(_tool_result_text(messages[idx]))
+    ]
     sizeable = [
         idx for idx in candidates
         if len(_tool_result_text(messages[idx])) >= min_chars_to_clear
@@ -414,8 +559,13 @@ def microcompact(
         # which is exactly when the harness can least afford the stall.
         current = estimate_fn(list(messages))
         if current > token_budget:
+            # A stub keeps its head, so it frees less than a bare marker;
+            # budget with a stand-in of the stub's size or the pass stops
+            # short of the target it believes it reached.
+            stand_in = (CLEARED_MARKER + " " * (max(0, int(observation_head_chars)) + 200)
+                        if stubs else CLEARED_MARKER)
             for idx in sizeable:
-                marker = _replace_tool_content(messages[idx], CLEARED_MARKER)
+                marker = _replace_tool_content(messages[idx], stand_in)
                 saved = estimate_fn([messages[idx]]) - estimate_fn([marker])
                 if saved <= 0:
                     continue
@@ -457,16 +607,29 @@ def microcompact(
         # case the old code claimed to handle and did not — it replaced
         # the <persisted-output> block, destroying the only route back to
         # the content.
+        cid = msg.get("tool_call_id") or msg.get("call_id") or ""
+        tool_name = tc_id_to_name.get(cid, "")
         if PERSISTED_OUTPUT_TAG in text:
-            new_text = _persisted_block_only(text)
-            if route:
-                new_text = f"{new_text} {route}"
+            new_text = ""
+            if stubs:
+                pointer = _pointer_path(text)
+                obs_id = observation_id_for_path(pointer, session_id)
+                if obs_id:
+                    new_text = _observation_stub(
+                        obs_id, tool_name, tc_id_to_args.get(cid),
+                        _pointer_size(text, pointer), _pointer_preview(text),
+                        observation_head_chars, route)
+            if not new_text:
+                new_text = _persisted_block_only(text)
+                if route:
+                    new_text = f"{new_text} {route}"
+            if new_text == text:
+                out.append(msg)
+                continue
             out.append(_replace_tool_content(msg, new_text))
             cleared += 1
             continue
 
-        cid = msg.get("tool_call_id") or msg.get("call_id") or ""
-        tool_name = tc_id_to_name.get(cid, "")
         path = None
         if session_id and cid:
             path = persist_for_compaction(
@@ -482,11 +645,16 @@ def microcompact(
                 out.append(msg)
                 continue
 
-        out.append(_replace_tool_content(
-            msg,
-            _cleared_marker(tool_name, tc_id_to_args.get(cid), len(text), path,
-                            read_denied=read_denied, route=route),
-        ))
+        obs_id = observation_id_for_path(path, session_id) if stubs else ""
+        if obs_id:
+            new_text = _observation_stub(
+                obs_id, tool_name, tc_id_to_args.get(cid), len(text), text,
+                observation_head_chars, route)
+        else:
+            new_text = _cleared_marker(
+                tool_name, tc_id_to_args.get(cid), len(text), path,
+                read_denied=read_denied, route=route)
+        out.append(_replace_tool_content(msg, new_text))
         cleared += 1
 
     if cleared:
@@ -666,6 +834,10 @@ def shrink_assistant_arguments(
 
 __all__ = [
     "DEFAULT_COMPACTABLE_TOOLS",
+    "DEFAULT_OBSERVATION_HEAD_CHARS",
+    "OBSERVATION_STUB_PREFIX",
+    "PREVIEW_DROPPED",
+    "observation_id_for_path",
     "DEFAULT_NON_COMPACTABLE",
     "CLEARED_MARKER",
     "SHRUNK_ARG_MARKER",

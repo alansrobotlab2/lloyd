@@ -261,6 +261,12 @@ class RunOptions:
     # may be cleared except these. From `compaction.microcompact.
     # non_compactable_tools` via `app.mcp_discovery`.
     intra_turn_microcompact_non_compactable: tuple[str, ...] | None = None
+    # #1481: a cleared result leaves an observation stub (id + bounded
+    # verbatim head) and `recall_observation(id)` is advertised to resolve
+    # it. Off = today's marker and today's catalog. From
+    # `compaction.microcompact.observation_stubs` / `observation_head_chars`.
+    intra_turn_microcompact_observation_stubs: bool = False
+    intra_turn_microcompact_observation_head_chars: int = 400
     # #1514: cleared-result markers (rung 1 and rung 4) also name the
     # session's own record, `sessions/<sid>.json` + `<sid>.tool-results/`.
     # From `compaction.microcompact.name_session_record`.

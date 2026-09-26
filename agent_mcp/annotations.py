@@ -32,6 +32,9 @@ from mcp.types import Tool, ToolAnnotations
 READ_ONLY: frozenset[str] = frozenset({
     # Filesystem
     "Read", "Grep", "Glob",
+    # A cleared tool result, back by its observation id (#1481): opens one
+    # file in the calling session's own spill directory.
+    "recall_observation",
     # Internal
     "_BackgroundTaskDrain",
     # Polls a detached gate; observes, never starts one.

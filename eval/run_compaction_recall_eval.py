@@ -54,7 +54,7 @@ real tool schemas, snapshotted once from the aggregator, served by
 in-process stubs — Read serves the synthetic files, this tree's files and
 the probe session's OWN record (its session JSON and the spill files
 microcompaction wrote); Grep searches the same and honours `path`;
-everything else
+`recall_observation` is the served tool's own resolver; everything else
 answers "not available in this evaluation". Until 2026-09-25 Read and Grep
 saw every session under the scratch root — the other arms' and seeds'
 records, each planting a different codename and port — so a Grep for
@@ -92,9 +92,11 @@ ARMS
   self_record #1514's FREE route: `tool_clear` plus one clause in every
               cleared-result marker naming the session's own record
               (`sessions/<sid>.json`, `sessions/<sid>.tool-results/`). No new
-              tool. The baseline #1481's `recall_observation` must beat.
-  production_self_record
-              the same switch at production's thresholds.
+              tool. The baseline `observation` must beat.
+  observation #1481: `tool_clear` with observation stubs (id + verbatim head)
+              and `recall_observation(id)` advertised.
+  production_self_record / production_observation
+              the same two switches at production's thresholds.
   raised      trigger/target 0.9/0.7 at both passes: fire later, keep more.
   trigger90   trigger 0.9, target 0.52: fire later, clear as far as today.
   summary_legacy     summarize layer, regenerate-every-turn 9-section summary.
@@ -267,7 +269,7 @@ ARMS: dict[str, dict[str, Any]] = {
     # cleared-result marker naming the session's own record
     # (`sessions/<sid>.json` + `<sid>.tool-results/`,
     # `tool_result_spill.session_record_route`). No new tool, no new
-    # permission — the baseline #1481's `recall_observation` has to beat.
+    # permission — the baseline `observation` has to beat.
     "self_record": {
         "compaction": {"mode": "truncate",
                        "microcompact": {"trigger_fraction": 0.2,
@@ -278,11 +280,28 @@ ARMS: dict[str, dict[str, Any]] = {
                     "intra_turn_microcompact_name_session_record": True},
         "expects_fire": True,
     },
-    # The same switch at production's thresholds: what flipping it on
-    # would actually change. Run beside `production`.
+    # #1481: `tool_clear` exactly, with observation stubs (id + bounded
+    # verbatim head) and `recall_observation(id)` advertised to resolve them.
+    "observation": {
+        "compaction": {"mode": "truncate",
+                       "microcompact": {"trigger_fraction": 0.2,
+                                        "target_fraction": 0.1,
+                                        "observation_stubs": True}},
+        "options": {"intra_turn_microcompact_trigger_fraction": 0.2,
+                    "intra_turn_microcompact_target_fraction": 0.1,
+                    "intra_turn_microcompact_observation_stubs": True},
+        "expects_fire": True,
+    },
+    # The same two switches at production's thresholds: what flipping one
+    # on would actually change. Run beside `production`.
     "production_self_record": {
         "compaction": {"microcompact": {"name_session_record": True}},
         "options": {"intra_turn_microcompact_name_session_record": True},
+        "expects_fire": True,
+    },
+    "production_observation": {
+        "compaction": {"microcompact": {"observation_stubs": True}},
+        "options": {"intra_turn_microcompact_observation_stubs": True},
         "expects_fire": True,
     },
     # The candidate the first three arms pointed at: production's mechanism
@@ -945,6 +964,13 @@ class EvalPool:
                          if rx.search(ln)]
             return {"content": "\n".join(hits[:200]) or "No matches found",
                     "is_error": False}
+        if bare == "recall_observation":
+            # The served tool's own resolver and refusal (#1481), bound to this
+            # probe's session exactly as the aggregator binds it.
+            from agent_mcp.recall_observation import recall, resolve
+            oid = str(args.get("id") or "")
+            return {"content": recall(oid, self.session_id, int(args.get("offset") or 0)),
+                    "is_error": resolve(oid, self.session_id) is None}
         if self.memory and bare in ("memory_add", "fact_add"):
             self.saved.append({"tool": bare, **dict(args or {})})
             return {"content": json.dumps({"ok": True}), "is_error": False}
@@ -1529,7 +1555,7 @@ async def run_one(session: Session, arm: str, *, discovered: list, system_prompt
             row.update(status="dry", fired=pre, warmup={"warmup": True, **winfo})
             return row
 
-        pool = EvalPool(discovered, session.files,
+        pool = EvalPool(with_recall_observation(discovered), session.files,
                         data_root, planted=session.planted, session_id=sid)
         log: list[dict] = []
         before: dict[str, float] = {}
@@ -1759,6 +1785,33 @@ def resolve_shape(shape: str, arms: list[str]) -> str:
         return shape
     return "conversation" if arms and all(ARMS[x].get("expects_summary")
                                           for x in arms) else "tool"
+
+
+def with_recall_observation(discovered: list) -> list:
+    """`discovered` plus `recall_observation` (#1481) on the lloyd-mcp server.
+
+    A snapshot taken from an aggregator older than the tool lacks it. Added
+    to every arm: the harness itself hides it from a turn whose relief writes
+    no observation stubs (`loop._open_turn`), so an arm with the switch off
+    advertises exactly what it did before — which exercises the real hiding.
+    """
+    from agent_mcp.recall_observation import tool
+    from app.harness.tool_result_spill import RECALL_OBSERVATION_TOOL
+
+    out = []
+    added = False
+    for srv, tools in discovered:
+        tools = list(tools)
+        if not added and any(t.get("name") == "Read" for t in tools):
+            if not any(t.get("name") == RECALL_OBSERVATION_TOOL for t in tools):
+                t = tool()
+                tools.append({"name": t.name, "description": t.description,
+                              "inputSchema": t.model_dump(by_alias=True)["inputSchema"],
+                              "annotations": {"readOnlyHint": True,
+                                              "idempotentHint": True}})
+            added = True
+        out.append([srv, tools])
+    return out
 
 
 def _load_discovered(snapshot: Path) -> list:

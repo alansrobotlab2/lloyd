@@ -242,6 +242,11 @@ def persist_for_compaction(
     return path
 
 
+#: The read-only tool that returns a cleared result by its observation id
+#: (#1481, `agent_mcp/recall_observation.py`). Advertised only to a turn whose
+#: relief writes observation stubs.
+RECALL_OBSERVATION_TOOL = "recall_observation"
+
 #: The tool that searches a directory tree for a phrase. Named here for the
 #: same reason as ``READ_TOOL``: a route is only a route if the turn owns it.
 GREP_TOOL = "Grep"

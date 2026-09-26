@@ -559,10 +559,35 @@ def test_the_pool_sees_only_its_own_session_record(tmp_path):
     assert "7185" in out["content"] and "7999" in out["content"]
 
 
+def test_the_pool_serves_recall_observation_and_names_the_route(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR", tmp_path / "sessions")
+    _two_sessions(tmp_path)
+    p = _planted()
+    (tmp_path / "sessions" / "mine.tool-results" / "call_planted.txt").write_text(
+        f"codename `{p.passphrase}`")
+    pool = R.EvalPool([], {}, tmp_path, tree_root=tmp_path / "tree", planted=p,
+                      session_id="mine")
+    out = asyncio.run(pool.call_tool("recall_observation", {"id": "call_planted"}))
+    assert not out["is_error"] and p.passphrase in out["content"]
+    assert pool.recovered_via == {"recall_observation": {"distinctive"}}
+    assert asyncio.run(pool.call_tool("recall_observation", {"id": "nope"}))["is_error"]
+    assert pool._route("Grep", {"path": str(tmp_path / "sessions" / "mine.json")}) \
+        == "session_record"
+    assert pool._route("Read", {"file_path": "x/mine.tool-results/call_1.txt"}) == "spill_file"
+
+
+def test_with_recall_observation_adds_the_schema_once():
+    disc = [["lloyd-mcp", [{"name": "Read"}]]]
+    out = R.with_recall_observation(disc)
+    names = [t["name"] for t in out[0][1]]
+    assert names == ["Read", "recall_observation"]
+    assert R.with_recall_observation(out)[0][1] == out[0][1]
+
+
 def test_the_new_arms_reach_the_wire(corpus, tmp_path, monkeypatch):
-    """Through run_one with a scripted engine: `self_record` names the session
-    record on the wire and `tool_clear` does not — the arms differ in exactly
-    their switch."""
+    """Through run_one with a scripted engine: `observation` advertises the tool
+    and puts a stub on the wire; `self_record` names the session record;
+    `tool_clear` does neither — so the arms differ in exactly their switch."""
     root, files = corpus
     s = R.build_session(3, 50_000, 0.5, root=root, corpus=files)
     monkeypatch.setattr(R, "_metrics", lambda base_url: {})
@@ -589,11 +614,15 @@ def test_the_new_arms_reach_the_wire(corpus, tmp_path, monkeypatch):
     monkeypatch.setenv("LLOYD_DATA", str(tmp_path / "d"))
     monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR",
                         tmp_path / "d" / "sessions")
-    for arm in ("tool_clear", "self_record"):
+    for arm in ("tool_clear", "self_record", "observation"):
         monkeypatch.setattr("app.harness.loop.stream_chat", fake_for(arm))
         row = asyncio.run(R.run_one(s, arm, discovered=disc, system_prompt="sys",
                                     data_root=tmp_path / "d", base_url="http://stub",
                                     max_turns=3))
         assert row["fired"]["turn_start_freed"] > 0, row.get("reason")
+    assert "recall_observation" not in seen["tool_clear"]["tools"]
+    assert "recall_observation" not in seen["self_record"]["tools"]
+    assert "recall_observation" in seen["observation"]["tools"]
+    assert seen["observation"]["stub"] and not seen["tool_clear"]["stub"]
     assert seen["self_record"]["record"] and not seen["tool_clear"]["record"]
 

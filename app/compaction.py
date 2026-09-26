@@ -676,8 +676,10 @@ async def load_and_compact_session(
                 disallowed_tools=disallowed_tools,
                 # Deny mode wins when configured; None keeps `tools`.
                 non_compactable_tools=mc_cfg.get("non_compactable_tools"),
-                # #1514 (off by default); the in-turn pass reads the same key
-                # through `mcp_discovery.intra_turn_compaction_kwargs`.
+                # #1481 / #1514 (off by default); the in-turn pass reads the
+                # same keys through `mcp_discovery.intra_turn_compaction_kwargs`.
+                observation_stubs=bool(mc_cfg.get("observation_stubs", False)),
+                observation_head_chars=int(mc_cfg.get("observation_head_chars", 400)),
                 name_session_record=bool(mc_cfg.get("name_session_record", False)),
             )
         except Exception as e:  # noqa: BLE001

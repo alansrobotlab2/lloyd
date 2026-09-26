@@ -1154,7 +1154,7 @@ def _stub(module, name, replacement):
 
 
 # ---------------------------------------------------------------------------
-# #1514 — the free route.
+# #1481 — observation stubs; idempotent re-relief. #1514 — the free route.
 # ---------------------------------------------------------------------------
 
 
@@ -1164,6 +1164,100 @@ def _planted_pairs(n: int, first_line: str, chars: int = 6_000) -> list[dict]:
     body = first_line + "\n" + ("filler line for the planted result\n" * (chars // 35))
     msgs[1] = dict(msgs[1], content=body)
     return msgs
+
+
+def test_a_cleared_result_leaves_an_observation_stub_with_its_first_line_verbatim(
+        tmp_path, monkeypatch):
+    """Clause 1: id + bounded verbatim prefix, never a summary."""
+    from app.harness import microcompact as mc
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR", tmp_path)
+    first = "QUARTZ-HERON-2291 ships on relay port 7185 — do not paraphrase me"
+    msgs = _planted_pairs(20, first)
+    est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
+    out, cleared = mc.microcompact(
+        msgs, token_budget=1, estimate_fn=est, keep_recent_tools=5,
+        session_id="sid1481", legacy_count_rule=False,
+        observation_stubs=True, observation_head_chars=300)
+    assert cleared == 15
+    stub = _marker_text(out[1])
+    assert stub.startswith(mc.OBSERVATION_STUB_PREFIX + "call_000 "), stub[:120]
+    assert first in stub, "the first line must appear byte-for-byte"
+    # Bounded: the head is at most its cap, and the stub is not the result.
+    head = stub.split("verbatim:\n", 1)[1].split("\n… recall_observation", 1)[0]
+    assert len(head) <= 300 and msgs[1]["content"].startswith(head)
+    assert len(stub) < len(msgs[1]["content"]) / 5
+    assert 'recall_observation(id="call_000")' in stub
+    # The id resolves to the full content, persisted before the clear.
+    saved = tmp_path / "sid1481.tool-results" / "call_000.txt"
+    assert saved.read_text() == msgs[1]["content"]
+    assert mc.observation_id_for_path(saved, "sid1481") == "call_000"
+    assert mc.observation_id_for_path(saved, "another-session") == ""
+
+
+def test_stubs_off_writes_todays_marker(tmp_path, monkeypatch):
+    from app.harness import microcompact as mc
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR", tmp_path)
+    msgs = _planted_pairs(20, "FIRST LINE")
+    est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
+    out, _ = mc.microcompact(msgs, token_budget=1, estimate_fn=est,
+                             keep_recent_tools=5, session_id="s",
+                             legacy_count_rule=False)
+    text = _marker_text(out[1])
+    assert not text.startswith(mc.OBSERVATION_STUB_PREFIX)
+    assert "FIRST LINE" not in text and "Read that path if you need it again.]" in text
+    assert "sessions" not in text.split("full content at")[0]
+
+
+def test_a_second_relief_pass_changes_no_byte_and_counts_no_clear(tmp_path, monkeypatch):
+    """Clause 2: re-running the pass over its own output is a no-op — for
+    stubs, plain markers and reduced `<persisted-output>` blocks alike (the
+    last one used to grow a duplicate `[preview dropped …]` line)."""
+    from app.harness import microcompact as mc
+    from app.harness.tool_result_spill import PERSISTED_OUTPUT_TAG
+    monkeypatch.setattr("app.harness.tool_result_spill.SESSIONS_DIR", tmp_path)
+    est = lambda ms: estimate_conversation_tokens(ms, "")  # noqa: E731
+
+    msgs = _planted_pairs(20, "HEAD")
+    pointer = (f"{PERSISTED_OUTPUT_TAG}\nOutput too large (54.7 KB, 56,034 chars). "
+               f"Full output saved to: {tmp_path}/s.tool-results/call_001.txt\n\n"
+               "Preview (first 2.0 KB):\n" + "p" * 2000 + "\n...\n"
+               "Read the full file with the Read tool.\n</persisted-output>")
+    msgs[3] = dict(msgs[3], content=pointer)
+    for stubs in (False, True):
+        once, n1 = mc.microcompact(msgs, token_budget=1, estimate_fn=est,
+                                   keep_recent_tools=5, session_id="s",
+                                   legacy_count_rule=False, observation_stubs=stubs)
+        assert n1 == 15
+        twice, n2 = mc.microcompact(once, token_budget=1, estimate_fn=est,
+                                    keep_recent_tools=5, session_id="s",
+                                    legacy_count_rule=False, observation_stubs=stubs)
+        assert n2 == 0, f"stubs={stubs}: {n2} re-cleared"
+        assert json.dumps(twice) == json.dumps(once)
+        assert _marker_text(twice[3]).count("preview dropped") <= 1
+    # The helper itself is idempotent too.
+    reduced = mc._persisted_block_only(pointer)
+    assert mc._persisted_block_only(reduced) == reduced
+
+
+def test_a_pointer_block_becomes_a_stub_whose_head_is_the_preview(tmp_path, monkeypatch):
+    """Through the real turn-start pass, `compaction.microcompact.
+    observation_stubs` on: an old transcript pointer (D1) becomes a stub whose
+    id is its spill file and whose head is its verbatim preview."""
+    from app.config import CONFIG
+    from app.harness import microcompact as mc
+    p, sid, fulls = _pointer_session(tmp_path, monkeypatch, 20)
+    comp = dict(CONFIG.get("compaction") or {})
+    comp["microcompact"] = {**(comp.get("microcompact") or {}),
+                            "observation_stubs": True, "observation_head_chars": 200}
+    monkeypatch.setitem(CONFIG, "compaction", comp)
+    out = _run(load_and_compact_session(p, model="qwen", mode_override="truncate"))
+    tools = [_marker_text(m) for m in out["history"] if m.get("role") == "tool"]
+    stubs = [t for t in tools if t.startswith(mc.OBSERVATION_STUB_PREFIX)]
+    assert len(stubs) == 5 == out["microcompacted"]
+    assert stubs[0].startswith(f"{mc.OBSERVATION_STUB_PREFIX}call_000 ")
+    assert fulls[0][:150] in stubs[0]
+    assert f"{len(fulls[0]):,} chars cleared" in stubs[0]
+    assert "preview dropped" not in stubs[0]
 
 
 def test_the_session_record_is_named_where_a_cleared_result_is_described(

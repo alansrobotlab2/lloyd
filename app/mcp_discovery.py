@@ -315,8 +315,13 @@ def intra_turn_compaction_kwargs() -> dict:
         out["intra_turn_microcompact_non_compactable"] = tuple(
             str(x) for x in mc["non_compactable_tools"]
         )
-    # #1514, off unless config turns it on (the turn-start pass in
-    # `app.compaction` reads the same key).
+    # #1481 / #1514, both off unless config turns them on (the turn-start
+    # pass in `app.compaction` reads the same three keys).
+    if "observation_stubs" in mc:
+        out["intra_turn_microcompact_observation_stubs"] = bool(mc["observation_stubs"])
+    if "observation_head_chars" in mc:
+        out["intra_turn_microcompact_observation_head_chars"] = int(
+            mc["observation_head_chars"])
     if "name_session_record" in mc:
         out["intra_turn_microcompact_name_session_record"] = bool(
             mc["name_session_record"])

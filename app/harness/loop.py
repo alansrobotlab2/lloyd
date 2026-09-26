@@ -40,6 +40,7 @@ from app.harness.errors import (
 from app.harness.microcompact import microcompact as _intra_microcompact
 from app.harness.tool_result_spill import (
     READ_TOOL,
+    RECALL_OBSERVATION_TOOL,
     fallback_for_empty_result,
     maybe_spill,
     tool_is_denied,
@@ -381,6 +382,12 @@ async def _open_turn(
     # plan-mode refresher's, which would otherwise rebuild it without them.
     surface_hidden = _surface_hidden(options)
     surface_hidden |= _allow_list_hidden(options, pool.discovered)
+    # #1481: `recall_observation` resolves observation stubs, and a turn
+    # whose relief writes none has nothing to resolve — advertising it would
+    # grow every turn's tools array (and move its cached prefix) for a tool
+    # that can only refuse. Off, the catalog is today's byte for byte.
+    if not getattr(options, "intra_turn_microcompact_observation_stubs", False):
+        surface_hidden.add(RECALL_OBSERVATION_TOOL)
     catalog = build_tool_list(list(pool.discovered),
                               set(options.disallowed_tools) | surface_hidden)
     # Every advertised tool grows one extra string parameter the model
@@ -2070,6 +2077,10 @@ def _intra_turn_microcompact(
         # marker on a long turn, and the turn that clears most is the one
         # with `Read` denied (#1066).
         disallowed_tools=list(getattr(options, "disallowed_tools", None) or []),
+        observation_stubs=bool(getattr(
+            options, "intra_turn_microcompact_observation_stubs", False)),
+        observation_head_chars=int(getattr(
+            options, "intra_turn_microcompact_observation_head_chars", 400)),
         name_session_record=bool(getattr(
             options, "intra_turn_microcompact_name_session_record", False)),
         **_rung_one_tool_selection(options),

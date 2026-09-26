@@ -973,7 +973,14 @@ def test_advertised_catalog_stays_under_its_token_ceiling(tools):
     from app.compaction import estimate_tokens
     from app.harness.tool_schema import mcp_tool_to_openai
 
-    advertised = [t for t in _internal(tools) if not t.name.startswith("_")]
+    from app.harness.tool_result_spill import RECALL_OBSERVATION_TOOL
+
+    # `recall_observation` (#1481) is served but advertised only to a turn
+    # whose relief writes observation stubs (`loop._open_turn` hides it
+    # otherwise, and the switch ships off), so it is not in the catalog a
+    # turn pays for by default.
+    advertised = [t for t in _internal(tools) if not t.name.startswith("_")
+                  and t.name != RECALL_OBSERVATION_TOOL]
     payload = json.dumps([mcp_tool_to_openai(t.model_dump(by_alias=True))
                           for t in advertised])
     tokens = estimate_tokens(payload)
