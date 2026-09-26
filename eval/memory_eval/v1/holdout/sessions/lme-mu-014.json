@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-014",
+ "sessions": [
+  {
+   "sid": "lme-mu-014-s1",
+   "date": "2026-05-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to get my audio setup working on the Radxa Rock 5C. The ReSpeaker mic array isn't being detected by my user account."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a permissions issue. Have you checked if your user is in the correct groups?"
+    },
+    {
+     "role": "user",
+     "text": "I just added myself to the plugdev group to enable ReSpeaker access. That seemed to do the trick."
+    },
+    {
+     "role": "assistant",
+     "text": "Great, that should grant the necessary device access. Did you also check the kernel modules?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, they're loaded. By the way, it's raining here again. I hope my umbrella makes it through the day."
+    },
+    {
+     "role": "assistant",
+     "text": "Fingers crossed for your umbrella. Is there anything else regarding the audio setup?"
+    },
+    {
+     "role": "user",
+     "text": "Nope, all good. Just wanted to note that down so I don't forget why I added that group."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. Glad you got it working."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-014-s2",
+   "date": "2026-05-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm doing some cleanup on my terminal configs for the Radxa Rock 5C. I'm trying to make it look nicer."
+    },
+    {
+     "role": "assistant",
+     "text": "What kind of changes are you making? Colors? Icons?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, icons. I've aliased the ls command to eza -a --icons=always. It looks so much better now."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a popular choice for modern terminals. Did you install eza from the official repo?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, compiled it from source actually. Took about ten minutes. Speaking of which, my coffee maker broke this morning."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh no, that's unfortunate. Did you get to order a replacement?"
+    },
+    {
+     "role": "user",
+     "text": "Ordered one, should be here Tuesday. Anyway, just wanted to remember this alias for later."
+    },
+    {
+     "role": "assistant",
+     "text": "I'll keep that in mind. Hope the new coffee maker arrives quickly."
+    }
+   ]
+  }
+ ]
+}

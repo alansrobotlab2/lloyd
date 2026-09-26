@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-067",
+ "sessions": [
+  {
+   "sid": "lme-mu-067-s1",
+   "date": "2026-05-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you help me debug this weird issue with Presidio?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, Alan. What's happening?"
+    },
+    {
+     "role": "user",
+     "text": "I noticed that identical PII values are hashing to different values across multiple calls. I looked it up, and since version 2.2.361, Presidio's hash operator uses a random per-entity salt by default, causing identical values to hash differently across calls."
+    },
+    {
+     "role": "assistant",
+     "text": "That explains the inconsistency. You'll need to configure the salt manually if you want deterministic hashing."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'll do that. By the way, what's the weather like in Seattle tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's expected to be cloudy with a high of 65°F."
+    },
+    {
+     "role": "user",
+     "text": "Nice. I also need to order a new HDMI cable for the office. Any recommendations?"
+    },
+    {
+     "role": "assistant",
+     "text": "A standard 6-foot braided HDMI 2.1 cable from a reputable brand like Anker should work fine."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-067-s2",
+   "date": "2026-05-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm reviewing some benchmark results for Presidio using the ONNX privacy-filter."
+    },
+    {
+     "role": "assistant",
+     "text": "How did it perform?"
+    },
+    {
+     "role": "user",
+     "text": "It was decent. Presidio with ONNX privacy-filter achieved 84.9% span recall and 81.0% strict recall on privaite-bench."
+    },
+    {
+     "role": "assistant",
+     "text": "Those are solid numbers for strict recall. Thanks for sharing."
+    },
+    {
+     "role": "user",
+     "text": "Yep. Also, do you know if there are any good Thai restaurants near the office?"
+    },
+    {
+     "role": "assistant",
+     "text": "There's a place called 'Bangkok Kitchen' about two blocks away. It has good reviews."
+    },
+    {
+     "role": "user",
+     "text": "Great, I'll check it out. Oh, and my printer is jamming again."
+    },
+    {
+     "role": "assistant",
+     "text": "Try checking the paper tray for stuck sheets and ensure the rollers are clean."
+    }
+   ]
+  }
+ ]
+}

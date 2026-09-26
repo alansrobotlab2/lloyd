@@ -1,0 +1,51 @@
+{
+ "episode": "lme-si-068",
+ "sessions": [
+  {
+   "sid": "lme-si-068-s1",
+   "date": "2026-06-09",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I finally got that new mechanical keyboard to work. The shift key is sticking again, though."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Did you try applying some lubricant to the switch housing, or is it a debris issue?"
+    },
+    {
+     "role": "user",
+     "text": "Lube didn't help. I think I need to replace the switch. Anyway, I spent the afternoon deep-diving into that paper on Inference Scaling for Long-Context Retrieval Augmented Generation. It's wild how efficient they claim to be."
+    },
+    {
+     "role": "assistant",
+     "text": "Efficiency in RAG is always a hot topic. What specific metrics stood out to you in that paper?"
+    },
+    {
+     "role": "user",
+     "text": "The trade-off curve. They show that 32× compute yields ~3× perplexity improvement and ~4× RAG recall improvement at k=8. That's a massive jump for just tweaking the inference budget."
+    },
+    {
+     "role": "assistant",
+     "text": "A 4x recall boost is significant if you can afford the compute. Are you planning to implement that scaling strategy in your current project?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. Right now, I'm just trying to decide what to make for dinner. I have too much kale and not enough ideas."
+    },
+    {
+     "role": "assistant",
+     "text": "Kale chips or a hearty soup with white beans are both great options if you want to use it up quickly."
+    },
+    {
+     "role": "user",
+     "text": "Soup sounds good. I'll go with that. Thanks for the chat."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy your dinner, Alan. Let me know if you need more RAG resources later."
+    }
+   ]
+  }
+ ]
+}

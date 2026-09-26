@@ -1,0 +1,47 @@
+{
+ "episode": "lme-pr-002",
+ "sessions": [
+  {
+   "sid": "lme-pr-002-s1",
+   "date": "2026-08-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to set up a new media server on a minimal Ubuntu container. It's super lightweight, just the core packages."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. For a minimal container, we should be careful about dependencies. What are you looking to do with it?"
+    },
+    {
+     "role": "user",
+     "text": "I want to automate downloading some podcasts and maybe some video clips for offline viewing. I was thinking of using yt-dlp for the video stuff."
+    },
+    {
+     "role": "assistant",
+     "text": "yt-dlp is great, but it can sometimes rely on external tools for certain formats or post-processing. Have you installed Node.js on that container yet?"
+    },
+    {
+     "role": "user",
+     "text": "No, I haven't. And honestly, I'd prefer to keep it that way. I want to yt-dlp should be avoided in environments without Node.js installed. It's just too messy with the extra runtime."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. We'll steer clear of that setup. What about the audio downloads?"
+    },
+    {
+     "role": "user",
+     "text": "Just RSS feeds mostly. Oh, also, my neighbor's dog barked all night, so I'm running on coffee. Anyway, back to the server."
+    },
+    {
+     "role": "assistant",
+     "text": "Sorry to hear about the sleepless night. For the RSS feeds, we can use a simple Python script with feedparser, which is much lighter."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Let's stick to lightweight Python tools only. No heavy runtimes like Node."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,65 @@
+{
+ "episode": "lme-kn-064",
+ "sessions": [
+  {
+   "sid": "lme-kn-064-s1",
+   "date": "2026-08-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you catch that storm last night? The power flickered twice in my apartment."
+    },
+    {
+     "role": "assistant",
+     "text": "I did. It was quite intense. Did your equipment survive the fluctuations okay?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly. I'm just worried about the HUG-Bench dataset integrity. I checked the stats and it still lists 60 unseen objects from 3 geometric categories with metric-scale 3D meshes."
+    },
+    {
+     "role": "assistant",
+     "text": "That matches the earlier documentation I have. Hopefully, the recent updates didn't corrupt the indices."
+    },
+    {
+     "role": "user",
+     "text": "I hope so. I'm going to run a quick integrity check now. The router is acting up a bit too."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Let me know if the check fails or if you need help troubleshooting the network."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-064-s2",
+   "date": "2026-08-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I finally got the latest patch for the benchmark installed. The documentation changed significantly."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? Did the object count change? I recall we were working with a smaller set before."
+    },
+    {
+     "role": "user",
+     "text": "Yes, exactly. HUG-Bench includes 90 unseen objects from 5 geometric categories with metric-scale 3D meshes now. The old numbers were outdated."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a substantial increase. Good to know the current state is much larger."
+    },
+    {
+     "role": "user",
+     "text": "Agreed. I'm grabbing takeout now, can't be bothered to cook. The delivery driver said the traffic was terrible."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy your meal. I'll make a note of the new dataset parameters for future reference."
+    }
+   ]
+  }
+ ]
+}

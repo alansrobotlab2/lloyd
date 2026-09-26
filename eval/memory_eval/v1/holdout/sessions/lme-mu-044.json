@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-044",
+ "sessions": [
+  {
+   "sid": "lme-mu-044-s1",
+   "date": "2026-07-21",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finally tackling that refactor for the Session Store. I've been digging through the JSON schema."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds productive. Is the structure causing any headaches?"
+    },
+    {
+     "role": "user",
+     "text": "A bit. I realized something crucial about the data model: The only place tool calls exist in the session store is within messages[].tool_calls[].function.name."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a good catch to make sure your parser doesn't look in the wrong places."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Also, do you have any recommendations for a good mechanical keyboard switch? I keep bottoming out."
+    },
+    {
+     "role": "assistant",
+     "text": "Have you tried linear switches like Cherry MX Reds? They are often recommended for that issue."
+    },
+    {
+     "role": "user",
+     "text": "I'll look into it. Thanks. One last thing on the code: I need to write a quick script to extract these names."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help draft that if you paste the sample JSON."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-044-s2",
+   "date": "2026-07-28",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I ran that analysis script on the Session Store dumps we discussed earlier."
+    },
+    {
+     "role": "assistant",
+     "text": "Did it run successfully? I know those directories can be heavy."
+    },
+    {
+     "role": "user",
+     "text": "It did. I was scanning for specific tool usage patterns. The result was interesting: 33 files under the first 200 .tool-results directories in the session store mention 'browser_evaluate' in their output bodies."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a significant number for a specific browser action. Are you optimizing those calls?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe. I'm just profiling performance right now. By the way, my internet cut out during the scan. Any tips for stabilizing Wi-Fi?"
+    },
+    {
+     "role": "assistant",
+     "text": "Try moving the router away from other electronics or switching to the 5GHz band if your device supports it."
+    },
+    {
+     "role": "user",
+     "text": "I'll try the 5GHz switch. Also, what's the weather like in Seattle for tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's expected to be overcast with light rain in the afternoon."
+    }
+   ]
+  }
+ ]
+}

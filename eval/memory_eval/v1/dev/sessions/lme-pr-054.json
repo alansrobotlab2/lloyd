@@ -1,0 +1,51 @@
+{
+ "episode": "lme-pr-054",
+ "sessions": [
+  {
+   "sid": "lme-pr-054-s1",
+   "date": "2026-06-28",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to organize my YouTube watch history. I have this recurring issue where the sidebar collapses when I scroll too fast. Annoying."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Have you tried disabling hardware acceleration in your browser settings? Sometimes that helps with rendering issues on heavy pages."
+    },
+    {
+     "role": "user",
+     "text": "I'll try that later. Actually, while I'm here, I want to make a note about Matthew Berman for future reference. I've been watching his stuff for a while, and honestly, Matthew Berman describes himself as generally optimistic but openly anxious about the pace of AI development."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I've noted that perspective on Matthew Berman. It's interesting how creators often balance that duality."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it's refreshing. Anyway, back to the bug—did you know Chrome 126 just dropped? Might be related to the sidebar issue."
+    },
+    {
+     "role": "assistant",
+     "text": "It's possible. New updates sometimes introduce layout regressions. Let me know if the hardware acceleration fix works."
+    },
+    {
+     "role": "user",
+     "text": "Will do. I'm also thinking about ordering a new mechanical keyboard. My current one is too loud for the office."
+    },
+    {
+     "role": "assistant",
+     "text": "Silent switches are a great solution. Linear or tactile?"
+    },
+    {
+     "role": "user",
+     "text": "Probably tactile. Thanks for the help, Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Good luck with the keyboard hunting!"
+    }
+   ]
+  }
+ ]
+}

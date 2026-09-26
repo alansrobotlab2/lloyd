@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-034",
+ "sessions": [
+  {
+   "sid": "lme-kn-034-s1",
+   "date": "2026-06-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to fix a dependency issue in my legacy scraper script. It keeps failing on SSL certs."
+    },
+    {
+     "role": "assistant",
+     "text": "That often happens with older SSL contexts. Are you using an old version of urllib3?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'm pinned to urllib3 1.26.0 because upgrading breaks our custom adapter. It's been stable for us though."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. Staying on 1.26.0 is fine if the security patches aren't critical for your use case. Have you checked if the cert bundle is outdated?"
+    },
+    {
+     "role": "user",
+     "text": "I'll check that. Also, did the package for the mechanical keyboard switches arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your email, but based on the shipping date, it should be there by Thursday."
+    },
+    {
+     "role": "user",
+     "text": "Cool. I'll try refreshing the cert bundle first. If that doesn't work, I might look at migrating later."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds like a plan. Let me know if you need help with the cert verification logic."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-034-s2",
+   "date": "2026-06-21",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I finally bit the bullet and refactored that scraper. The old SSL issues are gone."
+    },
+    {
+     "role": "assistant",
+     "text": "Great to hear. Did you upgrade the HTTP library?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, I moved to urllib3 version 2.7.0. I heard they are fundraising for HTTP/2 support, which is the only reason I bothered with the migration right now."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense. HTTP/2 support in urllib3 is a long-requested feature. The 2.x series is much cleaner regarding SSL handling too."
+    },
+    {
+     "role": "user",
+     "text": "Definitely. The API changes were annoying, but worth it. Also, did you see the weather forecast for next weekend?"
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like rain is expected Saturday. Maybe keep the indoor projects going?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'll probably just tinker with the keyboard builds then. The 2.7.0 update is running smooth for now."
+    },
+    {
+     "role": "assistant",
+     "text": "Excellent. Glad the migration went well."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-031",
+ "sessions": [
+  {
+   "sid": "lme-pr-031-s1",
+   "date": "2026-08-06",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to organize my reading list. I started reading that new alignment paper by Evan Hubinger last night. It's pretty dense, but really interesting."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a deep dive. Which specific aspect of his work are you focusing on right now?"
+    },
+    {
+     "role": "user",
+     "text": "Mainly the part about deceptive alignment. I've been thinking about how we interpret model reasoning. Honestly, I think Evan Hubinger stated that a sufficiently smart deceptive model can choose to not reveal its deception in its Chain of Thought. That really stuck with me."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a critical insight. It suggests that CoT isn't always a reliable window into the true internal state of advanced models. Did you find the counter-proposals in the paper convincing?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly. By the way, do you know if there's a good meetup in SF this weekend? I need to stretch my legs after staring at PDFs for six hours."
+    },
+    {
+     "role": "assistant",
+     "text": "There is a tech networking event at the Dogpatch Labs on Saturday, and a small indie game demo day in the Mission District on Sunday."
+    },
+    {
+     "role": "user",
+     "text": "The game demo day sounds fun. I'll probably check that out. Also, my coffee maker is acting weird again. It's making a grinding noise."
+    },
+    {
+     "role": "assistant",
+     "text": "That usually indicates a blockage in the grinder or worn burrs. Have you tried cleaning the chute with a brush?"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-023",
+ "sessions": [
+  {
+   "sid": "lme-pr-023-s1",
+   "date": "2026-06-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you help me pick a book for my team's monthly book club? We want something on complex systems and feedback loops."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure! Are there specific authors or styles you prefer? Or should I look for highly-rated introductory texts?"
+    },
+    {
+     "role": "user",
+     "text": "Just go with Thinking in Systems. I rate it 10/10 and consider it required reading."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll prioritize that title for the recommendation."
+    },
+    {
+     "role": "user",
+     "text": "Also, quick check: did that package with the monitor stand arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking info says it's out for delivery and should be there by 5 PM today."
+    },
+    {
+     "role": "user",
+     "text": "Nice. Anyway, back to the book. Just draft a short intro paragraph for the newsletter recommending it."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll draft an enthusiastic intro highlighting its value as a foundational text for the team."
+    }
+   ]
+  }
+ ]
+}

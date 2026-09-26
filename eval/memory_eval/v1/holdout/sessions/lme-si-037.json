@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-037",
+ "sessions": [
+  {
+   "sid": "lme-si-037-s1",
+   "date": "2026-07-29",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm trying to configure the new voice MD for the prototype. How do I handle the streaming latency?"
+    },
+    {
+     "role": "assistant",
+     "text": "You should buffer the incoming audio chunks to smooth out jitter. I can send you the config snippet for the buffer size."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, did you see that bug report about the microphone timeout? It's really annoying."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I saw it. It looks like a race condition in the driver. The fix is scheduled for next week."
+    },
+    {
+     "role": "user",
+     "text": "Good. One more thing before I go offline: I'm worried about the legal side of this project. Specifically, the privacy and IP posture of routing unfiltered streams and scraped writings through commercial models is an open question."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. That is a significant compliance risk. We should flag that for legal review."
+    },
+    {
+     "role": "user",
+     "text": "Agreed. I'll add it to the backlog. Anyway, what's for dinner tonight?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't eat, but you mentioned you were thinking of ordering Thai earlier."
+    }
+   ]
+  }
+ ]
+}

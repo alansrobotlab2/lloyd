@@ -1,0 +1,73 @@
+{
+ "episode": "lme-mu-064",
+ "sessions": [
+  {
+   "sid": "lme-mu-064-s1",
+   "date": "2026-07-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, do you remember that paper I mentioned last week? Mind the Memory Gap. I think Recasens et al. published it in 2025."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I have that noted. Is there something specific you want to do with it?"
+    },
+    {
+     "role": "user",
+     "text": "Just checking. Also, my coffee maker is acting up again. The steam wand leaks unless I hold it at a weird angle."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a gasket issue. Have you tried tightening the connection?"
+    },
+    {
+     "role": "user",
+     "text": "I did, no luck. I'll probably just buy a new one from Amazon later. Anyway, back to the paper, it's been pretty useful for my research."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad to hear it. Let me know if you need help summarizing other sections."
+    },
+    {
+     "role": "user",
+     "text": "Will do. Thanks."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-064-s2",
+   "date": "2026-07-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I finally ran those benchmarks. Mind the Memory Gap really unveils GPU bottlenecks in large-batch LLM inference. That was the key takeaway for me."
+    },
+    {
+     "role": "assistant",
+     "text": "Interesting. Did those bottlenecks match the theoretical predictions from the paper?"
+    },
+    {
+     "role": "user",
+     "text": "Pretty much. It was annoying to debug though. Also, did you hear the weather forecast for Saturday? They say rain all day."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I saw that. Might be a good day to stay in and code."
+    },
+    {
+     "role": "user",
+     "text": "Exactly my plan. I need to finish the report on this inference issue. The data is solid, though."
+    },
+    {
+     "role": "assistant",
+     "text": "Great. Let me know if you need any assistance formatting the results."
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. I'm going to grab lunch."
+    }
+   ]
+  }
+ ]
+}

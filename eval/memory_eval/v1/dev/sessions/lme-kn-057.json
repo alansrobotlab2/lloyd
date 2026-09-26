@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-057",
+ "sessions": [
+  {
+   "sid": "lme-kn-057-s1",
+   "date": "2026-08-23",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finally getting around to tweaking the CI/CD pipeline for the Pstrucha repo. Can you help me draft the GitHub Action YAML for the security scan?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure thing. Are you using a specific scanner tool like SonarQube or Snyk for Pstrucha?"
+    },
+    {
+     "role": "user",
+     "text": "We're using a custom internal script. Just so you know for the budget spreadsheet, the current cost is about $2 per PR. That seems low, but it's a lightweight check."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it, $2 per PR. I'll keep that in mind for any cost estimation tools. Do you want the scan to block the PR if it fails?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, hard block. Also, did my order for the new mechanical keyboard switches arrive? The tracking says out for delivery."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have direct access to your personal shipping notifications, but typically 'out for delivery' means it should arrive today. I can check your calendar if you want to block time for installation."
+    },
+    {
+     "role": "user",
+     "text": "No need. Just finish that YAML snippet for me. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "Here is the snippet with the blocking condition enabled."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-057-s2",
+   "date": "2026-08-31",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, big update on the Pstrucha infrastructure. We switched from the lightweight custom script to the enterprise-grade agent security-scanning workflow."
+    },
+    {
+     "role": "assistant",
+     "text": "Interesting. How does that impact the resource usage?"
+    },
+    {
+     "role": "user",
+     "text": "It's much heavier. The new workflow costs approximately $5 per PR. We need to adjust our monthly cloud budget forecast accordingly."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll note the increase to $5 per PR for future budget calculations."
+    },
+    {
+     "role": "user",
+     "text": "Also, the weather is terrible here in Seattle. Rain again?"
+    },
+    {
+     "role": "assistant",
+     "text": "Looks like a typical November day. High chance of precipitation."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it's gloomy. Anyway, I need to update the project proposal document with these new cost figures. I'll handle it later."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me know if you need help calculating the new totals."
+    }
+   ]
+  }
+ ]
+}

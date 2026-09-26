@@ -56,6 +56,9 @@ __pycache__/
 # …and the retrieval holdout manifest (#1412): the reserved ids and the
 # split_hash that stops the split being re-picked after results are seen.
 !eval/vault_recall_holdout_manifest.json
+# …and LloydMemEval's frozen sets (#1480): the manifest and the synthetic
+# session files ARE the set; an ignored one would fail its own sha check.
+!eval/memory_eval/**/*.json
 # …and the episodic-arm measurement (#675), the item's committed deliverable.
 !eval/episodic-arm/*.json
 # …and the prefetch cost eval's merged (numbers-only) artifacts (#562).

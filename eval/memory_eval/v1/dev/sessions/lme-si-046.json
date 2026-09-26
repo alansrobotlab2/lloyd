@@ -1,0 +1,47 @@
+{
+ "episode": "lme-si-046",
+ "sessions": [
+  {
+   "sid": "lme-si-046-s1",
+   "date": "2026-08-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you see the latest update on the GigaWorld-Policy model? It looks like GigaWorld-Policy achieves a 7% higher success rate than Motus."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant improvement. I have noted that performance gap."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, the benchmark charts were pretty clear on that. Anyway, do you remember if I ordered the new mechanical keyboard switches last week?"
+    },
+    {
+     "role": "assistant",
+     "text": "I do not have access to your personal purchase history, but I can help you track it if you provide the order number."
+    },
+    {
+     "role": "user",
+     "text": "Ah, right. I'll check my email. By the way, it's raining here again. I hate this weather."
+    },
+    {
+     "role": "assistant",
+     "text": "I'm sorry to hear that. You might need an umbrella if you plan to go out later."
+    },
+    {
+     "role": "user",
+     "text": "Probably. I was thinking about making pasta for dinner instead of going out. Any quick recipe ideas?"
+    },
+    {
+     "role": "assistant",
+     "text": "Aglio e Olio is quick and simple. Just garlic, olive oil, chili flakes, and pasta."
+    },
+    {
+     "role": "user",
+     "text": "Sounds good. Thanks, Lloyd."
+    }
+   ]
+  }
+ ]
+}

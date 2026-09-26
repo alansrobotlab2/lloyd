@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-061",
+ "sessions": [
+  {
+   "sid": "lme-mu-061-s1",
+   "date": "2026-06-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you check if that invoice for the client meeting is in the shared folder?"
+    },
+    {
+     "role": "assistant",
+     "text": "I see a few files. Which client was this for?"
+    },
+    {
+     "role": "user",
+     "text": "It was with Jim DiNunzio's team. I need to make sure we got the lunch bill sorted."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Did you pay for it personally?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, I covered the bill. The $75 lunch expense for Jim DiNunzio was reimbursed via PayPal."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I'll add that to the expense log."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, what's the weather like for tomorrow? I might bike to work."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks sunny but slightly windy. Should be manageable."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-061-s2",
+   "date": "2026-07-06",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm trying to reconcile the accounts from the conference last week."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. Which specific transactions are giving you trouble?"
+    },
+    {
+     "role": "user",
+     "text": "The ones related to the guest speakers. I remember handling Jim's costs differently."
+    },
+    {
+     "role": "assistant",
+     "text": "Do you have a record of how those were processed?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I looked it up. PayPal was used to reimburse Jim for the exhibitor lunches."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. That matches the other PayPal transaction you mentioned earlier."
+    },
+    {
+     "role": "user",
+     "text": "Good. Hey, did that package with the new monitor stand arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking shows it was delivered this morning."
+    }
+   ]
+  }
+ ]
+}

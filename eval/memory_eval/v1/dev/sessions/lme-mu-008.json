@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-008",
+ "sessions": [
+  {
+   "sid": "lme-mu-008-s1",
+   "date": "2026-07-13",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you check if the new coffee maker arrived?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your real-time shipping notifications, but I can check your email if you've connected your account. Did you receive a tracking number?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I'll check later. Also, I'm reviewing some new ML papers. Specifically looking at ANCL."
+    },
+    {
+     "role": "assistant",
+     "text": "Interesting. Do you have a link to the paper or are you reading it from memory?"
+    },
+    {
+     "role": "user",
+     "text": "I'm looking at the preprint now. It's interesting because ANCL is derived from published CVPR/ICLR papers."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, so it builds on existing conference work. That makes sense for a new method."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Anyway, back to the coffee maker. If it's not here by Friday, I'm returning it."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll remind you to check the status tomorrow afternoon."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-008-s2",
+   "date": "2026-07-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, my kitchen sink is leaking again. Any quick fixes?"
+    },
+    {
+     "role": "assistant",
+     "text": "First, try tightening the nut under the sink. If that doesn't work, it might be the washer. Do you have a wrench handy?"
+    },
+    {
+     "role": "user",
+     "text": "I do. I'll try that. While I wait for the plumber, I'm continuing to read about ANCL."
+    },
+    {
+     "role": "assistant",
+     "text": "How is the reading going? Did you find anything else noteworthy?"
+    },
+    {
+     "role": "user",
+     "text": "Yes. I realized ANCL achieves a better stability-plasticity trade-off via a dual-network stability/plasticity separation."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a robust approach to handling catastrophic forgetting. Thanks for sharing that detail."
+    },
+    {
+     "role": "user",
+     "text": "It is. Okay, the wrench didn't help. I'm calling the plumber now."
+    },
+    {
+     "role": "assistant",
+     "text": "Good idea. Let me know if you need help finding a good service provider."
+    }
+   ]
+  }
+ ]
+}

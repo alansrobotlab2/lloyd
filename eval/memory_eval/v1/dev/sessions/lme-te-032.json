@@ -1,0 +1,73 @@
+{
+ "episode": "lme-te-032",
+ "sessions": [
+  {
+   "sid": "lme-te-032-s1",
+   "date": "2026-07-18",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I've been digging into knowledge graph embeddings. It's interesting how TransE models triples as h + r ≈ t in a shared embedding space using L1/L2 scoring."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a fundamental concept in KG embeddings. The translational distance property makes it quite efficient for large graphs."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It's simple but effective. By the way, do you remember if I ordered that replacement fan for my laptop yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your purchase history in this chat, so I can't confirm the order status. Did you check your email?"
+    },
+    {
+     "role": "user",
+     "text": "Ah, right. I'll check later. It's been so hot here, the laptop is running hot anyway. Any tips on cooling it down?"
+    },
+    {
+     "role": "assistant",
+     "text": "Elevating the back of the laptop and cleaning the vents with compressed air can help significantly."
+    },
+    {
+     "role": "user",
+     "text": "Good idea. I'll try that. Thanks, Lloyd."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-032-s2",
+   "date": "2026-07-27",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I saw something new in robotics. LingBot-VLA surpasses π₀.5 on AgiBot G1 tasks using only ~80 demonstrations per task compared to π₀.5's 130."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant reduction in data requirements. Few-shot learning in vision-language-action models is really advancing."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it makes deployment way more practical. Speaking of practical, did you remember to remind me about the dentist appointment?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have calendar access to set reminders for you, Alan. You might want to check your own calendar app."
+    },
+    {
+     "role": "user",
+     "text": "Right, right. I always forget. The weather is supposed to be rain-free this weekend, so maybe I'll ride my bike there."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a good plan if the forecast holds up. Enjoy the ride."
+    },
+    {
+     "role": "user",
+     "text": "Will do. Thanks."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-045",
+ "sessions": [
+  {
+   "sid": "lme-mu-045-s1",
+   "date": "2026-07-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you see that weird 404 bug on the staging server?"
+    },
+    {
+     "role": "assistant",
+     "text": "No, I didn't see that. Is it blocking the deployment?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet, but it's annoying. I'm trying to trace it back to a route config issue."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a pain. Do you want me to check the logs for recent changes?"
+    },
+    {
+     "role": "user",
+     "text": "Nah, I got it. By the way, I was looking into c15t earlier. It's pretty interesting how widely adopted it is. I read that c15t is used in production by 2,800 websites."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant number. It seems to be gaining traction quickly."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Anyway, back to the bug. I think I found the typo in the nginx config."
+    },
+    {
+     "role": "assistant",
+     "text": "Great! Let me know if you need help verifying the fix."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-045-s2",
+   "date": "2026-07-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hi Lloyd, I'm prepping for my talk on agent-readiness next week. Any advice on the intro?"
+    },
+    {
+     "role": "assistant",
+     "text": "Starting with a concrete example usually works well. What topic are you planning to use?"
+    },
+    {
+     "role": "user",
+     "text": "I decided to go with c15t. I realized that c15t serves as the case study for the agent-readiness concepts discussed in the talk."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a strong choice. It will make the abstract concepts much more tangible for the audience."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I just need to organize my slides now. Also, did you hear that it's going to rain tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time weather access, but you might want to bring an umbrella just in case."
+    },
+    {
+     "role": "user",
+     "text": "Good call. I'll check the forecast later. Thanks for the feedback on the talk structure."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome! Good luck with the presentation prep."
+    }
+   ]
+  }
+ ]
+}

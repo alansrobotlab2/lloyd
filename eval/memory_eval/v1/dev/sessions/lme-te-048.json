@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-048",
+ "sessions": [
+  {
+   "sid": "lme-te-048-s1",
+   "date": "2026-05-29",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you get a chance to review the new OKF spec updates? The draft for v0.2 just dropped."
+    },
+    {
+     "role": "assistant",
+     "text": "I saw the notification. I haven't dug into the diffs yet. Did anything major change in the core schema?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, actually. It's a breaking change for the metadata section. OKF v0.2 supersedes the 'timestamp' field with 'generated: {by, at}' in section 13.1. We need to update our parser."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. That nested structure makes sense for attribution. I'll make a note to check our ingestion logic for that specific field mapping."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Also, unrelated, but can you check if my order for the mechanical keyboard switches has shipped? It's been three days."
+    },
+    {
+     "role": "assistant",
+     "text": "Checking tracking now... It looks like it was marked 'shipped' yesterday evening. You should get a carrier update shortly."
+    },
+    {
+     "role": "user",
+     "text": "Okay, good. I'm tired of typing on this laptop membrane. Thanks for checking."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Let me know if you need help with those regex patterns for the new 'generated' field later."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-048-s2",
+   "date": "2026-06-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm trying to refactor the document generation pipeline. Can you show me the current implementation of the plan document handler?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. I'm looking through the repository structure for the main handler class. Usually, this logic lives in `src/generators/`."
+    },
+    {
+     "role": "user",
+     "text": "I was looking for `app/harness/plan_document.py` specifically. I think I left a TODO there last week."
+    },
+    {
+     "role": "assistant",
+     "text": "I just ran a search on the current checkout. It turns out app/harness/plan_document.py does not exist in the Lloyd checkout. That path might be from an older branch or a different module."
+    },
+    {
+     "role": "user",
+     "text": "Ah, that explains why the import was failing. I must have been looking at the legacy repo. Let's just create a new stub in the correct generator module."
+    },
+    {
+     "role": "assistant",
+     "text": "Will do. I'll create `src/generators/plan_handler.py` with the basic stub you requested."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, is it going to rain later? I want to walk the dog before it gets dark."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows a 40% chance of showers after 6 PM. I'd suggest going now to be safe."
+    }
+   ]
+  }
+ ]
+}

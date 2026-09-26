@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-042",
+ "sessions": [
+  {
+   "sid": "lme-kn-042-s1",
+   "date": "2026-07-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to set up the community links in my new blog footer. I need the Discord invite for Agent Zero."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure! Here is the link for the Agent Zero Discord community: https://discord.gg/old-invite-link-123. Let me know if you need help styling the footer."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, did my order for the 500GB NVMe drive ship yet? I need it for the weekend build."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your shipping notifications, but usually those orders take 2-3 days to process. You might want to check the tracking number in your email."
+    },
+    {
+     "role": "user",
+     "text": "I'll check. I'm just hoping it arrives before Friday. The weather is supposed to be terrible, so I want to stay inside and build."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a solid plan. A weekend build with bad weather outside is the best way to spend time."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Anyway, I'll paste that Discord link in later. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome! Let me know if you need any CSS snippets for the footer."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-042-s2",
+   "date": "2026-07-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update on that blog footer. The Agent Zero Discord link changed recently. The new one is https://discord.gg/B8KZKNsPpj."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I've noted that the Agent Zero Discord community is now at https://discord.gg/B8KZKNsPpj."
+    },
+    {
+     "role": "user",
+     "text": "Good. Did the NVMe drive arrive? I'm still waiting on it."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time tracking access, so I can't confirm the delivery status. Have you tried refreshing your email for a new tracking update?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I did. Still says 'preparing for shipment'. Annoying. I might just go buy one locally if it doesn't show up by tomorrow."
+    },
+    {
+     "role": "assistant",
+     "text": "That might be a safer bet if you need to start building immediately. Local stores usually have 500GB drives in stock."
+    },
+    {
+     "role": "user",
+     "text": "I'll check the mall tonight. Also, don't forget the new Discord link for when I ask you to generate the footer HTML later."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll use the updated link when we generate the HTML."
+    }
+   ]
+  }
+ ]
+}

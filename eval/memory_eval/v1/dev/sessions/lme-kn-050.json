@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-050",
+ "sessions": [
+  {
+   "sid": "lme-kn-050-s1",
+   "date": "2026-07-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finally cleaning up the observability stack. I need to double-check the performance impact of the trace context propagation before we roll out the new gateway."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, Alan. Which specific library or method are you referring to? The overhead can vary depending on the serializer and transport."
+    },
+    {
+     "role": "user",
+     "text": "It's the opentelemetry.propagate module. I remember from the initial benchmarks a few months ago that inject() and extract() were pretty heavy, clocking in at about 5.0-8.0ms per request. We need to make sure that's still accurate or if it's too slow for our SLA."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. That was indeed a significant cost. Have you checked if there have been any recent optimizations in the core library?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I'm mostly worried about the latency spike during peak hours. Oh, unrelated, did that coffee maker order go through? I think I used the wrong address."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your shopping history, but I can help you check your email if you'd like. Regarding the propagation, if it's still 5-8ms, that's definitely noticeable in high-throughput systems."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, let's keep that in mind. I'll run a quick local test later today. Thanks for the reminder."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Let me know if you need help setting up the profiler."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-050-s2",
+   "date": "2026-07-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, good news. I updated to the latest version of the opentelemetry.propagate library and ran the benchmarks again."
+    },
+    {
+     "role": "assistant",
+     "text": "That's great. How did the performance numbers look compared to your previous tests?"
+    },
+    {
+     "role": "user",
+     "text": "Huge improvement. It turns out the old numbers were due to an inefficient serialization format. Now, inject() and extract() operations have negligible performance overhead (~0.5-1.3ms per request). We can safely ignore the propagation cost in our capacity planning."
+    },
+    {
+     "role": "assistant",
+     "text": "Excellent. That's a massive reduction. Do you need to update any internal documentation or SLA calculations with this new data?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, I need to update the 'Propagation Overhead' field in the capacity model spreadsheet. Also, I'm thinking of ordering that new mechanical keyboard for my setup. Do you have any recommendations for quiet switches?"
+    },
+    {
+     "role": "assistant",
+     "text": "For quiet switches, I'd suggest looking at Cherry MX Silent Red or Gateron Silent Black. Regarding the spreadsheet, should I help you calculate the new total latency budget?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. I just wanted to log this change so I don't forget. The old 5-8ms figure is completely obsolete now."
+    },
+    {
+     "role": "assistant",
+     "text": "Logged. The current overhead is ~0.5-1.3ms per request. Let me know when you're ready to update the model."
+    }
+   ]
+  }
+ ]
+}

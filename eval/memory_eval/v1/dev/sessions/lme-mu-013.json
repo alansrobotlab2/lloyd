@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-013",
+ "sessions": [
+  {
+   "sid": "lme-mu-013-s1",
+   "date": "2026-05-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my printer is jamming again. Any quick fixes?"
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan. Try opening the tray and gently pulling out any crumpled paper. Also, check if the rollers are dirty and clean them with a lint-free cloth."
+    },
+    {
+     "role": "user",
+     "text": "That helped, thanks. Oh, and I just watched a video from a conference talk. Ashok Chandrasekar from Google discussed the reliability of LLM performance benchmarks. Pretty interesting stuff."
+    },
+    {
+     "role": "assistant",
+     "text": "Good to hear the printer is working. Benchmark reliability is indeed a hot topic in AI research."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, exactly. Anyway, do you have any recommendations for a good Thai place nearby?"
+    },
+    {
+     "role": "assistant",
+     "text": "There's 'Bangkok Bites' about two blocks east. They're known for their Pad See Ew."
+    },
+    {
+     "role": "user",
+     "text": "I'll check it out. Thanks, Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Enjoy dinner!"
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-013-s2",
+   "date": "2026-05-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, what's the weather like for this weekend?"
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like partly cloudy with highs around 75°F. A good day for a hike."
+    },
+    {
+     "role": "user",
+     "text": "Nice. By the way, I finally found that video link I was looking for. Ashok Chandrasekar co-authored the video 'Are LLM Performance Benchmarks Reliable?'."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad you found it. That sounds like a useful resource if you're diving into model evaluation."
+    },
+    {
+     "role": "user",
+     "text": "Definitely. I need to order some new mechanical keyboards. Any brands you like?"
+    },
+    {
+     "role": "assistant",
+     "text": "Keychron and Logitech are popular for reliability. If you want custom, check out Drop."
+    },
+    {
+     "role": "user",
+     "text": "I'll look into Keychron. Thanks for the tip."
+    },
+    {
+     "role": "assistant",
+     "text": "Happy to help. Let me know if you need specs."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-018",
+ "sessions": [
+  {
+   "sid": "lme-si-018-s1",
+   "date": "2026-07-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to get this model merge running. I switched to Arcee Fusion for the method."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. Arcee Fusion is a solid choice. Do you need help with the config?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I was reading the docs. It's interesting how it works under the hood. Arcee Fusion calculates importance scores from parameter differences and KL divergence to create a fusion mask."
+    },
+    {
+     "role": "assistant",
+     "text": "That's the core mechanism. It helps preserve the strengths of both models."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Anyway, unrelated, did you see the weather forecast for Friday? Looks like rain."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, 80% chance of precipitation. You might want to keep an umbrella."
+    },
+    {
+     "role": "user",
+     "text": "Good call. I'll add it to my calendar. Also, my GPU fan is making a weird noise again."
+    },
+    {
+     "role": "assistant",
+     "text": "Hope it's just dust. Let me know if you need to troubleshoot that later."
+    }
+   ]
+  }
+ ]
+}

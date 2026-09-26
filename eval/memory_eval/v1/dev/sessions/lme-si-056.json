@@ -1,0 +1,51 @@
+{
+ "episode": "lme-si-056",
+ "sessions": [
+  {
+   "sid": "lme-si-056-s1",
+   "date": "2026-05-29",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm struggling with this Python script. It keeps throwing a KeyError when I try to access the 'metadata' field."
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan. A KeyError usually means the key doesn't exist in the dictionary. Are you checking if the key exists before accessing it, or using .get()?"
+    },
+    {
+     "role": "user",
+     "text": "I tried .get() but it returned None. Anyway, unrelated, did you order the new mechanical keyboard switches yet? I need the tactile ones for the prototype."
+    },
+    {
+     "role": "assistant",
+     "text": "I placed the order for the tactile switches yesterday; shipping should arrive by Thursday. Regarding the script, if .get() returns None, the key 'metadata' simply isn't present in that specific data structure instance."
+    },
+    {
+     "role": "user",
+     "text": "Right, makes sense. I'll add a default fallback. Speaking of defaults, I'm worried about the model evaluation metrics drifting over time. We need a stable baseline."
+    },
+    {
+     "role": "assistant",
+     "text": "Stable baselines are crucial for consistent evaluation. Have you considered using fixed benchmark sets?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, that's why we use Golden datasets. They serve as trusted ground truth used to calibrate LLM judges and prevent drift. It's the only way to keep the scoring honest."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Using trusted ground truth is definitely the standard practice for calibration."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Alright, back to the code. How do I check if a key exists in a dict without throwing an error?"
+    },
+    {
+     "role": "assistant",
+     "text": "You can use the `in` keyword: `if 'metadata' in data:`."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-011",
+ "sessions": [
+  {
+   "sid": "lme-pr-011-s1",
+   "date": "2026-08-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to set up my morning routine better. I've decided that YouTube is used for daily highlight sessions covering AI agent memory systems and model benchmarks."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a productive way to start the day. Would you like me to help curate a specific playlist or schedule for these sessions?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I also need to fix that leaky faucet in the kitchen. It's been dripping all week."
+    },
+    {
+     "role": "assistant",
+     "text": "Dripping faucets can be annoying and waste water. Have you checked if it's just a worn-out washer, or do you suspect the valve is corroded?"
+    },
+    {
+     "role": "user",
+     "text": "Probably the washer. I'll take a look tonight. By the way, are we still on for dinner on Friday?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I have the reservation at Luigi's for 7 PM noted. Do you want to make any changes?"
+    },
+    {
+     "role": "user",
+     "text": "No, 7 PM is fine. Just keep the YouTube routine in mind when I ask for content later."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll remember your preference for AI memory and benchmark content for those daily sessions."
+    }
+   ]
+  }
+ ]
+}

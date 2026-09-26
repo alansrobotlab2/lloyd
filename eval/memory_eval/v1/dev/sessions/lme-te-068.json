@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-068",
+ "sessions": [
+  {
+   "sid": "lme-te-068-s1",
+   "date": "2026-08-08",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I finally got my CAD setup sorted. I found this Autodesk-Fusion-360-for-Linux project hosted on GitHub by user cryinkfly. It seems stable enough for my quick sketches."
+    },
+    {
+     "role": "assistant",
+     "text": "That's great news, Alan. The cryinkfly repository is indeed a popular choice for getting Fusion 360 running on Linux. Glad to hear it's working for you."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it beats dual-booting. By the way, did you see the weather forecast for this weekend? It looks like rain again."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it looks like another wet weekend. I hope you have some indoor projects planned, like those CAD sketches."
+    },
+    {
+     "role": "user",
+     "text": "Actually, I was thinking of ordering a new mechanical keyboard if the weather keeps me inside. Do you have any recommendations?"
+    },
+    {
+     "role": "assistant",
+     "text": "If you're into tactile feedback, the Keychron Q series is usually well-regarded. Would you like me to check current prices?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. For now, just keep an eye on that GitHub project updates for me."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll monitor the cryinkfly repository for any significant changes."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-068-s2",
+   "date": "2026-08-11",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I watched a really interesting talk by Cyrus Clarke yesterday. He presented a talk on how AI leaves the screen, enters the real world, and is accepted by people without reading as terrifying. It was quite profound."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a compelling perspective. Cyrus Clarke often explores the intersection of physical interaction and digital intelligence. Did he mention specific examples?"
+    },
+    {
+     "role": "user",
+     "text": "He talked about robotic interfaces that feel natural. It made me think about our own interactions. Anyway, I'm trying to decide what to make for dinner tonight."
+    },
+    {
+     "role": "assistant",
+     "text": "Given the late hour, maybe something quick? Pasta with a simple tomato basil sauce is always a safe bet."
+    },
+    {
+     "role": "user",
+     "text": "Good idea. I think I have basil in the fridge. Thanks, Lloyd. Oh, and don't forget to remind me about the hardware order next week."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I'll set a reminder for next week regarding your hardware order."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I'm heading out to buy the basil now. Talk later."
+    },
+    {
+     "role": "assistant",
+     "text": "Have a nice trip. I'll be here when you get back."
+    }
+   ]
+  }
+ ]
+}

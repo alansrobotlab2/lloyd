@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-022",
+ "sessions": [
+  {
+   "sid": "lme-pr-022-s1",
+   "date": "2026-07-31",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm setting up my dev environment for the new project. I've been reading up on Matt Pocock's workflow for AI-assisted coding."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a solid choice. Pocock's approach is quite practical. What specific parts are you focusing on?"
+    },
+    {
+     "role": "user",
+     "text": "The model separation. I've decided to stick to his recommendation: Sonnet is used for implementation in Matt Pocock's AI workflow. I'll just use GPT-4 for the high-level planning."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Using Sonnet for the actual code generation and GPT-4 for architecture makes sense."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Also, do you know if my SSD is still under warranty? I think I bought it in 2023."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your purchase records, but most SSDs have a 5-year warranty. Check your receipt or the manufacturer's site."
+    },
+    {
+     "role": "user",
+     "text": "Right. I'll look it up. Thanks. I'm going to go grab some coffee, it's pouring rain here."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy the coffee! Stay dry."
+    }
+   ]
+  }
+ ]
+}

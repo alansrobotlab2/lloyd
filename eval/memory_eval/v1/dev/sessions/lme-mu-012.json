@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-012",
+ "sessions": [
+  {
+   "sid": "lme-mu-012-s1",
+   "date": "2026-05-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did that bug fix in the auth service actually deploy?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the hotfix for the token expiration issue was successfully deployed to prod at 2 AM."
+    },
+    {
+     "role": "user",
+     "text": "Great. I was worried about the timeout settings. I finally looked up the default failureRateThreshold in Resilience4j and saw it is 50%."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. That's a reasonable baseline for most microservices."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I might tweak it later. Anyway, do you know if the new mechanical keyboards arrived?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your personal shipping notifications, but I can check if you have a tracking link."
+    },
+    {
+     "role": "user",
+     "text": "No, never mind. Just wanted to make sure the deploy didn't break anything else."
+    },
+    {
+     "role": "assistant",
+     "text": "Monitoring looks stable. No spikes in error rates."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-012-s2",
+   "date": "2026-05-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm stuck on this concurrency issue with the metrics collector."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Are you using a thread-safe collection?"
+    },
+    {
+     "role": "user",
+     "text": "I was reading the docs on Resilience4j sliding window synchronization can be configured as SYNCHRONIZED (locks) or LOCK_FREE (CAS operations)."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, that could definitely explain the contention if you're under heavy load."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I think I need to switch to the lock-free mode. By the way, is it raining in Seattle?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, current conditions show light rain with 60% humidity."
+    },
+    {
+     "role": "user",
+     "text": "Figures. I need to grab an umbrella for the meeting later."
+    },
+    {
+     "role": "assistant",
+     "text": "Don't forget your coat, it's only 55°F."
+    }
+   ]
+  }
+ ]
+}

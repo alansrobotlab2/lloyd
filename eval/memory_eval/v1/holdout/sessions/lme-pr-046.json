@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-046",
+ "sessions": [
+  {
+   "sid": "lme-pr-046-s1",
+   "date": "2026-07-13",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm deep in the weeds with SMACC2 right now. I need to design the interaction layer for our new autonomous agent."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Are you planning to have the agent generate SMACC2 scripts directly to modify its environment, or will you use SMACC2 as the underlying state space?"
+    },
+    {
+     "role": "user",
+     "text": "No, that's exactly what I want to avoid. I think SMACC2 is recommended as the substrate from which an agent selects states, rather than a system the agent writes code for."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. So the agent acts as a selector over the SMACC2 graph, not a programmer of it. That simplifies the safety constraints significantly."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It keeps the agent's scope limited to navigation. Also, did that pizza place deliver the extra garlic knots you ordered for the team lunch?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, they arrived fresh. The garlic knots were a hit."
+    },
+    {
+     "role": "user",
+     "text": "Great. Anyway, back to SMACC2. I need a high-level strategy for the selection mechanism. How should the agent evaluate which state to pick next?"
+    },
+    {
+     "role": "assistant",
+     "text": "Since the agent is selecting from the substrate, you could use a heuristic function that maps current SMACC2 states to reward signals, avoiding any state-mutation logic."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-046",
+ "sessions": [
+  {
+   "sid": "lme-kn-046-s1",
+   "date": "2026-06-18",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to figure out the evaluation metrics for MuSiQue. Does the official evaluator give us the standard F1 scores?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the official evaluator returns answer_f1 and support_f1 for MuSiQue-Ans, and group_answer_sufficiency_f1 / group_support_sufficiency_f1 for MuSiQue-Full. It does not provide per-hop credit."
+    },
+    {
+     "role": "user",
+     "text": "That's annoying. I really need per-hop accuracy to see where the model is failing in the chain. I guess I'll have to write my own script."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a good plan. Writing a custom script for per-hop metrics will give you much better insight into the reasoning steps."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Also, did that package I ordered for the GPU server arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check the status for you. It looks like it was delivered yesterday afternoon. Do you want me to schedule the installation?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet, I'm still working on a bug in the data loader. It's crashing on empty batches."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, that's a common issue. Make sure your collate function handles the empty list case before trying to stack tensors."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-046-s2",
+   "date": "2026-06-28",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I finally updated the MuSiQue evaluation pipeline. I found a workaround, but I need to update my notes."
+    },
+    {
+     "role": "assistant",
+     "text": "Great! What did you find out about the metrics?"
+    },
+    {
+     "role": "user",
+     "text": "It turns out the official evaluator still only gives answer_f1 and support_f1 for MuSiQue-Ans, and group_answer_sufficiency_f1 / group_support_sufficiency_f1 for MuSiQue-Full, but lacks per-hop credit."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've updated my records to reflect that per-hop credit is still missing from the official output."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. By the way, is it supposed to rain this weekend? I planned a hike."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows a 40% chance of showers on Saturday afternoon, but Sunday looks clear."
+    },
+    {
+     "role": "user",
+     "text": "Good enough. I'll go Sunday then. I need to buy some new trail shoes before then."
+    },
+    {
+     "role": "assistant",
+     "text": "I can set a reminder for you to check for sales on trail shoes this week."
+    }
+   ]
+  }
+ ]
+}

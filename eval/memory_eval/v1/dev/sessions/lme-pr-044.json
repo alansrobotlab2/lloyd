@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-044",
+ "sessions": [
+  {
+   "sid": "lme-pr-044-s1",
+   "date": "2026-06-18",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm reviewing the security spec for the new IoT gateway. We need to pick an auth protocol."
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan. For IoT gateways, OAuth 2.0 is the industry standard. It's well-supported and relatively easy to implement compared to mTLS."
+    },
+    {
+     "role": "user",
+     "text": "I know it's the standard, but I have a specific stance on it. I believe OAuth 2.0 is endorsed as a good starting point but rejected as sufficient for probabilistic actors. These devices can be compromised in unpredictable ways, so standard token flows aren't enough."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. You view OAuth 2.0 as a baseline rather than a complete solution for unreliable nodes. I'll note that constraint for future design recommendations."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Also, did the replacement fan for the server room arrive yet? It's been making a loud clicking noise."
+    },
+    {
+     "role": "assistant",
+     "text": "Checking the tracking status... Yes, it was delivered this morning and is currently on your desk. I can remind you to install it if you like."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. I'll do it after lunch. What's on the menu?"
+    },
+    {
+     "role": "assistant",
+     "text": "The cafeteria has grilled salmon and quinoa today, or a turkey sandwich if you prefer something lighter."
+    }
+   ]
+  }
+ ]
+}

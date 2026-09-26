@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-009",
+ "sessions": [
+  {
+   "sid": "lme-kn-009-s1",
+   "date": "2026-08-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm writing up the initial pitch deck for the Sleep Mode feature. I need the headline stats for the intro slide."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. What numbers do you want to highlight for the performance boost?"
+    },
+    {
+     "role": "user",
+     "text": "Just stick with the early prototype data. It shows a 5–12× speedup based on vLLM's official blog data. Keep it conservative for now."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll note the 5–12× range. Did you want to mention the hardware requirements on that same slide?"
+    },
+    {
+     "role": "user",
+     "text": "No, keep the slide clean. Oh, by the way, did the package with the new mechanical keyboard switches arrive yet? My old ones are getting sticky."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't see a delivery confirmation for the switches in your email history yet. Want me to check the tracking link?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, do that. Also, it's pouring rain outside, so I might just stay in and test the keyboard once it gets here."
+    },
+    {
+     "role": "assistant",
+     "text": "I'll keep an eye on the tracking. The 5–12× stat is saved for your draft."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-009-s2",
+   "date": "2026-08-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, we've finalized the vLLM integration. The early prototype numbers are outdated. Please update the pitch deck notes."
+    },
+    {
+     "role": "assistant",
+     "text": "What are the new performance metrics?"
+    },
+    {
+     "role": "user",
+     "text": "Sleep Mode demonstrates an 18–203× speedup based on vLLM's official blog data. Use this for all marketing materials now."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've updated the records with the 18–203× speedup. Do you want me to draft an email to the sales team about this change?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. Just update the file. Speaking of which, did you get a chance to track that keyboard order? The rain hasn't let up here in Seattle."
+    },
+    {
+     "role": "assistant",
+     "text": "The package is currently in transit, estimated to arrive next Tuesday. The weather forecast for Tuesday is mostly cloudy."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Let me know when it's out for delivery. I want to test the switches before the client demo."
+    },
+    {
+     "role": "assistant",
+     "text": "Will do. I've flagged the delivery date. The new speedup stats are recorded."
+    }
+   ]
+  }
+ ]
+}

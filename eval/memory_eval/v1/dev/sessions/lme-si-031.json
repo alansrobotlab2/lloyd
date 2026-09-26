@@ -1,0 +1,51 @@
+{
+ "episode": "lme-si-031",
+ "sessions": [
+  {
+   "sid": "lme-si-031-s1",
+   "date": "2026-07-05",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did the coffee maker finally arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "It did, Alan. It was on your doorstep when you woke up. Do you want me to add it to the recycling list for the old one?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, please. I'm trying to focus on this RLSC training run. It's slower than I expected."
+    },
+    {
+     "role": "assistant",
+     "text": "RLSC can be computationally heavy depending on your sampling strategy. How are you configuring the sampling?"
+    },
+    {
+     "role": "user",
+     "text": "I'm just using the standard setup: RLSC trains on the model's own confidence with 16 samples per question and 10–20 steps. I thought that would be fast enough, but the GPU utilization is spiking."
+    },
+    {
+     "role": "assistant",
+     "text": "That configuration is quite standard for stability, but it definitely requires more VRAM. Have you checked if the batch size is causing the bottleneck?"
+    },
+    {
+     "role": "user",
+     "text": "Probably. I'll lower the batch size. Also, is it going to rain tomorrow? I want to know if I should bring the umbrella to the lab."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast shows a 60% chance of rain in the afternoon, so I'd recommend bringing it just in case."
+    },
+    {
+     "role": "user",
+     "text": "Good call. I'll head out then."
+    },
+    {
+     "role": "assistant",
+     "text": "Good luck with the training run!"
+    }
+   ]
+  }
+ ]
+}

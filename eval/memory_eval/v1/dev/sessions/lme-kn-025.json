@@ -1,0 +1,57 @@
+{
+ "episode": "lme-kn-025",
+ "sessions": [
+  {
+   "sid": "lme-kn-025-s1",
+   "date": "2026-08-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm tweaking my home automation dashboard. The ESP-Claw library used to just do 'Basic Serial Echo' on the ESP32-S3, right? Just wanted to confirm before I update the docs."
+    },
+    {
+     "role": "assistant",
+     "text": "Hello Alan. Yes, historically it focused on basic serial echo functionality. Let me know if you need help with the doc updates."
+    },
+    {
+     "role": "user",
+     "text": "Cool. Also, did the package of screws I ordered for the server rack arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time tracking access, but I can help you draft a follow-up email if you provide the order number."
+    },
+    {
+     "role": "user",
+     "text": "Nah, I'll check it myself. Thanks."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-025-s2",
+   "date": "2026-08-13",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, big update on the project. I just read the new release notes and it turns out ESP-Claw brings 'Chat Coding' capabilities to ESP32-S3 microcontrollers now. Way more advanced than before."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant upgrade. Integrating Chat Coding will definitely change how you handle natural language interactions on the device."
+    },
+    {
+     "role": "user",
+     "text": "Totally. By the way, is it going to rain this weekend? I was thinking of planting some herbs."
+    },
+    {
+     "role": "assistant",
+     "text": "I can't check live weather forecasts, but planting herbs is a great idea for the garden."
+    },
+    {
+     "role": "user",
+     "text": "Fair enough. I'll keep an eye on the sky."
+    }
+   ]
+  }
+ ]
+}

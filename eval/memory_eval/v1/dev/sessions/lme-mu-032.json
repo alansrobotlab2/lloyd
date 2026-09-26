@@ -1,0 +1,97 @@
+{
+ "episode": "lme-mu-032",
+ "sessions": [
+  {
+   "sid": "lme-mu-032-s1",
+   "date": "2026-06-09",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you see that new update for Altos Labs' internal ML platform?"
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan. No, I haven't seen any recent updates regarding Altos Labs' internal platforms. Is there something specific you're looking for?"
+    },
+    {
+     "role": "user",
+     "text": "Just curious. Akram Baharlouei is an ML engineer at Altos Labs, so he probably knows all about it."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense. ML engineers usually have the best insight into those platform changes."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Anyway, can you help me debug this Python script? It's throwing a key error on line 42."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, please share the code snippet and the full error traceback."
+    },
+    {
+     "role": "user",
+     "text": "Here it is: [code snippet]. It works locally but fails in the container."
+    },
+    {
+     "role": "assistant",
+     "text": "The issue seems to be a missing environment variable `API_KEY`. You need to export it before running the container."
+    },
+    {
+     "role": "user",
+     "text": "Ah, got it. Thanks. Also, what's the weather like for my hiking trip next Tuesday?"
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like partly cloudy with a high of 72°F and light winds. Perfect for hiking."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-032-s2",
+   "date": "2026-06-19",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm trying to find more info on that speaker from the AI conference."
+    },
+    {
+     "role": "assistant",
+     "text": "Which speaker, Alan? The conference had several presenters."
+    },
+    {
+     "role": "user",
+     "text": "The one who talked about large language models. Akram Baharlouei's LinkedIn profile is linked in the video description."
+    },
+    {
+     "role": "assistant",
+     "text": "Okay, I'll make a note of that for your reference. Did you want me to look up anything specific from his profile?"
+    },
+    {
+     "role": "user",
+     "text": "No, just wanted to make sure I didn't lose the link. By the way, did my package arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your personal shipping notifications, but you can check your email or the carrier's website."
+    },
+    {
+     "role": "user",
+     "text": "Right. Okay, another thing. What's a good substitute for basil in this pasta recipe?"
+    },
+    {
+     "role": "assistant",
+     "text": "Spinach or arugula work well as substitutes, though they will change the flavor profile slightly."
+    },
+    {
+     "role": "user",
+     "text": "I'll try arugula. Thanks Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome! Enjoy your dinner."
+    }
+   ]
+  }
+ ]
+}

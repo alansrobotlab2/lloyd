@@ -1,0 +1,47 @@
+{
+ "episode": "lme-pr-063",
+ "sessions": [
+  {
+   "sid": "lme-pr-063-s1",
+   "date": "2026-05-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can we look at the MCP Memory & Vault Tool Refactoring Plan? I'm worried the retrieval logic is getting bloated."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, Alan. I've reviewed the current proposal. What specific parts concern you?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly the search module. I feel like we are over-engineering it. tag_search is kept as-is because it is the fastest and most precise path for known topics."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I will note that preference for the refactoring strategy."
+    },
+    {
+     "role": "user",
+     "text": "Also, did that package with the new NVMe drive arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "Checking the tracking info... yes, it was delivered this morning. It's on your desk."
+    },
+    {
+     "role": "user",
+     "text": "Great. I'll install it after dinner. What's good for a quick pasta tonight?"
+    },
+    {
+     "role": "assistant",
+     "text": "I recommend a simple Aglio e Olio. Fast and uses pantry staples."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Back to the code, keep this in mind for the draft."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,77 @@
+{
+ "episode": "lme-kn-069",
+ "sessions": [
+  {
+   "sid": "lme-kn-069-s1",
+   "date": "2026-08-27",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm updating the calendar for the next few months. Just wanted to confirm the details for the AI conference in Paris."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, Alan. Which one? The AI Engineer conference?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, AI Engineer Paris 2026. I need to know when ElevenLabs is speaking."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check the agenda. Ah, it looks like they are scheduled for Day 1."
+    },
+    {
+     "role": "user",
+     "text": "Okay, Day 1 it is. I'll block that off. Also, did that package with the new keyboard switches arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't see a delivery confirmation for that order yet. Would you like me to track the shipment?"
+    },
+    {
+     "role": "user",
+     "text": "No need, I'll check my email. Thanks."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-069-s2",
+   "date": "2026-09-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick correction on the Paris trip. The schedule shifted."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? What changed?"
+    },
+    {
+     "role": "user",
+     "text": "ElevenLabs presented at the main stage of AI Engineer Paris 2026 Day 2. I need to update my notes."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll note that it's Day 2 now. Anything else?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, the weather forecast for that week looks rainy. Do you think I should bring a heavy coat?"
+    },
+    {
+     "role": "assistant",
+     "text": "If it's going to be wet, a waterproof jacket is usually more practical than a heavy wool coat for Paris."
+    },
+    {
+     "role": "user",
+     "text": "Good point. I'll pack a rain shell."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds like a solid plan."
+    }
+   ]
+  }
+ ]
+}

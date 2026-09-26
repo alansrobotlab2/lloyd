@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-012",
+ "sessions": [
+  {
+   "sid": "lme-si-012-s1",
+   "date": "2026-07-11",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, did you see the latest update on AgeMem? I was digging into the architecture docs this morning."
+    },
+    {
+     "role": "assistant",
+     "text": "I saw the release notes, Alan. It looks like they made some significant changes to how memory updates are handled."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, that's the big takeaway. AgeMem generalizes Mem0's four-operation update policy into a six-tool action space with explicit TTL policies for stale memory. It feels much more robust now."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense. Explicit TTLs are crucial for preventing context window bloat over time."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Anyway, unrelated, my garage door sensor keeps triggering falsely. Is it a battery thing or alignment?"
+    },
+    {
+     "role": "assistant",
+     "text": "Usually it's alignment if the light is still strong. Try cleaning the lenses first."
+    },
+    {
+     "role": "user",
+     "text": "I'll try that. Also, did my order for the new monitor cables arrive? I need them for the setup tonight."
+    },
+    {
+     "role": "assistant",
+     "text": "Tracking shows it's out for delivery today. Should be there by 5 PM."
+    }
+   ]
+  }
+ ]
+}

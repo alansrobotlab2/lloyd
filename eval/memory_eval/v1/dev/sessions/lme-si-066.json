@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-066",
+ "sessions": [
+  {
+   "sid": "lme-si-066-s1",
+   "date": "2026-08-16",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you catch that merge conflict in the auth module yesterday?"
+    },
+    {
+     "role": "assistant",
+     "text": "I saw the notification. Did you manage to resolve it without breaking the tests?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it was messy but fixed. Anyway, on a different note, I finally merged Issue #219. Level 3 is live. I added skill injection to pipeline-hooks.ts, including a PipelineState.skills field and the loadSkillContent() function."
+    },
+    {
+     "role": "assistant",
+     "text": "Nice work. That should definitely help with the dynamic loading requirements."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Now, can you remind me what time my dentist appointment is tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's scheduled for 2:30 PM at Dr. Evans' office."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Oh, and did that package of USB-C cables arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking number shows it was delivered to the front desk this morning."
+    }
+   ]
+  }
+ ]
+}

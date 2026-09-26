@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-067",
+ "sessions": [
+  {
+   "sid": "lme-te-067-s1",
+   "date": "2026-07-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I was poking around that new startup CoupleWork AI this morning and noticed something interesting. Maxine is the AI agent within CoupleWork AI, which seems pretty central to their whole pitch."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a core feature. Have you tried using it yet?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet, I'm just reading the docs. Oh, by the way, do you know if it's going to rain this evening? I want to walk the dog."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time weather data, but you can check a local app for the most accurate forecast."
+    },
+    {
+     "role": "user",
+     "text": "Fair enough. I'll check. Anyway, back to the tech stuff, I need to order some new mechanical switches for my keyboard."
+    },
+    {
+     "role": "assistant",
+     "text": "What kind of switches are you looking for?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe the Cherry MX Browns. They have a nice tactile bump."
+    },
+    {
+     "role": "assistant",
+     "text": "Good choice. They are quite popular for typing and gaming."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-067-s2",
+   "date": "2026-07-11",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I found a really cool research paper today. Cyrus Clarke is affiliated with MIT Media Lab, and their work on spatial computing is fascinating."
+    },
+    {
+     "role": "assistant",
+     "text": "MIT Media Lab does have a strong reputation in that area. What specific aspects did you find interesting?"
+    },
+    {
+     "role": "user",
+     "text": "Just the way they handle user interaction in mixed reality. Speaking of mixed reality, I need to clean my VR headset lenses."
+    },
+    {
+     "role": "assistant",
+     "text": "Make sure to use a microfiber cloth to avoid scratching them."
+    },
+    {
+     "role": "user",
+     "text": "I will. Also, do you remember if we have any leftover Thai food in the fridge?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your fridge inventory, but I hope it's still good!"
+    },
+    {
+     "role": "user",
+     "text": "Haha, I'll check. Thanks for the reminder to check the lenses."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need more info on the paper."
+    }
+   ]
+  }
+ ]
+}

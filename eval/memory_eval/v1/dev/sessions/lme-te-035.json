@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-035",
+ "sessions": [
+  {
+   "sid": "lme-te-035-s1",
+   "date": "2026-05-07",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick check on the weather for tomorrow. Looks like rain?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, 80% chance of precipitation after 2 PM. I'd bring an umbrella if you're heading out then."
+    },
+    {
+     "role": "user",
+     "text": "Ugh, great. Anyway, I'm digging into the new paper on CLARE. It's pretty interesting how it handles adaptation."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? What's the core mechanism?"
+    },
+    {
+     "role": "user",
+     "text": "Basically, CLARE implements continual learning for VLA models via autonomous adapter routing and expansion. It's clever how it avoids catastrophic forgetting."
+    },
+    {
+     "role": "assistant",
+     "text": "That does sound robust. I'll make a note of that for your research files."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, did that package from Amazon arrive? The one with the HDMI cables."
+    },
+    {
+     "role": "assistant",
+     "text": "Tracking says it was delivered to your front porch around 10 AM."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-035-s2",
+   "date": "2026-05-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm stuck on this Snowflake configuration. The semantic layer isn't showing up in the sandbox."
+    },
+    {
+     "role": "assistant",
+     "text": "Did you check the version compatibility? Older versions might not support automatic materialization."
+    },
+    {
+     "role": "user",
+     "text": "Ah, right. I forgot to update. Snowflake's semantic layer is materialized into the sandbox in v4. I'm on v3."
+    },
+    {
+     "role": "assistant",
+     "text": "That explains it. Upgrading to v4 should fix the visibility issue."
+    },
+    {
+     "role": "user",
+     "text": "Will do. Thanks for catching that. Hey, what's for dinner tonight? I'm thinking Thai."
+    },
+    {
+     "role": "assistant",
+     "text": "Thai sounds good. There's a highly-rated place nearby that delivers in 30 minutes."
+    },
+    {
+     "role": "user",
+     "text": "Perfect, let's go with that. I'll put the order in."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy! Let me know if you need any other tech support later."
+    }
+   ]
+  }
+ ]
+}

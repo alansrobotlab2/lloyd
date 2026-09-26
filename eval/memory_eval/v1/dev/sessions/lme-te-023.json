@@ -1,0 +1,93 @@
+{
+ "episode": "lme-te-023",
+ "sessions": [
+  {
+   "sid": "lme-te-023-s1",
+   "date": "2026-05-23",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm reviewing the citations for the new paper. Can you check the bibliography?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, Alan. Which section are you looking at?"
+    },
+    {
+     "role": "user",
+     "text": "The related works section. I want to make sure I've grouped the safety approaches correctly."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. What specific grouping are you concerned about?"
+    },
+    {
+     "role": "user",
+     "text": "Well, guardrail safety monitors are related work to Inner Voice. They aren't the same method, just comparable."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll note that distinction for the context."
+    },
+    {
+     "role": "user",
+     "text": "Also, did the package with the monitor stand arrive yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time tracking access, but you can check the shipping link in your email."
+    },
+    {
+     "role": "user",
+     "text": "Right. Thanks."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-023-s2",
+   "date": "2026-05-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I need to adjust the timing for the AWC Video Progression module."
+    },
+    {
+     "role": "assistant",
+     "text": "Okay, what needs to change?"
+    },
+    {
+     "role": "user",
+     "text": "The transition feels too rushed. I need to extend the end segment."
+    },
+    {
+     "role": "assistant",
+     "text": "How long should the end segment be?"
+    },
+    {
+     "role": "user",
+     "text": "Make the PI wordform end segment lasts 30 seconds during the video progression. That gives enough time to read it."
+    },
+    {
+     "role": "assistant",
+     "text": "Updated. Does that affect the total runtime?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, it adds about ten seconds. I'll fix the total duration later."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted."
+    },
+    {
+     "role": "user",
+     "text": "Is it raining outside? I forgot my umbrella."
+    },
+    {
+     "role": "assistant",
+     "text": "It is currently drizzling in your area."
+    }
+   ]
+  }
+ ]
+}

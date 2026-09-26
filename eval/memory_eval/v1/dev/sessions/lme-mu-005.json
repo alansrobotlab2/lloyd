@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-005",
+ "sessions": [
+  {
+   "sid": "lme-mu-005-s1",
+   "date": "2026-08-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did that package with the thermal paste arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't see a tracking update for a thermal paste order in your recent emails. Did you check the spam folder?"
+    },
+    {
+     "role": "user",
+     "text": "No, just checking. Anyway, I've been diving into pathfinding algorithms for my game prototype."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds interesting. Are you using A* or something more dynamic?"
+    },
+    {
+     "role": "user",
+     "text": "I'm looking at collision avoidance. Specifically, I found that Optimal Reciprocal Collision Avoidance (ORCA) is a canonical method for velocity-space conflict resolution."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a well-known approach for multi-agent navigation. It usually handles local avoidance very well."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it seems robust. I might implement a basic version of it this weekend."
+    },
+    {
+     "role": "assistant",
+     "text": "Good luck! Let me know if you need help with the math."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-005-s2",
+   "date": "2026-08-11",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, what's the weather like for Saturday?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's looking partly cloudy with a high of 75°F. Good for hiking."
+    },
+    {
+     "role": "user",
+     "text": "Nice. I might cancel the hike and stay in to code. I'm still tweaking my agent movement logic."
+    },
+    {
+     "role": "assistant",
+     "text": "Sticking with the collision avoidance work?"
+    },
+    {
+     "role": "user",
+     "text": "Yes. I realized ORCA linearizes RVO constraints and operates in O(n) per agent via 2D linear programs."
+    },
+    {
+     "role": "assistant",
+     "text": "That efficiency is definitely a key selling point for real-time applications."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. The computational cost is manageable compared to other global planners."
+    },
+    {
+     "role": "assistant",
+     "text": "Makes sense. Let me know if you hit any performance bottlenecks."
+    }
+   ]
+  }
+ ]
+}

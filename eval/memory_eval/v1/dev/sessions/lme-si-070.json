@@ -1,0 +1,51 @@
+{
+ "episode": "lme-si-070",
+ "sessions": [
+  {
+   "sid": "lme-si-070-s1",
+   "date": "2026-06-18",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to fix this bug in my data pipeline where it's choking on credit card numbers."
+    },
+    {
+     "role": "assistant",
+     "text": "Hi Alan. Are you using Presidio for the anonymization step? That's a common place for regex conflicts."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I am. It works fine for phone numbers, but it completely misses most credit card entries."
+    },
+    {
+     "role": "assistant",
+     "text": "Have you checked the default recognizer settings? Sometimes the stock models need tuning for specific entity types."
+    },
+    {
+     "role": "user",
+     "text": "I looked at the docs. It turns out stock Presidio achieves 11.1% recall on CREDIT_CARD entities and 50% on PHONE_NUMBER entities. That explains why it's missing so many."
+    },
+    {
+     "role": "assistant",
+     "text": "That makes sense. You might need to add custom recognizers or fine-tune the existing ones to improve that coverage."
+    },
+    {
+     "role": "user",
+     "text": "I'll try that. Also, do you know if the weather is going to rain tomorrow? I have a picnic planned."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time weather data, but you might want to check a local forecast app to be sure."
+    },
+    {
+     "role": "user",
+     "text": "Good point. I'll check it later. Thanks for the help with the Presidio issue."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. Let me know if you need help with the custom recognizers later."
+    }
+   ]
+  }
+ ]
+}

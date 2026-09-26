@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-068",
+ "sessions": [
+  {
+   "sid": "lme-mu-068-s1",
+   "date": "2026-05-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question. I was trying to find someone on the professional network today."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, who are you looking for?"
+    },
+    {
+     "role": "user",
+     "text": "Patricija Žemaitytė. I checked and she actually has a LinkedIn profile."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. Noted that she has a LinkedIn profile."
+    },
+    {
+     "role": "user",
+     "text": "Also, did my package with the new HDMI cables arrive? The tracking said it was out for delivery."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your personal mail tracking, but usually 'out for delivery' means it should arrive today. Did you check the porch?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, they are there. Thanks. Also, is it going to rain this weekend? I want to go hiking."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast for this weekend looks mostly sunny with a slight chance of showers on Sunday afternoon, but Saturday looks clear."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-068-s2",
+   "date": "2026-05-30",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm updating my contacts. Can you help me categorize a few people?"
+    },
+    {
+     "role": "assistant",
+     "text": "Of course. Who do you want to start with?"
+    },
+    {
+     "role": "user",
+     "text": "Patricija Žemaitytė. She is a product manager at Oxylabs."
+    },
+    {
+     "role": "assistant",
+     "text": "Okay, I've updated her record to show she is a product manager at Oxylabs."
+    },
+    {
+     "role": "user",
+     "text": "Great. By the way, what's the status of the server migration ticket I opened yesterday?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's currently marked as 'In Progress' by the dev team. They expect to finish the data sync by end of day."
+    },
+    {
+     "role": "user",
+     "text": "Okay. And did you remember to order the restock of coffee beans?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the order for the dark roast beans was placed this morning. It should arrive by Thursday."
+    }
+   ]
+  }
+ ]
+}

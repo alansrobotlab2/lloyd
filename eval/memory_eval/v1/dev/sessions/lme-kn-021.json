@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-021",
+ "sessions": [
+  {
+   "sid": "lme-kn-021-s1",
+   "date": "2026-07-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finally getting around to cleaning up my local dev environment. Can you help me clear out some old cache directories?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, Alan. Which ones are you targeting? Usually `~/.npm` or `~/.cache` are good starting points for quick wins."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, just the pip cache for now. Also, while we're at it, do you remember how long TransE took on the small dataset last week?"
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check the logs. It ran for about 15 minutes."
+    },
+    {
+     "role": "user",
+     "text": "Right. And for the medium-sized graph I was testing, it only took 2 hours. I think I set the dimensions to 100 back then."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. 2 hours at 100 dimensions. Noted for your reference."
+    },
+    {
+     "role": "user",
+     "text": "Cool. Just clear the pip cache now please."
+    },
+    {
+     "role": "assistant",
+     "text": "Done. Freed up 1.2 GB."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-021-s2",
+   "date": "2026-07-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm setting up the new GPU cluster for the embedding experiments. The specs are way better than my laptop."
+    },
+    {
+     "role": "assistant",
+     "text": "That's exciting! What hardware are we looking at?"
+    },
+    {
+     "role": "user",
+     "text": "A100s. I'm also upgrading the TransE config. I'm switching to 500–1000 dimensions for the large knowledge graphs."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. 500–1000 dimensions is a significant jump from your previous settings."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, the trade-off is time. With these new dimensions, TransE training takes 4–9 hours on large knowledge graphs now."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. 4–9 hours is the new benchmark for those large graphs."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I also ordered a new mechanical keyboard, should be here tomorrow."
+    },
+    {
+     "role": "assistant",
+     "text": "Nice! I hope the switches are smooth."
+    }
+   ]
+  }
+ ]
+}

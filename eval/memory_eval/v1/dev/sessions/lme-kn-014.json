@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-014",
+ "sessions": [
+  {
+   "sid": "lme-kn-014-s1",
+   "date": "2026-08-12",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to track down why the CI pipeline is failing on the latest commit. It looks like a timeout issue."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help with that. Have you checked the build logs for specific steps that are taking longer than usual?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, it's stuck on the dependency installation. Also, while I'm here, don't forget to link this bug report to the Per-User Memory Architecture task. It's currently Backlog item #45."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I've noted that the Per-User Memory Architecture is linked to Backlog item #45. I'll check if the dependency installation timeout is related to the network configuration."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, what's the weather like for this weekend? I'm thinking of going hiking."
+    },
+    {
+     "role": "assistant",
+     "text": "It's looking partly cloudy with a high of 72°F, which should be nice for hiking. No rain expected."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I'll book the trail."
+    },
+    {
+     "role": "assistant",
+     "text": "Great choice. Let me know if you need any gear recommendations."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-014-s2",
+   "date": "2026-08-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I need to update the sprint board. We moved the Per-User Memory Architecture work. It's no longer #45; it's actually Backlog item #91 now."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I've updated my records to reflect that Per-User Memory Architecture is now tracked as Backlog item #91."
+    },
+    {
+     "role": "user",
+     "text": "Good. By the way, did that new monitor stand ever arrive? I need it for the meeting tomorrow."
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking number shows it was delivered yesterday, but it might still be in the mailroom. I can send you a photo of the mailroom inventory if you'd like."
+    },
+    {
+     "role": "user",
+     "text": "No, I'll just go check. Oh, and can you cancel my 2 PM appointment? I have to prep for the demo."
+    },
+    {
+     "role": "assistant",
+     "text": "Done. Your 2 PM appointment has been cancelled. Good luck with the demo prep."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. I'll grab a coffee."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy your coffee!"
+    }
+   ]
+  }
+ ]
+}

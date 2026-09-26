@@ -1,0 +1,73 @@
+{
+ "episode": "lme-te-053",
+ "sessions": [
+  {
+   "sid": "lme-te-053-s1",
+   "date": "2026-08-13",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick check on our project metrics. What's the primary KPI we're using for the Long-running Agents that handle process ticketing?"
+    },
+    {
+     "role": "assistant",
+     "text": "Based on your previous notes, you identified Mean Time To Resolution (MTTR) as the key performance indicator for those specific agents. Is that still the focus?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, exactly. MTTR is the one. By the way, did my package arrive today?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your shipping notifications, but I can help you draft an email to the vendor if it's missing."
+    },
+    {
+     "role": "user",
+     "text": "Never mind, it's probably just the rain slowing things down. I'll check later."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds good. Let me know if you need anything else regarding the agent metrics."
+    },
+    {
+     "role": "user",
+     "text": "Will do. Thanks."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-053-s2",
+   "date": "2026-08-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I caught up with Dalibor and Daniel today. It's interesting how their views on AI adoption speed diverge."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? How do their perspectives differ?"
+    },
+    {
+     "role": "user",
+     "text": "Dalibor agrees with Daniel on the near term but not the far term regarding AI adoption speed. Daniel's much more optimistic long-term."
+    },
+    {
+     "role": "assistant",
+     "text": "That’s a common split. Are you planning to adjust your strategy based on that?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe. First, I need to fix this bug in my code. It's crashing on startup."
+    },
+    {
+     "role": "assistant",
+     "text": "Do you have a stack trace?"
+    },
+    {
+     "role": "user",
+     "text": "Just a generic error. I'll dig into it. Thanks for listening."
+    }
+   ]
+  }
+ ]
+}

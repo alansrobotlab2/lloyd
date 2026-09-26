@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-040",
+ "sessions": [
+  {
+   "sid": "lme-te-040-s1",
+   "date": "2026-08-25",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm diving into motor control today. SimpleFOC uses classes such as BLDCMotor, BLDCDriver3PWM, and Encoder for implementation. It's surprisingly modular."
+    },
+    {
+     "role": "assistant",
+     "text": "That modularity is definitely a strength of the library. It makes swapping components pretty straightforward."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, exactly. I also spent the morning fixing a leaky faucet in the kitchen. Not fun."
+    },
+    {
+     "role": "assistant",
+     "text": "Plumbing issues are always a hassle. Did you manage to get it fixed?"
+    },
+    {
+     "role": "user",
+     "text": "Eventually. Just needed to replace the washer. Anyway, back to code."
+    },
+    {
+     "role": "assistant",
+     "text": "Good to hear it's sorted. Are you working on a specific motor setup?"
+    },
+    {
+     "role": "user",
+     "text": "Just testing with a small drone motor for now. The weather outside is terrible, so I'm staying in."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds like a good day for coding. Stay dry!"
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-040-s2",
+   "date": "2026-09-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I was reading about entropy today. I learned that Information is calculated using the formula Bits = -log₂(p), where p is the probability of an event."
+    },
+    {
+     "role": "assistant",
+     "text": "That's the classic Shannon formula. It’s fundamental to understanding data compression and communication."
+    },
+    {
+     "role": "user",
+     "text": "Right. It’s interesting how low probability events carry more 'information'. I also finally got my new monitor stand delivered."
+    },
+    {
+     "role": "assistant",
+     "text": "Nice upgrade! Is the assembly going smoothly?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly. One screw was stripped, but I found a replacement. The weather is finally clearing up too."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad the weather is cooperating. Enjoy the new setup."
+    },
+    {
+     "role": "user",
+     "text": "Will do. I might try calculating the entropy of some random text samples later."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a fun experiment. Let me know if you need help with the math."
+    }
+   ]
+  }
+ ]
+}

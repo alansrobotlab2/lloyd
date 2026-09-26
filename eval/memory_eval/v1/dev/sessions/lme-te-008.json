@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-008",
+ "sessions": [
+  {
+   "sid": "lme-te-008-s1",
+   "date": "2026-07-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick check on our sensor stack. I've been running benchmarks on the new image processing pipeline. It turns out that Image processing for DIGIT sensors via CNN adds 5–15 ms inference latency on GPU. That's a bit more than I expected."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a noticeable overhead. Have you considered quantizing the model or using a lighter backbone to reduce that latency?"
+    },
+    {
+     "role": "user",
+     "text": "I'm thinking about it, but the accuracy drop might be too high. Anyway, unrelated, did you see that rainstorm we had last night? My garden hose finally cracked."
+    },
+    {
+     "role": "assistant",
+     "text": "I saw the weather reports. Sorry to hear about the hose. Did you manage to fix it or did you need to replace it?"
+    },
+    {
+     "role": "user",
+     "text": "Replaced it. Got a new braided one from the hardware store. It feels sturdier. Back to sensors, I'm going to try pruning the network tomorrow."
+    },
+    {
+     "role": "assistant",
+     "text": "Pruning is a good next step. Let me know how the latency numbers look after that."
+    },
+    {
+     "role": "user",
+     "text": "Will do. Thanks for the reminder about the backup script, by the way."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Good luck with the pruning."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-008-s2",
+   "date": "2026-07-30",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I've been reading up on alternative force sensors. I found a paper on ShapeForce. It says that ShapeForce captures force/torque changes sufficient for contact-rich manipulation, with performance comparable to six-axis F/T sensors at extremely low cost."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds promising for your budget constraints. Do you think it's accurate enough for your current assembly tasks?"
+    },
+    {
+     "role": "user",
+     "text": "It looks like it. The cost savings are huge compared to the ATI sensors we use now. By the way, my coffee maker started leaking again this morning."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, the eternal struggle with coffee makers. Is it the gasket or the tank?"
+    },
+    {
+     "role": "user",
+     "text": "The gasket. I cleaned it, but it's still seeping. I might just upgrade to a drip machine soon. Anyway, I'm ordering a few ShapeForce dev kits."
+    },
+    {
+     "role": "assistant",
+     "text": "Good idea. Having the hardware will help validate those claims quickly."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I'll let you know when they arrive and if they match the paper's specs."
+    },
+    {
+     "role": "assistant",
+     "text": "Looking forward to it."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-031",
+ "sessions": [
+  {
+   "sid": "lme-te-031-s1",
+   "date": "2026-06-30",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick question. I was reading up on security protocols today and noticed curl moved to GitHub private vulnerability reporting after ending its HackerOne program. Good change, right?"
+    },
+    {
+     "role": "assistant",
+     "text": "That's a significant shift in their security disclosure strategy. Moving to GitHub's native system often streamlines the process for maintainers."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I think so too. Anyway, the weather here is surprisingly nice for June. I might head out for a hike later."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy the hike! Hope the trails are clear."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Oh, I also fixed that bug in the login module this morning. The session timeout was way off."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad you caught that. Session timeouts can be tricky to debug."
+    },
+    {
+     "role": "user",
+     "text": "Definitely. I think I'm done with work for the day. Going to make some pasta."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds like a relaxing evening. Bon appétit!"
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-031-s2",
+   "date": "2026-07-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I came across something interesting today. LingBot-VLA surpasses π₀.5 on AgiBot G1 tasks using only ~80 demonstrations per task compared to π₀.5's 130."
+    },
+    {
+     "role": "assistant",
+     "text": "That's an impressive efficiency gain. Reducing demonstration requirements by nearly half is a big deal for data scarcity."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. It makes me wonder about the next generation of models. Did you know I ordered some new server RAM this morning?"
+    },
+    {
+     "role": "assistant",
+     "text": "You did? Hope it arrives quickly. Is it for the home lab?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, upgrading the nodes. The weather has been gloomy all week, perfect for indoor tech projects."
+    },
+    {
+     "role": "assistant",
+     "text": "A good excuse to stay inside and tinker."
+    },
+    {
+     "role": "user",
+     "text": "I'm thinking of installing the RAM tomorrow. Let's see if the benchmarks improve."
+    },
+    {
+     "role": "assistant",
+     "text": "Keep me posted on the results."
+    }
+   ]
+  }
+ ]
+}

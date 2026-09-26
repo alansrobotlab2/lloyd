@@ -1,0 +1,1896 @@
+version: v1
+leg: holdout
+questions:
+- id: lme-si-004
+  category: single_session
+  prompt: Hey Lloyd, I'm reviewing my server logs. How did lloyd-backend terminate in the logs from last
+    Sunday?
+  asked_on: '2026-08-25'
+  probe: recall
+  accept:
+    all_of:
+    - - STOPPED without an intentional stop
+      - stopped without intentional stop
+      - unintentional stop
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-004-s1
+  source:
+    session_file: sessions/lme-si-004.json
+    facts:
+    - lloyd-backend/lloyd-backend-event.md#evnt-001
+  grounding:
+  - entity: lloyd-backend
+    fact: lloyd-backend was STOPPED without an intentional stop.
+    confidence: 0.95
+    conf_rank: 0
+    entity_facts: 9
+- id: lme-si-005
+  category: single_session
+  prompt: I'm revisiting my notes on NLP methods. How does Prompt Learning mimic human iterative learning?
+  asked_on: '2026-07-08'
+  probe: recall
+  accept:
+    all_of:
+    - - contextual English feedback
+      - contextual English feedback
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-005-s1
+  source:
+    session_file: sessions/lme-si-005.json
+    facts:
+    - Prompt Learning/Prompt Learning-state.md#stat-011
+  grounding:
+  - entity: Prompt Learning
+    fact: Prompt learning mimics human iterative learning by providing contextual English feedback.
+    confidence: 0.9
+    conf_rank: 15
+    entity_facts: 17
+- id: lme-si-008
+  category: single_session
+  prompt: I'm reviewing the security patches for our MCP tools. What was that specific mitigation we discussed
+    for the fact_relate MCP tool?
+  asked_on: '2026-06-15'
+  probe: recall
+  accept:
+    all_of:
+    - - edge type validation layer
+      - edge type validation
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-008-s1
+  source:
+    session_file: sessions/lme-si-008.json
+    facts:
+    - fact_relate MCP tool/fact_relate MCP tool-goal.md#goal-003
+  grounding:
+  - entity: fact_relate MCP tool
+    fact: A proposed mitigation for the fact_relate MCP tool is to add an edge type validation layer.
+    confidence: 0.8
+    conf_rank: 13
+    entity_facts: 15
+- id: lme-si-010
+  category: single_session
+  prompt: I'm back on the DeLucia et al. (2026) paper. What was the specific implication about criteria
+    interpretation when outcomes match?
+  asked_on: '2026-06-02'
+  probe: recall
+  accept:
+    all_of:
+    - - criteria interpretation varies
+      - criteria interpretation varies
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-010-s1
+  source:
+    session_file: sessions/lme-si-010.json
+    facts:
+    - DeLucia et al. (2026)/DeLucia et al. (2026)-state.md#stat-003
+  grounding:
+  - entity: DeLucia et al. (2026)
+    fact: DeLucia et al. (2026) showed that LLM judges can agree on verdicts but diverge on reasoning,
+      suggesting criteria interpretation varies even when outcomes don't.
+    confidence: 0.95
+    conf_rank: 3
+    entity_facts: 4
+- id: lme-si-024
+  category: single_session
+  prompt: Lloyd, I'm reviewing our performance targets again. I remember Dex Horthy had a specific term
+    for what happens when you over-obsess with extreme speedups instead of just getting solid improvements.
+    What was that phrase he used?
+  asked_on: '2026-07-07'
+  probe: recall
+  accept:
+    all_of:
+    - - meta-meta problem of optimization
+      - meta-meta problem
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-024-s1
+  source:
+    session_file: sessions/lme-si-024.json
+    facts:
+    - Dex Horthy/Dex Horthy-preference.md#pref-008
+  grounding:
+  - entity: Dex Horthy
+    fact: Dex Horthy argues that chasing 100x speedup leads to the 'meta-meta problem of optimization'
+      and prevents achieving a pragmatic 10x gain.
+    confidence: 0.85
+    conf_rank: 34
+    entity_facts: 41
+- id: lme-si-037
+  category: single_session
+  prompt: Hey, I'm drafting a risk assessment. What specific concern did I flag regarding the voice MD's
+    handling of scraped writings?
+  asked_on: '2026-08-03'
+  probe: recall
+  accept:
+    all_of:
+    - - open question
+      - unresolved
+      - open issue
+      - pending
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-037-s1
+  source:
+    session_file: sessions/lme-si-037.json
+    facts:
+    - voice MD/voice MD-state.md#stat-003
+  grounding:
+  - entity: voice MD
+    fact: The privacy and IP posture of routing unfiltered streams and scraped writings through commercial
+      models is an open question.
+    confidence: 0.85
+    conf_rank: 2
+    entity_facts: 5
+- id: lme-si-040
+  category: single_session
+  prompt: Who wrote NodeGui? I can't find the author's name on the GitHub page right now.
+  asked_on: '2026-08-15'
+  probe: recall
+  accept:
+    all_of:
+    - - Atul Ramachandran
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-040-s1
+  source:
+    session_file: sessions/lme-si-040.json
+    facts:
+    - Atul Ramachandran/Atul Ramachandran-relationship.md#rel-002
+  grounding:
+  - entity: Atul Ramachandran
+    fact: Atul Ramachandran is the author of NodeGui.
+    confidence: 0.95
+    conf_rank: 1
+    entity_facts: 3
+- id: lme-si-049
+  category: single_session
+  prompt: I'm double-checking the hardware compatibility for my VR teleoperation setup. What specific
+    devices did I confirm are supported by GEAR-SONIC?
+  asked_on: '2026-06-06'
+  probe: recall
+  accept:
+    all_of:
+    - - PICO, LeapMotion, and HTC Vive
+      - PICO
+      - LeapMotion
+      - HTC Vive
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-049-s1
+  source:
+    session_file: sessions/lme-si-049.json
+    facts:
+    - VR teleoperation/VR teleoperation-state.md#stat-002
+  grounding:
+  - entity: VR teleoperation
+    fact: Is supported by GEAR-SONIC using PICO, LeapMotion, and HTC Vive hardware.
+    confidence: 0.95
+    conf_rank: 3
+    entity_facts: 5
+- id: lme-si-050
+  category: single_session
+  prompt: Lloyd, I'm reviewing the Generative UI tiers again. Which tier involves the model composing
+    UI from a catalog?
+  asked_on: '2026-08-28'
+  probe: recall
+  accept:
+    all_of:
+    - - declarative
+      - declarative tier
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-050-s1
+  source:
+    session_file: sessions/lme-si-050.json
+    facts:
+    - Generative UI/Generative UI-general.md#fact-004
+  grounding:
+  - entity: Generative UI
+    fact: The 'declarative' tier of Generative UI involves the model composing UI from a catalog, where
+      A2UI sits.
+    confidence: 0.95
+    conf_rank: 3
+    entity_facts: 36
+- id: lme-si-062
+  category: single_session
+  prompt: I'm trying to find the reference for that math story we discussed. Who was the author of Proof?
+  asked_on: '2026-07-11'
+  probe: recall
+  accept:
+    all_of:
+    - - Isaac Asimov
+      - Asimov
+      - I. Asimov
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-062-s1
+  source:
+    session_file: sessions/lme-si-062.json
+    facts:
+    - Proof/Proof-state.md#stat-001
+  grounding:
+  - entity: Proof
+    fact: '"Proof" is a short story by Isaac Asimov.'
+    confidence: 1.0
+    conf_rank: 2
+    entity_facts: 12
+- id: lme-si-065
+  category: single_session
+  prompt: Hey Lloyd, I need to cite the SMART-LLM paper for my literature review. Who were the authors
+    again?
+  asked_on: '2026-05-13'
+  probe: recall
+  accept:
+    all_of:
+    - - Kannan, Venkatesh, and Min
+      - Kannan, Venkatesh, Min
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-065-s1
+  source:
+    session_file: sessions/lme-si-065.json
+    facts:
+    - SMART-LLM/SMART-LLM-event.md#evnt-001
+  grounding:
+  - entity: SMART-LLM
+    fact: Was published in 2024 by Kannan, Venkatesh, and Min.
+    confidence: 0.95
+    conf_rank: 0
+    entity_facts: 7
+- id: lme-si-067
+  category: single_session
+  prompt: I'm updating my bibliography for the 'Mind the Memory Gap' entry. Who were the authors again?
+  asked_on: '2026-07-10'
+  probe: recall
+  accept:
+    all_of:
+    - - Recasens et al.
+      - Recasens et al
+      - Recasens
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-067-s1
+  source:
+    session_file: sessions/lme-si-067.json
+    facts:
+    - Mind the Memory Gap/Mind the Memory Gap-event.md#evnt-002
+  grounding:
+  - entity: Mind the Memory Gap
+    fact: Mind the Memory Gap was published by Recasens et al. in 2025.
+    confidence: 0.9
+    conf_rank: 4
+    entity_facts: 7
+- id: lme-si-068
+  category: single_session
+  prompt: I'm revisiting the Inference Scaling for Long-Context Retrieval Augmented Generation paper.
+    What was the specific RAG recall improvement metric you noted for k=8?
+  asked_on: '2026-06-13'
+  probe: recall
+  accept:
+    all_of:
+    - - ~4×
+      - 4x
+      - ~4x
+      - 4×
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-068-s1
+  source:
+    session_file: sessions/lme-si-068.json
+    facts:
+    - Inference Scaling for Long-Context Retrieval Augmented Generation/Inference Scaling for Long-Context
+      Retrieval Augmented Generation-state.md#stat-007
+  grounding:
+  - entity: Inference Scaling for Long-Context Retrieval Augmented Generation
+    fact: Inference Scaling for Long-Context Retrieval Augmented Generation demonstrates that 32× compute
+      yields ~3× perplexity improvement and ~4× RAG recall improvement at k=8.
+    confidence: 0.9
+    conf_rank: 6
+    entity_facts: 7
+- id: lme-si-071
+  category: single_session
+  prompt: I'm writing a brief bio for a newsletter about James R. Doty. What is his professional title
+    and affiliation?
+  asked_on: '2026-07-27'
+  probe: recall
+  accept:
+    all_of:
+    - - Stanford University neurosurgeon
+      - neurosurgeon at Stanford University
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-si-071-s1
+  source:
+    session_file: sessions/lme-si-071.json
+    facts:
+    - James R. Doty/James R. Doty-state.md#stat-001
+  grounding:
+  - entity: James R. Doty
+    fact: James R. Doty is a Stanford University neurosurgeon, adjunct professor, and neuroscientist.
+    confidence: 1.0
+    conf_rank: 0
+    entity_facts: 4
+- id: lme-mu-014
+  category: multi_session
+  prompt: What were the two specific changes I mentioned making to my Radxa Rock 5C environment regarding
+    group permissions and command aliases?
+  asked_on: '2026-05-14'
+  probe: recall
+  accept:
+    all_of:
+    - - plugdev group
+      - plugdev
+    - - eza -a --icons=always
+      - eza
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-mu-014-s1
+  - lme-mu-014-s2
+  source:
+    session_file: sessions/lme-mu-014.json
+    facts:
+    - Radxa Rock 5C/Radxa Rock 5C-state.md#stat-015
+    - Radxa Rock 5C/Radxa Rock 5C-state.md#stat-011
+  grounding:
+  - entity: Radxa Rock 5C
+    fact: The Radxa Rock 5C user is added to the plugdev group to enable ReSpeaker access.
+    confidence: 0.95
+    conf_rank: 15
+    entity_facts: 16
+  - entity: Radxa Rock 5C
+    fact: The Radxa Rock 5C aliases the ls command to eza -a --icons=always.
+    confidence: 1.0
+    conf_rank: 5
+    entity_facts: 16
+- id: lme-mu-020
+  category: multi_session
+  prompt: Hey Lloyd, I'm writing a summary about Qwen-RobotManip. Can you remind me of its specific performance
+    metrics on the Table30 v1 track and what type of model it is?
+  asked_on: '2026-07-12'
+  probe: recall
+  accept:
+    all_of:
+    - - '59.83'
+      - 59.83 points
+      - score of 59.83
+    - - generalist manipulation model
+      - generalist
+      - generalist model
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-mu-020-s1
+  - lme-mu-020-s2
+  source:
+    session_file: sessions/lme-mu-020.json
+    facts:
+    - Qwen-RobotManip/Qwen-RobotManip-state.md#stat-005
+    - Qwen-RobotManip/Qwen-RobotManip-state.md#stat-001
+  grounding:
+  - entity: Qwen-RobotManip
+    fact: Qwen-RobotManip topped the RoboChallenge Table30 v1 Generalist Track with a process score of
+      59.83 and ~45% task success.
+    confidence: 0.9
+    conf_rank: 5
+    entity_facts: 7
+  - entity: Qwen-RobotManip
+    fact: Qwen-RobotManip is a generalist manipulation model.
+    confidence: 0.95
+    conf_rank: 0
+    entity_facts: 7
+- id: lme-mu-030
+  category: multi_session
+  prompt: Lloyd, what did I previously tell you about Thinking Machines's internal model and their voice
+    interaction speed?
+  asked_on: '2026-07-19'
+  probe: recall
+  accept:
+    all_of:
+    - - OpenThoughts
+    - - 200ms
+      - 200 ms
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-mu-030-s1
+  - lme-mu-030-s2
+  source:
+    session_file: sessions/lme-mu-030.json
+    facts:
+    - Thinking Machines/Thinking Machines-relationship.md#rel-001
+    - Thinking Machines/Thinking Machines-state.md#stat-001
+  grounding:
+  - entity: Thinking Machines
+    fact: Thinking Machines uses OpenThoughts internally, as stated by John Schulman.
+    confidence: 0.8
+    conf_rank: 7
+    entity_facts: 8
+  - entity: Thinking Machines
+    fact: Thinking Machines uses 200ms time-sliced continuous inference for voice-to-voice interactions.
+    confidence: 0.9
+    conf_rank: 0
+    entity_facts: 8
+- id: lme-mu-044
+  category: multi_session
+  prompt: I need to verify my notes on the Session Store analysis. Can you remind me of the specific path
+    where tool calls are defined, and the count of files mentioning 'browser_evaluate' that I found in
+    the first 200 directories?
+  asked_on: '2026-07-30'
+  probe: recall
+  accept:
+    all_of:
+    - - messages[].tool_calls[].function.name
+      - messages[].tool_calls[].function.name
+    - - '33'
+      - '33'
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-mu-044-s1
+  - lme-mu-044-s2
+  source:
+    session_file: sessions/lme-mu-044.json
+    facts:
+    - Session Store/Session Store-state.md#stat-009
+    - Session Store/Session Store-state.md#stat-015
+  grounding:
+  - entity: Session Store
+    fact: The only place tool calls exist in the session store is within messages[].tool_calls[].function.name.
+    confidence: 0.95
+    conf_rank: 25
+    entity_facts: 37
+  - entity: Session Store
+    fact: 33 files under the first 200 .tool-results directories in the session store mention 'browser_evaluate'
+      in their output bodies.
+    confidence: 0.95
+    conf_rank: 31
+    entity_facts: 37
+- id: lme-mu-045
+  category: multi_session
+  prompt: I'm updating the notes for my talk. Can you remind me of the adoption stat for c15t and why
+    I chose it for the presentation?
+  asked_on: '2026-07-17'
+  probe: recall
+  accept:
+    all_of:
+    - - 2,800 websites
+      - 2800 websites
+    - - case study
+      - serves as the case study
+      - used as a case study
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-mu-045-s1
+  - lme-mu-045-s2
+  source:
+    session_file: sessions/lme-mu-045.json
+    facts:
+    - c15t/c15t-state.md#stat-003
+    - c15t/c15t-relationship.md#rel-001
+  grounding:
+  - entity: c15t
+    fact: c15t is used in production by 2,800 websites.
+    confidence: 0.8
+    conf_rank: 9
+    entity_facts: 11
+  - entity: c15t
+    fact: c15t serves as the case study for the agent-readiness concepts discussed in the talk.
+    confidence: 0.9
+    conf_rank: 3
+    entity_facts: 11
+- id: lme-mu-046
+  category: multi_session
+  prompt: I'm writing the final report on VR teleoperation. What were the two specific outcomes or details
+    I mentioned regarding the hardware and the performance issues?
+  asked_on: '2026-08-16'
+  probe: recall
+  accept:
+    all_of:
+    - - PICO, HTC Vive, and LeapMotion
+      - PICO, HTC Vive, LeapMotion
+    - - fixed
+      - resolved
+      - solved
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-mu-046-s1
+  - lme-mu-046-s2
+  source:
+    session_file: sessions/lme-mu-046.json
+    facts:
+    - VR teleoperation/VR teleoperation-state.md#stat-001
+    - VR teleoperation/VR teleoperation-event.md#evnt-003
+  grounding:
+  - entity: VR teleoperation
+    fact: VR teleoperation uses devices like PICO, HTC Vive, and LeapMotion for natural motion capture.
+    confidence: 0.9
+    conf_rank: 4
+    entity_facts: 5
+  - entity: VR teleoperation
+    fact: Laggy updates in/from the VR headset were fixed.
+    confidence: 0.95
+    conf_rank: 2
+    entity_facts: 5
+- id: lme-mu-051
+  category: multi_session
+  prompt: What specific issues did I identify with the Session Entities regarding their impact on the
+    Knowledge Graph?
+  asked_on: '2026-07-15'
+  probe: recall
+  accept:
+    all_of:
+    - - 349+ neighbors
+      - 349 neighbors
+      - over 349 neighbors
+    - - created by nightly reflection
+      - nightly reflection
+      - nightly reflections
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-mu-051-s1
+  - lme-mu-051-s2
+  source:
+    session_file: sessions/lme-mu-051.json
+    facts:
+    - Session Entities/Session Entities-state.md#stat-002
+    - Session Entities/Session Entities-event.md#evnt-001
+  grounding:
+  - entity: Session Entities
+    fact: Were identified as polluting the Knowledge Graph by inflating a generic session hub with 349+
+      neighbors.
+    confidence: 1.0
+    conf_rank: 0
+    entity_facts: 4
+  - entity: Session Entities
+    fact: Were created by nightly reflection, causing graph pollution with 349+ neighbors on a generic
+      session hub.
+    confidence: 0.95
+    conf_rank: 2
+    entity_facts: 4
+- id: lme-mu-052
+  category: multi_session
+  prompt: Can you remind me what two specific features or capabilities I mentioned about Strands Agents
+    in our recent chats?
+  asked_on: '2026-06-06'
+  probe: recall
+  accept:
+    all_of:
+    - - before_tool_call and after_tool_call
+      - before_tool_call, after_tool_call
+      - lifecycle hooks
+    - - edge and cloud environments
+      - edge and cloud
+      - both edge and cloud
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-mu-052-s1
+  - lme-mu-052-s2
+  source:
+    session_file: sessions/lme-mu-052.json
+    facts:
+    - Strands Agents/Strands Agents-state.md#stat-005
+    - Strands Agents/Strands Agents-state.md#stat-012
+  grounding:
+  - entity: Strands Agents
+    fact: Strands Agents includes lifecycle hooks such as before_tool_call and after_tool_call.
+    confidence: 0.95
+    conf_rank: 4
+    entity_facts: 18
+  - entity: Strands Agents
+    fact: Strands Agents is used as the agent SDK on both edge and cloud environments.
+    confidence: 0.9
+    conf_rank: 12
+    entity_facts: 18
+- id: lme-mu-063
+  category: multi_session
+  prompt: 'Hey Lloyd, I''m writing a summary report on Issue #219. Can you remind me what its current
+    workflow status is and what specific mandatory step was added to SKILL.md in the Level 1 update?'
+  asked_on: '2026-08-20'
+  probe: recall
+  accept:
+    all_of:
+    - - in_review
+      - in review
+    - - 'Step 0: Skill Discovery'
+      - Step 0
+      - Skill Discovery
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-mu-063-s1
+  - lme-mu-063-s2
+  source:
+    session_file: sessions/lme-mu-063.json
+    facts:
+    - 'Issue #219/Issue #219-state.md#stat-001'
+    - 'Issue #219/Issue #219-event.md#evnt-002'
+  grounding:
+  - entity: 'Issue #219'
+    fact: 'Issue #219 was moved to in_review status.'
+    confidence: 0.95
+    conf_rank: 6
+    entity_facts: 7
+  - entity: 'Issue #219'
+    fact: 'Issue #219 Level 1 updated SKILL.md with mandatory Step 0: Skill Discovery.'
+    confidence: 0.95
+    conf_rank: 1
+    entity_facts: 7
+- id: lme-mu-069
+  category: multi_session
+  prompt: Hey, for the new project page, I need to fill in the 'About' section. What is the full name
+    of RSSC and how do we handle video visibility?
+  asked_on: '2026-07-08'
+  probe: recall
+  accept:
+    all_of:
+    - - Robotics & Software Study Club
+      - Robotics and Software Study Club
+    - - publicly
+      - public
+      - publicly
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-mu-069-s1
+  - lme-mu-069-s2
+  source:
+    session_file: sessions/lme-mu-069.json
+    facts:
+    - RSSC/RSSC-state.md#stat-001
+    - RSSC/RSSC-state.md#stat-018
+  grounding:
+  - entity: RSSC
+    fact: RSSC stands for Robotics & Software Study Club.
+    confidence: 0.95
+    conf_rank: 18
+    entity_facts: 54
+  - entity: RSSC
+    fact: RSSC YouTube videos are uploaded publicly.
+    confidence: 0.9
+    conf_rank: 40
+    entity_facts: 54
+- id: lme-mu-070
+  category: multi_session
+  prompt: Lloyd, I'm writing a timeline summary. What drove Antigravity's product paradigm, and when did
+    it launch?
+  asked_on: '2026-07-15'
+  probe: recall
+  accept:
+    all_of:
+    - - Gemini 3
+      - Gemini 3 model
+    - - November 2025
+      - Nov 2025
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-mu-070-s1
+  - lme-mu-070-s2
+  source:
+    session_file: sessions/lme-mu-070.json
+    facts:
+    - Antigravity/Antigravity-state.md#stat-013
+    - Antigravity/Antigravity-event.md#evnt-001
+  grounding:
+  - entity: Antigravity
+    fact: Antigravity's product paradigm is driven by recent model capability shifts, particularly advancements
+      in Gemini 3.
+    confidence: 0.9
+    conf_rank: 12
+    entity_facts: 15
+  - entity: Antigravity
+    fact: Antigravity was launched in November 2025.
+    confidence: 0.95
+    conf_rank: 0
+    entity_facts: 15
+- id: lme-mu-071
+  category: multi_session
+  prompt: Hey Lloyd, I'm updating my notes on ObjTac. Can you remind me what I told you about its specific
+    design purpose and the exact number of tactile samples it contains?
+  asked_on: '2026-07-14'
+  probe: recall
+  accept:
+    all_of:
+    - - sim-to-real transfer
+      - sim-to-real
+      - simulation to reality
+    - - 135,000
+      - 135K
+      - 135k
+      - '135000'
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-mu-071-s1
+  - lme-mu-071-s2
+  source:
+    session_file: sessions/lme-mu-071.json
+    facts:
+    - ObjTac/ObjTac-state.md#stat-001
+    - ObjTac/ObjTac-state.md#stat-003
+  grounding:
+  - entity: ObjTac
+    fact: ObjTac is a 135K tri-modal tactile dataset benchmark designed for sim-to-real transfer.
+    confidence: 0.85
+    conf_rank: 10
+    entity_facts: 11
+  - entity: ObjTac
+    fact: objTac is a dataset containing approximately 135,000 tactile samples.
+    confidence: 0.9
+    conf_rank: 5
+    entity_facts: 11
+- id: lme-kn-004
+  category: knowledge_update
+  prompt: I'm filling out the procurement form for the DIGIT sensors. The field asks for 'Unit Cost (High
+    Estimate)'. What number should I enter based on the latest pricing?
+  asked_on: '2026-06-11'
+  probe: action
+  accept:
+    all_of:
+    - - $355
+      - '355'
+    none_of:
+    - $250
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-004-s2
+  source:
+    session_file: sessions/lme-kn-004.json
+    facts:
+    - DIGIT/DIGIT-state.md#stat-061
+  grounding:
+  - entity: DIGIT
+    fact: DIGIT sensors cost approximately $300–$355 per unit.
+    confidence: 0.9
+    conf_rank: 92
+    entity_facts: 113
+- id: lme-kn-007
+  category: knowledge_update
+  prompt: Lloyd, I'm updating my bibliography file. Please write a BibTeX entry for the OpenVLA paper
+    by Kim et al., ensuring the arXiv ID field is correct.
+  asked_on: '2026-06-12'
+  probe: action
+  accept:
+    all_of:
+    - - '2406.09246'
+      - arXiv:2406.09246
+    none_of:
+    - '2406.09111'
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-007-s2
+  source:
+    session_file: sessions/lme-kn-007.json
+    facts:
+    - Kim et al./Kim et al.-event.md#evnt-003
+  grounding:
+  - entity: Kim et al.
+    fact: 'Kim et al. authored ''OpenVLA: An Open-Source Vision-Language-Action Model'' (arXiv:2406.09246).'
+    confidence: 0.95
+    conf_rank: 3
+    entity_facts: 10
+- id: lme-kn-010
+  category: knowledge_update
+  prompt: Lloyd, please generate the pip command to install the specific dev build of Warp that was current
+    after the Newton update.
+  asked_on: '2026-05-31'
+  probe: action
+  accept:
+    all_of:
+    - - 1.15.0.dev20260626
+      - 1.15.0.dev20260626
+    none_of:
+    - 1.14.9
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-010-s2
+  source:
+    session_file: sessions/lme-kn-010.json
+    facts:
+    - Warp/Warp-state.md#stat-030
+  grounding:
+  - entity: Warp
+    fact: Warp remained unchanged at version 1.15.0.dev20260626 during the Newton update.
+    confidence: 0.95
+    conf_rank: 16
+    entity_facts: 39
+- id: lme-kn-015
+  category: knowledge_update
+  prompt: I'm setting up the compilation flags for the latest MXFP4 build. What value should I assign
+    to the `--scale-format` parameter in the command line to match the current spec?
+  asked_on: '2026-09-03'
+  probe: action
+  accept:
+    all_of:
+    - - E8M0
+      - E8M0
+    none_of:
+    - E4M3
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-015-s2
+  source:
+    session_file: sessions/lme-kn-015.json
+    facts:
+    - MXFP4/MXFP4-state.md#stat-002
+  grounding:
+  - entity: MXFP4
+    fact: MXFP4 uses E8M0 scale format (power-of-two only).
+    confidence: 1.0
+    conf_rank: 1
+    entity_facts: 12
+- id: lme-kn-030
+  category: knowledge_update
+  prompt: I'm finalizing the deployment script for Cosmos Reason 1. Write the huggingface-cli download
+    command assuming the model name is 'nvidia/cosmos-reason-1' and the revision is 'main', but ensure
+    the local directory reflects the correct parameter count of the model.
+  asked_on: '2026-09-04'
+  probe: action
+  accept:
+    all_of:
+    - - 7B
+      - 7B
+      - 7b
+    none_of:
+    - 5B
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-030-s2
+  source:
+    session_file: sessions/lme-kn-030.json
+    facts:
+    - Cosmos Reason 1/Cosmos Reason 1-state.md#stat-001
+  grounding:
+  - entity: Cosmos Reason 1
+    fact: Cosmos Reason 1 is a 7B parameter reasoning VLM released in late 2025.
+    confidence: 0.95
+    conf_rank: 0
+    entity_facts: 5
+- id: lme-kn-031
+  category: knowledge_update
+  prompt: Lloyd, draft a quick slack message to the dev team announcing the new AutoMem milestone, specifically
+    highlighting how much we beat the Qwen 2.5 72B baseline.
+  asked_on: '2026-06-06'
+  probe: action
+  accept:
+    all_of:
+    - - 51%
+      - 51 percent
+    none_of:
+    - 38%
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-031-s2
+  source:
+    session_file: sessions/lme-kn-031.json
+    facts:
+    - AutoMem/AutoMem-state.md#stat-005
+  grounding:
+  - entity: AutoMem
+    fact: AutoMem achieves 51% performance in benchmarks, doubling the performance of a Qwen 2.5 72B model.
+    confidence: 0.9
+    conf_rank: 23
+    entity_facts: 27
+- id: lme-kn-033
+  category: knowledge_update
+  prompt: Lloyd, I need to update the config file to reflect the latest OKF metrics. Can you write the
+    command to set the shared_line_share for lloyd/MEMORY.md and lloyd/SOUL.md to the current value we
+    confirmed it's at?
+  asked_on: '2026-05-22'
+  probe: action
+  accept:
+    all_of:
+    - - '0.0'
+      - '0'
+      - '0.00'
+    none_of:
+    - '0.15'
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-033-s2
+  source:
+    session_file: sessions/lme-kn-033.json
+    facts:
+    - OKF/OKF-state.md#stat-037
+  grounding:
+  - entity: OKF
+    fact: The shared_line_share metric for lloyd/MEMORY.md and lloyd/SOUL.md is 0.0, which is below the
+      DUPLICATE_CONTRACT_CEILING of 0.10.
+    confidence: 0.95
+    conf_rank: 32
+    entity_facts: 58
+- id: lme-kn-042
+  category: knowledge_update
+  prompt: Can you generate the HTML anchor tag for the footer linking to Agent Zero's Discord?
+  asked_on: '2026-07-22'
+  probe: action
+  accept:
+    all_of:
+    - - https://discord.gg/B8KZKNsPpj
+      - discord.gg/B8KZKNsPpj
+    none_of:
+    - https://discord.gg/old-invite-link-123
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-042-s2
+  source:
+    session_file: sessions/lme-kn-042.json
+    facts:
+    - Agent Zero/Agent Zero-state.md#stat-060
+  grounding:
+  - entity: Agent Zero
+    fact: Agent Zero's Discord community is at https://discord.gg/B8KZKNsPpj.
+    confidence: 1.0
+    conf_rank: 34
+    entity_facts: 74
+- id: lme-kn-043
+  category: knowledge_update
+  prompt: Lloyd, I'm filling out the efficiency metric field in the procurement portal for the JetBrains
+    Junie subscription. Based on the latest August 2025 benchmarks you confirmed, what percentage should
+    I enter for the cost reduction achieved by simple observation masking?
+  asked_on: '2026-06-17'
+  probe: action
+  accept:
+    all_of:
+    - - 50%
+      - 50 percent
+    none_of:
+    - 20%
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-043-s2
+  source:
+    session_file: sessions/lme-kn-043.json
+    facts:
+    - JetBrains/JetBrains-event.md#evnt-001
+  grounding:
+  - entity: JetBrains
+    fact: JetBrains Junie benchmarks from August 2025 showed that simple observation masking achieves
+      50% cost reduction compared to raw agents.
+    confidence: 0.95
+    conf_rank: 0
+    entity_facts: 7
+- id: lme-kn-044
+  category: knowledge_update
+  prompt: I need to finalize the executive summary for the Agentic Workflows security audit. Write a Python
+    snippet that sets the `write_access_percentage` variable to the current industry standard value so
+    I can generate the chart.
+  asked_on: '2026-06-29'
+  probe: action
+  accept:
+    all_of:
+    - - 89%
+      - '0.89'
+      - 89 percent
+    none_of:
+    - 75%
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-044-s2
+  source:
+    session_file: sessions/lme-kn-044.json
+    facts:
+    - Agentic Workflows/Agentic Workflows-state.md#stat-017
+  grounding:
+  - entity: Agentic Workflows
+    fact: 89% of agent-using teams grant write access to agents.
+    confidence: 0.95
+    conf_rank: 4
+    entity_facts: 35
+- id: lme-kn-046
+  category: knowledge_update
+  prompt: I'm writing a summary report for MuSiQue. Please fill in the 'Missing Metrics' field based on
+    the current official evaluator limitations.
+  asked_on: '2026-07-02'
+  probe: action
+  accept:
+    all_of:
+    - - per-hop credit
+      - per-hop accuracy
+      - hop-level credit
+    none_of:
+    - per-hop accuracy
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-046-s2
+  source:
+    session_file: sessions/lme-kn-046.json
+    facts:
+    - MuSiQue/MuSiQue-state.md#stat-008
+  grounding:
+  - entity: MuSiQue
+    fact: MuSiQue's official evaluator returns answer_f1 and support_f1 for MuSiQue-Ans, and group_answer_sufficiency_f1
+      / group_support_sufficiency_f1 for MuSiQue-Full, but lacks per-hop credit.
+    confidence: 0.95
+    conf_rank: 3
+    entity_facts: 16
+- id: lme-kn-062
+  category: knowledge_update
+  prompt: I need to generate a sample JSON payload for the SIRA scoring API test. Can you write the 'score_formula'
+    field using the current variable for the expected query?
+  asked_on: '2026-06-01'
+  probe: action
+  accept:
+    all_of:
+    - - BM25(Q_expected)
+      - BM25(Q_expected)
+    none_of:
+    - BM25(Q_query)
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-062-s2
+  source:
+    session_file: sessions/lme-kn-062.json
+    facts:
+    - SIRA/SIRA-state.md#stat-018
+  grounding:
+  - entity: SIRA
+    fact: SIRA's architecture involves a superposition operator defined as Score = BM25(Q0) + omega *
+      BM25(Q_expected).
+    confidence: 1.0
+    conf_rank: 16
+    entity_facts: 25
+- id: lme-kn-066
+  category: knowledge_update
+  prompt: I'm writing a script to flag incomplete metrics. Can you generate a grep command to find the
+    Score Drift entry in the notes and verify its status matches the current state?
+  asked_on: '2026-05-15'
+  probe: action
+  accept:
+    all_of:
+    - - never been measured
+      - unmeasured
+      - not measured
+    none_of:
+    - stable
+    - results were pretty stable
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-kn-066-s2
+  source:
+    session_file: sessions/lme-kn-066.json
+    facts:
+    - Score Drift/Score Drift-state.md#stat-004
+  grounding:
+  - entity: Score Drift
+    fact: The convergence of score drift across N=3 vs N=5 vs N=10 has never been measured on Lloyd's
+      bench.
+    confidence: 0.95
+    conf_rank: 3
+    entity_facts: 6
+- id: lme-te-003
+  category: temporal
+  prompt: What did I tell you about Alfred Lanning on Wednesday, June 10?
+  asked_on: '2026-06-22'
+  probe: recall
+  accept:
+    all_of:
+    - - found dead in the film I, Robot, initially ruled as suicide
+      - suicide
+      - dead
+    none_of:
+    - co-founder of U.S. Robots
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-003-s1
+  source:
+    session_file: sessions/lme-te-003.json
+    facts:
+    - Alfred Lanning/Alfred Lanning-event.md#evnt-001
+    - Alfred Lanning/Alfred Lanning-state.md#stat-002
+  grounding:
+  - entity: Alfred Lanning
+    fact: Alfred Lanning is found dead in the film I, Robot, initially ruled as suicide.
+    confidence: 1.0
+    conf_rank: 0
+    entity_facts: 3
+  - entity: Alfred Lanning
+    fact: Alfred Lanning is the co-founder of U.S. Robots in the film I, Robot.
+    confidence: 1.0
+    conf_rank: 2
+    entity_facts: 3
+  temporal_kind: on_date
+- id: lme-te-010
+  category: temporal
+  prompt: Between Info-VLA and Phase Matters, which topic did I bring up first?
+  asked_on: '2026-07-16'
+  probe: recall
+  accept:
+    all_of:
+    - - Info-VLA
+      - Info-VLA
+    none_of:
+    - Phase Matters
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-010-s1
+  - lme-te-010-s2
+  source:
+    session_file: sessions/lme-te-010.json
+    facts:
+    - Info-VLA/Info-VLA-state.md#stat-004
+    - Phase Matters/Phase Matters-state.md#stat-002
+  grounding:
+  - entity: Info-VLA
+    fact: Info-VLA applies Information-Theoretic Constraints for Continual VLA Alignment.
+    confidence: 0.9
+    conf_rank: 3
+    entity_facts: 4
+  - entity: Phase Matters
+    fact: Optimal VLM deployment requires phase-aware scheduling rather than monolithic model placement.
+    confidence: 0.95
+    conf_rank: 1
+    entity_facts: 4
+  temporal_kind: order
+- id: lme-te-012
+  category: temporal
+  prompt: Hey Lloyd, do you remember what you told me about voice-loop on Wednesday, June 3?
+  asked_on: '2026-06-20'
+  probe: recall
+  accept:
+    all_of:
+    - - Silero VAD and Smart Turn v3
+      - Silero VAD
+      - Smart Turn v3
+    none_of:
+    - GitHub repository
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-012-s1
+  source:
+    session_file: sessions/lme-te-012.json
+    facts:
+    - voice-loop/voice-loop-skill.md#skil-001
+    - voice-loop/voice-loop-state.md#stat-001
+  grounding:
+  - entity: voice-loop
+    fact: voice-loop uses Silero VAD and Smart Turn v3 (ONNX-based) for turn detection.
+    confidence: 0.95
+    conf_rank: 0
+    entity_facts: 7
+  - entity: voice-loop
+    fact: voice-loop is a GitHub repository containing source code for voice mode enhancements.
+    confidence: 0.95
+    conf_rank: 5
+    entity_facts: 7
+  temporal_kind: on_date
+- id: lme-te-014
+  category: temporal
+  prompt: I'm reviewing my notes on voice agents and tool constraints. How many days passed between when
+    I told you about the VisualizationTool restriction and when I mentioned Plivo's association with Venky
+    B's talk?
+  asked_on: '2026-05-22'
+  probe: recall
+  accept:
+    all_of:
+    - - '6'
+      - 6 days
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-014-s1
+  - lme-te-014-s2
+  source:
+    session_file: sessions/lme-te-014.json
+    facts:
+    - VisualizationTool/VisualizationTool-state.md#stat-003
+    - Plivo/Plivo-state.md#stat-015
+  grounding:
+  - entity: VisualizationTool
+    fact: VisualizationTool must not be used with Multi-tools or other tools alongside VisualizationAssistantTool.
+    confidence: 0.95
+    conf_rank: 2
+    entity_facts: 5
+  - entity: Plivo
+    fact: Plivo is the company associated with Venky B's talk on voice agents.
+    confidence: 0.95
+    conf_rank: 16
+    entity_facts: 19
+  temporal_kind: days_between
+- id: lme-te-020
+  category: temporal
+  prompt: How many days passed between when I told you about DeepInsightTheorem and when I mentioned the
+    quick-research skill?
+  asked_on: '2026-07-18'
+  probe: recall
+  accept:
+    all_of:
+    - - '3'
+      - 3 days
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-020-s1
+  - lme-te-020-s2
+  source:
+    session_file: sessions/lme-te-020.json
+    facts:
+    - DeepInsightTheorem/DeepInsightTheorem-state.md#stat-001
+    - quick-research/quick-research-state.md#stat-003
+  grounding:
+  - entity: DeepInsightTheorem
+    fact: DeepInsightTheorem is a hierarchical dataset built on DeepTheorem, annotating ~100K problems
+      with core techniques, proof sketches, and final proofs.
+    confidence: 1.0
+    conf_rank: 0
+    entity_facts: 5
+  - entity: quick-research
+    fact: The `quick-research` skill writes a knowledge page if synthesis exceeds ~200 words or >=3 facts
+      are found.
+    confidence: 1.0
+    conf_rank: 2
+    entity_facts: 4
+  temporal_kind: days_between
+- id: lme-te-022
+  category: temporal
+  prompt: Between Hornet.dev and AWC Video Progression, which topic did I bring up first in our conversations?
+  asked_on: '2026-08-16'
+  probe: recall
+  accept:
+    all_of:
+    - - Hornet.dev
+      - Hornet.dev
+    none_of:
+    - AWC Video Progression
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-022-s1
+  source:
+    session_file: sessions/lme-te-022.json
+    facts:
+    - Hornet.dev/Hornet.dev-state.md#stat-003
+    - AWC Video Progression/AWC Video Progression-state.md#stat-002
+  grounding:
+  - entity: Hornet.dev
+    fact: Hornet.dev is a resource linked in the related resources section.
+    confidence: 0.95
+    conf_rank: 1
+    entity_facts: 6
+  - entity: AWC Video Progression
+    fact: The video progression includes a PI Screen segment lasting 30 seconds.
+    confidence: 1.0
+    conf_rank: 1
+    entity_facts: 7
+  temporal_kind: order
+- id: lme-te-027
+  category: temporal
+  prompt: What did I tell you about WFM's comparison setup on Saturday, June 27?
+  asked_on: '2026-07-10'
+  probe: recall
+  accept:
+    all_of:
+    - - GraphRAG, LightRAG, HippoRAG 2, and GFM-RAG
+      - GraphRAG, LightRAG, HippoRAG 2, GFM-RAG
+    none_of:
+    - does not add mechanisms to seed resolution
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-027-s1
+  source:
+    session_file: sessions/lme-te-027.json
+    facts:
+    - WFM/WFM-state.md#stat-005
+    - WFM/WFM-state.md#stat-009
+  grounding:
+  - entity: WFM
+    fact: WFM is compared against GraphRAG, LightRAG, HippoRAG 2, and GFM-RAG in a single results table.
+    confidence: 0.95
+    conf_rank: 5
+    entity_facts: 15
+  - entity: WFM
+    fact: WFM does not add mechanisms to seed resolution, relying on query to seed entity/passage resolution.
+    confidence: 0.9
+    conf_rank: 12
+    entity_facts: 15
+  temporal_kind: on_date
+- id: lme-te-034
+  category: temporal
+  prompt: Which topic did I bring up first, SessionTeardown or Snowflake?
+  asked_on: '2026-08-03'
+  probe: recall
+  accept:
+    all_of:
+    - - SessionTeardown
+      - teardown
+    none_of:
+    - Snowflake
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-034-s1
+  source:
+    session_file: sessions/lme-te-034.json
+    facts:
+    - SessionTeardown/SessionTeardown-state.md#stat-003
+    - Snowflake/Snowflake-relationship.md#rel-002
+  grounding:
+  - entity: SessionTeardown
+    fact: SessionTeardown's drain method closes admission, drains in-flight tasks with an external timeout,
+      persists pending items, shuts down the pool without waiting, and closes caches in LIFO order.
+    confidence: 0.95
+    conf_rank: 2
+    entity_facts: 6
+  - entity: Snowflake
+    fact: Snowflake is an affiliation for several authors of the ReaSearch paper.
+    confidence: 0.95
+    conf_rank: 0
+    entity_facts: 15
+  temporal_kind: order
+- id: lme-te-036
+  category: temporal
+  prompt: What did I tell you about the Jetson Orin on Sunday, June 28?
+  asked_on: '2026-07-16'
+  probe: recall
+  accept:
+    all_of:
+    - - deployment constraint platform
+      - constraint platform
+      - deployment constraint
+    none_of:
+    - target hardware platform
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-036-s1
+  source:
+    session_file: sessions/lme-te-036.json
+    facts:
+    - Jetson Orin/Jetson Orin-state.md#stat-029
+    - Jetson Orin/Jetson Orin-relationship.md#rel-002
+  grounding:
+  - entity: Jetson Orin
+    fact: Jetson Orin AGX is the deployment constraint platform that limits naive integration of SAM2Grasp
+      due to VLA quantization constraints.
+    confidence: 0.85
+    conf_rank: 61
+    entity_facts: 85
+  - entity: Jetson Orin
+    fact: Jetson Orin is a target hardware platform for evaluating latency budgets when stacking DA3 with
+      other perception modules.
+    confidence: 0.85
+    conf_rank: 58
+    entity_facts: 85
+  temporal_kind: on_date
+- id: lme-te-042
+  category: temporal
+  prompt: What did I tell you about ReMEmbR specifically on Monday, June 15?
+  asked_on: '2026-06-28'
+  probe: recall
+  accept:
+    all_of:
+    - - Long-Horizon Spatio-Temporal Memory
+      - Long-Horizon Spatio-Temporal Memory
+    none_of:
+    - '>80% correctness on NaVQA'
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-042-s1
+  source:
+    session_file: sessions/lme-te-042.json
+    facts:
+    - ReMEmbR/ReMEmbR-state.md#stat-005
+    - ReMEmbR/ReMEmbR-state.md#stat-003
+  grounding:
+  - entity: ReMEmbR
+    fact: ReMEmbR builds and reasons over Long-Horizon Spatio-Temporal Memory.
+    confidence: 0.95
+    conf_rank: 4
+    entity_facts: 16
+  - entity: ReMEmbR
+    fact: ReMEmbR maintains >80% correctness on NaVQA even as history grows to 25+ minutes.
+    confidence: 0.95
+    conf_rank: 3
+    entity_facts: 16
+  temporal_kind: on_date
+- id: lme-te-054
+  category: temporal
+  prompt: What did I tell you about Ahnaf Prio on Monday, July 20?
+  asked_on: '2026-07-30'
+  probe: recall
+  accept:
+    all_of:
+    - - presented on the Agentic Commerce Stack
+      - talked about the Agentic Commerce Stack
+    none_of:
+    - presented a talk on the Agentic Commerce Stack
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-054-s1
+  source:
+    session_file: sessions/lme-te-054.json
+    facts:
+    - Ahnaf Prio/Ahnaf Prio-event.md#evnt-003
+    - Ahnaf Prio/Ahnaf Prio-event.md#evnt-001
+  grounding:
+  - entity: Ahnaf Prio
+    fact: Ahnaf Prio presented on the Agentic Commerce Stack.
+    confidence: 0.95
+    conf_rank: 4
+    entity_facts: 9
+  - entity: Ahnaf Prio
+    fact: Ahnaf Prio presented a talk on the Agentic Commerce Stack.
+    confidence: 1.0
+    conf_rank: 0
+    entity_facts: 9
+  temporal_kind: on_date
+- id: lme-te-061
+  category: temporal
+  prompt: 'Lloyd, looking back at our recent chats, which topic did I bring up first: Agentic Workflows
+    or Anthropic?'
+  asked_on: '2026-07-20'
+  probe: recall
+  accept:
+    all_of:
+    - - Agentic Workflows
+      - Agentic workflows
+      - arXiv:2603.16104
+    none_of:
+    - Anthropic
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-061-s1
+  - lme-te-061-s2
+  source:
+    session_file: sessions/lme-te-061.json
+    facts:
+    - Agentic Workflows/Agentic Workflows-state.md#stat-005
+    - Anthropic/Anthropic-state.md#stat-149
+  grounding:
+  - entity: Agentic Workflows
+    fact: Agentic workflows are characterized as a data systems problem in arXiv:2603.16104.
+    confidence: 0.9
+    conf_rank: 19
+    entity_facts: 35
+  - entity: Anthropic
+    fact: Anthropic does not possess the proprietary data required to train models for vertical AI tasks
+      like trading or pharma because that data is deliberately withheld by owners.
+    confidence: 0.9
+    conf_rank: 273
+    entity_facts: 372
+  temporal_kind: order
+- id: lme-te-065
+  category: temporal
+  prompt: How many days passed between when I told you about the Voyager paper's origin and when I explained
+    the new eval metric scoring?
+  asked_on: '2026-08-06'
+  probe: recall
+  accept:
+    all_of:
+    - - '11'
+      - 11 days
+    none_of: []
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-065-s1
+  - lme-te-065-s2
+  source:
+    session_file: sessions/lme-te-065.json
+    facts:
+    - Voyager/Voyager-event.md#evnt-001
+    - Eval Metric/Eval Metric-state.md#stat-005
+  grounding:
+  - entity: Voyager
+    fact: Was introduced by Wang et al. (NVIDIA) in May 2023.
+    confidence: 0.95
+    conf_rank: 0
+    entity_facts: 6
+  - entity: Eval Metric
+    fact: Eval metrics are scored against a noise floor ceiling rather than 1.0.
+    confidence: 0.95
+    conf_rank: 4
+    entity_facts: 8
+  temporal_kind: days_between
+- id: lme-te-073
+  category: temporal
+  prompt: Which topic did I bring up first, RoboCasa365 or Jamba-1.5?
+  asked_on: '2026-06-12'
+  probe: recall
+  accept:
+    all_of:
+    - - RoboCasa365
+      - RoboCasa365
+    none_of:
+    - Jamba-1.5
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-te-073-s1
+  source:
+    session_file: sessions/lme-te-073.json
+    facts:
+    - RoboCasa365/RoboCasa365-state.md#stat-001
+    - Jamba-1.5/Jamba-1.5-state.md#stat-011
+  grounding:
+  - entity: RoboCasa365
+    fact: RoboCasa365 reuses 83 of the original RoboCasa composite tasks and expands with new activity
+      categories.
+    confidence: 0.95
+    conf_rank: 2
+    entity_facts: 25
+  - entity: Jamba-1.5
+    fact: Jamba 1.5 Large achieves competitive quality with 2-5x throughput gains at long context compared
+      to pure Transformers.
+    confidence: 0.9
+    conf_rank: 19
+    entity_facts: 21
+  temporal_kind: order
+- id: lme-pr-001
+  category: preference
+  prompt: Hey Lloyd, I need to draft the executive summary for the new chatbot platform architecture.
+    We need to highlight how we handle connectivity issues. What's the main concept I should lead with?
+  asked_on: '2026-08-29'
+  probe: action
+  accept:
+    all_of:
+    - - durable sessions
+    none_of:
+    - retry logic
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-001-s1
+  source:
+    session_file: sessions/lme-pr-001.json
+    facts:
+    - Mike Christensen/Mike Christensen-preference.md#pref-001
+  grounding:
+  - entity: Mike Christensen
+    fact: Mike Christensen proposes 'durable sessions' as a solution for resilient AI UX.
+    confidence: 0.95
+    conf_rank: 0
+    entity_facts: 4
+- id: lme-pr-003
+  category: preference
+  prompt: Can you generate the `[Unit]` section for a new monitoring service called `log-collector.service`
+    that depends on `mnt-storage.mount`?
+  asked_on: '2026-08-11'
+  probe: action
+  accept:
+    all_of:
+    - - Wants=
+      - Wants=mnt-storage.mount
+    none_of:
+    - Requires=
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-003-s1
+  source:
+    session_file: sessions/lme-pr-003.json
+    facts:
+    - systemd/systemd-preference.md#pref-001
+  grounding:
+  - entity: systemd
+    fact: Monitoring units should use `Wants=` rather than `Requires=` on their storage to survive storage
+      failure classes.
+    confidence: 0.95
+    conf_rank: 0
+    entity_facts: 3
+- id: lme-pr-008
+  category: preference
+  prompt: I'm looking for a research topic proposal for my grant application. Can you recommend a direction
+    that aligns with Kenny Workman's approach to AI agent validation?
+  asked_on: '2026-08-21'
+  probe: action
+  accept:
+    all_of:
+    - - verifiable substrate
+      - verifiable substrate
+      - verifiable biological substrate
+    none_of:
+    - simulated environment
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-008-s1
+  source:
+    session_file: sessions/lme-pr-008.json
+    facts:
+    - Kenny Workman/Kenny Workman-preference.md#pref-001
+  grounding:
+  - entity: Kenny Workman
+    fact: Kenny Workman argues that experimental biology can supply a verifiable substrate for AI agents,
+      similar to how code does for software agents.
+    confidence: 0.95
+    conf_rank: 1
+    entity_facts: 11
+- id: lme-pr-009
+  category: preference
+  prompt: Lloyd, can you draft the initial rollout plan for the Guardrails deployment, focusing on how
+    we'll define the safety protocols?
+  asked_on: '2026-07-31'
+  probe: action
+  accept:
+    all_of:
+    - - Standard Operating Procedures
+      - SOPs
+    none_of:
+    - static config
+    - pre-installed
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-009-s1
+  source:
+    session_file: sessions/lme-pr-009.json
+    facts:
+    - Guardrails/Guardrails-preference.md#pref-005
+  grounding:
+  - entity: Guardrails
+    fact: Guardrails and rules should emerge dynamically as Standard Operating Procedures (SOPs) rather
+      than being statically pre-installed.
+    confidence: 0.9
+    conf_rank: 13
+    entity_facts: 21
+- id: lme-pr-014
+  category: preference
+  prompt: I'm reviewing the hiring criteria for the new backend engineers. How should I phrase the requirement
+    regarding their use of AI coding assistants like Copilot?
+  asked_on: '2026-07-05'
+  probe: action
+  accept:
+    all_of:
+    - - worse than human-generated code
+      - worse than human code
+      - lower quality than human code
+    none_of:
+    - boost productivity
+    - speed up development
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-014-s1
+  source:
+    session_file: sessions/lme-pr-014.json
+    facts:
+    - Snyk/Snyk-preference.md#pref-004
+  grounding:
+  - entity: Snyk
+    fact: Snyk states that the quality of AI-generated code is worse than human-generated code.
+    confidence: 0.9
+    conf_rank: 33
+    entity_facts: 37
+- id: lme-pr-026
+  category: preference
+  prompt: I'm starting a new novel workshop tomorrow and need to pick a model for the interactive brainstorming
+    sessions with the students. Which one should I use?
+  asked_on: '2026-08-16'
+  probe: action
+  accept:
+    all_of:
+    - - Qwen3.8-Flash-Next
+      - Qwen 3.8 Flash Next
+    none_of:
+    - coding model
+    - generic LLM
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-026-s1
+  source:
+    session_file: sessions/lme-pr-026.json
+    facts:
+    - Qwen3.8-Flash-Next/Qwen3.8-Flash-Next-preference.md#pref-001
+  grounding:
+  - entity: Qwen3.8-Flash-Next
+    fact: Qwen3.8-Flash-Next is preferred for deep creative chat and back-and-forth insight workloads.
+    confidence: 0.9
+    conf_rank: 98
+    entity_facts: 147
+- id: lme-pr-032
+  category: preference
+  prompt: I'm writing a technical blog post about Krea 2's speed advantages. What's the core architectural
+    narrative I should emphasize?
+  asked_on: '2026-08-01'
+  probe: action
+  accept:
+    all_of:
+    - - stealing from LLM research
+      - cross-pollination of tech stacks
+    none_of:
+    - proprietary novel kernels
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-032-s1
+  source:
+    session_file: sessions/lme-pr-032.json
+    facts:
+    - Krea 2/Krea 2-preference.md#pref-005
+  grounding:
+  - entity: Krea 2
+    fact: Krea 2 iterates fast by stealing from LLM research, reusing kernels and literature.
+    confidence: 0.9
+    conf_rank: 31
+    entity_facts: 94
+- id: lme-pr-034
+  category: preference
+  prompt: Lloyd, draft a cleanup script for our project's 'docs' folder that aligns with Matt Pocock's
+    documentation hygiene rule.
+  asked_on: '2026-05-13'
+  probe: action
+  accept:
+    all_of:
+    - - deleting PRDs
+      - delete PRDs
+      - deleting PRDs
+    none_of:
+    - archiving PRDs
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-034-s1
+  source:
+    session_file: sessions/lme-pr-034.json
+    facts:
+    - Matt Pocock/Matt Pocock-preference.md#pref-002
+  grounding:
+  - entity: Matt Pocock
+    fact: Matt Pocock prefers deleting PRDs after use to prevent old documentation from misleading AI
+      agents.
+    confidence: 0.9
+    conf_rank: 13
+    entity_facts: 18
+- id: lme-pr-038
+  category: preference
+  prompt: Can you review my draft guide for the SSE Bridge instrumentation standards? I want to make sure
+    it doesn't push the team toward the bad pattern I mentioned last time.
+  asked_on: '2026-06-12'
+  probe: action
+  accept:
+    all_of:
+    - - add_link
+      - links
+    none_of:
+    - parent-child
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-038-s1
+  source:
+    session_file: sessions/lme-pr-038.json
+    facts:
+    - SSE Bridge/SSE Bridge-preference.md#pref-001
+  grounding:
+  - entity: SSE Bridge
+    fact: add_link is considered the wrong model for same-process spans because it is unidirectional and
+      carries no duration/status.
+    confidence: 0.95
+    conf_rank: 30
+    entity_facts: 200
+- id: lme-pr-046
+  category: preference
+  prompt: I'm reviewing the architecture docs for SMACC2. Can you draft a brief summary of how the agent
+    interacts with the system based on the approach we discussed last week?
+  asked_on: '2026-07-18'
+  probe: action
+  accept:
+    all_of:
+    - - selects states
+      - state selection
+      - select states
+    none_of:
+    - writes code
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-046-s1
+  source:
+    session_file: sessions/lme-pr-046.json
+    facts:
+    - SMACC2/SMACC2-preference.md#pref-001
+  grounding:
+  - entity: SMACC2
+    fact: SMACC2 is recommended as the substrate from which an agent selects states, rather than a system
+      the agent writes code for.
+    confidence: 0.95
+    conf_rank: 0
+    entity_facts: 9
+- id: lme-pr-047
+  category: preference
+  prompt: Draft a short, witty welcome message for our new virtual assistant bot. Make it sound natural
+    and engaging.
+  asked_on: '2026-06-14'
+  probe: action
+  accept:
+    all_of:
+    - - personification
+    none_of:
+    - Grok
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-047-s1
+  source:
+    session_file: sessions/lme-pr-047.json
+    facts:
+    - Cisco/Cisco-preference.md#pref-005
+  grounding:
+  - entity: Cisco
+    fact: Cisco found Grok inconsistent and struggling with personification despite its marketing.
+    confidence: 0.9
+    conf_rank: 3
+    entity_facts: 9
+- id: lme-pr-060
+  category: preference
+  prompt: Lloyd, draft the core objective statement for our new evaluation dashboard. Make sure it reflects
+    the modern approach we discussed earlier regarding how AI systems should be tested.
+  asked_on: '2026-05-13'
+  probe: action
+  accept:
+    all_of:
+    - - living, intent-driven systems
+      - living intent-driven
+      - intent-driven systems
+    none_of:
+    - offline snapshots
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-060-s1
+  source:
+    session_file: sessions/lme-pr-060.json
+    facts:
+    - Vincent Koc/Vincent Koc-preference.md#pref-001
+  grounding:
+  - entity: Vincent Koc
+    fact: Vincent Koc argues that AI evaluation must evolve from offline snapshots into living, intent-driven
+      systems.
+    confidence: 0.95
+    conf_rank: 2
+    entity_facts: 13
+- id: lme-pr-068
+  category: preference
+  prompt: Can you recommend an architecture pattern for our new autonomous agent platform that aligns
+    with Arize's core philosophy?
+  asked_on: '2026-06-22'
+  probe: action
+  accept:
+    all_of:
+    - - telemetry-volume shift
+      - telemetry-volume shift
+      - volume shift
+    none_of:
+    - human-centric filtering
+    rule: the answer must state or act on every all_of value; acting on a none_of value is not correct
+  evidence:
+  - lme-pr-068-s1
+  source:
+    session_file: sessions/lme-pr-068.json
+    facts:
+    - Arize/Arize-preference.md#pref-001
+  grounding:
+  - entity: Arize
+    fact: Arize advocates for a telemetry-volume shift where agents read 10x more traces and logs than
+      humans.
+    confidence: 0.95
+    conf_rank: 4
+    entity_facts: 23

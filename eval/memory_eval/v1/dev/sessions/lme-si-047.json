@@ -1,0 +1,51 @@
+{
+ "episode": "lme-si-047",
+ "sessions": [
+  {
+   "sid": "lme-si-047-s1",
+   "date": "2026-06-25",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to parse some JSON logs from the Session Store. I keep getting null pointers when I try to access 'tool_name' at the top level."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a schema mismatch. Are you sure the field isn't nested deeper? Usually, metadata is tucked away inside the message object itself."
+    },
+    {
+     "role": "user",
+     "text": "I think I found it. It's annoyingly deep. The only place tool calls exist in the session store is within messages[].tool_calls[].function.name."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, that explains the null pointer. You have to traverse that exact path. Did you check if the tool_calls array is empty first?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, had to add a guard clause. Speaking of bugs, my coffee maker is making a weird grinding noise again."
+    },
+    {
+     "role": "assistant",
+     "text": "Is it the burrs or just a clogged chute? Maybe try cleaning it with rice for a quick fix."
+    },
+    {
+     "role": "user",
+     "text": "I'll try the rice trick. Back to the code, I also need to map the timestamps. Are they UTC or local?"
+    },
+    {
+     "role": "assistant",
+     "text": "The store usually normalizes everything to UTC. You'll need to convert them if you want to display them in your local timezone."
+    },
+    {
+     "role": "user",
+     "text": "Great, thanks. One last thing, what's the max payload size per message?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's typically around 1MB, but check your specific instance config. It varies by deployment."
+    }
+   ]
+  }
+ ]
+}

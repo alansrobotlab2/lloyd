@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-051",
+ "sessions": [
+  {
+   "sid": "lme-si-051-s1",
+   "date": "2026-07-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finally trying to get my local LLM setup running on the M3. I'm using QMD as the backend wrapper, but it seems to be failing during the model load step."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Are you seeing any specific error logs, or does it just hang? Sometimes node-llama-cpp has issues with specific Metal features depending on the driver state."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it hangs right at initialization. I looked into it, and it turns out QMD applies Apple Silicon Metal workarounds before `node-llama-cpp` initializes. That fixed the hang when I forced that order."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, I see. That specific timing for the Metal workarounds is crucial for those M-series chips. Glad you found the root cause. Did you need to update any other dependencies to get it stable?"
+    },
+    {
+     "role": "user",
+     "text": "No, just that. By the way, did you hear about the rain tomorrow? I was planning to go hiking but might cancel if it pours."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time weather data, so I can't check the forecast for you. You might want to check a local weather app before making plans."
+    },
+    {
+     "role": "user",
+     "text": "Fair enough. I'll check it later. Thanks for the help with the debugging!"
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome! Good luck with the hiking plan."
+    }
+   ]
+  }
+ ]
+}

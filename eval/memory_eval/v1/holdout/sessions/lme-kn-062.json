@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-062",
+ "sessions": [
+  {
+   "sid": "lme-kn-062-s1",
+   "date": "2026-05-14",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to remember the exact scoring formula we agreed on for SIRA last month. Was it Score = BM25(Q0) + omega * BM25(Q_expected)?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have that specific detail in my current memory, Alan. Would you like me to note it down for future reference?"
+    },
+    {
+     "role": "user",
+     "text": "Actually, let me correct that. It's actually Score = BM25(Q0) + omega * BM25(Q_query). We changed the term from Q_expected to Q_query."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I've updated the SIRA architecture notes to reflect the Q_query term."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, did you see the weather forecast for the weekend? It looks like rain again."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it is predicted to be rainy. You might want to bring an umbrella if you're going out."
+    },
+    {
+     "role": "user",
+     "text": "Will do. I also ordered a new mechanical keyboard today, should arrive Tuesday."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy the new setup! Let me know if you need help with any configuration files."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-062-s2",
+   "date": "2026-05-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update on SIRA. We reverted the change from last month. The architecture is back to using Q_expected."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. So the scoring function is no longer using Q_query?"
+    },
+    {
+     "role": "user",
+     "text": "Correct. The current formula is Score = BM25(Q0) + omega * BM25(Q_expected)."
+    },
+    {
+     "role": "assistant",
+     "text": "I have updated the records to reflect that Q_expected is the current standard."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. I also fixed that bug in the login module we discussed yesterday."
+    },
+    {
+     "role": "assistant",
+     "text": "Good to hear. That should reduce the support tickets significantly."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. I'm grabbing lunch now, probably just a sandwich."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy your lunch, Alan."
+    }
+   ]
+  }
+ ]
+}

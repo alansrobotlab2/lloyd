@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-001",
+ "sessions": [
+  {
+   "sid": "lme-kn-001-s1",
+   "date": "2026-05-31",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finally setting up the ObjTac dataset for my tactile sensor research. Do you have the stats handy? I remember it being pretty big but I want to make sure I allocate enough disk space."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help with that. Could you remind me which version or specific dataset split you are referring to? Stats can vary between releases."
+    },
+    {
+     "role": "user",
+     "text": "It's the standard full set. I recall reading somewhere that it contains 100K samples across 40 objects."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I'll keep that in mind for your storage planning. By the way, did you get the new mechanical keyboard you ordered last week?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, arrived yesterday. The switches are a bit stiffer than I expected, but the typing feel is great. I'm worried the 100K samples might still be too large for my current SSD if I need to process raw data."
+    },
+    {
+     "role": "assistant",
+     "text": "Processing raw tactile data is indeed heavy. You might want to consider external storage or cloud processing if the SSD space is tight."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'll check my remaining space. Thanks for the reminder."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Let me know if you need help with the data pipeline setup."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-001-s2",
+   "date": "2026-06-06",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update on the ObjTac dataset. I dug deeper into the documentation and realized my previous numbers were outdated. It's actually much larger than I thought."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? What are the current figures?"
+    },
+    {
+     "role": "user",
+     "text": "It says it contains 135K samples across 56 objects. That's a significant jump from the 100K/40 objects I used before."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a substantial increase. It definitely changes the storage and processing requirements."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I need to resize my VM instance before I run the next batch of experiments. Also, is it raining outside? I forgot to close the window."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me check the local weather for you... It looks like light rain is starting. You should probably close the window soon."
+    },
+    {
+     "role": "user",
+     "text": "On it. Back to the dataset, I want to make sure I don't make the same mistake again. I need to update my config file."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll note the new values for your future reference."
+    }
+   ]
+  }
+ ]
+}

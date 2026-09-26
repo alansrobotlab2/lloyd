@@ -1,0 +1,65 @@
+{
+ "episode": "lme-kn-039",
+ "sessions": [
+  {
+   "sid": "lme-kn-039-s1",
+   "date": "2026-05-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm messing around with Voice-Tts again. My current speed setting of 0.50 gives me 1.50 words per second, which is exactly 0.75x Dave Cullen's natural rate."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. So you're running at 75% of his natural speed. Is that too slow for your listening preference, or are you testing the lower end of the range?"
+    },
+    {
+     "role": "user",
+     "text": "It's a bit sluggish. I might bump it up later. Did you see the weather alert for tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, heavy rain expected. Did you manage to get that new USB-C cable you ordered?"
+    },
+    {
+     "role": "user",
+     "text": "It arrived, but it's shorter than I needed. Annoying. Anyway, back to TTS, I'll tweak it soon."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Let me know if you want me to note down the 1.50 wps figure for reference."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-039-s2",
+   "date": "2026-05-31",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I updated my Voice-Tts config. I've changed it to 0.70, which results in a speaking rate of 2.10 words per second, which is a 1.02x ratio to Dave Cullen's natural rate."
+    },
+    {
+     "role": "assistant",
+     "text": "Nice, that's a slight boost over the natural rate. Much better than the previous setting you had."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, feels snappier. By the way, the rain finally stopped."
+    },
+    {
+     "role": "assistant",
+     "text": "Good to hear. Did you get a chance to test the new cable in the rain?"
+    },
+    {
+     "role": "user",
+     "text": "No, stayed inside. I'll try it out later. Thanks for noting the new rate."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome. I've updated my records to reflect the new 2.10 wps speed."
+    }
+   ]
+  }
+ ]
+}

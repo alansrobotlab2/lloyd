@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-007",
+ "sessions": [
+  {
+   "sid": "lme-si-007-s1",
+   "date": "2026-06-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you see that talk by Chris Noring about AI in dev workflows?"
+    },
+    {
+     "role": "assistant",
+     "text": "I recall seeing the title. Did you find it useful?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, actually. The most striking point for me was how Chris Noring asserts that AI-assisted development shifts deliverables from documentation to working demos. It really changes what we prioritize."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a significant shift. It definitely reduces the overhead of writing specs upfront."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Anyway, my coffee maker is broken again. Just a drip this time, not a full leak."
+    },
+    {
+     "role": "assistant",
+     "text": "I'm sorry to hear that. Have you checked the gasket?"
+    },
+    {
+     "role": "user",
+     "text": "I will after this meeting. Do you know if they sell replacement parts locally?"
+    },
+    {
+     "role": "assistant",
+     "text": "Most hardware stores should have them, but I can check online retailers for you."
+    }
+   ]
+  }
+ ]
+}

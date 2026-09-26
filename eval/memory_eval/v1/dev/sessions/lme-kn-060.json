@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-060",
+ "sessions": [
+  {
+   "sid": "lme-kn-060-s1",
+   "date": "2026-05-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finally getting around to debugging the ACT training script. It's a pain."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds tedious. What kind of errors are you seeing?"
+    },
+    {
+     "role": "user",
+     "text": "Just memory issues. I realized the architecture is still set up for the old sequential decoder where it outputs one step at a time, so the batch size has to be tiny."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, that makes sense. Sequential decoding is indeed slower and heavier on memory. Did you try reducing the batch size further?"
+    },
+    {
+     "role": "user",
+     "text": "I did, but it's too slow now. I need to rethink the pipeline. Oh, and did you see the weather forecast for next week?"
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't checked yet. Is it looking bad for your outdoor plans?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, rain every day. I'll probably just stay in and code. Anyway, back to the model, the step-by-step output is just not scalable for our dataset."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Maybe looking into parallel decoding techniques could help later, but for now, sticking with the current setup is safer."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-060-s2",
+   "date": "2026-05-23",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, good news. I refactored the ACT model. We switched the CVAE to output a 100-step trajectory in one shot. No more sequential generation!"
+    },
+    {
+     "role": "assistant",
+     "text": "That's a huge improvement for speed. How is the training stability now?"
+    },
+    {
+     "role": "user",
+     "text": "Much better. The one-shot approach handles the long horizon without the exposure bias issues we had before. By the way, my coffee machine broke again. Any recommendations for a repair shop near downtown?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sorry to hear that. I can look up some highly-rated repair shops in the downtown area for you."
+    },
+    {
+     "role": "user",
+     "text": "Please do. And regarding the code, I need to update the inference wrapper to match this new one-shot architecture."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. Since it's one-shot now, the wrapper will be much simpler. Do you want me to draft a snippet?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, please. Also, what's the best way to visualize these long trajectories? Matplotlib is too slow for 100 steps."
+    },
+    {
+     "role": "assistant",
+     "text": "You might try Plotly for interactive visualization or just downsample the trajectory for quick checks."
+    }
+   ]
+  }
+ ]
+}

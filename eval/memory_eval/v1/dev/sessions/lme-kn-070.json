@@ -1,0 +1,89 @@
+{
+ "episode": "lme-kn-070",
+ "sessions": [
+  {
+   "sid": "lme-kn-070-s1",
+   "date": "2026-07-30",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you see the latest stats on the RLDX-1 humanoid robot?"
+    },
+    {
+     "role": "assistant",
+     "text": "I have access to some general robotics news. What specific metric are you looking at?"
+    },
+    {
+     "role": "user",
+     "text": "The coffee-pouring success rate. It was stuck at 62.5% for weeks. Pretty disappointing for a high-end bot."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a low success rate for a task requiring fine motor control. Did they identify the issue?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, apparently the wrist torque sensors were drifting. Anyway, did you check if my package from HardwareDirect arrived?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time shipping tracking access, but I can check if you've shared the tracking number before."
+    },
+    {
+     "role": "user",
+     "text": "Right, forgot. I'll check the email myself. Just wanted to get that stat off my chest."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Let me know if you need help interpreting other robot performance metrics."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-070-s2",
+   "date": "2026-08-04",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, quick update. The RLDX-1 performance improved significantly after the firmware patch."
+    },
+    {
+     "role": "assistant",
+     "text": "That's good to hear. What is the new success rate?"
+    },
+    {
+     "role": "user",
+     "text": "It hit 70.8% on real-world coffee-pouring tasks using the WIRobotics Allex humanoid. Much better than before."
+    },
+    {
+     "role": "assistant",
+     "text": "A nearly 8% jump is impressive. The Allex hardware seems to be handling the torque adjustments well."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I'm actually going to a robotics conference next week. Do you think it'll rain on Saturday?"
+    },
+    {
+     "role": "assistant",
+     "text": "I can't predict the weather for next week yet, but I can check the forecast when we get closer to the date."
+    },
+    {
+     "role": "user",
+     "text": "Cool. I need to pack an umbrella just in case. Also, did you finish sorting my photos?"
+    },
+    {
+     "role": "assistant",
+     "text": "I've organized the recent ones into the 'Summer 2026' folder. The rest are still in the inbox."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. I'll deal with the inbox later. Bye for now."
+    },
+    {
+     "role": "assistant",
+     "text": "Have a great day, Alan."
+    }
+   ]
+  }
+ ]
+}

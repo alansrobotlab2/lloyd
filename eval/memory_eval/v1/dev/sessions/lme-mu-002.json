@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-002",
+ "sessions": [
+  {
+   "sid": "lme-mu-002-s1",
+   "date": "2026-06-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you see the recording from last week's AI meetup? The audio was terrible."
+    },
+    {
+     "role": "assistant",
+     "text": "I can't watch videos, but I can summarize transcripts if you paste them. Was it the RL systems group?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it was. Stefano Fiorucci was the speaker who presented on engineering RL environments for LLMs. His mic kept cutting out during the demo."
+    },
+    {
+     "role": "assistant",
+     "text": "That's frustrating. Hopefully the slides were clear. Did you manage to catch the part about the environment setup?"
+    },
+    {
+     "role": "user",
+     "text": "Barely. Anyway, I need to order some new mechanical keyboard switches. What's the status of that package I ordered last Tuesday?"
+    },
+    {
+     "role": "assistant",
+     "text": "Your package with the Cherry MX Blacks is currently in transit and expected to arrive tomorrow morning."
+    },
+    {
+     "role": "user",
+     "text": "Great. By the way, is it going to rain this weekend? I want to go hiking."
+    },
+    {
+     "role": "assistant",
+     "text": "The forecast for Saturday looks mostly sunny with a 10% chance of rain, so it should be perfect for hiking."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-002-s2",
+   "date": "2026-06-27",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm trying to set up a RAG pipeline. Do you know who's behind the Haystack framework?"
+    },
+    {
+     "role": "assistant",
+     "text": "Haystack is an open-source framework for building production-ready search and NLP pipelines. It was created and is maintained by deepset."
+    },
+    {
+     "role": "user",
+     "text": "Right, deepset. I remember now that Stefano Fiorucci maintains the Haystack framework at deepset. He mentioned it briefly in his talk."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, that aligns with what we discussed before. Do you need help with the initial setup commands?"
+    },
+    {
+     "role": "user",
+     "text": "Maybe later. Right now, my kitchen sink is leaking. Do you have any quick tips for tightening a P-trap?"
+    },
+    {
+     "role": "assistant",
+     "text": "First, place a bucket underneath. Use channel-lock pliers to loosen the slip nuts, clean out any debris, and re-tighten hand-tight plus a quarter turn."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, what time does the grocery store close tonight?"
+    },
+    {
+     "role": "assistant",
+     "text": "The local store is open until 10 PM tonight."
+    }
+   ]
+  }
+ ]
+}

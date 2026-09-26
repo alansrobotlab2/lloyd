@@ -1,0 +1,81 @@
+{
+ "episode": "lme-mu-060",
+ "sessions": [
+  {
+   "sid": "lme-mu-060-s1",
+   "date": "2026-05-31",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my coffee maker is leaking again. Any ideas?"
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds frustrating. Have you checked if the carafe is seated correctly or if the seal is cracked?"
+    },
+    {
+     "role": "user",
+     "text": "The seal looks fine. Maybe it's the valve. Also, I was reading some tech news earlier. Jason Kramberger from Google discussed the reliability of LLM performance benchmarks."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. Benchmark reliability is definitely a hot topic. For the coffee maker, try descaling it; mineral buildup can sometimes affect the valve mechanism."
+    },
+    {
+     "role": "user",
+     "text": "Will do. I'm actually heading out to dinner soon."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy! Is there anything else you need help with?"
+    },
+    {
+     "role": "user",
+     "text": "No, that's it. Thanks."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome, Alan."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-060-s2",
+   "date": "2026-06-02",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, did my package arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your shipping tracker, Alan. Did you check the email confirmation?"
+    },
+    {
+     "role": "user",
+     "text": "Just got it. It's the new mechanical keyboard. By the way, regarding that conference talk I mentioned, Jason Kramberger presented on the reliability of LLM performance benchmarks."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. So he both discussed and presented on that topic. Let me know if you need help setting up the keyboard drivers."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, I'll get to that later. It's raining here, so I'm staying in."
+    },
+    {
+     "role": "assistant",
+     "text": "Good idea. Let me know if you need any recommendations for indoor activities."
+    },
+    {
+     "role": "user",
+     "text": "Maybe I'll watch a movie. That's all for now."
+    },
+    {
+     "role": "assistant",
+     "text": "Enjoy the rain and the movie!"
+    }
+   ]
+  }
+ ]
+}

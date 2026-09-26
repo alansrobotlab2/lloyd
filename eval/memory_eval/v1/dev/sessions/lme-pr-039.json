@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-039",
+ "sessions": [
+  {
+   "sid": "lme-pr-039-s1",
+   "date": "2026-07-27",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm feeling a bit overwhelmed by all the SaaS advice out there. Can you help me structure my learning?"
+    },
+    {
+     "role": "assistant",
+     "text": "Absolutely. To give you the best advice, what specific methodologies or authors do you trust? Are you following someone specific?"
+    },
+    {
+     "role": "user",
+     "text": "I mostly follow Dan Martell. I like his approach because he advocates for a 'just-in-time' reading framework and the 'Learn, Do, Teach' cycle. I don't want to read whole books upfront; I want to apply things immediately."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. So you prefer practical application over theoretical accumulation. I'll keep that in mind for future suggestions."
+    },
+    {
+     "role": "user",
+     "text": "Yes, exactly. Anyway, did you get the replacement fan for my laptop?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it shipped yesterday and should arrive tomorrow. Do you need help with the installation guide?"
+    },
+    {
+     "role": "user",
+     "text": "No, I can handle it. Just remind me to check the thermal paste when it arrives. Back to the learning thing - if I want to learn about cold outreach, how should I go about it?"
+    },
+    {
+     "role": "assistant",
+     "text": "Would you like a curated list of books to read first, or do you want to start with a small experiment?"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-042",
+ "sessions": [
+  {
+   "sid": "lme-te-042-s1",
+   "date": "2026-06-15",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I've been digging into this new AI framework called ReMEmbR. It's interesting because ReMEmbR builds and reasons over Long-Horizon Spatio-Temporal Memory."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds quite advanced. Integrating memory over long horizons is a significant challenge for autonomous agents."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, the paper claims it handles complex environments better than standard approaches. Anyway, do you have a moment? I'm trying to decide what to make for dinner tonight."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure! Do you want something quick, or are you in the mood to cook?"
+    },
+    {
+     "role": "user",
+     "text": "Quick. Maybe tacos? But I'm out of tortillas."
+    },
+    {
+     "role": "assistant",
+     "text": "You could try lettuce wraps or flatbreads if you have them. Or maybe just order in?"
+    },
+    {
+     "role": "user",
+     "text": "Good idea. I'll check the freezer for flatbreads. Thanks Lloyd."
+    },
+    {
+     "role": "assistant",
+     "text": "You're welcome! Let me know if you need help with anything else."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-042-s2",
+   "date": "2026-06-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I've continued reading about ReMEmbR. One standout metric is that ReMEmbR maintains >80% correctness on NaVQA even as history grows to 25+ minutes."
+    },
+    {
+     "role": "assistant",
+     "text": "That is an impressive robustness metric, especially for navigation tasks with long histories."
+    },
+    {
+     "role": "user",
+     "text": "It really is. Oh, before I forget, did my package from the hardware store arrive yet? I ordered some HDMI cables."
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your tracking numbers directly, but typically shipping takes 2-3 business days. Did you get a confirmation email?"
+    },
+    {
+     "role": "user",
+     "text": "Let me check... Ah, yes, it says delivered. I must have missed the notification. The weather has been so rainy lately, I've been inside all day."
+    },
+    {
+     "role": "assistant",
+     "text": "Rainy weather is great for staying indoors and reading technical papers, it seems."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I'm just going to go find those cables. Talk later."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds good, Alan."
+    }
+   ]
+  }
+ ]
+}

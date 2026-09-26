@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-005",
+ "sessions": [
+  {
+   "sid": "lme-kn-005-s1",
+   "date": "2026-07-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to sync my notes from the meeting. Also, quick check on the project status: Conversation Relation Linking (Task 51) is currently showing 5 failures and is in blocked status. Can you note that down?"
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. Task 51 has 5 failures and is blocked. Do you want me to schedule a review?"
+    },
+    {
+     "role": "user",
+     "text": "Not yet. I'm also thinking of ordering a new mechanical keyboard. Do you have any recommendations for silent switches?"
+    },
+    {
+     "role": "assistant",
+     "text": "Cherry MX Silent Red or Gateron Silent Brown are popular choices for quiet typing."
+    },
+    {
+     "role": "user",
+     "text": "I'll look into those. Thanks. Back to the task, just keep the 5 failures in mind for the report."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. The report will reflect 5 failures for Task 51."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. What's the weather like in SF right now? Planning to walk to the coffee shop."
+    },
+    {
+     "role": "assistant",
+     "text": "It's currently 68°F and sunny in San Francisco."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-005-s2",
+   "date": "2026-07-08",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hi Lloyd, good news on the project front. Conversation Relation Linking (Task 51) has been updated. It now has 0 failures and is in up_next status. Please update your records."
+    },
+    {
+     "role": "assistant",
+     "text": "Updated. Task 51 is now up_next with 0 failures."
+    },
+    {
+     "role": "user",
+     "text": "Great. By the way, I finally ordered that keyboard. It arrived in a damaged box, but the switches seem fine. Annoying packaging."
+    },
+    {
+     "role": "assistant",
+     "text": "Sorry to hear about the packaging. Glad the switches survived."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Anyway, I need to push this task to the production queue soon. Just remember the current status for later."
+    },
+    {
+     "role": "assistant",
+     "text": "I have the current status saved: up_next with 0 failures."
+    },
+    {
+     "role": "user",
+     "text": "Cool. Did you get a chance to look at those Python 3.11 release notes I sent?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I reviewed them. The new exception groups are quite useful."
+    }
+   ]
+  }
+ ]
+}

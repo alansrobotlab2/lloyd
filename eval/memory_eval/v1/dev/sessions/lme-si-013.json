@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-013",
+ "sessions": [
+  {
+   "sid": "lme-si-013-s1",
+   "date": "2026-05-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to configure Resilience4j for our order service. It seems like the default slow call detection is way too aggressive for our legacy API."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. The default threshold for what you're referring to is set to 60 seconds in the standard configuration. You can override this in your application.yml if the legacy responses are consistently slow."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, 60s is basically forever for a checkout flow. I'll tweak it. Also, did you check if the new coffee maker arrived?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have access to your shipping notifications, so I can't confirm delivery. You might want to check the carrier's website directly."
+    },
+    {
+     "role": "user",
+     "text": "Right, forgot about that. Okay, back to code. I'm seeing some circuit breaker trips. Is there a specific wait duration I should look at for the open state?"
+    },
+    {
+     "role": "assistant",
+     "text": "The default waitDurationInOpenState is typically 60 seconds as well, but you'll likely want to shorten that to recover faster from transient failures."
+    },
+    {
+     "role": "user",
+     "text": "Good to know. I'll adjust both. Oh, and the kitchen faucet is still leaking. Did you add a reminder for the plumber?"
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't created a reminder for a plumber yet. Would you like me to add one for next Tuesday?"
+    }
+   ]
+  }
+ ]
+}

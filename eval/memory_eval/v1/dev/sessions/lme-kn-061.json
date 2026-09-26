@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-061",
+ "sessions": [
+  {
+   "sid": "lme-kn-061-s1",
+   "date": "2026-06-23",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, did you see the latest arXiv paper on LLM reasoning benchmarks? I'm trying to update our internal wiki on data serialization protocols."
+    },
+    {
+     "role": "assistant",
+     "text": "I can help with that. Which specific benchmark or protocol are you focusing on? The field is moving fast, so context helps."
+    },
+    {
+     "role": "user",
+     "text": "It's about the efficiency of JSON versus natural language prompts. I'm noting down the overhead costs."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. Are you looking at token count overhead or accuracy degradation?"
+    },
+    {
+     "role": "user",
+     "text": "Accuracy primarily. The old study I cited in last quarter's report said 10% accuracy loss."
+    },
+    {
+     "role": "assistant",
+     "text": "That seems low for current models, but if that's what you're documenting, I'll note it as the baseline from the previous report."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, let's stick to the 10% figure for now until we verify the new data. Also, did the coffee maker order arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "The tracking says it's out for delivery today. I'll let you know when it lands."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-061-s2",
+   "date": "2026-06-28",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I need to correct the documentation. The 10% figure was outdated. New research shows it's much worse."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. What is the new metric for the accuracy loss when using natural language instead of structured formats?"
+    },
+    {
+     "role": "user",
+     "text": "It's 20% now. They call it the 'communication bottleneck' tax."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. Updating the knowledge base to reflect a 20% accuracy loss due to the communication bottleneck."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Make sure we flag this as a critical optimization target for the next sprint."
+    },
+    {
+     "role": "assistant",
+     "text": "I've added a high-priority tag to the serialization performance task."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. By the way, is the weather going to stay clear for the weekend hike?"
+    },
+    {
+     "role": "assistant",
+     "text": "Forecast looks sunny with highs around 75°F. Perfect hiking weather."
+    }
+   ]
+  }
+ ]
+}

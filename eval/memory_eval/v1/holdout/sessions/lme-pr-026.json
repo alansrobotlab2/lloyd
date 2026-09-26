@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-026",
+ "sessions": [
+  {
+   "sid": "lme-pr-026-s1",
+   "date": "2026-08-11",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to decide which model to use for my next storywriting project."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, Alan. What kind of workloads are you planning? Are you doing code generation, summarization, or creative writing?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly creative writing. I've been testing a few, but honestly, Qwen3.8-Flash-Next is preferred for deep creative chat and back-and-forth insight workloads. It just flows better."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll note that preference for creative tasks. Did you also want to discuss the hardware order you placed for the new GPU?"
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it's still stuck in customs. Annoying. Anyway, back to the model, do you have any other recommendations for coding?"
+    },
+    {
+     "role": "assistant",
+     "text": "For coding, you might look at models optimized for logic and syntax, but for your creative needs, we'll stick with your chosen one."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. Also, did you remember to book the table for dinner on Friday?"
+    },
+    {
+     "role": "assistant",
+     "text": "I have the reminder set, but I need the restaurant name to confirm the booking. Shall I use the usual Italian place?"
+    }
+   ]
+  }
+ ]
+}

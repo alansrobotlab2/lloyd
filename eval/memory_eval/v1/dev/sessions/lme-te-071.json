@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-071",
+ "sessions": [
+  {
+   "sid": "lme-te-071-s1",
+   "date": "2026-07-17",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finally getting around to optimizing my vision model setup. I decided to switch the LLaMA-3.2-11B-Vision-Instruct to use NF4. It's a 4-bit quantization method used to reduce latency. I'm hoping this cuts down the inference time significantly without losing too much context fidelity."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds like a solid move. NF4 is generally quite efficient for keeping latency low while maintaining reasonable quality on models of that size. How does the setup environment look otherwise?"
+    },
+    {
+     "role": "user",
+     "text": "Pretty clean. I just had to update the transformers library a bit. Oh, and by the way, the weather here has been weirdly humid for July. It's making my laptop fans spin like crazy."
+    },
+    {
+     "role": "assistant",
+     "text": "Humidity can definitely mess with thermal management. Maybe prop up the back of the laptop a bit to improve airflow? Let me know if you need help checking the NF4 configuration files."
+    },
+    {
+     "role": "user",
+     "text": "I think I've got it. Just running a few test prompts now. The load time feels snappier already. Thanks for listening."
+    },
+    {
+     "role": "assistant",
+     "text": "Glad to hear it's working out. Keep me posted if you run into any quantization errors or weird outputs."
+    },
+    {
+     "role": "user",
+     "text": "Will do. Also, I ordered a new cooling pad. Should arrive in a couple of days."
+    },
+    {
+     "role": "assistant",
+     "text": "Smart choice. Hope it helps with the heat and the noise."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-071-s2",
+   "date": "2026-07-28",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I've run into a strange issue. I've been logging a bug, let's call it #38606. It causes non-deterministic output at temperature=0 when rapidly alternating between two adapters while long-prefix requests are mid-prefill. It's really confusing because the output should be stable."
+    },
+    {
+     "role": "assistant",
+     "text": "That does sound tricky. Race conditions during the prefill phase with adapter switching can definitely lead to that kind of non-determinism. Have you tried isolating the adapter switch to happen strictly after the prefill completes?"
+    },
+    {
+     "role": "user",
+     "text": "I tried that, but it slows down the throughput too much. I'm trying to find a balance. Anyway, unrelated, did you hear about the software update for the IDE? The dark mode theme got even darker, which is nice."
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't tested the new theme, but deeper dark modes are usually easier on the eyes for long coding sessions. Back to bug #38606, are you using a specific CUDA version that might be interacting poorly with the adapter logic?"
+    },
+    {
+     "role": "user",
+     "text": "I'm on the latest stable CUDA. I think it's more of a logic race in my custom pipeline. I'll keep digging. I just need a reliable way to force determinism without the heavy sync."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Let me know if you want to brainstorm some synchronization primitives that might be lighter weight. Good luck with the debugging."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. I'll probably post an update on GitHub once I narrow it down."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds like a plan. Fingers crossed you find the root cause soon."
+    }
+   ]
+  }
+ ]
+}

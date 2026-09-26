@@ -1,0 +1,81 @@
+{
+ "episode": "lme-kn-011",
+ "sessions": [
+  {
+   "sid": "lme-kn-011-s1",
+   "date": "2026-07-22",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, can you help me draft a quick reply to Sarah about the Q3 budget? I'm stuck."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure! What are the key points you want to convey regarding the budget adjustments?"
+    },
+    {
+     "role": "user",
+     "text": "Mainly that we need to cut costs on cloud infrastructure. Also, I was reading some stuff on agentic workflows for engineering. Itamar Friedman claims they only deliver about 1.5x efficiency gains right now. Seems modest."
+    },
+    {
+     "role": "assistant",
+     "text": "That’s a reasonable target for early adoption. Would you like me to frame the budget cuts around optimizing those specific workflows?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, please. Also, did you see it’s going to rain this weekend? I need to reschedule my hiking trip."
+    },
+    {
+     "role": "assistant",
+     "text": "I can draft the budget email and also suggest indoor activities for the weekend if you'd like."
+    },
+    {
+     "role": "user",
+     "text": "Just the email draft for now. Keep it professional but concise."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I'll focus on the cost reduction strategies linked to workflow efficiency."
+    }
+   ]
+  },
+  {
+   "sid": "lme-kn-011-s2",
+   "date": "2026-08-01",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I need to update the presentation slides for the team meeting. The data on efficiency gains has changed."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. What is the new figure we should be using?"
+    },
+    {
+     "role": "user",
+     "text": "Itamar Friedman has updated his stance. He now argues that dynamic agentic workflows are essential for 2x–10x gains, not the lower number I mentioned before. Also, my coffee maker broke again. Any recommendations?"
+    },
+    {
+     "role": "assistant",
+     "text": "I'll note the new efficiency range for the slides. For coffee makers, are you looking for a specific price range or feature set?"
+    },
+    {
+     "role": "user",
+     "text": "Mid-range, preferably with a built-in grinder. But let's stick to the slides. I need to put this new number in the 'Projected Impact' section."
+    },
+    {
+     "role": "assistant",
+     "text": "Got it. I will prepare the text for the 'Projected Impact' section using the updated efficiency metrics."
+    },
+    {
+     "role": "user",
+     "text": "Great. Just give me the exact string to paste into that field."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, let me know if you need any other updates for the deck."
+    }
+   ]
+  }
+ ]
+}

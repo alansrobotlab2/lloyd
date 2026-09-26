@@ -1,0 +1,73 @@
+{
+ "episode": "lme-mu-021",
+ "sessions": [
+  {
+   "sid": "lme-mu-021-s1",
+   "date": "2026-06-20",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did the package for the mechanical keyboard switches arrive?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time tracking, Alan. Did you check your email for a shipping notification?"
+    },
+    {
+     "role": "user",
+     "text": "No, still nothing. Anyway, I've been tweaking the simulation code. The Weibull decay model uses the formula multiplier = exp(-ln2 * (t / halfLife)^β)."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. That's a standard formulation for shape parameter β."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. I'm trying to see if increasing the batch size helps with the convergence speed."
+    },
+    {
+     "role": "assistant",
+     "text": "It usually does, provided you have enough VRAM."
+    },
+    {
+     "role": "user",
+     "text": "Right. Let's just wait on the switches for now."
+    }
+   ]
+  },
+  {
+   "sid": "lme-mu-021-s2",
+   "date": "2026-06-24",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, what's the weather like this weekend? I want to know if I can walk the dog."
+    },
+    {
+     "role": "assistant",
+     "text": "It looks like light rain on Saturday morning, clearing up by Sunday afternoon."
+    },
+    {
+     "role": "user",
+     "text": "Perfect. I'll schedule the walk for Sunday then. Speaking of schedules, I was reading up on memory retention models."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh? Did you find something interesting?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, the Weibull decay model more closely matches human forgetting curves as described by Averell & Heathcote (2011)."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a compelling comparison for cognitive modeling."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. I might reference that in the next project doc."
+    }
+   ]
+  }
+ ]
+}

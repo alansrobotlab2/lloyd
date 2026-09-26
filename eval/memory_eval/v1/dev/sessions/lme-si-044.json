@@ -1,0 +1,47 @@
+{
+ "episode": "lme-si-044",
+ "sessions": [
+  {
+   "sid": "lme-si-044-s1",
+   "date": "2026-05-14",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm trying to fix this bug in my Node.js app. The event loop is blocking on a large JSON parse."
+    },
+    {
+     "role": "assistant",
+     "text": "Have you tried streaming the JSON instead of loading it all into memory? Or maybe using a Web Worker for the heavy parsing."
+    },
+    {
+     "role": "user",
+     "text": "Streaming sounds good. I'll look into it. Also, did you catch that talk by Steve Yegge last week?"
+    },
+    {
+     "role": "assistant",
+     "text": "I saw some highlights. He always has interesting takes on system design."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, really insightful. It was actually based on an essay he wrote five months prior to the talk, called 'Software Survival 3.0'."
+    },
+    {
+     "role": "assistant",
+     "text": "Ah, that explains the depth. Did he go into specific coding practices in that essay?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly high-level strategy, but it had some concrete advice on technical debt. Anyway, back to my bug—do you think I should switch to `JSON.parse` with a reviver function?"
+    },
+    {
+     "role": "assistant",
+     "text": "If the blocking is the main issue, a reviver won't help much since it still parses the whole string first. Stick with streaming or workers."
+    },
+    {
+     "role": "user",
+     "text": "Got it. Thanks. I'll try the streaming approach tonight."
+    }
+   ]
+  }
+ ]
+}

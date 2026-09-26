@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-050",
+ "sessions": [
+  {
+   "sid": "lme-si-050-s1",
+   "date": "2026-08-21",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, quick check on the UI architecture docs. I'm confused about the tiering."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure! We have three main tiers: imperative, declarative, and generative. What specifically is unclear?"
+    },
+    {
+     "role": "user",
+     "text": "Right, so where does A2UI actually sit? I know it's not fully autonomous generation."
+    },
+    {
+     "role": "assistant",
+     "text": "Correct. A2UI operates in the 'declarative' tier, where the model composes UI from a pre-defined catalog rather than generating raw code from scratch."
+    },
+    {
+     "role": "user",
+     "text": "Got it. So the model picks components from the catalog based on the prompt?"
+    },
+    {
+     "role": "assistant",
+     "text": "Exactly. It maps intent to existing components. Much safer than free-form generation."
+    },
+    {
+     "role": "user",
+     "text": "Makes sense. Also, did that coffee order go through? I need a refill."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, the order for two dark roast bags was confirmed at 9:00 AM."
+    }
+   ]
+  }
+ ]
+}

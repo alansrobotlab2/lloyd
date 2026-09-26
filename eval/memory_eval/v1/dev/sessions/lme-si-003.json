@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-003",
+ "sessions": [
+  {
+   "sid": "lme-si-003-s1",
+   "date": "2026-07-30",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you order the new mechanical keyboard switches yet?"
+    },
+    {
+     "role": "assistant",
+     "text": "I haven't yet, Alan. I was waiting for you to confirm the color preference. Black or white?"
+    },
+    {
+     "role": "user",
+     "text": "White this time. Oh, also, quick question about our evaluation pipeline. Why are we using DMR for the latest run?"
+    },
+    {
+     "role": "assistant",
+     "text": "We are using it because it's a standard benchmark established by the MemGPT team."
+    },
+    {
+     "role": "user",
+     "text": "Ah, right. I forgot they released that one. Thanks for the reminder."
+    },
+    {
+     "role": "assistant",
+     "text": "No problem. Shall I go ahead with the white switches?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, please. And can you check if the weather looks good for hiking on Saturday?"
+    },
+    {
+     "role": "assistant",
+     "text": "I'll check the forecast for Saturday now."
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-034",
+ "sessions": [
+  {
+   "sid": "lme-si-034-s1",
+   "date": "2026-05-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, do you remember if that coffee shop on 5th is open on Sundays?"
+    },
+    {
+     "role": "assistant",
+     "text": "I don't have real-time hours, but most shops in that area open at 8 AM on Sundays. Want me to check a specific website?"
+    },
+    {
+     "role": "user",
+     "text": "Nah, I'll just drive by. Oh, by the way, I had that meeting with the Millennium reps yesterday."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh nice. How did that go? Did they have good answers for your questions?"
+    },
+    {
+     "role": "user",
+     "text": "It was interesting. I noticed that the CISO at Millennium asks vendors about breach plans. It really threw off their standard sales pitch."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a smart way to cut through the fluff. Many vendors get caught off guard by that specific question."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Anyway, unrelated, my Wi-Fi is acting up again. Do you think I should just buy a new router?"
+    },
+    {
+     "role": "assistant",
+     "text": "If you've already tried restarting it and checking the channels, a new router might be the next step. Which model are you looking at?"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-033",
+ "sessions": [
+  {
+   "sid": "lme-si-033-s1",
+   "date": "2026-08-13",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my coffee maker started leaking again. Any tips?"
+    },
+    {
+     "role": "assistant",
+     "text": "Usually, that's a worn-out gasket. Have you tried replacing the seal?"
+    },
+    {
+     "role": "user",
+     "text": "I just cleaned it. Anyway, I'm running some benchmarks on my local LLM setup. Perplexity on WikiText-2 for Q4_K_M was approximately 6.8, which seems decent."
+    },
+    {
+     "role": "assistant",
+     "text": "That sounds reasonable for a 4-bit quant. How does the inference speed compare to the FP16 version?"
+    },
+    {
+     "role": "user",
+     "text": "Much faster, though I'm still tuning the context window. Did you check the weather for tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, it looks like light rain in the morning. Shall I suggest an indoor lunch spot?"
+    },
+    {
+     "role": "user",
+     "text": "Yes, please. Also, remind me to order more coffee filters."
+    },
+    {
+     "role": "assistant",
+     "text": "Noted. I've added filters to your shopping list."
+    }
+   ]
+  }
+ ]
+}

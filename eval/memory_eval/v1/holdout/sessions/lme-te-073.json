@@ -1,0 +1,65 @@
+{
+ "episode": "lme-te-073",
+ "sessions": [
+  {
+   "sid": "lme-te-073-s1",
+   "date": "2026-06-03",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm looking into RoboCasa365 today. It's interesting how RoboCasa365 reuses 83 of the original RoboCasa composite tasks and expands with new activity categories."
+    },
+    {
+     "role": "assistant",
+     "text": "That's a significant expansion. Keeping the core composite tasks while broadening the activity scope is a smart move for benchmarking."
+    },
+    {
+     "role": "user",
+     "text": "Yeah. Also, did you see the weather forecast for the weekend? It looks like rain."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I saw that. It might be a good time to stay indoors and focus on data analysis."
+    },
+    {
+     "role": "user",
+     "text": "True. I also need to fix that bug in my script later."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me know if you need help debugging it."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-073-s2",
+   "date": "2026-06-06",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I read a paper today on Jamba-1.5. It says Jamba 1.5 Large achieves competitive quality with 2-5x throughput gains at long context compared to pure Transformers."
+    },
+    {
+     "role": "assistant",
+     "text": "Those throughput gains are impressive for long-context tasks. The hybrid architecture seems to be paying off."
+    },
+    {
+     "role": "user",
+     "text": "Definitely. I also ordered a new monitor today. It should arrive next week."
+    },
+    {
+     "role": "assistant",
+     "text": "Nice. A new monitor always helps with productivity."
+    },
+    {
+     "role": "user",
+     "text": "I hope so. I need more screen real estate for these papers."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. Let me know when it arrives."
+    }
+   ]
+  }
+ ]
+}

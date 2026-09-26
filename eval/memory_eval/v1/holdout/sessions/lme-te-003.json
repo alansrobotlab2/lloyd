@@ -1,0 +1,81 @@
+{
+ "episode": "lme-te-003",
+ "sessions": [
+  {
+   "sid": "lme-te-003-s1",
+   "date": "2026-06-10",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I finally watched that Will Smith movie I keep hearing about. The ending was super depressing."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, which one was it? I try to keep up with pop culture recommendations."
+    },
+    {
+     "role": "user",
+     "text": "I, Robot. It turns out Alfred Lanning is found dead in the film, initially ruled as suicide. It really sets up the mystery for the rest of the plot."
+    },
+    {
+     "role": "assistant",
+     "text": "That’s a classic setup. The pacing must have been engaging if you were hooked enough to notice those details."
+    },
+    {
+     "role": "user",
+     "text": "Yeah, it was good. Anyway, did you check if my package arrived? The tracking number was 998123456."
+    },
+    {
+     "role": "assistant",
+     "text": "I checked the status. It says 'Out for Delivery' and should arrive by 5 PM today."
+    },
+    {
+     "role": "user",
+     "text": "Great. I was worried because the weather forecast said heavy rain, which usually delays the local courier."
+    },
+    {
+     "role": "assistant",
+     "text": "Let me know if it doesn't show up. I can help you draft a complaint if needed."
+    }
+   ]
+  },
+  {
+   "sid": "lme-te-003-s2",
+   "date": "2026-06-21",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Lloyd, I'm looking into the lore for a sci-fi presentation. I need to explain the origins of the company in I, Robot."
+    },
+    {
+     "role": "assistant",
+     "text": "Sure, I can help with that. What specific aspect do you need?"
+    },
+    {
+     "role": "user",
+     "text": "I need to mention the key figures. Specifically, Alfred Lanning is the co-founder of U.S. Robots in the film I, Robot. He works alongside Lawrence Robertson."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. So for your slides, you'll want to highlight Lanning's role as a technical genius and co-founder compared to Robertson's corporate focus."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Also, did you get a chance to look at that code snippet I sent over yesterday? The one with the memory leak."
+    },
+    {
+     "role": "assistant",
+     "text": "I did. It looks like the issue is in the recursive function not clearing the stack properly. I sent a fix to your email."
+    },
+    {
+     "role": "user",
+     "text": "Perfect, I'll apply that. By the way, are we still on for lunch tomorrow? I was thinking that Thai place on 4th street."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I've reserved a table for 12:30 PM. See you then!"
+    }
+   ]
+  }
+ ]
+}

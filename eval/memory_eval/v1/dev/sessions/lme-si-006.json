@@ -1,0 +1,43 @@
+{
+ "episode": "lme-si-006",
+ "sessions": [
+  {
+   "sid": "lme-si-006-s1",
+   "date": "2026-05-11",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, my coffee maker started leaking again. Any tips before I buy a new one?"
+    },
+    {
+     "role": "assistant",
+     "text": "Oh no, that's annoying. Try checking if the gasket is seated properly or if the water reservoir is overfilled. Sometimes descaling helps too if mineral buildup is forcing leaks."
+    },
+    {
+     "role": "user",
+     "text": "I'll check the gasket. Anyway, I've been reading up on ORCA for the new navigation module. It's surprisingly efficient."
+    },
+    {
+     "role": "assistant",
+     "text": "Oh, ORCA is quite popular for multi-agent path planning. What specifically are you finding interesting about it?"
+    },
+    {
+     "role": "user",
+     "text": "The scalability. It seems like it linearizes RVO constraints and operates in O(n) per agent via 2D linear programs."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, that's a key advantage over traditional sampling methods. The linear programming approach keeps the computational load manageable even with many agents."
+    },
+    {
+     "role": "user",
+     "text": "Exactly. Also, did you see the weather forecast for next week? Looks like rain."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, I saw that. It might be wise to keep an umbrella handy if you're walking to the office."
+    }
+   ]
+  }
+ ]
+}

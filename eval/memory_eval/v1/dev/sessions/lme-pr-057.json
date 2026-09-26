@@ -1,0 +1,43 @@
+{
+ "episode": "lme-pr-057",
+ "sessions": [
+  {
+   "sid": "lme-pr-057-s1",
+   "date": "2026-05-19",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, did you order those noise-cancelling headphones? I need them for the flight next week."
+    },
+    {
+     "role": "assistant",
+     "text": "Yes, they were shipped yesterday. Tracking number is 1Z999AA10123456784."
+    },
+    {
+     "role": "user",
+     "text": "Great. Also, I'm looking at the Speaker Verification model config. Can you draft a request for the engineering team to update the deployment parameters?"
+    },
+    {
+     "role": "assistant",
+     "text": "Sure. Should I keep the current threshold settings or adjust them?"
+    },
+    {
+     "role": "user",
+     "text": "No, definitely change them. Speaker verification thresholds should be derived from a calibration set recorded on the C920 mic rather than frozen at 0.75. That static number is killing our accuracy on laptop calls."
+    },
+    {
+     "role": "assistant",
+     "text": "Understood. I will include that instruction in the ticket."
+    },
+    {
+     "role": "user",
+     "text": "Thanks. Also, what's the weather like in Seattle for tomorrow?"
+    },
+    {
+     "role": "assistant",
+     "text": "It's expected to be partly cloudy with a high of 65°F."
+    }
+   ]
+  }
+ ]
+}

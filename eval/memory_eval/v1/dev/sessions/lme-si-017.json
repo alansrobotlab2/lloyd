@@ -1,0 +1,47 @@
+{
+ "episode": "lme-si-017",
+ "sessions": [
+  {
+   "sid": "lme-si-017-s1",
+   "date": "2026-07-26",
+   "turns": [
+    {
+     "role": "user",
+     "text": "Hey Lloyd, I'm finally deep into the MOTIF Hand integration. It's a beast."
+    },
+    {
+     "role": "assistant",
+     "text": "Sounds complex. What's the biggest hurdle right now?"
+    },
+    {
+     "role": "user",
+     "text": "The sensor fusion pipeline. I've got it set up with the dense tactile arrays (6×6, 2.5mm resolution, 20g trigger) and the 9-axis IMUs at each joint. Plus, there's an onboard FLIR Lepton 3.5 thermal camera, a ToF depth sensor, and an RGB camera. It's a lot of data streams to sync."
+    },
+    {
+     "role": "assistant",
+     "text": "That is a heavy load. Have you managed to get the timestamps aligned?"
+    },
+    {
+     "role": "user",
+     "text": "Mostly. I'm struggling with the thermal camera latency though. It's lagging behind the tactile data."
+    },
+    {
+     "role": "assistant",
+     "text": "Thermal sensors often have higher latency due to frame rates. Maybe try buffering the tactile data to match?"
+    },
+    {
+     "role": "user",
+     "text": "I'll try that. Also, do you know if the local hardware store has any USB-C cables in stock? Mine just frayed."
+    },
+    {
+     "role": "assistant",
+     "text": "I can't check real-time inventory, but Best Buy or Micro Center usually have plenty. Want me to check their online availability?"
+    },
+    {
+     "role": "user",
+     "text": "No worries, I'll swing by later. Thanks for the sync tip."
+    }
+   ]
+  }
+ ]
+}
