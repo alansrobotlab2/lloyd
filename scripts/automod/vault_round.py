@@ -200,9 +200,26 @@ print(json.dumps(errs))
 
 
 def loader_errors(paths: list[str]) -> list[str]:
-    """Run the real loaders in a fresh interpreter, scoped to `paths`."""
+    """Run the real loaders in a fresh interpreter, scoped to `paths`.
+
+    The child's `PYTHONPATH` is `LLOYD_HOME` and nothing else, because the whole
+    claim of this check is that it ran the loaders *of the tree it was pointed
+    at*. Passing no `env` inherits the caller's, and `app` is a regular package
+    (it has an `__init__.py`): PEP 420 keeps scanning after a namespace portion
+    and returns the first regular package it finds, so a caller whose
+    `PYTHONPATH` names some other checkout beats the `LLOYD_HOME` copy sitting at
+    `sys.path[0]` (cwd) and the verdict comes back for the wrong tree. The gate's
+    `tests` rung does exactly that — `_child_env` sets `PYTHONPATH` to the round's
+    worktree (`scripts/automod/gate.py`) — so every gate run judged a tree other
+    than the one it was handed, and the two tests that aim this subprocess at a
+    stub checkout by patching `LLOYD_HOME` alone (#1099's auto-restore refusal,
+    the fresh-interpreter loader rung inside a rollback) read "the contract
+    builds" and let a broken restore through (#1562). Pinned by
+    `tests/test_automod_vault_round.py::test_the_loader_subprocess_judges_the_checkout_named_by_loyd_home`.
+    """
     r = subprocess.run([str(PYTHON), "-c", _LOADER_SCRIPT, json.dumps(paths), str(VAULT)],
-                       cwd=str(LLOYD_HOME), capture_output=True, text=True, timeout=180)
+                       cwd=str(LLOYD_HOME), capture_output=True, text=True, timeout=180,
+                       env={**os.environ, "PYTHONPATH": str(LLOYD_HOME)})
     if r.returncode != 0:
         return [f"loader crashed: {(r.stdout + r.stderr).strip()[-600:]}"]
     try:

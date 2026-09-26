@@ -448,6 +448,69 @@ def test_a_retirement_by_rename_lands_as_one_commit(livevalidatorvault):
     assert {"skills/foo/SKILL.md", "skills/.archived/foo/SKILL.md"} <= set(shown.splitlines()), shown
 
 
+# ── #1562: the loader child judges the checkout named by `LLOYD_HOME` ────────
+
+def _fake_checkout(root: Path, name: str, *, prompt_len: int, real_layout: bool) -> Path:
+    """A directory shaped like a Lloyd checkout for the one import the loader makes.
+
+    Its `app/prompt_builder.py` returns a prompt `prompt_len` characters long: the
+    loader's own threshold is 500, so below it is that child's "the system prompt
+    failed to build" verdict and above it is its clean verdict.
+
+    `real_layout=True` also writes `app/__init__.py`, which is what makes `app` a
+    REGULAR package — the layout every real checkout has. A checkout without it is
+    only a PEP 420 namespace portion, and a regular package anywhere on `sys.path`
+    beats a namespace portion outright however early the portion sits. That
+    asymmetry is the entire defect: the stub checkout the two red tests aim the
+    loader at is a bare `app/` directory, while the gate's `PYTHONPATH` names a
+    real checkout, so the child answered for the gate's tree, not the one it was
+    pointed at.
+    """
+    checkout = root / name
+    (checkout / "app").mkdir(parents=True)
+    if real_layout:
+        (checkout / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (checkout / "app" / "prompt_builder.py").write_text(
+        "def build_system_prompt(*a, **k):\n"
+        f"    return {'x' * prompt_len!r}\n", encoding="utf-8")
+    return checkout
+
+
+def test_the_loader_subprocess_judges_the_checkout_named_by_loyd_home(
+        livevalidatorvault, tmp_path, monkeypatch):
+    """Clause: the fresh-interpreter check runs the loaders of `LLOYD_HOME`.
+
+    Both halves run the REAL subprocess (the `livevalidatorvault` fixture leaves it
+    unmocked, which is the only way to see what happens across that boundary) and
+    aim it at one checkout while the caller's inherited `PYTHONPATH` names the
+    other — the shape `scripts/automod/gate.py::_child_env` puts the suite in,
+    where `PYTHONPATH` is the round's worktree.
+
+    Half 1 is the one the defect fails: `LLOYD_HOME` is a stub checkout holding a
+    prompt builder that cannot clear the 500-character threshold, `PYTHONPATH`
+    names a real-layout checkout that can, and the verdict must be the refusal.
+    Half 2 points the same two checkouts the other way round, so a loader child
+    that refused unconditionally could not pass this test either.
+    """
+    stub = _fake_checkout(tmp_path, "stub-checkout", prompt_len=20, real_layout=False)
+    builds = _fake_checkout(tmp_path, "real-layout-checkout", prompt_len=600, real_layout=True)
+    assert not (stub / "app" / "__init__.py").exists() and (builds / "app" / "__init__.py").is_file()
+
+    monkeypatch.setenv("PYTHONPATH", str(builds))
+    monkeypatch.setattr(V, "LLOYD_HOME", stub)
+    errors = V.loader_errors(["lloyd/SOUL.md"])
+    assert [e for e in errors if "failed to build" in e], (
+        f"the loader child reported for the checkout on PYTHONPATH ({builds}) instead "
+        f"of the one named by LLOYD_HOME ({stub}), whose prompt builder returns 20 "
+        f"characters against the loader's 500-character floor: {errors}")
+
+    monkeypatch.setenv("PYTHONPATH", str(stub))
+    monkeypatch.setattr(V, "LLOYD_HOME", builds)
+    assert V.loader_errors(["lloyd/SOUL.md"]) == [], (
+        "LLOYD_HOME holds a builder clearing the 500-character floor, so the verdict "
+        "must be clean whatever the caller's PYTHONPATH names")
+
+
 # ── #1360: an archive staged with `git mv` lands, and is graded as a move ────
 
 ARCHIVE_PATHS = ["skills/foo/SKILL.md", "skills/.archived/foo/SKILL.md"]
