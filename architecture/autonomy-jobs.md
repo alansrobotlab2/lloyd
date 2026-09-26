@@ -620,7 +620,7 @@ asymmetry is the group's defining property, not an accident of scheduling.
 
 | ID | Freq | Depends | Role |
 |----|------|---------|---|
-| #48 | daily | #24 | Name-shape clustering; **applies** the `CASE`/`PUNCT` shape merges unattended (`--apply --tiers CASE,PUNCT`), one transaction per run. Suffix pairs never apply on schedule: they need a unanimous definition-based verdict from the semantic gate *and* a human to pass the tier |
+| #48 | daily | #24 | Name-shape clustering; **applies** the `CASE`/`PUNCT` shape merges unattended (`--apply --tiers CASE,PUNCT`). The apply is **one store transaction** — the aliases and every edge rewrite — followed by a fact-file half that runs outside that transaction and is **resumable**: each variant's dir outcome is journalled into the apply report as it completes, and a kill in the gap is finished by `--resume <the apply report>`, which replays only the pending `dir_operations`. Suffix pairs never apply on schedule: they need a unanimous definition-based verdict from the semantic gate *and* a human to pass the tier |
 | #67 | weekly | — | LLM-judges the pairs string rules cannot — differently-spelled names, abbreviations, path variants. ~40 min/run. Writes `semantic-proposals-latest.jsonl` for #48's review list; strict guard rails downgrade questionable merges to alias-only |
 | #84 | daily | — | Fact-quality pass: reads the corrections log and recent-write drift, pairs contradictions, reports which claims an independent reason condemns |
 

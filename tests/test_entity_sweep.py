@@ -814,3 +814,137 @@ def test_build_plan_keeps_c_cpp_and_csharp_apart():
     reviewed = {c["canonical"]: {v for v, _deg in c["variants"]} for c in plan["ambiguous"]}
     assert reviewed["C++"] == {"C", "C++", "C#"} and reviewed["pass@k"] == {"pass^k", "pass@k"}
     assert all(c["tier"] == "SUFFIX_AMBIGUOUS" for c in plan["ambiguous"])
+
+
+# ── the fact-move half is resumable (#1558) ──────────────────────────────────
+#
+# The apply has two halves and a killable gap between them: aliases and every
+# edge rewrite commit in one store transaction, and the fact files move AFTER it,
+# because the filesystem cannot join that transaction. What makes the gap
+# survivable is a journal — each variant's dir outcome written into the claimed
+# apply report as it completes — plus `--resume <that report>` to finish what the
+# kill left pending. These tests kill a run inside the window in-process, because
+# a subprocess cannot be interrupted at a chosen line, and then finish it with the
+# real CLI flag.
+
+def _pair_facts(entity: str, texts: list[str]) -> str:
+    fm = {"type": "facts", "entity": entity, "category": "state",
+          "facts": [{"entity": entity, "fact": t, "confidence": 0.9, "category": "state"}
+                    for t in texts]}
+    return f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# {entity} - state\n"
+
+
+def _two_pair_tree(tmp_path):
+    """Facts and a store holding TWO case pairs, each variant dir with TWO fact
+    files: two variants so a kill can land *between* them, two files each so a
+    kill can land *inside* one. The canonical of each pair carries two edges and
+    the variant one, which is what makes degree — not a coin-flip — pick it.
+
+    The fact files are indexed (`facts_idx.reindex`) because that is how a live
+    tree arrives: the apply retags only a file its own index attributes to the
+    variant, so in an unindexed fixture `retag_fact_file` is never reached and a
+    kill patched onto it silently never fires.
+    """
+    root = tmp_path / "facts"
+    db = tmp_path / "kg.sqlite"
+    st = KGStore(db)
+    for canonical, variant in (("vLLM", "vllm"), ("Gemma", "gemma")):
+        (root / canonical).mkdir(parents=True)
+        (root / canonical / f"{canonical}-state.md").write_text(
+            _pair_facts(canonical, [f"{canonical} serves 40 req/s."]))
+        (root / variant).mkdir(parents=True)
+        (root / variant / f"{variant}-state.md").write_text(
+            _pair_facts(variant, [f"{variant} restarts nightly at 04:00."]))
+        (root / variant / f"{variant}-goal.md").write_text(
+            _pair_facts(variant, [f"{variant} aims to halve cold start."]))
+        st.entities.register(canonical); st.entities.register(variant)
+        st.edges.add({"source": canonical, "target": "Ray", "type": "mentions"}, origin="test")
+        st.edges.add({"source": canonical, "target": "Triton", "type": "mentions"}, origin="test")
+        st.edges.add({"source": variant, "target": "Triton", "type": "mentions"}, origin="test")
+    st.facts_idx.reindex([p for p in root.rglob("*.md")], root=root)
+    st.close()
+    return root, db
+
+
+def _killed_apply(tmp_path, monkeypatch, die_after_retags: int):
+    """Run `apply_merges` until it dies `die_after_retags` fact FILES into the
+    move half — 2 lands between the two variants, 1 lands inside the first one.
+    Returns (root, db, out_dir, claimed report path)."""
+    root, db = _two_pair_tree(tmp_path)
+    out = tmp_path / "out"; out.mkdir()
+    st = KGStore(db)
+    dirs = {d.name for d in root.iterdir()}
+    plan = ers.build_plan(st.edges.active(), dirs, allowed_tiers=["CASE"])
+    assert len(plan["safe_merges"]) == 2, plan["safe_merges"]
+    report = out / "entity-merges-applied-2026-09-26-20260926T000000Z.json"
+    ers.claim_report(report, out / "entity-merges-latest.jsonl", "2026-09-26", "20260926T000000Z")
+    real, seen = ers.retag_fact_file, [0]
+
+    def dying(path, old, new):
+        seen[0] += 1
+        if seen[0] > die_after_retags:
+            raise KeyboardInterrupt("killed in the fact-move window")
+        return real(path, old, new)
+
+    monkeypatch.setattr(ers, "retag_fact_file", dying)
+    with pytest.raises(KeyboardInterrupt):
+        ers.apply_merges(plan, st, root, rebuild_aliases=False, existing_dirs=dirs,
+                         report_path=str(report))
+    st.close()
+    return root, db, out, report
+
+
+def _fact_texts(root: Path) -> list[str]:
+    """Every fact text on the tree, path by path — the census that catches a
+    resume applying the same move twice."""
+    return [f["fact"] for p in sorted(root.rglob("*.md"))
+            for f in (yaml.safe_load(p.read_text().split("---")[1]) or {}).get("facts") or []]
+
+
+def test_a_kill_in_the_move_window_journals_what_already_moved(tmp_path, monkeypatch):
+    """Clause 1: a run interrupted after the store commit leaves a report that
+    still PARSES, still says `started` and claims no count, and already lists
+    every `dir_operations` entry it finished — so a later reader, and `--resume`,
+    can tell the moved dirs from the untouched ones. Before #1558 `dir_ops` lived
+    only in memory and reached disk in the final report a killed run never
+    writes, so the stub said nothing about a merge that had half happened."""
+    root, db, out, report = _killed_apply(tmp_path, monkeypatch, die_after_retags=2)
+    doc = json.loads(report.read_text())              # an unparseable stub fails the test here
+    assert doc["report_status"] == "started", "a killed run must not claim completion"
+    assert doc["applied_clusters"] is None, "a killed run must not claim a count"
+    done = [op for op in doc["dir_operations"] if op.get("done")]
+    assert len(done) == 1, f"exactly one variant had finished: {doc['dir_operations']}"
+    assert not (root / done[0]["variant"]).exists(), "the journal claims a dir still on disk"
+    left = set(doc["variant_to_canonical"]) - {op["variant"] for op in done}
+    assert len(left) == 1 and (root / left.pop()).exists(), \
+        "the unfinished variant is still on disk and must not be in the journal"
+    assert doc["edge_rewrites"], "the store half committed, so its ids belong in the journal"
+
+
+def test_resume_finishes_only_the_dirs_the_kill_left_pending(tmp_path, monkeypatch):
+    """Clause 2: `--resume <apply report>` replays only the `dir_operations` not
+    yet recorded as done. This kills INSIDE the first variant — after one of its
+    two files had moved, so nothing was journaled — and the resume must complete
+    both variants: no file left under either variant dir, and every fact counted
+    exactly once under its canonical (a re-applied move would show up as a
+    duplicate text or a `_dup` sidecar)."""
+    root, db, out, report = _killed_apply(tmp_path, monkeypatch, die_after_retags=1)
+    stub = json.loads(report.read_text())
+    assert [op for op in stub["dir_operations"] if op.get("done")] == [], \
+        "the kill landed inside the first variant, so nothing may be journaled done"
+
+    r = _run(root, db, out, "--resume", str(report))
+    assert r.returncode == 0, r.stdout + r.stderr
+    done = json.loads(report.read_text())
+    assert done["report_status"] == "complete"
+    assert {op["variant"] for op in done["dir_operations"] if op.get("done")} \
+        == set(done["variant_to_canonical"]), done["dir_operations"]
+    for variant in done["variant_to_canonical"]:
+        vdir = root / variant
+        assert not vdir.exists() or not list(vdir.rglob("*")), f"{variant} still holds files"
+    assert not list(root.rglob("*_dup*")), "the resume wrote a sidecar instead of merging"
+    assert sorted(_fact_texts(root)) == sorted([
+        "vLLM serves 40 req/s.", "vllm restarts nightly at 04:00.",
+        "vllm aims to halve cold start.", "Gemma serves 40 req/s.",
+        "gemma restarts nightly at 04:00.", "gemma aims to halve cold start.",
+    ]), "each moved fact must be counted exactly once under the canonical"

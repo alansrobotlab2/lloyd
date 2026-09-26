@@ -7,7 +7,7 @@ normalized name, classifies each cluster as auto-mergeable (CASE / PUNCT /
 SUFFIX) or ambiguous (LOOP / RESEARCH / OTHER), and either prints a plan
 (dry-run) or applies the merges.
 
-Apply mode:
+Apply mode — TWO steps with a killable gap, not one bounded operation:
   1. Backs up the store (SQLite backup API — consistent under writers).
   2. In ONE transaction, for each SAFE merge:
        a. Adds  {variant: canonical}  to the alias table.
@@ -18,7 +18,20 @@ Apply mode:
      aliases and edges as two separate whole-file rewrites, and a crash
      between them left the tree half-merged (2026-09-03).
   3. Moves fact files from variant dir into canonical dir (rename prefix),
-     retags them, removes the empty variant dir.
+     retags them, removes the empty variant dir. The filesystem cannot join
+     the transaction, so this half runs AFTER it: it is a second, unbounded
+     step, and a kill in it leaves aliases routing to the canonical while some
+     of the variant's fact files are still under the variant. What makes that
+     survivable is a journal, not atomicity — each variant's outcome is written
+     into the apply report as it completes (`report_status` stays "started"
+     until the whole run is done, which is what stops #1538's audit reading a
+     partial run as a finished one), and the half can be replayed alone with
+     `--resume <that report>`. Plain `--apply` is NOT the retry: a second apply
+     records an EMPTY edge trail for an already-rewritten variant, because
+     `rewrite_endpoint` walks only ACTIVE edges and the first apply expired
+     them, and `revert-suffix-merges.py --fix-edges` takes its pairs from the
+     one report it is handed — so the first run's ids go un-inverted and it
+     falls back to its prose heuristic.
 
 Ambiguous clusters are dumped to a review JSONL for Tier 2 hand-review.
 
@@ -31,6 +44,9 @@ Usage:
 
   # also drop inherited alias entries that are pipeline noise:
   python entity-resolution-sweep.py --apply --rebuild-aliases
+
+  # finish an apply that died between the transaction and the moves (#1558):
+  python entity-resolution-sweep.py --resume <entity-merges-applied-*.json>
 """
 from __future__ import annotations
 
@@ -841,9 +857,21 @@ def apply_merges(
     The alias writes and every edge rewrite happen in ONE store transaction:
     a crash or a kill in the middle leaves the graph exactly as it was, not
     half-merged. The fact-file moves follow, after the transaction commits,
-    because the filesystem cannot join it — and that is the safe order: the
-    alias table already routes new facts to the survivor, so a crash between
-    the two costs a re-run, not a corrupted tree.
+    because the filesystem cannot join it — which makes the apply TWO steps with
+    a killable gap, not one bounded operation. A kill in that gap DOES leave a
+    half-merge: the aliases already route to the canonical while some of the
+    variant's fact files are still under the variant's own dir.
+
+    What makes that gap survivable is a journal, not atomicity. Each variant's
+    dir outcome is written into `report_path` as it completes, so a killed run
+    leaves a report that names the dirs already moved, and `--resume <that
+    report>` finishes the rest without touching the store half again (#1558).
+    The sentence this replaces — "a crash between the two costs a re-run, not a
+    corrupted tree" — held only if the re-run could tell what had already moved.
+    It could not: `dir_ops` was in-memory until the final report, which a killed
+    run never writes, and re-applying the same plan silently loses the first
+    run's edge trail because `rewrite_endpoint` only walks ACTIVE edges, which
+    the first apply had already expired.
 
     Returns a report dict. `edge_rewrites` maps each variant to the list of
     (old_edge_id, new_edge_id) pairs, which `revert-suffix-merges.py
@@ -879,15 +907,102 @@ def apply_merges(
 
     rewrite_count = sum(len(v) for v in edge_rewrites.values())
 
-    # ── Move fact files
-    dir_ops: list[dict] = []
+    # ── Move fact files: the half the transaction cannot cover (#1558) ──────
+    dir_ops = _move_fact_dirs(
+        variant_to_canonical, st, facts_root, report_path=report_path,
+        extra={"variant_to_canonical": variant_to_canonical,
+               "edge_rewrites": {k: [list(p) for p in v] for k, v in edge_rewrites.items()}})
+
+    return {
+        "rewritten_edges": rewrite_count,
+        "edge_rewrites": {k: [list(p) for p in v] for k, v in edge_rewrites.items()},
+        "alias_writes": alias_writes,
+        "dir_operations": dir_ops,
+        "variant_to_canonical": variant_to_canonical,
+    }
+
+
+def _atomic_write_json(path: Path, obj: dict) -> None:
+    """Write `obj` to `path` through a dot-prefixed tmp file and `os.replace`.
+
+    The file this writes is the recovery input for a half-finished merge, so it
+    has to parse for the whole time it exists: a truncated report is worse than
+    a missing one, because the next reader cannot tell a partial journal from a
+    complete one and `--resume` would trust it. Same shape as the final report
+    write in `main()`, which is why the tmp name is dot-prefixed — the apply
+    report glob in `memory_disposition_audit._sweep_applied_reports` is
+    `entity-merges-applied-*.json`, and a stray tmp must not match it.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _journal_dir_progress(report_path: str | None, dir_ops: list[dict], extra: dict) -> None:
+    """Re-write the claimed apply report with the dir outcomes earned so far.
+
+    Read-modify-write of the file `claim_report` put down, keeping its `run_id`,
+    `ledger` and plan pointers: the two facts a reader needs are which run this
+    is and which dirs have moved. `report_status` stays `"started"` and
+    `applied_clusters` stays None while the run is in progress — a report that
+    counted merges it had not finished is the exact lie #1538 exists to catch —
+    and the whole file goes through tmp + `os.replace`, so a second kill cannot
+    leave a half-written journal behind.
+    """
+    if not report_path:
+        return
+    path = Path(report_path)
+    doc: dict = {}
+    if path.is_file():
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            doc = {}                     # a stub we cannot read is still ours to rewrite
+    doc.setdefault("report_status", "started")
+    doc.setdefault("applied_clusters", None)
+    doc.update(extra)
+    doc["dir_operations"] = dir_ops
+    _atomic_write_json(path, doc)
+
+
+def _move_fact_dirs(variant_to_canonical: dict[str, str], st, facts_root: Path, *,
+                    report_path: str | None = None, carried: list[dict] = (),
+                    skip: set[str] = frozenset(), extra: dict | None = None) -> list[dict]:
+    """Move each variant's fact files into its canonical dir, journaling as it goes.
+
+    The loop body is the apply's original one — same prefix matching, same
+    `_merge_fact_file_into`/`retag_fact_file` rules, same `facts_idx` retirement of
+    the paths a merge moved away (#996), same `entities.remove`. Only three things
+    are new (#1558): the entries a previous run already finished are carried in as
+    `carried`, the variants they name are in `skip` so a resume never re-applies a
+    finished move, and every finished variant — including one that had no dir to
+    move — is stamped `done` and written to `report_path` before the next one
+    starts. That journal is what makes the post-commit window survivable:
+    `apply_merges`' old promise that "a crash between the two costs a re-run" was
+    only true if a re-run could tell what had already moved, and `dir_ops` used to
+    live in memory until a report a killed run never writes.
+    """
+    dir_ops: list[dict] = list(carried)
+    # Journal the store half BEFORE the first move. A kill inside the very first
+    # variant then leaves a report whose dir list holds only the carried entries —
+    # correctly "nothing finished here" — but it carries the pairs and the edge ids,
+    # so --resume has input and revert-suffix-merges.py --fix-edges can still name
+    # the edges it has to undo.
+    _journal_dir_progress(report_path, dir_ops, dict(extra or {}))
     for variant, canonical in variant_to_canonical.items():
+        if variant in skip:
+            continue                        # journaled done by the run that died
         vdir = facts_root / variant
         cdir = facts_root / canonical
         if not vdir.exists():
+            # A variant with no fact dir is finished work, not pending work: it gets
+            # the same `done` stamp, so a resume never revisits it.
             dir_ops.append(
-                {"variant": variant, "canonical": canonical, "action": "skip_no_variant_dir"}
+                {"variant": variant, "canonical": canonical, "action": "skip_no_variant_dir",
+                 "done": True}
             )
+            _journal_dir_progress(report_path, dir_ops, dict(extra or {}))
             continue
         cdir.mkdir(parents=True, exist_ok=True)
         moved = 0
@@ -1001,15 +1116,43 @@ def apply_merges(
                 "canonical": canonical,
                 "files_moved": moved,
                 "removed_dir": removed,
+                "done": True,
             }
         )
+        # One journal step per finished variant: the most a kill can cost is the
+        # variant it landed inside, and a resume re-does exactly that one.
+        _journal_dir_progress(report_path, dir_ops, dict(extra or {}))
+    return dir_ops
 
+
+def resume_merges(report: dict, st, facts_root: Path, report_path: str | None = None) -> dict:
+    """Finish the fact-move half of an apply that died mid-window.
+
+    Reads the pairs out of the report a killed run claimed and replays ONLY the
+    `dir_operations` not yet stamped done. It writes no alias and no edge row:
+    the store half of the original run committed, and re-selecting a plan here
+    would merge new pairs into a report that claims to describe one run. The
+    original run's `edge_rewrites` are carried into the returned report rather
+    than re-derived, because `rewrite_endpoint` records only ACTIVE edges and
+    the first apply already expired them — re-deriving would hand
+    `revert-suffix-merges.py --fix-edges` an empty trail, and it picks its mode
+    from the one report it is handed, so an empty trail silently degrades exact
+    by-id inversion to the `_own_prose_edges` heuristic.
+    """
+    v2c = {k: v for k, v in (report.get("variant_to_canonical") or {}).items()}
+    ops = [op for op in (report.get("dir_operations") or []) if isinstance(op, dict)]
+    carried = [op for op in ops if op.get("done")]
+    edge_rewrites = report.get("edge_rewrites") or {}
+    dir_ops = _move_fact_dirs(
+        v2c, st, facts_root, report_path=report_path, carried=carried,
+        skip={str(op.get("variant")) for op in carried},
+        extra={"variant_to_canonical": v2c, "edge_rewrites": edge_rewrites})
     return {
-        "rewritten_edges": rewrite_count,
-        "edge_rewrites": {k: [list(p) for p in v] for k, v in edge_rewrites.items()},
-        "alias_writes": alias_writes,
+        "rewritten_edges": sum(len(v) for v in edge_rewrites.values()),
+        "edge_rewrites": edge_rewrites,          # run 1's pairs, untouched
+        "alias_writes": 0,                        # nothing here writes an alias
         "dir_operations": dir_ops,
-        "variant_to_canonical": variant_to_canonical,
+        "variant_to_canonical": v2c,
     }
 
 
@@ -1284,6 +1427,95 @@ def safety_record(no_gate: bool, allow_degraded: bool, gate, plan: dict,
             "active_edges": active_edges, "baseline_measured": bool(measured)}
 
 
+def _resume_apply(args, st, facts_root: Path) -> int:
+    """`--resume <apply report>`: finish a killed apply's file-move half.
+
+    Deliberately skips three things the fresh-apply path runs. It does not build
+    a plan or run the gate: this run merges nothing, and selecting new pairs would
+    fold them into a report that claims to describe one run. It does not enforce
+    the degraded-graph guard either — that guard stops a run from *making* a mess
+    on a broken graph, and refusing a recovery there would leave a half-merge
+    stuck, which is the failure this path exists to close; it prints the guard's
+    reason instead, so the operator still sees the ground underfoot. And `--apply`
+    is ignored, because there is nothing here to authorise: the merges were already
+    committed by the run that claimed the report.
+    """
+    report_path = Path(args.resume)
+    if not report_path.is_file():
+        print(f"REFUSING --resume: no apply report at {report_path}")
+        return 2
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"REFUSING --resume: {report_path} does not parse ({exc})")
+        return 2
+    v2c = report.get("variant_to_canonical") or {}
+    if not v2c:
+        print(f"REFUSING --resume: {report_path} records no variant_to_canonical, so no merge "
+              "was ever committed for it to finish. A stub with none means the run died inside "
+              "the store transaction, which rolled back on its own.")
+        return 2
+    done = {str(op.get("variant")) for op in (report.get("dir_operations") or [])
+            if isinstance(op, dict) and op.get("done")}
+    pending = [v for v in v2c if v not in done]
+    if not pending and report.get("report_status") == "complete":
+        print(f"== {report_path.name}: already complete, {len(v2c)} variants journaled done ==")
+        return 0
+
+    print(f"== Resuming apply {report_path.name} (claimed {report.get('timestamp', '?')}, "
+          f"{len(pending)} of {len(v2c)} dirs pending) ==")
+    if args.apply:
+        print("  [resume] --apply ignored: this finishes the claimed report, it does not merge")
+    baseline_floor = load_baseline(Path(args.out_dir) / "graph-baseline.json")
+    guard = degraded_reason(len(st.edges.active()), baseline_floor)
+    print("  [resume] graph, read-only: "
+          + (guard or ("healthy" if baseline_floor > 0 else
+                       "unmeasured (no baseline on disk) — read is not a risk, so it cannot "
+                       "refuse a recovery"))
+          )
+
+    ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")
+    backup_dir = Path(args.out_dir) / "store-backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    store_bak = st.backup(backup_dir / f"kg-sweep-resume-{ts}.sqlite")
+    print(f"  Backed up store: {store_bak}")
+
+    before = st.stats()
+    result = resume_merges(report, st, facts_root, str(report_path))
+    after = st.stats()
+    for op in result["dir_operations"]:
+        if op["variant"] not in pending:
+            continue                                # journaled done by the run that died
+        if op.get("action") == "skip_no_variant_dir":
+            print(f"  {op['variant']} → {op['canonical']}: no dir on disk, nothing to move")
+        else:
+            print(f"  {op['variant']} → {op['canonical']}: {op['files_moved']} file(s) moved, "
+                  f"removed_dir={op['removed_dir']}")
+    print(f"  Store: entities {before['entities']}→{after['entities']}, "
+          f"aliases {before['aliases']}→{after['aliases']}, "
+          f"edges {before['edges_active']}→{after['edges_active']} "
+          "(0 alias/edge writes expected: the first run committed them)")
+
+    finished = dict(report)                      # every field of the claiming run survives
+    finished.update(result)                      # dir list complete now, run 1's ids carried
+    finished["report_status"] = "complete"
+    finished["applied_merges"] = len(v2c)
+    finished["applied_clusters"] = report.get("applied_clusters")   # run 1 never claimed a count
+    finished["store_backup"] = str(store_bak)
+    finished["store_before"], finished["store_after"] = before, after
+    finished["resumed"] = {
+        "pending_variants": pending,
+        "ledger": invocation_ledger(),
+        "note": "the aliases and edge rewrites were committed by the run that claimed this "
+                "report; this run only moved the fact files that report had not journaled done, "
+                "and wrote no alias or edge row",
+    }
+    _atomic_write_json(report_path, finished)
+    print(f"  Report: {report_path}")
+    st.close()
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="Apply SAFE merges")
@@ -1307,12 +1539,19 @@ def main() -> int:
     ap.add_argument("--facts-dir", default=str(FACTS_ROOT))
     ap.add_argument("--out-dir", default=str(OUT_DIR))
     ap.add_argument("--date", default=dt.date.today().isoformat())
+    ap.add_argument("--resume", metavar="APPLY_REPORT", default=None,
+                    help="finish the fact-file half of an apply that died after its store "
+                         "transaction committed: replay only the dir_operations that report has "
+                         "not journaled done, write no alias and no edge, and keep the original "
+                         "run's (old_edge_id, new_edge_id) pairs so revert stays exact by id")
     args = ap.parse_args()
 
     facts_root = Path(args.facts_dir)
     out_dir = Path(args.out_dir)
 
     st = KGStore(Path(args.db))
+    if args.resume:
+        return _resume_apply(args, st, facts_root)
     active_edges = st.edges.active()
 
     existing_dirs = (

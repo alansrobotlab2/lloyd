@@ -1,6 +1,7 @@
 """revert-suffix-merges.py — put a wrongly merged variant's facts back."""
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -308,3 +309,130 @@ def test_membership_compares_the_surface_exactly_not_normalized(two_variants):
     assert res["alias_ops"] == [{"remove": C, "was": CPP}, {"add": C}]
     assert st.aliases.resolve("c") is None
     assert st.aliases.resolve("c#") == CPP                          # C# is still routed to C++
+
+
+# ── a killed apply, resumed, still reverts exactly by id (#1558) ──────────────
+#
+# Every test above hands `fix_edges` a report that was finished on purpose. This
+# one is about the report a KILLED run leaves: the store half committed, the fact
+# moves did not, and the only recovery is `entity-resolution-sweep.py --resume
+# <that report>`. If the resume re-derives the edge trail instead of carrying the
+# original one, the finished report shows 0 pairs — `rewrite_endpoint` walks only
+# ACTIVE edges and the first apply expired them — and `fix_edges` then picks its
+# mode from the one report it is handed and spends its single shot on the prose
+# heuristic. An unrevertable merge that reports itself reverted is the failure.
+
+SWEEP = ROOT / "scripts/memory/entity-resolution-sweep.py"
+
+
+def _sweep_module():
+    """Load the sweep by path, the way `kg_hygiene` does, to drive an apply that
+    dies at a chosen line. A subprocess cannot be interrupted mid-function."""
+    spec = importlib.util.spec_from_file_location("entity_resolution_sweep", SWEEP)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules["entity_resolution_sweep"] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _cli(script, root, db, out, *extra):
+    return subprocess.run([sys.executable, str(script), "--facts-dir", str(root),
+                           "--db", str(db), "--out-dir", str(out), *extra],
+                          capture_output=True, text=True, timeout=180)
+
+
+def _reverted_record(out: Path) -> dict:
+    recs = sorted(out.glob("entity-merges-reverted-*.json"))
+    assert recs, "the revert wrote no record, so it never ran"
+    return json.loads(recs[-1].read_text())
+
+
+def test_a_resumed_apply_still_reverts_exactly_by_id(tmp_path, monkeypatch):
+    """Clause 3: `--resume` writes no alias and no edge for the pairs the killed
+    run already committed, carries that run's `(old_edge_id, new_edge_id)` pairs
+    into the finished report, and leaves
+    `revert-suffix-merges.py --applied <that report> --apply --fix-edges` in
+    `exact` mode with pairs > 0.
+
+    Two variants share one canonical so the kill has to land between them: one
+    dir journaled done, one left pending.
+    """
+    root, db = tmp_path / "facts", tmp_path / "kg.sqlite"
+    out = tmp_path / "out"; out.mkdir()
+    canonical = "Rerank Reranker"
+    v_upper, v_lower = "RERANK RERANKER", "rerank reranker"
+    st = KGStore(db)
+    (root / canonical).mkdir(parents=True)
+    _write(root / canonical / "Rerank Reranker-state.md",
+           _facts(canonical, "state", [(canonical, "Reranker v2 ships Thursday.")]))
+    # Both variants are CASE forms of the canonical, which is the merge #48 makes
+    # daily and needs no semantic gate. A bare `Rerank` beside
+    # `Rerank Reranker` would be a SUFFIX pair and would never merge at all.
+    for variant, target in ((v_upper, "Ray"), (v_lower, "Triton")):
+        _write(root / variant / f"{variant}-state.md",
+               _facts(variant, "state", [(variant, f"{variant} serves 12 req/s.")]))
+        st.entities.register(canonical); st.entities.register(variant)
+        st.edges.add({"source": canonical, "target": target, "type": "mentions"}, origin="seed")
+        st.edges.add({"source": variant, "target": target, "type": "mentions"}, origin="seed")
+    st.facts_idx.reindex([p for p in root.rglob("*.md")], root=root)
+
+    ers = _sweep_module()
+    dirs = {d.name for d in root.iterdir()}
+    plan = ers.build_plan(st.edges.active(), dirs, allowed_tiers=["CASE", "PUNCT"])
+    merged = {m["variant"] for c in plan["safe_merges"] for m in c["merges"]}
+    assert merged == {v_upper, v_lower}, f"need both mechanical variants merged: {merged}"
+
+    report = out / "entity-merges-applied-2026-09-26-20260926T000000Z.json"
+    ers.claim_report(report, out / "entity-merges-latest.jsonl", "2026-09-26", "20260926T000000Z")
+    real, seen = ers.retag_fact_file, [0]
+
+    def dying(path, old, new):
+        seen[0] += 1
+        if seen[0] > 1:
+            raise KeyboardInterrupt("killed in the fact-move window")
+        return real(path, old, new)
+
+    monkeypatch.setattr(ers, "retag_fact_file", dying)
+    with pytest.raises(KeyboardInterrupt):
+        ers.apply_merges(plan, st, root, rebuild_aliases=False, existing_dirs=dirs,
+                         report_path=str(report))
+    st.close()
+
+    stub = json.loads(report.read_text())
+    journaled = [op["variant"] for op in stub["dir_operations"] if op.get("done")]
+    assert journaled in ([v_upper], [v_lower]), \
+        f"exactly one variant had finished before the kill: {stub['dir_operations']}"
+    assert sum(len(v) for v in stub["edge_rewrites"].values()) == 2, \
+        "both variants' edges committed in the one transaction, so the journal holds both trails"
+
+    r = _cli(SWEEP, root, db, out, "--resume", str(report))
+    assert r.returncode == 0, r.stdout + r.stderr
+    finished = json.loads(report.read_text())
+    assert finished["report_status"] == "complete"
+    assert finished["alias_writes"] == 0, "a resume must write no alias"
+    assert finished["store_before"]["aliases"] == finished["store_after"]["aliases"] \
+        and finished["store_before"]["edges_active"] == finished["store_after"]["edges_active"], \
+        "the resume changed the store: it is the file half only"
+    assert sum(len(v) for v in finished["edge_rewrites"].values()) == 2, \
+        ("the finished report lost run 1's ids; a re-derived trail is EMPTY here because "
+         "rewrite_endpoint walks only ACTIVE edges and run 1 expired them")
+    assert not (root / v_upper).exists() and not (root / v_lower).exists(), \
+        "the resume left a variant dir behind"
+
+    # `--tiers CASE`, not ALL: `plan_revert` selects each pair by
+    # `classify_pair(variant, canonical)`, and both variants here are CASE forms of
+    # their canonical — an ALL would plan zero ops and never reach `fix_edges`.
+    r = _cli(ROOT / "scripts/memory/revert-suffix-merges.py", root, db, out,
+             "--applied", str(report), "--tiers", "CASE", "--apply", "--fix-edges")
+    assert r.returncode == 0, r.stdout + r.stderr
+    edges = _reverted_record(out)["edges"]
+    assert edges["mode"] == "exact", f"fell back to the prose heuristic: {edges}"
+    assert edges["pairs"] == 2 and edges["reverted"] == 2, edges
+
+    st = KGStore(db)
+    try:
+        live = {(e["source"], e["target"]) for e in st.edges.active()}
+    finally:
+        st.close()
+    assert (canonical, "Ray") in live and (v_lower, "Triton") in live, \
+        "the merged edges are not live again, so the revert did not invert them by id"

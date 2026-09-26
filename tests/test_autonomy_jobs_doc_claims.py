@@ -1172,3 +1172,46 @@ def test_the_sweep_skill_and_the_doc_agree_on_which_tiers_apply():
         "the tier table has #48 back under 'Proposes; an operator applies' while the "
         "skill still orders a scheduled apply — the pairing that made the doc false, "
         "and now red on the skill's side of the boundary too")
+
+
+def test_the_sweep_apply_row_bounds_the_transaction_and_names_the_resumable_half():
+    """#1558: §Canonicalize told the reader #48's apply was "one transaction per
+    run", which reads as though the whole apply were bounded when only the store
+    half is — the fact files move after the commit, and until #1558 nothing on
+    disk said which of them had moved, so a kill there left a half-merge that
+    neither a re-run nor `revert-suffix-merges.py` could finish.
+
+    Both halves of the real bound are graded, on both sides of the vault boundary:
+    one store transaction, then a file-move half that is resumable, naming
+    `--resume`. Reading the skill as well as the row is not decoration — the skill
+    is the prompt the job runs from, so a row fixed here and a skill left silent is
+    a claim the next run can make false without this repo changing.
+    """
+    import board_presence
+
+    row = next((ln for ln in _text().splitlines() if ln.lstrip().startswith("| #48 |")), None)
+    assert row is not None, "there is no #48 row in the Canonicalize table any more"
+    assert "one transaction per run" not in row.lower(), (
+        "the row still claims the whole apply is one transaction. It is not: only the "
+        "aliases and the edge rewrites are in the store, and the fact files move after "
+        "that commit")
+    flat = _flat(row)
+    assert re.search(r"one store transaction", flat, re.I), (
+        f"the row never names what IS bounded: {row}")
+    assert "--resume" in flat and re.search(r"resum", flat, re.I), (
+        "the row states no recovery for the half it now admits is outside the "
+        "transaction, so a reader with a half-finished merge has nowhere to go")
+    assert re.search(r"dir_operations?", flat), (
+        "the row does not say WHAT the resume replays, which is the only reason a "
+        "resume cannot simply be another --apply")
+
+    skill = board_presence.vault_root() / "skills" / "entity-resolution-sweep" / "SKILL.md"
+    assert skill.is_file(), f"{skill} is unreadable, and the bound pinned here is about that file"
+    skill_flat = _flat(skill.read_text())
+    assert re.search(r"ONE store transaction|one store transaction", skill_flat, re.I) \
+        and re.search(r"transaction[^.]{0,80}(outside|resum)", skill_flat, re.I), (
+        "the skill still describes the apply as one transaction with no word about the "
+        "half that runs after it")
+    assert "--resume" in skill_flat, (
+        "the skill — the prompt the job actually runs from — names no way to finish a "
+        "killed apply, so the operator improvises a re-run and loses the edge trail")
