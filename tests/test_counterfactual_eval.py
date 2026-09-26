@@ -206,6 +206,15 @@ def _store_where_every_swap_resolves(tmp_path):
     return db
 
 
+#: `eval/` scripts that open qmd's retrieval index with sqlite3 — a different
+#: database from the knowledge store this rule is about. Each is a measurement
+#: harness that copies or builds a scratch index; the test below proves none of
+#: their connects names a knowledge store.
+QMD_INDEX_READERS = {
+    "embed_side_index.py",          # #1493: side index built beside a copy
+}
+
+
 def test_no_script_under_eval_opens_the_knowledge_store_file():
     """`eval/` reaches the graph through `app.kg_store`, never through sqlite3.
 
@@ -227,8 +236,17 @@ def test_no_script_under_eval_opens_the_knowledge_store_file():
     # rule is about has to be among what the scan read.
     assert "counterfactual.py" in [p.name for p, _ in scanned], scanned
     offenders = [p.name for p, text in scanned
-                 if "import sqlite3" in text or "sqlite3.connect" in text]
+                 if ("import sqlite3" in text or "sqlite3.connect" in text)
+                 and p.name not in QMD_INDEX_READERS]
     assert offenders == [], f"{offenders} open the knowledge store directly"
+    # The named exceptions open qmd's OWN index (a VACUUM copy of it, or a
+    # scratch index they built), never a knowledge store: no connect line of
+    # theirs may name one, so the exemption cannot grow into the thing it exempts.
+    for p, text in scanned:
+        if p.name in QMD_INDEX_READERS:
+            bad = [ln.strip() for ln in text.splitlines()
+                   if "sqlite3.connect" in ln and ("kg" in ln.lower() or "KG_DB" in ln)]
+            assert bad == [], f"{p.name} connects to a knowledge store: {bad}"
     # And the predicate is not vacuous: the module that owns the boundary trips
     # it, through a different path than the one under audit.
     kg_text = (ROOT / "app" / "kg_store.py").read_text()
