@@ -572,6 +572,30 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
                         task_id, task.get("name"), new_id, priority)
 
 
+def _artifact_on_disk(artifact_path: str) -> bool:
+    """True iff `artifact_path` is a non-empty file under the RESOLVED data root.
+
+    `artifact_path` is DATA_ROOT-relative (`autonomy-runs/<task_id>/<run_id>.md`),
+    so it has to be resolved against `app.paths.DATA_ROOT` and never against the
+    process cwd — checking it with `Path(p).exists()` from `~/lloyd` reports 96 of
+    97 real artifacts missing, which is a false alarm worse than the bug: it makes
+    the check get disabled. The data root resolves from `$LLOYD_DATA` first and a
+    worktree's `.lloyd-data/` third (`app/paths.py:63-83`), so "which root" is a
+    real question and this answers it the same way the writer's `AUTONOMY_RUNS_DIR`
+    was derived.
+
+    Existence only, and only non-emptiness: the writer side already verifies the
+    bytes (`app.autonomy._run_record_readable`); this is the reader's second
+    opinion, from the other process, one hop before the row is written.
+    """
+    from app.paths import DATA_ROOT
+    try:
+        path = DATA_ROOT / artifact_path
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 async def execute(item: QueueItem) -> dict[str, Any]:
     from app.autonomy import run_task, run_trigger
     from app.discord_notify import _discord_notify_task_complete
@@ -629,15 +653,28 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # cooldown was ever consulted. run_task has already written the run record,
     # bumped failure_count and set the cooldown.
     status = result.get("status") or ("success" if result.get("success") else "failed")
+    artifact_path = (f"autonomy-runs/{task_id}/{result.get('run_id')}.md"
+                     if result.get("run_id") else "")
     out = {
         "status": status,
         "summary": (result.get("response_preview") or result.get("error") or "")[:500],
         "task_id": str(task_id),
-        "artifact_path": f"autonomy-runs/{task_id}/{result.get('run_id')}.md"
-                         if result.get("run_id") else "",
+        # The path is recorded UNCHANGED whether or not the file is on disk: it is a
+        # path, and `pool.normalize_result` copies it verbatim into `runs.artifact_path`,
+        # which other readers join on. The verdict goes beside it in `meta`, so "a run
+        # record was written" and "there is a run record to read" stop being the same
+        # claim — every one of the 97 scheduled-task `artifact_path` values in
+        # `workers.db` was built from `run_id` alone without looking at disk (#1567).
+        "artifact_path": artifact_path,
         "response": result.get("response_preview") or "",
         "meta": result.get("meta") or {},
     }
+    if artifact_path and not _artifact_on_disk(artifact_path):
+        from app.paths import DATA_ROOT
+        logger.error("Task #%s: run record %s is not a non-empty file under the resolved "
+                     "data root %s — the queue row records artifact_absent instead of "
+                     "presenting it as readable", task_id, artifact_path, DATA_ROOT)
+        out["meta"] = {**out["meta"], "artifact_absent": True}
     # #945 — this dict is a hand-written whitelist, and `claims` was not on it,
     # which severed the pilot's evidence bundle one hop upstream of the verifier:
     # `autonomy.run_task` sets `result["claims"]` for `EVIDENCE_PILOT_TASK_IDS`,

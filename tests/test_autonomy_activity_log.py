@@ -280,3 +280,81 @@ def test_the_collapse_survives_the_stamp_inside_the_run_id(task_file):
     stamps.advance(minutes=30)
     autonomy._append_activity_log(991, second)
     assert len(_failures(_under_heading(path))) == 1
+
+
+
+
+# ── #1567: an entry cannot cite a record that no reader can open ──────────────
+#
+# `autonomy-runs/<id>/<run>.md` inside an Activity Log line is an instruction to
+# open a file. For task #77 that instruction has been false for weeks: the entry
+# naming `run_77_20260922_150638.md` is still in
+# `~/obsidian/autonomy/77-weekly-backlog-hygiene.md` while the file, its directory,
+# and any `runs` row for `task_id='77'` in `workers.db` are gone. Each such line
+# was written by a process that had just called `write_text` and never looked
+# again, so `skills/queue-health-check` Step 2 sends a watchdog to `sed` a set of
+# citations triage counted at 1,178 inside the 30-day retention window.
+#
+# Scope of these pins, stated plainly: the WORDING of both outcomes, and that
+# every entry site consumes the writer's verdict. Not a live `run_task`, which
+# reaches ~15 engine seams (`_resolve_task_model`, `_model_dispatch_refusal`,
+# `_get_model_env`, the recorded event stream, `attach_observer_for_turn`) before
+# it writes an entry; that end-to-end leg belongs to the item as a finding.
+
+import inspect  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+TASK, RUN = 77, "run_77_20260101_000000"
+
+
+def test_a_readable_record_reads_exactly_as_it_did_before_the_fix():
+    """The unchanged half of the clause. An ordinary successful run's entry is
+    byte-identical to the shipped wording, in both formats the three sites use, so
+    the fix cannot decorate the 99% case or reflow the line the retention sweep and
+    the daily-note readers already parse."""
+    assert autonomy._record_phrase(TASK, RUN, True) == \
+        f"see autonomy-runs/{TASK}/{RUN}.md"
+    assert autonomy._record_phrase(TASK, RUN, True, style="full") == \
+        f"[full: autonomy-runs/{TASK}/{RUN}.md]"
+
+
+def test_an_unreadable_record_says_it_could_not_be_read_and_names_no_path_to_open():
+    """The clause's failure half. The old text was a false affordance — a path
+    offered as openable — so the replacement must (a) state that the record could
+    not be read, and (b) not leave a `see`/`full:`/`via` citation standing, since
+    those are the forms the watchdog step greps for."""
+    phrase = autonomy._record_phrase(TASK, RUN, False)
+
+    assert "could not be read" in phrase.lower(), phrase
+    assert not re.search(r"(see|full:|via) autonomy-runs/", phrase), phrase
+
+
+def test_the_missing_record_sentence_names_where_the_record_should_be():
+    """Naming the intended location is not claiming it exists, and it is what lets
+    a reader tell the two causes apart: 'never written' versus 'stranded by a data
+    root move', which is the actual #1567 cause. Both formats carry it."""
+    seen = autonomy._record_phrase(TASK, RUN, False)
+    full = autonomy._record_phrase(TASK, RUN, False, style="full")
+
+    for phrase in (seen, full):
+        assert f"expected at autonomy-runs/{TASK}/{RUN}.md" in phrase, phrase
+
+
+def test_the_verdict_arrives_from_the_writer_not_from_a_constant():
+    """The wiring, which is where this class of fix usually dies: a helper nobody
+    calls. Every one of the three entry sites — the tool-error success line, the
+    empty-terminal-text line and the failure line — passes `record is not None`,
+    where `record` is the value `_write_run_record` returned, and no entry site
+    interpolates a run-record path any more."""
+    for name in ("_record_failure", "run_task"):
+        assert "see autonomy-runs/{task_id}" not in inspect.getsource(
+            getattr(autonomy, name)), name
+
+    src = Path(autonomy.__file__).read_text(encoding="utf-8")
+    assert src.count("_record_phrase(task_id, run_id, record is not None") == 3, \
+        "each of the three entry sites has to consume the verdict"
+    stale = [ln.strip() for ln in src.splitlines()
+             if "{task_id}/{run_id}.md" in ln
+             and ("see " in ln or "full: " in ln or "via " in ln)
+             and "def _record_phrase" not in ln]
+    assert stale == [], stale

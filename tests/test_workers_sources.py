@@ -1264,3 +1264,110 @@ def test_session_distill_config_names_the_turn_budget():
     cfg = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
     src = cfg["workers"]["sources"]["session-distill"]
     assert int(src["max_turns"]) == 15
+
+
+# ---------------------------------------------------------------------------
+# #1567 — the queue row must not present a run record that is not on disk
+#
+# `artifact_path` was assembled from `run_id` alone and never looked at the
+# filesystem, so all 97 scheduled-task `runs.artifact_path` values in
+# `~/lloyd-data/workers.db` assert a file the writer never verified exists. That
+# is how task #77's `run_77_20260922_150638.md` came to be cited from an Activity
+# Log while `autonomy-runs/77/` does not exist at all. The path string is kept
+# byte-identical in both outcomes — it is a path, and `pool.normalize_result`
+# copies it into `runs.artifact_path`, which the health route and the retention
+# sweep join on; the verdict is the new `meta.artifact_absent` key beside it.
+# ---------------------------------------------------------------------------
+
+def _scheduled_result(run_id: str = "run_77_20260101_000000") -> dict:
+    return {"status": "success", "success": True, "run_id": run_id,
+            "response_preview": "done", "error": None, "meta": {}}
+
+
+@pytest.fixture
+def sched(monkeypatch, tmp_path):
+    """`scheduled_task.execute` with everything but the artifact check stubbed.
+
+    The health gate, `run_task`, the task-file lookup and the Discord notifier are
+    all production seams that would spend a real run; `_artifact_on_disk`'s view of
+    `app.paths.DATA_ROOT` is redirected to `tmp_path` so the check is exercised
+    against a real filesystem rather than mocked — the point of the clause is that
+    somebody looks at disk.
+    """
+    from workers.sources import scheduled_task as ST
+    from app import paths
+
+    monkeypatch.setattr(ST, "_vllm_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(ST, "_model_health_url", lambda m: "http://stub/health")
+    monkeypatch.setattr("app.autonomy.run_task",
+                        lambda *a, **k: asyncio.sleep(0, _scheduled_result()))
+    monkeypatch.setattr("app.autonomy._find_task_file", lambda tid: None)
+    monkeypatch.setattr("app.discord_notify._discord_notify_task_complete",
+                        lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(paths, "DATA_ROOT", tmp_path)
+    return ST, tmp_path
+
+
+def _execute(ST, task_id: int = 77) -> dict:
+    return asyncio.run(ST.execute(_item({"task_id": task_id})))
+
+
+def test_a_run_record_on_disk_records_the_path_and_says_nothing_about_absence(sched):
+    """The 99% case is a no-op: same string, no new key. A check that reports
+    success on every row tells a reader nothing and gets ignored."""
+    ST, root = sched
+    (root / "autonomy-runs" / "77").mkdir(parents=True)
+    (root / "autonomy-runs" / "77" / "run_77_20260101_000000.md").write_text(
+        "---\nstatus: success\n---\n\nworked\n", encoding="utf-8")
+
+    out = _execute(ST)
+
+    assert out["artifact_path"] == "autonomy-runs/77/run_77_20260101_000000.md"
+    assert "artifact_absent" not in out["meta"], out["meta"]
+
+
+def test_a_run_record_missing_from_disk_is_marked_absent_and_keeps_its_path(sched):
+    """The clause. Nothing is deleted or blanked from the row — the row keeps the
+    path it would have had, so the pair (path, `artifact_absent: True`) says both
+    where the record belongs and that it is not there. Before this, the row and the
+    Activity Log were the only two surfaces and both claimed the file."""
+    ST, root = sched
+    (root / "autonomy-runs" / "77").mkdir(parents=True)   # dir exists, file does not
+
+    out = _execute(ST)
+
+    assert out["artifact_path"] == "autonomy-runs/77/run_77_20260101_000000.md"
+    assert out["meta"].get("artifact_absent") is True, out["meta"]
+
+
+def test_a_zero_byte_run_record_counts_as_absent(sched):
+    """A truncated write on a full mount leaves a file that `exists()` answers true
+    for. `is_file()` alone would call that a record, which is the same false claim
+    in a new place."""
+    ST, root = sched
+    p = root / "autonomy-runs" / "77" / "run_77_20260101_000000.md"
+    p.parent.mkdir(parents=True)
+    p.write_text("", encoding="utf-8")
+
+    assert _execute(ST)["meta"].get("artifact_absent") is True
+
+
+def test_the_check_resolves_against_the_data_root_and_not_the_cwd(monkeypatch, tmp_path):
+    """`artifact_path` is DATA_ROOT-relative, so checking it against the process
+    cwd reports 96 of 97 real artifacts missing — a false alarm that gets the check
+    switched off, which is worse than the bug. Pinned by making the two roots
+    disagree: an artifact under the data root answers present even with a cwd
+    pointing at a tree that has no such file."""
+    from workers.sources import scheduled_task as ST
+    from app import paths
+
+    root = tmp_path / "data"
+    monkeypatch.chdir(tmp_path)                        # cwd has no autonomy-runs/
+    monkeypatch.setattr(paths, "DATA_ROOT", root)
+    assert not Path("autonomy-runs/77/x.md").exists(), "positive control: cwd lacks it"
+
+    assert ST._artifact_on_disk("autonomy-runs/77/x.md") is False
+    (root / "autonomy-runs" / "77").mkdir(parents=True)
+    (root / "autonomy-runs" / "77" / "x.md").write_text("record", encoding="utf-8")
+    assert ST._artifact_on_disk("autonomy-runs/77/x.md") is True
+    assert ST._artifact_on_disk("") is False

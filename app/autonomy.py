@@ -734,12 +734,75 @@ def _failure_summary(summary: str) -> str:
     return summary[:RUN_SUMMARY_CAP]
 
 
+def _run_record_readable(path: Path) -> bool:
+    """True iff `path` is a file, has bytes in it, and this process can read it.
+
+    Three separate ways a run record fails to exist for a reader, and every one
+    of them looked like a success until #1567: the write raised, the file landed
+    empty, and the file exists but cannot be opened. All three left the writer
+    returning a `Path` that every caller threw away, so the Activity Log cited
+    `autonomy-runs/<task>/<run>.md` as an openable file behind a record that was
+    never there — 3,217 such citations across 32 of 33 task files measured
+    2026-09-26, of which 1,178 are too young to be retention (30 days,
+    `scripts/groundskeeper/retention-sweep.py:164`).
+
+    The check reads the bytes back rather than trusting `stat()`: a
+    write-then-stat that reports success on a zero-length file is exactly the
+    shape of the bug being fixed here.
+    """
+    try:
+        if not path.is_file():
+            return False
+        return len(path.read_bytes()) > 0
+    except OSError:
+        return False
+
+
+def _record_phrase(task_id: int, run_id: str, record_ok: bool, *,
+                   style: str = "see") -> str:
+    """The Activity Log's reference to this run's record, worded for what is on disk.
+
+    `style` reproduces the two forms the shipped lines use so a readable record
+    reads byte-identically to today: `"see"` → `see autonomy-runs/77/run_77_x.md`,
+    `"full"` → `[full: autonomy-runs/77/run_77_x.md]`.
+
+    When the record is not readable the line says so in words and names no path as
+    something to open — only where the record was expected, which is what lets a
+    reader tell "never written" from "stranded by a data-root move" (#1567's actual
+    cause, the 2026-09-22 cutover). A citation that reads like an openable file is
+    the defect: the watchdog's `sed` errors on it while the line still says "see".
+    """
+    rel = f"autonomy-runs/{task_id}/{run_id}.md"
+    if record_ok:
+        return f"[full: {rel}]" if style == "full" else f"see {rel}"
+    return (f"RUN RECORD COULD NOT BE READ — {run_id} left no readable non-empty "
+            f"file; expected at {rel} (#1567)")
+
+
 def _write_run_record(task_id: int, run_id: str, status: str,
                       started_at: str, completed_at: str,
                       duration_seconds: float, summary: str, body: str,
-                      extra: Optional[dict] = None) -> Path:
+                      extra: Optional[dict] = None) -> Optional[Path]:
+    """Write one run record, and return it only if a reader can actually open it.
+
+    `None` means the record is not on disk in readable, non-empty form: the write
+    raised, or it left nothing behind. Callers must not cite the path in that
+    case — `_record_phrase` is how they say so instead.
+
+    A missing record does NOT turn a successful run into a failed one. The run's
+    status reports what the engine did; a record that did not land is a bug in the
+    recording, and flipping the status would charge a healthy task a `failure_count`
+    and a cooldown for it, up to and including an auto-disable (#1085's counter).
+    Loud log line + an honest Activity Log entry + the queue row marked absent is
+    the whole remedy.
+    """
     runs_dir = AUTONOMY_RUNS_DIR / str(task_id)
-    runs_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        runs_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        logger.error("Run record for task #%s (%s): %s could not be created: %s",
+                     task_id, run_id, runs_dir, exc)
+        return None
     fm = {
         "run_id": run_id, "task_id": task_id, "status": status,
         "started_at": started_at, "completed_at": completed_at,
@@ -757,7 +820,20 @@ def _write_run_record(task_id: int, run_id: str, status: str,
             fm.setdefault(k, v)
     content = f"---\n{yaml.dump(fm, default_flow_style=False)}---\n\n{body}"
     path = runs_dir / f"{run_id}.md"
-    path.write_text(content, encoding="utf-8")
+    # The write is not the contract; a reader opening the file is. Verified before
+    # returning so no caller has to remember to check something it cannot see.
+    try:
+        path.write_text(content, encoding="utf-8")
+    except OSError as exc:
+        logger.error("Run record for task #%s (%s) could not be written at %s: %s",
+                     task_id, run_id, path, exc)
+        return None
+    if not _run_record_readable(path):
+        logger.error("Run record for task #%s (%s) is not readable after the write "
+                     "at %s — the run's Activity Log line will say the record is "
+                     "missing instead of naming this path",
+                     task_id, run_id, path)
+        return None
     return path
 
 
@@ -2851,7 +2927,7 @@ async def _record_artifact_success(task: dict, task_id, run_id: str,
             "output_artifact": artifact}
     if grade is not None:
         meta[_ACCEPTANCE_GRADE_KEY] = grade
-    _write_run_record(
+    record = _write_run_record(
         task_id=task_id, run_id=run_id, status="success",
         started_at=started_at, completed_at=completed_at,
         duration_seconds=duration, summary=summary,
@@ -2891,8 +2967,8 @@ async def _record_artifact_success(task: dict, task_id, run_id: str,
     _append_activity_log(
         task_id,
         f"Run {run_id} — SUCCESS ({duration:.0f}s) ⚠ empty terminal text; "
-        f"status from artifact {Path(rel).name} ({artifact['bytes']} B); see "
-        f"autonomy-runs/{task_id}/{run_id}.md")
+        f"status from artifact {Path(rel).name} ({artifact['bytes']} B); "
+        + _record_phrase(task_id, run_id, record is not None))
     logger.info("Task #%s completed in %.1fs on artifact evidence (%s, %d B, "
                 "stop_reason=%s)", task_id, duration, Path(rel).name,
                 artifact["bytes"], stop_reason)
@@ -3122,7 +3198,7 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
         str((extra or {}).get("session_id") or ""), run_id)
     if ledger_block:
         body = f"{body}\n\n{ledger_block}"
-    _write_run_record(
+    record = _write_run_record(
         task_id=task_id, run_id=run_id, status="failed",
         started_at=started_at, completed_at=completed_at,
         duration_seconds=duration, summary=_failure_summary(summary), body=body,
@@ -3180,7 +3256,8 @@ async def _record_failure(task: dict, task_id, run_id: str, started_at: str,
         fields["next_run"] = (now + datetime.timedelta(seconds=cooldown)).isoformat()
     _update_task_field(task_id, **fields)
 
-    note = f"Run {run_id} — FAILED ({kind}): {summary[:280]} [full: autonomy-runs/{task_id}/{run_id}.md]"
+    note = (f"Run {run_id} — FAILED ({kind}): {summary[:280]} "
+            + _record_phrase(task_id, run_id, record is not None, style="full"))
     if disabled:
         note += (f" — DISABLED after {failures} consecutive failures; "
                  f"set status back to up_next to re-enable")
@@ -3791,12 +3868,17 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
         if grade is not None:
             meta[_ACCEPTANCE_GRADE_KEY] = grade
 
-        _write_run_record(
+        record = _write_run_record(
             task_id=task_id, run_id=run_id, status="success",
             started_at=started_at, completed_at=completed_at,
             duration_seconds=duration, summary=_outcome_summary(final_response),
             body="\n\n".join(body_parts), extra=meta,
         )
+        # Empty string when the record is on disk, which is every line's wording
+        # today; the sentence only ever appears on a run whose record no reader
+        # can open.
+        missing_record = ("" if record is not None else
+                          " ⚠ " + _record_phrase(task_id, run_id, False))
 
         interval = _frequency_interval_seconds(task)
         completed_dt = datetime.datetime.fromisoformat(completed_at)
@@ -3819,16 +3901,17 @@ async def run_task(task_id, *, max_duration: int | None = None) -> dict:
             _append_activity_log(
                 task_id,
                 f"Run {run_id} — success ({duration:.0f}s) ⚠ silent-failure indicators: "
-                f"{silent_failures[0][:120]}",
+                f"{silent_failures[0][:120]}{missing_record}",
             )
         elif tool_errors:
             _append_activity_log(
                 task_id,
                 f"Run {run_id} — success ({duration:.0f}s) ⚠ {len(tool_errors)} "
-                f"tool error(s); see autonomy-runs/{task_id}/{run_id}.md",
+                f"tool error(s); " + _record_phrase(task_id, run_id, record is not None),
             )
         else:
-            _append_activity_log(task_id, f"Run {run_id} — success ({duration:.0f}s)")
+            _append_activity_log(task_id,
+                                 f"Run {run_id} — success ({duration:.0f}s){missing_record}")
 
         logger.info("Task #%s completed in %.1fs (stop_reason=%s)",
                     task_id, duration, stop_reason)
