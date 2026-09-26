@@ -529,9 +529,10 @@ def alias_resolver() -> callable:
     hand-written resolver that cannot fail that way.
 
     Going through `app.kg_store` rather than opening the file is the stated
-    boundary — "Nothing opens the store except `app.kg_store`" — and it is what
+    boundary — "`app.kg_store` is the only writer of the store" — and it is what
     makes an absent derived store raise `StoreUnavailable` instead of reading as
-    an empty alias table (#1236).
+    an empty alias table (#1236). The one opener this does not cover is the
+    guardian's read-only row count (#1525); an audit script is not that.
     """
     return _resolver_from_map(_kg_store_module().store().aliases.all_lower())
 

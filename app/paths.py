@@ -31,8 +31,9 @@ IS_WORKTREE = (LLOYD_HOME / ".git").is_file()
 # `app.paths.DATA_ROOT_MARKER`, `data_root_for_tree`, `production_data_root`,
 # `resolve_data_root` and `DataRootMissing` at the place it always did.
 from app.data_root import (
-    ACCOUNT_HOME, DATA_ROOT_MARKER, DataRootMissing, PRODUCTION_DATA_ROOT,
-    data_root_for_tree, production_data_root, resolve_data_root)
+    ACCOUNT_HOME, DATA_ROOT_MARKER, DataRootMissing, KG_DB_RELATIVE,
+    PRODUCTION_DATA_ROOT, data_root_for_tree, production_data_root,
+    resolve_data_root)
 
 #: The names re-exported through `app.paths`, listed so the import above reads as
 #: the API it is rather than as four unused imports a later tidy-up can delete —
@@ -40,7 +41,7 @@ from app.data_root import (
 #: one of these lines breaks `app.paths`, not `app.data_root`. This is the
 #: re-export list, not this module's whole surface: the constants below are its
 #: other half.
-__all__ = ["ACCOUNT_HOME", "DATA_ROOT_MARKER", "DataRootMissing",
+__all__ = ["ACCOUNT_HOME", "DATA_ROOT_MARKER", "DataRootMissing", "KG_DB_RELATIVE",
            "PRODUCTION_DATA_ROOT", "data_root_for_tree", "production_data_root",
            "resolve_data_root"]
 
@@ -185,11 +186,15 @@ VAULT_FACTS_ROOT = Path(os.environ["LLOYD_FACTS_ROOT"]) if os.environ.get("LLOYD
     else VAULT_FACTS_ROOT_DEFAULT
 
 # The knowledge-graph store: edges, aliases, entity registry and the fact
-# index live in one SQLite file (app.kg_store). Nothing opens it except that
-# module. LLOYD_KG_DB overrides the location for rebuilds and tests;
-# `VAULT_KG_DB_DEFAULT` is the built-in location, env-immune for the reason
-# above.
-VAULT_KG_DB_DEFAULT = VAULT_DERIVED_ROOT / "kg.sqlite"
+# index live in one SQLite file, and `app.kg_store` is the only WRITER. It is
+# not the only opener: the guardian's data-damage tripwire opens it read-only for
+# a row count (`count_kg_rows` in `agent-services/guardian/guardian.py`), and
+# because that watchdog runs system python on a staged snapshot it cannot import
+# this module, so the layout below comes from `app.data_root.KG_DB_RELATIVE`,
+# which is the one spelling both readers share (#1525). LLOYD_KG_DB overrides the
+# location for rebuilds and tests; `VAULT_KG_DB_DEFAULT` is the built-in location,
+# env-immune for the reason above.
+VAULT_KG_DB_DEFAULT = DATA_ROOT / KG_DB_RELATIVE
 VAULT_KG_DB = Path(os.environ["LLOYD_KG_DB"]) if os.environ.get("LLOYD_KG_DB") \
     else VAULT_KG_DB_DEFAULT
 

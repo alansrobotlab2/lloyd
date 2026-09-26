@@ -983,3 +983,79 @@ def test_workers_jobs_documents_the_board_steward():
     assert "apply: false" in body
     assert "primary" in body and "secondary" in body
     assert "never set `done`" in body
+
+
+# ── who may open the knowledge-graph store (#1525) ─────────────────────────
+# Three sentences claimed `app.kg_store` was the store's only opener. All three
+# were false: the guardian's data-damage tripwire has opened it read-only for a row
+# count since it shipped. A rule nobody can act on is worse than no rule — a reader
+# who believed them treated the guardian's handle as the violation and "fixed" the
+# watchdog. Each site now names the second opener, and the wording that lied is
+# gone from the corpus.
+
+KG_OPENER_CLAIM_SITES = [
+    ("app/paths.py, the store comment",
+     ROOT / "app" / "paths.py",
+     r"(?sm)^# The knowledge-graph store:.*?^VAULT_KG_DB_DEFAULT[^\n]*"),
+    ("architecture/autonomy-jobs.md, the One store paragraph",
+     ROOT / "architecture" / "autonomy-jobs.md",
+     r"(?sm)^\*\*One store.*?(?=\n\n---\n)"),
+    ("CLAUDE.md, the Knowledge graph section",
+     ROOT / "CLAUDE.md",
+     r"(?sm)^## Knowledge graph\n\n.*?(?=^- An unreadable store)"),
+]
+
+#: The three spellings that claimed a sole opener, verbatim from the filing. Each
+#: is asserted absent rather than matched-and-counted, so a rewording that keeps
+#: the meaning ("only that module ever opens it") still has to be caught by hand —
+#: which is why the per-site assertions above require the guardian's name in the
+#: same sentence rather than merely the absence of a phrase.
+SOLE_OPENER_PHRASES = ("Nothing opens it except", "nothing else opens",
+                       "Nothing opens the store except")
+
+
+@pytest.mark.parametrize("label, path, pattern", KG_OPENER_CLAIM_SITES)
+def test_each_sole_opener_sentence_now_names_the_read_only_guardian(label, path,
+                                                                    pattern):
+    """Both halves, inside one extracted region: the site still says `app.kg_store`
+    owns the writing, and it names the guardian's read-only read as the second
+    opener. Extracting the region is the point: `CLAUDE.md` mentions the guardian
+    21 times and `app/paths.py` not at all outside its own comment, so a
+    file-wide search would pass on the wrong sentence."""
+    text = path.read_text()
+    m = re.search(pattern, text)
+    assert m, f"{label}: the region moved or lost its heading marker"
+    body = m.group(0)
+    assert "writer" in body.lower(), f"{label} no longer says who owns the writing"
+    assert "guardian" in body.lower(), f"{label} names no second opener"
+    assert "count_kg_rows" in body, (
+        f"{label} does not name the read that is the second opener")
+    assert "read-only" in body, f"{label} does not say the second read is read-only"
+    for phrase in SOLE_OPENER_PHRASES:
+        assert phrase not in body, f"{label} still says {phrase!r}"
+
+
+def test_no_doc_in_the_corpus_still_claims_a_sole_opener():
+    """The item's own check, over prose AND docstrings.
+
+    Wider than the three filed files because the claim lived in both media:
+    correcting those sentences left two more copies inside
+    `eval/counterfactual.py:532` and `eval/run_fact_write_gate_eval.py:56`, each
+    quoting the CLAUDE.md line as though it were still the rule. No assertion
+    covered those quotations, so nothing noticed the file they cite changing
+    underneath them. A fourth copy elsewhere would be believed by the next reader
+    exactly as these five were.
+    """
+    here = Path(__file__).resolve()          # this file states the phrases to ban
+    targets = (list((ROOT / "architecture").rglob("*.md"))
+               + list((ROOT / "app").rglob("*.py"))
+               + list((ROOT / "eval").rglob("*.py"))
+               + [ROOT / "CLAUDE.md"])
+    hits = []
+    for path in targets:
+        if path.resolve() == here:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        hits += [(str(path.relative_to(ROOT)), phrase)
+                 for phrase in SOLE_OPENER_PHRASES if phrase in text]
+    assert hits == [], f"sole-opener claims still standing: {hits}"

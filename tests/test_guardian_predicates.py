@@ -278,6 +278,114 @@ def test_missing_baseline_never_fires():
     assert detect.data_damage(0, 0, 0.05)[0] is False
 
 
+# ── an unreadable knowledge graph is not an intact one (#1525) ──────────────
+# `detect.data_damage` above is a pure predicate over two numbers, and those four
+# nodes are all it ever had. The defect lived one level up: the predicate answers
+# "no baseline" both for a missing baseline and for a count that could not be
+# taken, `evaluate_data_damage` threw that reason away, and so a store that could
+# not be opened at all — the shape a moved data root leaves behind — reached the
+# journal as "data intact". These call the real method on a real Guardian with
+# only the counters' inputs substituted, so what is exercised is the reporting,
+# not a stub's return value.
+
+def _kg_store(path, rows: int) -> str:
+    """A knowledge-graph store with `rows` rows, at `path`."""
+    import sqlite3
+
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE edges (id INTEGER PRIMARY KEY, src TEXT, dst TEXT)")
+    con.executemany("INSERT INTO edges (src, dst) VALUES (?, ?)",
+                    [(f"e{i}", f"t{i}") for i in range(rows)])
+    con.commit()
+    con.close()
+    return str(path)
+
+
+def _damage_guardian(tmp_path, monkeypatch, *, kg_db: str, current: dict):
+    """A Guardian whose only real behaviour is `evaluate_data_damage`."""
+    import types
+
+    import guardian as G
+
+    args = types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "state"),
+        guardian_state=str(tmp_path / "gstate"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0,
+    )
+    g = G.Guardian(args)
+    monkeypatch.setattr(G.policy, "KG_DB", kg_db)
+    # The vault half is fixed at "unchanged", so every assertion below is about
+    # the graph read and cannot be satisfied by a vault finding.
+    monkeypatch.setattr(G, "count_vault_files", lambda root: 400)
+    return g, dict(current)
+
+
+def test_a_graph_that_cannot_be_opened_is_reported_unreadable_not_intact(tmp_path,
+                                                                          monkeypatch):
+    """The store is absent, which is what a root that moved looks like to this
+    watchdog, and it is the case #1525 names as the risk of the restated path."""
+    missing = str(tmp_path / "moved-away" / "kg.sqlite")
+    g, current = _damage_guardian(
+        tmp_path, monkeypatch, kg_db=missing,
+        current={"kg_rows": 1000, "vault_files": 400})
+
+    hit, why = g.evaluate_data_damage(current)
+
+    assert hit is False, "an unreadable store is not evidence of damage to roll back"
+    assert "UNREADABLE" in why, f"reported {why!r} for a store it never opened"
+    assert "data intact" not in why, why
+    assert missing in why, f"the reason must name the store it could not read: {why!r}"
+
+
+def test_a_store_whose_read_raises_is_reported_unreadable_too(tmp_path, monkeypatch):
+    """The file is there and is not a database: `count_kg_rows` swallows that into
+    the same None, so the reporting has to carry it — the second failure shape
+    `except Exception: return None` hid."""
+    junk = tmp_path / "kg.sqlite"
+    junk.write_bytes(b"not a database, just bytes with a sqlite suffix")
+    g, current = _damage_guardian(
+        tmp_path, monkeypatch, kg_db=str(junk),
+        current={"kg_rows": 1000, "vault_files": 400})
+
+    hit, why = g.evaluate_data_damage(current)
+
+    assert hit is False and "UNREADABLE" in why and "data intact" not in why, why
+
+
+def test_the_healthy_read_still_reports_data_intact(tmp_path, monkeypatch):
+    """The positive control, in both directions. `data intact` has to survive a
+    store that really was counted, or the node above could be satisfied by a
+    reason that always complains; and the same call has to still fire on a real
+    drop, or `data intact` would be a constant and the tripwire a decoration."""
+    store = _kg_store(tmp_path / "kg.sqlite", 950)
+    g, current = _damage_guardian(
+        tmp_path, monkeypatch, kg_db=store,
+        current={"kg_rows": 1000, "vault_files": 400})
+
+    assert g.evaluate_data_damage(current) == (False, "data intact")
+
+    _kg_store(tmp_path / "dropped.sqlite", 900)
+    g2, _ = _damage_guardian(
+        tmp_path, monkeypatch, kg_db=str(tmp_path / "dropped.sqlite"),
+        current={"kg_rows": 1000, "vault_files": 400})
+    hit, why = g2.evaluate_data_damage({"kg_rows": 1000, "vault_files": 400})
+    assert hit and "knowledge graph rows" in why and "dropped 10.0%" in why, why
+
+
+def test_a_missing_path_is_reported_as_no_path(tmp_path, monkeypatch):
+    """`policy.KG_DB` empty is the shape of a resolver that produced nothing at
+    all; the reason has to say that rather than name a file."""
+    g, current = _damage_guardian(
+        tmp_path, monkeypatch, kg_db="",
+        current={"kg_rows": 1000, "vault_files": 400})
+
+    hit, why = g.evaluate_data_damage(current)
+
+    assert hit is False and "UNREADABLE" in why, why
+    assert "no path given" in why, why
+
+
 # ---------------------------------------------------------------------------
 # normalize
 # ---------------------------------------------------------------------------

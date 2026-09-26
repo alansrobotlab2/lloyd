@@ -462,8 +462,13 @@ One SQLite queue drained by `workers.slots` asyncio workers inside the backend
 
 ## Knowledge graph
 
-- **Nothing opens the store except `app.kg_store`** — no script, router or
-  fixture.
+- **`app.kg_store` is the only writer of the store** — no script, router or
+  fixture writes or opens it for a mutation. One read-only opener exists and is
+  allowed: the guardian's data-damage tripwire counts rows through its own
+  read-only handle (`count_kg_rows`, `agent-services/guardian/guardian.py`)
+  because the watchdog runs system python on a staged snapshot and cannot import
+  this repo; its path comes from the stdlib-only `app/data_root.py`, not from a
+  restated `_pipeline/...` literal (#1525).
 - An unreadable store raises `StoreUnavailable`; never return an empty graph on
   a read failure.
 - Expire edges, never delete them.

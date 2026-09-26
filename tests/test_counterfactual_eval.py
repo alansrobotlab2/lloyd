@@ -220,8 +220,8 @@ QMD_INDEX_READERS = {
 def test_no_script_under_eval_opens_the_knowledge_store_file():
     """`eval/` reaches the graph through `app.kg_store`, never through sqlite3.
 
-    The rule is stated in CLAUDE.md — "Nothing opens the store except
-    `app.kg_store`" — and `--verify` was the last violator: it opened
+    The rule is stated in CLAUDE.md — "`app.kg_store` is the only writer of the
+    store" — and `--verify` was the last violator: it opened
     `VAULT_KG_DB` read-only and hand-queried `aliases`. Living that close to raw
     sqlite is what let one expression — `.lower()` over a one-column ROW instead
     of the row's field — raise AttributeError on every invocation from the file's

@@ -46,6 +46,14 @@ DATA_ROOT_ENV = "LLOYD_DATA"
 #: `scripts/backup/backup-vault.sh:28` already read; `vault_root()` honours the
 #: same name rather than inventing a second knob.
 VAULT_ROOT_ENV = "LLOYD_VAULT_ROOT"
+#: Where a data root keeps the knowledge-graph store, relative to the root.
+#: Spelled once, here, because two readers name that file and only one of them
+#: can import `app.paths`: `app.paths.VAULT_KG_DB_DEFAULT` builds it from this
+#: constant, and the guardian's data-damage tripwire asks `kg_store_for_tree()`
+#: — its `policy.py` used to restate `_pipeline/vault-derived/kg.sqlite` against
+#: its own `DATA_ROOT`, which is the same restatement #1415 is about, one root
+#: move away from biting (#1525).
+KG_DB_RELATIVE = Path("_pipeline") / "vault-derived" / "kg.sqlite"
 
 try:
     import pwd as _pwd
@@ -150,6 +158,26 @@ def resolve_data_root_for_tree(tree: Path | None = None) -> Path:
                              is_worktree=tree_is_worktree(home),
                              live_checkout=live_checkout(),
                              production_root=production_data_root())
+
+
+def kg_store_for_root(root: Path) -> Path:
+    """The knowledge-graph store inside one already-resolved data root.
+
+    For a caller that resolved the root itself and needs the file name inside it,
+    which is the only layout fact it should be allowed to know.
+    """
+    return Path(root) / KG_DB_RELATIVE
+
+
+def kg_store_for_tree(tree: Path | None = None) -> Path:
+    """`resolve_data_root_for_tree` plus the store's place inside that root.
+
+    The entry point for a reader outside the venv: one call, no `app.paths`, no
+    restated layout. `DataRootMissing` propagates exactly as it does from
+    `resolve_data_root_for_tree` — the caller decides whether a missing root is a
+    refusal or a fallback, this module does not guess for it.
+    """
+    return kg_store_for_root(resolve_data_root_for_tree(tree))
 
 
 def vault_root() -> Path:

@@ -596,3 +596,102 @@ def test_a_raising_selftest_is_named_in_the_page_too(cold_stack, monkeypatch):
     cold_stack.maybe_selftest()
     assert cold_stack.selftest_ok is False
     assert "selftest module broke" in seen[0]["body"]
+
+
+# ── the KG tripwire still works from the staged snapshot (#1525) ─────────────
+
+#: What the driver prints, and the three environments it prints it under. The
+#: `repo` values are the two a deployed watchdog can actually be in: the live
+#: checkout, whose resolver answers; and a snapshot that points at a tree with no
+#: `app/data_root.py`, which is the branch that must degrade rather than die.
+KG_PROBE = (
+    "import sys, os\n"
+    "sys.path.insert(0, os.environ['KG_SNAP'])\n"
+    "import policy, guardian as G\n"
+    "print('KG_DB', policy.KG_DB)\n"
+    "print('COUNT', *G.count_kg_rows(policy.KG_DB))\n"
+)
+
+
+def _kg_probe(tmp_path: Path, *, snapshot: Path, repo: Path,
+              data_root: Path | None = None):
+    """Run the real `policy` + `guardian` under system python3, with only the
+    snapshot dir on sys.path — which is what `%h/.local/state/lloyd-guardian/bin`
+    is when the unit execs it.
+
+    `data_root` is `LLOYD_DATA` when a case wants an explicit root, and absent
+    when the case is testing what the resolver derives with none — a worktree
+    checkout (`tests/conftest.py:63`) keeps its data inside the tree, so the
+    second case below expects the store under `repo/.lloyd-data`, which is a
+    different answer from `repo` itself and so still proves the resolver ran.
+    """
+    env = {k: str(v) for k, v in {
+        "PATH": "/usr/bin:/bin", "HOME": tmp_path / "kg-home",
+        "KG_SNAP": snapshot,
+        "LLOYD_GUARDIAN_REPO": repo,
+        "LLOYD_GUARDIAN_STATE": tmp_path / "kg-gstate",
+        "LLOYD_AUTOMOD_STATE": tmp_path / "kg-astate"}.items()}
+    if data_root is not None:
+        env["LLOYD_DATA"] = str(data_root)
+    return subprocess.run(["/usr/bin/python3", "-c", KG_PROBE],
+                          cwd=str(tmp_path), capture_output=True, text=True,
+                          env=env, timeout=60)
+
+
+def test_the_staged_snapshot_boots_with_the_kg_tripwire_and_passes_staging(tmp_path):
+    """The boundary #1525 crosses. `policy.py` now reaches for `app/data_root.py`,
+    and `policy` is imported at start-up from the STAGED snapshot, where no repo sits
+    on sys.path (`lloyd-guardian.service` execs `/usr/bin/python3` on
+    `%h/.local/state/lloyd-guardian/bin/guardian.py`; `guardian-stage.sh` copies only
+    `agent-services/guardian/*.py`). A `policy.py` that raised on import would not
+    fail a test: it would fail the boot, and the gate would refuse the candidate,
+    keeping the previous watchdog in charge with one journal line as the trace. So
+    both halves are run against the staged tree — `selftest.py --profile staging`
+    still exits 0, and the snapshot imports and counts a real store under either
+    answer the resolver can give: the resolved one, and the fallback for a snapshot
+    pointing at a tree that has no `app/data_root.py`."""
+    proc = _run_selftest("staging", tmp_path)
+    assert proc.returncode == 0, (
+        "the stage gate would refuse this candidate and keep the pre-change "
+        f"watchdog running:\n{proc.stdout}\n{proc.stderr}")
+
+    snap = _candidate(tmp_path / "kg")            # the real files, copied
+    store = tmp_path / "kg-data" / "_pipeline" / "vault-derived" / "kg.sqlite"
+    store.parent.mkdir(parents=True)
+    import sqlite3
+    con = sqlite3.connect(store)
+    con.execute("CREATE TABLE edges (a)")
+    con.executemany("INSERT INTO edges VALUES (?)", [(1,), (2,), (3,)])
+    con.commit()
+    con.close()
+
+    # Snapshot pointing at itself: no app/data_root.py there at all, so this is the
+    # fallback branch, and the file it names is still the one that exists.
+    r = _kg_probe(tmp_path, snapshot=snap, data_root=tmp_path / "kg-data", repo=snap)
+    assert r.returncode == 0, f"the snapshot failed to import: {r.stderr}"
+    assert f"KG_DB {store}" in r.stdout, r.stdout
+    assert "COUNT 3 " in r.stdout, r.stdout
+
+    # Same snapshot, now pointed at a tree that HAS the resolver, with a root set:
+    # the counted file moves to that root, which is the fallback's shape and not
+    # the resolver's — the fallback would name `repo/_pipeline/...` inside the tree.
+    other = tmp_path / "resolver-data"
+    r2 = _kg_probe(tmp_path, snapshot=snap, repo=ROOT, data_root=other)
+    assert r2.returncode == 0, f"the resolver branch failed to import: {r2.stderr}"
+    got = [ln for ln in r2.stdout.splitlines() if ln.startswith("KG_DB ")][0][6:]
+    assert got == str(other / "_pipeline" / "vault-derived" / "kg.sqlite"), (
+        f"the watchdog counted {got!r} with LLOYD_DATA={other}: it is answering its "
+        "in-tree literal, not the resolver")
+    assert not got.startswith(str(ROOT)), (
+        f"{got} is inside the code tree — the pre-#1525 spelling")
+    assert "COUNT None" in r2.stdout, (
+        "a store that is not there reports no count and the path it tried: "
+        f"{r2.stdout}")
+
+    # And with no root set at all the call still has to answer — a resolver that
+    # raises must not take the import down with it.
+    r3 = _kg_probe(tmp_path, snapshot=snap, repo=ROOT)
+    assert r3.returncode == 0, (
+        f"policy/guardian failed to import from the snapshot with no LLOYD_DATA: "
+        f"{r3.stderr}")
+    assert r3.stdout.startswith("KG_DB /"), r3.stdout

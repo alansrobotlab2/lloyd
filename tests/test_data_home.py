@@ -11,7 +11,11 @@ databases, `_pipeline/` and logs went with the code. They moved to
   root — the data used to be isolated by living inside the worktree, and a path
   outside it isolates nothing unless someone sets it;
 * the guardian's data tripwire, the snapshot and restore scripts, and the
-  one-shot migration, all against temp trees.
+  one-shot migration, all against temp trees;
+* the guardian's knowledge-graph path (#1525): derived from this resolver by file
+  path, because the watchdog runs system python on a staged snapshot and cannot
+  import `app.paths`, and degrading to its own literal rather than failing to
+  boot when the resolver is missing or refuses.
 """
 from __future__ import annotations
 
@@ -595,6 +599,151 @@ def _migrate():
     sys.path.insert(0, str(ROOT / "scripts"))
     import migrate_data_home as M
     return M
+
+
+# ── the guardian reaches this resolver by path, not by copying the layout ───
+# #1525: the watchdog counted rows in `_pipeline/vault-derived/kg.sqlite` built
+# from its own `DATA_ROOT` literal while `app.paths` built the same file from this
+# module — two rules for one path, one root move apart, and latent until today:
+# both spellings name the same existing file. The guardian cannot import
+# `app.paths` (system python, staged snapshot, no venv), so it loads
+# `app/data_root.py` by file path, which is stdlib-only for exactly this reason.
+
+def _guardian_fallback_store(tmp_path) -> Path:
+    """A store at the pre-#1525 spelling under a fallback root, holding 7 rows."""
+    store = tmp_path / "fallback-data" / "_pipeline" / "vault-derived" / "kg.sqlite"
+    store.parent.mkdir(parents=True)
+    con = sqlite3.connect(store)
+    con.execute("CREATE TABLE edges (src TEXT, dst TEXT)")
+    con.executemany("INSERT INTO edges VALUES (?, ?)",
+                    [(f"a{i}", f"b{i}") for i in range(7)])
+    con.commit()
+    con.close()
+    return store
+
+
+def test_the_guardian_kg_path_follows_lloyd_data(tmp_path, monkeypatch):
+    """Clause 1, first half: a root set for the watchdog is the root it counts.
+
+    Deliberately not compared to `paths.VAULT_KG_DB_DEFAULT` under this
+    environment: that constant is env-immune by design (`app/paths.py:193`), so it
+    answers `DATA_ROOT` and not `LLOYD_DATA`, and a test that expected them to
+    agree here would be pinning a difference the code states as intended. What the
+    two readers must share is the layout below it, which is the next node's
+    business.
+    """
+    root = tmp_path / "guardian-data"
+    monkeypatch.setenv("LLOYD_DATA", str(root))
+
+    got = policy.kg_db_path(repo=str(ROOT), fallback_root=str(tmp_path / "unused-fb"))
+
+    assert got == str(root / "_pipeline" / "vault-derived" / "kg.sqlite")
+    assert "unused-fb" not in got, "a resolved answer must not name the fallback root"
+
+
+def test_the_guardian_asks_the_resolver_instead_of_restating_the_layout(tmp_path):
+    """Clause 1, second half — provenance, not spelling. The stand-in returns a
+    path no restatement of `_pipeline/vault-derived/kg.sqlite` could produce, so
+    the call can only return it by reading it out of the loaded module. The old
+    literal answers with the fallback root's path instead, which reddens this."""
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "data_root.py").write_text(
+        'import pathlib\n\n\n'
+        'def kg_store_for_tree(tree=None):\n'
+        '    return pathlib.Path("/resolver/answered/this/kg-4242.sqlite")\n',
+        encoding="utf-8")
+
+    got = policy.kg_db_path(repo=str(repo), fallback_root=str(tmp_path / "fb"))
+
+    assert got == "/resolver/answered/this/kg-4242.sqlite", got
+    assert "fb" not in got, "the fallback root leaked into a resolved answer"
+
+
+def test_the_resolver_and_app_paths_spell_the_store_from_one_constant():
+    """The layout constant is shared, so the two readers cannot drift by editing
+    one side: `app.paths` builds its default from `KG_DB_RELATIVE`, and the
+    resolver the guardian loads answers from the same constant."""
+    from app import data_root
+
+    assert paths.VAULT_KG_DB_DEFAULT == paths.DATA_ROOT / paths.KG_DB_RELATIVE
+    assert paths.KG_DB_RELATIVE == Path("_pipeline/vault-derived/kg.sqlite")
+    assert data_root.kg_store_for_root(Path("/data/x")) == \
+        Path("/data/x/_pipeline/vault-derived/kg.sqlite")
+
+
+def test_the_guardian_falls_back_when_the_resolver_is_not_there(tmp_path):
+    """Clause 2: no repo at all — the shape of a snapshot whose `REPO` has moved.
+    Nothing may escape, and the watchdog must still be counting a store it can
+    name, which is the pre-#1525 literal doing its job as the fallback."""
+    store = _guardian_fallback_store(tmp_path)
+    gone = str(tmp_path / "no-such-repo")
+
+    assert policy._data_root_module(gone) is None
+    got = policy.kg_db_path(repo=gone, fallback_root=str(tmp_path / "fallback-data"))
+
+    assert got == str(store)
+    assert G.count_kg_rows(got) == (7, str(store)), (
+        "the fallback path has to be one the counter can actually read")
+
+
+def test_the_guardian_falls_back_when_the_resolver_raises_on_import(tmp_path):
+    """A resolver file that explodes while executing is the worst shape: an
+    escaping exception here is a watchdog that never starts."""
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "data_root.py").write_text(
+        'raise RuntimeError("boom during import")\n', encoding="utf-8")
+    store = _guardian_fallback_store(tmp_path)
+
+    assert policy._data_root_module(str(repo)) is None
+    assert policy.kg_db_path(repo=str(repo),
+                             fallback_root=str(tmp_path / "fallback-data")) == str(store)
+
+
+def test_the_guardian_falls_back_when_the_resolver_refuses_the_root(tmp_path):
+    """`DataRootMissing` is a designed answer, not a bug — a production checkout
+    whose data root lost its marker is a refusal by design (the resolver's own
+    refusal is pinned by `test_resolve_for_tree_refuses_an_unmarked_production_root`
+    above). A watchdog must not inherit that refusal: it degrades to the literal
+    and keeps counting, because a watchdog that dies is worse than one watching
+    one root too many."""
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "data_root.py").write_text(
+        'class DataRootMissing(Exception):\n'
+        '    pass\n\n\n'
+        'def kg_store_for_tree(tree=None):\n'
+        '    raise DataRootMissing("the data root lost its marker")\n',
+        encoding="utf-8")
+    store = _guardian_fallback_store(tmp_path)
+
+    got = policy.kg_db_path(repo=str(repo), fallback_root=str(tmp_path / "fallback-data"))
+
+    assert got == str(store), "a refusing resolver must not take the tripwire down"
+    assert G.count_kg_rows(got)[0] == 7
+
+
+def test_the_resolver_the_guardian_loads_still_refuses_an_unmarked_root(tmp_path,
+                                                                        monkeypatch):
+    """The half the watchdog does not get to decide. The module the guardian loads
+    is the module the promoter uses, and it still refuses rather than guessing a
+    path inside the tree — the refusal this file has always pinned through
+    `app.paths` (`test_production_without_its_marker_refuses_rather_than_writing_into_the_tree`),
+    now pinned on the entry point a no-venv caller actually calls:
+    `resolve_data_root_for_tree`, which reads the live environment."""
+    from app import data_root
+
+    live = (tmp_path / "lloyd").resolve()
+    live.mkdir()
+    prod = tmp_path / "lloyd-data"
+    prod.mkdir()                                     # production root, unmarked
+    monkeypatch.delenv("LLOYD_DATA", raising=False)
+    monkeypatch.setattr(data_root, "live_checkout", lambda: live)
+    monkeypatch.setattr(data_root, "production_data_root", lambda: prod)
+
+    with pytest.raises(data_root.DataRootMissing, match="refuses to fall back"):
+        data_root.resolve_data_root_for_tree(live)
 
 
 def test_the_migration_moves_everything_verifies_it_and_holds_the_originals(tmp_path):

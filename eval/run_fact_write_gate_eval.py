@@ -53,8 +53,9 @@ LIVE_DB = Path.home() / "lloyd-data" / "_pipeline" / "vault-derived" / "kg.sqlit
 
 
 def _open_copy(db: Path):
-    """The copy, through `app.kg_store` — nothing else opens a store (CLAUDE.md);
-    an absent file raises `StoreUnavailable` rather than reading as zero rows."""
+    """The copy, through `app.kg_store`, the store's only writer (CLAUDE.md); an
+    absent file raises `StoreUnavailable` rather than reading as zero rows. The one
+    opener that is not this module is the guardian's read-only row count (#1525)."""
     from app.kg_store import KGStore, _require_database
     if db.resolve() == LIVE_DB.resolve():
         raise SystemExit("refusing the live kg.sqlite: `.backup` a copy and pass that")

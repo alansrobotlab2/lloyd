@@ -167,7 +167,68 @@ ROLLBACK_REQUEST_MAX_AGE_SECONDS = 900.0
 # and the vault are gitignored, so a change that deletes rows or notes boots
 # fine, logs nothing, and survives the revert.
 DATA_DROP_FRACTION = 0.05
-KG_DB = f"{DATA_ROOT}/_pipeline/vault-derived/kg.sqlite"
+
+#: Only the fallback branch of `kg_db_path` below uses this, and only because that
+#: branch is the one where no resolver could be loaded at all. Everything else
+#: that needs this layout reads `app.data_root.KG_DB_RELATIVE`.
+_KG_DB_RELPATH = "_pipeline/vault-derived/kg.sqlite"
+
+
+def _data_root_module(repo: str):
+    """The stdlib-only data-root resolver, imported by file path, or None.
+
+    By path and not by name for the reason `speak.py::_load_shaping_module`
+    spells out: this file runs from the pinned snapshot under
+    `~/.local/state/lloyd-guardian/bin` on `/usr/bin/python3`, where the repo is
+    not on `sys.path`. The module's own header says nothing here may import from
+    `app/`, and this is not an exception to that rule so much as the case the rule
+    is written around: `app/data_root.py` is the stdlib-only half (#1415) with no
+    import of its own and no venv behind it — `app.paths`, which does need one,
+    stays out. Every failure shape (no repo, no module, a loader that refuses, a
+    module that raises while executing) returns None rather than propagating,
+    because an exception here is a watchdog that never starts.
+    """
+    path = __import__("pathlib").Path(repo) / "app" / "data_root.py"
+    if not path.is_file():
+        return None
+    try:
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("lloyd_data_root", path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    except Exception:      # noqa: BLE001 - see the docstring: never propagate
+        return None
+
+
+def kg_db_path(repo: str = REPO, fallback_root: str = DATA_ROOT) -> str:
+    """Where the knowledge-graph store the tripwire counts lives.
+
+    Restating `_pipeline/vault-derived/kg.sqlite` against `DATA_ROOT` was the
+    defect: the data root moved to `~/lloyd-data` on 2026-09-22, and a copy of a
+    path whose root moved returns a clean-looking non-answer — here a missing file
+    reads as an unreadable graph, which is what #1525 is about. The resolver is
+    asked instead, so a `LLOYD_DATA` set for the watchdog is followed by both it
+    and `app.paths`, and the layout is spelled in one place (`KG_DB_RELATIVE`).
+
+    The fallback is that pre-#1525 literal, and it stays reachable on purpose: a
+    watchdog that dies because its resolver is missing or refuses
+    (`DataRootMissing` on a production root with no marker) is worse than one
+    counting against a path it can name. `datawatch.py:133` sets the precedent
+    for degrading rather than raising, and the caller says out loud which store it
+    read.
+    """
+    resolver = _data_root_module(repo)
+    if resolver is not None:
+        try:
+            return str(resolver.kg_store_for_tree(__import__("pathlib").Path(repo)))
+        except Exception:  # noqa: BLE001 - DataRootMissing and anything like it
+            pass
+    return str(__import__("pathlib").Path(fallback_root) / _KG_DB_RELPATH)
+KG_DB = kg_db_path()
 VAULT_ROOT = "/home/alansrobotlab/obsidian"
 
 # ── Vault tripwire (every tick, not only while observing) ──────────────────

@@ -597,9 +597,15 @@ status field in a JSON file nothing downstream read. It also ran every 15 minute
 until it was moved to nightly, where 95 of 96 daily runs were no-ops — the input
 is written once a night by #56.
 
-**One store.** Edges, aliases, the entity registry and the fact index live in
-`_pipeline/vault-derived/kg.sqlite` behind `app.kg_store`, and nothing else opens
-it. See [[knowledge-graph]].
+**One store, one writer, and one read-only reader.** Edges, aliases, the entity
+registry and the fact index live in `_pipeline/vault-derived/kg.sqlite` behind
+`app.kg_store`, and nothing else **writes** it. It has a second opener: the
+guardian's data-damage tripwire opens it read-only for a row count
+(`count_kg_rows`, `agent-services/guardian/guardian.py`). That watchdog runs
+system python on a staged snapshot, so it can import neither `app.kg_store` nor
+`app.paths`, and the path it counts comes from the stdlib-only
+`app/data_root.py` — the one spelling both readers share (#1525). See
+[[knowledge-graph]].
 
 ---
 

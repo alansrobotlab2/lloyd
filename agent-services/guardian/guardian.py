@@ -366,7 +366,7 @@ class Guardian:
     def evaluate_data_damage(self, current: dict) -> tuple[bool, str]:
         before_rows = current.get("kg_rows")
         before_files = current.get("vault_files")
-        rows_now = count_kg_rows(policy.KG_DB)
+        rows_now, kg_read = count_kg_rows(policy.KG_DB)
         files_now = count_vault_files(policy.VAULT_ROOT)
         hit, why = detect.data_damage(before_rows, rows_now, policy.DATA_DROP_FRACTION)
         if hit:
@@ -374,6 +374,18 @@ class Guardian:
         hit, why = detect.data_damage(before_files, files_now, policy.DATA_DROP_FRACTION)
         if hit:
             return True, f"vault files {why}"
+        # A count that could not be taken is not a store that is intact. The
+        # predicate answers "no baseline" both for a missing baseline and for a
+        # missing count, and this call site threw the reason away — so until #1525
+        # a knowledge graph that could not be opened at all, including one whose
+        # data root had moved out from under a restated path, reached the journal
+        # as "data intact". The vault tripwire above is still the thing that stops
+        # a lost store being shrugged off; this only names which store it could not
+        # read, and still rolls back nothing.
+        if rows_now is None:
+            return False, ("knowledge graph UNREADABLE"
+                           + (" (no baseline written yet)" if not before_rows else "")
+                           + f": {kg_read or 'no path given'}")
         return False, "data intact"
 
     # ── rollback ───────────────────────────────────────────────────────
@@ -1244,21 +1256,37 @@ class Guardian:
             time.sleep(self.interval)
 
 
-def count_kg_rows(db_path: str) -> int | None:
-    """Total rows across the knowledge-graph store, read-only."""
+def count_kg_rows(db_path: str) -> tuple[int | None, str]:
+    """Total rows across the knowledge-graph store, read-only, and what was read.
+
+    The second element is the store that was opened, or `""` when there was no
+    path to open at all. It exists because a bare `None` could not tell an empty
+    graph from no graph, and the caller reported either as "data intact" (#1525):
+    the path is now in the log line, so a moved root cannot present itself as a
+    healthy store.
+
+    Still the guardian's own read-only handle, not `app.kg_store` — the watchdog
+    runs system python on a staged snapshot and cannot import it. Unifying this
+    counter with the promoter's (`scripts/automod/promote.py::count_kg_rows`),
+    which resolve the same file by two different rules, is the follow-up #1525
+    records rather than does.
+    """
     import sqlite3
+    if not db_path:
+        return None, ""
     if not Path(db_path).exists():
-        return None
+        return None, str(db_path)
     try:
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
         try:
             names = [r[0] for r in con.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'")]
-            return sum(con.execute(f"SELECT count(*) FROM '{n}'").fetchone()[0] for n in names)
+            return sum(con.execute(f"SELECT count(*) FROM '{n}'").fetchone()[0]
+                       for n in names), str(db_path)
         finally:
             con.close()
     except Exception:
-        return None
+        return None, str(db_path)
 
 
 def count_vault_files(root: str) -> int | None:
