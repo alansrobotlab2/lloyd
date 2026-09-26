@@ -97,6 +97,15 @@ def rollback_title(current: dict | None, bad: str | None, expected: str) -> str:
     return f"Rolled back {(bad or '?')[:8]} → {expected[:8]}"
 
 
+#: The runtime-data stray alert's title, and therefore the daily-note section
+#: heading its incident is coalesced under. One constant because the check that
+#: raises it and the check that clears it must agree on the string byte for byte —
+#: `notify.resolve()` matches headings literally, and a retitled alarm whose
+#: retraction still says the old words leaves the stale instructions standing as the
+#: only readable record of the incident (#1536).
+RUNTIME_DATA_ALERT_TITLE = "Runtime data is being written into the code tree"
+
+
 class Guardian:
     def __init__(self, args):
         self.repo = args.repo
@@ -834,6 +843,46 @@ class Guardian:
             f"Sync will not start until then. Marker: {marker}")
 
     # ── data-root tripwire ─────────────────────────────────────────────
+    def _runtime_data_incident(self, now: float) -> None:
+        """One stray check: raise the alert, or retract it, for this tick.
+
+        Split out of `check_data` so the incident's two edges are testable without
+        booting a supervisor, a probe set and a rollback history — `check_data`
+        calls this unmodified on the same tick it always did (#1536).
+        """
+        try:
+            strays = datawatch.stray_in_tree(policy.REPO)
+        except Exception as exc:  # noqa: BLE001
+            log(f"stray check failed (continuing): {exc}")
+            strays = []
+        if strays and self.data.armed:
+            # `coalesce` is what keeps one incident to one section on the daily
+            # note. This check runs every STRAY_CHECK_SECONDS (3600 s) and the
+            # condition can outlast many of them, so the hourly cadence used to
+            # append a whole new section per check — 21 copies of ONE incident in
+            # memory/2026-09-25.md, each naming a different snapshot of the set
+            # and none ever retracted. Guardian's own repeat guard cannot help:
+            # ALERT_REPEAT_SECONDS is 900 s and 3600 > 900 always, so every
+            # finding passed straight through (#1536).
+            self.alert("error", RUNTIME_DATA_ALERT_TITLE,
+                       "These exist inside the tree again:\n  "
+                       + "\n  ".join(f"{policy.REPO}/{n}" for n in strays)
+                       + f"\n\nSomething still resolves a data path off the code "
+                       f"instead of app.paths.DATA_ROOT ({policy.DATA_ROOT}). Find the "
+                       "writer, move the data across, and remove the in-tree copy.",
+                       coalesce=True)
+        elif not strays:
+            # The condition cleared, so the retraction goes on the SAME surface
+            # the alarm used — the acceptance half of #1536. Not gated on
+            # `data.armed` the way the alert is: a guardian that paused mid-incident
+            # should still close the section it opened, and `resolve` writes
+            # nothing unless one of our sections is actually open. It is
+            # idempotent, so the hourly all-clear after the first stays silent.
+            self.notifier.resolve(
+                RUNTIME_DATA_ALERT_TITLE,
+                "no runtime stores inside the code tree on the latest check — the "
+                "instructions above are stale, nothing further to move")
+
     def check_data(self) -> None:
         """Trip on a wipe of `~/lloyd-data`: pause workers, halt promotions,
         keep evidence, alert. Hourly, also name any runtime path that came
@@ -844,18 +893,7 @@ class Guardian:
         now = time.time()
         if now - self._strays_checked_at >= policy.STRAY_CHECK_SECONDS:
             self._strays_checked_at = now
-            try:
-                strays = datawatch.stray_in_tree(policy.REPO)
-            except Exception as exc:  # noqa: BLE001
-                log(f"stray check failed (continuing): {exc}")
-                strays = []
-            if strays and self.data.armed:
-                self.alert("error", "Runtime data is being written into the code tree",
-                           "These exist inside the tree again:\n  "
-                           + "\n  ".join(f"{policy.REPO}/{n}" for n in strays)
-                           + f"\n\nSomething still resolves a data path off the code "
-                           f"instead of app.paths.DATA_ROOT ({policy.DATA_ROOT}). Find the "
-                           "writer, move the data across, and remove the in-tree copy.")
+            self._runtime_data_incident(now)
         # Is the hourly snapshot still arriving? That layer catches what the
         # tripwire cannot — a root eaten slowly enough never to trip it — and it
         # fails silently: both refusals in `scripts/backup/snapshot-data.sh`

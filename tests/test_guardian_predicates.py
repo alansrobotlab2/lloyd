@@ -12,6 +12,7 @@ including the `start`/`now`/`spawnerr`/`group` fields the predicate reads.
 from __future__ import annotations
 
 import contextlib
+import types
 import sys
 from pathlib import Path
 
@@ -1345,3 +1346,206 @@ def test_the_three_sites_that_cannot_act_all_ask_for_a_human():
         "`asks_for_a_human` matches no alert text in guardian.py: the prose was "
         "reworded everywhere, so delete the fallback from `Notifier.alert` rather "
         "than leave a route nothing can take")
+
+
+# ---------------------------------------------------------------------------
+# #1536 — one runtime-data incident is one daily-note section, and it gets
+# retracted on the surface it was written to.
+#
+# `memory/2026-09-25.md` holds 21 of its 22 `## ` sections as copies of ONE
+# "Runtime data is being written into the code tree" incident — one per
+# STRAY_CHECK_SECONDS tick it outlived — and zero lines saying it cleared. The
+# repeat guard that was supposed to stop it cannot: ALERT_REPEAT_SECONDS is 900.0
+# and the check interval is 3600.0, so every finding passed straight through.
+# Each fixture below advances the clock by exactly one check interval, so the
+# 900 s guard is exercised under the arithmetic that made it inert in production.
+# ---------------------------------------------------------------------------
+
+def _stray_incident(tmp_path, monkeypatch, strays):
+    """A guardian whose stray check reads `strays`, writing to a throwaway vault.
+
+    Everything between the finding and the note is the real thing: the check
+    branch, `Guardian.alert`'s repeat guard, `Notifier.alert`'s fan-out, and
+    `_vault_note`'s write. Only the detector is synthetic — `stray_in_tree`
+    returns whatever the test says, because the live tree returns `[]` since
+    `9e98d0df` and the incident has to be manufactured to be observed.
+    """
+    import guardian as gmod
+    import notify
+    from datetime import datetime as _dt
+
+    vault = tmp_path / "obsidian"
+    (vault / "memory").mkdir(parents=True)
+    clock = {"t": 1_700_000_000.0}
+    monkeypatch.setattr(gmod.time, "time", lambda: clock["t"])
+    found = {"strays": list(strays)}
+    monkeypatch.setattr(gmod.datawatch, "stray_in_tree",
+                        lambda repo: list(found["strays"]))
+
+    g = gmod.Guardian.__new__(gmod.Guardian)   # no supervisor, no probes, no ledger
+    g.notifier = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                                 vault_root=str(vault),
+                                 backend_url="http://127.0.0.1:1")
+    g.data = types.SimpleNamespace(armed=True)
+    g._alert_seen = {}
+    g.last_alert = ""
+    note = vault / "memory" / f"{_dt.now().strftime('%Y-%m-%d')}.md"
+    clears: list[tuple[str, bool]] = []
+    real_resolve = g.notifier.resolve            # the real method, wrapped not replaced
+
+    def _resolve(title, note_text):
+        ok = real_resolve(title, note_text)
+        clears.append((title, ok))
+        return ok
+
+    g.notifier.resolve = _resolve
+
+    def tick(new_strays=None):
+        """One stray-check interval later, with the detector now seeing `new_strays`."""
+        if new_strays is not None:
+            found["strays"] = list(new_strays)
+        clock["t"] += gmod.policy.STRAY_CHECK_SECONDS
+        g._runtime_data_incident(clock["t"])
+
+    return g, note, tick, clears
+
+
+def _sections(note, title):
+    """Bodies of the daily note's `## Self-mod guardian: {title}` sections."""
+    import notify
+
+    text = note.read_text(encoding="utf-8") if note.exists() else ""
+    return [text[a:b] for (t, a, b) in notify.Notifier._daily_sections(text)
+            if t == title]
+
+
+def test_two_stray_checks_of_one_incident_leave_one_daily_note_section(tmp_path, monkeypatch):
+    """#1536 clause 1: the day log's volume tracks incidents, not duration.
+
+    Two checks one interval apart, the same two strays both times. The note gains
+    exactly ONE heading, and the second interval is proven not to be a repeat the
+    900 s guard swallowed: the clock moved 3600 s, `ALERT_REPEAT_SECONDS` is 900 s,
+    so both firings really did reach the notifier (that inequality is the whole
+    reason 21 copies landed on 2026-09-25).
+    """
+    import guardian as gmod
+
+    assert gmod.policy.STRAY_CHECK_SECONDS > gmod.policy.ALERT_REPEAT_SECONDS, (
+        "the fixture's premise: the check interval outruns the repeat guard")
+    g, note, tick, clears = _stray_incident(tmp_path, monkeypatch, ["workers.db", "eval/baselines"])
+    tick()
+    tick()
+
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 1, f"{len(secs)} sections for one incident:\n{note.read_text()}"
+    assert "workers.db" in secs[0] and "eval/baselines" in secs[0], secs[0]
+
+
+def test_a_shrinking_stray_set_rewrites_the_one_section_and_drops_the_gone_path(
+        tmp_path, monkeypatch):
+    """#1536 clause 2: the single section names what the LATEST check found.
+
+    The 21 copies on 2026-09-25 were 21 different snapshots, so `~/lloyd/workers.db`
+    appeared in the note long after the file was gone and a reader could not tell a
+    live firing from a dead one. One check later `workers.db` has left the set: it
+    must disappear from the body, `eval/baselines` must survive, and the heading
+    count must still be one.
+    """
+    import guardian as gmod
+
+    g, note, tick, clears = _stray_incident(tmp_path, monkeypatch, ["workers.db", "eval/baselines"])
+    tick()
+    tick(["eval/baselines"])
+
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 1, f"{len(secs)} sections:\n{note.read_text()}"
+    assert "workers.db" not in secs[0], "a cleared path is still being ordered about"
+    assert "eval/baselines" in secs[0], secs[0]
+
+
+def test_the_set_emptying_writes_one_cleared_line_and_stays_silent_after(
+        tmp_path, monkeypatch):
+    """#1536 clause 3: the retraction lands on the surface the alarm used.
+
+    Three empty checks after a live one: exactly one `cleared:` line, the open
+    marker gone, and the heading still there above it — the point is not to erase
+    the incident but to contradict its imperative instructions where they were
+    written, since the 2026-09-25 note's only surviving record of a half-resolved
+    condition is 21 copies of "Find the writer, move the data across".
+    """
+    import guardian as gmod
+    import notify
+
+    g, note, tick, clears = _stray_incident(tmp_path, monkeypatch, ["workers.db"])
+    tick()
+    tick([])
+    tick([])
+    tick([])
+
+    text = note.read_text(encoding="utf-8")
+    assert text.count(f"{notify.DAILY_CLEARED_PREFIX} ") == 1, text
+    assert notify.DAILY_STILL_OPEN not in text, "the section still claims to be open"
+    assert len(_sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)) == 1, text
+    assert "no runtime stores inside the code tree" in text, text
+    # The other half of "does not repeat it": all three all-clear checks reached
+    # `resolve` for this title and each reported the note as cleared, so silence
+    # comes from an idempotent no-op and not from a swallowed error — the heartbeat
+    # reads that True, and a False every hour would read as a broken notifier.
+    assert [t for t, _ in clears] == [gmod.RUNTIME_DATA_ALERT_TITLE] * 3, clears
+    assert [ok for _, ok in clears] == [True, True, True], clears
+
+
+def test_a_stray_finding_after_a_clear_opens_a_new_section(tmp_path, monkeypatch):
+    """#1536 clause 4: coalescing closes an incident, it does not mute the alert.
+
+    A fix that only ever wrote one section per title would hide the SECOND
+    incident, which is worse than the repetition it removed. Clear the set, then
+    let a stray reappear: two headings, the older one closed with its own
+    `cleared:` line, the new one open — so the count of headings is the count of
+    incidents.
+    """
+    import guardian as gmod
+    import notify
+
+    g, note, tick, clears = _stray_incident(tmp_path, monkeypatch, ["workers.db"])
+    tick()
+    tick([])
+    tick(["sessions"])
+
+    text = note.read_text(encoding="utf-8")
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 2, f"{len(secs)} sections for two incidents:\n{text}"
+    assert text.count(f"{notify.DAILY_CLEARED_PREFIX} ") == 1, text
+    assert secs[0].rstrip().startswith(secs[0].rstrip().splitlines()[0])
+    assert f"\n{notify.DAILY_CLEARED_PREFIX} " in secs[0], secs[0]
+    assert notify.DAILY_STILL_OPEN not in secs[0], "the closed incident reopened"
+    assert secs[1].rstrip().endswith(notify.DAILY_STILL_OPEN), secs[1]
+    assert "sessions" in secs[1] and "workers.db" not in secs[1], secs[1]
+
+
+def test_coalescing_is_scoped_to_the_runtime_data_title(tmp_path, monkeypatch):
+    """#1536 clause 5: another alert's repetition is untouched.
+
+    Two firings of a DIFFERENT title one interval apart — the same cadence, the
+    same notifier, `coalesce` left at its default — still append two sections.
+    Without this, the fix could be silently generalised to every guardian alert,
+    and a rollback or a broken-loop notice that recurs across a night would go
+    unread while it is still true.
+    """
+    import guardian as gmod
+    import notify
+
+    g, note, tick, clears = _stray_incident(tmp_path, monkeypatch, [])
+    for n in range(2):
+        g.alert("error", "Supervisord keeps dying", f"attempt {n}")
+        tick([])
+
+    text = note.read_text(encoding="utf-8")
+    assert len(_sections(note, "Supervisord keeps dying")) == 2, text
+    assert notify.DAILY_STILL_OPEN not in text, "a non-coalescing alert grew a marker"
+    assert _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE) == []
+    # The keyword's own default, since `alert` passes the flag explicitly: a caller
+    # that says nothing must get the old append, not a coalescing section.
+    assert g.notifier._vault_note("Plain notice", "body") is True
+    assert notify.DAILY_STILL_OPEN not in note.read_text(encoding="utf-8")[len(text):], (
+        "`_vault_note`'s default coalesces, so every alert in the file silently did too")

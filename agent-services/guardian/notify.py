@@ -35,6 +35,21 @@ import urllib.request
 from datetime import datetime
 from pathlib import Path
 
+# ── The daily note's incident format (#1536) ──────────────────────────────
+#
+# `_vault_note`'s own section header, as a constant because the coalescing has to
+# FIND the sections it wrote: a format written in one place and re-typed in another
+# is how a retraction stops matching the alarm it retracts.
+DAILY_SECTION_PREFIX = "## Self-mod guardian: "
+# What an OPEN incident's section ends with. Written by `_vault_note` for a
+# coalescing alert and removed only by `resolve`, so "is this incident still open"
+# is answerable from the note itself — no state file, and a guardian restart ten
+# minutes into an incident cannot lose it and start a second section.
+DAILY_STILL_OPEN = "_(still open on the next check)_"
+# What replaces that marker when the condition clears. A prefix rather than prose so
+# a reader scanning the note sees the section's state, not another alarm body.
+DAILY_CLEARED_PREFIX = "cleared:"
+
 
 def _run(cmd: list[str], timeout: float = 5.0) -> bool:
     try:
@@ -117,8 +132,19 @@ class Notifier:
 
     def alert(self, level: str, title: str, body: str, *, evidence: str = "",
               commit: str = "", trigger: str = "", tag: str = "",
-              needs_human: bool = False) -> dict:
+              needs_human: bool = False, coalesce: bool = False) -> dict:
         """Fan out one alert. Returns per-channel success for the heartbeat.
+
+        `coalesce` changes the daily note only, and only for this title. The
+        condition it reports can be one incident that outlasts many checks, and the
+        daily note is the surface a human reads: the runtime-data stray alert used
+        to append a whole section on every hourly check — 21 copies of ONE incident
+        in `memory/2026-09-25.md`, each naming a different snapshot of the stray set,
+        none ever retracted (#1536). With the flag the incident gets ONE section,
+        refreshed in place to the latest finding, and closed by `resolve()`. Every
+        other channel still fans out per firing: the ledger is the per-check audit
+        trail rather than a reading surface, and the toast and the speech already
+        have their own repeat windows.
 
         `needs_human=True` says the guardian has run out of actions: rollback is
         not the right answer here, and only a person can make it one. It routes
@@ -148,7 +174,7 @@ class Notifier:
         results["journal"] = self._journal(level, f"{title} :: {body}")
         results["desktop"] = self._desktop(level, title, body)
         results["voice"] = self._speak(level, title, body)
-        results["vault"] = self._vault_note(title, text)
+        results["vault"] = self._vault_note(title, text, coalesce=coalesce)
         # Four ways into the one channel that becomes work: a terminal state, a
         # rollback's trigger, a site's explicit flag, and the prose that predates
         # the flag. Everything above this line is either ephemeral, overwritten
@@ -251,17 +277,137 @@ class Notifier:
         except Exception:
             return False
 
-    def _vault_note(self, title: str, text: str) -> bool:
+    def _vault_note(self, title: str, text: str, *, coalesce: bool = False) -> bool:
+        """Write this alert's section into today's daily note.
+
+        `coalesce=False` — every alert but the runtime-data stray one — appends a
+        section per fan-out, byte-identical to the pre-#1536 format. `coalesce=True`
+        opens a section on the first finding and REFRESHES that same section on every
+        later finding of the same incident, so one incident is one section no matter
+        how many checks it outlives.
+        """
         try:
-            memory = self.vault_root / "memory"
-            if not memory.is_dir():
+            note = self._daily_note()
+            if note is None:
                 return False
-            note = memory / f"{datetime.now().strftime('%Y-%m-%d')}.md"
+            body = note.read_text(encoding="utf-8") if note.exists() else ""
+            open_at = self._daily_open_at(body, title) if coalesce else None
+            if open_at is not None:
+                start, end = open_at
+                stale = body[start:end]
+                lead = stale[:len(stale) - len(stale.lstrip())]   # keep its blank lead
+                body = (body[:start] + lead + text.rstrip()
+                        + "\n\n" + DAILY_STILL_OPEN + "\n" + body[end:])
+                note.write_text(body, encoding="utf-8")
+                return True
             with open(note, "a", encoding="utf-8") as f:
-                f.write(f"\n\n## Self-mod guardian: {title}\n\n{text}\n")
+                if coalesce:
+                    f.write(f"\n\n## Self-mod guardian: {title}\n\n{text.rstrip()}\n\n"
+                            f"{DAILY_STILL_OPEN}\n")
+                else:
+                    f.write(f"\n\n## Self-mod guardian: {title}\n\n{text}\n")
             return True
         except Exception:
             return False
+
+    def resolve(self, title: str, note_text: str) -> bool:
+        """Close an open incident on the daily note. #1536.
+
+        An alarm written to the surface a human reads is only half-written until its
+        retraction is on that SAME surface. `memory/2026-09-25.md` holds 21 sections
+        of imperative instructions ("Find the writer, move the data across, and
+        remove the in-tree copy") for a condition that has since partly resolved, and
+        zero lines saying it cleared — so the only surviving record of a finished
+        incident is an instruction to do work nobody should do, and the count reads as
+        escalating urgency instead.
+
+        This replaces the open marker with one `cleared:` line, so a reader who does
+        reach the stale instructions finds the contradiction at the foot of the same
+        section rather than in a file they were never sent to. It writes nothing when
+        no incident is open for `title`, which is what makes the second, third and
+        hundredth all-clear check silent. No other channel is touched: a clear is not
+        an alert, so no toast, no speech, no backlog task — and the ledger still holds
+        every individual firing either way.
+
+        Returns True when the note is in a cleared state for `title` (sealed now, or
+        nothing was open), False on failure.
+        """
+        if not self.external:
+            return True
+        try:
+            note = self._daily_note()
+            if note is None or not note.exists():
+                return True
+            body = note.read_text(encoding="utf-8")
+            open_at = self._daily_open_at(body, title)
+            if open_at is None:
+                return True
+            start, end = open_at
+            stale = body[start:end].rstrip()
+            # The marker is REPLACED, not followed: leaving it standing above the
+            # `cleared:` line means the note still claims the incident is open to
+            # anyone scanning for that marker, which is the one question a
+            # retraction exists to change the answer to.
+            if stale.endswith(DAILY_STILL_OPEN):
+                stale = stale[:-len(DAILY_STILL_OPEN)].rstrip()
+            note.write_text(body[:start]
+                            + stale
+                            + f"\n\n{DAILY_CLEARED_PREFIX} {note_text}\n"
+                            + body[end:], encoding="utf-8")
+            return True
+        except Exception:
+            return False
+
+    # ── daily-note incident plumbing (#1536) ──────────────────────────────
+    #
+    # Incident state is read back OUT of the note, never held in this process, so a
+    # guardian restart mid-incident refreshes the existing section instead of opening
+    # a second one: the incident is a fact about the note, not about this runtime.
+
+    def _daily_note(self):
+        """Today's note, or None when the vault has no `memory/` to write into."""
+        memory = self.vault_root / "memory"
+        if not memory.is_dir():
+            return None
+        return memory / f"{datetime.now().strftime('%Y-%m-%d')}.md"
+
+    @staticmethod
+    def _daily_sections(text: str) -> list[tuple[str, int, int]]:
+        """(title, body_start, body_end) per guardian section, in file order.
+
+        The prefix is matched as a literal so a `###` sub-heading inside a body does
+        not split its parent, and lines inside a fenced block are skipped so a note
+        quoting this very format cannot invent a section out of a code sample.
+        """
+        out: list[tuple[str, int, int]] = []
+        cur: tuple[str, int] | None = None
+        offset = 0
+        fence = False
+        for line in text.splitlines(keepends=True):
+            if line.strip().startswith(("```", "~~~")):
+                fence = not fence
+            elif not fence and line.startswith(DAILY_SECTION_PREFIX):
+                if cur is not None:
+                    out.append((cur[0], cur[1], offset))
+                cur = (line.rstrip("\n")[len(DAILY_SECTION_PREFIX):], offset + len(line))
+            offset += len(line)
+        if cur is not None:
+            out.append((cur[0], cur[1], len(text)))
+        return out
+
+    def _daily_open_at(self, text: str, title: str):
+        """(body_start, body_end) of `title`'s most recent OPEN section, else None.
+
+        Open means the body still ends with `DAILY_STILL_OPEN`. Newest-match matters:
+        after an incident was cleared and a second one opened, the closed one is a
+        historical record and the new one is the live incident.
+        """
+        for sect in reversed(self._daily_sections(text)):
+            if sect[0] != title:
+                continue
+            body = text[sect[1]:sect[2]]
+            return (sect[1], sect[2]) if body.rstrip().endswith(DAILY_STILL_OPEN) else None
+        return None
 
     def _backlog_task(self, title: str, text: str, commit: str, tag: str) -> bool:
         """File a backlog item so the revert becomes work, not a mystery."""
