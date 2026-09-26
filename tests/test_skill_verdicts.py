@@ -1762,3 +1762,195 @@ def test_widening_the_terminal_set_did_not_make_a_hand_written_status_ledger_min
     assert "LEDGER_ABSENT" not in out, out
     assert set(RUNBOOK_PRESCRIBED_VERDICTS).isdisjoint(sv.MINTED_BY_LEDGER), (
         "a runbook-written frontmatter status must not count as proof a ledger existed")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# `audit` — the ledger's falsifiers get re-executed, not inherited (#1533).
+#
+# #530/#525 made `evidence_cmd` mandatory so that a verdict is a check rather than
+# an assertion. `~/lloyd/_pipeline` was deleted on 2026-09-22 (#1377) and the
+# ledger's stored commands still name it, so for most of the ledger the check
+# cannot run while `check` goes on honouring the decision it carried: 78 of 103
+# latest-wins keys tonight, per the item's proving command. Nothing noticed,
+# because `check` only executes the commands of keys that blocked a candidate in
+# the scanned directory — 2 tonight, both re-recorded with live commands.
+#
+# Each fixture command below was run through the classifier before it was written
+# into a fixture, so the shapes are the classifier's own four reasons and not
+# guesses: a missing file (rc relabelled 127, stderr names it), a command bash
+# cannot parse (rc 2 plus bash's parse-error prefix), rc 127 itself, and a timeout.
+# ═══════════════════════════════════════════════════════════════════════════
+
+AUDIT_SEES = "sweep/observed_x"                  # exits 0 after printing its count
+AUDIT_SEES_NONE = "sweep/observed_none"          # prints count=0, exits 1: still an observation
+AUDIT_MISSING_FILE = "sweep/missing_file"        # stderr: No such file or directory
+AUDIT_PARSE_ERROR = "sweep/parse_error"          # bash: …: unexpected EOF while …
+AUDIT_NO_SUCH_COMMAND = "sweep/no_such_command"  # rc 127
+AUDIT_HANGS = "sweep/hangs"                      # exceeds --timeout
+AUDIT_FAILED_BUT_RAN = "sweep/error_2"           # rc 2, nothing missing: ran and failed
+
+AUDIT_CMDS = {
+    AUDIT_SEES: "echo 'sweep/observed_x count=4'",
+    AUDIT_SEES_NONE: "echo 'sweep/observed_none count=0'; exit 1",
+    AUDIT_MISSING_FILE: "grep -c x /tmp/definitely-missing-falsifier-file-1533.md",
+    AUDIT_PARSE_ERROR: 'echo "unbalanced',
+    AUDIT_NO_SUCH_COMMAND: "definitely-not-a-command-1533",
+    AUDIT_HANGS: "sleep 5",
+    AUDIT_FAILED_BUT_RAN: "grep -c x .",
+}
+AUDIT_DEAD = {AUDIT_MISSING_FILE, AUDIT_PARSE_ERROR, AUDIT_NO_SUCH_COMMAND, AUDIT_HANGS}
+
+
+def write_ledger(store: Path, keys) -> None:
+    """A ledger holding exactly `keys`, one latest-wins row each.
+
+    Written by hand rather than with `record`, because `record` executes the command
+    it is asked to store — right for a verdict, but it would put the fixture's own
+    exit codes in front of the thing under test.
+    """
+    store.parent.mkdir(parents=True, exist_ok=True)
+    with store.open("w", encoding="utf-8") as fh:
+        for key in keys:
+            fh.write(json.dumps({"logged_at": "2026-09-26T07:00:00+00:00",
+                                 "pattern_key": key, "candidate": key, "occurrences": 1,
+                                 "verdict": "rejected_false_positive",
+                                 "reason": "fixture: pattern is a traceback line",
+                                 "scope": "project", "skill": "",
+                                 "evidence_cmd": AUDIT_CMDS[key],
+                                 "source": "skill-sweep"}) + "\n")
+
+
+def run_audit(store: Path, timeout: int = 1) -> tuple[int, str]:
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = sv.main(["audit", "--store", str(store), "--timeout", str(timeout)])
+    return rc, buf.getvalue()
+
+
+def test_audit_names_every_key_whose_stored_check_cannot_run(tmp_path):
+    """Clause 1: one `UNRUNNABLE <pattern_key> :: <detail>` line per dead key, and
+    none for a key whose check ran."""
+    store = tmp_path / "verdicts.jsonl"
+    write_ledger(store, [AUDIT_SEES, AUDIT_MISSING_FILE, AUDIT_PARSE_ERROR])
+
+    rc, out = run_audit(store)
+    lines = [ln for ln in out.splitlines() if ln.startswith("UNRUNNABLE ")]
+
+    assert len(lines) == 2, out
+    assert {ln.split(" :: ")[0] for ln in lines} == {
+        f"UNRUNNABLE {AUDIT_MISSING_FILE}", f"UNRUNNABLE {AUDIT_PARSE_ERROR}"}, out
+    # The detail is the classifier's, so a reader can tell a deleted file from an
+    # unparseable command without executing anything themselves.
+    missing = next(ln for ln in lines if AUDIT_MISSING_FILE in ln)
+    assert "No such file or directory" in missing, missing
+    parse = next(ln for ln in lines if AUDIT_PARSE_ERROR in ln)
+    assert "bash:" in parse, parse
+    assert AUDIT_SEES not in out, "a check that observed something was reported dead"
+
+
+def test_audit_tally_is_its_final_line(tmp_path):
+    """Clause 2: `keys: N unrunnable: M` last, because a nightly reading of this
+    surface takes `splitlines()[-1]` — `check`'s existing contract, extended.
+
+    The two numbers are asserted independently of each other and of the finding
+    lines: `keys` is the ledger's latest-wins key count (7 keys written, 4 dead),
+    so an implementation that printed the findings as the total, or counted rows
+    instead of keys, fails here rather than downstream.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    write_ledger(store, sorted(AUDIT_DEAD) + [AUDIT_SEES, AUDIT_SEES_NONE,
+                                              AUDIT_FAILED_BUT_RAN])
+
+    rc, out = run_audit(store)
+    last = out.splitlines()[-1]
+
+    assert last == f"keys: {len(AUDIT_DEAD) + 3} unrunnable: {len(AUDIT_DEAD)}", out
+    assert len(out.splitlines()) == len(AUDIT_DEAD) + 1, (
+        f"tally must be the {len(AUDIT_DEAD) + 1}th line of its own output: {out}")
+    assert out.count("UNRUNNABLE ") == len(AUDIT_DEAD), out
+
+
+def test_audit_reports_exactly_the_unrunnable_classification(tmp_path):
+    """Clause 3: the reported set is `evidence_cmd_status`'s decision, not a new rule.
+
+    Four shapes must be reported, three must not. The three that must not are what
+    makes this falsifiable: `grep -c x .` exits 2, and a "`rc != 0` means dead"
+    implementation reports it; the two observing commands exit 0 and 1, which an
+    "`anything` non-zero is dead" implementation reports too; `sleep 5` is caught
+    only by something that enforces a timeout. The parity assertion at the end runs
+    the same function `check` already uses over the same rows, so `audit` cannot
+    answer a different question about a row than the one `check` asks of the two it
+    happens to execute.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    write_ledger(store, list(AUDIT_CMDS))
+
+    rc, out = run_audit(store)
+    reported = {ln.split(" :: ")[0].removeprefix("UNRUNNABLE ")
+                for ln in out.splitlines() if ln.startswith("UNRUNNABLE ")}
+
+    assert reported == AUDIT_DEAD, out
+    table = sv.load_verdicts(store)
+    assert len(table) == len(AUDIT_CMDS), "fixture keys collided in the ledger"
+    assert reported == {k for k, row in table.items()
+                        if sv.evidence_cmd_status(row, timeout=1)[0] == sv.UNRUNNABLE}, (
+        "audit's set disagrees with evidence_cmd_status on the same rows")
+
+
+def test_audit_exits_1_when_anything_is_unrunnable_and_0_when_nothing_is(tmp_path):
+    """Clause 4, first half: the exit code follows the tally in both directions.
+
+    A nightly that reads only the tally line must still be failed by a red exit, and
+    a ledger whose falsifiers all run must not train anyone to ignore one.
+    """
+    dead = tmp_path / "dead.jsonl"
+    write_ledger(dead, [AUDIT_MISSING_FILE, AUDIT_SEES])
+    rc_dead, out_dead = run_audit(dead)
+    assert rc_dead == 1, out_dead
+    assert out_dead.splitlines()[-1] == "keys: 2 unrunnable: 1", out_dead
+
+    alive = tmp_path / "alive.jsonl"
+    write_ledger(alive, [AUDIT_SEES, AUDIT_SEES_NONE])
+    rc_alive, out_alive = run_audit(alive)
+    assert rc_alive == 0, out_alive
+    assert out_alive.splitlines()[-1] == "keys: 2 unrunnable: 0", out_alive
+    assert "UNRUNNABLE " not in out_alive, out_alive
+
+
+def test_check_still_reports_its_slice_and_its_own_final_line(tmp_path):
+    """Clause 4, second half: `check` is untouched — same two numbers, same
+    `checked: N  skipped_by_verdict: M` last line, same rc 0 when it blocks work on
+    a verdict it could not verify (and still says `EVIDENCE_CMD_UNRUNNABLE`).
+
+    The candidate is `Bash/timeout` at 9 occurrences and the ledger row for that key
+    carries a falsifier naming a file that is not there, which is tonight's ledger
+    in miniature: the decision is honoured, and only this line says it was honoured
+    on an uncheckable basis.
+    """
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+    raw_candidate(cands, "candidate-a.md", "rejected_artifact_class")
+    store = tmp_path / "verdicts.jsonl"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    with store.open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"logged_at": "2026-09-26T07:00:00+00:00",
+                             "pattern_key": "Bash/timeout", "candidate": "x",
+                             "occurrences": 9,
+                             "verdict": "rejected_artifact_class",
+                             "reason": "fixture: artifact-class pattern",
+                             "scope": "project", "skill": "",
+                             "evidence_cmd": AUDIT_CMDS[AUDIT_MISSING_FILE],
+                             "source": "nightly-skill-consolidation"}) + "\n")
+
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = sv.main(["check", "--candidates", str(cands), "--store", str(store)])
+    out = buf.getvalue()
+
+    assert rc == 0, out
+    assert out.splitlines()[-1] == "checked: 1  skipped_by_verdict: 1", out
+    assert "EVIDENCE_CMD_UNRUNNABLE Bash/timeout" in out, out

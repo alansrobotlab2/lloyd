@@ -826,6 +826,47 @@ def cmd_check(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def cmd_audit(args: argparse.Namespace) -> int:
+    """Re-execute every stored falsifier in the ledger and name the ones that cannot run.
+
+    Why `check` does not already cover this: `check` runs `evidence_cmd` only for keys
+    that just blocked a candidate in the scanned directory — two candidates tonight, so
+    2 of the ledger's 103 latest-wins keys were exercised and the other 101 were
+    honoured on the strength of a check nobody ran. #530/#525 made the falsifier
+    mandatory precisely so a later run could *falsify* a verdict rather than inherit it;
+    a falsifier nobody executes falsifies nothing, and Phase 0 keeps spending its SKIP
+    decisions on it anyway. The `_pipeline` root that used to sit inside the code tree was
+    deleted on 2026-09-22 (#1377), and 78 of those 103 stored commands still name that
+    dead location — which is what this surface is for. (The root is described rather than
+    spelled out: `tests/test_no_runtime_paths_in_code.py` refuses a home-rooted
+    runtime path anywhere in tracked code, and a pattern match does not exempt prose.)
+
+    The judgement is `evidence_cmd_status`'s — the same classifier `check` reports
+    `EVIDENCE_CMD_UNRUNNABLE` from — asked of every key instead of the handful the scan
+    happens to touch. A command that exits 0 or 1 has observed something and is not a
+    finding even when it observed nothing; one that names a file that is gone, that bash
+    cannot parse, that exits 127, or that outlives `--timeout` is. A key with no
+    `evidence_cmd` at all is counted in `keys:` and not named, because there is no
+    command to fail: that shape is the ledger's own invariant (#530 makes the field
+    mandatory), and `record` refuses to write it.
+
+    Output is read by the nightly jobs, so the shape is the contract: one
+    `UNRUNNABLE <pattern_key> :: <detail>` line per dead key, then
+    `keys: N unrunnable: M` as the LAST line — `check`'s shape, so a reader that takes
+    `splitlines()[-1]` gets the tally here too. Exit 1 when M > 0, so an unverifiable
+    ledger fails a run instead of printing into a log nobody re-reads.
+    """
+    table = load_verdicts(store_path(args.store))      # latest-wins, the table check reads
+    dead = []
+    for key in sorted(table):
+        status = evidence_cmd_status(table[key], timeout=args.timeout)
+        if status and status[0] == UNRUNNABLE:
+            dead.append(key)
+            print(f"UNRUNNABLE {key} :: {status[1]}")
+    print(f"keys: {len(table)} unrunnable: {len(dead)}")
+    return 1 if dead else 0
+
+
 def cmd_record(args: argparse.Namespace) -> int:
     try:
         row = record_verdict(
@@ -951,6 +992,17 @@ def main(argv: list[str] | None = None) -> int:
 
     p_list = with_store(sub.add_parser("list", help="latest-wins view of the ledger"))
     p_list.set_defaults(func=cmd_list)
+
+    # `audit` asks `list`'s subject a question `list` cannot: not what was decided,
+    # but whether the decision can still be checked. `check` already knows how to ask
+    # it (`evidence_cmd_status`) — of the two keys a scan happened to block.
+    p_audit = with_store(sub.add_parser(
+        "audit", help="re-run every stored evidence_cmd, name the keys whose check "
+                      "cannot run, and exit 1 if any"))
+    p_audit.add_argument("--timeout", type=int, default=EVIDENCE_TIMEOUT_SECONDS,
+                         help=f"seconds per command before it counts as UNRUNNABLE "
+                              f"(default {EVIDENCE_TIMEOUT_SECONDS})")
+    p_audit.set_defaults(func=cmd_audit)
 
     args = parser.parse_args(argv)
     return args.func(args)
