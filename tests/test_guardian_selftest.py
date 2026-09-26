@@ -26,6 +26,12 @@ candidate tree, with the whole machine redirected to the pytest `tmp_path`:
 itself copied with that one line redirected: `policy.REPO` and `SRC` are
 absolute constants, so pointing at the tree under review rather than whatever
 the live checkout happens to hold is the only way the test tests a candidate.
+The script is otherwise left exactly as the unit execs it — including its silence
+on `--repo`, which is how a staged candidate keeps verifying a rollback target
+against production (#1553 clause 4). What is redirected instead is the *candidate
+copy's* `REPO` literal, and the argv runs carry `--repo`: seeding a rollback
+target from the tree under test while the check reads production's object store
+was the bug, not the design.
 The selftest is separately executed as `/usr/bin/python3 selftest.py --profile …`
 with argv and an exit code, so the flag plumbing the unit depends on is inside
 the test and not beside it.
@@ -83,6 +89,80 @@ def _head(repo: Path) -> str:
                           capture_output=True, text=True, check=True).stdout.strip()
 
 
+def _commit_exists(repo: Path | str, sha: str) -> bool:
+    """Is `sha` readable in `repo`'s own object store?
+
+    The same question `rollback.commit_exists` asks — `git cat-file -e <sha>^{commit}`
+    — run here so a test can state its premise beside its assertion instead of
+    borrowing the code under test to confirm itself.
+    """
+    return subprocess.run(
+        ["git", "-C", str(repo), "cat-file", "-e", f"{sha}^{{commit}}"],
+        capture_output=True, text=True).returncode == 0
+
+
+def _lkg_path(tmp_path: Path) -> Path:
+    """Where `_machine` puts the scratch machine's LKG pointer."""
+    return tmp_path / "home" / ".local/state/lloyd-automod" / "last_known_good.json"
+
+
+def _seed_target(tmp_path: Path, sha: str) -> None:
+    """Point that machine's rollback target at `sha`.
+
+    Written to the file rather than into an object, because `rollback_target()`
+    reads it on every call: a case that wants an unreadable target has to make the
+    disk say so, and not stub the reader that is part of what is under test.
+    """
+    path = _lkg_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"schema": 1, "commit": sha, "floor": sha}) + "\n")
+
+
+def _scratch_repo(tmp_path: Path, name: str = "repo-under-test") -> Path:
+    """A git repo invented by the fixture, holding one commit nobody could have landed.
+
+    This is #1553's premise made to order: the head sha is present in THIS repo's
+    object store and absent from production's, which is exactly what a clone
+    carrying an unlanded commit is. Built with `git init` plus one `--allow-empty`
+    commit rather than by cloning `~/lloyd`, because the condition being tested is
+    "is this sha readable in the store at this path", and that needs a store, not a
+    checkout of the tree.
+    """
+    repo = tmp_path / name
+    repo.mkdir(parents=True, exist_ok=True)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(repo), *args], env=env,
+                              capture_output=True, text=True, check=True)
+
+    git("init", "-q")
+    git("config", "user.email", "fixture@example.invalid")
+    git("config", "user.name", "fixture")
+    git("commit", "-q", "--allow-empty",
+        "-m", "an unlanded commit, invented by this fixture")
+    return repo
+
+
+def _point_repo_literal(snap: Path, repo: Path) -> None:
+    """Rewrite the copied `policy.REPO` literal to `repo`, and insist it happened.
+
+    `REPO` is an absolute constant with no flag and no environment variable behind
+    it, so editing the copy is the only knob that reaches any code that reads it
+    from a directory the test made. Asserting the substitution is what stops a
+    silent no-op: an unreplaced literal leaves the copy pointed at production, and
+    every case that believes it chose a different store would then be measuring
+    production while saying it was not.
+    """
+    import re
+    src = (snap / "policy.py").read_text()
+    out = re.sub(r'^REPO = ".*"$', f'REPO = "{repo}"', src, count=1, flags=re.M)
+    assert out != src, (f'no `REPO = "<literal>"` line to point at {repo} in '
+                        f"{snap / 'policy.py'}, so a case here cannot reach the "
+                        "store it claims to be testing")
+    (snap / "policy.py").write_text(out)
+
+
 def _notes(root: Path, n: int = 60) -> Path:
     """A vault-shaped directory: enough notes for `measure` to count something."""
     for sub in ("knowledge", "backlog"):
@@ -95,24 +175,32 @@ def _notes(root: Path, n: int = 60) -> Path:
     return root
 
 
-def _machine(tmp_path: Path) -> tuple[dict, Path]:
+def _machine(tmp_path: Path, target: str | None = None) -> tuple[dict, Path]:
     """The whole machine redirected into `tmp_path`, with nothing listening.
 
     Returns `(env, home)`. Every path the guardian and the stage script *write*
     is scratch: `$HOME` (hence `mktemp` and the promote `DST`), `TMPDIR`,
-    `LLOYD_GUARDIAN_STATE` and `LLOYD_AUTOMOD_STATE`. What stays real is the
-    repo and its commit graph, because `policy.REPO` is a constant and a
-    stack-independent check must therefore fail here only for the reason its own
-    docstring names — never because the fixture invented a second failure. The
-    rollback target is that real repo's HEAD, so `rollback target readable and
-    real` is true for a reason this file controls.
+    `LLOYD_GUARDIAN_STATE` and `LLOYD_AUTOMOD_STATE`. The repo it *reads* is
+    redirected too, and that is #1553. This fixture used to seed the rollback
+    target with `_head(ROOT)` — the tree under test — while the check verified
+    that sha against `policy.REPO`, because `--repo` went unpassed and defaults to
+    that literal. Two different object stores, agreeing only when the tree under
+    test is a checkout production already has: give a clone one commit of its own
+    and the seeded target is unreadable in the store the check reads, which took 11
+    tests down at fixture level. So `target` defaults to `ROOT`'s HEAD and every
+    consumer of this machine is pointed at that same repo — `--repo` on the argv
+    runs, the copied `REPO` literal for the stage script — which keeps the promise
+    this docstring always made: a stack-independent check fails here only for the
+    reason its own docstring names, never because the fixture invented a second
+    failure.
     """
     home = tmp_path / "home"
     (home / ".local/state").mkdir(parents=True, exist_ok=True)
-    automod = home / ".local/state/lloyd-automod"
+    # One spelling of the path: `cold_stack` and the nodes below re-seed through
+    # `_seed_target`, and a second copy of this path here could disagree with it.
+    automod = _lkg_path(tmp_path).parent
     automod.mkdir(parents=True, exist_ok=True)
-    (automod / "last_known_good.json").write_text(
-        json.dumps({"schema": 1, "commit": _head(ROOT), "floor": _head(ROOT)}) + "\n")
+    _seed_target(tmp_path, target if target is not None else _head(ROOT))
     env = {
         "PATH": "/usr/bin:/bin",
         "HOME": str(home),
@@ -124,17 +212,28 @@ def _machine(tmp_path: Path) -> tuple[dict, Path]:
     return env, home
 
 
-def _candidate(tmp_path: Path, name: str = "candidate") -> Path:
+def _candidate(tmp_path: Path, name: str = "candidate",
+               repo: Path | None = None) -> Path:
     """A copy of the guardian sources from THIS tree — the candidate under review.
 
     `SRC` in the script is an absolute constant, so without this the test would
     promote whatever the live checkout happens to hold rather than the round's
     own code.
+
+    `repo` points the copy's `policy.REPO` literal at a store of the caller's
+    choosing. `guardian-stage.sh` execs its candidate with no `--repo` — clause 4
+    of #1553 keeps it that way, because on the deploy box that literal IS the
+    answer, and a rollback target must be readable in production — so the literal
+    is the only way to tell a staged candidate which repo to verify against. Left
+    as `None` the copy is byte-identical to the tree's, which is what the KG cases
+    below need.
     """
     dst = tmp_path / name
     shutil.copytree(str(GUARDIAN_DIR), str(dst))
     for junk in dst.rglob("__pycache__"):
         shutil.rmtree(junk, ignore_errors=True)
+    if repo is not None:
+        _point_repo_literal(dst, repo)
     return dst
 
 
@@ -159,12 +258,23 @@ def _snapshot_dir(home: Path) -> Path:
     return home / ".local/state/lloyd-guardian/bin"
 
 
-def _run_selftest(profile: str, tmp_path: Path, extra_argv: list[str] | None = None):
-    """Exec the standalone entry point the way the unit does: system python3, argv, cwd = a copy of the candidate."""
-    env, _ = _machine(tmp_path)
+def _run_selftest(profile: str, tmp_path: Path, extra_argv: list[str] | None = None,
+                  repo: Path | None = None, target: str | None = None):
+    """Exec the standalone entry point the way the unit does: system python3, argv, cwd = a copy of the candidate.
+
+    `--repo` is named explicitly rather than inherited: it defaults to
+    `policy.REPO`, a literal for the deploy checkout, and a fixture that seeds its
+    rollback target from the tree under test while the run reads production's
+    object store is the two-store bug #1553 is about. `repo` is therefore the
+    store this run is pointed at and `target` the sha seeded as its rollback
+    target; a case that wants them to disagree — which is what makes the check
+    interesting — says so in both arguments.
+    """
+    env, _ = _machine(tmp_path, target=target)
     stage = _candidate(tmp_path)
     argv = ["--backend-url", BACKEND_DEAD, "--mcp-url", MCP_DEAD,
-            "--no-external-alerts"] + (extra_argv or [])
+            "--no-external-alerts", "--repo", str(repo if repo is not None else ROOT)] \
+        + (extra_argv or [])
     if profile:
         argv += ["--profile", profile]
     return subprocess.run(["/usr/bin/python3", "selftest.py"] + argv,
@@ -183,7 +293,11 @@ def cold_stack(tmp_path, monkeypatch):
     env, _ = _machine(tmp_path)
     gdir = Path(env["LLOYD_GUARDIAN_STATE"])
     gdir.mkdir(parents=True, exist_ok=True)
+    # `--repo` here for the same reason it is on the argv side: this Guardian reads
+    # its rollback target out of the scratch state above and would otherwise verify
+    # it against `policy.REPO`, so `#g.repo` and the seeded sha would be two trees.
     args = G.build_parser().parse_args([
+        "--repo", str(ROOT),
         "--state", env["LLOYD_AUTOMOD_STATE"], "--guardian-state", str(gdir),
         "--supervisor-sock", NO_SOCK, "--backend-url", BACKEND_DEAD,
         "--mcp-url", MCP_DEAD, "--no-external-alerts"])
@@ -259,7 +373,7 @@ def test_the_stage_script_stages_a_candidate_with_nothing_running(tmp_path):
     its `DST`, not `REFUSING`.
     """
     env, home = _machine(tmp_path)
-    candidate = _candidate(tmp_path)
+    candidate = _candidate(tmp_path, repo=ROOT)
     proc = subprocess.run(["bash", str(_stage_script(tmp_path, candidate))],
                           env=env, capture_output=True, text=True)
     assert "REFUSING" not in proc.stderr, proc.stderr
@@ -279,7 +393,7 @@ def test_a_candidate_that_does_not_compile_is_still_refused(tmp_path):
     """
     env, home = _machine(tmp_path)
     env.pop("LLOYD_SUPERVISOR_SOCK")     # the warm case: default live socket
-    candidate = _candidate(tmp_path)
+    candidate = _candidate(tmp_path, repo=ROOT)
     (candidate / "broken_syntax.py").write_text("def oops(:\n    pass\n")
     proc = subprocess.run(["bash", str(_stage_script(tmp_path, candidate))],
                           env=env, capture_output=True, text=True)
@@ -302,7 +416,7 @@ def test_a_candidate_whose_vault_tripwire_no_longer_trips_is_still_refused(tmp_p
     reason rather than the compiler's.
     """
     env, home = _machine(tmp_path)
-    candidate = _candidate(tmp_path)
+    candidate = _candidate(tmp_path, repo=ROOT)
     # Redefining `evaluate` at module scope after the real one is the smallest
     # edit that makes the candidate wrong about a wipe, and it survives any
     # refactor of the real function.
@@ -329,7 +443,7 @@ def test_a_refusal_names_the_check_that_failed(tmp_path):
     assertion is that stderr carries the check's own name ahead of REFUSING.
     """
     env, home = _machine(tmp_path)
-    candidate = _candidate(tmp_path)
+    candidate = _candidate(tmp_path, repo=ROOT)
     with (candidate / "vaultwatch.py").open("a", encoding="utf-8") as f:
         f.write("\n\n# BROKEN CANDIDATE (test injection): a wipe reads as ordinary churn.\n"
                 "def evaluate(history, current, **kw):\n"
@@ -482,6 +596,153 @@ def test_the_two_profiles_partition_the_checks():
     assert set(STACK_INDEPENDENT).isdisjoint(STACK_DEPENDENT)
     assert len(STACK_INDEPENDENT) == 5 and len(STACK_DEPENDENT) == 3
     assert ST.PROFILES == (ST.PROFILE_DAILY, ST.PROFILE_STAGING)
+
+
+# ── #1553: which object store the rollback target is verified against ─────
+#
+# The check asks one question — can this guardian reach the commit it would have
+# to restore? — and it can only be answered in one store at a time. The fixture
+# seeded its target from the tree under test while `--repo` went unpassed and
+# defaulted to `policy.REPO`, so from any clone whose HEAD production had never
+# seen the answer was `not in the object store` and 11 tests went red at fixture
+# level. The two nodes below put one sha through both stores and demand opposite
+# verdicts; the two after them pin that the fix did this by redirecting a fixture,
+# not by demoting the check or by teaching the stage script to name a repo.
+
+
+def test_an_unlanded_rollback_target_passes_when_pointed_at_the_repo_that_has_it(tmp_path):
+    """The #1553 reproduction at the entry point: an unlanded HEAD is not an
+    unreadable rollback target, once the check is aimed at the repo it came from.
+
+    The condition is built, not hoped for. `_scratch_repo` makes a git repo of the
+    fixture's own with one empty commit, so its head sha is readable in that store
+    and cannot be in production's — which is precisely what a clone carrying a
+    commit of its own is, and the premise is asserted below rather than left as a
+    comment. That sha is then seeded as the rollback target and the staging profile
+    runs through argv against `--repo <that repo>`: `[ok ]`, exit 0.
+
+    Red on this file before the fixture change: `--repo` was never passed, so the
+    same sha was verified against `policy.REPO` and answered `not in the object
+    store` — the `[FAIL] rollback target readable and real: <sha> not in the object
+    store` line #1553 was filed from. Its probe sha is deliberately not quoted
+    here: that probe commit was discarded, so no repo on this machine resolves it,
+    and a citation a reader cannot open proves nothing.
+    """
+    import policy
+
+    unlanded = _scratch_repo(tmp_path)
+    sha = _head(unlanded)
+    assert _commit_exists(unlanded, sha), "the fixture's own repo cannot read its HEAD"
+    assert not _commit_exists(policy.REPO, sha), (
+        f"{sha[:8]} is already in production's object store, so this case would be "
+        "calling a landed commit unlanded")
+
+    proc = _run_selftest("staging", tmp_path / "staging", repo=unlanded, target=sha)
+    assert proc.returncode == 0, (
+        f"the stage gate would refuse a candidate whose own repo has the target:"
+        f"\n{proc.stdout}\n{proc.stderr}")
+    assert (f"[ok ] rollback target readable and real: {sha[:8]} "
+            "via last_known_good.json") in proc.stdout, proc.stdout
+    assert "=> PASS (5/5)" in proc.stdout, proc.stdout
+
+
+def test_a_rollback_target_absent_from_the_pointed_at_repo_fails_staging(tmp_path):
+    """The half that has to stay red: one sha, two stores, two verdicts.
+
+    The same construction as the node above and the same argv boundary, with only
+    the pointed-at store changed to `ROOT`, which does not contain that sha. The
+    check must then say so and take the staging profile down with it. This is the
+    failure the check exists to catch — a watchdog that could not restore anything
+    — and until this node existed, `grep -rn "rollback target readable" tests/`
+    found no fixture anywhere that produced it.
+
+    Which is also why the item's alternative wording ("or skip that one check when
+    the running tree's HEAD is not in the production lineage") was not taken: a
+    skip would have turned the node above green, left this one red, and left the
+    stage gate blind to a genuinely unrecoverable guardian on every real boot.
+    """
+    unlanded = _scratch_repo(tmp_path)
+    sha = _head(unlanded)
+    assert _commit_exists(unlanded, sha), "the fixture's own repo cannot read its HEAD"
+    assert not _commit_exists(ROOT, sha), (
+        f"{sha[:8]} is readable in the tree under test, so pointing at ROOT would "
+        "not be the unreadable case this node is for")
+
+    proc = _run_selftest("staging", tmp_path / "staging", repo=ROOT, target=sha)
+    assert proc.returncode != 0, (
+        "a rollback target the pointed-at store cannot read must not be enough to "
+        f"stage a watchdog:\n{proc.stdout}")
+    assert (f"[FAIL] rollback target readable and real: {sha[:8]} "
+            "not in the object store") in proc.stdout, proc.stdout
+    assert "=> FAIL (4/5)" in proc.stdout, proc.stdout
+
+
+def test_the_staging_profile_still_judges_the_rollback_target_check(cold_stack,
+                                                                    tmp_path, capsys):
+    """Clause 3: the fix redirects where a fixture looks; it does not demote the check.
+
+    `rollback target readable and real` must stay one of the five checks `staging`
+    judges. Deleting it, excluding it, or moving it to `STACK_DEPENDENT` would make
+    the 11 red tests green by making the gate blind, which is #1302's fix run
+    backwards — so the verdict is demanded in process here, with nothing about the
+    candidate changed and only the seeded target made unreadable: a sha the pointed-
+    at repo cannot read, written to the LKG file `rollback_target()` reads on every
+    call rather than into a stubbed reader.
+
+    Staging must still execute the check, print `[FAIL]` for it and not `[skip]`,
+    and return False — and still judge five checks, four of them passing, so the
+    failing one can only be this one.
+    """
+    absent = "0" * 40
+    assert not _commit_exists(ROOT, absent), (
+        "the tree under test can read all-zero, so this is not the unreadable case")
+    _seed_target(tmp_path, absent)
+
+    assert ST.run(cold_stack, verbose=True, profile=ST.PROFILE_STAGING) is False
+    out = capsys.readouterr().out
+    assert f"[FAIL] rollback target readable and real: {absent[:8]} " \
+        "not in the object store" in out, out
+    assert "[skip] rollback target readable and real" not in out, (
+        f"an excluded check cannot refuse a candidate:\n{out}")
+    assert "=> FAIL (4/5)" in out, (
+        f"five checks judged, this one failing, is the claim being made:\n{out}")
+
+
+def test_the_stage_script_overrides_no_repo_so_the_candidates_own_literal_decides(tmp_path):
+    """Clause 4, both readings of it.
+
+    Text: `guardian-stage.sh` execs `selftest.py --profile staging` and the string
+    `--repo` does not appear in the script at all, so a staged candidate verifies a
+    rollback target against the repo named by its own `policy.REPO` — production,
+    on the deploy box. That is not a detail worth tidying away: the check's whole
+    claim is that the guardian which is about to be in charge can reach the commit
+    it would restore, and a repo handed down from the script would aim it at
+    whatever tree the boot happened to run from.
+
+    Behaviour, across the seam it crosses (bash → `/usr/bin/python3` → `git`): a
+    candidate whose `REPO` literal names a store without the seeded target must be
+    refused for that check's own reason, naming it in the journal, and `DST` must
+    stay empty. Grows a `--repo` in the script, or stop condemning an unreachable
+    rollback, and this goes red.
+    """
+    script = STAGE_SH.read_text()
+    assert "selftest.py --profile staging" in script
+    assert "--repo" not in script, (
+        "guardian-stage.sh now names a repo, so a staged candidate would verify its "
+        "rollback target against the stage's tree instead of production's")
+
+    env, home = _machine(tmp_path)                    # target = the tree's own HEAD
+    foreign = _scratch_repo(tmp_path, "store-without-the-target")
+    assert not _commit_exists(foreign, _head(ROOT)), (
+        "the case must start with a target that store cannot read")
+    candidate = _candidate(tmp_path, repo=foreign)
+    proc = subprocess.run(["bash", str(_stage_script(tmp_path, candidate))],
+                          env=env, capture_output=True, text=True)
+    assert proc.returncode != 0, proc.stderr
+    assert "[FAIL] rollback target readable and real" in proc.stderr, proc.stderr
+    assert "REFUSING" in proc.stderr, proc.stderr
+    assert not list(_snapshot_dir(home).glob("*.py")), (
+        "a candidate that cannot read its rollback target must not be promoted")
 
 
 # ── the running guardian's first daily run is a boot race too ───────────
@@ -672,15 +933,9 @@ def _kg_probe(tmp_path: Path, *, snapshot: Path,
     """
     snap = snapshot
     if repo is not None:
-        import re
-        import shutil
         snap = tmp_path / f"snap-repo-{repo.name}"
         shutil.copytree(snapshot, snap)
-        src = (snap / "policy.py").read_text()
-        out = re.sub(r'^REPO = ".*"$', f'REPO = "{repo}"', src, count=1, flags=re.M)
-        assert out != src, (f'no `REPO = "<literal>"` line to point at {repo}, so '
-                            "this case cannot reach the fallback branch")
-        (snap / "policy.py").write_text(out)
+        _point_repo_literal(snap, repo)
     env = {k: str(v) for k, v in {
         "PATH": "/usr/bin:/bin", "HOME": tmp_path / "kg-home",
         "KG_SNAP": snap,
