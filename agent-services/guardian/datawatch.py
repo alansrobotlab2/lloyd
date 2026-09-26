@@ -53,17 +53,59 @@ ROOT_MARKER = ".lloyd-data-root"
 #: What used to live in the tree and must not come back there. Anything the
 #: gitignore also hides: a writer that still resolves off `__file__` recreates
 #: one of these silently, because git never shows it.
+#:
+#: Since #1541 this is no longer the candidate list — `stray_in_tree` asks the
+#: tree — and the list survives for the one thing no enumeration can do: name
+#: the runtime stores that sit *below* the top level that scan reads
+#: (`data/tool_overrides.yaml`, `agent-services/logs`), which `git status`
+#: cannot show either. Everything else in it is history worth keeping rather
+#: than a prediction of what a writer will create next. `"None"` included: it is
+#: the scar of a writer that once resolved a path to `None` and created
+#: `~/lloyd/None` (added by `6426668b`); no such file exists today, the writer
+#: was never identified, and deleting the name deletes the only breadcrumb to it.
 RUNTIME_NAMES = ("sessions", "event_logs", "logs", "autonomy-runs", "_pipeline",
                  "usage.db", "workers.db", "research.db", "mc-state.json",
                  "data/tool_overrides.yaml", "voice_profiles", "eval/baselines",
                  "agent-services/logs", "None")
 
+#: Top-level entries a real `~/lloyd` checkout carries that are not runtime
+#: data. `architecture/data-home.md` names the rebuildable-cache half of this
+#: set ("code, build output or a rebuildable cache, not data": `.venvs/`,
+#: `qmd/`, `node_modules`, `graphify-out/`, `__pycache__`); the rest is editor
+#: and CI tooling, the gitignored local config, and `.claude/worktrees`, which
+#: holds the trees an open automod round is running.
+#:
+#: An EXCLUSION list, deliberately the mirror image of `RUNTIME_NAMES`: a
+#: top-level entry is a candidate stray unless git tracks it or it is named
+#: here, so a writer's new directory is caught without anyone having predicted
+#: its name — the class rule that a hand-maintained allowlist cannot close a
+#: property over an open set. What cannot be closed is the other direction, and
+#: it is a decision rather than an oversight: a new *tooling* directory alarms
+#: until a person decides which side of this constant it belongs on. For a
+#: tripwire that is the right way round, and the alert names this set so the
+#: decision has somewhere to land.
+KNOWN_GOOD_TOPLEVEL = frozenset({
+    ".git",            # git never lists its own repository directory
+    ".claude",         # agent scratch; `.claude/worktrees` is an open round
+    ".env",            # local config, gitignored, never committed
+    ".pytest_cache",   # ignored only by its own nested .gitignore, not ours
+    ".venvs",
+    ".vscode",
+    "__pycache__",
+    "graphify-out",    # the code graph's per-tree cache (`agent_mcp/code_graph.py`)
+    "qmd",             # the qmd fork: its own clone, ignored by `.gitignore`
+    "node_modules",
+    "llama.cpp",       # vendored trees; neither one is gitignored
+})
 
-def _ls_files(tree: str, names: list[str], *flags: str) -> set[str] | None:
-    """The paths `git ls-files` reports under `names`, or None when git cannot
-    answer (not a checkout, no git, a hung index lock)."""
+
+def _ls_files(tree: str, names: tuple[str, ...] = (), *flags: str) -> set[str] | None:
+    """The paths `git ls-files` reports under `names` — every path in the index
+    when `names` is empty — or None when git cannot answer (not a checkout, no
+    git, a hung index lock)."""
     try:
-        out = subprocess.run(["git", "-C", tree, "ls-files", "-z", *flags, "--", *names],
+        out = subprocess.run(["git", "-C", tree, "ls-files", "-z", *flags,
+                              *(("--", *names) if names else ())],
                              capture_output=True, timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
@@ -72,27 +114,65 @@ def _ls_files(tree: str, names: list[str], *flags: str) -> set[str] | None:
     return {p for p in out.stdout.decode("utf-8", "replace").split("\0") if p}
 
 
-def stray_in_tree(tree: str = TREE) -> list[str]:
-    """Runtime names present inside the code tree. Empty is healthy.
+def _top_level(tree: str) -> list[str]:
+    """The tree's own top-level entries, minus `KNOWN_GOOD_TOPLEVEL`.
 
-    A name git tracks is committed on purpose, not written by a stray writer:
-    `eval/baselines/` holds measurement records the harness reviews commit as
-    evidence (#600, P4-P9), and it alerted every hour for them. Such a name is a
-    stray only when it also holds something untracked (ignored files included —
-    the gitignore hiding a writer is the case this check exists for). When git
-    cannot answer, presence alone decides, as before."""
-    present = [n for n in RUNTIME_NAMES if os.path.lexists(os.path.join(tree, n))]
+    This is where the candidates come from now, and the point of it is that
+    nobody listed them: `os.scandir`, not a tuple of names someone predicted,
+    and not `git ls-files --others --exclude-standard`, which the item proposed
+    and which answers 0 paths on this tree — `--exclude-standard` excludes
+    exactly the gitignored writers (`usage.db`, `workers.db`, `research.db`,
+    `mc-state.json`) the check exists to catch. The scan is the top level only:
+    one level deeper is the 367,353 ignored paths the full ignored set holds,
+    and nested runtime names are what `RUNTIME_NAMES` is still for."""
+    try:
+        return sorted(e.name for e in os.scandir(tree)
+                      if e.name not in KNOWN_GOOD_TOPLEVEL)
+    except OSError:
+        return []
+
+
+def stray_in_tree(tree: str = TREE) -> list[str]:
+    """Runtime data that has come back inside the code tree. Empty is healthy.
+
+    The candidate set is the tree, not a list: `KNOWN_GOOD_TOPLEVEL` subtracted
+    from its top-level entries, plus the retained `RUNTIME_NAMES` whose nested
+    paths the top-level scan cannot reach. Two rules then decide a candidate:
+
+    * a retained runtime name is a stray unless git tracks everything under it.
+      A name git tracks is committed on purpose, not written by a stray writer:
+      `eval/baselines/` holds measurement records the harness reviews commit as
+      evidence (#600, P4-P9), and it alerted every hour for them (9e98d0df).
+      Such a name is a stray again once it also holds something untracked —
+      ignored files included, because `--others` is called *without*
+      `--exclude-standard` precisely so the gitignore cannot hide a writer;
+    * any other candidate is a stray only when git tracks nothing at all under
+      it. That half is what keeps an ordinary source directory which merely
+      holds a build or test cache (`app/__pycache__`, `scripts/selfmod`,
+      `web/.vite`, `chrome-extension/manifest.json`) off the alert.
+
+    When git cannot answer, the open set stays shut and only the retained names
+    are judged, on presence alone, as before #1541: with no index there is no
+    way to tell `.venvs` from a stray writer, and a check that guesses wrong
+    alerts every hour until someone turns it off."""
+    retained = [n for n in RUNTIME_NAMES if os.path.lexists(os.path.join(tree, n))]
+    present = retained + [n for n in _top_level(tree) if n not in retained]
     if not present:
         return []
-    tracked = _ls_files(tree, present)
-    untracked = _ls_files(tree, present, "--others")
-    if tracked is None or untracked is None:
-        return present
+    tracked = _ls_files(tree)
+    if tracked is None:
+        return retained
 
     def under(paths: set[str], name: str) -> bool:
         return any(p == name or p.startswith(name + "/") for p in paths)
 
-    return [n for n in present if not under(tracked, n) or under(untracked, n)]
+    untracked = _ls_files(tree, tuple(retained), "--others") if retained else set()
+    if untracked is None:
+        return retained
+    kept = set(retained)
+    return sorted(n for n in present
+                  if not under(tracked, n)
+                  or (n in kept and under(untracked, n)))
 
 
 class DataWatch(V.VaultWatch):

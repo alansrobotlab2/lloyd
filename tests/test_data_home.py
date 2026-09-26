@@ -1037,3 +1037,197 @@ def test_a_tracked_runtime_name_is_not_a_stray_until_something_untracked_lands(t
     (base / "written-by-a-stray.json").unlink()
     (tree / "workers.db").write_bytes(b"")
     assert DW.stray_in_tree(str(tree)) == ["workers.db"]
+
+
+# ---------------------------------------------------------------------------
+# #1541: the stray check reads the tree, not a hand-list of names.
+#
+# `RUNTIME_NAMES` was the whole candidate set, so a runtime writer whose
+# directory nobody had written down — a new `cache/`, a `runs/`, anything a
+# refactor renames — could not be reported however wrong it was. These four
+# fixtures are the shape of the gap and the shape of the fix: an unlisted name
+# is caught (clause 1), a gitignored one is caught too (clause 2), the ordinary
+# tooling a real checkout carries is not (clause 3), and 9e98d0df's tracked-name
+# rule still holds inside the widened check (clause 4).
+# ---------------------------------------------------------------------------
+
+def _checkout(tmp_path, gitignore="*.db\n"):
+    """A scratch checkout that looks like `~/lloyd` in the two ways the stray
+    check reads: git has an index that tracks *something*, and the gitignore
+    hides runtime shapes the way `.gitignore:33` (`*.db`) and `:38` (`*.json`)
+    do on the live tree. `.gitignore` itself is added because the check treats
+    an untracked top-level entry as a candidate, and in a real checkout it is
+    tracked."""
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / ".gitignore").write_text(gitignore)
+    (tree / "README.md").write_text("# lloyd\n")
+
+    def run(*a):
+        return subprocess.run(["git", "-C", str(tree), *a], check=True,
+                              capture_output=True)
+
+    run("init", "-q")
+    run("add", "-f", ".gitignore", "README.md")
+    return tree
+
+
+def test_an_unlisted_top_level_runtime_directory_is_reported(tmp_path, monkeypatch):
+    """Clause 1 (#1541): `cache/` and `runs/` are reported, and neither name is
+    in `RUNTIME_NAMES` — so what makes them visible is the tree, not the list.
+
+    The second half is the one that pins the clause: with the hand-list emptied
+    out entirely the report is identical, which no edit to `RUNTIME_NAMES` could
+    ever have produced. The list itself stays byte-for-byte as shipped."""
+    tree = _checkout(tmp_path)
+    for rel, text in (("cache/x", "{}"), ("runs/j.log", "job\n")):
+        f = tree / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(text)
+
+    assert DW.stray_in_tree(str(tree)) == ["cache", "runs"]
+    assert "cache" not in DW.RUNTIME_NAMES and "runs" not in DW.RUNTIME_NAMES, (
+        "the fixture stopped resembling the gap it pins")
+
+    monkeypatch.setattr(DW, "RUNTIME_NAMES", ())
+    assert DW.stray_in_tree(str(tree)) == ["cache", "runs"], (
+        "the candidate set still comes from the hand-list: an unlisted name is "
+        "invisible the moment the list is not carrying it")
+
+
+def test_a_runtime_writer_the_gitignore_hides_is_still_reported(tmp_path):
+    """Clause 2 (#1541): `probe.db` at the tree root is matched by the
+    fixture's `*.db` exactly as `usage.db`, `workers.db` and `research.db` are
+    by `.gitignore:33`, so `git ls-files --others --exclude-standard` — the one
+    call the item proposed — cannot see it: `--exclude-standard` is the flag
+    that excludes the ignored. The candidate set comes from `os.scandir`, which
+    reads the directory whatever the gitignore says.
+
+    The control is asserted first, because it is the claim being made: if
+    `--exclude-standard` could see this file, the clause would be pinning
+    nothing."""
+    tree = _checkout(tmp_path)
+    (tree / "probe.db").write_bytes(b"")
+
+    scoped = subprocess.run(["git", "-C", str(tree), "ls-files", "--others",
+                             "--exclude-standard", "--", "probe.db"],
+                            capture_output=True, text=True, check=True)
+    assert scoped.stdout == "", (
+        "--exclude-standard can see the gitignored file, so this fixture no "
+        "longer reproduces the case the single call cannot give")
+
+    assert DW.stray_in_tree(str(tree)) == ["probe.db"]
+
+
+def test_the_known_good_top_level_entries_a_real_checkout_carries_stay_quiet(tmp_path):
+    """Clause 3 (#1541): `~/lloyd` is never a clean tree. All nine of these sit
+    at its top level right now with nothing tracked under them — `.venvs`,
+    `qmd`, `.claude` (whose `worktrees/` holds an open automod round's trees),
+    `.pytest_cache`, `.vscode`, `__pycache__`, `graphify-out`, `.env`, `.git` —
+    and four of them are not even ignored by the repo's own `.gitignore`. A
+    check that reported every untracked top-level entry would have alarmed
+    hourly from its first tick, on every machine, including a round in flight.
+
+    `architecture/data-home.md` is the authority on the set: things stay in the
+    tree because they are code, build output or a rebuildable cache, not data."""
+    tree = _checkout(tmp_path)
+    for rel in (".venvs/lloyd/bin/python", "qmd/src/cli.ts",
+                ".claude/worktrees/SM_round/round.yaml",
+                ".pytest_cache/v/cache/lastfailed", ".vscode/settings.json",
+                "__pycache__/test_data_home.cpython-312.pyc",
+                "graphify-out/cache/ast/graph.json", ".env"):
+        f = tree / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("{}\n")
+
+    assert DW.stray_in_tree(str(tree)) == []
+
+
+def test_a_tracked_runtime_name_is_judged_only_by_what_lands_in_it(tmp_path):
+    """Clause 4 (#1541): the widening must not undo 9e98d0df, and it is the
+    half that a naive open-set rewrite gets wrong — the top-level `eval` here
+    holds untracked, gitignored content under a tracked name, and reporting
+    that would alarm on every tree that has ever run a test.
+
+    So the tracked-name rule is applied to the retained names only:
+    `eval/baselines` with committed records is quiet even beside the tooling a
+    real checkout carries, and one file written beside them is the stray again."""
+    tree = _checkout(tmp_path, gitignore="eval/baselines/*\n*.db\n")
+    base = tree / "eval" / "baselines" / "p4"
+    base.mkdir(parents=True)
+    (base / "measured.json").write_text("{}")
+    subprocess.run(["git", "-C", str(tree), "add", "-f",
+                    "eval/baselines/p4/measured.json"], check=True, capture_output=True)
+    (tree / ".venvs" / "lloyd").mkdir(parents=True)
+    (tree / ".venvs" / "lloyd" / "python").write_text("")
+    (tree / ".pytest_cache").mkdir()
+    (tree / ".pytest_cache" / "CACHEDIR.TAG").write_text("")
+
+    assert DW.stray_in_tree(str(tree)) == [], (
+        "a tracked runtime name holding only tracked content is not a stray, "
+        "whatever else is untracked in the tree")
+    (base / "written-by-a-stray.json").write_text("{}")
+    assert DW.stray_in_tree(str(tree)) == ["eval/baselines"]
+
+
+def test_an_untracked_top_level_entry_is_a_stray_below_the_top_level_it_is_not(tmp_path):
+    """The scope limit the widening ships with (#1541): the open set is the
+    top level, because one level deeper is the 367,353 ignored paths
+    `git ls-files --others --ignored --exclude-standard` lists on this machine.
+
+    `web/.vite` and `scripts/selfmod` are exactly that shape on the live tree
+    today — untracked content under a tracked directory — and they must stay
+    quiet, which is why the second rule is "git tracks nothing under it at all"
+    rather than "it holds something untracked". Nested runtime names are the
+    retained list's job, not the scan's."""
+    tree = _checkout(tmp_path)
+    for rel in ("web/index.html", "scripts/backup/snapshot-data.sh", "app/server.py"):
+        f = tree / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("# tracked source\n")
+    subprocess.run(["git", "-C", str(tree), "add", "-f", "web", "scripts", "app"],
+                   check=True, capture_output=True)
+    for rel in ("web/.vite/deps/chunk.js", "scripts/selfmod/scratch.sh",
+                "app/__pycache__/server.cpython-312.pyc"):
+        f = tree / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("")
+
+    assert DW.stray_in_tree(str(tree)) == []
+
+
+def test_a_tree_git_cannot_answer_about_falls_back_to_the_retained_names(tmp_path):
+    """No index, no verdict: when `git ls-files` fails the open set stays shut
+    and presence of a retained name decides, as it did before #1541.
+
+    Without git there is no way to tell `.venvs` from a stray writer, and a
+    check that guesses about every directory in an unknown tree alerts until
+    someone turns it off. `workers.db` is still reported, because the retained
+    half never needed git to decide presence."""
+    tree = tmp_path / "not-a-checkout"
+    (tree / "cache").mkdir(parents=True)
+    (tree / "cache" / "x").write_text("{}")
+    (tree / ".venvs").mkdir()
+    (tree / "workers.db").write_bytes(b"")
+
+    assert DW.stray_in_tree(str(tree)) == ["workers.db"]
+
+
+def test_the_strays_cli_exits_nonzero_naming_an_unlisted_directory(tmp_path):
+    """The process boundary the widened check also has to cross (#1541):
+    `datawatch.py strays` is what `scripts/maintenance/cutover_data_home.sh`
+    branches on, and the shell never imports the module — it reads the exit
+    code and the printed paths. So an unlisted writer has to surface there, in a
+    separate interpreter, with the tree named by `LLOYD_TREE` rather than by
+    anything this test imported."""
+    tree = _checkout(tmp_path)
+    (tree / "cache").mkdir()
+    (tree / "cache" / "x").write_text("{}")
+
+    out = subprocess.run([sys.executable, str(GUARDIAN_DIR / "datawatch.py"), "strays"],
+                         env={**os.environ, "LLOYD_TREE": str(tree)},
+                         capture_output=True, text=True)
+
+    assert out.returncode == 1, f"the cutover script would have said all clear:\n{out}"
+    assert str(tree / "cache") in out.stdout, out.stdout
+    assert str(tree / "README.md") not in out.stdout, "a tracked file reported as a stray"

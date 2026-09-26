@@ -1441,6 +1441,31 @@ def test_two_stray_checks_of_one_incident_leave_one_daily_note_section(tmp_path,
     assert "workers.db" in secs[0] and "eval/baselines" in secs[0], secs[0]
 
 
+def test_the_stray_alert_names_where_a_new_tooling_directory_is_classified(
+        tmp_path, monkeypatch):
+    """#1541: the widened check reports any top-level entry git does not track,
+    so a new `.mypy_cache` alarms exactly like a new writer until a person says
+    which it is — that residual is the price of an open set and cannot be paid
+    with a longer list.
+
+    What CAN be closed is the alert giving only one instruction. `stray_in_tree`
+    is now tree-driven, so the body has to carry the other branch as well: the
+    name of the exclusion constant and the file it lives in. Without them the
+    cheapest way to stop an hourly false alarm is to delete a tooling directory
+    or switch the check off."""
+    import guardian as gmod
+
+    g, note, tick, clears = _stray_incident(tmp_path, monkeypatch, ["runs"])
+    tick()
+
+    secs = _sections(note, gmod.RUNTIME_DATA_ALERT_TITLE)
+    assert len(secs) == 1, f"{len(secs)} sections:\n{note.read_text()}"
+    assert "runs" in secs[0], secs[0]
+    assert "KNOWN_GOOD_TOPLEVEL" in secs[0], (
+        "the alert names no place a tooling directory can be classified")
+    assert "agent-services/guardian/datawatch.py" in secs[0], secs[0]
+
+
 def test_a_shrinking_stray_set_rewrites_the_one_section_and_drops_the_gone_path(
         tmp_path, monkeypatch):
     """#1536 clause 2: the single section names what the LATEST check found.

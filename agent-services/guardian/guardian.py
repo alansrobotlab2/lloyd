@@ -869,7 +869,19 @@ class Guardian:
                        + "\n  ".join(f"{policy.REPO}/{n}" for n in strays)
                        + f"\n\nSomething still resolves a data path off the code "
                        f"instead of app.paths.DATA_ROOT ({policy.DATA_ROOT}). Find the "
-                       "writer, move the data across, and remove the in-tree copy.",
+                       "writer, move the data across, and remove the in-tree copy."
+                       # The widened check (#1541) reports anything at the top of
+                       # the tree git does not track, so one of these names may be
+                       # tooling or a rebuildable cache rather than a writer, and
+                       # "remove the in-tree copy" is the wrong order for it. The
+                       # residual of an open-set check is a human deciding which
+                       # side of the list a new name is on; say so where they read
+                       # it, or the honest response to a new `.mypy_cache` is to
+                       # switch the check off.
+                       + "\n\nIf one of these is tooling or a rebuildable cache and "
+                       "not a writer, it belongs in KNOWN_GOOD_TOPLEVEL in "
+                       "agent-services/guardian/datawatch.py — adding its name there "
+                       "is what stops this alert; deleting the directory is not.",
                        coalesce=True)
         elif not strays:
             # The condition cleared, so the retraction goes on the SAME surface
