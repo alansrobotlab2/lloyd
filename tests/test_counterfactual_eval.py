@@ -212,6 +212,8 @@ def _store_where_every_swap_resolves(tmp_path):
 #: their connects names a knowledge store.
 QMD_INDEX_READERS = {
     "embed_side_index.py",          # #1493: side index built beside a copy
+    "contextual_titles.py",         # #1494: sub-corpus copy with situating titles
+    "contextual_full_corpus.py",    # #1494: full-corpus scratch indexes
 }
 
 

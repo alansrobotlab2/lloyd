@@ -211,6 +211,7 @@ READERS_ALLOWED = {
     # Holdout-leg drivers: they set HOLDOUT_LEG_ENV and hand the leg to
     # run_eval.py, which enforces the rule; they keep aggregates only (#1412).
     "eval/recall_topics_merge.py",             # #1456
+    "eval/contextual_full_corpus.py",          # #1494
 }
 
 
