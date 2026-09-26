@@ -710,7 +710,8 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
                                 extra_disallowed: list[str] | None = None,
                                 final_schema: dict | None = None,
                                 final_schema_prompt: str = "",
-                                model: str = "primary") -> dict:
+                                model: str = "primary",
+                                session_id: str | None = None) -> dict:
     """Run one turn through the backend's own chat path, in a real session.
 
     This is the counterpart to `run_prompt_on_primary`, and the difference is
@@ -728,6 +729,13 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     hand-driven automod rounds ran. The turn shows up in the session list, in
     `/health.turns`, and in the Inner Voice tab, and every tool call is
     persisted.
+
+    `session_id` posts the turn into an EXISTING worker session instead of
+    minting one — the implement source's continuation (`autocode._warm_session`),
+    where the next item's turn reads the previous round's trajectory rather
+    than rediscovering the tree from a cold start. The session keeps its
+    title, platform and Inner Voice flags; history is rebuilt from its file
+    like any second turn.
 
     Returns {text, session_id, stop_reason, num_turns, errors, structured,
     structured_error}. `stop_reason` is the part callers must look at:
@@ -781,8 +789,9 @@ async def run_prompt_in_session(prompt: str, *, title: str, source: str,
     # a switch that reads as broken the one time somebody uses it.
     if inner_voice is None:
         inner_voice = source_inner_voice(source)
-    session_id = new_worker_session(title=title, source=source, inner_voice=inner_voice,
-                                    model=model)
+    if not session_id:
+        session_id = new_worker_session(title=title, source=source,
+                                        inner_voice=inner_voice, model=model)
     # #534 — whose authority this turn borrows, carried across the loopback
     # POST. `policy.current_scope` is a contextvar the pool binds around the
     # claimed job, and it is correct HERE, in the pool's own task; the backend

@@ -1626,6 +1626,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # record to 2026-09-13 had ever been told they were a re-offer: no
     # `from_branch`, no findings, no clause verdicts, every one a fresh start.
     reoffer = _reoffer_for(candidate.id) + _strategy_block(candidate, triage)
+    # Before the `started` row too: `_warm_session` reads this slot's latest
+    # turn, and this attempt's own row would otherwise be it.
+    slot = getattr(item, "dedup_key", None)
+    warm = await _warm_session(slot)
 
     # Recorded BEFORE the turn. `implemented_ids` counts any event for the
     # item, so this is what makes it one attempt per item: a turn that crashes
@@ -1634,10 +1638,13 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     started = time.time()
     S.append_event({"event": "backlog_implement", "item_id": candidate.id,
                     "phase": "started", "name": candidate.name[:200],
-                    "budget": budget})
+                    "budget": budget, "slot": slot,
+                    **({"continues_session": warm["session_id"], "chain": warm["chain"],
+                        "history_tokens": warm["history_tokens"]} if warm else {})})
     B.set_status(candidate.id, "in_progress", "automod round starting")
     try:
-        return await _run_and_record(item, candidate, triage, budget, started, reoffer)
+        return await _run_and_record(item, candidate, triage, budget, started, reoffer,
+                                     warm=warm, slot=slot)
     finally:
         # Every exit — landed, aborted, timed out, never ran, skipped for a
         # drain — hands the item back to the ledger's verdict. Without this the
@@ -1702,6 +1709,94 @@ def _vault_landed_since(item_id: int, since_ts: float,
     from scripts.automod import state as S
     return bool(_vault_commits_since(S.read_events(limit=500), item_id, since_ts,
                                      session_id=session_id))
+
+
+# Continuation defaults; each is `workers.sources.autocode.<key>`.
+CONTINUE_MAX_ITEMS = 3            # items one session may carry, the first included
+CONTINUE_MAX_HISTORY_TOKENS = 60_000
+CONTINUE_WITHIN_S = 1800
+
+
+async def _warm_session(slot: str | None) -> dict | None:
+    """The session the next item on this slot should continue in, or None.
+
+    Every round started cold: a fresh session, the ~55k-token prompt, and
+    64 tool calls (median, week to 2026-09-25) before its first gate —
+    much of it re-learning the same tree, test commands and gate protocol the
+    previous round on the slot had just used. The hand sweeps of 2026-09-24
+    cleared 60 items in one session because item 40 knew what item 1 had
+    learned. A finished round's session rebuilds to 20–55k tokens (tool
+    results are stored as 2 KB pointers; measured on the live store), so the
+    next item can start there instead: one round per item and one turn per
+    pool job, as before — only the session is shared.
+
+    Continue only when every one of these holds, else start cold:
+      * `continue_session` is on and the slot has a latest turn row, which is
+        a `finished` row marked `continuable` (ended on `stop` with its item
+        decided) — a `started` with no end, an `infra_failed`, a timeout or a
+        stall all start cold;
+      * it finished within `continue_within_s`, the session has carried fewer
+        than `continue_max_items` items, nothing is running in it, and its
+        rebuilt history is under `continue_max_history_tokens`.
+    """
+    cfg = _source_cfg(NAME)
+    if not slot or not bool(cfg.get("continue_session", True)):
+        return None
+    try:
+        max_items = int(cfg.get("continue_max_items", CONTINUE_MAX_ITEMS))
+        max_hist = int(cfg.get("continue_max_history_tokens", CONTINUE_MAX_HISTORY_TOKENS))
+        within = float(cfg.get("continue_within_s", CONTINUE_WITHIN_S))
+    except (TypeError, ValueError):
+        return None
+    from scripts.automod import state as S
+    rows = [e for e in S.read_events(limit=400)
+            if e.get("event") == "backlog_implement" and e.get("slot") == slot
+            and e.get("phase") in ("started", "finished", "infra_failed")]
+    if not rows:
+        return None
+    last = rows[-1]
+    sid = str(last.get("session_id") or "")
+    if last.get("phase") != "finished" or not last.get("continuable") or not sid:
+        return None
+    chain = int(last.get("chain") or 1)
+    if chain >= max_items or time.time() - float(last.get("ts") or 0) > within:
+        return None
+    try:
+        from app.paths import SESSIONS_DIR
+        from app.sessions_io import active_sessions_snapshot
+        if sid in {s.get("session_id") for s in active_sessions_snapshot()}:
+            return None
+        path = SESSIONS_DIR / f"{sid}.json"
+        if not path.exists():
+            return None
+        from app.compaction import load_and_compact_session
+        rebuilt = await load_and_compact_session(path, model="primary")
+    except Exception as exc:  # noqa: BLE001 — a cold start is always safe
+        logger.warning("autocode continuation: could not read %s: %s", sid, exc)
+        return None
+    tokens = int(rebuilt.get("tokens_after") or 0)
+    if not rebuilt.get("history") or tokens > max_hist:
+        return None
+    return {"session_id": sid, "chain": chain + 1, "history_tokens": tokens,
+            "prev_item": last.get("item_id"), "prev_round": last.get("round_id")}
+
+
+def _continuation_block(warm: dict, item_id: int) -> str:
+    """What a continued session is told before the next item's prompt."""
+    prev_round = warm.get("prev_round")
+    prev = (f"round {prev_round} for #{warm.get('prev_item')}" if prev_round
+            else f"#{warm.get('prev_item')}")
+    return (
+        f"<next_item continuing_session=\"true\" item=\"{item_id}\">\n"
+        f"Your previous item in this session, {prev}, is finished: whatever it "
+        f"started landing is the loop's now. Do not touch that round, its worktree "
+        f"or its branch, and call no automod tool on it again. This is a NEW item "
+        f"with its own round. What you learned above about this codebase, its "
+        f"tests and the gate still holds and saves you the rediscovery; nothing "
+        f"you concluded about #{warm.get('prev_item')} is evidence about "
+        f"#{item_id}. Read the item below as if fresh, open its round with "
+        f"automod_start, and follow every rule below exactly as a first round would.\n"
+        f"</next_item>\n\n")
 
 
 async def _reap_at_turn_end(session_id: str | None) -> None:
@@ -1771,7 +1866,8 @@ def _strategy_block(candidate, triage) -> str:
 
 
 async def _run_and_record(item, candidate, triage, budget, started,
-                          reoffer: str = "") -> dict[str, Any]:
+                          reoffer: str = "", *, warm: dict | None = None,
+                          slot: str | None = None) -> dict[str, Any]:
     from scripts.automod import backlog as B, state as S
     from workers.sources._common import DrainActive, TurnTimeout, run_prompt_in_session
     logger.info("implementing backlog #%s (budget %d): %s",
@@ -1810,6 +1906,8 @@ async def _run_and_record(item, candidate, triage, budget, started,
         # this attempt's `started` row, which would otherwise erase it.
         reoffer=reoffer,
     )
+    if warm:
+        prompt = _continuation_block(warm, candidate.id) + prompt
     want_outcome = bool((item.payload or {}).get("structured_outcome", True))
     # Taken BEFORE the turn: an id the turn claims that is at or below this
     # already existed, so it is a merge (or a citation), not a spawn.
@@ -1819,6 +1917,7 @@ async def _run_and_record(item, candidate, triage, budget, started,
         run = await run_prompt_in_session(
             prompt, title=f"autocode #{candidate.id}: {candidate.name[:48]}",
             source=NAME, max_turns=budget, priority=1,
+            session_id=(warm or {}).get("session_id"),
             final_schema=B.IMPLEMENT_OUTCOME_SCHEMA if want_outcome else None,
             final_schema_prompt=(
                 "Restate the result of this round as a single JSON object matching "
@@ -2007,8 +2106,16 @@ async def _run_and_record(item, candidate, triage, budget, started,
         logger.warning("backlog #%s filed %d item(s) over the cap of %d%s",
                        candidate.id, over_cap, SPAWN_CAP,
                        " while landing nothing" if not (round_id or vault_commits) else "")
+    # Whether the next item on this slot may continue in this session
+    # (`_warm_session`): only a turn that ended on its own and left its item
+    # decided — a landing in hand, a vault commit, or an item verdict. A turn
+    # that died, stalled with a round open, or aborted starts the next one cold.
+    continuable = bool(run.get("stop_reason") == "stop" and (
+        seen or (outcome and outcome.get("acceptance") in B.ITEM_VERDICT_OUTCOMES)))
     S.append_event({"event": "backlog_implement", "item_id": candidate.id,
                     "phase": "finished", "session_id": run["session_id"],
+                    "slot": slot, "chain": (warm or {}).get("chain", 1),
+                    "continuable": continuable,
                     "spawn_cap": SPAWN_CAP, "spawned_over_cap": over_cap,
                     "round_id": round_id, "vault_commits": vault_commits,
                     "surface": triage.get("surface") or "code",

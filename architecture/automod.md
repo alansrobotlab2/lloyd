@@ -1173,6 +1173,26 @@ runs after the other two:
 | never | an item verdict (`unnecessary`/`rejected`: nothing committed either), a round something tried to land, a stopped loop. Switch `workers.sources.autocode.gate_ungated` |
 | the item closes on the review | `backlog.ungated_rescued_rounds`: the turn's outcome predates every gate, so `settled_landings` and `implement_outcomes` take the review rung's all-`met` grading in its place; a review that did not vouch for every clause leaves the turn's word standing |
 
+**The next item continues in the last round's session (2026-09-25).** Every
+round started cold: a fresh session, the ~55k-token prompt, and a median 64
+tool calls before its first gate, much of it re-learning what the previous
+round on the slot had just used. `autocode._warm_session` hands the next item
+on a slot (`QueueItem.dedup_key`) the previous turn's session when that turn
+ended on `stop` with its item decided (`continuable` on its `finished` row: a
+landing seen, a vault commit, or an item verdict), finished within
+`continue_within_s` (1800), the session has carried fewer than
+`continue_max_items` (3), nothing runs in it, and its history rebuilds under
+`continue_max_history_tokens` (60k; measured 20–55k, since stored tool
+results are 2 KB pointers). The prompt is prefixed with a `<next_item>` block
+(the previous round is the loop's now; nothing concluded about that item is
+evidence about this one) and is otherwise the full implement prompt.
+`run_prompt_in_session(session_id=)` posts into the existing session. Still
+one round per item and one turn per pool job, so every per-round invariant
+holds. Ledger: `slot`, `chain` and `continues_session` on `started`, `slot`,
+`chain`, `continuable` on `finished` — compare chained and fresh rounds on
+iterations to first gate and landing rate before widening it. The session
+keeps its first item's title.
+
 The reaper's 20-minute grace no longer follows `autocode.inner_voice`. It
 waited for the observer's post-turn follow-up, which R2 of the IV plan retired
 (the observer's one LLM judgment is now the terminal review, before the turn

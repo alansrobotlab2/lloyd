@@ -1868,6 +1868,20 @@ workers:
       # remove --force` deleted whatever the turn had not committed. Off:
       # aborted, as before.
       gate_ungated: true
+      # Continuation (2026-09-25): the next item on a slot runs in the
+      # previous round's session when that turn ended on `stop` with its item
+      # decided (a landing, a vault commit, or an item verdict), within
+      # continue_within_s, the session has carried fewer than
+      # continue_max_items items, and its rebuilt history (20-55k tokens
+      # measured; tool results are stored as pointers) is under
+      # continue_max_history_tokens. One round per item and one turn per pool
+      # job as before - only the session, and what it learned about the
+      # tree, is shared. Ledger: `slot`, `chain`, `continuable`,
+      # `continues_session`. Off: every round starts cold, as before.
+      continue_session: true
+      continue_max_items: 3
+      continue_max_history_tokens: 60000
+      continue_within_s: 1800
       # The hard bound on the board. A self-filed draft that nothing —
       # clustering, group triage, a human — picked up in
       # expire_spawns_after_days is closed, tagged `expired`, and reopens by

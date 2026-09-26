@@ -1230,6 +1230,11 @@ redoing changes that had already passed every rung, and two items were closed
   pre-gate outcome (`backlog.ungated_rescued_rounds`). 139 of 489 rounds a
   week were aborted that way. The reaper's grace no longer follows
   `inner_voice` (`abandon_grace_seconds`, default 0). `architecture/automod.md` §3.2g.
+- **The next item on a slot continues in the last round's session**
+  (2026-09-25, `autocode._warm_session`, `…autocode.continue_session`): only
+  after a turn that ended on `stop` with its item decided, under 3 items and
+  60k tokens of rebuilt history. One round per item, one turn per pool job;
+  ledger `chain` / `continues_session`. `architecture/automod.md` §3.2g.
 - **A finished gate report leads with `verdict` and `next`**
   (`automod._with_headline`); a pass's advisory findings move to
   `notes_that_did_not_block`. Four rounds in four days were aborted by their
