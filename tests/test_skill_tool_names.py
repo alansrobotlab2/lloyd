@@ -420,6 +420,30 @@ BACKTICKED = re.compile(r"`([^`\n]+)`")
 # command block that names a script means "run this script".
 _PY_IN_COMMAND = re.compile(r"(?:^|[\s/])((?:eval|app|tests|scripts)/[A-Za-z0-9_./-]+\.py)")
 
+#: The marker left where something was cut short. `clip_skill_description` says so
+#: of itself — "cut to at most `max_chars` characters, the cut marked with `…`"
+#: (`prompt_builder.py:992-996`) — and `scripts/skill_lint.py:822` puts that clipped
+#: string into a table cell of the report it emits, which is a document this guard
+#: scans. `...` is the same event typed by a human.
+CLIP_MARKERS = ("\N{HORIZONTAL ELLIPSIS}", "...")
+
+
+def _truncated(cand: str, tail: str = "") -> bool:
+    """True when `cand` is a quotation that ran out of room, not a path being named.
+
+    Two shapes, one rule, because the marker lands on a different side per matcher:
+    inside the candidate (the backticked class allows any non-backtick character, so
+    it carries the marker through) or immediately after it (the two anchored classes
+    stop at it, so the report's cell reads `…~/lloyd/agent-services/su…` and yields
+    `agent-services/su`). Either way the text is not asserting that a file named
+    `agent-services/su` should exist — it is quoting a real name that continues past
+    what the budget allowed. A reference this guard cannot complete is not checkable
+    against the checkout, so the honest verdict is "not a claim", the same verdict
+    `_is_template` reaches for a `<slug>`; the alternative is a red node that no
+    change to the code can clear.
+    """
+    return any(m in cand for m in CLIP_MARKERS) or tail.startswith(CLIP_MARKERS)
+
 #: Every unresolved reference that existed on 2026-09-18, when this check was
 #: written, across 230 skill/task files and 381 references. Same contract as
 #: `KNOWN_UNFIXED` above: real drift, each one worth fixing, held out of the
@@ -483,15 +507,19 @@ def _named_paths(body: str, skill_dir: Path | None) -> set[tuple[str, str]]:
     """
     out: set[tuple[str, str]] = set()
     for m in _LLOYD_PATH.finditer(body):
-        if not m.group(1).startswith(RUNTIME_FIRST):
+        if not m.group(1).startswith(RUNTIME_FIRST) and not _truncated(m.group(1),
+                                                                      body[m.end():]):
             out.add(("repo", m.group(1)))
     for m in _OBSIDIAN_PATH.finditer(body):
-        out.add(("vault", m.group(1)))
+        if not _truncated(m.group(1), body[m.end():]):
+            out.add(("vault", m.group(1)))
     for tok in BACKTICKED.findall(body):
         s = tok.strip()
         if not s:
             continue
         core = re.split(r"[:\s(]", s, maxsplit=1)[0]
+        if _truncated(core):
+            continue
         if core.startswith(CHECKOUT_PREFIXES) or core.startswith(SKILL_LOCAL_PREFIXES):
             out.add(("repo", core))
     for block in _command_blocks(body):
@@ -1366,3 +1394,57 @@ def test_the_two_nightly_docs_name_one_location_for_the_trend():
         assert "eval/secondary-routing/trend.md" not in doc, (
             f"the {name} still names a repo trend file that nothing writes")
 
+
+
+# ── #1531 — a clipped path quotation is not a path being named ───────────────
+
+def test_a_clipped_path_quotation_is_not_read_as_a_phantom(tmp_path, monkeypatch):
+    """The guard reads a quotation that ran out of room as a claim about a short
+    file, and reddens three nodes on a real tree with no defect in it.
+
+    `clip_skill_description` cuts a description to a character budget and marks the
+    cut with `…` (`prompt_builder.py:992-996`); `scripts/skill_lint.py:822` writes
+    that clipped string into a cell of `~/obsidian/autonomy/skill-lint-report.md`,
+    which is an autonomy task file and therefore in this guard's own corpus. On
+    2026-09-25 the report's `service-health-check` row clipped mid-path and left
+    `…~/lloyd/agent-services/su…`; the guard extracted `agent-services/su`, asked
+    the checkout for it, found nothing, and filed the report as drift. That broke
+    `test_no_active_skill_or_task_names_a_path_absent_from_the_checkout` outright,
+    and because the fixture tests assert their planted row is the *only* one, it
+    broke the two probes that exist to prove this check can still fail.
+
+    Four shapes, both sides of the rule. The clipped pair must produce no row: one
+    cut after the `~/lloyd/` anchor, one cut inside a backticked token (the two
+    sites where a marker can arrive, since the anchored classes stop at `…` and the
+    backticked class carries it through). The unclipped pair pins the direction that
+    must survive: a real path is still not a violation, and an absent file named in
+    full is still exactly one.
+    """
+    from prompt_builder import clip_skill_description
+
+    real = "agent-services/supervisor/supervisord.conf"
+    absent = "eval/a_script_only_a_clipped_quotation_names_1531.py"
+    clipped_anchor = clip_skill_description(f"run ~/lloyd/{real} to check the conf", 40)
+    assert "…" in clipped_anchor and real not in clipped_anchor, clipped_anchor
+
+    docs = [
+        ("autonomy/9101-anchor-clipped.md", f"| `svc` | clipped | {clipped_anchor} |\n"),
+        ("autonomy/9102-backticked-clipped.md", "see `agent-services/su…` for the conf\n"),
+        ("autonomy/9103-anchor-real.md", f"run ~/lloyd/{real} to check the conf\n"),
+        ("autonomy/9104-anchor-absent.md", f"run ~/lloyd/{absent} to do the thing\n"),
+    ]
+    files = []
+    for label, text in docs:
+        p = tmp_path / label.split("/")[-1]
+        p.write_text(text, encoding="utf-8")
+        files.append((label, p))
+    real_docs = _doc_files()
+    monkeypatch.setattr(sys.modules[__name__], "_doc_files",
+                        lambda: real_docs + files)
+
+    rows = {r for r in _unresolved() if r.split("::", 1)[0] in {l for l, _ in docs}}
+    assert rows == {f"autonomy/9104-anchor-absent.md::repo:{absent}"}, (
+        f"a clipped quotation was read as a phantom, or an absent file named in full "
+        f"went unseen: {sorted(rows)}")
+    assert _truncated("agent-services/su", "… |") and _truncated("app/x…"), (
+        "_truncated stopped covering one of the two arrival shapes")
