@@ -784,3 +784,25 @@ def test_the_home_relative_sweep_catches_the_spelling_that_shipped(tmp_path):
     # And the file this control lives in is itself inside the swept set: the
     # assembly above is why that is possible.
     assert _home_relative_hits(ROOT, ["tests/test_data_home.py"]) == []
+
+
+def test_a_tracked_runtime_name_is_not_a_stray_until_something_untracked_lands(tmp_path):
+    """`eval/baselines/` holds committed measurement records; the hourly check
+    alerted on the directory existing at all (2026-09-25). Tracked content is
+    quiet, an untracked or ignored file beside it is a stray, and a runtime
+    name git knows nothing about is a stray however empty."""
+    tree = tmp_path / "tree"
+    base = tree / "eval" / "baselines"
+    base.mkdir(parents=True)
+    (tree / ".gitignore").write_text("eval/baselines/*\n*.db\n")
+    (base / "measured.json").write_text("{}")
+    run = lambda *a: subprocess.run(["git", "-C", str(tree), *a], check=True,  # noqa: E731
+                                    capture_output=True)
+    run("init", "-q")
+    run("add", "-f", ".gitignore", "eval/baselines/measured.json")
+    assert DW.stray_in_tree(str(tree)) == []
+    (base / "written-by-a-stray.json").write_text("{}")
+    assert DW.stray_in_tree(str(tree)) == ["eval/baselines"]
+    (base / "written-by-a-stray.json").unlink()
+    (tree / "workers.db").write_bytes(b"")
+    assert DW.stray_in_tree(str(tree)) == ["workers.db"]

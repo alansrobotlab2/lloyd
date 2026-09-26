@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -58,9 +59,40 @@ RUNTIME_NAMES = ("sessions", "event_logs", "logs", "autonomy-runs", "_pipeline",
                  "agent-services/logs", "None")
 
 
+def _ls_files(tree: str, names: list[str], *flags: str) -> set[str] | None:
+    """The paths `git ls-files` reports under `names`, or None when git cannot
+    answer (not a checkout, no git, a hung index lock)."""
+    try:
+        out = subprocess.run(["git", "-C", tree, "ls-files", "-z", *flags, "--", *names],
+                             capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return {p for p in out.stdout.decode("utf-8", "replace").split("\0") if p}
+
+
 def stray_in_tree(tree: str = TREE) -> list[str]:
-    """Runtime names present inside the code tree. Empty is healthy."""
-    return [n for n in RUNTIME_NAMES if os.path.lexists(os.path.join(tree, n))]
+    """Runtime names present inside the code tree. Empty is healthy.
+
+    A name git tracks is committed on purpose, not written by a stray writer:
+    `eval/baselines/` holds measurement records the harness reviews commit as
+    evidence (#600, P4-P9), and it alerted every hour for them. Such a name is a
+    stray only when it also holds something untracked (ignored files included —
+    the gitignore hiding a writer is the case this check exists for). When git
+    cannot answer, presence alone decides, as before."""
+    present = [n for n in RUNTIME_NAMES if os.path.lexists(os.path.join(tree, n))]
+    if not present:
+        return []
+    tracked = _ls_files(tree, present)
+    untracked = _ls_files(tree, present, "--others")
+    if tracked is None or untracked is None:
+        return present
+
+    def under(paths: set[str], name: str) -> bool:
+        return any(p == name or p.startswith(name + "/") for p in paths)
+
+    return [n for n in present if not under(tracked, n) or under(untracked, n)]
 
 
 class DataWatch(V.VaultWatch):
