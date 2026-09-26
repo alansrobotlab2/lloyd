@@ -655,3 +655,121 @@ async def test_the_status_carries_each_surfaces_last_measured_mitigation(q, monk
         "pool_pause": {"classification": "dispatch-only", "seconds": None,
                        "at": "2026-09-24T20:00:00+00:00"},
     }
+
+
+# ---------------------------------------------------------------------------
+# #1550 — the alarm's pause verdict is the database's, not this process's
+#
+# An operator pause is persisted (`29d88695`) precisely so a restart cannot
+# resume a pool a person stopped. The same durability is what makes it invisible:
+# a 16.5 h hold on 2026-09-24/25 produced eight `autonomy scheduler may be
+# stalled` alerts and not one mention of the pause, because the alarm read
+# nothing but queue ages and task files. These tests pin where the alert's answer
+# comes from.
+# ---------------------------------------------------------------------------
+
+
+def _age_a_queued_row(q, *, age_min: int) -> int:
+    """A queued scheduled-task row `age_min` minutes old, by hand.
+
+    Raw SQL because the age IS the fixture: `enqueue` stamps `enqueued_at` with
+    the wall clock. 990 min is the item's queue row 510, eleven times the
+    starving threshold (3 x `max_duration_seconds` = 90 min at the 1800 s the
+    tests below pass in).
+    """
+    import datetime as _dt
+    import sqlite3
+    row_id = q.enqueue(source="scheduled-task", kind="autonomy-task",
+                       payload={"task_id": 510})
+    aged = (_dt.datetime.now(_dt.timezone.utc)
+            - _dt.timedelta(minutes=age_min)).isoformat()
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE queue SET enqueued_at=? WHERE id=?", (aged, row_id))
+        conn.commit()
+    return row_id
+
+
+def _hold_operator_pause(q, *, hours: float) -> str:
+    """Pause as an operator, then wind the persisted row's `updated_at` back.
+
+    Only the timestamp is wound back — `pause()` and its `wm_set` are the real
+    writers, so the row is the production one in every other respect. That is
+    what makes the assertion below a test of provenance: a fix that read the
+    pause from process memory, or stamped its own start instant, could not report
+    16.5 h for a pool that has existed for milliseconds.
+    """
+    import datetime as _dt
+    import sqlite3
+    from workers.pool import PAUSE_WM_KEY, PAUSE_WM_SOURCE
+    WorkerPool(q, slots=1).pause(True)
+    since = (_dt.datetime.now(_dt.timezone.utc)
+             - _dt.timedelta(hours=hours)).isoformat()
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE watermarks SET updated_at=? "
+                     "WHERE source=? AND key=?", (since, PAUSE_WM_SOURCE, PAUSE_WM_KEY))
+        conn.commit()
+    return since
+
+
+async def _starving_alerts(q, monkeypatch, tmp_path):
+    """One real `enqueue_if_due` tick over `q`; returns the alerts it posted.
+
+    The task dir is pointed at an EMPTY directory, so the alert under test can
+    only be the starving clause: with no task files neither `overdue` nor the
+    `next_run` scan has anything to name. That isolation is load-bearing here —
+    the alternative is a tick that scans and re-arms the LIVE board.
+    """
+    import autonomy
+    import workers.sources.scheduled_task as st
+    monkeypatch.setattr(autonomy, "AUTONOMY_DIR", tmp_path / "tasks")
+    monkeypatch.setattr(autonomy, "AUTONOMY_RUNS_DIR", tmp_path / "runs")
+    (tmp_path / "tasks").mkdir(exist_ok=True)
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(st, "_state", {**st._state, "unparseable_scan_at": None,
+                                       "stall_streak": st._STALL_ALARM_TICKS,
+                                       "stall_alerted_at": None,
+                                       "nextrun_streak": 0,
+                                       "nextrun_alerted_at": None})
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture)
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    return alerts
+
+
+async def test_a_pool_built_fresh_on_a_paused_database_alerts_by_the_pause(
+        q, monkeypatch, tmp_path):
+    """Clause 2: the restart analogue still produces the pause-named alert.
+
+    The pause is taken by one pool and the alert is produced after a SECOND
+    `WorkerPool` is constructed over the same database — the way a backend
+    restart leaves it — with the first pool dropped. `_load_operator_pause` is
+    the only thing that could carry the hold across that gap, and the alert must
+    agree with it rather than with whatever the new process happened to remember.
+    The control at the end is what makes the first assertion non-vacuous: the
+    same fresh pool, resumed, must go back to the age-only sentence.
+    """
+    _age_a_queued_row(q, age_min=990)
+    since = _hold_operator_pause(q, hours=16.5)
+
+    fresh = WorkerPool(q, slots=1)
+    assert fresh.paused_by == ["operator"], "the restart analogue lost the hold"
+    assert fresh.paused_since == since, (
+        f"status() does not report the persisted pause instant: {fresh.status()}")
+
+    alerts = await _starving_alerts(q, monkeypatch, tmp_path)
+    assert len(alerts) == 1, alerts
+    msg = alerts[0]
+    assert "operator" in msg, f"the alert does not name the pause: {msg}"
+    assert "16.5 h" in msg, f"the alert does not state the held duration: {msg}"
+    assert since in msg, f"the alert does not quote the pause instant: {msg}"
+    assert "oldest claimable queue item is 990 min old" in msg, msg
+
+    fresh.pause(False)
+    alerts = await _starving_alerts(q, monkeypatch, tmp_path)
+    assert alerts == ["autonomy scheduler may be stalled: "
+                      "oldest claimable queue item is 990 min old"], (
+        f"after the resume the alert must fall back to today's text: {alerts}")

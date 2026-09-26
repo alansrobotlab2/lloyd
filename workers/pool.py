@@ -304,6 +304,37 @@ PAUSE_WM_SOURCE = "_pool"
 PAUSE_WM_KEY = "operator_paused"
 
 
+def operator_pause_state(queue: WorkQueue) -> dict[str, Any]:
+    """The OPERATOR pause as the DATABASE sees it: ``{"paused", "since"}``.
+
+    ONE read for both surfaces that have to agree (#1550). The pool's own flag is
+    in-process and dies with it; the watermark row is what survives a restart, and
+    it is the only thing an alert raised in the scheduler can consult — the
+    scheduler's tick and the pool that started it are not guaranteed to be the same
+    process's memory, and on 2026-09-24/25 the alert that consulted neither
+    produced eight `autonomy scheduler may be stalled` lines about a pause.
+
+    `since` is the row's `updated_at`: the instant `pause()` last wrote it, which is
+    the instant the hold was taken while the value is "1". It is None whenever the
+    pool is not operator-held — including a hold taken by `automod`, which is
+    deliberately not persisted at all (see `WorkerPool.pause`), so there is no
+    durable instant to report and inventing one would assert a pause that a
+    landing's restart does not survive.
+
+    Never raises: an unreadable watermark is reported as "no pause held" with a loud
+    line, because every caller of this is a read surface (boot, status, an alert),
+    and a database hiccup must not claim a hold that is not there.
+    """
+    try:
+        paused = queue.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_KEY) == "1"
+        since = queue.wm_updated_at(PAUSE_WM_SOURCE, PAUSE_WM_KEY) if paused else None
+    except Exception:
+        logger.exception("Worker pool: could not read the persisted operator "
+                         "pause; reporting it as not held")
+        return {"paused": False, "since": None}
+    return {"paused": paused, "since": since}
+
+
 class WorkerPool:
     def __init__(
         self,
@@ -426,11 +457,15 @@ class WorkerPool:
         logger.info("Worker pool stopped")
 
     def _load_operator_pause(self) -> bool:
-        try:
-            return self.queue.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_KEY) == "1"
-        except Exception:
-            logger.exception("Worker pool: could not read the persisted pause; starting unpaused")
-            return False
+        """Reload a hold a previous process took. Reads the same row the alert reads.
+
+        Both halves of #1550 had to come from one accessor: the verdict that keeps
+        a restarted pool from claiming work is the SAME read that puts the pause in
+        the stall alert, so an alert can never accuse a pool this process considers
+        free, nor clear one it is holding. `operator_pause_state` swallows and logs
+        its own failures, which is why no try/except lives here any more.
+        """
+        return operator_pause_state(self.queue)["paused"]
 
     def pause(self, paused: bool = True, owner: str = "operator") -> None:
         """Pause or resume. `owner` is `operator` (persisted) or `automod` (not).
@@ -468,11 +503,33 @@ class WorkerPool:
         return [o for o, on in (("operator", self._paused_operator),
                                 ("automod", self._paused_automod)) if on]
 
+    @property
+    def paused_since(self) -> Optional[str]:
+        """When the OPERATOR pause was taken (ISO), or None if none is held.
+
+        #1550. `paused_by` said WHO held the pool and never FOR HOW LONG, which is
+        the gap that let a 16.5 h hold on 2026-09-24/25 be reported only as
+        `autonomy scheduler may be stalled: oldest claimable queue item is 637 min
+        old`: nothing on any surface could state the duration, so the hold was
+        reconstructable only by reading `watermarks.updated_at` against the
+        `claimed_at` of the rows that finally drained.
+
+        Read per call rather than cached in `__init__`, because the answer belongs
+        to the row and not to this process: a pool built against a database left
+        paused reports the instant the PREVIOUS process wrote, which is the whole
+        point of persisting the pause — and an alert raised minutes or days later
+        must see a hold that began after this pool started, not the clock at boot.
+        """
+        if not self._paused_operator:
+            return None
+        return operator_pause_state(self.queue)["since"]
+
     def status(self) -> dict:
         return {
             "running": self._running,
             "paused": self._paused,
             "paused_by": self.paused_by,
+            "paused_since": self.paused_since,
             "slots": self.slots,
             "in_flight": {
                 str(k): {

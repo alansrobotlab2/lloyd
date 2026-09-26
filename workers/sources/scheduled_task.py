@@ -303,6 +303,53 @@ def _queue_starving(queue: WorkQueue, max_duration: int) -> float:
     return oldest if oldest > 3 * max_duration else 0.0
 
 
+def _operator_pause_clause(queue: WorkQueue) -> str:
+    """A clause naming an engaged operator pause and how long it has been held.
+
+    Empty string when no operator pause is held, which is the overwhelmingly
+    common case and must leave the alert byte-identical to what it said before
+    #1550 — `agent-services/guardian/detect.py` greps the surrounding sentence, and
+    an accusation that leaked into the unpaused case would both break that watch and
+    blame a person who touched nothing.
+
+    Why this exists: an operator pause is durable and has no TTL, so a hold taken
+    by hand in Mission Control stops claims for as long as nobody resumes it. On
+    2026-09-24 one lasted 16.5 h straight through the 22:00-04:00 nightly window —
+    queue row 510 enqueued 05:00:19Z and was claimed at 18:44:52.78Z, one second
+    after the resume line at 18:44:51.495 — and every alert in that stretch read
+    `autonomy scheduler may be stalled: oldest claimable queue item is 637 min old`
+    (then 791 min). The scheduler was healthy. The pause was the entire cause, and
+    nothing said so.
+
+    The verdict is read from the persisted `(_pool, operator_paused)` watermark
+    through `workers.pool.operator_pause_state`, the same read `WorkerPool` uses to
+    re-engage a hold after a restart. It cannot use `get_pool()`: this tick runs in
+    the backend process, which after a restart has a pool whose in-memory flags came
+    from that row anyway — and during an outage where no pool started at all there
+    is no object to ask. The row is the durable fact; memory is a copy of it.
+    """
+    try:
+        from workers.pool import operator_pause_state
+        state = operator_pause_state(queue)
+    except Exception:
+        logger.exception("stall alarm: could not read the operator pause; "
+                         "alarming without it")
+        return ""
+    if not state["paused"]:
+        return ""
+    import datetime as _dt
+    held_h = 0.0
+    since = state["since"]
+    if since:
+        taken = _parse_iso_safe(since)
+        if taken is not None:
+            now = _dt.datetime.now(_dt.timezone.utc)
+            held_h = max(0.0, (now - taken).total_seconds() / 3600.0)
+    return (f"the worker pool is PAUSED by operator, held {held_h:.1f} h since "
+            f"{since} — claims are held by that pause, not by this scheduler; "
+            f"resume it to drain the backlog")
+
+
 def _parse_iso_safe(value):
     import autonomy
     return autonomy._parse_iso(value)
@@ -449,6 +496,13 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
                              f"(ids: {overdue[:15]})")
             if starving:
                 parts.append(f"oldest claimable queue item is {starving/60:.0f} min old")
+            # #1550: attribute a starving queue to a held pool before attributing it
+            # to anything. Computed on the alert path only — one indexed read of the
+            # watermark row, not a per-tick cost — and empty unless an operator pause
+            # is actually persisted, so the unpaused message is untouched.
+            pause_clause = _operator_pause_clause(queue)
+            if pause_clause:
+                parts.append(pause_clause)
             msg = "autonomy scheduler may be stalled: " + "; ".join(parts)
             logger.error("%s", msg)
             await _alert(msg)

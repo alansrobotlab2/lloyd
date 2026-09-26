@@ -4,6 +4,7 @@ GET  /api/workers/status           — pool state + queue depth by source
 GET  /api/workers/queue            — list queue items (filterable)
 GET  /api/workers/runs             — list recent runs (filterable)
 POST /api/workers/enqueue          — manually enqueue (for testing / agent hooks)
+GET  /api/workers/pause            — who holds the pause, and since when (#1550)
 POST /api/workers/pause            — pause/resume worker draining
 POST /api/workers/enable           — toggle workers.enabled in config.yaml
 GET  /api/workers/pending          — list pending-research artifacts
@@ -300,6 +301,36 @@ async def workers_enqueue(request: Request):
     return JSONResponse({"id": new_id})
 
 
+@router.get("/api/workers/pause")
+async def workers_pause_state():
+    """Who holds the pool, and since when — without taking the pause.
+
+    #1550. An operator pause is durable and has no TTL, so "paused by someone" is
+    a state a human has to be able to read on its own terms: this returns the
+    instant the hold was taken (`paused_since`, the persisted watermark row's
+    timestamp), which is what turns "the queue has 990-minute-old rows" into "a
+    person paused this 16.5 hours ago" — the duration nothing could state while a
+    16.5 h hold on 2026-09-24/25 was being reported as a stalled scheduler.
+
+    It is a separate route because the only pause endpoint was the POST that
+    MUTATES it: reading the state required changing it first, which is not a thing
+    an alert or a status poll can do. The instant comes from the pool, which reads
+    it off `(_pool, operator_paused)` in `workers.db` — the same row
+    `WorkerPool._load_operator_pause` re-engages at boot, so a restarted backend
+    and this route cannot disagree. No pause is not an error: the honest answer is
+    `{"paused": false, "paused_since": null}`, and a hold taken by `automod` (which
+    is deliberately transient) reports null rather than an invented instant.
+    """
+    pool = get_pool()
+    if not pool:
+        raise HTTPException(status_code=503, detail="pool not running")
+    return JSONResponse({
+        "paused": pool.paused,
+        "paused_by": getattr(pool, "paused_by", None),
+        "paused_since": getattr(pool, "paused_since", None),
+    })
+
+
 @router.post("/api/workers/pause")
 async def workers_pause(request: Request):
     pool = get_pool()
@@ -311,7 +342,12 @@ async def workers_pause(request: Request):
     # operator's and survives a restart (`WorkerPool.pause`).
     owner = "automod" if data.get("owner") == "automod" else "operator"
     pool.pause(paused, owner=owner)
-    return JSONResponse({"paused": pool.paused, "paused_by": getattr(pool, "paused_by", None)})
+    return JSONResponse({"paused": pool.paused,
+                         "paused_by": getattr(pool, "paused_by", None),
+                         # #1550: the response to the click that took the pause is
+                         # what the panel renders, so it carries the same instant
+                         # GET reports — one hold, one duration, every surface.
+                         "paused_since": getattr(pool, "paused_since", None)})
 
 
 @router.post("/api/workers/enable")

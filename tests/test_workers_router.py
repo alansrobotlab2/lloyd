@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import inspect
 import re
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -827,3 +828,91 @@ def test_the_sync_message_route_is_gone():
     callers = [p for p in web.rglob("*.ts*") if pattern.search(p.read_text(errors="replace"))]
     assert callers == [], callers
     assert pattern.search("fetch(`${API_BASE}/message`, {")  # the pattern bites
+
+
+# ---------------------------------------------------------------------------
+# #1550 clause 4 — the panel and the alert state the same pause duration
+#
+# `(_pool, operator_paused)` carried the fact that a pool was held and nothing
+# else: `status()` named the holder (`paused_by`) but not the instant, so no
+# surface could answer "for how long", and the 16.5 h hold of 2026-09-24/25 was
+# reconstructable only by comparing `watermarks.updated_at` with the `claimed_at`
+# of the rows that finally drained. `paused_since` is that column, exposed.
+# ---------------------------------------------------------------------------
+
+
+def _pause_client(monkeypatch, tmp_path: Path, *, held_for_hours: float | None = None):
+    """A client whose pool is a real `WorkerPool` over a real `WorkQueue`.
+
+    Only `get_pool` is faked, and with a real pool: the field under test is read
+    off the watermark table by the pool itself, so a stub pool would assert
+    nothing about provenance. `held_for_hours` winds the persisted row's
+    `updated_at` back, because `wm_set` stamps it with the wall clock.
+    """
+    import sqlite3
+
+    from workers.pool import PAUSE_WM_KEY, PAUSE_WM_SOURCE, WorkerPool
+    from workers.queue import WorkQueue
+
+    queue = WorkQueue(tmp_path / "workers.db")
+    pool = WorkerPool(queue, slots=1)
+    since = None
+    if held_for_hours is not None:
+        pool.pause(True)
+        since = (datetime.now(timezone.utc)
+                 - timedelta(hours=held_for_hours)).isoformat()
+        with sqlite3.connect(str(queue.db_path)) as conn:
+            conn.execute("UPDATE watermarks SET updated_at=? "
+                         "WHERE source=? AND key=?",
+                         (since, PAUSE_WM_SOURCE, PAUSE_WM_KEY))
+            conn.commit()
+    monkeypatch.setattr(router, "get_pool", lambda: pool)
+    app = _FastAPI()
+    app.include_router(router.router)
+    return _TestClient(app), pool, since
+
+
+def test_the_pause_route_and_status_report_the_instant_the_pause_was_taken(
+        monkeypatch, tmp_path):
+    """A 16.5 h hold is one field, on every surface, all from one column.
+
+    Three readers of the same instant: `GET /api/workers/pause` (the read the
+    panel and any alerting script can poll without mutating anything), the POST
+    that takes the pause (its response is what a click renders immediately), and
+    `WorkerPool.status()`, which `/api/workers/status` embeds. They must agree
+    byte for byte, because an alert and a panel that quote different durations
+    for one hold is the disagreement #1550 is about.
+    """
+    client, pool, since = _pause_client(monkeypatch, tmp_path, held_for_hours=16.5)
+
+    body = client.get("/api/workers/pause").json()
+    assert body["paused"] is True and body["paused_by"] == ["operator"], body
+    assert body["paused_since"] == since, body
+    assert datetime.fromisoformat(body["paused_since"]).year > 2020, (
+        "paused_since must be an ISO instant, not a duration")
+    assert pool.status()["paused_since"] == since, (
+        "`GET /api/workers/status` embeds status(); it must carry the same instant")
+
+    resuming = client.post("/api/workers/pause", json={"paused": False}).json()
+    assert resuming["paused"] is False and resuming["paused_since"] is None, resuming
+
+
+def test_paused_since_is_only_the_operator_pause_instant(monkeypatch, tmp_path):
+    """Nothing unpaused, and nothing persisted, can report an instant.
+
+    The automod half of the pair is the interesting case: it holds the pool
+    (`paused: true`, `paused_by: ["automod"]`) and is deliberately NOT persisted,
+    because the promoter counts on a landing's own restart clearing it. So the
+    honest answer there is None — a synthesized timestamp would claim a durable
+    hold that a restart silently erases, which is the misreporting this item is
+    about in the other direction.
+    """
+    client, pool, _ = _pause_client(monkeypatch, tmp_path)
+    assert client.get("/api/workers/pause").json()["paused_since"] is None
+
+    pool.pause(True, owner="automod")
+    body = client.get("/api/workers/pause").json()
+    assert body["paused"] is True and body["paused_by"] == ["automod"], body
+    assert body["paused_since"] is None, (
+        "an automod hold has no persisted instant to report; inventing one would "
+        "assert a pause that the landing's restart does not survive")

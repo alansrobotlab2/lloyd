@@ -1131,6 +1131,29 @@ class WorkQueue:
             ).fetchone()
             return row["value"] if row else None
 
+    def wm_updated_at(self, source: str, key: str) -> Optional[str]:
+        """When a watermark row was last written, or None if it does not exist.
+
+        `wm_get` answers WHAT is remembered and cannot answer SINCE WHEN: it
+        selects `value`, and `updated_at` — which `wm_set` stamps on every write —
+        is read by nothing. That gap is #1550. The instant an operator paused the
+        worker pool lives ONLY in this column, so the held duration, the one thing
+        an alert or the Mission Control panel needed to say about a 16.5 h hold on
+        2026-09-24/25, was obtainable no other way than raw SQL against
+        `workers.db`.
+
+        It is the row's own timestamp rather than an instant the writer stores
+        alongside its value on purpose: a second copy of the clock can disagree
+        with the row it describes, and one accessor both sides read is what keeps
+        an alert and a panel quoting the same duration for one hold.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT updated_at FROM watermarks WHERE source=? AND key=?",
+                (source, key),
+            ).fetchone()
+            return row["updated_at"] if row else None
+
     def wm_keys(self, source: str) -> list[str]:
         """Every watermark key this source has recorded.
 

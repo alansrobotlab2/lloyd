@@ -4090,3 +4090,142 @@ def test_an_up_next_task_outside_the_domain_warns_once_per_process(
     assert autonomy._frequency_interval_seconds({**task, "runs_per_day": 6}) == 14400.0
     autonomy._is_task_due({**task, "runs_per_day": 6}, [task])
     assert not [r for r in caplog.records if "6x-daily" in r.getMessage()]
+
+
+# ── #1550: a held pool must not read as a stalled scheduler ──────────────────
+#
+# On 2026-09-24 an operator paused the worker pool at 19:16 local and it stayed
+# paused for 16.5 h, straight through the 22:00-04:00 nightly window. Queue rows
+# enqueued on time and sat unclaimed — queue row 510 enqueued 05:00:19Z and was
+# claimed at 18:44:52.78Z, one second after the resume line at 18:44:51.495 — and
+# the fleet's alarm printed `autonomy scheduler may be stalled: oldest claimable
+# queue item is 637 min old` (again at 06:55, 07:17 and 11:11, reaching 791 min).
+# That sentence names the scheduler, which was healthy, and not the one thing that
+# was true: a person had the pool by hand. The pause is durable and has no TTL, so
+# the alarm is the whole mitigation; before #1550 nothing read it at all.
+
+
+def _age_a_row(q, *, age_min: int) -> int:
+    """One queued scheduled-task row, aged `age_min` minutes, and its id.
+
+    Aged with raw SQL because the row's age IS the fixture and the queue stamps
+    `enqueued_at` with the wall clock on every public write. 990 min is #1550's
+    row 510: old enough to clear the 3 x `max_duration_seconds` starving threshold
+    (90 min) by eleven times over.
+    """
+    import sqlite3
+    row_id = q.enqueue(source="scheduled-task", kind="autonomy-task",
+                       payload={"task_id": 510})
+    aged = (dt.datetime.now(dt.timezone.utc)
+            - dt.timedelta(minutes=age_min)).isoformat()
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE queue SET enqueued_at=? WHERE id=?", (aged, row_id))
+        conn.commit()
+    return row_id
+
+
+def _age_an_operator_pause(q, *, hours: float) -> str:
+    """Pause the pool the way an operator does, then age the persisted row.
+
+    `WorkerPool.pause` is the only writer of `(_pool, operator_paused)`, so the
+    pause is real; only its TIMESTAMP is wound back, because the fixture is a
+    pause that has been held for hours and `wm_set` stamps `updated_at` with the
+    wall clock. Returns the instant left in the watermark — the same string the
+    alert has to quote.
+    """
+    import sqlite3
+    from workers.pool import WorkerPool, PAUSE_WM_SOURCE, PAUSE_WM_KEY
+    WorkerPool(q, slots=1).pause(True)
+    since = (dt.datetime.now(dt.timezone.utc)
+             - dt.timedelta(hours=hours)).isoformat()
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE watermarks SET updated_at=? "
+                     "WHERE source=? AND key=?", (since, PAUSE_WM_SOURCE, PAUSE_WM_KEY))
+        conn.commit()
+    return since
+
+
+async def _starve_alerts(aut, monkeypatch, tmp_path, q):
+    """One real tick over a starving queue; returns the alerts it posted.
+
+    Only what leaves the process is stubbed — the vLLM health socket and the
+    Discord post — exactly as the stall-alarm tests above do. The task dir is the
+    `aut` fixture's empty one, so neither `overdue` nor the `next_run` scan can
+    contribute a part to the message, and the alert under test is the starving
+    clause alone.
+    """
+    import workers.sources.scheduled_task as st
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    monkeypatch.setattr(st, "_state", {**st._state,
+                                       "unparseable_scan_at": _scan_not_due(),
+                                       "stall_streak": st._STALL_ALARM_TICKS,
+                                       "stall_alerted_at": None,
+                                       "nextrun_streak": 0,
+                                       "nextrun_alerted_at": None})
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture)
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    return alerts
+
+
+async def test_the_stall_alarm_names_an_engaged_operator_pause_and_its_age(
+        aut, monkeypatch, tmp_path):
+    """Clause 1: the alert attributes a starving queue to the held pool.
+
+    990 minutes of a queued row plus 16.5 hours of an operator pause is #1550's
+    2026-09-24/25 hold re-played, and today's message for it is the age-only
+    sentence. The fix has to keep the age (it is the symptom a reader acts on) and
+    add who is holding the pool, for how long, and since when.
+    """
+    from workers.queue import WorkQueue
+    q = WorkQueue(tmp_path / "pause-starve.db")
+    _age_a_row(q, age_min=990)
+    since = _age_an_operator_pause(q, hours=16.5)
+
+    alerts = await _starve_alerts(aut, monkeypatch, tmp_path, q)
+
+    assert len(alerts) == 1, alerts
+    msg = alerts[0]
+    assert "oldest claimable queue item is 990 min old" in msg, (
+        f"the age of the starving row is no longer in the alert: {msg}")
+    assert "operator" in msg, f"the alert does not name who holds the pool: {msg}"
+    assert "16.5 h" in msg, f"the alert does not state how long it is held: {msg}"
+    assert since in msg, f"the alert does not quote the pause instant: {msg}"
+    assert msg.startswith("autonomy scheduler may be stalled: "), msg
+
+
+async def test_a_starving_queue_with_no_pause_alerts_byte_identically(
+        aut, monkeypatch, tmp_path):
+    """Clause 3: the no-pause alert is today's string, character for character.
+
+    Byte-identical is the point: `agent-services/guardian/detect.py:243` watches
+    this sentence, and a pause clause that leaked into the unpaused case would
+    both break that watch and accuse an innocent operator. The second half is the
+    resumed pool — the watermark row still exists and says "0", which is the live
+    state of `workers.db` right now, so row existence must not read as a pause.
+    """
+    from workers.queue import WorkQueue
+    q = WorkQueue(tmp_path / "nopause-starve.db")
+
+    alerts = await _starve_alerts(aut, monkeypatch, tmp_path, q)
+    assert alerts == [], "a queue with no aged row must not alarm"
+    _age_a_row(q, age_min=990)
+    alerts = await _starve_alerts(aut, monkeypatch, tmp_path, q)
+    assert alerts == ["autonomy scheduler may be stalled: "
+                      "oldest claimable queue item is 990 min old"], (
+        f"the unpaused alert changed: {alerts}")
+
+    # The resumed case: a pause was taken and lifted, so the row is there with
+    # value "0" and an `updated_at` older than the queue row beside it.
+    _age_an_operator_pause(q, hours=16.5)
+    from workers.pool import WorkerPool
+    WorkerPool(q, slots=1).pause(False)
+    alerts = await _starve_alerts(aut, monkeypatch, tmp_path, q)
+    assert alerts == ["autonomy scheduler may be stalled: "
+                      "oldest claimable queue item is 990 min old"], (
+        f"a lifted pause still reached the alert, so it reads on the row rather "
+        f"than its value: {alerts}")
