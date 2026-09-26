@@ -915,39 +915,36 @@ def test_reaper_leaves_landed_observed_and_cleaned_rounds_alone(isolated, monkey
     assert I.reap_abandoned_rounds(now=later) == [] and aborted2 == [], "already cleaned up"
 
 
-def test_with_no_observer_a_round_left_open_is_reaped_at_turn_end(isolated, monkeypatch, tmp_path):
-    """`autocode.inner_voice: false` since 2026-09-12: no ambient follow-up can
-    come, and the 20-minute grace only held the loop closed — 15 rounds in a
-    week waited a median 26 minutes for a rescue that could not arrive."""
+@pytest.mark.parametrize("observed", [False, True])
+def test_a_round_left_open_is_reaped_at_turn_end_observed_or_not(isolated, monkeypatch, tmp_path,
+                                                                  observed):
+    """No ambient follow-up can come — with the observer off (2026-09-12) or on:
+    since R2 (2026-09-24) its only LLM judgment runs BEFORE the turn ends. The
+    20-minute grace only held the loop closed — 15 rounds in a week waited a
+    median 26 minutes for a rescue that could not arrive — so switching the
+    observer back on for autocode (2026-09-25) must not bring it back."""
     import time as _t
     write_item(isolated, 2)
-    aborted = _reaper_env(monkeypatch, tmp_path, observed=False, busy=("s1",))
+    aborted = _reaper_env(monkeypatch, tmp_path, observed=observed, busy=("s1",))
     _finished()
     assert I.reap_abandoned_rounds(now=_t.time() + 1) == [], "its own session still reads busy"
     out = I.reap_abandoned_rounds(now=_t.time() + 1, finished_session="s1")
     assert [r["round_id"] for r in out] == ["SM_X"] and aborted == ["SM_X"]
-    assert "no observer to rescue it" in out[0]["reason"]
+    assert "nothing the reaper could rescue" in out[0]["reason"]
 
 
-def test_the_grace_is_zero_while_autocode_is_unobserved(monkeypatch):
-    """#1015 inverted `source_inner_voice`'s fallback to False. The grace is
-    its second reader, and must read 0 both for an explicit `false` and for no
-    key at all — inverting the fallback must not resurrect it."""
-    for cfg in ({"autocode": {"inner_voice": False}}, {"autocode": {}}, {}):
-        monkeypatch.setattr("workers.sources.get_sources_config", lambda cfg=cfg: cfg)
+def test_the_grace_does_not_follow_inner_voice(monkeypatch):
+    """#1015 inverted `source_inner_voice`'s fallback to False, and the grace
+    used to be its second reader. It reads its own key now, default 0, so the
+    observer can be switched on without re-arming a wait for nothing."""
+    for cfg in ({"autocode": {"inner_voice": False}}, {"autocode": {}}, {},
+                {"autocode": {"inner_voice": True}}):
+        monkeypatch.setattr(I, "_source_cfg", lambda name, cfg=cfg: cfg.get(name, {}))
         assert I._abandon_grace_seconds() == 0, cfg
-    monkeypatch.setattr("workers.sources.get_sources_config",
-                        lambda: {"autocode": {"inner_voice": True}})
-    assert I._abandon_grace_seconds() == I.ABANDON_GRACE_SECONDS
-
-
-def test_with_an_observer_the_grace_still_holds(isolated, monkeypatch, tmp_path):
-    import time as _t
-    write_item(isolated, 2)
-    aborted = _reaper_env(monkeypatch, tmp_path, observed=True)
-    _finished()
-    assert I.reap_abandoned_rounds(now=_t.time() + 1, finished_session="s1") == []
-    assert aborted == [], "#278's rescue came two minutes after the cut-off"
+    monkeypatch.setattr(I, "_source_cfg", lambda name: {"abandon_grace_seconds": 300})
+    assert I._abandon_grace_seconds() == 300
+    monkeypatch.setattr(I, "_source_cfg", lambda name: {"abandon_grace_seconds": "junk"})
+    assert I._abandon_grace_seconds() == 0
 
 
 @pytest.mark.parametrize("marker", ["gate", "land"])

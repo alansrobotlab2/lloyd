@@ -1154,6 +1154,32 @@ into the session. Cut 1 of senses-not-supervision (09-12) switched the observer
 off for unattended turns and replaced its stall, budget and context nudges with
 deterministic anchors — but not that one.
 
+**Work nobody gated is gated, not destroyed (2026-09-25).** The two rescues
+above cover a round whose gate passed and one whose grader was unreachable.
+The largest loss was neither: in the week to 09-25, 139 of 489 rounds were
+aborted as "implement turn ended with the round still open, no gate or
+landing" — 100 on `stop`, the model writing its report with the change in the
+worktree — and 39 more after a review refusal the turn fixed and never
+re-gated. The abort is `git worktree remove --force`, so what the turn had not
+committed was deleted, not kept on the branch. `autocode._gate_if_ungated`
+runs after the other two:
+
+| rule | detail |
+|---|---|
+| commit the leftovers | `worktree.commit_pending`: `add -A` (ignores honoured), one commit naming the reaper |
+| gate what no gate judged | a change against the run spec's base AND no `gate.json` naming the commit the worktree now holds |
+| land a pass at once | `round.gate_detached(..., land_on_pass=True)` → `round gate --land-on-pass reaper` → `land_detached` + a `land_rescued` row; the unreviewed re-gate uses it too |
+| once | `gate_rescued` with `kind: ungated`, `UNGATED_CAP` 1: a refusal is then an ordinary verdict, closed and re-offered with findings |
+| never | an item verdict (`unnecessary`/`rejected`: nothing committed either), a round something tried to land, a stopped loop. Switch `workers.sources.autocode.gate_ungated` |
+| the item closes on the review | `backlog.ungated_rescued_rounds`: the turn's outcome predates every gate, so `settled_landings` and `implement_outcomes` take the review rung's all-`met` grading in its place; a review that did not vouch for every clause leaves the turn's word standing |
+
+The reaper's 20-minute grace no longer follows `autocode.inner_voice`. It
+waited for the observer's post-turn follow-up, which R2 of the IV plan retired
+(the observer's one LLM judgment is now the terminal review, before the turn
+ends), so switching the observer back on for autocode would have held every
+round open for a rescue that cannot come. `abandon_grace_seconds` (default 0)
+is its own key now.
+
 **A model that misreads a pass.** Four rounds in four days were aborted by
 their author 20–90 s after passing every rung, each reporting a refusal that is
 on no ledger row: #1131 (09-15, "both review attempts spent" on a 5-of-5 pass),

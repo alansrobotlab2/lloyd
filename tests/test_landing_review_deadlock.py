@@ -185,7 +185,9 @@ def test_a_round_whose_grader_was_unreachable_is_gated_again(env):
     _finished()
     out = I.reap_abandoned_rounds()
     assert env["aborted"] == [], "a finished change was thrown away over a sibling's landing"
-    assert env["spawned"] and env["spawned"][0][-2:] == ["gate", RID]
+    # With `--land-on-pass` (2026-09-25): a pass lands at once instead of on
+    # the reaper's next look — no turn is waiting to read it.
+    assert env["spawned"] and env["spawned"][0][-4:] == ["gate", RID, "--land-on-pass", "reaper"]
     assert [(r["round_id"], r["verb"]) for r in out] == [(RID, "gating")]
     marker = S.gate_in_progress(RID)
     assert marker["by"] == "reaper" and marker["head"] == HEAD

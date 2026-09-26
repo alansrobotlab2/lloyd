@@ -171,7 +171,49 @@ def start(goal: str, *, base: str | None = None, force: bool = False,
         lock.release()
 
 
-def run_gate(round_id: str, *, skip_smoke: bool = False) -> dict:
+def run_gate(round_id: str, *, skip_smoke: bool = False,
+             land_on_pass: str | None = None) -> dict:
+    """Gate a round; with `land_on_pass`, start its landing the moment it passes.
+
+    `land_on_pass` names who asked (`reaper`). A gate the reaper started has no
+    turn behind it to read the pass and call `automod_land`, and waiting for
+    the reaper's next look cost up to `interval_seconds` (900 s) of a finished
+    change sitting gated and unlanded. The landing it starts is
+    `land_detached`, the same spawn every other landing takes, after the same
+    checks `autocode._land_if_passed` makes.
+    """
+    report = _run_gate(round_id, skip_smoke=skip_smoke)
+    if land_on_pass and report.get("ok"):
+        _land_after_pass(round_id, report, by=land_on_pass)
+    return report
+
+
+def _land_after_pass(round_id: str, report: dict, *, by: str) -> None:
+    if S.is_halted() or S.is_broken() or not S.is_enabled(LIVE_ROOT):
+        return
+    head = W.head(W.worktree_path(round_id)) or ""
+    if not head or str(report.get("head") or "") != head:
+        return
+    started = land_detached(round_id, by=by)
+    if started.get("error"):
+        print(f"[land-on-pass] {round_id}: landing could not start: {started['error']}")
+        return
+    item_id = None
+    try:
+        import yaml
+        spec_doc = yaml.safe_load((S.ROUNDS_DIR / round_id / "run_spec.yaml").read_text()) or {}
+        item_id = (spec_doc.get("item") or {}).get("id")
+    except Exception:  # noqa: BLE001 — the item id is attribution, not the landing
+        pass
+    # `land_rescued`, like the reaper's own landing: it is what joins a
+    # promotion with no `finished` row of its own back to its item, and what
+    # keeps `_land_if_passed` from starting a second landing.
+    S.append_event({"event": "land_rescued", "round_id": round_id, "item_id": item_id,
+                    "head": head, "pid": started["pid"], "verb": "landing", "by": by,
+                    "reason": f"the gate {by} started passed at {head[:8]}; landing it at once"})
+
+
+def _run_gate(round_id: str, *, skip_smoke: bool = False) -> dict:
     wt = W.worktree_path(round_id)
     if not wt.exists():
         raise RuntimeError(f"no worktree for {round_id}")
@@ -472,7 +514,8 @@ def land_detached(round_id: str, *, by: str) -> dict:
     return {"pid": pid, "log": str(log)}
 
 
-def gate_detached(round_id: str, *, by: str, skip_smoke: bool = False) -> dict:
+def gate_detached(round_id: str, *, by: str, skip_smoke: bool = False,
+                  land_on_pass: bool = False) -> dict:
     """Start `round gate` for an open round in its own session.
 
     `{"pid", "log"}` on success, `{"error"}` otherwise. The one spawn, for the
@@ -480,6 +523,9 @@ def gate_detached(round_id: str, *, by: str, skip_smoke: bool = False) -> dict:
     a round whose only failed rung was a grader that could not be reached
     (`autocode._regate_if_unreviewed`). The marker is written here with the
     child's pid before this returns, for the reason `land_detached` gives.
+
+    `land_on_pass` hands the pass straight to a landing (`run_gate`), for a
+    gate no turn is waiting on: the reaper's.
     """
     if not W.worktree_path(round_id).exists():
         return {"error": f"no worktree for {round_id}"}
@@ -492,6 +538,8 @@ def gate_detached(round_id: str, *, by: str, skip_smoke: bool = False) -> dict:
     argv = [python, "-m", "scripts.automod.round", "gate", round_id]
     if skip_smoke:
         argv.append("--skip-smoke")
+    if land_on_pass:
+        argv += ["--land-on-pass", by]
     pid = S.spawn_detached(argv, log, cwd=LIVE_ROOT)
     S.write_gate_marker(round_id, pid=pid, head=W.head(W.worktree_path(round_id)) or "", by=by)
     return {"pid": pid, "log": str(log)}
@@ -977,6 +1025,8 @@ def main(argv=None) -> int:
     s.add_argument("--from-branch", default=None,
                    help="resume a branch the review rung sent back (automod/SM_…), rebased onto live main")
     g = sub.add_parser("gate"); g.add_argument("round_id"); g.add_argument("--skip-smoke", action="store_true")
+    g.add_argument("--land-on-pass", metavar="BY", default=None,
+                   help="start the landing as soon as the gate passes (the reaper's gates)")
     l = sub.add_parser("land"); l.add_argument("round_id"); l.add_argument("--dry-run", action="store_true")
     l.add_argument("--force", action="store_true", help="ignore automod.enabled")
     a = sub.add_parser("abort"); a.add_argument("round_id")
@@ -1048,7 +1098,8 @@ def main(argv=None) -> int:
         print(json.dumps(start(args.goal, force=args.force, item_id=args.item_id,
                                from_branch=args.from_branch), indent=2))
     elif args.cmd == "gate":
-        rep = run_gate(args.round_id, skip_smoke=args.skip_smoke)
+        rep = run_gate(args.round_id, skip_smoke=args.skip_smoke,
+                       land_on_pass=args.land_on_pass)
         print(json.dumps(rep, indent=2))
         return 0 if rep["ok"] else 1
     elif args.cmd == "land":

@@ -165,6 +165,9 @@ def test_a_gate_that_failed_closes_as_it_always_has(env):
 
 
 def test_a_round_that_was_never_gated_closes_as_it_always_has(env):
+    # This fixture has no run spec, so `_gate_if_ungated` has no base to judge
+    # a change against; with one, a never-gated change is gated instead
+    # (tests/test_reaper_gates_ungated.py).
     _finished(DEFERRED)
     _expect_the_old_behaviour(env)
 

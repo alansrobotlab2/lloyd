@@ -485,12 +485,24 @@ def _landing_seen(round_id: str | None, events: list[dict]) -> bool:
 
 
 def _abandon_grace_seconds() -> int:
-    """How long a round left open waits for a rescue: `ABANDON_GRACE_SECONDS`
-    while the Inner Voice observer watches this source, else none — the
-    observer's ambient follow-up is the only rescue the grace ever waited
-    for, and with `autocode.inner_voice: false` (2026-09-12) none can come."""
-    from workers.sources import _common as C
-    return ABANDON_GRACE_SECONDS if C.source_inner_voice(NAME) else 0
+    """How long a round left open waits before the reaper acts: none.
+
+    The grace waited for the Inner Voice observer's ambient follow-up — #278's
+    rescue, a second turn queued into the session after the first ended. That
+    follow-up is gone whether or not the observer watches this source: since
+    the IV plan's R2 (2026-09-24) the observer's one LLM judgment is the
+    terminal review, BEFORE the turn ends, and the `result` judgment and the
+    ambient lever that sent #278's follow-up were retired. So the grace no
+    longer tracks `inner_voice` (switching the observer back on for autocode,
+    2026-09-25, would otherwise have held every round open for 20 minutes for
+    a rescue that cannot come) and the reaper's own rescues —
+    `_land_if_passed`, `_regate_if_unreviewed`, `_gate_if_ungated` — are the
+    first responders. `workers.sources.autocode.abandon_grace_seconds` sets
+    one if a future post-turn rescue ever needs it back."""
+    try:
+        return max(0, int(_source_cfg(NAME).get("abandon_grace_seconds", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def reap_abandoned_rounds(now: float | None = None, *,
@@ -506,13 +518,20 @@ def reap_abandoned_rounds(now: float | None = None, *,
     report; if the gate passed, land it" — and that second turn gated, landed,
     and the whole feature was live at 17:34. A reaper that aborted at turn end
     would have raced the rescue and thrown away 875 lines the gate then
-    passed. So while the source is observed, the observer is the first
-    responder and this is the backstop, `ABANDON_GRACE_SECONDS` after the turn
-    ended. While it is not observed nothing can rescue the round, and the
-    grace only held the loop closed: 15 rounds in the week to 2026-09-14
-    waited a median 26 minutes each. Then `_run_and_record` calls this the
-    moment the turn ends, passing the session that just ended so its own
-    wind-down is not read as activity.
+    passed. So while that follow-up existed the observer was the first
+    responder and this the backstop, `ABANDON_GRACE_SECONDS` after the turn
+    ended. It no longer exists (`_abandon_grace_seconds`), and a grace with
+    nothing to wait for only held the loop closed: 15 rounds in the week to
+    2026-09-14 waited a median 26 minutes each. So `_run_and_record` calls
+    this the moment the turn ends, passing the session that just ended so its
+    own wind-down is not read as activity, and the rescues below are #278's
+    made deterministic.
+
+    **Work the turn never gated is gated, not destroyed** (2026-09-25,
+    `_gate_if_ungated`): the leftover edits are committed and the round is
+    gated with `land_on_pass`. Before this an abort's `worktree remove
+    --force` threw away whatever the turn had not committed, and a finished
+    change went back to the pool for a whole new round — 139 rounds in a week.
 
     Two protections the grace was silently providing are explicit instead: a
     round whose detached gate is still running (`S.gate_in_progress`) or whose
@@ -585,12 +604,19 @@ def reap_abandoned_rounds(now: float | None = None, *,
         if regate is not None:
             reaped.append(regate)
             continue
+        # Work the turn wrote and never gated — or changed after its last
+        # gate — is gated by the loop rather than thrown away.
+        ungated = _gate_if_ungated(rid, e, events)
+        if ungated is not None:
+            reaped.append(ungated)
+            continue
         review = _review_note(events, rid)
         why = (f"implement turn ended ({e.get('stop_reason')}) and the round "
                f"stayed open for {int(age // 60)} min with nothing running in "
                f"its session" if grace else
                f"implement turn ended ({e.get('stop_reason')}) with the round still "
-               f"open, no gate or landing running, and no observer to rescue it")
+               f"open, no gate or landing running, and nothing the reaper could "
+               f"rescue (no passed gate, no unreviewed gate, no ungated work)")
         if review is not None:
             why = (f"the review rung sent the round back and the turn ended without "
                    f"abort or re-gate; {why}")
@@ -759,7 +785,7 @@ def _regate_if_unreviewed(rid: str, finished: dict, events: list[dict]) -> dict 
         return None
     if S.is_halted() or S.is_broken() or not S.is_enabled(LIVE_ROOT):
         return None
-    started = R.gate_detached(rid, by="reaper")
+    started = R.gate_detached(rid, by="reaper", land_on_pass=True)
     if started.get("error"):
         logger.warning("round %s: its grader was unreachable but the re-gate could not start: %s",
                        rid, started["error"])
@@ -770,6 +796,112 @@ def _regate_if_unreviewed(rid: str, finished: dict, events: list[dict]) -> dict 
            f"(pid {started['pid']})")
     rec = {"event": "gate_rescued", "round_id": rid, "item_id": item_id, "head": head,
            "pid": started["pid"], "reason": why, "verb": "gating"}
+    S.append_event(rec)
+    if item_id is not None:
+        B.note_item(int(item_id), f"automod round {rid}: {why}.")
+    logger.info("round %s: %s", rid, why)
+    return rec
+
+
+# How many times the reaper gates a round its turn left ungated. One: the
+# gate's own verdict is then on the ledger, and a round it refuses is closed
+# and re-offered with the findings like any other refusal.
+UNGATED_CAP = 1
+
+
+def _gate_if_ungated(rid: str, finished: dict, events: list[dict]) -> dict | None:
+    """Gate a round whose turn ended with work in it that no gate has judged.
+    The record of it, or None when the reaper should close the round as it
+    always has.
+
+    The largest single loss the loop had (week to 2026-09-25): 139 of 489
+    rounds were aborted as "implement turn ended with the round still open, no
+    gate or landing" — 100 of them on `stop`, the model writing its closing
+    report with the change in the worktree and never calling `automod_gate` —
+    and 39 more as "the review rung sent the round back and the turn ended
+    without abort or re-gate". Each went back to the pool for a whole new
+    round. Worse, an abort is `worktree remove --force`: whatever the turn had
+    not committed was destroyed, not kept on the branch.
+
+    So, when the turn is over and neither `_land_if_passed` nor
+    `_regate_if_unreviewed` applies:
+
+      * uncommitted edits in the round's worktree are committed first
+        (`W.commit_pending`) — the gate judges commits, and the abort would
+        delete them;
+      * the round is gated if it has a change against its base AND no gate
+        report names the commit it now holds (never gated, or committed after
+        its last gate — a fix for a review refusal the turn never re-gated);
+      * the gate is started with `land_on_pass`, so a pass lands at once
+        rather than on the reaper's next look.
+
+    Not for a turn that ended on an item verdict (`unnecessary` / `rejected`:
+    the author decided), a round something already tried to land, a round
+    this has gated `UNGATED_CAP` times, or a stopped loop. A gate that fails
+    is then an ordinary refusal: the reaper's next look finds a report at the
+    worktree's HEAD, this returns None, and the round is closed and re-offered
+    with the findings — the verdict a whole new round would otherwise have
+    had to reach from scratch.
+
+    The item then closes on the review rung's grading, not the turn's
+    outcome, which described a change no gate had seen
+    (`backlog.settled_landings`, `ungated_rescued_rounds`). Kill switch:
+    `workers.sources.autocode.gate_ungated`.
+    """
+    from scripts.automod import backlog as B, round as R, state as S, worktree as W
+    if not bool(_source_cfg(NAME).get("gate_ungated", True)):
+        return None
+    outcome = finished.get("outcome")
+    if isinstance(outcome, dict) and outcome.get("acceptance") in B.ITEM_VERDICT_OUTCOMES:
+        return None
+    mine = [ev for ev in events if ev.get("round_id") == rid]
+    if any(ev.get("event") in ("promoted", "land_failed", "land_rescued") for ev in mine):
+        return None
+    if sum(1 for ev in mine if ev.get("event") == "gate_rescued"
+           and ev.get("kind") == "ungated") >= UNGATED_CAP:
+        return None
+    if S.is_halted() or S.is_broken() or not S.is_enabled(LIVE_ROOT):
+        return None
+    wt = W.worktree_path(rid)
+    try:
+        import yaml
+        spec = yaml.safe_load((S.ROUNDS_DIR / rid / "run_spec.yaml").read_text(encoding="utf-8")) or {}
+        base = str((spec.get("code") or {}).get("base_commit") or "")
+    except (OSError, ValueError, yaml.YAMLError):
+        return None
+    if not base:
+        return None
+    try:
+        report = json.loads((S.ROUNDS_DIR / rid / "gate.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        report = None
+    committed, detail = W.commit_pending(
+        wt, f"automod {rid}: work the implement turn left uncommitted\n\n"
+            f"Committed by the reaper so the gate can judge it (the turn ended "
+            f"({finished.get('stop_reason')}) without gating).")
+    head = W.head(wt) or ""
+    if not head:
+        return None
+    if report is not None and str(report.get("head") or "") == head:
+        # Judged at exactly this commit already: a pass is `_land_if_passed`'s,
+        # a refusal is a verdict.
+        return None
+    if not W.changed_paths(wt, base):
+        return None
+    started = R.gate_detached(rid, by="reaper", land_on_pass=True)
+    if started.get("error"):
+        logger.warning("round %s: its turn left it ungated but the gate could not start: %s",
+                       rid, started["error"])
+        return None
+    item_id = finished.get("item_id")
+    prior = "never gated" if report is None else (
+        f"last gated at {str(report.get('head') or '')[:8]}, changed since")
+    why = (f"its turn ended ({finished.get('stop_reason')}) with work in the round {prior}"
+           f"{'; ' + detail if committed else ''}; the loop gated it at {head[:8]} and will "
+           f"land it if it passes (pid {started['pid']})")
+    rec = {"event": "gate_rescued", "kind": "ungated", "round_id": rid, "item_id": item_id,
+           "head": head, "pid": started["pid"], "committed": bool(committed),
+           "reason": why, "verb": "gating"}
     S.append_event(rec)
     if item_id is not None:
         B.note_item(int(item_id), f"automod round {rid}: {why}.")

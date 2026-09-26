@@ -216,6 +216,29 @@ def is_clean(repo: Path) -> bool:
     return r.returncode == 0 and not r.stdout.strip()
 
 
+def commit_pending(worktree: Path, message: str) -> tuple[str | None, str]:
+    """Commit everything uncommitted in a round's worktree: `(new_sha, detail)`.
+
+    `new_sha` is None when there was nothing to commit or the commit failed,
+    and `detail` says which. For the reaper, which gates a round whose turn
+    stopped without gating (`autocode._gate_if_ungated`): the gate judges
+    commits only, and the alternative — `abort` — runs `worktree remove
+    --force`, which destroys exactly the edits a stalled turn left behind.
+    `add -A` honours `.gitignore`, so caches and `graphify-out/` stay out.
+    """
+    r = git(worktree, "status", "--porcelain")
+    if r.returncode != 0:
+        return None, f"git status failed: {(r.stderr or '').strip()[:160]}"
+    if not r.stdout.strip():
+        return None, "nothing uncommitted"
+    if git(worktree, "add", "-A").returncode != 0:
+        return None, "git add -A failed"
+    c = git(worktree, "commit", "-q", "--no-verify", "-m", message)
+    if c.returncode != 0:
+        return None, f"commit failed: {(c.stderr or c.stdout or '').strip()[:160]}"
+    return head(worktree), f"committed {len(r.stdout.strip().splitlines())} uncommitted path(s)"
+
+
 def dirty_paths(repo: Path, limit: int | None = None) -> list[str]:
     """Every path `git status` reports as modified or untracked.
 

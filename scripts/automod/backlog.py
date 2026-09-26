@@ -2184,6 +2184,7 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
     promoted_ev = {str(d.get("round_id") or ""): d for d in
                    _ledger_events(ledger, "promoted", require_item=False)}
     promoted = set(promoted_ev)
+    ungated = ungated_rescued_rounds(ledger)
     out: dict[int, tuple[str, str]] = {}
     for iid, ev in latest.items():
         phase = str(ev.get("phase") or "")
@@ -2203,6 +2204,12 @@ def implement_outcomes(ledger: Path) -> dict[int, tuple[str, str]]:
             # honest move is one more round told which clauses, not a closed
             # item and not a park.
             unmet = unmet_clauses(ev.get("outcome"))
+            # A round the reaper gated because its turn never did: that turn's
+            # `not_met` was written before any gate saw the change, and the
+            # review rung grading the landed change all `met` answers it
+            # (`settled_landings` closes the item on the same grading).
+            if unmet and rid in ungated and code_review_outcome(ledger, rid):
+                unmet = []
             if unmet and n <= 1 + PARTIAL_RETRY_CAP:
                 sha = str(promoted_ev[rid].get("commit") or "")[:8]
                 out[iid] = ("partial",
@@ -2529,6 +2536,16 @@ def outcome_carries_no_claim(outcome) -> bool:
     return outcome.get("acceptance") == "not_met"
 
 
+def ungated_rescued_rounds(ledger: Path) -> set[str]:
+    """Rounds the reaper gated because their implement turn ended without
+    gating (`autocode._gate_if_ungated`, a `gate_rescued` row of kind
+    `ungated`). Their turn's outcome predates every gate of the change that
+    landed; `settled_landings` reads the review's grading in its place."""
+    return {str(d.get("round_id") or "")
+            for d in _ledger_events(ledger, "gate_rescued", require_item=False)
+            if d.get("kind") == "ungated" and d.get("round_id")}
+
+
 def settled_landings(ledger: Path) -> list[dict]:
     """Every item whose round landed and stayed landed.
 
@@ -2579,7 +2596,18 @@ def settled_landings(ledger: Path) -> list[dict]:
     clean supersedes the landing that sent it back. #608 and #617 each landed
     twice and the join returned the first — round 1's sha and round 1's
     `not_met` — while round 2 sat graded all-met.
+
+    **A round the reaper gated because its turn never did closes on the
+    review's grading** (2026-09-25, `ungated_rescued_rounds`). The turn's
+    outcome was written before any gate had seen the change — typically a
+    `not_met` or `deferred` from a model that stopped short of gating — so it
+    describes the round, not the change that landed. When the review rung
+    graded that change all `met`, that grading is used; when it did not, the
+    turn's word stands as it always has. This is the one case where a reported
+    outcome is set aside, and it is set aside only for a second reader's
+    all-`met` verdict on the exact change.
     """
+    ungated = ungated_rescued_rounds(ledger)
     settled = {str(d.get("commit") or ""): d
                for d in _ledger_events(ledger, "settled", require_item=False)}
     settled.pop("", None)
@@ -2632,8 +2660,13 @@ def settled_landings(ledger: Path) -> list[dict]:
             # when every clause was `met`; an outcome that carries a claim is
             # never overridden. The refused item verdict rides along so the
             # sweep's note can say why the turn's word was not taken.
-            stand_in = None if usable else (graded_for(d, vault)
-                                            or code_review_outcome(ledger, rid))
+            pregate = rid in ungated
+            stand_in = None if (usable and not pregate) else (graded_for(d, vault)
+                                                              or code_review_outcome(ledger, rid))
+            if pregate and usable and stand_in is None:
+                # The review did not vouch for the whole contract: the turn's
+                # own word decides, exactly as for any other landing.
+                pregate = False
             if stand_in and isinstance(outcome, dict) and outcome.get("item_verdict_refused"):
                 stand_in = {**stand_in, "item_verdict_refused": outcome["item_verdict_refused"]}
             out.append({"item_id": int(d["item_id"]), "round_id": rid, "commit": p["commit"],
@@ -2647,7 +2680,7 @@ def settled_landings(ledger: Path) -> list[dict]:
                         # the turn's word, which the line above had just
                         # declared worthless); with nothing carried the sweep
                         # parks it as the no-outcome shape instead.
-                        "outcome": outcome if usable else stand_in,
+                        "outcome": stand_in if pregate else (outcome if usable else stand_in),
                         "vault": False})
             continue
         if not vault:
@@ -2787,7 +2820,9 @@ def code_review_outcome(ledger: Path, round_id: str) -> dict | None:
     after the turn ended is landed by the reaper (`land_rescued`), and an item
     verdict the landing contradicts is refused (`settle_item_verdict`). Only
     ever a stand-in for an outcome that is MISSING: what the turn did report is
-    never overridden.
+    never overridden — with one exception, a round the reaper gated because
+    its turn never did (`ungated_rescued_rounds`), whose outcome was written
+    before any gate saw the change that landed.
 
     The reaper shape is named here because #1318 is what made the name true. A
     reaped finalizer leaves no `phase: finished` row, and `settled_landings`

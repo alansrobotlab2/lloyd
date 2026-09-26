@@ -1866,6 +1866,14 @@ workers:
       # re-offered for a whole new turn. About eleven rounds on the night of
       # 09-18. Off: aborted, as before.
       regate_unreviewed: true
+      # The third rescue (2026-09-25): a round whose turn ended with work in it
+      # that no gate has judged — never gated, or changed after its last gate
+      # — has its leftover edits committed and is gated once by the loop, and
+      # a pass lands at once (`round gate --land-on-pass`). 139 of 489 rounds
+      # in the week to 09-25 were aborted that way, and an abort's `worktree
+      # remove --force` deleted whatever the turn had not committed. Off:
+      # aborted, as before.
+      gate_ungated: true
       # The hard bound on the board. A self-filed draft that nothing —
       # clustering, group triage, a human — picked up in
       # expire_spawns_after_days is closed, tagged `expired`, and reopens by

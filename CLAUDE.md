@@ -1222,6 +1222,14 @@ redoing changes that had already passed every rung, and two items were closed
   rescue made deterministic. `round.land_detached` is the one way a landing is
   started, for `automod_land` and the reaper both. The reaper also runs on
   every declined look, not only at turn end and with housekeeping.
+- **Work the turn never gated is gated, not destroyed** (2026-09-25,
+  `autocode._gate_if_ungated`, `gate_rescued kind: ungated`, switch
+  `…autocode.gate_ungated`): leftover edits are committed (an abort's
+  `worktree remove --force` deleted them) and the round is gated once with
+  `--land-on-pass`; the item then closes on the review's all-`met`, not the
+  pre-gate outcome (`backlog.ungated_rescued_rounds`). 139 of 489 rounds a
+  week were aborted that way. The reaper's grace no longer follows
+  `inner_voice` (`abandon_grace_seconds`, default 0). `architecture/automod.md` §3.2g.
 - **A finished gate report leads with `verdict` and `next`**
   (`automod._with_headline`); a pass's advisory findings move to
   `notes_that_did_not_block`. Four rounds in four days were aborted by their
