@@ -13,6 +13,10 @@ due-gates, the failure ladder, the deadline anchor, the run records; this
 document is the fleet it dispatches, one entry per job, grouped by what the job
 is trying to accomplish.
 
+**Artifact paths.** Every bare `_pipeline/` in this document means `~/lloyd-data/_pipeline/`,
+not a path under `~/lloyd`: runtime data left the code tree in `6426668b`, and
+[[data-home]] owns the layout it moved to.
+
 **The skill is the job.** A task file is frontmatter: a schedule, a set of
 gates, and a `skill_name`. The procedure — the phases, the output contract, the
 incident history, the standing non-findings — lives in the vault at
@@ -307,9 +311,7 @@ file it has not read this session, so a Phase 0 skeleton write is *refused on
 every run* — `signals-latest.md` always exists from the night before. And the
 vault tools reject anything under `~/lloyd/` with `PATH_ESCAPE`, so every
 `_pipeline/` artifact in this chain is written with `Write` at an absolute path,
-never `vault_write` — and the root this document spells bare is
-`~/lloyd-data/_pipeline/`, since runtime data left the code tree (`6426668b`);
-the skills all quote it in full.
+never `vault_write`.
 
 **A `-latest` overwrite keeps a dated copy, and the directory is checked for it.**
 `scripts/reflection_archive.py` refuses a governed skill that drops its archive

@@ -27,6 +27,16 @@ The one external expectation pinned here is the item's own: the bound reads "24
 through 86", and it is the only such bound in `architecture/`. That literal moves
 when the fleet does — deliberately, because a doc saying "24 through 86" while a
 task 87 exists is the defect this file exists to stop.
+
+A second contract joined this file with item #1521 (2026-09-26): the
+`_pipeline/` shorthand. The doc spells the prefix bare on twelve table and prose
+lines, the root it names moved to `~/lloyd-data/` (`6426668b`, "Move all runtime
+data out of the code tree into ~/lloyd-data", 2026-09-22), and at filing the only
+sentence mapping shorthand to root was buried in §Distil — below the first table
+row that uses the bare spelling, in a doc whose sibling architecture files all
+spell the prefix the same bare way. The shorthand tests keep exactly one
+definition, place it above every bare use, and make it point at [[data-home]],
+which already owns the root-move rule (`architecture/data-home.md:33-34`).
 """
 
 from __future__ import annotations
@@ -357,3 +367,140 @@ def test_every_job_has_one_function_and_exactly_one_write_tier():
     assert set(grouped) == set(tiered), (
         f"listed only as a function: {sorted(set(grouped) - set(tiered))}; "
         f"listed only as a tier: {sorted(set(tiered) - set(grouped))}")
+
+
+# ── #1521 — the `_pipeline/` shorthand: one definition, above every use ───────
+
+#: The shorthand itself: a backticked path that *is* just `_pipeline/`. Prose
+#: carrying it alongside the rooted path is defining the mapping — no other
+#: sentence shape puts the two spellings side by side. §Distil's PATH_ESCAPE
+#: paragraph did exactly that at filing, which is what made it the duplicate.
+_BARE_SHORTHAND = re.compile(r"`_pipeline/`")
+
+#: Any use of the bare spelling, including artifact paths spelled from it
+#: (`_pipeline/reflection/...`); this is what `grep '_pipeline/' | grep -v
+#: lloyd-data` counts, line-wise, in the item's acceptance command.
+_BARE_USE = re.compile(r"`_pipeline/")
+
+#: The data root spelled in full (trailing artifact path allowed).
+_ROOTED = re.compile(r"`~/lloyd-data/_pipeline/")
+
+
+def _defining_blocks() -> list[str]:
+    """Paragraphs that carry the shorthand and the rooted path together.
+
+    Paragraph-wise, not line-wise: the doc wraps near 88 columns, so a
+    definition can straddle lines, and a line-wise match would call a wrapped
+    definition absent — the same false-absence that made the item's bare glob
+    read as "no fresh handoff" when it was really "wrong root".
+    """
+    return [b for b in _text().split("\n\n")
+            if _BARE_SHORTHAND.search(b) and _ROOTED.search(b)]
+
+
+def _line_of(text: str, pos: int) -> int:
+    return text.count("\n", 0, pos) + 1
+
+
+def test_the_bare_pipeline_shorthand_is_defined_above_its_first_bare_use():
+    """Item #1521 clause 1. Exactly one paragraph defines the shorthand, it sits
+    above the first bare use, and it states the root and names the move commit.
+
+    At base this fails on position: the only paragraph carrying both spellings
+    was the §Distil PATH_ESCAPE one, ~60 lines *below* the first bare table row
+    — so a reader who copies a bare path into a command run from `~/lloyd`
+    meets it before meeting the definition.
+    """
+    text = _text()
+    defs = _defining_blocks()
+    assert len(defs) == 1, (
+        f"{len(defs)} paragraphs carry both the bare shorthand and the rooted path; "
+        f"the contract is exactly one definition — a second one is the half-"
+        f"corrected doc reforming (at base this file had one, buried in §Distil)")
+    block = defs[0]
+    def_start = text.index(block)
+    def_end = def_start + len(block)
+
+    uses = [m.start() for m in _BARE_USE.finditer(text)
+            if not def_start <= m.start() < def_end]
+    assert uses, (
+        "no paragraph outside the definition spells `_pipeline/` bare at all — "
+        "this test's premise (a doc that *uses* the shorthand) has moved; revisit "
+        "the #1521 contract rather than let 'above every use' pass vacuously")
+    first_use = min(uses)
+    assert first_use >= def_end, (
+        f"the shorthand is defined at line {_line_of(text, def_start)} but first "
+        f"used bare at line {_line_of(text, first_use)} — the definition belongs "
+        f"above every use, which is the whole of #1521's placement requirement")
+
+    flat = _flat(block)
+    assert re.search(r"bare `_pipeline/`[^.]{0,40}means `~/lloyd-data/_pipeline/`", flat), (
+        f"the defining paragraph no longer states the mapping clause 1 names "
+        f"(bare prefix means the data root): {flat!r}")
+    assert "6426668b" in block, (
+        "the definition no longer names `6426668b`, the commit that moved runtime "
+        "data out of the code tree — the reason a reader must not resolve the "
+        "shorthand against `~/lloyd`")
+
+
+def test_the_defining_paragraph_wikilinks_data_home_and_defines_it_alone():
+    """Item #1521 clause 2. The definition points at [[data-home]] — the doc
+    that already owns the rule (`architecture/data-home.md:33-34`: "every name
+    is the one it had in the tree, so a path `~/lloyd/X` became
+    `~/lloyd-data/X`") — and nothing else in the file competes as a definition.
+
+    The sole-definition rail is re-derived through `_defining_blocks`, not
+    asserted from a location: qualifying a table cell here, or restating the
+    root in another section, would put a second paragraph in that set. This
+    failed at base because `autonomy-jobs.md` contained no `data-home` string
+    at all.
+    """
+    defs = _defining_blocks()
+    assert len(defs) == 1, (
+        f"{len(defs)} competing definitions; clause 2 allows one")
+    assert "[[data-home]]" in defs[0], (
+        "the defining paragraph does not wikilink [[data-home]], the owner of the "
+        "root-move rule — a definition that stands alone here is the duplicate "
+        "this item exists to prevent")
+    assert (ARCH_DIR / "data-home.md").is_file(), (
+        "[[data-home]] points at a file absent from architecture/ — the wikilink "
+        "would dangle in the one doc that delegates the rule to it")
+
+
+def test_the_distil_paragraph_no_longer_restates_the_root():
+    """Item #1521 clause 3. §Distil's PATH_ESCAPE paragraph was folded into the
+    definition instead of duplicating it, so its phrase occurs zero times — with
+    a positive control, because a zero-count that cannot tell "folded away" from
+    "paragraph deleted" is not a check.
+
+    The paragraph's own rule (vault tools refuse `~/lloyd/` with `PATH_ESCAPE`,
+    so chain artifacts go through `Write` at an absolute path) still stands;
+    only the root-restatement left it.
+    """
+    text = _text()
+    assert "the root this document spells bare" not in text, (
+        "§Distil still restates the root the intro now defines — the duplicate "
+        "clause 3 exists to keep out, and two statements of one mapping are how "
+        "this doc drifted half-corrected in the first place")
+    assert "PATH_ESCAPE" in text, (
+        "positive control tripped: the PATH_ESCAPE paragraph is gone entirely. "
+        "Folding the root clause must leave the paragraph's own rule standing")
+
+
+def test_the_bare_spelling_still_appears_on_exactly_twelve_lines():
+    """The acceptance count, as the item states it: `grep -n '_pipeline/'
+    architecture/autonomy-jobs.md | grep -v lloyd-data` was 12 lines at triage
+    (2026-09-26) and must stay 12. The fix is one definition, not per-cell
+    qualification — the other eleven `architecture/*.md` files carry 27 more
+    bare mentions, so qualifying this doc's cells would make it the only one
+    that reads differently from the corpus it is part of.
+
+    This node passes at base by design: it is the rail against the *other*
+    failure mode, a "fix" that rewrites the twelve cells instead of defining
+    the shorthand.
+    """
+    bare = [ln for ln in _text().splitlines()
+            if "_pipeline/" in ln and "lloyd-data" not in ln]
+    assert len(bare) == 12, (
+        f"{len(bare)} lines spell `_pipeline/` without the root, not the 12 the "
+        f"triage counted: {bare}")
