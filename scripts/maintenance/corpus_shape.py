@@ -20,19 +20,28 @@ daily notes, a USER.md entry about USER.md, a trajectory row from a session that
 was reading trajectories). The prose corpora are also scanned for a sentence that
 recurs across items, which is the planted-regression shape #543 asked for.
 
-THE TREND FILE IS APPEND-ONLY, AND THIS SCRIPT IS ITS ONLY WRITER. Each run
-opens a NEW `corpus-shape-<UTC stamp>.json` with O_EXCL; a stamp already taken
-gets a numeric suffix rather than an overwrite. The previous file is read before
-the new one exists, so no run can diff against — or gate on — a file it wrote
+THE SERIES HOLDS ONE ROW PER UTC DATE, AND THIS SCRIPT IS ITS ONLY WRITER. The
+row key is the UTC date of the run's resolved `--now`, not its second: each new
+row is opened with O_EXCL (a stamp already taken gets a numeric suffix rather
+than an overwrite), and a run whose day already has a row writes nothing. A retry
+inside a day therefore cannot append a second row and become the next night's diff
+base (#1576) — before that guard, three rows written 39 s apart on 2026-09-24 sat
+in the series and the 09-25 run diffed against one of them. The row a run diffs
+against is always the newest row from an EARLIER date, and it is read before this
+run creates anything, so no run can diff against — or gate on — a file it wrote
 itself. That is the `graph-baseline.json` failure #543 named: a baseline the run
 it judges rewrites. Nothing is derived from git HEAD either, for the same reason.
+One row per day bounds duplicates, not gaps: a day that did not run leaves the
+next run's base older than one day.
 
 The thresholds below are provisional. Real ones need a week of series (a human
 clause on #761); until then a move past them is a prompt to look, not a verdict.
 
 Exit 0: nothing to report. Exit 2: a metric moved past its threshold, or a
-sentence recurs that did not recur in the previous run. `--quiet` prints
-nothing on exit 0, so a scheduled run speaks only when it has something to say. Read-only apart from the one new JSON.
+sentence recurs that did not recur in the earlier day's row. `--quiet` prints
+nothing on exit 0, so a scheduled run speaks only when it has something to say.
+Read-only apart from the day's one new JSON — and apart from nothing at all on a
+same-day retry, which writes no row.
 """
 from __future__ import annotations
 
@@ -237,11 +246,53 @@ def _run_order(path: Path):
     return (m.group(1), int(m.group(2) or 0)) if m else ("", -1)
 
 
-def previous_run(out_dir: Path):
+#: The row key: the date half of `STAMP_FMT`, the UTC date of the `--now` that
+#: measured the row.
+_ROW_DATE_FMT = "%Y%m%d"
+
+
+def _stamp_date(stamp: str):
+    """The UTC date half of a `STAMP_FMT` stamp."""
+    return datetime.strptime(stamp[:8], _ROW_DATE_FMT).date()
+
+
+def _row_date(path: Path):
+    """The UTC date a row is keyed to — the date half of its stamp name."""
+    m = _RUN_NAME.match(path.name)
+    return _stamp_date(m.group(1)) if m else None
+
+
+def _rows(out_dir: Path) -> list[Path]:
+    """Every well-named row in the out dir, oldest first."""
     if not out_dir.is_dir():
-        return None
-    files = sorted((p for p in out_dir.glob(FILE_PREFIX + "*.json") if _RUN_NAME.match(p.name)),
-                   key=_run_order)
+        return []
+    return sorted((p for p in out_dir.glob(FILE_PREFIX + "*.json")
+                   if _RUN_NAME.match(p.name)), key=_run_order)
+
+
+def row_for(out_dir: Path, day):
+    """The row already written for UTC date `day`, or None.
+
+    A series written before #1576 can hold several rows for one date; the newest
+    is that date's row for ordering purposes, and none of them is ever rewritten.
+    """
+    rows = [p for p in _rows(out_dir) if _row_date(p) == day]
+    return rows[-1] if rows else None
+
+
+def previous_run(out_dir: Path, before=None):
+    """The newest row to diff against, or None.
+
+    `before` is the UTC date the calling run is keyed to. A row carrying that date
+    belongs to the run's own day — that day's first row, or a retry of it — and is
+    never a valid base: it was measured at an earlier hour, whose skills window
+    and memory files can differ, and a run diffed against it reports a delta of
+    zero whatever the series did overnight (#1576). With `before` unset the newest
+    readable row is the base.
+    """
+    files = _rows(out_dir)
+    if before is not None:
+        files = [p for p in files if _row_date(p) < before]
     for p in reversed(files):
         try:
             return p, json.loads(p.read_text())
@@ -250,8 +301,20 @@ def previous_run(out_dir: Path):
     return None
 
 
-def write_new(out_dir: Path, report: dict) -> Path:
-    """Create a new dated file; never open an existing one for writing."""
+def write_new(out_dir: Path, report: dict) -> tuple[Path, bool]:
+    """Create the row for the report's UTC date; never open a row for writing.
+
+    Returns `(row, written)`. When that date already has a row this run is a retry
+    inside its own day, and the existing row comes back untouched: the series keeps
+    a day's first measurement, so a re-run hours later — whose skills mtime window
+    has shifted and whose `USER.md`/`MEMORY.md` may have changed — cannot replace
+    the row the following night diffs against, and nothing is opened for writing at
+    all (#1576). Skipping rather than replacing is also what lets a row kept
+    read-only stay unwritten.
+    """
+    existing = row_for(out_dir, _stamp_date(report["generated"]))
+    if existing is not None:
+        return existing, False
     out_dir.mkdir(parents=True, exist_ok=True)
     data = json.dumps(report, indent=1, sort_keys=True) + "\n"
     base = FILE_PREFIX + report["generated"]
@@ -263,7 +326,7 @@ def write_new(out_dir: Path, report: dict) -> Path:
             continue
         with os.fdopen(fd, "w") as fh:
             fh.write(data)
-        return path
+        return path, True
     raise RuntimeError(f"no free name for {base} in {out_dir}")
 
 
@@ -341,15 +404,17 @@ def main(argv=None) -> int:
     now = now.astimezone(timezone.utc)
 
     report = measure(args.vault, args.pipeline, now, args.days)
-    prior = previous_run(out_dir)            # read BEFORE this run writes anything
+    day = _stamp_date(report["generated"])      # the row key: resolved --now, in UTC
+    prior = previous_run(out_dir, before=day)   # read BEFORE this run writes anything
     lines, moved = diff_lines(prior[1] if prior else None, report)
     recurring, new_recurring = recurring_lines(prior[1] if prior else None, report)
-    written = write_new(out_dir, report)
+    row, wrote = write_new(out_dir, report)
 
     finding = moved or new_recurring
     if finding or not args.quiet:
-        print(f"corpus shape over {args.days} d -> {written}"
-              + (f" (vs {prior[0].name})" if prior else ""))
+        kept = "" if wrote else f" [row for {day} already existed; nothing written]"
+        print(f"corpus shape over {args.days} d -> {row}"
+              + (f" (vs {prior[0].name})" if prior else "") + kept)
         for name in CORPORA:
             c = report["corpora"][name]
             print(f"  {name} [{c['window']}]: n={c['n']} len_mean={c['len_mean']} "

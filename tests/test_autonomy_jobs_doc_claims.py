@@ -52,6 +52,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
+#: Reads the live `~/obsidian`, which no round under test controls — the gate
+#: deselects it (`pytest.ini:10-13`). Same convention as
+#: tests/test_autonomy_task_prompt_claims.py:83.
+live_vault = pytest.mark.live_vault
+
 ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "architecture" / "autonomy-jobs.md"
 ARCH_DIR = ROOT / "architecture"
@@ -2005,3 +2012,111 @@ def test_the_measure_row_and_the_measure_paragraph_both_give_the_pile_to_the_swe
     assert "pauses" in role, (
         "the row lost the pause with the write, and pausing a chronically failing "
         "task is still what #76 does — it is in the write tier for it")
+
+
+#: What the two prose carriers of the corpus-shape row-key claim said while the
+#: writer was keyed to the second, and had to stop saying when #1576 keyed it to the
+#: UTC date. Matched case-insensitively against flattened text, because the module
+#: docstring states its headline in capitals.
+CORPUS_SHAPE_ROW_PER_RUN_CLAIMS = (
+    "row per run",
+    "appended to",
+    "diffed against the previous run",
+    "diffs it against the last",
+    "append-only",
+    "each run opens a new",
+)
+
+#: The two properties that must be present wherever the claim was. The second is the
+#: one that has to SURVIVE the rewrite: it is why the writer was append-only in the
+#: first place (#543's `graph-baseline.json` — a baseline the run it judges rewrites).
+CORPUS_SHAPE_ROW_KEY_CLAIM = re.compile(r"one (?:dated )?row per UTC (?:date|day)", re.I)
+CORPUS_SHAPE_EARLIER_BASE_CLAIM = re.compile(r"newest row from an earlier (?:day|date)", re.I)
+CORPUS_SHAPE_READ_BEFORE_WRITE_CLAIM = re.compile(r"read before .*?wrote itself", re.I)
+
+SCRIPT_DIR = ROOT / "scripts" / "maintenance"
+TASK_90_FILE = Path.home() / "obsidian" / "autonomy" / "90-corpus-shape-trend.md"
+
+
+def _module_docstring(path: Path) -> str:
+    """A script's module docstring, wrapped sentences collapsed like §sections."""
+    import ast
+
+    return _flat(ast.get_docstring(ast.parse(path.read_text())) or "")
+
+
+def test_the_corpus_shape_row_key_is_a_utc_date_in_both_prose_carriers():
+    """#1576 clause 4. §Bound entropy and `corpus_shape.py`'s own docstring both
+    said a row is written per run, and both had to move.
+
+    The doc said #90 "writes one dated row per run ..., diffs it against the last"
+    and its table row said the series is "appended to ... and diffed against the
+    previous run"; the docstring's headline was "THE TREND FILE IS APPEND-ONLY ...
+    Each run opens a NEW `corpus-shape-<UTC stamp>.json`". All three were true of the
+    writer keyed to the second — three rows landed on 2026-09-24 within 39 s of each
+    other — and are false of the writer keyed to the UTC date of the resolved
+    `--now`, which writes nothing on a same-day retry. The paragraph carries the
+    caveat the guard does NOT buy: one row per day bounds duplicates, not gaps.
+
+    Checked in both carriers, not "somewhere in the tree": a review reads the doc and
+    its §Bound entropy matcher is what refuted the false copies before (#1524), while
+    the script's docstring is what an implementer reads before touching the writer.
+    """
+    bound = _group_section("Bound entropy")
+    docstring = _module_docstring(SCRIPT_DIR / "corpus_shape.py")
+
+    for where, text in (("§Bound entropy", bound),
+                        ("corpus_shape.py's module docstring", docstring)):
+        for stale in CORPUS_SHAPE_ROW_PER_RUN_CLAIMS:
+            assert stale not in text.lower(), (
+                f"{where} still says {stale!r}: a corpus-shape row is keyed to the "
+                f"UTC date of the run's resolved --now, so a same-day retry writes "
+                f"nothing (#1576)")
+        for claim, what in ((CORPUS_SHAPE_ROW_KEY_CLAIM, "one row per UTC date"),
+                            (CORPUS_SHAPE_EARLIER_BASE_CLAIM,
+                             "the diff base is the newest row from an earlier day"),
+                            (CORPUS_SHAPE_READ_BEFORE_WRITE_CLAIM,
+                             "the base row is read before the run's own row exists, "
+                             "so no run gates on a file it wrote itself")):
+            assert claim.search(text), (
+                f"{where} no longer says {what}; that is the property #1576 was for, "
+                f"and it is the one the old prose was written to protect")
+
+
+@live_vault
+def test_the_corpus_shape_task_description_says_at_most_one_row_per_day():
+    """#1576 clause 5, against the live task file. `@live_vault` because the vault is
+    not a tree this round controls (`pytest.ini:10-13`); run it from a worktree with
+
+        ~/lloyd/.venvs/lloyd/bin/python -m pytest \\
+            tests/test_autonomy_jobs_doc_claims.py::test_the_corpus_shape_task_description_says_at_most_one_row_per_day -q
+
+    — the vault half of #1576 landed as its own sha before this diff, so the node is
+    green against `~/obsidian` and the gate never executes it.
+
+    The description is what a runner is handed, so this parses it through the real
+    loader (`app.autonomy._parse_task_file`, the call the scheduler makes) rather than
+    reading raw front matter: a description the parser cannot reach is unpinnable.
+    """
+    from app import autonomy
+
+    task = autonomy._parse_task_file(TASK_90_FILE)
+    assert task, f"{TASK_90_FILE} does not parse as an autonomy task"
+    desc = _flat(task.get("description") or "")
+    body = _flat(TASK_90_FILE.read_text())
+    assert desc, f"{TASK_90_FILE.name} has no description to check"
+
+    for stale in ("appends one new dated", "appends a new", "diffs it against the previous one"):
+        assert stale not in desc.lower(), (
+            f"the task description still instructs the runner that every run {stale!r}")
+    assert "at most one row exists per utc day" in desc.lower(), (
+        "the description never states the one-row-per-day key, so a runner reading "
+        "only the description would still expect a fresh row each run")
+    assert CORPUS_SHAPE_EARLIER_BASE_CLAIM.search(desc), (
+        "the description does not say a same-day run diffs against an earlier day's "
+        "row, which is the half that stops a retry becoming tomorrow's base")
+    assert "writes no row" in body.lower(), (
+        "the task body no longer states that a retry inside a day writes nothing")
+    assert "not gap handling" in body.lower(), (
+        "the task body reads as 'one row per day therefore no gaps', which the guard "
+        "does not deliver")

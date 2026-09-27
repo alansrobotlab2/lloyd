@@ -716,7 +716,7 @@ find.
 | #79 | weekly | yes | Retention: delete `_pipeline/tasks` background-bash logs over 30 days, gzip session transcripts inactive 90+ days |
 | #78 | weekly | no | Broken backlinks, unreferenced notes, stale skill references, broken cross-links → a cleanup report |
 | #80 | weekly | no | OKF v0.1 conformance — `validate_okf.py` catches pages with no non-empty `type` or unparseable frontmatter |
-| #90 | daily | no | Shape of four nightly-written corpora — daily notes, `USER.md`/`MEMORY.md`, `SKILL.md` bodies, trajectory rows: counts, length p95, distinct-key ratio, duplicate and self-reference rate — appended to `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json` and diffed against the previous run |
+| #90 | daily | no | Shape of four nightly-written corpora — daily notes, `USER.md`/`MEMORY.md`, `SKILL.md` bodies, trajectory rows: counts, length p95, distinct-key ratio, duplicate and self-reference rate — written to `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json`, one row per UTC day, and diffed against the newest row from an earlier day |
 
 **#81 is the one with a measured payoff**: orphaned chunks had grown the index to
 24 GB and vec queries to 700 ms, and orphans displace real results, so it buys
@@ -739,10 +739,16 @@ and a memory file or a skills library can grow past its usefulness while every
 file on disk stays small. So #90 measures shape rather than size — daily notes,
 `USER.md`/`MEMORY.md`, `SKILL.md` bodies and trajectory rows, each by count,
 length p95, distinct-key ratio, duplicate rate and self-reference rate — writes
-one dated row per run under `~/lloyd-data/_pipeline/metrics/`, diffs it against
-the last, and exits 2 only when a metric crosses its provisional threshold or a
-sentence newly recurs across items. Exit 0 prints `corpus shape: no finding`;
-either way it changes nothing outside its own series, which is why it sits in
+one dated row per UTC day under `~/lloyd-data/_pipeline/metrics/`, keyed on the
+run's resolved UTC time rather than its second, and diffs it against the newest
+row from an earlier day: a second run inside one day writes nothing, so a retry
+cannot become the following night's diff base, and the base is always read before
+the day's own row exists, so no run gates on a file it wrote itself (#1576). One
+row per day bounds duplicates, not gaps — a day #90 did not run leaves the next
+run's base older than one day. It exits 2 only when a metric crosses its
+provisional threshold or a sentence newly recurs across items. Exit 0 prints
+`corpus shape: no finding`; either way it changes nothing outside its own series,
+which is why it sits in
 this group and in the Reports-only tier rather than in Measure, where the other
 trend recorders are. `scripts/maintenance/corpus_shape.py` is #90.
 
