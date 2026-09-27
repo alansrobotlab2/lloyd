@@ -537,7 +537,13 @@ def record_verdict(
     `reason` and `evidence_cmd` are required: without the second, a verdict is an
     assertion a later run can only inherit. The command is *executed* before anything is
     written and an append whose combined output is empty is refused (#736 clause 2), and
-    the first line it printed is stored as `evidence_observed` (clause 3).
+    the first line it printed is stored as `evidence_observed` (clause 3). Emptiness is not
+    runnability: an append whose command `evidence_cmd_status` — the classifier `check` and
+    `audit` report from — calls UNRUNNABLE is refused too, because a command that never
+    started still prints its own failure and quotes it as a measurement (#1586). The
+    classifier's fourth shape, a check that outlives its timeout, never reaches that test:
+    `run_evidence` returns empty output for it, so the emptiness guard above is what
+    refuses it.
 
     `occurrences` is `None` when the caller did not name a count, which is not the same
     fact as `0`: an omitted count is carried forward from the row this line supersedes,
@@ -576,6 +582,32 @@ def record_verdict(
             "`true`, `false` and `test $(…) -eq 0` are silent on success, which is why "
             "12 of the ledger's 41 live keys were unfalsifiable prose with a `cmd` key "
             "attached (#736 clause 2)"
+        )
+    # Output is not runnability. `run_evidence` quotes whatever the command printed, and a
+    # command that never started prints too — its own failure — so the emptiness test above
+    # accepted three shapes that cannot falsify anything: an absent file, a command bash
+    # cannot parse, and a not-found binary, each recorded with `evidence_observed` holding
+    # the crash and then honoured by `check` for its full 60 days while its own
+    # re-execution prints EVIDENCE_CMD_UNRUNNABLE (#1586: the write path was minting the
+    # exact ledger state #1533 measures with `audit`). Refuse precisely what the ledger's
+    # own readers already report, by asking that classifier rather than inventing a second
+    # rule — which costs a second execution of the check, because `evidence_cmd_status`
+    # needs the exit code and the whole stderr and `run_evidence` keeps only one line of
+    # one stream. That is bounded and cheap next to what it prevents: the live ledger's 170
+    # rows fall on 15 dates, busiest night 21, and every one of them is read by every later
+    # night for its full 60 days.
+    status_rc, status_detail = evidence_cmd_status({"evidence_cmd": evidence_cmd})
+    if status_rc == UNRUNNABLE:
+        raise ValueError(
+            "evidence_cmd is UNRUNNABLE — it cannot run at all, so it falsifies nothing "
+            f"and this verdict would be born uncheckable: {status_detail!r} — "
+            f"{evidence_cmd!r}. `check` and `audit` report the same UNRUNNABLE for it "
+            "(absent file, exit 127, or a command bash refuses to parse), which is a "
+            "different fact from a check that runs and answers no: a falsifier exiting 1 "
+            "beside a printed count is a verdict this function records. When the "
+            "measurement *is* the absence of a file, print the absence so a later run can "
+            f"re-check it — `test ! -f <path> && echo absent` — instead of letting grep's "
+            "error stand in for the observation (#1586)"
         )
     row = {
         "pattern_key": pattern_key,
@@ -651,7 +683,11 @@ def run_evidence(evidence_cmd: str, timeout: int = EVIDENCE_TIMEOUT_SECONDS) -> 
     and reports `UNRUNNABLE`; this one asks whether a check is worth storing, so it keeps
     the output. rc 1 beside a printed count is a falsification and a perfectly good
     verdict; rc 0 with no output is the vacuous assertion #736 is about, which is why
-    emptiness, not rc, is what `record_verdict` refuses on.
+    emptiness, not rc, is what `record_verdict` refuses on. Its one other refusal is
+    `evidence_cmd_status`'s verdict on the same command — a shape that cannot run is
+    refused for being unrunnable, never for its exit code (#1586) — and this function's
+    return shape and stderr fallback are what make that second refusal safe for a check
+    that legitimately reports through stderr.
 
     stdin is DEVNULL, never inherited: `grep -c x` with no file blocks on stdin forever,
     and `record` runs synchronously inside a nightly turn — an inherited terminal would

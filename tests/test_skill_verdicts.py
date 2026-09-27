@@ -201,7 +201,8 @@ def test_non_terminal_verdict_does_not_block(store, tmp_path):
     paragraph below pins the three values that went with it."""
     sv.record_verdict(
         store=store, pattern_key="Bash/timeout", verdict="proposed",
-        reason="patch below auto-apply threshold", evidence_cmd="ls ~/x", occurrences=13,
+        reason="patch below auto-apply threshold",
+        evidence_cmd="echo 'proposed: patch below the auto-apply threshold'", occurrences=13,
     )
     path = Path(mt.write_candidate_file(error_pattern(), tmp_path / "c", verdict_store=store))
 
@@ -223,7 +224,8 @@ def test_sequence_keys_are_gated_too(seeded, store, tmp_path):
     """Error slugs are the common case, not the only one."""
     sv.record_verdict(
         store=store, pattern_key="seq-2-bash-fs-read", verdict="rejected_false_positive",
-        reason="co-occurs by accident, no causal link", evidence_cmd="grep -r x ~/y",
+        reason="co-occurs by accident, no causal link",
+        evidence_cmd="echo 'seq-2-bash-fs-read co-occurs without a causal link'",
         occurrences=40,
     )
     path = Path(mt.write_candidate_file(sequence_pattern(), tmp_path / "c", verdict_store=store))
@@ -253,6 +255,203 @@ def test_record_requires_a_falsifiable_check(store):
     with pytest.raises(ValueError, match="reason"):
         sv.record_verdict(store=store, pattern_key="Bash/timeout",
                           verdict="reviewed_no_skill", reason="", evidence_cmd="ls")
+
+
+# ── #1586: a falsifier that cannot run is not evidence ───────────────────────────
+#
+# `run_evidence` quotes output, and a command that never started prints output too — its
+# own failure. So #736 clause 2's emptiness test let three UNRUNNABLE shapes be recorded:
+# measured through the real `record_verdict` on 2026-09-27, each of the three below was
+# ACCEPTED and appended with `evidence_observed` holding its own crash
+# (`grep: /nonexistent-file-xyz.md: No such file or directory`, bash's parse error,
+# `bash: line 1: …: command not found`). Such a verdict is then honoured by `check` for its
+# full 60 days while that check's own re-execution prints EVIDENCE_CMD_UNRUNNABLE — the
+# state #1533's `audit` counts as `keys: 104 unrunnable: 79`, minted at write time. The
+# fourth shape `evidence_cmd_status` names, a check that outlives its timeout, prints
+# nothing and was already refused by the emptiness guard.
+
+#: The three shapes that reach `record`'s classifier with output to quote, keyed by what
+#: broke. Each is a command no falsifier can legitimately be.
+UNRUNNABLE_SHAPES = {
+    "absent-file": "grep -c zzz /nonexistent-file-xyz.md",
+    "bash-parse-error": "this is prose (not a command) and bash cannot parse it",
+    "not-found-binary": "this-command-does-not-exist-xyz",
+}
+
+#: The fragment each shape's classifier detail must reach the refusal with, so the nightly
+#: log names which of the three broke without anyone re-running the command.
+UNRUNNABLE_SHAPE_DETAIL = {
+    "absent-file": "No such file or directory",
+    "bash-parse-error": "syntax error",
+    "not-found-binary": "command not found",
+}
+
+#: A falsifier that reports its measurement on stderr and exits non-zero. Legal by
+#: construction (`run_evidence` falls back to stderr precisely for this) and the case a
+#: refusal keyed on exit code instead of runnability would wrongly kill.
+STDERR_MEASUREMENT = "printf 'count=3\\n' >&2; exit 3"
+
+#: Assembled rather than literal: a token this file spells out would be found by the very
+#: `grep -c` that is supposed to come back 0, and the falsifier would answer yes.
+NO_SUCH_TOKEN = "ZZZ" + "_NO_SUCH_TOKEN_" + "7F"
+
+
+def test_record_refuses_an_evidence_cmd_that_cannot_run(store, mirror):
+    """Clause 1: each UNRUNNABLE shape raises, and neither the ledger nor its durable
+    copy gains a line.
+
+    The accepted verdict first is what makes the line counts a test rather than a
+    tautology: with both trees empty, "still zero" would pass a refusal that crashed
+    before writing and one that wrote then raised.
+    """
+    sv.record_verdict(store=store, pattern_key="Bash/logic", verdict="reviewed_no_skill",
+                      reason="the accepted baseline whose lines the assertions below count",
+                      evidence_cmd=PRINTING_CMD)
+    assert len(store.read_text().splitlines()) == 1
+    assert mirror.read_text().splitlines() == store.read_text().splitlines()
+
+    for shape, cmd in UNRUNNABLE_SHAPES.items():
+        with pytest.raises(ValueError, match="UNRUNNABLE"):
+            sv.record_verdict(store=store, pattern_key=f"test/{shape}",
+                              verdict="reviewed_no_skill",
+                              reason=f"{shape} cannot support a verdict",
+                              evidence_cmd=cmd)
+
+    assert len(store.read_text().splitlines()) == 1, "a refusal writes no line"
+    assert mirror.read_text().splitlines() == store.read_text().splitlines(), \
+        "a refusal must not reach the durable copy either"
+
+
+def test_the_refusal_names_the_shape_and_quotes_the_command(store):
+    """Clause 2: the refusal says which shape the command has and repeats the command, so
+    `refused: …` in the nightly log is actionable without re-running anything.
+
+    Three assertions per shape: the word `UNRUNNABLE` (the same token `check` and `audit`
+    print, so one grep finds both ends), the command verbatim, and the fragment of the
+    classifier's own detail that distinguishes this shape from the other two.
+    """
+    for shape, cmd in UNRUNNABLE_SHAPES.items():
+        with pytest.raises(ValueError) as excinfo:
+            sv.record_verdict(store=store, pattern_key=f"test/{shape}",
+                              verdict="reviewed_no_skill",
+                              reason=f"{shape} cannot support a verdict",
+                              evidence_cmd=cmd)
+        message = str(excinfo.value)
+        assert "UNRUNNABLE" in message, shape
+        assert cmd in message, f"{shape}: the refusal must quote the command: {message}"
+        assert UNRUNNABLE_SHAPE_DETAIL[shape] in message, \
+            f"{shape}: the refusal must name the shape: {message}"
+
+
+def test_a_nonzero_exit_beside_a_printed_count_still_records(store):
+    """Clause 3: rc 1 beside a measurement is a falsification, not a hole, and the
+    emptiness guard is untouched.
+
+    Both halves are the same boundary seen from either side of the new guard: a `grep -c`
+    that prints `0` and exits 1 must still be recorded with that `0` as its
+    `evidence_observed` (a falsifier reporting its verdict false is the ledger working),
+    while a command that prints nothing is still refused with #736's own `observed nothing`
+    message — the classifier check sits *after* the emptiness check, so no command that
+    #736 refused now reaches a different error, and no command that #736 accepted and
+    printed something is now accepted unexamined.
+    """
+    count_cmd = (f"grep -c '{NO_SUCH_TOKEN}' "
+                 f"{_ROOT / 'scripts' / 'skill_verdicts.py'}")
+    assert sv.run_evidence(count_cmd)[0] == 1, \
+        "the fixture must exit 1: `grep -c` with no match is a falsifier answering no"
+    row = sv.record_verdict(store=store, pattern_key="Bash/timeout",
+                            verdict="reviewed_no_skill",
+                            reason="the count is the measurement, and it is zero",
+                            evidence_cmd=count_cmd)
+    assert row["evidence_observed"] == "0"
+
+    with pytest.raises(ValueError, match="observed nothing"):
+        sv.record_verdict(store=store, pattern_key="Edit/not_found",
+                          verdict="reviewed_no_skill",
+                          reason="a command that says nothing cannot be overturned",
+                          evidence_cmd="true")
+
+
+def test_record_refuses_exactly_what_the_classifier_calls_unrunnable(store):
+    """Clause 4: the refused set is `evidence_cmd_status`'s, imported rather than invented.
+
+    For every command here, `record` accepts iff the classifier the ledger's readers run
+    (`check`, `audit`) reports as not-UNRUNNABLE. Every case prints at least one line, so
+    #736's emptiness guard is inert across this table and the classifier is the only
+    refusal on the table — `true`, runnable but silent, is clause 3's case, not one here.
+    The accepted group includes the two shapes a rule keyed on exit code would wrongly
+    refuse: `grep -c` exiting 1 with its `0`, and a measurement on stderr at exit 3.
+    """
+    count_cmd = (f"grep -c '{NO_SUCH_TOKEN}' "
+                 f"{_ROOT / 'scripts' / 'skill_verdicts.py'}")
+    cases = [
+        (UNRUNNABLE_SHAPES["absent-file"], True),
+        (UNRUNNABLE_SHAPES["bash-parse-error"], True),
+        (UNRUNNABLE_SHAPES["not-found-binary"], True),
+        ("echo 'bash-timeout owns this signature'", False),
+        (PRINTING_CMD, False),
+        (count_cmd, False),
+        (STDERR_MEASUREMENT, False),
+    ]
+    for index, (cmd, expect_unrunnable) in enumerate(cases):
+        status_rc, _detail = sv.evidence_cmd_status({"evidence_cmd": cmd})
+        assert (status_rc == sv.UNRUNNABLE) == expect_unrunnable, \
+            f"the classifier itself disagrees about {cmd!r}"
+        refused = False
+        try:
+            sv.record_verdict(store=store, pattern_key=f"test/iff-{index}",
+                              verdict="reviewed_no_skill",
+                              reason="one row per case, so the accepted ones are countable",
+                              evidence_cmd=cmd)
+        except ValueError:
+            refused = True
+        assert refused == expect_unrunnable, \
+            f"record {'refused' if refused else 'accepted'} {cmd!r}; " \
+            f"classifier UNRUNNABLE={expect_unrunnable}"
+
+    stored = {json.loads(ln)["evidence_cmd"]: json.loads(ln)["evidence_observed"]
+              for ln in store.read_text().splitlines()}
+    assert stored[STDERR_MEASUREMENT] == "count=3", \
+        "a check reporting through stderr records its measurement, not its silence"
+    assert stored[count_cmd] == "0"
+
+
+def test_the_shipped_cli_refuses_an_unrunnable_check_without_touching_either_tree(tmp_path,
+                                                                                  mirror):
+    """The same refusal across the boundary the nightly actually crosses.
+
+    `nightly-skill-consolidation` Phase 5.1 records verdicts by invoking
+    `skill_verdicts.py record` as a subprocess, so the guard's exit status and its stderr
+    line — not the `ValueError` — are what a nightly sees, and the durable copy is written
+    by that child, not by this process. This spawns the shipped module from this checkout
+    with `$SKILL_VERDICTS_MIRROR` aimed at the tmp copy: one accepted record to give both
+    trees a line, then one refused record, which must exit non-zero, name UNRUNNABLE and
+    quote the command on stderr, and leave both trees byte-identical to the accepted line.
+    """
+    store = tmp_path / "cli-reviews" / "verdicts.jsonl"
+    env = dict(os.environ, SKILL_VERDICTS_MIRROR=str(mirror))
+    run = lambda *args: subprocess.run(
+        [sys.executable, "-m", "scripts.skill_verdicts", *args],
+        cwd=_ROOT, env=env, capture_output=True, text=True, timeout=120)
+
+    accepted = run("record", "--pattern", "Bash/timeout", "--verdict", "reviewed_no_skill",
+                   "--reason", "installed skill bash-timeout owns this signature",
+                   "--evidence-cmd", PRINTING_CMD, "--occurrences", "13",
+                   "--store", str(store))
+    assert accepted.returncode == 0, accepted.stderr
+    assert len(store.read_text().splitlines()) == 1
+
+    refused = run("record", "--pattern", "Write/logic", "--verdict", "reviewed_no_skill",
+                  "--reason", "grounds a crash message cannot support",
+                  "--evidence-cmd", UNRUNNABLE_SHAPES["absent-file"],
+                  "--occurrences", "4", "--store", str(store))
+    assert refused.returncode != 0, "an unrunnable falsifier must fail the shipped CLI too"
+    assert "UNRUNNABLE" in refused.stderr, refused.stderr
+    assert UNRUNNABLE_SHAPES["absent-file"] in refused.stderr, refused.stderr
+    assert "No such file or directory" in refused.stderr, refused.stderr
+    assert len(store.read_text().splitlines()) == 1, "a refusal writes no line"
+    assert mirror.read_text().splitlines() == store.read_text().splitlines(), \
+        "a refusal must not reach the durable copy either"
 
 
 def test_decisions_track_lines_one_to_one(seeded, store):
@@ -634,7 +833,7 @@ def test_a_widened_sequence_key_survives_the_candidate_round_trip(tmp_path, stor
 
     sv.record_verdict(store, key, "reviewed_no_skill",
                       reason="covered by an installed skill",
-                      evidence_cmd="grep -n 'seq-5' _pipeline/skills/candidates/*.md")
+                      evidence_cmd=PRINTING_CMD)
     row = mt.verdict_for(long_seq, store=store)
     assert row is not None and row["verdict"] == "reviewed_no_skill"
 
@@ -804,12 +1003,20 @@ def test_check_reports_a_verdict_whose_check_can_no_longer_run(tmp_path, store, 
     """
     cands = tmp_path / "candidates"
     cands.mkdir()
+    # The two runnable keys go through `record`. The two that must sit in the ledger
+    # *unrunnable* are stated as stored rows instead, because since #1586 `record` refuses
+    # to create them — an absent script and a command bash cannot parse are exactly what
+    # the write path now turns away, and that refusal is why a broken falsifier can only
+    # arrive here as a row written before it: 99 of the live ledger's keys were recorded
+    # before any guard existed and will be read long after this one.
     for key, cmd in (("Bash/timeout", "echo 'bash-timeout owns this signature'"),
-                     ("Edit/not_found", "echo 'the grounds are gone'; exit 1"),
-                     ("Bash/logic", f"{tmp_path}/gone/falsifier.sh"),
-                     ("Write/logic", 'echo "unbalanced')):
+                     ("Edit/not_found", "echo 'the grounds are gone'; exit 1")):
         sv.record_verdict(store=store, pattern_key=key, verdict="reviewed_no_skill",
                           reason=f"grounds for {key}", evidence_cmd=cmd)
+    for key, cmd in (("Bash/logic", f"{tmp_path}/gone/falsifier.sh"),
+                     ("Write/logic", 'echo "unbalanced')):
+        stored_row(store, key, cmd, reason=f"grounds for {key}")
+    for key in ("Bash/timeout", "Edit/not_found", "Bash/logic", "Write/logic"):
         mt.write_candidate_file(error_pattern(tool=key.split("/")[0],
                                               error_type=key.split("/")[1]),
                                 cands, verdict_store=store)
@@ -1368,11 +1575,15 @@ def test_an_accepted_row_stores_what_the_check_printed(tmp_path, store):
     assert row["evidence_cmd"] == f"{sys.executable} {script}", "the command is unchanged"
 
     # A command reporting through stderr is stored with what it printed, not with nothing.
+    # The fixture here used to be `grep -c 'x' /nope/nothing-here`, whose entire output was
+    # grep's own `No such file or directory` — the shape #1586 now refuses at write time —
+    # so the case rides on a falsifier that measures something, prints it on stderr, and
+    # exits non-zero: the reason `run_evidence` falls back to stderr in the first place.
     assert sv.main(["record", "--pattern", "Write/logic", "--verdict", "reviewed_no_skill",
-                    "--reason", "the check itself fails on this box, and says so",
-                    "--evidence-cmd", "grep -c 'x' /nope/nothing-here",
+                    "--reason", "the check reports its count on stderr and exits 3",
+                    "--evidence-cmd", STDERR_MEASUREMENT,
                     "--occurrences", "4", "--store", str(store)]) == 0
-    assert "No such file" in sv.load_verdicts(store)["Write/logic"]["evidence_observed"]
+    assert sv.load_verdicts(store)["Write/logic"]["evidence_observed"] == "count=3"
 
     # A long first line is a quotation, not an attachment.
     long_line = "M" * (sv.EVIDENCE_OBSERVED_MAX + 50)
