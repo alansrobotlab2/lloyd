@@ -186,3 +186,107 @@ def test_a_failing_probe_never_takes_the_scheduler_down(monkeypatch, tmp_path, f
     monkeypatch.setattr(sp, "run_probe", _raise)
     pool = WorkerPool(WorkQueue(tmp_path / "q.db"), slots=1)
     asyncio.run(pool._probe_services())  # must not raise
+
+
+# ── #1683: one outage, measured once, announced by both watchers ───────────────
+#
+# The primary engine's port has two watchers. `workers/service_probe.py` (this
+# file) announces `LLM Primary is not serving: :8096 closed` once its grace
+# elapses, journal + toast, deliberately no ledger row. The dispatch gate in
+# `workers/sources/scheduled_task.py` pauses autonomy enqueue while the
+# primary's /health fails and raised its own discord alert on a SECOND timer at
+# 45 min — so one outage produced two unrelated sentences at two thresholds,
+# neither knowing the other existed, and the gate's comment still claimed
+# nothing else watches the model server. The fix is one measurement and an
+# asserted ordering; these tests pin the probe's half of it.
+
+PRIMARY_SVC = {"agent-llm-primary": ("LLM Primary", 8096)}
+
+
+def _primary_procs(state: str = "RUNNING") -> dict:
+    return {"agent-llm-primary": {"name": "agent-llm-primary",
+                                  "statename": state}}
+
+
+def _held(probe, clock, svc, procs, minutes: int, port_open=CLOSED) -> None:
+    """`minutes` of 60 s ticks against a closed port, fake clock advancing."""
+    for _ in range(minutes):
+        probe.tick(svc, procs, port_open)
+        clock.t += 60
+
+
+def test_the_primary_down_line_carries_the_dispatch_cost_and_djevs_does_not():
+    """Clause 3: the in-room line says what the outage COSTS.
+
+    Only the gate could say it before, because only the gate stops the fleet —
+    and the gate's line is the one 15 minutes later and on discord. So the
+    journal line for the primary now says it too. djev is the negative control
+    in the same tick: an infra port that does not gate dispatch must not claim
+    that dispatch is paused, or the sentence stops meaning anything.
+    """
+    probe, clock, calls = _probe()
+    svc = {**PRIMARY_SVC, **DJEV}
+    procs = {**_primary_procs(), **_procs("RUNNING")}
+    _held(probe, clock, svc, procs, 31)   # djev's 15 min grace, then primary's 30
+
+    assert len(calls) == 2, f"expected one line per service: {calls}"
+    primary = next(c for c in calls if ":8096" in c[0])
+    djev = next(c for c in calls if ":8011" in c[0])
+    assert "autonomy dispatch is paused" in primary[1].lower(), (
+        f"the primary's down line does not say dispatch is paused: {primary[1]}")
+    assert "while the primary is unreachable" in primary[1].lower(), primary[1]
+    assert "dispatch is paused" not in djev[1].lower(), (
+        f"a service that does not gate dispatch claimed it does: {djev[1]}")
+
+
+def test_the_primary_grace_always_precedes_the_dispatch_gate_alert():
+    """Clause 4: the ordering between the two watchers is an invariant.
+
+    The probe's grace has to be strictly below the gate's outage threshold, or
+    the two sentences arrive in the wrong order (or in the same minute) and the
+    pair reads as two incidents. The lower bound is the other half: the primary's
+    legitimate boot runs up to 20 minutes, so a grace cut to chase the gate's
+    number would announce every restart.
+    """
+    import workers.sources.scheduled_task as st
+
+    grace = sp.GRACE_S[sp.PRIMARY_ENGINE]
+    assert grace < st._VLLM_DOWN_ALERT_SECONDS, (
+        f"probe grace {grace}s is not below the dispatch gate's outage threshold "
+        f"{st._VLLM_DOWN_ALERT_SECONDS}s: the discord line would land first, or "
+        "both in the same minute, and one outage reads as two")
+    assert grace > 20 * 60, (
+        f"probe grace {grace}s no longer outlasts the primary's 20-minute boot, "
+        "so every legitimate restart is announced as an outage")
+
+
+def test_the_probe_the_pool_ticks_is_the_one_the_gate_reads(monkeypatch, tmp_path):
+    """The process seam (#1683): the gate reads elapsed minutes off an instance
+    it did not create. If the pool ticked a private probe and the gate read a
+    different one, the gate would silently always fall back to its own timer and
+    the two timers would be back — so identity, not just existence, is asserted.
+    """
+    from workers.pool import WorkerPool
+    from workers.queue import WorkQueue
+    import workers.sources as sources
+
+    monkeypatch.setattr(sp, "_shared", None)
+    ran: list[object] = []
+    monkeypatch.setattr(sp, "run_probe", lambda probe: ran.append(probe) or [])
+    monkeypatch.setattr(sources, "SOURCE_REGISTRY", {}, raising=False)
+    monkeypatch.setattr(sources, "get_sources_config", lambda: {}, raising=False)
+
+    async def go():
+        pool = WorkerPool(WorkQueue(tmp_path / "q.db"), slots=1,
+                          poll_idle_seconds=0.01)
+        await pool.start()
+        try:
+            await asyncio.sleep(0.3)
+        finally:
+            await pool.stop()
+
+    asyncio.run(go())
+    assert ran, "the scheduler loop never ticked a service probe"
+    assert sp.shared() is ran[0], (
+        "the pool ticks a probe that is not the process-wide one the dispatch "
+        "gate reads — the outage would be measured twice again")

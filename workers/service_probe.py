@@ -36,6 +36,23 @@ Three rules, each the reason for a line below:
 An unreachable supervisord skips the tick without touching any streak: it says
 nothing about the programs, and a canary pointing `LLOYD_SUPERVISOR_SOCK` at a
 dead path must stay silent.
+
+One more rule, added by #1683: the primary engine has a SECOND watcher, the
+dispatch gate in `workers/sources/scheduled_task.py`, which pauses autonomy
+enqueue while the primary's /health fails. Before that fix one outage produced
+two unrelated sentences on two independent timers — this probe's line at its
+30-minute grace, the gate's discord alert at 45 minutes, neither naming the
+other. Now the outage is measured once: the gate reads its elapsed minutes from
+the streak below through `shared()` (the pool's scheduler loop ticks that one
+instance) and quotes this file's earlier announcement, while the gate's own
+timer survives only as the fallback for a probe that cannot see anything. The
+two still do not measure the same thing — this one watches the PORT under
+supervisord, the gate watches /health — which is why that fallback is not dead
+code: a wedged vLLM holding an open socket never gets a streak here. And
+NEITHER surface writes a guardian ledger row for an engine outage: this file
+announces (journal and toast, no bookkeeping), the gate writes `logger.error`
+plus discord. Whether one should exist is an open ruling, not something either
+watcher decides.
 """
 from __future__ import annotations
 
@@ -46,10 +63,28 @@ from typing import Callable, Optional
 
 logger = logging.getLogger("lloyd-workers.service_probe")
 
+#: The one infra slot whose closed port also stops the fleet: the dispatch gate
+#: in `workers/sources/scheduled_task.py` refuses every enqueue while the
+#: primary's /health fails. It is why this service's line is allowed to say
+#: something the others may not (#1683).
+PRIMARY_ENGINE = "agent-llm-primary"
+
+#: What a primary outage costs, said in the in-room line rather than only in the
+#: gate's discord alert 15 minutes later: the fleet is stopped, so every stall
+#: alert from here on describes a paused fleet and not a broken one (#1683).
+PRIMARY_COST = (" autonomy dispatch is PAUSED while the primary is unreachable "
+                "(workers/sources/scheduled_task.py), so every stall alert from "
+                "here on describes a paused fleet, not a broken one.")
+
 #: Seconds a port may stay closed while its program is in supervisord's hands.
 DEFAULT_GRACE_S = 15 * 60
-#: The primary's boot legitimately takes up to 20 minutes.
-GRACE_S = {"agent-llm-primary": 30 * 60}
+#: The primary's boot legitimately takes up to 20 minutes. MUST stay strictly
+#: below the dispatch gate's outage threshold
+#: (`_VLLM_DOWN_ALERT_SECONDS`, workers/sources/scheduled_task.py): the probe's
+#: line is the first sentence of an outage and the gate's is the second, and if
+#: the two ever crossed, one outage would read as two incidents in the same
+#: minute. Pinned by `test_the_primary_grace_always_precedes_the_dispatch_gate_alert`.
+GRACE_S = {PRIMARY_ENGINE: 30 * 60}
 
 # A deliberate stop ends a streak; everything else supervisord reports while it
 # still owns the program (RUNNING, STARTING, BACKOFF, EXITED on the way to a
@@ -64,6 +99,31 @@ class _Streak:
     since: float
     state: str
     announced: bool = False
+    #: What was announced, so a later reader (the dispatch gate, #1683) can
+    #: quote the sentence a person already saw instead of paraphrasing it.
+    announcement: str = ""
+    #: The registry's own (display, port) for this streak, kept so `outage()`
+    #: can answer without re-reading supervisord — the gate has no business
+    #: opening the supervisor socket just to word an alert.
+    display: str = ""
+    port: int = 0
+
+
+@dataclass(frozen=True)
+class Outage:
+    """One service's closed-port streak, as another watcher may read it.
+
+    `down_seconds` is measured on the probe's own clock, which is the point: the
+    dispatch gate reports THIS number rather than counting a second run of
+    unhealthy ticks, so an outage has one length and one instrument (#1683).
+    """
+
+    service: str
+    display: str
+    port: int
+    down_seconds: float
+    announced: bool
+    announcement: str
 
 
 @dataclass
@@ -97,25 +157,44 @@ class ServiceProbe:
                 continue
             streak = self.streaks.get(name)
             if streak is None:
-                self.streaks[name] = _Streak(since=now, state=state)
+                self.streaks[name] = _Streak(since=now, state=state,
+                                             display=display, port=port)
                 continue
             streak.state = state
             grace = GRACE_S.get(name, DEFAULT_GRACE_S)
             if not streak.announced and now - streak.since >= grace:
                 streak.announced = True
-                events.append(self._say(
-                    "down", name,
-                    f"{display} is not serving: :{port} closed while supervisord "
-                    f"says {state}",
-                    f"{name} has held supervisord state {state} (or cycled "
-                    f"through respawns) for {int(now - streak.since) // 60} min "
-                    f"without :{port} opening — a crash loop reads as RUNNING "
-                    f"to everything that trusts supervisord's state (#1359). "
-                    f"Its log: supervisorctl tail {name} stderr.", "critical"))
+                title = (f"{display} is not serving: :{port} closed while "
+                         f"supervisord says {state}")
+                body = (f"{name} has held supervisord state {state} (or cycled "
+                        f"through respawns) for {int(now - streak.since) // 60} min "
+                        f"without :{port} opening — a crash loop reads as RUNNING "
+                        f"to everything that trusts supervisord's state (#1359). "
+                        f"{PRIMARY_COST if name == PRIMARY_ENGINE else ''}"
+                        f"Its log: supervisorctl tail {name} stderr.")
+                streak.announcement = title
+                events.append(self._say("down", name, title, body, "critical"))
         # A slot switched off since the last tick is no longer ours to judge.
         for gone in set(self.streaks) - seen:
             self.streaks.pop(gone, None)
         return events
+
+    def outage(self, name: str) -> Optional[Outage]:
+        """This service's closed-port streak, or None when there is none.
+
+        The reader the dispatch gate uses (#1683), so that one outage has one
+        length. Returns None — not a zero — when the probe holds no streak:
+        either supervisord was unreachable (a skipped tick says nothing about the
+        programs and starts no clock) or the port is genuinely answering, and in
+        both cases the caller has to say WHICH measurement it is reporting.
+        """
+        streak = self.streaks.get(name)
+        if streak is None:
+            return None
+        return Outage(service=name, display=streak.display or name,
+                      port=streak.port, down_seconds=self.clock() - streak.since,
+                      announced=streak.announced,
+                      announcement=streak.announcement)
 
     def _say(self, kind: str, name: str, title: str, body: str,
              level: str) -> dict:
@@ -129,6 +208,22 @@ class ServiceProbe:
                 logger.warning("service_probe: announce failed: %s", exc)
         return {"kind": kind, "service": name, "title": title,
                 "level": level, "channels": channels}
+
+
+#: The instance the pool's scheduler loop ticks. The dispatch gate reads its
+#: streaks through `shared()` rather than keeping a timer of its own (#1683):
+#: a second timer over the same port is the defect that was fixed, and a probe
+#: the gate built itself would see nothing, because only the loop ticks one.
+_shared: Optional[ServiceProbe] = None
+
+
+def shared() -> ServiceProbe:
+    """The one probe this process runs. Lazily built with the guardian's fan-out;
+    a test installs its own by setting `_shared`."""
+    global _shared
+    if _shared is None:
+        _shared = ServiceProbe(announce=guardian_announce)
+    return _shared
 
 
 def guardian_announce(title: str, body: str, level: str) -> dict:

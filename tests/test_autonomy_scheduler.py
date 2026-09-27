@@ -2936,12 +2936,20 @@ async def test_a_parked_upstream_keeps_its_dependent_out_of_the_queue(
 # down, `_grossly_overdue`, `_queue_starving` and `_next_run_stalled` were each
 # called ZERO times — measured over 8 consecutive ticks on 2026-09-20 — with 0
 # `_alert` calls and exactly one `logger.warning` line total, deduped for the
-# whole outage by `_state["vllm_down_logged"]`. No other watcher covered the
-# gap: `agent-services/guardian/policy.py` WATCHED names only
-# `lloyd-backend`/`lloyd-mcp`, and the vault tasks that do probe the model
+# whole outage by `_state["vllm_down_logged"]`. Nothing in the fleet's OWN
+# watchdogs covered the gap: `agent-services/guardian/policy.py` WATCHED names
+# only `lloyd-backend`/`lloyd-mcp`, and the vault tasks that do probe the model
 # server are autonomy tasks dispatched through this very gate, so the monitor
 # died with the thing it monitors. At `tick_interval: 60` a 3-day outage is
 # ~4300 ticks and one log line.
+#
+# That was the whole picture until #1359 shipped a co-watcher that runs OUTSIDE
+# this gate: `workers/service_probe.py`, driven from the pool's scheduler loop,
+# announces `LLM Primary is not serving: :8096 closed` once its grace elapses.
+# So the model server is watched from two places now, and what NEITHER one
+# writes is a guardian ledger row for an engine outage — the probe announces
+# (journal + toast) and this gate logs plus alerts to discord (#1683, pinned by
+# `test_the_unwatched_model_server_claim_names_the_probe_and_the_ledger_gap`).
 #
 # Every other stall test in this file forces the gate OPEN
 # (`_vllm_healthy` → True), so the outage path had no coverage and the suite
@@ -3274,6 +3282,182 @@ async def test_a_sustained_outage_alerts_once_and_a_later_outage_alerts_again(
     assert len(alerts) == 2, (
         f"the second outage never alerted: {alerts} — a fleet that has been "
         "through one outage must not be deaf to the next")
+
+
+# ── #1683: one outage is measured once, on the service probe's streak ─────────
+#
+# `workers/service_probe.py` (#1359) and this gate both watch :8096, on two
+# independent timers, and neither referenced the other: at 30 min the probe
+# announced the closed port (journal + toast) and at 45 min the gate alerted on
+# discord, two unrelated sentences about one outage. These tests pin the merged
+# measurement — the gate's elapsed minutes come from the probe's streak, its
+# alert quotes the probe's earlier line, and the gate keeps its own timer ONLY
+# as the fallback for the case where the probe cannot see anything at all.
+
+def _shared_probe_in_outage(monkeypatch, minutes: int):
+    """A real `ServiceProbe` driven to `minutes` of closed :8096 under a fake
+    clock, installed as the process-wide instance the dispatch gate reads.
+
+    The streak comes out of `ServiceProbe.tick` itself — nothing writes a number
+    into the gate's state — so the minutes the gate reports are the probe's own
+    measurement, and the announcement the alert quotes is the string the probe
+    really announced. Returns the probe and its (title, body, level) calls.
+    """
+    from workers import service_probe as sp
+
+    t = [1000.0]
+    calls: list[tuple[str, str, str]] = []
+    probe = sp.ServiceProbe(
+        announce=lambda *a: calls.append(a) or {"desktop": True},
+        clock=lambda: t[0])
+    monkeypatch.setattr(sp, "_shared", probe)
+    services = {sp.PRIMARY_ENGINE: ("LLM Primary", 8096)}
+    procs = {sp.PRIMARY_ENGINE: {"name": sp.PRIMARY_ENGINE,
+                                 "statename": "RUNNING"}}
+    for _ in range(minutes):
+        probe.tick(services, procs, lambda port: False)
+        t[0] += 60
+    return probe, calls
+
+
+async def test_the_outage_alert_measures_the_outage_on_the_probe_streak(
+        aut, monkeypatch, tmp_path):
+    """Clauses 1 and 2, across the pool→gate seam, on an empty board.
+
+    The gate's OWN outage accounting is at zero — this is the first unhealthy
+    tick — while the probe has held :8096 closed for 90 minutes. So any elapsed
+    time in the alert can only have come from the probe, and 90 is a number the
+    gate's tick counter cannot reach on tick one. Pre-fix this fails on the very
+    first assertion (the gate's own 45-minute timer had to elapse first) and on
+    the quote (nothing here knew the probe had already spoken).
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+
+    probe, calls = _shared_probe_in_outage(monkeypatch, 90)
+    assert calls, "the fixture's probe never announced the outage to be quoted"
+    announced_title = calls[0][0]
+
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: False)
+    _clean_outage_state(monkeypatch, st)
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture)
+    q = WorkQueue(tmp_path / "probe-measured.db")
+
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, (
+        f"90 minutes of closed :8096 on the probe's streak raised no outage "
+        f"alert on the first unhealthy tick: {alerts}")
+    msg = alerts[0]
+    assert "model server" in msg and st._VLLM_HEALTH_URL in msg, (
+        f"the outage alert does not name the model server: {msg}")
+    assert "90 min" in msg, (
+        f"the alert does not state the outage length the probe measured "
+        f"(90 min on its :8096 streak): {msg}")
+    assert announced_title in msg, (
+        f"the alert does not name the service probe's announcement for :8096 "
+        f"({announced_title!r}): {msg}")
+    assert ":8096" in msg, f"the alert does not name the port: {msg}"
+    assert st._state["vllm_down_alerted"] is True, (
+        "the outage alert fired without marking THIS outage alerted, so the "
+        "next tick raises it again")
+
+    for _ in range(3):
+        await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, (
+        f"one uninterrupted outage raised {len(alerts)} alerts — one per outage "
+        "is the contract, and the probe's streak only grows")
+
+
+async def test_the_outage_alert_falls_back_to_its_own_ticks_without_a_streak(
+        aut, monkeypatch, tmp_path):
+    """Clause 2's second half: a probe that cannot see is not a mute button.
+
+    `run_probe` returns before touching a streak when supervisord is unreachable,
+    which is precisely the moment the probe has no opinion and the gate is the
+    only thing left measuring the outage. So the fallback is the gate's own
+    uninterrupted run of unhealthy ticks, and the alert says which measurement it
+    used rather than quietly reporting a number whose source is unknown.
+    """
+    from workers.queue import WorkQueue
+    from workers import service_probe as sp
+    import workers.sources.scheduled_task as st
+
+    monkeypatch.setattr(sp, "_shared", sp.ServiceProbe())   # no streak at all
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: False)
+    _clean_outage_state(monkeypatch, st)
+    alerts: list[str] = []
+
+    async def _capture(msg):
+        alerts.append(msg)
+
+    monkeypatch.setattr(st, "_alert", _capture)
+    q = WorkQueue(tmp_path / "probe-blind.db")
+    threshold = st._VLLM_DOWN_ALERT_SECONDS
+
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert alerts == [], "the first unhealthy tick alerted before any downtime"
+
+    st._state["vllm_down_since"] = (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=threshold + 120))
+    await st.enqueue_if_due(q, {"max_duration_seconds": 1800})
+    assert len(alerts) == 1, (
+        "with no probe streak the gate fell silent on a 47-minute outage — the "
+        "case the fallback exists for is the one that went unreported")
+    msg = alerts[0]
+    assert "47 min" in msg, (
+        f"the fallback alert does not report the gate's own 47-minute "
+        f"measurement: {msg}")
+    assert "service probe" in msg.lower() and "no streak" in msg.lower(), (
+        f"the alert does not say it fell back because the probe holds no "
+        f"streak: {msg}")
+
+
+def test_the_unwatched_model_server_claim_names_the_probe_and_the_ledger_gap():
+    """Clause 5, on the prose a fresh session reads before it decides whether
+    the coverage gap still exists.
+
+    The claim that nothing else watches the model server was true when it was
+    written (`3890de7c9`, 2026-09-20) and false from #1359 (2026-09-24) onwards.
+    It sat in three places a reader trusts: the comment above
+    `_VLLM_DOWN_ALERT_SECONDS`, `_note_vllm_outage`'s docstring, and this file's
+    outage header — the last being exactly where the next session looks for
+    coverage rationale. The negative assertion needs its positive control, so
+    both halves are here: the sentence is gone, AND each of the three names
+    `workers/service_probe.py` as the co-watcher and states that an engine
+    outage writes no ledger row.
+    """
+    import inspect
+    from pathlib import Path
+    import workers.sources.scheduled_task as st
+
+    src = inspect.getsource(st)
+    doc = st._note_vllm_outage.__doc__ or ""
+    here = Path(__file__).read_text(encoding="utf-8")
+    head = here[:here.index("# ── The run record vetoes")]
+    header = head[head.index("# ── #938:"):]
+
+    # The claim is assembled here rather than written out, because the third
+    # scan below reads this file: a test that contained the sentence it forbids
+    # could never pass, which is the same trap as a forbid that forbids itself.
+    claim = "no other " + "watcher"
+    for label, text in (("scheduled_task.py", src),
+                        ("_note_vllm_outage's docstring", doc),
+                        ("this file's outage header", here)):
+        assert claim not in text.lower(), (
+            f"{label} still asserts that nothing else watches the model server")
+    for label, text in (("scheduled_task.py", src),
+                        ("_note_vllm_outage's docstring", doc),
+                        ("this file's outage header", header)):
+        assert "workers/service_probe.py" in text, (
+            f"{label} does not name the co-watcher #1359 added")
+        assert "ledger row" in text.lower(), (
+            f"{label} does not state that neither surface writes a ledger row "
+            "for an engine outage")
 
 
 # ── The run record vetoes a second dispatch of a period that already ran ──────

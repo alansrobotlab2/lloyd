@@ -1022,13 +1022,19 @@ class WorkerPool:
 
         Same seat as the poison sweep and for the same reason: it must run
         whether or not a worker slot is free. Never raises.
+
+        The instance is the process-wide one from `service_probe.shared()`, not a
+        pool-private probe: the dispatch gate in
+        `workers/sources/scheduled_task.py` reads the primary's outage length off
+        these streaks instead of keeping a second timer over :8096, and it can
+        only do that if the loop that ticks the probe is the one whose probe it
+        reads (#1683).
         """
         try:
             from workers import service_probe
 
             if self._service_probe is None:
-                self._service_probe = service_probe.ServiceProbe(
-                    announce=service_probe.guardian_announce)
+                self._service_probe = service_probe.shared()
             await asyncio.to_thread(service_probe.run_probe, self._service_probe)
         except Exception as e:
             logger.error("Service probe failed: %s", e, exc_info=True)

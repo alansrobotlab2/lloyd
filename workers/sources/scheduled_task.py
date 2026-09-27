@@ -75,13 +75,31 @@ _STALL_ALERT_INTERVAL_SECONDS = 6 * 3600
 # streak is a separate counter so neither alarm can reset the other's.
 _STALL_NEXTRUN_TICKS = 5
 _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS = 24 * 3600
-# How long the model server can stay down before the outage itself is an alert
-# (not one `logger.warning` line deduped for the whole outage). The gate in
-# `enqueue_if_due` pauses dispatch, and until #938 that one line was the only
-# thing an outage produced: `agent-services/guardian/policy.py` watches only
-# `lloyd-backend`/`lloyd-mcp`, never the model server, and the vault tasks that
-# do probe it are autonomy tasks dispatched through this gate, so they die with
-# it. At `tick_interval: 60` a 3-day outage was ~4300 ticks and one log line.
+# How long the model server can stay unreachable at /health before the outage
+# itself is an alert (not one `logger.warning` line deduped for the whole
+# outage). The gate in `enqueue_if_due` pauses dispatch, and when this constant
+# was written that one line was all an outage produced:
+# `agent-services/guardian/policy.py` watches only `lloyd-backend`/`lloyd-mcp`,
+# never the model server, and the vault tasks that do probe it are autonomy
+# tasks dispatched through this gate, so they die with it (#938).
+#
+# That is no longer the whole picture. `workers/service_probe.py` (#1359) is the
+# CO-WATCHER of this same port: it announces `LLM Primary is not serving: :8096
+# closed` once its grace elapses, from the pool's scheduler loop, outside this
+# gate. The two do not measure the same thing — the probe watches the PORT under
+# supervisord, this gate watches /health — so the probe cannot retire this
+# threshold: a wedged vLLM that keeps the socket open, or an unreachable
+# supervisord, produces no probe streak at all. What one outage costs is said
+# once and measured once: the probe's grace is asserted STRICTLY BELOW this
+# threshold (tests/test_service_probe.py::
+# test_the_primary_grace_always_precedes_the_dispatch_gate_alert) so the in-room
+# line always precedes this one, and `_note_vllm_outage` reads the elapsed
+# minutes off the probe's streak rather than counting its own ticks (#1683).
+# Neither surface writes a guardian ledger row for an engine outage — the probe
+# announces (journal and toast, no bookkeeping) and this path is `logger.error`
+# plus discord — and whether one should is an open ruling, not a gap to close by
+# accident here.
+#
 # 45 min is long enough to sit past a vLLM restart (the n-gram table alone takes
 # minutes to load) and short enough that a person hears about it within an hour.
 _VLLM_DOWN_ALERT_SECONDS = 45 * 60
@@ -403,21 +421,72 @@ async def _alert(message: str) -> None:
         logger.error("alert dispatch failed: %s", e)
 
 
+def _vllm_outage_sentence(outage, own_seconds: float, now) -> str:
+    """The one sentence a sustained primary outage produces (#1683).
+
+    Which instrument measured it is stated in the sentence, because the two
+    numbers are not the same quantity: `outage.down_seconds` is how long :8096
+    has been closed while supervisord holds the program (the co-watcher's
+    measurement, the one that also produced the in-room announcement this
+    quotes), and `own_seconds` is how long this scheduler has failed to get a
+    200 from /health. The second is only ever used when the first does not
+    exist, and saying so is what keeps a reader from adding them.
+    """
+    import datetime as _dt
+
+    if outage is None:
+        measured = own_seconds
+        where = ("measured on this scheduler's own run of unhealthy /health "
+                 "ticks; the service probe (workers/service_probe.py) holds no "
+                 "streak for the primary, so it has announced nothing to quote "
+                 "— supervisord unreachable, or the port never closed")
+    else:
+        measured = outage.down_seconds
+        quoted = (f", which already announced \"{outage.announcement}\""
+                  if outage.announced else ", which has not reached its grace")
+        where = (f"measured on the service probe's :{outage.port} closed-port "
+                 f"streak (workers/service_probe.py){quoted}")
+    started = now - _dt.timedelta(seconds=measured)
+    return (f"primary model server {_VLLM_HEALTH_URL} has been unreachable for "
+            f"{measured / 60:.0f} min (since {started.isoformat()}, {where}): "
+            f"autonomy dispatch is PAUSED until it recovers, so every stall "
+            f"alert from here on is describing a paused fleet, not a broken "
+            f"one. Neither that line nor this one writes a guardian ledger row "
+            f"for an engine outage (#1683).")
+
+
 async def _note_vllm_outage() -> None:
     """Account for one unhealthy tick: log the transition, and alert once if the
     outage has run past `_VLLM_DOWN_ALERT_SECONDS`.
 
-    Called on every unhealthy tick and on nothing else, so the elapsed time it
-    measures is the length of ONE uninterrupted run of them — the healthy tick
-    clears `_vllm_down_since`, which is what makes a later outage alert again
-    instead of inheriting this one's `vllm_down_alerted`.
+    Called on every unhealthy tick and on nothing else. The elapsed time it
+    alerts on is measured ONCE, on `workers/service_probe.py`'s closed-port
+    streak for the primary when it holds one: the same streak that announced the
+    outage in the journal at the probe's grace, so the person on discord is
+    reading the probe's number and the alert can quote the sentence they already
+    saw instead of arriving as a second, unrelated incident. This module's own
+    uninterrupted run of unhealthy ticks is the fallback, and it is load-bearing
+    rather than legacy — the probe holds no streak when supervisord is
+    unreachable (a skipped tick says nothing about the programs) or when vLLM
+    keeps :8096 open while /health stops answering. A healthy tick clears
+    `_vllm_down_since`, which is what makes a later outage alert again instead of
+    inheriting this one's `vllm_down_alerted`.
 
     The alert is exactly one per outage and the log line stays transition-only:
-    at `tick_interval: 60` an alert-per-tick would be 1440 a day, and the
-    single deduped `logger.warning` this replaced was 0 a day where a person
-    reads it — `logger` output goes to the unit log, `_alert` goes to discord,
-    and no other watcher covers the model server (#938)."""
+    at `tick_interval: 60` an alert-per-tick would be 1440 a day, and the single
+    deduped `logger.warning` this replaced was 0 a day where a person reads it —
+    `logger` output goes to the unit log, `_alert` goes to discord (#938). The
+    co-watcher of this port is `workers/service_probe.py` (#1359), whose grace
+    is asserted strictly below this threshold so its line always comes first;
+    `agent-services/guardian/policy.py` still watches only
+    `lloyd-backend`/`lloyd-mcp`. NEITHER surface writes a guardian ledger row
+    for an engine outage — the probe announces (journal and toast, no
+    bookkeeping by design) and this path is a log line plus discord — and
+    whether one should exist is a ruling for a person, not this function
+    (#1683)."""
     import datetime as _dt
+    from workers import service_probe
+
     now = _dt.datetime.now(_dt.timezone.utc)
     if not _state["vllm_down_logged"]:
         logger.warning("scheduled-task: vLLM unhealthy — pausing enqueue until it recovers")
@@ -426,14 +495,13 @@ async def _note_vllm_outage() -> None:
         _state["vllm_down_alerted"] = False
     if _state.get("vllm_down_alerted"):
         return
-    since = _state.get("vllm_down_since") or now
-    down_for = (now - since).total_seconds()
-    if down_for >= _VLLM_DOWN_ALERT_SECONDS:
+    own_since = _state.get("vllm_down_since") or now
+    own_seconds = (now - own_since).total_seconds()
+    outage = service_probe.shared().outage(service_probe.PRIMARY_ENGINE)
+    measured = own_seconds if outage is None else outage.down_seconds
+    if measured >= _VLLM_DOWN_ALERT_SECONDS:
         _state["vllm_down_alerted"] = True
-        msg = (f"primary model server {_VLLM_HEALTH_URL} has been unreachable for "
-               f"{down_for / 60:.0f} min (since {since.isoformat()}): autonomy "
-               f"dispatch is PAUSED until it recovers, so every stall alert from "
-               f"here on is describing a paused fleet, not a broken one")
+        msg = _vllm_outage_sentence(outage, own_seconds, now)
         logger.error("%s", msg)
         await _alert(msg)
 
