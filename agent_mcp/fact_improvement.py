@@ -1286,6 +1286,21 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         signals, tally = _collect_signals(sources=sources, days=days, limit=limit,
                                           corrections_days=corrections_days)
 
+    # #1654: the store verdict gates the WRITES, not the plan. Everything this
+    # pass reads from a dead store comes back as a sentinel (-1, {}), and the
+    # apply path never touches the store at all — `apply_action` stamps
+    # `expired_at`/`invalid_at` into the MARKDOWN fact files under FACTS_ROOT and
+    # aims through `_get_facts_sync`, which is the markdown read path too. So
+    # before this an `--apply` run during a store outage retired facts anyway and
+    # then reported `actions_taken` beside `before_active: -1`: a record that
+    # cannot show what it deleted, over an index still serving those facts as
+    # active until a rebuild. Only an explicit `store_ok: False` refuses, so this
+    # is an outage gate and not an unconditional stop. The dry run is deliberately
+    # NOT gated (#1383): a pass that cannot see the graph must still be able to
+    # say what it would do, and the wrapper's exit 2 stays reachable.
+    writes_refused = bool(apply) and store_verdict.get("store_ok") is False
+    apply_writes = bool(apply) and not writes_refused
+
     planned = taken = 0
     per_entity: list[dict] = []
     budget = max_actions
@@ -1323,7 +1338,7 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
                  "pairs_before": plan.get("pairs_before", 0),
                  "planned": len(plan["actions"]), "taken": 0, "actions": []}
         planned += len(plan["actions"])
-        if apply:
+        if apply_writes:
             for action in plan["actions"]:
                 if budget <= 0:
                     entry["stopped"] = "run action budget"
@@ -1360,7 +1375,9 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         else:
             # A plan-mode pass that reports only a count is not a plan. List
             # what it would do, with the reason, so an operator can read the
-            # judgement before trusting it with `apply`.
+            # judgement before trusting it with `apply`. An apply pass refused by
+            # an unreadable store (#1654) lands here too, and the same list is
+            # the honest entry for it: asked to write, wrote nothing.
             entry["actions"] = [{"kind": a["kind"], "loser_fact": a["loser_fact"][:90],
                                  "reason": a["reason"], "planned": True, "applied": False}
                                 for a in plan["actions"]]
@@ -1369,7 +1386,8 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
             # looked like an unchanged tree.
             entry["pairs_after"] = entry["pairs_before"]
         entry["before_active"] = plan.get("before_active", -1)
-        entry["after_active"] = _active_count(entity) if apply else entry["before_active"]
+        entry["after_active"] = (_active_count(entity) if apply_writes
+                                 else entry["before_active"])
         per_entity.append(entry)
 
     after = _active_count()
@@ -1382,6 +1400,15 @@ def run_improvement(apply: bool = False, sources=("corrections", "drift"),
         # are kept (a missing count is not a zero), so the record is the only
         # place the two readings part ways.
         **store_verdict,
+        # `writes_refused_reason` (#1654): why an APPLY pass took no writes.
+        # `actions_taken: 0` cannot say it on its own — that is also what a clean
+        # tree reports — so the refused pass quotes the probe's own error, which
+        # is the only text naming the store it could not open (class + path).
+        # Null otherwise, including for a dry run: a pass that was never asked to
+        # write has no refusal to explain.
+        "writes_refused_reason": (
+            f"apply refused, knowledge-graph store unreadable: "
+            f"{store_verdict.get('store_error')}" if writes_refused else None),
         # `facts_root`, `kg_db`, `git_head`, `isolated` (#700): which tree and
         # which store the counts below describe, and which code produced them.
         **run_provenance(),

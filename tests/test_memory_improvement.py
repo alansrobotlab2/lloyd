@@ -1962,6 +1962,158 @@ def test_wrapper_exit_codes_keep_their_distinct_meanings(monkeypatch, capsys):
     assert "unreadable" not in out, out
 
 
+# ── #1654: an unreadable store must stop the WRITES, not the pass ────────────
+#
+# #1383 made an unreadable store loud — one probe, a verdict in the record, a
+# warning line, exit 2 — and every one of those fires AFTER the pass has written.
+# The apply loop never consults `store_verdict`, and the writes do not go to the
+# unreadable store at all: `apply_action` stamps `expired_at` / `invalid_at` into
+# the MARKDOWN fact files under `FACTS_ROOT` (its `_apply_fact_marks` call) and
+# aims through `_get_facts_sync`, which is also the markdown read path; the index
+# is only consulted for counts, where a dead store answers the `-1` sentinel. So
+# an operator who ran `--apply` during a store outage retired facts, was told the
+# store was unreadable only by the exit code they got afterwards
+# (`scripts/memory/fact-improvement.py`, the `store_ok is False` → 2 rung, which
+# is evaluated after `run_improvement` has already written), and got a record
+# whose `before_active`/`after_active` were both `-1` — unable to show what it
+# changed, while the index went on serving the facts it had just retired until a
+# rebuild.
+#
+# The gate therefore belongs on the write path and nowhere else: #1383 pins that
+# a dry run on a dead store still plans (`actions_planned == 1`) and still exits
+# 2, so an outage must not silence the pass — only stop it from writing.
+
+def _write_voices_pair(root, entity):
+    """Write one contradictory entity and return its fact file path.
+
+    The 30-day-old `working / 200 OK` claim loses to the 2-day-old `broken / 500
+    errors` one on recency alone, so a plan over this entity is exactly ONE
+    action — the unit the apply loop is required to take or leave.
+    """
+    _write_facts(root, entity, "state", [
+        {"fact": "TTS built-in voices are working and returning 200 OK.",
+         "created_at": _days_ago(30)},
+        {"fact": "TTS built-in voices are broken and returning 500 errors.",
+         "created_at": _days_ago(2)},
+    ])
+    return root / entity / f"{entity}-state.md"
+
+
+def test_an_apply_pass_writes_nothing_when_the_store_could_not_be_read(world,
+                                                                       monkeypatch,
+                                                                       tmp_path):
+    """Clause 1, both arms. On a readable store this call retires the loser; with
+    the store unreadable it retires nothing and the fact file is byte-identical —
+    which is the whole difference between an outage and a clean tree, and today
+    only the clean tree is safe."""
+    facts_root, st, _vault = world
+    control_file = _write_voices_pair(facts_root, "TTSCtl")
+    target_file = _write_voices_pair(facts_root, "TTS")
+    _reindex(st, facts_root)
+
+    control_before = control_file.read_bytes()
+    applied = fi.run_improvement(apply=True, entities=["TTSCtl"])
+    assert applied["store_ok"] is True, applied["store_error"]
+    assert (applied["actions_planned"], applied["actions_taken"]) == (1, 1), \
+        applied["per_entity"]
+    assert control_file.read_bytes() != control_before, \
+        "the readable-store arm must actually write, or the refused arm proves nothing"
+
+    _point_the_store_at_nothing(monkeypatch, tmp_path)
+    target_before = target_file.read_bytes()
+    rec = fi.run_improvement(apply=True, entities=["TTS"])
+    assert rec["store_ok"] is False
+    assert rec["actions_planned"] == 1, (
+        "the markdown half still plans on a dead store — that is what makes this "
+        "a refusal rather than an empty pass:", rec["per_entity"])
+    assert rec["actions_taken"] == 0, rec["per_entity"]
+    assert target_file.read_bytes() == target_before, (
+        "an apply pass that could not read the store retired a fact anyway")
+
+
+def test_a_refused_apply_record_names_the_store_as_the_reason_it_wrote_nothing(
+        world, monkeypatch, tmp_path):
+    """Clause 2. A refused apply and an empty plan both report
+    `actions_taken: 0`, and only the record can tell them apart: the refused one
+    pairs `apply: true` with `store_ok: false` and a reason quoting the store's
+    own error, and the readable pass that simply had nothing to do carries no
+    such reason."""
+    facts_root, st, _vault = world
+    _write_voices_pair(facts_root, "TTS")
+    # A near-duplicate pair, which the loop reports and never deletes: an apply
+    # pass over it plans 0 and takes 0 on a healthy store.
+    _write_facts(facts_root, "Transcripts", "usage", [
+        {"fact": "Transcripts were extracted from the video with the VTT parser.",
+         "created_at": _days_ago(20), "confidence": 0.9},
+        {"fact": "Transcripts were extracted from the video with the parser.",
+         "created_at": _days_ago(19), "confidence": 0.6},
+    ])
+    _reindex(st, facts_root)
+
+    empty = fi.run_improvement(apply=True, entities=["Transcripts"])
+    assert empty["store_ok"] is True and empty["store_error"] is None
+    assert (empty["actions_planned"], empty["actions_taken"]) == (0, 0), empty["per_entity"]
+    assert empty["writes_refused_reason"] is None, (
+        "a pass with nothing to do must not borrow the refusal reason — that "
+        "would make the new key a second spelling of `actions_taken: 0`")
+
+    _point_the_store_at_nothing(monkeypatch, tmp_path)
+    rec = fi.run_improvement(apply=True, entities=["TTS"])
+    assert rec["apply"] is True and rec["store_ok"] is False
+    assert (rec["actions_planned"], rec["actions_taken"]) == (1, 0), rec["per_entity"]
+    why = rec["writes_refused_reason"]
+    assert why and "unreadable" in why, rec
+    assert "StoreUnavailable" in why, (
+        "the reason must quote the probe's error, which is the only text naming "
+        "the store the pass could not open:", why)
+    on_disk = _persisted_record(rec)
+    assert on_disk["apply"] is True and on_disk["store_ok"] is False
+    assert on_disk["writes_refused_reason"] == why, (
+        "the reason has to survive into the record an operator reads, not just "
+        "the returned dict")
+
+
+def test_a_dry_run_on_an_unreadable_store_still_plans_and_reports_no_refusal(
+        world, monkeypatch, tmp_path):
+    """Clause 3, the module-call half: the gate is on the write path ONLY. The
+    #1383 dry-run behaviour is unchanged — same plan, same sentinels, same
+    record — and the refusal key stays null, because a dry run was never asking
+    to write and a reason there would read as an apply pass that was refused."""
+    facts_root, st, _vault = world
+    target_file = _write_voices_pair(facts_root, "TTS")
+    _reindex(st, facts_root)
+    _point_the_store_at_nothing(monkeypatch, tmp_path)
+    before = target_file.read_bytes()
+
+    rec = fi.run_improvement(entities=["TTS"])
+    assert rec["apply"] is False and rec["store_ok"] is False
+    assert rec["actions_planned"] == 1, rec["per_entity"]
+    assert rec["actions_taken"] == 0
+    assert rec["writes_refused_reason"] is None, rec["writes_refused_reason"]
+    assert target_file.read_bytes() == before
+    assert {a["planned"] for a in rec["per_entity"][0]["actions"]} == {True}, \
+        rec["per_entity"][0]["actions"]
+
+
+def test_the_cli_exits_2_and_writes_nothing_when_apply_meets_an_absent_store(tmp_path):
+    """Clause 3, across the real process boundary: `--apply` with `LLOYD_KG_DB`
+    pointing at a missing file still exits 2 and still prints the unreadable
+    line — but it leaves the fact tree alone, so the exit code stops arriving
+    after the writes it used to follow."""
+    db = tmp_path / "absent" / "kg.sqlite"
+    target_file = _write_voices_pair(tmp_path / "facts", "TTS")
+    before = target_file.read_bytes()
+
+    proc = _run_wrapper(tmp_path, db, ["--apply", "--entity", "TTS"])
+    out = proc.stdout
+    assert proc.returncode == 2, (
+        f"exit {proc.returncode}\nstdout:\n{out}\nstderr:\n{proc.stderr}")
+    assert "[warn] knowledge-graph store unreadable:" in out, out
+    assert "[facts] active -1 -> -1 (delta None)" in out, out
+    assert target_file.read_bytes() == before, (
+        "the wrapper retired a fact through an unreadable store")
+
+
 # ── #1544: a resolved contradiction leaves a trace naming the winner ─────────
 #
 # `fact_resolve_apply` invalidated the weaker fact and recorded nothing else: no
