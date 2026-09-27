@@ -1,5 +1,5 @@
 {
-  "corpus_sha": "8f6c5e5e85fb8b29f802e080d3569faab15476ee08e36f9d26ee961f9dcefaf7",
+  "corpus_sha": "a639bb516531b4f3e3e92aa5128c48051dca17f7ebeb4e7114355edc1269015d",
   "leg": "holdout",
   "n": 27,
   "reserve_rule": "only the holdout leg of the post-landing paired check scores these ids; it records aggregate deltas, never per-query rows or ids; no nightly, trend report, prompt or tuning job reads them",
@@ -32,5 +32,5 @@
     "vault-format-conformance",
     "web-ui-serves-old-code"
   ],
-  "split_hash": "50655a406a23cae8362430267fb43527a4dc5b9e1fc9cdcce25ca4b0f6d2a32d"
+  "split_hash": "0d168eb7bc66e4623bc213bf1da26f277d9bbdc167461068f0d038e4abd9136f"
 }

@@ -217,4 +217,11 @@ queries:
     query: "Why is the nightly engine routing comparison parked, and what would its numbers mean if it ran now?"
     category: recent
     expect_entities: ["Secondary Routing Eval"]
-    expect_docs: ["autonomy/85-secondary-routing-eval.md", "skills/secondary-routing-eval/SKILL.md"]
+    # Re-pointed, NOT re-labelled: this is the one kind of edit the reserve rule
+    # above allows. The gold document `autonomy/85-secondary-routing-eval.md` was
+    # deleted from the vault by Alan's retirement ruling (backlog #1577, vault commit
+    # bf363373), so the label named a path the index cannot hold rather than one the
+    # retriever scored badly. No per-query result was read to make this change. The
+    # skill is the document that still answers both halves of the question — why
+    # there is nothing to pair against (exit 7) and what a run's numbers would mean.
+    expect_docs: ["skills/secondary-routing-eval/SKILL.md"]

@@ -630,63 +630,128 @@ def test_summarise_reports_spread_wall_seconds_and_tokens():
 
 # ── The nightly wiring ───────────────────────────────────────────────────
 
-def test_a_nightly_autonomy_task_runs_the_eval():
-    """Verification the acceptance names: the eval is run by something."""
-    runners = [p for p in AUTONOMY_DIR.glob("*.md")
-               if "secondary_routing_eval.py" in p.read_text(encoding="utf-8")]
-    assert runners, "no autonomy task invokes eval/secondary_routing_eval.py"
+#: The instrument this file measures, and the skill that tells a run how to invoke
+#: it. A live task can reach the eval through either door, so both are scanned for.
+EVAL_SCRIPT_NAME = "secondary_routing_eval.py"
+EVAL_SKILL_NAME = "secondary-routing-eval"
+
+#: The live fleet held 35 task files when this was measured on 2026-09-27. The floor is
+#: well below that and well above zero for a reason: an absence asserted over a
+#: directory nobody scanned is not an absence, and a vault path that moved would
+#: report one.
+MIN_LIVE_TASK_FILES = 20
 
 
-def test_that_nightly_task_is_one_the_scheduler_will_actually_run():
-    """`app/autonomy.py:433` refuses a task with no skill_name — "it will NEVER
-    run" — so a task file alone is not a nightly run."""
-    import yaml
-
-    runners = [p for p in AUTONOMY_DIR.glob("*.md")
-               if "secondary_routing_eval.py" in p.read_text(encoding="utf-8")]
-    assert runners
-    body = runners[0].read_text(encoding="utf-8")
-    front = yaml.safe_load(body.split("---\n")[1])
-    assert front["frequency"] == "daily"
-    assert front.get("skill_name"), f"{runners[0].name} would never run"
-    # `status` is asserted by `test_the_task_dispatches_only_when_there_is_a_slot_to_measure`
-    # below, keyed on the slot: pinning it to `up_next` unconditionally is the
-    # claim acceptance clause 4 makes false — #1328 parks the job while
-    # `secondary_enabled` is false, and a nightly with no second engine is the
-    # burn, not the coverage.
-    assert "--repeats" in body and "3" in body, "the nightly run must be decision-grade"
+def _tasks_naming(autonomy_dir: Path, fragment: str) -> list[Path]:
+    """Task files whose body contains `fragment`, in filename order."""
+    return [p for p in sorted(autonomy_dir.glob("*.md"))
+            if fragment in p.read_text(encoding="utf-8", errors="replace")]
 
 
-def test_the_task_dispatches_only_when_there_is_a_slot_to_measure():
-    """The dispatch rule and the instrument's rule have to be one rule.
+def _skill_named(path: Path) -> str:
+    """The skill slug a task file dispatches on, or "" when it names none.
 
-    Runnable while an engine exists to compare against; a status in
-    `DISPATCH_STOPPING_STATUSES` (`app/autonomy.py:218` — `draft` or `paused`, the
-    two values the scheduler drops) while it does not. Asserted as a pair
-    rather than as one literal so it goes red in both directions: a slot
-    re-armed without re-arming the job stops being measured nightly, and a
-    slot retired without parking the job burns 120 primary-engine trials every
-    morning on a cause string that is false.
+    Both spellings count as a route: `skill_name:` is the slug the loader resolves,
+    and `skill_path:` is the same directory written as a path to its SKILL.md.
     """
     import yaml
 
-    from app import autonomy
+    try:
+        front = yaml.safe_load(path.read_text(encoding="utf-8").split("---\n")[1]) or {}
+    except Exception:  # noqa: BLE001 — no readable front matter names no skill
+        return ""
+    value = str(front.get("skill_name") or front.get("skill_path") or "").strip()
+    if not value:
+        return ""
+    value = value.rstrip("/")
+    if value.endswith("SKILL.md"):
+        return value.split("/")[-2]
+    return value.split("/")[-1]
+
+
+def test_no_autonomy_task_arms_the_retired_eval(tmp_path):
+    """Verification the acceptance names: the eval is armed by nothing.
+
+    This node used to assert the opposite — that the eval is run by something — on
+    #1328's acceptance. Alan's ruling of 2026-09-26 retired task #85 instead of
+    re-scoping it (#1577): with `secondary_enabled: false` both arms reach the primary
+    by policy, so an armed nightly spends 120 same-engine trials to print a cause
+    string that is false. That is the burn #1328's park-while-off rule already
+    forbade, so the rule and this node now point the same way.
+
+    The absence is paired with a positive control and a denominator, because a scan of
+    a directory nobody checked also reports no runners.
+    """
+    scanned = list(AUTONOMY_DIR.glob("*.md"))
+    assert len(scanned) > MIN_LIVE_TASK_FILES, (
+        f"only {len(scanned)} task files under {AUTONOMY_DIR}: that is a denominator "
+        "failure, not evidence that the retired eval is unarmed")
+
+    assert _tasks_naming(AUTONOMY_DIR, EVAL_SCRIPT_NAME) == [], (
+        "a live task names the retired instrument; while the secondary slot is off it "
+        "can only exit 7, and the arm guard refuses to arm it (#1555)")
+
+    fixture = tmp_path / "99-retired-armed.md"
+    fixture.write_text(f"runs eval/{EVAL_SCRIPT_NAME} nightly\n", encoding="utf-8")
+    assert [p.name for p in _tasks_naming(tmp_path, EVAL_SCRIPT_NAME)] == [fixture.name], (
+        "the scan cannot see a task that names the instrument, so the assertion above "
+        "could not fail")
+
+
+def test_no_scheduled_task_routes_to_the_retired_eval_skill(tmp_path):
+    """The other door into the eval: a task needs a `skill_name` to run at all
+    ("it will NEVER run" without one, `app/autonomy.py:433`), and it is the *skill*
+    that spells out the command. So a task re-added after #1577 could re-arm this
+    nightly without ever mentioning `secondary_routing_eval.py` — the hole the scan
+    above falls through. Checked through the skill, with its own control.
+    """
+    parsed = [p for p in AUTONOMY_DIR.glob("*.md") if _skill_named(p)]
+    assert len(parsed) > MIN_LIVE_TASK_FILES, (
+        f"only {len(parsed)} live task files name a skill: nothing here would have "
+        "been able to route a nightly, armed or not")
+
+    armed = [p.name for p in parsed if _skill_named(p) == EVAL_SKILL_NAME]
+    assert armed == [], f"{armed} routes a scheduled nightly to the retired eval"
+
+    fixture = tmp_path / "99-skill-routed.md"
+    fixture.write_text(f"---\nid: 99\nskill_name: {EVAL_SKILL_NAME}\n---\nbody\n",
+                       encoding="utf-8")
+    assert _skill_named(fixture) == EVAL_SKILL_NAME, (
+        "the reader cannot see a skill-routed task, so the assertion above could not fail")
+
+
+@pytest.mark.parametrize("slot_enabled", [False, True])
+def test_the_instrument_and_the_arm_guard_refuse_on_one_measurement(monkeypatch,
+                                                                    slot_enabled):
+    """The dispatch rule and the instrument's rule have to be one rule.
+
+    This paired a task's `status` against the live slot while #85 existed, and #1328's
+    point was that a slot retired without parking the job burns trials while a slot
+    re-armed without un-parking the job stops being measured. #1577 deleted the task,
+    so the pair is now between the two surfaces that can refuse a *re-arm*: the eval's
+    own pre-flight (`secondary_slot_state`, exit 7) and the scheduler's writer
+    (`app.autonomy.slot_arm_block`, #1555). Both take their answer from
+    `app.llm_slots`, so one patch below is one measurement for both, and drift between
+    them — a sweep that starts while the writer refuses, or a writer that arms onto an
+    engine the sweep would not measure — reddens one of these cells.
+    """
+    from app import autonomy as A
     from app import llm_slots
 
-    runners = [p for p in AUTONOMY_DIR.glob("*.md")
-               if "secondary_routing_eval.py" in p.read_text(encoding="utf-8")]
-    assert runners
-    front = yaml.safe_load(runners[0].read_text(encoding="utf-8").split("---\n")[1])
-    status = str(front["status"])
-    if llm_slots.is_enabled("agent-llm-secondary"):
-        assert status in autonomy.RUNNABLE_STATUSES, (
-            f"the secondary slot is enabled but task #85 ({status}) is not dispatching: "
-            "the routing decision would stop being measured nightly")
-    else:
-        assert status in autonomy.DISPATCH_STOPPING_STATUSES, (
-            f"task #85 is {status} with `secondary_enabled` false: both arms reach the "
-            "primary by policy, so the sweep produces 120 same-engine trials and a "
-            "cause string that is false (#1328). Park it until a second engine exists.")
+    monkeypatch.setattr(llm_slots, "is_enabled",
+                        lambda program, config=None: slot_enabled)
+
+    engine_there, why = ev.secondary_slot_state({})
+    block = A.slot_arm_block({"id": 85, "requires_slot": ev.SECONDARY_PROGRAM},
+                             "up_next")
+
+    assert engine_there is slot_enabled
+    assert (block is None) is slot_enabled, (
+        f"the arm guard answered {block!r} while the instrument says the second "
+        f"engine {'is there' if slot_enabled else 'is not'}: two answers, one flag")
+    if not slot_enabled:
+        assert "secondary_enabled" in why and "secondary_enabled" in block, (
+            f"a refusal nobody can act on: {why!r} / {block!r}")
 
 
 def test_the_skill_states_the_exit_codes_and_the_frozen_trend():

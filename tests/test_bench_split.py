@@ -336,6 +336,9 @@ LIVE_BENCH_CATEGORIES = {
     "bench_015_audit_cross_entity_fact_copies": "synthetic",
     "bench_016_audit_skill_dead_paths": "synthetic",
     "bench_017_audit_unresolved_task_skills": "synthetic",
+    # Keyed by stem with the `category:` its own front matter declares — the only
+    # authority this table may copy. Landed in the live corpus on 2026-09-26.
+    "bench_018_skill_invocation_rare_interp": "synthetic",
 }
 
 

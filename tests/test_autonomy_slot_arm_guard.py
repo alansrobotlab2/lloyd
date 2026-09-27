@@ -19,11 +19,19 @@ not. Both edges of the write are covered, and
 `test_every_writer_that_records_a_status_change_also_checks_the_slot` is what stops
 the next writer from being added to one surface only: a guard on one of two writers
 is not a guard.
+
+Task #85, the incident's subject, was itself retired by Alan's ruling of 2026-09-26
+(#1577) and its task file deleted — `secondary_enabled` has been false since
+`551e9044`, and djev is not a chat slot to re-scope onto. The guard is untouched by
+that: what it refuses is any task naming a switched-off slot, which is why the
+live-fleet node below scans every declaration in the fleet instead of asserting that
+one particular task still makes one.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -229,17 +237,66 @@ def test_the_declaration_survives_a_degraded_parse():
 
 # ── the live declaration ─────────────────────────────────────────────────
 
+#: The live fleet held 35 task files when this was measured on 2026-09-27. The floor
+#: sits well below that and well above zero, because a scan of a directory nobody read
+#: reports no declarations for exactly the reason a clean fleet does.
+MIN_LIVE_TASK_FILES = 20
 
-def test_the_secondary_routing_nightly_declares_the_slot_it_measures():
-    """The guard only fires for a task that declares its slot, so the declaration
-    is the part of the fix that lives outside this repo and has to be checked.
-    `test_the_task_dispatches_only_when_there_is_a_slot_to_measure` reads the same
-    file and asserts the status rule; this asserts the wiring that makes the next
-    un-parking attempt refuse instead of dispatch."""
-    runners = [p for p in VAULT_AUTONOMY_DIR.glob("*.md")
-               if "secondary_routing_eval.py" in p.read_text(encoding="utf-8")]
-    assert runners, "no autonomy task invokes eval/secondary_routing_eval.py"
-    front = yaml.safe_load(runners[0].read_text(encoding="utf-8").split("---\n")[1])
-    assert front.get("requires_slot") == SLOT, (
-        f"{runners[0].name} measures the secondary engine but does not declare it, "
-        f"so `{FLAG}` going false would not stop anything arming it")
+
+def _switched_off_declarations(autonomy_dir: Path) -> list[str]:
+    """One entry per task file naming a program `llm_slots` says is switched off.
+
+    The reader is the same authority the guard consults, so the live scan and the
+    writers cannot disagree about what a declaration means. A file whose front matter
+    will not parse falls back to a text search rather than reading as undeclared —
+    the fails-closed rule `test_the_declaration_survives_a_degraded_parse` exists for.
+    """
+    out: list[str] = []
+    for path in sorted(autonomy_dir.glob("*.md")):
+        body = path.read_text(encoding="utf-8", errors="replace")
+        try:
+            front = yaml.safe_load(body.split("---\n")[1]) or {}
+            declared = str(front.get("requires_slot") or "").strip()
+        except Exception:  # noqa: BLE001 — a broken file must not hide a declaration
+            found = re.search(r"^requires_slot:[ \t]*(\S+)[ \t]*$", body, re.MULTILINE)
+            declared = found.group(1) if found else ""
+        if declared and llm_slots.slot_flag(declared) and not llm_slots.is_enabled(declared):
+            out.append(f"{path.name}: {declared}")
+    return out
+
+
+def test_no_live_task_declares_a_slot_the_box_has_switched_off(
+        tmp_path, monkeypatch):
+    """The part of the fix that lives outside this repo: the guard only fires for a
+    task that declares its slot, so the declarations themselves have to be read.
+
+    Until #1577 this asserted the reverse — that a task naming the instrument declared
+    `SLOT`, the wiring a `draft -> up_next` would have needed. Alan's ruling deleted
+    that task, so the live fleet names a switched-off program nowhere and the
+    assertion inverts with the guard's purpose intact. It covers every program
+    `app.llm_slots` knows about rather than one id, because `agent-djev` is the second
+    optional slot and a `== SLOT` comparison would ignore a declaration naming it.
+    """
+    files = list(VAULT_AUTONOMY_DIR.glob("*.md"))
+    assert len(files) > MIN_LIVE_TASK_FILES, (
+        f"only {len(files)} task files under {VAULT_AUTONOMY_DIR}: that is a "
+        "denominator failure, not evidence that nothing declares a dead slot")
+
+    assert _switched_off_declarations(VAULT_AUTONOMY_DIR) == [], (
+        "a live task names a slot this machine has switched off; the writers refuse to "
+        "arm it and `scripts/autonomy/validate_tasks.py` reports it (#1577)")
+
+    # The control measures the scan, not the live flag, so it sets the flag itself:
+    # asserting the fixture is reported while `secondary_enabled` happens to be false
+    # would fail on a box that boots the second engine and blame the scan for the
+    # machine. Both directions are pinned, so what drives the verdict is the flag and
+    # not the fixture's presence.
+    fixture = _task_file(tmp_path, 85, "Secondary Routing Eval", "draft",
+                         requires_slot=SLOT)
+    monkeypatch.setattr(llm_slots, "is_enabled", lambda program, config=None: False)
+    assert _switched_off_declarations(tmp_path) == [f"{fixture.name}: {SLOT}"], (
+        "the scan cannot see a declaration, so the assertion above could not fail")
+    monkeypatch.setattr(llm_slots, "is_enabled", lambda program, config=None: True)
+    assert _switched_off_declarations(tmp_path) == [], (
+        "the scan reports a declaration the flag has switched on, so it is not the "
+        "flag that drives the verdict and the assertion above proves nothing")

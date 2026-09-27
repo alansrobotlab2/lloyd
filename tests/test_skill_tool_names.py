@@ -1334,19 +1334,72 @@ def test_the_secondary_routing_nightly_docs_are_clean():
     assert drift == set(), f"the routing eval's own docs are still broken: {sorted(drift)}"
 
 
-def _routing_docs() -> dict[str, str]:
-    """The two documents that tell the nightly run what to do, keyed by label.
+#: What a task file must contain to count as an instruction for this eval. Scanned
+#: for the instrument rather than for a task id, because the id is retired.
+EVAL_SCRIPT_NAME = "secondary_routing_eval.py"
+#: The slug the skill loads under, and the door a scheduled task routes through.
+EVAL_SKILL_NAME = "secondary-routing-eval"
 
-    The skill and the autonomy task are the same run's instructions read in
-    either order, so a sentence corrected in one and not the other is a
-    sentence the run will follow differently depending on which it opened.
+
+def _routing_docs() -> dict[str, str]:
+    """Every document that tells this eval's run what to do, keyed by label.
+
+    The skill and an autonomy task are the same run's instructions read in either
+    order, so a sentence corrected in one and not the other is a sentence the run
+    will follow differently depending on which it opened — which is why this returns
+    a dict and every node below loops over it rather than naming two paths.
+
+    Task #85 was retired by Alan's ruling of 2026-09-26 (backlog **#1577**) and its
+    file deleted, so today the dict holds the skill alone. The fleet is scanned
+    rather than the path hardcoded because re-adding a task is the cheap move the
+    ruling names, and a helper that quietly stopped matching would drop the pair back
+    to one document with the suite green: a re-armed task is caught by this same loop.
     """
-    return {
-        "skill": (VAULT / "skills" / "secondary-routing-eval" / "SKILL.md").read_text(
-            encoding="utf-8", errors="replace"),
-        "task": next(iter((VAULT / "autonomy").glob("85-*.md"))).read_text(
+    docs = {
+        "skill": (VAULT / "skills" / EVAL_SKILL_NAME / "SKILL.md").read_text(
             encoding="utf-8", errors="replace"),
     }
+    docs.update(_tasks_naming_eval(VAULT / "autonomy"))
+    return docs
+
+
+def _tasks_naming_eval(autonomy_dir: Path) -> dict[str, str]:
+    """Task files under `autonomy_dir` whose body names the eval instrument.
+
+    Top-level `*.md` on purpose: that is the same non-recursive directory scan
+    `app.autonomy.load_tasks` performs, so `_archived/` cannot smuggle a retired task
+    back in, and it reads every status rather than only armed ones — stricter than the
+    scheduler, which is the direction a witness should err in.
+    """
+    return {f"task ({path.name})": path.read_text(encoding="utf-8", errors="replace")
+            for path in sorted(autonomy_dir.glob("*.md"))
+            if EVAL_SCRIPT_NAME in path.read_text(encoding="utf-8", errors="replace")}
+
+
+def test_the_routing_doc_scan_finds_a_task_that_names_the_instrument(tmp_path):
+    """The scan's positive control, which the deleted `85-*.md` glob did not need.
+
+    `next(iter(glob("85-*.md")))` raised `StopIteration` the moment its document went
+    away, so a vanished subject could not pass unnoticed. A scan that matches nothing
+    looks exactly like a clean fleet, so this builds the task the scan is supposed to
+    survive: if the fragment, the directory or the reader breaks, the pair silently
+    returns to one document and every assertion below quietly applies to the skill
+    alone. A decoy file is scanned alongside it to prove the fragment is doing the
+    work and not "any file in the fleet".
+    """
+    (tmp_path / "97-rerouted.md").write_text(
+        f"---\nskill_name: {EVAL_SKILL_NAME}\n---\n"
+        f"runs eval/{EVAL_SCRIPT_NAME} nightly\n", encoding="utf-8")
+    (tmp_path / "98-unrelated.md").write_text(
+        "---\nskill_name: heartbeat\n---\nnothing to do with routing\n",
+        encoding="utf-8")
+
+    found = _tasks_naming_eval(tmp_path)
+
+    assert list(found) == ["task (97-rerouted.md)"], (
+        f"the scan returned {sorted(found)}: one document of two is what a broken "
+        "scan reports, and the nodes reading _routing_docs() cannot tell that from a "
+        "fleet that has no task")
 
 
 def test_the_routing_skill_states_the_real_per_job_route():
@@ -1357,10 +1410,12 @@ def test_the_routing_skill_states_the_real_per_job_route():
     sentence would have had a nightly set `secondary_enabled: false` — taking
     the engine down for all four jobs that were measured as keeps.
 
-    Both docs are held to it, not just the skill: the task file repeats the
+    Every document is held to it, not just the skill: a task file repeats the
     procedure for the run that reads the task row instead, and it named no
     route at all until item #1240, which left "how do I apply a flip"
-    unanswered exactly where a flip is what the nightly is looking for.
+    unanswered exactly where a flip is what the nightly is looking for. Task #85
+    was retired (#1577), so the loop holds one document today and picks the pair
+    back up if a task is ever re-added.
     """
     for label, body in _routing_docs().items():
         assert "JOBS_ON_PRIMARY" in body, (
@@ -1378,17 +1433,16 @@ def test_the_routing_skill_states_the_real_per_job_route():
             "in app/secondary_models.py")
 
 
-def test_the_two_nightly_docs_name_one_location_for_the_trend():
-    """The skill and the task are the same run's instructions, read in either
-    order. They disagreed before: the skill said append to
-    `eval/secondary-routing/trend.md`, the task said the same, and the four real
-    runs wrote the vault instead — so whichever path this round picked, both
-    docs had to move together or the next night drifted again."""
-    skill = (VAULT / "skills" / "secondary-routing-eval" / "SKILL.md").read_text(
-        encoding="utf-8", errors="replace")
-    task = next(iter((VAULT / "autonomy").glob("85-*.md"))).read_text(
-        encoding="utf-8", errors="replace")
-    for doc, name in ((skill, "skill"), (task, "task")):
+def test_the_nightly_instructions_name_one_location_for_the_trend():
+    """Every instruction document for this eval, read through the one helper.
+
+    They disagreed before: the skill said append to `eval/secondary-routing/trend.md`,
+    the task said the same, and the four real runs wrote the vault instead — so
+    whichever path this round picked, the documents had to move together or the next
+    night drifted again. The node is named for the invariant rather than for the
+    document count because #1577 deleted the task half: the count is whatever the
+    fleet currently holds, and the one-location rule applies to each of them."""
+    for name, doc in _routing_docs().items():
         assert "projects/lloyd/secondary-routing-eval/trend.md" in doc, (
             f"the {name} must point the trend row at the vault note that holds it")
         assert "eval/secondary-routing/trend.md" not in doc, (
