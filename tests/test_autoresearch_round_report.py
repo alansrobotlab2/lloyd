@@ -77,7 +77,9 @@ def round_env(tmp_path, monkeypatch):
                    "final_text": "I called vault_recall and the answer is done.",
                    "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0}
                   for vid, _ in variant_pairs for t in tasks]
-        return direct, []
+        # Third value = each arm's own wall seconds (#1605). {} because this double
+        # benches both arms in one loop and times neither.
+        return direct, [], {}
 
     monkeypatch.setattr(run_round, "_run_trials", fake_trials)
     return cfg
@@ -198,7 +200,9 @@ def test_the_default_round_names_the_task_on_the_runtime_arm(round_env, monkeypa
                     "final_text": "I called vault_recall and the answer is done.",
                     "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0,
                     "tool_trace_authoritative": arm == "sdk"}
-        return [trace(t, "direct") for t in direct], [trace(t, "sdk") for t in sdk]
+        # Third value = each arm's own wall seconds (#1605); {} because this double
+        # builds traces without running or timing either arm.
+        return ([trace(t, "direct") for t in direct], [trace(t, "sdk") for t in sdk], {})
 
     monkeypatch.setattr(run_round, "_run_trials", routed)
     result = asyncio.run(run_round.run(targets=["prompts"], bench_limit=3))

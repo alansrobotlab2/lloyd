@@ -249,7 +249,8 @@ def round_env(tmp_path, monkeypatch):
                  "task_category": t.get("category"), "turns": 1, "harness": "direct",
                  "final_text": "the answer is done.", "tool_calls": [], "denied_calls": [],
                  "duration_seconds": 1.0}
-                for vid, _ in variant_pairs for t in tasks], []
+                for vid, _ in variant_pairs for t in tasks], [], {}
+
 
     monkeypatch.setattr(run_round, "_run_trials", fake_trials)
     return cfg

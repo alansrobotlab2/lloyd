@@ -256,7 +256,9 @@ def drive_round(env: Env, baseline_mean: float, *, monkeypatch,
                     "harness": "direct", "task_category": task.get("category"),
                     "preset_composite": score,
                 })
-        return direct, []
+        # Third value = each arm's own wall seconds (#1605); {} — this double benches
+        # one arm in a loop and times nothing.
+        return direct, [], {}
 
     def fake_judge(task, trace, rubric_model=None, **_kw):
         score = float(trace["preset_composite"])

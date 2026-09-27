@@ -617,8 +617,10 @@ def test_run_round_records_and_surfaces_on_the_live_path(world, monkeypatch):
              "turns": 1, "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0}
             for vid, _ in variant_pairs for t in tasks
         ]
-        # (direct_traces, sdk_traces) — the real return shape.
-        return traces, []
+        # (direct_traces, sdk_traces, arm_seconds) — the real return shape since
+        # #1605, whose third value is each arm's own wall seconds. {} is what a
+        # double that ran no arm can honestly report.
+        return traces, [], {}
 
     monkeypatch.setattr(run_round, "load_config", lambda: cfg)
     monkeypatch.setattr(run_round, "propose_variants", lambda *a, **kw: [
@@ -722,8 +724,10 @@ def test_a_later_round_reads_the_report_the_round_actually_wrote(world, monkeypa
         return [
             {"variant_id": vid, "task_id": t["id"], "status": "ok", "task_category": "c",
              "turns": 1, "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0}
+            # The third value is each arm's own wall seconds (#1605); {} because this
+            # double builds traces without running or timing either arm.
             for vid, _ in variant_pairs for t in tasks
-        ], []
+        ], [], {}
 
     monkeypatch.setattr(run_round, "load_config", lambda: cfg)
     monkeypatch.setattr(run_round, "propose_variants", lambda *a, **kw: [
@@ -1067,8 +1071,10 @@ def test_the_report_run_writes_carries_the_shape_block_capped_at_five(world, mon
         return [
             {"variant_id": vid, "task_id": t["id"], "status": "ok", "task_category": "c",
              "turns": 1, "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0}
+            # The third value is each arm's own wall seconds (#1605); {} because this
+            # double builds traces without running or timing either arm.
             for vid, _ in variant_pairs for t in tasks
-        ], []
+        ], [], {}
 
     monkeypatch.setattr(run_round, "load_config", lambda: cfg)
     monkeypatch.setattr(run_round, "propose_variants", lambda *a, **kw: [

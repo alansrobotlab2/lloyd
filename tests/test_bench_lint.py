@@ -558,7 +558,9 @@ def _drive_round(cfg: AutoresearchConfig, monkeypatch,
                             "turns": 1, "tool_calls": [], "denied_calls": [],
                             "harness": "direct", "task_category": task.get("category"),
                             "preset_composite": table[task["id"]]})
-        return out, []
+        # Third value = each arm's own wall seconds (#1605); {} — this double builds
+        # traces on one arm and times nothing.
+        return out, [], {}
 
     def fake_judge(task, trace, rubric_model=None, **_kw):
         score = float(trace["preset_composite"])

@@ -327,16 +327,20 @@ async def _run_trials(
     max_parallel: int,
     *,
     deadline: float | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Run the (variant × task) matrix, split by harness routing.
 
     `deadline` (a `time.monotonic()` instant) goes to both runners: past it no
     trial starts, and a trial that would outlive it runs on the time left and
     comes back marked `deadline_cut` (#1546).
 
-    Returns `(direct_traces, sdk_traces)`. `run()` has already taken the
-    `requires_runtime` tasks a `direct` round skips out of `tasks`, so the
-    third element of the split is empty here.
+    Returns `(direct_traces, sdk_traces, arm_seconds)`. `run()` has already taken
+    the `requires_runtime` tasks a `direct` round skips out of `tasks`, so the
+    third element of the split is empty here. `arm_seconds` (#1605) is the wall
+    time each arm took — keys `direct_seconds` / `sdk_seconds`, a key absent when
+    that arm had no task to run. One combined `trial_seconds` cannot say which arm
+    ate the window, and the two arms are costed differently by the projection
+    below, so the audit needs the split.
 
     Both runners are awaited sequentially rather than concurrently: they share
     the primary vLLM slot, and the direct runner's cap of 3 exists precisely
@@ -347,24 +351,29 @@ async def _run_trials(
     direct_tasks, sdk_tasks, _skipped = split_tasks_by_harness(tasks, harness)
     direct_traces: list[dict[str, Any]] = []
     sdk_traces: list[dict[str, Any]] = []
+    arm_seconds: dict[str, Any] = {}
 
     if direct_tasks:
+        arm_started = time.monotonic()
         direct_traces = await run_bench(
             cfg, variant_pairs, direct_tasks, model=model,
             max_parallel=max_parallel,
             per_task_timeout=300,
             deadline=deadline,
         )
+        arm_seconds["direct_seconds"] = round(time.monotonic() - arm_started, 1)
     if sdk_tasks:
         logger.info("harness=%s: routing %d task(s) through the agent loop "
                     "(%d variants)", harness, len(sdk_tasks), len(variant_pairs))
+        arm_started = time.monotonic()
         sdk_traces = await run_bench_sdk(
             cfg, variant_pairs, sdk_tasks, model=model,
             max_parallel=1,
             per_task_timeout=SDK_PER_TASK_TIMEOUT,
             deadline=deadline,
         )
-    return direct_traces, sdk_traces
+        arm_seconds["sdk_seconds"] = round(time.monotonic() - arm_started, 1)
+    return direct_traces, sdk_traces, arm_seconds
 
 
 # The round's clock (#1546). The budget is what the worker source derives from
@@ -405,6 +414,221 @@ def complete_matrix(traces: list[dict[str, Any]], variant_ids: list[str],
     reached = {tid for tid, vids in have.items() if want <= vids}
     not_reached = [t["id"] for t in tasks if t.get("id") not in reached]
     return [t for t in traces if t["task_id"] in reached], not_reached
+
+
+# ── the trial matrix: what the window can actually hold (#1605) ───────────────
+#
+# Both runners walk the matrix task by task and start nothing past the deadline
+# (pinned in tests/test_autoresearch_deadline.py), so a matrix too big for the
+# window is not slowed down — it is CUT, and `complete_matrix` then drops the
+# unreached tasks for every variant at once. Every scheduled round of 2026-09-27
+# stopped that way: a 1440 s trial window against an agent-loop arm awaited
+# serially at ~85 s a trial (measured on those four rounds: 40 sdk trials, mean
+# 82.1 s, median 85.2 s, p90 204.5 s; 216 direct trials, mean 2.8 s, p90 5.3 s).
+# And because the cut takes the tail of the bench order, it took lint-valid tasks —
+# the same pool `promote.py` scores its valid-only mean over — so a stopped round
+# deleted the only evidence a promotion could be justified on.
+#
+# So the matrix is costed BEFORE it starts, each arm the way it actually runs, and
+# what does not fit is dropped up front and named. The priors are deliberately
+# pessimistic against those measurements — direct at its p90, the agent-loop arm at
+# the runner's own 90 s `SDK_MIN_TRIAL_SECONDS` floor, the smallest slice of window
+# that arm can spend on one trial — because over-estimating defers a task to the
+# next round while under-estimating is the cut this section exists to end.
+DIRECT_TRIAL_SECONDS = 5.0
+SDK_TRIAL_SECONDS = 90.0
+
+#: Fraction of the trial window a projected matrix may claim. The window already
+#: gives the judge its reserve (#1546); this is the margin for the gap between the
+#: priors above and whatever the primary actually took.
+PROJECTION_MARGIN = 0.9
+
+#: Never shrink below this. A round with no task measures nothing, and a window
+#: that cannot hold one task is a mis-set budget: `fits` False on a one-task
+#: matrix says that in the report rather than the round quietly benching nothing.
+MIN_MATRIX_TASKS = 1
+
+
+def _waves(trials: int, max_parallel: int) -> int:
+    """Trials as they land on the direct arm's workers: `max_parallel` at a time."""
+    return -(-int(trials) // max(1, int(max_parallel)))
+
+
+def project_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto",
+                   max_parallel: int = 4, *, window_seconds: float | None = None,
+                   direct_trial_seconds: float = DIRECT_TRIAL_SECONDS,
+                   sdk_trial_seconds: float = SDK_TRIAL_SECONDS) -> dict[str, Any]:
+    """Project the wall cost of the (variant × task) matrix, arm by arm.
+
+    `arms` is the number of things benched — the baseline plus every surviving
+    variant, which is what `_run_trials` receives as `variant_pairs`.
+
+    The arms are costed separately because they do not run the same way: the direct
+    arm puts `max_parallel` trials on the workers at once, so it costs
+    `ceil(arms × direct_tasks / max_parallel)` trials of time, while the agent-loop
+    arm is awaited serially at `max_parallel=1` (both arms share the one primary
+    vLLM slot), so it costs every trial it has. `window_seconds` is the room
+    `trial_deadline` left; `fits` is the projection against it under
+    `PROJECTION_MARGIN`, and stays None when there is no window — a hand-run round
+    with no budget has nothing to fit into.
+    """
+    direct_tasks, sdk_tasks, _skipped = split_tasks_by_harness(tasks, harness)
+    arms = max(int(arms), 0)
+    direct_seconds = _waves(arms * len(direct_tasks), max_parallel) * direct_trial_seconds
+    sdk_seconds = arms * len(sdk_tasks) * sdk_trial_seconds
+    out: dict[str, Any] = {
+        "arms": arms,
+        "tasks": len(tasks),
+        "direct_tasks": len(direct_tasks),
+        "sdk_tasks": len(sdk_tasks),
+        "direct_trials": arms * len(direct_tasks),
+        "sdk_trials": arms * len(sdk_tasks),
+        "direct_seconds": round(direct_seconds, 1),
+        "sdk_seconds": round(sdk_seconds, 1),
+        "projected_seconds": round(direct_seconds + sdk_seconds, 1),
+        "direct_trial_seconds": direct_trial_seconds,
+        "sdk_trial_seconds": sdk_trial_seconds,
+        "window_seconds": None,
+        "fits": None,
+    }
+    if window_seconds is not None:
+        out["window_seconds"] = round(float(window_seconds), 1)
+        out["fits"] = out["projected_seconds"] <= out["window_seconds"] * PROJECTION_MARGIN
+    return out
+
+
+def order_tasks_for_coverage(tasks: list[dict[str, Any]],
+                             valid_ids: set[str] | None) -> list[dict[str, Any]]:
+    """Lint-valid tasks first, bench order inside each group.
+
+    The runners start trials in list order, so this is what decides what a deadline
+    cut takes: with the valid pool at the front, the tail a cut removes is made of
+    the tasks `promote.py` would exclude from its valid-only mean anyway. Bench
+    order is kept inside each group so a round's sequence stays reproducible, and a
+    `None` pool (the lint could not be read) leaves the order exactly as it was.
+    """
+    if valid_ids is None:
+        return list(tasks)
+    return ([t for t in tasks if t.get("id") in valid_ids]
+            + [t for t in tasks if t.get("id") not in valid_ids])
+
+
+def _drop_preference(task: dict[str, Any], valid_ids: set[str] | None,
+                     saving: float, best_outside_veto: float) -> tuple:
+    """Sort key for one shrink step: (veto_deferral, worthless_last, widest_saving).
+
+    **A held-out task is given up only when it frees more window than every task
+    outside the veto slice does, by at least 5 percent** — so an equal-cost trade is
+    never made in favour of the veto task, which is the case that actually arises here.
+    The
+    veto is what a promotion is *refused* on — `promote.py` keeps a guardrail failure
+    fatal at any size — so trading
+    `bench_010_safety_destructive` for coverage of a lint-valid audit task that saves
+    exactly the same window is the wrong trade. Cost alone could not see that: at 4
+    arms every agent-loop task frees the same 360 s, so the first version of this rule,
+    which ordered by saving with validity as the tiebreak, dropped
+    `bench_010_safety_destructive` while `bench_016`/`bench_017` stayed in the matrix
+    (simulated on the live 19-task bench at the derived 30-minute budget).
+
+    The deferral is comparative, not absolute, and that matters on a short window: a
+    two-minute round whose only expensive task IS a safety task has to be allowed to
+    give it up — deferring it there would spend the shrink on direct tasks that free a
+    wave fraction of ~5 s each and still not fit, losing every task in the bench to
+    protect one.
+
+    Otherwise the widest saving goes first, because spending drops on cheap tasks
+    cannot fit a round the serial arm has outgrown — it only loses more tasks to reach
+    the same place — and only then does validity break the tie: among tasks that free
+    the same window, the lint-invalid one goes, since `valid_tasks` is computed over the
+    valid pool and scoring a dead-rubric task informs no mean. Validity is the LAST key
+    on purpose: as a higher-precedence rule it would spend the shrink on five cheap
+    lint-invalid tasks that free ~10 s each and still not fit, then have to give up the
+    expensive work anyway.
+    """
+    veto = str(task.get("category") or "") in bench_split.HELDOUT_CATEGORIES
+    worthless = valid_ids is not None and task.get("id") not in valid_ids
+    return (1 if (veto and saving <= best_outside_veto * 1.05) else 0,
+            -saving, 0 if worthless else 1)
+
+
+def fit_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto",
+               max_parallel: int = 4, window_seconds: float | None = None,
+               valid_ids: set[str] | None = None) -> tuple[list[dict[str, Any]],
+                                                           dict[str, Any], list[str]]:
+    """The largest matrix that fits the window, the projection that says so, and
+    the task ids dropped to get there.
+
+    Shrinks one task at a time by `_drop_preference` — a held-out task only once
+    nothing outside the veto frees comparable window, then the widest saving, then the
+    lint-invalid task before the lint-valid one, then the bench tail, which is the same
+    end a deadline cut takes from, so shrinking and being cut choose alike. Stops at
+    `MIN_MATRIX_TASKS`, and `fits` False on a one-task matrix is the report's problem,
+    not an empty bench.
+
+    `window_seconds` None (no budget) means no shrink: the tasks still come back in
+    coverage order, because that ordering is what keeps an unexpected cut off the
+    valid pool.
+    """
+    kept = order_tasks_for_coverage(list(tasks), valid_ids)
+    if window_seconds is None or not kept:
+        return kept, project_matrix(arms, kept, harness, max_parallel), []
+
+    def cost(pool: list[dict[str, Any]]) -> float:
+        return project_matrix(arms, pool, harness, max_parallel)["projected_seconds"]
+
+    proj = project_matrix(arms, kept, harness, max_parallel, window_seconds=window_seconds)
+    dropped: list[str] = []
+    while proj["fits"] is False and len(kept) > MIN_MATRIX_TASKS:
+        here = proj["projected_seconds"]
+        # `_drop_preference`: a held-out task is deferred while any non-held-out task
+        # frees comparable window; then widest saving (one agent-loop task frees ~90 s
+        # per arm where a direct task frees a wave fraction of ~5 s, so spending drops
+        # on cheap tasks cannot fit a round the serial arm has outgrown); then
+        # lint-invalid before lint-valid; then the bench tail, the same end a deadline
+        # cut takes from, so shrinking and being cut choose alike.
+        savings = {id(t): here - cost([x for x in kept if x is not t]) for t in kept}
+        outside = [sav for t, sav in savings.items()
+                   if str(next(x for x in kept if id(x) == t).get("category") or "")
+                   not in bench_split.HELDOUT_CATEGORIES]
+        best_outside = max(outside, default=0.0)
+        victims = sorted(
+            enumerate(reversed(kept)),
+            key=lambda pair: (_drop_preference(pair[1], valid_ids, savings[id(pair[1])],
+                                               best_outside),
+                              pair[0]))
+        victim = victims[0][1]
+        kept = [t for t in kept if t is not victim]
+        dropped.append(str(victim.get("id")))
+        proj = project_matrix(arms, kept, harness, max_parallel,
+                              window_seconds=window_seconds)
+    return kept, proj, dropped
+
+
+def _lint_valid_ids(bench_dir: Path) -> set[str] | None:
+    """The lint-valid task ids, or None when the lint cannot be read.
+
+    A local import for the same reason `promote.py` does it: a round must still run
+    when the lint's own deps are missing. None is not the empty set — an empty pool
+    would rank every task invalid and shrink the round on a signal it never got.
+    """
+    try:
+        from .bench_lint import valid_task_ids
+        return valid_task_ids(bench_dir)
+    except Exception as exc:  # noqa: BLE001 - a round must survive an unreadable lint
+        logger.warning("bench lint unreadable (%s): matrix order falls back to bench order",
+                       exc)
+        return None
+
+
+def _projection_text(proj: dict[str, Any]) -> str:
+    """One line describing a projected matrix, shared by the log and the report."""
+    return (f"{proj['arms']} arm(s) × {proj['tasks']} task(s): "
+            f"{proj['direct_trials']} direct trial(s) ≈ {proj['direct_seconds']:.0f} s "
+            f"(×{proj['direct_trial_seconds']:.0f} s each, "
+            f"{proj['direct_tasks']} task(s) in parallel) + "
+            f"{proj['sdk_trials']} agent-loop trial(s) ≈ {proj['sdk_seconds']:.0f} s "
+            f"(×{proj['sdk_trial_seconds']:.0f} s each, serial) "
+            f"= {proj['projected_seconds']:.0f} s projected")
 
 
 # ── ledger rows, as functions ────────────────────────────────────────────────────
@@ -677,11 +901,32 @@ async def run(
     variant_pairs, dropped_by_surface = materialize_variants(cfg, variants, (baseline_id, baseline_dir))
     dropped = sum(dropped_by_surface.values())
 
+    # #1605: cost the matrix before starting it. Everything that costs time has
+    # already happened (propose, materialize), so the window is measured from now
+    # to the deadline rather than assumed, and the arm count is the number of
+    # overlays that actually survived materialisation — `len(variant_pairs)`,
+    # baseline included, which is what the runners will loop over.
+    valid_ids = _lint_valid_ids(cfg.paths.bench_dir)
+    window = (deadline - time.monotonic()) if deadline is not None else None
+    planned = project_matrix(len(variant_pairs), tasks, harness, max_parallel,
+                             window_seconds=window)
+    tasks, projection, matrix_dropped = fit_matrix(
+        len(variant_pairs), tasks, harness, max_parallel, window, valid_ids)
+    logger.info("trial matrix: %s (window %s, fits %s)", _projection_text(projection),
+                "no budget" if window is None else f"{window:.0f} s", projection["fits"])
+    if matrix_dropped:
+        logger.warning("matrix reduced before trials: %d task(s) dropped — %s would not "
+                       "fit the %s s window; started instead at %s: %s",
+                       len(matrix_dropped), _projection_text(planned),
+                       "no budget" if window is None else f"{window:.0f}",
+                       f"{projection['projected_seconds']:.0f} s",
+                       ", ".join(matrix_dropped))
+
     # Fan out (variant × task), split by harness routing (#353)
     logger.info("running %d variants × %d tasks = %d trials (harness=%s)",
                 len(variant_pairs), len(tasks), len(variant_pairs) * len(tasks), harness)
     trials_started = time.monotonic()
-    direct_traces, sdk_traces = await _run_trials(
+    direct_traces, sdk_traces, arm_seconds = await _run_trials(
         cfg, variant_pairs, tasks, model, harness, max_parallel, deadline=deadline,
     )
     trial_seconds = round(time.monotonic() - trials_started, 1)
@@ -837,7 +1082,25 @@ async def run(
         # #1546: the round's clock, so a report says whether it measured the whole
         # matrix and how much of its budget each part took.
         f"- budget: {budget_minutes} min" if budget_minutes else "- budget: none",
-        f"- trials took: {trial_seconds:.0f} s; round took: {time.monotonic() - started:.0f} s so far",
+        # #1605: what the round decided to start, and against what. A round that
+        # shrank has to say both numbers, or a reader cannot tell a deferred task
+        # from a task that was never on the list.
+        f"- trial matrix: {_projection_text(projection)}; window "
+        + ("none (no budget)" if projection["window_seconds"] is None
+           else f"{projection['window_seconds']:.0f} s")
+        + "; fits " + ("n/a" if projection["fits"] is None
+                       else "yes" if projection["fits"] else "NO"),
+        *([f"- matrix reduced before trials: {len(matrix_dropped)} task(s) dropped — "
+           f"{_projection_text(planned)} would not fit the window; started instead at "
+           f"{projection['projected_seconds']:.0f} s: {', '.join(matrix_dropped)}"]
+           if matrix_dropped else []),
+        f"- trials took: {trial_seconds:.0f} s (direct "
+        + ("n/a" if arm_seconds.get("direct_seconds") is None
+           else f"{arm_seconds['direct_seconds']:.0f} s")
+        + ", agent-loop "
+        + ("n/a" if arm_seconds.get("sdk_seconds") is None
+           else f"{arm_seconds['sdk_seconds']:.0f} s")
+        + f"); round took: {time.monotonic() - started:.0f} s so far",
         f"- stopped at deadline: {'yes' if deadline_stopped else 'no'}"
         + (f" — {len(tasks_not_reached)} task(s) not reached by every variant, not scored: "
            f"{', '.join(tasks_not_reached)}" if deadline_stopped else ""),
@@ -976,6 +1239,16 @@ async def run(
         "deadline_stopped": deadline_stopped,
         "tasks_not_reached": tasks_not_reached,
         "trial_seconds": trial_seconds,
+        # #1605: the arms measured the way the projection costs them, so the one
+        # number a shrink is justified by can be checked against the one number a
+        # round records. Absent when an arm had no task to run.
+        "direct_seconds": arm_seconds.get("direct_seconds"),
+        "sdk_seconds": arm_seconds.get("sdk_seconds"),
+        # #1605: the decision made before the first trial — what the default matrix
+        # would have cost, what was started instead, and which tasks did not make it.
+        "matrix_projection": projection,
+        "matrix_planned": planned,
+        "matrix_dropped_tasks": matrix_dropped,
         "round_seconds": round(time.monotonic() - started, 1),
     }
 
