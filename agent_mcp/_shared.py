@@ -447,6 +447,15 @@ AUTONOMY_TASK_FIELDS: tuple[str, ...] = (
     # arming right the declaration was there to withhold — onto an engine that is
     # switched off. #85's park exists because flipping that slot OOMs GPU 2.
     "requires_slot",
+    # #1592: the stall-alert suppression's only carrier. A task file declares
+    # `parked: <why a person parked it>` and `workers/sources/scheduled_task.py`
+    # reads it through `autonomy.parked_declaration` to keep a deliberate park out
+    # of the next_run stall alarm. Lost on recovery, the declaration is not merely a
+    # lost label — the alarm that the suppression exists to quieten starts naming the
+    # parked task again on the surface a human reads, which is the noise this field
+    # was added to stop. It is asked of the file and never inferred from `status`,
+    # because #1121 is on record that a status flips by accident.
+    "parked",
 )
 
 #: Backlog #951: an autonomy task file's markdown body is documentation plus the

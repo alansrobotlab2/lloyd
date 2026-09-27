@@ -224,7 +224,23 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
     alert and the fleet report cannot call the same board two different things.
 
     The instant is `autonomy._utcnow()`, like the alarm beside it, so one clock
-    pin moves both."""
+    pin moves both.
+
+    Each entry carries `parked`: the declaration from that task's OWN file, via
+    `autonomy.parked_declaration`, or '' when it says nothing. The scan does not
+    filter on it, and that is deliberate twice over. First, `_nextrun_alert_message`
+    is the surface a person reads, so that is where a declared park is taken out and
+    counted — see its docstring for why the count has to survive; second, the list
+    here is what a reader of the mechanism, not of the alert, consults, and a task
+    silently missing from it would be indistinguishable from one the gap predicate
+    never looked at.
+
+    The declaration is asked of the file and never inferred from `status`, because a
+    status is precisely what #1121 proved can flip by accident: #68, parked on
+    purpose by Alan on 2026-09-17 with the ruling that nobody restore it or re-file
+    an item to re-enable it, sits `draft` exactly like an accidental flip does. A
+    suppression derived from `draft` would have undone that widening in one line, a
+    few above the test that pins it."""
     from app import autonomy
     now = autonomy._utcnow()
     resolution = autonomy.dependency_resolution_set()
@@ -242,8 +258,14 @@ def _next_run_stalled(queue: WorkQueue) -> list[dict]:
             "gap_ratio": gap["gap_ratio"],
             "hold": autonomy.hold_reason(t, resolution, now=now),
             "queued": str(t.get("id")) in active,
+            "parked": autonomy.parked_declaration(t),
         })
     return stalled
+
+
+def _parked_note(entry: dict) -> str:
+    """The declaration carried on a flagged entry, '' if its file declares nothing."""
+    return str(entry.get("parked") or "").strip()
 
 
 def _nextrun_alert_message(stalled: list[dict]) -> str:
@@ -256,18 +278,36 @@ def _nextrun_alert_message(stalled: list[dict]) -> str:
     reads "up_next task(s)" concludes the message is about some other task and
     drops it. When every flagged task is `up_next` — late against its own
     `next_run` and held by nothing — the wording is exactly what it was before
-    the widening, so a reader of the old alert reads the same sentence."""
-    statuses = sorted({str(e.get("status") or "unknown") for e in stalled})
+    the widening, so a reader of the old alert reads the same sentence.
+
+    A task whose file declares it parked is then taken OUT of that list, and the
+    asymmetry is why the count must ride along rather than the entry quietly
+    disappearing: suppressing a declared park removes a named task, so silence after
+    the suppression is indistinguishable from the silence #1121 was filed about. Zero
+    used to mean nothing was late; it can now also mean every late task talked itself
+    out of the alert. A count is the cheapest marker that keeps "nothing is stalled"
+    and "everything stalled was parked" two different sentences, so it is appended
+    even when nothing un-suppressed is left — and the caller alerts on the scan's
+    list, not on this string's arithmetic, which is what lets that case be said at
+    all. The names behind the count stay in the task files: a park is a decision
+    somebody wrote down, and the reader needs proof the scan looked, not a rerun of
+    a ruling they made."""
+    suppressed = [e for e in stalled if _parked_note(e)]
+    late = [e for e in stalled if not _parked_note(e)]
+    statuses = sorted({str(e.get("status") or "unknown") for e in late})
     # `up_next task(s)` alone reproduces the pre-widening string byte for byte,
     # so anything that matches on the old alert text keeps matching.
-    scope = f"{'/'.join(statuses)} task(s)"
+    scope = f"{'/'.join(statuses)} task(s)" if late else "task(s)"
     lines = "; ".join(
         f"#{e['id']} ({e['name']}) is {e['hours']:.1f}h past its next_run"
         f" — {_hold_note(e)}"
-        for e in stalled[:15])
-    return (f"{len(stalled)} {scope} more than one period past "
-            f"their own next_run, which the due-ness stall alarm cannot "
-            f"see: {lines}")
+        for e in late[:15])
+    head = (f"{len(late)} {scope} more than one period past "
+            f"their own next_run, which the due-ness stall alarm cannot see")
+    tail = (f" | {len(suppressed)} task(s) suppressed as declared parked in "
+            f"their own file (`parked:`) and not counted above"
+            if suppressed else "")
+    return f"{head}: {lines}{tail}" if lines else f"{head}{tail}"
 
 
 def _hold_note(entry: dict) -> str:
@@ -513,6 +553,12 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     # sees the three shapes the alarm above is built to exclude. Separate
     # streak, separate cooldown, separate message: nothing about the noisy
     # alarm's exclusions or text moved.
+    #
+    # The trigger below stays on the scan's own list, declared parks included, and
+    # that is what lets `_nextrun_alert_message` suppress them at all: filtering here
+    # would make a board whose only late tasks are parked indistinguishable from a
+    # healthy one, which is the silence #1121 was filed about. The message says
+    # "0 …| 1 suppressed" for that board instead of saying nothing.
     stalled = await loop.run_in_executor(None, _next_run_stalled, queue)
     _state["nextrun_streak"] = (
         (_state.get("nextrun_streak", 0) + 1) if stalled else 0)

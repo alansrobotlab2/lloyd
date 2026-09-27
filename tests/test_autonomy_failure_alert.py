@@ -380,3 +380,117 @@ async def test_the_fast_failure_line_has_no_discord_code_path_at_all(aut, monkey
     assert len(_alert_lines()) == 1, "the note landed"
     assert posted == [], f"the fast-failure alert must not use Discord: {posted}"
 
+
+# ── #1592: an alarm the Discord transport refuses still has to reach a person ──
+
+def _bullet_lines():
+    """Every bullet in today's note — the surface a dropped alarm now lands on.
+
+    `_alert_lines()` filters on `Autonomy #`, which is the fast-failure line's own
+    wording; a dropped Discord alarm quotes whatever message it was handed and does
+    not necessarily name a task, so the drop has to be read off the note itself.
+
+    The front matter comes off first: a fresh note's `tags:` block is itself a list of
+    `- ` lines, and counting those as entries would make every note look like it
+    already carried an alarm.
+    """
+    path = _note_file(autonomy)
+    if not path.exists():
+        return []
+    text = path.read_text()
+    if text.startswith("---\n"):
+        _, _, text = text.partition("\n---\n")
+    return [ln for ln in text.splitlines() if ln.startswith("- ")]
+
+
+async def test_an_undeliverable_discord_alert_lands_on_todays_note(aut):
+    """Clauses 1 and 2, over the transport's real drop branch.
+
+    `discord_alert` is the terminus of all five scheduler alarms (model-server
+    outage, unparseable task files, their recovery, due-ness stall, next_run stall),
+    and until now its no-channel branch was a `logger.warning` and a `return`: the
+    2026-09-27 alarm about #68 sitting 258 h past its own `next_run` reached a
+    rotating log and no person. Nothing is mocked here — the transport's two halves
+    are read from the boot-merged `CONFIG`, whose `home_channel` the test above pins
+    off `config.yaml` on disk and whose empty token `_discord_token()` resolves at
+    call time — so the branch under test is the box's own, not a fixture's.
+
+    Both properties in one read of one line, because they are one line's job: the
+    alert text has to be there at all (clause 1), and it has to say that Discord
+    refused it and which half of the transport is missing (clause 2). A note that
+    only quotes the alarm would be indistinguishable from an alarm someone chose to
+    ignore, which is the difference between setting up a transport and dismissing a
+    report.
+    """
+    from app import discord_notify
+
+    assert not discord_notify._discord_token(), (
+        "the token resolved to something, so this would be exercising the delivery "
+        "branch while claiming to test the drop")
+
+    await discord_notify.discord_alert(
+        "autonomy scheduler may be stalled: task #42 next_run 40h past due",
+        title="Scheduler stall")
+
+    lines = _bullet_lines()
+    assert len(lines) == 1, f"expected the dropped alarm on the note, once: {lines}"
+    line = lines[0]
+    assert "task #42 next_run 40h past due" in line, (
+        f"the alarm text itself never reached the note: {line!r}")
+    assert "Scheduler stall" in line, (
+        f"the alert's own title is how a reader sorts it: {line!r}")
+    assert "not delivered" in line, (
+        "a reader must be able to tell a dropped alarm from one someone ignored: "
+        f"{line!r}")
+    assert "discord.home_channel" in line and "unset" in line, (
+        "the line must name the half of the transport that is missing, and not as a "
+        f"generic 'not configured': {line!r}")
+
+
+async def test_the_drop_reason_names_only_the_half_that_is_actually_missing(aut,
+                                                                           monkeypatch):
+    """The reason a reader gets must be true of this box, not of the branch.
+
+    Both halves being absent is the live state, but a channel configured with no
+    token is the state a person is most likely to create by half-doing option (a),
+    and a line telling them `home_channel` is unconfigured then sends them to the
+    wrong key. The title and message are also capped the way the Discord path caps
+    them, so the note can never carry a longer account of an alarm than the refused
+    channel would have.
+    """
+    from app import discord_notify
+
+    monkeypatch.setattr("app.discord_notify.CONFIG",
+                        {"discord": {"home_channel": "1234567890", "token": ""}},
+                        raising=False)
+    await discord_notify.discord_alert("probe alarm text", title="Probe")
+
+    lines = _bullet_lines()
+    assert len(lines) == 1, f"one dropped alarm, one note line: {lines}"
+    line = lines[0]
+    assert "bot token" in line, (
+        f"a missing token has to be named as the missing half: {line!r}")
+    assert "discord.home_channel" not in line, (
+        f"the reason blames a key that is configured on this call: {line!r}")
+
+
+async def test_the_dropped_alert_never_raises_even_when_the_note_cannot_be_written(
+        aut, monkeypatch):
+    """Clause 1's second word, which is the half that can only fail at runtime.
+
+    Every caller is a scheduler tick or a run's failure path — `_alert`, the
+    infra-ceiling crossing, the disable — and none of them is written to survive an
+    exception from the alert. So a vault on a read-only mount has to cost a log line
+    and nothing else: the same non-propagation rule `_append_fast_failure_alert`
+    already follows for its own note write, extended to the route that now shares
+    that writer.
+    """
+    from app import discord_notify
+
+    # `/proc` exists and is not writable by this user, so the mkdir inside the
+    # writer fails for a real reason instead of a mocked one.
+    monkeypatch.setenv("LLOYD_DAILY_NOTE_DIR", "/proc/definitely-not-writable/notes")
+
+    await discord_notify.discord_alert("alarm that has nowhere to go")
+    assert not _bullet_lines(), "nothing landed, and that is the passing case"
+

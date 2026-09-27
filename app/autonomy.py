@@ -2278,6 +2278,31 @@ def _hour_windows(hours) -> str:
     return ",".join(out)
 
 
+def parked_declaration(task: dict) -> str:
+    """The task's OWN declaration that it is parked on purpose, '' if it says nothing.
+
+    `parked: true`, or `parked: <the reason>`, in a task file's front matter. The
+    key exists because `status` cannot carry this meaning: #1121 widened the
+    next_run stall scan to every status precisely because an unattributed
+    `up_next -> draft` flip is how #68 went dark for ~50 cycles while the alarm
+    built for that shape reported zero stalls. Anything derived from a status
+    would undo that widening one line from the test that pins it, so a park is a
+    sentence the file writes about itself and nothing infers it (#1592).
+
+    Empty means "not declared", and the two spellings that mean it are a missing
+    key and `parked: false`. Anything else that is not a bare `true` or a
+    non-empty string is NOT a declaration either, which fails the ambiguous case
+    toward the alarm naming the task: for a stall alarm, noise is the recoverable
+    direction and silence is not.
+    """
+    value = task.get("parked")
+    if isinstance(value, str):
+        return value.strip()
+    if value is True:
+        return "true"
+    return ""
+
+
 def hold_reason(task: dict, all_tasks: list[dict], *,
                 now: Optional[datetime.datetime] = None) -> Optional[str]:
     """Why this task will not dispatch right now, or None if nothing holds it.
@@ -3025,6 +3050,57 @@ def _daily_note_dir() -> Path:
     return Path.home() / "obsidian" / "memory"
 
 
+def append_daily_alert_line(body: str) -> bool:
+    """Append `- HH:MM %Z — <body>` to today's daily note. True if it landed.
+
+    The one writer of the `LLOYD_DAILY_NOTE_DIR` route. Two callers, one
+    destination: `_append_fast_failure_alert` (#1209), which reached the daily note
+    by deciding NOT to call `discord_alert` and said so in its docstring, and
+    `app.discord_notify.discord_alert` (#1592), which applies that same conclusion
+    to the alarms that were still routing themselves into a transport this box does
+    not configure — five scheduler alarms whose only trace was a WARNING in a
+    rotating log. A person reads this file; nobody reads that log.
+
+    Never raises, and that is load-bearing rather than tidy: the caller is a
+    scheduler tick or a run's failure path, and a note that could not be written
+    must not change what the run record, the retry budget or the next tick says.
+    Every failure is logged and returned as False.
+
+    The `body` carries its own prose and its own reason, so every alarm in the
+    note reads the way the fast-failure line already does: `- HH:MM %Z — …`,
+    America/Los_Angeles like `app/post_capture._append_daily_note`, which is also
+    what decides the filename. A note that does not exist yet gets the same
+    OKF-conformant header that function gives a fresh one — `type` is required by
+    `scripts/vault/validate_okf.py`, and a note whose first line came from an
+    alert must not be a conformance violation on arrival.
+    """
+    from zoneinfo import ZoneInfo
+
+    try:
+        now = datetime.datetime.now(ZoneInfo("America/Los_Angeles"))
+        entry = f"\n- {now.strftime('%H:%M %Z')} — {body}\n"
+        path = _daily_note_dir() / f"{now.strftime('%Y-%m-%d')}.md"
+        if not path.exists():
+            frontmatter = yaml.safe_dump(
+                {"segment": "memory", "tags": ["memory", "daily-notes"],
+                 "type": "note",
+                 "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S")},
+                sort_keys=False, allow_unicode=True, default_flow_style=False,
+            ).rstrip()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                f"---\n{frontmatter}\n---\n\n"
+                f"# {now.strftime('%Y-%m-%d')} Daily Notes\n{entry}",
+                encoding="utf-8")
+        else:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(entry)
+        return True
+    except Exception as exc:  # noqa: BLE001 — a note is never worth the run
+        logger.warning("could not write a daily-note alert line: %s", exc)
+        return False
+
+
 def _fast_task_failure_seconds(path: Path, *,
                                max_seconds: float) -> Optional[float]:
     """This run record's duration, when it IS a sub-`max_seconds` task failure.
@@ -3115,50 +3191,29 @@ def _append_fast_failure_alert(task: dict, task_id, durations: list[float]) -> b
     session summaries to, on the same America/Los_Angeles date filename, so the
     line lands where a person already reads rather than where a webhook would.
 
+    The prose is all that lives here now: the create-or-append it used to do
+    inline is `append_daily_alert_line`, shared with the alarm route #1592 added
+    to `discord_alert`, and the line that reaches the note is byte-for-byte what
+    this function wrote before the split (the fast-failure nodes in
+    `tests/test_autonomy_failure_alert.py` are what would catch it otherwise). The
+    task id stays in this function's own failure log even though the shared writer
+    is the one that knows why the write failed.
+
     A failure to write is logged and reported as False; it never propagates,
     because a note that could not be written must not change what the run record
     or the retry budget say.
     """
-    from zoneinfo import ZoneInfo
-
-    try:
-        la = ZoneInfo("America/Los_Angeles")
-        now = datetime.datetime.now(la)
-        path = _daily_note_dir() / f"{now.strftime('%Y-%m-%d')}.md"
-        name = str(task.get("name") or "").strip() or "unnamed task"
-        listed = ", ".join(f"{d:.1f}s" for d in durations)
-        entry = (
-            f"\n- {now.strftime('%H:%M %Z')} — **Autonomy #{task_id} ({name}): "
-            f"{len(durations)} consecutive failures under "
-            f"{_FAST_FAILURE_ALERT_SECONDS:.0f}s each ({listed}).** A run that "
-            f"reached the engine takes minutes; these were refused before any "
-            f"work — check `model:` and the engine route in the task file. "
-            f"Details: autonomy-runs/{task_id}/\n"
-        )
-        if not path.exists():
-            # Same OKF-conformant header a fresh daily note gets from
-            # `app/post_capture._append_daily_note`: `type` is required
-            # (scripts/vault/validate_okf.py) and a note born without it is a
-            # conformance violation from its first line.
-            frontmatter = yaml.safe_dump(
-                {"segment": "memory", "tags": ["memory", "daily-notes"],
-                 "type": "note",
-                 "timestamp": now.strftime("%Y-%m-%dT%H:%M:%S")},
-                sort_keys=False, allow_unicode=True, default_flow_style=False,
-            ).rstrip()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                f"---\n{frontmatter}\n---\n\n"
-                f"# {now.strftime('%Y-%m-%d')} Daily Notes\n{entry}",
-                encoding="utf-8")
-        else:
-            with open(path, "a", encoding="utf-8") as handle:
-                handle.write(entry)
+    name = str(task.get("name") or "").strip() or "unnamed task"
+    listed = ", ".join(f"{d:.1f}s" for d in durations)
+    if append_daily_alert_line(
+            f"**Autonomy #{task_id} ({name}): {len(durations)} consecutive "
+            f"failures under {_FAST_FAILURE_ALERT_SECONDS:.0f}s each ({listed}).** "
+            f"A run that reached the engine takes minutes; these were refused "
+            f"before any work — check `model:` and the engine route in the task "
+            f"file. Details: autonomy-runs/{task_id}/"):
         return True
-    except Exception as exc:  # noqa: BLE001 — a note is never worth the run
-        logger.warning("Task #%s: could not write the fast-failure alert: %s",
-                       task_id, exc)
-        return False
+    logger.warning("Task #%s: could not write the fast-failure alert", task_id)
+    return False
 
 
 async def _record_failure(task: dict, task_id, run_id: str, started_at: str,

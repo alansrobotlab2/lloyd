@@ -4229,3 +4229,226 @@ async def test_a_starving_queue_with_no_pause_alerts_byte_identically(
                       "oldest claimable queue item is 990 min old"], (
         f"a lifted pause still reached the alert, so it reads on the row rather "
         f"than its value: {alerts}")
+
+
+# ── #1592: a declared park comes out of the next_run alert, and says so ───────
+#
+# The widening above is correct and the box contains a counterexample to acting on
+# it blindly: #68 sat 258.3 h — nearly eleven days — past its own `next_run` on
+# 2026-09-27, which the shipped alarm named twice that morning, because Alan
+# parked it on 2026-09-17 and ruled that nobody restore it or re-file an item to
+# re-enable it. Once the alarm had a destination a person reads (#1592's other
+# half), that row became the first thing the new surface would show — so the scan
+# needs a suppression, and the suppression needs to be legible, or it is the same
+# silence #1121 was filed about with a count attached.
+
+def _parked_fleet(aut):
+    """Three tasks, all `draft`, all a quarter of a year late, differing only in
+    what their own file says about it. Ids in the 920s.
+
+    The discrimination has to be exact, so the fleet is as alike as the shapes
+    allow: every task here is `draft` and far past `next_run`, which is precisely
+    the state #1121 widened the scan to see. If a suppression could be derived from
+    that state it would swallow all three and the widening would be gone in one
+    line, a few below the test that pins it. What separates them is a `parked:` key
+    in the front matter and nothing else:
+
+      920 — declares the park in its own file. Comes out of the alert message.
+      921 — says nothing, which is what an accidental `up_next -> draft` flip looks
+            like, and stays named: the shape #68's ~50 dark cycles were.
+      922 — declares `parked: false`, the explicit no. Also stays named, because a
+            key that answers "not parked" must not behave like a key that is absent
+            in one direction and like a park in the other.
+    """
+    late = PIN - dt.timedelta(days=90)
+    write_task(aut, 920, status="draft", frequency="every-15min",
+               last_run=late.isoformat(), next_run=late.isoformat(),
+               parked="Alan parked this task on purpose on 2026-09-17")
+    write_task(aut, 921, status="draft", frequency="every-15min",
+               last_run=late.isoformat(), next_run=late.isoformat())
+    write_task(aut, 922, status="draft", frequency="every-15min",
+               last_run=late.isoformat(), next_run=late.isoformat(),
+               parked=False)
+
+
+async def test_the_parked_suppression_is_read_from_the_task_file(aut, monkeypatch,
+                                                                tmp_path):
+    """Clauses 3 and 4, at the seam that matters: a file on disk to an alert string.
+
+    Written as a file and parsed back through `_parse_task_file`, not as a dict,
+    because the declaration's whole job is to survive the round trip from a human
+    editing front matter to the tick that builds the alert. A `parked:` key the
+    reader drops would leave every test here green while #68 kept crying wolf on the
+    live board — which is the failure `agent_mcp/_shared.AUTONOMY_TASK_FIELDS`
+    exists to prevent, and why `test_the_parked_field_is_read_by_the_recoverer`
+    below is the same claim from the other side.
+    """
+    from workers.sources.scheduled_task import _next_run_stalled
+
+    _pin(aut, monkeypatch)
+    _parked_fleet(aut)
+    flagged = {e["id"]: e for e in _next_run_stalled(
+        __import__("workers.queue", fromlist=["WorkQueue"]).WorkQueue(
+            tmp_path / "parked.db"))}
+
+    assert set(flagged) == {920, 921, 922}, (
+        "the scan itself is not supposed to filter these — a task missing from the "
+        f"list is indistinguishable from one the gap predicate never saw: {sorted(flagged)}")
+    assert flagged[920]["parked"], (
+        "the declaration did not survive the parse, so no message-level suppression "
+        f"can be trusted: {flagged[920]!r}")
+    assert flagged[921]["parked"] == "" and flagged[922]["parked"] == "", (
+        "an undeclared task and one that declares `parked: false` both read as "
+        f"parked: {flagged[921]['parked']!r} / {flagged[922]['parked']!r}")
+
+
+def test_the_alert_drops_a_declared_park_and_keeps_naming_the_undeclared_one(
+        aut, monkeypatch, tmp_path):
+    """Clause 3, on the string a person actually reads.
+
+    #921 is the assertion that keeps this honest: a suppression implemented by
+    skipping every non-`up_next` task would pass a parked-only board and quietly
+    undo #1121, so the same message has to name the identical task that said nothing
+    about itself."""
+    from workers.queue import WorkQueue
+    from workers.sources.scheduled_task import _next_run_stalled, _nextrun_alert_message
+
+    _pin(aut, monkeypatch)
+    _parked_fleet(aut)
+    msg = _nextrun_alert_message(
+        _next_run_stalled(WorkQueue(tmp_path / "parked-msg.db")))
+
+    assert "#920" not in msg, (
+        f"a task that declares its own park is still named in the alert: {msg!r}")
+    assert "#921 (task921)" in msg, (
+        "the undeclared draft task went missing — the widening is what this "
+        f"suppression must leave intact: {msg!r}")
+    assert "#922 (task922)" in msg, (
+        f"`parked: false` suppressed a task that declared the opposite: {msg!r}")
+    assert msg.startswith("2 draft task(s) more than one period past their own "
+                         "next_run, which the due-ness stall alarm cannot see: "), (
+        "the count and the statuses are the pre-suppression sentence and must stay "
+        f"byte-identical for the two tasks still counted: {msg!r}")
+
+
+def test_the_alert_reports_a_suppressed_park_instead_of_going_silent(
+        aut, monkeypatch, tmp_path):
+    """Clause 4: zero stalls and all-stalls-parked must not be one message.
+
+    The asymmetry that makes this clause worth pinning: a suppression REMOVES a
+    named task from an alarm whose absence is the signal, so after the first use of
+    the suppression a reader can no longer tell "the fleet is prompt" from "the
+    fleet is late and every late task talked itself out of the alert" — which is the
+    state #68 was actually in for ~50 cycles. A count is the cheapest marker that
+    keeps them apart, and it has to be there even when it is the whole message.
+    """
+    from workers.queue import WorkQueue
+    from workers.sources.scheduled_task import _next_run_stalled, _nextrun_alert_message
+
+    _pin(aut, monkeypatch)
+    _parked_fleet(aut)
+    q = WorkQueue(tmp_path / "parked-count.db")
+    msg = _nextrun_alert_message(_next_run_stalled(q))
+
+    assert "1 task(s) suppressed as declared parked" in msg, (
+        f"the message suppressed a park and said nothing about it: {msg!r}")
+    assert "`parked:`" in msg, (
+        f"the count must say where the declaration lives, or a reader cannot act on "
+        f"it: {msg!r}")
+
+    # And the case the count exists for: a board whose ONLY late task is parked. The
+    # alert still fires (the caller triggers on the scan's list, parks included) and
+    # its message is not the message a healthy board would produce.
+    parked_only = _nextrun_alert_message(
+        [e for e in _next_run_stalled(q) if e["id"] == 920])
+    assert "0 task(s) more than one period past" in parked_only, (
+        f"a parked-only board stopped producing a message at all: {parked_only!r}")
+    assert "1 task(s) suppressed as declared parked" in parked_only, (
+        f"the count vanished with the names it was counting: {parked_only!r}")
+    assert parked_only != _nextrun_alert_message([]), (
+        "a board of nothing but declared parks and a board with nothing late "
+        f"produce the same sentence: {parked_only!r}")
+
+
+def test_the_parked_field_is_read_by_the_recoverer(aut):
+    """The declaration has to survive the parser's LAST layer, not just its first.
+
+    A task file whose front matter is broken YAML — here the unquoted-colon breakage
+    `tests/test_autonomy_fallback_field_parity.py` documents as the classic
+    agent-written one — is read by the regex fallback, which returns only the names
+    in `agent_mcp._shared.AUTONOMY_TASK_FIELDS`. A `parked:` key absent from that
+    tuple is dropped exactly when the file is already damaged, which is the moment a
+    park is most likely to be re-labelled by whoever repairs it — and the alarm would
+    then name a task Alan parked, on the surface the fix was built to keep quiet."""
+    path = aut.AUTONOMY_DIR / "923-task923.md"
+    path.write_text("""---
+id: 923
+name: parked: recovery: canary
+status: draft
+frequency: every-15min
+parked: Alan parked this task on purpose on 2026-09-17
+---
+
+body
+
+## Activity Log
+""", encoding="utf-8")
+
+    task = aut._parse_task_file(path)
+    assert task["id"] == 923, "the file did not parse at all, so this proves nothing"
+    assert aut.parked_declaration(task) == (
+        "Alan parked this task on purpose on 2026-09-17"), (
+        "the recoverer dropped the declaration: "
+        "add `parked` to AUTONOMY_TASK_FIELDS or a damaged file un-parks its task")
+
+
+# The live board, not a synthesized one. `tests/test_autonomy_slot_arm_guard.py`
+# reads the same directory to pin that no live task names a switched-off engine; the
+# park is the same kind of fact — a human decision written in a task file, whose
+# whole job is to be true of the box this suite runs on.
+VAULT_AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
+MIN_LIVE_TASK_FILES = 20
+
+
+def test_the_live_board_suppresses_the_task_alan_parked_and_says_so(tmp_path):
+    """Clause 5, end to end on the real fleet: #68 stays parked and stops being news.
+
+    `~/obsidian/autonomy/68-morning-brief-triage.md` carries Alan's 2026-09-17
+    ruling — do not restore it to `up_next`, do not re-file an item to re-enable it —
+    and `status: draft` is the ruling's own state, which this change must not touch:
+    suppressing the alarm is not the same act as un-parking the task, and a round
+    that flipped `draft` to silence the alert would have done the one thing the
+    ruling forbids.
+
+    Three assertions, each with a different failure it exists to catch. A missing
+    `parked:` key is the clause failing. `status` no longer `draft` is the ruling
+    broken. And #68 absent from the scan altogether means the gap predicate stopped
+    applying, so the suppression has no subject and this test is about a board that
+    no longer exists — a stale green, which is the reason it is asserted rather than
+    assumed.
+    """
+    from workers.queue import WorkQueue
+    from workers.sources.scheduled_task import _next_run_stalled, _nextrun_alert_message
+
+    files = list(VAULT_AUTONOMY_DIR.glob("*.md"))
+    assert len(files) > MIN_LIVE_TASK_FILES, (
+        f"only {len(files)} task files under {VAULT_AUTONOMY_DIR}: that is a "
+        "denominator failure, not evidence that nothing needed suppressing")
+
+    live = {int(e["id"]): e for e in _next_run_stalled(WorkQueue(tmp_path / "live.db"))}
+    assert 68 in live, (
+        "#68 is no longer more than one period past its own next_run, so the live "
+        "premise of this test is gone: re-read the stall scan before trusting the "
+        "two assertions below")
+    assert live[68]["status"] == "draft", (
+        "#68's status changed from the parked ruling's `draft` — suppressing an "
+        f"alarm is not un-parking a task: {live[68]['status']!r}")
+    assert live[68]["parked"], (
+        "#68's file declares no park, so the alarm names a task Alan parked on "
+        "purpose: add the `parked:` key the 2026-09-17 ruling recorded")
+
+    msg = _nextrun_alert_message(list(live.values()))
+    assert "#68" not in msg, (
+        f"the live alert still names the deliberately-parked task: {msg!r}")
+    assert "suppressed as declared parked" in msg, (
+        f"the live scan suppressed a park without saying so: {msg!r}")
