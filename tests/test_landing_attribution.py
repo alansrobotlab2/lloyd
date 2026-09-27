@@ -127,3 +127,25 @@ def test_the_shipped_config_names_lloyd():
     from pathlib import Path
     cfg = yaml.safe_load((Path(__file__).resolve().parent.parent / "config.yaml").read_text())
     assert cfg["automod"]["landing"]["coauthor"] == "Lloyd <lloyd@local>"
+
+
+def test_settle_attribution_authors_a_single_commit_round_as_the_repos_identity(repo):
+    """#1577 and #1543 landed on 2026-09-26 authored `Lloyd <lloyd@localhost>`
+    after the credit fix: their messages were already right, so nothing was
+    rewritten, and a single-commit round skips the squash that commits as the
+    repo. The repo's configured identity (`t <t@e.com>` here) is the author."""
+    r, base = repo
+    commit(r, f"one\n\n{LLOYD}\n", name="Lloyd", email="lloyd@localhost")
+    old_tree = git(r, "rev-parse", "HEAD^{tree}").stdout.strip()
+    new, note = P.settle_attribution("SM_X", r, base)
+    assert new and "reworded 1 of 1" in note
+    assert git(r, "log", "-1", "--format=%an <%ae>").stdout.strip() == "t <t@e.com>"
+    assert git(r, "rev-parse", "HEAD^{tree}").stdout.strip() == old_tree
+    assert body(r).rstrip().endswith(LLOYD)
+
+
+def test_settle_attribution_leaves_a_branch_already_authored_right(repo):
+    r, base = repo
+    old = commit(r, f"one\n\n{LLOYD}\n", name="t", email="t@e.com")
+    new, note = P.settle_attribution("SM_X", r, base)
+    assert new is None and "already" in note and W.head(r) == old

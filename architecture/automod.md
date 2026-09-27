@@ -2888,8 +2888,12 @@ one-commit round, which the squash never touches.
 - **`settle_attribution`** runs after the squash on both landing paths (eager
   and train). It calls `W.reword_onto(worktree, live_head, attributed)`, which
   rewrites the message of each commit `squash_onto` left alone: a one-commit
-  round, or every commit when `squash` is off. Each keeps its tree, parent
-  chain and author; the final tree is proved equal to the gated one; the
+  round, or every commit when `squash` is off. Each keeps its tree and parent
+  chain, and is authored as the repo's configured identity
+  (`landing_author`, read from git config): a commit the model made under
+  another name is rewritten too. #1577 and #1543 landed on 2026-09-26, after
+  this fix, authored `Lloyd <lloyd@localhost>`, because their messages were
+  already right and the author was kept. The final tree is proved equal to the gated one; the
   unrewritten history is kept at `refs/automod/rounds/<round>`; and
   `squashed_from` names the gated sha, as a squash does. A branch whose
   messages are already right keeps its shas.

@@ -869,8 +869,21 @@ def foreign_coauthors(worktree: Path, base: str, coauthor: str | None = None) ->
     return list(dict.fromkeys(ln for ln in found if ln.lower() != want))
 
 
+def landing_author(worktree: Path) -> tuple[str, str] | None:
+    """The repo's configured identity — who a landing is authored as (Alan).
+
+    Read from git config, which a worktree shares with the live repo; the
+    squash commits as it already. None when unset, and authors are then left
+    as they are rather than rewritten to an empty name.
+    """
+    name = (W.git(worktree, "config", "user.name").stdout or "").strip()
+    email = (W.git(worktree, "config", "user.email").stdout or "").strip()
+    return (name, email) if name and email else None
+
+
 def settle_attribution(round_id: str, worktree: Path, base: str) -> tuple[str | None, str]:
-    """Give every commit about to land the landing's credit line and no other.
+    """Give every commit about to land the landing's credit line and no other,
+    authored as the repo's own identity (`landing_author`).
 
     `(new_head, detail)` from `W.reword_onto`, run after the squash: a squashed
     commit is already right and comes back unchanged, so this does its work on
@@ -878,7 +891,8 @@ def settle_attribution(round_id: str, worktree: Path, base: str) -> tuple[str | 
     landing when a foreign credit would still reach `main`.
     """
     new, note = W.reword_onto(worktree, base, attributed,
-                              keep_ref=f"refs/automod/rounds/{round_id}")
+                              keep_ref=f"refs/automod/rounds/{round_id}",
+                              author=landing_author(worktree))
     stray = foreign_coauthors(worktree, base)
     if stray:
         _land_failed(round_id, f"the branch would credit {stray[0]!r} on main ({note})",

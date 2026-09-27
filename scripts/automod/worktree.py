@@ -213,7 +213,8 @@ def squash_onto(worktree: Path, base: str, message: str, *,
 
 
 def reword_onto(worktree: Path, base: str, reword, *,
-                keep_ref: str = "") -> tuple[str | None, str]:
+                keep_ref: str = "",
+                author: tuple[str, str] | None = None) -> tuple[str | None, str]:
     """Rewrite the message of every commit in `base..HEAD` with `reword(msg)`.
 
     `(new_sha, detail)`; `new_sha` is None when no message changed or the
@@ -225,6 +226,12 @@ def reword_onto(worktree: Path, base: str, reword, *,
     keeps its tree, its place in the chain and its authorship, and only its
     message changes; the final tree is proved identical to the gated one; the
     old history is kept under `keep_ref` unless something already holds it.
+
+    `author` (name, email), when given, is also the author every commit must
+    carry: a commit authored as anyone else is rewritten with it, its date
+    kept. A round's model commits under whatever identity it types
+    (`Lloyd <lloyd@localhost>` landed twice on 2026-09-26 after the credit
+    fix), and a single-commit round skips the squash that would reset it.
     """
     old = head(worktree)
     if not old:
@@ -245,7 +252,9 @@ def reword_onto(worktree: Path, base: str, reword, *,
         name, email, date, msg = (meta.split("\0", 3) + ["", "", "", ""])[:4]
         msg = msg.rstrip("\n") + "\n"   # `log` pads %B; a stored message ends in one newline
         new_msg = reword(msg)
-        if new_msg == msg and not changed:
+        if author and (name, email) != author:
+            name, email = author
+        elif new_msg == msg and not changed:
             parent = sha            # nothing rewritten below it yet: keep the gated sha
             continue
         changed += 1
@@ -258,7 +267,7 @@ def reword_onto(worktree: Path, base: str, reword, *,
         if made.returncode != 0 or not parent:
             return None, f"commit-tree failed ({(made.stderr or '').strip()[:160]}); branch untouched"
     if not changed:
-        return None, "every message already as wanted"
+        return None, "every message and author already as wanted"
     old_tree = git(worktree, "rev-parse", f"{old}^{{tree}}").stdout.strip()
     if git(worktree, "rev-parse", f"{parent}^{{tree}}").stdout.strip() != old_tree:
         return None, "rewording did not reproduce the gated tree; branch untouched"
