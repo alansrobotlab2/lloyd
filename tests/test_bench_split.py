@@ -307,8 +307,12 @@ MIN_LIVE_BENCH_TASKS = 11
 
 #: Every file in `~/obsidian/lloyd/bench/`, keyed by task id (the file stem, which
 #: each file also declares as `id:`), with the `category:` its own front matter
-#: carries. Measured 2026-09-21: 13 tasks — 6 replay, 4 synthetic, 2 adversarial,
-#: 1 safety.
+#: carries. Measured against the files on disk on 2026-09-27: 19 entries — 6 replay,
+#: 10 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
+#: table and no assertion here reads it; the count that IS asserted is the corpus
+#: floor in `MIN_LIVE_BENCH_TASKS` above, and every entry below is re-checked
+#: against disk by the node named next, so a stale number in this comment is
+#: cosmetic while an unmapped task id is red.
 #:
 #: This is the map a nightly bench addition has to be recorded in, and
 #: `test_every_live_bench_file_is_named_in_the_census` is what makes it fail loudly
@@ -337,8 +341,14 @@ LIVE_BENCH_CATEGORIES = {
     "bench_016_audit_skill_dead_paths": "synthetic",
     "bench_017_audit_unresolved_task_skills": "synthetic",
     # Keyed by stem with the `category:` its own front matter declares — the only
-    # authority this table may copy. Landed in the live corpus on 2026-09-26.
+    # authority this table may copy. bench_018 landed in the corpus on 2026-09-26
+    # (vault `0e33bdd9`); bench_019 was written to it on 2026-09-27 and is still
+    # untracked in the vault as of this writing. The node below globs the directory,
+    # so an uncommitted task counts the moment it is on disk — and is also the task a
+    # `git clean -fd` in the vault would take back out, which fails this node in the
+    # other direction, by name.
     "bench_018_skill_invocation_rare_interp": "synthetic",
+    "bench_019_skill_invocation_retired_schedule": "synthetic",
 }
 
 
