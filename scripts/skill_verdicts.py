@@ -23,11 +23,17 @@ handing it to the executor makes things worse — says the value is in accumulat
 already-adjudicated knowledge, not in rewriting skills more often. So this ledger is
 a development-side instrument. It must never be injected into a runtime prompt.
 
-Five invariants:
+Six invariants:
 
 * **Append-only, latest-wins per key.** A verdict is never edited or deleted; a
   reopen is a new line. Rollback is asymmetric the way WikiSkill's is: a skill can
   be reverted, the record of why it was rejected never is.
+* **A repair may never change what a verdict blocks (#1588).** The moved data root
+  killed falsifiers without touching the decisions they grounded, and `repair` is the
+  machine correcting its own bookkeeping, so it runs unattended. Its one safety line is
+  terminality: a correction keeps the verdict, and a disposal of grounds that retention
+  deleted may relabel a terminal verdict as terminal (`rejected_unverifiable`) but must
+  never mint a block a non-terminal verdict never had.
 * **`evidence_cmd` is required.** A prose verdict is an assertion the next run can
   only inherit. A re-executable check is what lets a later run *falsify* it, which is
   the weakness #525 records on the worker-evidence path.
@@ -86,6 +92,10 @@ Usage:
     skill_verdicts.py record  --pattern K --verdict V --reason R --evidence-cmd C
     skill_verdicts.py seed    --candidates DIR    # harvest existing dispositions once
     skill_verdicts.py list                        # latest-wins view
+    skill_verdicts.py audit                       # re-execute every stored check (#1533)
+    skill_verdicts.py repair                      # append the corrections the moved data
+                                                  # root broke, and name the ones only a
+                                                  # re-derivation can fix (#1588)
 """
 
 from __future__ import annotations
@@ -101,7 +111,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.paths import PIPELINE_DIR  # noqa: E402
+from app.paths import LIVE_CHECKOUT, PIPELINE_DIR  # noqa: E402
 
 # Append-only. Under the data root's `_pipeline/`, same as `REVIEW-LOG.md` beside it.
 DEFAULT_STORE = PIPELINE_DIR / "skills" / "reviews" / "verdicts.jsonl"
@@ -759,6 +769,305 @@ def evidence_cmd_status(row: dict, timeout: int = EVIDENCE_TIMEOUT_SECONDS):
     return proc.returncode, ""
 
 
+# --------------------------------------------------------------- root-move repair --
+
+#: The four answers `falsifier_repair` gives about a key `audit` called UNRUNNABLE.
+#: Only `ROOT_MOVED` is a machine's business: the other two name an input that no
+#: longer exists, or a field that never held a command, and both need a re-derivation.
+RUNNABLE = "runnable"
+ROOT_MOVED = "root_moved"
+NEEDS_RERECORD = "needs_rerecord"
+UNPARSEABLE = "unparseable"
+
+#: The two `NEEDS_RERECORD` shapes a re-anchor can actually fix, kept as words because
+#: they are what `reanchor_verdict` is offered for: the dead root is reachable by editing
+#: the command, unlike a corpus retention deleted. Which one fired is worth printing —
+#: a quoted glob and a nested string need different edits and look identical in `audit`.
+NESTED_ROOT = "nested_root"        # rewritten command still PRINTS the dead root
+QUOTED_GLOB = "quoted_glob"        # the rewritten detail still contains a `*`
+DATED_CORPUS = "dated_corpus"      # the named input is simply gone: retention's doing
+REANCHORABLE = (NESTED_ROOT, QUOTED_GLOB)
+
+#: What a disposal relabels a *terminal* verdict to. Terminal, like the verdict it
+#: supersedes, so honouring it keeps blocking exactly what it blocked before; and a
+#: different word, so the ledger stops claiming a decision whose grounds can be re-run.
+#: The non-terminal half of the rule is `disposal_verdict`.
+UNVERIFIABLE_VERDICT = "rejected_unverifiable"
+
+#: Tag every row this pass appends, so a reader can tell bookkeeping from a decision
+#: an agent made about a candidate.
+REPAIR_DECIDED_BY = "root-move-repair"
+DISPOSE_DECIDED_BY = "root-move-repair-disposal"
+
+#: A re-anchor's command was authored by hand against an artifact that still exists, so
+#: it is neither the substitution nor a disposal. Named as a constant because the ledger
+#: rows written on 2026-09-27 already carry this exact string: it is the value that makes
+#: them reproducible, not a label invented after them.
+REANCHOR_DECIDED_BY = "root-move-repair-reanchor"
+
+#: A classifier detail shaped `grep: /path: No such file or directory` or
+#: `ls: cannot access '/path*': No such file or directory` — the input is named, which
+#: is what makes an absence check writable for it.
+_MISSING_INPUT_RE = re.compile(
+    r":\s*(?:cannot access\s*)?['\"]?([^'\"\n|&;]+?)['\"]?:\s*No such file or directory")
+
+#: The check a disposal leaves behind: count the corpus the verdict was measured on.
+#: A count and not an assertion — if a restore ever brings the dated files back the
+#: number goes nonzero and the disposal is falsified by its own check, rather than by
+#: somebody remembering to look. Braces are filled with a path already screened for
+#: shell metacharacters by `disposable_input`.
+TOMBSTONE_TEMPLATE = ('echo "dated_corpus_files=$(ls -1 \'{input}\' 2>/dev/null | wc -l)'
+                      ' pinned_input=\'{input}\'"')
+
+DISPOSAL_NOTE = (
+    "#1588 disposal: the check above was pinned to {input}, which retention has pruned, so "
+    "those grounds can no longer be re-executed by anyone; the appended check counts that "
+    "corpus absent instead, and a nonzero count falsifies this disposal and reopens the "
+    "decision. Verdict {kept}.")
+
+
+def dead_root_spellings(live: Path | None = None) -> tuple[tuple[str, str], ...]:
+    """Each spelling the data root used to have, paired with where it lives today.
+
+    `_pipeline/` used to sit inside the code tree; since 2026-09-22 it is a sibling of it
+    (`architecture/data-home.md`), and the stored falsifiers that name the old location
+    have reported `UNRUNNABLE` ever since — 79 of the ledger's 104 keys on 2026-09-27.
+
+    Assembled from `LIVE_CHECKOUT` and `PIPELINE_DIR.name` rather than written as a
+    literal, because a home-rooted runtime path in tracked code is precisely what
+    `tests/test_no_runtime_paths_in_code.py` refuses: the *name* of a dead path is not a
+    reason to reintroduce the bug that test exists to catch.
+    """
+    target = str(PIPELINE_DIR if live is None else live)
+    in_tree = LIVE_CHECKOUT / PIPELINE_DIR.name
+    # Absolute first — it is the longer spelling, and both land on the same directory.
+    return ((str(in_tree), target), (f"~/{in_tree.parent.name}/{in_tree.name}", target))
+
+
+def rewrite_dead_roots(cmd: str, *, rewrites: list[tuple[str, str]] | None = None
+                       ) -> tuple[str, bool]:
+    """`cmd` with every dead root spelling replaced, and whether anything changed."""
+    out = cmd
+    for old, new in (rewrites or dead_root_spellings()):
+        out = out.replace(old, new)
+    return out, out != cmd
+
+
+def missing_input(detail: str) -> str:
+    """The path a classifier detail names as absent, or '' when it names none.
+
+    A glob spelling survives here (`…/candidate-*-20260920.md`) because bash never
+    expands a quoted glob and neither does `ls`'s complaint about it: the literal,
+    asterisks and all, is what the stored command looked for.
+    """
+    m = _MISSING_INPUT_RE.search(detail)
+    return m.group(1) if m else ""
+
+
+def disposable_input(detail: str) -> str:
+    """`missing_input(detail)` when it is safe to embed in a check, else ''.
+
+    A path carrying a quote, backslash or `$` would let the *ledger data* choose what
+    the tombstone executes. Those keys are reported instead of disposed.
+    """
+    pinned = missing_input(detail)
+    if not pinned or any(c in pinned for c in "'\"$`\\"):
+        return ""
+    return pinned
+
+
+def falsifier_repair(row: dict, *, timeout: int = EVIDENCE_TIMEOUT_SECONDS,
+                     rewrites: list[tuple[str, str]] | None = None) -> tuple[str, str, str]:
+    """Classify one dead verdict's falsifier: `(class, replacement_cmd, detail)`.
+
+    `ROOT_MOVED` carries the rewritten command; the other dead classes carry the
+    classifier detail that says why a rewrite cannot save the key, which is also the
+    input a disposal pins. A row whose check runs answers `RUNNABLE` with nothing to
+    offer: a command that executed is never a repair target whatever its exit code said.
+
+    `evidence_cmd_status` decides both sides, deliberately. #1588 measured that judging
+    a rewritten command by `rc in (0,1)` instead reports 62 repaired where the truth is
+    31 — a probe shaped `grep <gone file> | head`, or a falsifier that dies by
+    traceback, exits 0 or 1 over a missing input, so a zero reads as a clean answer.
+    One classifier, shared with `audit` and `check`, or the pass and the audit report
+    two numbers and one of them gets believed.
+    """
+    status = evidence_cmd_status(row, timeout=timeout)
+    if status is None or status[0] != UNRUNNABLE:
+        return RUNNABLE, "", ""
+    if _BASH_PARSE_ERROR_RE.search(status[1]):
+        # Bash could not parse the field at all. Rows written before the parse-error
+        # classifier existed hold a sentence where a command belongs, and no
+        # substitution reaches prose.
+        return UNPARSEABLE, "", status[1]
+    rewritten, changed = rewrite_dead_roots(row.get("evidence_cmd") or "", rewrites=rewrites)
+    if not changed:
+        return NEEDS_RERECORD, "", status[1]
+    after = evidence_cmd_status({**row, "evidence_cmd": rewritten}, timeout=timeout)
+    if after is not None and after[0] == UNRUNNABLE:
+        # The root was one dead input among others, so the rewrite does not save the key.
+        # Which of three it is decides whether a person can still fix it, and the detail
+        # says so without re-running anything: the OLD root surviving in the *output* is
+        # a path inside a script or a nested string (the substitution reached the command,
+        # not the string it hands to python); a `*` in the detail is a glob that sits
+        # inside quotes, so no shell ever expanded it; neither, and the named input is
+        # simply gone, which is retention's doing and no edit reaches it either.
+        return NEEDS_RERECORD, "", after[1]
+    return ROOT_MOVED, rewritten, status[1]
+
+
+def rerecord_shape(detail: str, *, rewrites: list[tuple[str, str]] | None = None
+                   ) -> str:
+    """Which of the three shapes a `NEEDS_RERECORD` detail is, as one of the constants.
+
+    Split out of `falsifier_repair` so the caller prints the cause and a test can name
+    each shape without a subprocess: the two `REANCHORABLE` ones are worth separating
+    because editing the command fixes them, while a pruned dated file is not repairable
+    at all and only a disposal or a re-derivation answers it.
+    """
+    for old, _new in (rewrites or dead_root_spellings()):
+        if old in detail:
+            return NESTED_ROOT
+    if "*" in detail:
+        return QUOTED_GLOB
+    return DATED_CORPUS
+
+
+def reanchor_verdict(store: str | Path | None = None, *, pattern_key: str,
+                     evidence_cmd: str, timeout: int = EVIDENCE_TIMEOUT_SECONDS,
+                     dry_run: bool = False) -> dict:
+    """Append a hand-authored falsifier for `pattern_key`, keeping its decision intact.
+
+    The lane for the two `REANCHORABLE` classes, which a substitution cannot reach: the
+    dead path is inside a script the stored command only names, or inside quotes bash
+    never expands. Rewriting those is a person's judgement about what the signature is
+    now owned by, so this takes the command as written — and then applies the discipline
+    §0.6 asks of any falsifier, in code rather than in prose:
+
+    * the command is executed through `evidence_cmd_status` before anything is written,
+      and a command the classifier calls dead is **refused**. This is the #1586 hazard
+      exactly: `record_verdict` only refuses a command that prints nothing, so a probe
+      whose sole output is its own traceback would otherwise be born dead and re-appear
+      in next night's `audit` as fresh damage from this pass;
+    * the verdict, reason and `occurrences_at_decision` come from the superseded row, so
+      re-anchoring cannot change what the key blocks or disarm the growth reopen;
+    * the row is tagged `REANCHOR_DECIDED_BY`, which is what tells a reader that the
+      command was authored by hand against a surviving artifact rather than substituted.
+
+    Raises `ValueError` with the reason; the caller prints it.
+    """
+    table = load_verdicts(store_path(store))
+    prior = table.get(pattern_key.strip())
+    if not prior:
+        raise ValueError(f"no verdict recorded for {pattern_key!r}; a re-anchor keeps an "
+                         "existing decision, so there is nothing to keep — use `record`")
+    cmd = (evidence_cmd or "").strip()
+    if not cmd:
+        raise ValueError("refused: evidence_cmd is empty")
+    candidate = {**prior, "evidence_cmd": cmd}
+    status = evidence_cmd_status(candidate, timeout=timeout)
+    if status is not None and status[0] == UNRUNNABLE:
+        raise ValueError(
+            f"refused: the new falsifier is itself unrunnable ({status[1]}); a re-anchor "
+            "must re-execute, or this pass mints a verdict that is born dead (#1586)")
+    if dry_run:
+        return {**prior, "evidence_cmd": cmd, "decided_by": REANCHOR_DECIDED_BY}
+    return record_verdict(store, pattern_key=pattern_key, verdict=prior.get("verdict") or "",
+                          reason=prior.get("reason") or "", evidence_cmd=cmd,
+                          occurrences=None, decided_by=REANCHOR_DECIDED_BY,
+                          source_candidate=prior.get("source_candidate") or "")
+
+
+def disposal_verdict(prior: dict) -> tuple[str, str]:
+    """The verdict a disposal records for `prior`, and how to say what it did to blocking.
+
+    This is the whole safety of running a repair unattended: relabelling is only ever
+    terminal → terminal. `proposed` and `below_threshold` stay as they were, because a
+    pass over bookkeeping must not manufacture a block that stops a candidate being
+    emitted when no such decision was ever made.
+    """
+    if is_terminal(prior):
+        return (UNVERIFIABLE_VERDICT,
+                f"recorded as {UNVERIFIABLE_VERDICT}, which is terminal like the verdict it "
+                "supersedes, so nothing that was blocked stops being blocked")
+    return (prior.get("verdict") or "",
+            "kept unchanged, because a repair may not mint a block a non-terminal verdict "
+            "never had")
+
+
+def repair_verdicts(store: str | Path | None = None, *, dry_run: bool = False,
+                    timeout: int = EVIDENCE_TIMEOUT_SECONDS,
+                    rewrites: list[tuple[str, str]] | None = None,
+                    dispose: bool = False,
+                    reanchors: dict[str, str] | None = None) -> dict[str, list[str]]:
+    """Append the corrections a moved root broke; report what only a re-derivation fixes.
+
+    Every appended row goes through `record_verdict`, which is append-only by
+    construction (#530) and refuses a command that observes nothing (#736 clause 2) — so
+    a repair cannot mint a fresh born-dead verdict behind `audit`'s back, and the row it
+    supersedes stays on disk byte for byte. `occurrences` is deliberately not passed:
+    `carried_forward_occurrences` keeps the prior count, which is what keeps the growth
+    reopen armed (#736 clause 1); passing `0` would disarm it.
+
+    `dispose=True` additionally records the keys whose measurement corpus is provably
+    gone, per `disposal_verdict`. It is opt-in because it relabels decisions however
+    conservatively; the default fixes bookkeeping and touches nothing else.
+    """
+    table = load_verdicts(store)
+    out: dict[str, list[str]] = {"repaired": [], "disposed": [], "reanchored": [],
+                                 "needs_rerecord": [], "unparseable": [], "refused": []}
+    for key in sorted(table):
+        row = table[key]
+        cls, new_cmd, detail = falsifier_repair(row, timeout=timeout, rewrites=rewrites)
+        if cls == RUNNABLE:
+            continue
+        if cls == ROOT_MOVED:
+            if dry_run:
+                out["repaired"].append(key)
+                continue
+            try:
+                record_verdict(store, pattern_key=key, verdict=row["verdict"],
+                               reason=row["reason"], evidence_cmd=new_cmd,
+                               occurrences=None, decided_by=REPAIR_DECIDED_BY,
+                               source_candidate=row.get("source_candidate") or "")
+                out["repaired"].append(key)
+            except ValueError as exc:
+                out["refused"].append(f"{key} :: {exc}")
+            continue
+        if cls == UNPARSEABLE:
+            out["unparseable"].append(key)
+            continue
+        # Which shape it is decides who can fix it. A nested root or a quoted glob is a
+        # dead path sitting where a substitution cannot reach but an *authored* command
+        # can, so those are the shapes `reanchors` is for; a dated corpus is nobody's to
+        # author around, since the input retention deleted is gone from every tree.
+        shape = rerecord_shape(detail, rewrites=rewrites)
+        authored = (reanchors or {}).get(key, "").strip()
+        if authored:
+            try:
+                reanchor_verdict(store, pattern_key=key, evidence_cmd=authored,
+                                 timeout=timeout, dry_run=dry_run)
+                out["reanchored"].append(key)
+            except ValueError as exc:
+                out["refused"].append(f"{key} :: {exc}")
+            continue
+        pinned = disposable_input(detail)
+        if not dispose or not pinned:
+            out["needs_rerecord"].append(f"{key} [{shape}]")
+            continue
+        verdict, kept = disposal_verdict(row)
+        out["disposed"].append(key)
+        if dry_run:
+            continue
+        record_verdict(store, pattern_key=key, verdict=verdict,
+                       reason=(f"{row['reason']} "
+                               f"{DISPOSAL_NOTE.format(input=pinned, kept=kept)}"),
+                       evidence_cmd=TOMBSTONE_TEMPLATE.format(input=pinned),
+                       occurrences=None, decided_by=DISPOSE_DECIDED_BY,
+                       source_candidate=row.get("source_candidate") or "")
+    return out
+
+
 def scan_candidates(candidates_dir: Path, store: Path | str | None = None, *,
                     table: dict[str, dict] | None = None) -> list[dict]:
     """One row per candidate file: its key, whether a verdict blocks it, and why.
@@ -903,6 +1212,110 @@ def cmd_audit(args: argparse.Namespace) -> int:
     return 1 if dead else 0
 
 
+def _read_reanchors(path: str | None) -> dict[str, str]:
+    """Parse the `--reanchor-file` map: a JSON object of pattern_key -> command.
+
+    A file rather than a flag because these commands are the long ones — a grep over an
+    installed `SKILL.md` with several counts quoted, which no shell line carries
+    readably. Blank values are dropped: an author who leaves a key's value empty meant to
+    get to it, and appending an empty command is what `record_verdict` refuses.
+    """
+    if not path:
+        return {}
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError("--reanchor-file must hold a JSON object of key -> command")
+    return {str(k): str(v) for k, v in raw.items() if str(v).strip()}
+
+
+def cmd_reanchor(args: argparse.Namespace) -> int:
+    """Append one hand-authored falsifier, keeping that key's decision.
+
+    The single-key lane for the shapes `repair` cannot substitute: the dead path inside a
+    mirrored script, a glob inside quotes, or a field that holds prose. Same guard as the
+    pass — `reanchor_verdict` runs the command through `evidence_cmd_status` first and
+    refuses it if the classifier calls it dead — so the answer to "did you re-anchor this
+    against something that exists?" is the exit code, not a claim.
+    """
+    try:
+        row = reanchor_verdict(args.store, pattern_key=args.pattern,
+                               evidence_cmd=args.evidence_cmd, timeout=args.timeout,
+                               dry_run=args.dry_run)
+    except ValueError as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        return 2
+    tail = (f"observed: {row.get('evidence_observed') or 'nothing'}" if not args.dry_run
+            else "nothing written")
+    print(f"{'would re-anchor' if args.dry_run else 're-anchored'} {row['pattern_key']}"
+          f" -> {row.get('verdict')} (decision kept, occurrences "
+          f"{row.get('occurrences_at_decision')}) {tail}")
+    return 0
+
+
+def cmd_repair(args: argparse.Namespace) -> int:
+    """Append the corrections a moved data root broke, and name what it cannot fix.
+
+    `audit` gives one number; the repair needs three, because a dead falsifier has
+    three causes and only one of them is a substitution. Measured on the live ledger
+    2026-09-27, of the 79 keys `audit` reported: 46 name only the moved root and are
+    correctable here; 30 name a *dated* input retention has since pruned, so no rewrite
+    reaches a corpus that no longer exists anywhere on the box — 46 rather than the 31 in
+    #1588's proving heredoc, because 15 of those were the same dead root inside the
+    mirrored falsifier scripts, where a two-way substitution on the stored command
+    cannot reach it and the fix was one `sed` over the script instead; 3 carry prose in
+    the field, written before `record` refused one.
+
+    So this subcommand does the first class mechanically, appends the second through
+    `--reanchor-file` where a person has written the command, and refuses to guess at the
+    rest. It never edits a line: each correction is a fresh append through
+    `record_verdict`, which also refuses a command that observes nothing, so a repair
+    cannot hand tomorrow's `audit` a fresh born-dead row (#1586's write-time half). What
+    it reports as `NEEDS_RERECORD` is the honest remainder, each key tagged with the shape
+    that decides who can fix it: `[nested_root]` and `[quoted_glob]` are a `sed` or a
+    re-quote away, `[dated_corpus]` is retention's doing and only a re-derivation against
+    an artifact that survives, or a disposal, answers it.
+
+    Output shape is the contract, like `audit`'s: one finding line per key, then the
+    tally as the LAST line, and exit 1 while any key is still outstanding — so a nightly
+    that runs this cannot print a clean night over a ledger it did not finish. Under
+    `--dry_run` the keys it *would* have written count as outstanding too: rehearsal zero
+    has to mean "this pass would change nothing", or a preview and the real thing report
+    the same success and only one of them is evidence.
+    """
+    store = store_path(args.store)
+    rewrites = [tuple(r) for r in args.rewrite] if args.rewrite else None
+    tally = repair_verdicts(store, dry_run=args.dry_run, timeout=args.timeout,
+                            rewrites=rewrites, dispose=args.dispose_unverifiable,
+                            reanchors=_read_reanchors(args.reanchor_file))
+    for key in tally["repaired"]:
+        print(f"REPAIRED {key}" + (" (dry-run)" if args.dry_run else ""))
+    for key in tally["reanchored"]:
+        print(f"REANCHORED {key}" + (" (dry-run)" if args.dry_run else ""))
+    for key in tally["disposed"]:
+        print(f"DISPOSED {key}" + (" (dry-run)" if args.dry_run else ""))
+    for key in tally["needs_rerecord"]:
+        print(f"NEEDS_RERECORD {key}")
+    for key in tally["unparseable"]:
+        print(f"UNPARSEABLE {key}")
+    for line in tally["refused"]:
+        print(f"REFUSED {line}")
+    # Under `--dry-run` nothing was appended, so every key the pass would have written is
+    # still outstanding — the same thing `audit` measures by. A caller that checks `$?`
+    # has to be reading the ledger's state, not the rehearsal's politeness, or a dry run
+    # over a ledger with a full ledger of keys to fix reports the same green as a
+    # finished one.
+    outstanding = (len(tally["needs_rerecord"]) + len(tally["unparseable"])
+                   + len(tally["refused"])
+                   + (len(tally["repaired"]) + len(tally["reanchored"])
+                      + len(tally["disposed"]) if args.dry_run else 0))
+    print(f"repaired: {len(tally['repaired'])}  reanchored: {len(tally['reanchored'])}  "
+          f"disposed: {len(tally['disposed'])}  "
+          f"needs_rerecord: {len(tally['needs_rerecord'])}  "
+          f"unparseable: {len(tally['unparseable'])}  refused: {len(tally['refused'])}  "
+          f"keys: {len(load_verdicts(store))}")
+    return 1 if outstanding else 0
+
+
 def cmd_record(args: argparse.Namespace) -> int:
     try:
         row = record_verdict(
@@ -1039,6 +1452,44 @@ def main(argv: list[str] | None = None) -> int:
                          help=f"seconds per command before it counts as UNRUNNABLE "
                               f"(default {EVIDENCE_TIMEOUT_SECONDS})")
     p_audit.set_defaults(func=cmd_audit)
+
+    # `audit` measures the damage a moved root did to stored falsifiers; `repair` fixes
+    # the one cause a substitution can reach and prints the rest as work.
+    p_repair = with_store(sub.add_parser(
+        "repair", help="append the ledger corrections the moved data root broke, and "
+                       "name the keys whose falsifier has to be re-derived"))
+    p_repair.add_argument("--timeout", type=int, default=EVIDENCE_TIMEOUT_SECONDS,
+                          help=f"seconds per command, same budget `audit` classifies "
+                               f"with (default {EVIDENCE_TIMEOUT_SECONDS})")
+    p_repair.add_argument("--dry-run", dest="dry_run", action="store_true",
+                          help="classify and report, append nothing")
+    p_repair.add_argument("--dispose-unverifiable", dest="dispose_unverifiable",
+                          action="store_true",
+                          help="also record a key whose measurement corpus is provably "
+                               "gone: terminal verdicts become "
+                               f"{UNVERIFIABLE_VERDICT} (still terminal, so nothing "
+                               "unblocks), non-terminal verdicts keep theirs. Off by "
+                               "default: it relabels decisions.")
+    p_repair.add_argument("--rewrite", action="append", nargs=2, metavar=("OLD", "NEW"),
+                          help="root spelling to substitute, repeatable; the default is "
+                               "the pair `dead_root_spellings()` derives from app.paths")
+    p_repair.add_argument("--reanchor-file", dest="reanchor_file", metavar="PATH",
+                          help="JSON object of pattern_key -> hand-authored falsifier, "
+                               "for the keys whose dead path sits inside a script or "
+                               "inside quotes; each is executed before it is appended")
+    p_repair.set_defaults(func=cmd_repair)
+
+    # The same guard as the pass, on one key, for the shapes the pass cannot substitute.
+    p_reanchor = with_store(sub.add_parser(
+        "reanchor", help="append a hand-authored falsifier for one key, keeping its "
+                         "decision — for a dead path inside a script or inside quotes"))
+    p_reanchor.add_argument("--pattern", required=True, help="pattern_key of the verdict")
+    p_reanchor.add_argument("--evidence-cmd", dest="evidence_cmd", required=True,
+                            help="the new check, executed verbatim before anything is written")
+    p_reanchor.add_argument("--timeout", type=int, default=EVIDENCE_TIMEOUT_SECONDS)
+    p_reanchor.add_argument("--dry-run", dest="dry_run", action="store_true",
+                            help="execute the command and report, append nothing")
+    p_reanchor.set_defaults(func=cmd_reanchor)
 
     args = parser.parse_args(argv)
     return args.func(args)

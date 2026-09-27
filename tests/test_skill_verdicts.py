@@ -2165,3 +2165,463 @@ def test_check_still_reports_its_slice_and_its_own_final_line(tmp_path):
     assert rc == 0, out
     assert out.splitlines()[-1] == "checked: 1  skipped_by_verdict: 1", out
     assert "EVIDENCE_CMD_UNRUNNABLE Bash/timeout" in out, out
+
+
+# ── #1588: the ledger repair pass over a moved data root ─────────────────────
+
+def moved_root(tmp_path):
+    """A dead in-tree `_pipeline` and the live sibling it moved to, as two tmp trees.
+
+    The live half holds one candidate a real `grep` can find, so a repaired check
+    *observes* something: `record` refuses a command that prints nothing (#736 clause 2),
+    which is exactly the #1586 hazard — a "repair" that lands a check whose only output
+    is its own error text is a fresh born-dead row, not a fix.
+    """
+    name = sv.PIPELINE_DIR.name
+    dead = tmp_path / "checkout" / name
+    live = tmp_path / "data" / name
+    found = live / "skills" / "candidates" / "candidate-x-20260927.md"
+    found.parent.mkdir(parents=True)
+    found.write_text("---\npattern: Bash/timeout\nstatus: reviewed_no_skill\n---\n",
+                     encoding="utf-8")
+    return str(dead), str(live)
+
+
+def root_move_row(store: Path, key: str, dead_root: str, stem: str,
+                  verdict: str = "reviewed_no_skill", occurrences: int = 4) -> dict:
+    """A stored verdict whose falsifier names the dead root for `stem`.
+
+    `stem` ends in a date: the shape that decides which of #1588's three buckets the
+    key lands in. A date retention still holds (20260927) is a key the substitution
+    saves; one it pruned (20260908) is a key no rewrite can reach, because the file is
+    missing from the old root *and* the new one.
+    """
+    return stored_row(store, key,
+                      f"grep -c '^status:' {dead_root}/skills/candidates/{stem}.md",
+                      verdict=verdict, reason="installed skill already owns this shape",
+                      occurrences=occurrences)
+
+
+def run_repair(store: Path, dead: str, live: str, *extra) -> tuple[int, str]:
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = sv.main(["repair", "--store", str(store), "--rewrite", dead, live, *extra])
+    return rc, buf.getvalue()
+
+
+def test_the_default_rewrites_point_at_the_live_data_root_not_the_code_tree():
+    """Clause 2's mechanism: what a correction is re-pointed *at*.
+
+    Both dead spellings the live ledger holds its commands in — the absolute one and the
+    tilde one — have to map onto the pipeline dir `app.paths` resolves today, and the old
+    one must not be inside the data root. Asserted structurally rather than as a literal home path: the same rule
+    `tests/test_no_runtime_paths_in_code.py` enforces is what forbids spelling the dead
+    root into this file's own source.
+
+    Containment is decided with `Path.is_relative_to`, not `str.startswith`, and that is
+    the whole point of the last line: the data root is a *sibling* whose name starts with
+    the code tree's own (`~/lloyd` and `~/lloyd-data`), so a string prefix reports the two
+    as nested when they are not, and the substitution would look like a no-op wherever the
+    two trees are not exactly `/home/<user>/lloyd`. Under the gate's round home — where
+    `app.paths` anchors to `<round>/home/lloyd` and the data root to
+    `<round>/home/lloyd-data` — a prefix test fails on a change that is correct.
+    """
+    pairs = dict(sv.dead_root_spellings())
+    assert len(pairs) == 2, pairs
+    assert all(new == str(sv.PIPELINE_DIR) for new in pairs.values()), pairs
+    dead = [old for old in pairs if Path(old).is_relative_to(sv.LIVE_CHECKOUT)]
+    assert len(dead) == 1, pairs
+    assert not sv.PIPELINE_DIR.is_relative_to(sv.LIVE_CHECKOUT), (
+        "app.paths no longer resolves the pipeline dir outside the code tree")
+
+
+def test_repair_repoints_a_falsifier_the_moved_root_left_behind(tmp_path):
+    """Clause 2: the root-substitution case, end to end through the CLI.
+
+    One `repair` run must append a row whose `evidence_cmd` names the live root, keep the
+    superseded row's `verdict` and `reason` byte-identical, leave that superseded row on
+    disk untouched (#530 append-only), and hand `audit` a ledger with nothing left to
+    report for the key.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    dead, live = moved_root(tmp_path)
+    root_move_row(store, "Bash/network", dead, "candidate-x-20260927")
+    before = store.read_text()
+
+    rc, out = run_repair(store, dead, live)
+
+    assert rc == 0, out
+    assert out.splitlines()[-1].startswith("repaired: 1  reanchored: 0  disposed: 0"), out
+    latest = sv.load_verdicts(store)["Bash/network"]
+    assert latest["evidence_cmd"] == (
+        f"grep -c '^status:' {live}/skills/candidates/candidate-x-20260927.md"), latest
+    assert latest["verdict"] == "reviewed_no_skill", latest
+    assert latest["reason"] == "installed skill already owns this shape", latest
+    assert latest["decided_by"] == sv.REPAIR_DECIDED_BY, latest
+    assert dead not in json.dumps(latest), "the repaired row still names the dead root"
+    # Append-only: the row it supersedes is still there, byte for byte.
+    lines = store.read_text().splitlines()
+    assert len(lines) == 2, lines
+    assert lines[0] + "\n" == before, "a repair edited the row it supersedes (#530)"
+
+    audit_rc, audit_out = run_audit(store)
+    assert audit_out.splitlines()[-1] == "keys: 1 unrunnable: 0", audit_out
+    assert audit_rc == 0, audit_out
+
+
+def test_repair_never_calls_a_command_repaired_because_of_its_exit_code(tmp_path):
+    """The trap #1588 names, pinned: a rewritten command is judged by the classifier.
+
+    Its first pass judged each rewritten command by `rc in (0,1)` and reported roughly
+    twice the number of repaired keys that the classifier agreed with. This fixture is one of the shapes
+    that lie that way: a `grep` of a file retention pruned, piped into `head`. The
+    substitution runs, the pipeline exits **0**, and the thing the check measures is
+    gone. So the node asserts the clean exit code first (the premise a naive pass would
+    believe), then that `falsifier_repair` classifies it `NEEDS_RERECORD` and appends
+    nothing — which is only true because the classifier reads stderr, not `$?`.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    dead, live = moved_root(tmp_path)
+    # Its own command, not the shared helper's: the trailing `| head` is the whole trap,
+    # since it is what hides grep's exit 2 behind a pipeline that exits 0.
+    row = stored_row(store, "Bash/network",
+                     f"grep -c '^status:' {dead}/skills/candidates/candidate-x-20260908.md"
+                     " | head",
+                     reason="installed skill already owns this shape", occurrences=4)
+    rewritten = row["evidence_cmd"].replace(dead, live)
+
+    naive = subprocess.run(["bash", "-c", rewritten], capture_output=True, text=True)
+    assert naive.returncode == 0, "fixture broke: this shape is only a trap if rc looks clean"
+
+    cls, new_cmd, detail = sv.falsifier_repair(row, rewrites=[(dead, live)])
+    assert cls == sv.NEEDS_RERECORD, (cls, new_cmd, detail)
+    assert new_cmd == "", "a key that needs re-recording must not be handed a command"
+    assert "No such file or directory" in detail, detail
+
+    rc, out = run_repair(store, dead, live)
+    assert rc == 1, out
+    assert out.splitlines()[-1].startswith("repaired: 0  reanchored: 0  disposed: 0  needs_rerecord: 1"), out
+    assert store.read_text().splitlines()[0] == json.dumps(row, ensure_ascii=False), (
+        "a key the rewrite does not save must be left exactly as it was")
+
+
+def test_a_repair_correction_carries_the_reopen_baseline_and_appends_over_the_old_row(tmp_path):
+    """Clause 2, third half: `occurrences_at_decision` travels, and a second run is a no-op.
+
+    The count at decision is the baseline the >10x growth reopen measures against
+    (#736 clause 1), and `carried_forward_occurrences` only runs when the caller passes
+    no count at all — so a repair that passed its own `0` would silently disarm that
+    reopen for the key while looking like a routine append. 12 is carried here; the
+    second run proves the pass is idempotent rather than an appending machine.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    dead, live = moved_root(tmp_path)
+    root_move_row(store, "Bash/network", dead, "candidate-x-20260927", occurrences=12)
+
+    rc, out = run_repair(store, dead, live)
+    assert rc == 0, out
+    assert sv.load_verdicts(store)["Bash/network"]["occurrences_at_decision"] == 12, out
+
+    rc2, out2 = run_repair(store, dead, live)
+    assert rc2 == 0, out2
+    assert out2.splitlines()[-1].startswith("repaired: 0  reanchored: 0"), out2
+    assert len(store.read_text().splitlines()) == 2, "the second run appended again"
+
+
+def test_repair_and_audit_answer_one_ledger_with_one_classifier(tmp_path):
+    """One ledger, three causes, the same numbers from both surfaces.
+
+    #1588's whole objection to the exit-code pass is that two tools would report two
+    numbers and one would be believed. Here `repair` classifies a moved root, a pruned
+    dated input and a field holding prose; its tally must account for all three keys, and
+    the keys it *refuses* to touch must be exactly what `audit` then calls UNRUNNABLE —
+    one classifier deciding both answers, or this fails.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    dead, live = moved_root(tmp_path)
+    root_move_row(store, "key/moved", dead, "candidate-x-20260927")
+    root_move_row(store, "key/pruned", dead, "candidate-x-20260908")
+    stored_row(store, "key/prose", 'echo "unbalanced', reason="a sentence, not a command")
+
+    rc, out = run_repair(store, dead, live)
+
+    assert rc == 1, out
+    assert out.splitlines()[-1] == ("repaired: 1  reanchored: 0  disposed: 0  "
+                                    "needs_rerecord: 1  unparseable: 1  refused: 0  "
+                                    "keys: 3"), out
+    assert "NEEDS_RERECORD key/pruned" in out, out
+    assert "UNPARSEABLE key/prose" in out, out
+
+    audit_rc, audit_out = run_audit(store)
+    reported = {ln.split(" :: ")[0].removeprefix("UNRUNNABLE ")
+                for ln in audit_out.splitlines() if ln.startswith("UNRUNNABLE ")}
+    assert reported == {"key/pruned", "key/prose"}, audit_out
+    assert audit_out.splitlines()[-1] == "keys: 3 unrunnable: 2", audit_out
+    assert audit_rc == 1, audit_out
+
+
+def test_a_disposal_relabels_a_terminal_verdict_without_unblocking_anything(tmp_path):
+    """Clause 4: the honest record for a verdict whose corpus retention deleted.
+
+    `rejected_unverifiable` is the disposal #1588 offers, and the reason it is safe for a
+    machine to make it is that the word is *terminal*, like the one it supersedes: the
+    ledger stops claiming grounds it cannot re-run, and the same candidate stays blocked.
+    Asserted across that boundary with the miner's own lookup, `terminal_verdict` — a
+    verdict that stops binding is the release nobody authorised. The appended check is a
+    count of the pruned corpus, so the disposal is falsifiable (a restore makes it
+    nonzero) rather than an assertion, and it exits 0, which is what takes the key out of
+    `audit`'s dead set honestly instead of by rewriting a path.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    dead, live = moved_root(tmp_path)
+    root_move_row(store, "seq-2-x-y", dead, "candidate-x-20260908", occurrences=5)
+    assert sv.terminal_verdict("seq-2-x-y", store=store) is not None, "fixture: not blocking"
+
+    rc, out = run_repair(store, dead, live, "--dispose-unverifiable")
+
+    assert rc == 0, out
+    assert out.splitlines()[-1].startswith("repaired: 0  reanchored: 0  disposed: 1"), out
+    latest = sv.load_verdicts(store)["seq-2-x-y"]
+    assert latest["verdict"] == sv.UNVERIFIABLE_VERDICT, latest
+    assert sv.is_terminal(latest), "a disposal must not unblock a blocked pattern"
+    assert sv.terminal_verdict("seq-2-x-y", store=store) is not None, (
+        "the candidate stopped being blocked: a disposal released a verdict")
+    assert "installed skill already owns this shape" in latest["reason"], latest
+    assert latest["decided_by"] == sv.DISPOSE_DECIDED_BY, latest
+    assert latest["occurrences_at_decision"] == 5, latest
+
+    ran = subprocess.run(["bash", "-c", latest["evidence_cmd"]],
+                         capture_output=True, text=True)
+    assert ran.returncode == 0, ran.stderr
+    assert "dated_corpus_files=0" in ran.stdout, ran.stdout
+    assert "No such file or directory" not in ran.stderr, ran.stderr
+    assert sv.evidence_cmd_status(latest)[0] != sv.UNRUNNABLE, latest
+
+    audit_rc, audit_out = run_audit(store)
+    assert audit_out.splitlines()[-1] == "keys: 1 unrunnable: 0", audit_out
+    assert audit_rc == 0, audit_out
+
+
+def test_a_disposal_never_mints_a_block_a_non_terminal_verdict_never_had(tmp_path):
+    """The other half of the terminality rule, and the only dangerous direction.
+
+    `proposed` and `below_threshold` do not block a candidate (#736's reopen rules,
+    `test_non_terminal_verdict_does_not_block`). If a repair pass over bookkeeping
+    relabelled one to `rejected_unverifiable`, it would author a rejection that was never
+    decided — a skill candidate silently suppressed every night with no diff anywhere. So
+    the verdict stays, the key is disposed only in the sense of being re-checked, and
+    `terminal_verdict` must go on answering None for it before and after.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    dead, live = moved_root(tmp_path)
+    root_move_row(store, "seq-3-a-b-c", dead, "candidate-x-20260908", verdict="proposed")
+
+    assert sv.terminal_verdict("seq-3-a-b-c", store=store) is None
+    verdict, kept = sv.disposal_verdict({"verdict": "proposed"})
+    assert verdict == "proposed", kept
+    assert not sv.is_terminal({"verdict": verdict}), kept
+
+    rc, out = run_repair(store, dead, live, "--dispose-unverifiable")
+    assert rc == 0, out
+    latest = sv.load_verdicts(store)["seq-3-a-b-c"]
+    assert latest["verdict"] == "proposed", latest
+    assert sv.terminal_verdict("seq-3-a-b-c", store=store) is None, (
+        "the repair minted a block the ledger never held")
+
+
+def test_dry_run_reports_the_repairs_it_does_not_append(tmp_path):
+    """`--dry-run` promises "append nothing", for both classes, and means it.
+
+    Caught on the live ledger while running the very pass this subcommand exists for: the
+    first draft honoured `dry_run` only on the disposal branch, so a rehearsal of the
+    machine repair appended its 46 correction rows and reported them as if nothing had
+    been written — a preview of a runtime-data write that performed it. A rehearsal that
+    writes is worse than no flag, because the next invocation of the same command is then
+    a second pass over data that was already changed. So the file is asserted byte for
+    byte unchanged across a dry run that still reports one repair and one disposal.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    dead, live = moved_root(tmp_path)
+    root_move_row(store, "key/moved", dead, "candidate-x-20260927")
+    root_move_row(store, "key/pruned", dead, "candidate-x-20260908")
+    before = store.read_bytes()
+
+    rc, out = run_repair(store, dead, live, "--dry-run", "--dispose-unverifiable")
+
+    assert rc == 1, out
+    assert out.splitlines()[-1].startswith("repaired: 1  reanchored: 0  disposed: 1"), out
+    assert "(dry-run)" in out, out
+    assert store.read_bytes() == before, "a dry run wrote to the ledger"
+
+    rc2, out2 = run_repair(store, dead, live, "--dispose-unverifiable")
+    assert rc2 == 0, out2
+    assert out2.splitlines()[-1].startswith("repaired: 1  reanchored: 0  disposed: 1"), out2
+    assert len(store.read_text().splitlines()) == 4, "the real run did not follow the rehearsal"
+
+
+# ── #1588 clause 3: the two shapes a substitution cannot reach ───────────────
+
+def nested_root_pair(tmp_path, key_stem: str = "candidate-x-20260927"):
+    """A command whose dead path lives one level down, in the script it invokes.
+
+    This is the shape the item's own heredoc could not repair and the reason 15 of its
+    45 turned out to be repairable after all: substituting both spellings *in the stored
+    command* succeeds, the script then runs, and the traceback it prints names the OLD
+    root — because that path is in the script's own source, where a rewrite of the
+    command cannot reach. The script is real and lives in the live tree, so the rewritten
+    command genuinely executes: only what it reports about is gone.
+    """
+    dead, live = moved_root(tmp_path)
+    tool_dir = Path(live) / "skills" / "tools"
+    tool_dir.mkdir(parents=True, exist_ok=True)
+    (tool_dir / "m.py").write_text(
+        "import sys\n"
+        f"try:\n    open({dead!r} + '/data/x.jsonl')\n"
+        "except OSError as exc:\n    print(f'{type(exc).__name__}: {exc}', file=sys.stderr)\n"
+        "sys.exit(1)\n", encoding="utf-8")
+    return dead, live
+
+
+def test_a_nested_root_falsifier_is_classified_as_the_shape_a_rewrite_cannot_reach(tmp_path):
+    """The nested-string shape, decided from what the rewritten command *prints*.
+
+    `falsifier_repair` must not call this repaired — the substitution ran, the script
+    ran, and the dead root came back in the detail. `rerecord_shape` then has to name it
+    `nested_root` rather than `dated_corpus`, because the two have different owners: one
+    is an edit to a script, the other is a corpus retention deleted. Both assertions are
+    about the classifier's judgement, not an exit code.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    dead, live = nested_root_pair(tmp_path)
+    row = stored_row(store, "ledger/evidence_cmd_syntax",
+                     f"python3 {dead}/skills/tools/m.py",
+                     reason="falsifier prints a missing input", occurrences=3)
+
+    cls, new_cmd, detail = sv.falsifier_repair(row, rewrites=[(dead, live)])
+    assert cls == sv.NEEDS_RERECORD, (cls, new_cmd, detail)
+    assert dead in detail, detail
+    assert sv.rerecord_shape(detail, rewrites=[(dead, live)]) == sv.NESTED_ROOT, detail
+
+
+def test_a_quoted_glob_is_classified_as_the_shape_no_shell_ever_expanded(tmp_path):
+    """The quoted-glob shape: a `*` inside quotes is a filename, not a wildcard.
+
+    Rewriting the root leaves the command grepping for a path with a literal asterisk in
+    it, so the detail still says the file is missing and still carries the `*` — which is
+    the tell. Named separately from `nested_root` because the edit is a re-quote, and
+    named separately from `dated_corpus` because re-quoting might yet find files. Here it
+    must not: the glob is offered over a directory that holds none of the dated inputs, so
+    `rerecord_shape` still says the corpus is what is missing, and a pass that re-quoted
+    it would be measuring nothing.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    dead, live = moved_root(tmp_path)
+    row = stored_row(store, "automod_vault_land/validation",
+                     f"grep -c x '{dead}/trajectories/2026-09-1*.jsonl' | head",
+                     reason="falsifier greps a quoted glob", occurrences=2)
+
+    cls, _new, detail = sv.falsifier_repair(row, rewrites=[(dead, live)])
+    assert cls == sv.NEEDS_RERECORD, (cls, detail)
+    assert "*" in detail, detail
+    assert sv.rerecord_shape(detail, rewrites=[(dead, live)]) == sv.QUOTED_GLOB, detail
+
+
+def test_the_pass_appends_an_authored_reanchor_and_keeps_the_decision(tmp_path):
+    """Clause 3's mechanism, shipped: a hand-authored falsifier reaches the ledger.
+
+    Through `repair --reanchor-file`, so the command that fixes a nested-root key is code
+    in this repo, not a script run outside it. The appended row must carry the superseded
+    verdict, reason and `occurrences_at_decision` unchanged, the re-anchor provenance
+    exactly, and a command the classifier accepts; and the pass's tally has to count it,
+    not leave it in `needs_rerecord`.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    dead, live = nested_root_pair(tmp_path)
+    root = stored_row(store, "ledger/evidence_cmd_syntax", f"python3 {dead}/skills/tools/m.py",
+                      verdict="reviewed_no_skill", reason="guard lives in the tool",
+                      occurrences=7)
+    authored = tmp_path / "reanchors.json"
+    authored.write_text(json.dumps(
+        {"ledger/evidence_cmd_syntax": f"grep -c . {live}/skills/tools/m.py"}),
+        encoding="utf-8")
+    before = store.read_text()
+
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = sv.main(["repair", "--store", str(store), "--rewrite", dead, live,
+                      "--reanchor-file", str(authored)])
+    out = buf.getvalue()
+
+    assert rc == 0, out
+    assert "REANCHORED ledger/evidence_cmd_syntax" in out, out
+    assert out.splitlines()[-1].startswith("repaired: 0  reanchored: 1"), out
+    latest = sv.load_verdicts(store)["ledger/evidence_cmd_syntax"]
+    assert latest["evidence_cmd"] == f"grep -c . {live}/skills/tools/m.py", latest
+    assert latest["verdict"] == root["verdict"] == "reviewed_no_skill", latest
+    assert latest["reason"] == root["reason"] == "guard lives in the tool", latest
+    assert latest["occurrences_at_decision"] == 7, latest
+    assert latest["decided_by"] == sv.REANCHOR_DECIDED_BY, latest
+    assert dead not in json.dumps(latest), latest
+    assert store.read_text().startswith(before), "the superseded row was edited (#530)"
+    assert sv.evidence_cmd_status(latest)[0] != sv.UNRUNNABLE, latest
+
+    audit_rc, audit_out = run_audit(store)
+    assert audit_out.splitlines()[-1] == "keys: 1 unrunnable: 0", audit_out
+    assert audit_rc == 0, audit_out
+
+
+def test_a_reanchor_refuses_a_command_that_is_itself_unrunnable(tmp_path):
+    """The #1586 hazard, closed at the point a human hand is involved.
+
+    `record_verdict` refuses only a command that prints *nothing*, so a probe whose sole
+    output is its own traceback would be accepted and would arrive in next night's
+    `audit` as fresh damage from this pass. `reanchor_verdict` therefore classifies the
+    authored command first and refuses it here — and the ledger is asserted unchanged,
+    because a refused re-anchor that still appended would be worse than no guard: the key
+    would look repaired while its check is dead on arrival.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    dead, live = moved_root(tmp_path)
+    root_move_row(store, "Bash/network", dead, "candidate-x-20260927")
+    before = store.read_text()
+
+    import contextlib
+    import io
+    buf = io.StringIO()
+    err = io.StringIO()
+    with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err):
+        rc = sv.main(["reanchor", "--store", str(store), "--pattern", "Bash/network",
+                      "--evidence-cmd", f"cat {dead}/skills/candidates/gone.md"])
+
+    assert rc == 2, (rc, buf.getvalue(), err.getvalue())
+    assert "unrunnable" in err.getvalue(), err.getvalue()
+    assert store.read_text() == before, "a refused re-anchor still wrote a row"
+
+
+def test_a_pinned_input_with_shell_metacharacters_is_reported_not_disposed(tmp_path):
+    """The disposal screen's refusal branch, which the green half cannot show.
+
+    A tombstone embeds the pruned path inside a command the pass authors itself, so a path
+    carrying a quote, a `$`, a backtick or a backslash would be spliced into a check that
+    then runs through `record_verdict`'s `run_evidence` — inside the only durable copy of
+    the ledger. The pass refuses rather than quotes, so the key comes back as work. The
+    fixture single-quotes the path so bash hands the `$` through literally, which is what
+    puts it in the detail the screen reads; the dead root stays in the path too, because
+    `falsifier_repair` takes no position on a command that never named it.
+    """
+    store = tmp_path / "verdicts.jsonl"
+    dead, live = moved_root(tmp_path)
+    stored_row(store, "Bash/network",
+               f"ls -1 '{dead}/skills/candidates/candidate-$pruned-20260908.md' | head",
+               reason="installed skill already owns this shape")
+
+    rc, out = run_repair(store, dead, live, "--dispose-unverifiable")
+
+    assert rc == 1, out
+    assert "NEEDS_RERECORD" in out, out
+    assert "DISPOSED" not in out, out
+    assert len(store.read_text().splitlines()) == 1, "a screened key was still written"
