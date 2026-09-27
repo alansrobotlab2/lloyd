@@ -1065,13 +1065,84 @@ def append_trajectories(trajectories: list[dict]) -> dict:
     return stats
 
 
-def rewrite_trajectories(trajectories: list[dict]) -> None:
-    """Write trajectories to date-bucketed output files (overwrite mode)."""
+class TrajectoryShrinkError(RuntimeError):
+    """A `--full` rewrite that would leave less mined history on disk than it is
+    about to delete. Raised by `rewrite_trajectories` before it touches a file.
+    """
+
+
+def corpus_inventory(dir_path: Path) -> tuple[int, set[str]]:
+    """How many rows and how many distinct dates the store on disk holds.
+
+    Dates are the `*.jsonl` day-files' own names, which is exactly the set
+    `rewrite_trajectories` is about to unlink, and rows are the lines that parse
+    as JSON — the way `print_stats` counts them — so a corrupt line already in a
+    bucket cannot inflate the on-disk count into refusing a healthy rewrite.
+    """
+    rows = 0
+    dates: set[str] = set()
+    for path in sorted(dir_path.glob("*.jsonl")):
+        dates.add(path.stem)
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                if not raw.strip():
+                    continue
+                try:
+                    json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                rows += 1
+    return rows, dates
+
+
+def rewrite_trajectories(trajectories: list[dict], allow_shrink: bool = False) -> None:
+    """Write trajectories to date-bucketed output files (overwrite mode).
+
+    OVERWRITE means delete-then-write over the whole store, so this is the one
+    path in the file that can destroy data it was never given: it unlinks every
+    `*.jsonl` day-file and then writes only the buckets in hand. That is what
+    `--full` calls it, and two supported invocations make its input set narrower
+    than the corpus on disk: `--agent worker` keeps only `autonomy_*.json`
+    filenames (`discover_sessions` filters on the stem), and a session the
+    retention sweep has gzipped is gone from its `*.json` glob for good. Both
+    would arrive here looking like a complete history. Neither is armed on this
+    machine as of 2026-09-27 — 0 `.json.gz` against 2246 `.json`, and 0
+    `autonomy_*.json`, so a real `--full` still re-derives every one of the 1570
+    rows — but the weekly sweep is `up_next` and gzips background sessions at 30
+    days, putting the first genuinely truncating run about two weeks out, and
+    #500/#509 both ask for a `--full` re-extract of history meanwhile.
+
+    The store is the durable mined history, not a cache: #57's
+    `conversation_relations.py` reads it to propose co-access pairs, and the
+    `live_vault` floors of `tests/test_conversation_relations.py` fail below 200
+    raw / 100 aggregate pairs. Measured 2026-09-27 it sat at 1317 raw / 111
+    aggregates on 1570 rows over 6 dates — eleven aggregates of margin, and
+    dropping the two newest day-files alone takes the probe to 509 / 53. A flag
+    must not be able to spend that by accident, so a rewrite that would leave
+    fewer dates or fewer rows than the files it is about to unlink is refused.
+    `allow_shrink` (CLI `--allow-shrink`) is the human's override.
+    """
     # Group by date
     by_date: dict[str, list[dict]] = {}
     for traj in trajectories:
         date_key = trajectory_date_key(traj)
         by_date.setdefault(date_key, []).append(traj)
+
+    # Refuse before any file is touched: a refusal that unlinked first would
+    # have destroyed the corpus it came to protect.
+    disk_rows, disk_dates = corpus_inventory(OUTPUT_DIR)
+    dropped = sorted(disk_dates - set(by_date))
+    if not allow_shrink and (dropped or len(trajectories) < disk_rows):
+        raise TrajectoryShrinkError(
+            f"refusing to rewrite {OUTPUT_DIR}: this run would leave "
+            f"{len(trajectories)} row(s) across {len(by_date)} date(s), but the store "
+            f"on disk holds {disk_rows} row(s) across {len(disk_dates)} date(s)"
+            + (f"; it would drop {len(dropped)} date(s): " + ", ".join(dropped)
+               if dropped else "")
+            + ". An unfiltered full re-extract over every un-gzipped session is the "
+              "run that legitimately rewrites history; if that is what this is, or you "
+              "mean the truncation, re-run with --allow-shrink."
+        )
 
     # Remove existing output files that will be rewritten
     existing = list(OUTPUT_DIR.glob("*.jsonl"))
@@ -1233,6 +1304,12 @@ def main() -> None:
         "--stats", action="store_true",
         help="Print summary statistics from existing trajectory files"
     )
+    parser.add_argument(
+        "--allow-shrink", action="store_true",
+        help="With --full: perform the rewrite even if it would leave fewer rows or "
+             "fewer day-files than the corpus on disk (which --full refuses to do by "
+             "default, because --agent and gzipped sessions narrow its input set)"
+    )
     args = parser.parse_args()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1290,7 +1367,14 @@ def main() -> None:
     # Write output
     if trajectories:
         if args.full:
-            rewrite_trajectories(trajectories)
+            try:
+                rewrite_trajectories(trajectories, allow_shrink=args.allow_shrink)
+            except TrajectoryShrinkError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                # Exit before the watermark is updated: a refused run that advanced
+                # it would make every later incremental run skip the sessions this
+                # refusal exists to keep available to a complete `--full`.
+                sys.exit(2)
         else:
             written = append_trajectories(trajectories)
             print(f"  Appended: {written['appended']}  "

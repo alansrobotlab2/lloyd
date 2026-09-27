@@ -5243,3 +5243,162 @@ def test_a_corpus_row_labelled_interactive_on_a_machine_platform_fails(
         test_no_live_corpus_row_is_interactive_on_a_machine_platform()
     assert "onto a machine-platform session" in str(caught.value), caught.value
     assert key in str(caught.value), caught.value
+
+
+# ── #1674: `--full` cannot shrink the mined history ───────────────────────────
+#
+# `rewrite_trajectories` deletes every `*.jsonl` day-file before writing the
+# buckets it was handed, and `--full` calls it with whatever `discover_sessions`
+# returned — a set that `--agent` narrows, and that the retention sweep narrows
+# for good by gzipping a session out of the `*.json` glob. The store is not a
+# cache: #57's `conversation_relations.py` mines co-access pairs out of it, and
+# `tests/test_conversation_relations.py` fails below 200 raw / 100 aggregate
+# pairs (measured 2026-09-27 on 1570 rows over 6 dates: 1317 raw / 111
+# aggregates — eleven aggregates of margin). So a truncating rewrite refuses.
+
+def cli_shrink_world(tmp_path):
+    """A data root where one `--full` run would truncate the corpus.
+
+    The sessions yield ONE row on 2026-09-04; the corpus on disk holds TWO rows on
+    2026-09-01. Both of `--full`'s real narrows look exactly like this from inside
+    the run — `--agent worker` selects a subset of filenames, and a gzipped
+    session is simply absent — so the run cannot tell a re-extract from a
+    truncation, which is why the comparison has to be against the disk.
+
+    Returns `(data_home, day_file, its bytes)`. `SESSIONS_DIR` and `OUTPUT_DIR`
+    both derive from the data root, so `LLOYD_DATA` is the one lever that points a
+    real process at this world.
+    """
+    data_home = tmp_path / "data"
+    sessions = data_home / "sessions"
+    sessions.mkdir(parents=True)
+    (sessions / "20260904_120000_cli1.json").write_text(json.dumps({
+        "session_id": "20260904_120000_cli1",
+        "session_start": "2026-09-04T18:00:00Z",          # 11:00 PDT, same local date
+        "messages": [{"role": "user", "content": "run it"}, *call_pair("ok", i=1)],
+    }), encoding="utf-8")
+    corpus = data_home / "_pipeline" / "trajectories"
+    corpus.mkdir(parents=True)
+    day_file = corpus / "2026-09-01.jsonl"
+    day_file.write_text("".join(json.dumps(traj(k, "2026-09-01T18:00:00Z")) + "\n"
+                                for k in ("gone-1", "gone-2")), encoding="utf-8")
+    return data_home, day_file, day_file.read_bytes()
+
+
+def run_extractor(data_home, extra_args=()):
+    """The real command line in a real process, over `cli_shrink_world`'s root."""
+    return subprocess.run([sys.executable, str(EXTRACTOR_PATH), *extra_args],
+                          capture_output=True, text=True, timeout=180,
+                          cwd=str(data_home.parent),
+                          env={**os.environ, "LLOYD_DATA": str(data_home)})
+
+
+def test_a_rewrite_that_drops_a_day_file_is_refused_and_touches_nothing(isolated_output):
+    """Clause 1: fewer distinct dates than the store holds raises, before any unlink.
+
+    The refusal has to precede the deletion — a guard that unlinked first would
+    have destroyed the history it came to protect, which is the bug itself.
+    """
+    et.append_trajectories([traj("old-a", "2026-09-03T18:00:00Z"),
+                            traj("old-b", "2026-09-04T18:00:00Z")])
+    before = {p.name: p.read_bytes() for p in sorted(isolated_output.glob("*.jsonl"))}
+    assert sorted(before) == ["2026-09-03.jsonl", "2026-09-04.jsonl"]
+
+    with pytest.raises(et.TrajectoryShrinkError) as caught:
+        et.rewrite_trajectories([traj("new", "2026-09-04T18:00:00Z")])
+    msg = str(caught.value)
+    assert "2026-09-03" in msg, msg                      # names the dropped date
+    assert "1 row(s)" in msg and "2 row(s)" in msg, msg  # both sides' row counts
+    assert ({p.name: p.read_bytes() for p in sorted(isolated_output.glob("*.jsonl"))}
+            == before), "a refusal must not touch a file"
+
+
+def test_a_rewrite_with_fewer_rows_on_the_same_dates_is_refused(isolated_output):
+    """Clause 2: the row count alone refuses, with no date being lost.
+
+    This is the `--agent main` shape — every date survives, rows quietly go.
+    """
+    et.append_trajectories([traj("s1", "2026-09-04T18:00:00Z"),
+                            traj("s2", "2026-09-04T19:00:00Z"),
+                            traj("s3", "2026-09-04T20:00:00Z")])
+    target = isolated_output / "2026-09-04.jsonl"
+    before = target.read_bytes()
+
+    with pytest.raises(et.TrajectoryShrinkError) as caught:
+        et.rewrite_trajectories([traj("s1", "2026-09-04T18:00:00Z")])
+    msg = str(caught.value)
+    assert "1 row(s)" in msg and "3 row(s)" in msg, msg
+    assert "would drop" not in msg, msg      # the row count refused it, not a date
+    assert target.read_bytes() == before
+
+
+def test_an_equal_size_replace_still_rewrites(isolated_output):
+    """Clause 3, half one: equal rows over equal dates is a re-parse, not a shrink.
+
+    `test_rewrite_mode_replaces_the_bucket` pins the same thing at one row; the
+    guard must key on strictly-fewer, or the flag stops working at size 2.
+    """
+    et.append_trajectories([traj("old-1", "2026-09-04T18:00:00Z"),
+                            traj("old-2", "2026-09-04T19:00:00Z")])
+    et.rewrite_trajectories([traj("new-1", "2026-09-04T18:00:00Z"),
+                             traj("new-2", "2026-09-04T19:00:00Z")])
+    keys = [json.loads(l)["session_key"]
+            for l in (isolated_output / "2026-09-04.jsonl").read_text().splitlines()]
+    assert keys == ["new-1", "new-2"]
+
+
+def test_a_larger_rewrite_over_more_dates_is_never_refused(isolated_output):
+    """Clause 3, half two: the honest `--full` must stay usable.
+
+    A re-extract over every un-gzipped session arrives with at least as many rows
+    and every date; refusing that would trade a latent hazard for a broken flag.
+    """
+    et.append_trajectories([traj("s1", "2026-09-04T18:00:00Z"),
+                            traj("s2", "2026-09-04T19:00:00Z")])
+    et.rewrite_trajectories([traj("s1", "2026-09-04T18:00:00Z"),
+                             traj("s2", "2026-09-04T19:00:00Z"),
+                             traj("s3", "2026-09-05T18:00:00Z"),
+                             traj("s4", "2026-09-05T19:00:00Z")])
+    assert sorted(p.name for p in isolated_output.glob("*.jsonl")) == [
+        "2026-09-04.jsonl", "2026-09-05.jsonl"]
+    assert len((isolated_output / "2026-09-05.jsonl").read_text().splitlines()) == 2
+
+
+def test_the_full_command_refuses_a_truncating_rewrite_in_a_real_process(tmp_path):
+    """The seam this fix exists for: the command line an operator or a skill types.
+
+    `--full` is invoked from the shell by #500/#509's re-extract and by anyone
+    following the skill text, so the refusal has to cross the process boundary as a
+    non-zero exit and a readable reason — a raise that became a traceback would
+    still exit non-zero, but `ERROR:` plus the counts is what a person reads and
+    what makes the exit status actionable.
+    """
+    data_home, day_file, before = cli_shrink_world(tmp_path)
+
+    proc = run_extractor(data_home, ["--full"])
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "ERROR:" in proc.stderr, proc.stderr
+    assert "2026-09-01" in proc.stderr, proc.stderr       # the dropped date, named
+    assert "1 row(s)" in proc.stderr and "2 row(s)" in proc.stderr, proc.stderr
+    assert "--allow-shrink" in proc.stderr, proc.stderr   # says how to proceed
+    assert day_file.read_bytes() == before, "the corpus is the one copy"
+    assert not (day_file.parent / "2026-09-04.jsonl").exists(), "touched no file"
+
+
+def test_the_shrink_override_is_listed_in_help_and_performs_the_rewrite(tmp_path):
+    """Clause 4: `--allow-shrink` does today's `--full`, and is discoverable.
+
+    Both halves matter: a flag nobody can find gets a truncation done by editing
+    the source instead, which is the one route a guard cannot audit.
+    """
+    help_proc = run_extractor(tmp_path / "nothing", ["--help"])
+    assert help_proc.returncode == 0, help_proc.stderr
+    assert "--allow-shrink" in help_proc.stdout, help_proc.stdout
+
+    data_home, day_file, _ = cli_shrink_world(tmp_path)
+    proc = run_extractor(data_home, ["--full", "--allow-shrink"])
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not day_file.exists(), "the override truncates, as --full always did"
+    written = day_file.parent / "2026-09-04.jsonl"
+    assert [json.loads(l)["session_key"] for l in
+            written.read_text().splitlines()] == ["20260904_120000_cli1"]
