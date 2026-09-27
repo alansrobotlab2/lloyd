@@ -1694,3 +1694,83 @@ def test_the_pre_classification_default_carries_no_hyphen(cr, vault, tmp_path, m
     written = json.loads(props.read_text())["proposals"]
     assert written, "Stage 1 should have proposed the pair"
     assert [p["type"] for p in written] == ["related_to"], written
+
+
+# ── #1664 clause 4: `--approve-strong` reads the store back ──────────────────
+
+def _approve_world(cr, tmp_path, monkeypatch, proposals):
+    """Point the approve run at a fixture proposals file and no relations index.
+
+    `RELATIONS_INDEX` is deduplicated against before anything is approved, and it
+    is read from the live pipeline directory; leaving it pointed there would let
+    whatever the real index happens to hold decide whether this run had a
+    proposal to land.
+    """
+    props = tmp_path / "proposals.json"
+    props.write_text(json.dumps({"watermark": {}, "stats": {},
+                                 "proposals": proposals}), encoding="utf-8")
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", props)
+    monkeypatch.setattr(cr, "RELATIONS_INDEX", tmp_path / "no-relations-index.json")
+    return props
+
+
+def test_approve_reports_the_store_conversation_edge_total_beside_the_landing_count(
+        store, cr, tmp_path, monkeypatch, capsys):
+    """Clause 4 of #1664: the report said what the run inserted, never what the
+    store holds, so a run that landed nothing printed the same line whether the
+    graph this job builds was sitting in the store or had been replaced.
+
+    `land_approved_edges` skips every proposal that already carries an `edge_id`,
+    which is every proposal once it has landed, so a lost edge cannot be
+    re-created by a later run. That is what makes the read-back the only signal
+    that can see the loss at all.
+    """
+    _approve_world(cr, tmp_path, monkeypatch,
+                   [_aged_proposal(cr, source="knowledge/a.md",
+                                      target="knowledge/b.md")])
+
+    cr.cmd_approve()
+    out = capsys.readouterr().out
+    assert "Edges landed in the store: 1" in out, out
+    assert "Conversation edges in the store: 1" in out, out
+
+    # The loss channel: a rebuild `swap` promotes the tree rebuilt before this
+    # row landed, and the row is not in it. The proposal now carries `edge_id`,
+    # so the next run has nothing to land and prints its usual zero.
+    store.conn.execute("DELETE FROM edges WHERE origin='conversation'")
+    store.conn.commit()
+    cr.cmd_approve()
+    lost = capsys.readouterr().out
+    assert "Edges landed in the store: 0" in lost, lost
+    assert "Conversation edges in the store: 0" in lost, lost
+
+    # And the same run on a store that still holds the row: an identical landing
+    # count, a different total. Without the second number these two runs are one
+    # report, which is how a destroyed set stayed invisible (#1584).
+    store.edges.add({"source": "knowledge/a.md", "target": "knowledge/b.md",
+                     "type": "related_to", "provenance": "INFERRED"},
+                    origin="conversation")
+    cr.cmd_approve()
+    quiet = capsys.readouterr().out
+    assert "Edges landed in the store: 0" in quiet, quiet
+    assert "Conversation edges in the store: 1" in quiet, quiet
+
+
+def test_approve_calls_the_store_unreadable_instead_of_zero_edges(
+        store, cr, tmp_path, monkeypatch, capsys):
+    """Clause 4's failure mode: printing `0` for a store this run could not open
+    would be exactly the healthy-looking empty report the read-back exists to
+    tell apart, so an unreachable store has to say it is unknown."""
+    import app.kg_store as kgs
+    _approve_world(cr, tmp_path, monkeypatch, [])
+
+    def unavailable():
+        raise kgs.StoreUnavailable("kg.sqlite is not provisioned")
+
+    monkeypatch.setattr(kgs, "store", unavailable)
+    assert cr.count_store_conversation_edges() is None
+
+    cr.cmd_approve()
+    out = capsys.readouterr().out
+    assert "Conversation edges in the store: UNKNOWN" in out, out
+    assert "Conversation edges in the store: 0" not in out, out

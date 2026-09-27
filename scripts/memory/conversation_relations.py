@@ -977,6 +977,37 @@ def land_approved_edges(proposals: list[dict]) -> int:
     return landed
 
 
+def count_store_conversation_edges():
+    """Read back how many ``origin='conversation'`` rows the store actually holds.
+
+    ``landed`` is this run's insert counter, so a run that lands nothing prints
+    ``Edges landed in the store: 0`` whether the graph this job built over weeks is
+    sitting in the store or vanished from it overnight — a rebuild `swap` renames
+    the live store to quarantine, and a proposal that already carries an `edge_id`
+    is skipped forever by `land_approved_edges`, so the next run cannot re-create
+    the rows. The job's own report surface reads `Auto-approved: 0` beside `Edges
+    landed in the store: 0` as a quiet night, which is how a landing path that
+    produced no graph stayed invisible for a month (#1584, #1664). This count is
+    what separates the two: a total that drops between runs is the loss, visible in
+    the run after it instead of never.
+
+    Counted over every row carrying that origin, expired ones included, exactly as
+    the report line names it — so a legitimate expiry reads as a drop here too, and
+    the number stays a tripwire for a human rather than a verdict.
+
+    Returns ``None`` when the store is unreachable: "cannot tell" and "zero" are
+    different statements, and printing 0 for an absent store would manufacture the
+    very healthy-looking empty report this exists to disambiguate.
+    """
+    from app.kg_store import StoreUnavailable, store
+    try:
+        st = store()
+    except StoreUnavailable:
+        return None
+    return int(st._query(
+        "SELECT count(*) AS n FROM edges WHERE origin='conversation'")[0]["n"])
+
+
 # ── CLI Commands ─────────────────────────────────────────────────────────────
 
 def cmd_incremental():
@@ -1261,6 +1292,17 @@ def cmd_approve():
     save_proposals(data)
     print(f"Auto-approved: {count}")
     print(f"Edges landed in the store: {landed}")
+    # Read back the store rather than restating the counter above. `landed` is
+    # this run's insert count and is 0 on any run with nothing new to land, which
+    # is the same line a run prints after the store it lands into was replaced —
+    # the report was the reason the pre-2026-09-04 no-op looked healthy (#1584).
+    # Two zeroes that mean different things; this is the second measurement that
+    # tells them apart (#1664).
+    in_store = count_store_conversation_edges()
+    if in_store is None:
+        print("Conversation edges in the store: UNKNOWN (store unavailable)")
+    else:
+        print(f"Conversation edges in the store: {in_store}")
     # This is the run that creates the dead end, so this is where its size has
     # to appear: #51 reports what this command printed. (`--stats` carries the
     # same line; both come out of `format_acceptance_band`.)

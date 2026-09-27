@@ -46,7 +46,7 @@ sys.path.insert(0, str(HERE))
 from app.paths import (  # noqa: E402
     EVAL_BASELINES_DIR, PIPELINE_DIR, VAULT_DERIVED_ROOT, VAULT_FACTS_ROOT, VAULT_KG_DB,
 )
-from app.kg_store import CARRY_EDGE_ORIGINS, KGStore  # noqa: E402
+from app.kg_store import CARRY_EDGE_ORIGINS, KGStore, canonical_edge_type  # noqa: E402
 from _invocation import invocation_ledger  # noqa: E402
 # The extractor writes this index (as a subprocess, with LLOYD_CONTENT_HASHES
 # pointed here) and this module reads it, so the rule for what one of its entries
@@ -240,6 +240,24 @@ def _junk_named(facts: list) -> int:
     from app.entity_naming import looks_like_junk_entity
     return sum(1 for f in facts
                if looks_like_junk_entity(f.get("entity", ""), f.get("source_doc")))
+
+
+def _carryover_edge_present(st, edge: dict) -> bool:
+    """Whether a carried-over edge is an ACTIVE row in the target store.
+
+    Matched on (source, target, type) with the type folded through
+    `canonical_edge_type`, because that triple is what the store's unique active
+    index keys on (`app/kg_store.py:133`) and what `edges.add` itself looks up
+    before inserting (`:709`). Matching the exported spelling would report a
+    carried `related-to` edge as missing while its row sits right there as
+    `related_to` — #1161's fragmentation re-imported as a gate that cannot pass.
+    """
+    src = (edge.get("source") or "").strip()
+    tgt = (edge.get("target") or "").strip()
+    typ = canonical_edge_type(edge.get("type") or "")
+    if not src or not tgt or not typ:
+        return False
+    return st.edges.find_active(src, tgt, typ) is not None
 
 
 def _corpus_size() -> int:
@@ -509,8 +527,9 @@ def cmd_import_worker(args) -> int:
 
     st = configure(VAULT_KG_DB)
     stats = {"facts": 0, "already_present": 0, "rejected_junk": 0, "dropped": 0,
-             "aliases": 0, "edges": 0, "experiments": 0}
+             "aliases": 0, "edges": 0, "edges_dropped": 0, "experiments": 0}
     dropped: list = []
+    dropped_edges: list = []
 
     # Facts go back through fact_add so they get the new ID scheme and land in
     # the new tree's files, rather than being copied in as raw markdown.
@@ -565,13 +584,27 @@ def cmd_import_worker(args) -> int:
             st.aliases.set(a["surface"], a["canonical"], kind=a["kind"],
                            origin=a["origin"], report_path=a.get("report_path"))
             stats["aliases"] += 1
+        # An edge that matched an existing active row is LANDED: `edges.add`
+        # returns that row's id (`app/kg_store.py:709-711`), which is what makes
+        # a re-run of `import` idempotent here the way it is on facts. A
+        # `ValueError` is the opposite: `add` raises it only for a missing
+        # endpoint/type (`app/kg_store.py:703`) or a self-loop (`:705`), so every
+        # one of them is a carried edge that is not in the tree we are about to
+        # promote — and it used to be swallowed by `except ValueError: pass`.
         for e in json.loads((carry / "edges.json").read_text()):
             payload = {k: v for k, v in e.items() if k not in ("id", "superseded_edge_id")}
             try:
                 st.edges.add(payload, origin=e.get("origin") or "migration")
                 stats["edges"] += 1
-            except ValueError:
-                pass
+            except ValueError as exc:
+                stats["edges_dropped"] += 1
+                dropped_edges.append({**e, "error": str(exc)})
+                # stderr, where the clause puts it and where the facts summary
+                # already goes: stdout carries the progress stream and the JSON
+                # the parent parses, so the one line naming which edge went
+                # missing belongs next to the refusal, not under the noise.
+                print(f"  DROPPED EDGE {e.get('source')} -> {e.get('target')} "
+                      f"[{e.get('type')}]: {str(exc)[:110]}", file=sys.stderr)
 
     review = carry / "review"
     if review.is_dir():
@@ -581,6 +614,13 @@ def cmd_import_worker(args) -> int:
 
     st.entities.backfill_kinds()
     print(f"carried over: {stats}")
+    # Facts and edges get the same treatment for the same reason: both are
+    # carry-over the extractor cannot reproduce, and a silent one is exactly as
+    # final as a loud one except that the gate then promotes the loss. Both
+    # reports are written before the exit, so an import that drops both kinds
+    # tells you about both in one run rather than making you discover them in
+    # series.
+    failed = False
     if dropped:
         report = carry / "dropped-facts.json"
         report.write_text(json.dumps(dropped, indent=2, default=str))
@@ -588,10 +628,18 @@ def cmd_import_worker(args) -> int:
               f"conversation and re-extraction cannot reproduce them.", file=sys.stderr)
         print(f"Written to {report}. Fix the cause and re-run `import`; it is "
               f"idempotent on facts already present.", file=sys.stderr)
-        print(json.dumps(stats))
-        return 4
+        failed = True
+    if dropped_edges:
+        ereport = carry / "dropped-edges.json"
+        ereport.write_text(json.dumps(dropped_edges, indent=2, default=str))
+        print(f"\n{len(dropped_edges)} carried-over edge(s) did not land. A stated "
+              f"edge is a claim someone made and re-extraction cannot reproduce it.",
+              file=sys.stderr)
+        print(f"Written to {ereport}. Fix the cause and re-run `import`; it is "
+              f"idempotent on edges already present.", file=sys.stderr)
+        failed = True
     print(json.dumps(stats))     # last line, parsed by the parent
-    return 0
+    return 4 if failed else 0
 
 
 # ── gate ─────────────────────────────────────────────────────────────────────
@@ -684,6 +732,21 @@ def cmd_gate(args) -> int:
         record("carryover_facts", have + _junk_named(want) >= len(want),
                f"{have}/{len(want)}", "all present",
                f"{junk} missing" if junk else "hand-stated facts re-added")
+
+    # 8b. Carried-over EDGES re-landed. `carryover_facts` had a counterpart for
+    #     facts and nothing at all for edges — `git grep carryover_edges` was
+    #     empty repo-wide — while `import` counted a raised `ValueError` and a
+    #     landed row identically. A rebuild whose import never ran, or whose edge
+    #     half was cut short, therefore passed the gate on an empty edge table
+    #     and `swap` promoted it (#1664). A carried edge with no active row in
+    #     the tree being promoted is the graph a human wrote, gone.
+    if (carry / "edges.json").is_file():
+        want_edges = json.loads((carry / "edges.json").read_text())
+        have_edges = sum(1 for e in want_edges if _carryover_edge_present(st, e))
+        missing = len(want_edges) - have_edges
+        record("carryover_edges", have_edges >= len(want_edges),
+               f"{have_edges}/{len(want_edges)}", "all present",
+               f"{missing} missing" if missing else "stated edges re-added")
     st.close()
 
     # 9. Retrieval, against the tree we are about to swap in. Under the rebuild
@@ -760,6 +823,45 @@ def _facts_written_since_export(state: dict) -> list[dict]:
         st.close()
 
 
+def _edges_written_since_export(state: dict) -> list[dict]:
+    """Carry-worthy edges added to the LIVE store after the carry-over export.
+
+    The edges counterpart of `_facts_written_since_export`, and the reason
+    `swap` needed two guards rather than one: the export carries an edge whose
+    provenance is in `CARRY_PROVENANCE` or whose origin is in
+    `CARRY_EDGE_ORIGINS`, but only the facts half of that set was checked before
+    the renames, so an edge landed during the rebuild went into the file
+    `cmd_swap` renames to `kg-quarantine-<ts>` and its `-wal`/`-shm` are unlinked
+    (:801-806) — destroyed, while every check above reported a clean run.
+
+    Nothing pauses that writer. `PAUSED_TASKS` is (24, 48, 74), and autonomy task
+    #51 (`conversation_relations.py --approve-strong`) is not among it; it lands
+    `origin="conversation"` rows through `app.kg_store` directly, which never
+    consults `knowledge_graph.write_enabled` — that gate sits in the MCP tool
+    (`agent_mcp/facts.py:971-973`), not the store.
+
+    No expiry filter, deliberately, because the facts guard has none either and
+    the question this answers is "what was written into the file about to be
+    quarantined", not "what would a fresh export carry". A row created and then
+    expired inside the window is still a row the swap destroys.
+    """
+    exported_at = (state.get("export") or {}).get("exported_at")
+    if not exported_at:
+        return []
+    st = KGStore(VAULT_KG_DB)
+    try:
+        prov = ",".join("?" * len(CARRY_PROVENANCE))
+        orig = ",".join("?" * len(CARRY_EDGE_ORIGINS))
+        rows = st._query(
+            f"SELECT id, source, target, type, created_at, provenance, origin "
+            f"FROM edges WHERE created_at > ? AND (provenance IN ({prov}) "
+            f"OR origin IN ({orig})) ORDER BY created_at",
+            (exported_at, *CARRY_PROVENANCE, *CARRY_EDGE_ORIGINS))
+        return [{k: r[k] for k in r.keys()} for r in rows]
+    finally:
+        st.close()
+
+
 def cmd_swap(args) -> int:
     """Two renames and a reindex. Refuses without a passing gate."""
     state = load_state()
@@ -772,17 +874,37 @@ def cmd_swap(args) -> int:
         return 2
 
     missed = _facts_written_since_export(state)
-    if missed and not args.force:
-        print(f"REFUSING: {len(missed)} hand-stated fact(s) were added to the live tree "
-              f"after the carry-over export at {(state.get('export') or {}).get('exported_at')}.",
-              file=sys.stderr)
-        for m in missed[:10]:
-            print(f"  {m['created_at']}  {m['entity']}/{m['category']}: {(m['fact'] or '')[:70]}",
+    missed_edges = _edges_written_since_export(state)
+    if (missed or missed_edges) and not args.force:
+        exported_at = (state.get("export") or {}).get("exported_at")
+        if missed:
+            print(f"REFUSING: {len(missed)} hand-stated fact(s) were added to the live tree "
+                  f"after the carry-over export at {exported_at}.",
                   file=sys.stderr)
-        if len(missed) > 10:
-            print(f"  … and {len(missed) - 10} more", file=sys.stderr)
-        print("\nRe-run `export` then `import`, and swap after that. Those facts came "
-              "from a conversation and re-extraction cannot reproduce them.", file=sys.stderr)
+            for m in missed[:10]:
+                print(f"  {m['created_at']}  {m['entity']}/{m['category']}: {(m['fact'] or '')[:70]}",
+                      file=sys.stderr)
+            if len(missed) > 10:
+                print(f"  … and {len(missed) - 10} more", file=sys.stderr)
+        if missed_edges:
+            # Named by both endpoints and the type, because that triple is the
+            # key the carried row is matched on — an id from the store being
+            # quarantined is worthless on the other side of the swap.
+            label = "edge" if len(missed_edges) == 1 else "edges"
+            print(f"REFUSING: {len(missed_edges)} carry-worthy {label} were added to the "
+                  f"live store after the carry-over export at {exported_at}.",
+                  file=sys.stderr)
+            for e in missed_edges[:10]:
+                print(f"  {e['created_at']}  {e['source']} -[{e['type']}]-> {e['target']} "
+                      f"(origin={e['origin']}, provenance={e['provenance']})",
+                      file=sys.stderr)
+            if len(missed_edges) > 10:
+                print(f"  … and {len(missed_edges) - 10} more", file=sys.stderr)
+        what = " and ".join(noun for noun, rows in
+                            (("facts", missed), ("edges", missed_edges)) if rows)
+        print(f"\nRe-run `export` then `import`, and swap after that. Those {what} came "
+              "from a conversation and re-extraction cannot reproduce them.",
+              file=sys.stderr)
         return 3
 
     ts = dt.datetime.now().strftime("%Y%m%dT%H%M%SZ")

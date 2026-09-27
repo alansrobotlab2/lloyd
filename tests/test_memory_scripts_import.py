@@ -210,7 +210,8 @@ def test_import_carries_facts_aliases_edges_and_experiments(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     stats = _json.loads(proc.stdout.strip().splitlines()[-1])
     assert stats == {"facts": 1, "already_present": 0, "rejected_junk": 0,
-                     "dropped": 0, "aliases": 1, "edges": 1, "experiments": 1}
+                     "dropped": 0, "aliases": 1, "edges": 1, "edges_dropped": 0,
+                     "experiments": 1}
 
     from app.kg_store import KGStore
     st = KGStore(tmp_path / "kg-rebuild.sqlite")
@@ -423,3 +424,216 @@ def test_import_is_idempotent(tmp_path):
         assert len(st.facts_idx.for_entity("Alan")) == 1
     finally:
         st.close()
+
+
+# ── #1664: carry-over EDGES, which had no guard, no report and no gate check ──
+#
+# The facts half of the carry-over was protected three ways and the edges half
+# not at all: `swap` checked only facts for staleness, `import` counted a raised
+# `ValueError` as a landed edge, and the gate had `carryover_facts` with no
+# `carryover_edges`. Every test below runs on temp stores. The live store held 0
+# `origin='conversation'` rows at triage (2026-09-27), so no live count can prove
+# or disprove any of this.
+
+def _carry_edge(source, target, type_, *, provenance="INFERRED", origin="conversation"):
+    return {"source": source, "target": target, "type": type_, "confidence": 1.0,
+            "provenance": provenance, "origin": origin}
+
+
+def test_swap_refuses_when_a_carry_worthy_edge_landed_after_the_export(tmp_path, monkeypatch, capfd):
+    """Clause 1 of #1664: the staleness guard at the swap looked only at facts.
+
+    An edge written into the live store after `export` was recorded is an edge
+    the export never carried, and `cmd_swap` renames that very file to
+    `kg-quarantine-<ts>` and unlinks its `-wal`/`-shm` (:801-806). Task #51 is
+    not in `PAUSED_TASKS` and writes through `app.kg_store` directly, so the
+    rebuild's own freeze never pauses it: a rebuild that spanned a night used to
+    destroy whatever that night landed, with every check reporting a clean run.
+    """
+    from app.kg_store import KGStore
+    m = _load(KG_REBUILD)
+    live, rebuild, live_db, rebuild_db = _swap_world(tmp_path, m, monkeypatch)
+    m.save_state(export={"exported_at": "2020-01-01T00:00:00+00:00"})
+    st = KGStore(live_db)
+    st.edges.add({"source": "Alan", "target": "Lloyd", "type": "uses",
+                  "provenance": "INFERRED"}, origin="conversation")
+    st.edges.add({"source": "Knowledge", "target": "Vault", "type": "mentions",
+                  "provenance": "STATED"}, origin="manual")
+    # Negative control inside the fixture: re-extraction CAN reproduce an
+    # extracted edge, so it is not carry-worthy and must not stop the swap — a
+    # guard that fired here would refuse every rebuild that spanned an extract.
+    st.edges.add({"source": "Doc", "target": "Entity", "type": "mentions",
+                  "provenance": "EXTRACTED"}, origin="extractor")
+    st.close()
+
+    missing = m._edges_written_since_export(m.load_state())
+    assert {(e["source"], e["target"], e["type"], e["origin"]) for e in missing} == {
+        ("Alan", "Lloyd", "uses", "conversation"),
+        ("Knowledge", "Vault", "mentions", "manual")}
+
+    assert m.cmd_swap(_Args()) == 3
+    err = capfd.readouterr().err
+    assert "Alan -[uses]-> Lloyd" in err, err
+    assert "Knowledge -[mentions]-> Vault" in err, err
+    assert (live / "Old").exists() and rebuild.exists(), "the refusal must move nothing"
+
+    # `--force` swaps anyway, exactly as it does for the facts guard: the operator
+    # who re-ran `export` and `import` must still be able to promote.
+    assert m.cmd_swap(_Args(force=True)) == 0
+    assert (live / "New").exists()
+    promoted = KGStore(live_db)
+    assert promoted.edges.find_active("Alan", "Lloyd", "uses") is None, (
+        "the forced swap was expected to lose the row it was warned about")
+    promoted.close()
+
+
+def test_import_fails_when_a_carried_edge_did_not_land(tmp_path):
+    """Clause 2 of #1664: `except ValueError: pass` swallowed every edge drop.
+
+    `edges.add` returns the existing id for a duplicate
+    (`app/kg_store.py:709-711`), so the swallowed `ValueError` was never the
+    idempotency path — it raises only on a missing endpoint/type (`:703`) or a
+    self-loop (`:705`). Each one is a carried edge that is absent from the tree
+    about to be promoted, and facts already get a report file, stderr and a
+    non-zero exit for exactly that case.
+    """
+    carry = _carryover(tmp_path, [], experiments=False, edges=[
+        _carry_edge("Alan", "Lloyd", "uses"),
+        _carry_edge("Solo", "Solo", "uses"),                    # self-loop
+        _carry_edge("Lloyd", "Vault", ""),                      # no type
+    ])
+    proc, _ = _run_import(tmp_path, carry)
+    assert proc.returncode == 4, proc.stdout + proc.stderr
+
+    stats = _json.loads(proc.stdout.strip().splitlines()[-1])
+    assert stats["edges"] == 1, "the one well-formed edge still had to land"
+    assert stats["edges_dropped"] == 2, stats
+
+    assert "DROPPED EDGE Solo -> Solo [uses]" in proc.stderr, proc.stderr
+    assert "carried-over edge(s) did not land" in proc.stderr, proc.stderr
+    report = carry / "dropped-edges.json"
+    assert report.is_file(), "the edge report sits beside dropped-facts.json"
+    dropped = _json.loads(report.read_text())
+    assert [d["source"] for d in dropped] == ["Solo", "Lloyd"], dropped
+    assert "self-loop" in dropped[0]["error"], dropped[0]
+    assert "source, target and type" in dropped[1]["error"], dropped[1]
+
+
+def test_a_carried_edge_that_matched_an_existing_row_counts_as_landed(tmp_path):
+    """Clause 2's other half: matching an active row is a landing, not a drop.
+
+    A rebuild is re-run more often than it is run once, so an edge the store
+    already holds has to be idempotent the way facts are — otherwise the exit
+    this round added would fail every second `import` on a store that is fine.
+    """
+    edges = [_carry_edge("Alan", "Lloyd", "uses", provenance="STATED",
+                         origin="fact_relate")]
+    carry = _carryover(tmp_path, [], experiments=False, edges=edges)
+
+    first, _ = _run_import(tmp_path, carry)
+    assert first.returncode == 0, first.stdout + first.stderr
+
+    second, out = _run_import(tmp_path, carry)
+    assert second.returncode == 0, second.stdout + second.stderr
+    stats = _json.loads(second.stdout.strip().splitlines()[-1])
+    assert stats["edges"] == 1 and stats["edges_dropped"] == 0, stats
+    assert not (carry / "dropped-edges.json").exists()
+
+
+def _gate_world(tmp_path, m, monkeypatch, *, store_edges, carried_edges):
+    """A rebuild tree and carry-over manifest with nothing wrong but the edges.
+
+    `_corpus_size` walks the real corpus and `_hashed_count` reads a
+    `_pipeline/` artifact, so both denominators are pinned: neither is what
+    these tests are about, and every other check is asserted to still pass so
+    the verdict cannot flip for an unrelated reason.
+    """
+    from app.kg_store import KGStore
+    derived = tmp_path / "vault-derived"
+    facts = derived / "facts-rebuild"
+    (facts / "Alan").mkdir(parents=True)
+    (facts / "Alan" / "Alan-state.md").write_text(
+        "---\ntype: facts\nentity: Alan\ncategory: state\nfacts:\n"
+        "- id: pref-001\n  fact: prefers terse reports\n  confidence: 0.95\n"
+        "  provenance: STATED\n  created_at: '2026-09-01T00:00:00+00:00'\n"
+        "  source_doc: knowledge/x.md\n---\n\n# Alan - state\n")
+    carry = tmp_path / "carryover"
+    carry.mkdir()
+    (carry / "facts.json").write_text("[]")
+    (carry / "aliases.json").write_text("[]")
+    (carry / "edges.json").write_text(_json.dumps(carried_edges))
+
+    monkeypatch.setattr(m, "REBUILD_FACTS", facts)
+    monkeypatch.setattr(m, "REBUILD_DB", derived / "kg-rebuild.sqlite")
+    monkeypatch.setattr(m, "VAULT_DERIVED_ROOT", derived)
+    monkeypatch.setattr(m, "STATE_PATH", derived / "rebuild-state.json")
+    monkeypatch.setattr(m, "RUN_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(m, "_corpus_size", lambda: 1)
+    monkeypatch.setattr(m, "_hashed_count", lambda: 1)
+
+    st = KGStore(derived / "kg-rebuild.sqlite")
+    st.entities.register("Alan")
+    st.entities.register("Lloyd")
+    for e in store_edges:
+        st.edges.add({"source": e["source"], "target": e["target"],
+                      "type": e["type"], "provenance": e["provenance"],
+                      "confidence": 1.0}, origin=e["origin"])
+    st.facts_idx.reindex(root=facts)
+    st.close()
+    m.save_state(carryover=str(carry), run_dir=str(tmp_path / "run"))
+    return tmp_path / "run" / "gate.json"
+
+
+def _gate_checks(m, gate_json) -> tuple:
+    rc = m.cmd_gate(_Args(min_provenance=100, skip_eval=True))
+    gate = _json.loads(gate_json.read_text())
+    return rc, gate["checks"]
+
+
+def test_the_gate_verifies_every_carried_edge_relanded(tmp_path, monkeypatch):
+    """Clause 3 of #1664: `carryover_facts` had no counterpart for edges.
+
+    `git grep carryover_edges` was empty repo-wide before this, and `edges.json`
+    was read in exactly one place (`import`), which did not report what it could
+    not write. A rebuild whose edge carry was cut short therefore passed the
+    gate and swapped, promoting a store with no stated edges in it.
+    """
+    m = _load(KG_REBUILD)
+    carried = [_carry_edge("Alan", "Lloyd", "uses"),
+               _carry_edge("Lloyd", "Alan", "related-to")]
+    # `edges.add` folds the type through `canonical_edge_type` on the way in
+    # (`app/kg_store.py:701`), so the carried `related-to` IS the `related_to`
+    # row. Matching the manifest's spelling would fail the gate on edges that
+    # landed correctly — #1161's fragmentation rebuilt as an unpassable check.
+    held = [_carry_edge("Alan", "Lloyd", "uses"),
+            _carry_edge("Lloyd", "Alan", "related_to")]
+    gate_json = _gate_world(tmp_path, m, monkeypatch, store_edges=held,
+                            carried_edges=carried)
+    rc, checks = _gate_checks(m, gate_json)
+    assert checks["carryover_edges"]["pass"] is True, checks
+    assert checks["carryover_edges"]["got"] == "2/2", checks
+    assert rc == 0, {k: v for k, v in checks.items() if not v["pass"]}
+
+
+def test_the_gate_fails_when_a_carried_edge_is_absent_from_the_rebuild_store(
+        tmp_path, monkeypatch):
+    """Clause 3's other half: a missing carried edge fails the gate itself.
+
+    The store holds one of the two manifest rows, which is what a partial import
+    leaves behind — and this asserts every OTHER check still passes, so the
+    refusal cannot be credited to something unrelated.
+    """
+    m = _load(KG_REBUILD)
+    carried = [_carry_edge("Alan", "Lloyd", "uses"),
+               _carry_edge("Lloyd", "Alan", "related-to")]
+    held = [_carry_edge("Alan", "Lloyd", "uses")]
+    gate_json = _gate_world(tmp_path, m, monkeypatch, store_edges=held,
+                            carried_edges=carried)
+    rc, checks = _gate_checks(m, gate_json)
+    assert checks["carryover_edges"]["pass"] is False, checks
+    assert checks["carryover_edges"]["got"] == "1/2", checks
+    assert checks["carryover_edges"]["note"] == "1 missing", checks
+    assert rc == 1, checks
+    assert all(v["pass"] for k, v in checks.items() if k != "carryover_edges"), (
+        "the gate must fail on the edge check alone: " +
+        str({k: v for k, v in checks.items() if not v["pass"]}))
