@@ -19,6 +19,28 @@ final answer:
   prefetch_rel  as `prefetch`, with the `<facts>` block ordered by query
                 relevance instead of confidence (#1482 rider 1); every other
                 byte of the block is the `prefetch` arm's
+  prefetch_rawspan
+                the `prefetch_rel` arm's facts, rendered as the source text they
+                were extracted from instead of the distilled fact line (#1556).
+                Selection is not a second lookup: the arm takes the relevance
+                arm's own records off one `_search_fact_records` call, so the
+                entities, their order and the count are the same by
+                construction, and only the rendering differs. Each fact's span
+                comes from its own `source_doc` under one windowing rule
+                (`rawspan_window`), and every facts block here — this arm's and
+                both distilled ones — is bounded by the one char budget
+                `FACTS_RENDER_CHAR_BUDGET`, because with selection held fixed
+                the equalised quantity has to be bytes and not facts. Facts
+                whose `source_doc` does not resolve, and facts whose windowing
+                rule finds no span, are counted and reported beside the arm's
+                scores (`prefetch_rawspan.counts`), never dropped quietly. What
+                the pair measures is representation, and neither reading is
+                wired anywhere in this file: raw above distilled says the
+                extractor is where the loss is, distilled at or above raw says
+                the abstraction is buying its keep. The paired number is the
+                bootstrap CI against `prefetch_rel`, and the retrieval half of
+                it costs no model call (`prefetch-retrieval --arms
+                prefetch_rel,prefetch_rawspan`)
   recall        the documents `vault_recall` returns for the question (top 10,
                 path + snippet), no history — the tool Lloyd calls to look
                 something up (#1485)
@@ -78,6 +100,14 @@ Usage (quality run: shared primary lock; the primary answers every question):
       --label sleep-notes-2026-09-26
     .venvs/lloyd/bin/python eval/run_memory_eval.py verify
     .venvs/lloyd/bin/python eval/run_memory_eval.py prefetch-retrieval   # no model: rider-1 retrieval A/B
+    # #1556: representation with retrieval held fixed — the same facts, distilled
+    # line vs their source text. Retrieval half, no model call:
+    .venvs/lloyd/bin/python eval/run_memory_eval.py prefetch-retrieval \
+      --arms prefetch_rel,prefetch_rawspan
+    # modelled half, the way sleep_notes was judged: a paired-bootstrap CI
+    flock -s ~/.local/state/lloyd-automod/primary.lock \\
+      .venvs/lloyd/bin/python eval/run_memory_eval.py run --arms prefetch_rel,prefetch_rawspan \\
+      --label rawspan-2026-09-27
     .venvs/lloyd/bin/python eval/run_memory_eval.py export-sessions --out DIR
     .venvs/lloyd/bin/python eval/run_memory_eval.py recall-retrieval [--out F]  # no model: #1485 A/B
 """
@@ -112,8 +142,34 @@ REQUIRED_FIELDS = ("id", "category", "prompt", "asked_on", "probe", "accept", "s
 #: One name, because the arm id appears in the arm list, the comparison pairs and
 #: the store redirect, and a copy that drifts would compare two different arms.
 SLEEP_NOTES_ARM = "sleep_notes"
-ARMS = ("closed_book", "history", "prefetch", "prefetch_rel", "recall",
-        "recall_episodic", SLEEP_NOTES_ARM)
+#: #1556: the representation arm. One name for the same reason: it is the arm
+#: list, both `--arms` validators, the comparison pair and the counts block.
+PREFETCH_RAWSPAN_ARM = "prefetch_rawspan"
+ARMS = ("closed_book", "history", "prefetch", "prefetch_rel", PREFETCH_RAWSPAN_ARM,
+        "recall", "recall_episodic", SLEEP_NOTES_ARM)
+#: The facts block's one char budget (#1556), applied to every arm that renders
+#: `<facts>` in this runner — `prefetch`, `prefetch_rel` and `prefetch_rawspan`.
+#:
+#: The production block is bounded by COUNT, not chars (`FACT_MAX_ENTITIES` ×
+#: `FACT_MAX_PER_ENTITY` facts, no ceiling on a line), so six distilled lines and
+#: six source spans are wildly different volumes of text. Held-fixed selection
+#: means the only thing the pair is allowed to vary is the rendering, so the
+#: thing that gets equalised has to be stated and equal: chars, this many, both
+#: arms. A span is cut to `budget // (FACT_MAX_ENTITIES × FACT_MAX_PER_ENTITY)`
+#: — derived from this number, not a second tuned one — and a block never exceeds
+#: it, which is the same cap on the distilled arm whether or not it binds there.
+FACTS_RENDER_CHAR_BUDGET = 1200
+#: The counts the rawspan arm reports, in this order, always all present —
+#: including the run where nothing renders and the one where everything
+#: resolves. A denominator of zero is still a denominator (#1209's rule).
+RAWSPAN_COUNT_KEYS = ("n_selected", "n_unresolved_source", "n_no_span",
+                      "n_budget_cut", "n_rendered")
+#: What the runner keeps per question off `blocks_fn`, so the artifact can say
+#: what each arm was actually shown. Read with `.get`: an injected block builder
+#: that returns fewer keys leaves them present-and-empty rather than making the
+#: artifact's shape depend on the injection.
+PREFETCH_META_KEYS = ("facts_conf", "facts_rel", "facts_rawspan", "prefetch_ms",
+                      "rawspan_counts")
 #: The `vault_recall` arms (#1485): the tool's documents for the question, with
 #: the episodic floor off / on. They need a qmd index whose `sessions`
 #: collection holds the set's sessions (`export-sessions`, then a prepared pin);
@@ -130,6 +186,21 @@ DEFAULT_CORPUS = Path(os.path.expanduser("~/lloyd-data/eval/1480/corpus"))
 Z_80 = 0.8416212335729143  # one-sided power 0.8
 RESERVE_RULE = ("only a run with --holdout reads the holdout leg; it reports aggregates, "
                 "never per-question rows or ids; no tuning comparison reads it")
+
+
+def parse_arms(spec: str) -> list[str]:
+    """Split and validate `--arms`, the one rule every command that takes it uses.
+
+    Both `run` and the no-model `prefetch-retrieval` command take the flag, and an
+    arm valid to one and refused by the other would make a comparison runnable in
+    the expensive half only — which is backwards for an arm whose retrieval
+    reading is meant to cost no model call.
+    """
+    arms = [a for a in spec.split(",") if a]
+    for a in arms:
+        if a not in ARMS:
+            raise SystemExit(f"unknown arm {a!r}")
+    return arms
 
 
 class SetLoadError(ValueError):
@@ -544,18 +615,236 @@ def splice_facts(rendered: str, question: str, fact_lines: list[str]) -> str:
     return body + "\n\n" + question + tail
 
 
+#: The pair #1556 is about: one selection, two renderings of it. Named once
+#: because it is the comparison the arm exists to make, and a pair written twice
+#: is a pair that can disagree with itself.
+RENDER_PAIR = ("prefetch_rel", PREFETCH_RAWSPAN_ARM)
+
+#: Words too common to locate a fact inside its own source document. This is the
+#: windowing rule's noise list, scoped to that job; it is not the retrieval
+#: stopword list and is not used anywhere else.
+_WINDOW_NOISE = frozenset("""
+a an the and or but of to in for on at by with from as is are was were be been being
+it its this that these those there here he she they them we you i not no so if then
+than what when where who which how why do does did doing have has had will would can
+could should must just also very more most other some such into over under about
+""".split())
+
+
+def _fact_terms(fact_text: str) -> list[str]:
+    """Content terms of a distilled fact, for finding it in its own source:
+    folded, word-bounded, three characters or more, noise dropped, deduped,
+    order kept."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for w in re.findall(r"\w+", fold(fact_text)):
+        if len(w) < 3 or w in _WINDOW_NOISE or w in seen:
+            continue
+        seen.add(w)
+        out.append(w)
+    return out
+
+
+def source_roots() -> list[Path]:
+    """Roots a fact's `source_doc` may be relative to, most specific first.
+
+    `source_doc` is stored vault-relative, but it was written by a pipeline that
+    has outlived tree moves, so the checkout and the data root are candidates
+    too. A root that cannot be resolved is not a candidate, and nothing
+    compensates for it: the facts it would have resolved are exactly what
+    `n_unresolved_source` counts, so a missing root shows up as a number beside
+    the arm's scores rather than as a silent shrinkage of the block.
+    """
+    roots: list[Path] = []
+    try:
+        from app.data_root import vault_root
+        roots.append(vault_root())
+    except Exception:  # noqa: BLE001 — no vault module, no vault root candidate
+        pass
+    roots.append(LLOYD_HOME)
+    try:
+        from app.paths import DATA_ROOT
+        roots.append(DATA_ROOT)
+    except Exception:  # noqa: BLE001 — unresolved data root: not a candidate
+        roots.append(Path.home() / "lloyd-data")
+    return roots
+
+
+def source_doc_path(source_doc: str, roots: list[Path] | None = None) -> Path | None:
+    """The file a fact's `source_doc` names, or None when nothing holds it.
+
+    Absolute paths and anything climbing with `..` come back unresolved rather
+    than opening a file: this arm reads the corpus the store names, not the disk
+    at large. `roots` is injectable so a test can plant a corpus; the default is
+    `source_roots()`.
+    """
+    doc = str(source_doc or "").strip()
+    if not doc or doc.startswith(("/", "\\")) or ".." in Path(doc).parts:
+        return None
+    for root in (roots if roots is not None else source_roots()):
+        try:
+            cand = Path(root) / doc
+            if cand.is_file():
+                return cand
+        except OSError:
+            continue
+    return None
+
+
+def rawspan_window(fact_text: str, source_text: str, window_chars: int) -> str:
+    """The source text to render for one fact, or "" when the rule finds none.
+
+    The one windowing rule, kept in a single place because it is a RENDERING
+    decision and a reader has to be able to tell it from retrieval: cut the
+    document at blank lines into blocks, score each block by how many of the
+    fact's own content terms appear in it as whole words, take the best-scoring
+    block (ties to the earliest), and return its first `window_chars` characters
+    with whitespace squeezed. "" when the budget leaves no room, the document
+    holds no text, or no block contains one single term.
+
+    What it is allowed to see is the fact and the document that fact was
+    extracted from — never the question. That is the whole reason the arm can
+    claim retrieval is held fixed: a rule that read the question would be a
+    second retriever standing inside the arm whose one retriever is under test.
+    """
+    text = str(source_text or "")
+    if window_chars <= 0 or not text.strip():
+        return ""
+    terms = _fact_terms(fact_text)
+    if not terms:
+        return ""
+    best_score, best_block = 0, ""
+    for block in re.split(r"\n\s*\n", text):
+        if not block.strip():
+            continue
+        folded = fold(block)
+        score = sum(1 for t in terms
+                    if re.search(rf"(?<!\w){re.escape(t)}(?!\w)", folded))
+        if score > best_score:
+            best_score, best_block = score, block
+            if score == len(terms):
+                break  # nothing later can beat it, only tie it, and ties go earliest
+    if best_score == 0:
+        return ""
+    return " ".join(best_block.split())[:window_chars]
+
+
+def apply_char_budget(lines: list[str],
+                      budget: int = FACTS_RENDER_CHAR_BUDGET) -> tuple[list[str], int]:
+    """Cap a facts block at `budget` chars: keep lines in order while the block
+    fits, stop at the first that does not, and report how many did not fit.
+
+    Stopping rather than skipping is deliberate — the block is ordered, and a
+    shorter later fact does not get to jump the earlier one it lost to. Every arm
+    in this runner that renders `<facts>` goes through here, the distilled ones
+    included, so the number is equal across the pair by construction: budget
+    equalised, selection equalised, rendering the only difference.
+    """
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        add = len(line) + (1 if kept else 0)
+        if used + add > budget:
+            return kept, len(lines) - len(kept)
+        kept.append(line)
+        used += add
+    return kept, 0
+
+
+def rawspan_window_chars(budget: int = FACTS_RENDER_CHAR_BUDGET) -> int:
+    """The per-fact slice: the one budget over the most facts production can
+    select (`FACT_MAX_ENTITIES × FACT_MAX_PER_ENTITY`). One place, because the
+    artifact reports this number and the arm renders with it — two copies is how
+    a reported window stops being the window that was used."""
+    from app import prefetch as pf
+    return budget // max(1, pf.FACT_MAX_ENTITIES * pf.FACT_MAX_PER_ENTITY)
+
+
+def render_rawspan_lines(records: list[dict], *, budget: int = FACTS_RENDER_CHAR_BUDGET,
+                         window_chars: int = 0,
+                         roots: list[Path] | None = None) -> tuple[list[str], dict]:
+    """The rawspan arm's facts lines for one selection, plus the counts behind them.
+
+    One line per selected record, in the arm's selection order, carrying the
+    source text (`rawspan_window`) in place of the distilled fact line and naming
+    the entity and the document the words came from. Then the same
+    `apply_char_budget` the distilled arms go through.
+
+    `window_chars` is the per-fact slice; 0 derives it as
+    `budget // (FACT_MAX_ENTITIES × FACT_MAX_PER_ENTITY)` — the one budget shared
+    across the most facts production can select, so no second tuned number
+    sneaks in.
+
+    Returns `(lines, counts)` with every key of `RAWSPAN_COUNT_KEYS` present
+    whatever happened, because "the arm rendered nothing" and "the arm rendered
+    nothing, and here is why" are different results — a fact dropped quietly
+    would make an empty block read as a retrieval failure rather than a
+    provenance gap.
+    """
+    if window_chars <= 0:
+        window_chars = rawspan_window_chars(budget)
+    counts: dict = dict.fromkeys(RAWSPAN_COUNT_KEYS, 0)
+    counts["n_selected"] = len(records)
+    lines: list[str] = []
+    for rec in records:
+        doc = str(rec.get("source_doc") or "").strip()
+        path = source_doc_path(doc, roots)
+        if path is None:
+            counts["n_unresolved_source"] += 1
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            counts["n_unresolved_source"] += 1
+            continue
+        span = rawspan_window(str(rec.get("fact") or ""), text, window_chars)
+        if not span:
+            counts["n_no_span"] += 1
+            continue
+        lines.append(f"- [{rec.get('entity', '')}] {span} (source: {doc})")
+    kept, cut = apply_char_budget(lines, budget)
+    counts["n_budget_cut"] = cut
+    counts["n_rendered"] = len(kept)
+    return kept, counts
+
+
 def prefetch_blocks(q: Question) -> dict:
-    """The two prefetch renderings for one question, off one prefetch call:
-    the confidence-ordered `<facts>` (today) and the relevance-ordered one."""
+    """The prefetch renderings for one question, off one selection each.
+
+    `prefetch` and `prefetch_rel` are the same facts in two orders — confidence
+    order (today's shipped behaviour) and query-relevance order (#1482 rider 1) —
+    with every other byte of the block shared. `prefetch_rawspan` is the
+    relevance arm's records rendered as the source text behind them (#1556), and
+    it takes them from the SAME `_search_fact_records` call that produced the
+    relevance lines: identical selection there is a property of this code path,
+    not a coincidence of two lookups agreeing. All three blocks go through one
+    char budget, so what the pair prices is representation at a fixed budget and
+    not volume.
+
+    Which rendering comes out ahead is decided by a run, not here: no branch,
+    default or comment in this function treats either direction as expected.
+    """
     from app import prefetch as pf
     t0 = time.monotonic()
     rendered = pf.prefetch_context(q.prompt)
     ms = (time.monotonic() - t0) * 1000
-    conf = pf._search_facts(q.prompt, rank="confidence")
-    rel = pf._search_facts(q.prompt, rank="relevance")
+    conf_records = pf._search_fact_records(q.prompt, rank="confidence")
+    rel_records = pf._search_fact_records(q.prompt, rank="relevance")
+    conf, conf_cut = apply_char_budget([r["line"] for r in conf_records], FACTS_RENDER_CHAR_BUDGET)
+    rel, rel_cut = apply_char_budget([r["line"] for r in rel_records], FACTS_RENDER_CHAR_BUDGET)
+    rawspan, rawspan_counts = render_rawspan_lines(
+        rel_records, budget=FACTS_RENDER_CHAR_BUDGET,
+        window_chars=rawspan_window_chars(FACTS_RENDER_CHAR_BUDGET))
     return {"prefetch": splice_facts(rendered, q.prompt, conf),
             "prefetch_rel": splice_facts(rendered, q.prompt, rel),
-            "facts_conf": conf, "facts_rel": rel, "prefetch_ms": round(ms, 1)}
+            PREFETCH_RAWSPAN_ARM: splice_facts(rendered, q.prompt, rawspan),
+            "facts_conf": conf, "facts_rel": rel, "facts_rawspan": rawspan,
+            "prefetch_ms": round(ms, 1),
+            "rawspan_counts": rawspan_counts,
+            "facts_rel_counts": {"n_selected": len(rel_records), "n_budget_cut": rel_cut,
+                                 "n_rendered": len(rel)},
+            "facts_conf_counts": {"n_selected": len(conf_records), "n_budget_cut": conf_cut,
+                                  "n_rendered": len(conf)}}
 
 
 def sleep_notes_block(prompt: str, fact_lines: list[str]) -> str:
@@ -669,7 +958,7 @@ def build_messages(q: Question, arm: str, pool: list[Question], blocks: dict | N
     if arm == "history":
         system += ("\n\nYour earlier conversations with Alan, oldest first:\n\n"
                    + history_block(q, pool))
-    elif arm in ("prefetch", "prefetch_rel", SLEEP_NOTES_ARM) or arm in RECALL_ARMS:
+    elif arm in ("prefetch", "prefetch_rel", PREFETCH_RAWSPAN_ARM, SLEEP_NOTES_ARM) or arm in RECALL_ARMS:
         user = blocks[arm]
     elif arm != "closed_book":
         raise ValueError(f"unknown arm {arm!r}")
@@ -851,10 +1140,7 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
     ap.add_argument("--corpus", default=str(DEFAULT_CORPUS),
                     help="facts snapshot the prefetch arms read (LLOYD_FACTS_ROOT/LLOYD_KG_DB)")
     args = ap.parse_args(argv)
-    arms = [a for a in args.arms.split(",") if a]
-    for a in arms:
-        if a not in ARMS:
-            raise SystemExit(f"unknown arm {a!r}")
+    arms = parse_arms(args.arms)
     ms = load_set(Path(args.set), view="all" if args.holdout else "tuning")
     judge_model = DJEV_JUDGE_MODEL if args.judge == "djev" else "rules"
     check_judge(ms.generator_model, judge_model)
@@ -898,7 +1184,7 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
             blocks = None
             if want_facts:
                 blocks = blocks_fn(q)
-                prefetch_meta[q.id] = {k: blocks[k] for k in ("facts_conf", "facts_rel", "prefetch_ms")}
+                prefetch_meta[q.id] = {k: blocks.get(k) for k in PREFETCH_META_KEYS}
                 if SLEEP_NOTES_ARM in arms:
                     # Off the SAME retrieval, so the pair prices the channel and
                     # nothing else: the arm's only advantage would be that a note
@@ -964,7 +1250,7 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
     report["dev"] = {arm: summarize_arm([r for r in dev_rows if r["arm"] == arm]) for arm in arms}
     comps = []
     for a, b in (("closed_book", "history"), ("closed_book", "prefetch"), ("prefetch", "prefetch_rel"),
-                 ("recall", "recall_episodic"), (SLEEP_NOTES_ARM, "prefetch")):
+                 RENDER_PAIR, ("recall", "recall_episodic"), (SLEEP_NOTES_ARM, "prefetch")):
         if a in arms and b in arms:
             for metric in ("correct_strict", "correct", "evidence_in_context"):
                 comps.append(compare(dev_rows, a, b, metric))
@@ -977,6 +1263,24 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
         report["holdout_reserve_rule"] = RESERVE_RULE
     report["rows"] = dev_rows
     report["prefetch"] = {i: m for i, m in prefetch_meta.items() if qmap[i].leg == "dev"}
+    # #1556: what the rawspan arm's scores were computed OVER. The block can be
+    # short for two very different reasons — the facts' provenance did not
+    # resolve, or the char budget had no room — and a reader told only that
+    # `evidence_in_context` is low cannot tell which, so the denominators travel
+    # with the rates. Emitted whenever the arm ran, whatever the counts are: an
+    # all-zero set is a result about the corpus, and its absence would be
+    # indistinguishable from an arm that rendered nothing at all. A run of other
+    # arms leaves it absent, because that arm did not run.
+    if PREFETCH_RAWSPAN_ARM in arms:
+        dev_pf_ids = [i for i in prefetch_meta if qmap[i].leg == "dev"]
+        report["prefetch_rawspan"] = {
+            "char_budget": FACTS_RENDER_CHAR_BUDGET,
+            "window_chars": rawspan_window_chars(),
+            "n_questions": len(dev_pf_ids),
+            "counts": {k: sum(int(((prefetch_meta[i].get("rawspan_counts") or {}).get(k)) or 0)
+                              for i in dev_pf_ids) for k in RAWSPAN_COUNT_KEYS},
+            "render_pair": list(RENDER_PAIR),
+        }
     if use_recall:
         report["recall"] = {i: m for i, m in recall_meta.items() if qmap[i].leg == "dev"}
     out_dir = Path(args.out_dir)
@@ -1007,51 +1311,152 @@ def _print_summary(report: dict) -> None:
         if not a.get("insufficient"):
             print(f"  {comp['b']} - {comp['a']} ({comp['metric']}): {a['diff']:+.3f} "
                   f"[{a['ci'][0]:+.3f},{a['ci'][1]:+.3f}] n={a['n']}")
+    if (sp := report.get("prefetch_rawspan")):
+        # The block's denominators beside the scores: which arm was rendered from
+        # what, and how much of the corpus the rendering could not reach.
+        print(f"\nrawspan rendering: {sp['char_budget']}-char facts block at "
+              f"{sp['window_chars']} chars/fact over {sp['n_questions']} dev questions: "
+              + "  ".join(f"{k}={v}" for k, v in sp["counts"].items()))
 
 
 # ─────────────────────────────────────────────────────────────── no-model A/B ──
 
-def prefetch_retrieval(argv: list[str] | None = None) -> dict:
-    """Rider 1's retrieval half with no model call: for every dev question, is
-    the gold value in the `<facts>` block under confidence order vs relevance
-    order? Same snapshot, same query, paired."""
+def prefetch_retrieval(argv: list[str] | None = None, *, select=None) -> dict:
+    """The prefetch arms' retrieval half with no model call: for every question,
+    is the gold value in the facts block this arm would render? Same snapshot,
+    same query, paired.
+
+    Two readings cost no GPU minute here. Rider 1's is confidence order against
+    relevance order over the same facts (`--arms prefetch,prefetch_rel`), and
+    #1556's is the distilled line against the source text behind exactly those
+    facts (`--arms prefetch_rel,prefetch_rawspan`) — the second one is only cheap
+    because retrieval is held fixed, so no answer is needed from anyone but the
+    fact store. It reports the signed difference and its bootstrap interval for
+    the requested pair and takes no position on the sign; the counts of facts
+    whose source did not resolve, whose windowing rule found no span, and that
+    the char budget cut travel beside the rates, so a low rawspan number can be
+    read as a rendering result rather than mistaken for a provenance gap.
+
+    `select` is the selection call, injectable for tests; by default it is
+    `app.prefetch._search_fact_records` — the same function the modelled arms
+    render from, so the two arms in this comparison are sharing a selection here
+    exactly as they do in a real run, not because two fixtures were written to
+    agree.
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--set", default=str(SET_ROOT / DEFAULT_VERSION))
     ap.add_argument("--corpus", default=str(DEFAULT_CORPUS))
+    ap.add_argument("--arms", default=",".join(("prefetch", "prefetch_rel", PREFETCH_RAWSPAN_ARM)))
     ap.add_argument("--holdout", action="store_true")
+    ap.add_argument("--out-dir", default=str(DEFAULT_OUT))
+    ap.add_argument("--label", default=None,
+                    help="artifact suffix; the arm pair by default, so a run of the pair "
+                         "lands beside the modelled run's artifact and is found by name")
     args = ap.parse_args(argv)
+    arms = parse_arms(args.arms)
+    label = args.label or "-".join(arms)
     os.environ.setdefault("LLOYD_FACTS_ROOT", str(Path(args.corpus) / "facts"))
     os.environ.setdefault("LLOYD_KG_DB", str(Path(args.corpus) / "kg.sqlite"))
-    from app import prefetch as pf
+    if select is None:
+        from app import prefetch as pf
+        select = pf._search_fact_records
     from stats import paired_bootstrap_ci
     ms = load_set(Path(args.set), view="all" if args.holdout else "tuning")
     qs = ms.holdout if args.holdout else ms.dev
+    want_conf = "prefetch" in arms
+    want_rel = ("prefetch_rel" in arms) or (PREFETCH_RAWSPAN_ARM in arms)
+    want_span = PREFETCH_RAWSPAN_ARM in arms
     rows = []
     for q in qs:
+        conf_records = rel_records = None
         t0 = time.perf_counter()
-        conf = pf._search_facts(q.prompt, rank="confidence")
+        if want_conf:
+            conf_records = select(q.prompt, "confidence")
         t1 = time.perf_counter()
-        rel = pf._search_facts(q.prompt, rank="relevance")
+        if want_rel:
+            rel_records = select(q.prompt, "relevance")
         t2 = time.perf_counter()
-        rows.append({"id": q.id, "category": q.category,
-                     "conf": gold_in(q, "\n".join(conf)), "rel": gold_in(q, "\n".join(rel)),
-                     "changed": conf != rel, "ms_conf": (t1 - t0) * 1e3, "ms_rel": (t2 - t1) * 1e3})
-    out = {"n": len(rows), "leg": "holdout" if args.holdout else "dev", "by_category": {}}
+        conf_lines, _ = apply_char_budget([r["line"] for r in (conf_records or [])])
+        rel_lines, rel_cut = apply_char_budget([r["line"] for r in (rel_records or [])])
+        span_lines, span_counts = render_rawspan_lines(rel_records or [])
+        row = {"id": q.id, "category": q.category,
+               "ms_conf": (t1 - t0) * 1e3, "ms_rel": (t2 - t1) * 1e3,
+               "conf": gold_in(q, "\n".join(conf_lines)) if want_conf else None,
+               "rel": gold_in(q, "\n".join(rel_lines)) if want_rel else None,
+               "changed": (conf_lines != rel_lines) if (want_conf and want_rel) else None,
+               "rawspan": gold_in(q, "\n".join(span_lines)) if want_span else None,
+               "rawspan_counts": span_counts,
+               "rel_counts": {"n_selected": len(rel_records or []), "n_budget_cut": rel_cut,
+                              "n_rendered": len(rel_lines)}}
+        rows.append(row)
+    out: dict = {"n": len(rows), "leg": "holdout" if args.holdout else "dev", "arms": arms,
+                 "char_budget": FACTS_RENDER_CHAR_BUDGET, "by_category": {}}
     for cat in CATEGORIES + ("all",):
         rs = [r for r in rows if cat == "all" or r["category"] == cat]
         if not rs:
             continue
-        a = [float(r["conf"]) for r in rs]
-        b = [float(r["rel"]) for r in rs]
-        ci = paired_bootstrap_ci(a, b) if len(rs) >= 2 else None
-        out["by_category"][cat] = {
-            "n": len(rs), "conf": round(sum(a) / len(rs), 4), "rel": round(sum(b) / len(rs), 4),
-            "block_changed": sum(r["changed"] for r in rs),
-            "diff": round(ci["diff"], 4) if ci else None,
-            "ci": [round(ci["lo"], 4), round(ci["hi"], 4)] if ci else None}
-    lat = sorted(r["ms_rel"] - r["ms_conf"] for r in rows)
-    out["extra_ms_p50"] = round(lat[len(lat) // 2], 3) if lat else None
+        cell: dict = {"n": len(rs)}
+        if want_conf and want_rel:
+            a = [float(r["conf"]) for r in rs]
+            b = [float(r["rel"]) for r in rs]
+            ci = paired_bootstrap_ci(a, b) if len(rs) >= 2 else None
+            cell.update({
+                "conf": round(sum(a) / len(rs), 4), "rel": round(sum(b) / len(rs), 4),
+                "block_changed": sum(r["changed"] for r in rs),
+                "diff": round(ci["diff"], 4) if ci else None,
+                "ci": [round(ci["lo"], 4), round(ci["hi"], 4)] if ci else None})
+        elif want_rel:
+            cell["rel"] = round(sum(float(r["rel"]) for r in rs) / len(rs), 4)
+        if want_span:
+            cell["rawspan"] = round(sum(float(r["rawspan"]) for r in rs) / len(rs), 4)
+            cell["rawspan_counts"] = {k: sum(r["rawspan_counts"][k] for r in rs)
+                                      for k in RAWSPAN_COUNT_KEYS}
+        out["by_category"][cat] = cell
+    if want_span:
+        # The denominators for the whole leg, always all five keys, whatever the
+        # arm rendered: an all-zero set is a result about the corpus, and an
+        # absent block would read as "the arm did not run".
+        out["rawspan_counts"] = {k: sum(r["rawspan_counts"][k] for r in rows)
+                                 for k in RAWSPAN_COUNT_KEYS}
+        out["window_chars"] = rawspan_window_chars()
+    a_arm, b_arm = RENDER_PAIR
+    if a_arm in arms and b_arm in arms:
+        comp: dict = {"a": a_arm, "b": b_arm, "metric": "gold_in_block",
+                      "reading": f"diff is {b_arm} - {a_arm}: rate of gold values present in "
+                                 "the block, per question, paired on the question id. Both "
+                                 "signs are readable and neither is expected",
+                      "by_category": {}}
+        # the per-question row keys the arms' gold-in-block flags were written to
+        row_key = {"prefetch": "conf", "prefetch_rel": "rel", PREFETCH_RAWSPAN_ARM: "rawspan"}
+        for cat in CATEGORIES + ("all",):
+            rs = [r for r in rows if cat == "all" or r["category"] == cat]
+            if not rs:
+                continue
+            va = [float(r[row_key[a_arm]]) for r in rs]
+            vb = [float(r[row_key[b_arm]]) for r in rs]
+            ci = paired_bootstrap_ci(va, vb) if len(rs) >= 2 else None
+            comp["by_category"][cat] = {
+                "n": len(rs), "a": round(sum(va) / len(rs), 4), "b": round(sum(vb) / len(rs), 4),
+                "diff": round(ci["diff"], 4) if ci else None,
+                "ci": [round(ci["lo"], 4), round(ci["hi"], 4)] if ci else None}
+        out["comparison"] = comp
+    if want_conf and want_rel:
+        lat = sorted(r["ms_rel"] - r["ms_conf"] for r in rows)
+        out["extra_ms_p50"] = round(lat[len(lat) // 2], 3) if lat else None
+    # The reading is written, not just printed: this command's whole purpose is a
+    # comparison someone quotes later, and a delta that exists only in a terminal
+    # scrollback cannot be checked against the counts that qualify it. Same
+    # directory and naming scheme as the modelled runs, so a paired retrieval
+    # reading and its modelled counterpart sit side by side.
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / f"prefetch-retrieval-{label}.json"
+    written = {"argv": list(argv), "generated_at": _dt.datetime.now().isoformat(timespec="seconds"),
+               "arms": arms, "facts_root": os.environ.get("LLOYD_FACTS_ROOT"), **out}
+    path.write_text(json.dumps(written, indent=1, default=str) + "\n")
+    out["_path"] = str(path)
     print(json.dumps(out, indent=1))
+    print(f"wrote {path}", file=sys.stderr)
     return out
 
 

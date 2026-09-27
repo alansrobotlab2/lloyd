@@ -421,3 +421,311 @@ def test_a_run_names_the_channel_store_it_used_inside_its_own_out_dir(tmp_path, 
     # the name the channel carries when nothing overrides it — the file a real
     # morning turn reads.
     assert used != nsn.DATA_ROOT / nsn.FILE_NAME, "the run pointed the arm at the live channel"
+
+# ── #1556: prefetch_rawspan — the facts prefetch_rel renders, as their own source ──
+#
+# The arm holds retrieval fixed and swaps only the rendering, so every test below
+# drives ONE selection and asks what the model was shown. The gold value in the set
+# `make_set` builds is 8182, which is why the planted source document carries it and
+# the distilled bullet does not: that is what makes the pair's sign observable.
+
+#: Three blocks, one of which a fact about the CTO can be found in. The middle one
+#: is the only place 8182 appears, and the first is the head of the file — so a
+#: windowing rule that just took the head would render a block with no gold value
+#: in it and every pair test below would go red.
+RAWSPAN_SOURCE = """# Northwind notes
+
+The depot at Bilbao ships pallets on Thursdays from the warehouse.
+
+The CTO of Northwind Traders is Dana Whitfield, and the relay she moved listens on port 8182.
+
+Lunch is at noon.
+"""
+
+BILBAO_SOURCE = """# Bilbao depot
+
+The Bilbao depot re-orders grommets every week under a standing order.
+"""
+
+#: What `app.prefetch.prefetch_context` is stood in for: shaped like the real
+#: envelope so `splice_facts` has a `<facts>` block to replace and the arms can be
+#: compared on bytes rather than on a fixture that flatters one of them.
+RAWSPAN_ENVELOPE = ("<skills>\n</skills>\n<facts>\nplaceholder\n</facts>\n"
+                    "<recent_turns>\n</recent_turns>")
+
+
+def _record(entity, fact, source_doc, conf=0.9):
+    """One selected fact exactly as `app.prefetch._search_fact_records` hands it
+    over: the fact's stored fields plus the bullet the distilled arm renders."""
+    return {"entity": entity, "fact": fact, "confidence": conf, "source_doc": source_doc,
+            "line": f"- [{entity}] {fact} (confidence: {conf})"}
+
+
+def _rawspan_records(fact="The current CTO of Northwind Traders is Dana Whitfield"):
+    return [_record("Northwind Traders", fact, "notes/northwind.md"),
+            _record("Bilbao Depot", "The Bilbao depot re-orders grommets every week",
+                    "notes/bilbao.md", conf=0.7)]
+
+
+def _plant_sources(tmp_path, monkeypatch):
+    """Plant the source documents under a vault root the runner will look in, so
+    span resolution is measured against a corpus this test owns."""
+    (tmp_path / "notes").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "notes" / "northwind.md").write_text(RAWSPAN_SOURCE, encoding="utf-8")
+    (tmp_path / "notes" / "bilbao.md").write_text(BILBAO_SOURCE, encoding="utf-8")
+    monkeypatch.setenv("LLOYD_VAULT_ROOT", str(tmp_path))
+    return tmp_path
+
+
+def _isolate_store(tmp_path, monkeypatch):
+    """Keep the runner off the live fact store: it sets those two variables itself,
+    so set them first and `monkeypatch` puts them back after."""
+    monkeypatch.setenv("LLOYD_FACTS_ROOT", str(tmp_path / "facts"))
+    monkeypatch.setenv("LLOYD_KG_DB", str(tmp_path / "kg.sqlite"))
+
+
+def _a_question(tmp_path) -> M.Question:
+    """One real `Question` off a planted set, for the tests that drive a block
+    builder rather than a whole command."""
+    return M.load_set(make_set(tmp_path, {"knowledge_update": 1}, holdout=0)).dev[0]
+
+
+def test_rawspan_arm_passes_arms_validation_on_both_commands(tmp_path, monkeypatch):
+    """Clause 1 (#1556): `prefetch_rawspan` is in `ARMS` and is valid to BOTH
+    `--arms` validators, so the pair runs on the no-model `prefetch-retrieval`
+    command — which returns its scores with no completion injected, no engine
+    named and no answer generated anywhere."""
+    assert "prefetch_rawspan" in M.ARMS
+    assert M.parse_arms("prefetch_rel,prefetch_rawspan") == ["prefetch_rel", "prefetch_rawspan"]
+    with pytest.raises(SystemExit):
+        M.parse_arms("prefetch_rawspan,nope")
+
+    root = make_set(tmp_path, {"knowledge_update": 2})
+    _plant_sources(tmp_path, monkeypatch)
+    _isolate_store(tmp_path, monkeypatch)
+    argv = ["--set", str(root), "--corpus", str(tmp_path / "corpus"),
+            "--arms", "prefetch_rel,prefetch_rawspan", "--out-dir", str(tmp_path / "runs")]
+    out = M.prefetch_retrieval(argv, select=lambda query, rank: _rawspan_records())
+    assert out["arms"] == ["prefetch_rel", "prefetch_rawspan"]
+    assert out["n"] == 2 and out["by_category"]["all"]["n"] == 2
+    assert out["by_category"]["all"]["rawspan"] is not None
+
+    # An arm valid to one command and refused by the other would leave the pair
+    # runnable in the expensive half only — backwards for an arm whose retrieval
+    # reading is meant to cost no model call.
+    with pytest.raises(SystemExit):
+        M.prefetch_retrieval(argv[:-2] + ["--arms", "prefetch_rawspan,bogus",
+                                          "--out-dir", str(tmp_path / "runs")],
+                             select=lambda query, rank: _rawspan_records())
+    with pytest.raises(SystemExit):
+        M.run(["--set", str(root), "--arms", "prefetch_rawspan,bogus", "--out-dir",
+               str(tmp_path / "runs")])
+    rep = M.run(["--set", str(root), "--arms", "prefetch_rel,prefetch_rawspan", "--judge",
+                 "rules", "--label", "s", "--out-dir", str(tmp_path / "runs")],
+                complete=_fake_complete(lambda m: "the relay listens on port 8182"),
+                primary=("http://x", "fake"),
+                blocks_fn=lambda q: {arm: M.splice_facts(q.prompt, q.prompt,
+                                                         ["- [Northwind Traders] relay port 8182"])
+                                     for arm in ("prefetch_rel", "prefetch_rawspan")})
+    assert set(rep["dev"]) == {"prefetch_rel", "prefetch_rawspan"}
+
+
+def test_rawspan_renders_the_same_selection_as_prefetch_rel(tmp_path, monkeypatch):
+    """Clause 2 (#1556): the two arms take their facts from ONE shared selection
+    call that hands back the fact RECORDS, so the entities, their order and the
+    count are equal by construction and not by two lookups happening to agree."""
+    import app.prefetch as pf
+    _plant_sources(tmp_path, monkeypatch)
+    calls: list = []
+
+    def fake_records(query, rank=None):
+        calls.append(rank)
+        recs = _rawspan_records()
+        return list(reversed(recs)) if rank == "confidence" else recs
+
+    monkeypatch.setattr(pf, "_search_fact_records", fake_records)
+    monkeypatch.setattr(pf, "prefetch_context", lambda text: RAWSPAN_ENVELOPE)
+    blocks = M.prefetch_blocks(_a_question(tmp_path))
+
+    # Two calls, one per ordering, and no third re-deriving a selection for the
+    # rawspan arm: it renders the relevance records themselves.
+    assert calls == ["confidence", "relevance"]
+    ents = lambda lines: [ln.split("]")[0].removeprefix("- [") for ln in lines]
+    assert ents(blocks["facts_rawspan"]) == ents(blocks["facts_rel"])
+    assert len(blocks["facts_rawspan"]) == len(blocks["facts_rel"]) == 2
+    assert M.PREFETCH_RAWSPAN_ARM in blocks
+    assert blocks[M.PREFETCH_RAWSPAN_ARM] != blocks["prefetch_rel"], (
+        "the two arms rendered identically, so nothing is being compared")
+
+    # And the shared selection is the production one: the bullets `_search_facts`
+    # renders are the records' own `line` field in the records' own order, so the
+    # arm's records and the shipped arm's lines cannot drift apart. Selection caps
+    # and the empty-fact rule are the shipped arm's too, not a second copy.
+    monkeypatch.undo()  # the fake selection above has to stop standing in for the real one
+    monkeypatch.setattr(pf, "_extract_entities_from_query", lambda q: [("Northwind Traders", 6.5)])
+    monkeypatch.setattr(pf, "_get_facts_sync", lambda entity, *a, **k: {
+        "facts": [_record(entity, f"Northwind Traders note {i}", "notes/northwind.md",
+                          conf=0.5 + i / 10) for i in range(5)] + [{"fact": "   "}]})
+    for mode in ("confidence", "relevance"):
+        recs = pf._search_fact_records("Northwind Traders update", rank=mode)
+        assert [r["line"] for r in recs] == pf._search_facts("Northwind Traders update", rank=mode)
+        assert len(recs) == pf.FACT_MAX_PER_ENTITY, "selection caps are not the shipped arm's"
+        assert all({"entity", "fact", "confidence", "source_doc", "line"} <= set(r) for r in recs)
+        assert all(r["source_doc"] == "notes/northwind.md" for r in recs), (
+            "the record lost the field the rawspan arm renders from")
+
+
+def test_rawspan_renders_the_source_text_and_one_char_budget_bounds_both_arms(tmp_path,
+                                                                             monkeypatch):
+    """Clause 3 (#1556): the line carries text drawn from the fact's `source_doc`
+    and not the distilled bullet, and the one named char budget caps the facts
+    block of BOTH arms."""
+    import app.prefetch as pf
+    roots = _plant_sources(tmp_path, monkeypatch)
+    lines, counts = M.render_rawspan_lines(_rawspan_records(), roots=[roots])
+    assert counts["n_rendered"] == 2 and counts["n_unresolved_source"] == 0
+    northwind = lines[0]
+    # Words that exist only in the document, in the block the fact's own terms
+    # point at — not the file's head, and not the distilled bullet's wording.
+    assert "relay she moved listens on port 8182" in northwind
+    assert "ships pallets" not in northwind and "Lunch is at noon" not in northwind
+    assert "The current CTO of Northwind Traders is Dana Whitfield" not in northwind
+    assert "(confidence:" not in northwind
+    assert "notes/northwind.md" in northwind, "the line did not name the document it drew from"
+
+    # One budget, both arms: shrink the named constant and both renderings obey
+    # it, each reporting how much of its own block the cap dropped.
+    monkeypatch.setattr(M, "FACTS_RENDER_CHAR_BUDGET", 120)
+    monkeypatch.setattr(pf, "prefetch_context", lambda text: RAWSPAN_ENVELOPE)
+    monkeypatch.setattr(pf, "_search_fact_records", lambda query, rank=None: _rawspan_records())
+    blocks = M.prefetch_blocks(_a_question(tmp_path))
+    assert len("\n".join(blocks["facts_rel"])) <= 120
+    assert len("\n".join(blocks["facts_rawspan"])) <= 120
+    assert blocks["facts_rel_counts"]["n_budget_cut"] >= 1
+    assert blocks["rawspan_counts"]["n_budget_cut"] >= 1
+    assert blocks["prefetch_rel"].count("<facts>") == 1
+    assert blocks[M.PREFETCH_RAWSPAN_ARM].count("<facts>") == 1
+
+
+def test_rawspan_counts_unresolved_sources_and_unwindowed_facts(tmp_path, monkeypatch):
+    """Clause 4 (#1556): a fact that cannot be rendered is counted and not dropped,
+    and the counts reach the run artifact beside the arm's scores — including the
+    run in which nothing renders at all."""
+    roots = _plant_sources(tmp_path, monkeypatch)
+    _isolate_store(tmp_path, monkeypatch)
+    recs = _rawspan_records() + [
+        _record("Nowhere Co", "The managing director of Nowhere Co is Wei Chen",
+                "notes/never-written.md"),                # source_doc names a file that isn't there
+        _record("Quokka Trust", "The quorum of the Quokka Trust is 1874 members",
+                "notes/northwind.md"),                    # resolves, but no term of the fact is in it
+    ]
+    lines, counts = M.render_rawspan_lines(recs, roots=[roots])
+    assert counts == {"n_selected": 4, "n_unresolved_source": 1, "n_no_span": 1,
+                      "n_budget_cut": 0, "n_rendered": 2}
+    assert len(lines) == 2
+
+    # Nothing renders at all: the block is empty and the counts are still there,
+    # all five of them. "The arm rendered nothing" has to read as a result about
+    # the corpus, and an absent block would read as a run that never happened.
+    _, empty = M.render_rawspan_lines([recs[2]], roots=[roots])
+    assert empty["n_rendered"] == 0 and empty["n_unresolved_source"] == 1
+    assert set(empty) == set(M.RAWSPAN_COUNT_KEYS)
+
+    # The no-model command carries the totals beside the rates, question by
+    # question and for the leg: n_selected 4 × 2 dev questions, half of them
+    # unreachable, none of it silent.
+    root = make_set(tmp_path, {"knowledge_update": 2})
+    out = M.prefetch_retrieval(["--set", str(root), "--corpus", str(tmp_path / "corpus"),
+                               "--arms", "prefetch_rel,prefetch_rawspan", "--out-dir", str(tmp_path / "runs")],
+                               select=lambda query, rank: recs)
+    assert out["rawspan_counts"] == {"n_selected": 8, "n_unresolved_source": 2, "n_no_span": 2,
+                                     "n_budget_cut": 0, "n_rendered": 4}
+    assert out["by_category"]["all"]["rawspan_counts"]["n_unresolved_source"] == 2
+    # The rate says what the block held; the counts beside it say how much of the
+    # selection that block was. Half of this one was unreachable and the arm still
+    # surfaced the value — which is exactly the reading a rate alone hides.
+    assert out["by_category"]["all"]["rawspan"] == 1.0
+
+    # On disk, not only on stdout: the file the next reader quotes has to carry
+    # the counts beside the rates it is quoting.
+    art = json.loads(Path(out["_path"]).read_text())
+    assert art["rawspan_counts"] == out["rawspan_counts"]
+    assert art["by_category"]["all"]["rawspan_counts"] == \
+        out["by_category"]["all"]["rawspan_counts"]
+    assert art["comparison"]["by_category"]["all"]["n"] == 2
+
+    # And on a fully-resolving run the same keys are present at zero — a clean
+    # denominator has to be readable as clean, not as a block that went missing.
+    clean = M.prefetch_retrieval(["--set", str(root), "--corpus", str(tmp_path / "corpus"),
+                                  "--arms", "prefetch_rel,prefetch_rawspan",
+                                  "--out-dir", str(tmp_path / "runs"), "--label", "clean"],
+                                 select=lambda query, rank: _rawspan_records())
+    clean_art = json.loads(Path(clean["_path"]).read_text())
+    assert clean_art["rawspan_counts"] == {"n_selected": 4, "n_unresolved_source": 0,
+                                           "n_no_span": 0, "n_budget_cut": 0, "n_rendered": 4}
+    assert clean_art["char_budget"] == M.FACTS_RENDER_CHAR_BUDGET
+
+    # And the modelled run's artifact reports them beside the scores.
+    per_q = {"n_selected": 4, "n_unresolved_source": 1, "n_no_span": 1,
+             "n_budget_cut": 0, "n_rendered": 2}
+    rep = M.run(["--set", str(root), "--arms", "prefetch_rel,prefetch_rawspan", "--judge",
+                 "rules", "--label", "rawspan-counts", "--out-dir", str(tmp_path / "runs")],
+                complete=_fake_complete(lambda m: "the relay listens on port 8182"),
+                primary=("http://x", "fake"),
+                blocks_fn=lambda q: {"prefetch_rel": "<ctx/>", "prefetch_rawspan": "<ctx/>",
+                                     "rawspan_counts": dict(per_q)})
+    reported = json.loads(Path(rep["_path"]).read_text())["prefetch_rawspan"]
+    assert reported["counts"] == {"n_selected": 8, "n_unresolved_source": 2, "n_no_span": 2,
+                                  "n_budget_cut": 0, "n_rendered": 4}
+    assert set(reported["counts"]) == set(M.RAWSPAN_COUNT_KEYS)
+    assert reported["char_budget"] == M.FACTS_RENDER_CHAR_BUDGET
+    assert reported["window_chars"] == M.rawspan_window_chars()
+
+
+def test_rawspan_pair_is_compared_with_a_ci_and_no_expected_direction(tmp_path, monkeypatch):
+    """Clause 5 (#1556): the artifact carries the paired `prefetch_rel` vs
+    `prefetch_rawspan` comparison with its bootstrap interval on the no-model path,
+    and it reports whichever way the delta lands."""
+    roots = _plant_sources(tmp_path, monkeypatch)
+    _isolate_store(tmp_path, monkeypatch)
+    root = make_set(tmp_path, {"knowledge_update": 2})
+    argv = ["--set", str(root), "--corpus", str(tmp_path / "corpus"),
+            "--arms", "prefetch_rel,prefetch_rawspan", "--out-dir", str(tmp_path / "runs")]
+
+    # The source text holds the gold value and the distilled bullet does not.
+    src_first = M.prefetch_retrieval(argv, select=lambda query, rank: _rawspan_records())
+    comp = src_first["comparison"]
+    assert (comp["a"], comp["b"]) == ("prefetch_rel", "prefetch_rawspan")
+    assert comp["metric"] == "gold_in_block"
+    first = comp["by_category"]["all"]
+    assert first["n"] == 2 and first["a"] == 0.0 and first["b"] == 1.0
+    assert first["diff"] == 1.0 and first["ci"][0] <= first["diff"] <= first["ci"][1]
+
+    # The other way round: the distilled bullet holds the value and the windowed
+    # source no longer does. Same artifact, same keys, sign flipped. A regression
+    # that suppressed, clamped or special-cased a negative delta fails here.
+    (roots / "notes" / "northwind.md").write_text(
+        RAWSPAN_SOURCE.replace("the relay she moved listens on port 8182",
+                               "the relay she moved listens on a port nobody remembers"),
+        encoding="utf-8")
+    rev = M.prefetch_retrieval(
+        argv, select=lambda query, rank: _rawspan_records(
+            "The CTO of Northwind Traders is Dana Whitfield and the relay listens on port 8182"))
+    second = rev["comparison"]["by_category"]["all"]
+    assert set(rev["comparison"]) == set(comp) and set(second) == set(first)
+    assert second["a"] == 1.0 and second["b"] == 0.0 and second["diff"] == -1.0
+    assert second["ci"][0] <= second["diff"] <= second["ci"][1]
+
+    # The modelled run compares the same pair, and the pair is named in one place.
+    rep = M.run(["--set", str(root), "--arms", "prefetch_rel,prefetch_rawspan", "--judge",
+                 "rules", "--label", "rawspan-pair", "--out-dir", str(tmp_path / "runs")],
+                complete=_fake_complete(lambda m: "the relay listens on port 8182"),
+                primary=("http://x", "fake"),
+                blocks_fn=lambda q: {arm: M.splice_facts(q.prompt, q.prompt,
+                                                         ["- [Northwind Traders] relay port 8182"])
+                                     for arm in ("prefetch_rel", "prefetch_rawspan")})
+    art = json.loads(Path(rep["_path"]).read_text())
+    assert list(M.RENDER_PAIR) == ["prefetch_rel", "prefetch_rawspan"]
+    assert {(c["a"], c["b"]) for c in art["dev_comparisons"]} == {M.RENDER_PAIR}
+    pair = next(c for c in art["dev_comparisons"] if c["metric"] == "correct_strict")
+    assert pair["by_category"]["knowledge_update"]["n"] == 2

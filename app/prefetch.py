@@ -803,13 +803,24 @@ def _rank_entity_facts(facts: list[dict], tokens: list[str], mode: str) -> list[
     return sorted(by_conf, key=lambda f: -_fact_score(f, tokens))
 
 
-def _search_facts(query: str, rank: str | None = None) -> list[str]:
-    """Return fact bullet lines for top matching entities.
+def _search_fact_records(query: str, rank: str | None = None) -> list[dict]:
+    """The `<facts>` selection as records, for a reader that needs the fact behind the line.
 
-    `rank` overrides `prefetch.facts.rank` (the eval renders both orders off
-    one query); None reads the config.
+    `_search_facts` returns the bullets, and a bullet cannot be turned back into
+    a `source_doc`. LloydMemEval's `prefetch_rawspan` arm (#1556) has to render
+    the source text behind exactly the facts the relevance arm renders, and if it
+    re-derived the selection to get there it would drift from it — two calls that
+    mostly agree are exactly the confound the arm exists to remove. So the
+    selection lives here and every rendering calls it: each record carries the
+    fact's own stored fields plus the one bullet `_search_facts` renders for it,
+    which is what makes the line and the record unable to disagree.
+
+    Selection is this function's and nowhere else's: `FACT_MAX_ENTITIES`
+    entities off the query, each ordered by `_rank_entity_facts` under `rank`
+    (or `prefetch.facts.rank` when `rank` is None), top `FACT_MAX_PER_ENTITY`
+    per entity. A fact with no text is not selected.
     """
-    lines = []
+    records: list[dict] = []
     mode = rank or _facts_rank_mode()
     tokens = _fact_query_tokens(query) if mode == "relevance" else []
     entity_matches = _extract_entities_from_query(query)[:FACT_MAX_ENTITIES]
@@ -819,9 +830,27 @@ def _search_facts(query: str, rank: str | None = None) -> list[str]:
         for f in facts[:FACT_MAX_PER_ENTITY]:
             fact_text = f.get("fact", "").strip()
             conf = f.get("confidence", 0.0)
-            if fact_text:
-                lines.append(f"- [{entity}] {fact_text} (confidence: {conf})")
-    return lines
+            if not fact_text:
+                continue
+            records.append({
+                "entity": entity,
+                "fact": fact_text,
+                "confidence": conf,
+                "source_doc": f.get("source_doc") or "",
+                "line": f"- [{entity}] {fact_text} (confidence: {conf})",
+            })
+    return records
+
+
+def _search_facts(query: str, rank: str | None = None) -> list[str]:
+    """Return fact bullet lines for top matching entities.
+
+    `rank` overrides `prefetch.facts.rank` (the eval renders both orders off
+    one query); None reads the config. The bullets are `_search_fact_records`'
+    own `line` field, so a reader holding records and a reader holding bullets
+    are looking at one selection and not two (#1556).
+    """
+    return [r["line"] for r in _search_fact_records(query, rank)]
 
 
 def _lex_terms(text: str) -> list[str]:
