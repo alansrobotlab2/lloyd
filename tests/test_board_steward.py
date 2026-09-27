@@ -306,26 +306,52 @@ def test_board_health_partitions_the_board(board):
 
 
 def test_board_flow_reads_each_stamp_in_its_writers_clock(board):
-    """`created` is naive local (the MCP store and the Mission Control router
-    use `datetime.now()`), `completed` is naive UTC (this module's closers),
-    and a close with no `completed` came from a local-time writer. Read all
-    as UTC, the two sides of the 24 h window sat seven hours apart here."""
+    """Both eras of a naive stamp, each read in the clock its own writer used.
+
+    `app/backlog_move.LOCAL_STAMP_CUTOVER` — 2026-09-26T04:00, #1517 — splits the
+    store's naive stamps. Below it a `created`/`updated` came from a box-clock
+    surface (the MCP store, Mission Control's router, this module's old `new_item`)
+    and reads as local; at or above it every writer stamps naive UTC
+    (`app/backlog_move.now_stamp()`), so the numerals are the instant already.
+    `completed` is UTC on both sides, since only `backlog.py`'s closers ever wrote it.
+
+    The stamps are anchored to that constant, not to the wall clock this run happens
+    to execute at. Deriving them from `datetime.now()` is what made this node expire:
+    a legacy stamp's numerals run seven hours behind its instant (PDT), so once real
+    `now` passed the cut-off plus 27 h (2026-09-27T07:00Z) the same fixture landed
+    *above* the cut-off, was read as UTC — correctly — aged to 27 h, and `created`
+    fell to 0 while `net` went negative. The behaviour under test never changed; the
+    fixture's era did.
+
+    Row 3 is the half this node never pinned, and the harm #1517 itself fixed: a
+    naive `created` at or above the cut-off must not be shifted into local, which
+    would place it seven hours in the future and outside a window whose cut is
+    `t <= now` — the reading that ran from 2026-09-14 to #1517.
+    """
     import os
     import time as _time
+    from app.backlog_move import LOCAL_STAMP_CUTOVER
     old = os.environ.get("TZ")
     os.environ["TZ"] = "America/Los_Angeles"
     _time.tzset()
     try:
-        now = datetime.now(timezone.utc)
+        # Three hours past the cut-off, so one row's numerals sit below it and
+        # another's above, permanently, whatever date this runs on.
+        now = (LOCAL_STAMP_CUTOVER + timedelta(hours=3)).replace(tzinfo=timezone.utc)
         local = lambda h: (now - timedelta(hours=h)).astimezone().replace(tzinfo=None).isoformat()
         utc = lambda h: (now - timedelta(hours=h)).replace(tzinfo=None).isoformat()
-        _write(board, 1, "draft", created=local(20))          # in
-        _write(board, 2, "draft", created=local(30))          # out; read as UTC it was 23 h old
-        _write(board, 3, "done", hours_old=240, completed=utc(3))                      # in
-        _write(board, 4, "done", hours_old=240, updated=local(26))                     # out; as UTC, 19 h
-        _write(board, 5, "done", hours_old=240, completed=utc(30), updated=local(1))  # out: completed wins
+        out_of_week = utc(7 * 24 + 24)  # 192 h: clear of the 7 d floor even shifted local
+        _write(board, 1, "draft", created=local(20))   # in; read as UTC it is 27 h old
+        _write(board, 2, "draft", created=local(30))   # out at 24 h, in at 7 d
+        _write(board, 3, "draft", created=utc(2))      # in; shifted local it is +5 h
+        _write(board, 4, "done", created=out_of_week, completed=utc(3))                  # closed: in
+        _write(board, 5, "done", created=out_of_week, updated=local(26))                 # no completed: 26 h
+        _write(board, 6, "done", created=out_of_week, completed=utc(30), updated=local(1))  # completed wins
         flow = B.board_flow(backlog_dir=board, now=now.timestamp())
-        assert flow["24h"] == {"created": 1, "closed": 1, "net": 0}
+        assert flow["24h"] == {"created": 2, "closed": 1, "net": 1}
+        # Every excluded row is excluded by the window's edge, not by a stamp the
+        # reader could not place: at 7 d all four dated events land.
+        assert flow["7d"] == {"created": 3, "closed": 3, "net": 0}
     finally:
         if old is None:
             os.environ.pop("TZ", None)
