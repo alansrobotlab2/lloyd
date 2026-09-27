@@ -65,7 +65,14 @@ except ImportError:  # pragma: no cover
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 HUMAN_TOUCH_DAYS = 7
+# The loop's own git identities before landings credited Alan as the author
+# (2026-09-26, 9407ddd1). Row 5 no longer reads authorship to find the loop:
+# a landing is authored as Alan by design, so an author test counted every
+# landing that revised an earlier one as a person undoing it (64% on
+# 2026-09-27). The ledger's landed commits are the loop's; these names only
+# catch commits from before that, and rounds that committed as themselves.
 AUTOMOD_AUTHOR = "lloyd"
+LOOP_AUTHORS = frozenset({"lloyd", "autocode"})
 _HONESTY_RE = re.compile(r"^\+.*(\bor\s+True\b|^\+\s*assert\s+True\b)", re.M)
 
 # ── who counts as a person, and where their words live ────────────────────
@@ -367,9 +374,26 @@ def _undone_by_hand(repo: Path, landing: dict, later: list[dict]) -> bool:
         theirs = _diff_lines(_commit_diff(repo, c["sha"]))
         for path in shared:
             removed = {ln.strip() for ln in (theirs.get(path) or ((), ()))[1]}
-            if added[path] & removed:
+            hits = added[path] & removed
+            if hits and not all(_carried(ln, theirs) for ln in hits):
                 return True
     return False
+
+
+def _is_subsequence(short: str, long: str) -> bool:
+    it = iter(long)
+    return all(ch in it for ch in short)
+
+
+def _carried(line: str, diff: dict[str, tuple[list[str], list[str]]]) -> bool:
+    """Whether the commit that removed `line` also added a line containing it
+    with characters only inserted — `import autonomy` -> `from app import
+    autonomy`, `autonomy.py:77` -> `app/autonomy.py:77`. That is a line edited
+    around, not undone. Moving the root modules into app/ (f9863c64) rewrote
+    every import of them and row 5 booked it as a person undoing 46 landings.
+    A substitution (`return 1` -> `return 3`) is not carried."""
+    return any(len(a) > len(line) and _is_subsequence(line, a.strip())
+               for plus, _ in diff.values() for a in plus)
 
 
 def _full_gate_median(ledger: Path) -> float | None:
@@ -698,7 +722,14 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
 
     # ── 5 human touch ───────────────────────────────────────────────────
     commits = _git_log(repo, since - HUMAN_TOUCH_DAYS * 86400)
-    human_commits = [c for c in commits if c["author"] != AUTOMOD_AUTHOR]
+    loop_shas = [str(e.get("commit") or "") for e in by("promoted") + by("arch_review")]
+    loop_shas = [sha for sha in loop_shas if sha]
+
+    def _is_loop(c: dict) -> bool:
+        return (c["author"].lower() in LOOP_AUTHORS
+                or any(c["sha"].startswith(sha) or sha.startswith(c["sha"]) for sha in loop_shas))
+
+    human_commits = [c for c in commits if not _is_loop(c)]
     touched = 0
     touched_rounds: list[str] = []
     for rid, p in promoted.items():
@@ -899,7 +930,7 @@ def render(row: dict) -> str:
         f"| 2 | audit delta | {_pct(au['delta'])} | grader {au['grader_met']} / author {au['author_met']} met clauses over {au['rounds_compared']} rounds |",
         f"| 3 | review refusal rate | {_pct(r['refusal_rate'])} | {r['rounds_refused']} of {r['rounds_graded']} graded rounds; {r['fixed_in_turn']} fixed in turn, {r['premise_unsound']} unsound, {r['escalated']} escalated, {r['grader_unavailable']} grader-unavailable, {r.get('seam_only_refusals', '—')} refused on a seam alone |",
         f"| 4 | spawn ratio | triage {s['triage_ratio'] if s['triage_ratio'] is not None else '—'} · implement {s['implement_ratio'] if s['implement_ratio'] is not None else '—'} | filed/closed: triage {s['triage_filed']}/{s['triage_closed']}, implement {s['implement_filed']}/{s['implement_closed']}; merged {s.get('triage_merged', 0)}+{s.get('implement_merged', 0)}, appended {s.get('findings_appended', 0)}, expired {s.get('expired', 0)}; open self-spawned {s.get('self_spawned_open', {}).get('count', 0)} (oldest {s.get('self_spawned_open', {}).get('oldest_days', 0)} d, bound {s.get('self_spawned_open', {}).get('bound_days', 0)}, over bound {s.get('self_spawned_open', {}).get('over_bound', 0)}) |",
-        f"| 5 | undone by hand | {_pct(h['rate'])} | {h['touched_within_7d']} of {h['landed']} landed rounds had a line they added removed by a non-`{AUTOMOD_AUTHOR}` commit within {HUMAN_TOUCH_DAYS} d |",
+        f"| 5 | undone by hand | {_pct(h['rate'])} | {h['touched_within_7d']} of {h['landed']} landed rounds had a line they added removed by a commit the loop did not land within {HUMAN_TOUCH_DAYS} d |",
         f"| 6 | test honesty | {t['grader_findings']} findings | {t['per_gated_round'] if t['per_gated_round'] is not None else '—'} per graded round; {t['landed_with_or_true']} landed commits add `or True`/`assert True` |",
         f"| 7 | bookkeeping defects | {b['nameless_deferrals'] + b['stranded_landings'] + b['bare_aborts']} | {b['nameless_deferrals']} nameless deferrals, {b['stranded_landings']} stranded landings, {b['bare_aborts']} bare aborts |",
         f"| 8 | verdict plumbing | {_pct(p['regex_rate'])} regex | {p['regex']} of {p['verdicts_with_source']} verdicts fell back; {p['truncated']} truncated; median finalizer tokens {p['finalizer_tokens_median'] if p['finalizer_tokens_median'] is not None else '—'} |",

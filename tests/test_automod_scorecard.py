@@ -792,6 +792,35 @@ def test_row_5_counts_a_landing_only_when_a_person_removed_a_line_it_added(tmp_p
     assert "undone by hand" in SC.render(row)
 
 
+def test_row_5_does_not_count_the_loop_revising_its_own_landing(tmp_path, repo):
+    """Landings are authored as Alan (9407ddd1), so authorship cannot say who
+    removed a line. A later landing that rewrites an earlier one is the loop's
+    own work; on 2026-09-27 the author test scored that as 64% "undone by hand".
+    A commit no ledger row landed still counts, whoever authored it."""
+    first = _commit(repo, "alansrobotlab", {"app/a.py": "def f():\n    return 1\n"}, 5)
+    second = _commit(repo, "alansrobotlab", {"app/a.py": "def f():\n    return 2\n"}, 4)
+    other = _commit(repo, "alansrobotlab", {"app/b.py": "Y = 1\n"}, 3)
+    _commit(repo, "alansrobotlab", {"app/b.py": "Y = 2\n"}, 2)  # a hand edit
+    ledger = _ledger(tmp_path, [
+        _ev("promoted", 5, round_id="SM_1", commit=first, changed_paths=["app/a.py"]),
+        _ev("promoted", 4, round_id="SM_2", commit=second, changed_paths=["app/a.py"]),
+        _ev("promoted", 3, round_id="SM_3", commit=other, changed_paths=["app/b.py"]),
+    ])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    assert row["human_touch"]["rounds"] == ["SM_3"]
+
+
+def test_row_5_does_not_count_an_import_rewritten_around_the_landed_line(tmp_path, repo):
+    """Moving modules into app/ rewrote `import autonomy` to `from app import
+    autonomy` everywhere (f9863c64): the landed line gained characters, it was
+    not undone. 46 landings were booked as undone by that one commit."""
+    sha = _commit(repo, "alansrobotlab", {"app/t.py": "import autonomy\nX = autonomy.f()\n"}, 3)
+    _commit(repo, "alan", {"app/t.py": "from app import autonomy\nX = autonomy.f()\n"}, 2)
+    ledger = _ledger(tmp_path, [_ev("promoted", 3, round_id="SM_I", commit=sha)])
+    row = SC.compute(since_days=7, ledger=ledger, backlog_dir=tmp_path / "none", repo=repo, now=NOW)
+    assert row["human_touch"]["touched_within_7d"] == 0
+
+
 def test_row_5_ignores_punctuation_only_lines(tmp_path, repo):
     """A reformat that moves a lone `)` removes a landed line that says nothing."""
     sha = _commit(repo, "lloyd", {"app/p.py": "X = f(\n    1,\n)\n"}, 3)
