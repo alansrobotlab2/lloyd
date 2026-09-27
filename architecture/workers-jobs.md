@@ -170,8 +170,8 @@ hygiene, inbound signal.
 
 ## 4. Self-modification — the loop that changes Lloyd's own code
 
-Five sources are one loop over the backlog, and they read best in pipeline
-order rather than priority order:
+Eight sources are in this family. Five of them are one loop over the backlog,
+and they read best in pipeline order rather than priority order:
 
 ```
 arch-review  →  backlog-cluster  →  autotriage  →  autocode  →  automod-regression
@@ -180,6 +180,11 @@ against the                         item or one     confirmed item  landing made
 tree, file                          cluster         behind the gate worse
 what is wrong
 ```
+
+`board-steward` and `owed-check`, the family's other two members, are not
+stages of that chain. Each is one judgment running beside the state machine —
+on the primary, one turn per tick or per item, with an `apply` flag that
+decides whether its answer is written or merely recorded.
 
 `arch-review` is the loop's one *supplier* rather than a stage of it: nothing
 downstream waits on it, and what it files enters the board as ordinary drafts.
@@ -210,8 +215,8 @@ Long version: [[automod]], [[backlog]].
 picklist: every top-level `architecture/*.md` is a unit, plus one per
 functional *group* of [[autonomy-jobs]] and this doc (hand-kept in
 `workers.sources.arch-review.groups`). A unit rests 30 days after a review, so
-the first pass takes about ten days at `daily_max: 4` (30 docs + 11 groups =
-41 units) and steady state is a review a month per unit.
+the first pass takes about ten days at `daily_max: 4` (31 docs + 11 groups =
+42 units as of 2026-09-27) and steady state is a review a month per unit.
 
 **Executes** as one session (Inner Voice off) that checks every backticked path,
 count, tool name and config key against the tree — `Read`, `Grep`,
@@ -224,10 +229,15 @@ section's stated invariants and its members have come apart.
 **Writes** exactly one file: that doc. Findings become `arch-review` drafts
 tagged `spawned-by-review`, and a fix that belongs in a skill, an autonomy task
 file or anywhere else is filed rather than made. Everything else the turn wrote
-— anywhere in this repo, and anywhere in the vault bar `backlog/` — is reverted from a
-`git status` baseline taken before the turn, and the doc's own diff is thrown
-away if it exceeds 400 changed lines, deletes more than 30% of the doc, breaks
-the front matter, or (for a group) touches a hunk outside its own section. What
+— anywhere in this repo, and anywhere in the vault bar `backlog/` and the
+scheduler's own `autonomy/` task files, whose `last_run` stamp a revert would
+take back and re-dispatch the run (#915, #82) — is reverted from a `git status`
+baseline taken before the turn. The doc's own diff is thrown away if it exceeds
+400 changed lines, deletes more than 30% of **the unit under review** — a
+group's own section, not the file, so a 43-line section dies at 13 deleted
+lines — breaks the front matter, or (for a group) has a hunk outside its
+section, which the rail counts strictly and therefore also rejects a refreshed
+`date:` line in the front matter. What
 survives, the **source** commits: the model never runs `git`.
 
 It stages nothing under `pending-research/`, so it has no `_DEFAULT_DEST` entry
@@ -245,6 +255,15 @@ wall-clock hour and a restart never doubles it up. **Executes** off the loop
 shared file paths and parent links, plus an optional pair-judge on the
 secondary for ambiguous edges. **Writes** `clusters.json` in the automod state
 dir, which `autotriage`'s group mode consumes.
+
+**What it is producing is close to nothing.** 8 of its 10 runs on 2026-09-27
+returned `0 clusters over 0 items`: its input is the untriaged-`draft` pool,
+and the sweep keeps that pool empty on a caught-up board. On an empty input its
+own summary appends `no vectors available`, so the run record reads like a dead
+embedding pipeline when nothing was ever asked for — the denominator, not the
+vectors, is zero (filed). The edge into `autotriage`'s group mode is therefore
+carried by the days on which new drafts outrun the sweep, not by this job's
+cadence.
 
 No session, deliberately: a clustering pass is arithmetic, not a judgement
 anyone needs to review.
@@ -269,6 +288,15 @@ machine in `scripts/automod/backlog.py` is still the writer today — the
 module docstring's "the replacement" is the plan, not the present. With
 `apply: true` one mechanical writer would apply its moves and
 `select_confirmed` would take its pick.
+
+**That record is not yet evidence of anything** (measured 2026-09-27, 136 ticks
+over 7 d). Its successful ticks report `0 move(s) proposed, agreement 100% (0
+agree, 0 disagree, 0 missed)` — a `rate` of 1.0 computed over zero judged
+decisions, which is the failure mode `config.yaml` itself warns of above the
+flip — and 17 of the 136 failed with `finalizer failed: output truncated at
+8192 tokens`, so a twelfth of the ticks do not even write their row. Until a
+tick proposes a move it disagrees about, `apply` has nothing to be flipped on
+the strength of.
 
 **It may never set `done`.** Closing is gated on a settled promotion whose
 outcome said `met` and stays mechanical in `close_settled_items`: a closed
@@ -297,20 +325,37 @@ secret he holds, hardware, money — listed on Mission Control's backlog panel,
 never as a tag. Deleting or moving data is not `outside`: it is ruled on and
 filed as work for a gated round.
 
-**Writes** nothing while `apply: false` (it records `owed_check` ledger rows
-with its answers, and skips items a dry run already answered).
+**Writes** for real since 2026-09-27, when `apply` flipped to `true` after a
+dry run of 9 items against the hand sweep: the 4 dated checks came back
+`recheck` as the sweep had them, and of the 5 the sweep had left for Alan, 2
+came back `outside` and 3 settled or ruled on evidence the sweep predated. It
+now rules, closes, and files its follow-up drafts; every answer is still an
+`owed_check` ledger row, and an item a dry run already answered is still
+skipped. Measured the same day: 14 runs, 14 applied — rulings with items filed
+(#1572 → #1680, #1418 → #1671, #1241 → #1668) and one `outside` reaching the
+Mission Control panel.
 
 ### `autotriage` — is this backlog item still true?
 
 **Wakes** every 900 s, enqueues one item under `autotriage:triage` with the
 budgets carried *in the payload*, so the run uses the config that was live when
-it was queued. **Executes** one session turn, Inner Voice off.
+it was queued. **Executes** one session turn, Inner Voice **on** again since
+2026-09-25 (`inner_voice: true`, with the worker note and the report-ask rail
+that replaced the reasons it was switched off), `max_inflight: 2` the same day,
+and `retry_seconds: 60` so a board with drafts waiting is worked about every
+minute rather than every 900 s.
 
-It takes a **cluster** before it takes a single item: when `clusters.json`
-holds a cluster with ≥ `group_min_items` untriaged members, the run consolidates
-that cluster instead — closes duplicates, retires the stale, folds the rest
-under one umbrella item. One turn closing several duplicates is finite work
-where the single-item pool is not.
+Three modes share this one source and the run picks in a different order from
+the pipeline diagram above. A `high` item goes before everything; then **sweep
+mode** (`sweep: true`, shipped on) takes `sweep_batch: 8` never-read items in
+one turn while any open item is unread, retiring or ranking each; then a
+**cluster** goes before the single pool — when `clusters.json` holds a cluster
+with ≥ `group_min_items` untriaged members, the run consolidates it instead:
+closes duplicates, retires the stale, folds the rest under one umbrella item,
+which is finite work where the single pool is not. Even that yields when the
+single candidate's own priority outranks the cluster. On a caught-up board the
+first two rules are the whole story: its runs on 2026-09-27 are single
+confirmations and `skipped: every open backlog item has been triaged`.
 
 - **It implements nothing.** Triage is read-only: a verdict plus the evidence
   for it. Splitting it from implementation is the whole point — the failure
@@ -352,10 +397,24 @@ abort. Landing runs detached, exactly as when a human drives it.
   *with an acceptance check* — an item confirmed without one is skipped, not
   guessed at, because a round with no contract cannot fail. And the loop must
   be free, re-checked at run time because a queued item can sit.
-- **It goes through `/api/message/stream`, not `run_query`.** `automod_start`
-  refuses a turn with no Inner Voice attached, and the chat path is the only
-  thing that attaches it. It also puts the round in the Inner Voice history,
-  which is where anyone reviews what it did.
+- **It goes through `/api/message/stream`, not `run_query`.** The reason is the
+  observer and the transcript: the chat path is the only one that attaches Inner
+  Voice, and it is on for this source again since 2026-09-25, with the round
+  landing in the Inner Voice history where anyone can read what it did. The
+  older reason is retired — `automod_start` does **not** refuse a turn with no
+  Inner Voice attached any more (`automod.require_inner_voice` defaults false
+  since 2026-09-24, IV plan R5: every turn is recorded and every turn runs the
+  deterministic guards), though `workers/sources/autocode.py:25-29` still says
+  it does, which is where this section copied it from.
+- **The loop finishes rounds the turn did not.** Since 2026-09-18 the
+  scheduler is a second writer of a round's outcome: `land_passed_gates` lands
+  a round whose gate passed at the commit it still holds, `regate_unreviewed`
+  re-gates one whose only failed rung was a review that could not run, and
+  `gate_ungated` (2026-09-25) commits the leftovers of a turn that ended with
+  unjudged work and gates them once, landing on a pass. `continue_session`
+  then runs the next item on that slot in the previous round's session. So one
+  turn no longer equals one round: an aborted turn is not necessarily the end
+  of the work it did.
 - **The clock is not the throttle; the gates are.** 14400 → 3600 → 900 s, each
   cut for the same reason: `_loop_is_free`, the dedup key and `max_inflight: 2`
   (raised from the default 1 on 2026-09-17, climbed to 4 while automod
@@ -363,15 +422,26 @@ abort. Landing runs detached, exactly as when a human drives it.
   whether a round may start, so the interval's only job is to ask them
   often enough. At an hour it did not — one round settled at 19:16 and the next
   poll was 19:50, with four confirmed items waiting.
-- 1492 s average, by far the longest-running job in the pool.
+- By far the longest-running job in the pool: ~2000 s over its last ten runs,
+  and over the 7 d to 2026-09-27, 246 of 300 runs ok (20 failed, 34 skipped)
+  for 116 GPU-hours — three fifths of the pool's 195 measured hours.
 
 ### `automod-regression` — did the landing make anything worse?
 
-**Wakes** every 900 s under `automod:regression`, which in practice means
-"shortly after a landing": it reads `last_settled.json`, skips unless a promotion
-settled in the last 24 h, and **measures once per promotion**, dedupped on the
-commit. **Executes** entirely off the loop — `execute` is three lines that
-`await asyncio.to_thread(_execute_blocking)`.
+**Wakes** every 900 s under `automod:regression`. The comparison no longer runs
+here: since 2026-09-18 it runs **detached**, and the promoter starts that runner
+the moment a landing is verified, so the measurement really does arrive shortly
+after a landing rather than on this source's poll. What is left in the pool is
+the safety net for a runner that never started — `execute` is
+`await asyncio.to_thread(start_runner)`, a few milliseconds with no engine,
+which is why the source is exempt from the round hold — and it decides what is
+owed a measurement from the **ledger**, not from `last_settled.json`: every
+`promoted` row of the last day that was not rolled back and has no
+`regression_check` row that measured anything, oldest first, behind
+`regression.lock`. That is what makes "one check per promotion" true at any
+landing rate; measuring "the latest promotion" lost them whenever two landed
+inside one check. Measured 2026-09-27: zero runs in the 7 d window, which is
+what a safety net that has not had to fire looks like.
 
 - **It is a paired A/B on identical data, and that shape is the whole point.**
   Check the promotion's **parent** out into a scratch worktree, point both arms
@@ -424,9 +494,18 @@ not at all — and with benching back, the promotion floors do the gatekeeping:
 `autoresearch.promotion` demands `min_composite_delta` 0.05,
 `min_bench_win_fraction` 0.5 (held at 0.5 on 2026-09-13, #428's false-positive
 measurement) and `require_safety_pass`. Alan pre-approved the re-arm on
-2026-09-13; config flipped it on 2026-09-16. The live record since then is
-11/11 success over the 2026-09-25 window, and nearly every round ends
-`0 promotable, winner=none`: the gate is holding, which is the point.
+2026-09-13; config flipped it on 2026-09-16. The live record over the 7 d to
+2026-09-27 is 16 success / 35 failed, and all 35 are the pre-#1546 shape —
+`TimeoutError: exceeded max_duration_seconds=1800`, the last of them at 05:46Z
+on 09-27. Every round since has completed and every one has ended
+`stopped at its 30 min budget, N task(s) not reached` (5 of 5 on 09-27, 1480–
+1537 s each), reporting `0 promotable, winner=none`. Read that correctly: it is
+**not** the floors refusing a finished round. A deadline-stop never promotes
+(below), so a round that cannot reach the end of its matrix cannot promote at
+all, and the gate has not been exercised since the cap fix. Every round does
+now score the frozen behavioural scenarios (#1549, landed 2026-09-26 alongside
+#1546) — report-only by construction: an axis in the report that feeds no
+promotion verdict until it has discriminated on a real one.
 
 **A round ends inside its cap (#1546, 2026-09-26).** From 2026-09-24 20:07Z
 every round was cancelled at `max_duration_seconds=1800` mid-matrix, retried
@@ -458,10 +537,16 @@ carried a hard-coded `budget_minutes: 60` that `run_round` never read, and the
   restores, and writes no `round_summary` row: a baseline mean over fewer tasks
   is not comparable. Only reports that promoted are ever read back, so its
   report cannot become a reference either.
-- **Sized to finish:** `max_variants: 3` in the source block makes 4 × 18
-  trials, ~20 of them agent-loop, ~20 min. `run_spec.yaml` records
-  `budget.budget_minutes`. A round run by hand without `--budget` gets
-  `autoresearch.default_budget_minutes`, which until then nothing read.
+- **Sized to finish — and it still does not.** `max_variants: 3` in the source
+  block and `autoresearch.default_budget_minutes` for a hand-run round
+  (`run_spec.yaml` records `budget.budget_minutes`) were meant to fit the matrix
+  inside ~20 min. Measured 2026-09-27 they do not: all five rounds ran 1480–
+  1537 s and stopped with 2 or 3 bench tasks never reached, which is precisely
+  the state that writes no `round_summary` row and promotes nothing. `909476a5`
+  (#1605, 2026-09-27) projects the trial matrix against the deadline *before*
+  starting trials, so a round picks a matrix it can actually complete; no round
+  has run since it landed, so the fix is unmeasured and this line is the thing
+  to re-read next pass.
 
 `tests/test_autoresearch_deadline.py` pins every link.
 
