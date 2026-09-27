@@ -328,3 +328,26 @@ def test_the_source_is_registered_and_configured():
     cfg = CONFIG["workers"]["sources"]["owed-check"]
     assert cfg["enabled"] is True and cfg["max_inflight"] == 1
     assert cfg["inner_voice"] is False
+
+
+def test_one_write_that_untags_and_owes_keeps_what_it_owes(isolated):
+    """The take-back rule acts on the item as it was, never on the caller's
+    own update: the 2026-09-27 migration wrote decide entries and removed the
+    legacy tag in one `update_frontmatter` call, and the take-back erased the
+    entries it had just written."""
+    p = write_item(isolated, 97, tags=("backlog", B.NEEDS_HUMAN_TAG),
+                   extra={"owed": [{"what": "stale decision", "kind": "decide"}]})
+    B.update_frontmatter(p, {"owed": [{"what": "fresh decision", "kind": "decide"}]},
+                         remove_tags=(B.NEEDS_HUMAN_TAG,))
+    fm = fm_of(p)
+    assert [e["what"] for e in O.entries_of(fm)] == ["fresh decision"]
+    assert fm["tags"] == ["backlog"]
+
+
+def test_answering_a_legacy_tagged_item_keeps_its_unanswered_decisions(isolated):
+    p = write_item(isolated, 98, tags=("backlog", B.NEEDS_HUMAN_TAG),
+                   extra={"owed": [{"what": "one", "kind": "check"},
+                                   {"what": "two", "kind": "decide"}]})
+    O.apply_verdict(p, O.entries_of(fm_of(p)),
+                    [{"n": 1, "outcome": "settled", "evidence": "e"}], item_id=98)
+    assert [e["what"] for e in O.entries_of(fm_of(p))] == ["two"]

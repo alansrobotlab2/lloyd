@@ -1317,6 +1317,12 @@ def update_frontmatter(path: Path, updates: dict, *, activity: str = "",
     if _unparsed_guard(path, text, fm, "update_frontmatter"):
         return False
     changed = False
+    # Take-back first, on the item as it was: the caller's own `owed` update
+    # below is what the item should end with. Run after it, the take-back
+    # erased the decide entries a single call both wrote and untagged — the
+    # 2026-09-27 migration lost five that way.
+    if NEEDS_HUMAN_TAG in remove_tags and _take_back(fm):
+        changed = True
     for k, v in (updates or {}).items():
         if v is None:
             if k in fm:
@@ -1325,8 +1331,6 @@ def update_frontmatter(path: Path, updates: dict, *, activity: str = "",
         elif fm.get(k) != v:
             fm[k] = v
             changed = True
-    if NEEDS_HUMAN_TAG in remove_tags and _take_back(fm):
-        changed = True
     raw_tags = fm.get("tags")
     tags = normalize_tags(raw_tags)
     new_tags = [t for t in tags if t not in remove_tags] + [t for t in add_tags if t not in tags]
