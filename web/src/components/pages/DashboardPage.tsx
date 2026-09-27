@@ -131,9 +131,15 @@ function Section({
   )
 }
 
+/** The `min-w-0` is not decoration. A grid item's `min-width` is `auto`,
+ *  which floors it at its own content, so one unbreakable line in one panel
+ *  widens the whole track and every panel sharing it: the Automation
+ *  section's four-column worker stat row once laid its three sibling panels
+ *  out at 686 px inside a 328 px phone column. `StatTile` had been carrying
+ *  this on its own call-site; it belongs on the component. */
 function Panel({ className, children }: { className?: string; children: React.ReactNode }) {
   return (
-    <div className={cn('rounded-lg border border-border bg-card p-3', className)}>
+    <div className={cn('min-w-0 rounded-lg border border-border bg-card p-3', className)}>
       {children}
     </div>
   )
@@ -796,7 +802,12 @@ function WorkersPanel({ workers }: { workers: WorkersState }) {
         </span>
       </div>
 
-      <div className="grid grid-cols-4 gap-3">
+      {/* Two columns on a phone, four from `sm` up. Four tiles at a 360 px
+          viewport are 47 px each, which truncates every label mid-word — and
+          a grid item is floored at its content by `min-width: auto`, so this
+          row's max-content was also what held the whole Automation section
+          open at 686 px on a 328 px column. */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <div>
           <div className="text-[10px] text-muted-foreground">In flight</div>
           <div className={cn('font-mono text-lg leading-none',
