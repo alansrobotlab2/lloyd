@@ -17,6 +17,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from datetime import timezone
+
+from workers import dispatch_watch
 from workers.pool import WorkerPool, normalize_result
 from workers.queue import QueueItem, WorkQueue
 
@@ -895,3 +898,226 @@ async def test_a_totals_failure_never_loses_the_run_record(q, monkeypatch, scrat
     assert runs[0]["status"] == "success", runs[0]
     assert json.loads(runs[0]["meta_json"])["scratchpad"] == {
         "writes": 0, "bytes": 0, "sessions": 0}
+
+
+# ── dispatch watermark pair: attempt vs clean return (#1681) ───────────────
+#
+# `last_enqueue_check` is the interval clock and has to advance whatever the
+# call does, or a source raising every tick is retried every tick. That is why
+# it cannot also be the signal that dispatch works — which is what
+# `workers/dispatch_watch.py` reads, and what the four tests below pin from
+# either side of the swallow at `workers/pool.py`.
+
+
+async def _one_pass_with(q, monkeypatch, *, raiser, cfg, repoll=False):
+    """Run one scheduler pass over a single source named `s`.
+
+    `raiser` is the point of these tests: `_one_pass` above can only return an
+    outcome, so the raise path — the one the whole item is about — had no test
+    and no harness. `repoll` puts REPOLL_ON_COMPLETE on the fake source, which
+    is what makes `_repoll_on_complete` re-arm the attempt stamp to the epoch.
+    """
+    import workers.sources as sources
+
+    async def enqueue_if_due(queue, src_cfg):
+        if raiser:
+            raise RuntimeError("ImportError inside the alarm code")
+        return None
+
+    monkeypatch.setattr(
+        sources, "SOURCE_REGISTRY",
+        {"s": SimpleNamespace(NAME="s", enqueue_if_due=enqueue_if_due,
+                              REPOLL_ON_COMPLETE=repoll)},
+        raising=False)
+    monkeypatch.setattr(sources, "get_sources_config", lambda: {"s": cfg},
+                        raising=False)
+    pool = WorkerPool(q, slots=0, poll_idle_seconds=0.01)
+    return pool, await pool._scheduler_pass()
+
+
+async def test_a_raising_enqueue_advances_the_attempt_stamp_only(q, monkeypatch):
+    """Clause 1: the swallow stamps the interval clock and leaves the clean
+    stamp alone, which is the only way the two can disagree — and a source
+    that raises on every tick must read OLDER, never fresher, than one merely
+    between intervals."""
+    cfg = {"enabled": True, "interval_seconds": 60}
+    pool, _ = await _one_pass_with(q, monkeypatch, raiser=True, cfg=cfg)
+    assert pool._dispatch_watch is None, "the tick belongs to the loop, not the pass"
+
+    await pool._watch_dispatch()
+    row = pool._dispatch_watch.rows()["s"]
+    # `pending`, not `unmeasured`: the attempt stamp proves the pool is ASKING and
+    # the missing clean stamp proves the answer is not arriving. Before this pair
+    # existed there was no state to distinguish that from a healthy source —
+    # `unmeasured` is a source with neither stamp, which is what a fresh install
+    # reports and what silence about a dead dispatcher used to look like.
+    assert row["state"] == dispatch_watch.STATE_PENDING, row
+    assert row["stalled"] is False, row
+    assert q.wm_get("s", "last_enqueue_check") is not None, (
+        "the interval clock stopped, so a raising source is retried every tick")
+    assert q.wm_get("s", dispatch_watch.OK_WM_KEY) is None, (
+        "a raise was recorded as a clean return")
+
+    age = _age_of_watermark(q, "s")
+    assert age < 5, f"attempt stamp should be ~now, is {age:.0f}s old"
+
+
+async def test_a_clean_return_advances_the_success_stamp_in_all_three_forms(
+        q, monkeypatch):
+    """Clause 2: None, an enqueue result and DECLINED are three different
+    returns and all three prove the call ran, so all three stamp. DECLINED
+    matters most: it is the one outcome whose ATTEMPT stamp is back-dated, so
+    it is the case where the two stamps deliberately differ."""
+    import workers.sources as sources
+    from datetime import datetime
+
+    for label, outcome in (("none", None), ("declined", sources.DECLINED)):
+        q.wm_set("s", dispatch_watch.OK_WM_KEY, "2020-01-01T00:00:00+00:00")
+        # Both stamps back to an old day first: the first pass through the loop
+        # stamps the attempt clock at `now`, and the interval arithmetic would
+        # otherwise skip the second pass as not-yet-due and leave the success
+        # stamp at 2020 — which is the right behaviour for a real source and the
+        # wrong result for this assertion.
+        q.wm_set("s", "last_enqueue_check", "2020-01-01T00:00:00+00:00")
+
+        async def enqueue_if_due(queue, src_cfg):
+            return outcome
+
+        monkeypatch.setattr(
+            sources, "SOURCE_REGISTRY",
+            {"s": SimpleNamespace(NAME="s", enqueue_if_due=enqueue_if_due)},
+            raising=False)
+        monkeypatch.setattr(
+            sources, "get_sources_config",
+            lambda: {"s": {"enabled": True, "interval_seconds": 900,
+                           "retry_seconds": 60}}, raising=False)
+        pool = WorkerPool(q, slots=0, poll_idle_seconds=0.01)
+        await pool._scheduler_pass()
+
+        ok = datetime.fromisoformat(q.wm_get("s", dispatch_watch.OK_WM_KEY))
+        age = (datetime.now(timezone.utc) - ok).total_seconds()
+        assert age < 5, f"{label}: success stamp is {age:.0f}s old, should be now"
+        if label == "declined":
+            assert _age_of_watermark(q, "s") > 800, (
+                "the DECLINED back-dating that clause 1 depends on has moved")
+            assert age < _age_of_watermark(q, "s"), (
+                "the clean stamp must not be back-dated too; it is the only "
+                "stamp that says the call worked")
+
+
+async def test_the_watch_runs_from_the_loop_seat_and_names_a_stalled_source(
+        q, monkeypatch, caplog):
+    """Clause 3: the reader sits beside _maybe_sweep_poisoned/_probe_services,
+    outside the try that swallows a raising pass, and calls a source stalled
+    once its clean stamp passes 3x its own interval."""
+    src = inspect.getsource(WorkerPool._scheduler_loop)
+    watch_at = src.index("await self._watch_dispatch()")
+    pass_at = src.index("await self._scheduler_pass()")
+    try_at = src.index("try:")
+    assert watch_at < pass_at, "the reader runs after the pass it measures"
+    assert watch_at < try_at or watch_at > src.index("except Exception"), \
+        "the reader is inside the try that can skip the pass"
+    loop_src = inspect.getsource(WorkerPool._watch_dispatch)
+    assert "except Exception" in loop_src, "the seat's never-raises contract"
+
+    cfg = {"enabled": True, "interval_seconds": 60}
+    pool, _ = await _one_pass_with(q, monkeypatch, raiser=True, cfg=cfg)
+    from datetime import datetime, timedelta
+    old = (datetime.now(timezone.utc) - timedelta(seconds=200)).isoformat()
+    q.wm_set("s", dispatch_watch.OK_WM_KEY, old)
+
+    pool._dispatch_watch = dispatch_watch.DispatchWatch(
+        queue=q, sources=lambda: {"s": cfg}, announce=None,
+        repoll=set())
+    row = pool._dispatch_watch.rows()["s"]
+    assert row["stalled"] is True, row
+    assert row["state"] == dispatch_watch.STATE_STALLED, row
+    assert row["threshold_seconds"] == 180.0, row
+    assert row["age_seconds"] > 180, row
+
+    # Fresh inside the window: the same source, one tick younger in effect.
+    q.wm_set("s", dispatch_watch.OK_WM_KEY,
+             datetime.now(timezone.utc).isoformat())
+    row = pool._dispatch_watch.rows()["s"]
+    assert row["stalled"] is False and row["state"] == dispatch_watch.STATE_OK, row
+
+
+async def test_the_watch_is_silent_on_a_re_armed_or_disabled_source(q, monkeypatch):
+    """Clause 4: two states that make the ATTEMPT stamp meaningless, and one of
+    them is a trap the fix would have walked straight into.
+    _repoll_on_complete back-dates `last_enqueue_check` to the epoch for a
+    source with REPOLL_ON_COMPLETE, so a reader watching that stamp would call
+    autocode stalled for the whole of its next interval after every run. A
+    source disabled in config is skipped before either stamp is written, so its
+    stamps go stale forever."""
+    from datetime import datetime, timedelta
+    cfg = {"enabled": True, "interval_seconds": 900}
+
+    pool, _ = await _one_pass_with(q, monkeypatch, raiser=False, cfg=cfg,
+                                   repoll=True)
+    q.wm_delete("s", "last_enqueue_check")
+    q.wm_set("s", "last_enqueue_check",
+             datetime(1970, 1, 1, tzinfo=timezone.utc).isoformat())
+    q.wm_delete("s", dispatch_watch.OK_WM_KEY)
+    watch = dispatch_watch.DispatchWatch(
+        queue=q, sources=lambda: {"s": cfg}, announce=None, repoll={"s"})
+    row = watch.rows()["s"]
+    assert row["repoll_on_complete"] is True, row
+    assert row["stalled"] is False, row
+    assert row["state"] == dispatch_watch.STATE_UNMEASURED, row
+    assert "re-arm" in row["detail"], row
+
+    # The same two stamps, without the declaration: `never_succeeded`, and
+    # stalled. So the exemption above is doing real work on the state the epoch
+    # stamp would otherwise produce, and is not a blanket silence — a repoll
+    # source with a clean stamp that has gone stale IS still called stalled, the
+    # first branch of `verdict` running before this one.
+    # The same two stamps on a source that does NOT re-arm: the epoch attempt
+    # stamp reads as "raised for 57 years", so the exemption above is doing real
+    # work on exactly the state that stamp produces, and is not a blanket
+    # silence — `plain` is the false positive clause 4 exists to prevent.
+    plain = dispatch_watch.DispatchWatch(
+        queue=q, sources=lambda: {"s": cfg}, announce=None, repoll=set())
+    assert plain.rows()["s"]["stalled"] is True, plain.rows()["s"]
+    assert (plain.rows()["s"]["state"]
+            == dispatch_watch.STATE_NEVER_SUCCEEDED), plain.rows()["s"]
+
+    # The state the re-arm actually leaves a WORKING repoll source in: attempt
+    # stamp at the epoch, clean stamp seconds old, because the re-arm follows a
+    # run and a run means the enqueue returned cleanly.
+    q.wm_set("s", dispatch_watch.OK_WM_KEY, datetime.now(timezone.utc).isoformat())
+    row = watch.rows()["s"]
+    assert row["stalled"] is False and row["state"] == dispatch_watch.STATE_OK, row
+
+    # And a re-armed source whose clean stamp DOES go stale is still caught: the
+    # exemption covers the meaningless stamp, never the meaningful one.
+    q.wm_set("s", dispatch_watch.OK_WM_KEY,
+             (datetime.now(timezone.utc) - timedelta(seconds=3000)).isoformat())
+    assert watch.rows()["s"]["stalled"] is True, watch.rows()["s"]
+    q.wm_set("s", dispatch_watch.OK_WM_KEY, datetime.now(timezone.utc).isoformat())
+
+    # Disabled, with a stamp two days old: not judged at all.
+    q.wm_set("s", dispatch_watch.OK_WM_KEY,
+             (datetime.now(timezone.utc) - timedelta(days=2)).isoformat())
+    off = dispatch_watch.DispatchWatch(
+        queue=q, sources=lambda: {"s": {**cfg, "enabled": False}},
+        announce=None, repoll=set())
+    row = off.rows()["s"]
+    assert (row["stalled"] is False
+            and row["state"] == dispatch_watch.STATE_DISABLED), row
+
+    # And a tick over a stall announces once, then stays quiet, then announces
+    # the recovery: a steady fault must not become a recurring alarm. On the
+    # 60-second source, which is `scheduled-task`'s real shape: 200 s old is
+    # past its 180 s threshold, where the same stamp is inside the 900 s cfg
+    # used by every block above.
+    q.wm_set("s", dispatch_watch.OK_WM_KEY,
+             (datetime.now(timezone.utc) - timedelta(seconds=200)).isoformat())
+    said = []
+    live = dispatch_watch.DispatchWatch(
+        queue=q, sources=lambda: {"s": {"enabled": True, "interval_seconds": 60}},
+        announce=lambda *a: said.append(a), repoll=set())
+    assert len(live.tick()) == 1 and live.tick() == [] and live.tick() == []
+    q.wm_set("s", dispatch_watch.OK_WM_KEY, datetime.now(timezone.utc).isoformat())
+    assert len(live.tick()) == 1
+    assert [s[2] for s in said] == ["warn", "info"], said

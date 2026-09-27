@@ -205,6 +205,23 @@ async def workers_health(days: int = 7, runs: int = 10):
     except Exception as e:
         logger.warning("workers health depth failed: %s", e)
         depth = {}
+    # `depth` and `rollup` are both computed from the `runs` table, so between them
+    # they answer "how is this source's work going" and cannot answer "is this
+    # source still asking": a source whose `enqueue_if_due` raises on every tick
+    # keeps showing the shape of its last successful run for as long as that run
+    # stays inside `days`. `dispatch` is the second question, read off the two
+    # enqueue watermarks by the same verdict the pool announces on, so the page and
+    # the announcement cannot disagree about one source. Config-named sources only:
+    # a retired one has no interval to be judged on and gets `dispatch: null`
+    # rather than a verdict invented from a default (#1681).
+    try:
+        from workers import dispatch_watch
+
+        dispatch = await loop.run_in_executor(
+            None, partial(dispatch_watch.dispatch_health, q, sources_cfg))
+    except Exception as e:  # noqa: BLE001 - a section, not the page
+        logger.warning("workers health dispatch check failed: %s", e)
+        dispatch = {}
 
     # Every source the config names AND every source the runs table knows
     # about. A source removed from config still has history worth reading,
@@ -244,6 +261,10 @@ async def workers_health(days: int = 7, runs: int = 10):
             "priority": cfg.get("priority"),
             "depth": depth.get(name, {}),
             "health": rollup.get(name),
+            # `null` for a source the config does not name: no interval to judge
+            # it on, and a verdict manufactured from a default would be a claim
+            # about a source nothing is dispatching.
+            "dispatch": dispatch.get(name),
             "recent": recent,
         })
     return JSONResponse({"initialized": True, "days": days, "sources": out})

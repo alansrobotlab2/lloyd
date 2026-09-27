@@ -26,6 +26,7 @@ from typing import Any, Optional
 from app import engine_pressure
 from app.harness.policy import current_effect_scope, current_scope
 from app.sessions_io import current_run_sessions
+from workers.dispatch_watch import OK_WM_KEY
 from workers.evidence import gaps_key, verify_bundle
 from workers.queue import WorkQueue, QueueItem, get_queue, new_run_id
 
@@ -398,6 +399,10 @@ class WorkerPool:
         self._in_flight: dict[int, dict[str, Any]] = {}
         self._landing_probe: tuple[float, bool] = (0.0, False)
         self._service_probe = None  # workers.service_probe.ServiceProbe, lazily
+        # workers.dispatch_watch.DispatchWatch, lazily, on the first scheduler pass.
+        # Lazy because a pool built in a process that never starts its scheduler (a
+        # test, an embed) must not have read config or judged anybody's dispatch.
+        self._dispatch_watch = None
         # KV gate state, reported by `status()`. See `_kv_gate_held`.
         self._kv_gate: dict[str, Any] = {
             "engaged": False,
@@ -906,6 +911,11 @@ class WorkerPool:
         while self._running:
             await self._maybe_sweep_poisoned()
             await self._probe_services()
+            # Before the pass, and outside its try. This is the reader that has to
+            # survive every source raising at once, so it cannot sit on the far
+            # side of the call it measures — nor inside `_scheduler_pass`, whose
+            # per-source `except` is the swallow that makes the blindness.
+            await self._watch_dispatch()
 
             try:
                 await self._scheduler_pass()
@@ -942,16 +952,30 @@ class WorkerPool:
                 if elapsed < wait:
                     continue
             outcome = None
+            raised = False
             try:
                 outcome = await source.enqueue_if_due(self.queue, src_cfg)
             except Exception as e:
                 logger.error("Source %s enqueue_if_due failed: %s", name, e, exc_info=True)
+                raised = True
             stamp = datetime.now(timezone.utc)
             retry = _positive_int(src_cfg.get("retry_seconds"))
             if outcome == DECLINED and retry and retry < wait:
                 stamp -= timedelta(seconds=wait - retry)
             await asyncio.to_thread(
                 self.queue.wm_set, name, "last_enqueue_check", stamp.isoformat())
+            # A second stamp for the same call, written only when it returned. The
+            # stamp above has to advance either way — the interval arithmetic and
+            # the DECLINED back-dating read it, so a source that raises every tick
+            # must not be retried every second — which leaves it unable to say
+            # whether dispatch WORKS. `last_enqueue_ok` can, and only it may be
+            # read for that: every fleet alarm lives inside the call above, so a
+            # source raising here has taken its own alarms down with it, and
+            # workers/dispatch_watch.py is the reader that survives that.
+            if not raised:
+                await asyncio.to_thread(
+                    self.queue.wm_set, name, OK_WM_KEY,
+                    datetime.now(timezone.utc).isoformat())
 
     # ── Queue maintenance — poison sweep ─────────────────────────────────
 
@@ -1008,6 +1032,30 @@ class WorkerPool:
             await asyncio.to_thread(service_probe.run_probe, self._service_probe)
         except Exception as e:
             logger.error("Service probe failed: %s", e, exc_info=True)
+
+    async def _watch_dispatch(self) -> None:
+        """Announce a source whose dispatch has stopped returning cleanly (#1681).
+
+        Same seat as the poison sweep and the service probe and for the same
+        reason: it must run whether or not the pass below survives. Never raises.
+        """
+        try:
+            from workers import dispatch_watch
+            from workers.sources import get_sources_config
+
+            if self._dispatch_watch is None:
+                self._dispatch_watch = dispatch_watch.DispatchWatch(
+                    queue=self.queue, sources=get_sources_config,
+                    announce=dispatch_watch.guardian_announce)
+            # `tick()` is synchronous and reads one watermark pair per source —
+            # seven or eight indexed reads, in the tens of microseconds. Threading
+            # it would put a second concurrent reader on the same sqlite
+            # connection, which is exactly the lock contention the sweep above
+            # goes out of its way to avoid by keeping one thread.
+            for event in self._dispatch_watch.tick():
+                logger.info("dispatch_watch: %s", event)
+        except Exception as e:
+            logger.warning("dispatch watch failed: %s", e, exc_info=True)
 
     # ── Worker loop — claims items and runs them ──────────────────────────
 

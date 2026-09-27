@@ -916,3 +916,126 @@ def test_paused_since_is_only_the_operator_pause_instant(monkeypatch, tmp_path):
     assert body["paused_since"] is None, (
         "an automod hold has no persisted instant to report; inventing one would "
         "assert a pause that the landing's restart does not survive")
+
+
+# ── /api/workers/health carries the dispatch verdict (#1681) ───────────────
+
+
+class _WmQueue:
+    """A queue whose only interesting behaviour is the two enqueue watermarks.
+
+    Stands in for `WorkQueue` so the route's four reads are all served from a
+    dict: the point of these tests is what the endpoint puts NEXT TO `depth` and
+    `health`, not whether sqlite returns rows.
+    """
+
+    def __init__(self, watermarks: dict[tuple[str, str], str]):
+        self.wm = watermarks
+
+    def wm_get(self, source, key):
+        return self.wm.get((source, key))
+
+    def run_rollup_by_source(self, since):
+        # Both sources have identical rollups on purpose: whatever distinguishes
+        # them in this response must come from `dispatch`, not from here.
+        return {"live": {"runs": 3, "success": 3, "failed": 0},
+                "dead": {"runs": 3, "success": 3, "failed": 0}}
+
+    def depth_by_source(self):
+        return {"live": {"queued": 0}, "dead": {"queued": 0}}
+
+    def list_runs(self, source="", limit=10):
+        return []
+
+
+def _health_client(monkeypatch, tmp_path, watermarks, sources):
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(router, "get_queue", lambda: _WmQueue(watermarks))
+    monkeypatch.setattr(router, "CONFIG",
+                        {"workers": {"sources": sources}}, raising=False)
+    return client
+
+
+def _row(body, name):
+    return next(s for s in body["sources"] if s["name"] == name)
+
+
+def test_health_distinguishes_a_stopped_dispatcher_from_a_quiet_one(
+        monkeypatch, tmp_path):
+    """The two rows that used to be identical, told apart.
+
+    `depth` and `health` come off the `runs` table, so a source whose
+    `enqueue_if_due` raises on every tick and one with genuinely nothing to do
+    both keep the shape of their last good run — the same look the fleet watchdog
+    would have, and that watchdog is dispatched by the very source it would
+    catch. `dispatch` is the field that separates them, with the age and the
+    verdict both on the page.
+    """
+    from datetime import datetime, timedelta, timezone
+    from workers import dispatch_watch
+
+    now = datetime.now(timezone.utc)
+    sources = {
+        "dead": {"enabled": True, "interval_seconds": 60},
+        "live": {"enabled": True, "interval_seconds": 60},
+    }
+    wm = {
+        ("live", dispatch_watch.ATTEMPT_WM_KEY): now.isoformat(),
+        ("live", dispatch_watch.OK_WM_KEY): now.isoformat(),
+        ("dead", dispatch_watch.ATTEMPT_WM_KEY): now.isoformat(),
+        ("dead", dispatch_watch.OK_WM_KEY): (
+            now - timedelta(seconds=400)).isoformat(),
+    }
+    q = _WmQueue(wm)
+    # The pair that makes the two rows identical on the fields that already
+    # existed: same depth, same outcome rollup.
+    assert q.run_rollup_by_source("x")["live"] == q.run_rollup_by_source("x")["dead"]
+    assert q.depth_by_source()["live"] == q.depth_by_source()["dead"]
+
+    client = _health_client(monkeypatch, tmp_path, wm, sources)
+    body = client.get("/api/workers/health?days=7&runs=0").json()
+    dead, live = _row(body, "dead"), _row(body, "live")
+
+    assert dead["depth"] == live["depth"] and dead["health"] == live["health"], (
+        "the premise of this test is that the older fields cannot tell these apart")
+    assert dead["dispatch"]["stalled"] is True, dead["dispatch"]
+    assert dead["dispatch"]["state"] == dispatch_watch.STATE_STALLED
+    assert dead["dispatch"]["age_seconds"] > 180, dead["dispatch"]
+    assert dead["dispatch"]["threshold_seconds"] == 180.0
+    assert live["dispatch"]["stalled"] is False, live["dispatch"]
+    assert live["dispatch"]["state"] == dispatch_watch.STATE_OK
+
+
+def test_health_dispatch_agrees_with_the_watch_and_survives_its_failure(
+        monkeypatch, tmp_path):
+    """The page must not invent its own verdict, and must not die on its newest
+    field. Agreement matters because the same threshold drives an announcement:
+    a dashboard that says `ok` beside an alert that says `stalled` teaches a
+    person to disbelieve one of them."""
+    from datetime import datetime, timezone
+    from workers import dispatch_watch
+
+    now = datetime.now(timezone.utc)
+    wm = {("dead", dispatch_watch.ATTEMPT_WM_KEY): now.isoformat()}
+    sources = {"dead": {"enabled": True, "interval_seconds": 60}}
+    client = _health_client(monkeypatch, tmp_path, wm, sources)
+    body = client.get("/api/workers/health?days=7&runs=0").json()
+    row = _row(body, "dead")["dispatch"]
+    direct = dispatch_watch.dispatch_health(_WmQueue(wm), sources)["dead"]
+    # `age_seconds` is measured at read time, so the two calls differ by the
+    # milliseconds between them; everything that carries a verdict is compared
+    # exactly.
+    assert {k: v for k, v in row.items() if k != "age_seconds"} == \
+        {k: v for k, v in {**direct, "name": "dead"}.items() if k != "age_seconds"}, (
+            "the route and the watch must return the same verdict, not two readings")
+    assert abs(row["age_seconds"] - direct["age_seconds"]) < 1.0
+    assert row["state"] == dispatch_watch.STATE_PENDING, row
+
+    def _boom(*a, **k):
+        raise RuntimeError("watermarks unreadable")
+
+    monkeypatch.setattr(dispatch_watch, "dispatch_health", _boom)
+    body2 = client.get("/api/workers/health?days=7&runs=0").json()
+    assert _row(body2, "dead")["dispatch"] is None, (
+        "an unreadable dispatch section must not 500 the health page")
+    assert body2["sources"], "and the rest of the page still has its rows"
