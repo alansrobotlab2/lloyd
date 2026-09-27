@@ -125,7 +125,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import AUTORESEARCH_PRIORITY, load_bench_tasks, load_config
-from .bench_runner import token_ledger_fields
+from .bench_runner import deadline_timeout, mark_if_cut, token_ledger_fields
 # Module-level, not inside `build_options` where the harness imports live: the
 # probe count is computed on the trace after the turn with no harness in play,
 # and `_DENIAL_MARKERS` needs the deny marker at import time.
@@ -150,6 +150,9 @@ HARNESS = "sdk"
 # round-trips, so it needs several times that (item #353 constraint 3).
 DEFAULT_PER_TASK_TIMEOUT = 600
 DEFAULT_MAX_AGENT_TURNS = 12
+# Least time left worth starting an agent-loop trial in: they took 40-280 s,
+# ~110 s on average, on the primary on 2026-09-26 (16 in 29 min, one at a time).
+SDK_MIN_TRIAL_SECONDS = 90
 
 # The judge keeps the tail of `final_text`; match the direct runner's cap so
 # both harnesses score the same amount of text.
@@ -649,8 +652,15 @@ async def run_bench_sdk(
     hooks_factory: Any | None = None,
     probe_prompt: str = "",
     prefetched_text: str | None = None,
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     """Fan out (variant × task) harness trials through a semaphore.
+
+    `deadline` (a `time.monotonic()` instant) bounds the fan-out the way it
+    bounds `bench_runner.run_bench`: no trial starts with less than
+    `SDK_MIN_TRIAL_SECONDS` left, one that starts near it runs on the time
+    left, and the matrix is walked task by task so a stopped round has every
+    variant measured on the same tasks (#1546).
 
     `cfg` is accepted for signature parity with the direct runner and is
     unused: this path writes nothing durable, so there is no output directory
@@ -686,17 +696,20 @@ async def run_bench_sdk(
 
     async def _one(variant_id: str, overlay_dir: Path, task: dict[str, Any]) -> None:
         async with sem:
+            timeout = deadline_timeout(per_task_timeout, deadline, SDK_MIN_TRIAL_SECONDS)
+            if timeout is None:
+                return
             hooks = hooks_factory() if hooks_factory is not None else None
             trace = await run_trial(
                 task, variant_id, overlay_dir, model,
-                per_task_timeout=per_task_timeout,
+                per_task_timeout=timeout,
                 max_agent_turns=max_agent_turns,
                 hooks=hooks, probe_prompt=probe_prompt,
                 prefetched_text=prefetched_text,
             )
-            traces.append(trace)
+            traces.append(mark_if_cut(trace, timeout, per_task_timeout, deadline))
 
-    await asyncio.gather(*[_one(vid, odir, t) for (vid, odir) in variants for t in tasks])
+    await asyncio.gather(*[_one(vid, odir, t) for t in tasks for (vid, odir) in variants])
     return traces
 
 

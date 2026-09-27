@@ -611,7 +611,7 @@ def test_run_round_records_and_surfaces_on_the_live_path(world, monkeypatch):
     overlay.mkdir(parents=True, exist_ok=True)
     (overlay / "SOUL.md").write_text("variant contract\n", encoding="utf-8")
 
-    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel):
+    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel, **_kw):
         traces = [
             {"variant_id": vid, "task_id": t["id"], "status": "ok", "task_category": "c",
              "turns": 1, "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0}
@@ -718,7 +718,7 @@ def test_a_later_round_reads_the_report_the_round_actually_wrote(world, monkeypa
     overlay.mkdir(parents=True, exist_ok=True)
     (overlay / "SOUL.md").write_text("variant contract\n", encoding="utf-8")
 
-    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel):
+    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel, **_kw):
         return [
             {"variant_id": vid, "task_id": t["id"], "status": "ok", "task_category": "c",
              "turns": 1, "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0}
@@ -1063,7 +1063,7 @@ def test_the_report_run_writes_carries_the_shape_block_capped_at_five(world, mon
         with open(soul, "a", encoding="utf-8") as fh:
             fh.write(f"- ordinary guidance line {i}\n")
 
-    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel):
+    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel, **_kw):
         return [
             {"variant_id": vid, "task_id": t["id"], "status": "ok", "task_category": "c",
              "turns": 1, "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0}

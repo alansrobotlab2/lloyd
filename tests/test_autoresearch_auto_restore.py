@@ -243,7 +243,7 @@ def drive_round(env: Env, baseline_mean: float, *, monkeypatch,
     `no_heldout_overlap`, and the round's own candidate can never be mistaken for the
     promotion being undone.
     """
-    async def fake_trials(cfg, variant_pairs, tasks, model, harness, max_parallel):
+    async def fake_trials(cfg, variant_pairs, tasks, model, harness, max_parallel, **_kw):
         direct = []
         for index, (vid, _overlay) in enumerate(variant_pairs):
             # `materialize_variants` seeds the list with the baseline pair, so index

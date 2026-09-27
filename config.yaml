@@ -264,6 +264,8 @@ autonomy:
   inner_voice: false
 autoresearch:
   bench_dir: ~/obsidian/lloyd/bench
+  # Only for a round run by hand without --budget; a scheduled round's budget
+  # is workers.sources.autoresearch.max_duration_seconds (#1546).
   default_budget_minutes: 120
   default_model: primary
   facts_experiments_dir: ${LLOYD_DATA}/_pipeline/vault-derived/facts/Experiments
@@ -1644,11 +1646,21 @@ workers:
     # runs ~100% of the time now and autoresearch is exempt from the round
     # hold (below), so this is the share of the primary it may take beside
     # a round — at most 30 min in 4 h.
+    # 2026-09-26 (#1546): every round from 09-24 died at this cap. fa8a5bac
+    # routed the `requires_runtime` bench tasks through the agent loop, and
+    # 8 variants x 5 such tasks at ~110 s a trial, one at a time, is ~75 min.
+    # The round now derives its budget from max_duration_seconds and stops
+    # starting trials before it (no promotion from a round that did), and
+    # max_variants sizes it to finish: 3 candidates + the baseline is ~20
+    # agent-loop trials, ~20 min, inside the 30 of this 4 h share. Optional
+    # here: budget_minutes (only lowers the derived budget), bench_limit,
+    # max_parallel (the direct arm's; default 3).
     autoresearch:
       enabled: true
       interval_seconds: 14400
       max_inflight: 1
       max_duration_seconds: 1800
+      max_variants: 3
     # Behavioural-regression check for a landed self-modification. It is a
     # no-op without an unmeasured promotion on the ledger, so polling it
     # costs nothing between landings.

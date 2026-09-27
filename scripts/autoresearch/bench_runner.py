@@ -187,6 +187,39 @@ def _run_one_sync(
     return trace
 
 
+# Least time left worth starting a direct trial in; one takes ~2-3 s on the
+# primary (104 trials in 80 s at 3 in parallel, 2026-09-26).
+DIRECT_MIN_TRIAL_SECONDS = 20
+
+
+def deadline_timeout(per_task_timeout: int, deadline: float | None,
+                     min_seconds: float) -> int | None:
+    """The timeout a trial starting NOW may use under the round's deadline.
+
+    `deadline` is a `time.monotonic()` instant (`run_round.run` derives it from
+    the round's budget, #1546). `per_task_timeout` unchanged when there is none
+    or it is far away; the time left when that is shorter; None when less than
+    `min_seconds` is left, so the trial is not started at all — a trial begun
+    with ten seconds to go can only be cut, and a cut trial is not scored.
+    """
+    if deadline is None:
+        return per_task_timeout
+    left = deadline - time.monotonic()
+    if left < min_seconds:
+        return None
+    return min(per_task_timeout, int(left))
+
+
+def mark_if_cut(trace: dict[str, Any], timeout: int, per_task_timeout: int,
+                deadline: float | None) -> dict[str, Any]:
+    """Flag a trial the deadline cut short: it ran on a shortened timeout and
+    was still running when the deadline arrived. `run_round` drops a task any
+    variant's trial of was cut, so no variant is scored on a truncated trial."""
+    if deadline is not None and timeout < per_task_timeout and time.monotonic() >= deadline - 1:
+        trace["deadline_cut"] = True
+    return trace
+
+
 async def run_bench(
     cfg: AutoresearchConfig,
     variants: list[tuple[str, Path]],  # (variant_id, overlay_dir)
@@ -194,6 +227,8 @@ async def run_bench(
     model: str,
     max_parallel: int = 3,
     per_task_timeout: int = 180,
+    *,
+    deadline: float | None = None,
 ) -> list[dict[str, Any]]:
     """Fan out (variant × task) HTTP calls through a semaphore-gated thread pool.
 
@@ -203,6 +238,11 @@ async def run_bench(
     disconnects — see hypothesis_generator.propose_variants for the full
     picture. Callers (workers/sources/autoresearch.py) should not raise
     this above 3 without also raising the engine cap.
+
+    With a `deadline`, no trial starts once it has (nearly) passed and a trial
+    that starts close to it runs on the time left (`deadline_timeout`). The
+    matrix is walked task by task, every variant of one task before the next,
+    so a round the deadline stops has every variant measured on the same tasks.
     """
     traces: list[dict[str, Any]] = []
     sem = asyncio.Semaphore(max_parallel)
@@ -210,11 +250,14 @@ async def run_bench(
 
     async def _one(variant_id: str, overlay_dir: Path, task: dict[str, Any]) -> None:
         async with sem:
+            timeout = deadline_timeout(per_task_timeout, deadline, DIRECT_MIN_TRIAL_SECONDS)
+            if timeout is None:
+                return
             trace = await loop.run_in_executor(
-                None, _run_one_sync, task, variant_id, overlay_dir, model, per_task_timeout,
+                None, _run_one_sync, task, variant_id, overlay_dir, model, timeout,
             )
-            traces.append(trace)
+            traces.append(mark_if_cut(trace, timeout, per_task_timeout, deadline))
 
-    coros = [_one(vid, odir, t) for (vid, odir) in variants for t in tasks]
+    coros = [_one(vid, odir, t) for t in tasks for (vid, odir) in variants]
     await asyncio.gather(*coros)
     return traces

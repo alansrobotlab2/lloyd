@@ -374,8 +374,8 @@ prompt-optimisation round per `interval_seconds` — 14400, every four hours and
 not the hourly cadence of the incident below: a round now runs nearly all the
 time and the source is exempt from the round hold, so the interval is the share
 of the primary it may take (at most 30 min in 4 h). Wraps
-`scripts/autoresearch/run_round.py`, dedupped on `autoresearch:round` because a
-round takes 30–60 minutes.
+`scripts/autoresearch/run_round.py`, dedupped on `autoresearch:round`; a round
+is bounded to the source's `max_duration_seconds` (below, #1546).
 
 It promoted generated prompt variants straight over the live `lloyd/SOUL.md`
 and `MEMORY.md` every hour with **no gate, no test, no review and no revert**.
@@ -400,6 +400,43 @@ measurement) and `require_safety_pass`. Alan pre-approved the re-arm on
 2026-09-13; config flipped it on 2026-09-16. The live record since then is
 11/11 success over the 2026-09-25 window, and nearly every round ends
 `0 promotable, winner=none`: the gate is holding, which is the point.
+
+**A round ends inside its cap (#1546, 2026-09-26).** From 2026-09-24 20:07Z
+every round was cancelled at `max_duration_seconds=1800` mid-matrix, retried
+three or four times, and quarantined: 8 rows, 32 runs, 16 h of the primary, no
+report and no measurement, since a killed round writes only `run_spec.yaml`. The
+cause was `fa8a5bac` (#885), which routed the `requires_runtime` bench tasks
+through the agent loop. A round grew from 91 trials with 1 such task to 144
+trials with 5 (8 variants × 5 tasks, ~110 s a trial, one at a time: ~75 min).
+The direct arm's 104 trials take ~80 s. Nothing bounded the round: the payload
+carried a hard-coded `budget_minutes: 60` that `run_round` never read, and the
+`bench_limit` / `max_variants` / `max_parallel` knobs had no way in from config.
+
+- **The budget is derived from the cap.** `budget_minutes_for` takes the pool
+  cap in whole minutes, lowered (never raised) by a payload or config
+  `budget_minutes`. It is applied at enqueue, and again at execute, because a
+  queued row can predate the cap.
+- **The round keeps a clock** (`run_round.trial_deadline`): trials must be over
+  by budget − max(20 %, 180 s), which leaves the judge and the report their
+  share. Both runners start no trial with too little time left (20 s direct,
+  90 s agent loop), cut a trial that starts near the deadline to the time left,
+  and flag a trial cut that way `deadline_cut`. They walk the matrix task by
+  task, so a stopped round has every variant measured on the same tasks.
+- **A stopped round is a result, not a failure.** `complete_matrix` drops any
+  task a variant missed or had cut, for every variant at once; the rest is
+  judged, ranked, ledgered and reported, and the report says `stopped at
+  deadline: yes` and names what was dropped. The round returns normally, so the
+  pool records it completed and does not re-run the same work. It **never
+  promotes** (every decision is `deadline_stopped`, HOLD), never compares or
+  restores, and writes no `round_summary` row: a baseline mean over fewer tasks
+  is not comparable. Only reports that promoted are ever read back, so its
+  report cannot become a reference either.
+- **Sized to finish:** `max_variants: 3` in the source block makes 4 × 18
+  trials, ~20 of them agent-loop, ~20 min. `run_spec.yaml` records
+  `budget.budget_minutes`. A round run by hand without `--budget` gets
+  `autoresearch.default_budget_minutes`, which until then nothing read.
+
+`tests/test_autoresearch_deadline.py` pins every link.
 
 ---
 

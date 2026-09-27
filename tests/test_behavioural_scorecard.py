@@ -244,7 +244,7 @@ def round_env(tmp_path, monkeypatch):
                         lambda cfg_: ("BASELINE_t", cfg_.paths.variants_dir))
     monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: '{"overall": 0.5}')
 
-    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel):
+    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel, **_kw):
         return [{"variant_id": vid, "task_id": t["id"], "status": "success",
                  "task_category": t.get("category"), "turns": 1, "harness": "direct",
                  "final_text": "the answer is done.", "tool_calls": [], "denied_calls": [],

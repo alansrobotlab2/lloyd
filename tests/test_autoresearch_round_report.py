@@ -71,7 +71,7 @@ def round_env(tmp_path, monkeypatch):
                         lambda cfg_: ("BASELINE_t", cfg_.paths.variants_dir))
     monkeypatch.setattr(judge, "_call_rubric_llm", lambda *a, **kw: '{"overall": 0.5}')
 
-    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel):
+    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel, **_kw):
         direct = [{"variant_id": vid, "task_id": t["id"], "status": "success",
                    "task_category": t.get("category"), "turns": 1, "harness": "direct",
                    "final_text": "I called vault_recall and the answer is done.",
@@ -165,7 +165,7 @@ def test_a_direct_round_skips_the_runtime_task_and_says_so(round_env, monkeypatc
     handed: list[str] = []
     real_fake = run_round._run_trials
 
-    async def spy(cfg_, variant_pairs, tasks, model, harness, max_parallel):
+    async def spy(cfg_, variant_pairs, tasks, model, harness, max_parallel, **_kw):
         handed.extend(t["id"] for t in tasks)
         return await real_fake(cfg_, variant_pairs, tasks, model, harness, max_parallel)
 
@@ -188,7 +188,7 @@ def test_the_default_round_names_the_task_on_the_runtime_arm(round_env, monkeypa
     from scripts.autoresearch.common import split_tasks_by_harness
     _write_runtime_task(round_env)
 
-    async def routed(cfg_, variant_pairs, tasks, model, harness, max_parallel):
+    async def routed(cfg_, variant_pairs, tasks, model, harness, max_parallel, **_kw):
         direct, sdk, skipped = split_tasks_by_harness(tasks, harness)
         assert skipped == []
 

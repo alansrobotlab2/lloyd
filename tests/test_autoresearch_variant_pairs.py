@@ -210,7 +210,7 @@ def drive_round(cfg, monkeypatch, caplog, variants_factory=two_well_formed_and_t
     """
     calls: dict[str, Any] = {}
 
-    async def fake_run_bench(cfg_, variant_pairs, tasks, *, model, max_parallel, per_task_timeout):
+    async def fake_run_bench(cfg_, variant_pairs, tasks, *, model, max_parallel, per_task_timeout, **_kw):
         calls["variant_pairs"] = list(variant_pairs)
         calls["n_tasks"] = len(tasks)
         return [

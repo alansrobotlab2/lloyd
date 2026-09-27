@@ -184,6 +184,10 @@ def _run_spec_from_cfg(cfg: AutoresearchConfig, model: str, budget_minutes: int 
         "budget": {
             "max_rounds": 0,  # open-ended — no fixed ceiling
             "max_variants_per_round": max_variants,
+            # #1546: the wall-clock budget the round was handed, which `run_round`
+            # enforces as its trial deadline — on disk beside the bound that would
+            # otherwise kill it. None for a hand-run round that asked for none.
+            "budget_minutes": budget_minutes,
         },
         "mutation_scope": {
             "writable_paths": writable_paths,

@@ -549,7 +549,7 @@ def _drive_round(cfg: AutoresearchConfig, monkeypatch,
                                                                       VARIANT_SCORES),
                  dead: tuple[str, ...] = ()) -> dict:
     """Run a whole round. `dead` names tasks whose rubric engine never answered."""
-    async def fake_trials(_cfg, variant_pairs, tasks, _model, _harness, _max_parallel):
+    async def fake_trials(_cfg, variant_pairs, tasks, _model, _harness, _max_parallel, **_kw):
         out = []
         for index, (vid, _overlay) in enumerate(variant_pairs):
             table = scores[index]

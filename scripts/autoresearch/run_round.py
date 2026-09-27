@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -324,8 +325,14 @@ async def _run_trials(
     model: str,
     harness: str,
     max_parallel: int,
+    *,
+    deadline: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Run the (variant × task) matrix, split by harness routing.
+
+    `deadline` (a `time.monotonic()` instant) goes to both runners: past it no
+    trial starts, and a trial that would outlive it runs on the time left and
+    comes back marked `deadline_cut` (#1546).
 
     Returns `(direct_traces, sdk_traces)`. `run()` has already taken the
     `requires_runtime` tasks a `direct` round skips out of `tasks`, so the
@@ -346,6 +353,7 @@ async def _run_trials(
             cfg, variant_pairs, direct_tasks, model=model,
             max_parallel=max_parallel,
             per_task_timeout=300,
+            deadline=deadline,
         )
     if sdk_tasks:
         logger.info("harness=%s: routing %d task(s) through the agent loop "
@@ -354,8 +362,49 @@ async def _run_trials(
             cfg, variant_pairs, sdk_tasks, model=model,
             max_parallel=1,
             per_task_timeout=SDK_PER_TASK_TIMEOUT,
+            deadline=deadline,
         )
     return direct_traces, sdk_traces
+
+
+# The round's clock (#1546). The budget is what the worker source derives from
+# the pool cap that would otherwise cancel the round mid-matrix; trials must be
+# over early enough to leave the judge and the report their share of it. The
+# judge runs one rubric call per trace on the primary — 1-4 s each in the rounds
+# that completed before 2026-09-24 — so a fifth of the budget, never under
+# three minutes, covers a 4-variant round's ~70 traces with room to spare.
+JUDGE_RESERVE_FRACTION = 0.2
+JUDGE_RESERVE_MIN_SECONDS = 180
+
+
+def trial_deadline(started: float, budget_minutes: int | None) -> float | None:
+    """The monotonic instant the round's trials must be over by, or None with
+    no budget (a hand-run round that asked for none)."""
+    if not budget_minutes or budget_minutes <= 0:
+        return None
+    budget = budget_minutes * 60.0
+    reserve = max(JUDGE_RESERVE_MIN_SECONDS, budget * JUDGE_RESERVE_FRACTION)
+    return started + max(budget - reserve, budget * 0.5)
+
+
+def complete_matrix(traces: list[dict[str, Any]], variant_ids: list[str],
+                    tasks: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
+    """Keep only the tasks every variant has an uncut trial of.
+
+    `(kept_traces, not_reached_task_ids)`. A task the deadline reached for some
+    variants and not others would rank them on different tasks, and a trial the
+    deadline cut short is a timeout the variant did not earn, so both go, for
+    every variant at once. The runners walk the matrix task by task, so what is
+    dropped is the tail of the task list, not a variant.
+    """
+    have: dict[str, set[str]] = {}
+    for t in traces:
+        if not t.get("deadline_cut"):
+            have.setdefault(t["task_id"], set()).add(t["variant_id"])
+    want = set(variant_ids)
+    reached = {tid for tid, vids in have.items() if want <= vids}
+    not_reached = [t["id"] for t in tasks if t.get("id") not in reached]
+    return [t for t in traces if t["task_id"] in reached], not_reached
 
 
 # ── ledger rows, as functions ────────────────────────────────────────────────────
@@ -535,6 +584,10 @@ async def run(
 
     rid = round_id()
     logger.info("=== autoresearch round %s (dry_run=%s harness=%s) ===", rid, dry_run, harness)
+    # The clock starts before anything that costs time: the pool's cap counts
+    # from the moment the worker claimed the row, not from the first trial.
+    started = time.monotonic()
+    deadline = trial_deadline(started, budget_minutes)
 
     # 1. Build and write run_spec.yaml
     spec = _run_spec_from_cfg(cfg, model, budget_minutes)
@@ -627,9 +680,27 @@ async def run(
     # Fan out (variant × task), split by harness routing (#353)
     logger.info("running %d variants × %d tasks = %d trials (harness=%s)",
                 len(variant_pairs), len(tasks), len(variant_pairs) * len(tasks), harness)
+    trials_started = time.monotonic()
     direct_traces, sdk_traces = await _run_trials(
-        cfg, variant_pairs, tasks, model, harness, max_parallel,
+        cfg, variant_pairs, tasks, model, harness, max_parallel, deadline=deadline,
     )
+    trial_seconds = round(time.monotonic() - trials_started, 1)
+    # #1546: what the deadline did not reach is dropped for every variant at
+    # once and named, so the round still ranks what it measured — on the same
+    # tasks for all — and says what it left out.
+    tasks_not_reached: list[str] = []
+    if deadline is not None:
+        kept, tasks_not_reached = complete_matrix(
+            direct_traces + sdk_traces, [vid for vid, _ in variant_pairs], tasks)
+        if tasks_not_reached:
+            logger.warning("deadline: %d task(s) not reached by every variant, not scored: %s",
+                           len(tasks_not_reached), ", ".join(tasks_not_reached))
+            gone = set(tasks_not_reached)
+            tasks = [t for t in tasks if t.get("id") not in gone]
+            keep = {id(t) for t in kept}
+            direct_traces = [t for t in direct_traces if id(t) in keep]
+            sdk_traces = [t for t in sdk_traces if id(t) in keep]
+    deadline_stopped = bool(tasks_not_reached)
     traces = direct_traces + sdk_traces
 
     # Judge each trace. The rubric mode is read once, so one round is judged by
@@ -661,7 +732,13 @@ async def run(
     # has to run in this window — a round that wrote its own comparison row first would
     # be recording a decline it had already acted on, and the report would describe a
     # contract it had already rewritten.
-    prior_promotion, comparison = post_promotion_comparison(
+    #
+    # #1546: a round the deadline stopped measured the baseline on fewer tasks than
+    # the round it would be compared with, so its mean is not comparable: no
+    # comparison, no restore on it, no `round_summary` row to become the next
+    # round's reference — and no promotion either (below). Every variant it did
+    # measure is still ranked, judged, reported and on the ledger.
+    prior_promotion, comparison = (None, None) if deadline_stopped else post_promotion_comparison(
         cfg, rid, float(baseline_summary.get("mean_composite", 0.0)))
 
     # Evaluate each candidate vs baseline and pick the winner
@@ -677,6 +754,12 @@ async def run(
         if not vs:
             continue
         should, reason = evaluate_promotion(cfg, baseline_summary, vs, split=split)
+        if deadline_stopped:
+            # Every item is a proposal deployed only on a measured gain; a round
+            # that did not measure every task has not measured one.
+            should, reason = False, (f"deadline_stopped: {len(tasks_not_reached)} task(s) not "
+                                     f"reached, no promotion from a partial round "
+                                     f"(predicate said: {reason})")
         m = slice_metrics(baseline_summary, vs, split)
         decisions.append({
             "variant_id": vid,
@@ -707,7 +790,7 @@ async def run(
     # uses, refuses any canonical file that changed after the promotion landed, and
     # never restores one promotion twice. Nothing here waits for a human; nothing here
     # copies a prompt file by hand. A `--dry-run` round never restores either.
-    restore_outcome = auto_restore.restore_for_decline(
+    restore_outcome = None if deadline_stopped else auto_restore.restore_for_decline(
         cfg, rid, comparison, prior_promotion, dry_run=dry_run,
     )
 
@@ -719,16 +802,23 @@ async def run(
     # #789: the same row carries the contract shape — the live SOUL.md's two
     # ratios and this round's candidate's own two, read from `best_overlay`, which
     # is None whenever no candidate survived to the contract check.
-    report_lines, summary_row, comparison = post_promotion_check(
-        cfg,
-        rid,
-        float(baseline_summary.get("mean_composite", 0.0)),
-        promotion_result,
-        best_summary,
-        best_overlay,
-        comparison=comparison,
-        restore=restore_outcome,
-    )
+    if deadline_stopped:
+        report_lines, summary_row = [
+            "", "## Post-promotion check (#429)",
+            f"- not run: the round stopped at its {budget_minutes} min budget with "
+            f"{len(tasks_not_reached)} task(s) not reached, so its baseline mean is not "
+            "comparable and no `round_summary` row was written (#1546)."], None
+    else:
+        report_lines, summary_row, comparison = post_promotion_check(
+            cfg,
+            rid,
+            float(baseline_summary.get("mean_composite", 0.0)),
+            promotion_result,
+            best_summary,
+            best_overlay,
+            comparison=comparison,
+            restore=restore_outcome,
+        )
 
     # Write round summary markdown
     summary_file = cfg.paths.rounds_dir / f"{rid}.md"
@@ -744,6 +834,13 @@ async def run(
         f"- requires_runtime tasks skipped under harness={harness}: {len(skipped_runtime_ids)}"
         + (f" ({', '.join(skipped_runtime_ids)}) — not scored, no ledger row"
            if skipped_runtime_ids else ""),
+        # #1546: the round's clock, so a report says whether it measured the whole
+        # matrix and how much of its budget each part took.
+        f"- budget: {budget_minutes} min" if budget_minutes else "- budget: none",
+        f"- trials took: {trial_seconds:.0f} s; round took: {time.monotonic() - started:.0f} s so far",
+        f"- stopped at deadline: {'yes' if deadline_stopped else 'no'}"
+        + (f" — {len(tasks_not_reached)} task(s) not reached by every variant, not scored: "
+           f"{', '.join(tasks_not_reached)}" if deadline_stopped else ""),
         f"- variants proposed: {len(variants)}",
         # #680: the aggregate said "2 dropped", which cannot distinguish "the
         # model invented spans" from "half this round's variants aimed at a file
@@ -872,13 +969,21 @@ async def run(
         "harness": harness,
         "tasks_on_harness_runner": len(sdk_task_ids),
         "requires_runtime_skipped": skipped_runtime_ids,
+        # #1546: the deadline-stop marker. A stopped round returns normally — it
+        # is a result, not a failure — so the pool records it as completed and
+        # does not re-run the same work three more times.
+        "budget_minutes": budget_minutes,
+        "deadline_stopped": deadline_stopped,
+        "tasks_not_reached": tasks_not_reached,
+        "trial_seconds": trial_seconds,
+        "round_seconds": round(time.monotonic() - started, 1),
     }
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run one autoresearch round")
     parser.add_argument("--targets", nargs="*", default=["prompts"])
-    parser.add_argument("--budget", type=int, default=None, help="Budget minutes (advisory; not a hard kill)")
+    parser.add_argument("--budget", type=int, default=None, help="Budget minutes: no trial starts past it, less a judging reserve (#1546)")
     parser.add_argument("--max-variants", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--model", default=None)
@@ -909,7 +1014,9 @@ def main() -> None:
 
     result = asyncio.run(run(
         targets=args.targets,
-        budget_minutes=args.budget,
+        # A hand-run round is bounded too: `autoresearch.default_budget_minutes`
+        # when --budget is not given (#1546 — until then nothing read that key).
+        budget_minutes=args.budget if args.budget is not None else load_config().default_budget_minutes,
         max_variants=args.max_variants,
         dry_run=args.dry_run,
         model=args.model,
