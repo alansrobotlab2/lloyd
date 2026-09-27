@@ -52,6 +52,21 @@ the transcript scratch home from backlog #566:
    work in flight or waiting, and the pool and the maintenance sweep own them. Same
    database, same busy wait, same `SKIPPED` form, no VACUUM.
 
+10. ~/lloyd-data/_pipeline/groundskeeper-queue.json + groundskeeper-writes.jsonl — the
+    groundskeeper survey's queue and its write ledger. Both were written only through
+    `scripts/groundskeeper/queue_io.py`, which `201901b4` (#1012) deleted together with
+    the survey and the weekly summary, and task #36 is archived — so nothing in the tree
+    opens either file to write it and nothing reads them either. Measured on 2026-09-27,
+    when this store was added: the queue was 3,128,444 bytes of 8,000 items whose
+    `generated_at` is 2026-09-23T02:41:48, the last record in
+    the ledger names a writer that no longer exists, and `scripts/backup/backup-graph.sh`
+    copies `_pipeline` wholesale, so the pair rides into every backup. DELETE each file
+    past GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS — 30, the same mtime window the other file
+    stores use, so a survey revived later cannot have a queue it just built pruned under
+    it. Aged by mtime, like task logs and transcript scratch: mtime is the only age a
+    file with no writer left can have, and the window is uniform so the pair leaves on the
+    same clock as the stores around it.
+
 Age signal: sessions are aged by the `last_active` field in the JSON
 (mtime lies — any reprocessing touches the file); task logs and transcript
 scratch by mtime (a transcript is written once and only ever read back); a
@@ -147,6 +162,22 @@ CANDIDATES_DIR = DATA_ROOT / "_pipeline" / "skills" / "candidates"
 # that reads as bounded. Deliberately not under /tmp (systemd-tmpfiles-clean.timer reaps it
 # daily) and not in the vault (raw inputs are not what the Obsidian Sync quota is for).
 TRANSCRIPT_SCRATCH_DIR = DATA_ROOT / "_pipeline" / "tmp"
+# The retired survey's queue pair (#1574). Named as two files, not a directory: the
+# survey wrote only these two under `_pipeline/`, and a glob over `_pipeline` would put
+# this sweep's `unlink` next to the task logs, the skill candidates and the transcript
+# scratch that the rungs above own with their own rules. Both are module-level constants
+# because `tests/test_retention_sweep.py`'s fixture redirects every path constant this
+# module holds — a tuple of the two built here would freeze the LIVE paths past that
+# redirection, which is exactly the fixture's guard exists to prevent.
+GROUNDSKEEPER_QUEUE_FILE = DATA_ROOT / "_pipeline" / "groundskeeper-queue.json"
+GROUNDSKEEPER_WRITES_FILE = DATA_ROOT / "_pipeline" / "groundskeeper-writes.jsonl"
+#: 30, the same horizon as the other mtime-bounded file stores here (task logs,
+#: transcript scratch, skill candidates, spill dirs). Uniform rather than chosen for this
+#: pair: the queue was last written 2026-09-23 and any window under 30 d would reclaim it
+#: sooner for no reason a reader can check, and a window over 30 d would let a survey
+#: revived later have a queue it just built pruned while its own writer is still running.
+#: `tests/test_retention_sweep.py` asserts this value rather than trusting the literal.
+GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS = 30
 
 TASK_LOG_MAX_AGE_DAYS = 30
 SESSION_ARCHIVE_AGE_DAYS = 90
@@ -625,6 +656,40 @@ def sweep_session_spills(apply: bool, now: float) -> tuple[int, int]:
     return count, freed
 
 
+def sweep_groundskeeper_queue(apply: bool, now: float) -> tuple[int, int]:
+    """Delete the retired survey's queue pair past GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS.
+
+    Returns (count, bytes), counting files — so the line reads `2 deleted` for the pair
+    and `0 deleted` for a tree that has neither file, which is the same answer a fresh
+    install gives and the only honest one: `0` here means the window held nothing, not
+    that the store was unreachable. There is no skip form because there is nothing to
+    skip on — two `unlink`s, no lock and no schema.
+
+    The files are looked up as module globals on every call rather than iterated from a
+    tuple, so the test fixture's redirection of the two constants is what actually gets
+    deleted. A symlink is passed over rather than unlinked: this store retires two
+    specific files that nothing writes any more, so a path that has become a link is not
+    one of them, and removing the link would report the store's real target gone while
+    leaving it in place.
+    """
+    count = freed = 0
+    cutoff = now - GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS * 86400
+    for path in (GROUNDSKEEPER_QUEUE_FILE, GROUNDSKEEPER_WRITES_FILE):
+        try:
+            if path.is_symlink() or not path.is_file():
+                continue
+            if path.stat().st_mtime >= cutoff:
+                continue
+            size = path.stat().st_size
+            if apply:
+                path.unlink()
+            count += 1
+            freed += size
+        except OSError as e:
+            print(f"  ! skip {path.name}: {e}", file=sys.stderr)
+    return count, freed
+
+
 # --------------------------------------------------------------------------
 # workers.db — the queue's own run history
 # --------------------------------------------------------------------------
@@ -773,8 +838,8 @@ def main() -> int:
     mode = "APPLY" if args.apply else "DRY RUN"
 
     # The header goes out before anything is counted or deleted, and in both
-    # modes. An operator approves `--apply` from the dry run's eight numbers, and
-    # all eight describe whichever root this run resolved — a value that depends
+    # modes. An operator approves `--apply` from the dry run's numbers, and
+    # every one of them describes whichever root this run resolved — a value that depends
     # on the caller's tree, its environment and its `$HOME`, and appears nowhere
     # in the report today (#1415). Naming the root above the numbers is what makes
     # them approvable, and is the only line that says which tree they describe.
@@ -788,6 +853,7 @@ def main() -> int:
     cand_n, cand_b = sweep_candidates(args.apply, now)
     scr_n, scr_b = sweep_transcript_scratch(args.apply, now)
     spill_n, spill_b = sweep_session_spills(args.apply, now)
+    gq_n, gq_b = sweep_groundskeeper_queue(args.apply, now)
     wr_n, wr_b, wr_skip = sweep_worker_runs(args.apply, now)
     wq_n, wq_b, wq_skip = sweep_queue_rows(args.apply, now)
 
@@ -814,6 +880,12 @@ def main() -> int:
     # line nobody can compare against the run they just approved.
     print(f"  session spill dirs (*{SPILL_DIR_SUFFIX}) >{SPILL_MAX_AGE_DAYS}d: "
           f"{spill_n} deleted, {spill_b / 1024:.0f} KiB freed")
+    # One line for the pair, counted in files, and identical in both modes like every
+    # line above it: the operator approves `--apply` from these numbers, and the bytes
+    # here are the whole of what approving them gives up.
+    print(f"  groundskeeper queue ({GROUNDSKEEPER_QUEUE_FILE.name} + "
+          f"{GROUNDSKEEPER_WRITES_FILE.name}) >{GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS}d: "
+          f"{gq_n} deleted, {gq_b / 1024:.0f} KiB freed")
     # Same line in both modes for the same reason as the spill line above. A skip is put
     # in place of the counts, never beside a `0`, so the number `0` on this store keeps
     # its only honest meaning — the window held nothing.

@@ -87,6 +87,12 @@ def rs(tmp_path, monkeypatch):
         # repair; a `mkdir` here would hand every test a directory where a
         # database should be, which sqlite reports as "unable to open".
         ("WORKERS_DB", "workers.db", False),
+        # The retired survey's queue pair (#1574): two FILES, both deliberately not
+        # created. Their absence is the state a fresh tree is in and the state clause 3
+        # must report as `0 deleted`; a fixture that mkdir'd or touched them would hand
+        # every test in this file a candidate it did not ask for.
+        ("GROUNDSKEEPER_QUEUE_FILE", "groundskeeper-queue.json", False),
+        ("GROUNDSKEEPER_WRITES_FILE", "groundskeeper-writes.jsonl", False),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -790,10 +796,10 @@ def test_a_bare_interpreter_reports_the_root_it_resolved(tmp_path):
 
 def test_the_one_resolution_owns_every_directory_the_sweep_touches(tmp_path, monkeypatch):
     """Clause 5: `LLOYD_DATA` at a scratch root puts `DATA_ROOT` and every
-    module-level `*_DIR` beneath it.
+    module-level `*_DIR` or `*_FILE` beneath it.
 
     The `rs` fixture patches each dir and then fails on an unpatched one, which
-    catches a new root escaping the fixture but cannot catch the six drifting apart,
+    catches a new root escaping the fixture but cannot catch the eight drifting apart,
     because the fixture is what places them. This loads the module with nothing
     patched and reads where its own arithmetic put them — the only way a
     `SOMETHING_DIR = Path.home() / ...` added beside the others becomes a test
@@ -810,13 +816,20 @@ def test_the_one_resolution_owns_every_directory_the_sweep_touches(tmp_path, mon
 
     assert mod.DATA_ROOT == root
     swept = {name: value for name, value in vars(mod).items()
-             if name.endswith("_DIR") and isinstance(value, Path)}
+             if (name.endswith("_DIR") or name.endswith("_FILE"))
+             and isinstance(value, Path)}
     assert set(swept) == {"AUTONOMY_RUNS_DIR", "AUTONOMY_TASKS_DIR", "CANDIDATES_DIR",
-                          "SESSIONS_DIR", "TASKS_DIR", "TRANSCRIPT_SCRATCH_DIR"}, \
+                          "SESSIONS_DIR", "TASKS_DIR", "TRANSCRIPT_SCRATCH_DIR",
+                          "GROUNDSKEEPER_QUEUE_FILE", "GROUNDSKEEPER_WRITES_FILE"}, \
         f"the sweep gained or lost a store dir; update this set deliberately: {sorted(swept)}"
     for name, value in sorted(swept.items()):
         assert value.is_relative_to(root), f"{name} = {value} is outside the root {root}"
     assert swept["AUTONOMY_TASKS_DIR"] == root / "vault" / "autonomy"
+    # The two files, not just the directories: the pair is deleted by name, so a
+    # `GROUNDSKEEPER_QUEUE_FILE = Path.home() / ...` beside the others would put a
+    # `--apply` outside every root this file otherwise holds it to.
+    assert swept["GROUNDSKEEPER_QUEUE_FILE"] == root / "_pipeline" / "groundskeeper-queue.json"
+    assert swept["GROUNDSKEEPER_WRITES_FILE"] == root / "_pipeline" / "groundskeeper-writes.jsonl"
 
 
 def test_the_vault_rung_reads_the_override_the_guardian_already_reads(tmp_path, monkeypatch):
@@ -1394,6 +1407,234 @@ def test_the_skill_table_names_the_constant_and_split_the_code_uses(rs):
         f"the skill omits the spill store the script sweeps: {list(rows)}")
     assert "SPILL_MAX_AGE_DAYS" in spill_row, spill_row
     assert f">{rs.SPILL_MAX_AGE_DAYS}d" in spill_row, spill_row
+
+
+# ---------------------------------------------------------------------------
+# The tenth store: the groundskeeper survey's queue pair (#1574).
+#
+# `201901b4` (#1012) deleted `scripts/groundskeeper/queue_io.py` along with the survey
+# that called it and the weekly summary, and task #36 is archived, so the two files the
+# writer left behind are opened by nothing in the tree — `git grep -n "groundskeeper.queue"`
+# returns comments about them and no `open()`. On the day this store was added they were
+# 3,128,444 bytes (queue, `generated_at` 2026-09-23T02:41:48, 8,000 items) and 250 bytes
+# (write ledger, whose last record names `writer: groundskeeper-survey.py`, a file that
+# commit deleted), and `scripts/backup/backup-graph.sh` copies `_pipeline` wholesale, so
+# every backup carried both. The nine stores bounded here did not include them, which is
+# how "every growing file is bounded" stayed true in the report while one file grew to
+# 3.1 MB with no reader and no writer at all.
+# ---------------------------------------------------------------------------
+
+def _seed_groundskeeper_pair(rs, *, queue_days: float, writes_days: float,
+                             queue_bytes: int = 4096) -> tuple[Path, Path]:
+    """Write the pair with the ages the rung ages on: their own mtimes.
+
+    Nothing else is backdated. mtime is the only age a file whose writer is deleted can
+    have, and touching anything beside it would leave a rule under some other signal
+    un-falsified.
+    """
+    queue, writes = rs.GROUNDSKEEPER_QUEUE_FILE, rs.GROUNDSKEEPER_WRITES_FILE
+    queue.parent.mkdir(parents=True, exist_ok=True)
+    queue.write_bytes(b"x" * queue_bytes)
+    writes.write_text(json.dumps({"writer": "groundskeeper-survey.py",
+                                  "path": str(queue)}) + "\n", encoding="utf-8")
+    _backdate(queue, queue_days)
+    _backdate(writes, writes_days)
+    return queue, writes
+
+
+def _groundskeeper_line(stdout: str) -> str:
+    lines = [ln for ln in stdout.splitlines() if "groundskeeper queue" in ln]
+    assert len(lines) == 1, f"exactly one report line for this store: {lines}"
+    return lines[0]
+
+
+def test_the_pair_past_the_horizon_goes_and_younger_stays(rs):
+    """Clause 1: each file leaves on its own mtime, past the rung's own horizon."""
+    assert rs.GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS == 30, (
+        "the pair is bounded by the same window as the other mtime stores here; a "
+        "different number is a different policy and has to be a decision, not a drift")
+    queue, writes = _seed_groundskeeper_pair(rs, queue_days=31, writes_days=29)
+    now = time.time()
+    queue_bytes = queue.stat().st_size
+
+    count, freed = rs.sweep_groundskeeper_queue(apply=False, now=now)
+    assert (count, freed) == (1, queue_bytes), (count, freed)
+    assert queue.is_file() and writes.is_file(), "a dry run deleted a file it counted"
+
+    count, freed = rs.sweep_groundskeeper_queue(apply=True, now=now)
+    assert (count, freed) == (1, queue_bytes), (count, freed)
+    assert not queue.exists(), "the file past the window survived the apply"
+    assert writes.is_file(), "a file two days inside the window was deleted"
+
+
+def test_both_groundskeeper_files_leave_and_the_count_is_files(rs):
+    """The count is files, not bytes and not one line for the pair: `2 deleted` is the
+    whole store, and it is what the operator approves from the dry run."""
+    queue, writes = _seed_groundskeeper_pair(rs, queue_days=400, writes_days=400,
+                                             queue_bytes=8192)
+    total = queue.stat().st_size + writes.stat().st_size
+    assert total == 8192 + writes.stat().st_size
+
+    count, freed = rs.sweep_groundskeeper_queue(apply=True, now=time.time())
+    assert (count, freed) == (2, total), (count, freed)
+    assert not queue.exists() and not writes.exists()
+
+
+def test_a_symlinked_groundskeeper_path_is_passed_over_not_unlinked(rs, tmp_path):
+    """The store's path is not a place to aim an `unlink` at whatever it points at."""
+    outside = tmp_path / "not-the-store.json"
+    outside.write_bytes(b"y" * 128)
+    _backdate(outside, 400)
+    rs.GROUNDSKEEPER_QUEUE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    rs.GROUNDSKEEPER_QUEUE_FILE.symlink_to(outside)
+
+    count, freed = rs.sweep_groundskeeper_queue(apply=True, now=time.time())
+    assert (count, freed) == (0, 0), (count, freed)
+    assert rs.GROUNDSKEEPER_QUEUE_FILE.is_symlink(), "the sweep unlinked the store's path"
+    assert outside.is_file(), "the sweep deleted through the link into a foreign file"
+
+
+def test_the_groundskeeper_line_is_byte_identical_across_the_two_modes(rs, capsys,
+                                                                      monkeypatch):
+    """Clause 2: the line approved in dry run is the line `--apply` prints."""
+    queue, writes = _seed_groundskeeper_pair(rs, queue_days=31, writes_days=31,
+                                             queue_bytes=4096)
+    total = queue.stat().st_size + writes.stat().st_size
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    dry = _groundskeeper_line(capsys.readouterr().out)
+    assert f">{rs.GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS}d" in dry, dry
+    assert "2 deleted" in dry, dry
+    assert f"{total / 1024:.0f} KiB freed" in dry, dry
+    assert queue.is_file() and writes.is_file(), "the dry run removed a candidate"
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    assert _groundskeeper_line(capsys.readouterr().out) == dry, (
+        "a report whose shape changes between the modes is not approvable from the "
+        "dry run, which is the only thing an operator has to approve from")
+    assert not queue.exists() and not writes.exists()
+
+
+def test_the_groundskeeper_store_reports_zero_and_exits_zero_when_it_holds_nothing(
+        rs, capsys, monkeypatch):
+    """Clause 3, both states that produce it: a tree that never had the pair (a fresh
+    install, a round's checkout, a sandbox) and a tree that has already reclaimed it.
+    Both report `0 deleted` on their own line and exit 0 — never an error, never a
+    skip — because a `0` that could also mean `not reached` stops meaning anything.
+    """
+    assert not rs.GROUNDSKEEPER_QUEUE_FILE.exists()
+    assert not rs.GROUNDSKEEPER_WRITES_FILE.exists()
+    assert rs.sweep_groundskeeper_queue(apply=True, now=time.time()) == (0, 0)
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    dry = _groundskeeper_line(capsys.readouterr().out)
+    assert "0 deleted" in dry and "0 KiB freed" in dry, dry
+
+    _seed_groundskeeper_pair(rs, queue_days=31, writes_days=31)
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    assert "2 deleted" in _groundskeeper_line(capsys.readouterr().out)
+    assert not rs.GROUNDSKEEPER_QUEUE_FILE.exists()
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0
+    after = _groundskeeper_line(capsys.readouterr().out)
+    assert "0 deleted" in after, (
+        f"the line the owed-check reads after the reclaim: {after}")
+
+
+def test_the_bare_invocation_deletes_the_pair_it_resolves(tmp_path):
+    """The boundary the weekly job actually runs on: task #79 calls
+    `python3 retention-sweep.py --apply` from cron, an interpreter with no project venv,
+    against the data root `LLOYD_DATA` gives it. Every in-process test above runs under
+    pytest with the constants redirected; this one runs the shipped file with no venv,
+    no pytest and a root of its own, and asserts the deletes are the ones the report
+    counted — including the `0 deleted` on the run after the pair is gone.
+    """
+    py3 = shutil.which("python3")
+    if not py3:
+        pytest.skip("no bare python3 to prove the no-venv path against")
+    root = tmp_path / "data"
+    pipeline = root / "_pipeline"
+    pipeline.mkdir(parents=True)
+    queue = pipeline / "groundskeeper-queue.json"
+    writes = pipeline / "groundskeeper-writes.jsonl"
+    queue.write_bytes(b"x" * 4096)
+    writes.write_text('{"writer": "groundskeeper-survey.py"}\n', encoding="utf-8")
+    _backdate(queue, 31)
+    _backdate(writes, 29)
+    keep = pipeline / "not-the-store.json"
+    keep.write_bytes(b"z" * 64)
+    _backdate(keep, 400)
+
+    env = dict(os.environ)
+    env["LLOYD_DATA"] = str(root)
+    env["LLOYD_VAULT_ROOT"] = str(tmp_path / "no-vault")
+
+    dry = subprocess.run([py3, str(_SCRIPT)], capture_output=True, text=True,
+                         env=env, cwd="/", timeout=120)
+    assert dry.returncode == 0, dry.stderr[-800:]
+    dry_line = _groundskeeper_line(dry.stdout)
+    assert ">30d" in dry_line and "1 deleted" in dry_line, dry_line
+    assert queue.is_file() and writes.is_file() and keep.is_file(), "dry run deleted"
+
+    applied = subprocess.run([py3, str(_SCRIPT), "--apply"], capture_output=True,
+                             text=True, env=env, cwd="/", timeout=120)
+    assert applied.returncode == 0, applied.stderr[-800:]
+    assert "Traceback" not in applied.stdout + applied.stderr
+    assert _groundskeeper_line(applied.stdout) == dry_line, (
+        "the line cron approved in dry run is not the line its --apply printed")
+    assert not queue.exists(), "the file past the window is still there"
+    assert writes.is_file(), "a file inside the window was deleted"
+    assert keep.is_file(), "the sweep deleted a `_pipeline` file this store never named"
+
+    again = subprocess.run([py3, str(_SCRIPT), "--apply"], capture_output=True,
+                           text=True, env=env, cwd="/", timeout=120)
+    assert again.returncode == 0, again.stderr[-800:]
+    assert "0 deleted" in _groundskeeper_line(again.stdout)
+
+
+def test_the_skill_says_ten_stores_and_its_table_has_a_row_per_report_line(
+        rs, capsys, monkeypatch):
+    """Clause 4: `skills/retention-sweep/SKILL.md` says ten, and its table's rows are
+    the report's lines.
+
+    The table is the operator's list of what the weekly sweep bounds, and it said nine
+    with the groundskeeper queue bounded by nothing — so a reader who saw `0 deleted`
+    on nine lines could still conclude the tree was bounded. Counting the rows against
+    the lines the script actually prints is the check that keeps them together: a store
+    added on one side and not the other fails here rather than reading as coverage.
+    """
+    skill = rs.vault_root() / "skills" / "retention-sweep" / "SKILL.md"
+    if not skill.is_file():
+        pytest.skip(f"the vault skill is not reachable from here: {skill}")
+    text = skill.read_text(encoding="utf-8")
+
+    rows = {ln.split("|")[1].strip(): ln
+            for ln in text.splitlines()
+            if ln.startswith("| ") and ln.count("|") >= 3
+            and not ln.split("|")[1].strip().lower().startswith("store")}
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    report = [ln.strip() for ln in capsys.readouterr().out.splitlines()
+              if ln.startswith("  ") and ln.strip().endswith(
+                  ("freed", "candidate", "removed (keep last 200)"))]
+    assert len(report) == 10, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(rows) == len(report), (
+        f"the skill lists {len(rows)} stores against {len(report)} report lines: "
+        f"{sorted(rows)}")
+    assert "ten unbounded-growth stores" in text, "the skill still says nine"
+
+    pair_row = next((ln for store, ln in rows.items()
+                     if "groundskeeper-queue.json" in store), None)
+    assert pair_row is not None, f"no row names the queue the sweep now bounds: {sorted(rows)}"
+    assert "groundskeeper-writes.jsonl" in pair_row, pair_row
+    assert "GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS" in pair_row, pair_row
+    assert f">{rs.GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS}d" in pair_row, pair_row
 
 
 # ---------------------------------------------------------------------------
