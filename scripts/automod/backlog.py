@@ -1278,6 +1278,28 @@ def _int_or_none(v) -> int | None:
         return None
 
 
+def _take_back(fm: dict) -> bool:
+    """Drop the item's owed `decide` entries in place; True if any went.
+
+    Every move that took `needs-human` off (a reopen, a re-triage, an unfold,
+    the reconciler putting an item back in a pool) is the loop taking the item
+    back, and a decision owed about the parked item is moot once it is not
+    parked. Called wherever that tag is removed, so the owed-check job never
+    closes an item the loop is working again.
+    """
+    owed = fm.get("owed")
+    if not isinstance(owed, list):
+        return False
+    kept = [e for e in owed if not (isinstance(e, dict) and e.get("kind") == "decide")]
+    if len(kept) == len(owed):
+        return False
+    if kept:
+        fm["owed"] = kept
+    else:
+        fm.pop("owed", None)
+    return True
+
+
 def update_frontmatter(path: Path, updates: dict, *, activity: str = "",
                        add_tags: tuple[str, ...] = (), remove_tags: tuple[str, ...] = ()) -> bool:
     """Set frontmatter keys on an item without moving its status.
@@ -1303,6 +1325,8 @@ def update_frontmatter(path: Path, updates: dict, *, activity: str = "",
         elif fm.get(k) != v:
             fm[k] = v
             changed = True
+    if NEEDS_HUMAN_TAG in remove_tags and _take_back(fm):
+        changed = True
     raw_tags = fm.get("tags")
     tags = normalize_tags(raw_tags)
     new_tags = [t for t in tags if t not in remove_tags] + [t for t in add_tags if t not in tags]
@@ -2912,25 +2936,12 @@ def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
     if close:
         fm["status"] = "done"
         fm["completed"] = stamp
-        # A close that owes nobody anything takes `needs-human` off on the way
-        # out (#1146). The tag rides the *move* into `draft` when an attempt
-        # spends itself, and until now nothing removed it on the way to `done`,
-        # so an item that landed clean sat `done` + needs-human for a person to
-        # notice — #392/#399/#413 for days, #498 and #1194 within two days of
-        # the item being filed, and every needs-human sweep then had to exclude
-        # closed items by hand to get a usable number out of it.
-        #
-        # What keeps the tag is a decision the caller already made and the item
-        # itself records, not a guess made here: a landing that still owes a
-        # person's check arrives with `tags=(NEEDS_HUMAN_TAG,)` — the caller in
-        # `_close_settled_items` passes it for a met landing that has human
-        # clauses, deliberately closing rather than parking in the triage pool
-        # (#1210) — and an item carrying `human_clauses` has an owed check
-        # whatever the caller passed. Both survive; a met landing with nothing
-        # owed does not. Removal only ever subtracts, so a tag list the caller
-        # wrote in some other order comes back in that order.
-        if NEEDS_HUMAN_TAG in have and NEEDS_HUMAN_TAG not in tags \
-                and not fm.get("human_clauses"):
+        # Every close takes `needs-human` off (#1146, and since 2026-09-27
+        # without exception): what a landing still owes is the item's `owed`
+        # list, settled by the owed-check job, never a tag a person must notice.
+        # Removal only ever subtracts, so a tag list the caller wrote in some
+        # other order comes back in that order.
+        if NEEDS_HUMAN_TAG in have:
             have = [t for t in have if t != NEEDS_HUMAN_TAG]
     # Write the field back only when this call changed the list or repaired its
     # shape — `update_frontmatter`'s `changed` rule, for the same reason: an item
@@ -2944,6 +2955,12 @@ def close_landed(item: Item, *, commit: str, round_id: str, settled_at: str,
     item.path.write_text(
         f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
         f"---\n{body.rstrip()}{section}", encoding="utf-8")
+    if close and fm.get("human_clauses"):
+        # What the item itself records as owed survives any close, whoever the
+        # caller is — the reason the tag used to be kept "unasked".
+        from scripts.automod import owed as O
+        O.add_owed(item.path, human_clauses_of(None, fm), kind="check",
+                   activity="owed after landing")
     return item.path
 
 
@@ -2999,24 +3016,22 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
         acc = outcome.get("acceptance")
         human = list(human_clauses_of(None, fm))
         # A path the loop may never write is the same shape of debt as a
-        # human clause: the round did what it could, and a person owes the
-        # rest. Reported rather than hidden, which is what `git add -f` was.
-        for hp in (outcome.get("human_paths") or []):
-            human.append(f"apply `{hp.get('path')}` by hand: {hp.get('reason')}")
+        # post-landing check: the round did what it could, and the rest is
+        # owed. Reported rather than hidden, which is what `git add -f` was.
+        paths_owed = [f"apply `{hp.get('path')}`: {hp.get('reason')}"
+                      for hp in (outcome.get("human_paths") or [])]
         for idx in (outcome.get("post_landing_clauses") or []):
             human.append(f"confirm clause {idx} now that the change is live")
         tags: tuple[str, ...] = ()
-        if acc == "met" and human:
-            # #1210: the loop's half is done, so the item closes. It used to be
-            # left open in `draft` carrying `needs-human`, and `draft` is the
-            # pool single-item triage reads — six landed items sat in it on
-            # 2026-09-17, #1199 among them. `done` carrying the tag states both
-            # halves in one place: the code is live, and a person still owes a
-            # check. It stamps `completed`, because `close_landed` stamps it for
-            # every close and a close is a close whatever its reason.
-            close, tags = True, (NEEDS_HUMAN_TAG,)
-            why = ("the round reported every acceptance clause met, so the item closes; a person "
-                   "still owes: " + "; ".join(human))
+        if acc == "met" and (human or paths_owed):
+            # #1210: the loop's half is done, so the item closes. What is
+            # still owed goes on the item's `owed` list, which the owed-check
+            # job settles (scripts/automod/owed.py). Until 2026-09-27 it was
+            # the `needs-human` tag, which nothing ever came back for: 257
+            # closed items piled up, and Alan ruled that nothing parks on him.
+            close = True
+            why = ("the round reported every acceptance clause met, so the item closes; still "
+                   "owed, for the owed-check job: " + "; ".join(human + paths_owed))
         elif acc == "met":
             close = True
             refused = outcome.get("item_verdict_refused")
@@ -3051,12 +3066,16 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
         close_landed(item, commit=landing["commit"], round_id=landing["round_id"],
                      settled_at=str(landing.get("settled_at") or ""), close=close, why=why,
                      tags=tags)
+        if acc == "met" and (human or paths_owed):
+            from scripts.automod import owed as O
+            O.add_owed(item.path, human, kind="check", activity="owed after landing")
+            O.add_owed(item.path, paths_owed, kind="path", activity="owed after landing")
         S.append_event({"event": "item_landed", "item_id": item.id,
                         "round_id": landing["round_id"], "commit": landing["commit"],
                         "vault": landing["vault"], "closed": close,
                         "acceptance": acc, "reason": why[:300],
                         "acceptance_source": outcome.get("source") or "round",
-                        "human_clauses": human}, path=ledger)
+                        "human_clauses": human + paths_owed}, path=ledger)
         done.append({"item_id": item.id, "closed": close, "acceptance": acc})
         # An umbrella that closed `met` closes the members it consolidated.
         # `not_met`, `deferred` and no-outcome leave them folded: the
@@ -3190,9 +3209,12 @@ def record_human_paths(item_id: int, human_paths: list[dict],
     if not added:
         return []
     update_frontmatter(
-        path, {"human_paths": existing}, add_tags=(NEEDS_HUMAN_TAG,),
+        path, {"human_paths": existing},
         activity=(f"round {round_id or '?'} needed paths the loop may not write, "
-                  f"left for a person: " + ", ".join(f"`{x}`" for x in added)))
+                  f"owed to the owed-check job: " + ", ".join(f"`{x}`" for x in added)))
+    from scripts.automod import owed as O
+    O.add_owed(path, [f"apply `{e['path']}`: {e['reason']}" for e in existing
+                      if isinstance(e, dict) and str(e.get("path")) in added], kind="path")
     return added
 
 
@@ -3444,6 +3466,8 @@ def _apply_status(path: Path, status: str, why: str, *,
     if not record_status_move(fm, status, why, add_tags=add_tags,
                               remove_tags=remove_tags):
         return False
+    if NEEDS_HUMAN_TAG in remove_tags:
+        _take_back(fm)
     path.write_text(
         f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
         f"---\n{body}", encoding="utf-8")
@@ -3566,7 +3590,7 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
                 # it: `reconcile_statuses` stores this string through
                 # `[:200]`, so a fixed 160-char reason plus a 40-hex sha
                 # (275 chars) loses exactly the part that names who decided.
-                head = "landed with every clause met; closed, a person still owes it: "
+                head = "landed with every clause met; closed, the rest owed to owed-check: "
                 sha = str(fm.get(LANDED_MARKER) or "")
                 tail = f" (landed as {sha})" if sha else ""
                 room = max(0, 200 - len(head) - len(tail))
@@ -3577,7 +3601,7 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
                                      + (ev.get("reason") or "deferred")[:160])
             else:
                 out[iid] = ("draft", "landed with no structured outcome recorded (predates the "
-                                     "finalizer); a human decides", True)
+                                     "finalizer); owed-check decides whether it is done", True)
         elif iid in observing and not (landed and partial):
             # Promoted, not yet settled: the guardian is watching it and the
             # sweep has not run. Neither back in the pool nor done.
@@ -3640,8 +3664,9 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
                 elif infra_parked(detail):
                     out[iid] = ("draft", detail[:300], True)
                 else:
-                    out[iid] = ("draft", "its one unattended attempt is spent; a human decides "
-                                         "(reopen_item to grant another)", True)
+                    out[iid] = ("draft", "its unattended attempts are spent; owed-check decides "
+                                         "whether to grant another (reopen) or close it as tried",
+                                True)
             elif _awaits_triage(iid):
                 out[iid] = ("draft", "re-triaged; waiting for its second triage to confirm a contract")
             else:
@@ -3725,17 +3750,26 @@ def reconcile_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BO
     for iid, want in desired_statuses(ledger, boards, open_round_items=open_round_items,
                                       retriage_enabled=retriage_enabled).items():
         status, why = want[0], want[1]
-        needs_human = bool(want[2]) if len(want) > 2 else False
+        # The third element was "tag it needs-human" until 2026-09-27. It now
+        # means a decision is owed to Lloyd: the move carries no tag, and the
+        # decision goes on the item's `owed` list for the owed-check job.
+        owed_decision = bool(want[2]) if len(want) > 2 else False
         if current.get(iid) == status:
             continue
-        if set_status(iid, status, why,
-                      add_tags=(NEEDS_HUMAN_TAG,) if needs_human else (),
-                      remove_tags=() if needs_human else (NEEDS_HUMAN_TAG,)):
-            # `needs_human` on the row itself: `board_decisions` counts a
-            # hand-off to a person, and read off the reason text it was a guess.
+        if set_status(iid, status, why, remove_tags=(NEEDS_HUMAN_TAG,)):
+            if owed_decision:
+                from scripts.automod import owed as O
+                path = next((i.path for i in open_items(None) if i.id == iid), None)
+                if path is None:
+                    path = next(iter(sorted(BACKLOG_DIR.glob(f"{iid}-*.md"))), None)
+                if path is not None:
+                    O.add_owed(path, [why], kind="decide")
+            # `needs_human` stays on the row, always False now, so
+            # `board_decisions` reads zero hand-offs to a person; `owed` says
+            # a decision went to the owed-check job instead.
             S.append_event({"event": "status_moved", "item_id": iid, "from": current.get(iid),
-                            "to": status, "reason": why[:200], "needs_human": needs_human},
-                           path=ledger)
+                            "to": status, "reason": why[:200], "needs_human": False,
+                            "owed": owed_decision}, path=ledger)
             moved.append({"item_id": iid, "from": current.get(iid), "to": status})
     return moved
 
@@ -4752,9 +4786,10 @@ def tag_item(item_id: int, *, add: tuple[str, ...] = (), remove: tuple[str, ...]
             fm, body = _split_frontmatter(raw)
             if _unparsed_guard(item.path, raw, fm, "tag_item"):
                 return False
+            took_back = NEEDS_HUMAN_TAG in remove and _take_back(fm)
             tags = normalize_tags(fm.get("tags"))
             new = [t for t in tags if t not in remove] + [t for t in add if t not in tags]
-            if new == tags and isinstance(fm.get("tags"), list):
+            if new == tags and isinstance(fm.get("tags"), list) and not took_back:
                 return False
             fm["tags"] = new
             fm["updated"] = now_stamp()
@@ -4889,7 +4924,7 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         # and a transcript is one the next reader of the item never sees.
         section += f"\n**Acceptance — what must become true:**\n{acceptance.strip()}\n"
     if verdict == "confirmed" and human:
-        section += ("\n**Needs a person before this closes:**\n"
+        section += ("\n**Owed after landing** (settled by the owed-check job):\n"
                     + "\n".join(f"- {c}" for c in human) + "\n")
     if verdict == "confirmed" and clauses:
         section += "\n**Acceptance clauses** (graded one by one at the gate):\n" + "\n".join(
@@ -4902,7 +4937,23 @@ def record_verdict(item: Item, verdict: str, evidence: str, *,
         f"---\n{yaml.dump(fm, default_flow_style=False, allow_unicode=True, sort_keys=False)}"
         f"---\n{body.rstrip()}{section}",
         encoding="utf-8")
+    # A verdict that leaves the item parked with no one to act — `not_code`,
+    # `unverifiable`, or a confirmed contract only a protected path can land —
+    # is a decision owed to Lloyd, not a draft that sits until a person looks
+    # (2026-09-27, Alan: nothing parks on him).
+    if not close and (verdict in PARKING_VERDICTS
+                      or (verdict == "confirmed" and is_human_only(acceptance))):
+        from scripts.automod import owed as O
+        what = ("its contract needs a path the loop may not write: " + acceptance.strip()
+                if verdict == "confirmed" else f"triage said `{verdict}`: {evidence.strip()}")
+        O.add_owed(item.path, [what[:500] + " — decide: close it, rework it, or route the edit"],
+                   kind="decide")
     return item.path
+
+
+# Triage verdicts that leave an open item with no unattended route (`draft`,
+# "not for the unattended loop"): owed to the owed-check job instead.
+PARKING_VERDICTS = frozenset({"unverifiable", "not_code"})
 
 
 def select_cluster(ledger: Path, clusters: dict, *, min_size: int = 3, max_size: int = 4,
@@ -5480,6 +5531,18 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
     closed_needs_human = sum(1 for i in everything
                              if i.status in CLOSED_STATUSES and NEEDS_HUMAN_TAG in i.tags)
 
+    # 2026-09-27: what items still owe goes on their `owed` list (the tag is
+    # retired as a destination), settled by the owed-check job. `outside` is
+    # the one list Alan reads: what only his hands can do.
+    try:
+        from scripts.automod import owed as O
+        owing = O.owing_items(boards, due_only=False)
+        owed = {"items": len(owing), "entries": sum(len(o.entries) for o in owing),
+                "due": sum(len(o.due) for o in owing), "outside": O.outside_list(boards)}
+    except Exception as exc:  # noqa: BLE001 — a count is never the board's shape
+        logger.warning("owed counts failed: %s", exc)
+        owed = None
+
     pool = implement_pool_bound(ledger, floor=floor, now=now)
     # #904: what the queue decisions produced — promotions joined to their
     # source event and terminal state, per-day counts, retire-then-reopen.
@@ -5495,6 +5558,7 @@ def board_health(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, 
         "open": open_counts,
         "draft": draft,
         "closed_needs_human": closed_needs_human,
+        "owed": owed,
         "up_next": up_next,
         "flow": board_flow(boards, items=everything, now=now),
         "self_spawned_open": sum(1 for i in items if is_loop_spawned(i)),

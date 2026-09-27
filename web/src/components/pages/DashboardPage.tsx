@@ -1057,6 +1057,19 @@ function BacklogHealthLines({ health }: { health: BacklogHealth }) {
           )}
         </div>
       )}
+      {health.owed && (
+        <div>
+          owed {health.owed.entries} on {health.owed.items} item{health.owed.items === 1 ? '' : 's'} · due {health.owed.due}
+          {health.owed.outside.length > 0 && (
+            <span className="text-amber-400"> · needs your hands {health.owed.outside.length}</span>
+          )}
+        </div>
+      )}
+      {health.owed?.outside.map((o) => (
+        <div key={`${o.item_id}-${o.what}`} className="text-amber-400/90">
+          #{o.item_id}: {o.needs || o.what}
+        </div>
+      ))}
       {health.decisions && <DecisionsLine d={health.decisions} />}
     </div>
   )

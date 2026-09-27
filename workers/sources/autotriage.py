@@ -345,15 +345,17 @@ verified** — the check you just ran should fail to reproduce afterwards.
 - **Some paths the loop may never touch**: `config.yaml`, `data/**`, `.env*`, \
 `pytest.ini`, `.gitignore`, and under `web/` the build inputs (`package.json`, \
 the lockfile, `vite.config.*`, `tsconfig*.json`). If the fix needs one of \
-them the item is still `confirmed`, but a human has to land it: begin \
+them the item is still `confirmed`, but the loop cannot land it: begin \
 ACCEPTANCE with `human-only:` and name the path. The implementer skips those \
-instead of spending a round finding out.
-- **A condition only a person can satisfy is not an acceptance clause.** Ten \
-items audited by Alan, a sign-off, a scope decision, a number that needs a week \
-of real traffic: put it under HUMAN_CLAUSES, never under ACCEPTANCE_CLAUSES. \
-The implementer is not asked to fake it, the reviewer does not grade it, and \
-after the code lands the item closes carrying `needs-human`, which is how a \
-person finds what they owe. #578 spent its round on a clause asking for ten human-audited items. \
+instead of spending a round finding out, and the owed-check job rules on them \
+(a route around the path, or the exact edit for the one list Alan reads).
+- **A condition no round can satisfy is not an acceptance clause.** An audit, \
+a scope decision, a number that needs a week of real traffic: put it under \
+HUMAN_CLAUSES, never under ACCEPTANCE_CLAUSES. The implementer is not asked to \
+fake it, the reviewer does not grade it, and after the code lands it goes on \
+the item's `owed` list, where Lloyd's owed-check job measures it, rules on it \
+(Alan has delegated those rulings) or files the follow-up. Nothing is left for \
+a person. #578 spent its round on a clause asking for ten human-audited items. \
 The same rule for **a check that can only run after landing** — a day of \
 traffic, a nightly run, a script over live data: the pre-landing mechanism \
 and its test go in ACCEPTANCE_CLAUSES, the post-landing check goes in \
@@ -383,10 +385,11 @@ confirmed once and its round could not meet the contract. Judge the premise \
 again from scratch. If it is still `confirmed`, write a NEW contract: drop \
 every clause the grader found `unmet` or `unsatisfiable` on two reviews (its \
 substance goes under `## Findings` on this item, or under HUMAN_CLAUSES when \
-only a person can settle it), keep at most {max_clauses}, and never restate \
+only a later check or a ruling can settle it), keep at most {max_clauses}, and never restate \
 a clause the refusal shows no round can meet. If what survives is not worth a \
 round, retire it (`stale`) and say why. This item gets no third automatic \
-chance: a second refused attempt goes to a human.
+chance: a second refused attempt goes to the owed-check job, which grants \
+another or closes it as tried.
 
 Finish with exactly this block and nothing after it:
 
@@ -399,8 +402,8 @@ ACCEPTANCE_CLAUSES: <if confirmed: the same contract as separately checkable cla
 one per line, each numbered "1." "2." …, each one thing a single test can pin, and each \
 ending with the test file that pins it, e.g. "— tests/test_workers_pool.py"; otherwise the \
 word none>
-HUMAN_CLAUSES: <if confirmed and any: the conditions only a person can satisfy, one per \
-line, numbered; otherwise the word none>
+HUMAN_CLAUSES: <if confirmed and any: the checks that can only run after landing and the \
+rulings no round can make, one per line, numbered; otherwise the word none>
 SPAWNED: <for stale/already_done, the ids you filed or appended to in step 6, e.g. #401 #402; otherwise the word none>
 
 The clauses are graded one by one at the gate by a reviewer who sees only the \

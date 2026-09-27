@@ -2423,6 +2423,16 @@ export interface BacklogHealth {
   // #904, `scripts/automod/board_decisions.summary`. Optional: absent on an older
   // snapshot, null when the join failed.
   decisions?: BoardDecisions | null
+  // scripts/automod/owed.py: what items still owe, settled by the owed-check
+  // job; `outside` is what only Alan's hands can do. Optional on an older snapshot.
+  owed?: BacklogOwed | null
+}
+
+export interface BacklogOwed {
+  items: number
+  entries: number
+  due: number
+  outside: { item_id: number; name: string; what: string; needs: string; since: string }[]
 }
 
 /** #904: what the queue decisions produced over the window. `outcome` carries

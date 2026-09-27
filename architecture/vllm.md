@@ -522,7 +522,7 @@ next iteration.
 ### 6.3 Keep prefixes alive
 
 - **The KV gate** (`workers/pool.py`, [[workers]] §2): a source declaring
-  `LONG_LIVED = True` — autocode, autotriage, deep-research, arch-review — is
+  `LONG_LIVED = True` — autocode, autotriage, deep-research, arch-review, owed-check — is
   not claimed while the primary's KV is over `workers.kv_gate.max_kv_usage`
   (0.60). It judges the **one-minute median**, not the newest sample, for the
   reason in §7.2. A hold keeps the item's attempt; no reading means open.

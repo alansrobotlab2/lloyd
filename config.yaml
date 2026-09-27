@@ -1526,7 +1526,7 @@ workers:
   # so at 5 every round's `tests` rung was red on a test no round had touched.
   slots: 6
   # KV budget gate (workers/pool.py). A source that declares LONG_LIVED —
-  # autocode, autotriage, deep-research, arch-review: tens of iterations, each
+  # autocode, autotriage, deep-research, arch-review, owed-check: tens of iterations, each
   # re-submitting a 100-200k context — is not claimed while the primary's KV
   # usage is above `max_kv_usage`; everything else claims as before. A held
   # item stays queued with its attempt intact, and no reading means open.
@@ -1621,6 +1621,26 @@ workers:
       # senses-not-supervision (2026-09-12). It landed the same day with no
       # key and inherited the old True fallback, so it was the one source
       # still watched on the primary every 900 s (#1015).
+      inner_voice: false
+    # Settles what items still owe after the loop is done with them — the
+    # post-landing checks, protected paths, spent attempts and parking triage
+    # verdicts that were the `needs-human` tag until 2026-09-27 (Alan: "no
+    # more needs-human … lloyd can approve his own choices"). One visible
+    # session per item; the apply step is the only writer. `apply: false`
+    # records the answers in the ledger (`owed_check` rows) and writes
+    # nothing. workers/sources/owed_check.py, scripts/automod/owed.py.
+    owed-check:
+      enabled: true
+      apply: false
+      # One job in flight at a time (max_inflight), so a short interval only
+      # removes the gap between items; an idle pass enqueues nothing.
+      interval_seconds: 120
+      max_inflight: 1
+      max_duration_seconds: 1500
+      model: primary
+      max_turns: 40
+      spawn_cap: 3
+      priority: 72
       inner_voice: false
     # OFF since 2026-09-08. This source promoted generated prompt variants
     # straight over the live `lloyd/SOUL.md` / `MEMORY.md` every hour with no

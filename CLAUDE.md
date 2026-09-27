@@ -203,7 +203,13 @@ bookkeeping (journal, toast, voice). Re-announcing a recorded state through
   the implement pool is full; `backlog.board_health` is the one board shape
   (§3.2c, `architecture/backlog.md`).
 - Clustering + group triage fold duplicates into umbrellas; a spent umbrella
-  unfolds; a spent item gets one re-triage before a human (§3.2c–3.2d).
+  unfolds; a spent item gets one re-triage before owed-check decides (§3.2c–3.2d).
+- **Nothing parks on Alan** (2026-09-27): no code adds `needs-human`. What an
+  item still owes (post-landing checks, protected paths, spent attempts,
+  parking triage verdicts) is its `owed` list, settled by the `owed-check`
+  job in a visible session. Only `outside` (sudo, secrets, hardware, money)
+  reaches him, on Mission Control, never as a tag. Guards are not approvals
+  (§3.2k).
 - A contract is at most six clauses (`MAX_CLAUSES`) (§3.2d).
 - **The sweep** ranks every open item (`worth` × `size`); the human's
   `priority` orders every pool, and a `high` item is picked up next (§3.2e).

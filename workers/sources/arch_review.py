@@ -937,7 +937,7 @@ classified `aspirational` — that is what the classification is for.
 true edit — this is a correction pass, not a rewrite.
   - `superseded` or `aspirational`: do **not** rewrite the body. Add one \
 paragraph under the H1 saying what replaced it (or that it was never built) \
-and file a `needs-human` item titled "retire architecture/{slug}.md → \
+and file an item titled "retire architecture/{slug}.md → \
 .archive/".
 {doc_log_rule}
   - Never run `git commit`, `git add`, `git checkout`, `git restore` or \

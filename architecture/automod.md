@@ -452,10 +452,10 @@ landings, because the loop is judged on items *resolved*, not shipped.
 other transition is derived, not scattered: `backlog.desired_statuses`
 computes the status each open item *should* have from the ledger — in flight
 (`started` with nothing after it), landed-and-awaiting, promoted-and-observing,
-an outcome that re-offers (`up_next`) or spends the attempt (`draft`, tagged
-`needs-human` — the pool means implement will take it and it will not, and
-`draft` is 250 deep, so the tag is what makes a decision findable; it comes
-off when a reopen moves the item back), a confirmed verdict, a non-confirmed
+an outcome that re-offers (`up_next`) or spends the attempt (`draft`, with
+a decision owed to the owed-check job — §3.2k; it was the `needs-human` tag
+until 2026-09-27, and like the tag the owed decision goes when a reopen or a
+re-triage takes the item back), a confirmed verdict, a non-confirmed
 verdict — and `reconcile_statuses` writes the differences, on
 every implement poll and after every turn. One table, so the migration of the
 existing board and the steady state are the same code.
@@ -1756,6 +1756,66 @@ told it lands more often is a live question, so
   first; then `on` only if resolved-per-round-hour is up with the landed rate
   not down (the house rule), else `off`. `tests/test_reasoning_bank.py`.
 
+### 3.2k Owed work: nothing parks on Alan (2026-09-27)
+
+**What an item still owes after the loop is done with it is settled by Lloyd.**
+The `needs-human` tag is retired as a destination: no code adds it
+(`tests/test_owed_check.py::test_no_code_adds_the_needs_human_tag`), every
+close removes it, and it survives only on legacy files until a writer touches
+them.
+
+**Why.** Four paths parked on the tag: a `met` landing with `human_clauses`
+or post-landing clauses (#1210's close), a path the loop may not write
+(`record_human_paths`), a spent attempt after its second life (the
+reconciler), and the parking triage verdicts (`not_code`, `unverifiable`, a
+`human-only:` contract). Nothing ever came back for the tag: 257 closed items
+piled up. A hand sweep on 2026-09-27 found 95 already done, 30 moot, 20
+waiting on a date, 68 policy calls Alan had delegated anyway, 63 pieces of
+leftover work written as prose on closed items, and 10 needing his hands.
+Alan's ruling that day: "i don't want any more needs-human … lloyd can approve
+his own choices now."
+
+**The mechanism.** Each of those paths writes an entry on the item's `owed`
+list (`scripts/automod/owed.py`: `what`, `kind` = check | path | decide,
+`since`, `recheck_after`, `rechecks`). The `owed-check` worker source
+(`workers/sources/owed_check.py`, `workers.sources.owed-check`) runs one
+visible session per item with a due entry. The session measures each entry
+against the live system, then answers with one of these:
+
+- `settled`, with the evidence;
+- `recheck`, with a date. The date is clamped to 30 days, and an entry already
+  rechecked four times is ruled on instead;
+- `ruling`, the call Lloyd makes under Alan's delegation;
+- `work`, a draft follow-up item on `lloyd`, at most `spawn_cap` per item;
+- `reopen`, another implement attempt (open items only);
+- `close`, through the shared status recorder, stamped `closed_by: owed-check`;
+- `outside`.
+
+The apply step is the only writer; the session cannot edit files or write the
+board.
+
+**`outside` is the one thing that reaches Alan**: sudo on the host, a secret he
+holds, hardware, money. It moves to `owed_outside`, which `board_health.owed.outside`
+and Mission Control's backlog panel list, and the job announces it once. It is
+never a tag and never blocks the board. Deleting or moving data is not
+`outside`; it is ruled on and filed as work for a gated round.
+
+**The loop taking an item back makes its owed decisions moot.** Every move that
+used to strip `needs-human` (a reopen, a re-triage, an unfold, the reconciler
+putting an item back in a pool) drops the item's `decide` entries in the same
+write (`backlog._take_back`). So owed-check never closes an item the loop is
+working again.
+
+**Guards are not approvals.** Lloyd approving his own choices does not relax the
+safety layers: vault protection, protected paths, the guardian, the bench
+sandbox. A protected path a change needs is ruled on like anything else. Either
+there is a route around it, or it becomes an `outside` entry naming the exact
+edit.
+
+`apply: false` records the answers (`owed_check` ledger rows) and writes
+nothing. That is how the job was checked against the 2026-09-27 hand verdicts
+before it was switched on.
+
 ### 3.3 For humans (this repo's development)
 
 `/home/alansrobotlab/lloyd` is production. Non-trivial work belongs in the
@@ -2166,7 +2226,9 @@ The day also showed three dead ends the loop could only escalate:
   to do, and not yours to simulate", the review prompt shows them as not
   graded, and `close_settled_items` leaves a `met` landing **open** and
   tagged `needs-human` with the outstanding conditions in its note. The
-  loop's half lands; the item waits for the person.
+  loop's half lands; the item waits for the person. (Superseded twice: #1210
+  closed the item carrying the tag, and since 2026-09-27 the conditions go on
+  its `owed` list for the owed-check job, §3.2k.)
 - **A gate over a running measurement.** Covered in 4.5b: the gate tool
   reads `_task_registry.list_active()` for the bound session and refuses.
 

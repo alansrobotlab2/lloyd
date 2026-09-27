@@ -106,7 +106,7 @@ ordinary Tuesday.
 ### The KV budget gate
 
 A source that declares `LONG_LIVED = True` — `autocode`, `autotriage`,
-`deep-research`, `arch-review` — is not claimed while the primary's KV usage
+`deep-research`, `arch-review`, `owed-check` — is not claimed while the primary's KV usage
 is above `workers.kv_gate.max_kv_usage` (0.60); every other source claims as
 before. The flag in `workers/sources/<name>.py` is the truth and this list is
 a copy of it: `tests/test_kv_gate_docs.py` fails when a source flips the flag
@@ -516,6 +516,7 @@ what it reads, what it writes, and the measured state of it.
 | `backlog-cluster` | 65 | nightly clustering of the open board for the above | none (numpy, off-loop) |
 | `arch-review` | 62 | one `architecture/` doc or one functional group: check it against the tree, edit it, file the rest | session, IV off |
 | `board-steward` | 68 | one board pass: proposed moves and the next item for `autocode`, recorded beside the state machine's | session (primary), IV off |
+| `owed-check` | 72 | one item's `owed` list settled: evidence, a recheck date, a ruling, a follow-up item, a reopen or a close (`architecture/automod.md` §3.2k) | session (primary), IV off |
 | `automod-regression` | 70 | paired A/B eval after a promotion | none (subprocess on a thread) |
 | `autoresearch` | 60 | one prompt-optimisation round | its own |
 | `deep-research` | 70 | one registry topic, through the deep-dive-research skill | session, IV off |

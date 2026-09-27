@@ -203,7 +203,7 @@ behind a fifteen-line helper. `tests/test_backlog_tags_shape.py` pins it.
 | `umbrella` | A consolidation item that carries `members`. Never merged by write-time dedupe. |
 | `grouped` | Folded into an umbrella; out of both pools until that umbrella lands. |
 | `blocker` | The one finding an implement round may still file as its own item. Never merged. While the item it blocks is open it is *live*: triaged first, never quarantined, held or expired (see **Blockers** below). |
-| `needs-human` | A spent attempt, or a landing whose `human_clauses` are outstanding. `draft` is 456 items deep, so the tag is what makes a decision findable. It comes off when a reopen moves the item back into a pool. |
+| `needs-human` | **Retired as a destination (2026-09-27).** No code adds it, and every close and take-back removes it. What it marked (a spent attempt, outstanding `human_clauses`, a protected path, a parking triage verdict) is now an entry on the item's `owed` list, settled by the `owed-check` job. See `architecture/automod.md` §3.2k. |
 | `expired` | Closed by `expire_stale_spawns`. A human setting the status back to `draft` reopens it. |
 
 **Quarantine.** `backlog.is_quarantined` holds a self-filed item out of the

@@ -727,18 +727,18 @@ def test_record_verdict_writes_human_clauses_beside_the_contract(isolated):
                      acceptance_clauses=["a"], human_clauses=["Alan signs off"])
     fm = _fm(path)
     assert fm["acceptance_clauses"] == ["a"] and fm["human_clauses"] == ["Alan signs off"]
-    assert "Needs a person before this closes" in path.read_text()
+    assert "Owed after landing" in path.read_text()
     assert B.human_clauses_of({}, fm) == ["Alan signs off"]
     assert B.human_clauses_for_item(path, {}) == ["Alan signs off"]
     assert B.human_clauses_for_item(None, {"human_clauses": ["x"]}) == ["x"]
 
 
-def test_a_met_landing_with_human_clauses_closes_and_keeps_the_tag(isolated):
+def test_a_met_landing_with_human_clauses_closes_and_owes_them(isolated):
     """#1210 rewrote this test's expectation: it asserted the landing stayed
     OPEN (`closed: False`, `status != "done"`) and tagged, and staying open
     meant `draft` — the pool single-item triage reads. The loop's half of a
-    `met` landing is done, so it closes; what survives the closure is the tag
-    and the named debt, which is what this test has always been about."""
+    `met` landing is done, so it closes; what survives the closure is the
+    named debt — on the `owed` list since 2026-09-27, the tag before."""
     path = write_item(isolated, 611, status="in_progress", clauses=["a"], human=["Alan audits"])
     S.append_event({"event": "backlog_implement", "item_id": 611, "phase": "finished",
                     "round_id": "SM_h", "stop_reason": "stop", "num_turns": 5,
@@ -750,8 +750,10 @@ def test_a_met_landing_with_human_clauses_closes_and_keeps_the_tag(isolated):
     assert done == [{"item_id": 611, "closed": True, "acceptance": "met"}]
     fm = _fm(path)
     assert fm["status"] == "done" and fm.get("completed"), "closed, with completed stamped"
-    assert B.NEEDS_HUMAN_TAG in fm["tags"], "the debt a person owes rides the closure"
-    assert "a person still owes: Alan audits" in path.read_text()
+    from scripts.automod import owed as O
+    assert B.NEEDS_HUMAN_TAG not in (fm.get("tags") or [])
+    assert [e["what"] for e in O.entries_of(fm)] == ["Alan audits"], "the debt rides the closure"
+    assert "still owed, for the owed-check job: Alan audits" in path.read_text()
     assert fm[B.LANDED_MARKER] == "d" * 40
     # …and without human clauses the same landing closes too, untagged: the tag
     # is now the only thing that distinguishes the two

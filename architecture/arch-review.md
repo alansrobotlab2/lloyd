@@ -192,7 +192,7 @@ describing something gone is exactly what `stale` means. A **doc** never
 reports a grouping.
 
 `superseded` and `aspirational` do not trigger an archive path. The turn adds
-one paragraph under the H1 and files a `needs-human` item — "retire
+one paragraph under the H1 and files an item — "retire
 `architecture/<slug>.md` → `.archive/`". Moving a doc is a human's commit, or
 an autocode round's.
 
@@ -249,7 +249,7 @@ Kill switch: `workers.sources.arch-review.enabled`.
 
 ## 6. What it does not do
 
-- **It does not move files.** No archive path; retirement is a `needs-human`
+- **It does not move files.** No archive path; retirement is a filed
   item.
 - **It does not fix what it finds** outside the one doc. A phantom tool name in
   a SKILL.md, an unbounded autonomy step, a dead consumer: all filed. This is

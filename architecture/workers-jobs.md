@@ -20,24 +20,24 @@ chain and the morning triage are all autonomy *task files* that reach the pool
 through the single `scheduled-task` source — [[autonomy]] is that mechanism
 and [[autonomy-jobs]] is what each of those jobs is for, not this document.
 
-The twelve are grouped here by **what they are for**, not by priority, because
+The thirteen are grouped here by **what they are for**, not by priority, because
 the families share more than the members do:
 
 | § | family | sources | what it is for |
 |---|---|---|---|
 | §3 | **dispatch** | `scheduled-task` | one door onto the autonomy fleet |
-| §4 | **self-mod** | `arch-review`, `backlog-cluster`, `board-steward`, `autotriage`, `autocode`, `automod-regression`, `autoresearch` | change Lloyd's own code, behind a gate |
+| §4 | **self-mod** | `arch-review`, `backlog-cluster`, `board-steward`, `owed-check`, `autotriage`, `autocode`, `automod-regression`, `autoresearch` | change Lloyd's own code, behind a gate |
 | §5 | **intake** | `youtube-digest`, `deep-research` | turn outside text into vault knowledge |
 | §6 | **mining** | `session-distill`, `bench-mine` | turn Lloyd's own exhaust into staged notes |
 
-§1's roster is the other view — the same twelve in priority order, which is
+§1's roster is the other view — the same thirteen in priority order, which is
 the order the pool considers them.
 
 ---
 
 ## 1. The roster
 
-Twelve sources are registered. Priority is `DEFAULT_PRIORITY` unless config
+Thirteen sources are registered. Priority is `DEFAULT_PRIORITY` unless config
 overrides it — `youtube-digest` is the only real override (45, not the default
 60); `arch-review` and `board-steward` state 62 and 68 in config, though those
 equal their defaults — and **lower runs sooner**.
@@ -52,6 +52,7 @@ equal their defaults — and **lower runs sooner**.
 | `arch-review` | self-mod | **62** | 1800 s | 1 | session | **yes** | off | yes |
 | `backlog-cluster` | self-mod | 65 | 3600 s poll | 1 | none (numpy) | no | — | yes |
 | `board-steward` | self-mod | 68 | 900 s | 1 | session (primary) | no | off | yes |
+| `owed-check` | self-mod | 72 | 120 s | 1 | session (primary) | **yes** | off | yes |
 | `deep-research` | intake | 70 | 3600 s | 1 | session | **yes** | off | yes |
 | `session-distill` | mining | 70 | 1800 s | 1 | direct (primary) | no | — | yes |
 | `automod-regression` | self-mod | 70 | 900 s | 1 | none (subprocess) | no | — | yes |
@@ -272,6 +273,32 @@ module docstring's "the replacement" is the plan, not the present. With
 **It may never set `done`.** Closing is gated on a settled promotion whose
 outcome said `met` and stays mechanical in `close_settled_items`: a closed
 item is never re-triaged, so it is the one move the loop cannot recover from.
+
+### `owed-check` — settle what an item still owes
+
+**Wakes** every 120 s and, when any item has a due entry on its `owed` list
+(`scripts/automod/owed.py`), enqueues one job (`owed-check:item`). **Executes**
+as one session on the **primary** per item: it measures each owed entry
+against the live system (run records, `server.err`, the ledger, the code) and
+answers per entry with one of `settled`, `recheck` (a date, clamped to 30 days;
+an entry rechecked four times is ruled on instead), `ruling`, `work` (a draft
+follow-up item, at most `spawn_cap` per item), `reopen`, `close`, or `outside`.
+The session may read and run commands but not edit files or write the board;
+the apply step is the only writer.
+
+**Why it exists.** The owed list replaced the `needs-human` tag on 2026-09-27.
+A met landing with a post-landing check, a path the loop may not write, a
+spent attempt and a parking triage verdict (`not_code`, `unverifiable`,
+`human-only`) all used to park on Alan with the tag, and nothing came back for
+it: 257 closed items piled up, and a hand sweep found 125 of them already done
+or moot. Alan's ruling: nothing parks on him, and Lloyd approves his own
+choices. `outside` is the only class that reaches him — sudo on the host, a
+secret he holds, hardware, money — listed on Mission Control's backlog panel,
+never as a tag. Deleting or moving data is not `outside`: it is ruled on and
+filed as work for a gated round.
+
+**Writes** nothing while `apply: false` (it records `owed_check` ledger rows
+with its answers, and skips items a dry run already answered).
 
 ### `autotriage` — is this backlog item still true?
 

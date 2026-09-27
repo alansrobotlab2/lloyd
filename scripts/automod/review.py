@@ -518,8 +518,9 @@ def _human_clauses_block(human_clauses: list[str]) -> str:
 {body}
 </human_clauses>
 
-Those are a person's job — an audit, a sign-off, a decision — and are not \
-graded here. Do not mark a clause partial or unmet for their absence.
+Those are settled after landing by the owed-check job — a check over live \
+traffic, an audit, a ruling — and are not graded here. Do not mark a clause \
+partial or unmet for their absence.
 """
 
 

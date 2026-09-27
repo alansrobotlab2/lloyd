@@ -24,11 +24,18 @@ from pathlib import Path
 import pytest
 import yaml
 
-from scripts.automod import backlog as B, state as S
+from scripts.automod import backlog as B, owed as O, state as S
 from workers.sources import _common as C
 from workers.sources import autocode as I
 from workers.sources import autotriage as M
 
+
+
+def _owed_kinds(item_id: int) -> list[str]:
+    """The kinds of the item's owed entries (2026-09-27: what was the
+    `needs-human` tag is now the `owed` list the owed-check job settles)."""
+    path = next(iter(sorted(B.BACKLOG_DIR.glob(f"{item_id}-*.md"))))
+    return [e["kind"] for e in O.entries_of(B._split_frontmatter(path.read_text())[0])]
 
 def write_item(d: Path, item_id, *, status="draft", days_old=100, body="Do the thing.",
                name="A thing", priority="medium", board="lloyd") -> Path:
@@ -2087,12 +2094,13 @@ def test_in_progress_means_a_round_is_running_and_nothing_else(isolated):
     _landed(643, "SM_643", "a643a643a643", outcome=None)
     B.close_settled_items(S.LEDGER_PATH)
     want = B.desired_statuses(S.LEDGER_PATH, None)
-    # met, a person owed a check: CLOSED, carrying needs-human (#1210). It was
-    # `draft` + needs-human here, which is the pool triage reads. The sweep
-    # closed it, so it is off the board and not a move this pass proposes.
+    # met, a check still owed: CLOSED, the check on its `owed` list (#1210;
+    # the tag until 2026-09-27). It was `draft` + needs-human here, which is
+    # the pool triage reads. The sweep closed it, so it is off the board and
+    # not a move this pass proposes.
     assert 640 not in want, "a closed item is not a status the pass moves"
     assert _fm(p640)["status"] == "done" and _fm(p640).get("completed")
-    assert "needs-human" in _fm(p640)["tags"], "the owed check survives the close"
+    assert _owed_kinds(640) == ["check"], "the owed check survives the close"
     # not_met, attempt still owed: offered once more (the existing `partial`
     # re-offer path says "offered again"; the new branch only speaks when
     # that attempt is spent, and then it says draft + needs-human)
@@ -2423,7 +2431,7 @@ def test_an_item_with_two_settled_landings_joins_the_newest_one(isolated):
     assert _fm(p608)["status"] == "done" and _fm(p608)["automod_landed"] == "be84d7c4bcf2", \
         "the newest settled landing, not the first"
     assert _fm(p617)["status"] == "done" and _fm(p617)["automod_landed"] == "230f07211652"
-    assert "needs-human" in _fm(p617)["tags"], "the path a person owes survives the close"
+    assert _owed_kinds(617) == ["path"], "the path still owed survives the close"
     assert B.close_settled_items(S.LEDGER_PATH) == [], "the newest marker still means processed"
 
 
@@ -2540,8 +2548,8 @@ def test_a_promotion_the_review_did_not_grade_all_met_is_still_nobody(isolated):
 def test_a_reported_met_with_clauses_closes_exactly_as_it_did_before(isolated):
     """The path the six did not take, pinned so the loosening is measurable:
     a `met` outcome with its clauses closes on the turn's own word, with the
-    same reason text, and the close path still drops `needs-human` when nobody
-    is owed a check and keeps it when the item carries one."""
+    same reason text, and the close path drops `needs-human` whatever is owed,
+    recording what the item carries on its `owed` list (2026-09-27)."""
     p_clean = write_item(isolated, 711, status="up_next")
     B.update_frontmatter(p_clean, {"tags": ["backlog", "needs-human"]})
     p_owed = write_item(isolated, 712, status="up_next")
@@ -2559,8 +2567,8 @@ def test_a_reported_met_with_clauses_closes_exactly_as_it_did_before(isolated):
     assert "Closed: the round reported the acceptance check met — shipped it" \
         in clean["activity_log"][-1]
     assert "needs-human" not in clean["tags"], "nothing owed, so the tag goes on the way out"
-    assert "a person still owes" in owed["activity_log"][-1]
-    assert "needs-human" in owed["tags"], "#1210: the owed check survives the close"
+    assert "still owed, for the owed-check job" in owed["activity_log"][-2]
+    assert _owed_kinds(712) == ["check"], "#1210: the owed check survives the close"
     assert "the review rung" not in clean["activity_log"][-1], \
         "the turn's own word closes it; the second reader was not needed"
 
@@ -2855,10 +2863,11 @@ def test_a_rejected_outcome_closes_the_item_tagged_and_keeps_its_clauses(isolate
 
 
 
-def test_the_needs_human_tag_rides_the_status_move_both_ways(isolated):
-    """A spent item in `draft` looks like one of 250 unread drafts; the tag is
-    the difference. It goes on with the move to draft and comes off when a
-    reopen takes the item back into the pool."""
+def test_the_owed_decision_rides_the_status_move_both_ways(isolated):
+    """A spent item in `draft` looks like one of 250 unread drafts; the owed
+    decision is the difference. It is recorded with the move to draft (never a
+    `needs-human` tag since 2026-09-27) and goes when a reopen takes the item
+    back into the pool."""
     write_item(isolated, 730)
     S.append_event({"event": "backlog_retriage", "item_id": 730, "ts": 1.0}, path=S.LEDGER_PATH)
     _confirm(730); B.set_status(730, "in_progress", "running")
@@ -2866,13 +2875,15 @@ def test_the_needs_human_tag_rides_the_status_move_both_ways(isolated):
     moved = B.reconcile_statuses(S.LEDGER_PATH, None)
     assert [(m["from"], m["to"]) for m in moved] == [("in_progress", "draft")]
     fm = B._split_frontmatter(next(isolated.glob("730-*.md")).read_text())[0]
-    assert fm["status"] == "draft" and B.NEEDS_HUMAN_TAG in fm["tags"]
+    assert fm["status"] == "draft" and B.NEEDS_HUMAN_TAG not in fm["tags"]
+    assert _owed_kinds(730) == ["decide"]
 
     B.reopen_item(730, "the blocker is gone", ledger=S.LEDGER_PATH)
     moved = B.reconcile_statuses(S.LEDGER_PATH, None)
     assert [(m["from"], m["to"]) for m in moved] == [("draft", "up_next")]
     fm = B._split_frontmatter(next(isolated.glob("730-*.md")).read_text())[0]
     assert fm["status"] == "up_next" and B.NEEDS_HUMAN_TAG not in fm["tags"]
+    assert _owed_kinds(730) == [], "the loop took it back: the decision is moot"
     assert "backlog" in fm["tags"], "other tags survive"
 
 
@@ -3115,11 +3126,11 @@ def test_no_hand_off_while_the_round_is_alive(isolated, monkeypatch, tmp_path, a
     want = B.desired_statuses(S.LEDGER_PATH)[950]
     assert want[0] == "in_progress" and len(want) == 2, want
     assert B.reconcile_statuses(S.LEDGER_PATH) == [], "already in_progress: nothing moves"
-    assert B.NEEDS_HUMAN_TAG not in B.item_by_id(950).tags
+    assert B.NEEDS_HUMAN_TAG not in B.item_by_id(950).tags and _owed_kinds(950) == []
     assert not [e for e in S.read_events(path=S.LEDGER_PATH)
                 if e.get("event") == "status_moved" and e.get("to") == "draft"]
 
-    # The round ends: now, and only now, a person is handed the item.
+    # The round ends: now, and only now, the decision is owed (to owed-check).
     S.clear_land_marker("SM_ALIVE")
     monkeypatch.setattr(S, "gate_in_progress", lambda rid: False)
     monkeypatch.setattr(S, "read_current", lambda: None)
@@ -3129,7 +3140,8 @@ def test_no_hand_off_while_the_round_is_alive(isolated, monkeypatch, tmp_path, a
                         "round_id": "SM_ALIVE", "stop_reason": "stop"}, path=S.LEDGER_PATH)
     moved = B.reconcile_statuses(S.LEDGER_PATH)
     assert [(m["from"], m["to"]) for m in moved] == [("in_progress", "draft")]
-    assert B.NEEDS_HUMAN_TAG in B.item_by_id(950).tags
+    assert B.NEEDS_HUMAN_TAG not in B.item_by_id(950).tags
+    assert _owed_kinds(950) == ["decide"]
 
 
 def test_a_hand_off_while_the_round_is_alive_is_taken_back(isolated, monkeypatch, tmp_path):
@@ -3168,10 +3180,13 @@ def test_no_hand_off_while_the_re_triage_is_owed(isolated, monkeypatch):
     _spent_after_review(952, round_id="SM_2")
     assert not B.second_life_owed(B.item_by_id(952), S.LEDGER_PATH)
     B.reconcile_statuses(S.LEDGER_PATH)
-    assert B.NEEDS_HUMAN_TAG in B.item_by_id(952).tags
+    assert B.NEEDS_HUMAN_TAG not in B.item_by_id(952).tags
+    assert _owed_kinds(952) == ["decide"]
     hand_offs = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "status_moved"
-                 and "a human decides" in (e.get("reason") or "")]
-    assert len(hand_offs) == 1, "exactly one hand-off, and it stuck"
+                 and e.get("owed")]
+    assert len(hand_offs) == 1, "exactly one hand-off to owed-check, and it stuck"
+    assert not any(e.get("needs_human") for e in S.read_events(path=S.LEDGER_PATH)
+                   if e.get("event") == "status_moved"), "never a hand-off to a person"
 
 
 def test_a_spend_waiting_on_an_open_blocker_is_still_handed_off(isolated, monkeypatch):
@@ -3193,13 +3208,14 @@ def test_a_spend_waiting_on_an_open_blocker_is_still_handed_off(isolated, monkey
     assert B.implement_outcomes(S.LEDGER_PATH)[954][0] == "spent"
     assert B.retriage_spent_items(S.LEDGER_PATH) == [], "waits for #955"
     B.reconcile_statuses(S.LEDGER_PATH)
-    assert B.NEEDS_HUMAN_TAG in B.item_by_id(954).tags
+    assert _owed_kinds(954) == ["decide"]
     B.set_status(955, "done", "the blocker landed")
     assert [r["item_id"] for r in B.retriage_spent_items(S.LEDGER_PATH)] == [954]
     assert B.NEEDS_HUMAN_TAG not in B.item_by_id(954).tags
+    assert _owed_kinds(954) == [], "re-triage took it back: the decision is moot"
 
 
-def test_with_retriage_off_a_first_spend_is_a_persons_at_once(isolated, monkeypatch):
+def test_with_retriage_off_a_first_spend_is_owed_at_once(isolated, monkeypatch):
     """`retriage_spent: false` means no second life is coming, so waiting for
     one would strand the item. Housekeeping and the turn-end reconcile both
     pass the switch."""
@@ -3207,7 +3223,7 @@ def test_with_retriage_off_a_first_spend_is_a_persons_at_once(isolated, monkeypa
     write_item(isolated, 953)
     _spent_after_review(953)
     B.reconcile_statuses(S.LEDGER_PATH, retriage_enabled=False)
-    assert B.NEEDS_HUMAN_TAG in B.item_by_id(953).tags
+    assert _owed_kinds(953) == ["decide"]
     seen = {}
     _housekeeping_counter(monkeypatch)
     monkeypatch.setattr(B, "reconcile_statuses", lambda ledger, **kw: seen.update(kw) or [])
@@ -3518,9 +3534,9 @@ def test_a_close_never_invents_a_tags_field(isolated):
     """The removal has to stay a subtraction. An item with no `tags` key is the
     common shape, and a closer that wrote the list it computed unconditionally
     would add `tags: []` to every file it closed — the `changed` rule
-    `update_frontmatter` enforces for exactly that reason. An ADD still creates the
-    key: that is what `tags=(NEEDS_HUMAN_TAG,)` from `_close_settled_items` means,
-    and dropping it would silently lose the check a person owes."""
+    `update_frontmatter` enforces for exactly that reason. Since 2026-09-27 a
+    passed `needs-human` is dropped too (what is owed is the `owed` list), so
+    that close invents no key either."""
     p = write_item(isolated, 946, status="draft")
     _untag(p)
     assert "tags" not in _fm(p), "fixture carries no tags field"
@@ -3534,7 +3550,7 @@ def test_a_close_never_invents_a_tags_field(isolated):
     B.close_landed(B.item_by_id(947), commit="e" * 40, round_id="SM_947", settled_at="s",
                    close=True, why="met, and a person owes a check",
                    tags=(B.NEEDS_HUMAN_TAG,))
-    assert _fm(p2)["tags"] == [B.NEEDS_HUMAN_TAG]
+    assert "tags" not in _fm(p2), "a passed needs-human is dropped, not written"
 
 
 # ===========================================================================
@@ -3683,12 +3699,13 @@ MET_OUTCOME = {"acceptance": "met", "landed": True, "deferred_to": [],
                "summary": "shipped", "spawned": [], "clause_outcomes": []}
 
 
-def test_a_landed_met_item_closes_and_carries_the_needs_human_tag(isolated):
+def test_a_landed_met_item_closes_with_what_it_still_owes(isolated):
     """#1210 clause 1. The sweep closed a met landing only when nobody owed a
     check, so a met landing with a human clause fell to `draft` + `needs-human`
     — the pool single-item triage reads. Six landed items sat there on
     2026-09-17, #1199 among them. Now it closes, stamps `completed` like any
-    other close, and keeps the tag so a person can still find what they owe."""
+    other close, and records the check on its `owed` list (2026-09-27; it was
+    the tag, which nothing came back for)."""
     p = write_item(isolated, 650)
     B.update_frontmatter(p, {"human_clauses": ["Alan confirms the dashboard shows it"]})
     _landed(650, "SM_650", "aa650aa650aa", outcome=MET_OUTCOME)
@@ -3697,7 +3714,9 @@ def test_a_landed_met_item_closes_and_carries_the_needs_human_tag(isolated):
     fm = _fm(p)
     assert fm["status"] == "done", "closed, not parked in the triage pool"
     assert fm.get("completed"), "a close stamps completed, as every other close does"
-    assert B.NEEDS_HUMAN_TAG in fm["tags"], "the check a person owes survives the closure"
+    assert B.NEEDS_HUMAN_TAG not in (fm.get("tags") or [])
+    assert [e["what"] for e in O.entries_of(fm)] == ["Alan confirms the dashboard shows it"], \
+        "the owed check survives the closure"
     ev = [e for e in S.read_events(path=S.LEDGER_PATH) if e.get("event") == "item_landed"][-1]
     assert ev["closed"] is True and ev["human_clauses"], "the ledger names what is owed"
 
@@ -3740,7 +3759,8 @@ def test_a_landed_met_item_found_in_draft_is_closed_naming_its_commit(isolated):
     B.reconcile_statuses(S.LEDGER_PATH, None)
     fm = _fm(p)
     assert fm["status"] == "done" and fm.get("completed")
-    assert B.NEEDS_HUMAN_TAG in fm["tags"]
+    assert B.NEEDS_HUMAN_TAG not in (fm.get("tags") or [])
+    assert "check" in _owed_kinds(652), "what it owed is still owed"
     moved = [e for e in S.read_events(path=S.LEDGER_PATH)
              if e.get("event") == "status_moved" and e.get("item_id") == 652]
     assert moved and moved[-1]["to"] == "done"
@@ -3856,8 +3876,9 @@ def test_close_landed_takes_the_needs_human_tag_off_the_item_it_closes(isolated)
         "only the tag that is no longer owed goes; the provenance tags stay"
 
 
-def test_a_close_that_still_owes_a_check_keeps_the_needs_human_tag(isolated):
-    """#1146 clause 3, the half that must not regress: the owed check survives.
+def test_a_close_that_still_owes_a_check_keeps_it_owed(isolated):
+    """#1146 clause 3, the half that must not regress: the owed check survives
+    — on the `owed` list, and a tag the caller passes is dropped (2026-09-27).
 
     `close_settled_items` closes a met landing that has human clauses and passes
     `tags=(NEEDS_HUMAN_TAG,)` to say so (#1210 — it used to park the item in
@@ -3876,11 +3897,12 @@ def test_a_close_that_still_owes_a_check_keeps_the_needs_human_tag(isolated):
     assert out is not None
     fm = _fm(p)
     assert fm["status"] == "done"
-    assert B.NEEDS_HUMAN_TAG in fm["tags"], "the check a person owes survived the close"
+    assert B.NEEDS_HUMAN_TAG not in (fm.get("tags") or []), "no tag, even when a caller passes it"
+    assert [e["what"] for e in O.entries_of(fm)] == ["Alan confirms the dashboard shows it"]
     assert fm["human_clauses"] == ["Alan confirms the dashboard shows it"]
 
 
-def test_a_close_on_an_item_carrying_human_clauses_keeps_the_tag_unasked(isolated):
+def test_a_close_on_an_item_carrying_human_clauses_owes_them_unasked(isolated):
     """The other owed-check source: what the item records, not what the caller passes.
 
     A caller may close without saying "a human owes this", and the tag must still
@@ -3897,7 +3919,8 @@ def test_a_close_on_an_item_carrying_human_clauses_keeps_the_tag_unasked(isolate
                           why="landed; the owed check is on the item") is not None
     fm = _fm(p)
     assert fm["status"] == "done"
-    assert B.NEEDS_HUMAN_TAG in fm["tags"], "the item's own owed check held the tag"
+    assert [e["what"] for e in O.entries_of(fm)] == ["run the probe against live traffic"], \
+        "the item's own owed check survived a caller that passed nothing"
 
 
 def test_close_settled_items_closes_a_spent_attempt_without_the_stale_tag(isolated):
