@@ -375,7 +375,7 @@ def check_bash_command(command: str, cwd: str | None = None, *,
     """Return (label, excerpt) if `command` matches a hard-deny pattern,
     else None.
 
-    Four checks, one definition. The fourth, `service_control`, needs the
+    Five checks, one definition. The fourth, `service_control`, needs the
     session: a background session (worker, autonomy, bench — by id shape,
     a `task:*` subagent by its parent through `parent_of`) may not restart
     or stop an engine or a service; a chat session may. Callers that do not
@@ -385,8 +385,12 @@ def check_bash_command(command: str, cwd: str | None = None, *,
     tree or $HOME wholesale — the spellings the regex table let through on
     2026-09-10 and 2026-09-12; `sync_registration` refuses anything that
     changes the Obsidian Sync registration, which Lloyd deleted twice on
-    2026-09-14. `cwd` is where the command starts; `None` means the
-    aggregator's own directory.
+    2026-09-14; and the fifth refuses a command whose write target — a
+    redirect, a mover's destination, a `sed -i` file, a path an interpreter
+    opens for writing — lands inside the write deny-set `agent_mcp/builtin_fs.py`
+    already refuses `Write` and `Edit` on (#1049 left this lane open; #1620 shut
+    it). `cwd` is where the command starts; `None` means the aggregator's own
+    directory, which is also where a relative write target resolves.
 
     This is the only definition: the harness PreToolUse hook calls it, and so
     does the aggregator's `call_tool` for every Bash dispatch (`at_dispatch`),
@@ -425,6 +429,20 @@ def check_bash_command(command: str, cwd: str | None = None, *,
         if len(excerpt) > 80:
             excerpt = excerpt[:80] + "..."
         return (f"service control: {why}", excerpt)
+    # Fifth, last: the write deny-set. Ordering is not cosmetic — the paired
+    # corpus (`tests/unit/test_harness_safety.py`) pins which check answers each
+    # true positive, so a new refusal placed earlier would re-label commands the
+    # other four already refuse. Nothing here is reached by a command the others
+    # already deny, and the checker below is the Bash half of the one predicate
+    # `agent_mcp/builtin_fs.py` consults for `Write` and `Edit`, grant contextvar
+    # included, so `allow_protected_writes` lifts both lanes or neither.
+    from app.harness.protected_paths import check_bash_write_denied
+    why = check_bash_write_denied(command, cwd)
+    if why:
+        excerpt = command.strip().splitlines()[0]
+        if len(excerpt) > 80:
+            excerpt = excerpt[:80] + "..."
+        return (f"protected write: {why}", excerpt)
     return None
 
 

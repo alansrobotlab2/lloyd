@@ -25,6 +25,10 @@ own worktree, which contains directories named like deny entries; the nightly
 knowledge-write job edits the loaded-memory files that sit *beside* the denied
 identity file; `vault_write` is a separate lane with its own root check. A
 predicate that refused any of those would not be a fix, it would be an outage.
+
+Since #1620 the Bash lane asks the same predicate of what a command writes, so
+the last two tests here run `check_bash_command` as well as `Write`: one grant
+contextvar, both lanes, and the allow half above holds on the shell route too.
 """
 
 from __future__ import annotations
@@ -42,6 +46,7 @@ sys.path.insert(0, str(ROOT))
 from agent_mcp import builtin_fs as FS  # noqa: E402
 from agent_mcp import main as M  # noqa: E402
 from app.harness import protected_paths as PP  # noqa: E402
+from app.harness.safety import check_bash_command  # noqa: E402
 
 SID = "20260921_1049_test"
 ORIGINAL = "ORIGINAL IDENTITY FILE"
@@ -239,6 +244,26 @@ async def test_a_narrowed_grant_lifts_only_what_it_names(home):
                                               "content": "OVERWRITTEN"}), soul)
         assert (await FS.call_tool("Write", {"file_path": str(venv),
                                              "content": "ok"})).is_error is False
+
+
+# Acceptance clause 5 of #1620: the grant pair, on the Bash lane beside the lane
+# whose fixture it uses. Node id: test_the_same_lift_covers_the_bash_write_the_file_write_waits_for
+def test_the_same_lift_covers_the_bash_write_the_file_write_waits_for(home):
+    """One predicate, two lanes (#1620): the fifth check asks the same
+    `write_deny_reason` `_protected_path_refusal` asks, so with no lift both
+    spellings are refused and a narrowed grant opens only the `tee` it names."""
+    tee = ("echo unit | tee -a ~/lloyd/agent-services/supervisor/conf.d"
+           "/agent-backend.conf")
+    redirect = "echo x > ~/.openclaw/credentials.json"
+    for cmd in (tee, redirect):
+        assert check_bash_command(cmd, str(home / "lloyd"), at_dispatch=True,
+                                  session_id=SID) is not None, cmd
+    with PP.allow_protected_writes("test: service units only",
+                                   paths=["~/lloyd/agent-services"]):
+        assert check_bash_command(tee, str(home / "lloyd"), at_dispatch=True,
+                                 session_id=SID) is None, tee
+        assert check_bash_command(redirect, str(home / "lloyd"), at_dispatch=True,
+                                 session_id=SID) is not None, redirect
 
 
 @pytest.mark.parametrize("extra", [

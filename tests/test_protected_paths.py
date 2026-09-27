@@ -302,7 +302,14 @@ def test_the_deny_set_is_consulted_from_one_place_in_the_write_path():
 def test_no_other_write_lane_consults_the_deny_set():
     """`vault_write` and `automod_vault_land` are sanctioned writers with their
     own root checks and their own validation, and the 06:00 nightly job runs on
-    them; the deny-set stops at the fs lane so it cannot fail that run."""
+    them; the deny-set stops at the fs lane so it cannot fail that run.
+
+    The name being scanned is why the Bash lane added by #1620 is not in this
+    list's trouble: `safety.check_bash_command` refuses those writes through
+    `protected_paths.check_bash_write_denied`, which owns the predicate, so no
+    dispatch or writer module spells the set or its predicate itself. That is the
+    property under test — one module decides, everyone else calls it — and the
+    Bash behaviour is pinned by `tests/test_bash_write_guard.py`."""
     for rel in ("agent_mcp/vault.py", "agent_mcp/automod.py", "agent_mcp/facts.py",
                 "app/harness/safety.py", "app/harness/mcp_pool.py", "agent_mcp/main.py"):
         path = REPO / rel

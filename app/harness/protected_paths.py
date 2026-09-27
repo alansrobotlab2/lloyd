@@ -668,6 +668,326 @@ def referenced_paths(command: str, cwd: str | None = None, _depth: int = 0) -> l
     return out
 
 
+# ---------------------------------------------------------------------------
+# The write deny-set on the Bash lane — #1049's remaining hole, closed by #1620
+# ---------------------------------------------------------------------------
+#
+# `agent_mcp/builtin_fs.py` asks `write_deny_reason` of every `Write` and
+# `Edit`, so since #1049 that lane refuses the four entries of
+# `PROTECTED_WRITE_ROOTS`. The Bash lane never asked the question at all: at
+# HEAD `4bf96749` `safety.check_bash_command` ran four checks (the catastrophic
+# regex table, `check_protected_delete`, `check_sync_registration`,
+# `check_service_control`) and none of them resolves what a command *writes*,
+# so `echo x > ~/.openclaw/credentials.json`, `echo x | tee -a
+# ~/lloyd/agent-services/supervisord.conf` and `mv /tmp/evil
+# ~/obsidian/lloyd/SOUL.md` were all allowed on both enforcement lanes while
+# `Write` on the identical path was refused. Reading SOUL.md was shut and
+# writing it was one Bash call.
+#
+# It parses rather than pattern-matches for the same reason the delete check
+# does: the one Bash write refusal that predates this — the desktop lease's
+# `(|tee|cp|mv|ln|install|rsync)…desktop/lease.json` — is a regex over a fixed
+# verb list, and a regex cannot follow a `cd`, a `$HOME` spelling or an
+# interpreter's quoted literal, which are the three spellings
+# `check_protected_delete` exists to catch. So this reuses the module's
+# tokenizer, `_strip_wrappers`, `_operands` and per-`cd` `_resolve`, exactly as
+# the bench-corpus read gate reuses `referenced_paths`.
+#
+# Write-shaped targets only — never a source, never a reader's operand.
+# `referenced_paths` is deliberately over-inclusive (its own docstring), and
+# `cat ~/lloyd/agent-services/supervisord.conf` names a deny-set path as a
+# matter of fact; denying on that output would refuse reading the supervisor
+# conf, which is routine triage work and was this item's own first step. So the
+# question here is which operand the command *writes*: a redirect's target, a
+# mover's destination, `tee`'s files, a `sed -i` file operand, a `dd of=`, or a
+# path sharing an interpreter's argument with a write-mode call. Operand
+# *position* is load-bearing, not decoration: `sed -i 's/a/b/' notes.md` read as
+# one blob hands back `<cwd>/s/a/b` — a path that exists nowhere — while the
+# file it actually rewrites is the second positional.
+#
+# One deny-set, one predicate, both lanes: `write_deny_reason` is called on the
+# resolved target exactly as the file lane calls it. That is what makes an
+# `allow_protected_writes` lift cover Bash as well as `Write`, and it also means
+# realpath semantics carry over — a symlink out of the set, like
+# `.venvs/lloyd/bin/python` → the uv-managed interpreter, is outside the set
+# here as it is on the file lane. Widening that is a membership decision (left
+# to Alan by #1620), not a per-lane one.
+
+#: Commands that write every file operand they are given.
+_WRITE_EVERY_OPERAND = frozenset({"tee"})
+
+#: Commands that write their last operand, or the `-t` target, given sources.
+_WRITE_LAST_OPERAND = frozenset({"cp", "mv", "install", "ln", "rsync"})
+
+#: Options that take a separate value on those commands, so the value is not
+#: read as an operand: `cp -t DIR a b` writes DIR, `rsync -e ssh src dst`
+#: writes dst. `-b`/`--backup` and `ln -s` take no value and are absent.
+_MOVE_TAKES_VALUE = frozenset({
+    "-t", "--target-directory", "-S", "--suffix",
+    "-e", "--rsh", "--exclude", "--include", "--filter", "-f",
+})
+
+#: `sed` options that carry the script, which is then not a file operand.
+_SED_SCRIPT_FLAGS = frozenset({"-e", "--expression", "-f", "--file"})
+
+#: The quoted-literal forms to read out of an interpreter's argument — the same
+#: two patterns `referenced_paths` and `_interpreter_delete` scan with, at :661
+#: and :526. Read out *whole*, because handing the payload to
+#: `referenced_paths` as one blob merges adjacent literals: shlex strips the
+#: quotes and keeps the comma, so `open('/a/x','w')` comes back naming
+#: `/a/x,w`, a path that exists nowhere. It still trips a directory entry, which
+#: is how the redirect-shaped case is caught either way, but it never equals the
+#: identity file, and a check that only ever matched `SOUL.md,w` would let
+#: `open("<…>/SOUL.md","w")` through while reporting a clean hit on the other
+#: spelling.
+_QUOTED_LITERALS = (r"'([^'\n]{2,400})'", r'"([^"\n]{2,400})"')
+
+#: A call inside an interpreter's argument that writes, and which quoted literal
+#: of that call is its destination — `…_QUOTED_LITERALS` index 0 for
+#: `open(p, "w")`, `Path(p).write_text(…)`, `fs.writeFileSync(p, …)`,
+#: `File.write(p, …)`; index 1 for the two-argument movers, whose literal 0 is
+#: the SOURCE. Position matters because `referenced_paths` does not know it: read
+#: as a target, `shutil.copy("~/obsidian/lloyd/SOUL.md", "/tmp/backup")` — which
+#: reads the identity file and writes elsewhere — would be refused for writing
+#: it, and `cp`'s equivalent is refused nowhere.
+#:
+#: These patterns name CALLS, never paths: which path a call touches comes from
+#: the literal, is resolved by `referenced_paths` exactly as every other operand
+#: here is, and is decided by `write_deny_reason`. That is the discipline
+#: `_interpreter_delete` applies to the same hole — inside `python3 -c "…"` there
+#: is no argv position left to read — and it keeps two known limits: a call whose
+#: destination is a variable or an f-string is not resolved (the payload's handle,
+#: not its path, is what is visible), and a bare `.write(` is absent, because
+#: `sys.stdout.write('/home/…/agent-services/x')` prints a path and writes
+#: nothing.
+_INTERPRETER_WRITE_CALLS: tuple[tuple[re.Pattern[str], int], ...] = (
+    # open()/io.open() in a write mode, positional or `mode=`.
+    (re.compile(r"\b(?:io\s*\.\s*)?open\s*\([^)]{0,200}?[\"'](?:mode\s*=\s*)?"
+                r"[wax][+btr]*[\"']"), 0),
+    # pathlib: the calls that create or replace bytes at a path.
+    (re.compile(r"Path\s*\([^)]{0,200}?\)\s*\.\s*"
+                r"(?:write_text|write_bytes|touch|mkdir)\s*\("), 0),
+    # node, ruby, php: the writers that take a destination first. The node
+    # methods are matched on the method alone, because the receiver in real code
+    # is `require('fs')`, and a match that started there would put the literal
+    # `fs` in the destination's position.
+    (re.compile(r"\.(?:writeFileSync|appendFileSync|writeFile|appendFile)\s*\("
+                r"|\bFile\s*\.\s*write\s*\(|\bfile_put_contents\s*\("), 0),
+    # The two-argument movers: destination is the second literal. Not `rmtree`,
+    # which is the delete axis and already answered elsewhere.
+    (re.compile(r"\b(?:shutil\s*\.\s*(?:copy\w*|move\w*|copytree)"
+                r"|os\s*\.\s*(?:replace|rename)|fs\s*\.\s*copyFileSync"
+                r"|FileUtils\s*\.\s*cp)\s*\("), 1),
+)
+
+
+def _sed_inplace_files(args: list[str]) -> list[str]:
+    """The files `sed -i` rewrites, or [] when it only prints to stdout."""
+    in_place, script_flag, positionals, literal = False, False, [], False
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if literal:
+            positionals.append(tok)
+        elif tok == "--":
+            literal = True
+        elif tok.startswith("-") and tok != "-":
+            if tok.startswith("-i") or tok.startswith("--in-place"):
+                in_place = True
+            if tok in _SED_SCRIPT_FLAGS or any(
+                    tok.startswith(f + "=") for f in _SED_SCRIPT_FLAGS):
+                script_flag = True
+                i += 1
+        else:
+            positionals.append(tok)
+        i += 1
+    if not in_place:
+        return []
+    # With `-e`/`-f` every positional is a file; without it the first is the script.
+    return positionals if script_flag else positionals[1:]
+
+
+def _interpreter_destinations(payload: str) -> list[str]:
+    """The paths the write calls in one interpreter argument would land on.
+
+    Each call is read in its own window, from the call to the end of its
+    statement, so a payload holding two writes never hands the second one's
+    literal to the first, and the literal read is the one that position names.
+    """
+    out: list[str] = []
+    for pattern, index in _INTERPRETER_WRITE_CALLS:
+        for match in pattern.finditer(payload):
+            window = payload[match.start():]
+            cut = min((window.find(sep) for sep in (";", "\n")
+                       if window.find(sep) != -1), default=len(window))
+            window = window[:cut or None]
+            literals: list[tuple[int, str]] = []
+            for quoted in _QUOTED_LITERALS:
+                for lit in re.finditer(quoted, window[:400]):
+                    literals.append((lit.start(), lit.group(1)))
+            literals.sort()
+            if len(literals) > index and literals[index][1] not in out:
+                out.append(literals[index][1])
+    return out
+
+
+def _move_destination(flags: list[str], operands: list[str]) -> str | None:
+    """What a mover writes: its `-t` target, else its last operand.
+
+    The last-operand reading is what keeps a `cp`/`mv` *source* out of the
+    answer — `cp ~/lloyd/agent-services/supervisord.conf /tmp/backup` copies
+    FROM the deny-set and must stay allowed, and it is: the destination there is
+    `/tmp/backup`.
+    """
+    for j, f in enumerate(flags):
+        if f in ("-t", "--target-directory") and j + 1 < len(flags):
+            return flags[j + 1]
+        if f.startswith("--target-directory="):
+            return f.split("=", 1)[1]
+    return operands[-1] if len(operands) >= 2 else None
+
+
+def write_targets(command: str, cwd: str | None = None,
+                  _depth: int = 0) -> list[tuple[str, str]]:
+    """Every `(path, shape)` the command writes to, resolved as of each `cd`.
+
+    `shape` is a phrase for the refusal — "a redirect into", "a `cp` writing" —
+    so the deny reason names the spelling that was caught, which is what makes
+    a false block diagnosable from the refusal log alone. Relative operands
+    resolve against the directory the command has `cd`-ed to, an unexpandable
+    token (`$VAR`, `~user`) is not returned at all, and a shell or interpreter
+    argument is re-entered once per level up to `_MAX_DEPTH`, which is how
+    `bash -c 'echo x > ~/.openclaw/x'` is caught as well as the plain form.
+    """
+    if not command or not isinstance(command, str):
+        return []
+    home = os.path.normpath(os.path.expanduser("~"))
+    state = {"cwd": _start_cwd(cwd, home)}
+    out: list[tuple[str, str]] = []
+
+    def keep(path: str, shape: str) -> None:
+        if path and (path, shape) not in out:
+            out.append((path, shape))
+
+    def add_token(tok: str, shape: str) -> None:
+        if not tok:
+            return
+        path = _resolve(tok, state["cwd"], home)
+        if path:
+            keep(path, shape)
+
+    def visit(argv: list[str]) -> None:
+        argv, _via_xargs = _strip_wrappers(argv)
+        if not argv:
+            return
+        cmd = os.path.basename(argv[0])
+        args = argv[1:]
+        if cmd in ("cd", "pushd"):
+            # Track the directory the rest of the command runs in, the same
+            # reading `referenced_paths` and `check_protected_delete` take, so
+            # `cd ~/lloyd && sed -i x agent-services/supervisord.conf` names the
+            # file it rewrites and not a path relative to where the tool started.
+            _, state["cwd"] = _check_segment(argv, state["cwd"], home, [], command, 0)
+            return
+        # The mover option table applies to the movers only: `-e` takes a value
+        # for `rsync` (its remote shell) and carries the program for `node` and
+        # `perl`, and read as a value it would swallow the payload the
+        # interpreter branch below exists to read. For everything else an option
+        # is just an option, and whatever is not one is an operand.
+        takes = _MOVE_TAKES_VALUE if cmd in _WRITE_LAST_OPERAND else frozenset()
+        flags, operands = _operands(args, takes)
+        if cmd in _WRITE_EVERY_OPERAND:
+            for tok in operands:
+                add_token(tok, "a `tee` writing")
+        elif cmd in _WRITE_LAST_OPERAND:
+            dest = _move_destination(flags, operands)
+            if dest:
+                add_token(dest, f"a `{cmd}` writing")
+        elif cmd == "sed":
+            for tok in _sed_inplace_files(args):
+                add_token(tok, "a `sed -i` rewriting")
+        elif cmd == "dd":
+            for tok in args:
+                if tok.startswith("of="):
+                    add_token(tok[3:], "a `dd of=` writing")
+        if _INTERPRETER.match(cmd) or cmd in _RESCAN:
+            if _depth >= _MAX_DEPTH:
+                return
+            # The payload is whatever the interpreter was handed: `-c` reads as a
+            # flag to `_operands`, so its argument lands in `operands` beside the
+            # script-file operands of a `sh file.sh`.
+            for tok in operands:
+                for path, shape in write_targets(tok, state["cwd"], _depth + 1):
+                    keep(path, shape)
+                for literal in _interpreter_destinations(tok):
+                    # Resolved by the same function that resolves every other
+                    # operand here, so a `~/…` inside a Python string lands on the
+                    # same deny-set entry the shell spelling does.
+                    for path in referenced_paths(literal, state["cwd"], _depth + 1):
+                        keep(path, "a write from an interpreter to")
+
+    try:
+        tokens = _tokens(command)
+        argv: list[str] = []
+        redirect_out = False
+        skip_next = False
+        for tok in tokens:
+            if not _is_boundary(tok):
+                if skip_next:
+                    skip_next = False
+                    argv.append(tok)      # a heredoc word or an fd: not a target
+                    continue
+                if redirect_out:
+                    redirect_out = False
+                    add_token(tok, "a redirect into")
+                    argv.append(tok)
+                    continue
+                argv.append(tok)
+                continue
+            if tok in (">", ">>", ">|"):
+                # `2>/dev/null` lexes as `2`, `>`: the fd number is not an
+                # operand, and leaving it in argv would read it as one.
+                if argv and argv[-1].isdigit():
+                    argv.pop()
+                redirect_out = True
+            elif tok == "<&" or tok == ">&" or tok == "&>":
+                # `>&2` duplicates a descriptor; `&>` is bash's redirect-out,
+                # whose target is the next token, so only the fd forms are skipped.
+                redirect_out = (tok == "&>")
+                skip_next = not redirect_out
+            elif tok.startswith("<"):
+                skip_next = True         # a redirect IN names a source, not a target
+            else:
+                visit(argv)
+                argv = []
+        visit(argv)
+    except Exception:  # noqa: BLE001 — a parser bug must not become a crash
+        return out
+    return out
+
+
+def check_bash_write_denied(command: str, cwd: str | None = None) -> str | None:
+    """Why `command` would write into the write deny-set, or None.
+
+    The Bash half of `write_deny_reason`, for the lane that reaches a shell
+    instead of a path argument: it names the shape and the resolved target and
+    then refuses on exactly the predicate the file lane refuses on, grant
+    contextvar included. A reader of a deny-set path is not a target of this
+    check at all — see the block comment above.
+    """
+    if not command or not isinstance(command, str):
+        return None
+    try:
+        targets = write_targets(command, cwd)
+    except Exception:  # noqa: BLE001
+        return None
+    for path, shape in targets:
+        label = write_deny_reason(path)
+        if label:
+            return f"{shape} {path} — inside {label}"
+    return None
+
+
 def check_protected_delete(command: str, cwd: str | None = None) -> str | None:
     """Why `command` would delete a protected tree wholesale, or None.
 

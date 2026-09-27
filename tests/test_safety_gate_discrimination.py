@@ -25,6 +25,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 LLOYD_HOME = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(LLOYD_HOME))
 
@@ -138,6 +140,71 @@ def test_seeding_is_undone_and_the_baseline_pair_still_holds():
     print("test_seeding_is_undone_and_the_baseline_pair_still_holds: OK")
 
 
+# ── the fifth check (#1620): naming a deny-set path is not writing to one ────
+#
+# `referenced_paths` is over-inclusive by design, and the deny-set check built on
+# it inherits that or it refuses ordinary work: `cat
+# ~/lloyd/agent-services/supervisord.conf` names a deny entry as a plain fact of
+# reading it. This is the benign arm of the new check; its attack arm is
+# `tests/test_bash_write_guard.py`. Scratch `$HOME`, because the deny-set is
+# home-relative and a probe against the real one reads the box running it.
+
+#: One existing file per deny entry, plus ordinary in-tree write targets.
+_DENY_FILES = ["obsidian/lloyd/SOUL.md", ".openclaw/credentials.json",
+               "lloyd/agent-services/supervisord.conf",
+               "lloyd/agent-services/conf/guardian.env",
+               "lloyd/.venvs/pyvenv.cfg", "lloyd/app/a.py", "lloyd/app/b.py"]
+
+#: Each names a deny-set path; none of them writes to one.
+_MERELY_NAMES_THE_SET = [
+    "cat ~/lloyd/agent-services/supervisord.conf",
+    "ls ~/lloyd/.venvs",
+    "echo x > ~/obsidian/knowledge/note.md",
+    "cd ~/lloyd && cp a.py b.py",
+    "cp a.py b.py",
+    "grep -rn supervisord ~/lloyd/agent-services",
+    "sort < ~/lloyd/agent-services/supervisord.conf",
+    "sed -n '1,10p' ~/lloyd/agent-services/conf/guardian.env",
+    "cp ~/lloyd/agent-services/supervisord.conf /tmp/backup.conf",
+    "cat ~/lloyd/.venvs/pyvenv.cfg > /tmp/out.txt",
+    "cd ~/lloyd && mv server.py server.py.bak",
+]
+
+
+@pytest.fixture()
+def deny_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    for rel in _DENY_FILES:
+        p = home / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("x\n")
+    (home / "obsidian" / "knowledge").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+@pytest.mark.parametrize("command", _MERELY_NAMES_THE_SET)
+def test_the_write_check_allows_a_deny_set_path_it_only_names(deny_home, command):
+    assert safety.check_bash_command(
+        command, str(deny_home / "lloyd"),
+        session_id="20260927_143507_chatabc") is None, command
+
+
+def test_the_write_check_lets_a_round_edit_its_own_worktree(deny_home, tmp_path):
+    """Prefix, not suffix: this path ends in the same `agent-services/…` the deny
+    entry names and is nowhere under the entry, and a check that refused it would
+    stop a round changing the service units it was opened to change."""
+    unit = (tmp_path / "lloyd-work" / "SM_20260927_213507" / "home" / "lloyd"
+            / "agent-services" / "supervisord.conf")
+    unit.parent.mkdir(parents=True)
+    unit.write_text("x\n")
+    cmd = f"cp /tmp/unit.conf {unit}"
+    assert safety.check_bash_command(cmd, str(deny_home / "lloyd")) is None, cmd
+
+
+#: The four seeding tests, which take no fixture: running this file directly
+#: covers these, while the #1620 section above needs `deny_home` and runs under
+#: pytest only (`-k write_check`).
 TESTS = [
     test_seeding_a_broad_pattern_makes_the_benign_arm_strictly_worse,
     test_removing_a_pattern_makes_the_true_positive_arm_strictly_worse,
