@@ -334,6 +334,40 @@ def _diff_lines(diff: str) -> dict[str, tuple[list[str], list[str]]]:
     return out
 
 
+#: Entries `functools.lru_cache` keeps for `_parsed_diff`. The live window's
+#: diff text measured 33.1 MB across 660 commits — ~50 KB a commit, and a
+#: parsed one costs about the same — so 512 entries is tens of MB, and it is a
+#: little more than the 431 unique commits one `compute` pass actually reads.
+PARSED_DIFF_CACHE = 512
+
+
+@functools.lru_cache(maxsize=PARSED_DIFF_CACHE)
+def _parsed_diff(repo: str, sha: str) -> dict[str, tuple[tuple[str, ...], tuple[str, ...]]]:
+    """`_diff_lines` of one commit, split ONCE per `(repo, sha)`.
+
+    `_commit_diff_cached` memoises a commit's diff *text*, so the forks stopped
+    multiplying — but every landing pair still re-ran `_diff_lines` over that
+    text, and a commit several landings share was re-split once per landing.
+    Measured on the live tree, 2026-09-27: **1,414 parses of 211 MB of diff
+    against 431 unique commits**, with row 5 costing 3.5 s of the 6.5 s a
+    `compute` pass takes — which is why one cold `/api/dashboard` cycle measured
+    7.50 s against an 8.0 s budget and went red (item #1673). Re-measured with
+    this cache in place, the same cycle took 6.11, 6.00 and 6.50 s on that board
+    — the spread is machine load, and the 8.0 s bound is ~20 % clear instead of
+    3 % clear.
+
+    The values are tuples, not the lists `_diff_lines` builds: this result is
+    shared by every reader of this commit, so a caller that mutated it would
+    corrupt another landing's verdict. Row 5 only reads it.
+
+    Bounded because a parsed diff costs about what its text does, and the cap is
+    set just above the unique-commit count of one window: a window is served
+    whole, and the first things evicted are commits an older window read.
+    """
+    return {path: (tuple(plus), tuple(minus))
+            for path, (plus, minus) in _diff_lines(_commit_diff(Path(repo), sha)).items()}
+
+
 def _tests_diff(diff: str) -> str:
     """The `tests/` sections of a diff, as row 6 has always read it."""
     keep, out = False, []
@@ -362,8 +396,9 @@ def _undone_by_hand(repo: Path, landing: dict, later: list[dict]) -> bool:
     sha = str(landing.get("commit") or "")
     if not sha:
         return False
+    key = str(repo)
     added = {path: {ln.strip() for ln in plus if _MEANINGFUL.search(ln)}
-             for path, (plus, _minus) in _diff_lines(_commit_diff(repo, sha)).items()}
+             for path, (plus, _minus) in _parsed_diff(key, sha).items()}
     added = {path: lines for path, lines in added.items() if lines}
     if not added:
         return False
@@ -371,7 +406,7 @@ def _undone_by_hand(repo: Path, landing: dict, later: list[dict]) -> bool:
         shared = added.keys() & set(c["files"])
         if not shared:
             continue
-        theirs = _diff_lines(_commit_diff(repo, c["sha"]))
+        theirs = _parsed_diff(key, c["sha"])
         for path in shared:
             removed = {ln.strip() for ln in (theirs.get(path) or ((), ()))[1]}
             hits = added[path] & removed

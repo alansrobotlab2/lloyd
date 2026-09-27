@@ -847,6 +847,37 @@ def test_commit_diff_is_memoised_per_sha(tmp_path, repo, monkeypatch):
     assert len(calls) == 1
 
 
+def test_a_shared_commit_is_split_once_not_once_per_landing(tmp_path, repo, monkeypatch):
+    """Row 5 parses a commit's diff once per commit, not once per landing pair.
+
+    On the live tree 2026-09-27 one `compute` pass ran `_diff_lines` 1,414 times
+    over 211 MB of diff to answer questions about 431 unique commits:
+    `_commit_diff_cached` memoised a commit's TEXT, so every landing pair
+    re-split the same bytes. That was 3.5 s of the 6.5 s a pass costs, and the
+    reason a cold `/api/dashboard` cycle measured 7.50 s against an 8.0 s budget
+    (item #1673). Two landings sharing one later commit is the smallest shape
+    that has it.
+    """
+    l1 = _commit(repo, "lloyd", {"app/a.py": "KEEP\nGONE\n"}, 3)
+    l2 = _commit(repo, "lloyd", {"app/b.py": "BEEp\n"}, 3)
+    # touches both files, so BOTH landings reach the comparison against it
+    shared = _commit(repo, "alan", {"app/a.py": "KEEP\n", "app/b.py": "BEEp\nBEEp2\n"}, 2)
+
+    parses = []
+    real = SC._diff_lines
+    monkeypatch.setattr(SC, "_diff_lines", lambda d: (parses.append(d), real(d))[1])
+    SC._parsed_diff.cache_clear()
+    assert SC._undone_by_hand(repo, {"commit": l1}, SC._git_log(repo, 0)) is True
+    assert SC._undone_by_hand(repo, {"commit": l2}, SC._git_log(repo, 0)) is False
+    assert SC._parsed_diff(str(repo), shared)["app/a.py"][1] == ("GONE",)
+    # 3 distinct commits read, 3 parses. Asked commit by commit the same walk
+    # is 6 parses (measured by reverting the two call sites and re-running:
+    # `assert 6 == 3`), because the second landing re-splits `shared` and each
+    # landing re-splits its own diff for its `added` set as well.
+    assert len(parses) == 3, f"{len(parses)} parses for 3 commits"
+    SC._parsed_diff.cache_clear()
+
+
 def test_row_3_counts_refusals_on_a_seam_alone(tmp_path, repo):
     met = [{"clause": 1, "verdict": "met"}, {"clause": 2, "verdict": "met"}]
     ledger = _ledger(tmp_path, [
