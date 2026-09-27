@@ -2,7 +2,7 @@
 """
 Skill-lint — advisory quality sweep over ~/obsidian/skills/*/SKILL.md.
 
-Writes `~/obsidian/autonomy/skill-lint-report.md` with eight categories:
+Writes `~/obsidian/autonomy/skill-lint-report.md` with nine categories:
   1. DEAD              — unparseable frontmatter or desc+tags both empty (never fires)
   2. MISSING_DESC      — has tags but no description (fires via tag/name only)
   3. DRIFT             — description present but output-framed not trigger-framed
@@ -12,6 +12,10 @@ Writes `~/obsidian/autonomy/skill-lint-report.md` with eight categories:
   7. MISSING_SCRIPT    — cites a repo script that is not in the tree
   8. INJECTION_PATTERN — body instructs acting on remotely hosted instructions or
                         config, or pipes remote content into a shell (#677)
+  9. DEAD_SYSTEMD_UNIT — a systemctl command names a .service/.timer that is in
+                        neither agent-services/systemd/ nor ~/.config/systemd/user
+                        (#1580). Commands only: a skill that names a retired unit in
+                        prose is describing a retirement, not prescribing a step.
 
 It also counts authorship (#774): how many live skills carry a `written_by:`
 front-matter key naming an unattended job, how many say `interactive`, and how
@@ -29,7 +33,8 @@ pipeline doesn't fail on lint findings).
 has a hard gate in the suite, because a report nobody reads is not a check.
 PHANTOM_TOOL → `tests/test_skill_tool_names.py`, MISSING_SCRIPT →
 `tests/test_skill_script_existence.py`, INJECTION_PATTERN →
-`tests/test_skill_lint_gates.py`.
+`tests/test_skill_lint_gates.py`, DEAD_SYSTEMD_UNIT →
+`tests/test_skill_dead_units.py`.
 
 Origin: Task #334. Methodology documented in that task's description.
 """
@@ -571,6 +576,170 @@ def unlisted_injection_findings(result: dict) -> list[dict]:
             if not str(hit.get("allow_reason", "")).strip()]
 
 
+# ── systemctl against a unit that is not on this box (#1580) ─────────────────
+#
+# The generator of this class is a service migrating to another supervisor while
+# its documentation stays behind. The groundskeeper survey moved to the queue
+# writer and then to nothing: #1012 deleted `lloyd-groundskeeper-survey.service`
+# and `.timer` on 2026-09-23, and the skill kept telling the agent the scan "runs
+# nightly at 02:30 under the systemd user timer" and gave it a `systemctl status`
+# block for the two dead units to run. Its prescribed diagnostic could only ever
+# answer `could not be found`, which is a missing file reported as a stale-queue
+# incident waiting to happen. The same shape is live in two other skills today:
+# `voice-mode` starts and stops `lloyd-voice-mode.service`, `lloyd-tts.service`,
+# `lloyd-vllm.service` and `lloyd-voice-mcp.service`, and `local-llm-gotchas`
+# stops and starts `lloyd-vllm.service` — those are supervisord programs
+# — and those names are supervisord programs, declared one per file under
+# `agent-services/supervisor/conf.d/` (`[program:agent-tts]`,
+# `[program:agent-llm-primary]`, `[program:agent-livekit-server]`), which
+# `stale-process-cleanup/SKILL.md:68` already says to restart with
+# `supervisorctl` instead of systemctl. So each of those two live skills tells the
+# agent to turn a service over through a supervisor that has no such unit.
+#
+# Why a new category and not a wider `MISSING_SCRIPT`: `_SCRIPT_PATH_RE` above
+# requires a `~/lloyd/` anchor AND a `.py|.sh|.js|.ts|.mjs` extension, so a bare
+# `lloyd-voice-mode.timer` matches neither half of it and cannot be caught by
+# loosening one. The unit corpus is also a different tree — the repo's install list
+# plus the user's systemd directory, which `scripts/automod/round.py` already reads
+# when it restarts a service, so a check and a restart cannot disagree about what
+# is installed.
+#
+# The precision rule, and the reason this can be ON: the claim is a step that runs
+# `systemctl` against a unit, so the verb has to be in the same command context as
+# the name. `command_contexts` reads fenced blocks AND inline backtick spans — wider
+# than code blocks alone, and deliberately so, because the finding that is not
+# `voice-mode` (`qmd-collection-management:92`, a dead gateway restart) lives inside
+# one span. The cost of that width shows up in the skill this category was filed
+# against: the rewritten `groundskeeper-survey` names both units it lost inside
+# backticks (`skills/groundskeeper-survey/SKILL.md:23,67`), so matching the bare name
+# in any command context would flag the retirement note itself.
+# `tests/test_skill_dead_units.py` pins both directions —
+# `test_a_command_naming_an_uninstalled_unit_is_reported` and
+# `test_a_prose_retirement_mention_of_the_same_unit_stays_clean` go red on the two
+# opposite mutations — and reaching for an allowlist instead is how `PHANTOM_EXEMPT`
+# became a permit nobody could point at.
+
+DEAD_UNIT_CATEGORY = "DEAD_SYSTEMD_UNIT"
+
+#: The unit types this checks. Only the two an instruction turns over — a skill
+#: that tells the agent to start or stop something names a `.service` or a
+#: `.timer`; sockets, targets, mounts and paths are installable surfaces, not
+#: commands a step runs, and widening to them buys matches on `systemctl list-*`
+#: prose rather than findings.
+_UNIT_TYPES = ("service", "timer")
+
+#: A unit name as systemd spells it, including an instantiated template
+#: (`lloyd-x@2.service`). Matched only inside a command context, never in prose.
+_UNIT_RE = re.compile(r"\b([\w@.\-]+\.(?:" + "|".join(_UNIT_TYPES) + r"))\b")
+
+#: Opens or closes a fenced block. `~~~` is included because CommonMark allows it;
+#: a fence that is not tracked turns every following line into a "command".
+_FENCE_MARK = re.compile(r"^\s*(?:```|~~~)")
+
+#: An inline command. One span per pair of backticks, no newline allowed inside.
+_INLINE_CODE_SPAN = re.compile(r"`([^`\n]+)`")
+
+#: Unit types the corpus enumerates. Wider than `_UNIT_TYPES` on purpose: a skill
+#: citing `foo.socket` should resolve against what is installed rather than be
+#: matched-and-never-found, and an unmatched name is a finding this check does not
+#: claim to make.
+_UNIT_GLOB_PATTERNS = ("*.service", "*.timer", "*.socket", "*.target",
+                       "*.path", "*.mount", "*.slice")
+
+
+def command_contexts(content: str) -> list[tuple[int, str]]:
+    """Every (line_no, text) in this skill that reads as a command to run.
+
+    Two surfaces: a line inside a fenced block, and an inline backtick span.
+    Deliberately NOT every line — the distinction is the whole precision story of
+    `DEAD_SYSTEMD_UNIT`, since a retirement note has to be able to name a deleted
+    unit without prescribing a command for it.
+    """
+    out: list[tuple[int, str]] = []
+    in_fence = False
+    for line_no, line in enumerate(content.splitlines(), 1):
+        if _FENCE_MARK.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            out.append((line_no, line))
+        else:
+            out.extend((line_no, span) for span in _INLINE_CODE_SPAN.findall(line))
+    return out
+
+
+def default_unit_roots() -> list[Path]:
+    """Where a unit can exist on this box: the repo's tracked install list, and
+    the user's systemd directory.
+
+    The same pair `scripts/automod/round.py:742` reads when it restarts a service
+    (and `tests/test_automod_hardening.py:752` asserts on), so this check and the
+    restart path agree about what is installed. A unit in neither is one no
+    `systemctl` on this machine can start.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    return [repo_root / "agent-services" / "systemd",
+            Path.home() / ".config" / "systemd" / "user"]
+
+
+def installed_units(unit_roots: Sequence[Path] | None = None) -> set[str]:
+    """Unit file NAMES present under `unit_roots`, recursing into subdirectories.
+
+    Recursion is not decorative: `agent-services/systemd/system/` holds the units
+    installed to the system path (`lloyd-data-snapshot-prune.service`), so a flat
+    listing of the repo directory would call a tracked unit dead.
+    """
+    roots = list(unit_roots) if unit_roots is not None else default_unit_roots()
+    names: set[str] = set()
+    for root in roots:
+        for pattern in _UNIT_GLOB_PATTERNS:
+            try:
+                names.update(p.name for p in root.rglob(pattern))
+            except OSError:
+                continue
+    return names
+
+
+def _template_name(unit: str) -> str:
+    """`lloyd-x@2.service` -> `lloyd-x@.service`, the file that provides it.
+
+    An instantiated unit is never a file on disk, so comparing the literal name
+    would report every templated unit as missing.
+    """
+    name, _, ext = unit.rpartition(".")
+    at, sep, _ = name.partition("@")
+    return f"{at}@.{ext}" if sep else unit
+
+
+def check_dead_units(content: str,
+                     unit_roots: Sequence[Path] | None = None) -> list[dict]:
+    """systemctl commands naming a unit that exists in neither unit root.
+
+    One dict per (line, unit), so the report shows which step of which skill has
+    to be rewritten and what the dead name is. Three shapes and only one is a
+    finding: a command context holding `systemctl` AND a unit name is the claim;
+    `systemctl` with no unit token is not (`skills/desktop-process-crash/SKILL.md:32`
+    says "`systemctl --user` or `journalctl` shows crash evidence", which is true
+    whatever is installed); and a unit name with no `systemctl` in its context is
+    not either — that is how the retired `groundskeeper-survey` writes the units it
+    lost, inside backticks (`:23,67`).
+    """
+    have = installed_units(unit_roots)
+    out: list[dict] = []
+    seen: set[tuple[int, str]] = set()
+    for line_no, ctx in command_contexts(content):
+        if "systemctl" not in ctx:
+            continue
+        for unit in _UNIT_RE.findall(ctx):
+            if unit in have or _template_name(unit) in have:
+                continue
+            if (line_no, unit) in seen:
+                continue
+            seen.add((line_no, unit))
+            out.append({"unit": unit, "line_no": line_no, "line": ctx.strip()})
+    return sorted(out, key=lambda d: (d["line_no"], d["unit"]))
+
+
 # ── size (#624) ─────────────────────────────────────────────────────────────
 #
 # "Your skill is really a folder": the SKILL.md body is an index and the detail
@@ -747,8 +916,8 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
 
     Narrowing the set is only admissible because every finding below is computed
     from the same walked records: DEAD, MISSING_DESC, DRIFT, DUPLICATE, STALE,
-    PHANTOM_TOOL, MISSING_SCRIPT and INJECTION_PATTERN all still fire for a live
-    skill that has them.
+    PHANTOM_TOOL, MISSING_SCRIPT, DEAD_SYSTEMD_UNIT and INJECTION_PATTERN all still
+    fire for a live skill that has them.
     What stops being reported is a defect in a skill the model can no longer reach —
     a retired skill cannot mislead anyone, and its findings would be permanently
     unactionable noise in a report a human reads.
@@ -775,6 +944,7 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
     stale: list[dict] = []
     phantom: list[dict] = []
     missing_script: list[dict] = []
+    dead_unit: list[dict] = []
     injection: list[dict] = []
     description: list[dict] = []
     index_clip = _skills_index_settings()["max_description_chars"]
@@ -884,6 +1054,16 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
                 "scripts": live_scripts,
             })
 
+        # The folder again, not just SKILL.md: a spilled skill's command block can
+        # live in a sibling, and the agent reads the sibling.
+        bad_units = check_dead_units(folder)
+        if bad_units:
+            dead_unit.append({
+                "name": entry.name,
+                "path": str(skill_file),
+                "units": bad_units,
+            })
+
         is_stale, age = check_stale(skill_file, fm)
         if is_stale:
             stale.append({
@@ -912,6 +1092,8 @@ def lint(skill_records: Optional[Sequence] = None) -> dict:
         "stale": stale,
         "phantom": phantom,
         "missing_script": missing_script,
+        # #1580. A skill whose commands name a unit that is in neither unit root.
+        "dead_unit": dead_unit,
         "injection": injection,
         # P5. `missing` renders name-only in a descriptions-on index and is a
         # finding; `clipped` is cut at `index_clip` characters, reported so the
@@ -969,6 +1151,11 @@ CATEGORY_TRUST: dict[str, tuple[str, str]] = {
     INJECTION_CATEGORY: ("yes", "every line of every skill is matched, but a match is a "
                                 "shape, not a risk — a regex misses paraphrase, so 0 "
                                 "means 'no match', never 'no risk'"),
+    DEAD_UNIT_CATEGORY: ("yes", "every command context of every skill is resolved "
+                               "against both unit roots, and only a context running "
+                               "systemctl is a claim — a skill naming a retired unit "
+                               "in prose or in backticks stays clean, which is what "
+                               "lets this be ON"),
 }
 
 TRUST_MARK = {"yes": "✅ yes", "mostly": "⚠️ mostly", "no": "❌ no"}
@@ -1043,6 +1230,7 @@ def render_report(result: dict) -> str:
     n_stale = len(result["stale"])
     n_phantom = len(result.get("phantom", []))
     n_scripts = len(result.get("missing_script", []))
+    n_dead_unit = len(result.get("dead_unit", []))
     injection = result.get("injection", [])
     n_inj = len(injection)
     desc_rows = result.get("description", [])
@@ -1081,6 +1269,8 @@ def render_report(result: dict) -> str:
          f"write a description; front-load its trigger in the first {desc_clip} chars"),
         (INJECTION_CATEGORY, "instructs acting on remote instructions/config, or pipes remote content into a shell",
          n_inj, "rewrite to name a local/pinned step, or list in INJECTION_ALLOWLIST with a reason"),
+        (DEAD_UNIT_CATEGORY, "runs systemctl against a unit in neither unit root",
+         n_dead_unit, "restart the real supervisor (supervisorctl) or install the unit"),
     ]
     lines.append("| category | count | action | is this count trustworthy? |")
     lines.append("|---|---|---|---|")
@@ -1294,8 +1484,33 @@ def render_report(result: dict) -> str:
             lines.append(f"| … | {len(ordered) - 40} more | | |")
         lines.append("")
 
+    # DEAD_SYSTEMD_UNIT — #1580. A command block that names a unit neither unit
+    # root has is a step that cannot work on this box: the agent runs it, reads
+    # `could not be found`, and has been taught by the skill's own prose to call
+    # that a stale-queue/incident symptom. The section prints the line, because the
+    # fix is a rewrite of that step and not of a count.
+    if n_dead_unit:
+        lines.append(f"## {DEAD_UNIT_CATEGORY} — {n_dead_unit} skill(s) running "
+                     "systemctl against a unit that is not installed")
+        lines.append("")
+        lines.append("Neither `agent-services/systemd/` (the units the repo installs) nor")
+        lines.append("~/.config/systemd/user/ has these names, so no `systemctl` on this")
+        lines.append("box can start or stop them. Some name programs that moved to")
+        lines.append("supervisord, where `supervisorctl` is the route; others name a")
+        lines.append("unit this machine never had. Read each row before acting: rewrite")
+        lines.append("the step, or land the unit file.")
+        lines.append("")
+        lines.append("| skill | unit | line | command |")
+        lines.append("|---|---|---|---|")
+        for item in result["dead_unit"]:
+            for hit in item["units"]:
+                cmd = hit["line"].replace("|", "\\|")
+                lines.append(f"| `{item['name']}` | `{hit['unit']}` | {hit['line_no']} "
+                             f"| `{cmd}` |")
+        lines.append("")
+
     if not (n_dead or n_missing or n_drift or n_dup or n_stale or n_phantom
-            or n_scripts or n_inj or desc_missing):
+            or n_scripts or n_inj or n_dead_unit or desc_missing):
         blind = untrustworthy_categories()
         if blind:
             # Every count is 0 and some of them could not have been anything
@@ -1357,6 +1572,7 @@ def main() -> int:
           f"stale={len(result.get('stale', []))}, "
           f"phantom={len(result.get('phantom', []))}, "
           f"missing_script={n_scripts}, "
+          f"dead_unit={len(result.get('dead_unit', []))}, "
           f"injection={len(result.get('injection', []))}, "
           f"description={len(result.get('description', []))}, "
           f"machine_written={(result.get('authorship') or {}).get('machine_written', 0)}, "
