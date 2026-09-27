@@ -31,6 +31,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from agent_mcp._shared import parse_frontmatter_text
+from app.backlog_boards import BOARDS, DEFAULT_BOARD, UnknownBoard, check_board
 from app.backlog_move import now_stamp, record_status_move, utc_instant
 from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import NEEDS_HUMAN_TAG, normalize_tags
@@ -248,7 +249,11 @@ def _board_index() -> tuple:
     board appearing or vanishing renumbers every id after it. `board` (the name)
     is the identity; see `backlog_task_update`.
     """
-    counts: dict[str, int] = {}
+    # The configured boards are always listed, at 0 when empty, so a board
+    # does not vanish from the picker (and renumber every id after it) when
+    # its last item moves off. A stray name a hand edit left on disk is
+    # listed too, so its items stay reachable.
+    counts: dict[str, int] = {b: 0 for b in BOARDS}
     for _, fm, _ in _backlog_scan():
         board = fm.get("board") or "default"
         counts[board] = counts.get(board, 0) + 1
@@ -651,7 +656,10 @@ async def backlog_task_update(request: Request):
         board = data["board"]
         if not isinstance(board, str) or not board.strip():
             raise HTTPException(status_code=400, detail="board must be a non-empty name")
-        fm["board"] = board.strip()
+        try:
+            fm["board"] = check_board(board)
+        except UnknownBoard as e:
+            raise HTTPException(status_code=400, detail=str(e))
     elif "board_id" in data:
         try:
             board_id = int(data["board_id"])
@@ -663,7 +671,10 @@ async def backlog_task_update(request: Request):
                 detail=f"Unknown board_id {data['board_id']!r}. Known boards: "
                        + ", ".join(f"{i}={n}" for i, n in sorted(id_to_name.items())),
             )
-        fm["board"] = id_to_name[board_id]
+        try:
+            fm["board"] = check_board(id_to_name[board_id])
+        except UnknownBoard as e:
+            raise HTTPException(status_code=400, detail=str(e))
     if "assigned_to_agent" in data:
         fm["assigned"] = data["assigned_to_agent"]
     if not status_recorded:
@@ -706,13 +717,17 @@ async def backlog_task_create(request: Request):
     board_map = _backlog_board_map()
     id_to_name = {v: k for k, v in board_map.items()}
     # Same preference as task-update: the name is the identity, the id is the
-    # compatibility path. Create keeps the id's silent "default" fallback,
-    # since a create with no resolvable board still has to land somewhere.
+    # compatibility path. A create naming no board lands on DEFAULT_BOARD —
+    # the guardian's alerts post none — and one naming a board off the list
+    # is refused (app/backlog_boards.py). This fallback was "default", a board
+    # nobody had set up, where ten guardian alerts sat until 2026-09-27.
     board_name = data.get("board")
     if not isinstance(board_name, str) or not board_name.strip():
-        board_name = id_to_name.get(data.get("board_id"), "default")
-    else:
-        board_name = board_name.strip()
+        board_name = id_to_name.get(data.get("board_id"), DEFAULT_BOARD)
+    try:
+        board_name = check_board(board_name)
+    except UnknownBoard as e:
+        raise HTTPException(status_code=400, detail=str(e))
     # One stamp for both dates, on the store's clock (#1517). This was
     # `datetime.now()`, so an item created here had a naive-local birth date while
     # its first status move — recorded by the shared helper, which writes UTC — was

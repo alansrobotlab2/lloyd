@@ -339,7 +339,7 @@ def test_the_window_and_a_board_filter_compose(client, backlog_dir):
     """`done_since` is one more filter, not a new code path through the others."""
     write_item(backlog_dir, 1, status="done", board="lloyd", completed=NEW)
     write_item(backlog_dir, 2, status="done", board="lloyd", completed=OLD)
-    write_item(backlog_dir, 3, status="done", board="other", completed=NEW)
+    write_item(backlog_dir, 3, status="done", board="alfie", completed=NEW)
     write_item(backlog_dir, 4, status="up_next", board="lloyd", completed=OLD)
 
     board_map = BR._board_index()[0]
@@ -474,12 +474,12 @@ def test_a_non_status_save_writes_no_activity_line_and_no_completed(
     post(client, id=1, priority="high")
     post(client, id=1, blocked=True)
     post(client, id=1, name="Renamed")
-    post(client, id=1, board="other")
+    post(client, id=1, board="alfie")
 
     fm = read_fm(f)
     assert "activity_log" not in fm, f"a field edit narrated a move: {fm.get('activity_log')!r}"
     assert "completed" not in fm
-    assert fm["priority"] == "high" and fm["blocked"] is True and fm["board"] == "other"
+    assert fm["priority"] == "high" and fm["blocked"] is True and fm["board"] == "alfie"
 
 
 def test_a_modal_save_that_re_posts_an_unchanged_status_records_no_move(

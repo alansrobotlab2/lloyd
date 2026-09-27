@@ -214,7 +214,8 @@ def test_a_yaml_broken_file_is_listed_not_dropped(boards):
 def test_a_yaml_broken_file_is_counted_on_its_board(boards):
     (boards / "7-broken.md").write_text(BROKEN_FM, encoding="utf-8")
     boards_out = json.loads(bytes(BR.backlog_boards().body))
-    assert [(b["name"], b["tasks_count"]) for b in boards_out] == [("lloyd", 1)]
+    counts = {b["name"]: b["tasks_count"] for b in boards_out}
+    assert counts["lloyd"] == 1 and sum(counts.values()) == 1
 
 
 @pytest.mark.asyncio

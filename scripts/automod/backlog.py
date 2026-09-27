@@ -51,6 +51,7 @@ try:  # ~15x faster than the pure-Python loader; all input is our own files
 except ImportError:  # pragma: no cover
     from yaml import SafeLoader as _YamlLoader  # type: ignore
 
+from app.backlog_boards import DEFAULT_BOARD, check_board
 from app.backlog_move import now_stamp, utc_instant
 from app.backlog_status import (
     CLOSED_ALIASES,
@@ -221,7 +222,7 @@ def spawn_expiry_days() -> int:
 # free — filtering here rather than spending an LLM turn per item to rediscover
 # it. Verified against #38 "Alfie — Fix mecanum wheels behavior": triage burned
 # a full turn to correctly conclude `not_code`, which the board already knew.
-DEFAULT_BOARDS = ("lloyd",)
+DEFAULT_BOARDS = (DEFAULT_BOARD,)
 
 VERDICTS = ("confirmed", "already_done", "stale", "unverifiable", "not_code")
 
@@ -5757,7 +5758,7 @@ def unfold_oversized_umbrellas(ledger: Path, boards: tuple[str, ...] | None = DE
 # ---------------------------------------------------------------------------
 
 RED_TREE_TAG = "red-tree"
-RED_TREE_BOARD = "lloyd"
+RED_TREE_BOARD = DEFAULT_BOARD
 # A red-tree item closed this recently whose node set covers a new report is
 # not refiled: a round cut from a base older than the heal still sees the
 # failure, and refiling it would reopen work that is already done.
@@ -5785,6 +5786,7 @@ def new_item(name: str, body: str = "", *, priority: str = DEFAULT_PRIORITY,
     root.mkdir(parents=True, exist_ok=True)
     if status not in PIPELINE_STATUSES:
         raise ValueError(f"unknown status {status!r}")
+    board = check_board(board)  # app/backlog_boards.py: raises on a board off the list
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:50] or "item"
     for _ in range(20):
         top = 0

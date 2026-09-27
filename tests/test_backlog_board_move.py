@@ -84,11 +84,11 @@ def test_listing_carries_the_board_name_beside_the_id(board_dir):
     (item #1199 cause 2), which is pinned in tests/test_backlog_route_offload.py.
     """
     _write(board_dir, 1, board="lloyd")
-    _write(board_dir, 2, board="alan")
+    _write(board_dir, 2, board="alfie")
     tasks = {t["id"]: t for t in json.loads(bytes(BR.backlog_tasks().body))}
     assert tasks[1]["board"] == "lloyd"
-    assert tasks[2]["board"] == "alan"
-    # sorted(["alan", "lloyd"]) -> alan=1, lloyd=2
+    assert tasks[2]["board"] == "alfie"
+    # sorted(["alfie", "lloyd"]) -> alan=1, lloyd=2
     assert tasks[1]["board_id"] == 2
     assert tasks[2]["board_id"] == 1
 
@@ -98,41 +98,39 @@ def test_listing_carries_the_board_name_beside_the_id(board_dir):
 @pytest.mark.asyncio
 async def test_a_named_board_moves_the_item(board_dir):
     f = _write(board_dir, 1, board="lloyd")
-    _write(board_dir, 2, board="alan")
-    resp = await BR.backlog_task_update(_Req({"id": 1, "board": "alan"}))
+    _write(board_dir, 2, board="alfie")
+    resp = await BR.backlog_task_update(_Req({"id": 1, "board": "alfie"}))
     assert resp.status_code == 200, resp.body
-    assert _fm(f)["board"] == "alan"
+    assert _fm(f)["board"] == "alfie"
 
 
 @pytest.mark.asyncio
 async def test_the_name_survives_a_renumbering_the_id_would_not(board_dir):
     """The drift this is all for, played out.
 
-    A tab reads the board list while `alan`, `lloyd` and `zoo` exist, so
-    lloyd is id 2. `zoo`'s only item is then moved away and `zoo` stops
-    existing — but the stale tab is not the one that changed anything, and
-    `alan`, `lloyd` still puts lloyd at 2, so an id-based move is only wrong
-    when the vanished board sorted *before* the target. Use `aaa` for that.
+    The listed boards (app/backlog_boards.py) are always in the list, so only
+    a stray board a hand edit left on disk can vanish — and when one sorting
+    before the target does, every id after it shifts. `aaa` is that stray.
     """
-    _write(board_dir, 1, board="aaa")     # id 1
-    _write(board_dir, 2, board="lloyd")   # id 3 (aaa, alan, lloyd)
-    _write(board_dir, 3, board="alan")    # id 2
-    item = _write(board_dir, 4, board="alan")
+    _write(board_dir, 1, board="aaa")     # aaa=1, alfie=2, lloyd=3, personal=4
+    _write(board_dir, 2, board="lloyd")
+    item = _write(board_dir, 4, board="alfie")
 
-    # The tab read the list here: aaa=1, alan=2, lloyd=3. Now `aaa` empties.
-    await BR.backlog_task_update(_Req({"id": 1, "board": "alan"}))
-    assert _fm(board_dir / "1-a-task.md")["board"] == "alan"
+    # The tab read the list here: personal=4. Now `aaa` empties.
+    await BR.backlog_task_update(_Req({"id": 1, "board": "alfie"}))
+    assert _fm(board_dir / "1-a-task.md")["board"] == "alfie"
 
-    # Boards are now alan=1, lloyd=2. The stale tab's "lloyd" is id 3, which
-    # no longer resolves — a 400, not a silent no-op and not a wrong board.
+    # Boards are now alfie=1, lloyd=2, personal=3. The stale tab's "personal"
+    # is id 4, which no longer resolves — a 400, not a silent no-op and not a
+    # wrong board.
     with pytest.raises(HTTPException) as exc:
-        await BR.backlog_task_update(_Req({"id": 4, "board_id": 3}))
+        await BR.backlog_task_update(_Req({"id": 4, "board_id": 4}))
     assert exc.value.status_code == 400
-    assert _fm(item)["board"] == "alan", "the item must not have moved"
+    assert _fm(item)["board"] == "alfie", "the item must not have moved"
 
     # The name is immune to the renumbering.
-    await BR.backlog_task_update(_Req({"id": 4, "board": "lloyd"}))
-    assert _fm(item)["board"] == "lloyd"
+    await BR.backlog_task_update(_Req({"id": 4, "board": "personal"}))
+    assert _fm(item)["board"] == "personal"
 
 
 @pytest.mark.asyncio
@@ -149,9 +147,9 @@ async def test_an_unresolvable_board_id_is_refused_not_ignored(board_dir):
 async def test_a_resolvable_board_id_still_works(board_dir):
     """The compatibility path: nothing that sent an id before is broken."""
     f = _write(board_dir, 1, board="lloyd")
-    _write(board_dir, 2, board="alan")
+    _write(board_dir, 2, board="alfie")
     await BR.backlog_task_update(_Req({"id": 1, "board_id": 1}))  # alan
-    assert _fm(f)["board"] == "alan"
+    assert _fm(f)["board"] == "alfie"
 
 
 @pytest.mark.asyncio
@@ -167,23 +165,23 @@ async def test_an_empty_board_name_is_refused(board_dir):
 
 @pytest.mark.asyncio
 async def test_the_name_wins_when_both_are_sent(board_dir):
-    _write(board_dir, 1, board="alan")
+    _write(board_dir, 1, board="alfie")
     f = _write(board_dir, 2, board="lloyd")
-    await BR.backlog_task_update(_Req({"id": 2, "board": "alan", "board_id": 2}))
-    assert _fm(f)["board"] == "alan"
+    await BR.backlog_task_update(_Req({"id": 2, "board": "alfie", "board_id": 2}))
+    assert _fm(f)["board"] == "alfie"
 
 
 @pytest.mark.asyncio
 async def test_a_move_leaves_the_rest_of_the_frontmatter_alone(board_dir):
     """The modal sends the whole form, so a move rides with everything else."""
     f = _write(board_dir, 1, board="lloyd")
-    _write(board_dir, 2, board="alan")
+    _write(board_dir, 2, board="alfie")
     await BR.backlog_task_update(_Req({
-        "id": 1, "board": "alan", "name": "Renamed", "status": "up_next",
+        "id": 1, "board": "alfie", "name": "Renamed", "status": "up_next",
         "priority": "high", "blocked": True,
     }))
     fm = _fm(f)
-    assert fm["board"] == "alan"
+    assert fm["board"] == "alfie"
     assert fm["status"] == "up_next"
     assert fm["priority"] == "high"
     assert fm["blocked"] is True
@@ -196,26 +194,27 @@ async def test_a_move_leaves_the_rest_of_the_frontmatter_alone(board_dir):
 @pytest.mark.asyncio
 async def test_create_takes_a_board_name(board_dir):
     _write(board_dir, 1, board="lloyd")
-    resp = await BR.backlog_task_create(_Req({"name": "New one", "board": "alan"}))
+    resp = await BR.backlog_task_create(_Req({"name": "New one", "board": "alfie"}))
     assert resp.status_code == 200, resp.body
     created = [f for f in board_dir.glob("*.md") if not f.name.startswith("1-")][0]
-    assert _fm(created)["board"] == "alan"
+    assert _fm(created)["board"] == "alfie"
 
 
 @pytest.mark.asyncio
 async def test_create_still_falls_back_when_no_board_is_named(board_dir):
-    """Unlike an update, a create with no resolvable board has to land somewhere."""
+    """Unlike an update, a create with no resolvable board has to land somewhere:
+    the default board (app/backlog_boards.py), not the `default` stray it was."""
     resp = await BR.backlog_task_create(_Req({"name": "New one"}))
     assert resp.status_code == 200, resp.body
     created = sorted(board_dir.glob("*.md"))[0]
-    assert _fm(created)["board"] == "default"
+    assert _fm(created)["board"] == "lloyd"
 
 
 @pytest.mark.asyncio
 async def test_create_ignores_a_blank_board_name(board_dir):
     _write(board_dir, 1, board="lloyd")
     resp = await BR.backlog_task_create(
-        _Req({"name": "New one", "board": "   ", "board_id": 1}))
+        _Req({"name": "New one", "board": "   ", "board_id": 2}))  # lloyd
     assert resp.status_code == 200, resp.body
     created = [f for f in board_dir.glob("*.md") if not f.name.startswith("1-")][0]
     assert _fm(created)["board"] == "lloyd", "falls through to the id"
@@ -269,7 +268,7 @@ async def test_closing_an_item_from_the_board_appends_a_status_move(board_dir):
     moves the machine made.
     """
     f = _write(board_dir, 1, board="lloyd")
-    _write(board_dir, 2, board="alan")
+    _write(board_dir, 2, board="alfie")
     resp = await BR.backlog_task_update(_Req({"id": 1, "status": "done"}))
 
     assert resp.status_code == 200, resp.body

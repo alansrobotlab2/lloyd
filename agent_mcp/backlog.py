@@ -17,6 +17,7 @@ from mcp.types import Tool
 
 from agent_mcp._shared import parse_frontmatter_text, text_result
 from agent_mcp import backlog_similar as SIM
+from app.backlog_boards import BOARDS, UnknownBoard, check_board
 from app.backlog_move import now_stamp
 from app.backlog_status import PIPELINE_STATUSES
 from app.backlog_tags import SPAWN_TAG_PREFIX, normalize_tags
@@ -155,7 +156,8 @@ async def list_tools():
                 "status": {"type": "string", "description": "Task status"},
                 "priority": {"type": "string", "enum": ["high", "medium", "low"],
                              "description": "Task priority. Default low; the unattended loop takes high before medium before low in every pool, so set it only when the item really should jump the queue"},
-                "board": {"type": "string", "description": "Board name (required for new tasks)"},
+                "board": {"type": "string", "enum": list(BOARDS),
+                          "description": "Board name (required for new tasks); lloyd is Lloyd's own code and operation"},
                 "tags": {"type": "array", "items": {"type": "string"}, "description": "Replaces the task's tag list wholesale"},
                 "blocked": {"type": "boolean", "description": "Mark the task as blocked on something external"},
                 "assigned": {"type": "boolean", "description": "Mark the task as claimed by an agent or person"},
@@ -288,6 +290,14 @@ def _handle_write(args: dict) -> str:
         if not args.get("board"): missing.append("board")
         if missing:
             return json.dumps({"success": False, "error": f"Missing required fields for new task: {', '.join(missing)}"})
+
+    # Nothing validates `args` against the inputSchema's enum, so the list is
+    # enforced here, for a move as well as a create (app/backlog_boards.py).
+    if args.get("board"):
+        try:
+            args = {**args, "board": check_board(args["board"])}
+        except UnknownBoard as e:
+            return json.dumps({"success": False, "error": str(e)})
 
     if task_id is not None:
         task = load_task(task_id)
