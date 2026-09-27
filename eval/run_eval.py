@@ -419,6 +419,105 @@ def _doc_satisfied_by(exps: list[str], got: str) -> bool:
     return any(_doc_pair_satisfied(exp, [got]) for exp in exps)
 
 
+#: ── #1599: can a DEPLOYED collection return this gold label? ───────────────
+#: A `doc_hit` is a substring test against what the recall returned, so a gold label
+#: naming a path no qmd collection indexes can never be satisfied: it is a permanent
+#: miss, and the artifact reported it as nothing but a low number. Five labels are in
+#: that state on the committed corpus — `lloyd-architecture/{harness,automod,
+#: retrieval,qmd,djev}.md`, filed 2026-09-24 by #1354 — because the file that would
+#: answer them (`~/lloyd/architecture/*.md`) is in no collection: the live index's
+#: `store_collections` held 14 rows on 2026-09-27, every one rooted in `~/obsidian`,
+#: `~/lloyd-data/autonomy-runs` or
+#: `~/lloyd-data/_pipeline/vault-derived/sessions`, and the one collection named
+#: `architecture` is rooted at `~/obsidian/architecture`, which holds none of those
+#: five basenames. Measured cost on `nightly-20260927`: `doc_hit_rate` 0.6279 with
+#: those five ids, 0.6667 without — 0.0388 of the document leg, every night.
+#:
+#: Which collections exist is a fact about the DEPLOYMENT, not about this repo, so it
+#: is read from the index the run scores rather than kept in a list here. The tracked
+#: template `agent-services/conf/qmd-index.yml` declares 15 collections where the
+#: live config declares 14 (#1599's reconciliation), which is exactly why a list in
+#: this file could only ever be someone's guess about a machine.
+
+def indexed_paths(collections: list[dict]) -> list[str]:
+    """Every path string a deployed collection could return, normalised, as one pool.
+
+    Shaped the way the retriever shapes it — `<collection name>/<path relative to that
+    collection's root>` — because that is the string `_doc_pair_satisfied` will be
+    asked about, and a pool built any other way would be a second definition of what
+    a returned path looks like.
+
+    Dot-prefixed components are excluded, which is qmd's own indexing rule (the
+    `parts.some(part => part.startsWith("."))` filter after the glob in
+    `qmd/src/cli/qmd.ts`): `skills/.archived/**` is not a location the index can hold,
+    so a label that only such a path would answer is not returnable either. A
+    collection whose root is not a directory contributes nothing — it is deployed in
+    config and empty on disk, which is the state #1599 is about.
+
+    One walk of the whole deployed corpus per call, over ~14 roots: ~2 seconds on the
+    live vault, against a nightly that takes minutes. Call it once and pass the pool
+    down; `gold_docs_unreturnable` does.
+    """
+    pool = []
+    for coll in collections:
+        name = str(coll.get("name") or "")
+        root = Path(str(coll.get("root") or coll.get("path") or "")).expanduser()
+        if not name or not root.is_dir():
+            continue
+        prefix = _norm(name) + "/"
+        for path in root.rglob("*"):
+            rel = path.relative_to(root)
+            if any(part.startswith(".") for part in rel.parts):
+                continue
+            pool.append(prefix + _norm(str(rel)))
+    return pool
+
+
+def _label_returnable(label: str, pool: list[str]) -> bool:
+    """Could a deployed collection hand back something the gold `label` scores?
+
+    Two conditions, both necessary, and the second is the one that was missing:
+
+      * it would be a HIT if it came back — asked of `doc_label_satisfied`, the same
+        public entry the second labeler uses, over to `_doc_pair_satisfied`, the ONE
+        rule for scoring a path. A separate matcher here would be a second definition
+        of a hit, which is what `doc_label_satisfied` exists to prevent; and
+      * such a path sits under a root some deployed collection indexes — the pool above.
+
+    Gold labels are SUBSTRINGS, not paths (`expect_docs: qmd` is legal and matches
+    `knowledge/qmd.md`), so the test cannot be `Path.exists()` on the label: an
+    existence check on the label itself was the first draft of this and it reported
+    12 of 86 queries unreturnable on the 2026-09-27 corpus where only 5 are, because
+    `qmd`, `robot` and `autonomy/48-entity-resolution` are substring labels whose gold
+    sits in perfectly searchable collections. Wrong in that direction is not safe:
+    it would hand a reader a work list of gold to delete.
+    """
+    return doc_label_satisfied(label, pool)
+
+
+def gold_docs_unreturnable(records: list[dict],
+                           collections: list[dict]) -> list[dict]:
+    """`[{query, label}]` for every gold doc label no deployed collection can return.
+
+    Gold is read off each record's `expected.docs` — what the scorer was graded
+    against, not what the YAML says today — the way `anchorless_queries` and
+    `gold_bearing_rates` read it. A record with no `expected` block (a synthetic
+    record, or an artifact from before that key) contributes nothing rather than a
+    clean bill: a missing input is not a measurement, and the direction it is wrong
+    in is the safe one, because the finding is the unsafe thing to invent.
+    """
+    pool = indexed_paths(collections)
+    out = []
+    for rec in records:
+        docs = (rec.get("expected") or {}).get("docs")
+        if docs is None:
+            continue
+        for label in docs:
+            if not _label_returnable(str(label), pool):
+                out.append({"query": str(rec.get("id", "?")), "label": str(label)})
+    return out
+
+
 def _ndcg_at_k(got_docs: list[str], expected_docs: list[str], k: int = 10) -> float:
     """Binary-relevance NDCG@k. Each got_docs[i] (i<k) scores 1 if it
     matches any expected substring, else 0. IDCG is computed against the
@@ -959,6 +1058,46 @@ def gold_bearing_line(overall: dict) -> str:
     return f"  {'gold_bearing':<20}" + "  ".join(parts)
 
 
+#: How many `query -> label` pairs the printed line names before pointing at the
+#: artifact for the rest. Three: a nightly whose corpus is badly broken would
+#: otherwise bury the rest of the summary in a hundred-character line, and the
+#: complete list is in `summary.overall.gold_doc_unreturnable` either way.
+GOLD_DOC_PRINT_PAIRS = 3
+
+
+def gold_doc_line(overall: dict) -> str:
+    """#1599's line: the gold doc labels no deployed collection can return.
+
+      gold_docs           unreturnable=5 of 14 deployed collections: harness-system-prompt-frozen -> lloyd-architecture/harness.md, ...
+
+    Directly under `gold_bearing`, because it is the other half of why the document
+    leg is the number it is: #1600 says which queries the leg was divided over, and
+    this says which of its gold could never have been found. Three states print here
+    and are never conflated — a nonzero list is a FINDING about the corpus, an empty
+    one is the check having run and passed against the count it checked, and `None` is
+    that the check could not run at all. The third prints in the interval block's own
+    `no verdict` words for the reason `_fmt_ci` gives: "the index would not open" and
+    "every label is returnable" look identical if the unknown collapses to 0.
+    """
+    unret = overall.get("gold_doc_unreturnable")
+    n_coll = overall.get("gold_doc_collections")
+    if unret is None:
+        return (f"  {'gold_docs':<20}unreturnable=null [no verdict] "
+                "(no deployed collection list readable, so nothing was checked)")
+    if not unret:
+        return (f"  {'gold_docs':<20}unreturnable=0"
+                f" (every gold doc label sits in one of {n_coll} deployed collections)")
+    named = ", ".join(f"{u['query']} -> {u['label']}" for u in unret[:GOLD_DOC_PRINT_PAIRS])
+    rest = (f", +{len(unret) - GOLD_DOC_PRINT_PAIRS} more in "
+            f"summary.overall.gold_doc_unreturnable"
+            if len(unret) > GOLD_DOC_PRINT_PAIRS else "")
+    # The count of collections travels with the count of findings: the finding is a
+    # claim about a deployment, and a reader cannot weigh 5 findings without knowing
+    # how big the deployment they were checked against is.
+    return (f"  {'gold_docs':<20}unreturnable={len(unret)} label(s) checked against "
+            f"{n_coll} deployed collection{'' if n_coll == 1 else 's'}: {named}{rest}")
+
+
 #: Which metrics have no gold-side ceiling, and why. Mirrors
 #: `UNMEASURED_METRICS` in `eval/label_agreement_ceiling.py`; restated here as the
 #: reporter's reason string so every metric gets a reason even when the artifact is
@@ -1097,7 +1236,15 @@ def _normalize_against_ceiling(fields: dict, overall: dict) -> None:
         fields[f"{metric}_normalized"] = round(score / cap, 4)
 
 
-def summarize(records: list[dict]) -> dict:
+def summarize(records: list[dict], *,
+              collections: list[dict] | None = None) -> dict:
+    """Aggregate one run's records. `summarize` stays a function of its records plus
+    the collection list it is handed: `main` resolves the deployed collections once
+    (only `main` knows which index the run scored), and every other caller — the CI
+    backtest, the automod baseline arm, the tests — either passes its own fixture or
+    leaves the list unset and gets an explicit "not checked" in the artifact rather
+    than a silent read of whatever machine it happens to be running on.
+    """
     by_cat = defaultdict(list)
     for r in records:
         by_cat[r.get("category") or "?"].append(r)
@@ -1171,6 +1318,27 @@ def summarize(records: list[dict]) -> dict:
     for _gb_metric, _gb in gold_bearing_rates(records).items():
         overall[f"{_gb_metric}_gold_bearing"] = _gb["rate"]
         overall[f"{_gb_metric}_gold_bearing_n"] = _gb["n"]
+    # Which gold the DOCUMENT leg could not be answered from at all (#1599). A label
+    # no deployed collection indexes is subtracted from `doc_hit_rate`, `doc_recall`,
+    # `mrr_doc` and `ndcg10` by every future run, and until now the artifact carried
+    # only the resulting low number: `doc_hit_rate` 0.628 with no trace of the five
+    # labels pinning 0.0388 of it. The list names each offending query id and its
+    # label, beside the number it depressed, so the document leg's absolute value
+    # reaches a reader with its cause attached. `gold_doc_collections` is the
+    # denominator the claim was checked against — 14 on the live index — because
+    # "nothing is unreturnable" computed against an empty list is not a pass.
+    # All three are None when the deployed list could not be read (an unreadable
+    # index, or a caller that passed no list), which is no verdict, never 0.
+    if collections is None:
+        overall["gold_doc_unreturnable"] = None
+        overall["gold_doc_unreturnable_query_ids"] = None
+        overall["gold_doc_collections"] = None
+    else:
+        _unret = gold_docs_unreturnable(records, collections)
+        _ids = list(dict.fromkeys(u["query"] for u in _unret))   # corpus order, deduped
+        overall["gold_doc_unreturnable"] = _unret
+        overall["gold_doc_unreturnable_query_ids"] = _ids
+        overall["gold_doc_collections"] = len(collections)
     # `label_agreement`, `ceiling` and the per-metric `<metric>_normalized` /
     # `<metric>_ceiling_kind` go beside the raw aggregates (#654). Emitted for all
     # seven metrics — including `fact_entity_recall_avg`, which has no gold-side
@@ -1359,6 +1527,9 @@ def print_table(records: list[dict], summary: dict) -> None:
     # populations, and printing only the first lets a gold edit read as a retrieval
     # move — which is how `entity_hit` 0.488 and 0.636 came to be the same leg.
     print(gold_bearing_line(o))
+    # ...and which of its gold no deployed collection indexes at all (#1599), so a
+    # `doc_hit` that a label pins at zero arrives naming the label.
+    print(gold_doc_line(o))
     # The labeler identity and, below 0.80, the disagreement set. The second half is
     # the clause that keeps this instrument from becoming an excuse: a low ceiling
     # reported without the labels that caused it is a reason to stop fixing entity
@@ -1657,7 +1828,13 @@ def main() -> int:
         djev_rerank_top=args.djev_rerank_top,
         counterfactual=args.counterfactual,
     )
-    summary = summarize(records)
+    # The collection list is resolved HERE for the same reason the ceiling is: only
+    # `main` knows which index this run scored, and `summarize` must stay a function
+    # of what it is handed (#1599). Read after scoring, from the file
+    # `doc_corpus.index_path_for` names — the one the run's own doc-corpus identity
+    # block describes — so a pinned run reads its snapshot and a run that cannot name
+    # one reports no verdict rather than the live index's collection list.
+    summary = summarize(records, collections=doc_corpus.deployed_collections())
     # The gold-side ceiling (#654), read HERE and not inside `summarize`: the
     # artifact has to be checked against the labels THIS run was scored against
     # (`labels_sha256`), and `summarize` is a pure function of its records that

@@ -1590,6 +1590,82 @@ def _doc_norm(s: str) -> str:
 CHECKOUT_LABEL_ROOTS = {"lloyd-architecture/": "architecture"}
 
 
+#: Passed as `collections` by a caller with no collection list to check against —
+#: the holdout corpus today. Distinct from `[]`, which would be an assertion that
+#: NO collection is deployed, and distinct from `None`, which means the list could
+#: not be read (#696's three-way shape again).
+NO_COLLECTION_LIST = object()
+
+
+def _deployed_collections(index_path: Path = None) -> list[dict]:
+    """`[{name, root}]` for the collections the qmd index actually serves.
+
+    Re-implemented per this file's standing convention (header at
+    `tests/test_eval_corpus_guard.py:1567-1573`): the guard reads the table the
+    deployment writes instead of importing the instrument's reader, so the guard
+    cannot be green because it agrees with the code it guards. The two
+    implementations are pinned against each other by
+    `test_the_guard_and_the_eval_agree_on_which_collections_are_deployed`.
+
+    `store_collections` is qmd's own table — the one the live proof command
+    `select name, path from store_collections` answers with — opened `mode=ro`.
+    Raises rather than returning `[]` when the file or the table is missing: an
+    empty list would assert that nothing is deployed and every label in the corpus
+    would read unsearchable, which is the same fabrication
+    `test_an_unreadable_store_raises_rather_than_reporting_every_name_absent`
+    refuses for the entity leg.
+    """
+    import sqlite3
+    path = Path(index_path) if index_path is not None \
+        else Path.home() / ".cache" / "qmd" / "index.sqlite"
+    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "select name, path from store_collections order by name").fetchall()
+    finally:
+        con.close()
+    return [{"name": str(n), "root": str(p)} for n, p in rows]
+
+
+def _served_paths(collections: list[dict]) -> list[str]:
+    """Every path a deployed collection could return, shaped as the retriever shapes
+    it (`<collection>/<root-relative path>`) and normalised.
+
+    Mirrors `indexed_paths` in `eval/run_eval.py` deliberately, for the reason at
+    :1567-1573: a guard and an instrument sharing an import cannot disagree, so "the
+    guard waved it through and the artifact named it" is only catchable when the rule
+    is held twice. The prefix is the shape: qmd returns `<name>/<path relative to that
+    collection's root>`, which is why the whole-vault `subliminal` collection serves a
+    vault-relative label like `projects/lloyd/architecture/qmd.md` — an earlier draft
+    that matched a label's first segment against a collection NAME called that label
+    unsearchable, because no collection is named `projects`.
+    """
+    pool = []
+    for coll in collections:
+        name = str(coll.get("name") or "")
+        root = Path(str(coll.get("root") or coll.get("path") or "")).expanduser()
+        if not name or not root.is_dir():
+            continue
+        pool.extend(_walk_normed(root, name + "/"))
+    return pool
+
+
+def _label_returnable(label: str, pool: list[str]) -> bool:
+    """Could a deployed collection hand back something this gold label scores?
+
+    Containment, which is this guard's own doc rule everywhere else (see `want in n`
+    below) and the substring semantics `_doc_pair_satisfied` implements in the scorer.
+    Labels are SUBSTRINGS, not paths — `expect_docs: qmd` is legal and matches
+    `knowledge/qmd.md` — so a `Path.exists()` test on the label cannot ask this
+    question: the first draft of #1599 did exactly that and called 12 of 86 queries
+    unreturnable where only 5 are, and a finding wrong in that direction hands a
+    reader a list of gold to delete, which is the corpus change the item reserves for
+    a person.
+    """
+    want = _doc_norm(label)
+    return any(want in n for n in pool)
+
+
 def _walk_normed(root: Path, prefix: str = "") -> list[str]:
     """Every path under `root` (files and dirs), `prefix` + root-relative,
     normalised, minus any dot-prefixed component — qmd's own indexing rule."""
@@ -1607,8 +1683,24 @@ def _walk_normed(root: Path, prefix: str = "") -> list[str]:
 def _doc_label_satisfiability_report(
         specs_path: Path = CORPUS,
         vault_root: Path = Path.home() / "obsidian",
-        checkout_root: Path = LLOYD_HOME) -> dict:
+        checkout_root: Path = LLOYD_HOME,
+        collections: list[dict] = NO_COLLECTION_LIST) -> dict:
     """Walk both roots once and return which `expect_docs` labels match no path.
+
+    THREE states, not two (#1599). A label can match no path anywhere (`dead`, what
+    this guard has always failed on); can match a path under a root while NO
+    deployed, searchable qmd collection indexes that root (`unsearchable` — filed
+    and green-lit for three nights because existence and searchability were the same
+    question here); or match a path a deployed collection serves (`satisfied_by`).
+    `unsearchable` entries carry the query id, the label and the root that resolved
+    it, and are excluded from `dead` so an unresolvable label and an unservable one
+    cannot be told apart by a reader who only counts.
+
+    `collections` is what makes the middle state expressible at all: which
+    collections are deployed is a fact about the machine, not this repo, so a caller
+    that has no list passes `NO_COLLECTION_LIST` and gets `unsearchable: []` plus
+    `collections_checked: None` — a check that did not run, which is not the same
+    thing as a clean corpus. The live list comes from `_deployed_collections()`.
 
     Two named roots (#1354). A label that starts with a `CHECKOUT_LABEL_ROOTS`
     prefix is resolved against that directory of the lloyd checkout and nowhere
@@ -1635,14 +1727,27 @@ def _doc_label_satisfiability_report(
     checkout_normed = [n for prefix, sub in CHECKOUT_LABEL_ROOTS.items()
                        for n in _walk_normed(checkout_root / sub, prefix)]
     checkout_prefixes = tuple(_doc_norm(p) for p in CHECKOUT_LABEL_ROOTS)
-    dead, satisfied_by = [], []
+    # The third corpus this report reads. The vault and the checkout answer "does a
+    # path like this exist"; only the deployed collections answer "could one be
+    # returned", and it costs one walk of every served root — the same price the two
+    # root walks above already pay.
+    served_pool = ([] if collections is NO_COLLECTION_LIST
+                   else _served_paths(collections))
+    dead, satisfied_by, unsearchable = [], [], []
     for qid, label in labels:
         want = _doc_norm(label)
         root, pool = (("checkout", checkout_normed)
                       if want.startswith(checkout_prefixes)
                       else ("vault", vault_normed))
         if any(want in n for n in pool):
-            satisfied_by.append({"query": qid, "label": label, "root": root})
+            # Resolved: a root holds something the scorer could match. Whether a
+            # deployed collection can RETURN such a path is the separate question
+            # #1599 asks, and only the collection list can answer it.
+            if (collections is NO_COLLECTION_LIST
+                    or _label_returnable(label, served_pool)):
+                satisfied_by.append({"query": qid, "label": label, "root": root})
+            else:
+                unsearchable.append({"query": qid, "label": label, "root": root})
         else:
             dead.append({"query": qid, "label": label})
     return {"vault": str(vault_root), "checkout": str(checkout_root),
@@ -1650,7 +1755,10 @@ def _doc_label_satisfiability_report(
             "queries": len(specs), "labels": len(labels),
             "walked_paths": len(vault_normed),
             "walked_checkout_paths": len(checkout_normed),
-            "satisfied_by": satisfied_by, "dead": dead}
+            "collections_checked": (None if collections is NO_COLLECTION_LIST
+                                    else len(collections)),
+            "satisfied_by": satisfied_by, "unsearchable": unsearchable,
+            "dead": dead}
 
 
 def test_committed_corpus_has_no_unresolvable_document_label():
@@ -2161,3 +2269,272 @@ def test_the_holdout_guard_fails_on_a_dead_expectation_and_names_no_id(tmp_path)
     msg = str(exc.value)
     assert "1 of 2" in msg, msg
     assert "reserved-probe" not in msg and "Backlog Item #363" not in msg, msg
+
+
+# ── #1599: a label can RESOLVE and still be unreturnable ────────────────────
+#
+# Until tonight this guard asked one question of a gold doc label — does some path
+# under a named root match it — and answered yes for five labels that no deployed
+# qmd collection indexes: `lloyd-architecture/{harness,automod,retrieval,qmd,djev}.md`
+# sat in `satisfied_by` with `root: checkout`, `dead` was empty, and the test at
+# `test_committed_corpus_has_no_unresolvable_document_label` was green while those
+# five scored `doc_hit: false` with `docs_matched: []` on every one of the three
+# nights they have existed (measured 2026-09-27: `doc_hit_rate` 0.6279 with the five
+# ids, 0.6667 without). Existence and searchability were the same question, so the
+# condition could not be reported. The middle state below is the second question.
+
+def test_a_label_that_resolves_but_no_deployed_collection_covers_it_is_unsearchable(tmp_path):
+    """Clause 1 of #1599: three states, not two, on a fixture corpus.
+
+    The four labels are the four shapes that exist in the committed corpus, and the
+    assertion that matters is that `dead` stays EMPTY while `unsearchable` is not:
+    an unresolvable label and an unservable one are different findings, and the
+    second is the one this guard was blind to.
+    """
+    vault, checkout = _two_root_fixture(tmp_path)
+    corpus = _write_corpus(tmp_path, [
+        {"id": "vault-note", "query": "q", "expect_docs": ["knowledge/live-note.md"]},
+        # A vault-relative label with NO `projects` collection deployed, served by
+        # the whole-vault collection. This is the false-alarm trap: `subliminal` is
+        # rooted at the vault itself, so a rule that only ever matched a label's
+        # first segment against a collection NAME would file this as unsearchable.
+        {"id": "vault-relative", "query": "q",
+         "expect_docs": ["projects/lloyd/architecture/qmd.md"]},
+        # The #1599 shape: resolves against the checkout, indexes nothing.
+        {"id": "checkout-doc", "query": "q",
+         "expect_docs": ["lloyd-architecture/harness.md"]},
+        {"id": "never-written", "query": "q",
+         "expect_docs": ["knowledge/never-written.md"]},
+    ])
+    collections = [
+        {"name": "knowledge", "root": str(vault / "knowledge")},
+        {"name": "subliminal", "root": str(vault)},
+        {"name": "architecture", "root": str(vault / "architecture")},
+    ]
+    rep = _doc_label_satisfiability_report(
+        specs_path=corpus, vault_root=vault, checkout_root=checkout,
+        collections=collections)
+    assert rep["collections_checked"] == 3, rep
+    assert rep["satisfied_by"] == [
+        {"query": "vault-note", "label": "knowledge/live-note.md", "root": "vault"},
+        {"query": "vault-relative", "label": "projects/lloyd/architecture/qmd.md",
+         "root": "vault"},
+    ], rep["satisfied_by"]
+    assert rep["unsearchable"] == [
+        {"query": "checkout-doc", "label": "lloyd-architecture/harness.md",
+         "root": "checkout"},
+    ], rep["unsearchable"]
+    assert rep["dead"] == [{"query": "never-written",
+                            "label": "knowledge/never-written.md"}], rep["dead"]
+
+    # And the finding is about the DEPLOYMENT, not the label: the moment a person
+    # registers the collection the label names — option (a) on #1599, which a round
+    # may not do — the same corpus reports no unsearchable label at all, through the
+    # same predicate. Nothing here rewrites a gold label to get that result.
+    rep2 = _doc_label_satisfiability_report(
+        specs_path=corpus, vault_root=vault, checkout_root=checkout,
+        collections=collections + [
+            {"name": "lloyd-architecture", "root": str(checkout / "architecture")}])
+    assert rep2["unsearchable"] == [], rep2
+    # Registering a collection moves a label from unsearchable to satisfied and
+    # NOTHING else: `never-written` matches no path under either root, so it stays
+    # dead under every deployment. The two findings are independent, and an
+    # assertion that let this one empty would not notice a report conflating them.
+    assert rep2["dead"] == rep["dead"], rep2["dead"]
+    assert {"query": "checkout-doc", "label": "lloyd-architecture/harness.md",
+            "root": "checkout"} in rep2["satisfied_by"], rep2["satisfied_by"]
+
+
+def test_the_committed_corpus_reports_three_states_with_no_dead_label():
+    """Clause 1's committed-corpus half: with the live collection list the corpus
+    still has NO dead label, and every label lands in exactly one of the three
+    states.
+
+    The invariant is the half that cannot rot silently: `CHECKOUT_LABEL_ROOTS` makes
+    a label resolvable against the checkout tree, and if no deployed collection is
+    named for that prefix then EVERY label under it is a permanent doc miss — so
+    they must all be reported as unsearchable, never satisfied. That conditional
+    needs no knowledge of the five ids, so a sixth checkout label filed tomorrow is
+    covered by the same line, which is the recurrence #1599 exists to stop. The
+    five are then named directly as the current corpus's instance of it.
+    """
+    colls = _deployed_collections()
+    assert colls, "no deployed collection list readable; the check has no denominator"
+    plain = _doc_label_satisfiability_report()
+    assert plain["collections_checked"] is None, (
+        "a caller that passed no list must report a check that did not run")
+    assert plain["unsearchable"] == [], (
+        "without a collection list there is nothing to check against; reporting "
+        "labels as unsearchable would be an invented finding")
+    rep = _doc_label_satisfiability_report(collections=colls)
+    assert rep["labels"] > 0, rep
+    assert rep["walked_paths"] > 100, rep
+    assert rep["collections_checked"] == len(colls)
+    assert rep["dead"] == [], (
+        f"{len(rep['dead'])} of {rep['labels']} expect_docs labels match no path: "
+        + "; ".join(f"{d['query']} -> {d['label']}" for d in rep["dead"]))
+
+    states = {name: {(d["query"], d["label"]) for d in rep[name]}
+              for name in ("satisfied_by", "unsearchable", "dead")}
+    total = set().union(*states.values())
+    assert len(total) == rep["labels"], (
+        "a label reached two states or none, so the three-way split is not a "
+        f"partition: {rep['labels']} labels, {len(total)} classified")
+    for name in ("satisfied_by", "unsearchable"):
+        for other in ("satisfied_by", "unsearchable"):
+            if other != name:
+                assert not (states[name] & states[other]), (name, other,
+                                                            states[name] & states[other])
+    for prefix in CHECKOUT_LABEL_ROOTS:
+        named = [c for c in colls
+                 if _doc_norm(c["name"]) == _doc_norm(prefix.rstrip("/"))]
+        under = {k for k in total if k[1].startswith(prefix)}
+        if not named:
+            assert under and under <= states["unsearchable"], (
+                f"{len(under)} labels resolve under the checkout prefix {prefix} "
+                f"while no collection is named {prefix!r}, so each is a permanent "
+                f"doc miss; reported: {sorted(states['unsearchable'])}")
+    unsearched = {d["query"] for d in rep["unsearchable"]}
+    assert {"harness-system-prompt-frozen", "automod-gate-rungs",
+            "recall-doc-pool-ordering", "qmd-embed-model-switch",
+            "djev-rank-not-gate"} <= unsearched, (
+        f"the five labels #1599 filed are not all reported unsearchable; got "
+        f"{sorted(unsearched)}")
+    assert unsearched <= {str(s.get("id")) for s in
+                          yaml.safe_load(CORPUS.read_text())["queries"]}, unsearched
+    # Bounded against the corpus size the way #606 insists a gold-side finding be.
+    # 5 of 144 labels is a work list; 144 of 144 is an empty or broken collection
+    # list, and the two must not be printable as the same sentence — a reader told
+    # "every gold doc in the corpus is unreturnable" would be advised to delete the
+    # gold set, which is the corpus change this item reserves for a person. A list
+    # read from the wrong index, or a `store_collections` rename, trips here.
+    assert len(states["unsearchable"]) <= rep["labels"] // 4, (
+        f"{len(states['unsearchable'])} of {rep['labels']} labels read unsearchable "
+        f"against {len(colls)} collections — past a quarter of the corpus this is a "
+        "deployment fault being reported as a corpus finding, not #1599's five")
+
+
+def test_the_guard_and_the_eval_agree_on_which_collections_are_deployed(tmp_path):
+    """The seam between the two implementations of "is this gold returnable".
+
+    The guard re-implements the deployed-collection read and the covering rule
+    rather than importing them (the discipline at the top of this file), so the pair
+    can drift: a guard that sees a collection the artifact does not green-lights a
+    label the nightly then reports unreturnable, and the two instruments disagree
+    about the corpus on the same night. This pins them to one answer on one fixture
+    index — the only place the comparison does not also depend on the live
+    deployment. The import is inside the test so this module's import-time posture
+    (the guard reads the tree, never imports it) is unchanged.
+    """
+    import sys
+    sys.path.insert(0, str(LLOYD_HOME))
+    import eval.run_eval as ev
+
+    # Roots that exist, because the pool rule walks them: a fixture pointing at
+    # `/vault` would make both sides return an empty pool and every assertion about
+    # a SERVED label would pass on nothing. This is the shape the live index has —
+    # `subliminal` rooted at the whole vault, `knowledge` rooted inside it — which is
+    # what makes a vault-relative label legal at all.
+    vault = tmp_path / "vault"
+    (vault / "knowledge").mkdir(parents=True)
+    (vault / "knowledge" / "live-note.md").write_text("x\n")
+    # A dot-prefixed directory, which qmd does not index (`parts.some(part =>
+    # part.startsWith("."))` in qmd.ts) and which both sides must therefore drop
+    # identically — the pool equality below is what pins that the two walks share the
+    # rule, since a fixture without one would leave it untested.
+    (vault / ".archived").mkdir()
+    (vault / ".archived" / "old-note.md").write_text("x\n")
+    db = tmp_path / "index.sqlite"
+    import sqlite3
+    con = sqlite3.connect(db)
+    con.execute("create table store_collections (id INTEGER PRIMARY KEY, name TEXT, "
+                "path TEXT, include TEXT, ignore TEXT)")
+    con.executemany("insert into store_collections (name, path, include) values (?,?,?)",
+                    [("knowledge", str(vault / "knowledge"), "*.md"),
+                     ("subliminal", str(vault), "**/*.md")])
+    con.commit()
+    con.close()
+
+    here = _deployed_collections(index_path=db)
+    assert here == [{"name": "knowledge", "root": str(vault / "knowledge")},
+                    {"name": "subliminal", "root": str(vault)}], here
+    # The eval reaches the index through its owner, `app.doc_corpus` — never through
+    # sqlite of its own, which is what
+    # `test_no_script_under_eval_opens_the_knowledge_store_file` exists to keep true.
+    # So the seam to pin is guard-vs-owner: if either side's read of
+    # `store_collections` changes shape, the guard can green-light a label the
+    # artifact then names, and both numbers are in the same morning note.
+    from app import doc_corpus
+    assert doc_corpus.deployed_collections(index_path=db) == here, (
+        "the guard and the module the eval reads through disagree about which "
+        "collections are deployed")
+    # The pool rule is duplicated on purpose (the guard's discipline), so the two
+    # pools must be the same set of strings and the two verdicts the same answer on
+    # the same labels — a served one and the unserved one the whole item is about.
+    assert _served_paths(here) == ev.indexed_paths(here), (
+        "the guard and the eval disagree about which paths a deployed collection can "
+        "return, so they can disagree about the corpus on the same night")
+    for label in ("knowledge/live-note.md", "live-note.md",
+                  "lloyd-architecture/harness.md"):
+        assert _label_returnable(label, _served_paths(here)) \
+            == ev._label_returnable(label, ev.indexed_paths(here)), label
+    assert _label_returnable("knowledge/live-note.md", _served_paths(here)), here
+    assert not _label_returnable("lloyd-architecture/harness.md", _served_paths(here))
+    # Stated as a fact about the pools and not only as their equality, because
+    # equality would also hold if BOTH sides dropped everything: `live-note.md` above
+    # says the pools are not empty, this says the dot-rule is the reason one file is
+    # missing from them.
+    assert not any("archived" in p for p in _served_paths(here)), _served_paths(here)
+    # And the owner answers None, not [], for an index that is not there: `[]` would
+    # assert nothing is deployed and every label in the corpus would read unreturnable.
+    assert doc_corpus.deployed_collections(index_path=tmp_path / "absent.sqlite") is None
+
+
+#: The five gold doc labels #1599 found unreturnable, pinned as EXPECTED TO EXIST in
+#: the corpus — not pinned as unsearchable. Their STATE may change tomorrow: a person
+#: registering the collection they name (option (a), which no round may do) moves all
+#: five to `satisfied_by`, and that is the fix. Only taking them out of the corpus
+#: removes them from the document leg, and that is the move this file refuses to let
+#: anyone make quietly — #606's words: "shrinking the gold set is the easy way to
+#: raise every rate, and the rates rising is the evidence that something is wrong".
+RETIRABLE_GOLD_LABELS = (
+    ("harness-system-prompt-frozen", "lloyd-architecture/harness.md"),
+    ("automod-gate-rungs", "lloyd-architecture/automod.md"),
+    ("recall-doc-pool-ordering", "lloyd-architecture/retrieval.md"),
+    ("qmd-embed-model-switch", "lloyd-architecture/qmd.md"),
+    ("djev-rank-not-gate", "lloyd-architecture/djev.md"),
+)
+
+
+def test_the_unreturnable_labels_may_be_served_but_never_deleted():
+    """#1599: the tripwire on the finding itself, so it cannot be made true by
+    deleting what it is about.
+
+    An `unsearchable` count goes to zero three ways, and only one of them is a fix:
+    register the collection, re-point the labels onto an indexed copy behind a prefix
+    no vault path contains, or delete the queries. The first two leave the label in
+    the corpus and the artifact; the third raises `doc_hit_rate` with retrieval
+    standing still, which is the number this whole instrument exists to keep honest.
+    So the assertion is about PRESENCE in the corpus, never about state: the same
+    labels are still here whatever the deployment decides to be, exactly as
+    `test_the_gold_set_may_only_grow` pins the query ids for the same reason.
+    """
+    specs = yaml.safe_load(CORPUS.read_text())["queries"]
+    present = {(str(s.get("id")), str(d))
+               for s in specs for d in (s.get("expect_docs") or [])}
+    missing = [f"{qid} -> {label}" for qid, label in RETIRABLE_GOLD_LABELS
+               if (qid, label) not in present]
+    assert missing == [], (
+        f"{len(missing)} of the {len(RETIRABLE_GOLD_LABELS)} gold doc labels #1599 "
+        f"found unreturnable are gone from {CORPUS}: {missing}. A dropped query turns "
+        "a permanent doc miss into an absence and lifts `doc_hit_rate` with retrieval "
+        "unchanged; dropping gold is this item's option (c) and a person's call. "
+        "Registering the collection they name is the other way out, and it keeps "
+        "these labels right where they are.")
+    # Whatever the deployment says today, it says it about labels that are still here.
+    rep = _doc_label_satisfiability_report(collections=_deployed_collections())
+    classified = ({(d["query"], d["label"]) for k in
+                   ("satisfied_by", "unsearchable", "dead") for d in rep[k]})
+    assert set(RETIRABLE_GOLD_LABELS) <= classified, (
+        "a pinned label is in the corpus but in none of the three states, so the "
+        "report is not reading it at all")

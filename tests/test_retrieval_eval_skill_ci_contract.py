@@ -219,3 +219,59 @@ def test_the_skill_tells_the_report_to_print_the_companion_beside_the_headline()
     # to take, which is the clause that keeps a future run from re-basing it.
     assert "reserves" in low, body[-600:]
     assert "mrr_doc" in body and "no" in low, body[-600:]
+
+
+# ── #1599: the unreturnable-gold fields the writer emits ────────────────────
+
+def test_the_skill_names_the_unreturnable_gold_fields_the_eval_emits():
+    """#1599: the nightly has to report which gold no deployed collection can
+    return, and a report told to quote some other name quotes nothing.
+
+    The names come out of `summarize()`'s own keys rather than a list this test
+    wrote, so a writer renaming a field fails along with the prose — #696's failure
+    mode (`a report told to quote `confidence` while eval/run_eval.py writes `ci`
+    quotes nothing`) applied to #1599's fields. The exact-name assert below is the
+    positive control: were `summarize` emitting none of them, the loop would have
+    nothing to check and would pass.
+    """
+    import sys
+    sys.path.insert(0, str(ROOT))
+    import eval.run_eval as ev
+    overall = ev.summarize([{"id": "q", "category": "single", "latency_ms": 1.0,
+                             "error": None,
+                             "expected": {"entities": [], "docs": ["knowledge/x.md"]},
+                             "scoring": {"entity_hit": False, "doc_hit": True,
+                                         "entity_recall": None, "doc_recall": 1.0,
+                                         "rr_doc": 1.0, "ndcg10": 1.0,
+                                         "first_doc_rank": 1,
+                                         "fact_entity_recall": None}}])["overall"]
+    emitted = sorted(k for k in overall if k.startswith("gold_doc"))
+    assert emitted == ["gold_doc_collections", "gold_doc_unreturnable",
+                       "gold_doc_unreturnable_query_ids"], emitted
+    # Emitted even when no collection list was supplied — as nulls. A key that only
+    # appeared on the checked path would be invisible to a report reading a run that
+    # could not open the index, which is the case that most needs a sentence.
+    assert overall["gold_doc_unreturnable"] is None, overall
+    assert overall["gold_doc_collections"] is None, overall
+    for name in emitted:
+        assert f"`{name}`" in TEXT, f"skill does not name the field the writer emits: {name}"
+
+
+def test_the_skill_reports_the_finding_without_touching_the_gold_set():
+    """#1599's instruction half, scoped to its own section so a mention in
+    `## Notes` cannot stand in for the report step saying it.
+
+    The half that matters most is the prohibition: an `unreturnable` count goes to
+    zero by registering the collection, by re-pointing the labels onto indexed
+    copies, or by deleting the queries — and only the first two are fixes. The other
+    two raise `doc_hit_rate` with retrieval standing still, so the report step has to
+    say out loud that it is not the one to make that move.
+    """
+    body = section("Which gold the deployed collections cannot return")
+    low = body.lower()
+    assert "never means editing the gold set" in low, body[:400]
+    assert "person's" in body, body[:400]
+    assert "no verdict" in body, body[:400]
+    # Both of the two moves that legitimately end the finding are named, so a reader
+    # is told what is being waited on rather than that something is broken.
+    assert "register" in low and "re-point" in low, body[:500]

@@ -189,6 +189,49 @@ def count_content_vectors(index_path: Path) -> int | None:
         con.close()
 
 
+def deployed_collections(index_path: Path | str | None = None) -> list[dict] | None:
+    """``[{name, root}]`` for the collections this index actually serves, or None.
+
+    #1599: a gold doc label naming a path no collection indexes can never be
+    returned, so it is a permanent `doc_hit` miss — five of them were costing
+    0.0388 of `doc_hit_rate` every night while nothing said so. Which collections
+    exist is a fact about the deployment and about this file's own subject (qmd's
+    index), so the answer is read from `store_collections`, the table `qmd status`
+    answers with, and lives HERE: `eval/` reaches shared stores through their owner
+    (`tests/test_counterfactual_eval.py::
+    test_no_script_under_eval_opens_the_knowledge_store_file` is the standing
+    statement of that rule), and the tracked template
+    `agent-services/conf/qmd-index.yml` is no substitute — it declared 15
+    collections where the live config declared 14 on 2026-09-27.
+
+    ``index_path`` goes through `index_path_for`, so a pinned run asks its own
+    snapshot and a run under an overlay that named no index gets None rather than
+    the live default: collections counted against the wrong index would be a
+    confident wrong answer on the artifact that claims to be pinned.
+
+    None means COULD NOT ANSWER — no path, no file, unreadable, or no table — and is
+    never collapsed into `[]`. An empty list asserts that nothing is deployed, and
+    every label in the corpus would then read unreturnable: the same refusal this
+    module makes of a zero vector count, in the other direction.
+    """
+    path = index_path_for(index_path)
+    if path is None:
+        return None
+    try:
+        con = sqlite3.connect(f"file:{Path(path).expanduser()}?mode=ro",
+                              uri=True, timeout=10)
+    except sqlite3.Error:
+        return None
+    try:
+        rows = con.execute(
+            "select name, path from store_collections order by name").fetchall()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    return [{"name": str(n), "root": str(p)} for n, p in rows] or None
+
+
 #: The five identity keys, in one place so `collect` cannot quietly start
 #: shipping six and stop shipping four. A pinned identity (index `evalpin.sqlite`
 #: instead of `index.sqlite`) is worth roughly one false `paired` verdict per

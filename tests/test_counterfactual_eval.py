@@ -921,3 +921,188 @@ def test_the_counterfactual_suite_is_sized_by_the_corpus_it_reads():
     assert literals == [], (
         f"the suite hard-codes a corpus size: {literals} — assert against "
         "`len(_specs())` instead")
+
+
+# ── #1599: the artifact names the gold that could never be returned ─────────
+#
+# A `doc_hit` is a substring test over what the recall returned, so a gold label
+# naming a path no deployed qmd collection indexes is subtracted from `doc_hit_rate`,
+# `doc_recall_avg`, `mrr_doc` and `ndcg10` by every future run and nothing said so.
+# Five labels were in that state on the committed corpus (`lloyd-architecture/*.md`,
+# filed 2026-09-24 by #1354), and the measured cost on `nightly-20260927` is
+# `doc_hit_rate` 0.6279 with those five query ids and 0.6667 without — 0.0388 of the
+# document leg, every night, reported as a bare number. The list below is the number
+# with its cause attached. Growing or shrinking the gold set is NOT this round's to
+# do, which is why the finding is reported rather than fixed here.
+
+def _gold_record(qid: str, expect_docs: list[str], got_docs: list[str]) -> dict:
+    """A scored record shaped like the one `main()` writes, gold included.
+
+    `expected` is what the check reads — the gold the scorer was graded against on
+    the night it ran, not what the YAML says today — so the record has to carry it,
+    the way `anchorless_queries` and #1600's `_gold_record` both require.
+    """
+    spec = {"id": qid, "query": f"query {qid}", "category": "single",
+            "expect_entities": ["Knowledge Graph"], "expect_docs": expect_docs}
+    result = {"entities": ["Knowledge Graph"], "documents": [{"path": p} for p in got_docs],
+              "entity_sources": {}, "entity_paths": {}, "seed_entities": ["Unrelated Seed"]}
+    rec = {"id": qid, "category": "single",
+           "query": f"query {qid}",
+           "result": result,
+           "expected": {"entities": ["Knowledge Graph"], "docs": list(expect_docs)},
+           "scoring": ev._score(spec, result, ["Unrelated Seed"]),
+           "latency_ms": 12.0, "error": None}
+    return rec
+
+
+def _fixture_collections(tmp_path: Path) -> list[dict]:
+    """One deployed collection rooted under `tmp_path`, with the file a label
+    naming it would have to be, and a second file no collection names."""
+    root = tmp_path / "deployed"
+    root.mkdir()
+    (root / "harness.md").write_text("served\n")
+    (tmp_path / "unindexed.md").write_text("on disk, in no collection\n")
+    return [{"name": "deployed", "root": str(root)}]
+
+
+def test_the_artifact_names_the_query_whose_gold_no_deployed_collection_returns(tmp_path):
+    """Clause 2 of #1599: one undeployed label in, exactly that query id out — and
+    the list empty when every label's collection IS deployed.
+
+    Both halves are the clause. The first is the finding; the second is why the
+    field can be trusted when it is quiet, which is only ever "checked against N
+    collections and found nothing" — `gold_doc_collections` is the denominator, so a
+    clean list over an empty collection list cannot read as a pass.
+    """
+    collections = _fixture_collections(tmp_path)
+    records = [
+        _gold_record("served", ["deployed/harness.md"], ["deployed/harness.md"]),
+        _gold_record("unserved", ["lloyd-architecture/harness.md"],
+                     ["deployed/harness.md"]),
+    ]
+    overall = ev.summarize(records, collections=collections)["overall"]
+    assert overall["gold_doc_unreturnable"] == [
+        {"query": "unserved", "label": "lloyd-architecture/harness.md"}], overall
+    assert overall["gold_doc_unreturnable_query_ids"] == ["unserved"], overall
+    assert overall["gold_doc_collections"] == 1, overall
+
+    served_only = [_gold_record("served", ["deployed/harness.md"],
+                               ["deployed/harness.md"])]
+    clean = ev.summarize(served_only, collections=collections)["overall"]
+    assert clean["gold_doc_unreturnable"] == [], clean
+    assert clean["gold_doc_unreturnable_query_ids"] == [], clean
+    # The quiet answer still names what it was checked against.
+    assert clean["gold_doc_collections"] == len(collections)
+
+    # And the check changes no measurement: the same records scored with no
+    # collection list at all produce identical doc rates, so the artifact gained a
+    # diagnosis and not a second yardstick (the #1600 discipline).
+    plain = ev.summarize(records)["overall"]
+    for key in ("doc_hit_rate", "doc_recall_avg", "mrr_doc", "ndcg10",
+                "entity_hit_rate", "n_queries"):
+        assert plain[key] == overall[key], key
+
+
+def test_a_missing_collection_list_is_no_verdict_and_the_page_says_so(tmp_path, capsys):
+    """The third state of the check itself: `collections` not supplied, or the index
+    unreadable, is three nulls — never an empty list.
+
+    `[]` would assert that NO collection is deployed, and every gold label in the
+    corpus would then read unreturnable; a reader told "every gold doc in the corpus
+    is unreturnable" would be advised to delete the gold set, which is the corpus
+    change #1599 reserves for a person. And a clean-looking 0 is the failure
+    `_fmt_ci` refuses for the interval beside it (#1260): "the index would not open"
+    and "everything is returnable" must not print the same sentence. So all three
+    renderings are pinned off one real `print_table` call each.
+    """
+    collections = _fixture_collections(tmp_path)
+    records = [_gold_record("unserved", ["lloyd-architecture/harness.md"],
+                            ["deployed/harness.md"])]
+
+    none_overall = ev.summarize(records)["overall"]
+    assert none_overall["gold_doc_unreturnable"] is None
+    assert none_overall["gold_doc_unreturnable_query_ids"] is None
+    assert none_overall["gold_doc_collections"] is None
+    ev.print_table(records, ev.summarize(records))
+    page = capsys.readouterr().out
+    line = [ln for ln in page.splitlines() if "gold_docs" in ln]
+    assert len(line) == 1, page
+    assert "unreturnable=null [no verdict]" in line[0], line[0]
+    assert "unreturnable=0" not in line[0], line[0]
+
+    # The finding, on the same surface, naming the query and the label.
+    ev.print_table(records, ev.summarize(records, collections=collections))
+    found = [ln for ln in capsys.readouterr().out.splitlines() if "gold_docs" in ln]
+    assert len(found) == 1, page
+    assert "unreturnable=1" in found[0], found[0]
+    assert "unserved -> lloyd-architecture/harness.md" in found[0], found[0]
+    assert "1 deployed collection" in found[0], found[0]
+
+    # The clean corpus, distinguished from both of the above by its own wording.
+    served = [_gold_record("served", ["deployed/harness.md"], ["deployed/harness.md"])]
+    ev.print_table(served, ev.summarize(served, collections=collections))
+    clean = [ln for ln in capsys.readouterr().out.splitlines() if "gold_docs" in ln]
+    assert len(clean) == 1, page
+    assert "unreturnable=0" in clean[0], clean[0]
+    assert "null" not in clean[0], clean[0]
+
+
+def test_a_record_carrying_no_gold_contributes_nothing_but_does_not_pass_the_corpus(tmp_path):
+    """Gold read off the record, the way the other record-derived reports read it.
+
+    A record with no `expected` block — an artifact written before that key, or a
+    synthetic one — cannot be checked, so it contributes no finding. That is stated
+    here rather than left to silence because the direction it is wrong in matters:
+    an absent input must never become a clean bill, the same reason
+    `test_no_script_under_eval_opens_the_knowledge_store_file` in this file demands a
+    denominator before it accepts an empty offender list.
+    """
+    collections = _fixture_collections(tmp_path)
+    bare = {"id": "legacy", "category": "single", "latency_ms": 1.0, "error": None,
+            "scoring": {"entity_hit": False, "doc_hit": False, "entity_recall": None,
+                        "doc_recall": None, "rr_doc": 0.0, "ndcg10": 0.0,
+                        "first_doc_rank": None, "docs_matched": [],
+                        "fact_entity_recall": None}}
+    overall = ev.summarize([bare], collections=collections)["overall"]
+    assert overall["gold_doc_unreturnable"] == [], overall
+    assert overall["gold_doc_collections"] == 1, (
+        "the check still reports the denominator it ran against, so an empty list "
+        "over a record with no gold is visibly a record that asked nothing")
+
+
+def test_a_substring_gold_label_in_a_served_collection_is_not_reported(tmp_path):
+    """The false-positive trap in #1599's own rule, pinned because the first draft
+    fell into it.
+
+    `expect_docs` entries are SUBSTRINGS, not paths — `qmd` and `robot` are legal
+    labels and match whatever the index holds. The first implementation of this check
+    asked `Path.exists()` on the label itself and named 12 of 86 queries unreturnable
+    on the 2026-09-27 corpus, where the true number is 5: `qmd`, `robot` and
+    `autonomy/48-entity-resolution` sit in perfectly searchable collections. A finding
+    wrong in THAT direction is the dangerous one — it hands a reader a list of gold to
+    delete, which is the corpus change #1599 reserves for a person — so the shapes the
+    draft got wrong are pinned as its own test rather than folded into the positive
+    case.
+
+    `label`, `name_only` and `basename` are three labels for the same served file, and
+    all three must come back clean. `sibling` is the negative control: a label whose
+    only match is a file no collection indexes must still be caught, or this test would
+    pass on a rule that reports nothing.
+    """
+    collections = _fixture_collections(tmp_path)
+    root = Path(collections[0]["root"])
+    (root / "knowledge").mkdir()
+    (root / "knowledge" / "qmd.md").write_text("served\n")
+    (root / "projects" / "lloyd" / "architecture").mkdir(parents=True)
+    (root / "projects" / "lloyd" / "architecture" / "robot.md").write_text("served\n")
+    records = [
+        _gold_record("label", ["qmd"], []),
+        _gold_record("name_only", ["deployed"], []),
+        _gold_record("basename", ["projects/lloyd/architecture/robot.md"], []),
+        _gold_record("sibling", ["nothing-indexed/absent.md"], []),
+    ]
+    overall = ev.summarize(records, collections=collections)["overall"]
+    assert overall["gold_doc_unreturnable_query_ids"] == ["sibling"], overall
+    assert overall["gold_doc_unreturnable"] == [
+        {"query": "sibling", "label": "nothing-indexed/absent.md"}], overall
+    assert overall["gold_doc_collections"] == 1, overall
