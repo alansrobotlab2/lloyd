@@ -4269,15 +4269,19 @@ def triage_pool(ledger: Path,
     # `draft` only: that is where an item waits to be judged. `up_next` is the
     # implement pool and `in_progress` is a round in flight; an untriaged item
     # in either is a dead state the reconciler moves back here.
-    # A parked item was read by a sweep and judged not worth a round: out of
-    # every pool until a person removes the tag.
+    # A parked item was read by a sweep and ranked below a round's worth. It
+    # was out of every pool until a person removed the tag; since 2026-09-27
+    # (Alan: nothing waits on him, and the loop should never idle) it is the
+    # pool's fallback — offered only when nothing unparked is left, so it
+    # fills an idle loop and never displaces better-ranked work.
     claimed = triage_claimed_ids()
     untriaged = [i for i in items
                  if i.id not in seen and i.id not in claimed
                  and i.status == TRIAGE_POOL_STATUS
-                 and not is_grouped(i) and not is_parked(i)]
-    fresh = [i for i in untriaged if not is_quarantined(i, released=released, live=live)]
-    return fresh, len(untriaged) - len(fresh)
+                 and not is_grouped(i)]
+    eligible = [i for i in untriaged if not is_quarantined(i, released=released, live=live)]
+    fresh = [i for i in eligible if not is_parked(i)] or eligible
+    return fresh, len(untriaged) - len(eligible)
 
 
 def expire_stale_spawns(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,

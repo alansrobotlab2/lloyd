@@ -1732,11 +1732,19 @@ workers:
       # with rounds. New items still get swept: the sweep takes precedence
       # whenever the pool is non-empty, at whatever cadence this is.
       interval_seconds: 900
+      # While there is work and the implement pool has room, the source
+      # looks again after `retry_seconds` instead of the interval
+      # (2026-09-27: one 2-minute turn per 900 s kept it at 13% duty with 70
+      # drafts waiting and autocode idle). A full pool or an empty board keeps
+      # 900 s, which is the 2026-09-16 lesson above.
+      retry_seconds: 60
       # Triage DEPTH: how many triage turns run at once. Each claims what it
       # reads (`backlog.claim_for_triage`) so two turns never take the same
       # item, cluster or sweep batch. 2 with autocode's (Alan, 2026-09-17);
       # back to 1 when the board is caught up. Needs a backend restart.
-      max_inflight: 1
+      # 2 again 2026-09-27: 70 drafts, autocode idle. Slots 6 >= 2 rounds +
+      # 2 triages + owed-check + 1.
+      max_inflight: 2
       # The sweep (2026-09-15, Alan's "switch gears"): while any open item
       # is unread, a run takes `sweep_batch` items in one turn instead of a
       # cluster or a single item, quarantine lifted, and either retires each

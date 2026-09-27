@@ -991,6 +991,22 @@ would become `confirmed-held`, which expiry exempts. The scorecard gauge now
 coerces tags through `normalize_tags`, since the digest has written them as a
 string.
 
+**Idle between turns (2026-09-27).** Over 09-25..27 autocode was busy 37% of
+the wall clock and autotriage 13%. There were 70 drafts on the board and
+nothing confirmed. Three causes, each fixed and pinned in
+`tests/test_loop_duty.py`:
+
+- Autotriage ran one ~2-minute turn per 900 s whatever was waiting. It now
+  looks again after `retry_seconds` (60) while it has work and the implement
+  pool has room (`autotriage._has_work`). A full pool or an empty board keeps
+  the interval, which is the 09-16 lesson of 39 held confirmations. Its depth
+  is 2.
+- Autocode slept a full interval when nothing was confirmed. It now declines,
+  which means a retry after `retry_seconds`, so a fresh confirmation starts a
+  round within a minute.
+- A parked draft was out of every pool until a person removed the tag. It is
+  now `triage_pool`'s fallback: offered only when nothing unparked waits.
+
 ### 3.2e The sweep: switching gears to read the whole board once
 
 **The measurement (2026-09-15, 7 d of `promotions.jsonl` and `workers.db`).**

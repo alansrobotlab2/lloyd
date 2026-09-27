@@ -575,10 +575,14 @@ def test_a_free_loop_enqueues_and_says_nothing_special(isolated, monkeypatch, tm
     _confirm(2)
     assert asyncio.run(I.enqueue_if_due(q, {"interval_seconds": 900})) is None
     assert q.get(1) is not None and q.get(1).source == I.NAME
-    # Nothing confirmed is not a decline either: the full interval applies.
+    # Nothing confirmed IS a decline since 2026-09-27: triage confirms one
+    # every few minutes while it has work, and a full interval here left a
+    # fresh confirmation idle for up to 15 minutes. The retry cadence applies.
+    from workers.sources import DECLINED
     q2 = WorkQueue(tmp_path / "w2.db")
     monkeypatch.setattr(B, "select_confirmed", lambda ledger: None)
-    assert asyncio.run(I.enqueue_if_due(q2, {"interval_seconds": 900})) is None
+    assert asyncio.run(I.enqueue_if_due(q2, {"interval_seconds": 900})) == DECLINED
+    assert q2.get(1) is None, "nothing queued"
 
 
 def test_a_free_loop_with_a_live_round_row_declines(isolated, monkeypatch, tmp_path):

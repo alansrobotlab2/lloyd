@@ -1380,7 +1380,11 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> str | None:
         logger.debug("autocode: not queueing — the previous round's row is still in flight")
         return DECLINED
     if await asyncio.to_thread(B.select_confirmed, S.LEDGER_PATH) is None:
-        return None
+        # Nothing confirmed yet — but triage confirms one every few minutes
+        # while it has work, and a full `interval_seconds` wait here left a
+        # fresh confirmation idle for up to 15 minutes. Look again in
+        # `retry_seconds` (the look is a board walk off the event loop).
+        return DECLINED
     new_id = queue.enqueue(
         source=NAME, kind="round",
         payload={"max_turns": int(src_cfg.get("max_turns", DEFAULT_MAX_TURNS)),

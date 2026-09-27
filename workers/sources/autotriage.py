@@ -909,6 +909,36 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
         )
         if new_id is not None:
             logger.info("Enqueued backlog triage id=%d", new_id)
+    # While there is work, look again in `retry_seconds` rather than a full
+    # `interval_seconds`: a triage turn takes about two minutes, and waiting
+    # out a 900 s interval after each one kept the source at 13% duty over
+    # 2026-09-25..27 with 70 drafts waiting. An idle board keeps the interval.
+    from workers.sources import DECLINED
+    if await asyncio.to_thread(_has_work, src_cfg):
+        return DECLINED
+    return None
+
+
+def _has_work(src_cfg: dict) -> bool:
+    """Whether a triage job queued now would find something autocode needs:
+    an urgent item, an unread sweep batch, or a candidate for single (or
+    group) triage — and the implement pool has room. A full pool keeps the
+    interval: on 2026-09-16 back-to-back triage confirmed into a pool the loop
+    could not drain (39 held) while sharing the engine with rounds."""
+    from scripts.automod import backlog as B, state as S
+    try:
+        if B.select_urgent(S.LEDGER_PATH) is not None:
+            return True
+        floor = int(src_cfg.get("implement_pool_floor", DEFAULT_IMPLEMENT_POOL_FLOOR))
+        if B.implement_pool_full(S.LEDGER_PATH, floor=floor).get("full"):
+            return False
+        if bool(src_cfg.get("sweep", False)) and B.select_sweep_batch(
+                S.LEDGER_PATH, int(src_cfg.get("sweep_batch", DEFAULT_SWEEP_BATCH))):
+            return True
+        return B.select_candidate(S.LEDGER_PATH) is not None
+    except Exception:  # noqa: BLE001 — a failed look is the interval, not a crash
+        logger.debug("autotriage: work check failed", exc_info=True)
+        return False
 
 
 def _claiming(fn):

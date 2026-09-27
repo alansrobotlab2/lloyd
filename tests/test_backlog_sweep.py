@@ -390,11 +390,16 @@ def test_autocode_yields_to_a_pending_sweep_and_resumes_when_it_is_done(isolated
     q = Q()
     assert asyncio.run(AC.enqueue_if_due(q, {"yield_to_sweep": True})) == DECLINED
     assert q.enqueued == []
-    assert asyncio.run(AC.enqueue_if_due(q, {"yield_to_sweep": False})) is None, \
-        "off: the sweep and the loop share the engine; nothing confirmed, so nothing queued"
+    assert asyncio.run(AC.enqueue_if_due(q, {"yield_to_sweep": False})) == DECLINED, \
+        "off: nothing confirmed, so nothing queued — and it looks again at the retry cadence"
+    assert q.enqueued == []
     B.record_sweep_verdicts("sw-1", [_item(1)], {1: {"verdict": "keep", "worth": "high", "size": "small",
                                                     "evidence": "e"}}, session_id="s")
-    assert asyncio.run(AC.enqueue_if_due(q, {"yield_to_sweep": True})) is None
+    looked = []
+    real = B.select_confirmed
+    monkeypatch.setattr(B, "select_confirmed", lambda ledger: looked.append(1) or real(ledger))
+    assert asyncio.run(AC.enqueue_if_due(q, {"yield_to_sweep": True})) == DECLINED
+    assert looked, "the sweep is done: it no longer yields, it looks for confirmed work"
 
 
 def test_the_sweep_keys_ride_in_the_payload():
