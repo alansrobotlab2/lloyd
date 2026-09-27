@@ -759,7 +759,7 @@ monitor in the fleet with authority to act on what it finds.
 | #82 | daily | retrieval | 20-query retrieval eval against production's recall defaults; records the trend |
 | #70 | weekly | the skills library | `skill-lint`, advisory — `DEAD`, `MISSING_DESC`, `DRIFT`, `DUPLICATE`, `STALE`. Read-only, writes `skill-lint-report.{md,json}` for a human |
 | #36 | daily | the vault | Read the groundskeeper queue and report counts, health score, and whether the timer ran |
-| #76 | daily | the fleet | Queue health: per-task failure rate, timeouts, empty runs, `[SILENT]` rate, GPU-hours; clears poisoned items and pauses failing tasks |
+| #76 | daily | the fleet | Queue health: per-task failure rate, timeouts, empty runs, `[SILENT]` rate, GPU-hours; reports the poisoned and quarantined rows the queue sweep has already triaged, and pauses failing tasks |
 | #86 | daily | the Inner Voice observer | Nightly grader run appended to a metrics series; flags a sustained `dropped_rate` breach |
 
 **Two of the six have no consumer.** #36's queue holds 31,291 items and
@@ -794,8 +794,12 @@ rather than rewriting.
 per-task run records.** 237 pool-timeout rows
 carried a NULL `task_id` and were unreachable from any per-task view by
 construction — a task that timed out on every single run was indistinguishable
-from a healthy one. It clears poisoned queue items after recording why, and
-pauses any task with 3+ consecutive failures and a >50% fail rate.
+from a healthy one. Its poison step is read-only: the deterministic sweep in
+`workers/maintenance.py` triages that pile — one bounded revive for a transient
+cause, `quarantined` for a structural one — and #76 reports those rows and the
+sweep's own escalation tally instead of overwriting them, because until #1578 its
+write named no `source` and reached rows owned by other sources. It pauses any
+task with 3+ consecutive failures and a >50% fail rate.
 
 **A value that resolves to nothing is shaped like an outage.** A field whose
 *value* resolves to nothing parses clean here and fails at dispatch, which is the

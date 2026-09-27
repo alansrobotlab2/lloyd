@@ -1729,3 +1729,279 @@ def test_the_job_row_labels_the_budget_and_cross_references_the_derived_bound():
         f"#35's row now reads {role[:70]!r}… — the vault retired `inbox` in favour of "
         f"`draft` (#786), and a job row naming a status the board cannot hold is the "
         f"doc contradicting the state machine")
+
+
+# ── #1578: #76's poison step is read-only, in every channel that reaches the run ──
+
+#: #76's prompt. The row and paragraph pinned below describe this file's steps,
+#: and — as §The skill is the job says of every job — a vault edit makes them
+#: false on the next run with no deploy and no gate, so the doc is read across the
+#: boundary rather than around it, for the reason `board_presence.py` gives.
+QUEUE_SKILL_REL = "skills/queue-health-check/SKILL.md"
+
+#: A SQL statement that changes a `queue` row, in the shape the retired reset took
+#: and the shape a reader who finds a pile of them would re-add. This is #1578's
+#: own acceptance grep — `grep -nE "UPDATE queue|DELETE FROM queue"` — as a node,
+#: so the grep and the test can never disagree about what counts as a write.
+QUEUE_WRITE_RE = re.compile(r"\b(?:UPDATE|DELETE FROM)\s+queue\b", re.I)
+
+#: The superseded claim as all three carriers worded it ("clears poisoned queue
+#: items" in the skill's front matter, `autonomy/76-queue-health-check.md:16` and
+#: `architecture/autonomy-jobs.md:797`). Narrow on purpose: it matches a statement
+#: that the job *does* it, so a step is still free to say what it must not do.
+POISON_CLAIM_RE = re.compile(
+    r"\b(?:clears|cleared|clearing|resets?|resetting)\b[^.]{0,25}\bpoisoned\b", re.I)
+
+#: The module that owns the transition now. Named by the skill, by the doc's
+#: paragraph and by this file, so the three cannot drift into describing
+#: different owners of the same write.
+SWEEP_MODULE = "workers/maintenance.py"
+
+
+def _queue_skill() -> str:
+    """#76's prompt, read from the live vault.
+
+    Read, never skipped when absent: `vault_root()` is env-overridable, so a skip
+    on a missing vault is one `monkeypatch.setenv` away from being a green that
+    certifies nothing, and the vault is on every box that runs this suite.
+    """
+    import board_presence
+
+    path = board_presence.vault_root() / Path(QUEUE_SKILL_REL)
+    assert path.is_file(), (
+        f"{path} is unreadable, and the claims pinned here — that #76's poison step "
+        f"writes nothing and names its real owner — are claims about that file")
+    return path.read_text()
+
+
+def _skill_step(raw: str, step: str) -> str:
+    """One `## Step …` section of the skill, up to the next heading.
+
+    Per step, not whole file, because the other steps legitimately act: Step 4
+    pauses a chronically failing task through `autonomy_write_task`, which is the
+    job's one remaining write and is not the queue's. A check allowed to range
+    over the file would let Step 4 excuse Step 3.
+    """
+    m = re.search(rf"^## {re.escape(step)}[^\n]*$", raw, re.M)
+    assert m, f"{QUEUE_SKILL_REL} has no `## {step}` section"
+    rest = raw[m.end():]
+    nxt = re.search(r"^## ", rest, re.M)
+    return rest[:nxt.start()] if nxt else rest
+
+
+#: §Measure's membership table, which carries a `Watches` column the other two
+#: `| ID | Freq | Role |` tables in the doc do not — so #76's row is not reachable
+#: with `_role_cell`, and reading the wrong table would report "no row for #76"
+#: while the row that needs editing sits unexamined.
+MEASURE_IDS_HEADER = "| ID | Freq | Watches | Role |"
+
+
+def _measure_role_cell(job: str) -> str:
+    """The Role cell of `job`'s row in §Measure's four-column table."""
+    lines = _text().splitlines()
+    starts = [i for i, ln in enumerate(lines) if ln.strip() == MEASURE_IDS_HEADER]
+    assert starts, f"architecture/autonomy-jobs.md has no `{MEASURE_IDS_HEADER}` table"
+    found = []
+    for i in starts:
+        for line in lines[i + 2:]:                              # header, then |---| rule
+            if not line.startswith("|"):
+                break
+            cells = [c.strip() for c in line.strip().strip("|").split("|")]
+            if cells[0] == job:
+                assert len(cells) == 4, (
+                    f"{job}'s row under a {MEASURE_IDS_HEADER!r} table has {len(cells)} "
+                    f"cells, not ID/Freq/Watches/Role — the reader can no longer tell "
+                    f"which column is the role")
+                found.append(cells[3])
+    assert len(found) == 1, (
+        f"{job} has {len(found)} rows in the doc's {len(starts)} "
+        f"{MEASURE_IDS_HEADER!r} tables — described twice is the double-assertion "
+        f"defect #1524 pinpointed, and 0 means the row this clause edits is gone")
+    return found[0]
+
+
+def _task_76_front_matter() -> dict:
+    """Task #76's parsed front matter, from the live vault."""
+    import board_presence
+    import yaml
+
+    root = board_presence.vault_root() / "autonomy"
+    files = sorted(root.glob("76-*.md"))
+    assert len(files) == 1, (
+        f"expected exactly one `autonomy/76-*.md` under {root}, found "
+        f"{[f.name for f in files]} — with two, which one the engine loads is "
+        f"undefined and this file cannot say which is being pinned")
+    parsed = yaml.safe_load(files[0].read_text().split("---", 2)[1])
+    assert isinstance(parsed, dict) and parsed.get("id") == 76, (
+        f"{files[0]} does not parse to the task with id 76")
+    return parsed
+
+
+def test_the_poison_step_of_the_skill_issues_no_write_against_the_queue():
+    """Clause 1. #76 stops being the one monitor with write authority over `queue`.
+
+    What it ran was an unfiltered, unclassified write. The pool's sweep does the
+    triage in code and applies two overrides no SQL statement can express: the
+    item's own revive budget (`DEFAULTS["max_revives"] = 1`,
+    `workers/maintenance.py:268`) and "an equivalent item is already open" (`:270`, because
+    a poisoned row has lost its `dedup_key`). And `attempts=0` did not refund what
+    the item claimed it refunded — the revive counter lives in `triage_json`, which
+    the write never touched — it refunded the pool's *claim* budget instead, which
+    the sweep deliberately leaves nearly spent (`:298`, `attempts=max(0,
+    max_attempts - 1)`, one more claim rather than a fresh budget). So the write
+    handed a structural payload a full retry run and hid the fact that it had
+    already failed.
+
+    Ranged over the whole file, not just the step, because that is the surface the
+    item's acceptance grep is written against: a second write in some other step
+    would be the same defect with a different heading.
+    """
+    raw = _queue_skill()
+    step3 = _skill_step(raw, "Step 3")
+
+    assert QUEUE_WRITE_RE.findall(raw) == [], (
+        f"{QUEUE_WRITE_RE.findall(raw)} is back in {QUEUE_SKILL_REL}. The sweep owns "
+        f"the poisoned→queued transition; a second writer refunds a budget it did "
+        f"not spend and erases the sweep's evidence")
+    # Positive control: the step is still a step that reads the pile, so the
+    # absence above is a rewrite and not a deletion that vacuously passes.
+    assert "poisoned" in step3, "Step 3 no longer looks at the poisoned pile at all"
+    assert re.search(r"\bSELECT\b", step3, re.I), (
+        "Step 3 no longer queries the queue, so it reports nothing and the "
+        "write-free verdict above is measuring an empty section")
+
+
+def test_the_poison_step_reports_the_pile_broken_out_by_source():
+    """Clause 2: the report answers "whose rows are these", which the write never did.
+
+    The retired write carried no `source` filter, and the stopped pile is not one
+    fleet's: on the live queue today (2026-09-27) `SELECT state, source, count(*)
+    FROM queue WHERE state IN ('poisoned','quarantined') GROUP BY state, source`
+    returns 9 rows, 8 of them `autoresearch` and 1 `scheduled-task`. A monitor of
+    the autonomy fleet that reset the table was therefore stopping eight rows owned
+    by something else. The read breaks both states out by source, and — the half
+    that a `WHERE source=` would defeat — it is not narrowed to one source, because
+    a pile already filtered to your own fleet cannot show you whose rows you were
+    about to touch.
+    """
+    step3 = _skill_step(_queue_skill(), "Step 3")
+    query = " ".join(step3.split())          # the SQL is wrapped in the skill
+
+    for state in ("'poisoned'", "'quarantined'"):
+        assert state in query, (
+            f"Step 3 no longer reports {state} rows. Quarantined is the sweep's "
+            f"verdict on a structural cause, and a pile report that omits it shows "
+            f"only the work that has not been triaged yet")
+    assert re.search(r"GROUP\s+BY[^;]*source", query, re.I), (
+        "the pile is counted without breaking it out by source — the count that "
+        "made the old cross-fleet write visible is the number this step exists to "
+        "print")
+    assert "scheduled-task" not in step3, (
+        "Step 3 filters the pile to one source. Breaking out a pile you have "
+        "already narrowed to your own fleet is not a cross-fleet report")
+
+
+def test_the_poison_step_names_the_sweep_and_where_its_decision_is_recorded():
+    """Clause 3: name the owner and its paper trail, or the next reader re-adds it.
+
+    The skill had zero mentions of the sweep, quarantine or `maintenance` before
+    #1578 (`grep -in "sweep\\|quarantin\\|maintenance"` over it exited 1), which is
+    why the write survived every prior edit of this file: a reader who finds a
+    pile and no owner writes it away. So the step must name `workers/maintenance.py`
+    as the
+    triager, must say where the decision is written — a `sweep_*.md` under
+    `~/lloyd-data/autonomy-runs/queue-maintenance/`, whose escalation lines carry
+    one `(source, signature)` pair per recurring cause once it hits
+    `DEFAULTS["repeat_threshold"]` (3) — and must say the pile is read-only here.
+
+    The tally is the reason this is not cosmetic: `sweep()` selects only
+    `state='poisoned'`, so a row moved to `queued` by hand was never scanned again
+    and its `(source, signature)` count never incremented — the one alert that
+    surfaces a cause still firing after a revive was erased by the write.
+    """
+    step3 = _flat(_skill_step(_queue_skill(), "Step 3")).lower()
+
+    assert SWEEP_MODULE in step3, (
+        f"Step 3 no longer names {SWEEP_MODULE} as the thing that triages the pile")
+    assert "sweep" in step3, "Step 3 no longer names the sweep"
+    assert "autonomy-runs/queue-maintenance" in step3, (
+        "Step 3 lost the path where the sweep's decision is recorded, so a reader "
+        "who disagrees with a quarantine has nowhere to check it")
+    assert "escalation" in step3 and "signature" in step3 and "repeat_threshold" in step3, (
+        "Step 3 stopped pointing at the per-(source, signature) escalation lines "
+        "that fire at repeat_threshold — the recurring-cause alert a hand write "
+        "silences")
+    assert "quarantin" in step3, (
+        "Step 3 no longer says a structural cause is quarantined, which is the "
+        "decision it must not overwrite")
+    assert re.search(r"read[- ]only|do not write|never write", step3), (
+        "Step 3 no longer states that it writes nothing here — the prohibition is "
+        "the part a reader needs, not the explanation")
+
+
+def test_the_prompt_task_76_is_served_orders_no_reset_of_the_pile():
+    """Clause 4, across the seam that carries an instruction to the model.
+
+    `_build_task_prompt` renders the skill plus the task's front-matter
+    `description:` and nothing else — the file's own body says so above its
+    Activity Log — and that description read "…clears poisoned queue items after
+    recording why…". So the same order reached every run twice, once from a step
+    and once from a field no step edit touches, and grading the skill alone would
+    leave the write-commanding sentence in the one channel guaranteed to arrive.
+    Hence the rendered prompt, not the file.
+    """
+    from app.autonomy import _build_task_prompt
+
+    task = _task_76_front_matter()
+    desc = str(task.get("description", "")).strip()
+    assert desc, "task #76's `description:` is empty"
+    assert POISON_CLAIM_RE.search(desc) is None, (
+        f"#76's `description:` claims the pile again: {desc[:90]!r}…")
+    assert "sweep" in desc.lower(), (
+        "the description dropped the order without saying what owns the pile now, "
+        "which leaves a run looking for the step that does it")
+
+    prompt = _build_task_prompt(task, _queue_skill())
+    assert "Task description:" in prompt, (
+        "_build_task_prompt stopped rendering the description, so this node and the "
+        "clause it pins are measuring a seam that has moved")
+    assert QUEUE_WRITE_RE.findall(prompt) == [], (
+        f"{QUEUE_WRITE_RE.findall(prompt)} survives in the prompt a #76 run is "
+        f"served, from a carrier outside Step 3. Find it and relabel it — Step 3 is "
+        f"not the only door")
+    assert POISON_CLAIM_RE.search(prompt) is None, (
+        "the prompt a #76 run is served still states that the job clears the pile")
+
+
+def test_the_measure_row_and_the_measure_paragraph_both_give_the_pile_to_the_sweep():
+    """Clause 5, in the file a reader who never opens the vault actually reads.
+
+    §Measure asserted the superseded behaviour twice — the ID/Freq/Role row at
+    `architecture/autonomy-jobs.md:762` ("clears poisoned items and pauses failing
+    tasks") and the paragraph at `:797` ("It clears poisoned queue items after
+    recording why") — which is the #1524 shape exactly: one claim, two copies, and
+    the item named only "the doc's #76 paragraph", singular. Both move together
+    here, and the paragraph must name the module the skill names, so the row, the
+    prose and the prompt cannot describe three different owners of one write.
+
+    The row keeps the pause, because that half is still true: pausing a chronically
+    failing task is the job's own act, and the tier table still lists #76 as the one
+    job that acts on the fleet itself.
+    """
+    role = _flat(_measure_role_cell("#76"))
+    measure = _group_section("Measure")
+
+    for where, text in (("the Measure table row", role),
+                        ("the §Measure paragraph", measure)):
+        assert POISON_CLAIM_RE.search(text) is None, (
+            f"{where} says #76 clears the poisoned pile again — that behaviour moved "
+            f"into {SWEEP_MODULE}")
+        assert "sweep" in text.lower(), (
+            f"{where} no longer says the deterministic queue sweep triages the pile, "
+            f"so the doc has an owner-less write again")
+    assert SWEEP_MODULE in measure, (
+        f"the §Measure paragraph never names {SWEEP_MODULE}, the module the skill "
+        f"names, and the two carriers of this claim can drift apart")
+    assert "pauses" in role, (
+        "the row lost the pause with the write, and pausing a chronically failing "
+        "task is still what #76 does — it is in the write tier for it")
