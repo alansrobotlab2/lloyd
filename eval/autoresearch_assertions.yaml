@@ -181,3 +181,21 @@ tasks:
       text: Bullets are used only for findings, not for commentary, method notes or caveats.
     - id: none_found_said_plainly
       text: If the reply reports no findings, it says so in plain prose rather than as a bullet.
+
+  bench_018_skill_invocation_rare_interp:
+    # The task's own "success is three things in one reply", turned into the three
+    # yes/no checks it names: the exact slug, the diagnosis that points at the
+    # interpreter rather than the missing package, and the concrete interpreter
+    # spelling. The third of its `rubric_criteria` (`conciseness`) is graded in prose
+    # and is deliberately not asserted here — the task's own text says so.
+    - id: a1
+      text: The reply names the skill by its exact slug, `probe-interpreter-mismatch`
+        — not a description of it, not another skill's name.
+    - id: a2
+      text: The reply attributes the `ModuleNotFoundError` to running the probe under
+        the wrong interpreter rather than to the code or to a genuinely missing
+        dependency, and for that reason does not endorse `pip install mcp`.
+    - id: a3
+      text: 'The reply gives the concrete interpreter spelling the skill prescribes —
+        the absolute path /home/alansrobotlab/lloyd/.venvs/lloyd/bin/python — as a
+        spelling, not a paraphrase like "use the venv python".'

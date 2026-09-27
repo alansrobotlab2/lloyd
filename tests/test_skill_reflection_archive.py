@@ -1239,9 +1239,19 @@ _REAL_SIGNALS_ARCHIVE = (
     f"     cp {_SIGNALS_LIVE} \\\n"
     f"        {_SIGNALS_LIVE[:-3]}-$STAMP.md\")   # archive, new path"
 )
+# Re-transcribed for #1589: vault commit da4d1b42 (#1552, 2026-09-26) inserted the `claimed:`
+# owner stamp into the shipped skeleton write and added a `date -u` step ahead of it. The
+# skill moved legitimately; this transcription did not follow, so the mutation this file
+# performs stopped being a mutation of the text that ships — which is the only thing the
+# drift-guard node below proves detectable. The `claimed:` segment is in the shipped
+# string byte-for-byte, including the two blank lines around it.
+# That commit is in the VAULT repo, not this one: `git -C ~/obsidian cat-file -t da4d1b42`
+# answers `commit`, and `git cat-file -t da4d1b42` in this checkout fails by design — the
+# change it describes is to a skill file this repo does not carry.
 _REAL_SIGNALS_SKELETON = (
     f'Write(file_path="{_SIGNALS_INFLIGHT}",\n'
-    '      content="# Signal Report <today>\\n\\nstatus: in-progress\\n\\n(Investigating.)\\n")'
+    '      content="# Signal Report <today>\\n\\nstatus: in-progress\\n\\n'
+    'claimed: YYYY-MM-DDTHH:MM:SSZ\\n\\n(Investigating.)\\n")'
 )
 #: The single write to the canonical pointer (Phase 3, complete report). The archive
 #: step is there to protect *this* overwrite, so the transcription the retention

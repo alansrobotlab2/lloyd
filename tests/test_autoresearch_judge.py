@@ -32,6 +32,7 @@ from __future__ import annotations
 import ast
 import inspect
 import logging
+import re
 
 import pytest
 
@@ -1098,22 +1099,157 @@ def test_the_mode_is_read_from_config_and_defaults_to_binary(monkeypatch, tmp_pa
     assert judge.judge_trace(_binary_task(), trace("x"))["rubric_mode"] == "binary"
 
 
-def test_the_repo_assertion_file_covers_the_bench_in_the_declared_shape():
-    """Clause 5, the half the repo owns: every bench task id has 2-5 named yes/no
-    assertions (or is labelled `graded`), ids unique within a task, and the file
-    loads through the same function the judge reads it with."""
-    table = judge.load_assertions()
-    expected = {f"bench_{i:03d}" for i in range(1, 18)}
-    prefixes = {tid[:9] for tid in table}
-    assert expected <= prefixes, f"missing: {sorted(expected - prefixes)}"
-    for tid, entry in table.items():
-        if isinstance(entry, dict):
-            assert entry.get("graded") is True, tid
+_BENCH_ID_RE = re.compile(r"^bench_(\d{3})")
+
+
+#: The live bench corpus held 18 tasks when #1589 landed and that count only rises, so
+#: this is a FLOOR and not an expected set: an expected set has to be edited every time a
+#: task is added, which is exactly how the `range(1, 18)` literal rotted.
+MIN_BENCH_TASKS_COVERED = 18
+
+
+def _shape_problems(table: dict, min_covered: int = MIN_BENCH_TASKS_COVERED) -> list[str]:
+    """What is wrong with an assertion table: shape first, then coverage. Empty = sound.
+
+    The shape rules are unchanged (2-5 named assertions per id, unique ids, and
+    `graded: true` as the only escape) and they already ran over every key in the table.
+    What changed for #1589 is coverage. The node used to compare the table against a
+    literal `range(1, 18)` — the tasks that existed when it was written — so every id
+    from `bench_018` on was invisible: a bench file could be added and sit unasserted,
+    falling back to the scalar judge, with only the `live_vault` sibling (which the
+    promotion gate deselects) able to notice.
+
+    Coverage is now derived from the table's own keys — every number below the highest
+    one present must exist — plus a floor. The floor is not decoration: a purely derived
+    rule passes vacuously on an EMPTY table, because `judge.load_assertions` returns
+    `{}` for a missing or unreadable file rather than raising, and that literal was also
+    what caught a wrecked assertion file. One-way, like the corpus it stands in for:
+    raising it takes an act, lowering it shows up as a change to a named constant.
+
+    The direction it deliberately does not take is a task present in the table but
+    absent from the live vault corpus — the literal had no opinion on that either, and
+    answering it is the live sibling's job. This node's job is to stop silently stopping
+    at 017 while keeping the ability to notice an empty file.
+    """
+    if not table:
+        return ["the assertion table is empty — `judge.load_assertions` returns {} for a "
+                "missing or unreadable file, which sends every bench task to the scalar "
+                "judge while this node would be checking nothing"]
+    problems: list[str] = []
+    numbers = []
+    for tid in sorted(table):
+        m = _BENCH_ID_RE.match(tid)
+        if not m:
+            problems.append(f"{tid}: not a bench_NNN id")
             continue
+        numbers.append(int(m.group(1)))
+        entry = table[tid]
+        if isinstance(entry, dict) and entry.get("graded") is not True:
+            problems.append(f"{tid}: a mapping that is not labelled graded: true")
+            continue
+        if isinstance(entry, dict):
+            continue                       # graded: the escape, and the only one
         got = judge.assertions_for({"id": tid}, table)
-        assert got is not None and 2 <= len(got) <= 5, tid
+        if got is None or not 2 <= len(got) <= 5:
+            problems.append(f"{tid}: {0 if got is None else len(got)} assertions, "
+                            f"needs 2-5 named yes/no checks")
+            continue
         ids = [a["id"] for a in got]
-        assert len(ids) == len(set(ids)), tid
+        if len(ids) != len(set(ids)):
+            problems.append(f"{tid}: duplicate assertion ids {ids}")
+    if len(numbers) < min_covered:
+        problems.append(
+            f"the table covers {len(numbers)} bench id(s), fewer than the "
+            f"{min_covered} the live corpus held when #1589 landed. A check derived "
+            "purely from the table cannot see a task that is absent from both sides, so "
+            "an emptied or thinned assertion file would otherwise pass with nothing "
+            "checked — and `judge.load_assertions` returns {} for a missing or "
+            "unreadable file rather than raising")
+    gaps = sorted(set(range(1, max(numbers) + 1)) - set(numbers)) if numbers else []
+    if gaps:
+        problems.append(
+            "numbering gap: no entry for " + ", ".join(f"bench_{g:03d}" for g in gaps)
+            + f", the highest id the table carries is bench_{max(numbers):03d} — a task was "
+              "added without its assertions and resolves to the scalar judge")
+    return problems
+
+
+def test_the_repo_assertion_file_covers_the_bench_in_the_declared_shape():
+    """Clause 5 / #1589 clause 2, the half the repo owns: the assertion table is
+    non-empty and covers at least `MIN_BENCH_TASKS_COVERED` ids, every id it carries has
+    2-5 named yes/no assertions (or is labelled `graded`), its assertion ids are unique,
+    and the numbering runs unbroken from `bench_001` — derived from the table, so this
+    node cannot quietly stop covering at 017 again."""
+    problems = _shape_problems(judge.load_assertions())
+    assert not problems, problems
+
+
+def test_the_shape_check_covers_a_task_numbered_past_the_last_one_it_knew():
+    """#1589 clause 2, unmarked so the promotion gate runs it: coverage is derived
+    from the table, so the node cannot stop looking at 017.
+
+    Both halves are pinned, and they failed differently before. The SHAPE half already
+    ran over the table's own keys, so a malformed higher entry was caught by the loop —
+    the cases below hold the behaviour the clause names and keep it from regressing.
+    The COVERAGE half was the literal: `expected <= prefixes` with
+    `expected = {bench_001..bench_017}`, so a task from 018 up that had no entry at all
+    was not in `expected`, was not required, and read as sound — that is the hole the
+    gap case below pins, and the one `bench_018` fell through for a day."""
+    def task(n: int, *assertion_ids: str) -> tuple[str, list[dict]]:
+        return (f"bench_{n:03d}_task", [{"id": a, "text": f"check {a}"} for a in assertion_ids])
+
+    def complete(thin_at: int, *assertion_ids: str) -> dict:
+        """A table filled in from `bench_001` to `bench_{thin_at:03d}` — so the only
+        thing wrong with it is the high-numbered entry, and the expected problem list
+        is exactly the one string the clause names."""
+        table = dict(task(n, "a1", "a2") for n in range(1, thin_at))
+        key, entry = task(thin_at, *assertion_ids)
+        table[key] = entry
+        return table
+
+    assert _shape_problems(complete(19, "a1")) == [
+        "bench_019_task: 1 assertions, needs 2-5 named yes/no checks"]
+
+    assert _shape_problems(complete(19, "a1", "a1")) == [
+        "bench_019_task: duplicate assertion ids ['a1', 'a1']"]
+
+    # `bench_003` was never given assertions while `bench_004` was: the old literal
+    # checked 003 only while 003 < 18, and never asked whether the ids in the file
+    # joined up at all, so a hole anywhere below 018 read as sound.
+    gapped = dict([task(1, "a1", "a2"), task(2, "a1", "a2"), task(4, "a1", "a2")])
+    assert _shape_problems(gapped, min_covered=3) == [
+        "numbering gap: no entry for bench_003, the highest id the table carries is "
+        "bench_004 — a task was added without its assertions and resolves to the "
+        "scalar judge"]
+
+    # Positive controls, so the helper is not simply always-red: the same ids with
+    # their assertions in place produce nothing, and `graded: true` is honoured as the
+    # escape the judge documents rather than reported as a shape problem.
+    assert _shape_problems(dict([task(1, "a1", "a2"), task(2, "a1", "a2"),
+                                 task(3, "a1", "a2"), task(4, "a1", "a2")]),
+                            min_covered=4) == []
+    assert _shape_problems({**dict([task(1, "a1", "a2")]),
+                            "bench_002_hard_to_grade": {"graded": True}},
+                           min_covered=2) == []
+    # A mapping that is NOT labelled `graded: true` is not the escape: it resolves to no
+    # assertions at all, which is the silent scalar fallback the node exists to refuse.
+    assert _shape_problems({**dict([task(1, "a1", "a2")]),
+                            "bench_002_mislabel": {"graded": False}},
+                           min_covered=2) == [
+        "bench_002_mislabel: a mapping that is not labelled graded: true"]
+
+    # The hole a purely derived rule opens, and the reason the floor exists: an empty
+    # table has no keys to be wrong about, and `judge.load_assertions` returns `{}` for a
+    # missing or unreadable file instead of raising. Before #1589 the `range(1, 18)`
+    # literal caught this; a derived check that forgot it would notice a wrecked
+    # assertion file by noticing nothing at all.
+    empty = _shape_problems({})
+    assert len(empty) == 1 and "the assertion table is empty" in empty[0], empty
+    thinned = _shape_problems(dict(task(n, "a1", "a2") for n in range(1, 10)))
+    assert len(thinned) == 1 and "fewer than the 18" in thinned[0], thinned
+    # and the floor is one-way: at 18 ids it is silent, so raising it later is the only
+    # edit a growing corpus needs.
+    assert _shape_problems(dict(task(n, "a1", "a2") for n in range(1, 19))) == []
 
 
 @pytest.mark.live_vault
