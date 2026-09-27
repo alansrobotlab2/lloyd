@@ -531,8 +531,8 @@ next iteration.
   triages + 1" (four rounds today), which `tests/test_loop_depth.py` pins — so
   the slot count is no longer the bound on how many long-lived contexts are
   resident at once. The KV gate above is. That trade is deliberate; §10 carries
-  the bar re-stated for this shape and the first day counted at it
-  (2026-09-23): KV sat well under the gate and the misses came anyway.
+  the bar re-stated for this shape and the first full day counted at it
+  (2026-09-25): KV sat well under the gate and the misses came anyway.
 - **The compaction wall** (`compaction.microcompact`) moved from 0.8/0.6 to 0.72/0.52 of the 210k
   threshold — trigger ≈168k → 151k, target ≈126k → 109k. The target moved with
   the trigger so the band stays 0.2 wide: every compaction rewrites the middle
@@ -738,56 +738,92 @@ has still not been run as of 2026-09-11.
   miss, (b) the fleet's misses and re-prefilled tokens per day are at or under
   §6.1's per-day baseline, (c) KV p50 is under the gate
   (`workers.kv_gate.max_kv_usage`, 0.60), and (d) no two-request window runs
-  under 15 tok/s that is not a cold admission. The bar written for slots = 2
-  asked for *zero* misses after iteration 2; with several rounds each idle for
-  minutes between iterations (below) that cannot hold on one pool, so the
-  re-stated bar asks for what a person feels (a, d) and a budget for the rest
-  (b). Clearing it needs a day of real chat, which the window below is not.
-- **The counted reading: 2026-09-23 00:00 → 2026-09-24 00:00 UTC** (one full
-  day, slots 6, four rounds, the 844,969-token FP8 pool), from `usage.db`, the
+  under 15 tok/s that is not a cold admission. (d) is counted per engine status
+  line over what the engine computed in its 10 s — prompt *and* generation —
+  which is a stricter population than the decode speed a person feels: a pass
+  there is a claim about the engine, not about chat. The bar written for
+  slots = 2 asked for *zero* misses after iteration 2; with several long-lived
+  contexts sharing one pool, each idle between its own iterations (below), that
+  cannot hold, so the re-stated bar asks for what a person feels (a, d) and a
+  budget for the rest (b). Clearing it needs a day with real chat in it, and
+  the day below is the first the counter has.
+- **The counted reading: 2026-09-25 00:00 → 2026-09-26 00:00 UTC** (one full
+  UTC day at the shape the bar names — slots 6, 2 rounds, the
+  844,969-token FP8 pool — and the first day counted at it, since the 09-23
+  reading below was taken at four rounds), from `usage.db`, the
   `brain1.prefix_miss` events and the engine's status lines, derived by
   `scripts/vllm_prefix_miss_window.py` over the extract committed as
-  `tests/fixtures/vllm_prefix_miss_2026-09-23.json`: **219 turns, 219
-  measured, 65 turns carrying 172 misses and 16,084,128 re-prefilled tokens**,
-  worst turn 601,503. Taken at four rounds; the shape now running (slots 6,
-  2 rounds) has not been counted yet. By session kind: autocode 158 misses (14.5M), then
-  deep-research 4, arch-review 3, youtube-digest 3, review 3, autonomy 1.
-  Chat 0 — but only 4 of the 219 turns were chat, so (a) was not tested and
-  this is not the normal day the bar asks for. 197 miss iterations logged, 85
-  of them fully cold (nothing cached) and 112 partial.
-- **Against §6.1, per day:** §6.1's baseline is 194 misses and 20.6M tokens
-  over *two* days (09-08/09) — 97 misses and 10.3M tokens a day. This window
-  is 172 and 16.1M in *one* day, about 1.8x the misses and 1.6x the tokens a
-  day of the stall that §6 exists for; (b) fails. The definitions differ at
-  the edge (§6.1 counted ≥ 50k uncached, the counter counts < 50% cached, both
-  at ≥ 100k), which does not close a 1.8x gap. The 2026-09-11 spot reading
-  this page used to quote (135 misses, 20.4M, 24 h) and the 09-19..21 days
-  read off the old database by #1339's triage are history now: `usage.db`
-  starts at 2026-09-22 20:17 UTC, after the 09-22 wipe, and cannot re-derive
-  them.
+  `tests/fixtures/vllm_prefix_miss_2026-09-25.json`: **443 turns, 443
+  measured, 16 turns carrying 46 misses and 5,664,101 re-prefilled tokens**,
+  worst turn 929,365. It is no working day's shape either — the retrieval-eval
+  bench and the MCP eval runs are most of its turns — so what this day adds
+  over 09-23 is the chat in it. By session kind (misses / re-prefilled):
+  archreview 18 / 2.4M, autonomy 16 / 1.9M, deepresearch 4 / 0.5M, autocode
+  4 / 0.4M, youtubediges 3 / 0.3M, autotriage 1 / 0.1M. 46 miss iterations
+  logged, 42 of them fully cold (nothing cached) and 4 partial.
+- **(a) passes.** 0 of the day's 23 chat turns carries a prefix miss — the
+  criterion the 09-23 reading could not test at all, since its chat count was
+  a handful and its rounds were four. Whether 23 turns of chat make this the
+  *normal* day the bar asks for is not a call this page can make; it is the
+  owed-check's, not a round's.
+- **Against §6.1, per day: (b) passes.** §6.1's baseline is 194 misses and
+  20.6M tokens over *two* days (09-08/09) — 97 misses and 10.3M tokens a day.
+  This window is 46 and 5.7M in *one* day, about 0.5x the misses and 0.5x the
+  tokens a day of the stall that §6 exists for, which is the whole of what (b)
+  asks. The definitions differ at the edge (§6.1 counted ≥ 50k uncached, the
+  counter counts < 50% cached, both at ≥ 100k); at half the budget, that edge
+  is not what decides it. The 2026-09-11 spot reading this page used to quote
+  (135 misses, 20.4M, 24 h) and the 09-19..21 days read off the old database
+  by #1339's triage are history now: `usage.db` starts at 2026-09-22 20:17
+  UTC, after the 09-22 wipe, and cannot re-derive them. The day this section
+  counted before, 2026-09-23, is history for a different reason — its extract
+  is still on disk as `tests/fixtures/vllm_prefix_miss_2026-09-23.json`, and
+  its figures are deliberately not quoted here, so they cannot rot beside
+  this one.
 - **Where a KV history can come from.** Not `engine_pressure`: its ring is
   300 s (`DEFAULT_WINDOW_S`, `engine_pressure.window_seconds`) in the backend's
   memory, emptied by every restart. The engine's own status line is the only
   record — `Running: N reqs, Waiting: N reqs, GPU KV cache usage: NN.N%`
   every 10 s while it has work, in `logs/services/agent-llm-primary.log*`,
-  stamped in local time with no year — and rotation keeps about two days of
-  it. Over the window, 5,761 such lines: **KV p50 0.26 / p90 0.55 / max
-  0.83**, three requests running at the median. Idle intervals print no line,
-  so the true p50 is lower still. (c) passes.
-- **Eviction, but not by pressure at the gate.** Each miss joined to the lines
-  in its *gap* — from the previous iteration's last proposed tool call, when
-  its request ended and its blocks went back to the free queue, to the miss
-  iteration's request: gap p50 240 s; KV peak in the gap **p50 0.544 / p90
-  0.713**, max 0.795; 54 of 197 at or over the 0.60 gate, **none over 0.90**.
-  The pool never came close to full, so this is not the 09-09 shape. What the
-  gaps do show is churn: vLLM's free queue is LRU, and in **117 of 197**
-  gaps the engine computed at least as many tokens as the free pool held at
-  the gap's tightest, which is enough to have reclaimed a paused prefix at
-  moderate KV. That is eviction the KV gate cannot see — it judges occupancy,
-  and the cost here is gap length times fleet throughput. The other 80 misses
-  had no such churn and are not explained by eviction; they are the
-  candidates for the branch below. Whether to chase that upstream or accept
-  the loss is Alan's call, not a round's.
+  stamped in local time with no year. Rotation is what bounds a day's life as
+  something that can still be counted, and it is bounded by bytes, not days:
+  supervisor rotates this logfile at `stdout_logfile_maxbytes` (10 MB per
+  file, a handful of rotations kept), so how many days of status lines survive
+  depends on how busy the engine was — days on this machine, and a number this
+  page will not quote because it is a fact about a log directory on the day you
+  look at it. What follows from it is not a number: the engine lines behind (c)
+  and (d) expire, so count a day the day it happens. Over the window, 5,968
+  such lines: **KV p50 0.20 / p90 0.45 / max 0.90**,
+  `Running:` 1 at the median. Idle intervals print no line, so the true p50 is
+  lower still, and (c) passes.
+- **Eviction: gate-level KV in most of the gaps, free-pool churn in three.**
+  Each miss joined to the lines in its *gap* — from the previous iteration's
+  last proposed tool call, when its request ended and its blocks went back to
+  the free queue, to the miss iteration's request: gap p50 0.1 s; KV peak in
+  the gap **p50 0.671 / p90 0.804**, max 0.852; 26 of 46 at or over the 0.60
+  gate, **none over 0.90**. The day before this one had the opposite shape —
+  gaps of minutes, KV at moderate level, churn in most of them. Here half the
+  misses came back inside a second with the pool sitting at gate level while
+  they were out, and the gate holds *new* long-lived claims on a one-minute
+  median, so a gap's peak says the pool was busy between claims rather than
+  that the gate misread it. What the gaps do *not* show is churn: vLLM's free
+  queue is LRU, and only in **3 of 46** gaps did the engine compute at least
+  as many tokens as the free pool held at the gap's tightest, which is the
+  most that could have reclaimed a paused prefix. The other 43 misses have no
+  churn to explain them and are the candidates for the branch below. Whether
+  to chase that upstream or accept the loss is Alan's call, not a round's.
+- **Two-request windows, and what (d) counts.** `two_request_throughput`
+  reads every status line the window has. Lines with `Running:` 2 or more:
+  **2,895**, median **2464.8 tok/s** combined, slowest **9.2**. Lines under the
+  bar's 15 tok/s: **1**. Excluded as an admission in flight: **1** — 0 of them
+  with a cold re-admission (§6.2's own floor: a prompt of ≥ 100k tokens with
+  under half of it cached) overlapping the interval, and 1 with a chunked
+  prefill climbing across it: KV rising, almost nothing counted, the whole
+  prompt landing on the next line, which is §6.1's episode signature. Windows counted against (d): **0**, and (d) passes. That
+  exclusion is the bar's own words — "that is not a cold admission" — turned
+  into a predicate the script applies, and a line it excludes has to name
+  which of the two evidences did it. A slow line with no cold re-admission
+  across its interval and no rising KV is counted, and this day had none.
 - **The unannotated draft group.** `_warn_if_unannotated_eagle_mamba` in
   vLLM's `v1/core/kv_cache_utils.py` — name the function, not the line: in
   the **production** venv at `dff1bde` the def is 2190 and its
@@ -797,8 +833,8 @@ has still not been run as of 2026-09-11.
   this build it says only "Speculative decoding (method=mtp) is enabled but no
   KV cache group could be identified as the draft model's" — the older
   builds' "prefix-cache reuse across requests will be disabled" is not in
-  its text. Reuse across requests is not off wholesale here: 112 of the
-  window's 197 misses still read part of their prompt from cache.
+  its text. Reuse across requests is not off wholesale here: 4 of the day's
+  46 misses still read part of their prompt from cache.
 - **YaRN's tool-choice effect is unsettled** (§4). Its short-prompt,
   long-context, retrieval, memory and prefill costs were measured on
   2026-09-21 and are nil or acceptable; 35 tool-choice queries leaned 95 vs
@@ -828,3 +864,4 @@ has still not been run as of 2026-09-11.
 ## Review log
 
 - 2026-09-21 — **stale.** §3's cache table, §2.3's clamp values (275/450/275), §2.4's index table, §2.5's persistence-mode claim, §5's knob defaults, §3.1's three asserts and the `workers.slots`-adjacent KV gate all verified against the live engine (`vllm:cache_config_info`: fp8, 844,969 tokens, block 3200) and the tree. Corrected: §1's verbatim command line was missing `--kv-cache-dtype fp8` and `--engram-config`; §6.3's "`workers.slots` stays 2" (now 6, `config.yaml:1163`); §6.4's observer priority (one step lower on unattended platforms since `97a86cc0`); §7's "priority-0 requests" (the bench runs at 1); §8's OOM account (four kills, not two — and `Slice=lloyd.slice`, not the RAM wait, is what keeps oomd off the unit, plus the FlashInfer JIT rebuild since `0150e88b`) and its restart route; §10's venv line numbers, which had drifted onto the `-0910` revert target. Filed #1337 #1338 #1339 #1340 #1341.
+- 2026-09-27 — **§10's counted reading re-pointed (#1627).** Replaced by one full UTC day of real chat (2026-09-25), now naming chat turns as part of the shape and marking (a)-(d) pass/fail; criterion (d) became a derivation (`two_request_throughput`: a per-status-line combined tok/s reading, and a cold-admission exclusion that separates a re-admission in flight from a chunked prefill climbing across the line), so the page can be wrong about throughput without anyone deciding it was a stall. Corrected: the eviction bullet's shape (this day is gate-level KV in 26 of 46 gaps and free-pool churn in 3, not the reverse), (b)'s verdict against §6.1's per-day budget, the draft-group partial count, §6.3's cross-reference, and rotation's true horizon (about five days of engine status lines, not "two"). `tests/test_vllm_doc_claims.py` now derives every counted figure, both history paragraphs labelled, plus a round-trip against `usage.db`.

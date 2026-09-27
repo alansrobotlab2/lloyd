@@ -40,6 +40,16 @@ ENGINE_TZ = "America/Los_Angeles"
 # have their lines.
 LOOKBACK_S = 3600
 STATUS_INTERVAL_S = 10
+# §10's criterion (d): a window with at least this many requests resident,
+# reading under this many tokens/s, is a stall unless it has an admission in
+# flight. 15 tok/s is the bar's own figure (§6.1's chat stall was 1-5).
+TWO_REQUEST_MIN = 2
+STALL_TOK_S = 15.0
+# §6.2's definition of a counted prefix miss, reused as the definition of a
+# cold re-admission: a prompt of at least this many tokens, less than this
+# fraction of it read from cache.
+COLD_PROMPT_MIN = 100_000
+COLD_CACHED_FRACTION = 0.5
 
 _STATUS_RE = re.compile(
     r"INFO (\d\d-\d\d \d\d:\d\d:\d\d) \[loggers\.py:\d+\] Engine 000: "
@@ -141,7 +151,73 @@ def _pct(values: list[float], q: float) -> float:
     return s[max(0, min(len(s) - 1, math.ceil(len(s) * q) - 1))] if s else float("nan")
 
 
-def derive(ex: dict, *, gate: float) -> dict:
+def _cold_re_admissions(ex: dict) -> list[tuple[float, float]]:
+    """Intervals spanned by iterations that were re-admitted cold: a prompt of
+    at least `COLD_PROMPT_MIN` with less than `COLD_CACHED_FRACTION` of it
+    cached (§6.2's own definition of a counted miss). Returns
+    [(request_sent_at, iteration_end), ...] — the window the rest of the fleet
+    was waiting behind."""
+    out = []
+    for m in ex["misses"]:
+        input_tokens, cache_read = m[3], m[4]
+        if input_tokens >= COLD_PROMPT_MIN and cache_read < COLD_CACHED_FRACTION * input_tokens:
+            out.append((m[0] - m[1] / 1000, m[0]))
+    return out
+
+
+def two_request_throughput(ex: dict, *, stall_tok_s: float = STALL_TOK_S) -> dict:
+    """§10's criterion (d), counted per engine status line.
+
+    Each line reports what the engine computed in the 10 s *before* its stamp,
+    prompt plus generation, so the reading is combined tokens/s over the
+    interval — a stricter population than the decode speed a person feels, and
+    used here only as "was the engine doing anything at all with two requests
+    resident". The counted thing is therefore the slow lines that are *not* an
+    admission in flight, because a cold prefill is exactly when §6.1 shows the
+    other resident requests crawl (one token per step until it lands):
+
+    * an iteration counted as a cold re-admission overlaps the interval, or
+    * the interval's KV rose over the previous contiguous line while the engine
+      counted under `stall_tok_s` — blocks going to a chunked prefill whose
+      tokens land on the *next* line, which is §6.1's episode signature
+      ("KV climbing ... with ~0 prompt tokens counted, then 100-360k landing
+      afterwards").
+
+    A line with neither is a two-request window that simply ran slowly.
+    """
+    t0, t1 = _epoch(ex["window"][0]), _epoch(ex["window"][1])
+    samples = sorted(ex["kv_samples"], key=lambda s: s[0])
+    in_window = [s for s in samples if t0 <= s[0] < t1]
+    two = [s for s in in_window if s[2] >= TWO_REQUEST_MIN]
+    tok_s = [s[3] / STATUS_INTERVAL_S for s in two]
+    cold = _cold_re_admissions(ex)
+    in_flight = prefill = 0
+    for s in two:
+        if s[3] / STATUS_INTERVAL_S >= stall_tok_s:
+            continue
+        # The line reports [t - interval, t]; an admission that arrived inside
+        # it and had not finished by the start of it was being prefilled here.
+        if any(arrived <= s[0] and end >= s[0] - STATUS_INTERVAL_S for arrived, end in cold):
+            in_flight += 1
+            continue
+        prev = [p for p in samples if p[0] < s[0]]
+        contiguous = prev and s[0] - prev[-1][0] <= STATUS_INTERVAL_S * 1.5
+        if contiguous and s[1] > prev[-1][1]:
+            prefill += 1
+    slow = sum(1 for v in tok_s if v < stall_tok_s)
+    return {
+        "two_request_windows": len(two),
+        "two_request_tok_s_p50": round(_pct(tok_s, 0.5), 1) if tok_s else float("nan"),
+        "two_request_tok_s_min": round(min(tok_s), 1) if tok_s else float("nan"),
+        "two_request_under_stall": slow,
+        "two_request_under_stall_cold_in_flight": in_flight,
+        "two_request_under_stall_cold_prefill": prefill,
+        "two_request_under_stall_cold_admission": in_flight + prefill,
+        "two_request_under_stall_not_cold": slow - in_flight - prefill,
+    }
+
+
+def derive(ex: dict, *, gate: float, stall_tok_s: float = STALL_TOK_S) -> dict:
     t0, t1 = _epoch(ex["window"][0]), _epoch(ex["window"][1])
     turns = ex["turns"]
     measured = [t for t in turns if t[2] is not None]
@@ -182,9 +258,12 @@ def derive(ex: dict, *, gate: float) -> dict:
         # against the free pool at its tightest is the most it could need.
         if sum(s[3] for s in g) >= (1 - peak) * pool:
             churned += 1
-    return {
+    chat = [t for t in turns if t[1] == "chat"]
+    out = {
         "turns": len(turns),
         "measured": len(measured),
+        "chat_turns": len(chat),
+        "chat_turns_with_misses": sum(1 for t in chat if (t[2] or 0) > 0),
         "turns_with_misses": len(missing),
         "misses": sum(t[2] for t in missing),
         "reprefill_tokens": sum(t[3] or 0 for t in missing),
@@ -206,6 +285,8 @@ def derive(ex: dict, *, gate: float) -> dict:
         "misses_gap_churned_free_pool": churned,
         "median_turn_misses": statistics.median([t[2] for t in missing]) if missing else 0,
     }
+    out.update(two_request_throughput(ex, stall_tok_s=stall_tok_s))
+    return out
 
 
 def main(argv: list[str] | None = None) -> int:
