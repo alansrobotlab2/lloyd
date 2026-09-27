@@ -70,6 +70,7 @@ from agent_mcp import (
     builtin_goal,
     builtin_grants,
     builtin_plan,
+    builtin_scratchpad,
     builtin_task,
     builtin_todo,
     code_graph,
@@ -138,6 +139,16 @@ MODULES = [
     builtin_goal,
     builtin_grants,
     builtin_plan,
+    # `Scratchpad` (#1554/#1571). Listed as of #1571: the catalog it joins is
+    # held under `tests/test_mcp_layer.py`'s 22,500-token ceiling by trimming
+    # redundant description prose, the one route that item's triage recorded as
+    # this loop's to take. Deliberately absent from
+    # `agent_mcp/annotations.py::READ_ONLY` — `action=append` writes a file — so
+    # it inherits that module's fail-safe default for an untabled tool, and
+    # `state_changing_tool()` reports True for it, which is why a call arriving
+    # with no session id is denied rather than treated as unsandboxed
+    # (`tests/test_scratchpad.py::test_the_aggregator_refuses_an_unbound_scratchpad_call`).
+    builtin_scratchpad,
     builtin_task,
     builtin_todo,
     # Domain modules

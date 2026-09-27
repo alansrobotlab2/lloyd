@@ -332,18 +332,26 @@ def test_the_tool_refuses_an_empty_append_and_an_unknown_action(data_root, monke
     assert sp.stats("worker:s1") == {"writes": 0, "bytes": 0}
 
 
-def test_the_tool_offers_only_read_and_append_and_is_not_yet_advertised():
-    """Two actions, and the exposure decision stated where the module is.
+def test_the_tool_offers_only_read_and_append_and_is_advertised():
+    """Two actions, and the module is listed now that the budget call is made.
 
     `append`/`read` only: an action that could replace or truncate the file is the
-    clobbering clause 1 rules out. The module is deliberately NOT in
-    `agent_mcp.main.MODULES` yet — the internal tool catalog sits at its declared
-    22,500-token ceiling (`tests/test_mcp_layer.py:979`, whose own comment says
-    re-arming, capping or raising it are "all three human calls, recorded on item
-    #1555"), and advertising this tool measured 22,613 estimated tokens against
-    22,458 without it. Listing it is that budget call, not this round's; until it
-    is made, `call_tool` above is exercised directly and the handler is reachable
-    the moment the module is listed.
+    clobbering clause 1 rules out.
+
+    The other half of this node used to assert the module was NOT in
+    `agent_mcp.main.MODULES`, because listing it would have put the internal tool
+    catalog past its declared 22,500-token ceiling
+    (`tests/test_mcp_layer.py::test_advertised_catalog_stays_under_its_token_ceiling`)
+    and that ceiling's own comment recorded re-arming, capping or raising it as
+    "all three human calls, recorded on item #1555". Item #1571 made the call by
+    the third route — reclaiming description prose, the way `708ed204` closed
+    #1555 — so the assertion is inverted and kept: it is the node that goes red if
+    anyone un-lists the tool to buy back catalog tokens, which is the one way the
+    ceiling must NOT be met.
+
+    Measured on this tree: 22,261 estimated tokens over 104 tools without the
+    module (22,433 before #1571 reclaimed 172 from eight tools' descriptions),
+    22,429 over 105 with it, against the 22,500 ceiling.
     """
     import agent_mcp.main as M
 
@@ -353,6 +361,68 @@ def test_the_tool_offers_only_read_and_append_and_is_not_yet_advertised():
     assert enum == ["append", "read"], (
         f"the tool offers {enum}; an action that can replace or truncate the file "
         f"is the clobbering clause 1 rules out")
-    assert tool not in M.MODULES, (
-        "the tool was advertised without the catalog budget call its ceiling is "
-        "waiting on — see tests/test_mcp_layer.py's ceiling test and item #1555")
+    assert tool in M.MODULES, (
+        "Scratchpad is no longer advertised, so a turn cannot write the notes "
+        "#1554's experiment measures. Meeting the catalog ceiling by un-listing a "
+        "tool is not allowed — trim a description instead; see "
+        "tests/test_mcp_layer.py's ceiling test and item #1571")
+
+
+def test_a_worker_turn_reaches_the_handler_through_the_aggregator(data_root):
+    """The boundary #1571 opened is `agent_mcp.main`, not this module.
+
+    Listing the module is what made the tool callable, and everything between a
+    turn's tool call and `call_tool` lives on the other side of that boundary: the
+    dispatch table `tools/list` is built from, the `_meta` session binding the
+    handler reads its address from (`main.py` sets the contextvar and resets it
+    around the call), and the safety and effect gates that sit in front of the
+    handler. Calling this module directly proves the file format and none of that,
+    so this node calls the aggregator the way the pool does — session id travelling
+    as the request's `_meta` — and then checks the bytes landed where
+    `app.scratchpad.read`, which runs in the backend process in production, reads
+    them. A module listed but unreachable from here, or reachable but writing to a
+    path the injection never opens, fails this and nothing else.
+    """
+    import agent_mcp.main as M
+
+    names = [t.name for t in asyncio.run(M.list_tools())]
+    assert "Scratchpad" in names, (
+        "the module is in MODULES but the aggregator does not list it")
+
+    res = asyncio.run(M.call_tool(
+        "Scratchpad", {"action": "append", "content": "crossed the aggregator seam"},
+        meta={M.META_SESSION_ID: "worker:seam"}))
+    assert not res.is_error, res.content[0].text
+    payload = json.loads(res.content[0].text)
+    assert "error" not in payload, payload
+    assert payload["writes"] == 1 and payload["bytes"] > 0, payload
+    assert "crossed the aggregator seam" in sp.read("worker:seam")
+
+    res = asyncio.run(M.call_tool(
+        "Scratchpad", {"action": "read"}, meta={M.META_SESSION_ID: "worker:seam"}))
+    assert not res.is_error, res.content[0].text
+    assert "crossed the aggregator seam" in json.loads(res.content[0].text)["content"]
+
+
+def test_the_aggregator_refuses_an_unbound_scratchpad_call(data_root):
+    """A `Scratchpad` call with no session in `_meta` never reaches a file.
+
+    The handler refuses an anonymous call rather than inventing a bucket name,
+    because an anonymous bucket is the cross-session leak the design exists to
+    prevent — but the aggregator gets there first, and this is the check that the
+    newly-advertised write tool is actually covered by it: a state-changing tool
+    arriving with no session id is denied (`main.py:588`, "sessionless write:
+    refused", #1053) rather than treated as "not sandboxed". A module sitting out
+    of `MODULES` was never exposed to that gate; listing it put a file-writing tool
+    in front of it, so the denial and the empty data root are both asserted here.
+    """
+    import agent_mcp.main as M
+
+    res = asyncio.run(M.call_tool(
+        "Scratchpad", {"action": "append", "content": "orphaned note"}))
+    payload = json.loads(res.content[0].text)
+    assert res.is_error, res
+    assert "no session id" in payload["error"], payload
+    assert payload["tool"] == "Scratchpad", payload
+    assert not data_root.exists() or not any(data_root.rglob("*")), (
+        "a denied call still put bytes somewhere")

@@ -122,8 +122,7 @@ CAPTURE_DESCRIPTION = (
     "pixels). Read-only — no lease needed. mode='som' (default) = image + elements; "
     "'vision' = image only; 'ax' = elements only (no image; cheapest, and the only "
     "useful mode for a model that cannot see); 'windows' = list open windows "
-    "(class, title, address, workspace, focused). window= picks a window by "
-    "address (0x…), class or title substring; omitted = the focused window. "
+    "(class, title, address, workspace, focused). "
     "scope='screen' grabs the whole monitor (image only, no elements). Works on "
     "windows on other workspaces. Element indices are valid until the next capture."
 )

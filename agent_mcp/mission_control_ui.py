@@ -197,13 +197,10 @@ async def list_tools():
                 "Use when the user says \"close that\" or \"dismiss it\"; for IDE editor tabs use ide_close_tab instead.\n\n"
                 "Dismiss any modal popup currently open in the given Mission "
                 "Control tab. Counterpart to mc_navigate when its focus_id "
-                "opens a modal (memory document viewer, autonomy/backlog task "
-                "editor, create-task dialog). Tabs without modals (workers, "
-                "settings, graph, etc.) silently no-op.\n\n"
-                "Use when the user says \"close that\", \"dismiss it\", "
-                "\"close the popup\", \"close the document\", or after you've "
-                "shown them an item via mc_navigate and they're done with it. "
-                "For closing IDE editor tabs use ide_close_tab instead."
+                "opens one (memory document viewer, autonomy/backlog task "
+                "editor, create-task dialog), or once the user is done with "
+                "what that call focused. Tabs without modals (workers, "
+                "settings, graph, etc.) silently no-op."
             ),
             inputSchema={
                 "type": "object",

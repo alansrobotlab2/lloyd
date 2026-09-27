@@ -970,12 +970,22 @@ RETIRED_TOOLS = frozenset({
 # ("Inner voice enabled for this session ... Call ClearGoal to abandon"). Nothing
 # an agent needed went away; measured now 22,433 over 104 tools.
 #
-# The remaining room is 67 estimated tokens — 0.3%. That is the point: the next
-# landing that grows any description trips this line, and by then the question is not
-# which sentence to cut but whether ~22.4k tokens of schemas on every chat and
-# session-backed worker turn is the budget while `harness.tool_search` is off by
-# decision (#456). Re-arm it, cap per-tool descriptions, or raise this number with a
+# The remaining room is 71 estimated tokens — 0.3%, now over 105 tools. That is the
+# point: the next landing that grows any description trips this line, and by then the
+# question is not which sentence to cut but whether ~22.4k tokens of schemas on every
+# chat and session-backed worker turn is the budget while `harness.tool_search` is off
+# by decision (#456). Re-arm it, cap per-tool descriptions, or raise this number with a
 # stated budget — all three are human calls, recorded on item #1555.
+#
+# #1571 took the third route's cheap case rather than make that call, to advertise
+# `Scratchpad`: the tool costs 168 estimated tokens against the 67 of room #1555 left,
+# so 172 came back out of eight other tools' descriptions — prose restating a
+# sentence already in the same description, a parameter's own schema description, or
+# a routing pointer the first line already carried (`mc_close_modal`,
+# `ide_open_file`, `desktop_capture`, `TodoWrite`, `Write`, `browser_evaluate`,
+# `http_search`, `http_request`). 22,261 over 104 tools without the module, 22,429
+# over 105 with it. No tool was un-listed to pay for it and no input_schema changed:
+# `test_no_module_tool_is_left_off_the_wire` is the node that holds that floor.
 INTERNAL_CATALOG_TOKEN_CEILING = 22_500
 
 
@@ -1008,3 +1018,29 @@ def test_advertised_catalog_stays_under_its_token_ceiling(tools):
         f"the advertised catalog is {tokens} estimated tokens over "
         f"{len(advertised)} tools, past the {INTERNAL_CATALOG_TOKEN_CEILING} "
         "ceiling; trim a description or raise the ceiling with a reason")
+
+
+def test_no_module_tool_is_left_off_the_wire(tools):
+    """Every tool a loaded module declares reaches `tools/list`.
+
+    The ceiling test above caps what the catalog may COST, which quietly makes
+    un-advertising a tool a way to satisfy it: the number goes down and a
+    capability disappears in the same commit, with a green suite. That is not a
+    saving, so the two tests pin the surface from opposite ends — cost from above,
+    coverage from below. `tools/list` must carry exactly what the modules declare,
+    which is also what makes a description-only reclaim auditable: the only lever
+    left that moves the ceiling number is the prose.
+
+    `declared` is each module's own `list_tools()`, so a module that exports a tool
+    but is missing from `MODULES` (the way `Scratchpad` sat unserved for a day) is a
+    mismatch here too. Thunderbird exports nothing while its bridge is absent, so it
+    contributes to neither side (see `_unverifiable_names`).
+    """
+    declared: set[str] = set()
+    for mod in M.MODULES:
+        declared |= {t.name for t in asyncio.run(mod.list_tools())}
+    advertised = {t.name for t in tools}
+    assert declared == advertised, (
+        "the advertised catalog is not what the modules declare: "
+        f"held back={sorted(declared - advertised)}, "
+        f"never declared={sorted(advertised - declared)}")

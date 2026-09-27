@@ -204,9 +204,7 @@ async def list_tools():
                 "Open a file in the IDE tab — adds an editor tab and focuses "
                 "it (or just focuses if already open). The user's IDE folder "
                 "should usually contain this file, but any absolute path "
-                "works. Returns the language Monaco will use.\n\n"
-                "Use this whenever the user asks to \"pull up\", \"show\", "
-                "\"open\" a file. For directories, use ide_open_folder."
+                "works. Returns the language Monaco will use."
             ),
             inputSchema={
                 "type": "object",

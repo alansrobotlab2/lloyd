@@ -86,7 +86,7 @@ async def _todo_write(args: dict[str, Any]) -> str:
 
 _TOOL_DESCRIPTION = """Use for a task of three or more steps, or when the user hands you a list of things to do; skip it for a single trivial task or a conversational answer. It keeps a task list for this session that the user can watch.
 
-Each call replaces the whole list: send every item, not a delta. Each item carries `content` (imperative, "Run tests"), `activeForm` (present continuous, "Running tests") and a `status` of pending, in_progress or completed.
+Each call replaces the whole list: send every item, not a delta. Each item carries `content` (imperative), `activeForm` (present continuous) and a `status`.
 
 - While work is ongoing, keep exactly one item in_progress, and mark it before you start it.
 - Mark an item completed as soon as it is fully done, and not before: failing tests, a partial implementation or an unresolved error keep it in_progress. When blocked, add an item for what has to be resolved.

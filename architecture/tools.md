@@ -17,7 +17,7 @@ relations:
   - autonomy/38-nightly-reflection-signals.md
   - architecture/autonomy-jobs.md
 tags: [architecture, tools, mcp]
-summary: The lloyd-mcp aggregator — 145 tools across 26 modules behind one
+summary: The lloyd-mcp aggregator — 147 tools across 29 modules behind one
   Server("lloyd") on :8500/mcp, the dispatch path every call takes, and every
   tool with its properties.
 type: reference
@@ -34,10 +34,12 @@ and no gateway. The in-process harness (`app/harness/`) is the client that
 dispatches tools. The Tools page's discovery (`app/mcp_discovery.py`) opens its
 own session to list them, and the backend reads the side routes in §2.
 
-**145 tools, 26 modules**, from an offline `list_tools()` on 2026-09-23 (105
-in the tree plus the Thunderbird bridge's 40). The model is shown fewer:
-`_BackgroundTaskDrain` is never advertised, and the four `discord_*` tools sit
-in `disabled_tools`, so an ordinary chat turn sees 140. Twelve were retired on
+**147 tools, 29 modules**, from an offline `list_tools()` on 2026-09-27 (107 in
+the tree plus the Thunderbird bridge's 40), which the live `:8500/health` agrees
+with once `Scratchpad` is listed — it read 146/28 the morning before. The model is
+shown fewer: `_BackgroundTaskDrain` is never advertised, `recall_observation` is
+offered only to a turn whose relief writes observation stubs (#1481), and the four
+`discord_*` tools sit in `disabled_tools`, so an ordinary chat turn sees 141. Twelve were retired on
 2026-09-23 as duplicates of, or subsumed by, a tool that stays: `fact_check`
 (`fact_resolve`), `fact_profile` (`fact_get`, which took its cap and `query`
 ranking), `browser_type` (`browser_fill(keystrokes=true)`), #376's
@@ -432,6 +434,7 @@ self-evidently a file with a fresh timestamp.
 | `builtin_goal` | 2 | the session goal |
 | `builtin_grants` | 3 | #534 scope-bound authority grants: the human's mint path |
 | `builtin_plan` | 2 | plan mode |
+| `builtin_scratchpad` | 1 | `Scratchpad`: one session's own mid-turn notes, appended additively to a file under the runtime data root and injected back under the pressure anchor (#1554). Listed by #1571, which paid for it in description prose — see `tests/test_mcp_layer.py`'s ceiling comment. In no `annotations` table, which is the fail-safe side: `plan_mode_blocked_tools` blocks it, and `state_changing_tool` says True, so a call with no session id is denied rather than treated as unsandboxed |
 | `builtin_task` | 1 | in-process subagents (§9) |
 | `builtin_todo` | 1 | the session todo list |
 | `ambient` | 2 | background producers pushing into the active chat, and the ambient turn's routing verdict |

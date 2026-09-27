@@ -1439,8 +1439,7 @@ async def list_tools():
             "browser_snapshot — to run the script inside that frame instead of the "
             "top one. That is the only way to reach a cross-origin frame, and the "
             "only way to reach a frame's own JS world; same-origin prose is also "
-            "readable from the top frame via contentDocument. Omitting it keeps "
-            "today's top-frame behaviour."
+            "readable from the top frame via contentDocument."
         ), inputSchema={
             "type": "object",
             "properties": {

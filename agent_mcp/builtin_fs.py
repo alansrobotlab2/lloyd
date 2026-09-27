@@ -700,8 +700,7 @@ async def list_tools():
                 "directories as needed. Creating a new file needs nothing "
                 "first; OVERWRITING an existing one requires that you have "
                 "Read it in this session and that it has not changed since — "
-                "otherwise the write is refused and tells you to Read it. Use "
-                "Edit for changing part of a file."
+                "otherwise the write is refused and tells you to Read it."
             ),
             inputSchema={
                 "type": "object",

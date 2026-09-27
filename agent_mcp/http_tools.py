@@ -544,8 +544,7 @@ async def list_tools():
             "Search the public web (DuckDuckGo) and get back ranked titles, URLs and snippets. "
             "This is the way to look something up online — reach for it before Bash whenever the "
             "answer is on the internet rather than on this machine, including when you do not yet "
-            "know which URL you need. Pair it with http_fetch to read a result in full. Do not shell "
-            "out to curl or wget for web search."
+            "know which URL you need. Do not shell out to curl or wget for web search."
         ), inputSchema={
             "type": "object",
             "properties": {
@@ -578,8 +577,8 @@ async def list_tools():
         Tool(name="http_request", description=(
             "Use for APIs, non-GET verbs or a raw body; to read a human-facing page use http_fetch instead.\n\n"
             "Make a raw HTTP request with any verb, custom headers and a body, and get back the status "
-            "code, response headers and the unparsed body. Use it for REST/GraphQL APIs, for POST/PUT/PATCH/DELETE, and whenever you want JSON or XML exactly as the server sent it rather than extracted "
-            "prose. For reading a human-facing web page use http_fetch; to find a URL first use http_search."
+            "code, response headers and the unparsed body. Use it for REST/GraphQL APIs, and whenever you want JSON or XML exactly as the server sent it rather than extracted "
+            "prose. To find a URL first, use http_search."
         ), inputSchema={
             "type": "object",
             "properties": {
