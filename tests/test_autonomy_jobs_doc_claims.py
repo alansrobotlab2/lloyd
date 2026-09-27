@@ -1442,3 +1442,236 @@ def test_the_hygiene_skill_points_the_closed_pile_at_its_owner():
     assert "what gets archived" not in flat and "Archive stale" not in flat, (
         "the skill has taken on the archiving role the doc just gave up. It is "
         "report-only; the owner it names is #1566, not itself")
+
+
+# ── #1568: what #35's eight-to-twelve actually is ───────────────────────────
+#
+# One status, two owners, and one number that described neither of them. `up_next`
+# is the target of #35's promotions and, via `IMPLEMENT_POOL_STATUS` in
+# `scripts/automod/backlog.py`, the self-modification loop's take-list. The job
+# table handed a reader "target queue size 8–12" for both, while the loop bounds the
+# same status at `max(IMPLEMENT_POOL_FLOOR, items landed in the trailing 7 days)` —
+# `bound` 268 against `floor` 20, `ready` 0, measured 2026-09-27 — and counts a
+# different set entirely: `ready_confirmed`, which additionally requires the item's
+# latest ledger `confirmed` verdict to carry acceptance. A triage promotion writes a
+# front-matter status and an `activity` line and no verdict, so it is never in that
+# count at all, and neither number can validate the other.
+#
+# The boundary the defect actually sat on is not this file. The prompt a #35 run is
+# served is `skills/backlog-triage/SKILL.md` plus that task's front-matter
+# `description:` and nothing else (`app/autonomy.py::_build_task_prompt`), so a
+# relabel that stopped in the repo doc would have changed what nobody executes and
+# left the phrasing in front of the worker. Read across it, for the reason
+# `board_presence.py` gives: the vault is on every box that runs this suite, so a
+# missing vault is an assertion failure here, never a skip.
+
+TRIAGE_CARRIERS = ("queue size", "8–12", "8-12")   # en dash and hyphen both
+
+
+def _triage_skill() -> str:
+    """The live triage skill, which is the job's prompt."""
+    import board_presence
+
+    path = board_presence.vault_root() / "skills" / "backlog-triage" / "SKILL.md"
+    assert path.is_file(), (
+        f"{path} is unreadable, and #35's instructions ARE that file — §Queue the "
+        f"work's row for it is prose about it, not the job")
+    return path.read_text()
+
+
+def _task_35_front_matter() -> dict:
+    """Task #35's parsed front matter, from the live vault."""
+    import board_presence
+    import yaml
+
+    root = board_presence.vault_root() / "autonomy"
+    files = sorted(root.glob("35-*.md"))
+    assert len(files) == 1, (
+        f"expected exactly one `autonomy/35-*.md` under {root}, found "
+        f"{[f.name for f in files]} — with two, which one the engine loads is "
+        f"undefined and this file cannot say which is being pinned")
+    parsed = yaml.safe_load(files[0].read_text().split("---", 2)[1])
+    assert isinstance(parsed, dict) and parsed.get("id") == 35, (
+        f"{files[0]} does not parse to the task with id 35")
+    return parsed
+
+
+def test_the_triage_skill_labels_its_budget_as_attention_not_queue_size():
+    """Clause 1. The number survives; what it is called does not.
+
+    "Ideal `up_next` queue size: 8–12 items" made a review budget read as a fleet
+    queue bound, in the one file that both the worker and §Queue the work describe.
+    Step 2 now holds the pass to a human attention budget of eight to twelve
+    promoted items and says so in those words, and the phrase "queue size" is gone
+    from the file. The guard the relabel could have been used to gut — "Never
+    promote more than 5 items per run" — is asserted as the floor it stays at: an
+    attention budget of twelve was never a licence to promote twelve in one run.
+    """
+    skill = _triage_skill()
+    stale = [c for c in TRIAGE_CARRIERS if c in skill]
+    assert stale == [], (
+        f"{stale} is back in skills/backlog-triage/SKILL.md. The cap this pass "
+        f"applies is a human attention budget for untriaged promotions; the loop's "
+        f"own limit is implement_pool.bound, and the skill's job is to point at it")
+    assert "attention budget" in skill, (
+        "the surviving cap is unlabelled again, which is the whole of #1568")
+    assert "Never promote more than 5 items per run (keep queue manageable)" in skill, (
+        "the per-run promotion guard went missing in the relabel. Twelve is what a "
+        "person can review afterwards; five is what one run may write")
+
+
+def test_the_triage_skill_points_the_run_at_the_bound_the_loop_derives():
+    """Clause 2. The limit it must not chase, with the command that reads it.
+
+    Step 2 names `board_health`'s `implement_pool.bound` / `.ready` and the bound's
+    derivation, because "do not chase it" is only executable by a run that can look
+    at it. So the command is not decoration: this node checks the names the skill
+    tells the run to read are real names in the dict that call returns, and pins the
+    constant the skill quotes (`IMPLEMENT_POOL_FLOOR = 20`) against the module that
+    defines it. The bound is landing-rate driven, so it is not asserted as a value —
+    on 2026-09-27 it read 268 with `ready` at 0, which is the point: with a floor of
+    20 and 267 items landed in the trailing week, nothing about the derived side
+    binds today, and a promotion pass reading it as a target would be promoting
+    toward a number it cannot influence.
+    """
+    from scripts.automod import backlog as B
+    from scripts.automod import state as S
+
+    skill = _flat(_triage_skill())
+    for token in ("board_health", "implement_pool", ".bound", ".ready"):
+        assert token in skill, (
+            f"Step 2 no longer names `{token}`, so the run has no way to read the "
+            f"bound this file tells it not to chase")
+    assert "IMPLEMENT_POOL_FLOOR" in skill and "trailing 7 days" in skill, (
+        "the skill stopped stating how the bound is derived, and a reader is left "
+        "with a large number sitting unexplained next to eight to twelve")
+    assert B.IMPLEMENT_POOL_FLOOR == 20, (
+        f"IMPLEMENT_POOL_FLOOR is {B.IMPLEMENT_POOL_FLOOR} in the code while the "
+        f"skill still quotes 20 — the constant moved, and prose quoting a constant "
+        f"has to move with it")
+    assert "would be wrong" in skill, (
+        "the skill lost the sentence saying promoting toward `bound` is wrong. "
+        "Naming a large derived ceiling beside a small attention budget without that "
+        "caveat is an invitation, which is how #1568's option A reads")
+
+    pool = B.board_health(S.LEDGER_PATH).get("implement_pool")
+    assert isinstance(pool, dict) and {"bound", "ready", "floor"} <= set(pool), (
+        f"board_health()['implement_pool'] is {pool!r}, and every #35 run is told to "
+        f"read `bound` and `ready` out of exactly that")
+    assert pool["bound"] >= pool["floor"] == B.IMPLEMENT_POOL_FLOOR, (
+        f"implement_pool reads {pool!r}: the bound no longer sits at or above the "
+        f"floor the skill quotes, so implement_pool_bound's max() is not what the "
+        f"prose says it is")
+
+
+def test_the_triage_skill_names_the_denominator_the_loop_actually_counts():
+    """Clause 3. Same status, different quantity, said out loud.
+
+    `implement_pool_full` reports `ready` as `len(ready_confirmed(...))` — items
+    that are `status == up_next` AND carry a ledger `confirmed` verdict with
+    acceptance, minus grouped members, human-only items, spent attempts and rounds
+    the loop is already gating or landing. #35's promotions write a status and an
+    `activity` line and no verdict, so they never enter that set. Which means
+    `ready: 0` is not a licence to promote toward `bound`, and a skill that does not
+    say so out loud will be read as if it were.
+    """
+    from scripts.automod import backlog as B
+    from scripts.automod import state as S
+
+    skill = _flat(_triage_skill())
+    assert "ready_confirmed" in skill, (
+        "the skill stopped naming the set the loop's gate counts, which is the only "
+        "reason the two numbers can never be reconciled by size alone")
+    line = next((ln for ln in _triage_skill().splitlines() if "ready_confirmed" in ln), "")
+    assert "verdict" in line and "acceptance" in line, (
+        f"the `ready_confirmed` line is now {line!r} — naming the function without "
+        f"the verdict-and-acceptance requirement is exactly how a reader concludes "
+        f"raw `up_next` is what fills the pool")
+    assert "invisible" in skill, (
+        "the skill lost the statement that a triage promotion is invisible to the "
+        "loop's gate. The asymmetry is the finding, not a footnote to it")
+
+    gate = B.implement_pool_full(S.LEDGER_PATH)
+    assert {"full", "ready", "bound", "floor"} <= set(gate), (
+        f"implement_pool_full returns {sorted(gate)}; the skill's sentence describes "
+        f"a gate whose report no longer has these keys")
+    assert gate["ready"] == len(B.ready_confirmed(S.LEDGER_PATH)), (
+        "`implement_pool_full.ready` is no longer `len(ready_confirmed(...))`, so "
+        "what the skill tells the run about the denominator and what the gate counts "
+        "have come apart — which is the defect #1568 was filed on")
+    raw = B.board_health(S.LEDGER_PATH)["up_next"]["total"]
+    assert gate["ready"] <= raw, (
+        f"ready_confirmed reports {gate['ready']} while raw `up_next` holds {raw}. "
+        f"The confirmed set is a subset of the status set by definition; if it ever "
+        f"exceeds it, the two are no longer the same status and the skill's "
+        f"explanation of the difference is false")
+
+
+def test_the_prompt_task_35_is_served_names_no_queue_size_target():
+    """Clause 4, across the seam that carries the number to the model.
+
+    `_build_task_prompt` renders the skill plus the task's front-matter
+    `description:` and nothing else, and that description used to read "Target queue
+    size: 8-12 items" — a second carrier that reached every run independently of the
+    skill, which is why editing the skill alone would not have closed this. So
+    assert against the rendered prompt, not the file: the thing that has to be free
+    of the phrasing is what the worker actually reads.
+    """
+    from app.autonomy import _build_task_prompt
+
+    task = _task_35_front_matter()
+    desc = str(task.get("description", "")).strip()
+    assert desc, "task #35's `description:` is empty"
+    stale = [c for c in TRIAGE_CARRIERS if c in desc]
+    assert stale == [], (
+        f"{stale} is back in #35's `description:`, which is rendered to the worker "
+        f"beside the skill whether or not the skill still says it")
+    assert "attention budget" in desc, (
+        "the description no longer says what the budget it defers to is")
+
+    prompt = _build_task_prompt(task, _triage_skill())
+    assert "Task description:" in prompt, (
+        "_build_task_prompt stopped rendering the description, so this node and the "
+        "clause it pins are measuring a seam that has moved")
+    leaked = [c for c in TRIAGE_CARRIERS if c in prompt]
+    assert leaked == [], (
+        f"the prompt a #35 run is served still carries {leaked}, from a carrier "
+        f"outside the skill. Find it and relabel it — the skill is not the only door")
+    assert "attention budget" in prompt, (
+        "neither carrier that reaches the run names the cap an attention budget, so "
+        "the run cannot tell it apart from a queue bound")
+
+
+def test_the_job_row_labels_the_budget_and_cross_references_the_derived_bound():
+    """Clause 5, in the file a reader who never opens the vault actually reads.
+
+    §Queue the work's row for #35 was the only place in the repo stating 8–12, and
+    it stated it as the queue target — the fleet's queue policy, to anyone reading
+    the job doc. It now labels the cap a human attention budget and points at
+    `implement_pool_bound` for the real limit, and the cross-reference is checked to
+    resolve rather than merely present: a pointer into `[[automod]]` that lands on no
+    such name is the same dead end as no pointer.
+
+    One word changed in passing on the line being rewritten: the row promoted "inbox
+    items", and the vault retired `inbox` in favour of `draft` (#786 — the same
+    retirement the node above §Queue cites, whose commit lives on the vault's main).
+    """
+    role = _role_cell("| ID | Freq | Role |", "#35")
+    stale = [c for c in TRIAGE_CARRIERS if c in role]
+    assert stale == [], (
+        f"{stale} is back in #35's role cell. Stating the attention budget there is "
+        f"fine; stating it as the queue size is the conflation #1568 exists to kill")
+    assert "attention budget" in role, "the row's cap is unlabelled again"
+    assert "implement_pool_bound" in role, (
+        "the row stopped pointing at the loop's real depth limit")
+    assert "[[automod]]" in role, (
+        "the row lost the link to the document that derives the bound it cites")
+    automod = (ROOT / "architecture" / "automod.md").read_text()
+    assert "implement_pool_bound" in automod, (
+        "the row cross-references [[automod]] for `implement_pool_bound` and that "
+        "name is not in architecture/automod.md — a cross-reference to a place that "
+        "does not hold the thing is how a doc starts lying again")
+    assert "`draft`" in role and "inbox" not in role, (
+        f"#35's row now reads {role[:70]!r}… — the vault retired `inbox` in favour of "
+        f"`draft` (#786), and a job row naming a status the board cannot hold is the "
+        f"doc contradicting the state machine")

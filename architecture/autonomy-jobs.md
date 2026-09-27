@@ -670,7 +670,7 @@ row); #65's registry conversion is still unmeasured.
 | ID | Freq | Role |
 |----|------|---|
 | #65 | daily | Propose 5–8 research topics into `research.db` via `research_propose`, from the knowledge health report, session-distill gaps, open backlog and the last two daily notes |
-| #35 | daily | Promote 2–4 high-priority inbox items into `up_next`; target queue size 8–12; skip when `up_next` is at capacity unless critical/high blockers exist |
+| #35 | daily | Promote 2–4 high-priority `draft` items into `up_next`, holding the queue to a **human attention budget** of eight to twelve promoted items and skipping when that is full unless critical/high blockers exist. The budget is what one person can review in a sitting, not the loop's intake limit: the depth gate is `implement_pool_bound`, derived as `max(implement_pool_floor, items landed in the trailing 7 days)` and counted over `ready_confirmed` items — read `implement_pool.bound` / `.ready` from `board_health`, and see [[automod]] for the bound's derivation |
 | #77 | weekly | Report-only census of the board — tally by status, flag stale drafts (>30 days untouched), duplicate ids, duplicate titles. Touches no file: archives nothing, edits nothing, deletes nothing, files nothing; every candidate it names is the user's act |
 
 **#65 feeds the `deep-research` worker and no longer reads or writes any queue
