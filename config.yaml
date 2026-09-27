@@ -1363,6 +1363,11 @@ automod:
     # history stays under refs/automod/rounds/<round>. false: every commit
     # of the branch lands, as before.
     squash: true
+    # The one co-author every landing commit carries (Alan, 2026-09-26); the
+    # author is the live repo's identity. Co-Authored-By lines the round's
+    # commits wrote are dropped — the model invents them, and #1238's credited
+    # a stranger on GitHub. A GitHub noreply address here would link Lloyd.
+    coauthor: "Lloyd <lloyd@local>"
     # A landing that changes no file the backend or the aggregator has
     # loaded restarts nothing (2026-09-19): no drain, no pool pause, no wait
     # for the other rounds' turns. The promoter asks both processes

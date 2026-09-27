@@ -16,6 +16,7 @@ branch twice, so every round gets its own `automod/<round_id>` branch.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -209,6 +210,64 @@ def squash_onto(worktree: Path, base: str, message: str, *,
     if keep_ref:
         git(worktree, "update-ref", keep_ref, old)
     return new, f"squashed {count.stdout.strip()} commits ({old[:8]} → {new[:8]}), same tree"
+
+
+def reword_onto(worktree: Path, base: str, reword, *,
+                keep_ref: str = "") -> tuple[str | None, str]:
+    """Rewrite the message of every commit in `base..HEAD` with `reword(msg)`.
+
+    `(new_sha, detail)`; `new_sha` is None when no message changed or the
+    rewrite was refused, and the branch is then exactly as it was. The
+    promoter runs it on whatever `squash_onto` leaves alone — a single-commit
+    round, or every commit when `squash` is off — because the model writes
+    those messages, and one of them credited a stranger on GitHub (#1238's
+    invented co-author, 2026-09-19). The squash's guarantees hold: each commit
+    keeps its tree, its place in the chain and its authorship, and only its
+    message changes; the final tree is proved identical to the gated one; the
+    old history is kept under `keep_ref` unless something already holds it.
+    """
+    old = head(worktree)
+    if not old:
+        return None, "no HEAD"
+    if git(worktree, "merge-base", "--is-ancestor", base, old).returncode != 0:
+        return None, f"{base[:8]} is not an ancestor of the branch"
+    if git(worktree, "rev-list", "--count", "--merges", f"{base}..{old}").stdout.strip() != "0":
+        return None, "branch has merge commits; left for the fast-forward to judge"
+    listed = git(worktree, "rev-list", "--reverse", f"{base}..{old}")
+    commits = (listed.stdout or "").split()
+    if listed.returncode != 0 or not commits:
+        return None, "no commits to reword"
+    if git(worktree, "status", "--porcelain", "--untracked-files=no").stdout.strip():
+        return None, "worktree has uncommitted changes"
+    parent, changed = base, 0
+    for sha in commits:
+        meta = git(worktree, "log", "-1", "--format=%an%x00%ae%x00%aI%x00%B", sha).stdout
+        name, email, date, msg = (meta.split("\0", 3) + ["", "", "", ""])[:4]
+        msg = msg.rstrip("\n") + "\n"   # `log` pads %B; a stored message ends in one newline
+        new_msg = reword(msg)
+        if new_msg == msg and not changed:
+            parent = sha            # nothing rewritten below it yet: keep the gated sha
+            continue
+        changed += 1
+        tree = git(worktree, "rev-parse", f"{sha}^{{tree}}").stdout.strip()
+        env = {**os.environ, "GIT_AUTHOR_NAME": name, "GIT_AUTHOR_EMAIL": email,
+               "GIT_AUTHOR_DATE": date}
+        made = subprocess.run(["git", "-C", str(worktree), "commit-tree", tree, "-p", parent,
+                               "-F", "-"], input=new_msg, capture_output=True, text=True, env=env)
+        parent = made.stdout.strip()
+        if made.returncode != 0 or not parent:
+            return None, f"commit-tree failed ({(made.stderr or '').strip()[:160]}); branch untouched"
+    if not changed:
+        return None, "every message already as wanted"
+    old_tree = git(worktree, "rev-parse", f"{old}^{{tree}}").stdout.strip()
+    if git(worktree, "rev-parse", f"{parent}^{{tree}}").stdout.strip() != old_tree:
+        return None, "rewording did not reproduce the gated tree; branch untouched"
+    if git(worktree, "reset", "--soft", parent).returncode != 0:
+        git(worktree, "reset", "--soft", old)
+        return None, "reset --soft failed; branch restored"
+    if keep_ref and git(worktree, "rev-parse", "-q", "--verify", keep_ref).returncode != 0:
+        git(worktree, "update-ref", keep_ref, old)
+    return parent, f"reworded {changed} of {len(commits)} commit(s) ({old[:8]} → {parent[:8]}), same tree"
 
 
 def is_clean(repo: Path) -> bool:

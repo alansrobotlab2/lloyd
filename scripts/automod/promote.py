@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -831,24 +832,75 @@ def squash_enabled() -> bool:
     return bool(S.landing_cfg(LIVE_ROOT).get("squash", True))
 
 
+# Who a landing credits. The commit's author is the live repo's identity (Alan);
+# the one co-author is Lloyd, and it is written HERE, never taken from the
+# round's commits. Until 2026-09-26 the squash copied every Co-Authored-By line
+# the model wrote, and the model — imitating a history where most commits carry
+# a Claude trailer — invents them: #1238's landing (adfd8022) credited
+# `Lloyding <69833984+Lloyding@users.noreply.github.com>`, and GitHub resolves
+# that address by its number to a real account, which then showed as a
+# contributor to the public repo. `automod.landing.coauthor` changes the line
+# (a GitHub noreply address, if Lloyd ever gets an account).
+DEFAULT_COAUTHOR = "Lloyd <lloyd@local>"
+# A trailer-shaped line only: prose that merely starts with the words (a
+# commit describing this very bug) is not a credit and is left alone.
+_COAUTHOR_RE = re.compile(r"^[ \t]*co-authored-by[ \t]*:[^\n]*<[^>\n]*>[ \t]*$", re.I | re.M)
+
+
+def landing_coauthor() -> str:
+    value = " ".join(str(S.landing_cfg(LIVE_ROOT).get("coauthor") or "").split())
+    return value if _COAUTHOR_RE.fullmatch(f"Co-Authored-By: {value}") else DEFAULT_COAUTHOR
+
+
+def attributed(message: str, coauthor: str | None = None) -> str:
+    """`message` with every Co-Authored-By trailer removed and the landing's own
+    appended — the only credit line a landing commit carries."""
+    kept = _COAUTHOR_RE.sub("", message)
+    kept = re.sub(r"\n{3,}", "\n\n", kept).rstrip()
+    return f"{kept}\n\nCo-Authored-By: {coauthor or landing_coauthor()}\n"
+
+
+def foreign_coauthors(worktree: Path, base: str, coauthor: str | None = None) -> list[str]:
+    """Every credit line in `base..HEAD` other than the landing's own; the last
+    check before a fast-forward publishes the branch onto `main`."""
+    want = f"co-authored-by: {coauthor or landing_coauthor()}".lower()
+    log = W.git(worktree, "log", "--format=%B%x00", f"{base}..HEAD").stdout or ""
+    found = (" ".join(m.group(0).split()) for m in _COAUTHOR_RE.finditer(log))
+    return list(dict.fromkeys(ln for ln in found if ln.lower() != want))
+
+
+def settle_attribution(round_id: str, worktree: Path, base: str) -> tuple[str | None, str]:
+    """Give every commit about to land the landing's credit line and no other.
+
+    `(new_head, detail)` from `W.reword_onto`, run after the squash: a squashed
+    commit is already right and comes back unchanged, so this does its work on
+    a single-commit round and on every commit when `squash` is off. Refuses the
+    landing when a foreign credit would still reach `main`.
+    """
+    new, note = W.reword_onto(worktree, base, attributed,
+                              keep_ref=f"refs/automod/rounds/{round_id}")
+    stray = foreign_coauthors(worktree, base)
+    if stray:
+        _land_failed(round_id, f"the branch would credit {stray[0]!r} on main ({note})",
+                     external=False)
+    return new, note
+
+
 def squash_message(round_id: str, title: str, worktree: Path, base: str) -> str:
     """The one commit's message: the round's title, then what it was made of.
 
     The child subjects are kept in the body because they are the only
     narrative of how the round got there once the branch is gone; the shas
-    are reachable under `refs/automod/rounds/<round>`.
+    are reachable under `refs/automod/rounds/<round>`. The credit line is the
+    landing's own (`attributed`); the children's trailers are not carried.
     """
     log = W.git(worktree, "log", "--reverse", "--format=%h %s", f"{base}..HEAD")
     children = [ln for ln in (log.stdout or "").splitlines() if ln.strip()]
-    trailers = W.git(worktree, "log", "--format=%(trailers:key=Co-Authored-By,unfold)", f"{base}..HEAD")
-    coauthors = list(dict.fromkeys(ln.strip() for ln in (trailers.stdout or "").splitlines() if ln.strip()))
     subject = " ".join((title or "").split())[:140] or (children[-1].split(" ", 1)[-1] if children else round_id)
     body = [subject, "", f"Round {round_id}, squashed at landing from {len(children)} commit(s)",
             f"(kept at refs/automod/rounds/{round_id}):", ""]
     body += [f"  {c}" for c in children]
-    if coauthors:
-        body += [""] + coauthors
-    return "\n".join(body) + "\n"
+    return attributed("\n".join(body))
 
 
 def _land_failed(round_id: str, why: str, *, external: bool, **extra) -> None:
@@ -1317,6 +1369,15 @@ def promote(round_id: str, worktree: Path, base: str, *,
                 current["commit"] = result["commit"] = head
                 _write_record(current, batch)
             result["squash"] = note
+        # Credit: Lloyd's line and no other, on whatever the squash left.
+        reworded, note = settle_attribution(round_id, Path(worktree), live_head)
+        if reworded:
+            current.setdefault("squashed_from", head)
+            result.setdefault("squashed_from", head)
+            head = reworded
+            current["commit"] = result["commit"] = head
+            _write_record(current, batch)
+        result["attribution"] = note
 
         # ── land ───────────────────────────────────────────────────────
         if restart:
@@ -2109,6 +2170,13 @@ def merge_round(round_id: str, worktree: Path, base: str, *,
                 head = entry["commit"] = result["commit"] = squashed
                 S.append_pending(entry)
             result["squash"] = note
+        reworded, note = settle_attribution(round_id, Path(worktree), live_head)
+        if reworded:
+            entry.setdefault("squashed_from", head)
+            result.setdefault("squashed_from", head)
+            head = entry["commit"] = result["commit"] = reworded
+            S.append_pending(entry)
+        result["attribution"] = note
         merge = subprocess.run(
             ["git", "-C", str(live), "merge", "--ff-only", f"automod/{round_id}"],
             capture_output=True, text=True)

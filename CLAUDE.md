@@ -234,7 +234,9 @@ bookkeeping (journal, toast, voice). Re-announcing a recorded state through
   (§8.1a–8.1b).
 - **One commit on `main` per landing**: the promoter squashes
   (`automod.landing.squash`), keeping history at `refs/automod/rounds/<round>`
-  (§6.1).
+  (§6.1). **A landing credits Alan (author) and Lloyd (`automod.landing.coauthor`)
+  only**: model-written `Co-Authored-By` lines are dropped on every path, since an
+  invented one credited a stranger on GitHub (§6.1a).
 
 ### Hand work: ~/lloyd-sandbox
 

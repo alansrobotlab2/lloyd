@@ -1251,7 +1251,9 @@ def _landing_repo(tmp_path, monkeypatch):
     sh(live, "worktree", "add", "-q", "-b", "automod/SM_V", str(wt))
     (wt / "f.py").write_text("A = 2\n", encoding="utf-8")
     sh(wt, "add", ".")
-    sh(wt, "commit", "-qm", "gated")
+    # Already carries the landing's credit line, so `settle_attribution` leaves
+    # the gated sha alone and `head` is what lands (test_landing_attribution.py).
+    sh(wt, "commit", "-qm", "gated\n\nCo-Authored-By: Lloyd <lloyd@local>")
     head = sh(wt, "rev-parse", "HEAD")
 
     health = {"boot_id": "boot-1", "commit": "not-the-candidate"}

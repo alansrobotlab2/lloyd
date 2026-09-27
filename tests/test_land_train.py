@@ -126,8 +126,12 @@ def world(tmp_path, monkeypatch):
     return w
 
 
-def _round(w, rid, rel="app/mod.py", text=None):
-    """A gated round cut from live HEAD: one commit on `automod/<rid>`."""
+def _round(w, rid, rel="app/mod.py", text=None, credit="Co-Authored-By: Lloyd <lloyd@local>"):
+    """A gated round cut from live HEAD: one commit on `automod/<rid>`.
+
+    The commit already carries the landing's credit line, so the landing keeps
+    its sha and `head` is what lands; pass another `credit` to exercise the
+    rewording (test_landing_attribution.py)."""
     live = w["live"]
     base = _git(live, "rev-parse", "HEAD").stdout.strip()
     wt = w["tmp"] / f"wt_{rid}"
@@ -135,7 +139,7 @@ def _round(w, rid, rel="app/mod.py", text=None):
     (wt / rel).parent.mkdir(parents=True, exist_ok=True)
     (wt / rel).write_text(text or f"# {rid}\nX = {rid!r}\n", encoding="utf-8")
     _git(wt, "add", "-A")
-    _git(wt, "commit", "-q", "-m", f"round {rid}")
+    _git(wt, "commit", "-q", "-m", f"round {rid}\n\n{credit}")
     head = _git(wt, "rev-parse", "HEAD").stdout.strip()
     return {"rid": rid, "wt": wt, "base": base, "head": head,
             "report": {"head": head, "ok": True, "changed_paths": [rel]}}
@@ -175,6 +179,22 @@ def test_a_deferrable_landing_only_merges(world, monkeypatch):
     row = _rows("promoted")[-1]
     assert row["deferred"] is True and row["restart_pending"] is True
     assert row["errors_until"] is None and row["restarted"] is None
+
+
+def test_an_invented_coauthor_never_reaches_main(world, monkeypatch):
+    """#1241's shape: a single-commit round whose model-written message credits
+    a stranger. The landing rewords it — same tree, new sha — and the pending
+    entry, the ledger row and `main` all name the reworded commit."""
+    _train(monkeypatch)
+    rd = _round(world, "SM_C", credit="Co-authored-by: Lloyding <69833984+Lloyding@users.noreply.github.com>")
+    out = _land(rd)
+    assert out["promoted"] is True and out["commit"] != rd["head"]
+    assert _head(world) == out["commit"] and out["squashed_from"] == rd["head"]
+    tree = lambda rev: _git(world["live"], "rev-parse", f"{rev}^{{tree}}").stdout.strip()
+    assert tree(out["commit"]) == tree(rd["head"]), "what was gated is what landed"
+    body = _git(world["live"], "log", "-1", "--format=%B").stdout
+    assert "69833984" not in body and body.rstrip().endswith("Co-Authored-By: Lloyd <lloyd@local>")
+    assert [e["commit"] for e in S.read_pending()] == [out["commit"]]
 
 
 def test_a_merge_lands_over_an_observing_record(world, monkeypatch):

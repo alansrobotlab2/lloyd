@@ -2861,13 +2861,49 @@ same way. Alan's rule: work on a branch, squash when it is promoted.
   does not change.
 - **The working history is kept** at `refs/automod/rounds/<round>` — outside
   `refs/heads`, so it shows in no branch list and gc never takes it — and the
-  child subjects ride in the squashed commit's body, with the round id and
-  deduplicated `Co-Authored-By` trailers. The subject is the round's title.
+  child subjects ride in the squashed commit's body, with the round id. The
+  subject is the round's title.
 - **Hand work**: one branch per change in the sandbox, squashed to one commit
   before the `merge --ff-only` command is handed over (§3.3a).
 
 `tests/test_landing_squash.py` pins it, including a squash sabotaged into a
 different tree restoring the branch.
+
+#### 6.1a Who a landing credits (2026-09-26)
+
+The author of a landing commit is the live repo's identity (Alan); its one
+co-author is `automod.landing.coauthor`, default `Lloyd <lloyd@local>`. Every
+`Co-Authored-By` line the round's own commits carry is dropped, because the
+model writes them. It imitates a history where most commits end in a Claude
+trailer, and it invents them. #1238's landing (`adfd8022`, 2026-09-19) carried
+`Lloyding <69833984+Lloyding@users.noreply.github.com>`. GitHub resolves a
+`<id>+<login>@users.noreply.github.com` address by its number, and 69833984 is
+a real account (`mikeh760`), which the public repo's sidebar then listed as a
+contributor. #1241's landing (`9728fbbb`) carried `lllydeon@proton.me`, which
+anyone could claim later. The squash copied the first. The second was a
+one-commit round, which the squash never touches.
+
+- **`squash_message`** writes the landing's line and carries no child
+  trailers.
+- **`settle_attribution`** runs after the squash on both landing paths (eager
+  and train). It calls `W.reword_onto(worktree, live_head, attributed)`, which
+  rewrites the message of each commit `squash_onto` left alone: a one-commit
+  round, or every commit when `squash` is off. Each keeps its tree, parent
+  chain and author; the final tree is proved equal to the gated one; the
+  unrewritten history is kept at `refs/automod/rounds/<round>`; and
+  `squashed_from` names the gated sha, as a squash does. A branch whose
+  messages are already right keeps its shas.
+- **The backstop:** `foreign_coauthors` reads `live_head..HEAD` just before
+  the fast-forward, and any credit line other than the landing's own refuses
+  the landing (`land_failed`).
+- Only trailer-shaped lines (`Co-authored-by: … <…>`) count. Prose that starts
+  with the words is left alone.
+- Removing the two credits already on `main` needs a history rewrite and a
+  force push to the public repo. It was not done; it is Alan's call.
+
+`tests/test_landing_attribution.py` pins it, and
+`tests/test_land_train.py::test_an_invented_coauthor_never_reaches_main`
+drives a whole train landing through it.
 
 **The observation window starts at step 4, not step 1.** The idle gate may
 legitimately wait fifteen minutes; a window started early would be mostly

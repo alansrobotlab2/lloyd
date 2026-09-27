@@ -54,7 +54,9 @@ def test_three_commits_become_one_with_the_same_tree_and_the_history_is_kept(bra
     assert body.startswith("Item #7: the change, as the board names it\n")
     assert "squashed at landing from 3 commit(s)" in body
     assert "feat(#7): the change" in body and "docs(#7): say so" in body
-    assert body.count("Co-Authored-By: Lloyd") == 1, "trailers deduplicated, not dropped"
+    assert "lloyd@example.invalid" not in body, "the round's own credit lines are not carried"
+    assert body.rstrip().endswith("Co-Authored-By: Lloyd <lloyd@local>")
+    assert body.lower().count("co-authored-by") == 1
 
 
 def test_a_single_commit_round_is_left_exactly_as_gated(branch):
