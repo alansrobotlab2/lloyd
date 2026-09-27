@@ -23,9 +23,11 @@ no qmd at all and cannot go red because somebody hand-edited their config.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -295,6 +297,11 @@ def _run_main(monkeypatch, tmp_path, template: Path, live: Path) -> dict:
     monkeypatch.setattr(m, "TEMPLATE_CONFIG", template)
     monkeypatch.setattr(m, "LIVE_CONFIG", live)
     monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    # #1598 put an acting delete into main()'s no-work path, so a run over an
+    # unpatched INDEX would unlink real files out of ~/.cache/qmd — the directory
+    # this job owns on a production box. Pointed at a fixture that does not exist,
+    # which is the measured-empty case: no strays, nothing to delete.
+    monkeypatch.setattr(m, "INDEX", tmp_path / "qmd" / "index.sqlite")
     monkeypatch.setattr(m, "inspect_index", lambda: {"orphan_ratio": 0.0, "vectors_orphaned": 0})
     monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
     monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
@@ -339,6 +346,10 @@ def test_dry_run_prints_the_drift_and_writes_no_file(monkeypatch, tmp_path, caps
     monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
     monkeypatch.setattr(m, "LIVE_CONFIG", l)
     monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    # #1598: main() now deletes in the index directory, so even a dry run points at
+    # a fixture path here — the case asserts no file is written, and it must not be
+    # the case that decides whether the real ~/.cache/qmd survives the suite.
+    monkeypatch.setattr(m, "INDEX", tmp_path / "qmd" / "index.sqlite")
     monkeypatch.setattr(m, "inspect_index", lambda: {"orphan_ratio": 0.0, "vectors_orphaned": 0})
     monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
     # #958 put a health probe on the branch --dry-run shares with the no-op case, so
@@ -416,6 +427,10 @@ def _guard_run(monkeypatch, tmp_path, *, pending: int, documents: int,
     monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
     monkeypatch.setattr(m, "LIVE_CONFIG", l)
     monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    # #1598: main() now deletes files from the index directory on an acting run, so
+    # the path it reads has to be a fixture's. "Nothing here touches ~/.cache/qmd"
+    # in this docstring is now enforced by this line and not by the stubs alone.
+    monkeypatch.setattr(m, "INDEX", tmp_path / "qmd" / "index.sqlite")
     monkeypatch.setattr(m, "inspect_index", lambda: {
         "index_bytes": 901_943_360, "chunks": 44_430, "documents": documents,
         "collections": 9, "collection_errors": 0, "files_skipped_missing": 0,
@@ -627,6 +642,9 @@ def test_the_capacity_verdict_fires_on_the_sept_18_shape_while_prune_does_not(
     monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
     monkeypatch.setattr(m, "LIVE_CONFIG", l)
     monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    # #1598: an empty fixture pile, so the `actions` assertion below is about the
+    # job's own verdict and not about files it measured next to the live index.
+    monkeypatch.setattr(m, "INDEX", tmp_path / "qmd" / "index.sqlite")
     monkeypatch.setattr(m, "inspect_index", lambda: dict(SEPT_18_SHAPE))
     monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
     monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
@@ -772,6 +790,10 @@ def _embed_run(monkeypatch, tmp_path, *, embed_out: str, embed_rc: int = 0,
     monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
     monkeypatch.setattr(m, "LIVE_CONFIG", l)
     monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    # #1598: this helper runs main() all the way through the mutating section, and
+    # that path now unlinks files in the index directory. "Nothing real behind it"
+    # in this docstring holds only because of this line.
+    monkeypatch.setattr(m, "INDEX", tmp_path / "qmd" / "index.sqlite")
 
     shapes, pends, slept = list(snapshots), list(pending), []
 
@@ -923,3 +945,371 @@ def test_an_embed_that_landed_carries_no_not_landed_verdict(monkeypatch, tmp_pat
     assert report["after"] != report["before"]
     assert "embed_did_not_land" not in report, report
     assert "did not land" not in capsys.readouterr().out
+
+
+# --- #1598: the stray pile beside the live index ------------------------------
+#
+# `du -sh ~/.cache/qmd/*` measured on 2026-09-27: four non-live databases — the
+# 09-07 `index.backup-*.sqlite` (998 MB), two embedding-model-switch copies from
+# 09-19 and 09-21 (1.25 GB and 1.27 GB), and `perfbench.sqlite` (1.24 GB) — whose
+# main files sum to 4,863,918,080 B against a live `index.sqlite` of 582,688,768 B.
+# Their `-wal`/`-shm` sidecars add 65,536 B more, so the directory's measured stray
+# total is 4,863,983,616 B. The nightly job that owns that directory printed
+# `need_prune False` and exit 0 with no key for any of them: the pile was invisible
+# to the run's verdict, so each run re-derived nobody's number. #844 had closed on
+# 2026-09-24 carrying #855's "decide their retention in the same change" unexecuted
+# — a closed item is not an owner.
+#
+# Every case here builds its own index directory under `tmp_path` and points `INDEX`
+# at it. Nothing in this section may run the delete path against the real
+# ~/.cache/qmd: four real backups are in there, and two of them are a person's call.
+#
+# And no concrete `index.sqlite.bak-<date>` name of a file that really exists is
+# spelled out anywhere in this file either. The code-reference grep the rule re-runs
+# walks `tests/**.py` too, so a comment naming one would make the run report *this
+# comment* as its reader — which the first live dry run of this change did, until the
+# names were reworded out.
+
+def _qmd_dir(tmp_path: Path, spec: list[tuple[str, int, float]]) -> Path:
+    """Build a fixture index directory: (name, bytes, days ago as mtime)."""
+    d = tmp_path / "qmd"
+    d.mkdir(parents=True, exist_ok=True)
+    # One clock reading for the whole fixture: two files given the same `days_ago`
+    # must come out with *equal* mtimes, the way a `cp -a` leaves a database and its
+    # WAL. Reading the clock per file would make each sidecar a few microseconds
+    # newer than the main file beside it, and the hold-under-test would fire on the
+    # clock rather than on the fact.
+    now = time.time()
+    for name, size, days_ago in spec:
+        p = d / name
+        p.write_bytes(b"\0" * size)
+        ts = now - days_ago * 86400
+        os.utime(p, (ts, ts))
+    return d
+
+
+def _listing(d: Path) -> dict[str, int]:
+    """Every regular file in `d`, as name -> bytes."""
+    return {p.name: p.stat().st_size for p in sorted(d.iterdir()) if p.is_file()}
+
+
+#: The live trio, present in every fixture below: strays are what is beside them.
+LIVE_TRIO = [("index.sqlite", 4000, 0.0), ("index.sqlite-wal", 3000, 0.0),
+             ("index.sqlite-shm", 200, 0.0)]
+
+
+def _retention_run(monkeypatch, tmp_path, index_dir: Path, repo_root: Path, *,
+                   dry_run: bool, capsys=None) -> dict:
+    """Run `main()` over a fixture index directory and a fixture code tree.
+
+    The index and the daemon are stubbed to "nothing to do" the way the helpers
+    above stub them, so the only thing this run can *do* is the retention pass, and
+    the only files it can do it to are the ones the case built. `repo_root` is what
+    the code-reference re-run walks in place of the real tree.
+
+    An acting run's report is read back off the dated file, the way the helpers
+    above do. A dry run's comes off `--json` stdout instead, because `--dry-run`
+    writes no file at all — and "the file is not the proof" is the point: the dry
+    run still has to say what it would have deleted, and it does so on the only
+    surface it has.
+    """
+    t, l = _pair(tmp_path)
+    monkeypatch.setattr(m, "TEMPLATE_CONFIG", t)
+    monkeypatch.setattr(m, "LIVE_CONFIG", l)
+    monkeypatch.setattr(m, "REPORT_DIR", tmp_path / "reflection")
+    monkeypatch.setattr(m, "INDEX", index_dir / "index.sqlite")
+    monkeypatch.setattr(m, "REPO_ROOT", repo_root)
+    monkeypatch.setattr(m, "inspect_index", lambda: {
+        "orphan_ratio": 0.0, "vectors_orphaned": 0})
+    monkeypatch.setattr(m, "pending_embeddings", lambda: 0)
+    monkeypatch.setattr(m, "daemon_healthy", lambda retries=10: True)
+    argv = ["qmd_index_maintenance.py"]
+    if dry_run:
+        assert capsys is not None, "a dry run has no dated file, so it needs --json"
+        argv += ["--dry-run", "--json"]
+    monkeypatch.setattr(sys, "argv", argv)
+    rc = m.main()
+    assert rc == 0, "measuring or retaining a backup never changes the exit code"
+    if dry_run:
+        return json.loads(capsys.readouterr().out)
+    reports = sorted((tmp_path / "reflection").glob("qmd-index-maintenance-*.json"))
+    assert len(reports) == 1, f"expected exactly one dated report, got {reports}"
+    return json.loads(reports[0].read_text())
+
+
+# --- clause 1: the dated report measures the pile -----------------------------
+
+def test_the_report_measures_every_non_live_file_with_bytes_and_mtime(monkeypatch,
+                                                                      tmp_path):
+    """Four 2026-09-27 strays, one named in #855 and still there 20 days later.
+
+    The claim is per-file — name, bytes, mtime — and the total, because "the pile
+    grew" and "the pile is the same pile" are different statements a run cannot
+    make from `index_bytes`, which is main+wal+shm of the live index alone.
+    """
+    d = _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("index.backup-20260907_100044.sqlite", 998, 20.0),
+        ("perfbench.sqlite", 1024, 8.0),
+    ])
+    (d / "models").mkdir()
+    (d / "models" / "big.onnx").write_bytes(b"x" * 5000)
+    # An acting run, because clause 1 is about the dated artifact: `--dry-run`
+    # writes no file at all, so the key has to be proven to reach the JSON on disk.
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    assert [f["name"] for f in report["stray"]] == [
+        "index.backup-20260907_100044.sqlite", "perfbench.sqlite"], (
+        "the live trio is not a stray, and neither is anything inside a directory")
+    assert {f["bytes"] for f in report["stray"]} == {998, 1024}
+    assert report["stray_bytes"] == 998 + 1024
+    by_name = {f["name"]: f for f in report["stray"]}
+    for name, days in (("index.backup-20260907_100044.sqlite", 20.0),
+                       ("perfbench.sqlite", 8.0)):
+        age_days = (datetime.now() - datetime.fromisoformat(by_name[name]["mtime"])).days
+        assert age_days == pytest.approx(days, abs=1), (name, by_name[name]["mtime"])
+
+
+def test_a_directory_holding_only_the_live_trio_records_zero_stray_bytes(
+        monkeypatch, tmp_path):
+    """An empty pile is a measurement of 0, not an omitted key.
+
+    A key that appears only when something is wrong is the absent-input default the
+    catalogued class is about: a reader who cannot tell "measured nothing" from
+    "did not look" inherits no number from it either.
+    """
+    d = _qmd_dir(tmp_path, LIVE_TRIO)
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    assert report["stray"] == []
+    assert "stray_bytes" in report, "0 must be recorded, not left out"
+    assert report["stray_bytes"] == 0
+
+
+# --- clause 2: the newest backup is kept, an older one is a candidate ---------
+
+def test_an_acting_run_keeps_the_newest_backup_by_mtime_and_deletes_the_older_ones(
+        monkeypatch, tmp_path):
+    """One kept copy, and the mtime decides which — the name's date does not.
+
+    `bak-a` is the newest file on disk and `bak-z` an older one, so a rule that
+    sorted by name would keep the wrong database. Each candidate goes with its own
+    `-wal`/`-shm` sidecars: a main file deleted and its WAL left behind is a 0-byte
+    orphan nobody can read.
+    """
+    d = _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("index.sqlite.bak-a", 3000, 1.0),
+        ("index.sqlite.bak-a-wal", 30, 1.0), ("index.sqlite.bak-a-shm", 32, 1.0),
+        ("index.sqlite.bak-z", 2000, 5.0),
+        ("index.sqlite.bak-z-wal", 20, 5.0), ("index.sqlite.bak-z-shm", 32, 5.0),
+        ("index.sqlite.bak-m", 1000, 9.0), ("index.sqlite.bak-m-wal", 10, 9.0),
+    ])
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    after = _listing(d)
+    assert report["stray_retention"]["kept"] == ["index.sqlite.bak-a"]
+    assert after["index.sqlite.bak-a"] == 3000
+    assert "index.sqlite.bak-a-wal" in after and "index.sqlite.bak-a-shm" in after
+    assert sorted(report["stray_retention"]["deleted"]) == [
+        "index.sqlite.bak-m", "index.sqlite.bak-z"]
+    for gone in ("index.sqlite.bak-z", "index.sqlite.bak-z-wal", "index.sqlite.bak-z-shm",
+                 "index.sqlite.bak-m", "index.sqlite.bak-m-wal"):
+        assert gone not in after, gone
+    assert report["stray_retention"]["deleted_bytes"] == 2000 + 20 + 32 + 1000 + 10
+    assert after["index.sqlite"] == 4000 and after["index.sqlite-wal"] == 3000, (
+        "the live trio is never this job's to touch")
+    assert len([n for n in after if n.startswith("index.sqlite.bak")
+                and not n.endswith(("-wal", "-shm"))]) == 1, (
+        "an acting run leaves at most one .bak main file on disk")
+
+
+def test_a_lone_backup_is_not_a_delete_candidate_because_no_newer_one_exists(
+        monkeypatch, tmp_path):
+    """The rule is "keep the newest", not "keep one and free the rest".
+
+    With a single backup there is nothing newer to fall back on, so deleting it
+    would leave the live index with no copy at all.
+    """
+    d = _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("index.sqlite.bak-only", 1500, 30.0), ("index.sqlite.bak-only-wal", 15, 30.0)])
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    assert report["stray_retention"]["kept"] == ["index.sqlite.bak-only"]
+    assert report["stray_retention"]["planned"] == []
+    assert report["stray_retention"]["deleted"] == []
+    assert "index.sqlite.bak-only" in _listing(d)
+
+
+def test_a_backup_s_sidecar_is_never_its_own_member_of_the_series(tmp_path):
+    """`…-wal` matches the `index.sqlite.bak*` prefix as a string and is not a copy.
+
+    Treating it as a member would let a 0-byte WAL be "the newest backup" and put
+    the database it belongs to on the delete list.
+    """
+    d = _qmd_dir(tmp_path, [("index.sqlite", 4000, 0.0),
+                            ("index.sqlite.bak-a", 3000, 2.0),
+                            ("index.sqlite.bak-a-wal", 30, 1.0)])
+    assert m.bak_series(d / "index.sqlite") == [d / "index.sqlite.bak-a"]
+
+
+def test_a_run_that_found_no_live_index_deletes_nothing(monkeypatch, tmp_path):
+    """A missing `index.sqlite` means a swap or a restore is in progress.
+
+    That is the worst possible moment to free a backup, so the pass declines and
+    says so, while still measuring the pile it can see.
+    """
+    d = _qmd_dir(tmp_path, [
+        ("index.sqlite.bak-a", 3000, 1.0), ("index.sqlite.bak-z", 2000, 5.0),
+        ("index.sqlite.bak-m", 1000, 9.0)])
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    assert report["stray_bytes"] == 3000 + 2000 + 1000, "measuring is still safe"
+    assert report["stray_retention"]["planned"] == []
+    assert report["stray_retention"]["deleted"] == []
+    assert "index.sqlite.bak-z" in _listing(d) and "index.sqlite.bak-m" in _listing(d)
+    assert "index.sqlite" in report["stray_retention"]["skipped"]
+
+
+# --- clause 3: a candidate is held while something still reads it -------------
+
+def test_a_candidate_still_named_by_a_code_reference_is_held_and_left_on_disk(
+        monkeypatch, tmp_path):
+    """The grep is re-run inside the same change, on the file it is about to delete.
+
+    #855 asked for `perfbench.sqlite` to go "unless a named benchmark still reads
+    it", and the reason the 2026-09-27 zero-hit grep is trustworthy is that its
+    control hit seven real code files. A hold that cites the file it found is the
+    same discipline applied at the moment of the delete.
+    """
+    repo = tmp_path / "repo"
+    (repo / "app").mkdir(parents=True)
+    (repo / "app" / "bench.py").write_text(
+        "DB = Path.home() / '.cache/qmd/index.sqlite.bak-z'\n")
+    d = _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("index.sqlite.bak-a", 3000, 1.0),
+        ("index.sqlite.bak-z", 2000, 5.0), ("index.sqlite.bak-z-wal", 20, 5.0),
+        ("index.sqlite.bak-m", 1000, 9.0)])
+    report = _retention_run(monkeypatch, tmp_path, d, repo, dry_run=False)
+    held = {h["name"]: h for h in report["stray_retention"]["held"]}
+    assert list(held) == ["index.sqlite.bak-z"], report["stray_retention"]
+    assert "index.sqlite.bak-z" in _listing(d), "a held candidate stays on disk"
+    assert held["index.sqlite.bak-z"]["code_references"] == ["app/bench.py"]
+    assert any("code reference" in b for b in held["index.sqlite.bak-z"]["because"]), held
+    assert "index.sqlite.bak-m" not in _listing(d), (
+        "the hold must not be a blanket refusal to ever delete anything")
+
+
+def test_a_candidate_whose_sidecar_is_newer_than_its_own_main_file_is_held(
+        monkeypatch, tmp_path):
+    """A `-wal`/`-shm` newer than the database means something opened it read-write.
+
+    Measured on the 2026-09-27 pile: `index.sqlite.bak-gemma-20260921-wal` is
+    2026-09-24 13:36 and both `-shm` files 2026-09-24 14:07, against main files from
+    09-19 and 09-21 — and no filename grep can see whoever did it, because a grep
+    cannot match a path built at runtime. Report and hold; do not delete.
+    """
+    d = _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("index.sqlite.bak-a", 3000, 1.0),
+        ("index.sqlite.bak-z", 2000, 5.0), ("index.sqlite.bak-z-wal", 20, 2.0),
+        ("index.sqlite.bak-m", 1000, 9.0), ("index.sqlite.bak-m-shm", 32, 9.0)])
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    held = {h["name"]: h for h in report["stray_retention"]["held"]}
+    assert list(held) == ["index.sqlite.bak-z"], report["stray_retention"]
+    assert "index.sqlite.bak-z" in _listing(d)
+    assert any("-wal" in b for b in held["index.sqlite.bak-z"]["because"]), held
+    assert "index.sqlite.bak-m" not in _listing(d), (
+        "a sidecar the same age as its main file is a clean close, not a hold")
+
+
+@pytest.mark.parametrize("relpath", [
+    ".venvs/lloyd/lib/read.py", "llama.cpp/tools/thing.py", "qmd/src/store.ts",
+    "node_modules/pkg/db.ts", ".git/hooks/pre-push.py", "docs/notes.md",
+    "scripts/notes.txt",
+])
+def test_a_name_mentioned_only_outside_lloyd_s_own_code_is_not_a_reader(
+        tmp_path, relpath):
+    """The hold reads only `*.py`, `*.ts`, `*.sh`, `*.yml` under our own tree.
+
+    The four 2026-09-27 strays are named in `architecture/qmd.md` and
+    `qmd/WORKLOG.md` and opened by no program: prose is not a reader, and neither
+    is a vendored or installed tree. Every one of these paths mentions the name.
+    """
+    repo = tmp_path / "repo"
+    p = repo / relpath
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("DB = 'index.sqlite.bak-z'\n")
+    assert m.code_reference_hits(["index.sqlite.bak-z"], repo) == {
+        "index.sqlite.bak-z": []}
+
+
+def test_the_code_reference_walk_finds_a_real_reader_and_a_real_absence():
+    """A 0-hit grep needs its positive control, on the tree it will really run on.
+
+    `index.sqlite` is named by code in this repo, so an empty answer for it would
+    mean the walk is broken rather than that a name is unread — which is exactly how
+    the 2026-09-27 zero became trustworthy: the same invocation's control hit seven
+    files.
+    """
+    assert m.code_reference_hits(["index.sqlite"], m.REPO_ROOT)["index.sqlite"], (
+        "the walk must find the name the live tree really does reference")
+    # Assembled at runtime, and not written as one literal anywhere in this file:
+    # this test file is itself part of the tree the walk reads, so a literal here
+    # would be a code reference to the very name it is asserting is unreferenced.
+    # That is not a hypothetical — the first run of this test failed exactly that
+    # way, on its own sentinel.
+    absent = "index.sqlite.bak-" + "19700101T000000Z-never-written"
+    assert m.code_reference_hits([absent], m.REPO_ROOT)[absent] == []
+
+
+def test_a_stray_outside_the_backup_series_is_held_for_a_person_and_never_deleted(
+        monkeypatch, tmp_path):
+    """"Not the live index" is not a licence to delete: the directory is shared.
+
+    `eval/contextual_titles.py:41,71` opens `~/.cache/qmd/sub06.sqlite` and
+    `eval/embed_side_index.py:52` builds `subctx.sqlite` there — live side-indexes
+    of this very repo — and #844:141-142 already ruled that deleting someone's
+    backup database is not a code round's call. So `perfbench.sqlite` (whose
+    deletion also retires #408's subject) and `index.backup-*.sqlite` stay: measured,
+    reported, and left for a person.
+    """
+    d = _qmd_dir(tmp_path, LIVE_TRIO + [
+        ("index.backup-20260907_100044.sqlite", 998, 20.0),
+        ("perfbench.sqlite", 1024, 8.0),
+        ("sub06.sqlite", 512, 0.0),
+        ("index.sqlite.bak-a", 3000, 1.0),
+        ("index.sqlite.bak-z", 2000, 5.0)])
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    after = _listing(d)
+    assert {h["name"] for h in report["stray_retention"]["held_for_person"]} == {
+        "index.backup-20260907_100044.sqlite", "perfbench.sqlite", "sub06.sqlite"}
+    for keep in ("index.backup-20260907_100044.sqlite", "perfbench.sqlite",
+                 "sub06.sqlite"):
+        assert keep in after, keep
+    assert "index.sqlite.bak-z" not in after, (
+        "the .bak rule still works beside the files it may not touch")
+
+
+# --- clause 4: --dry-run deletes nothing an acting run would ------------------
+
+def test_a_dry_run_leaves_the_directory_byte_identical_to_what_an_acting_run_would_delete(
+        monkeypatch, tmp_path, capsys):
+    """Same fixture, both ways: the dry run must have something to delete and not
+    delete it, or "deletes nothing" is only proven on a case that had nothing.
+
+    The listing and the byte total are compared file-by-file — `--dry-run` already
+    declines to write its report, and a flag that promises to change nothing has to
+    be held to the directory it is pointed at, not just to the index. The dry run's
+    own verdict comes off `--json` stdout, which is the only surface it leaves.
+    """
+    spec = LIVE_TRIO + [
+        ("index.sqlite.bak-a", 3000, 1.0), ("index.sqlite.bak-a-wal", 30, 1.0),
+        ("index.sqlite.bak-z", 2000, 5.0), ("index.sqlite.bak-z-wal", 20, 5.0),
+        ("perfbench.sqlite", 1024, 8.0)]
+    d = _qmd_dir(tmp_path, spec)
+    before, total_before = _listing(d), sum(_listing(d).values())
+    report = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo",
+                            dry_run=True, capsys=capsys)
+    assert _listing(d) == before, "--dry-run changed the index directory"
+    assert sum(_listing(d).values()) == total_before
+    assert report["stray_retention"]["planned"] == ["index.sqlite.bak-z"], (
+        "the dry run has to name what an acting run would delete")
+    assert report["stray_retention"]["deleted"] == []
+    assert report["stray_retention"]["dry_run"] is True
+    assert report["stray_bytes"] == 3000 + 30 + 2000 + 20 + 1024
+    acting = _retention_run(monkeypatch, tmp_path, d, tmp_path / "repo", dry_run=False)
+    assert acting["stray_retention"]["deleted"] == ["index.sqlite.bak-z"]
+    assert "index.sqlite.bak-z" not in _listing(d)

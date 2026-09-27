@@ -85,6 +85,17 @@ SAFETY CONTRACT — this runs unattended:
     the daemon actually reads, and records it as `config_drift` in the dated
     report (#1298). Drift is a report entry and never an exit code: the job that
     fixes embeddings must not start failing over a stale tracked copy.
+  * Every run measures the files beside the live index and reports them as `stray`
+    plus `stray_bytes` (#1598), and an acting run keeps exactly the newest
+    `index.sqlite.bak*` copy — never one it cannot fall back on, and never one a
+    re-run code-reference grep over Lloyd's own tree still matches, or whose
+    `-wal`/`-shm` is newer than its own main file. Everything outside that series
+    (`perfbench.sqlite`, `index.backup-*.sqlite`, the eval side-indexes this
+    directory shares with `eval/contextual_titles.py`) is measured, recorded under
+    `held_for_person`, and left alone: #844:141-142 ruled that deleting someone's
+    backup database is not a code round's call, and `/home` is mounted `noatime`,
+    so atime is not evidence of "unread" here and is not used as such. `--dry-run`
+    deletes nothing; the plan is reported with `dry_run: true` instead.
 
 Usage:
   python scripts/maintenance/qmd_index_maintenance.py            # act if needed
@@ -95,6 +106,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import subprocess
 import sys
@@ -294,6 +306,222 @@ def index_footprint(index: Path) -> dict:
                       ("shm", index.with_name(index.name + "-shm"))):
         parts[key] = path.stat().st_size if path.exists() else 0
     return {"total": sum(parts.values()), **parts}
+
+
+# ---- #1598: the files beside the live index ----------------------------------
+#
+# On 2026-09-27 `du -sh ~/.cache/qmd/*` found four non-live databases there: the
+# 09-07 `index.backup-*.sqlite` (998 MB), two model-switch copies from 09-19 and
+# 09-21 (1.25 GB and 1.27 GB) and `perfbench.sqlite` (1.24 GB) — 4,863,918,080 B in
+# total against a live `index.sqlite` of 582,688,768 B — while the nightly run
+# printed `need_prune False`, exit 0 and nothing about them. `index_bytes` is
+# main+wal+shm of the *live* index, so the pile was invisible to the job's verdict
+# and every run inherited nobody's number. #844 closed on 2026-09-24 carrying #855's
+# "decide their retention in the same change" unexecuted, and #855, #408 and #1126
+# are closed too: a closed item is not an owner. This job is the only one that looks
+# at the directory at all — `lloyd-qmd-cleanup.service` runs `qmd.js cleanup`, which
+# prunes vectors *inside* the live DB, and the `retention-sweep` skill bounds nine
+# stores and `~/.cache/qmd` is not one of them.
+#
+# No concrete `index.sqlite.bak-<date>` name is spelled out anywhere in this file,
+# and that is deliberate: `code_reference_hits` below matches a candidate's exact
+# filename against the text of every `*.py`/`*.ts`/`*.sh`/`*.yml` in this tree, so a
+# mention of one here would "find a reader" in the file that is deciding its fate —
+# prose mistaken for a program, and a hold nobody could justify afterwards.
+#
+# LIVE_SIDECARS are sqlite's own companions, not separate copies of anything.
+LIVE_SIDECARS = ("-wal", "-shm")
+# The side-copy series a rebuild leaves behind (`index.sqlite.bak-<something>`).
+BACKUP_INFIX = ".bak"
+# What counts as "Lloyd's own code" when asking whether a file still has a reader.
+# Prose is deliberately absent: the four 2026-09-27 strays are named in
+# `architecture/qmd.md` and `qmd/WORKLOG.md` and opened by no program, and the
+# excluded trees are neither ours nor read by us.
+CODE_REF_SUFFIXES = {".py", ".ts", ".sh", ".yml"}
+CODE_REF_EXCLUDED_DIRS = {".venvs", "llama.cpp", "qmd", "node_modules", ".git"}
+
+
+def _live_index_names(index: Path) -> set[str]:
+    """The three files that *are* the live index: the DB and its two sqlite sidecars."""
+    return {index.name, *(index.name + s for s in LIVE_SIDECARS)}
+
+
+def stray_files(index: Path | None = None) -> dict:
+    """Measure every regular file in the index directory that is not the live index.
+
+    Directories are excluded (`models/` and `dist.prev-*/` are qmd's own, and their
+    contents are not this job's to count), as are symlinks, which are not regular
+    files. A missing directory is a measured empty pile, never an exception: this
+    runs on every report, including a night that found no index at all.
+    """
+    index = INDEX if index is None else index
+    d = index.parent
+    files: list[dict] = []
+    if d.is_dir():
+        live = _live_index_names(index)
+        for p in sorted(d.iterdir()):
+            if p.name in live or p.is_symlink() or not p.is_file():
+                continue
+            st = p.stat()
+            files.append({
+                "name": p.name,
+                "bytes": st.st_size,
+                "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+            })
+    return {"files": files, "bytes": sum(f["bytes"] for f in files)}
+
+
+def code_reference_hits(names: list[str] | set[str],
+                        root: Path | None = None) -> dict[str, list[str]]:
+    """Which of `names` appear in Lloyd's own code, and in which files. One walk.
+
+    This is the grep gate #855 asked for — delete "unless a named benchmark still
+    reads it" — re-run at the moment of the delete rather than inherited from a
+    closed item's note. It is one pass over the tree answering every name at once,
+    because the question is symmetric and doing it per-file multiplies a ~0.4 s walk.
+    """
+    root = REPO_ROOT if root is None else root
+    wanted = sorted(set(names))
+    hits: dict[str, list[str]] = {n: [] for n in wanted}
+    if not wanted or not root.is_dir():
+        return hits
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in CODE_REF_EXCLUDED_DIRS)
+        for fn in filenames:
+            if Path(fn).suffix not in CODE_REF_SUFFIXES:
+                continue
+            p = Path(dirpath) / fn
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            rel = p.relative_to(root).as_posix()
+            for n in wanted:
+                if n in text:
+                    hits[n].append(rel)
+    return hits
+
+
+def bak_series(index: Path | None = None) -> list[Path]:
+    """The `index.sqlite.bak*` main files, newest mtime first.
+
+    Sidecars are excluded even though `index.sqlite.bak-gemma-20260921-wal` matches
+    the prefix as a string: it is not a copy of anything, it belongs to the database
+    beside it, and counting it would let a 0-byte WAL be "the newest backup" and put
+    the real copy on the delete list. Name order is not the key — the date inside a
+    name is whoever made it, so mtime is what decides which copy is newest.
+    """
+    index = INDEX if index is None else index
+    d = index.parent
+    if not d.is_dir():
+        return []
+    mains = [p for p in d.iterdir()
+             if p.name.startswith(index.name + BACKUP_INFIX)
+             and not p.name.endswith(LIVE_SIDECARS)
+             and not p.is_symlink() and p.is_file()]
+    return sorted(mains, key=lambda p: (p.stat().st_mtime, p.name), reverse=True)
+
+
+def plan_stray_retention(index: Path | None = None,
+                         repo_root: Path | None = None) -> dict:
+    """Decide what the retention rule would do to the index directory. Touches nothing.
+
+    Three rules, in the order the safety of each matters:
+
+    1. The newest `.bak*` main file is kept, always. "Keep one copy" with only one
+       copy present means keep it — the rule is a series rule, not "free everything
+       that is not the live index".
+    2. An older one is a delete candidate, together with its own `-wal`/`-shm`, and
+       is *held* instead if a code reference still names it or if either sidecar is
+       newer than its main file. A newer sidecar means something opened that
+       database read-write after the copy was made — measured on the 2026-09-27
+       pile, the newest copy's `-wal` was 09-24 13:36 and both `-shm` files 09-24
+       14:07 against main files from 09-19 and 09-21, three days after each of them
+       stopped being the newest thing in the directory — and a filename grep
+       structurally cannot see whoever did it, because a grep cannot match a path
+       assembled at runtime. So the hold is reported, not resolved.
+    3. Anything outside the series is never this job's to delete. The directory is
+       shared write home for live eval side-indexes
+       (`eval/contextual_titles.py:41,71` opens `sub06.sqlite`,
+       `eval/embed_side_index.py:52` builds `subctx.sqlite`), and #844:141-142
+       already ruled that deleting someone's backup database is not a code round's
+       call. `perfbench.sqlite` is in that group too: deleting it retires #408's
+       subject, which is a person's decision, not a clause.
+    """
+    index = INDEX if index is None else index
+    repo_root = REPO_ROOT if repo_root is None else repo_root
+    out: dict = {"bak_series": [], "kept": [], "planned": [], "deleted": [],
+                 "deleted_bytes": 0, "held": [], "held_for_person": [], "errors": []}
+    if not index.exists():
+        # No live index means a swap or a restore is in flight — the one moment
+        # when freeing a backup is unambiguously the wrong thing to do. Measuring
+        # stays safe, so `stray`/`stray_bytes` still say what is on disk.
+        out["skipped"] = ("no live index.sqlite in the directory: a side-copy swap or "
+                          "a restore is in progress, so nothing is deleted this run")
+        return out
+    mains = bak_series(index)
+    out["bak_series"] = [p.name for p in mains]
+    out["kept"] = [p.name for p in mains[:1]]
+    candidates = mains[1:]
+    hits = code_reference_hits([p.name for p in candidates], repo_root)
+    for p in candidates:
+        ref = hits.get(p.name, [])
+        reasons = []
+        if ref:
+            reasons.append("a code reference in Lloyd's own tree names it: "
+                           + ", ".join(ref[:3]))
+        for sfx in LIVE_SIDECARS:
+            side = p.with_name(p.name + sfx)
+            if side.is_file() and side.stat().st_mtime > p.stat().st_mtime:
+                reasons.append(f"its {sfx} sidecar is newer than the database itself, "
+                               f"so something has opened it read-write since")
+        if reasons:
+            out["held"].append({"name": p.name, "bytes": p.stat().st_size,
+                                "code_references": ref, "because": reasons})
+        else:
+            out["planned"].append(p.name)
+    in_series = {p.name for p in mains} | {p.name + s for p in mains
+                                          for s in LIVE_SIDECARS}
+    out["held_for_person"] = [
+        {"name": f["name"], "bytes": f["bytes"],
+         "because": ("outside the index.sqlite.bak* series, so not this job's to "
+                     "delete: this directory is shared with live eval side-indexes, "
+                     "and #844:141-142 ruled that deleting someone's backup "
+                     "database is not a code round's call")}
+        for f in stray_files(index)["files"] if f["name"] not in in_series
+    ]
+    return out
+
+
+def apply_stray_retention(plan: dict, index: Path | None = None) -> dict:
+    """Delete the planned backups and their sidecars; record what actually went.
+
+    Nothing here reaches outside the index directory: a name must carry the backup
+    prefix, contain no path separator, and still be a plain file where it was found.
+    A failed unlink is recorded in `errors` and never raised — an unattended run has
+    to still measure, probe retrieval and write its report, and losing the artifact
+    is worse than leaving one 1.25 GB file for the next night.
+    """
+    index = INDEX if index is None else index
+    d = index.parent
+    deleted, freed = [], 0
+    for name in list(plan.get("planned", [])):
+        p = d / name
+        if "/" in name or not name.startswith(index.name + BACKUP_INFIX) \
+                or not p.is_file() or p.is_symlink():
+            plan["errors"].append(f"{name}: not a deletable member of the series")
+            continue
+        for target in (p, *(p.with_name(name + s) for s in LIVE_SIDECARS)):
+            try:
+                size = target.stat().st_size if target.is_file() else 0
+                target.unlink(missing_ok=True)
+                freed += size
+            except OSError as e:
+                plan["errors"].append(f"{target.name}: {e!r}")
+        deleted.append(name)
+    plan["deleted"] = deleted
+    plan["deleted_bytes"] = freed
+    return plan
 
 
 def vec0_capacity(con: sqlite3.Connection, table: str = "vectors_vec") -> dict:
@@ -604,6 +832,31 @@ def main() -> int:
 
     before = inspect_index()
     report["before"] = before
+    # #1598: the pile beside the live index, measured on every run that reports. The
+    # 4,863,918,080 B of 2026-09-27 was invisible to this job's verdict because
+    # `index_bytes` is main+wal+shm of the live index and no key existed for the
+    # rest, so every run re-derived nobody's number and #844 could close with #855's
+    # retention clause unexecuted. An empty pile records a 0 rather than omitting
+    # the key: "measured nothing" has to be distinguishable from "did not look".
+    stray = stray_files()
+    report["stray"] = stray["files"]
+    report["stray_bytes"] = stray["bytes"]
+    retention = plan_stray_retention()
+    retention["dry_run"] = bool(args.dry_run)
+    # Acting, not dry-run: `--dry-run` shares the early-exit branch below precisely
+    # because it changes nothing, and here that promise has teeth.
+    if not args.dry_run and retention["planned"]:
+        apply_stray_retention(retention)
+    if stray["files"]:
+        report["actions"].append(
+            f"stray files: {len(stray['files'])} file(s), "
+            f"{stray['bytes'] / 1e9:.2f} GB beside the live index; kept newest "
+            f"{', '.join(retention['kept']) or '—'}; deleted "
+            f"{len(retention['deleted'])} ({retention['deleted_bytes'] / 1e9:.2f} GB), "
+            f"{len(retention['planned'])} planned on an acting run, "
+            f"{len(retention['held'])} .bak held + "
+            f"{len(retention['held_for_person'])} outside the series")
+    report["stray_retention"] = retention
     pend = pending_embeddings()
     report["pending_embeddings"] = pend
     # Read the two collection definitions fresh, from the module-level paths, so
@@ -662,9 +915,11 @@ def main() -> int:
     if args.dry_run or not (need_prune or need_embed):
         if args.dry_run:
             report["actions"].append("dry-run")
-        elif not guard["tripped"]:
+        elif not guard["tripped"] and not report["actions"]:
             # A refused guard already recorded its own reason; "nothing to do"
-            # would contradict the line above it in the same report.
+            # would contradict the line above it in the same report. Same reasoning
+            # now covers #1598: a run that freed a 1.25 GB stale backup from the
+            # index directory did something, whatever the index itself needed.
             report["actions"].append("none — nothing to do")
         # Doing nothing is not evidence that retrieval is up, so this branch
         # measured it too: it used to `return 0` without ever calling
@@ -780,6 +1035,18 @@ def _emit(r: dict, as_json: bool) -> None:
     if fp:
         print(f"                    main {mb(fp['main'])} + wal {mb(fp['wal'])}"
               f" + shm {mb(fp['shm'])}")
+    # Printed even at zero (#1598): the pile was invisible precisely because the
+    # only size this run said out loud was the live index's, and a field that
+    # appears only when something is wrong is indistinguishable from a check that
+    # did not run.
+    sr = r.get("stray_retention") or {}
+    if sr:
+        print(f"  stray files       {len(r.get('stray', []))} file(s), "
+              f"{mb(r.get('stray_bytes'))} beside the live index; "
+              f"kept {', '.join(sr.get('kept', [])) or '—'}; deleted "
+              f"{len(sr.get('deleted', []))}, {len(sr.get('planned', []))} planned, "
+              f"{len(sr.get('held', []))} held"
+              + (f"; {sr['skipped']}" if sr.get("skipped") else ""))
     v = b.get("vec0") or {}
     if v.get("occupancy") is not None:
         print(f"  vec0 occupancy    {100*v['occupancy']:.1f} %  "

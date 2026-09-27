@@ -61,6 +61,20 @@ collections:
 HEALTH_LINE = re.compile(r"^  daemon healthy\s+(True|False)$", re.M)
 
 
+@pytest.fixture(autouse=True)
+def _index_dir_is_a_fixture(tmp_path, monkeypatch):
+    """No case here may let `main()` reach the real `~/.cache/qmd`.
+
+    #1598 added a retention pass that *deletes files* in the index directory, and
+    it runs on the no-op path this file exists to test. Pointing `INDEX` at an
+    empty tmp_path directory is what keeps this file's own claim — "Nothing in this
+    file ... opens the live index" — true after that change. It is a measured empty
+    pile, not a skipped check: the stray measurement still runs, it just has nothing
+    to find.
+    """
+    monkeypatch.setattr(m, "INDEX", tmp_path / "qmd" / "index.sqlite")
+
+
 class _Supervisor:
     """Records every supervisorctl action `main()` would have taken."""
 
