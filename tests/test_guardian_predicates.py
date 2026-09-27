@@ -1574,3 +1574,182 @@ def test_coalescing_is_scoped_to_the_runtime_data_title(tmp_path, monkeypatch):
     assert g.notifier._vault_note("Plain notice", "body") is True
     assert notify.DAILY_STILL_OPEN not in note.read_text(encoding="utf-8")[len(text):], (
         "`_vault_note`'s default coalesces, so every alert in the file silently did too")
+
+
+# ── #1590: retracting an alarm across the day boundary ───────────────────────
+#
+# Every fixture above builds its note path from `_dt.now()`, so each one proves the
+# same-day contract and none of them can see a day change. These four drive the real
+# `Notifier` with the date it keys its daily notes on moved forward — the smallest seam
+# that reproduces the defect: an alert raised at 23:05 and all-cleared at 00:05 lives in
+# two files, and `resolve` read only the second one.
+
+def _day_notifier(tmp_path, day):
+    """A real `Notifier` over a throwaway vault, standing on `day`.
+
+    `_today` is the only date the notifier consults, so overriding that one method moves
+    every daily-note path it builds — writer and retractor together. Nothing else on the
+    notifier is stubbed: `_vault_note` and `resolve` are the shipped methods, so what these
+    tests assert is what the hourly all-clear does to the files.
+    """
+    import notify
+
+    vault = tmp_path / "obsidian"
+    (vault / "memory").mkdir(parents=True, exist_ok=True)
+    n = notify.Notifier(ledger=tmp_path / "l.jsonl", state_dir=tmp_path,
+                        vault_root=str(vault), backend_url="http://127.0.0.1:1")
+    n._today = lambda: day          # per instance; the class is left alone
+    # The seam has to reach the shipped path builder, not just the local clock: if
+    # `_daily_note` stopped consulting `_today`, every test below would silently write to
+    # the real today's file and its assertions would be about a file nothing wrote.
+    assert n._daily_note().name == f"{day.isoformat()}.md", n._daily_note()
+    return n
+
+
+def _note_of(vault_root: Path, day) -> Path:
+    return Path(vault_root) / "memory" / f"{day.strftime('%Y-%m-%d')}.md"
+
+
+def test_resolve_seals_an_alarm_written_the_previous_day(tmp_path):
+    """#1590 clause 1: an alarm written on day D is retracted on day D+1.
+
+    The alert is coalesced on D, the all-clear runs on D+1. The assertion is on D's file,
+    not today's: exactly one `cleared:` line, and no standing open marker — the marker is
+    REPLACED, because a note that still ends in it still claims the incident is open, which
+    is the one question a retraction exists to change. `resolve` returning True here is the
+    claim it could not previously justify: before the fix it returned True having opened a
+    file with no open section in it, and day D's section went on instructing a reader to
+    delete a git-tracked path.
+    """
+    import notify
+    from datetime import date, timedelta
+
+    day = date(2026, 9, 25)
+    n = _day_notifier(tmp_path, day)
+    title = "Runtime data left in the tree"
+    n._vault_note(title, "move `eval/baselines` out of the tree", coalesce=True)
+    note_d = _note_of(n.vault_root, day)
+    assert note_d.read_text().rstrip().endswith(notify.DAILY_STILL_OPEN), "fixture: open on D"
+
+    n._today = lambda: day + timedelta(days=1)
+    assert n.resolve(title, "nothing further to move") is True
+
+    text = note_d.read_text(encoding="utf-8")
+    assert text.count(f"\n{notify.DAILY_CLEARED_PREFIX} ") == 1, text
+    assert "nothing further to move" in text, text
+    assert notify.DAILY_STILL_OPEN not in text, (
+        "day D still claims the incident is open: the marker was left standing")
+
+
+def test_one_resolve_seals_an_open_section_on_each_side_of_midnight(tmp_path):
+    """#1590 clause 2: an incident that spans midnight leaves no open section behind.
+
+    The coalescing writer keys on the same date as the retractor, so after midnight it
+    cannot find yesterday's section and appends a fresh one: one incident, two open
+    sections, in two files. One all-clear must seal BOTH — the probe measured one per day
+    surviving every retraction, each still carrying the imperative instructions. Asserted
+    as "no section for that title inside the window ends in the marker", across every dated
+    note in the window, because sealing only the newest is the bug.
+    """
+    import notify
+    from datetime import date, timedelta
+
+    day = date(2026, 9, 25)
+    n = _day_notifier(tmp_path, day)
+    title = "Runtime data left in the tree"
+    n._vault_note(title, "move `eval/baselines` out of the tree", coalesce=True)
+    n._today = lambda: day + timedelta(days=1)
+    n._vault_note(title, "move `eval/baselines` out of the tree", coalesce=True)
+
+    notes = [_note_of(n.vault_root, day), _note_of(n.vault_root, day + timedelta(days=1))]
+    open_before = [p for p in notes
+                   if n._daily_open_at(p.read_text(encoding="utf-8"), title) is not None]
+    assert len(open_before) == 2, (
+        "fixture premise: an incident that crossed midnight opened one section per day")
+
+    assert n.resolve(title, "nothing further to move") is True
+
+    for p in notes:
+        text = p.read_text(encoding="utf-8")
+        assert n._daily_open_at(text, title) is None, f"{p.name} still open:\n{text}"
+        assert text.count(f"\n{notify.DAILY_CLEARED_PREFIX} ") == 1, f"{p.name}:\n{text}"
+
+
+def test_resolve_reports_false_for_an_alarm_older_than_the_scan_window(tmp_path):
+    """#1590 clause 3: reach is finite, and the return says so.
+
+    Two halves, both required. An open section in a note older than `DAILY_SCAN_DAYS` is
+    beyond any retraction's reach, so `resolve` must return False rather than report a
+    question it did not answer closed — and it must NOT rewrite that note, because silently
+    sealing an alarm nobody verified is the same unqualified success in a different costume.
+    Then the other half, which the first half must not break: with nothing open anywhere in
+    the window, every all-clear still returns True. That is the idempotent-silence contract
+    the hourly caller depends on, and it is why the answer cannot simply be False.
+    """
+    import notify
+    from datetime import date, timedelta
+
+    assert notify.DAILY_SCAN_DAYS >= 2, (
+        "the window has to be able to reach yesterday, or this test proves nothing")
+    day = date(2026, 9, 25)
+    n = _day_notifier(tmp_path, day)
+    title = "Runtime data left in the tree"
+    stale_day = day - timedelta(days=notify.DAILY_SCAN_DAYS)
+    n._today = lambda: stale_day
+    n._vault_note(title, "move `eval/baselines` out of the tree", coalesce=True)
+    old_note = _note_of(n.vault_root, stale_day)
+    stale_before = old_note.read_text(encoding="utf-8")
+    assert stale_before.rstrip().endswith(notify.DAILY_STILL_OPEN), "fixture: open, out of reach"
+
+    n._today = lambda: day
+    assert n.resolve(title, "nothing further to move") is False, (
+        "an alarm outside the scan window was reported as retracted")
+    assert old_note.read_text(encoding="utf-8") == stale_before, (
+        "a note beyond the window was rewritten instead of reported")
+
+    # ...and with nothing open in the window at all, the same call is silent success.
+    for p in (n.vault_root / "memory").iterdir():
+        text = p.read_text(encoding="utf-8")
+        (p.parent / p.name).write_text(text.replace(notify.DAILY_STILL_OPEN, ""),
+                                       encoding="utf-8")
+    assert n.resolve(title, "nothing further to move") is True
+
+
+def test_the_windowed_scan_leaves_same_day_behaviour_untouched(tmp_path):
+    """#1590 clause 4: one live check and three all-clears, on one day, as the tree does it.
+
+    Two things the widened scan could break, both asserted. First the shape
+    `test_the_set_emptying_writes_one_cleared_line_and_stays_silent_after` proves through the
+    whole guardian, restated at the notifier so the scan cannot change it from underneath:
+    exactly ONE `cleared:` line after three all-clears, True on every one, and the open
+    marker gone. A `False` for "nothing open in the window" would fail this, and
+    re-appending a second retraction each hour would too.
+
+    Second, the reach the scan newly has: an open section for a DIFFERENT title on an
+    earlier day inside the same window must survive untouched. Retracting one incident's
+    alarm is not retracting every alarm in range — seal by file rather than by title and
+    the same-day result above still looks perfect while a live incident is marked cleared.
+    """
+    import notify
+    from datetime import date, timedelta
+
+    day = date(2026, 9, 25)
+    n = _day_notifier(tmp_path, day)
+    title = "Runtime data left in the tree"
+    other = "Vault write landed an invalid skill"
+    yesterday_note = _note_of(n.vault_root, day - timedelta(days=1))
+    n._today = lambda: day - timedelta(days=1)
+    n._vault_note(other, "the installed skill still owns this signature", coalesce=True)
+    other_before = yesterday_note.read_text(encoding="utf-8")
+    assert other_before.rstrip().endswith(notify.DAILY_STILL_OPEN), "fixture: other is open"
+    n._today = lambda: day
+    n._vault_note(title, "move `eval/baselines` out of the tree", coalesce=True)
+
+    clears = [n.resolve(title, "nothing further to move") for _ in range(3)]
+    assert clears == [True, True, True], clears
+    text = _note_of(n.vault_root, day).read_text(encoding="utf-8")
+    assert text.count(f"\n{notify.DAILY_CLEARED_PREFIX} ") == 1, text
+    assert notify.DAILY_STILL_OPEN not in text, text
+
+    assert yesterday_note.read_text(encoding="utf-8") == other_before, (
+        "the scan sealed another title's open incident in a note it reached")

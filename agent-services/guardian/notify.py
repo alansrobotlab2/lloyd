@@ -29,10 +29,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 # ── The daily note's incident format (#1536) ──────────────────────────────
@@ -49,6 +50,17 @@ DAILY_STILL_OPEN = "_(still open on the next check)_"
 # What replaces that marker when the condition clears. A prefix rather than prose so
 # a reader scanning the note sees the section's state, not another alarm body.
 DAILY_CLEARED_PREFIX = "cleared:"
+#: How many dated daily notes `resolve` scans back when it retracts an alarm (#1590). An
+#: alert written at 23:05 and cleared at 00:05 lives in TWO files, because `_daily_note` is
+#: keyed on the date it is called; scanning today's alone finds nothing to seal and used to
+#: report the alarm retracted anyway. Two days is the minimum that can reach a
+#: midnight-spanning incident; three leaves an incident that ran two days before its
+#: retraction still reachable in the note that alerted. Older than the window is reported,
+#: never rewritten — see `resolve`.
+DAILY_SCAN_DAYS = 3
+#: A daily note's filename stem as `_daily_note` writes it. Only a dated note can hold an
+#: open section, so only dated notes are consulted outside the window.
+DATED_NOTE_STEM = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def _run(cmd: list[str], timeout: float = 5.0) -> bool:
@@ -329,34 +341,59 @@ class Notifier:
         an alert, so no toast, no speech, no backlog task — and the ledger still holds
         every individual firing either way.
 
-        Returns True when the note is in a cleared state for `title` (sealed now, or
-        nothing was open), False on failure.
+        The return is a claim about the notes it could reach, not about the incident.
+        True means: every daily note inside the last `DAILY_SCAN_DAYS` that it opened for
+        `title` is now sealed — including the note of a day that has since passed, which is
+        where an alarm raised before midnight still stands — or that none of them held an
+        open section, which is the ordinary hourly all-clear and stays True so the
+        idempotent-silence contract holds. False means it could not read or write, or that
+        an open section for `title` sits in a dated note OLDER than that window: a
+        retraction reaches back a fixed number of days and no further, so an alarm beyond
+        its reach is not a closed question and must not be reported as one. A note it never
+        opened is never counted as cleared — reporting exactly that, `True` over a file
+        `_daily_note` had not read because the clock had crossed midnight, was the defect
+        (#1590): an alert written 23:05 and all-cleared 00:05 returned success and left the
+        alarm's own section claiming it was still open.
         """
         if not self.external:
             return True
-        try:
-            note = self._daily_note()
-            if note is None or not note.exists():
-                return True
-            body = note.read_text(encoding="utf-8")
-            open_at = self._daily_open_at(body, title)
-            if open_at is None:
-                return True
-            start, end = open_at
-            stale = body[start:end].rstrip()
-            # The marker is REPLACED, not followed: leaving it standing above the
-            # `cleared:` line means the note still claims the incident is open to
-            # anyone scanning for that marker, which is the one question a
-            # retraction exists to change the answer to.
-            if stale.endswith(DAILY_STILL_OPEN):
-                stale = stale[:-len(DAILY_STILL_OPEN)].rstrip()
-            note.write_text(body[:start]
-                            + stale
-                            + f"\n\n{DAILY_CLEARED_PREFIX} {note_text}\n"
-                            + body[end:], encoding="utf-8")
-            return True
-        except Exception:
-            return False
+        # Checked before sealing, from the filenames: the out-of-window question is "is
+        # there an alarm for this title my reach does not cover", and a section sealed a
+        # moment ago must not be able to mask one it cannot touch.
+        out_of_reach = bool(self._open_days_beyond_window(title))
+        wrote = True
+        for day in self._scan_days():
+            note = self._daily_note_path(day)
+            if note is None or not note.is_file():
+                continue
+            try:
+                body = note.read_text(encoding="utf-8")
+            except OSError:
+                wrote = False
+                continue
+            sealed = body
+            while True:
+                open_at = self._daily_open_at(sealed, title)   # newest still-open, if any
+                if open_at is None:
+                    break
+                start, end = open_at
+                stale = sealed[start:end].rstrip()
+                # The marker is REPLACED, not followed: leaving it standing above the
+                # `cleared:` line means the note still claims the incident is open to
+                # anyone scanning for that marker, which is the one question a
+                # retraction exists to change the answer to.
+                if stale.endswith(DAILY_STILL_OPEN):
+                    stale = stale[:-len(DAILY_STILL_OPEN)].rstrip()
+                sealed = (sealed[:start] + stale
+                          + f"\n\n{DAILY_CLEARED_PREFIX} {note_text}\n"
+                          + sealed[end:])
+            if sealed == body:
+                continue
+            try:
+                note.write_text(sealed, encoding="utf-8")
+            except OSError:
+                wrote = False
+        return False if out_of_reach else wrote
 
     # ── daily-note incident plumbing (#1536) ──────────────────────────────
     #
@@ -366,10 +403,62 @@ class Notifier:
 
     def _daily_note(self):
         """Today's note, or None when the vault has no `memory/` to write into."""
+        return self._daily_note_path(self._today())
+
+    def _daily_note_path(self, day: date):
+        """`<vault>/memory/<day>.md`, or None when the vault has no `memory/`.
+
+        Split out of `_daily_note` because a retraction is no longer keyed on today alone:
+        the alarm being retracted may live in yesterday's file, and the only thing that
+        distinguishes the two is the date in the name.
+        """
         memory = self.vault_root / "memory"
         if not memory.is_dir():
             return None
-        return memory / f"{datetime.now().strftime('%Y-%m-%d')}.md"
+        return memory / f"{day.strftime('%Y-%m-%d')}.md"
+
+    def _today(self) -> date:
+        """The date daily notes are keyed on.
+
+        A method rather than a `datetime.now()` call site so a test can stand on day D+1
+        without freezing a clock across a whole module — which is the only way the cross-day
+        retraction can be observed at all (#1590).
+        """
+        return datetime.now().date()
+
+    def _scan_days(self) -> list[date]:
+        """The days whose daily notes `resolve` retracts across, newest first."""
+        newest = self._today()
+        return [newest - timedelta(days=back) for back in range(DAILY_SCAN_DAYS)]
+
+    def _open_days_beyond_window(self, title: str) -> list[date]:
+        """Dated notes OUTSIDE the window that still hold an open section for `title`.
+
+        Bounded by the filename, not by a walk of anything: only a `YYYY-MM-DD.md` can be an
+        incident's daily note, so this is one `iterdir` of `memory/`. An alarm older than
+        `DAILY_SCAN_DAYS` is precisely the case a retraction cannot make, which is why it is
+        reported rather than rewritten.
+        """
+        memory = self.vault_root / "memory"
+        if not memory.is_dir():
+            return []
+        in_window = {day.isoformat() for day in self._scan_days()}
+        try:
+            stems = sorted(p.stem for p in memory.iterdir()
+                           if DATED_NOTE_STEM.fullmatch(p.stem or ""))
+        except OSError:
+            return []
+        beyond = []
+        for stem in stems:
+            if stem in in_window:
+                continue
+            try:
+                body = (memory / f"{stem}.md").read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if self._daily_open_at(body, title) is not None:
+                beyond.append(date.fromisoformat(stem))
+        return beyond
 
     @staticmethod
     def _daily_sections(text: str) -> list[tuple[str, int, int]]:
