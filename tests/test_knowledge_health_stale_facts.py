@@ -301,6 +301,191 @@ def test_stale_table_stays_capped_while_the_count_is_reported(tmp_path):
     assert UNEVALUABLE_RE.search(section) is not None
 
 
+# ── #1543: the section shows the shape of the backlog, and lists reviewable rows ─
+#
+# Measured live the day these were written, over `app.paths.VAULT_FACTS_ROOT` with the
+# script's own `find_stale_facts`: 15,948 stale facts, p10 82 days, **median 148**, p90
+# 576, max 49,942; 88.1% inside a year and 114 (0.71%) older than ten years. Sorting by
+# age descending therefore spent all 50 rows on that 0.71% — the top row was `Dual
+# Process Theory lineage includes William James's distinction`, 49,942 days, a historical
+# fact with a real `event_date` that no review would invalidate — while the 14,053-fact
+# band just past the threshold, which is the actual backlog, was listed nowhere. A
+# reader of the section came away believing the store was a pile of century-old junk.
+
+#: The band labels the section must print: one closed band per ladder bound, then one
+#: open above the largest. Derived from the module's own constant so a boundary edit
+#: moves this test rather than silently disagreeing with it; the lowest band opens one
+#: day AT the staleness threshold, because `find_stale_facts` selects with
+#: `age >= threshold_days` and so calls an exactly-threshold-old fact stale.
+BAND_LABELS = [f"{lo:,}-{hi:,}" for lo, hi in zip(
+    [THRESH, *[b + 1 for b in khr.AGE_BAND_BOUNDS_DAYS[:-1]]],
+    khr.AGE_BAND_BOUNDS_DAYS)] + [f">{khr.AGE_BAND_BOUNDS_DAYS[-1]:,}"]
+
+
+def test_the_printed_bands_cover_the_total_without_gaps_or_overlap(tmp_path):
+    """Every stale fact lands in exactly one band, so the shares sum to the whole.
+
+    Two holes this pins, both found by running the ladder against live data rather than
+    against itself. (a) One band per bound with the last open above its own edge leaves a
+    gap between the second-largest bound and the largest: a 1,000-day fact sits in no
+    band. (b) The floor: `find_stale_facts` selects with `age >= threshold_days`, so an
+    exactly-60-day fact is stale and counted in the total, and a floor of `THRESH + 1`
+    dropped the 78 such facts the live store has out of the line beside it. Either hole
+    prints shares summing to less than 100% under a total that counts every fact — the
+    same misreading of the backlog this item is about, one line higher up.
+    """
+    assert len(BAND_LABELS) == len(khr.AGE_BAND_BOUNDS_DAYS) + 1, BAND_LABELS
+    ages = [THRESH, 61, 90, 91, 365, 366, 730, 731, 1000, 3650, 3651]
+    section = _one_entity_section(tmp_path, ages)
+    line = _band_line(section)
+    for label in BAND_LABELS:
+        assert label in line, f"{label} missing from {line}"
+    # Three facts in the lowest band: the threshold itself, one day past it, and the
+    # first bound — the two edges a floor of `THRESH + 1` would lose are the first two.
+    assert f"{THRESH}-90: 3 (27.3%)" in line, line
+    assert "731-3,650: 3 (27.3%)" in line, line
+    assert ">3,650: 1 (9.1%)" in line, line
+    counts = [int(entry.split(": ", 1)[1].split(" ")[0].replace(",", ""))
+              for entry in line.split(": ", 1)[1].split(" | ")]
+    assert sum(counts) == len(ages), (
+        f"the bands sum to {sum(counts)} of the {len(ages)} stale facts: a fact in no "
+        "band is invisible in the line while still counted in the total")
+    shares = [float(entry.split("(")[1].rstrip(")%")) for entry in
+              line.split(": ", 1)[1].split(" | ")]
+    assert abs(sum(shares) - 100.0) <= 0.3, f"shares sum to {sum(shares)}%: {line}"
+
+
+def _one_entity_section(tmp_path, ages: list[int], name: str = "Pile") -> str:
+    """The Stale Facts section for exactly one entity holding one stale fact per `age`."""
+    root = tmp_path / "facts"
+    _write(root, name, "state",
+           [{"fact": f"claim at {a} days", "event_date": _iso(a)} for a in ages])
+    return _stale_section(_report(khr.load_entities(root)))
+
+
+def _listed_ages(section: str) -> list[int]:
+    """The ages of the listed rows, in the order printed."""
+    rows = [ln for ln in section.splitlines()
+            if ln.startswith("| ") and not ln.startswith("|---")
+            and "Entity | Category" not in ln and not ln.startswith("| …")]
+    return [int(ln.rsplit("|", 2)[-2].strip()) for ln in rows]
+
+
+def _band_line(section: str) -> str:
+    lines = [ln for ln in section.splitlines() if ln.startswith("Age bands (days):")]
+    assert len(lines) == 1, f"expected exactly one band line, got {len(lines)}"
+    return lines[0]
+
+
+def test_the_reviewable_band_is_one_of_the_printed_band_edges():
+    """The two constants have to stay coupled, and nothing else in the file says so.
+
+    The table selects on `REVIEWABLE_AGE_DAYS` while the printed distribution is cut by
+    `AGE_BAND_BOUNDS_DAYS`. If those drift — 365 raised to 400, say — the counts in the
+    band line would no longer add up to the reviewable/older split the listing sentence
+    states, and the section would contradict itself one line apart.
+    """
+    assert khr.REVIEWABLE_AGE_DAYS in khr.AGE_BAND_BOUNDS_DAYS, (
+        f"the listing cuts at {khr.REVIEWABLE_AGE_DAYS} days but the printed bands are "
+        f"cut at {khr.AGE_BAND_BOUNDS_DAYS}, so no band edge matches the split the "
+        "section describes")
+
+
+def test_the_section_prints_one_band_line_of_counts_and_shares(tmp_path):
+    """Clause 1: one line, one entry per band, each with its count and its percentage.
+
+    Six facts, one per band, so every share is exactly 16.7% and a fact bucketed into the
+    wrong band moves two numbers at once. The counts also have to add up to the total: a
+    band line that silently lost the over-3,650 tail would put clause 4's "remain visible
+    as counts" back into the dark.
+    """
+    section = _one_entity_section(tmp_path, [70, 120, 300, 500, 1000, 5000])
+
+    line = _band_line(section)
+    for label in BAND_LABELS:
+        assert f"{label}: 1 (16.7%)" in line, f"{label} missing or miscounted: {line}"
+
+    counts = [int(entry.split(": ", 1)[1].split(" ")[0].replace(",", ""))
+              for entry in line.split(": ", 1)[1].split(" | ")]
+    assert sum(counts) == 6, f"the band counts sum to {sum(counts)}, not the 6 reported"
+
+
+def test_the_median_age_prints_beside_the_total(tmp_path):
+    """Clause 2: the median is on the total's own line, not somewhere in the section.
+
+    15,948 is a number a reader cannot act on; 15,948 with a median of 100 days says the
+    backlog is one dense band just past the threshold. Three facts, so the median is an
+    actual member of the fixture and a whole-day print: a `f"{x}"` on a float median
+    would show `100.0` and a mean would show 166.
+    """
+    section = _one_entity_section(tmp_path, [61, 100, 300])
+
+    total_line = next(ln for ln in section.splitlines() if "in total" in ln)
+    assert "**3** in total" in total_line, total_line
+    assert "median **100 days**" in total_line, (
+        f"the median is not on the total's line: {total_line!r}")
+
+
+def test_the_listed_rows_are_the_oldest_within_the_reviewable_band(tmp_path):
+    """Clause 3: the rows are the oldest *reviewable* facts, not the century tail.
+
+    Two historical facts stand above three reviewable ones, mirroring the live shape
+    that motivated the item. The over-band ages must not appear as rows — and must still
+    appear as counts, which is clause 4's first half read from the other side.
+    """
+    over, reviewable = [5000, 49942], [300, 200, 100]
+    section = _one_entity_section(tmp_path, over + reviewable)
+
+    assert _listed_ages(section) == sorted(reviewable, reverse=True)
+    assert not any(f"| {a} |" in section for a in over), (
+        "a fact older than the reviewable band is listed as a row")
+    assert f"{khr.REVIEWABLE_AGE_DAYS:,} days" in section
+    assert "3 of 5 are reviewable" in section.replace("**", ""), (
+        "the section does not say how much of the total the listing covers")
+    assert ">3,650: 2 (40.0%)" in _band_line(section), (
+        "the over-band facts vanished instead of being counted")
+
+
+def test_the_reviewable_listing_keeps_the_cap_the_ellipsis_and_the_total(tmp_path):
+    """Clause 3, second half: capping the *reviewable* rows must not shrink the count.
+
+    70 reviewable facts (100-169 days, the fixture the existing cap test uses) plus 40
+    over-band (400-439). The listing is capped at `SECTION_ROW_CAP`, but the total and
+    the `*N more*` ellipsis are over all 110 stale facts: an ellipsis that started
+    counting only the selected band would report 20 more when 60 exist, which is the same
+    misreading of the backlog size this item is about, one line further down.
+    """
+    root = tmp_path / "facts"
+    _write(root, "Pile", "state",
+           [{"fact": f"reviewable {i}", "event_date": _iso(100 + i)} for i in range(70)]
+           + [{"fact": f"historical {i}", "event_date": _iso(400 + i)} for i in range(40)])
+    section = _stale_section(_report(khr.load_entities(root)))
+
+    assert len(_listed_ages(section)) == khr.SECTION_ROW_CAP
+    assert _listed_ages(section) == sorted(range(100, 170), reverse=True)[:khr.SECTION_ROW_CAP]
+    assert "**110** in total" in section, "the total no longer counts all stale facts"
+    assert "*60 more*" in section, "the ellipsis counted only the reviewable band"
+
+
+def test_the_section_names_the_gap_when_nothing_is_reviewable(tmp_path):
+    """Clause 4, second half: no reviewable fact is said, not left as an empty table.
+
+    Three facts all older than the band. An empty table under a non-zero count reads as
+    "nothing stale" one line after the section said there are three, so the oldest rows
+    print anyway with the reason said out loud — the listing degrades, the visibility
+    does not.
+    """
+    section = _one_entity_section(tmp_path, [5000, 4200, 3800])
+
+    assert "none of the 3" in section
+    assert f"{khr.REVIEWABLE_AGE_DAYS:,}-day reviewable band" in section
+    assert "historical" in section, "the section does not say why the rows are not candidates"
+    assert _listed_ages(section) == [5000, 4200, 3800], (
+        "an empty table where the item requires the oldest rows")
+    assert "*more*" not in section, "three rows are under the cap, so no ellipsis is owed"
+    assert ">3,650: 3 (100.0%)" in _band_line(section)
+
+
 class _FakeEdges:
     def __init__(self, edges):
         self._edges = edges

@@ -16,6 +16,7 @@ Output:
 import argparse
 import json
 import re
+import statistics
 import sys
 from collections import defaultdict, Counter
 from datetime import datetime, timezone
@@ -38,6 +39,24 @@ SECTION_ROW_CAP = 50
 GOD_ENTITY_THRESHOLD = 20
 THIN_ENTITY_MAX_FACTS = 2
 STALE_DAYS_THRESHOLD = 60
+#: Past how many days a stale fact stops being a review candidate.
+#:
+#: `STALE_DAYS_THRESHOLD` decides *whether* a fact is stale; this decides whether a
+#: stale fact is worth a reader's row. Measured live 2026-09-27 over the 15,948 active
+#: stale facts the section reports: median 148 days, 88.1% within a year, 114 facts
+#: (0.71%) older than ten years. Sorting by age descending therefore spent every one of
+#: the 50 rows on that 0.71% — top row `Dual Process Theory lineage includes William
+#: James's distinction`, 49,942 days, a historical fact with a real `event_date` that no
+#: review would invalidate — while the 14,053-fact band just past the threshold, where
+#: the backlog actually sits, was never listed at all. So the table lists the oldest
+#: *reviewable* facts and the rest stay visible as a count (#1543).
+REVIEWABLE_AGE_DAYS = 365
+#: Upper edge in days of each age band, ascending; the last band is open above its own
+#: edge. The band below the first edge is `STALE_DAYS_THRESHOLD` to that edge, since
+#: nothing younger reaches this section. `REVIEWABLE_AGE_DAYS` must be one of these
+#: edges or the printed distribution would not show the cut the table selects on —
+#: pinned by `test_the_reviewable_band_is_one_of_the_printed_band_edges`.
+AGE_BAND_BOUNDS_DAYS = (90, 180, 365, 730, 3650)
 # Edge-type cardinality (#546): a type used fewer than this many times is a
 # one-off, and one type holding more than this share of active edges is a
 # catch-all absorbing relations that should have been typed.
@@ -352,6 +371,42 @@ def find_stale_facts(entities: dict, now: datetime, threshold_days: int) -> list
                         "age_days": age,
                     })
     return stale
+
+
+def stale_age_bands(stale_facts: list[dict]) -> list[tuple[str, int, float]]:
+    """[(band label, count, percent of the total)] over the AGE_BAND_BOUNDS_DAYS ladder.
+
+    The shape a bare total hides (#1543): of the 15,948 stale facts measured live on
+    2026-09-27, 88.1% were inside a year and 0.71% older than ten, so "the 50 oldest"
+    sampled that tail and none of the backlog. The first band opens AT
+    `STALE_DAYS_THRESHOLD`, not one day past it, because `find_stale_facts` selects with
+    `age >= threshold_days` — an exactly-threshold-old fact is stale, and a floor of
+    `THRESH + 1` dropped 78 of them from the live line while the total beside it still
+    counted them. Pinned by
+    `test_the_printed_bands_cover_the_total_without_gaps_or_overlap`.
+    """
+    total = len(stale_facts)
+    ages = [sf["age_days"] for sf in stale_facts]
+    out: list[tuple[str, int, float]] = []
+    low = STALE_DAYS_THRESHOLD
+    for high in AGE_BAND_BOUNDS_DAYS:
+        count = sum(1 for a in ages if low <= a <= high)
+        out.append((f"{low:,}-{high:,}", count,
+                    round(count / total * 100, 1) if total else 0.0))
+        low = high + 1
+    # Closed band per bound, then one open band above the largest: the loop above
+    # leaves no gap, so the shares always sum to 100% of the total.
+    count = sum(1 for a in ages if a > AGE_BAND_BOUNDS_DAYS[-1])
+    out.append((f">{AGE_BAND_BOUNDS_DAYS[-1]:,}", count,
+                round(count / total * 100, 1) if total else 0.0))
+    return out
+
+
+def _stale_band_line(stale_facts: list[dict]) -> str:
+    """The distribution as one markdown line: every band, its count and its share."""
+    return "Age bands (days): " + " | ".join(
+        f"{label}: {count:,} ({share}%)"
+        for label, count, share in stale_age_bands(stale_facts))
 
 
 def stale_coverage(entities: dict) -> tuple[int, int]:
@@ -673,11 +728,34 @@ def generate_report(
 
     if stale_facts:
         stale_sorted = sorted(stale_facts, key=lambda x: x["age_days"], reverse=True)
-        lines.append(f"**{len(stale_sorted):,}** in total; the {min(SECTION_ROW_CAP, len(stale_sorted))} oldest:")
+        within = [sf for sf in stale_sorted if sf["age_days"] <= REVIEWABLE_AGE_DAYS]
+        over_band = len(stale_sorted) - len(within)
+        # Total and median on one line: 15,948 alone reads as a mountain, and 15,948
+        # with a median of 148 days says one dense band just past the threshold
+        # (#1543). The `g` format prints a whole-day median as 148, not 148.0.
+        lines.append(f"**{len(stale_sorted):,}** in total; median **"
+                     f"{statistics.median([sf['age_days'] for sf in stale_sorted]):g} "
+                     f"days** old.")
+        lines.append(_stale_band_line(stale_sorted))
+        if within:
+            lines.append(f"the {min(SECTION_ROW_CAP, len(within))} oldest within "
+                         f"{REVIEWABLE_AGE_DAYS:,} days — {len(within):,} of "
+                         f"{len(stale_sorted):,} are reviewable; the {over_band:,} older "
+                         f"than that are counted in the bands above, not listed:")
+            listed = within[:SECTION_ROW_CAP]
+        else:
+            # An empty table one line after a five-figure count would read as "nothing
+            # stale", so the oldest rows still print with the reason said out loud.
+            lines.append(f"none of the {len(stale_sorted):,} is within the "
+                         f"{REVIEWABLE_AGE_DAYS:,}-day reviewable band, so the "
+                         f"{min(SECTION_ROW_CAP, len(stale_sorted))} oldest overall are "
+                         f"listed below — every one is historical rather than a review "
+                         f"candidate.")
+            listed = stale_sorted[:SECTION_ROW_CAP]
         lines.append("")
         lines.append("| Entity | Category | Fact Preview | Age (days) |")
         lines.append("|--------|----------|-------------|-----------|")
-        for sf in stale_sorted[:SECTION_ROW_CAP]:
+        for sf in listed:
             # Escape pipe characters in preview text
             preview = sf["preview"].replace("|", "\\|")
             lines.append(f"| {sf['entity']} | {sf['category']} | {preview} | {sf['age_days']} |")
