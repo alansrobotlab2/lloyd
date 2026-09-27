@@ -1830,7 +1830,14 @@ edit.
 
 `apply: false` records the answers (`owed_check` ledger rows) and writes
 nothing. That is how the job was checked against the 2026-09-27 hand verdicts
-before it was switched on.
+before it was switched on. The dry run covered 9 items:
+
+- The 4 dated checks came back `recheck`, as the sweep had them.
+- The sweep had left 5 for Alan. 2 came back `outside` (a drive, and sudo); the
+  CA answer also caught that the sweep's command had gone stale.
+- The other 3 were settled or ruled with evidence newer than the sweep.
+
+`apply` is `true` from that day.
 
 ### 3.3 For humans (this repo's development)
 

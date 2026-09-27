@@ -326,7 +326,7 @@ def test_the_source_is_registered_and_configured():
     from workers.sources import SOURCE_REGISTRY
     assert SOURCE_REGISTRY["owed-check"] is OC
     cfg = CONFIG["workers"]["sources"]["owed-check"]
-    assert cfg["enabled"] is True and cfg["max_inflight"] == 1
+    assert cfg["enabled"] is True and cfg["max_inflight"] == 1 and cfg["apply"] is True
     assert cfg["inner_voice"] is False
 
 

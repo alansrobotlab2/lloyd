@@ -1631,7 +1631,11 @@ workers:
     # nothing. workers/sources/owed_check.py, scripts/automod/owed.py.
     owed-check:
       enabled: true
-      apply: false
+      # On 2026-09-27 after a dry run of 9 items against the hand sweep: the
+      # 4 dated checks came back `recheck` (as the sweep had them), and of
+      # the 5 the sweep left for Alan, 2 came back `outside` (a drive, sudo)
+      # and 3 settled or ruled with evidence the sweep predated.
+      apply: true
       # One job in flight at a time (max_inflight), so a short interval only
       # removes the gap between items; an idle pass enqueues nothing.
       interval_seconds: 120
