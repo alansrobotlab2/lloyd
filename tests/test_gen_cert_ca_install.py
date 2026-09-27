@@ -498,3 +498,288 @@ def test_the_identical_fixture_is_refused_by_an_empty_nss_store(
 
     verdict = asyncio.run(_navigate(tls_fixture, home))
     assert "failed:" in verdict and "net::ERR_CERT_AUTHORITY_INVALID" in verdict, verdict
+
+
+# ── #1668 clause 1-5: `install-ca.sh --check`, the drift guard the re-mint lacked ──
+#
+# The live store on this box carried the retired Aug-22 CA (`98:1E:A0:F3...`) five
+# days after agent-services/cert/ca.crt was re-minted to `C5:A0:C2:DC...`, and
+# nothing on the box could say so: the only caller of install-ca.sh is gen-cert.sh
+# (scripts/gen-cert.sh:50), which normal ops never run. These tests drive `--check`
+# through the same sandboxed-PATH harness as the install path, against temp stores
+# only — the real ~/.pki/nssdb is not opened by any test here.
+
+PK12UTIL = shutil.which("pk12util")
+
+# `certutil -A` cannot carry a private key, and NSS downgrades a keyless `-t u,u,u`
+# entry to `,,`, so the leaf-and-key nickname the box actually holds (`Lloyd-goliath
+# u,u,u`) can only be reproduced with pk12util. It ships in the same nss package as
+# certutil, so wherever this file's other tests run, this one runs too.
+requires_pk12 = pytest.mark.skipif(
+    CERTUTIL is None or PK12UTIL is None,
+    reason="certutil/pk12util (nss-tools) not installed — cannot build an NSS store",
+)
+
+
+def _fingerprint(path: Path) -> str:
+    """`openssl x509 -in <path> -noout -fingerprint -sha256`, value only — the form
+    #1668's premise check was measured in, so a test failure reads straight across
+    to the command an operator would run by hand."""
+    openssl = shutil.which("openssl")
+    assert openssl is not None, "openssl not available for the trust-step tests"
+    out = subprocess.run([openssl, "x509", "-in", str(path), "-noout",
+                          "-fingerprint", "-sha256"],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return out.stdout.strip().rsplit("=", 1)[-1]
+
+
+def _mint_ca(dest: Path) -> Path:
+    """A second CA — a different key, not a re-signed copy of the same one.
+
+    The drift `--check` exists to catch is the store holding a *different key*, which
+    a re-export of the same key cannot produce. 2048 bits because this fixture's job
+    is a mismatching DER, and the re-mint this models is already exercised end to end
+    by `minted`.
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    openssl = shutil.which("openssl")
+    assert openssl is not None, "openssl not available for the trust-step tests"
+    crt = dest / "other-ca.crt"
+    out = subprocess.run(
+        [openssl, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout",
+         str(dest / "other-ca.key"), "-out", str(crt), "-days", "400",
+         "-subj", "/CN=Lloyd other CA (test fixture)"],
+        capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return crt
+
+
+def _check(bindir: Path, cert_dir: Path, ca: Path | None, *, home: Path,
+           nss_db: Path | None):
+    """`bash scripts/install-ca.sh --check [ca]`, sandboxed like every other call.
+
+    With *ca* None the script resolves the CA from `$LLOYD_CERT_DIR/ca.crt` — the
+    other half of the clause, and the form an operator runs after a re-mint.
+    """
+    argv = ["--check"] if ca is None else ["--check", str(ca)]
+    return _run(INSTALL_CA, bindir, argv, cert_dir=cert_dir, home=home,
+                nss_db=nss_db)
+
+
+def test_check_exits_zero_for_the_ca_it_would_install(minted: Minted, tmp_path) -> None:
+    """Clause 1. An installed store passes the check, by both ways of naming the CA.
+
+    The store ends up holding the CA through the real install path, so the match is
+    `certutil`'s stored DER against `openssl`'s read of the file, not two reads of the
+    same file by one tool. Then the check runs twice: with `ca.crt` as the positional
+    argument, and with only `$LLOYD_CERT_DIR` set (`_run` points that at the minted
+    cert dir and passes no argument), because the operator after a re-mint types the
+    second form. Both must exit 0 and print the fingerprint that
+    `openssl x509 -in ca.crt -noout -fingerprint -sha256` prints for the same file —
+    the value #1668's premise check compares against the store.
+    """
+    store = tmp_path / "nssdb"
+    home = tmp_path / "home"
+    home.mkdir()
+
+    install = _run(INSTALL_CA, minted.bindir, [], cert_dir=minted.cert_dir,
+                   home=home, nss_db=store)
+    assert install.returncode == 0, f"exit {install.returncode}:\n{install.stderr}"
+
+    want = _fingerprint(minted.cert_dir / "ca.crt")
+    positional = _check(minted.bindir, minted.cert_dir, minted.cert_dir / "ca.crt",
+                        home=home, nss_db=store)
+    assert positional.returncode == 0, (
+        f"a store holding the CA failed its own check: exit "
+        f"{positional.returncode}\n{positional.stdout}\n{positional.stderr}")
+    assert want in positional.stdout, f"{want!r} missing from:\n{positional.stdout}"
+
+    by_env = _check(minted.bindir, minted.cert_dir, None, home=home, nss_db=store)
+    assert by_env.returncode == 0, (
+        f"--check with only $LLOYD_CERT_DIR set failed: exit {by_env.returncode}\n"
+        f"{by_env.stdout}\n{by_env.stderr}")
+    assert want in by_env.stdout, f"{want!r} missing from:\n{by_env.stdout}"
+
+
+def test_check_fails_naming_both_sides_when_the_nickname_is_absent(
+        minted: Minted, tmp_path) -> None:
+    """Clause 2, first half. No nickname at all is the state a fresh box is in, and
+    it is also the state a store left half-written lands in; either way the answer is
+    a failure that prints the fingerprint the store *should* hold, so the operator has
+    something to compare. `_run` gives every call a temp HOME, and the store override
+    points at a path that does not exist: the run must not have to create anything to
+    discover the absence.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    want = _fingerprint(minted.cert_dir / "ca.crt")
+
+    run = _check(minted.bindir, minted.cert_dir, minted.cert_dir / "ca.crt",
+                 home=home, nss_db=tmp_path / "absent" / "nssdb")
+    assert run.returncode != 0, (
+        f"an absent 'Lloyd CA' nickname reported no drift:\n{run.stdout}")
+    both = run.stdout + run.stderr
+    assert want in both, f"expected fingerprint {want!r} missing:\n{both}"
+    assert "stored" in both.lower() and "expected" in both.lower(), (
+        f"the failure named neither side of the comparison:\n{both}")
+
+
+def test_check_fails_naming_both_fingerprints_when_the_store_holds_another_key(
+        minted: Minted, tmp_path) -> None:
+    """Clause 2, second half — the exact drift that sat on this box for five days.
+
+    The store holds one CA, `ca.crt` is another. Both fingerprints must appear, because
+    the operator's next question is "which of my two boxes is the stale one?", and this
+    is the state the retired Aug-22 CA left: a nickname present, trusted, and wrong.
+    """
+    store = tmp_path / "nssdb"
+    home = tmp_path / "home"
+    home.mkdir()
+    other = _mint_ca(tmp_path / "other")
+
+    install = _run(INSTALL_CA, minted.bindir, [str(other)], cert_dir=minted.cert_dir,
+                   home=home, nss_db=store)
+    assert install.returncode == 0, f"exit {install.returncode}:\n{install.stderr}"
+
+    stored, want = _fingerprint(other), _fingerprint(minted.cert_dir / "ca.crt")
+    assert stored != want, "the two fixture CAs are the same key; nothing to detect"
+
+    run = _check(minted.bindir, minted.cert_dir, minted.cert_dir / "ca.crt",
+                 home=home, nss_db=store)
+    assert run.returncode != 0, (
+        f"a store holding a different CA reported no drift:\n{run.stdout}")
+    both = run.stdout + run.stderr
+    assert stored in both, f"stored fingerprint {stored!r} missing:\n{both}"
+    assert want in both, f"expected fingerprint {want!r} missing:\n{both}"
+
+
+def test_check_never_writes_to_the_store_it_reports_on(minted: Minted,
+                                                      tmp_path) -> None:
+    """Clause 3. A guard that repairs while it judges cannot be run from a health
+    check or by an operator who is only looking, which is why this mode exists at all:
+    #1241's ruling of 2026-09-27 declined the machine-wide anchor, so a `--check` that
+    auto-installed would have quietly done the per-store half of the thing that ruling
+    asked someone to look at first.
+
+    Two stores, both with HOME a temp dir. The fresh one must come back with no
+    database at all — not an empty nickname list, which a `certutil -N` on the read
+    path would also leave behind. The stale one must be byte-identical afterwards:
+    same stored DER, same trust bits, same `cert9.db` file bytes.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+
+    fresh = tmp_path / "fresh" / "nssdb"
+    first = _check(minted.bindir, minted.cert_dir, minted.cert_dir / "ca.crt",
+                   home=home, nss_db=fresh)
+    assert first.returncode != 0
+    assert not (fresh / "cert9.db").exists(), (
+        "--check created a certificate database while reporting on it")
+    assert not (home / ".pki").exists(), (
+        "--check fell back to $HOME/.pki and wrote there")
+
+    store = tmp_path / "stale" / "nssdb"
+    other = _mint_ca(tmp_path / "other2")
+    install = _run(INSTALL_CA, minted.bindir, [str(other)], cert_dir=minted.cert_dir,
+                   home=home, nss_db=store)
+    assert install.returncode == 0, f"exit {install.returncode}:\n{install.stderr}"
+
+    db = store / "cert9.db"
+    assert db.is_file(), "install did not leave the store this half reads back"
+    before_der = _stored_der_sha(store)
+    before_trust = _trusts(store, NSS_NICK)
+    before_bytes = hashlib.sha256(db.read_bytes()).hexdigest()
+    assert before_der == _ca_der_sha(other) and before_trust == [NSS_TRUST], (
+        f"the stale fixture is not the shape the box holds: {before_trust!r}")
+
+    run = _check(minted.bindir, minted.cert_dir, minted.cert_dir / "ca.crt",
+                 home=home, nss_db=store)
+    assert run.returncode != 0
+    assert _stored_der_sha(store) == before_der, (
+        "--check rewrote the stored DER it was only meant to compare")
+    assert _trusts(store, NSS_NICK) == before_trust, "--check changed the trust bits"
+    assert hashlib.sha256(db.read_bytes()).hexdigest() == before_bytes, (
+        "cert9.db bytes changed across a read-only check")
+
+
+@requires_pk12
+def test_install_replaces_only_the_lloyd_ca_nickname(minted: Minted,
+                                                    tmp_path) -> None:
+    """Clause 4. The store on this box also holds `Lloyd-goliath  u,u,u` — the server
+    leaf and its key, which is what the browser arm and vite read for the fallback
+    cert. An install that swept it would break the page the CA install exists to make
+    loadable, so the only removal this script may perform is the same-nickname
+    `certutil -D` (scripts/install-ca.sh) that replaces `Lloyd CA` with the new CA.
+
+    Asserted two ways because the comment this clause retires claimed a broader
+    retirement that never shipped: the surviving nickname and its trust bits after an
+    install, and that the script still contains exactly one `certutil -D` call. The
+    nickname is imported with pk12util because `certutil -A` cannot carry a key, and
+    NSS downgrades a keyless `u,u,u` entry to `,,`.
+    """
+    store = tmp_path / "nssdb"
+    _create_empty_store(store)
+    leaf_crt, leaf_key = minted.cert_dir / "lloyd.crt", minted.cert_dir / "lloyd.key"
+    p12 = tmp_path / "leaf.p12"
+    openssl = shutil.which("openssl")
+    exported = subprocess.run(
+        [openssl, "pkcs12", "-export", "-inkey", str(leaf_key), "-in", str(leaf_crt),
+         "-name", "Lloyd-goliath", "-out", str(p12), "-passout", "pass:testpw"],
+        capture_output=True, text=True)
+    assert exported.returncode == 0, exported.stderr
+    imported = subprocess.run([PK12UTIL, "-i", str(p12), "-d", f"sql:{store}",
+                               "-W", "testpw"], capture_output=True, text=True,
+                              timeout=60)
+    assert imported.returncode == 0, imported.stderr
+
+    before = _nss_rows(store)
+    assert ("Lloyd-goliath", "u,u,u") in before, (
+        f"the fixture store does not reproduce the box's leaf nickname: {before}")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    install = _run(INSTALL_CA, minted.bindir, [], cert_dir=minted.cert_dir,
+                   home=home, nss_db=store)
+    assert install.returncode == 0, f"exit {install.returncode}:\n{install.stderr}"
+
+    rows = _nss_rows(store)
+    assert ("Lloyd-goliath", "u,u,u") in rows, (
+        f"install removed or retrusted the leaf nickname: {rows}")
+    assert (NSS_NICK, NSS_TRUST) in rows, f"the CA was not installed: {rows}"
+
+    grep = shutil.which("grep")
+    counting = subprocess.run([grep, "-c", "certutil -D", str(INSTALL_CA)],
+                              capture_output=True, text=True)
+    assert counting.stdout.strip() == "1", (
+        f"install-ca.sh no longer holds exactly one deletion call: "
+        f"{counting.stdout.strip()!r}\n{INSTALL_CA.read_text()}")
+
+
+def test_the_script_header_tells_an_operator_to_run_the_check_after_a_re_mint() -> None:
+    """Clause 5. `gen-cert.sh` is the only caller of this script and normal ops never
+    run it, so a CA re-minted out of band is invisible to every scheduled job on the
+    box — the drift in this item was found by hand, five days late. The knowledge that
+    `--check` exists therefore has to live where the person who just re-minted a CA is
+    looking, which is the top of the script itself, not a vault note.
+
+    Read out of the header block only (everything up to the first non-comment line),
+    so a mention buried in a branch further down does not pass: three months from now
+    the reader skims the usage comment and nothing else.
+    """
+    header_lines = []
+    for line in INSTALL_CA.read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            break
+        header_lines.append(line)
+    header = "\n".join(header_lines)
+    assert header.strip(), "install-ca.sh has no header block to read"
+
+    low = header.lower()
+    assert "--check" in low, "the header never mentions --check"
+    assert "re-mint" in low, "the header does not tie --check to a CA re-mint"
+    assert "never writes" in low or "write nothing" in low, (
+        "the header does not say --check is read-only")
+    assert "/etc" in low, (
+        "the header does not scope --check away from /etc, which #1241's ruling "
+        "requires of it")
