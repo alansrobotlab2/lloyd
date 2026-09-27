@@ -32,7 +32,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -42,6 +44,7 @@ from app.harness.safety import install_default_safety_hook
 from app.harness.mcp_pool import DEFAULT_LLOYD_MCP_SERVERS
 from scripts.autoresearch import judge
 from scripts.autoresearch.bench_runner_sdk import (
+    PLANTED_PROBE_PROMPT,
     STATEFUL_TOOLS,
     build_options,
     ledger_row_for,
@@ -1036,3 +1039,118 @@ def test_a_trace_with_no_skill_channel_reports_none_not_empty():
     assert row["skills_injected"] is None
     assert row["skills_delivered"] is None
     assert row["skill_dispatch_installed"] is None
+
+
+# ===========================================================================
+# #1666 — the CLI route that ships the positive control
+#
+# `PLANTED_PROBE_PROMPT` (bench_runner_sdk.py:167) is what lets a zero
+# `bench_probe_count` over the real ledger be read as "no trial went looking for
+# its own grading" rather than "the detector never fires". #651 pinned the
+# library half (`tests/test_bench_invariants.py:289`), but nothing in this file
+# named the CLI, and the flag reaches the trial through exactly one expression:
+# `probe_prompt=PLANTED_PROBE_PROMPT if planted_probe else ""`
+# (bench_runner_sdk.py:822). Deleting that line left the whole suite green and
+# silently turned the positive control into an ordinary trial — the one run
+# everyone is told to execute, `--planted-probe --record`, would then print a
+# zero row that reads as a dead detector.
+#
+# These drive `main()` itself, argparse and all, through the same fake pool and
+# stream seam every trial test in this file uses, so no socket is opened, and
+# read the prompt back out of the `messages` the loop handed `stream_chat`. That
+# is the boundary the clause names: argv in, model input out.
+# ===========================================================================
+
+ORDINARY_PROMPT = "Summarise the quarterly note."
+
+
+class _PromptRecordingScript(_StreamScript):
+    """The scripted replier, plus the text of every completion it answered.
+
+    `app/harness/loop.py` calls `stream_chat(messages=chat_messages, ...)`, so
+    `messages` here is what the model was actually shown — the far end of the
+    CLI route, and the only place `probe_prompt` can be checked without
+    trusting the argument it was passed.
+    """
+
+    def __init__(self, turns: list[tuple[str, list[dict[str, Any]]]]):
+        super().__init__(turns)
+        self.prompts: list[str] = []
+
+    def __call__(self, **kwargs):
+        self.prompts.append("\n".join(
+            str(m.get("content", "")) for m in (kwargs.get("messages") or [])))
+        return super().__call__(**kwargs)
+
+
+def _drive_cli(monkeypatch, capsys, argv: list[str]) -> list[str]:
+    """Run `bench_runner_sdk.main()` with `argv`; return the prompts the trial
+    loop handed the model, one entry per completion.
+
+    Only what the CLI touches before a trial exists is stubbed — config, task
+    loading, the baseline overlay — and the task it loads is
+    `requires_runtime: true`, which is what the no-`--task` default selects
+    (bench_runner_sdk.py:898-903). The trial itself is real, so the prompt
+    travels argv → argparse → `_cli` → `run_bench_sdk` → `run_trial` →
+    `stream_chat`: a broken link anywhere along that chain shows up here as the
+    planted sentence missing from the returned text.
+    """
+    _patch_off_vault(monkeypatch)
+    script = _PromptRecordingScript([("all clear", [])])
+    _patch_harness(monkeypatch, _FakePool("lloyd-mcp", [_mcp_tool("Read")]), script)
+
+    class _Paths:
+        bench_dir = Path("/nonexistent-cli-bench")
+        ledger_path = Path("/nonexistent-cli-ledger.jsonl")
+
+        def ensure(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        _runner, "load_config",
+        lambda: SimpleNamespace(paths=_Paths(), default_model="primary"))
+    monkeypatch.setattr(
+        _runner, "load_bench_tasks", lambda _bench_dir: [_task(prompt=ORDINARY_PROMPT)])
+    monkeypatch.setattr(
+        "scripts.autoresearch.variant_sandbox.materialize_baseline",
+        lambda _cfg: ("BASELINE", Path("/nonexistent-overlay")))
+    monkeypatch.setattr(sys, "argv", ["bench_runner_sdk", *argv])
+
+    rc: Any = "no-exit"
+    try:
+        _runner.main()
+    except SystemExit as exc:  # `main()` always exits, with the runner's rc
+        rc = exc.code
+    captured = capsys.readouterr()
+    assert rc == 0, f"the CLI exited {rc!r}; stderr: {captured.err[-400:]}"
+    return script.prompts
+
+
+def test_the_planted_probe_flag_reaches_the_prompt_the_loop_receives(monkeypatch, capsys):
+    """Clause 1, with-arm. The flag has to arrive as the planted sentence inside
+    the trial's own prompt — a truthy argparse attribute that never reached
+    `run_bench_sdk` would leave the control silently un-run."""
+    seen = "\n".join(_drive_cli(monkeypatch, capsys, ["--planted-probe"]))
+
+    assert seen, "the trial never reached a completion"
+    assert PLANTED_PROBE_PROMPT in seen, seen
+    # Appended to the task, never in place of it: the control measures a real
+    # trial, so the task's own prompt has to still be in front of the model.
+    assert ORDINARY_PROMPT in seen, seen
+
+
+def test_the_cli_without_the_planted_probe_flag_hands_no_planted_prompt(monkeypatch,
+                                                                        capsys):
+    """Clause 1, without-arm.
+
+    Not decoration: a `probe_prompt` that leaked through unconditionally would
+    plant the probe on every scored round, and the ledger's
+    `bench_probe_count` would stop describing what the model did. `ORDINARY_PROMPT`
+    is the positive control that makes the negative assertion mean something —
+    the trial demonstrably reached the loop with the task's prompt, so what is
+    missing is the planted sentence and not the run.
+    """
+    seen = "\n".join(_drive_cli(monkeypatch, capsys, []))
+
+    assert ORDINARY_PROMPT in seen, seen
+    assert PLANTED_PROBE_PROMPT not in seen, seen
