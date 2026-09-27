@@ -59,7 +59,13 @@ extension, the idler daemon):
 | `app/routers/mc_ui.py::_summarize_autonomy` | the tab summary the agent reads |
 
 Every one of them skips a file whose name does not start with a digit, so
-`_config.md` and the stray reports in that directory are not tasks. The walk is
+`_config.md` and the stray reports in that directory are not tasks. That sentence
+was a description of six independent gates until #1594: `mc_ui._summarize_autonomy`
+gated on frontmatter instead, counted a prose note as a task, and dropped three real
+tasks whose frontmatter ran past its 2000-byte read window — 32 task files reported
+as 30. It now calls `app/routers/autonomy.py::autonomy_task_files()` /
+`list_parsed_tasks()`, so the rule lives once (`_TASK_NAME_RE`) and the last row of
+the table above is the first three rows' enumeration rather than its own. The walk is
 `glob("*.md")` and never `rglob`, which is why `_archived/` — 14 retired tasks —
 is invisible to the scheduler rather than merely inactive.
 

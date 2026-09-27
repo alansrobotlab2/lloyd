@@ -368,7 +368,9 @@ def _summarize_chat() -> dict:
 
 
 _BACKLOG_DIR = Path.home() / "obsidian" / "backlog"
-_AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
+# No `_AUTONOMY_DIR` of its own: #1594. A second constant for one directory is how
+# the summary came to enumerate it independently of the route that owns it — see
+# `_summarize_autonomy` and `app/routers/autonomy.py::autonomy_task_files`.
 
 
 def _summarize_backlog() -> dict:
@@ -398,26 +400,42 @@ def _summarize_backlog() -> dict:
 
 
 def _summarize_autonomy() -> dict:
-    if not _AUTONOMY_DIR.exists():
+    """Autonomy tab counts for the agent-facing Mission Control summary.
+
+    The counts are the task route's own enumeration and parse path
+    (`app/routers/autonomy.py::list_parsed_tasks`), not a second walk of the
+    directory. There were two, and they disagreed in both directions (#1594):
+
+    * this one counted any `*.md` (except `_config.md`) that opened with `---`, so
+      `~/obsidian/autonomy/meta-analysis-2026-06-03.md` — a prose note with
+      frontmatter and no `status:` key — was counted as a task and, through the
+      `or "scheduled"` default below, filed under a status no autonomy task file
+      can carry; and
+    * it read only the first 2000 bytes, so a real task whose frontmatter closed
+      past that (`79-retention-sweep.md` at 2734, `86-nightly-iv-metrics-series.md`
+      at 3373, `90-corpus-shape-trend.md` at 2028) failed `len(parts) < 3` and was
+      silently not counted.
+
+    Net on the live vault: `total: 30` where `GET /api/autonomy/tasks` listed 32.
+    The tab is what `mc_get_state` answers "how many tasks are scheduled" from, so
+    the wrong number was the agent's number.
+
+    The missing-directory `{}` return is kept: an absent tree is reported as no
+    summary for the tab, not as a zero-task fleet.
+    """
+    from app.routers import autonomy as _route_autonomy  # same lazy style as _summarize_workers
+
+    if not _route_autonomy._AUTONOMY_DIR.exists():
         return {}
     statuses: dict[str, int] = {}
     total = 0
-    for tf in _AUTONOMY_DIR.glob("*.md"):
-        if tf.name == "_config.md":
-            continue
-        try:
-            head = tf.read_text(encoding="utf-8")[:2000]
-            if not head.startswith("---"):
-                continue
-            parts = head.split("---", 2)
-            if len(parts) < 3:
-                continue
-            fm = yaml.safe_load(parts[1]) or {}
-            total += 1
-            status = str(fm.get("status") or "scheduled")
-            statuses[status] = statuses.get(status, 0) + 1
-        except Exception:
-            continue
+    for task in _route_autonomy.list_parsed_tasks():
+        # The parse path already resolves a missing `status:` to
+        # AUTONOMY_DEFAULT_STATUS; the `or` only covers a file that declares
+        # `status:` with an empty value, so this function never invents a status.
+        status = str(task.get("status") or _route_autonomy.AUTONOMY_DEFAULT_STATUS)
+        statuses[status] = statuses.get(status, 0) + 1
+        total += 1
     return {"total": total, "by_status": statuses}
 
 

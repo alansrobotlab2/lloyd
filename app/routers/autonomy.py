@@ -21,6 +21,18 @@ logger = logging.getLogger("lloyd-server")
 _AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 from app.paths import AUTONOMY_RUNS_DIR as _AUTONOMY_RUNS_DIR
 
+# A task file is named `NN-slug.md`; anything else in the directory is a report, a
+# note, or `_config.md`. #1594: this pattern was spelled inline at the task-list
+# route only, while `_summarize_autonomy` gated the same glob on "has frontmatter"
+# instead — so a prose note that grew frontmatter was counted as a task there.
+_TASK_NAME_RE = re.compile(r"\d+-")
+
+# The status of a task file that does not declare one. One literal on purpose
+# (#1594): the Mission Control summary used to carry its own default of
+# `"scheduled"` — a status no autonomy task file can have, since no file says
+# `status: scheduled` — so a status-less note read as a scheduled task.
+AUTONOMY_DEFAULT_STATUS = "draft"
+
 
 # ── Runtime control ──────────────────────────────────────────────────────────
 
@@ -92,7 +104,7 @@ def _autonomy_parse(path: Path) -> dict | None:
             "id": id_val,
             "name": fm.get("name", ""),
             "description": fm.get("description", ""),
-            "status": fm.get("status", "draft"),
+            "status": fm.get("status", AUTONOMY_DEFAULT_STATUS),
             # #1555: same read-side half as `agent_mcp/autonomy.py` — the task-write
             # route asks the projected dict for `requires_slot` before it arms, and
             # a projection that dropped the key would arm the task anyway.
@@ -145,6 +157,44 @@ def _autonomy_parse(path: Path) -> dict | None:
         }
     except Exception:
         return None
+
+
+def autonomy_task_files() -> list[Path]:
+    """Every task file in `_AUTONOMY_DIR`, and ONLY task files (#1594).
+
+    This is the one enumeration of that directory. The task-list route below and
+    the Mission Control autonomy summary (`app/routers/mc_ui.py`) both go through
+    it, which is the point: the summary used to glob the same directory and gate on
+    `head.startswith("---")` — frontmatter present, first 2000 bytes only — while
+    this route gated on the `NN-` task filename. A prose note with legal
+    frontmatter was therefore a task on the agent-facing tab and not on the board,
+    and a real task whose frontmatter ran past byte 2000 was on the board and not
+    on the tab (32 task files reported as 30, 2026-09-27). Whatever the next file
+    in this directory turns out to be, there is now one rule that decides whether
+    it counts.
+
+    Returns an empty list when the directory does not exist.
+    """
+    if not _AUTONOMY_DIR.exists():
+        return []
+    return sorted(p for p in _AUTONOMY_DIR.glob("*.md") if _TASK_NAME_RE.match(p.name))
+
+
+def list_parsed_tasks() -> list[dict]:
+    """The task dicts for `autonomy_task_files()`, via `_autonomy_parse`.
+
+    One parse path as well as one name gate, so a task the scheduler loads can no
+    longer be missing from a reader's total: `_autonomy_parse` reads the whole file
+    and goes through the graduated-recovery frontmatter loader (#1014), where the
+    summary's inline `yaml.safe_load(head[:2000])` silently returned nothing.
+    """
+    tasks = []
+    for path in autonomy_task_files():
+        task = _autonomy_parse(path)
+        if task is None:
+            continue
+        tasks.append(task)
+    return tasks
 
 
 def _autonomy_find_file(task_id: int) -> Path | None:
@@ -228,21 +278,17 @@ def _autonomy_write_file(task_dict: dict) -> Path:
 
 @router.get("/api/autonomy/tasks")
 async def autonomy_tasks(status: str = "", tag: str = ""):
-    """List autonomy tasks from ~/obsidian/autonomy/."""
-    if not _AUTONOMY_DIR.exists():
-        return JSONResponse({"tasks": []})
-    tasks = []
-    for path in _AUTONOMY_DIR.glob("*.md"):
-        if not re.match(r"\d+-", path.name):
-            continue  # only NN-name.md task files; skip _config.md, reports, notes
-        task = _autonomy_parse(path)
-        if task is None:
-            continue
-        if status and task.get("status") != status:
-            continue
-        if tag and tag not in (task.get("tags") or []):
-            continue
-        tasks.append(task)
+    """List autonomy tasks from ~/obsidian/autonomy/.
+
+    Which files ARE tasks, and what each one says, both come from
+    `list_parsed_tasks()` — the same call the Mission Control autonomy summary now
+    makes, so the board and the tab cannot report different fleets (#1594).
+    """
+    tasks = list_parsed_tasks()
+    if status:
+        tasks = [t for t in tasks if t.get("status") == status]
+    if tag:
+        tasks = [t for t in tasks if tag in (t.get("tags") or [])]
     # Why the scheduler is holding each task, from the scheduler itself. The
     # board used to derive "overdue" from elapsed/interval alone, which paints
     # a nightly job red for the eighteen hours a day it is not allowed to run.
