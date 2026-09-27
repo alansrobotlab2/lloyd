@@ -142,3 +142,80 @@ def test_a_called_out_metric_still_has_to_name_a_most_likely_cause():
     assert re.search(r"most likely cause", step4), (
         "Step 4 no longer requires a cause for a metric it calls out — #608's "
         "vault commit ca43ca6b removed it and this round must put it back")
+
+
+# ── #1600: the gold-bearing companions the writer emits ─────────────────────
+
+def _overall_with_gold_mixed_in() -> dict:
+    """A real `summarize()` pass over two queries — one carrying entity gold, one
+    not — so the field names checked below come out of what the writer emits, not
+    out of a list this test wrote.
+
+    Imported here rather than at module scope: the rest of this file is pure text
+    and stays that way.
+    """
+    import sys
+    sys.path.insert(0, str(ROOT))
+    import eval.run_eval as ev
+    return ev.summarize([
+        {"id": "with-gold", "category": "single", "latency_ms": 10.0, "error": None,
+         "expected": {"entities": ["Knowledge Graph"], "docs": ["knowledge/kg.md"]},
+         "scoring": {"entity_hit": True, "doc_hit": True, "entity_recall": 1.0,
+                     "doc_recall": 1.0, "rr_doc": 1.0, "ndcg10": 1.0,
+                     "fact_entity_recall": 1.0, "first_doc_rank": 1,
+                     "entity_hit_retrieval_carried": True}},
+        {"id": "no-entity-gold", "category": "single", "latency_ms": 10.0, "error": None,
+         "expected": {"entities": [], "docs": ["knowledge/kg.md"]},
+         "scoring": {"entity_hit": False, "doc_hit": True, "entity_recall": None,
+                     "doc_recall": 1.0, "rr_doc": 1.0, "ndcg10": 1.0,
+                     "fact_entity_recall": None, "first_doc_rank": 1,
+                     "entity_hit_retrieval_carried": False}},
+    ])["overall"]
+
+
+def test_the_skill_names_the_gold_bearing_fields_the_eval_emits():
+    """#1600 clause 5: the nightly report has to print each hit leg's
+    gold-bearing rate beside the headline, and a report told to quote some other
+    name quotes nothing.
+
+    The names are taken from `summarize()`'s own keys, so the writer renaming a
+    companion fails this test along with the prose — the failure mode #696 pinned
+    for `ci95` (`a report told to quote `confidence` while eval/run_eval.py writes
+    `ci` quotes nothing`) applied to the new fields. The exact-name assert below is
+    the positive control: were the writer emitting no companions at all, the loop
+    over `emitted` would have nothing to check and would pass.
+    """
+    overall = _overall_with_gold_mixed_in()
+    emitted = sorted(k for k in overall
+                     if k.endswith("_gold_bearing") or k.endswith("_gold_bearing_n"))
+    assert emitted == [
+        "doc_hit_rate_gold_bearing", "doc_hit_rate_gold_bearing_n",
+        "entity_hit_rate_gold_bearing", "entity_hit_rate_gold_bearing_n",
+        "entity_hit_rate_retrieval_carried_gold_bearing",
+        "entity_hit_rate_retrieval_carried_gold_bearing_n",
+    ], emitted
+    # The values the section's example numbers describe: the empty-gold query
+    # leaves the entity companion at 1.0 over one query while the headline is
+    # 0.5 over two.
+    assert overall["entity_hit_rate"] == 0.5
+    assert overall["entity_hit_rate_gold_bearing"] == 1.0
+    assert overall["entity_hit_rate_gold_bearing_n"] == 1
+    for name in emitted:
+        assert f"`{name}`" in TEXT, f"skill does not name the field the writer emits: {name}"
+
+
+def test_the_skill_tells_the_report_to_print_the_companion_beside_the_headline():
+    """#1600 clause 5's instruction half, scoped to its own section so a mention
+    in `## Notes` cannot stand in for the report step saying it."""
+    body = section("Which population each hit rate was divided over")
+    low = body.lower()
+    assert "print the gold-bearing rate beside the headline" in low, body[:400]
+    assert "own `n`" in body, body[:400]
+    # A leg the corpus asked nothing of is null and prints the interval block's
+    # own no-verdict — the rule that keeps "nothing scored" off the page as 0.000.
+    assert "null" in low and "never `0.0`" in body, body[:400]
+    assert "no verdict" in body, body[:400]
+    # And the section says out loud that the denominator policy is not this job's
+    # to take, which is the clause that keeps a future run from re-basing it.
+    assert "reserves" in low, body[-600:]
+    assert "mrr_doc" in body and "no" in low, body[-600:]

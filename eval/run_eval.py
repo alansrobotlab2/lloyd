@@ -778,6 +778,73 @@ CI_METRICS = {
 }
 
 
+#: The three hit-side rates, each with the gold list that makes it scoreable
+#: (#1600). A query with an empty `expect_entities` asks NOTHING of the entity
+#: leg, yet `_score` records `entity_hit: bool([])` = False for it and `summarize`
+#: divides that False over EVERY record — while a recall for the same query comes
+#: back None (`:501-502`) and leaves its own average. So the same artifact
+#: reported two halves of one leg over two populations: on the 2026-09-27 corpus
+#: `entity_hit_rate` is 0.488 over all 86 queries and 0.636 over the 66 that carry
+#: entity gold, 0.148 apart, and only the first was published. `doc_hit_rate` moved
+#: 0.628 / 0.684 (n=86 / 79) the same way.
+#:
+#: The companion below publishes the second reading beside the first. It does not
+#: re-base the first: guarding the hit booleans instead would divide every prior
+#: night in the trend window against a different definition, and #1600 reserves
+#: that denominator-policy decision for a person.
+GOLD_BEARING_LEGS = {
+    "entity_hit_rate": "entities",
+    # Same gold list, narrower numerator (#1548) — so both entity companions
+    # carry the entity leg's n, and a reader can multiply either back out.
+    "entity_hit_rate_retrieval_carried": "entities",
+    "doc_hit_rate": "docs",
+}
+
+
+def _leg_hit(rec: dict, metric: str) -> bool:
+    """This query's hit on one hit leg, asked the SAME way the published rate
+    asks it.
+
+    The companion and the headline are one numerator over two denominators, so
+    both go through here rather than through two comprehensions that can drift
+    apart. `entity_hit_rate_retrieval_carried` keeps #1548's fallback through
+    `scoring.entity_legs`, so an artifact predating that field reads as
+    not-carried in the headline and in the companion alike — never one way in one
+    and the other way in the other.
+    """
+    if metric == "entity_hit_rate_retrieval_carried":
+        return _retrieval_entity_hit(rec)
+    return bool((rec.get("scoring") or {}).get(CI_METRICS[metric][0]))
+
+
+def gold_bearing_rates(records: list[dict]) -> dict:
+    """Each hit leg re-divided over only the queries that carry gold for it.
+
+    Returns ``{published_metric: {"rate": float | None, "n": int, "k": int}}``.
+    `n` counts the records whose gold list for that leg is non-empty — the same
+    population `ci95` already divides that leg's RECALL over, because `_score`
+    nulls a recall exactly when the list is empty, so a reader can check the two
+    denominators against each other instead of taking either on trust.
+
+    Excluding an empty-gold query is the ONLY difference from the headline, which
+    keeps scoring it as a miss. `rate` is None, never 0.0, when no query carries
+    gold for the leg: that leg scored nothing on this corpus, and 0.0 would report
+    the absence as a measured zero — the rule `_fmt_rate` and `_fmt_ci` already
+    follow on the printed page and `METRIC_NAN_POLICY` in the artifact.
+
+    `expected` is read the way `anchorless_queries` reads it, so an artifact with
+    no `expected` block (a synthetic record) is not scored for the leg rather than
+    guessed at: a missing input is not a zero-gold query.
+    """
+    out: dict = {}
+    for metric, leg in GOLD_BEARING_LEGS.items():
+        scored = [r for r in records if ((r.get("expected") or {}).get(leg) or [])]
+        k = sum(1 for r in scored if _leg_hit(r, metric))
+        out[metric] = {"rate": (round(k / len(scored), 3) if scored else None),
+                       "n": len(scored), "k": k}
+    return out
+
+
 def confidence_intervals(records: list[dict], *,
                          n_resamples: int = evstats.N_RESAMPLES,
                          seed: int = evstats.SEED) -> dict:
@@ -846,6 +913,50 @@ def _fmt_ci(metric: str, overall: dict) -> str:
     if n <= 0 or not ci or any(b is None for b in ci):
         return f"  [no verdict] n={n}"
     return f"  [{ci[0]:.3f},{ci[1]:.3f}] n={n}"
+
+
+#: Short name for each hit leg on the printed page, so #1600's companion line
+#: reads against the rates whose population it narrows instead of repeating
+#: `_rate` three times.
+GOLD_BEARING_LABELS = {
+    "entity_hit_rate": "entity_hit",
+    "entity_hit_rate_retrieval_carried": "retrieval_carried",
+    "doc_hit_rate": "doc_hit",
+}
+
+
+def _fmt_gold_bearing(value, n: int) -> str:
+    """One leg's gold-bearing rate for the page: `0.636 n=66`, or the interval's
+    own `no verdict` when NO query carries gold for that leg.
+
+    null and 0.000 are different facts here exactly as they are in `_fmt_rate`: a
+    leg with no gold-bearing query scored nothing, and printing 0.000 would report
+    that nothing as a measured zero — the same failure `_fmt_ci` refuses for the
+    bracket beside it (#1260). Three decimals rather than two because the gap
+    between a leg's two readings is the whole point of the line (0.488 against
+    0.636 on the 2026-09-27 corpus), and a 2 dp page can round such a pair to one
+    number and make the companion look like the headline.
+    """
+    if value is None or not n:
+        return f"null [no verdict] n={n or 0}"
+    return f"{value:.3f} n={n}"
+
+
+def gold_bearing_line(overall: dict) -> str:
+    """The companion line for all three hit legs (#1600):
+
+      gold_bearing      entity_hit=0.636 n=66  retrieval_carried=0.621 n=66  doc_hit=0.684 n=79
+
+    Printed immediately under the metric lines, so each companion sits beside the
+    headline rate it narrows. A leg the corpus asked nothing of prints
+    `null [no verdict] n=0`.
+    """
+    parts = []
+    for metric in GOLD_BEARING_LEGS:
+        value = overall.get(f"{metric}_gold_bearing")
+        n = overall.get(f"{metric}_gold_bearing_n") or 0
+        parts.append(f"{GOLD_BEARING_LABELS[metric]}={_fmt_gold_bearing(value, n)}")
+    return f"  {'gold_bearing':<20}" + "  ".join(parts)
 
 
 #: Which metrics have no gold-side ceiling, and why. Mirrors
@@ -1000,10 +1111,16 @@ def summarize(records: list[dict]) -> dict:
         # arm carry no perturbation block, and summarize runs over both.
         return rec["scoring"].get(key)
 
-    # Each rate averages only the queries that were scoreable for that half, so
-    # the denominators travel with the numbers: a pinned_rate over 4 of 20
-    # queries is not comparable to one over 18, and the whole point of #541 is
-    # that a low number here is a finding rather than a malfunction.
+    # Some rates average only the queries that were scoreable for that half, so
+    # the denominators travel with the numbers: a pinned_rate over 4 of 20 queries
+    # is not comparable to one over 18, and the whole point of #541 is that a low
+    # number here is a finding rather than a malfunction. WHICH rates do is not
+    # uniform, and saying "each" was wrong until #1600: the recalls, the
+    # counterfactual rates and `fact_entity_recall_avg` all drop a query that was
+    # never scoreable, while the three hit rates below score such a query as a
+    # miss and divide over every record. That asymmetry is what the
+    # `<metric>_gold_bearing` companions published alongside them are for — see
+    # `GOLD_BEARING_LEGS`.
     moved_vals = [_cf(r, "counterfactual_moved_rate") for r in records]
     pinned_vals = [_cf(r, "counterfactual_pinned_rate") for r in records]
     anchorless = anchorless_queries(records)
@@ -1016,7 +1133,7 @@ def summarize(records: list[dict]) -> dict:
         # changed, not one whose search got better.
         "anchorless_query_count": len(anchorless),
         "anchorless_query_ids": anchorless,
-        "entity_hit_rate": avg([1.0 if r["scoring"]["entity_hit"] else 0.0 for r in records]),
+        "entity_hit_rate": avg([1.0 if _leg_hit(r, "entity_hit_rate") else 0.0 for r in records]),
         # #1548: retrieval-only, by construction — a hit counts here only if a
         # fact, a graph-expanded fact or a graph neighbour carried a matched
         # entity. <= `entity_hit_rate` on any record set, and the difference is
@@ -1025,8 +1142,8 @@ def summarize(records: list[dict]) -> dict:
         # carry it). Read alongside `fact_entity_recall_avg`, whose denominator is
         # the fact leg and which therefore cannot be seed-inflated either.
         "entity_hit_rate_retrieval_carried": avg(
-            [1.0 if _retrieval_entity_hit(r) else 0.0 for r in records]),
-        "doc_hit_rate": avg([1.0 if r["scoring"]["doc_hit"] else 0.0 for r in records]),
+            [1.0 if _leg_hit(r, "entity_hit_rate_retrieval_carried") else 0.0 for r in records]),
+        "doc_hit_rate": avg([1.0 if _leg_hit(r, "doc_hit_rate") else 0.0 for r in records]),
         "entity_recall_avg": avg([r["scoring"]["entity_recall"] for r in records]),
         "doc_recall_avg": avg([r["scoring"]["doc_recall"] for r in records]),
         "mrr_doc": avg([r["scoring"]["rr_doc"] for r in records]),
@@ -1041,6 +1158,19 @@ def summarize(records: list[dict]) -> dict:
         "counterfactual_n_moved": len([v for v in moved_vals if v is not None]),
         "counterfactual_n_pinned": len([v for v in pinned_vals if v is not None]),
     }
+    # Which population each hit rate above was divided over (#1600). The headline
+    # keys keep their all-records denominator UNCHANGED — a query that carries no
+    # gold for a leg stays a miss on that leg, which is the denominator policy a
+    # person owns — and each gains a companion re-dividing the same numerator over
+    # only the gold-bearing queries, with its own `n`. Both readings are in every
+    # artifact from here on, because the composition of the GOLD, not of the
+    # retrieval, is what moves a headline hit rate under this convention: on the
+    # 2026-09-27 corpus the entity leg reads 0.488 (n=86) and 0.636 (n=66), and a
+    # gold edit that emptied one more query's `expect_entities` would have moved
+    # the first number with retrieval held perfectly still.
+    for _gb_metric, _gb in gold_bearing_rates(records).items():
+        overall[f"{_gb_metric}_gold_bearing"] = _gb["rate"]
+        overall[f"{_gb_metric}_gold_bearing_n"] = _gb["n"]
     # `label_agreement`, `ceiling` and the per-metric `<metric>_normalized` /
     # `<metric>_ceiling_kind` go beside the raw aggregates (#654). Emitted for all
     # seven metrics — including `fact_entity_recall_avg`, which has no gold-side
@@ -1223,6 +1353,12 @@ def print_table(records: list[dict], summary: dict) -> None:
             suffix = (f"   score/ceiling={'null' if norm is None else norm}"
                       f" (ceiling={cap} kind={kind})")
         print(f"  {label:<20}{fmt(o.get(metric))}{_fmt_ci(metric, o)}{suffix}")
+    # Each hit rate's OTHER denominator, directly under the rates themselves
+    # (#1600). An empty-gold query is a miss in `entity_hit_rate` above and is not
+    # in `entity_hit_rate_gold_bearing` here, so the two are one numerator over two
+    # populations, and printing only the first lets a gold edit read as a retrieval
+    # move — which is how `entity_hit` 0.488 and 0.636 came to be the same leg.
+    print(gold_bearing_line(o))
     # The labeler identity and, below 0.80, the disagreement set. The second half is
     # the clause that keeps this instrument from becoming an excuse: a low ceiling
     # reported without the labels that caused it is a reason to stop fixing entity
