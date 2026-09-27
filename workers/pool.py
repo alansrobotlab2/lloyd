@@ -277,6 +277,31 @@ def effect_scope_for(item: QueueItem) -> str:
     return f"item:{item.source}:{item.id}"
 
 
+def _scratchpad_meta() -> dict[str, int]:
+    """What this run wrote to its scratchpad, read off disk at record time.
+
+    #1554 step 1 asks whether writes-per-active-hour predicts an outcome. That is
+    only a question if the number is on the run row: `meta_json.scratchpad.writes`
+    joins to `runs.status`, `duration_seconds` is already there, and no new
+    instrument is needed. `sessions` counts only the sessions that actually have a
+    scratchpad file, so a run whose model never touched the tool reads as
+    `{writes: 0, bytes: 0, sessions: 0}` — a real zero, not a missing key a later
+    reader has to guess at.
+
+    Totals come from the file rather than a counter in this process because the
+    append happens in the MCP server process: the two share a filesystem, not
+    memory. Never raises — a run must not fail on the way to its own record
+    because a tally could not be taken, and a run that died is exactly the run
+    whose tally we most want and least want to lose.
+    """
+    try:
+        from app.scratchpad import summarize
+        return summarize(current_run_sessions.get() or [])
+    except Exception:
+        logger.debug("scratchpad tally failed; recording zeros", exc_info=True)
+        return {"writes": 0, "bytes": 0, "sessions": 0}
+
+
 def _task_id_of(item: QueueItem, result: Any = None) -> Optional[str]:
     """Task id for a run record: prefer the handler's result, fall back to the
     queue payload. Timeout/exception branches have no result, and omitting the
@@ -1070,7 +1095,8 @@ class WorkerPool:
                 # scheduler's own cooldown is ever consulted.
                 norm = normalize_result(item, result)
                 norm["meta"] = {**norm["meta"],
-                                "session_ids": list(current_run_sessions.get() or [])}
+                                "session_ids": list(current_run_sessions.get() or []),
+                                "scratchpad": _scratchpad_meta()}
                 run_status = norm["status"]
                 # #525 — verify the run's claims at the moment its record is
                 # written, and only for a source that emitted any (`claims`
@@ -1141,7 +1167,13 @@ class WorkerPool:
                         meta_json=json.dumps({
                             "pool_timeout": True,
                             "max_duration_seconds": max_duration,
-                            "session_ids": list(current_run_sessions.get() or [])}),
+                            "session_ids": list(current_run_sessions.get() or []),
+                            # A run killed at its cap is the population #1554 is
+                            # about: how much it had externalised by the moment it
+                            # died is the comparison the item's whole hypothesis
+                            # rests on, and this branch is where that run's row is
+                            # written.
+                            "scratchpad": _scratchpad_meta()}),
                     )
                 )
                 new_state = await asyncio.to_thread(
@@ -1166,7 +1198,8 @@ class WorkerPool:
                         task_id=_task_id_of(item),
                         meta_json=json.dumps({
                             "exception": type(e).__name__,
-                            "session_ids": list(current_run_sessions.get() or [])}),
+                            "session_ids": list(current_run_sessions.get() or []),
+                            "scratchpad": _scratchpad_meta()}),
                     )
                 )
                 new_state = await asyncio.to_thread(

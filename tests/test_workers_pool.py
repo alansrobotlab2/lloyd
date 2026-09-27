@@ -9,6 +9,7 @@ nothing, and the rule that keeps a worker from freezing the backend.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import inspect
@@ -773,3 +774,124 @@ async def test_a_pool_built_fresh_on_a_paused_database_alerts_by_the_pause(
     assert alerts == ["autonomy scheduler may be stalled: "
                       "oldest claimable queue item is 990 min old"], (
         f"after the resume the alert must fall back to today's text: {alerts}")
+
+
+#: ── #1554: the run record carries its scratchpad tally ───────────────────────
+#:
+#: Step 1 of #1554 asks whether scratchpad write-rate predicts an outcome. That is
+#: only a query if the number is on the run row: `meta_json.scratchpad` joined to
+#: `runs.status` over `duration_seconds` is the whole experiment, and no new
+#: instrument is needed. A run that wrote nothing records zeros rather than an
+#: absent key, because a missing key is a question a later reader has to guess at —
+#: and "the scratchpad never caught on" and "nobody recorded" look identical in a
+#: count of nulls.
+#:
+#: The source below writes the notes through the real `app.scratchpad.append` and
+#: registers its session through the real `app.sessions_io.note_run_session`, so the
+#: test crosses the seam the feature actually uses: the pool reads totals back from
+#: disk at record time, which is the only thing that can be true when the append
+#: happens in another process.
+
+
+@pytest.fixture
+def scratch_root(tmp_path, monkeypatch):
+    import app.scratchpad as sp
+    root = tmp_path / "data"
+    monkeypatch.setattr(sp, "DATA_ROOT", root)
+    return root
+
+
+async def test_a_finished_run_records_its_scratchpad_writes_beside_duration(
+        q, monkeypatch, scratch_root):
+    """Clause 5. The source writes three notes totalling a known byte count for the
+    session it registers, and the run row has to say exactly that, next to the
+    duration the rate is divided by."""
+    import app.scratchpad as sp
+    from app.sessions_io import note_run_session
+
+    sid = "worker:s:aaa111"
+
+    async def execute(item):
+        note_run_session(sid)                    # what the worker driver does
+        for text in ("ruled out the 4k window", "hypothesis: kv gate", "next: 8k"):
+            sp.append(sid, text)
+        return {"summary": "did the thing"}
+
+    q.enqueue("s", "k")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+    meta = json.loads(runs[0]["meta_json"])
+    assert meta["session_ids"] == [sid], meta
+    sp_meta = meta["scratchpad"]
+    assert sp_meta["writes"] == 3, sp_meta
+    assert sp_meta["bytes"] == len(
+        "ruled out the 4k window") + len("hypothesis: kv gate") + len("next: 8k"), sp_meta
+    assert sp_meta["sessions"] == 1, sp_meta
+    assert runs[0]["duration_seconds"] is not None, (
+        "the tally is meant to be divided by this; a run row without it cannot "
+        "answer writes-per-active-hour")
+
+
+async def test_a_run_that_never_used_the_scratchpad_records_zeros(
+        q, monkeypatch, scratch_root):
+    """The control arm of the same query. Two thirds of the fleet will never touch
+    the tool, and if their rows simply omit the key then "no correlation" and "no
+    data" are the same shape — the ambiguity that made the earlier autonomy
+    telemetry unreadable."""
+    async def execute(item):
+        return {"summary": "no notes taken"}
+
+    q.enqueue("s", "k")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+    meta = json.loads(runs[0]["meta_json"])
+    assert meta["scratchpad"] == {"writes": 0, "bytes": 0, "sessions": 0}, meta
+
+
+async def test_a_timed_out_run_still_records_how_much_it_had_externalised(
+        q, monkeypatch, scratch_root):
+    """The population the item is about. A run killed at its cap is the row whose
+    write-rate means something — how much had it written down by the moment it died
+    is the comparison — and this branch is where that row is written. The 1 s window
+    is the pool's real timeout path, the same one #1050's tests drive."""
+    import app.scratchpad as sp
+    from app.sessions_io import note_run_session
+
+    sid = "worker:s:tim101"
+
+    async def execute(item):
+        note_run_session(sid)
+        sp.append(sid, "halfway through the corpus, still on pass 2")
+        await asyncio.sleep(5)                   # past the 1 s pool timeout
+        return {"summary": "never reaches here"}
+
+    q.enqueue("s", "k")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute),
+                            cfg={"max_duration_seconds": 1})
+    meta = json.loads(runs[0]["meta_json"])
+    assert meta["pool_timeout"] is True, meta
+    assert meta["scratchpad"]["writes"] == 1, meta
+    assert meta["scratchpad"]["bytes"] == len(
+        "halfway through the corpus, still on pass 2"), meta
+
+
+async def test_a_totals_failure_never_loses_the_run_record(q, monkeypatch, scratch_root):
+    """The tally is a reader of someone else's file, on the way to writing this
+    row. If it ever raises, the run's own record must still be written: a run that
+    died is the run whose tally we most want and least want to lose, and losing the
+    whole row to save a key is the wrong trade."""
+    import app.scratchpad as sp
+
+    def _boom(session_ids):
+        raise RuntimeError("data root unreadable")
+
+    monkeypatch.setattr(sp, "summarize", _boom, raising=False)
+    # `summarize` is imported inside the helper, so patch the attribute it resolves.
+    monkeypatch.setattr("app.scratchpad.summarize", _boom, raising=False)
+
+    async def execute(item):
+        return {"summary": "still recorded"}
+
+    q.enqueue("s", "k")
+    runs = await _drain_one(q, monkeypatch, SimpleNamespace(NAME="s", execute=execute))
+    assert runs[0]["status"] == "success", runs[0]
+    assert json.loads(runs[0]["meta_json"])["scratchpad"] == {
+        "writes": 0, "bytes": 0, "sessions": 0}

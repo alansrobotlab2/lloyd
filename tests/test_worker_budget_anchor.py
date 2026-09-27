@@ -376,3 +376,176 @@ def test_the_anchor_rides_the_loop_appended_and_position_zero_unchanged(monkeypa
                    for m in requests[4]), "warned before iteration 6"
     assert any("<budget>Iteration 6 of 8" in str(m.get("content") or "")
                for m in requests[5])
+
+
+#: ── #1554: the scratchpad rides the same seam, and only that seam ────────────
+#:
+#: Clause 3 of #1554 is a cache claim wearing a memory-system costume: the
+#: scratchpad's bytes must never enter the position-0 prefix, because that prefix is
+#: built once per turn precisely so it stays KV-cached — 7,648,814 re-prefill tokens
+#: across 66 prefix misses in the 24 h the item measured, and 79.6% hit rate since
+#: boot, is what it costs when something does move. So the tests below are the byte
+#: comparison the budget anchor above already uses, run against a turn that HAS
+#: scratchpad notes and one that has none, plus the positive half: the notes must
+#: still arrive, appended, on the iterations where the budget is short.
+#:
+#: Notes are written through the real writer (`app.scratchpad.append`) with the data
+#: root repointed, so an injected line demonstrably came from disk rather than from
+#: an argument someone remembered to pass.
+
+SCRATCH_SESSION = "worker:session-distill:sc1234"
+
+#: The tag key the harness stamps its own appended messages with. Read through the
+#: module the rest of this file imports, not a fresh alias.
+SCRATCH_TAG = app.deadline_anchor.ANCHOR_TAG
+
+
+@pytest.fixture
+def scratch_dir(tmp_path, monkeypatch):
+    """A data root of our own, so the notes under test are real files on disk."""
+    import app.scratchpad as sp
+    monkeypatch.setattr(sp, "DATA_ROOT", tmp_path / "data")
+    return tmp_path / "data"
+
+
+def _scratch_notes(session_id: str, *notes: str) -> None:
+    import app.scratchpad as sp
+    for note in notes:
+        sp.append(session_id, note)
+
+
+def test_the_scratchpad_never_moves_the_cached_position_zero_prefix(
+        monkeypatch, scratch_dir):
+    """Clause 3: a turn whose scratchpad holds content assembles the same
+    prompt-prefix bytes as one whose scratchpad is empty.
+
+    Two real loop runs over the same 15-iteration session-distill cap — one
+    session with three notes on disk, one with none. Position 0 must be
+    byte-identical between them and stable across all fifteen requests, because
+    the prefix is built once precisely so it stays KV-cached (7,648,814
+    re-prefill tokens across 66 misses in the 24 h #1554 measured; that is the
+    invoice for getting this wrong by accident). The notes still arrive, and only
+    as appended messages after the turn is short on iterations — the positive
+    half, so an inert injector cannot pass by emitting nothing.
+    """
+    import app.scratchpad as sp
+
+    async def _pool_async(_options):
+        return _FakePool()
+
+    monkeypatch.setattr("app.harness.loop._build_pool", _pool_async)
+
+    def _drive(session_id: str, engine: _Engine) -> list[list[dict]]:
+        monkeypatch.setattr("app.harness.loop.stream_chat", engine)
+        options = C._worker_run_options(
+            SESSION_DISTILL_TURNS, source="session-distill", session_id=session_id)
+        options.model = "primary"
+        options.tool_search_enabled = False
+        asyncio.run(_drain([{"role": "user", "content": "do the distill pass"}],
+                           options))
+        return engine.requests
+
+    _scratch_notes(SCRATCH_SESSION, "ruled out the 4k window",
+                   "hypothesis: kv gate", "next: raise batch size")
+    assert sp.read(SCRATCH_SESSION), "the fixture stored nothing, so it proves nothing"
+
+    with_notes = _Engine(turns=SESSION_DISTILL_TURNS)
+    req_notes = _drive(SCRATCH_SESSION, with_notes)
+    empty = _Engine(turns=SESSION_DISTILL_TURNS)
+    req_empty = _drive("worker:session-distill:none11", empty)
+
+    assert len(req_notes) == SESSION_DISTILL_TURNS, len(req_notes)
+    heads_notes = [m[0]["content"] for m in req_notes]
+    heads_empty = [m[0]["content"] for m in req_empty]
+    assert len(set(heads_notes)) == 1, "position 0 moved mid-turn"
+    assert heads_notes[0] == heads_empty[0], (
+        "a session with scratchpad notes assembles a different cached prefix than "
+        "an empty one: the scratchpad is reaching position 0")
+
+    # The notes do reach the model — appended, and only once the cap is in sight.
+    def _has_note(msgs: list[dict]) -> bool:
+        return any("kv gate" in str(m.get("content")) for m in msgs[1:])
+
+    assert not _has_note(req_notes[0]), "injected on iteration 1, before position 0 " \
+        "was even cached — the point of the ceiling is that this costs nothing here"
+    late = [i for i, msgs in enumerate(req_notes) if _has_note(msgs)]
+    assert late, "the scratchpad never reached the model at all: the affordance is inert"
+    assert min(late) >= 7, f"first injection at request index {min(late)} of " \
+        f"{SESSION_DISTILL_TURNS}, before the 50 % level (index 7 = iteration 8)"
+    for i, msgs in enumerate(req_notes):
+        if not _has_note(msgs):
+            continue
+        positions = [j for j, m in enumerate(msgs)
+                     if "kv gate" in str(m.get("content"))]
+        assert all(p > 0 for p in positions), f"note at position 0 on request {i}"
+
+
+def test_the_scratchpad_clock_fires_only_at_its_own_levels(scratch_dir):
+    """The other half of clause 3: there IS an append path, it fires at 50 % and
+    80 % of the cap, and at no other iteration. A test that only asserted absence
+    would leave a feature that never injects green, which is the most common way a
+    pinned clause fails to pin anything.
+
+    session-distill's cap is 15 turns, so its scratchpad levels are iteration 8
+    (50 %) and iteration 12 (80 %).
+    """
+    _scratch_notes(SCRATCH_SESSION, "hypothesis: kv gate")
+    anchor = C._worker_state_anchor(
+        SESSION_DISTILL_TURNS, "session-distill", session_id=SCRATCH_SESSION)
+
+    def scratch_msgs(i: int) -> list[dict]:
+        return [m for m in _run_for(anchor, (i,))[i]
+                if m.get(SCRATCH_TAG, {}).get("kind") == "scratchpad"]
+
+    assert scratch_msgs(1) == [] and scratch_msgs(7) == [], (
+        "a scratchpad was injected before the 50 % level, where the model still has "
+        "its own history in context and the tokens would be paid for twice")
+
+    first = scratch_msgs(8)
+    assert len(first) == 1 and "hypothesis: kv gate" in first[0]["content"], first
+    assert first[0]["role"] == "user", (
+        "the injection is not a user-role append: the harness stamps and sweeps only "
+        "user-role anchors, so anything else reads to the model as an instruction "
+        "from the operator and is never removed")
+
+    assert scratch_msgs(11) == [], "the 50 % level re-fired"
+    assert len(scratch_msgs(12)) == 1, "the 80 % level did not fire"
+    assert scratch_msgs(15) == [], (
+        "both levels re-fired at the cap; the notes are already in context")
+
+
+def test_a_turn_that_named_no_session_gets_no_scratchpad_clock(scratch_dir):
+    """`run_prompt_with_run_state` builds its template before any session exists,
+    so it names no id and must get exactly the pre-feature anchor. An empty id that
+    resolved to *someone's* scratchpad — or to a directory-wide one — would leak one
+    run's notes into another turn while every with-session test stayed green."""
+    _scratch_notes(SCRATCH_SESSION, "someone else's notes")
+    plain = C._worker_state_anchor(SESSION_DISTILL_TURNS, "session-distill")
+    assert plain is not None
+    for i in (1, 7, 8, 12, 15):
+        kinds = [m.get(SCRATCH_TAG, {}).get("kind")
+                 for m in _run_for(plain, (i,))[i]]
+        assert "scratchpad" not in kinds, f"iteration {i}: kinds={kinds}"
+
+
+def test_the_third_clock_does_not_disturb_the_two_that_were_there(scratch_dir, clock):
+    """Three clocks ride one hook now, so the two that predate this feature have to
+    keep firing on their own numbers: the iteration clock at 75 % of 15 (iteration
+    12) and session-distill's wall clock at 378 s of its 540 s window.
+    `compose_state_anchors` promises that ordering, and a third clock returning
+    early is exactly how that promise breaks."""
+    _scratch_notes(SCRATCH_SESSION, "hypothesis: kv gate")
+    anchor = C._worker_state_anchor(
+        SESSION_DISTILL_TURNS, "session-distill", session_id=SCRATCH_SESSION)
+
+    kinds = [m.get(SCRATCH_TAG, {}).get("kind") for m in _run_for(anchor, (12,))[12]]
+    assert "iteration_budget" in kinds, f"kinds={kinds}: the budget clock went quiet"
+    assert "scratchpad" in kinds, f"kinds={kinds}: the scratchpad clock never joined"
+
+    clock["t"] += 378                            # 70 % of the 540 s turn window
+    # Iteration 13 rather than 12: the other two clocks already spent their level at
+    # 12 and each fires once, so anything they return here would be a double.
+    late = [m.get(SCRATCH_TAG, {}).get("kind") for m in asyncio.run(anchor(13))]
+    assert late == ["deadline_budget"], (
+        f"kinds={late}: the wall clock either went quiet behind the scratchpad or "
+        f"re-fired a level it had already warned on")

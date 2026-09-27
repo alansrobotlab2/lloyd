@@ -263,8 +263,9 @@ class TurnResult:
                 f"turns={self.num_turns}) — nothing written")
 
 
-def _worker_state_anchor(max_turns: int, source: str | None):
-    """The one `state_anchor` a direct worker turn gets, carrying both its clocks.
+def _worker_state_anchor(max_turns: int, source: str | None,
+                         session_id: str = ""):
+    """The one `state_anchor` a direct worker turn gets, carrying its clocks.
 
     `max_turns` must be the value handed to `RunOptions` and `turn_timeout_for(
     source)` the number the turn's own timer receives — each warning is a
@@ -278,6 +279,14 @@ def _worker_state_anchor(max_turns: int, source: str | None):
     and session-distill 173 in 30 days all ended `stop_reason=max_turns`, against
     2 wall-clock timeouts.
 
+    With a `session_id` it carries a third clock — #1554's scratchpad, injected at
+    the same iteration thresholds, from the file that session's id names. That is
+    the only route those bytes take: `state_anchor` output is appended by the loop
+    after the history, so the position-0 prefix the prefix cache keys on is
+    untouched. With no session, or a session that never wrote, it emits nothing, so
+    a turn that does not use the affordance is byte-identical to this file before
+    the affordance existed.
+
     `app.deadline_anchor` is imported lazily because this module is imported by
     the worker pool and by the sources alike, and every other helper here keeps
     its harness imports inside the function for exactly that reason.
@@ -287,15 +296,20 @@ def _worker_state_anchor(max_turns: int, source: str | None):
     )
 
     deadline = turn_timeout_for(source, default=0.0) if source else 0.0
+    scratch = None
+    if session_id:
+        from app.scratchpad import build_scratchpad_anchor
+        scratch = build_scratchpad_anchor(session_id, max_turns=max_turns)
     return compose_state_anchors(
         build_iteration_anchor(max_turns),
+        scratch,
         build_deadline_anchor(int(deadline), what="turn"),
     )
 
 
 def _worker_run_options(max_turns: int, *, source: str | None = None,
                         extra_disallowed: Sequence[str] = (),
-                        priority: int = 1):
+                        priority: int = 1, session_id: str = ""):
     """Build the `RunOptions` every in-process worker turn runs under, in one place.
 
     Two turn shapes consume this now — the append-only `run_prompt_on_primary`
@@ -425,7 +439,12 @@ def _worker_run_options(max_turns: int, *, source: str | None = None,
         # 30 days before this landed were each first told about their cap by the
         # cap (#1050). Appended, never written into position 0 — the loop's own
         # comment is the record of why that would cost the prefix cache.
-        state_anchor=_worker_state_anchor(max_turns, source),
+        #
+        # `session_id` is what adds the scratchpad clock alongside those two. It
+        # arrives empty here for the state-carried caller, whose template is built
+        # before any session exists, and an empty id is "no scratchpad", not
+        # "someone else's scratchpad".
+        state_anchor=_worker_state_anchor(max_turns, source, session_id=session_id),
         # The compaction wall, from the config the chat path reads. This
         # constructor takes no `_get_harness_kwargs()` at all — see
         # architecture/vllm.md, "Found on the way" — so
@@ -462,9 +481,14 @@ async def run_prompt_on_primary(prompt: str, max_turns: int = 20, *,
     from app.run_recorder import record_events
     from app.sessions_io import create_session, new_background_session_id
 
-    options = _worker_run_options(max_turns, source=source)
     session_id = new_background_session_id(source)
     run_id = uuid.uuid4().hex[:12]
+    # Built after the id exists, because the scratchpad anchor is keyed on it: the
+    # file the model appends to through the MCP tool is named by the session id the
+    # harness forwards in `_meta` (`app/harness/mcp_pool.py:836`,
+    # `META_SESSION_ID`), and the file this anchor reads from is named by this one.
+    # Two ids, two files, and the run would write notes nothing ever re-injected.
+    options = _worker_run_options(max_turns, source=source, session_id=session_id)
     try:
         create_session(session_id, platform="worker", model="primary",
                        title=(title or f"{source} run")[:80], source=source,
