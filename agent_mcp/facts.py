@@ -300,7 +300,8 @@ def fact_identity(fact: dict):
 
 def _apply_fact_marks(marks: dict, files_to_scan, *, field: str, stamp: str,
                       reason_field: str, text_matches: dict | None = None,
-                      stop_after_first: bool = False) -> dict:
+                      stop_after_first: bool = False,
+                      extra_fields: dict | None = None) -> dict:
     """Mark the facts named by `marks` {(file_name, fact_id): reason}. One route.
 
     Both fact writers — `fact_resolve`, `fact_invalidate` and the improve
@@ -319,6 +320,15 @@ def _apply_fact_marks(marks: dict, files_to_scan, *, field: str, stamp: str,
     single action cannot mark two facts that happen to contain the same
     sentence.
 
+    `extra_fields` is {(file_name, fact_id): {field: value}} for the caller whose
+    mark carries more than a reason string: `fact_resolve_apply` records the
+    winning fact of a contradiction on the loser it invalidates (#1544), and a
+    one-line reason string is where that kind of structure goes to become prose a
+    machine cannot query. It is applied only on the identity path — a fact reached
+    through `text_matches` has no key in `marks`, so it gets no extra field — and
+    only when the mark lands, never on an `already_marked` candidate, which is how
+    a second run over the same pair writes no second trace.
+
     Returns the facts it marked, each with the file it came from, plus
     `unapplied` (a requested mark that found nothing) and `already_marked` (a
     candidate that already had `field` set). A caller that planned N actions and
@@ -331,6 +341,7 @@ def _apply_fact_marks(marks: dict, files_to_scan, *, field: str, stamp: str,
     touched: list[Path] = []
     wanted = dict(marks)
     by_text = dict(text_matches or {})
+    extra = dict(extra_fields or {})
     seen_files: set[str] = set()
 
     for fact_file in files_to_scan:
@@ -379,6 +390,13 @@ def _apply_fact_marks(marks: dict, files_to_scan, *, field: str, stamp: str,
                     continue
                 f[field] = stamp
                 f[reason_field] = want
+                if how == "identity" and extra:
+                    # Carried on the fact that was just marked, in the same
+                    # atomic write as the mark itself: a trace written by a
+                    # second pass could land on a fact the first pass never
+                    # marked, and a trace without a mark is a claim about a
+                    # resolution that did not happen.
+                    f.update(extra.get((source, f.get("id"))) or {})
                 changed = True
                 matched.append({"id": f.get("id"), "file": source,
                                 "fact": str(f.get("fact") or "")[:80], "how": how})
@@ -737,6 +755,48 @@ def _fact_resolve(params: dict) -> dict:
                      "to expire a specific fact.")}
 
 
+#: The key a resolved contradiction leaves on the loser, spelled exactly as the
+#: canonical edge type it stands for (`app.kg_store.EDGE_TYPES`, where
+#: `conflicts_with` has lived since commit 4f4432f3 / #546). One spelling in both
+#: layers, so whoever rules on #1593's endpoint design has a join key already.
+_CONTRADICTION_TRACE = "conflicts_with"
+
+
+def _contradiction_trace(winner: dict, winner_entity: str, reason: str,
+                         stamp: str) -> dict:
+    """The record left on a loser, naming the fact that beat it (#1544).
+
+    A dict, not a sentence, because the question this exists to answer is asked by
+    something downstream, not read by a person: "what did this contradict, and who
+    won?". Before this, the answer existed only as `invalid_at` — a dead fact with
+    no counterparty, so the winner's identity was unrecoverable from the loser.
+
+    The key is `conflicts_with`, the canonical edge type's spelling
+    (`app.kg_store.EDGE_TYPES`), so the fact layer and the edge layer are counting
+    the same relation. It is NOT an edge row: a contradiction pair is always
+    intra-entity (`_resolve_scan` globs one entity directory, and
+    `_detect_contradictions_sync` pairs inside that one list), and
+    `EdgeStore.add` refuses `source == target` (`app/kg_store.py:704-705`), so
+    there is no representable edge for it. #1593 carries the endpoint
+    representation (relax the self-loop refusal, or fact-granularity node ids) for
+    a person to rule on; when it lands, this record is the same claim in the layer
+    that can be traversed, keyed by the same name.
+
+    `file` is spelled exactly as `fact_identity` spells it, so the trace points at
+    one fact and not at every fact sharing its per-file counter id (#874).
+    """
+    return {
+        "type": "conflicts_with",
+        "entity": winner_entity,
+        "file": str(winner.get("source_file") or ""),
+        "fact_id": str(winner.get("id") or ""),
+        "fact": str(winner.get("fact") or "")[:200],
+        "confidence": winner.get("confidence"),
+        "reason": reason,
+        "resolved_at": stamp,
+    }
+
+
 def _fact_resolve_apply(params: dict) -> dict:
     """Mark the lower-confidence side of each contradictory pair `invalid_at`.
 
@@ -745,6 +805,13 @@ def _fact_resolve_apply(params: dict) -> dict:
     skipped, and a loser is only marked when it carries a file attribution — a
     fact id is a per-file counter, so selecting by id alone is what made one
     call invalidate 25 facts to change 2 (#874).
+
+    A mark also leaves a `conflicts_with` trace on the loser naming the winner
+    (#1544), because a resolution that records only the dead fact leaves nothing
+    downstream able to ask which fact beat it and why. It rides on the mark rather
+    than being a second write: an already-marked loser is reported
+    `already_marked` and gets no second trace, and a pair that marks nothing —
+    equal confidences, or a loser with no id — writes no trace at all.
 
     A writer by classification, which is the point of splitting it out: the name
     appears in none of the annotation tables, so plan mode and a bench session
@@ -760,33 +827,61 @@ def _fact_resolve_apply(params: dict) -> dict:
     try:
         entity_dir = _find_entity_dir(entity)
         marks: dict[tuple, str] = {}
+        traces: dict[tuple, dict] = {}
         unattributed = 0
+        untraceable = 0
         for contradiction in contradictions:
             f1, f2 = contradiction.get("fact1", {}), contradiction.get("fact2", {})
             c1, c2 = f1.get("confidence", 0.5), f2.get("confidence", 0.5)
             if c1 == c2:
                 continue     # no basis to pick a winner
-            loser = f2 if c1 > c2 else f1
+            loser, winner = (f2, f1) if c1 > c2 else (f1, f2)
             key = fact_identity(loser)
             if key is None:
                 unattributed += 1
                 continue
-            marks[key] = (f"fact_resolve_apply: "
-                          f"{contradiction.get('reason', 'contradiction')}")
+            reason = contradiction.get("reason", "contradiction")
+            marks[key] = f"fact_resolve_apply: {reason}"
+            # A winner that cannot be named is not a trace: it would record a
+            # resolution whose counterparty is unrecoverable, which is the defect
+            # this exists to fix. The loser is still marked — an unattributed
+            # winner is no reason to leave a wrong fact standing — but the count
+            # of traces says how many resolutions are actually answerable.
+            if fact_identity(winner) is None:
+                untraceable += 1
+            else:
+                traces[key] = {_CONTRADICTION_TRACE: _contradiction_trace(
+                    winner, winner.get("entity") or entity, reason, now_iso)}
         resolved = 0
         applied: dict = {"marked": 0, "matched_facts": [], "applied": 0,
                          "unapplied": [], "files_touched": []}
         if entity_dir and (marks or unattributed):
             applied = _apply_fact_marks(
                 marks, list(entity_dir.glob("*.md")),
-                field="invalid_at", stamp=now_iso, reason_field="invalid_reason")
+                field="invalid_at", stamp=now_iso, reason_field="invalid_reason",
+                extra_fields=traces)
             resolved = applied["marked"]
+        # Measured on what landed, not on what was planned: a mark that hit an
+        # already-invalid fact reports `already_marked` and wrote no trace, so
+        # `len(traces)` would overstate a second run over the same pair.
+        traces_written = sum(1 for m in applied["matched_facts"]
+                             if (m["file"], m["id"]) in traces)
         unresolved_pairs = len(contradictions) - resolved - unattributed
         out = {"entity": entity, "resolved": resolved,
                "remaining": max(unresolved_pairs, 0),
+               # The resolutions a reader can trace back to a winner. Always
+               # present: a missing key reads as "no traces needed", and the whole
+               # point of #1544 is that the count was never measured at all.
+               "traces_written": traces_written,
                # Which facts, in which files. A count without the list cannot be
                # audited, and this change exists because a count was trusted.
                "facts": applied["matched_facts"]}
+        if untraceable:
+            out["untraceable"] = [
+                {"id": None, "why": "",
+                 "reason": "winning fact read without an id or file attribution; "
+                           "the loser was invalidated but the winner is not named"}
+                for _ in range(untraceable)]
         if applied["unapplied"] or unattributed:
             # Say what could not be marked instead of quietly marking less. A
             # caller that reads `resolved` alone would otherwise report fewer

@@ -1960,3 +1960,167 @@ def test_wrapper_exit_codes_keep_their_distinct_meanings(monkeypatch, capsys):
     assert code == 0
     assert "[store] ok" not in out, out
     assert "unreadable" not in out, out
+
+
+# ── #1544: a resolved contradiction leaves a trace naming the winner ─────────
+#
+# `fact_resolve_apply` invalidated the weaker fact and recorded nothing else: no
+# winner, no counterparty. "What did this contradict, and who won?" had no answer
+# anywhere downstream, and the canonical `conflicts_with` edge type
+# (`app.kg_store.EDGE_TYPES`, canonical since 4f4432f3 / #546) held exactly 1 row
+# — hand-filed through `fact_relate` — over 36,875 active edges, measured
+# 2026-09-27 through `app.kg_store` on the live store.
+#
+# The trace is a record on the LOSER, not an edge row, because a contradiction
+# pair has no two entities to be an edge's endpoints: `_resolve_scan` globs ONE
+# entity directory and `_detect_contradictions_sync` pairs inside that one list,
+# while `EdgeStore.add` raises `refusing self-loop edge` when `source == target`
+# (`app/kg_store.py:704-705`). Measured the same day: 12,244 entity dirs, 0 of
+# them holding more than one distinct `entity`; 48,488 edge rows, 0 with
+# `source = target` in any state. Which shape an intra-entity contradiction takes
+# in the graph — a relaxed self-loop refusal, or fact-granularity node ids — is
+# #1593's ruling, so `test_a_resolution_mints_no_edge_row_while_1593_is_unruled`
+# fences the half this round deliberately did not build.
+
+TRACE_KEY = "conflicts_with"          # the canonical edge type's own spelling
+PAIR_FILE = "Lloyd/Lloyd-state.md"    # spelled as `retrieval.fact_source_file` does
+
+
+def _write_adjudicable_pair(facts_root, *, winner_conf=0.9, loser_conf=0.5,
+                            omit_from_loser=()):
+    """One file, one adjudicable pair: `stat-001` beats `stat-002`.
+
+    `enabled`/`disabled` is a member of `_OPPOSING_PAIRS` matched whole-word
+    (#701), so the detector fires `opposing_terms` rather than the 0.6-overlap
+    heuristic, which pairs facts that merely read alike. The YAML is written here
+    rather than through `_write_facts` so a test can drop the loser's `id` — the
+    one shape that makes `fact_identity` return None, and with it both the mark
+    and the trace refuse to land.
+    """
+    def row(fid, text, conf, days):
+        return {"fact": text, "confidence": conf, "category": "state", "id": fid,
+                "created_at": _days_ago(days), "valid_at": _days_ago(days),
+                "invalid_at": None, "expired_at": None, "provenance": "STATED",
+                "source_doc": None}
+    winner = row("stat-001", "the feature is enabled", winner_conf, 2)
+    loser = row("stat-002", "the feature is disabled", loser_conf, 30)
+    for key in omit_from_loser:
+        loser.pop(key, None)
+    fm = {"type": "facts", "entity": "Lloyd", "category": "state",
+          "facts": [winner, loser]}
+    d = facts_root / "Lloyd"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "Lloyd-state.md").write_text(
+        f"---\n{yaml.dump(fm, sort_keys=False)}---\n\n# Lloyd\n", encoding="utf-8")
+
+
+def _traced_facts(facts_root):
+    """(file_name, fact_id) for every fact entry carrying a contradiction trace."""
+    out = []
+    for path in sorted(facts_root.rglob("*.md")):
+        fm = yaml.safe_load(path.read_text(encoding="utf-8").split("---")[1]) or {}
+        for f in fm.get("facts") or []:
+            if isinstance(f, dict) and f.get(TRACE_KEY):
+                out.append((path.name, f.get("id")))
+    return out
+
+
+def test_a_resolved_pair_leaves_exactly_one_trace_on_the_loser(world):
+    """Clause 1: the mark and the trace are one event, on the fact that lost."""
+    facts_root, _st, _vault = world
+    _write_adjudicable_pair(facts_root)
+    out = facts._fact_resolve_apply({"entity": "Lloyd"})
+    assert out["resolved"] == 1, out
+    assert out["traces_written"] == 1, out
+    assert _traced_facts(facts_root) == [("Lloyd-state.md", "stat-002")], \
+        "the pair's trace must sit on the loser and nowhere else"
+    rows = _fact_rows(facts_root)
+    assert rows["stat-002"]["invalid_at"], "the loser was not invalidated"
+    assert not rows["stat-001"].get("invalid_at"), "the winner lost its fact too"
+    trace = rows["stat-002"][TRACE_KEY]
+    assert trace["resolved_at"] == rows["stat-002"]["invalid_at"], (
+        "a trace stamped apart from the mark is a claim about a resolution the "
+        "file does not record")
+    assert trace["reason"] == "opposing_terms:enabled/disabled", trace
+
+
+def test_the_trace_names_the_winner_by_a_pointer_that_resolves(world):
+    """Clause 2: who won, answered from the loser's own record.
+
+    `fact` is copied so the answer needs no second read, and `file` + `fact_id`
+    are the handle `fact_identity` uses, so the winner is one fact and not every
+    fact sharing a per-file counter id (#874). The pointer is asserted to land: a
+    trace naming a file or an id that is not there would satisfy a "names both
+    sides" reading of the clause while answering nothing.
+    """
+    facts_root, _st, _vault = world
+    _write_adjudicable_pair(facts_root)
+    facts._fact_resolve_apply({"entity": "Lloyd"})
+    read = facts._fact_get({"entity": "Lloyd", "include_expired": True})
+    losers = [f for f in read["facts"] if f.get(TRACE_KEY)]
+    assert [f["id"] for f in losers] == ["stat-002"], read["facts"]
+    trace = losers[0][TRACE_KEY]
+    assert trace["type"] == TRACE_KEY and trace["entity"] == "Lloyd", trace
+    assert trace["fact_id"] == "stat-001" and trace["confidence"] == 0.9, trace
+    assert trace["file"] == PAIR_FILE, trace
+    assert trace["fact"] == "the feature is enabled", trace
+    assert (facts_root / trace["file"]).is_file(), (
+        f"the trace names a file that is not there: {trace['file']}")
+    winner = _fact_rows(facts_root)["stat-001"]
+    assert (winner["fact"], winner["confidence"]) == (trace["fact"],
+                                                      trace["confidence"])
+    # The default read does not show it. An invalidated fact leaves the active
+    # path, so the trace is reachable only through the read that asks for
+    # expired/invalid facts — the shape the clause names, not an accident.
+    assert [f["id"] for f in facts._fact_get({"entity": "Lloyd"})["facts"]] == [
+        "stat-001"], "the loser is still on the active read path"
+
+
+def test_a_second_resolve_apply_over_a_resolved_pair_adds_no_trace(world):
+    """Clause 3, dedupe half: a settled pair stays settled, byte for byte."""
+    facts_root, _st, _vault = world
+    _write_adjudicable_pair(facts_root)
+    path = facts_root / "Lloyd" / "Lloyd-state.md"
+    facts._fact_resolve_apply({"entity": "Lloyd"})
+    after_first = path.read_bytes()
+    out = facts._fact_resolve_apply({"entity": "Lloyd"})
+    assert out["resolved"] == 0 and out["traces_written"] == 0, out
+    assert len(_traced_facts(facts_root)) == 1, "the same pair was traced twice"
+    assert path.read_bytes() == after_first, "a second run rewrote a settled pair"
+
+
+def test_a_run_that_marks_no_fact_traces_nothing(world):
+    """Clause 3, zero-mark halves: equal confidences, and an unattributed loser."""
+    facts_root, _st, _vault = world
+    _write_adjudicable_pair(facts_root, winner_conf=0.7, loser_conf=0.7)
+    equal = facts._fact_resolve_apply({"entity": "Lloyd"})
+    assert equal["resolved"] == 0 and equal["traces_written"] == 0, equal
+    assert _traced_facts(facts_root) == [], (
+        "a pair with no basis to pick a winner must not name one")
+    assert not [f for f in _fact_rows(facts_root).values() if f.get("invalid_at")]
+
+    (facts_root / "Lloyd" / "Lloyd-state.md").unlink()
+    _write_adjudicable_pair(facts_root, omit_from_loser=("id",))
+    orphan = facts._fact_resolve_apply({"entity": "Lloyd"})
+    assert orphan["resolved"] == 0 and orphan["traces_written"] == 0, orphan
+    assert _traced_facts(facts_root) == [], (
+        "a loser that cannot be marked cannot be traced either")
+    assert orphan["unapplied"], "the run has to say it marked nothing, and why"
+
+
+def test_a_resolution_mints_no_edge_row_while_1593_is_unruled(world):
+    """The half of #1544's acceptance this round deliberately does NOT do.
+
+    A `conflicts_with` edge for an intra-entity pair needs either `EdgeStore.add`
+    to stop refusing self-loops or fact-granularity node ids — the two designs
+    #1593 puts to a person, each of which acts on all 48,488 edge rows and on
+    `edges.nodes()`, from which `fact_neighbors` and `fact_search` derive their
+    nodes. This node is the fence: the trace shipped, the edge did not, and when
+    #1593's ruling lands this is the test that has to change.
+    """
+    facts_root, st, _vault = world
+    _write_adjudicable_pair(facts_root)
+    out = facts._fact_resolve_apply({"entity": "Lloyd"})
+    assert out["traces_written"] == 1, out
+    assert st.edges.active(types=[TRACE_KEY]) == []
+    assert st.edges.count(active_only=False) == 0, "the resolve path wrote an edge row"

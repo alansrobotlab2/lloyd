@@ -881,11 +881,33 @@ def edge_type_cardinality(type_dist: dict[str, int]) -> str:
                   key=lambda t: (type_dist[t], t))
     dominant = max(type_dist, key=lambda t: (type_dist[t], t))
     share = type_dist[dominant] / total
-    verdict = "FAIL" if rare or share > EDGE_TYPE_MAX_SHARE else "PASS"
+    # Name which condition failed the line (#1544 clause 4). The two conditions are
+    # independent drifts and the operands of both are always printed, so on a store
+    # whose `mentions` type holds 76.5% of active edges the line FAILs every night no
+    # matter what the rare-type column says — and on 2026-09-26 it read `types under 5
+    # uses: conflicts_with (1)` on a line already failing on share the night before
+    # with `types under 5 uses: none`. A reader then goes looking for the new thing in
+    # the wrong column, which is what made this item's ruling unanswerable from the
+    # report. Listing every failing condition, under-floor first, also stops a fix for
+    # one from hiding the other.
+    failing = []
+    if rare:
+        # Phrased away from the column above on purpose: `tests/test_knowledge_health_
+        # stale_facts.py:566` pins that `"uses ("` never appears unless `uses` is itself
+        # under the floor, and repeating the column's wording here would satisfy that
+        # assertion's negation with an attribution instead of a measurement.
+        failing.append("types below the "
+                       f"{EDGE_TYPE_MIN_USES}-use floor ("
+                       + ", ".join(f"{t} ({type_dist[t]})" for t in rare) + ")")
+    if share > EDGE_TYPE_MAX_SHARE:
+        failing.append(f"dominant type share ({dominant} {share:.1%} > "
+                       f"{EDGE_TYPE_MAX_SHARE:.0%})")
+    verdict = "FAIL" if failing else "PASS"
     rare_txt = (", ".join(f"{t} ({type_dist[t]})" for t in rare) if rare else "none")
     return (f"Edge-type cardinality: {verdict} — types under {EDGE_TYPE_MIN_USES} uses: "
             f"{rare_txt}; dominant type {dominant} is {share:.1%} of {total:,} active edges "
-            f"(limit {EDGE_TYPE_MAX_SHARE:.0%})")
+            f"(limit {EDGE_TYPE_MAX_SHARE:.0%}) — conditions failing: "
+            f"{'; '.join(failing) if failing else 'none'}")
 
 
 def _alarms(store_stats: dict | None, hygiene: dict, duplicate_id_files: int,

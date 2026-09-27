@@ -24,6 +24,15 @@ _spec.loader.exec_module(kg_health)
 
 from app import kg_store  # noqa: E402
 
+# The verdict line lives in the *report*, not the snapshot module, and is loaded the
+# same importlib way `tests/test_knowledge_health_stale_facts.py` loads it — the file
+# name has a hyphen, so it is not importable by module path.
+_khr_spec = importlib.util.spec_from_file_location(
+    "khr_cardinality", ROOT / "scripts" / "memory" / "knowledge-health-report.py")
+khr = importlib.util.module_from_spec(_khr_spec)
+sys.modules["khr_cardinality"] = khr
+_khr_spec.loader.exec_module(khr)
+
 
 def _kg_hygiene():
     """The same module object `kg_health._hygiene_section` imports, by the same
@@ -177,3 +186,80 @@ def test_the_summary_renders_a_pre_fix_snapshot_without_a_bare_count(db, tmp_pat
     assert len(lines) == 1, lines
     assert "51 of 11,959 new dirs" in lines[0], lines[0]
     assert "no baseline recorded" in lines[0], lines[0]
+
+
+# ── The cardinality line names the condition that failed it (#1544 clause 4) ─────
+
+#: What the line printed itself on the two nights this item was measured. Both FAIL,
+#: and from the printed text a reader cannot tell which condition failed either one:
+#: 2026-09-25 had no under-floor type at all, and 2026-09-26 had one.
+LIVE_2026_09_25 = "Edge-type cardinality: FAIL — types under 5 uses: none; dominant type " \
+                  "mentions is 84.7% of 35,849 active edges (limit 50%)"
+LIVE_2026_09_26 = "Edge-type cardinality: FAIL — types under 5 uses: conflicts_with (1); " \
+                  "dominant type mentions is 76.5% of 36,119 active edges (limit 50%)"
+
+
+def _failing_segment(line: str) -> str:
+    """Everything after the `conditions failing: ` marker, so an assertion about the
+    attribution cannot be satisfied by the operand columns before it."""
+    return line.split("conditions failing: ", 1)[1]
+
+
+def test_a_share_only_failure_is_attributed_to_share_and_not_to_an_under_floor_type():
+    """Clause 4, first fixture: no under-floor type, dominant type over the limit.
+
+    `mentions` 60 of 100 with `uses` 40 is the live shape (2026-09-25: mentions at
+    84.7% of 35,849 active edges and nothing under the floor), and it is the case
+    the guard's own `test_either_signal_alone_fails` already calls "a catch-all with
+    no rare types". The verdict must stay FAIL on the share condition alone while
+    saying so: a reader who sees only `FAIL` goes looking for the rare type that is
+    not there, which is what happened when `conflicts_with (1)` appeared on a line
+    that share had been failing since at least the night before.
+    """
+    line = khr.edge_type_cardinality({"mentions": 60, "uses": 40})
+
+    assert line.startswith("Edge-type cardinality: FAIL — "), line
+    assert "types under 5 uses: none" in line, \
+        "the under-floor condition must still read clean: " + line
+    assert "conditions failing: dominant type share (mentions 60.0% > 50%)" in line, line
+    assert "floor" not in _failing_segment(line), \
+        f"share alone must not be attributed to the floor: {_failing_segment(line)}"
+
+
+def test_an_under_floor_type_is_named_as_its_own_condition():
+    """Clause 4, second fixture: one type under the floor, no type over the share limit.
+
+    `conflicts_with` at 1 over 101 active edges is 2026-09-26's measurement modulo
+    the store's size — `mentions` there held 76.5%, but this fixture deliberately
+    spreads the rest so share is *not* failing (40 of 101 = 39.6%, under the 50%
+    limit) and the under-floor type is the only drift. The attribution must name the
+    type, so the line answers "which type, and because of which rule" instead of
+    leaving the count next to an unattributed FAIL.
+    """
+    dist = {"mentions": 40, "uses": 35, "related_to": 25, "conflicts_with": 1}
+    line = khr.edge_type_cardinality(dist)
+
+    assert line.startswith("Edge-type cardinality: FAIL — "), line
+    assert "conditions failing: types below the 5-use floor (conflicts_with (1))" in line, line
+    assert "dominant type share" not in _failing_segment(line), \
+        f"a 39.6% leader is not over the 50% limit: {_failing_segment(line)}"
+
+
+def test_both_conditions_are_attributed_together_and_a_clean_vocabulary_names_none():
+    """Attribution lists every failing condition, and PASS names none.
+
+    The joint row (mentions 60 of 101 = 59.4% over the limit, `conflicts_with` at 1
+    under it) is the shape tomorrow's store has if `describes (1)` survives into it
+    alongside `conflicts_with (1)`; naming only the first would let a fix for one
+    condition hide the other. The clean row keeps the PASS wording
+    `test_cardinality_passes_a_spread_vocabulary_with_no_rare_type` pins.
+    """
+    both = khr.edge_type_cardinality(
+        {"mentions": 60, "uses": 35, "related_to": 5, "conflicts_with": 1})
+    failing_both = _failing_segment(both)
+    assert failing_both.startswith("types below the 5-use floor (conflicts_with (1))"), both
+    assert "dominant type share (mentions 59.4% > 50%)" in failing_both, both
+
+    clean = khr.edge_type_cardinality({"uses": 40, "part_of": 35, "related_to": 25})
+    assert clean.startswith("Edge-type cardinality: PASS — "), clean
+    assert _failing_segment(clean) == "none\n" or _failing_segment(clean) == "none", clean
