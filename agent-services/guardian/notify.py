@@ -526,8 +526,28 @@ class Notifier:
                 if not (200 <= resp.status < 300):
                     return False
                 created = json.loads(resp.read().decode("utf-8", "replace") or "{}")
-                # A 2xx with a defaulted name means the payload contract drifted.
-                name = str(created.get("name") or created.get("task", {}).get("name") or "")
-                return "guardian" in name.lower() if name else True
+                # Decide from the reply the endpoint actually sends. Since
+                # `backlog_task_create` answers `{"success": true, "id": N}`
+                # (app/routers/backlog.py:765) and never echoes the `name` it
+                # filed, the name this used to read was always empty, so the
+                # `if name else True` default was the production path and every
+                # 2xx — `{"success": false}`, `{}` — reported a delivered filing
+                # that filed nothing. A row id is the only field in that reply
+                # that cannot be present unless a task file exists, so it is what
+                # the verdict is now made of, along with the success flag.
+                # `bool` is screened out because it is an `int` subclass and
+                # `True > 0`, and an id of `true` is not a row.
+                #
+                # What this still cannot see is the drift `7da1e0e4` wrote the
+                # name check against: a payload posting `title`/`body` instead of
+                # `name`/`description` gets a 200 and an id for the empty task it
+                # created. Detecting that needs the endpoint to echo the filed
+                # name, or a read-back of GET /api/backlog/task/{id} — owed scope
+                # ruling 2 on #1612, not this branch's to make.
+                row_id = created.get("id")
+                return (created.get("success") is True
+                        and isinstance(row_id, int)
+                        and not isinstance(row_id, bool)
+                        and row_id > 0)
         except (urllib.error.URLError, OSError, ValueError):
             return False

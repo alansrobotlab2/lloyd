@@ -1194,10 +1194,9 @@ def _stub_board(tmp_path, reply: dict):
 
     `reply` is what the caller says the backend answers, and the caller passes
     the shape `app/routers/backlog.py::backlog_task_create` really returns,
-    `{"success": true, "id": N}`. It does **not** echo the request's `name`:
-    `_backlog_task` inspects `created["name"]` to catch a drifted payload, and the
-    real endpoint never sends one, so an echo would have the stub decide the
-    outcome the test exists to observe."""
+    `{"success": true, "id": N}`. It does **not** echo the request's `name`, and
+    no branch of `_backlog_task` reads a name any more, so every reply shape the
+    tests below pass is one the real endpoint can actually send."""
     import json
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1247,11 +1246,11 @@ def test_the_needs_human_route_posts_the_payload_the_board_reads(tmp_path):
     called "New Task" that says nothing — so `"backlog" in res` is not evidence
     across this seam. The evidence is `seen["body"]`.
 
-    `res["backlog"]` is asserted last, for what it can prove: the reply carries
-    the real endpoint's no-`name` shape, so the value comes from
-    `_backlog_task`'s no-name branch.
-    `test_a_defaulted_name_from_the_board_reads_as_a_failed_filing` is what shows
-    that branch is a decision and not a constant True."""
+    `res["backlog"]` is asserted last, for what it can prove and no more: the
+    reply carries the real endpoint's shape, `{"success": true, "id": 999}`, so the
+    value is `_backlog_task` accepting a filing. What makes that a decision rather
+    than a constant is `test_no_board_reply_lacking_a_positive_integer_id_reads_as_delivered`,
+    which fails this same call on nine replies that carry no positive integer id."""
     with _stub_board(tmp_path, {"success": True, "id": 999}) as (server, seen):
         res = _board_notifier(server, tmp_path).alert(
             "error", "Service down, but no promotion to revert", NEEDS_HUMAN_BODY)
@@ -1272,9 +1271,15 @@ def test_a_defaulted_name_from_the_board_reads_as_a_failed_filing(tmp_path):
     """The other side of that same seam. A drifted payload is not an error: the
     endpoint answers 2xx and files a task called "New Task", which is how a
     routing fix that posts the wrong keys would quietly report delivered forever.
-    `_backlog_task` reads the reply's `name` for exactly that, so a reply naming a
-    task that is not the guardian's must not come back True — without this, the
-    `is True` above could be the guard defaulting rather than deciding."""
+
+    #1612 moved the verdict off the reply's `name` — the endpoint never echoes one,
+    so reading it was reading a field that is always absent — onto `success` and a
+    positive integer `id`. This reply still reads as a failure, because it carries
+    no id. What it no longer proves is the drift itself: a payload that posts the
+    wrong keys gets an id for the empty task it created, and only a name echo or a
+    read-back of the filed task would catch that (owed ruling 2 on #1612).
+    `test_no_board_reply_lacking_a_positive_integer_id_reads_as_delivered` is where
+    the reason this returns False is pinned."""
     with _stub_board(tmp_path, {"success": True, "name": "New Task"}) as (server, seen):
         res = _board_notifier(server, tmp_path).alert(
             "error", "Service down, but no promotion to revert", NEEDS_HUMAN_BODY)
@@ -1753,3 +1758,80 @@ def test_the_windowed_scan_leaves_same_day_behaviour_untouched(tmp_path):
 
     assert yesterday_note.read_text(encoding="utf-8") == other_before, (
         "the scan sealed another title's open incident in a note it reached")
+
+
+# ── #1612: the backlog verdict comes from success + id, never a name ─────────
+#
+# The two seam tests above (`test_the_needs_human_route_posts_the_payload_the_board_reads`
+# and `test_a_defaulted_name_from_the_board_reads_as_a_failed_filing`) still hold,
+# but neither can tell a deciding guard from a constant True: the first passes the
+# only shape that may be True, the second passes a shape with no id in it, so both
+# were green while `_backlog_task` returned True for every 2xx. These pin the
+# decision itself, one reply shape per assertion, over the same loopback seam.
+
+def _board_verdict(tmp_path, reply: dict) -> bool:
+    """`_backlog_task`'s own verdict on one board reply, across the loopback seam.
+
+    Called directly rather than through `alert()` because the clauses name this
+    function, and `alert()` only copies its result into `results["backlog"]` — the
+    POST and the JSON reply, which are the boundary, are unchanged by that. The
+    request it makes is asserted too: a stub that answered any request would let a
+    verdict stand for a filing the guardian never sent.
+    """
+    with _stub_board(tmp_path, reply) as (server, seen):
+        verdict = _board_notifier(server, tmp_path)._backlog_task(
+            "Service down, but no promotion to revert", NEEDS_HUMAN_BODY, "", "")
+    assert seen.get("path") == "/api/backlog/task-create", seen
+    assert seen["body"]["name"].startswith("[guardian] "), seen
+    return verdict
+
+
+def test_a_board_reply_with_the_success_and_id_the_endpoint_sends_is_delivered(tmp_path):
+    """Clause 1 of #1612. This is `app/routers/backlog.py:765` verbatim —
+    `JSONResponse({"success": True, "id": task_id})`, `task_id = max_id + 1`, and
+    the only 2xx the endpoint has; every error path raises HTTPException, which
+    `urlopen` turns into an `HTTPError` the caller already returns False for.
+
+    It has to stay True. The bug was a guard that always said yes, and a fix that
+    always said no would leave this channel reporting a filing that happened,
+    which is #775's silence wearing the opposite sign.
+    """
+    assert _board_verdict(tmp_path, {"success": True, "id": 999}) is True
+
+
+def test_a_board_reply_saying_it_failed_is_not_delivered_though_it_was_2xx(tmp_path):
+    """Clause 2 of #1612. The old branch read a `name` the endpoint never sends and
+    ended `if name else True`, so `success` was never consulted and this 200 came
+    back delivered. A channel that reports its own failure as success is how
+    needs-a-human alerts stop existing without anyone noticing.
+    """
+    assert _board_verdict(tmp_path, {"success": False}) is False
+
+
+@pytest.mark.parametrize("reply", [
+    {},                                     # an empty body
+    {"success": True},                      # success, but no row id
+    {"success": True, "id": None},          # a null id: no task file was written
+    {"success": True, "name": "New Task"},  # the drifted-payload reply, no id
+    {"success": True, "id": 0},             # 0 is not a row
+    {"success": True, "id": -3},            # neither is a negative one
+    {"success": True, "id": "999"},         # the endpoint's id is an int
+    {"success": True, "id": True},          # bool IS an int subclass, and True > 0
+    {"id": 999},                            # a row id with no success flag
+], ids=["empty-body", "success-no-id", "null-id", "defaulted-name-no-id",
+        "zero-id", "negative-id", "string-id", "bool-id", "id-without-success"])
+def test_no_board_reply_lacking_a_positive_integer_id_reads_as_delivered(tmp_path, reply):
+    """Clause 3 of #1612: no path through `_backlog_task` returns True without a
+    positive integer id.
+
+    Eight of these came back True before the fix: the `name` that branch inspected
+    is absent from every one of them, and an absent name took the `else True` arm,
+    so each reported a filing that filed nothing. The ninth, the `defaulted-name`
+    reply, is the one shape the old guard could fail, and it belongs here because
+    it still fails — now for the reason the clause gives, which is that it carries
+    no id. The last five are what "positive integer" holds the guard to:
+    `backlog_task_create` answers with `max_id + 1`, so a zero, a negative, a
+    string or a `bool` is not that value, and an id with no `success` is not that
+    reply either.
+    """
+    assert _board_verdict(tmp_path, reply) is False
