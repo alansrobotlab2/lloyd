@@ -16,9 +16,11 @@ Each node below pins one clause of #954: recency breaks the tie (1); no
 artifact-shaped name reaches the section (2); too few survivors is a printed finding
 rather than twenty junk questions (3); and the `## Thin Entities` table keeps listing
 artifact-shaped entities, because the filter belongs to the questions and not to the
-hygiene count (4). The artifact shapes are matched here with a regex written
-independently of the module's own, so the test does not grade the implementation
-against itself.
+hygiene count (4). The four nodes at the bottom pin the four clauses of #1542, which
+widens the same filter to the two shapes #954 never covered: an underscore-bearing
+dotted path and a bare number. The artifact shapes are matched here with regexes
+written independently of the module's own, so the test does not grade the
+implementation against itself.
 """
 import importlib.util
 import re
@@ -44,6 +46,34 @@ ARTIFACT_RE = re.compile(r"^#\d|^--|\.md$|^\d{4}-\d{2}-\d{2}")
 # report's top 20, and every `#NNN` among them is a backlog id.
 ARTIFACT_NAMES = ["#441", "#160", "--continue",
                   "03-linear-representation-hypothesis.md", "2026-09-11"]
+
+# The two shapes #1542 adds, also written independently of the module: a dotted
+# path with an underscore on either side of a dot (a pytest node id `a_b.c_d`, a
+# dotted config key `inner_voice.todo_stewardship.enabled`) and a bare number.
+# Whitespace stops the dotted leg, because a code path is one token: a name with
+# a space in it is prose, and is left alone.
+CODE_SHAPE_RE = re.compile(r"[^.\s]*_[^.\s]*\.|\.[^.\s]*_|^\d+$")
+
+# Six rows of the live 2026-09-26 `## Thin Entities` table that are code, not
+# concepts: the first two are the pair that reached the briefing that morning (as
+# `- Is **test_iv_loop_guards.pytest_observer_resolves_to_the_primary_endpoint**
+# still relevant?` and the same for `inner_voice.todo_stewardship.enabled`), and
+# `255` is the table's row 40. Of the table's 50 listed rows the widened rule
+# rejects 7 of them, which is what these names are here to pin.
+CODE_SHAPED_NAMES = [
+    "test_iv_loop_guards.pytest_observer_resolves_to_the_primary_endpoint",
+    "inner_voice.todo_stewardship.enabled",
+    "inner_voice.todo_stewardship",
+    "observer_prompt._tool_call_labels",
+    "guards._strip_cd_prefix",
+    "255",
+]
+
+# The dotted name the widened rule must spare: a nix flake, so a dot is legitimate
+# and neither segment carries an underscore. Row 27 of the same live table. That
+# single fixture pair — this name asked about twice, `guards._strip_cd_prefix`
+# never — is the whole discriminator.
+DOTTED_NOT_CODE = "jail.nix"
 
 
 def _write(root: Path, name: str, days_ago_list: list[int]) -> None:
@@ -224,3 +254,113 @@ def test_thin_entities_table_still_lists_the_artifact_names(tmp_path):
     # And it is the questions that lost them, not the table: no artifact is a
     # question here either.
     assert [q for q in _questions(report) if ARTIFACT_RE.search(q)] == []
+
+
+# ── #1542 clause 1: a code-shaped name is not a research subject ──────────────
+
+def test_code_shaped_names_never_reach_the_questions(tmp_path):
+    """12 usable names + 6 code-shaped: 12 questions, and not one of them is code.
+
+    12 usable sits above MIN_USABLE_RESEARCH_QUESTIONS (10), so the section is
+    rendering an ordinary ranking here — the rejection has to hold while the
+    section works, not only when it gives up (that case is the last node). Each
+    name would otherwise have produced two lines, `- What does **…** relate to?`
+    and `- Is **…** still relevant?`, which is what the briefing reads.
+    """
+    root = tmp_path / "facts"
+    usable = {f"Gap-Shape-{i:02d}": [i] for i in range(12)}
+    entities = _load(root, {**usable,
+                            **{n: [100 + i] for i, n in enumerate(CODE_SHAPED_NAMES)}})
+    report = _report(entities)
+    section = _section(report, "## Suggested Research Questions")
+    questions = _questions(report)
+
+    assert len(questions) == 12
+    assert set(questions) == set(usable)
+    assert [q for q in questions if CODE_SHAPE_RE.search(q)] == []
+    # Not merely absent from the parsed questions: absent from the section, so
+    # neither of its two line forms is rendered for a code-shaped name.
+    for name in CODE_SHAPED_NAMES:
+        assert f"**{name}**" not in section
+    # And the section rendered questions rather than surrendering: 12 survivors
+    # is above the floor, so no verdict line is due.
+    assert "RESEARCH_QUESTIONS_UNEVALUABLE" not in section
+
+
+# ── #1542 clause 2: the underscore is the discriminator, not the dot ──────────
+
+def test_a_dotted_name_without_an_underscore_keeps_both_questions(tmp_path):
+    """`jail.nix` is a nix flake and a real tool: it keeps both of its questions.
+
+    The widened rule rejects dotted code-shaped names, not every name containing
+    a dot. The fixture holds `jail.nix` next to `guards._strip_cd_prefix`, so the
+    only difference between the name asked about twice and the name never asked
+    about is the underscore: a rule written as "the name contains a dot" fails
+    this node, and the underscore is what makes a dotted name a code path.
+    """
+    root = tmp_path / "facts"
+    usable = {f"Gap-Shape-{i:02d}": [i] for i in range(11)}
+    entities = _load(root, {**usable, DOTTED_NOT_CODE: [4],
+                            **{n: [100 + i] for i, n in enumerate(CODE_SHAPED_NAMES)}})
+    report = _report(entities)
+    section = _section(report, "## Suggested Research Questions")
+
+    assert [ln for ln in section.splitlines() if f"**{DOTTED_NOT_CODE}**" in ln] == [
+        "- What does **jail.nix** relate to?",
+        "- Is **jail.nix** still relevant?",
+    ]
+    # Same section, opposite verdict: the underscore-bearing dotted name next to
+    # it is gone, and 12 usable names (11 + jail.nix) still clear the floor.
+    assert "guards._strip_cd_prefix" not in section
+    assert "RESEARCH_QUESTIONS_UNEVALUABLE" not in section
+
+
+# ── #1542 clause 3: the widened filter belongs to the questions only ──────────
+
+def test_thin_entities_table_still_lists_the_code_shaped_names(tmp_path):
+    """All 18 thin entities stay in the table and keep the stated total at 18.
+
+    The same 12 usable + 6 code-shaped fixture as clause 1: the questions drop to
+    12, but the table lists every one of the 6 rejections and its total is the
+    unfiltered thin-entity population — 18, not the 12 the section was allowed to
+    ask about. This is the signal #743/#1535 read: hide these rows and a regrowth
+    in junk minting stops being visible.
+    """
+    root = tmp_path / "facts"
+    usable = {f"Gap-Shape-{i:02d}": [i] for i in range(12)}
+    entities = _load(root, {**usable,
+                            **{n: [100 + i] for i, n in enumerate(CODE_SHAPED_NAMES)}})
+    report = _report(entities)
+    table = _table_names(report)
+
+    assert set(CODE_SHAPED_NAMES) <= set(table)
+    assert "**18** in total" in _section(report, "## Thin Entities")
+    # The table kept them; only the questions lost them.
+    assert [q for q in _questions(report) if CODE_SHAPE_RE.search(q)] == []
+
+
+# ── #1542 clause 4: the widened rejections drive the existing verdict ─────────
+
+def test_code_shaped_rejections_alone_can_drive_the_unevaluable_verdict(tmp_path):
+    """4 usable of 14: the widened shapes alone take the section under the floor.
+
+    None of the 10 rejected names here matches any of the four #954 shapes — no
+    `#`, no leading `--`, no `.md`, no leading date — so the count of 10 and the
+    4 survivors come entirely from the two #1542 shapes. The section prints the
+    guard that already existed, unchanged, instead of padding with the four
+    names that survived: same marker, same wording, one code path.
+    """
+    root = tmp_path / "facts"
+    entities = _load(root, {
+        **{f"Live-Shape-{i}": [1] for i in range(4)},                 # 4 usable
+        **{n: [2] for n in CODE_SHAPED_NAMES},                        # 6
+        **{f"test_iv_guard_{i}.pytest_case_{i}": [3] for i in range(2)},  # 2 node ids
+        **{"1204": [4], "77": [4]},                                   # 2 bare numbers
+    })
+    section = _section(_report(entities), "## Suggested Research Questions")
+
+    assert len(CODE_SHAPED_NAMES) == 6
+    assert ("RESEARCH_QUESTIONS_UNEVALUABLE: 10 of 14 thin entities carry an "
+            "artifact-shaped name") in section
+    assert "- What does" not in section
+    assert "- Is **" not in section

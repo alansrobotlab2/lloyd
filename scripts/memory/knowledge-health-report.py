@@ -63,16 +63,31 @@ MIN_USABLE_RESEARCH_QUESTIONS = 10
 # the top of the section. Stopping the minting is #743; this filter is what
 # makes the section useless-to-useful before that gate lands and harmless after
 # it.
+#
+# The two shapes #954 never covered, added by #1542. The extractor mints a test
+# node id and a dotted config key as entities (`test_iv_loop_guards.pytest_…`,
+# `inner_voice.todo_stewardship.enabled`), and a bare line number too (`255` was
+# row 40 of the 2026-09-26 thin table); all three dominated the thin list. The
+# dotted leg keys on an underscore beside the dot, not on the dot itself, because
+# `jail.nix` — a nix flake, a real tool, row 27 of the same table — is dotted with
+# no underscore and is a researchable thing. Whitespace stops that leg: a code
+# path is one token, so a name with a space in it is prose and is left alone.
 EXTRACTION_ARTIFACT_NAME_RES = (
     re.compile(r"^#\d"),                # '#441' — a backlog id, not an entity
     re.compile(r"^--"),                 # '--continue' — a CLI flag
     re.compile(r"\.md$"),               # '03-linear-representation-hypothesis.md' — a filename
     re.compile(r"^\d{4}-\d{2}-\d{2}"),  # '2026-09-11' — a date
+    re.compile(r"[^.\s]*_[^.\s]*\.|\.[^.\s]*_"),  # 'guards._strip_cd_prefix', 'a.b_c.enabled'
+    re.compile(r"^\d+$"),               # '255' — a bare number, not an entity
 )
 
 
 def is_extraction_artifact_name(name: str) -> bool:
     """True when an entity name is a shape the extractor minted, not a concept.
+
+    The shapes are the four mints #954 named plus the two #1542 adds — an
+    underscore-bearing dotted path and a bare number — which is why the section's
+    verdict line can call everything it rejects "artifact-shaped".
 
     Only the questions are filtered by this. The `## Thin Entities` table is not:
     it is the surface on which a regrowth in `#NNN` minting becomes visible, so
