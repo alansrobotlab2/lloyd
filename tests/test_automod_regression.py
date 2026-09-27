@@ -1546,3 +1546,66 @@ def test_a_refused_manifest_does_not_run_the_holdout_leg(monkeypatch, tmp_path):
     R._execute_blocking()
     assert [leg for _, leg in calls] == ["dev", "dev"]
     assert _check(events)["holdout"]["status"] == "unmeasured"
+
+
+# ---------------------------------------------------------------------------
+# A stale floor is re-measured by the runner, once per question set
+# ---------------------------------------------------------------------------
+#
+# From 2026-09-23 to 09-27 every check (120) was report-only: rounds had grown
+# the question set from 81 to 86 queries, and re-measuring was a command nobody
+# ran. `refresh_stale_floor` runs after the queue drains, under the lock.
+
+@pytest.fixture
+def floor_env(monkeypatch, tmp_path):
+    import scripts.automod.promote as P
+    import scripts.automod.state as S
+    events: list = []
+    said: list = []
+    monkeypatch.setattr(S, "append_event", lambda row, **kw: events.append(row))
+    monkeypatch.setattr(S, "read_events", lambda **kw: list(events))
+    monkeypatch.setattr(P, "announce", lambda title, body="", **kw: said.append(title))
+    monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "noise.json")
+    monkeypatch.setattr(R, "queries_fingerprint", lambda: "new-fp")
+    (tmp_path / "noise.json").write_text(json.dumps({"queries_fingerprint": "old-fp", "metrics": {}}))
+    return {"events": events, "said": said, "path": tmp_path / "noise.json"}
+
+
+def _measured(n):
+    def measure(*a, **kw):
+        noise = {"queries_fingerprint": "new-fp",
+                 "metrics": {"doc_hit_rate": {"mean": 0.6, "stdev": 0.01, "n": n}}}
+        R.NOISE_PATH.write_text(json.dumps(noise))
+        return noise
+    return measure
+
+
+def test_a_stale_floor_is_remeasured_and_said(floor_env, monkeypatch):
+    monkeypatch.setattr(R, "measure_noise", _measured(5))
+    row = R.refresh_stale_floor()
+    assert row["ok"] is True and row["previous_fingerprint"] == "old-fp"
+    assert json.loads(floor_env["path"].read_text())["queries_fingerprint"] == "new-fp"
+    assert floor_env["said"] == ["Regression floor re-measured"]
+
+
+def test_a_current_floor_is_left_alone(floor_env, monkeypatch):
+    floor_env["path"].write_text(json.dumps({"queries_fingerprint": "new-fp"}))
+    monkeypatch.setattr(R, "measure_noise", lambda *a, **kw: pytest.fail("measured a current floor"))
+    assert R.refresh_stale_floor() is None and floor_env["events"] == []
+
+
+def test_one_attempt_per_question_set(floor_env, monkeypatch):
+    monkeypatch.setattr(R, "measure_noise", _measured(1))
+    first = R.refresh_stale_floor()
+    assert first["ok"] is False
+    monkeypatch.setattr(R, "measure_noise", lambda *a, **kw: pytest.fail("tried twice"))
+    assert R.refresh_stale_floor() is None
+    assert floor_env["said"] == ["Regression floor is stale"]
+
+
+def test_a_thin_measurement_keeps_the_old_floor(floor_env, monkeypatch):
+    monkeypatch.setattr(R, "measure_noise", _measured(2))
+    row = R.refresh_stale_floor()
+    assert row["ok"] is False and "too few samples" in row["error"]
+    assert json.loads(floor_env["path"].read_text())["queries_fingerprint"] == "old-fp", \
+        "a floor too thin to be a σ must not be published"

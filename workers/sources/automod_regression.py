@@ -1393,9 +1393,71 @@ def run_pending(max_checks: int | None = None) -> list[dict]:
                         str(result.get("summary") or result.get("skipped") or "")[:300])
             if result.get("regressed"):
                 break       # a rollback has been requested; let the guardian act first
+        if not (done and done[-1].get("regressed")):
+            try:
+                refresh_stale_floor()
+            except Exception:  # noqa: BLE001 — the floor is housekeeping; the checks are done
+                logger.exception("noise floor refresh failed")
     finally:
         lock.release()
     return done
+
+
+# The floor needs at least this many samples per metric to be a σ at all.
+MIN_FLOOR_SAMPLES = 3
+
+
+def refresh_stale_floor() -> dict | None:
+    """Re-measure the noise floor once the question set it was measured on is
+    gone. Called by `run_pending` with `regression.lock` held and the queue
+    drained; returns the ledger row, or None when there was nothing to do.
+
+    A stale floor withholds every verdict (#1352), and nothing re-measured it:
+    `noise` was a command a person had to remember. From 2026-09-23 07:39 PDT
+    to 09-27 every check — 120 of them — was report-only because rounds had
+    grown the question set from 81 queries to 86. One attempt per fingerprint,
+    so a measurement that keeps failing costs one run and one announcement, not
+    one per landing. A result with too few samples is not published: the old
+    artifact is put back, and the checks stay honestly stale.
+    """
+    from scripts.automod import promote as P, state as S
+    live = queries_fingerprint()
+    try:
+        old_text = NOISE_PATH.read_text(encoding="utf-8")
+        old_fp = str(json.loads(old_text).get("queries_fingerprint") or "")
+    except (OSError, ValueError):
+        return None     # no floor at all is `_skip`'s case, with its own message
+    if not live or old_fp == live:
+        return None
+    if any(e.get("event") == "noise_refreshed" and e.get("queries_fingerprint") == live
+           for e in S.read_events(limit=4000)):
+        return None
+    logger.info("noise floor is stale (%s, questions now %s); re-measuring", old_fp, live)
+    started = time.time()
+    error, noise = "", None
+    try:
+        noise = measure_noise()
+    except Exception as exc:  # noqa: BLE001 — recorded below, and the old floor kept
+        error = repr(exc)[:300]
+    counts = [m.get("n", 0) for m in ((noise or {}).get("metrics") or {}).values()]
+    ok = bool(counts) and min(counts) >= MIN_FLOOR_SAMPLES
+    if not ok:
+        NOISE_PATH.write_text(old_text, encoding="utf-8")
+        error = error or f"too few samples per metric ({min(counts) if counts else 0} < {MIN_FLOOR_SAMPLES})"
+    row = {"event": "noise_refreshed", "ok": ok, "queries_fingerprint": live,
+           "previous_fingerprint": old_fp, "seconds": round(time.time() - started, 1),
+           "dropped_trials": (noise or {}).get("dropped_trials") or [], "error": error}
+    S.append_event(row)
+    if ok:
+        P.announce("Regression floor re-measured",
+                   f"The eval's question set changed ({old_fp} -> {live}); the noise floor "
+                   f"was re-measured and regression checks can decide again.")
+    else:
+        P.announce("Regression floor is stale",
+                   f"The eval's question set changed ({old_fp} -> {live}) and re-measuring "
+                   f"the floor failed: {error}. Checks stay report-only until "
+                   f"`python -m scripts.automod.regression_runner noise` succeeds.")
+    return row
 
 
 def _skip(commit: str, reason: str, *, level: int = logging.ERROR) -> dict[str, Any]:

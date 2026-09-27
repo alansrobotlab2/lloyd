@@ -3495,9 +3495,17 @@ draws djev independently instead of replaying the anchor's answers.
   leg kept the first 8, so 7 of 81 gold queries admitted different files run to
   run. It sorts before the cut now. That was live recall's behaviour too, not
   just the eval's (`tests/test_recall_first_stage.py`).
-- **Re-measure the floors when the eval changes:**
-  `python -m scripts.automod.regression_runner noise` takes `regression.lock`
-  and writes `eval-noise.json`. **Anything that restarts or loads djev or the
+- **The runner re-measures the floors when the eval changes**
+  (`refresh_stale_floor`, 2026-09-27). After it drains its queue, still
+  holding `regression.lock`, it compares the artifact's
+  `queries_fingerprint` with the live question set. On a mismatch it runs
+  `measure_noise` once per fingerprint (about 10 min), writes a
+  `noise_refreshed` ledger row, and announces the outcome. A result with fewer
+  than 3 samples per metric is not published, and the old artifact is kept.
+  Nothing did this before: rounds grew the set from 81 to 86 queries on
+  09-23, and every check for four days (120 of them) was report-only.
+  `python -m scripts.automod.regression_runner noise` still re-measures by
+  hand, and it also takes `regression.lock` and writes `eval-noise.json`. **Anything that restarts or loads djev or the
   qmd daemon holds that lock too**; the second rollback was the author's own
   canvas experiment running under a check.
 - `tests/test_automod_regression.py` (the check) and `tests/test_djev_replay.py`
