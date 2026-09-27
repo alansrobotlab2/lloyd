@@ -1700,3 +1700,23 @@ def test_the_vault_writer_still_demotes_a_turn_that_landed_nothing(isolated, mon
     ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM, surface="vault")
     assert ev["outcome"]["landed"] is False, ev["outcome"]
     assert "vault_land" in ev["outcome_landing_mismatch"], ev["outcome_landing_mismatch"]
+
+
+def test_a_commit_the_vault_holds_is_not_an_unresolved_citation(repo, tmp_path, monkeypatch):
+    """A `mixed` round lands vault commits and the grader cites them. Three of
+    the five shas that spent review attempts on 2026-09-26/27 were real vault
+    commits (7709cf49, e3c415a1, da4d1b42): the rail asked only the code repo."""
+    r, _ = repo
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    git(vault, "init", "-q")
+    (vault / "note.md").write_text("n\n")
+    git(vault, "add", "-A")
+    git(vault, "-c", "user.name=v", "-c", "user.email=v@v", "commit", "-q", "-m", "vault")
+    vsha = git(vault, "rev-parse", "HEAD").stdout.strip()[:8]
+    monkeypatch.setattr(RV, "REVIEW_EVIDENCE_ROOTS", (vault,))
+    parsed = _judged(r, _fin({"verdict": "met", "test_node_id": "", "evidence_path": "app/m.py",
+                              "evidence_line": 1, "note": f"the skill landed in vault commit {vsha}"}),
+                     1, repo=r)
+    assert parsed["unreliable"] == [] and "citation_unresolved" not in parsed["clauses"][0]
+    assert RV.unresolved_shas(f"see {vsha}", r, also=()) == [vsha], "the code repo alone lacks it"

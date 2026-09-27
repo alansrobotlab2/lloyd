@@ -1324,9 +1324,16 @@ def evidence_of_absence(raw_path: str, changed_paths=()) -> bool:
     return any(m in head for m in _ABSENCE_MARKERS)
 
 
-def unresolved_shas(text: str, repo: Path | None) -> list[str]:
-    """Commit-ish tokens in `text` that `repo` cannot resolve, at most
+def unresolved_shas(text: str, repo: Path | None,
+                    also: tuple[Path, ...] | None = None) -> list[str]:
+    """Commit-ish tokens in `text` that neither `repo` nor any git repo among
+    `also` (default `REVIEW_EVIDENCE_ROOTS`, the vault) can resolve, at most
     `_SHA_RAIL_MAX_TOKENS` of them.
+
+    The vault counts because a `mixed` round lands vault commits and the
+    grader cites them: three of the five "unresolvable" shas that spent
+    review attempts on 2026-09-26/27 (7709cf49, e3c415a1, da4d1b42) were
+    real vault commits, and the rail asked only `~/lloyd`.
 
     The grader that refused round `SM_20260924_104307`'s last attempt wrote
     "satisfied by a test in a prior landing (agent_mcp/facts.py:520-540, commit
@@ -1345,9 +1352,11 @@ def unresolved_shas(text: str, repo: Path | None) -> list[str]:
     probe = _git(repo, "rev-parse", "--git-dir")
     if not probe.strip():
         return []
+    roots = [repo] + [r for r in (REVIEW_EVIDENCE_ROOTS if also is None else also)
+                      if r != repo and _git(r, "rev-parse", "--git-dir").strip()]
     out: list[str] = []
     for tok in _SHA_TOKEN_RX.findall(text)[:_SHA_RAIL_MAX_TOKENS]:
-        if tok not in out and not _git(repo, "cat-file", "-t", tok).strip():
+        if tok not in out and not any(_git(r, "cat-file", "-t", tok).strip() for r in roots):
             out.append(tok)
     return out
 
