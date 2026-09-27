@@ -11,6 +11,7 @@ import time
 import urllib.request
 import xml.etree.ElementTree as ET
 
+from ..body import clip_body, strip_link_footer
 from ..models import FeedItem
 from .. import state
 from ..profile import load_profile
@@ -394,7 +395,16 @@ def scan_youtube_channels() -> Tuple[List[FeedItem], FeedCoverage]:
             # Create FeedItem
             title = video.get("title", "")
             url = video.get("url", "")
-            description = video.get("description", "")[:500] if video.get("description") else ""
+            # The channel's own copy, and it arrives with two pieces of noise the
+            # digest should not carry (#1561): a promotional footer (`____` rule,
+            # `My Links 🔗`, the handles under it) and, until now, a cut at 500 that
+            # landed wherever 500 fell — a mid-token tail reaching `knowledge/` with
+            # nothing to say it had been cut. The footer comes off first, so the 500
+            # chars are spent on prose, and `clip_body` is the same helper the three
+            # GitHub shapes go through: the boundary moves back to a word and the cut
+            # is marked. A description with no footer and room under the cap comes
+            # back untouched, which is #1269 clause 2's behaviour.
+            description = clip_body(strip_link_footer(video.get("description") or ""))
             published = video.get("published", "")
             
             item = FeedItem(

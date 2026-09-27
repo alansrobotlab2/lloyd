@@ -10,7 +10,7 @@ from typing import List, Dict, Any, Optional
 from . import state as scanner_state
 from .models import ScoredItem, GRADE_CALL_CAP, GRADE_KEYWORD
 from .profile import load_profile, get_all_keywords, keyword_match
-from .body import clean_body
+from .body import clean_body, ends_a_sentence, strip_link_footer
 
 
 from ._paths import VAULT_ROOT, KNOWLEDGE_DIR, FEEDS_DIR as SCORED_FEEDS_DIR, VAULT_WRITTEN_STATE
@@ -403,12 +403,32 @@ def _entry_body(item: ScoredItem) -> str:
     A GitHub summary goes through `body.clean_body` first (backlog #1225): an
     unfilled PR template or a body under the floor is not pasted but named, as
     `None — <reason>`, and a body that only restates the title is left out. That is
-    the one case this returns "", which the caller renders as no body line. Other
-    sources are not upstream templates, and a short feed summary is still a summary.
+    the one case this returns "", which the caller renders as no body line.
+
+    A feed description is not an upstream template, so it keeps its prose — but it is
+    a channel's own copy, and since #1561 the promotional footer on the end of it is
+    taken off (`strip_link_footer`), with a remainder that ends no sentence treated as
+    no body at all so the entry carries `why` instead. A short feed summary is still a
+    summary; a link block is not a summary, and publishing one as knowledge prose is
+    what this is here to stop.
     """
     summary = (item.summary or "").strip()
     if summary and (item.source or "").lower() != "github":
-        return summary
+        # A feed description is the channel's own copy, so it can arrive with the
+        # channel's promotional footer on the end of it (#1561). Take the footer off.
+        # If what that leaves does not end a sentence, the summary WAS the footer and
+        # nothing else, so fall through to `why` below rather than publish a link
+        # block as knowledge prose — #1509's `is_trailer_only` cannot see that shape,
+        # since a `____` rule and two handles are not git trailers. A summary with no
+        # footer under its rule is returned exactly as it stands: this judges the
+        # strip's remainder, it is not a licence to prefer `why` over every feed
+        # description, which is what a general promo-classifier here would become.
+        stripped = strip_link_footer(summary)
+        if stripped == summary:                      # no footer: today's behaviour
+            return summary
+        if ends_a_sentence(stripped):
+            return stripped
+        summary = ""
     if summary:
         body, reason = clean_body(summary, item.title or "")
         if body:

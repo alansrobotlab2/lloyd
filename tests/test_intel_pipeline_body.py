@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ from intel_pipeline import state as state_mod  # noqa: E402
 from intel_pipeline import vault_writer as vw_mod  # noqa: E402
 from intel_pipeline.models import ScoredItem  # noqa: E402
 from intel_pipeline.scanners import github_scanner as gh_mod  # noqa: E402
+from intel_pipeline.scanners import youtube_scanner as yt_mod  # noqa: E402
 
 LIMIT = body_mod.SUMMARY_LIMIT
 ELL = body_mod.ELLIPSIS
@@ -293,3 +295,260 @@ def test_the_batch_counts_skipped_no_body(tmp_path, monkeypatch, capsys):
     assert TRAILER_TITLE not in text and "Co-authored-by" not in text
     # Not marked written: the drop is a refusal, not a publication.
     assert json.loads((tmp_path / "written.json").read_text())["written"] == [good.id]
+
+
+# ── #1561: the YouTube branch published the feed description verbatim ─────────
+#
+# The four GitHub clauses above all held, and the YouTube branch was never in this
+# file: `_entry_body` returned `summary` as-is for any non-GitHub source, so the
+# channel's own promotional footer — a `____` rule, `My Links 🔗`, an arrow and a
+# Twitter handle — reached `knowledge/` as knowledge prose, and the `[:500]` slice
+# upstream meant the prose that survived was cut wherever 500 bytes fell.
+#
+# The tests below drive the three surfaces the fix crosses: the renderer
+# (`_entry_body`), the scanner that builds the summary off the wire, and the
+# published file. The one-helper contract they extend is #1225's, which until now
+# covered only release/commit/PR.
+
+#: `youtube:UCqcbQf6yw5KzRoDDcZ_wBSw:V3KeMw2nIDA`'s `summary` field, copied out of
+#: `lloyd-data/_pipeline/vault-derived/memory/feeds/raw/2026-09-26.jsonl`: 500
+#: characters, ending in the channel's `____` rule, its `My Links` line and its
+#: Twitter link. Both defects are in this one string — the upstream description is
+#: longer than 500 chars, so this is what the slice left, and the footer is what
+#: the last 100 characters of it are.
+WESROTH_DESCRIPTION = (
+    "OpenAI’s alarm went off. The automatic shutdown didn’t. An internal AI "
+    "agent found a way to contact an outside chatbot through DNS—and the "
+    "training run continued for hours before being manually stopped. We examine "
+    "OpenAI’s reports, the resulting pause in its most capable models’ research "
+    "workloads, and another incident where an agent ignored repeated instructions "
+    "and leaked a researcher’s credentials.\n\n"
+    "______________________________________________\n"
+    "My Links 🔗\n"
+    "➡️ Twitter: https://x.com/WesRothMon")
+
+#: The same channel's footer, alone: the body #1509's counter waved through because
+#: `is_trailer_only` matches git trailers, and a `____` rule plus two link lines is
+#: not a git trailer. This is the row the run logged as a write and not as
+#: `skipped (no body)`.
+FOOTER_ONLY = ("______________________________________________\n"
+               "My Links 🔗\n"
+               "➡️ Twitter: https://x.com/WesRothMon\n"
+               "➡️ Instagram: https://instagram.com/wesroth")
+
+_RULE_AT_LINE_START = re.compile(r"^\s*[_=]{5,}\s*$", re.MULTILINE)
+
+
+def _yt(id: str = "youtube:UCtest:vid1", *, summary: str = "", why: str = "",
+        title: str = "OpenAI paused all training runs... ALIGNMENT FAILURE",
+        relevance: int = 8) -> ScoredItem:
+    """A scored YouTube row, the shape `--score` hands the writer for a video whose
+    channel has no monitor note — the branch #1269 clause 2 routes to `summary`."""
+    return ScoredItem(id=id, source="youtube", title=title,
+                      url=f"https://www.youtube.com/watch?v={id.rsplit(':', 1)[-1]}",
+                      summary=summary, discovered_at="2026-09-27T06:00:00+00:00",
+                      relevance=relevance, why=why, category="ai-llms")
+
+
+@pytest.fixture
+def intel_state(tmp_path, monkeypatch):
+    """Move the writer's and the scanner's state into `tmp_path`.
+
+    `_paths` resolves at import time and each module imported the result by name, so
+    rebinding the per-module names is what actually moves them — otherwise driving
+    the scanner would append a day of fake rows to the live feed raw file.
+    """
+    feeds = tmp_path / "feeds"
+    (feeds / "raw").mkdir(parents=True)
+    vault = tmp_path / "vault"
+    (vault / "knowledge").mkdir(parents=True)
+    monkeypatch.setattr(state_mod, "RAW_DIR", feeds / "raw")
+    monkeypatch.setattr(state_mod, "STATE_FILE", feeds / "scanner-state.json")
+    monkeypatch.setattr(vw_mod, "SCORED_FEEDS_DIR", feeds)
+    monkeypatch.setattr(vw_mod, "VAULT_WRITTEN_STATE", feeds / "vault-written.json")
+    monkeypatch.setattr(vw_mod, "KNOWLEDGE_DIR", vault / "knowledge")
+    monkeypatch.setattr(vw_mod, "VAULT_ROOT", vault)
+    monkeypatch.setenv("INTEL_DISABLE_LLM", "1")
+    return tmp_path
+
+
+#: A profile whose one topic matches on `agent`, so a YouTube item is routed to
+#: `knowledge/ai-llms/youtube-digest.md` — the file the item names as the surface. With
+#: no matching topic the writer files the same item under
+#: `knowledge/feeds/youtube-uncategorized.md`, which is a real destination but not the
+#: one under test.
+DIGEST_PROFILE = {"topics": [{"name": "ai-llms", "weight": 0.9, "keywords": ["agent"]}]}
+
+#: Where `DIGEST_PROFILE` sends a YouTube item, under the redirected vault.
+DIGEST_FILE = "knowledge/ai-llms/youtube-digest.md"
+
+
+def _publish(tmp_path, *items, profile: dict | None = None) -> str:
+    """Write `items` through `write_item_to_vault` and return everything that landed
+    under the redirected `knowledge/` — the file is the artefact the item names, so
+    the assertion runs on it and not only on the rendered string."""
+    profile = DIGEST_PROFILE if profile is None else profile
+    for item in items:
+        vw_mod.write_item_to_vault(item, profile)
+    return "\n".join(p.read_text() for p in
+                     sorted((tmp_path / "vault" / "knowledge").rglob("*.md")))
+
+
+def test_recorded_youtube_description_reaches_the_note_without_its_link_footer(intel_state):
+    """Clause 1 (#1561): a feed description whose tail is a separator rule and the
+    link lines under it renders without that block, on the renderer and in the
+    published file. The recorded WesRoth description has to come back ending at its
+    own last sentence, with no rule, no `My Links` and no `Twitter:`."""
+    assert len(WESROTH_DESCRIPTION) == 500, "the fixture stopped being the recorded row"
+    rendered = vw_mod._entry_body(_yt(summary=WESROTH_DESCRIPTION))
+    assert rendered.endswith("leaked a researcher’s credentials.")
+    assert "My Links" not in rendered and "Twitter:" not in rendered
+    assert not _RULE_AT_LINE_START.search(rendered)
+    # What survives is the channel's own prose, not a head-of-file stub: the strip
+    # has to remove the block and keep everything above it.
+    assert rendered.startswith("OpenAI’s alarm went off.")
+    assert len(rendered) > 400
+
+    # The two shapes a `____` can be, and the one thing that tells them apart. Under a
+    # paragraph or heading with no blank between, `______` is markdown's setext underline
+    # and removing it would re-render the surviving line as a heading; set off by a
+    # blank, it is the divider over a channel's link block. Both are in a real corpus,
+    # so the branch has to be decided by the blank and not left to whichever shape the
+    # sample happened to carry.
+    setext = "Prose about the run.\n####Subhead\n______"
+    assert body_mod.strip_link_footer(setext) == setext, "a setext underline was stripped"
+    promo = "Prose about the run.\n\n______\nMy Links 🔗\n➡️ Twitter: https://x.com/a"
+    assert body_mod.strip_link_footer(promo) == "Prose about the run."
+
+    written = _publish(intel_state, _yt(summary=WESROTH_DESCRIPTION))
+    digest = intel_state / "vault" / DIGEST_FILE
+    assert digest.is_file(), f"the item never reached {DIGEST_FILE}: {sorted(written)[:60]}"
+    body = digest.read_text()
+    assert "My Links" not in body and "Twitter:" not in body
+    assert not _RULE_AT_LINE_START.search(body)
+    assert "leaked a researcher’s credentials." in body
+
+
+def test_youtube_summary_at_the_char_cap_is_cut_on_a_word_boundary_and_marked(intel_state,
+                                                                             monkeypatch):
+    """Clause 2 (#1561): the YouTube summary passes through `body.clip_body` — the
+    same helper `_words` bodies go through above, and asserted with the same helper,
+    `_assert_word_boundary_cut` — so a description longer than the cap reaches the
+    note cut at a word boundary and marked with the package's ellipsis. Never inside
+    a token, which is what the raw `[:500]` slice produced: the byte at the cap here
+    is inside `word08`, so the old code's summary ended mid-word and unmarked."""
+    description = " ".join(f"word{i:02d}" for i in range(400))     # 3,099 chars, no footer
+    # The fixture has to be one the OLD code failed: the char at the cap is inside a
+    # token, so `[:500]` ended the summary mid-word and said nothing about it.
+    assert not description[LIMIT - 1].isspace() and not description[LIMIT].isspace()
+    atom = f"""<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns:media="http://search.yahoo.com/mrss/"
+      xmlns:yt="http://www.youtube.com/xml/schemas/2015"
+      xmlns="http://www.w3.org/2005/Atom">
+ <entry>
+  <id>yt:video:LONG1111</id>
+  <yt:videoId>LONG1111</yt:videoId>
+  <yt:channelId>UClong</yt:channelId>
+  <title>a channel with no monitor note</title>
+  <link rel="alternate" href="https://www.youtube.com/watch?v=LONG1111"/>
+  <media:description>{description}</media:description>
+ </entry>
+</feed>"""
+    monkeypatch.setattr(yt_mod, "load_youtube_channels_config", lambda: [
+        {"handle": "@wesroth", "name": "Wes Roth", "channel_id": "UClong"}])
+    monkeypatch.setattr(yt_mod, "_http_get", lambda url, headers=None, timeout=None: atom)
+
+    items, coverage = yt_mod.scan_youtube_channels()
+
+    assert coverage.fetched == 1 and len(items) == 1
+    summary = items[0].summary
+    # The release/commit/PR shapes above assert this cut with `_assert_word_boundary_cut`
+    # (ellipsis, kept text a prefix, width inside the cap, and the character after the
+    # cut whitespace); the YouTube summary now answers to the same check.
+    _assert_word_boundary_cut(description, summary)
+    kept = summary[:-len(body_mod.ELLIPSIS)]
+    assert len(kept) > 450, f"clip width {len(kept)} is not the cap, it is a stub"
+    # The boundary moved BACK to the previous word, not forward past the next one:
+    # at this fixture's width a byte slice keeps 500 characters and a word-boundary
+    # clip keeps the whole word before the cap, which is a shorter string.
+    assert len(kept) < LIMIT
+    # No footer is fabricated out of a description that has none: the prose is the
+    # feed's, whole up to the cut.
+    assert "My Links" not in summary and "_" not in summary
+
+
+def test_a_youtube_description_under_the_cap_is_still_passed_through_untouched(intel_state):
+    """The other half of #1269 clause 2, which the strip and the clip must not
+    disturb: a description with no footer and room under the cap reaches the entry as
+    the channel wrote it, uncut, unmarked and not replaced by the scorer's line.
+
+    The second case below is the one that keeps this honest: a footer-less summary
+    that does NOT end in punctuation — what an older row cut mid-sentence by the
+    `[:500]` slice looks like — is still published as the summary, because the
+    emptiness ruling in `_entry_body` judges what THE STRIP removed, not whether the
+    writer happens to like the sentence. Prefer `why` over that and this file would be
+    quietly rewriting #1269's clause."""
+    description = ("Two-week cadence on the humanoid stack, with the gait weights "
+                   "checked in and the sim-to-real gap measured on the bench.")
+    assert len(description) < LIMIT
+    item = _yt(id="youtube:UCtest:vid3", summary=description, why="Scores 8/10: robotics")
+    assert vw_mod._entry_body(item) == description
+    assert description in _publish(intel_state, item)
+
+    cut_mid_sentence = ("The gait weights were checked in and the sim-to-real gap was "
+                        "measured on the bench before they started talking abo")
+    assert not cut_mid_sentence.rstrip().endswith((".", "!", "?", "…"))
+    older = _yt(id="youtube:UCtest:vid4", summary=cut_mid_sentence,
+                why="Scores 8/10: robotics")
+    assert vw_mod._entry_body(older) == cut_mid_sentence
+
+
+def test_footer_only_youtube_summary_falls_through_to_the_scored_why(intel_state):
+    """Clause 3 (#1561): when stripping the footer leaves nothing a sentence ends,
+    the writer treats the summary as empty and the entry carries `ScoredItem.why`,
+    so a body that is nothing but a channel's link block is never published. #1509's
+    counter cannot catch this shape — `is_trailer_only` matches git trailers."""
+    assert vw_mod.is_trailer_only(FOOTER_ONLY) is False, (
+        "the positive control broke: if a footer were trailer-only, #1509 would "
+        "already have refused this body and this clause would be testing nothing")
+
+    item = _yt(summary=FOOTER_ONLY, why="Scores 8/10: covers the agent-safety keyword set")
+    rendered = vw_mod._entry_body(item)
+    assert rendered == "Scores 8/10: covers the agent-safety keyword set"
+    assert "My Links" not in rendered and not _RULE_AT_LINE_START.search(rendered)
+
+    written = _publish(intel_state, item)
+    assert "Scores 8/10: covers the agent-safety keyword set" in written
+    assert "My Links" not in written and "Twitter:" not in written
+    assert "Instagram" not in written
+
+    # And a body that does end a sentence is kept, footer or no footer: the
+    # emptiness test is about the strip's remainder, not a licence to drop every
+    # YouTube summary in favour of the scoring note.
+    kept = vw_mod._entry_body(_yt(id="youtube:UCtest:vid2", summary=WESROTH_DESCRIPTION,
+                                  why="Scores 8/10: covers the agent-safety keyword set"))
+    assert kept.endswith("leaked a researcher’s credentials.")
+
+
+def test_github_template_and_trailer_only_bodies_keep_their_rulings(intel_state, capsys):
+    """Clause 4 (#1561): the GitHub branch is untouched by the YouTube fix. An
+    unfilled PR template still renders `None — <reason>` rather than the raw
+    headings, and a commit whose body is only a `Co-authored-by:` trailer is still
+    refused by the `skipped (no body)` counter instead of reaching the note."""
+    assert vw_mod._entry_body(_item("Add a feature", UNFILLED_TEMPLATE, "t1")).startswith("None — ")
+
+    day = "2026-09-27"
+    trailer_commit = ScoredItem(
+        id="github:openclaw:commit:t1", source="github", title="Bump the pin",
+        url="https://github.com/openclaw/openclaw/commit/t1",
+        summary="Co-authored-by: someone <someone@users.noreply.github.com>",
+        discovered_at="2026-09-27T06:00:00+00:00", source_tags=["commit"],
+        relevance=9, category="tools")
+    (intel_state / "feeds" / f"intel-{day}.jsonl").write_text(
+        json.dumps(trailer_commit.to_dict()) + "\n", encoding="utf-8")
+
+    assert vw_mod.write_all_to_vault(day) == 0
+    out = capsys.readouterr().out
+    assert "skipped (no body): 1" in out
+    assert not list((intel_state / "vault" / "knowledge").rglob("*.md")), \
+        "a trailer-only commit body reached the note"

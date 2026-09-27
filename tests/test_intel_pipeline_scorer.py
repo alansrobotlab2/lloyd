@@ -43,6 +43,7 @@ INTEL_DIR = REPO_ROOT / "scripts" / "intel-pipeline"
 if str(INTEL_DIR) not in sys.path:
     sys.path.insert(0, str(INTEL_DIR))
 
+from intel_pipeline import body as body_mod  # noqa: E402
 from intel_pipeline import models as models_mod  # noqa: E402
 from intel_pipeline import profile as profile_mod  # noqa: E402
 from intel_pipeline import scoring as scoring_mod  # noqa: E402
@@ -2768,7 +2769,17 @@ def test_an_empty_nested_description_is_an_empty_summary_not_an_error(
         redirect_paths, monkeypatch):
     """Clause 2: 3 of the 15 live entries carry <media:description/>; they
     still parse, and the scan turns them into `FeedItem.summary == ""` beside
-    a sibling whose description is delivered (and clipped at 500 chars)."""
+    a sibling whose description is delivered (and clipped to the 500-char cap).
+
+    The clip is `body.clip_body`'s now (#1561), not a `[:500]` byte slice. This
+    description is one unbroken run of `x`, so there is no whitespace anywhere
+    inside the cap for the clip to land on: it keeps the full width and marks the
+    cut, which is the shape the helper already returned for the three GitHub shapes
+    and the one case where its "at most `limit`" sentence runs one character over
+    (recorded on #1561, not fixed here — it would move every GitHub clip by a
+    character). What this row now has and did not have before is the marker: a
+    summary that ran out of budget says so instead of ending mid-token silently.
+    """
     long_desc = "x" * 700
     monkeypatch.setattr(yt_mod, "_http_get", lambda url, headers=None, timeout=None:
                         _live_shaped_atom([("full", long_desc), ("bare", None)]))
@@ -2781,7 +2792,10 @@ def test_an_empty_nested_description_is_an_empty_summary_not_an_error(
     by_id = {i.id.rsplit(":", 1)[-1]: i for i in items}
     assert set(by_id) == {"full", "bare"}
     assert by_id["bare"].summary == ""
-    assert by_id["full"].summary == "x" * 500
+    full = by_id["full"].summary
+    assert full.startswith("x" * 400)
+    assert full.endswith(body_mod.ELLIPSIS), "a capped summary reached the note unmarked"
+    assert len(full) <= 501
     assert (coverage.fetched, coverage.attempted) == (1, 1)
 
 
