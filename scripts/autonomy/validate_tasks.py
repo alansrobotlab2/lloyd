@@ -27,6 +27,13 @@ key is present (#811) — three classes the scheduler only objects to at dispatc
     `_record_failure(kind="infra")` keeps off the retry budget.
   * `skill_name`/`skill_path` that resolves to no SKILL.md under the skills dirs,
     which fails at dispatch with "Skill not found".
+  * `requires_slot:` naming a program whose enabled flag is false (#1577) —
+    `agent-llm-secondary` while `secondary_enabled: false`, the shape that retired
+    #85. No name check can see this one: `secondary` is still a key of `models:`,
+    so `model: primary` and `model: secondary` both resolve clean against a slot
+    that was retired on 2026-09-20 (`551e9044`). Since #1555 the two status writers
+    also refuse to *arm* such a task (`app/autonomy.py::slot_arm_block`); this is
+    the static half, and it answers from `app.llm_slots`, never a copy.
 
 Usage:
     python scripts/autonomy/validate_tasks.py [--autonomy-dir DIR] [--strict]
@@ -55,6 +62,17 @@ try:
     from app.run_acceptance import acceptance_problems  # noqa: E402
 except Exception:  # noqa: BLE001
     acceptance_problems = None
+# The one authority on "is this program supposed to be running" (#1577). Imported
+# for the same reason as FREQUENCY_INTERVALS: a second slot table in the linter is
+# a second thing to drift when a slot is retired, and `app.llm_slots`'s own
+# docstring is the record of what six tables that silently disagree cost. The
+# module is cheap to import — it reaches for the live app.config only when a
+# caller hands it no config at all, and the linter always hands it the one read
+# from `--config`. None = the check cannot run, which is reported, never passed.
+try:
+    from app import llm_slots  # noqa: E402
+except Exception:  # noqa: BLE001
+    llm_slots = None
 
 DEFAULT_DIR = Path.home() / "obsidian" / "autonomy"
 # Mirrors the slug branch of autonomy._load_skill_content (:894), which is the
@@ -105,6 +123,54 @@ def _parse(path: Path):
     return fm, None
 
 
+def config_mapping(config_path: Path) -> dict | None:
+    """The `--config` yaml as a mapping, or None when there is no readable mapping.
+
+    Every check that reads it treats None as "no verdict" rather than "clean", and
+    for `requires_slot` that distinction is load-bearing: `llm_slots.is_enabled`
+    answers False for a slot whose flag key is simply *absent*, so a config that
+    failed to parse would otherwise print a switched-off verdict that nobody
+    configured.
+    """
+    try:
+        cfg = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — an unreadable config is the case being handled
+        return None
+    return cfg if isinstance(cfg, dict) else None
+
+
+def slot_problem(value: str, config: dict | None, config_path: Path) -> str | None:
+    """Why a `requires_slot:` value cannot be armed, or None when it can.
+
+    `requires_slot` names the supervisord program the task's engine runs on, and
+    two of them are optional with a switch in config.yaml. The answer is
+    `app.llm_slots`'s — the same `is_enabled` the dispatch-side arming guard
+    consults since #1555 — because a linter that kept its own list of slots would
+    be the seventh table that disagrees about a retired engine.
+
+    None means nothing to say: a program that is not an optional slot has no
+    switch and is always enabled (`agent-llm-primary`), and a slot whose flag is
+    true is what a task is supposed to name. The reported case is #85's:
+    `requires_slot: agent-llm-secondary` held for a week against
+    `secondary_enabled: false` while every name check stayed silent, because
+    `secondary` remains a key of `models:` whatever the flag says.
+    """
+    if llm_slots is None:
+        return (f"requires_slot '{value}' unchecked — app.llm_slots could not be "
+                "imported, so no slot can be reported as enabled")
+    flag = llm_slots.slot_flag(value)
+    if flag is None:
+        return None                     # not an optional slot: always enabled
+    if config is None:
+        return (f"requires_slot '{value}' unchecked — {config_path} holds no "
+                "readable yaml mapping, so the slot's enabled flag could not be read")
+    if llm_slots.is_enabled(value, config):
+        return None
+    return (f"requires_slot '{value}' names a switched-off slot: {flag} is false in "
+            f"{config_path}, so nothing may arm this task and its engine is not "
+            "booted to run it")
+
+
 def model_names(config_path: Path) -> set[str] | None:
     """Every `model:` value the engine will accept: keys of `models:` + aliases.
 
@@ -115,10 +181,7 @@ def model_names(config_path: Path) -> set[str] | None:
     Returns None when no `models:` mapping can be read — the caller must treat
     that as "cannot check", never as "nothing to warn about".
     """
-    try:
-        config = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return None
+    config = config_mapping(config_path) or {}
     models = config.get("models")
     if not isinstance(models, dict) or not models:
         return None
@@ -159,7 +222,9 @@ def main() -> int:
                          "only skills root the dispatch loader consults.")
     ap.add_argument("--config", default=str(DEFAULT_CONFIG),
                     help="yaml whose `models:` keys and aliases define the "
-                         "accepted model: values")
+                         "accepted model: values, and whose slot enabled flags "
+                         "(`secondary_enabled`, `djev.enabled`) decide which "
+                         "requires_slot: programs are switched off")
     ap.add_argument("--strict", action="store_true",
                     help="treat structural warnings as failures (exit 2)")
     args = ap.parse_args()
@@ -198,6 +263,10 @@ def main() -> int:
     # when no `models:` mapping can be read; that must never read as a clean pass,
     # so it becomes a loud per-file warning below instead of silence.
     known_models = _UNSET
+    # Same for the slot enabled flags: read once, only if some file declares a
+    # requires_slot, and an unreadable mapping is reported per file — `is_enabled`
+    # answers False for a flag that is absent, so silence here would be a verdict.
+    slot_cfg = _UNSET
 
     warnings: list[str] = []
     for p, fm in by_file:
@@ -237,6 +306,17 @@ def main() -> int:
                     f"{p.name}: model '{model}' is not a models: key or alias in "
                     f"{config_path} (known: {', '.join(sorted(known_models))})"
                 )
+        slot = _clean(fm.get("requires_slot"))
+        if slot and not _is_nullish(slot):
+            # A name check cannot see this: `secondary` is a models: key whether or
+            # not the slot is booted, so #85 passed every check above for a week
+            # against `secondary_enabled: false` (#1577).
+            if slot_cfg is _UNSET:
+                slot_cfg = config_mapping(config_path)
+            problem = slot_problem(slot, None if slot_cfg is _UNSET else slot_cfg,
+                                   config_path)
+            if problem:
+                warnings.append(f"{p.name}: {problem}")
         frequency = _clean(fm.get("frequency")).lower()
         rpd = _clean(fm.get("runs_per_day"))
         if frequency and not _is_nullish(frequency) and (not rpd or _is_nullish(rpd)):

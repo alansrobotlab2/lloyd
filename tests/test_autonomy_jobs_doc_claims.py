@@ -61,11 +61,17 @@ TIERS_HEADER = "| Tier | Jobs | |"
 
 #: The Measure-group jobs whose report has no scheduled consumer. Three
 #: sentences in the doc count against this set — the "no consumer" heading, that
-#: paragraph's closing "they are three of seven", and #78/#80's "same position as
-#: three of the seven jobs in Measure" — so the set is stated once, here, and the
+#: paragraph's closing "they are two of six", and #78/#80's "same position as two
+#: of the six jobs in Measure" — so the set is stated once, here, and the
 #: paragraph is checked to name exactly it. A job gaining or losing a consumer has
 #: to move all three sentences together, which is the point.
-NO_CONSUMER = {"#36", "#85", "#70"}
+#:
+#: #85 left on 2026-09-27 with the retirement Alan ruled on backlog **#1577**: its
+#: slot was switched off on 2026-09-20, so it had no report to leave unconsumed.
+#: That is why the membership lives here and not in the sentences — dropping the id
+#: from this set is what forces the three counts in the doc to be edited in the
+#: same commit, and why a doc that quietly kept "three of the seven" is red.
+NO_CONSUMER = {"#36", "#70"}
 
 _WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
@@ -397,6 +403,54 @@ def test_the_no_consumer_paragraph_names_exactly_the_jobs_its_counts_claim():
     assert named == NO_CONSUMER, (
         f"the paragraph names {sorted(named)} as the jobs with no consumer, but "
         f"the group's four counting sentences all say {sorted(NO_CONSUMER)}")
+
+
+def test_the_measure_id_table_lists_the_heading_membership_and_nothing_else():
+    """The group's own ID table is a membership statement no other check reads.
+
+    `test_the_functions_table_row_and_every_anchor_follow_the_group_heading` follows
+    the heading into the function table and the anchors, and
+    `test_every_job_has_one_function_and_exactly_one_write_tier` compares the two
+    summary tables with each other — so a row naming a retired job, or a job that
+    never existed, could sit in the §Measure table while every one of those stayed
+    green. Deleting #85's row for the retirement (backlog **#1577**) is what makes
+    the gap concrete: that row is the line a reader trusts once the heading has
+    scrolled past, and it is the line nothing was reading.
+    """
+    doc = _text()
+    start = doc.index(_measure_heading())
+    section = doc[start:doc.find("\n## ", start + 1)]
+    rows = [m.group(1) for m in re.finditer(r"^\| (#\d+) \|", section, re.M)]
+    ids = _measure_ids()
+    assert rows, "the §Measure section types no job rows, so its table is gone"
+    assert rows == ids, (
+        f"the §Measure table's rows are {rows} while its heading lists {ids} — the "
+        "two membership statements of one group, disagreeing, with nothing between")
+
+
+def test_the_retired_secondary_eval_is_recorded_only_in_the_dated_log():
+    """#1577. #85's slot was switched off on 2026-09-20 and Alan ruled the job
+    retired rather than re-scoped, so the id may appear in exactly one place: the
+    §Review log entry that says when, and why djev is not its successor.
+
+    The sentence it carried here — that #85 was the fleet's only `draft` task — was
+    false the day it was written, because #68 has held that status throughout. A
+    false claim is not repaired by moving it somewhere truer-looking, so both halves
+    are pinned: the claim is gone from prose a reader takes as current, and the log
+    keeps the retirement with its date and its item rather than the job simply
+    vanishing.
+    """
+    live = _live_prose()
+    assert "#85" not in live, (
+        "a current sentence names #85 again; the job is retired and belongs in the "
+        "dated §Review log only")
+    assert "fleet's only `draft` task" not in live, (
+        "the only-draft claim is back in current prose — #68 is draft too, which is "
+        "what made it false")
+    log = _review_log()
+    assert "#85" in log and "#1577" in log, (
+        "the §Review log no longer records the retirement, so the deletion carries no "
+        "dated explanation of itself")
 
 
 # ── clause 4 — write authority: one tier per job, counts that match their rows ─

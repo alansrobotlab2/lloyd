@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "autonomy" / "validate_tasks.py"
@@ -332,6 +333,119 @@ def test_the_skill_check_resolves_exactly_what_the_dispatch_loader_loads(
     for value, expected in cases.items():
         assert (autonomy._load_skill_content(value) is not None) is expected, value
         assert vt.skill_resolves(value, [skills_root]) is expected, value
+
+
+# ── #1577: a `requires_slot:` naming a slot the box has switched off ──────────
+#
+# `requires_slot` names a supervisord program, and two of them are optional with a
+# switch in config.yaml. `secondary_enabled: false` has been in force since
+# 2026-09-20 (`551e9044`, "Retire the secondary slot and put DiffusionGemma (djev)
+# on GPU 2"), yet #85 kept declaring `requires_slot: agent-llm-secondary` for a
+# week and this linter printed a clean pass, because name resolution cannot see a
+# flag: `secondary` is still a key of `models:`, so both `model: primary` and
+# `model: secondary` resolve however the flag is set. The eval refused itself
+# (`EXIT_SLOT_DISABLED = 7`) and the arm guard refuses a write (#1555); the static
+# report is the half that was missing, and it is what would have made the
+# retirement an obvious decision instead of a nightly 404-shaped mystery.
+
+#: The programs the check can be told about: the retired slot, the other optional
+#: slot, and a program with no switch at all.
+SLOT_PROGRAMS = ["agent-llm-primary", "agent-llm-secondary", "agent-djev"]
+
+
+def _slot_config(secondary_enabled: bool, djev_enabled: bool) -> str:
+    """The `--config` yaml with both slot switches spelled out, so the two can be
+    set independently. `djev.enabled` is the other real slot
+    (`app.llm_slots._SLOTS`), and a linter that hardcoded the secondary's rule has
+    somewhere to be wrong in the grid below rather than passing on the one slot it
+    happened to know about."""
+    return (CONFIG
+            + f"secondary_enabled: {'true' if secondary_enabled else 'false'}\n"
+            + f"djev:\n  enabled: {'true' if djev_enabled else 'false'}\n")
+
+
+def test_a_switched_off_slot_names_the_file_the_program_and_the_flag(tmp_path):
+    """One line, three facts: which file, which program, which key to change.
+
+    "disabled" is not actionable. "`secondary_enabled` is false in config.yaml" is
+    the sentence that ends the search, which is why `llm_slots` carries the flag
+    string rather than a boolean.
+    """
+    lint = Linter(tmp_path, config=_slot_config(False, False))
+    lint.add("85-r.md", id=85, name="r", status="draft", frequency="daily",
+             skill_name="heartbeat", requires_slot="agent-llm-secondary")
+
+    code, out = lint.run()
+
+    assert code == 0, "a structural warning is a failure only under --strict"
+    line = next(ln for ln in out.splitlines() if "requires_slot" in ln)
+    # Warnings print indented under their header; the file name is what leads the
+    # text itself, and it is what tells a reader which task file to open.
+    assert line.lstrip().startswith("85-r.md:"), line
+    assert "agent-llm-secondary" in line
+    assert "secondary_enabled" in line, "the flag a person has to flip is the point"
+    assert "switched-off" in line
+    assert lint.run("--strict")[0] == 2, "the state that retired #85 must fail the strict rung"
+
+
+@pytest.mark.parametrize("secondary_enabled,djev_enabled",
+                         [(False, False), (True, True), (False, True), (True, False)],
+                         ids=["off/off", "on/on", "off/on", "on/off"])
+def test_the_slot_verdict_is_app_llm_slots_verdict_for_every_program(
+        tmp_path, secondary_enabled, djev_enabled):
+    """Three programs under both flags: the linter speaks iff `is_enabled` is False.
+
+    `agent-llm-primary` has no switch, and `app.llm_slots`'s rule that a program
+    which is not an optional slot is always enabled is what keeps this from becoming
+    a second service registry — it must stay silent whatever the flags say. The two
+    split cells (`off/on`, `on/off`) are the ones a table copy dies on: with both
+    flags moved together, a check that read `secondary_enabled` for *every* program
+    would agree with the module by accident. All three declarations go through one
+    run, so the expectation for each is read off the line its own file is named on.
+    """
+    from app import llm_slots
+
+    config = _slot_config(secondary_enabled, djev_enabled)
+    parsed = yaml.safe_load(config)
+    lint = Linter(tmp_path, config=config)
+    files = {program: f"{n}-r.md" for n, program in enumerate(SLOT_PROGRAMS, start=1)}
+    for program, fname in files.items():
+        lint.add(fname, id=int(fname.split("-")[0]), name="r", status="up_next",
+                 frequency="daily", skill_name="heartbeat", requires_slot=program)
+
+    code, out = lint.run("--strict")
+    lines = [ln for ln in out.splitlines() if "requires_slot" in ln]
+
+    for program, fname in files.items():
+        mine = [ln for ln in lines if ln.lstrip().startswith(fname + ":")]
+        assert len(mine) <= 1, f"{fname} reported twice: {mine}"
+        reported = bool(mine)
+        enabled = llm_slots.is_enabled(program, parsed)
+        assert reported is not enabled, (
+            f"{program} with secondary_enabled={secondary_enabled}, "
+            f"djev.enabled={djev_enabled}: llm_slots.is_enabled answers {enabled}, "
+            f"the linter reported {mine or 'nothing'}")
+        if reported:
+            flag = llm_slots.slot_flag(program)
+            assert flag in mine[0], (
+                f"the line names a flag of its own, not the module's {flag!r}: {mine[0]}")
+
+    anything_off = any(not llm_slots.is_enabled(p, parsed) for p in SLOT_PROGRAMS)
+    assert code == (2 if anything_off else 0), out
+
+
+def test_an_unreadable_config_leaves_a_slot_declaration_unchecked(tmp_path):
+    """No verdict is not a switched-off verdict: `is_enabled` says False for a flag
+    that is merely absent, so an unparseable config would otherwise invent a
+    retired slot out of a broken file."""
+    lint = Linter(tmp_path, config="models: [this never closes\n")
+    lint.add("9-r.md", id=9, name="r", status="up_next", frequency="daily",
+             skill_name="heartbeat", requires_slot="agent-llm-secondary")
+
+    out = lint.run()[1]
+
+    assert "requires_slot 'agent-llm-secondary' unchecked" in out
+    assert "switched-off" not in out
 
 
 # ── The pre-existing contract, pinned so the new checks cannot quietly widen ──

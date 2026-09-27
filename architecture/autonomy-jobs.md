@@ -56,7 +56,7 @@ is a floor, and the id it names carries the date it was the newest.
 | [Canonicalize](#canonicalize-48-67-84) | #48 #67 #84 | make what is already stored agree with itself |
 | [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
 | [Bound entropy](#bound-entropy-79-81-78-80-90) | #79 #81 #78 #80 · #90 | stop the stores rotting or growing without limit |
-| [Measure](#measure-60-82-70-36-76-85-86) | #60 #82 #70 #36 #76 #85 #86 | say whether any of it is working |
+| [Measure](#measure-60-82-70-36-76-86) | #60 #82 #70 #36 #76 #86 | say whether any of it is working |
 
 ### Write authority is the fault line
 
@@ -73,7 +73,7 @@ the row answers the permission question, never the size question:
 | Writes durable state unattended | #30 #53 · #38 #42 #39 #40 #47 #56 #57 #58 #83 #54 · #24 #51 #74 · #65 #35 #77 · #79 #81 · #87 #88 #89 · #48 | 24 |
 | Injects expiring context unattended | #68 | 1 |
 | Proposes; an operator applies | #67 #84 | 2 |
-| Reports only | #60 #82 #70 #78 #80 #36 #85 #86 #90 | 9 |
+| Reports only | #60 #82 #70 #78 #80 #36 #86 #90 | 8 |
 | Acts on the fleet itself | #76 | 1 |
 
 The rows answer "may it write while nobody is watching", not "how much may it
@@ -547,7 +547,7 @@ a grandfathering.
 **The other half of "wrong skill" is measured, not written.** When the body is
 fine and the *description* is not, retrieval fires the skill on the wrong request
 or fails to fire it on the right one; that is #70's `MISSING_DESC` and `DRIFT`,
-advisory only, and it lives in [Measure](#measure-60-82-70-36-76-85-86). When the
+advisory only, and it lives in [Measure](#measure-60-82-70-36-76-86). When the
 procedure itself has rotted, that is #83's Stage 3, which appends a correction
 rather than rewriting.
 
@@ -650,7 +650,7 @@ first automatic apply merged, and a revert then undid, are why the line sits at
 
 **#84 exits 2 rather than report zero** when the graph cannot be read — the
 monitor rule it shares with #60, stated under
-[Measure](#measure-60-82-70-36-76-85-86).
+[Measure](#measure-60-82-70-36-76-86).
 
 ---
 
@@ -731,8 +731,8 @@ this, `groundskeeper-survey.py`, and `groundskeeper-weekly-summary.py`.
 **#78 and #80 look like the fleet's worst jobs and are not** — see
 [What the fleet actually costs](#what-the-fleet-actually-costs). Both are
 report-only by design: neither has ever been asked to fix what it names, and the
-reports have no scheduled consumer, which puts them in the same position as three
-of the seven jobs in Measure.
+reports have no scheduled consumer, which puts them in the same position as two
+of the six jobs in Measure.
 
 **#90 bounds growth the stores themselves cannot see.** #79 and #81 free bytes,
 and a memory file or a skills library can grow past its usefulness while every
@@ -748,9 +748,9 @@ trend recorders are. `scripts/maintenance/corpus_shape.py` is #90.
 
 ---
 
-## Measure: #60, #82, #70, #36, #76, #85, #86
+## Measure: #60, #82, #70, #36, #76, #86
 
-Say whether any of it is working. Six of the seven change nothing; #76 is the only
+Say whether any of it is working. Five of the six change nothing; #76 is the only
 monitor in the fleet with authority to act on what it finds.
 
 | ID | Freq | Watches | Role |
@@ -760,15 +760,13 @@ monitor in the fleet with authority to act on what it finds.
 | #70 | weekly | the skills library | `skill-lint`, advisory — `DEAD`, `MISSING_DESC`, `DRIFT`, `DUPLICATE`, `STALE`. Read-only, writes `skill-lint-report.{md,json}` for a human |
 | #36 | daily | the vault | Read the groundskeeper queue and report counts, health score, and whether the timer ran |
 | #76 | daily | the fleet | Queue health: per-task failure rate, timeouts, empty runs, `[SILENT]` rate, GPU-hours; clears poisoned items and pauses failing tasks |
-| #85 | daily | routing | Paired primary-vs-secondary eval over the jobs routed to the secondary engine. **Cannot run** |
 | #86 | daily | the Inner Voice observer | Nightly grader run appended to a metrics series; flags a sustained `dropped_rate` breach |
 
-**Three of the seven have no consumer.** #36's queue holds 31,291 items and
-nothing reads it back (below). #85 cannot run at all. #70's findings are
-advisory and reach #83 only if #83 happens to look — there is no `depends_on`
-between them. Under the chain grouping those were three unrelated facts in three
-different sections; grouped by function they are three of seven, which is a pattern
-rather than three incidents.
+**Two of the six have no consumer.** #36's queue holds 31,291 items and
+nothing reads it back (below). #70's findings are advisory and reach #83 only if
+#83 happens to look — there is no `depends_on` between them. Under the chain
+grouping those were two unrelated facts in two different sections; grouped by
+function they are two of six, which is a pattern rather than two incidents.
 
 **A monitor that reports success when it cannot see the thing it monitors is
 worse than none.** #60 exits 2 and alerts when the store cannot be read, when
@@ -799,32 +797,26 @@ construction — a task that timed out on every single run was indistinguishable
 from a healthy one. It clears poisoned queue items after recording why, and
 pauses any task with 3+ consecutive failures and a >50% fail rate.
 
-**#85 is the fleet's only `draft` task, and it is blocked twice over.** What it
-is for is turning a routing choice made on throughput into one checked nightly
-against a stated margin: it runs the paired eval over the five generation jobs
-routed to the secondary engine and records the per-job routing decision. The
-first blocker is that `eval/secondary_routing_eval.py` exists only on an aborted
-round's branch — the vault half of a mixed-surface change landed immediately by
-design while the code half waited behind a gate that refused it, and whoever
-noticed set #85 back to `draft` so the nightly failure was not queued (backlog
-**#827**). The second bit after that branch lands, and is what the check below now
-stops before dispatch: `85-secondary-routing-eval.md` pinned `model: eco`, and
-`models:` in config.yaml defines only `primary` and `secondary`. Nothing rejects
-an unknown alias — `resolve_model_alias` rewrites only `secondary` → `primary`,
+**A value that resolves to nothing is shaped like an outage.** A field whose
+*value* resolves to nothing parses clean here and fails at dispatch, which is the
+class backlog **#811** added these checks for. A `model:` no engine serves is the
+sharpest case: `resolve_model_alias` rewrites only `secondary` → `primary`,
 `_get_model_env` returns `{}`, and the run then goes to the *primary's* endpoint
 (the hardcoded `base_url` fallback) under a name it does not serve, where the
 engine answers `404 The model 'eco' does not exist.` A 404 is shaped like an
-engine being down, which is the class `_record_failure(kind="infra")`
-deliberately keeps off the retry budget — so a permanently misconfigured task can
-look like a transient outage indefinitely. `validate_tasks.py` now checks that
-each of those values *resolves*, not merely that the field is present: a
-`depends_on` whose upstream parses but is parked at any status other than
-`up_next`/`in_progress`, a `model:` that is neither a key of `models:` nor one of
-its declared `alias` values, and a `skill_name`/`skill_path` with no `SKILL.md`
-(or, for a path-valued reference, no file) behind it — the three that used to
-validate clean and fail only at dispatch (backlog **#811**). #85's own `model:`
-was changed `eco` → `primary` on 2026-09-17, so on today's board these checks are
-regression guards rather than alarms: every task file passes them.
+engine being down, which is the class `_record_failure(kind="infra")` deliberately
+keeps off the retry budget — so a permanently misconfigured task can look like a
+transient outage indefinitely. So the linter checks that each value *resolves*, not
+merely that the field is present: a `depends_on` whose upstream parses but is
+parked at any status other than `up_next`/`in_progress`; a `model:` that is neither
+a key of `models:` nor one of its declared `alias` values; a `skill_name`/
+`skill_path` with no `SKILL.md` (or, for a path-valued reference, no file) behind
+it; and since backlog **#1577** a `requires_slot:` naming a program whose enabled
+flag is false. That last one is invisible to name resolution, because `secondary`
+is still a key of `models:` after the slot behind it was retired. Since **#1555**
+the two writers that arm a task refuse a disabled slot outright
+(`app/autonomy.py::slot_arm_block`); this linter is what says the same thing before
+anyone arms anything.
 
 **#86 measures the observer, not the model.** It runs `scripts/iv_grade.py
 --json` — which opens `usage.db` with `mode=ro` and writes nothing in it — and
@@ -1068,3 +1060,22 @@ decide what gets worked on next.
   holds a third script; and the orphan skip is 3,867 + 25 with two reason strings,
   not 3,892 with one. Also appended to #899 and #900 — the unbound-skill hazard is
   five skills, all five advertised in the index today.
+
+- **2026-09-27 — `retired`.** #85 (`Secondary Routing Eval`) leaves this doc's
+  membership tables, the write-authority table and the Measure anchor. Alan ruled
+  it retired, not re-scoped (backlog **#1577**): `config.yaml` has carried
+  `secondary_enabled: false` since `551e9044` (2026-09-20, "Retire the secondary
+  slot and put DiffusionGemma (djev) on GPU 2"), so there is no second arm for a
+  paired routing eval to measure — and djev is not a chat slot and nothing routes a
+  turn to it, so re-scoping the comparison onto it would measure nothing real. The
+  sentence this replaces, "#85 is the fleet's only `draft` task", was false the day
+  it was written: #68 has carried the same status throughout. What the retirement
+  is: `~/obsidian/autonomy/85-secondary-routing-eval.md` deleted, not moved to
+  `_archived/`, and `eval/secondary_routing_eval.py` and
+  `skills/secondary-routing-eval/SKILL.md` left on `main`, because a task file is
+  cheap to re-add if a second chat engine ever returns. The blind spot that let the
+  declaration sit for a week is closed the same day — `validate_tasks.py` now
+  reports a `requires_slot:` whose enabled flag is false, answering from
+  `app.llm_slots` rather than a table of its own, and `--strict` exits 2 on it. The
+  dated fleet-size counts elsewhere in this doc are measurements of the day each
+  was taken and are not restated here; a retirement moves the fleet, not them.
