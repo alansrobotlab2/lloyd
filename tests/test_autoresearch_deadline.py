@@ -887,3 +887,189 @@ def test_a_matrix_that_reports_fits_yes_fits_at_the_priors_it_named(tmp_path, mo
     cut = ordered[-5:]                                    # a cut that takes 5
     assert not ({t["id"] for t in cut} & valid), [t["id"] for t in cut]
     assert {t["id"] for t in cut} == {t["id"] for t in tasks[-5:]}
+
+
+# ── #1716: what a shrink gave up, in the two currencies the ruling is written in ──
+#
+# The standing budget-versus-coverage ruling says the code-side shrink suffices and
+# `autoresearch.max_duration_seconds` stays at 1800 until a measurement re-opens it.
+# A round could not produce that measurement: `matrix reduced before trials: 2
+# task(s) dropped ... started instead at 1150 s: bench_017, bench_016` names the ids
+# but never says that both were lint-valid out of an 18-task valid pool, nor that the
+# two tasks came off the serial arm. These nodes pin the two counts, the arm the
+# window came from, and the re-open condition, all of it report/payload only.
+
+_SCHEDULED_19: list[tuple[str, bool, str]] = [
+    # The live bench's own routing split and categories, same as the 19-task node
+    # above: 14 direct / 5 `requires_runtime`, held-out slice = 2 adversarial + 1
+    # safety, and the four non-veto agent-loop audit tasks bench_014..017.
+    ("bench_p1", False, "replay"), ("bench_p2", False, "replay"),
+    ("bench_p3", False, "replay"), ("bench_p4", False, "replay"),
+    ("bench_p5", False, "replay"), ("bench_p6", False, "replay"),
+    ("bench_s1", False, "synthetic"), ("bench_s2", False, "synthetic"),
+    ("bench_s3", False, "synthetic"), ("bench_s4", False, "synthetic"),
+    ("bench_s5", False, "synthetic"), ("bench_s6", False, "synthetic"),
+    ("bench_014", True, "synthetic"), ("bench_015", True, "synthetic"),
+    ("bench_016", True, "synthetic"), ("bench_017", True, "synthetic"),
+    ("bench_008", False, "adversarial"), ("bench_009", False, "adversarial"),
+    ("bench_010", True, "safety"),
+]
+
+
+def test_a_shrunk_round_reports_the_lint_valid_and_runtime_coverage_it_gave_up(
+        round_env, monkeypatch):
+    """#1716 clauses 1 and 3, plus the serial-arm state of clause 4, on the shape the
+    scheduled round really runs: the 19-task bench, 4 arms, the derived 30-minute
+    budget, fallback priors — the node above already shows that matrix dropping
+    `bench_017` and `bench_016` to start at 1150 s.
+
+    The lint-valid set is deliberately 18 of the 19 loaded tasks — every id except
+    `bench_s1` — so the valid pool is a strict subset of what the round loaded and
+    none of the three counts can be read as another. The shrink gives up `bench_016`
+    and `bench_017`, both lint-valid, and `bench_s1` survives while being invalid, so
+    the coverage line is `16 ... of 18`: not 17 (the tasks started), not 19 (the tasks
+    loaded), not 18 (the pool). That triple is the whole of the item — #1605's own
+    commit message names the bug as rounds reporting `valid_tasks` of 2 and 4 against a
+    10-task pool, and the fix is only real if the denominator is on the same page as
+    the numerator.
+
+    The runtime half is the same claim in the other currency: 5 agent-loop tasks were
+    planned, 3 started, and it has to be stated as tasks. `_projection_text` prints
+    that arm as `sdk_trials` (arms × tasks), so 20 trials against 12 is the same fact
+    only after dividing by the arm count — arithmetic a reader of a round report
+    should not have to do to learn what the round gave up.
+    """
+    _bench(round_env, _SCHEDULED_19)
+    _quiet_proposer(monkeypatch, 3)
+    loaded = {tid for tid, _r, _c in _SCHEDULED_19}
+    _drive_round(monkeypatch, valid_ids=loaded - {"bench_s1"})
+    result = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=30))
+    assert "error" not in result, result
+    assert result["matrix_dropped_tasks"] == ["bench_017", "bench_016"], \
+        "the precondition: this round shrank, and gave up two lint-valid tasks"
+
+    cov = result["matrix_coverage"]
+    assert (cov["lint_valid_started"], cov["lint_valid_total"]) == (16, 18)
+    assert (cov["runtime_started"], cov["runtime_planned"]) == (3, 5)
+    assert cov["freed_window_serial_only"] is True, \
+        "both victims were agent-loop tasks, so every freed second is serial"
+
+    report = Path(result["summary_file"]).read_text(encoding="utf-8")
+    assert ("- coverage given up by the shrink: 16 lint-valid task(s) started of "
+            "18 on the bench; 3 requires_runtime task(s) started of 5 planned"
+            in report), report
+    assert "0.0 s on the direct arm, 720.0 s on the serial agent-loop arm" in report
+    assert "freed by the serial agent-loop arm alone: yes" in report
+    # Clause 4 of the item: the ruling's re-open condition travels with the number.
+    assert "3 consecutive rounds" in report
+    assert "inside that task's own p90 spread" in report
+
+
+def test_an_unreadable_lint_reports_lint_valid_coverage_as_unknown_not_zero(
+        round_env, monkeypatch):
+    """Clause 2: `_lint_valid_ids` returns None when the lint cannot be read, and
+    `None` is not the empty set (`run_round.py:793-806` says so about the shrink
+    order). Coverage must inherit that distinction: `0 lint-valid task(s) started of 0`
+    would read as a bench whose every task the lint refuses — the strongest possible
+    argument for a budget raise — when the truth is that the round knows nothing.
+
+    The runtime half is unaffected by the lint, so it still reads 3 of 5: an unknown
+    in one currency does not blank the other one out with it.
+    """
+    _bench(round_env, _SCHEDULED_19)
+    _quiet_proposer(monkeypatch, 3)
+    _drive_round(monkeypatch)                       # no valid set stubbed
+    monkeypatch.setattr(run_round, "_lint_valid_ids", lambda bench_dir: None)
+    result = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=30))
+    assert "error" not in result, result
+    assert result["matrix_dropped_tasks"] == ["bench_017", "bench_016"]
+
+    cov = result["matrix_coverage"]
+    assert cov["lint_valid_total"] is None and cov["lint_valid_started"] is None
+    assert (cov["runtime_started"], cov["runtime_planned"]) == (3, 5)
+
+    report = Path(result["summary_file"]).read_text(encoding="utf-8")
+    line = [ln for ln in report.splitlines()
+            if ln.startswith("- coverage given up by the shrink")][0]
+    assert "lint-valid coverage unknown (bench lint unreadable" in line, line
+    assert "0 of 0" not in line and " of 0 " not in line, line
+    assert "3 requires_runtime task(s) started of 5 planned" in line, line
+
+
+def test_a_shrink_that_frees_only_direct_window_says_the_serial_arm_is_not_it(
+        round_env, tmp_path, monkeypatch):
+    """Clause 4's other state, which is the one that makes the flag worth printing: a
+    matrix shrunk entirely on the parallel arm.
+
+    The priors are the round's own measurement, not the constants (a measured 200 s
+    direct trial, which is what makes a direct task worth more than the step floor),
+    and the bench has no `requires_runtime` task at all: 4 arms × 8 direct tasks = 8
+    waves of 200 s = 1600 s against a 1440 s window, so 1296 s of it is spendable and
+    two tasks go, each freeing one whole wave. 400 s of window, none of it serial.
+    `runtime_planned` and `runtime_started` are both 0 here, which is exactly why the
+    flag cannot be inferred from the runtime counts and has to be said.
+    """
+    _prior_ledger(tmp_path / "ledger.jsonl", direct_secs=200.0, sdk_secs=90.0)
+    specs = [("bench_d1", False, "replay"), ("bench_d2", False, "replay"),
+             ("bench_d3", False, "synthetic"), ("bench_d4", False, "synthetic"),
+             ("bench_d5", False, "synthetic"), ("bench_008", False, "adversarial"),
+             ("bench_009", False, "adversarial"), ("bench_010", False, "safety")]
+    _bench(round_env, specs)
+    _quiet_proposer(monkeypatch, 3)
+    _drive_round(monkeypatch, valid_ids={t for t, _r, _c in specs})
+    result = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=30))
+    assert "error" not in result, result
+
+    cov = result["matrix_coverage"]
+    assert len(result["matrix_dropped_tasks"]) == 2, result["matrix_dropped_tasks"]
+    assert (cov["freed_direct_seconds"], cov["freed_serial_seconds"]) == (400.0, 0.0)
+    assert (cov["runtime_planned"], cov["runtime_started"]) == (0, 0)
+    assert cov["freed_window_serial_only"] is False
+
+    report = Path(result["summary_file"]).read_text(encoding="utf-8")
+    assert "400.0 s on the direct arm, 0.0 s on the serial agent-loop arm" in report
+    assert "freed by the serial agent-loop arm alone: no" in report
+
+
+def test_the_coverage_numbers_reach_no_promotion_decision(round_env, monkeypatch):
+    """Clause 5 across the one seam it could travel: `run()` hands
+    `promote.evaluate_promotion` the config, the two summaries and the split, and the
+    spy is on that call. A coverage figure that leaked into any argument would reach
+    the predicate that decides promotions, which the item forbids; a coverage figure
+    that leaked into a `decisions` row would reach the ledger row every downstream
+    parser reads (`promotion_fp_rate.py`, #428's denominator).
+
+    The assertions are on the call as made, not on a source grep: the numbers are
+    computed in the same function that calls the predicate one line later, so only
+    the argument list shows whether they crossed.
+    """
+    seen: list[tuple[tuple, dict]] = []
+    real = run_round.evaluate_promotion
+
+    def spy(*args, **kwargs):
+        seen.append((args, kwargs))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(run_round, "evaluate_promotion", spy)
+    _bench(round_env, _SCHEDULED_19)
+    _quiet_proposer(monkeypatch, 3)
+    loaded = {tid for tid, _r, _c in _SCHEDULED_19}
+    _drive_round(monkeypatch, valid_ids=loaded - {"bench_s1"})
+    result = asyncio.run(run_round.run(targets=["prompts"], budget_minutes=30))
+    assert "error" not in result, result
+
+    assert len(seen) == 3, f"expected one predicate call per candidate, got {len(seen)}"
+    for args, kwargs in seen:
+        assert len(args) == 3 and set(kwargs) == {"split"}, \
+            "the predicate's own signature is the contract being pinned here"
+        blob = json.dumps([list(args), kwargs], sort_keys=True, default=str)
+        assert "lint_valid" not in blob, "coverage reached the promotion predicate"
+        assert "matrix_coverage" not in blob
+        assert "freed_window_serial_only" not in blob
+
+    assert result["matrix_coverage"]["lint_valid_total"] == 18, \
+        "the numbers exist, so the assertions above ruled out a real path"
+    for d in result["decisions"]:
+        assert set(d) == {"variant_id", "mean_composite", "targeted_delta",
+                          "heldout_delta", "normalized_gain", "should_promote",
+                          "reason", "validity"}, set(d)

@@ -831,6 +831,112 @@ def _projection_text(proj: dict[str, Any]) -> str:
             f"{proj['priors'].provenance()}")
 
 
+#: #1716: the standing budget-versus-coverage ruling and the only thing that re-opens
+#: it. #1605 settled that the code-side shrink suffices — `autoresearch.max_duration_seconds`
+#: stays at 1800 and `max_variants` at 3, a config edit being a loop-forbidden path —
+#: and settled it as a ruling to be re-opened on a MEASUREMENT, not a memory. That
+#: measurement was impossible from the artifact that would carry it: a shrunk round
+#: printed `2 task(s) dropped ... started instead at 1150 s: bench_017, bench_016` and
+#: never said those were 2 of an 18-task lint-valid pool, so "3 consecutive rounds
+#: sacrificing the same runtime tasks" had no denominator to count and no verdict-side
+#: number to compare. The condition therefore travels with the figures it is measured
+#: on: a reader holding the coverage line is one round away from deciding, and should
+#: not have to remember the threshold out of a commit message.
+REOPEN_CONDITION_NOTE = (
+    "re-open condition for the standing budget-vs-coverage ruling (#1605, put in the "
+    "report by #1716): propose raising autoresearch.max_duration_seconds / "
+    "autoresearch.max_variants as a SEPARATE item only after 3 consecutive rounds "
+    "sacrifice the SAME requires_runtime task(s) and the round's decision delta on "
+    "one of them lands inside that task's own p90 spread. A shrink that moves no "
+    "verdict is a budget opinion, not a measurement."
+)
+
+
+def matrix_coverage(
+    pre_fit_tasks: list[dict[str, Any]], dropped_ids: list[str],
+    valid_ids: set[str] | None, planned: dict[str, Any], started: dict[str, Any],
+    *, harness: str,
+) -> dict[str, Any]:
+    """What a matrix shrink gave up, in the two currencies #1605's ruling is written
+    against, so the ruling can be re-opened on a number instead of a recollection.
+
+    Not the raw planned-vs-started counts — #1605's `909476a5` already puts those on
+    the shrink line via `_projection_text`. The two denominators the ruling turns on
+    were never there:
+
+    * **lint-valid coverage** — `lint_valid_started` over `lint_valid_total`, the total
+      being the bench's own lint pool (`_lint_valid_ids`, the same set that only ever
+      ordered the shrink before this) and the started count the intersection of that
+      pool with the tasks actually handed to the runners. Those three numbers are
+      routinely all different: the pool excludes tasks the round loaded, and the
+      shrink hands back tasks the pool calls valid. #1605's commit message names the
+      bug this is: rounds reported `valid_tasks` of 2 and 4 against a 10-task pool
+      because the page had the numerator and not the denominator.
+    * **requires_runtime coverage** — `runtime_started` over `runtime_planned`, as
+      TASK COUNTS. `_projection_text` costs the serial arm in `sdk_trials`, which is
+      arms × tasks, so started-versus-planned runtime coverage was only reachable by
+      dividing by the arm count. The counts already exist in both projections; this
+      puts them beside the drop.
+
+    `freed_window_serial_only` answers the question the shrink cannot otherwise answer:
+    whether every second it freed came off the serial agent-loop arm (where one task
+    is worth `arms × ~90 s`) or partly off the parallel direct arm (a wave fraction).
+    It is derived from the arm each dropped task was costed on —
+    `split_tasks_by_harness`, the same routing the projection used — so a round with no
+    serial work at all reads False rather than vacuously True.
+
+    Report and payload only. Nothing here is an input to `evaluate_promotion`, which is
+    called with the config, the two summaries and the split and nothing else.
+    """
+    dropped = set(dropped_ids)
+    started_ids = {str(t.get("id")) for t in pre_fit_tasks} - dropped
+    # `None` is not zero: `_lint_valid_ids` returns None when the lint could not be
+    # read, and rendering that as `0 of 0` would tell the next reader that the lint
+    # refused every task on the bench — the strongest possible argument for a budget
+    # raise, made by a round that knows nothing.
+    lint_valid_total = None if valid_ids is None else len(valid_ids)
+    lint_valid_started = (None if valid_ids is None
+                          else len(started_ids & {str(v) for v in valid_ids}))
+    dropped_tasks = [t for t in pre_fit_tasks if str(t.get("id")) in dropped]
+    dropped_direct, _dropped_serial, _dropped_skipped = split_tasks_by_harness(
+        dropped_tasks, harness)
+    return {
+        "shrunk": bool(dropped),
+        "lint_valid_total": lint_valid_total,
+        "lint_valid_started": lint_valid_started,
+        "runtime_planned": planned["sdk_tasks"],
+        "runtime_started": started["sdk_tasks"],
+        "freed_direct_seconds": round(planned["direct_seconds"]
+                                      - started["direct_seconds"], 1),
+        "freed_serial_seconds": round(planned["sdk_seconds"]
+                                      - started["sdk_seconds"], 1),
+        "freed_window_serial_only": bool(dropped_tasks) and not dropped_direct,
+        "reopen_condition": REOPEN_CONDITION_NOTE,
+    }
+
+
+def _coverage_text(cov: dict[str, Any]) -> list[str]:
+    """The coverage a shrink gave up, as report lines. Three, and in this order,
+    because the reader's question is "was the shrink worth it, and on what pool": the
+    two counts, then which arm's window they bought, then what would re-open the
+    budget ruling that let the shrink stand.
+    """
+    valid = ("lint-valid coverage unknown (bench lint unreadable, so no pool was read)"
+             if cov["lint_valid_total"] is None else
+             f"{cov['lint_valid_started']} lint-valid task(s) started of "
+             f"{cov['lint_valid_total']} on the bench")
+    return [
+        f"- coverage given up by the shrink: {valid}; "
+        f"{cov['runtime_started']} requires_runtime task(s) started of "
+        f"{cov['runtime_planned']} planned",
+        f"- window freed by the shrink: {cov['freed_direct_seconds']:.1f} s on the "
+        f"direct arm, {cov['freed_serial_seconds']:.1f} s on the serial agent-loop arm "
+        f"— freed by the serial agent-loop arm alone: "
+        f"{'yes' if cov['freed_window_serial_only'] else 'no'}",
+        f"- {cov['reopen_condition']}",
+    ]
+
+
 # ── ledger rows, as functions ────────────────────────────────────────────────────
 # Both row shapes are contracts read by other programs — `promotion_fp_rate.py` and
 # #428's published false-positive denominator parse `decision` rows, and
@@ -1119,9 +1225,20 @@ async def run(
     priors = derive_trial_priors(cfg.paths.ledger_path)
     planned = project_matrix(len(variant_pairs), tasks, harness, max_parallel,
                              window_seconds=window, priors=priors)
+    # #1716: the list the shrink was given, kept because it IS one of the two
+    # denominators — `lint_valid_started` is the valid pool intersected with the tasks
+    # handed to the runners, and `tasks` is rebound to the shrunk matrix on the next
+    # line, so after it there is no way back to what was asked for.
+    pre_fit_tasks = list(tasks)
     tasks, projection, matrix_dropped = fit_matrix(
         len(variant_pairs), tasks, harness, max_parallel, window, valid_ids,
         priors=priors)
+    # Cost of the shrink in the ruling's currencies, computed here at the one place
+    # that knows both the planned and the started matrix. Deliberately before the
+    # deadline cut below: "handed to the runners" is the shrink's decision, and a
+    # task the deadline later failed to reach is a second, separately reported loss.
+    matrix_coverage_report = matrix_coverage(
+        pre_fit_tasks, matrix_dropped, valid_ids, planned, projection, harness=harness)
     logger.info("trial matrix: %s (window %s, fits %s)", _projection_text(projection),
                 "no budget" if window is None else f"{window:.0f} s", projection["fits"])
     if matrix_dropped:
@@ -1322,6 +1439,12 @@ async def run(
            f"{_projection_text(planned)} would not fit the window; started instead at "
            f"{projection['projected_seconds']:.0f} s: {', '.join(matrix_dropped)}"]
            if matrix_dropped else []),
+        # #1716: the ids on the line above are the drop; what they COST is the
+        # standing ruling's business, and the ruling is only as good as the
+        # denominator next to it. Printed only on a round that actually shrank — a
+        # round that dropped nothing has no coverage to have given up, and a `0`
+        # there would be the same unreadable number as an unreadable lint.
+        *(_coverage_text(matrix_coverage_report) if matrix_dropped else []),
         # #1715: the case #1605's loop had no words for. The matrix is over window,
         # shrinking has stopped, and the reason is not that it ran out of tasks — it
         # is that every step left frees less than the margin already holds back, so
@@ -1493,6 +1616,12 @@ async def run(
         "matrix_projection": projection,
         "matrix_planned": planned,
         "matrix_dropped_tasks": matrix_dropped,
+        # #1716: the same figures the report states, so the owed-check that measures
+        # the re-open condition does not have to parse them back out of markdown.
+        # Present on every round, shrunk or not (`shrunk` says which), because a
+        # payload key that exists only on the interesting rounds is a key every
+        # reader has to guard. Read by nothing that decides anything.
+        "matrix_coverage": matrix_coverage_report,
         "round_seconds": round(time.monotonic() - started, 1),
     }
 
