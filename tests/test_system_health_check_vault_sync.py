@@ -26,9 +26,11 @@ Each test names the acceptance clause it pins.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -223,6 +225,7 @@ def rig(tmp_path):
         linked_id = "566dda1217a7a8dfddbac33d4f280b3a"
 
         def __init__(self, base):
+            self.base = base
             self.vault = base / "vault"
             (self.vault / "lloyd").mkdir(parents=True)
             self.server = base / "server"          # the stand-in sync remote
@@ -245,6 +248,80 @@ def rig(tmp_path):
             (self.registry / vid / "config.json").write_text(
                 json.dumps({"vaultId": vid, "vaultPath": str(self.vault.resolve())}))
             return self.registry / vid
+
+        def plant_state_db(self, *, local=(), server=(), folders=("work", "facts"),
+                           vault_id=None, sidecars=False):
+            """Write a stand-in client manifest into the live registration directory.
+
+            Real sqlite, with the schema the shipped client uses — one `path` plus
+            one JSON `data` per row, in `local_files` and `server_files` — because
+            the count under test comes from reading those tables, not a fixture
+            format this file invented. `folders` are rows the client flags
+            `"folder": true`, written to `local_files` with no `server_files` row:
+            a directory the client has locally and never uploaded is exactly the
+            shape a missing folder filter would book as a gap, so the plant keeps
+            one around rather than letting that row read as covered.
+
+            With `sidecars=True` the trio is snapshotted while the writing
+            connection is still open, so the rows live in `state.db-wal` and the
+            main file is a bare header — which is what the manifest looks like
+            beside a running client, and what a copy that forgets the sidecars
+            would read as an empty vault.
+            """
+            reg = self.plant_live_registration(vault_id)
+            build = self.base / "manifest-build"
+            build.mkdir(exist_ok=True)
+            src = build / "state.db"
+            for suffix in ("", "-wal", "-shm"):
+                Path(str(src) + suffix).unlink(missing_ok=True)
+            conn = sqlite3.connect(str(src))
+            closed = False
+            try:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+                conn.execute("CREATE TABLE local_files (path TEXT PRIMARY KEY, data TEXT NOT NULL)")
+                conn.execute("CREATE TABLE server_files (path TEXT PRIMARY KEY, data TEXT NOT NULL)")
+                conn.execute("INSERT INTO meta VALUES ('version', '19582')")
+                for path in [*folders, *local]:
+                    conn.execute("INSERT INTO local_files VALUES (?, ?)",
+                                 (path, json.dumps({"path": path,
+                                                    "folder": path in folders})))
+                for path in server:
+                    conn.execute("INSERT INTO server_files VALUES (?, ?)",
+                                 (path, json.dumps({"path": path,
+                                                    "device": "goliath-headless"})))
+                conn.commit()
+
+                def snapshot():
+                    for suffix in ("", "-wal", "-shm"):
+                        source = Path(str(src) + suffix)
+                        if source.is_file():
+                            (reg / ("state.db" + suffix)).write_bytes(source.read_bytes())
+
+                if sidecars:
+                    snapshot()          # writer still open: the rows stay in the -wal
+                    conn.close()
+                    closed = True
+                else:
+                    conn.close()        # last close checkpoints the wal into the db
+                    closed = True
+                    snapshot()
+            finally:
+                if not closed:
+                    conn.close()
+            return reg
+
+        def registration_digest(self):
+            """sha256 of every file in the registration tree, keyed by path.
+
+            The registration directory holds the end-to-end `encryptionKey`, and
+            `ob sync-unlink` deletes one by vault id, so "the count was read and
+            nothing changed" only means something if it covers `config.json` and
+            the whole `state.db` trio rather than the one file that was opened.
+            """
+            return {str(p.relative_to(self.registry)):
+                    hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in sorted(self.registry.rglob("*")) if p.is_file()}
 
         def live_ids(self):
             return sorted(p.name for p in self.registry.iterdir() if (p / "config.json").is_file())
@@ -921,3 +998,175 @@ def test_a_temp_dir_that_cannot_be_made_still_takes_the_sentinel_out(rig, monkey
     assert list((rig.vault / "lloyd").glob("healthcheck-vault-sync-*.md")) == []
     assert set(Path(tempfile.gettempdir()).glob(shc.SCRATCH_PREFIX + "*")) == before
     assert rig.live_ids() == [rig.linked_id]
+
+
+# --------------------------------------------------------------- #1753 clauses 1-4
+# "The check reports, with no round trip and no `ob` mutation, how many local vault
+#  files the sync type filter leaves with no server-side record: the total from the
+#  client's own manifest, split by file type, markdown as its own figure, and
+#  `unknown` rather than 0 when there is no registration or no readable manifest."
+#
+# The number is a difference between two tables of `<registration>/state.db` —
+# `local_files` rows with no `server_files` row — because `ob sync-status` prints
+# `File types: image, audio, pdf, video` plus markdown and every other type is
+# invisible to sync forever. Measured on this box 2026-09-28: 267 such paths, 0 of
+# them markdown. The registration directory also holds the end-to-end key, so each
+# test hashes it before and after the run: reading the manifest is allowed, writing
+# to it is not.
+
+# The five gaps below are the classes the item names: skill sidecar scripts, a
+# vault template, and the registry/voice-transcript data files. The two `.md` files
+# and the two folders are planted on the server side as coverage that is NOT a gap.
+GAPS = ["skills/autolink/autolink.py",
+        "knowledge/benchmarks/score_bench.py",
+        "people/registry.json",
+        "templates/fact-file-template.yaml",
+        "people/dave_cullen.lab"]
+
+
+def test_the_uncovered_count_comes_from_the_manifest_with_no_round_trip_flag(rig):
+    """Clause 1: an ordinary `--component vault_sync --format json` run carries an
+    uncovered count built from non-folder `local_files` paths that have no
+    `server_files` row, and produces it without the round-trip flag and without
+    asking `ob` to change anything."""
+    rig.plant_state_db(local=GAPS + ["lloyd/notes.md", "lloyd/other.md"],
+                       server=["lloyd/notes.md", "lloyd/other.md"])
+    payload, proc = rig.json("--component", "vault_sync")
+    block = payload["vault_sync"]
+    assert block["state"] == shc.VAULT_SYNC_ROUNDTRIP_SKIPPED, block
+    unc = block["uncovered_files"]
+    assert unc["status"] == shc.UNCOVERED_MEASURED, unc
+    # 5, not 7: the two synced markdown files have server rows, and the two
+    # planted folders have none at all — a directory the client never uploaded is
+    # not a file the type filter dropped, and booking it would inflate the number
+    # every single run.
+    assert unc["total"] == 5, unc
+    assert proc.returncode == DEGRADED_EXIT, proc.stdout
+    commands = {call[0] for call in rig.logged()}
+    assert commands <= {"sync-status", "sync-list-remote"}, sorted(commands)
+
+
+def test_the_total_is_split_by_file_type_and_prints_beside_the_verdict(rig):
+    """Clause 2: JSON carries an extension-to-count tally of the same set, and the
+    text format prints the total on a line beside the sync verdict."""
+    rig.plant_state_db(local=GAPS, server=[])
+    payload, _ = rig.json("--component", "vault_sync")
+    unc = payload["vault_sync"]["uncovered_files"]
+    assert unc["by_type"] == {".py": 2, ".json": 1, ".lab": 1, ".yaml": 1}, unc
+    assert sum(unc["by_type"].values()) == unc["total"], unc
+    assert next(iter(unc["by_type"])) == ".py", unc["by_type"]   # most numerous first
+
+    text = rig.run("--component", "vault_sync", fmt="text").stdout
+    lines = text.splitlines()
+    verdict = [i for i, line in enumerate(lines) if "obsidian-sync —" in line]
+    assert verdict, text
+    beside = lines[verdict[0]:verdict[0] + 5]
+    assert any(line.lstrip().startswith(
+        f"{unc['total']} local files have no server-side copy") for line in beside), beside
+
+
+def test_a_markdown_gap_is_its_own_figure_and_not_part_of_the_other_types(rig):
+    """Clause 3: a missing server row for a `.md` file is its own number, so the
+    markdown gap (0 today) and the non-markdown mass (267 today) cannot be read as
+    one another."""
+    rig.plant_state_db(local=GAPS + ["lloyd/a.md", "lloyd/b.md"], server=[])
+    unc = rig.json("--component", "vault_sync")[0]["vault_sync"]["uncovered_files"]
+    assert unc["total"] == 7 and unc["markdown"] == 2, unc
+    assert unc["non_markdown"] == 5, unc
+    assert unc["markdown"] + unc["non_markdown"] == unc["total"], unc
+    assert unc["by_type"][".md"] == 2, unc["by_type"]
+    text = rig.run("--component", "vault_sync", fmt="text").stdout
+    assert "2 markdown" in text and "5 other types" in text, text
+
+    # And today's shape on the same rig: markdown is fully covered, so its figure
+    # is 0 while the other types are not — a zero that must not be the total.
+    rig.plant_state_db(local=GAPS[:2], server=["lloyd/a.md"])
+    again = rig.json("--component", "vault_sync")[0]["vault_sync"]["uncovered_files"]
+    assert again["markdown"] == 0, again
+    assert again["non_markdown"] == 2 and again["total"] == 2, again
+
+
+@pytest.mark.parametrize("shape", ["no-registration", "no-state-db",
+                                   "state-db-not-a-database"])
+def test_an_absent_or_unreadable_manifest_is_unknown_never_zero(rig, shape):
+    """Clause 4: with nothing to read, the component keeps the non-green state it
+    would have had anyway and the count says `unknown` — a 0 here would be read as
+    "the type filter dropped nothing" — and the run leaves the registration
+    directory, key and manifest included, byte for byte as it found it."""
+    if shape == "no-registration":
+        spec = rig.spec(linked=False)
+    else:
+        spec = rig.spec()
+        reg = rig.plant_live_registration()
+        if shape == "no-state-db":
+            assert not (reg / "state.db").exists()
+        else:
+            (reg / "state.db").write_bytes(b"definitely not a sqlite database\n" * 64)
+    before = rig.registration_digest()
+    payload, proc = rig.json("--component", "vault_sync", spec=spec)
+    block = payload["vault_sync"]
+    unc = block["uncovered_files"]
+    assert unc["status"] == shc.UNCOVERED_UNKNOWN, unc
+    assert unc["total"] is None and unc["markdown"] is None, unc
+    assert unc["by_type"] is None, unc
+    assert unc["reason"] == {"no-registration": "no-registration",
+                             "no-state-db": "state-db-missing",
+                             "state-db-not-a-database": "state-db-unreadable"}[shape], unc
+    assert block["state"] == ("not-configured" if shape == "no-registration"
+                              else shc.VAULT_SYNC_ROUNDTRIP_SKIPPED), block
+    assert payload["overall_status"] == "degraded", payload
+    assert proc.returncode == DEGRADED_EXIT
+    assert rig.registration_digest() == before
+
+
+def test_a_manifest_whose_rows_are_still_in_its_wal_sidecar_is_counted(rig):
+    """The live manifest sits beside a client that is running: the rows can be in
+    `state.db-wal` with nothing but a header in the main file, so a copy that takes
+    `state.db` alone reads as an empty manifest and reports zero files at risk.
+    The rows in this plant are provably only in the sidecar."""
+    reg = rig.plant_state_db(local=GAPS, server=[], sidecars=True)
+    assert (reg / "state.db-wal").stat().st_size > 0, "plant wrote no sidecar"
+    import shutil
+    import tempfile
+    alone = Path(tempfile.mkdtemp()) / "state.db"
+    shutil.copyfile(reg / "state.db", alone)
+    conn = sqlite3.connect(f"file:{alone}?mode=ro", uri=True)
+    try:
+        assert conn.execute("select count(*) from local_files").fetchone()[0] == 0
+    except sqlite3.OperationalError:
+        pass                       # no schema in the main file at all: same proof
+    finally:
+        conn.close()
+        shutil.rmtree(alone.parent, ignore_errors=True)
+
+    unc = rig.json("--component", "vault_sync")[0]["vault_sync"]["uncovered_files"]
+    assert unc["status"] == shc.UNCOVERED_MEASURED, unc
+    assert unc["total"] == 5, unc
+
+
+def test_the_manifest_copy_is_opened_read_only_outside_the_registration(rig, monkeypatch):
+    """The manifest is read from a byte-copy in scratch space, under a read-only
+    sqlite handle — never from the registration directory, which holds the
+    end-to-end key. Spied on the real `sqlite3.connect` boundary, with the spy
+    delegating so the count still has to come back right."""
+    rig.plant_state_db(local=GAPS, server=[], sidecars=True)
+    # In-process, so the rig's own environment has to be the process's: without
+    # `XDG_CONFIG_HOME` pointing at the rig's config, `_ob_config_dir()` resolves
+    # to the real ~/.config and this would read the live registration instead.
+    for key, value in rig.env(rig.spec()).items():
+        monkeypatch.setenv(key, value)
+    seen = []
+    real = shc.sqlite3.connect
+
+    def spy(target, *args, **kwargs):
+        seen.append((str(target), kwargs.get("uri")))
+        return real(target, *args, **kwargs)
+
+    monkeypatch.setattr(shc.sqlite3, "connect", spy)
+    unc = shc.uncovered_sync_files(str(rig.vault.resolve()), rig.linked_id)
+    assert unc["status"] == shc.UNCOVERED_MEASURED and unc["total"] == 5, unc
+    assert seen, "the manifest was never opened at all"
+    for uri, uri_mode in seen:
+        assert uri_mode is True, uri
+        assert uri.startswith("file:") and "mode=ro" in uri, uri
+        assert str(rig.registry) not in uri, f"opened inside the registration: {uri}"
