@@ -611,3 +611,208 @@ def test_a_paraphrase_from_a_later_session_does_not_add_a_second_active_row(
         assert active[0]["source_doc"] == "sessions/20260924_221452_ivb794"
     finally:
         kg_store.reset()
+
+
+# ---------------------------------------------------------------------------
+# #1647 — the threshold counts human turns, not rows with role="user"
+# ---------------------------------------------------------------------------
+#
+# An inner-voice intervention and a background-task notification are both
+# persisted as `role="user"` rows (`app/routers/messages.py:1161-1167`,
+# `app/harness/turn_guards.py:236`), and the gate counted them. Measured
+# 2026-09-27 across 24 user-platform sessions with mtime ≥ 09-23: 55 `role=user`
+# messages, 12 of them synthetic by the codebase's own screen
+# (`app/uptake.py`'s `_synthetic`), 4 sessions reaching the ≥3 threshold on
+# fewer than 3 human turns, 3 of those already stamped with a non-zero
+# `fact_watermark`. Concretely `20260926_092023_iv7136`: 4 user rows, 2 of them
+# inner-voice injects, watermark 147 — a window on the single-slot secondary
+# engine, spent on text Alan never said. The same machine prose also reached the
+# extractor prompt, under a system line saying it extracts facts from
+# conversations.
+#
+# The exclusion is uptake's screen, not a fifth literal list, and it lands in
+# the fact path only: `_build_capture_transcript`'s bytes stay unscreened
+# because `eval/secondary_routing_eval.py` hashes them (pinned in
+# tests/test_thinking_trace_transcripts.py). Coverage still advances over the
+# machine rows, or a machine-only stretch would reopen the window forever.
+
+def _machine(n: int, text: str, source: str) -> dict:
+    """A machine-injected turn exactly as the chat path persists it: role=user.
+
+    `source` is what the screen reads first; the text marker is what catches a
+    row written before the tag existed, which is why some fixtures here carry
+    the marker and no tag at all.
+    """
+    msg = _msg("user", text, n)
+    msg["source"] = source
+    return msg
+
+
+def _iv(n: int, text: str = "[INNER VOICE] Stop: you have issued 3 near-identical queries") -> dict:
+    return _machine(n, text, "inner_voice_inject")
+
+
+def _notify(n: int, text: str = "[SYSTEM: background task 512 finished with exit 0]") -> dict:
+    return _machine(n, text, "bg_task_notification")
+
+
+def _spoken(n: int, text: str) -> dict:
+    """A turn that arrived over `/api/voice/inject`: no source tag, `[Alan]: ` prefix.
+
+    Spoken turns are persisted untagged (`app/routers/messages.py:1026` only
+    tags a non-user turn source) and arrive prefixed with the speaker
+    (`app/routers/voice.py:159-162`), so they are the case an over-broad prefix
+    rule would silently delete.
+    """
+    return _msg("user", f"[Alan]: {text}", n)
+
+
+async def test_two_human_turns_and_two_injects_issue_zero_extraction_calls(env):
+    """Clause 1: 2 human + 2 inner-voice rows past the watermark is not a window.
+
+    Before #1647 this session extracted: the flat `role == "user"` count saw 4
+    and the gate opened, spending a slot on the single-tenant engine for half
+    machine text. The watermark must also stay put — a gate that declines has
+    consumed nothing, and stamping it would hide the two human turns from every
+    later pass.
+    """
+    messages = [_msg("user", "Turn 1: move the tts health check to a synthetic request", 1),
+                _msg("assistant", "Noted", 1),
+                _iv(2),
+                _msg("user", "Turn 2: the wake word needs a media port check", 2),
+                _msg("assistant", "Noted", 2),
+                _msg("user", "Turn 3: keep the capture worker on the pinned corpus", 3),
+                _msg("assistant", "Noted", 3),
+                _iv(3, "[INNER VOICE] Budget anchor fired; commit and gate")]
+    env.write(messages, captured=True, fact_watermark=2)   # window = messages 2..7
+
+    await post_capture._post_session_capture(SID)
+
+    assert env.calls["facts"] == [], (
+        "2 human turns plus 2 inner-voice injections must not open a window"
+    )
+    assert env.calls["fact_add"] == []
+    assert env.read()["fact_watermark"] == 2, (
+        "a pass that declined must leave the watermark where it was"
+    )
+
+
+async def test_three_human_turns_interleaved_with_injects_still_extract(env):
+    """Clause 2: excluding machine rows must not starve a real conversation.
+
+    Three human turns with an inject before and after them: the count is 3, so
+    the pass runs, and `covered` still walks over both injects — the watermark
+    lands on the end of the message list, not on the last human row. Skipping
+    machine rows in the coverage walk too would leave that tail permanently
+    unseen and reopen the window on every later pass.
+    """
+    # Watermark 2 leaves an inject at index 2 first and one at index 9 last,
+    # with three human turns between them at 3, 5 and 7: the window is 3 human
+    # rows plus 2 machine rows, which the pre-#1647 count saw as 5.
+    messages = [_msg("user", "Turn 1: retrain the wake word model", 1),
+                _msg("assistant", "Noted", 1),
+                _iv(2),
+                _msg("user", "Turn 2: the djev engine runs on gpu 2", 2),
+                _msg("assistant", "Noted", 2),
+                _msg("user", "Turn 3: voice barge-in is full duplex now", 3),
+                _msg("assistant", "Noted", 3),
+                _msg("user", "Turn 4: the noise floor is measured on the pinned corpus", 4),
+                _msg("assistant", "Noted", 4),
+                _iv(3, "[INNER VOICE] Budget anchor fired; commit and gate")]
+    env.write(messages, captured=True, fact_watermark=2)
+
+    await post_capture._post_session_capture(SID)
+
+    assert len(env.calls["facts"]) == 1, "3 human turns is the threshold, injects or not"
+    assert len(env.calls["fact_add"]) == 1
+    assert env.read()["fact_watermark"] == len(messages), (
+        "coverage has to advance over the machine rows too, or the same window "
+        "reopens on every later pass"
+    )
+
+
+async def test_the_extractor_transcript_omits_machine_markers_keeps_human_lines(env):
+    """Clause 3: `[INNER VOICE]`, `[SYSTEM:` and `<task_notification>` rows are
+    not handed to the extractor; the human line before and after each still is.
+
+    These three fixtures deliberately carry NO `source` tag: the marker half of
+    the screen is what catches a row persisted before the tag existed, and it is
+    also what catches a marker that arrives with no tag at all.
+    """
+    messages = [_msg("user", "HUMAN-BEFORE: the doc corpus daemon listens on 8182", 1),
+                _msg("user", "[INNER VOICE] Stop and re-check the blast radius", 2),
+                _msg("assistant", "Noted", 1),
+                _msg("user", "[SYSTEM: autonomy task 68 fired", 3),
+                _msg("user", "HUMAN-MIDDLE: the guardian observes for five minutes", 2),
+                _msg("user", "<task_notification> task 99 exited 0", 4),
+                _msg("user", "HUMAN-AFTER: rollback target is the last known good sha", 3)]
+
+    transcript, covered = post_capture._build_fact_transcript(messages, start=0)
+
+    assert covered == len(messages), "passed-over machine rows are still covered"
+    assert "INNER VOICE" not in transcript and "[SYSTEM:" not in transcript \
+        and "<task_notification>" not in transcript, transcript
+    for marker in ("HUMAN-BEFORE", "HUMAN-MIDDLE", "HUMAN-AFTER"):
+        assert marker in transcript, f"{marker} vanished from the extractor's prompt"
+    assert transcript.count("USER: ") == 3, transcript
+
+
+async def test_a_notification_row_is_excluded_and_typed_and_spoken_turns_are_not(env):
+    """Clause 4: `source=\"bg_task_notification\"` behaves exactly like an inject, in
+    the count and in the render; a plain typed row and a `[Alan]: ` spoken row
+    are both counted.
+
+    Exclusion cannot be "has a source", because typed and spoken turns persist
+    untagged; and a prefix rule must not swallow `[Alan]: `, or voice sessions
+    stop counting — the very sessions #1159 exists for.
+    """
+    # Half one: 2 human + 1 notification is below the threshold.
+    short = [_msg("user", "Turn 1: the tts venv is the one that boots the engine", 1),
+             _msg("assistant", "Noted", 1),
+             _notify(2),
+             _spoken(3, "turn two, note the voice room shares the chat session id"),
+             _msg("assistant", "Noted", 2)]
+    env.write(short, sid="20260920_120000_notifaa", captured=True, fact_watermark=0)
+    await post_capture._post_session_capture("20260920_120000_notifaa")
+    assert env.calls["facts"] == [], (
+        "a bg_task_notification row must not count toward the threshold"
+    )
+    assert env.read("20260920_120000_notifaa")["fact_watermark"] == 0
+
+    # Half two: add one human turn and the pass runs — with the spoken turn
+    # counted, and the notification absent from the prompt.
+    full = short + [_msg("user", "Turn 3: the eval pins the capture transcript bytes", 4),
+                    _msg("assistant", "Noted", 3)]
+    env.write(full, sid="20260920_120000_notifbb", captured=True, fact_watermark=0)
+    await post_capture._post_session_capture("20260920_120000_notifbb")
+
+    assert len(env.calls["facts"]) == 1, (
+        "2 typed/spoken human turns plus a notification is still only 2 human turns; "
+        "the third is the added typed turn"
+    )
+    prompt = env.calls["facts"][0]
+    assert "background task 512" not in prompt, "the notification reached the extractor"
+    assert "[Alan]: turn two" in prompt, "a spoken turn was dropped from the prompt"
+    assert "Turn 3: the eval pins" in prompt
+
+
+async def test_the_screen_is_uptakes_and_not_a_new_literal_list(env):
+    """The exclusion reuses `app/uptake._synthetic`, so one screen decides what
+    is machine text everywhere it is measured (#1647's stated constraint).
+
+    Asserted by behaviour, not by a grep: an ambient-source row — in uptake's
+    set and in no list of post_capture's — is excluded from the count here too.
+    """
+    messages = [_msg("user", "Turn 1: the vault recall eval is the trend instrument", 1),
+                _machine(2, "a queued ambient note about the calendar", "ambient"),
+                _spoken(3, "turn two, the noise floor needs re-measuring"),
+                _msg("assistant", "Noted", 1)]
+    env.write(messages, captured=True, fact_watermark=0)
+
+    await post_capture._post_session_capture(SID)
+
+    assert env.calls["facts"] == [], "an `ambient` row is machine text to uptake, so it is here too"
+
+    # The same screen, counted directly: the two untagged human rows above —
+    # one spoken, one typed — count, and the `ambient` row does not.
+    assert len(post_capture._human_user_messages(messages)) == 2

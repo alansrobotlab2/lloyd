@@ -423,3 +423,65 @@ def test_the_summary_builder_still_returns_the_bytes_the_eval_hash_is_built_from
     assert _build_capture_transcript([{"role": "user", "content": "x" * 5000}]) == (
         "USER: " + "x" * 600
     ), "the 600-char per-line cap moved, which re-bases every rendered transcript"
+
+
+# ------------------------------------------------------- #1647: the screen is fact-path only
+
+
+def _session_with_injects() -> list[dict]:
+    """A session holding an inner-voice inject and a spoken turn, untagged.
+
+    Row 3 is how an intervention is persisted (`role="user"`,
+    `source="inner_voice_inject"`, `app/routers/messages.py:1161-1167`); row 4 is
+    how a spoken turn arrives (no source tag, `[Alan]: ` prefix). #1647 screens
+    both roles' machine rows out of the FACT path; neither may move the bytes
+    the routing eval hashes.
+    """
+    def msg(mid: str, role: str, text: str, **extra) -> dict:
+        return {"id": mid, "role": role,
+                "content": [{"type": "text", "text": text}],
+                "timestamp": "2026-09-08T12:00:00", **extra}
+
+    return [
+        msg("u1", "user", "How much disk is left?"),
+        msg("a1", "assistant", "The disk is at 78 percent."),
+        msg("u2", "user", "[INNER VOICE] Stop: you have issued 3 near-identical queries",
+            source="inner_voice_inject"),
+        msg("u3", "user", "[Alan]: check the tts service too"),
+        msg("a2", "assistant", "Checked."),
+    ]
+
+
+def test_the_capture_transcript_still_renders_the_rows_the_fact_path_drops():
+    """Clause 5 (#1647): the machine-row screen belongs to the fact path alone.
+
+    `eval/secondary_routing_eval.py` rebuilds each item's input through
+    `_build_capture_transcript` and refuses the whole run on a sha256 mismatch
+    (`:1213-1220`, `:1326-1329`), so equivalence is not enough — it needs the
+    same bytes. The screen is therefore applied in `_build_fact_transcript` and
+    NOT in the shared `_transcript_line`. This test pins the unscreened bytes as
+    the exact rendering the test itself constructs, so a screen that crept into
+    the shared renderer loses the `[INNER VOICE]` line and fails here as well as
+    against the eval's recorded hashes.
+    """
+    from app.post_capture import _build_capture_transcript, _build_fact_transcript
+
+    messages = _session_with_injects()
+    expected = "\n".join([
+        "USER: How much disk is left?",
+        "ASSISTANT: The disk is at 78 percent.",
+        "USER: [INNER VOICE] Stop: you have issued 3 near-identical queries",
+        "USER: [Alan]: check the tts service too",
+        "ASSISTANT: Checked.",
+    ])
+    assert _build_capture_transcript(messages) == expected, (
+        "the capture summary's bytes moved: the routing eval's pinned input "
+        "hashes no longer verify"
+    )
+
+    # The other half, from the same rows: the fact path drops the inject and
+    # keeps the spoken turn, and the difference is the whole point of #1647.
+    fact_text, covered = _build_fact_transcript(messages, start=0)
+    assert "INNER VOICE" not in fact_text
+    assert "[Alan]: check the tts service too" in fact_text
+    assert covered == len(messages), "the dropped row is still covered"

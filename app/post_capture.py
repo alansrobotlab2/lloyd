@@ -38,20 +38,19 @@ from app.secondary_models import (
 
 logger = logging.getLogger("lloyd-server")
 
+from app import uptake  # #1647: the machine-injected-row screen lives there
 from app.paths import VAULT_BACKGROUND_SESSIONS_DIR, VAULT_SESSIONS_DIR
 
 
-def _transcript_line(msg: dict) -> Optional[str]:
-    """The transcript line for one message, or None if it is not transcript content.
+def _rendered_text(msg: dict) -> Optional[str]:
+    """The text a `user`/`assistant` row carries, or None if it carries none.
 
-    Dropped: any role other than `user`/`assistant` — which is what keeps a
-    `thinking` row carrying a whole chain of thought out of every secondary-model
-    prompt — and Claude Code's control blocks and envelope prefixes. Both
-    transcript builders render through here so their bytes cannot drift;
-    `eval/secondary_routing_eval.py` pins a hash over one of them.
+    `_transcript_line` renders from here and the #1647 machine-row screen asks
+    it the same question, so the two can never disagree about what the row's
+    text is. Roles other than `user`/`assistant`, non-text content, and
+    whitespace-only content carry none.
     """
-    role = msg.get("role", "")
-    if role not in ("user", "assistant"):
+    if msg.get("role", "") not in ("user", "assistant"):
         return None
     content = msg.get("content", "")
     if isinstance(content, list):
@@ -65,7 +64,62 @@ def _transcript_line(msg: dict) -> Optional[str]:
         text = content
     else:
         return None
-    if not text.strip():
+    return text if text.strip() else None
+
+
+def _machine_user_row(msg: dict) -> bool:
+    """Is this a persisted `role=\"user\"` row that no human typed or spoke (#1647)?
+
+    Inner-voice interventions and background-task notifications are persisted as
+    `role="user"` rows (`app/routers/messages.py:1161-1167`,
+    `app/harness/turn_guards.py:236`), so the flat `role == "user"` count in
+    `_extract_facts_past_watermark` treated them as human turns: measured
+    2026-09-27, 12 of 55 user rows across 24 user-platform sessions were
+    synthetic, and 4 sessions reached the ≥3 threshold on fewer than 3 human
+    turns, spending a window on the single-slot secondary engine for text Alan
+    never said.
+
+    The screen is uptake's, not a fifth literal list: `_SYNTHETIC_MSG_SOURCES`
+    (`inner_voice_inject`, `bg_task_notification`, `ambient`, …) and the text
+    markers `_SYNTHETIC_TEXT_PREFIXES` (`[INNER VOICE]`, `[SYSTEM:`,
+    `<task_notification>`, …), the latter catching a row written before its
+    source tag existed. A human turn cannot be eaten by it: typed and spoken
+    turns both persist with **no** source tag (`app/routers/messages.py:1026`),
+    and a spoken turn arrives as `[Alan]: …`
+    (`app/routers/voice.py:159-162`), which no prefix in that tuple matches.
+    """
+    if msg.get("role") != "user":
+        return False
+    text = _rendered_text(msg)
+    return text is not None and uptake._synthetic(text, msg.get("source"))
+
+
+def _human_user_messages(messages: list) -> list[dict]:
+    """The `role="user"` rows a human authored: what the extraction threshold counts.
+
+    Machine rows are excluded here and nowhere else in the pass, so coverage
+    still advances over them — see `_extract_facts_past_watermark`.
+    """
+    return [m for m in messages
+            if m.get("role") == "user" and not _machine_user_row(m)]
+
+
+def _transcript_line(msg: dict) -> Optional[str]:
+    """The transcript line for one message, or None if it is not transcript content.
+
+    Dropped: any role other than `user`/`assistant` — which is what keeps a
+    `thinking` row carrying a whole chain of thought out of every secondary-model
+    prompt — and Claude Code's control blocks and envelope prefixes. Both
+    transcript builders render through here so their bytes cannot drift;
+    `eval/secondary_routing_eval.py` pins a hash over one of them. That is why
+    the #1647 machine-row screen is NOT applied here: it belongs to the fact
+    path only, and the capture summary's bytes are pinned by that eval.
+    """
+    role = msg.get("role", "")
+    if role not in ("user", "assistant"):
+        return None
+    text = _rendered_text(msg)
+    if text is None:
         return None
     stripped = text.strip()
     if any(stripped.startswith(pfx) for pfx in (
@@ -117,6 +171,13 @@ def _build_fact_transcript(messages: list, *, start: int = 0,
     inside the returned text — so a caller may safely advance a watermark to
     `covered` and mean it.
 
+    This is the fact path, and it is the only render with a #1647 screen: a
+    machine-injected `role="user"` row (`_machine_user_row`) is passed over like
+    any other non-content row, so the extractor never reads an inner-voice
+    nudge as something the user said, while `covered` still walks past it.
+    `_build_capture_transcript` deliberately does not screen — the routing eval
+    hashes its bytes.
+
     Two properties `_build_capture_transcript` cannot offer, and which the
     summary path does not need because it has no watermark to advance. It spends
     its budget head-and-tail over the whole slice, so (a) the middle is invisible
@@ -141,10 +202,14 @@ def _build_fact_transcript(messages: list, *, start: int = 0,
     for idx in range(max(0, start), len(messages)):
         msg = messages[idx]
         line = _transcript_line(msg)
-        if line is None:
-            # A `thinking` row, a blank block, or a control/envelope prefix: the
-            # extractor has no use for it, and passing one over is not skipping
-            # content, so `covered` still counts it.
+        if line is None or _machine_user_row(msg):
+            # A `thinking` row, a blank block, a control/envelope prefix, or a
+            # machine-injected user row (#1647): the extractor has no use for
+            # it — an inner-voice nudge is the machine's own prose, and asking
+            # a prompt introduced as "You extract durable facts from
+            # conversations" to read it is how a caveat became a fact — and
+            # passing one over is not skipping content, so `covered` still
+            # counts it.
             covered = idx + 1
             continue
         cost = len(line) + (1 if chunks else 0)
@@ -767,9 +832,11 @@ async def _extract_facts_past_watermark(session_id: str) -> int:
     conversation keeps arriving over `/api/voice/inject` while the first pass is
     still in flight.
 
-    The gate is `>= FACT_EXTRACT_MIN_NEW_USER_MSGS` user messages *past the
-    watermark*, so the call is event-gated and not per turn: the secondary
-    engine is single-tenant, and a pass with nothing new must issue zero calls.
+    The gate is `>= FACT_EXTRACT_MIN_NEW_USER_MSGS` *human* user messages *past
+    the watermark* (#1647) — an inner-voice or notification row persisted as
+    `role="user"` does not count, though coverage still walks over it — so the
+    call is event-gated and not per turn: the secondary engine is
+    single-tenant, and a pass with nothing new must issue zero calls.
     Re-running this with no new messages therefore writes nothing.
 
     The watermark advances on any completed attempt, including one that returned
@@ -786,7 +853,13 @@ async def _extract_facts_past_watermark(session_id: str) -> int:
     data = json.loads(meta_path.read_text())
     messages = data.get("messages", [])
     watermark = _fact_watermark(data)
-    new_user = [m for m in messages[watermark:] if m.get("role") == "user"]
+    # Human turns only (#1647): an inner-voice nudge or a background-task
+    # notification is persisted as `role="user"`, and counting one toward the
+    # threshold let a session with two things said by Alan reach the gate on
+    # machine text — then the window, and the single engine slot with it, was
+    # spent. `messages[watermark:]` is still the whole unseen slice below, so
+    # coverage advances over the machine rows even though they are not counted.
+    new_user = _human_user_messages(messages[watermark:])
     if len(new_user) < FACT_EXTRACT_MIN_NEW_USER_MSGS:
         return 0
 
