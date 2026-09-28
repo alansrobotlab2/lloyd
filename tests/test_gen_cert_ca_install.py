@@ -783,3 +783,68 @@ def test_the_script_header_tells_an_operator_to_run_the_check_after_a_re_mint() 
     assert "/etc" in low, (
         "the header does not scope --check away from /etc, which #1241's ruling "
         "requires of it")
+
+
+# ── #1726 clause 5: gaining a production reader must not move these boundaries ──
+
+HEALTH_CHECK = REPO / "scripts" / "service_health_check.py"
+
+
+def test_the_new_caller_left_the_deletion_path_at_one_call() -> None:
+    """Clause 5, first half. `certutil -D` stays at exactly one call in this script.
+
+    The single removal is the same-nickname replacement at the install path. A second
+    deletion call — and above all one reachable from a health check, which a person or
+    an agent may run unattended — would let an automated read destroy the trust it was
+    asked to measure. Counted rather than diffed, so the invariant holds for whatever
+    the next round does to this file too.
+    """
+    src = INSTALL_CA.read_text(encoding="utf-8")
+
+    assert src.count("certutil -D") == 1, (
+        f"{src.count('certutil -D')} `certutil -D` calls in install-ca.sh; the "
+        "contract this file's own clause 4 test pins is exactly one")
+
+
+def test_the_health_checker_that_calls_this_script_never_asks_it_to_write() -> None:
+    """Clause 5, second half: the caller #1726 added is read-only against the machine.
+
+    Read-only against the *store* is `tests/test_service_health_check_ca_trust.py`'s
+    job, asserted against the argv it builds. This is the other sense: #1241's ruling of
+    2026-09-27T18:56Z moved the system half of the trust story out of every automated
+    path, so an entry that ran `update-ca-trust`, or wrote an anchor under
+    `/etc/ca-certificates/`, or shelled to `certutil` itself, would be a health check
+    that needs root and reimplements the verdict it is reading. The whole file is
+    scanned, comments included, because the clause says "anywhere in the diff".
+    """
+    src = HEALTH_CHECK.read_text(encoding="utf-8")
+    assert src, f"{HEALTH_CHECK} vanished"
+
+    assert "update-ca-trust" not in src, (
+        "a health check cannot run update-ca-trust — it needs root (#1241's ruling)")
+    assert "/etc/ca-certificates" not in src, (
+        "nothing automated writes a system trust anchor (#1241's ruling)")
+    assert re.search(r"[\"']certutil", src) is None, (
+        "the checker reaches the store only through `install-ca.sh --check`; a quoted "
+        "`certutil` token is an argv entry, which would be a second implementation of "
+        "the verdict this row reads")
+    assert '"--check"' in src, "the caller must build the read-only form"
+
+
+def test_no_executable_line_under_scripts_reaches_system_trust() -> None:
+    """Every `update-ca-trust` under `scripts/` is a comment recording that it is NOT run.
+
+    Three shell scripts mention the command to say why they do not call it, so the
+    assertion ignores comment lines — a test that could not tell a prohibition from an
+    invocation would have to be deleted the first time someone wrote the prohibition
+    down. What is left must be empty: system trust is a person's job (#1241).
+    """
+    offenders = []
+    for path in sorted((REPO / "scripts").glob("*.sh")):
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            if "update-ca-trust" in line and not line.lstrip().startswith("#"):
+                offenders.append(f"{path.name}:{n}: {line.strip()}")
+
+    assert not offenders, (
+        "these lines execute the machine-wide trust update that #1241 ruled a "
+        "person's job: " + "; ".join(offenders))

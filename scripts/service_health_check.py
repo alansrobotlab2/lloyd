@@ -333,6 +333,159 @@ DEPLOYED_COPIES = (
      Path("/usr/local/sbin/set-gpu-power-limit.sh")),
 )
 
+# The private CA the browser arm has to trust. `scripts/install-ca.sh --check`
+# existed with a test and no production caller (#1668), so the drift it detects —
+# the CA re-minted on 09-22 while the NSS nickname kept the retired key — stayed
+# invisible until a human ran the guard by hand (#1726). This entry is that caller.
+#
+# Its own category, for the reason #1649's `Fleet:` heading was chosen: the
+# per-category summary marks a category degraded when ANY member is unhealthy, and
+# `lloyd:` already means "the three Mission Control processes". Filing a stale trust
+# store there would let a latent browser-arm problem turn a heading whose red means
+# "MC is down" red for something else.
+CA_TRUST_CATEGORY = "ca"
+INSTALL_CA = _TREE / "scripts" / "install-ca.sh"
+
+# install-ca.sh's three verdict words, and the two fingerprints it prints beside
+# them. Parsing the WORD rather than the exit code is the whole grade: exit 1 is
+# also what `ERROR: no CA certificate at ...` returns, before the store has been
+# read at all, and reporting that as drift would be #1726's clause 2 in the shape of
+# a green row. So `warn` requires `CHECK FAILED` in the answer.
+_CA_ANSWER = re.compile(r"CHECK (OK|FAILED|INCONCLUSIVE)")
+# Every line the script prints is tagged `[install-ca] `, and the two words are spaced
+# by hand (`stored   sha256 ` / `expected sha256 `), so this matches on the hex rather
+# than the start of the line. A `^`-anchored pattern reads the real output and finds
+# nothing: the fingerprint-less row it would produce still says `warn`, which is how
+# that bug reaches production without failing a test.
+_CA_FINGERPRINT = re.compile(r"\b(stored|expected)\s+sha256\s+([0-9A-Fa-f:]{8,})")
+
+
+def _ca_head(text: str) -> str:
+    """The line that carries the verdict, with the script's tag stripped off it."""
+    line = next((l for l in (text or "").splitlines() if "CHECK " in l),
+                (text or "").splitlines()[0] if text else "")
+    return (line.split("] ", 1)[-1] if line.startswith("[install-ca]")
+            else line).strip() or "no output"
+
+
+def _ca_argv() -> list:
+    """The one argv this entry ever builds: the check mode of the tree's script.
+
+    `--check` is unconditional, because the same script without it WRITES the store
+    (`certutil -D` then `-A`), and a health check that costs the thing it measures is
+    the failure #1141 recorded. The CA path is deliberately NOT passed: `--check`
+    resolves it the way the operator's command does, from `$LLOYD_CERT_DIR` or the
+    tree, so this entry compares the CA the frontend would serve.
+    """
+    return ["bash", str(INSTALL_CA), "--check"]
+
+
+def _ca_verdict(code: int, text: str) -> str:
+    """`ok` / `warn` / `unknown` from the guard's own answer, never its exit code alone.
+
+    `unknown` is the answer for every read that did not reach the store: exit 2 (no
+    `certutil`, or no `HOME` and no override — install-ca.sh:88-89), an unreadable CA
+    file, an unparseable answer, or a nonzero code that is not a named verdict. An
+    inconclusive read is never `ok`, and never `warn` either: `warn` is a claim about
+    a mismatch that was measured.
+    """
+    named = _CA_ANSWER.search(text or "")
+    if named is None:
+        return "unknown"
+    word = named.group(1)
+    if word == "OK":
+        return "ok" if code == 0 else "unknown"
+    if word == "FAILED":
+        # `CHECK FAILED` with a code other than 1 is not the drift this row reports.
+        return "warn" if code == 1 else "unknown"
+    return "unknown"
+
+
+def _ca_fingerprints(text: str) -> dict:
+    found = {}
+    for kind, value in _CA_FINGERPRINT.findall(text or ""):
+        found.setdefault(kind, value.strip())
+    return found
+
+
+def _ca_detail(text: str) -> str:
+    """The fingerprints as the operator reads them, naming any that the check withheld.
+
+    A hash that IS present is always shown. The no-such-nickname branch prints
+    `stored   sha256 none (no such nickname)`, which is not a hash, and a row that
+    answered that by printing neither value would hide the one number the operator
+    needs in order to tell a missing entry from a replaced CA.
+    """
+    found = _ca_fingerprints(text)
+    parts = [f"{k} sha256 {found[k]}" for k in ("stored", "expected") if found.get(k)]
+    missing = [k for k in ("stored", "expected") if not found.get(k)]
+    shown = " — " + ", ".join(parts) if parts else ""
+    if not missing:
+        return shown
+    if parts:
+        return f"{shown} (the check printed no {missing[0]} fingerprint)"
+    return " (the check printed neither fingerprint)"
+
+
+def _ca_row(verdict: str, status: str, exit_code: int, output: str,
+            stored: Optional[str] = None, expected: Optional[str] = None) -> dict:
+    return {
+        "name": "ca-trust",
+        "status": status,
+        "healthy": verdict == "ok",
+        # Advisory rows are reported and never counted as a fault: clause 3 of
+        # #1726 is that this row cannot turn an otherwise-healthy run into a
+        # failure, and #1108's `drift:` rows are not the model here because a stale
+        # trust store is latent (the frontend serves a Let's Encrypt leaf while
+        # `web/vite.config.ts` finds one) where a missing root-owned script is live.
+        "advisory": verdict != "ok",
+        "verdict": verdict,
+        "exit_code": exit_code,
+        "output": output,
+        "category": CA_TRUST_CATEGORY,
+        "stored_sha256": stored,
+        "expected_sha256": expected,
+    }
+
+
+def check_ca_trust(runner=subprocess.run) -> list:
+    """One read-only row: does the NSS store hold the CA this tree would install?
+
+    `bash scripts/install-ca.sh --check`, against the invoking user's real store:
+    `LLOYD_NSS_DB` is stripped from the child environment, because that variable is
+    how this repo's own tests sandbox the script, and a row that silently reported on
+    a redirected store would be a health verdict about a database nobody uses.
+    Nothing else in the environment is touched, and the check branch of the script
+    writes nothing (#1668 clause 3).
+
+    `runner` is the seam the suite grades through, the same shape
+    `check_deployed_copies(pairs=...)` uses: a test that cannot force `CHECK FAILED`
+    on a real store otherwise has to accept whatever state this box happens to be in.
+    """
+    argv = _ca_argv()
+    env = {k: v for k, v in os.environ.items() if k != "LLOYD_NSS_DB"}
+    try:
+        proc = runner(argv, capture_output=True, text=True, timeout=20, env=env)
+    except Exception as exc:
+        # No bash, no subprocess, a timeout: nothing was read, so nothing is graded.
+        return [_ca_row("unknown", f"unknown: the CA trust check could not be run "
+                                   f"({str(exc)[:120]}) — nothing was read", -1, str(exc))]
+    text = ((proc.stdout or "") + "\n" + (proc.stderr or "")).strip()
+    verdict = _ca_verdict(proc.returncode, text)
+    found = _ca_fingerprints(text)
+    head = _ca_head(text)[:200]
+    if verdict == "ok":
+        status = f"ok: {head}"
+    elif verdict == "warn":
+        status = (f"warn: the NSS trust store does not hold this tree's Lloyd CA"
+                  f"{_ca_detail(text)} — run: bash scripts/install-ca.sh")
+    else:
+        status = (f"unknown: the CA trust check returned no verdict "
+                  f"(exit {proc.returncode}): {head}{_ca_detail(text)}")
+    return [_ca_row(verdict, status, proc.returncode, text,
+                    found.get("stored"), found.get("expected"))]
+
+
 CATEGORIES = {
     "llm": ["agent-llm-primary", "agent-llm-secondary", "agent-djev"],
     "lloyd": ["lloyd-backend", "lloyd-frontend", "lloyd-mcp"],
@@ -340,6 +493,9 @@ CATEGORIES = {
     # No supervisor program behind it: `main` answers this category from
     # `check_deployed_copies` instead.
     DEPLOY_CATEGORY: [],
+    # Same shape: `main` answers it from `check_ca_trust`, which is neither a
+    # supervisor program nor a deployed file.
+    CA_TRUST_CATEGORY: [],
     "all": list(SERVICES.keys()),
 }
 
@@ -537,19 +693,41 @@ def check_service(name: str, service_def: dict) -> dict:
         }
 
 
+def _advisory_rows(results: list) -> list:
+    """Rows that report something without claiming a fault (#1726 clause 3).
+
+    A row is advisory by its own declaration, never by its category name, so a future
+    round cannot make a real fault invisible by filing it under `ca`.
+    """
+    return [r for r in results if r.get("advisory")]
+
+
+def _scored_rows(results: list) -> list:
+    """The rows the verdict is arithmetic over."""
+    return [r for r in results if not r.get("advisory")]
+
+
 def format_text(results: list, summary: dict) -> str:
     """Format results as human-readable text."""
     lines = []
-    healthy_count = sum(1 for r in results if r["healthy"])
-    total = len(results)
+    scored = _scored_rows(results)
+    advisory = _advisory_rows(results)
+    healthy_count = sum(1 for r in scored if r["healthy"])
+    total = len(scored)
 
     lines.append("=== Service Health Check ===")
     lines.append(f"Time: {datetime.now(timezone.utc).isoformat()}")
     lines.append(f"Overall: {healthy_count}/{total} services healthy")
+    if advisory:
+        # Its own line, so `Overall:` keeps meaning "faults over what was graded"
+        # and a stale trust store still cannot be missed under a separate heading.
+        lines.append(f"Advisory: {len(advisory)} row(s) reported without a fault "
+                     f"verdict: {', '.join(r['name'] for r in advisory)}")
     lines.append("")
 
     for result in results:
-        icon = "[✓]" if result["healthy"] else "[✗]"
+        icon = ("[!]" if result.get("advisory")
+                else "[✓]" if result["healthy"] else "[✗]")
         lines.append(f"{icon} {result['name']}\u2014 {result['status']}")
 
     lines.append("")
@@ -561,15 +739,23 @@ def format_text(results: list, summary: dict) -> str:
 
 
 def format_json(results: list, summary: dict) -> str:
-    """Format results as JSON."""
-    healthy_count = sum(1 for r in results if r["healthy"])
-    total = len(results)
+    """Format results as JSON.
+
+    `unhealthy` is faults only: an advisory row goes into its own count, so
+    `healthy + unhealthy + advisory == total_services` and a caller that reads just
+    `unhealthy` is not told the box is broken by a retired certificate. The row
+    itself, with its `verdict` and its two fingerprints, is always in `services`.
+    """
+    scored = _scored_rows(results)
+    advisory = _advisory_rows(results)
+    healthy_count = sum(1 for r in scored if r["healthy"])
 
     output = {
         "check_time": datetime.now(timezone.utc).isoformat(),
-        "total_services": total,
+        "total_services": len(results),
         "healthy": healthy_count,
-        "unhealthy": total - healthy_count,
+        "unhealthy": len(scored) - healthy_count,
+        "advisory": len(advisory),
         "services": results,
         "summary": summary
     }
@@ -609,20 +795,41 @@ def main():
     # category; a `--services` ask names supervisor programs and gets only those.
     if not args.services and args.category in (None, DEPLOY_CATEGORY):
         results.extend(check_deployed_copies())
+    # The CA trust guard rides with the full check and with its own category, on the
+    # same rule as the deployed copies: an ask that names supervisor programs gets
+    # only those. No `LLOYD_NSS_DB` is set here, so the check reads the store the
+    # operator's own `bash scripts/install-ca.sh --check` would read.
+    if not args.services and args.category in (None, CA_TRUST_CATEGORY):
+        results.extend(check_ca_trust())
 
     # Calculate summary
     summary = {}
     for result in results:
         cat = result["category"]
         if cat not in summary:
-            healthy_in_cat = sum(1 for r in results if r["category"] == cat and r["healthy"])
-            total_in_cat = len([r for r in results if r["category"] == cat])
-            if healthy_in_cat == total_in_cat:
-                summary[cat] = "healthy"
-            elif healthy_in_cat > 0:
-                summary[cat] = "degraded"
+            # Only graded rows feed the arithmetic, so an advisory row cannot move a
+            # category's word — clause 3 of #1726, for a category that later gains
+            # both kinds of row. A category with nothing but advisory rows has no
+            # fault to name and reports its own verdict word instead.
+            graded = [r for r in results
+                      if r["category"] == cat and not r.get("advisory")]
+            if graded:
+                healthy_in_cat = sum(1 for r in graded if r["healthy"])
+                if healthy_in_cat == len(graded):
+                    summary[cat] = "healthy"
+                elif healthy_in_cat > 0:
+                    summary[cat] = "degraded"
+                else:
+                    summary[cat] = "unhealthy"
             else:
-                summary[cat] = "unhealthy"
+                verdicts = {r.get("verdict") for r in results
+                            if r["category"] == cat}
+                if verdicts == {"ok"}:
+                    summary[cat] = "healthy"
+                elif "warn" in verdicts:
+                    summary[cat] = "warn"
+                else:
+                    summary[cat] = "unknown"
 
     # Output
     if args.format == "json":
