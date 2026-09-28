@@ -24,6 +24,7 @@ import json
 import os
 import subprocess
 import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -615,22 +616,113 @@ def test_resolve_engine_reads_base_url_from_either_config_key(monkeypatch):
     assert url == "http://127.0.0.1:8096/v1/chat/completions"
 
 
-def test_resolve_engine_refuses_a_djev_run_with_no_served_model_name(monkeypatch):
-    """:8010 answers, but `djev` is not what it serves, and config.yaml records no
-    served name for it. Guessing one would fail on query 1 of 81, after a person
-    decided to start the run; the refusal has to name the probe and the flag that
-    resolve it, because choosing the model that produces a ceiling is the
-    person's call, not a value to invent in code."""
-    _fake_config(monkeypatch)
+def test_resolve_engine_learns_the_served_djev_name_over_a_real_socket(monkeypatch):
+    """Clause 3, and the reason #1655's ruling has been unrunnable since it was
+    written: `config.yaml` carries `djev.base_url` and no `djev.model`, and adding one
+    is a human edit to a file the loop may not write. The old code refused and told a
+    person to go read `GET <base>/v1/models` and paste the answer into a flag — so the
+    name WAS discoverable, from the endpoint that the run is about to ask, and the
+    resolver asked nothing.
+
+    This goes through `urllib` and a loopback server rather than an injected fetcher,
+    because the thing that has to be true is that the GET is really sent to
+    `/v1/models` on the configured base and its reply really decoded: an injected
+    fetcher would let a resolver that never built the URL pass. The name it learns is
+    the reply's `id` (`djev` on this box, per the live probe of 2026-09-28, whose
+    `root` is the long `nvidia-diffusiongemma-26B-A4B-it-NVFP4` path — a name nobody
+    should be copying into config).
+    """
+    import http.server
+    import threading
+
+    got: dict = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            got["path"] = self.path
+            raw = json.dumps({"object": "list", "data": [
+                {"id": "djev", "object": "model",
+                 "root": "/models/nvidia-diffusiongemma-26B-A4B-it-NVFP4"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        _fake_config(monkeypatch, djev_base=base)
+        assert lac.resolve_engine("djev") == (
+            f"{base}/v1/chat/completions", "djev"), (
+            "the pair the artifact records as `model`/`endpoint` must be the chat URL "
+            "and the name THAT endpoint answers to: vLLM refuses a name it is not "
+            "serving, and the artifact's provenance is the name it was asked under")
+        assert got["path"] == "/v1/models", (
+            "the probe has to be a GET of /v1/models on the configured base, not a "
+            "guess about it")
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_resolve_engine_refuses_a_djev_run_only_when_the_endpoint_cannot_answer(monkeypatch):
+    """The refusal survives, narrowed to the state that needs a person: the endpoint
+    is down, so there is no served name to learn and no run to start. (The clause is
+    asymmetric on purpose — resolve, or refuse with a reason that cannot be fixed by
+    starting a service. A refusal that fires while the engine is up is what made this
+    item's ruling unexecutable.)
+
+    The second half is the other direction of the same rule: a configured
+    `djev.model` is a person's choice and must win WITHOUT a probe, so the fetcher
+    here raises if it is ever called."""
+    _fake_config(monkeypatch, djev_base="http://127.0.0.1:9")
     with pytest.raises(SystemExit) as exc:
         lac.resolve_engine("djev")
     msg = str(exc.value)
     assert "LABELER_MODEL_UNKNOWN" in msg
-    assert "http://127.0.0.1:8010/v1/models" in msg, "must name how to find the served name"
-    assert "--labeler-model" in msg and "--labeler-url" in msg
+    assert "http://127.0.0.1:9/v1/models" in msg, "must name the probe that failed"
+    assert "--labeler-model" in msg and "--labeler-url" in msg, (
+        "and the two flags that resolve it without a config edit")
+
+    def no_probe(url):
+        raise AssertionError(f"probed {url} although config.yaml names the model")
+
+    _fake_config(monkeypatch)  # back to the live-shaped base, with a model set below
     monkeypatch.setitem(cfg_mod.CONFIG["djev"], "model", "diffusiongemma-26b-a4b")
-    assert lac.resolve_engine("djev") == (
+    assert lac.resolve_engine("djev", models_fetcher=no_probe) == (
         "http://127.0.0.1:8010/v1/chat/completions", "diffusiongemma-26b-a4b")
+
+
+@pytest.mark.parametrize("data,marker", [
+    ([{"id": "djev-a"}, {"id": "djev-b"}], "LABELER_MODEL_AMBIGUOUS"),
+    ([], "LABELER_MODEL_UNKNOWN"),
+], ids=["two models", "empty list"])
+def test_resolve_engine_refuses_when_the_models_list_cannot_name_one_model(
+        monkeypatch, data, marker):
+    """Two states where the endpoint is up and still cannot answer the question, each
+    with the reason that fits it.
+
+    More than one model is the only case here that is a real CHOICE — which model
+    produces the ceiling changes what the number means — so it gets its own code and
+    names both ids, rather than silently taking `data[0]`, which would decide the
+    meaning of the artifact by list order. An empty list is not a choice: it names no
+    model, so it is the unreachable case wearing a 200, and takes the UNKNOWN reason
+    that tells a person to start or point the engine.
+    """
+    _fake_config(monkeypatch)
+    with pytest.raises(SystemExit) as exc:
+        lac.resolve_engine("djev", models_fetcher=lambda url: {"data": data})
+    msg = str(exc.value)
+    assert marker in msg
+    assert "http://127.0.0.1:8010/v1/models" in msg
+    if marker == "LABELER_MODEL_AMBIGUOUS":
+        assert "djev-a" in msg and "djev-b" in msg, (
+            "a refusal to choose must show what it was refusing to choose between")
 
 
 def test_resolve_engine_names_the_engines_it_will_accept(monkeypatch):
@@ -752,6 +844,147 @@ def test_http_post_json_crosses_a_real_socket():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+#: Copied byte for byte out of the live reply from `:8010/v1/chat/completions` on
+#: 2026-09-28 (`temperature: 0` in the request, 400 out). Its seven parameter names
+#: are what `_DIFFUSION_REJECTED_SAMPLING` lists, and it is kept verbatim rather than
+#: paraphrased because the matcher reads the body for those words: a rewrite of this
+#: string is a rewrite of the thing the endpoint actually says.
+_SAMPLING_REFUSAL = (
+    '{"error":{"message":"The temperature, min_p, seed, min_tokens, logit_bias, '
+    'bad_words, and allowed_token_ids sampling parameters are not yet supported '
+    'with diffusion models.","type":"BadRequestError","code":400}}')
+
+
+def _post_that_refuses_then_accepts(replies: list[tuple[int, str]]):
+    """A loopback chat-completions endpoint that answers each POST with the next
+    (status, body) in `replies`, and records every request body it received. Real
+    `urllib` on both sides: `HTTPError` is something `urlopen` raises, and whether the
+    refused body is still READABLE off it (`exc.read()`) is exactly the part an
+    injected transport cannot demonstrate."""
+    import http.server
+    import threading
+
+    seen: list[dict] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            seen.append(json.loads(self.rfile.read(n).decode("utf-8")))
+            status, body = replies[min(len(seen) - 1, len(replies) - 1)]
+            raw = body.encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def log_message(self, *args):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions"
+    return srv, url, seen
+
+
+def test_http_labeler_retries_once_without_the_sampling_parameters_a_400_names(
+        capsys):
+    """Clause 1, across the socket.
+
+    What this refuses to let happen: the ruling on #1655 (`--engine djev`, chosen
+    because it needs no pool pause) dying on query 1 of 86. The labeler sends
+    `temperature: 0` because a labeler that samples is not a second rater, and the
+    djev build rejects the word, not the value — so `urlopen` raised `HTTPError`, the
+    exception escaped `http_labeler` before `LABELER_EMPTY_RESPONSE` could even be
+    considered, and every query in the corpus failed rather than degraded. The fix is
+    one retry with the named parameters dropped, and it has to keep the label: a
+    labeler that returns nothing is the instrument failure the empty-reply check
+    already exists to name.
+
+    The refusal goes to stderr, not into the artifact, and that is asserted here
+    because the alternative is the quieter bug: an artifact that recorded
+    `temperature 0` for a request that was demonstrably sent without it would be a
+    number describing a run that did not happen.
+    """
+    accepted = json.dumps(
+        {"choices": [{"message": {"content": 'thought\n{"entities": [1], "docs": [2]}'}}]})
+    srv, url, seen = _post_that_refuses_then_accepts([(400, _SAMPLING_REFUSAL),
+                                                      (200, accepted)])
+    try:
+        out = lac.http_labeler(url, "djev")({"id": "x", "prompt": "PROMPT"})
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    assert out["text"] == 'thought\n{"entities": [1], "docs": [2]}', (
+        "the label survived the refusal — which is the whole clause")
+    assert len(seen) == 2, f"expected one retry, saw {len(seen)} POSTs"
+    assert seen[0]["temperature"] == 0.0, (
+        "the first request is unchanged: the retry is a response to the endpoint's "
+        "refusal, not a pre-emptive workaround")
+    assert "temperature" not in seen[1], "the refused parameter must be gone"
+    assert seen[1]["max_tokens"] == 300 and seen[1]["model"] == "djev", (
+        "only what the 400 named is dropped; the keys this endpoint accepts are sent "
+        "again untouched")
+    assert lac.parse_reply(out["text"], n_entities=2, n_docs=2)["entities"] == [0], (
+        "and the reply still parses through the `thought` prefix the diffusion build "
+        "puts on its answers")
+    err = capsys.readouterr().err
+    assert "labeler-sampling-dropped" in err and "temperature" in err, (
+        "a label produced without the temperature the module's docstring promises has "
+        "to be visible where the run is watched")
+
+
+@pytest.mark.parametrize("status,body,why", [
+    (400, '{"error":{"message":"The model `djev-x` does not exist.","code":400}}',
+     "a 400 about a name this payload sent nothing about"),
+    (503, _SAMPLING_REFUSAL, "the sampling sentence arriving as a 503"),
+], ids=["unrelated 400", "sampling text but not a 400"])
+def test_http_labeler_does_not_retry_a_400_that_names_nothing_it_sent(
+        status, body, why):
+    """Clause 2's other half, and the half that makes the retry safe to have.
+
+    A retry that fired on any 400 would turn a genuine request bug — a misnamed
+    model, a malformed payload — into a second, stranger request and then report the
+    failure of the SECOND one, which is how a guard eats the evidence of its own
+    trigger. So the HTTPError propagates on the first POST, one request sent, no
+    second chance. The 503 case pins the status test specifically: the same words from
+    a different kind of failure are not the sampling refusal.
+    """
+    srv, url, seen = _post_that_refuses_then_accepts([(status, body)])
+    try:
+        with pytest.raises(urllib.error.HTTPError) as raised:
+            lac.http_labeler(url, "djev")({"id": "x", "prompt": "PROMPT"})
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert raised.value.code == status
+    assert len(seen) == 1, f"retried anyway ({why}): {len(seen)} POSTs"
+    assert seen[0]["temperature"] == 0.0
+
+
+def test_http_labeler_sends_temperature_to_an_endpoint_that_takes_it():
+    """Clause 2, the ordinary path: an endpoint that accepts sampling parameters is
+    sent exactly the payload `http_labeler` has always built — one POST, `temperature`
+    present at 0.0, and none of the seven names removed. The retry is invisible to a
+    server that never refuses, which is what keeps this ceiling's `temperature 0`
+    claim true for every engine that can honour it."""
+    seen: list[dict] = []
+
+    def transport(url: str, payload: dict) -> dict:
+        seen.append(payload)
+        return {"choices": [{"message": {"content": '{"entities": [1], "docs": []}'}}]}
+
+    out = lac.http_labeler("http://127.0.0.1:9/v1/chat/completions", "qwen",
+                           transport=transport)({"id": "x", "prompt": "PROMPT"})
+    assert out["text"] == '{"entities": [1], "docs": []}'
+    assert len(seen) == 1, "an endpoint that accepts sampling must not be retried"
+    assert seen[0]["temperature"] == 0.0
+    assert set(seen[0]) == {"model", "messages", "temperature", "max_tokens"}, (
+        "same payload as before this round: the drop is a reaction to a refusal, not "
+        "a new default shape")
 
 
 # ── seam 3: the skill's documented command -> the parser ─────────────────────

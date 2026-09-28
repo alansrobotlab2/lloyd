@@ -332,6 +332,201 @@ def _write(art: dict, directory: Path) -> None:
         json.dumps(art), encoding="utf-8")
 
 
+# ── #1655: an ENGINE-labelled artifact all the way to a divided score ─────────
+
+#: The identity `resolve_engine("djev")` yields after #1655's fix — the pair that
+#: `test_resolve_engine_learns_the_served_djev_name_over_a_real_socket` (same dir,
+#: `test_eval_label_agreement.py`) pins — recorded here rather than invented, because
+#: the artifact's provenance is
+#: what makes its number mean anything: `run_eval` writes `labeler.model` into every
+#: baseline, and the item's own ruling note is that "which model produced the ceiling
+#: changes what the number means".
+DJEV_IDENTITY = {"kind": "engine", "model": "djev",
+                 "endpoint": "http://127.0.0.1:8010/v1/chat/completions"}
+
+#: Three queries, one gold name each, and a two-name pool so every gold is always
+#: OFFERED: an unofferable gold is excluded from the ceiling rather than counted
+#: against it, which would let the instrument's own cap move the number this file
+#: exists to keep honest.
+_CEIL_CORPUS = [
+    {"id": "q-alive", "query": "what did the nightly reflection knowledge write decide",
+     "expect_entities": ["Research"], "expect_docs": []},
+    {"id": "q-disagree", "query": "which godnode index lists the research notes",
+     "expect_entities": ["Research"], "expect_docs": []},
+    {"id": "q-miss", "query": "where is the research note about the reflection write",
+     "expect_entities": ["Research"], "expect_docs": []},
+]
+
+
+def _engine_artifact(directory: Path, *, disagree_on=()):
+    """Run the real labelling pass over `_CEIL_CORPUS` with a second rater that agrees
+    everywhere except the ids in `disagree_on`.
+
+    Nothing here is hand-written JSON: the artifact comes out of `lac.label_corpus`,
+    so its per-query rows, its `labels_sha256` and its stored ceiling are all things
+    `load_artifact` can recompute. An artifact assembled by hand would clear the loader
+    by construction and prove nothing about the file a real djev pass writes.
+
+    `corpus_path` is a file this helper wrote into `directory`, not the shipped 86-query
+    yaml: the artifact records `corpus.path` and its sha as its provenance, and a file
+    that named the shipped corpus while carrying three rows would be a fixture lying
+    about where it came from.
+    """
+    corpus_file = directory / "three-query-corpus.yaml"
+    if not corpus_file.exists():
+        corpus_file.write_text(
+            "".join(f"- id: {q['id']}\n  query: {q['query']}\n"
+                    f"  expect_entities: [{q['expect_entities'][0]}]\n"
+                    for q in _CEIL_CORPUS), encoding="utf-8")
+
+    def labeler(request: dict) -> dict:
+        want = "Godnodes" if request["id"] in set(disagree_on) else "Research"
+        cands = request["entity_candidates"]
+        idx = cands.index(want) if want in cands else 0
+        # 1-based, as an OpenAI-style reply is; no docs, so the doc leg stays
+        # unmeasured rather than measured against an empty pool.
+        return {"text": json.dumps({"entities": [idx + 1], "docs": []})}
+    return lac.label_corpus(
+        labeler=labeler, labeler_identity=dict(DJEV_IDENTITY),
+        queries=[dict(q) for q in _CEIL_CORPUS],
+        entity_names=["Research", "Godnodes"], vault_paths=[],
+        entity_cap=2, doc_cap=0, corpus_path=corpus_file)
+
+
+def test_an_engine_artifact_clears_all_four_refusals_and_divides_the_score(
+        tmp_path, monkeypatch):
+    """Clause 4: the file a real djev pass would write, admitted by the loader, and
+    the score it produces divided by the ceiling it measured.
+
+    Why this node exists at all: `--print` has exited 2 since the module landed, so
+    every guard in `load_artifact` has only ever been exercised against a
+    hand-assembled stub artifact from a test. The state the item is about — a real
+    engine's file on disk — is the one state no node had seen, and a loader that
+    refuses everything looks identical to one that refuses only what it should.
+
+    Three queries, one gold name each; the second rater disagrees on `q-disagree`, so
+    measured `entity_label_agreement` is 2/3 = 0.6667 and the ceiling it implies for
+    `entity_hit_rate` is the same 0.6667 (the surrogate of a query whose gold is not
+    reproducible is floored at half, so 1 + 0.5 + 1 over 3). Retrieval that hits the
+    gold on two of the three then scores 0.6667 raw and 0.9999 of the ceiling — not
+    1.0, because the stored ceiling is rounded to four places (0.6667) while the score
+    is 2/3 exact, and the residual is that rounding, not a shortfall. The reading is
+    the veto's whole point: a miss on a query two labelers cannot agree about is not a
+    retrieval defect.
+
+    The control is the same corpus with a labeler that agrees everywhere: ceiling
+    1.0, normalized 0.6667. Same retrieval, same queries, same scorer — only the
+    labels differ, which is what shows the divisor came from the labels and not from
+    the seed blocks or the corpus size.
+    """
+    art = _engine_artifact(tmp_path, disagree_on={"q-disagree"})
+    assert art["agreement"]["entity_label_agreement"] == 0.6667
+    assert art["agreement"]["doc_label_agreement"] is None, (
+        "no doc labels were offered, so the doc leg is unmeasured — not zero")
+    assert not any(row["parse_failed"] for row in art["queries"]), (
+        "0 of 3 replies failed to parse: a ceiling computed from rows the parser "
+        "gave up on is an instrument reading, not a label disagreement, and #1655's "
+        "owed ruling is to check exactly this number on the real pass")
+    ids = [q["id"] for q in _CEIL_CORPUS]
+    gold_queries = [dict(q) for q in _CEIL_CORPUS]
+    gold = lac.labels_sha256(gold_queries)
+    art_dir = tmp_path / "label-agreement"
+    art_dir.mkdir()
+
+    def load(artifact, *, labels_sha=gold):
+        """Put ONE artifact on disk and load it. The unlink matters twice over: the
+        loader takes the NEWEST file in the directory, so a previous step's mutant left
+        behind would be what the next assertion reads — which is exactly how the
+        gold-moved refusal here first reported a stub refusal instead."""
+        for stale in art_dir.glob("label-agreement-*.json"):
+            stale.unlink()
+        (art_dir / "label-agreement-20260928-090000.json").write_text(
+            json.dumps(artifact), encoding="utf-8")
+        return lac.load_artifact(directory=art_dir, expect_labels_sha256=labels_sha)
+
+    # Refusal 1, absent — the state production has been in since this module landed and
+    # the reason `--print` exits 2. Named first because it is the state this item exists
+    # to end, and because a loader that refused everything would be indistinguishable
+    # from one that refuses only what it should unless something gets PAST it.
+    with pytest.raises(lac.ArtifactRefused) as exc:
+        lac.load_artifact(directory=tmp_path / "nothing-here",
+                          expect_labels_sha256=gold)
+    assert "no label-agreement artifact under" in str(exc.value)
+
+    # …and the file a real pass writes gets through all four.
+    good = load(art)
+    assert good["labeler"]["model"] == "djev" and good["labeler"]["kind"] == "engine"
+    assert good["ceiling"]["values"]["entity_hit_rate"] == 0.6667
+
+    stub = json.loads(json.dumps(art))
+    stub["labeler"]["kind"] = "stub"
+    with pytest.raises(lac.ArtifactRefused) as exc:
+        load(stub)
+    assert "labelled by a stub" in str(exc.value), "refusal 2: a stub agrees with itself"
+
+    with pytest.raises(lac.ArtifactRefused) as exc:
+        load(art, labels_sha="f" * 64)
+    assert "the gold labels moved" in str(exc.value), (
+        "refusal 3: `9b028e9` re-pointed 22 gold names under an unchanged id set")
+
+    edited = json.loads(json.dumps(art))
+    edited["ceiling"]["values"]["entity_hit_rate"] = 0.999
+    with pytest.raises(lac.ArtifactRefused) as exc:
+        load(edited)
+    assert "does not reproduce from the artifact" in str(exc.value), (
+        "refusal 4: this is the DIVISOR, so a stored value the rows do not support "
+        "must never divide tonight's score")
+    stripped = json.loads(json.dumps(art))
+    stripped["queries"] = []
+    with pytest.raises(lac.ArtifactRefused) as exc:
+        load(stripped)
+    assert "does not reproduce from its own contents" in str(exc.value), (
+        "refusal 4's other half: rows removed, so the agreement cannot recompute")
+
+    # ── and the same file through the nightly's own route ─────────────────────
+    # Re-write the good artifact first: the battery above left its last MUTANT on
+    # disk, and the loader takes the newest file in the directory, so without this the
+    # run below would be annotating a score with the rows-removed file's refusal.
+    load(art)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(art_dir))
+    fields = ev.ceiling_context(gold_queries, scored_ids=ids)
+    assert fields["ceiling"]["kind"] == lac.CEILING_KIND, (
+        "the ceiling is the gold-label surrogate, not the seed-side anchorless count")
+    assert fields["ceiling"]["entity_hit_rate"] == 0.6667
+    assert fields["ceiling"]["labeler"] == DJEV_IDENTITY, (
+        "the baseline records WHICH ENGINE produced the divisor — #1655's own note is "
+        "that the model changes what the number means — and `ceiling_context` carries "
+        "kind, model AND endpoint straight out of the artifact")
+    assert fields["label_agreement"]["entity_disagreements"] == [
+        "q-disagree gold=Research"], (
+        "a sub-1.0 agreement cannot be read without the labels that caused it")
+    assert fields["entity_hit_rate_normalized"] is None, (
+        "before there are scores there is nothing to divide: the field is present "
+        "and null, which is the shape that keeps a null from reading as a zero")
+
+    overall = {"entity_hit_rate": 2 / 3}
+    ev._normalize_against_ceiling(fields, overall)
+    assert fields["entity_hit_rate_normalized"] == pytest.approx(1.0, abs=1e-3), (
+        "0.6667 / 0.6667: at the ceiling, because the one query it missed is the one "
+        "the two labelers disagree on")
+    assert fields["entity_hit_rate_ceiling_kind"] == lac.CEILING_KIND
+
+    ctl_dir = tmp_path / "control" / "label-agreement"
+    ctl_dir.mkdir(parents=True)
+    agreeing = _engine_artifact(ctl_dir)
+    assert agreeing["agreement"]["entity_label_agreement"] == 1.0, (
+        "same three queries, same gold, a labeler that never dissents")
+    assert agreeing["ceiling"]["values"]["entity_hit_rate"] == 1.0
+    (ctl_dir / "label-agreement-20260928-090001.json").write_text(
+        json.dumps(agreeing), encoding="utf-8")
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(ctl_dir))
+    ctl = ev.ceiling_context([dict(q) for q in _CEIL_CORPUS], scored_ids=ids)
+    ev._normalize_against_ceiling(ctl, overall)
+    assert ctl["entity_hit_rate_normalized"] == pytest.approx(0.6667, abs=1e-3), (
+        "identical retrieval, labels that agree: 0.6667 of the ceiling, not 1.0 — the "
+        "difference between these two numbers is the labels, and only the labels")
+
+
 def test_a_present_artifact_produces_a_measured_ceiling(tmp_path, monkeypatch):
     art = _synthetic_artifact()
     _write(art, tmp_path)

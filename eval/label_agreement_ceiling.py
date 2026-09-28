@@ -366,6 +366,59 @@ def http_post_json(url: str, payload: dict, *, timeout: float = 90.0) -> dict:
         return json.loads(resp.read().decode())
 
 
+#: Sampling-parameter names a diffusion-model server rejects outright. The djev
+#: endpoint on this box answers ANY `temperature` (it is a diffusion build, not an
+#: autoregressive one) with HTTP 400 and this sentence, copied from the live reply
+#: on 2026-09-28: "The temperature, min_p, seed, min_tokens, logit_bias, bad_words,
+#: and allowed_token_ids sampling parameters are not yet supported with diffusion
+#: models." Those seven are the names listed here, and nothing else is dropped:
+#: the retry only ever removes a key that is BOTH in this list and in the payload it
+#: just sent, so an endpoint that accepts sampling parameters is never silently
+#: sent a different request than the one `http_labeler` builds.
+_DIFFUSION_REJECTED_SAMPLING = ("temperature", "min_p", "seed", "min_tokens",
+                                "logit_bias", "bad_words", "allowed_token_ids")
+
+
+def http_get_json(url: str, *, timeout: float = 10.0) -> dict:
+    """GET `url` and decode a JSON object. The read-side twin of `http_post_json`,
+    and its own function for the same reason: it is one of the two places in this
+    module that touches a socket, so `resolve_engine` takes a fetcher of this
+    signature and a test can exercise the real URL building and decoding against a
+    canned `/v1/models` document instead of stubbing the resolver."""
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _rejected_sampling_params(exc: Any, payload: dict) -> list[str]:
+    """Which sampling parameters THIS 400 says THIS payload may not carry.
+
+    Three conditions, all required, because the failure this guards against (an
+    engine that will not take `temperature`) is one the labeler can only survive by
+    retrying, and retrying a 400 for any other reason would turn a real error into
+    a second, weirder error:
+
+      * the status is 400, not 401/404/500 — a refusal to sample is a bad request;
+      * the reply body names one of `_DIFFUSION_REJECTED_SAMPLING` in words;
+      * that name is a key the payload actually sent.
+
+    A 400 for an unknown model or a malformed body names neither, returns the empty
+    list here, and the original `HTTPError` propagates untouched — which is the
+    other half of what makes the retry safe: it cannot mask a genuine request bug.
+    """
+    if getattr(exc, "code", None) != 400:
+        return []
+    try:
+        body = str(exc.read().decode("utf-8", "replace")).lower()
+    except Exception:
+        # `HTTPError` is itself the response object, so reading usually works; if a
+        # subclass has already drained the body there is nothing to match on, and
+        # the safe answer is "not the sampling refusal" — propagate.
+        return []
+    return [name for name in _DIFFUSION_REJECTED_SAMPLING
+            if name in payload and name in body]
+
+
 def http_labeler(url: str, model: str, *, timeout: float = 90.0,
                  temperature: float = 0.0,
                  transport: Callable[[str, dict], dict] | None = None
@@ -377,6 +430,19 @@ def http_labeler(url: str, model: str, *, timeout: float = 90.0,
     `transport` swaps the POST (see `http_post_json`) and nothing else: payload
     assembly, prompt embedding and response decoding still run, which is what makes
     a test through it a test of this module's HTTP behaviour.
+
+    One retry, and only one, when the endpoint answers 400 naming a sampling
+    parameter it will not accept (`_rejected_sampling_params`): the parameter is
+    dropped and the same request sent again. Without it the ruling on #1655 — label
+    with djev, which needs no pool pause — cannot run at all, because `urllib` raises
+    `HTTPError` on a 400 and every one of the corpus's queries dies on the first POST
+    rather than degrading: `LABELER_EMPTY_RESPONSE` never fires, because that check is
+    downstream of the exception. The dropped names go to stderr rather than into the
+    artifact, because a label produced without the temperature the ceiling's own
+    docstring promises is a label whose provenance a reader has to be able to see —
+    and an artifact that silently recorded it as `temperature 0` would be a number
+    describing a request that was never sent. The retry is NOT applied to a 400 that
+    does not name a parameter this payload sent.
     """
     post = transport or http_post_json
 
@@ -387,7 +453,19 @@ def http_labeler(url: str, model: str, *, timeout: float = 90.0,
                          {"role": "user", "content": request["prompt"]}],
             "temperature": temperature, "max_tokens": 300,
         }
-        data = post(url, payload)
+        try:
+            data = post(url, payload)
+        except urllib.error.HTTPError as exc:
+            rejected = _rejected_sampling_params(exc, payload)
+            if not rejected:
+                raise
+            for name in rejected:
+                payload.pop(name, None)
+            print(f"  [labeler-sampling-dropped] {url} rejected "
+                  f"{', '.join(rejected)} for {model}; retried once without "
+                  f"them — this query's label was NOT sampled at temperature 0",
+                  file=sys.stderr)
+            data = post(url, payload)
         text = (((data.get("choices") or [{}])[0].get("message") or {}).get("content")
                 or "")
         if not text.strip():
@@ -409,7 +487,59 @@ def http_labeler(url: str, model: str, *, timeout: float = 90.0,
 ENGINE_NAMES = ("primary", "secondary", "djev")
 
 
-def resolve_engine(name: str) -> tuple[str, str]:
+def served_model_name(base: str, *, fetch: Callable[[str], dict] | None = None
+                      ) -> str:
+    """Ask the endpoint at `base` what model it serves, via `{base}/v1/models`.
+
+    Why the code asks rather than refusing: the ruling on #1655 is to label with
+    djev, `config.yaml` carries `djev.base_url` but no `djev.model` (adding one is a
+    human edit to a file this loop may not write), and the served name is sitting in
+    the endpoint's own `/v1/models` reply — the refusal this replaces told a person to
+    go and read exactly that document and paste it into a flag. Asking costs one GET
+    and removes no decision, because the name comes FROM the thing that will be asked
+    to label: it is a measurement of which model is up, not a choice of which model
+    should produce the ceiling.
+
+    It therefore refuses, and only refuses, in the two states where the endpoint
+    cannot answer that question for itself: unreachable (or answering something that
+    is not a model list), and serving MORE THAN ONE model — at which point picking one
+    IS a choice about what the number means, and `resolve_engine`'s standing rule is
+    that such a choice goes to a person. An empty list is the unreachable case in
+    another costume: it names no model, so there is nothing to learn.
+    """
+    get = fetch or http_get_json
+    url = f"{base.rstrip('/')}/v1/models"
+    try:
+        doc = get(url)
+        ids = [str(entry.get("id") or "")
+               for entry in (doc.get("data") or []) if isinstance(entry, dict)]
+    except Exception as exc:
+        raise SystemExit(
+            f"LABELER_MODEL_UNKNOWN: config.yaml records no served model name under "
+            f"`djev:`, and asking the endpoint failed ({type(exc).__name__}: {exc} "
+            f"for GET {url}). Start it, or name the model yourself: "
+            f"`--labeler-url {base.rstrip('/')}/v1/chat/completions "
+            f"--labeler-model <served name>`. Naming the model that produced a "
+            f"ceiling is part of what the ceiling means, so it is not a value to "
+            f"invent here.")
+    ids = [i for i in ids if i]
+    if len(ids) > 1:
+        raise SystemExit(
+            f"LABELER_MODEL_AMBIGUOUS: {url} serves {len(ids)} models "
+            f"({', '.join(ids)}), and config.yaml records no `djev.model`. Which one "
+            f"produces the ceiling changes what the number means, so it is a person's "
+            f"call: pass `--labeler-model <one of them>` or set `djev.model`.")
+    if not ids:
+        raise SystemExit(
+            f"LABELER_MODEL_UNKNOWN: {url} answered but listed no model, so there is "
+            f"no served name to learn. Pass `--labeler-url "
+            f"{base.rstrip('/')}/v1/chat/completions --labeler-model <served name>`.")
+    return ids[0]
+
+
+def resolve_engine(name: str, *,
+                   models_fetcher: Callable[[str], dict] | None = None
+                   ) -> tuple[str, str]:
     """(chat_completions_url, served model name) for a named engine.
 
     No default engine exists: `secondary_enabled: false` and a stopped
@@ -442,19 +572,17 @@ def resolve_engine(name: str) -> tuple[str, str]:
             raise SystemExit("LABELER_ENGINE_NO_URL: config.yaml has no "
                              "`djev.base_url`, so there is no djev "
                              "chat-completions endpoint to label with")
-        served = str(block.get("model") or "")
-        if not served:
-            # vLLM refuses a model name it is not serving, and `djev` is not the
-            # served name. Guessing one would surface as an HTTP error on query 1
-            # of 81 — after the run has cost a person's decision to start it.
-            raise SystemExit(
-                f"LABELER_MODEL_UNKNOWN: config.yaml records no served model name "
-                f"under `djev:`. Ask the endpoint what it serves "
-                f"(`GET {base}/v1/models`) and pass "
-                f"`--labeler-url {base.rstrip('/')}/v1/chat/completions "
-                f"--labeler-model <served name>`. Naming the model that produced a "
-                f"ceiling is part of what the ceiling means, so it is not a value "
-                f"to invent here.")
+        # A configured `djev.model` wins and costs no probe: it is what a person
+        # chose. Without one the endpoint is asked what it serves
+        # (`served_model_name`), which is the only reading of "the djev engine" that
+        # cannot go stale the way a copied name in a config file goes stale — and the
+        # alternative, refusing, is what has kept this item's ruling unrunnable since
+        # it was written. Guessing a name is still not on the table: vLLM refuses a
+        # model it is not serving, and finding that out on query 1 of 86, after a
+        # person decided to start the run, is the failure this branch exists to
+        # prevent.
+        served = str(block.get("model") or "") or served_model_name(
+            base, fetch=models_fetcher)
         return f"{base.rstrip('/')}/v1/chat/completions", served
     if name == "secondary" and not root.get("secondary_enabled", False):
         raise SystemExit(
