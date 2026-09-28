@@ -409,3 +409,148 @@ def test_workers_jobs_dropped_the_pointer_at_the_docstring_it_fixed():
     assert "require_inner_voice" in sec4 and "2026-09-24" in sec4, (
         "§4 lost the retirement record along with the pointer — the dated fact "
         "is the part that has to stay")
+
+
+# ------------------------------------------------------- `bench-mine`'s cap
+# (#1712).
+#
+# `MAX_ENQUEUE_PER_TICK`'s comment said "per tick, per input" while
+# `enqueue_if_due` passed the resolved `max_enqueue_per_tick` value to the
+# failed-runs selector alone; the ledger input ran at `_recent_ledger_losers`'s
+# own default 5. §6 of this doc was then rewritten (#a42640eb, 2026-09-27) to
+# state exactly that — "on the failed-runs input only ... neither that constant
+# nor the `max_enqueue_per_tick` key bounds it (filed)" — so the code fix makes
+# THE DOC the false statement unless the same sha repairs it. Nothing else in
+# this file reads that paragraph, which is why the two nodes below exist: a
+# missed doc edit would otherwise reach no test at all.
+
+_BENCH_MINE_SRC = ROOT / "workers" / "sources" / "bench_mine.py"
+
+
+#: The false sentence itself, verbatim, so the ban below is proven to have eyes:
+#: a `not in` over a phrase the scan could never have matched is a passing test
+#: about nothing (#1689's `RETIRED_SENTENCE`, same reason).
+RETIRED_CAP_SENTENCE = ("**Wakes** every 7200 s with two deliberately independent inputs, "
+                        "capped at `MAX_ENQUEUE_PER_TICK` (3) on the failed-runs input "
+                        "only — the ledger input is offered by `_recent_ledger_losers` at "
+                        "its own default `limit=5`, so neither that constant nor the "
+                        "`max_enqueue_per_tick` key bounds it (filed)")
+
+
+def _cap_sentence(flat_sec: str) -> str:
+    """The sentence of `flat_sec` that states the enqueue cap, whitespace-flattened.
+
+    Scoped to one sentence rather than the section because the key
+    `max_enqueue_per_tick` appears in the RETIRED prose too — "neither that
+    constant nor the `max_enqueue_per_tick` key bounds it" — so a section-wide
+    token check could be satisfied by the very sentence this node exists to
+    delete. The cap sentence is the only place the true scope may be asserted.
+    """
+    hits = [s for s in re.split(r"(?<=[.!?]) ", flat_sec) if "capped at" in s]
+    assert hits, (
+        "§6 no longer has a sentence stating the enqueue cap ('capped at'), so "
+        "there is nothing here to check the scope of — the paragraph was deleted, "
+        "not corrected")
+    assert len(hits) == 1, (
+        f"§6 states the cap in {len(hits)} sentences; one sentence is the scope "
+        "this node grades, and two would let the false half hide in the other")
+    return hits[0]
+
+
+def _const_comment(src: str, name: str) -> str:
+    """The `#:` comment block sitting directly above a module constant.
+
+    Block-anchored rather than a whole-file grep, because "per input" appearing
+    anywhere else in the module would otherwise make the ban unenforceable and a
+    key named in an unrelated comment would make the requirement free.
+    """
+    m = re.search(r"((?:^#:[^\n]*\n)+)^" + re.escape(name) + r" = ", src, re.M)
+    assert m, (
+        f"no `#:` comment block directly above `{name}` — deleted rather than "
+        "corrected, or the constant moved off the column-0 form this extracts")
+    return m.group(1)
+
+
+def test_bench_mine_cap_comment_names_the_key_that_overrides_it():
+    """Clause 4, code half: the comment's two false halves, pinned both ways.
+
+    "per input" was false for the one input the cap did not reach, and the
+    comment never named the config key that overrides the constant — so an
+    operator reading it had no way to find the knob or to learn it was
+    half-read. Both directions are asserted: the retired phrase is gone, and the
+    scope plus the key are actually stated, so deleting the comment cannot pass.
+    """
+    src = _BENCH_MINE_SRC.read_text(encoding="utf-8")
+    # Positive control that the extractor has eyes: a sibling constant in the
+    # same block is found too. An extractor matching nothing makes every
+    # `not in` below vacuously true.
+    assert "max_turns" in _const_comment(src, "DEFAULT_MAX_TURNS").lower(), (
+        "the comment extractor matched a block with no key in it, so the checks "
+        "below are reading the wrong text")
+
+    comment = _const_comment(src, "MAX_ENQUEUE_PER_TICK")
+    assert "per input" not in comment.lower(), (
+        "the comment is back to claiming the cap covers every input by its "
+        "spelling — #1712 is the input it did not reach")
+    assert "max_enqueue_per_tick" in comment, (
+        "the comment no longer names the config key that overrides the constant, "
+        "so an operator cannot find the knob from the number")
+    assert "both" in comment.lower(), (
+        "the comment states the key but not that one value bounds both of the "
+        "source's inputs, which is the scope #1712 fixed")
+    assert 'src_cfg.get("max_enqueue_per_tick", MAX_ENQUEUE_PER_TICK)' in src, (
+        "the comment names a key the code stopped reading, or read a different "
+        "way — the note has outlived the resolution it describes")
+
+
+def test_workers_jobs_states_the_cap_over_both_inputs():
+    """Clause 4, doc half: §6's sentence must follow the code, not the bug.
+
+    The negative checks are the sentence #a42640eb wrote on purpose; it was true
+    when written and is the false statement now. The positive checks are the
+    paired requirement from #1689/#1713: a correction has to say the true scope
+    in the present tense, not merely drop the lie — and the threading it claims
+    is re-checked against the source, because prose about a call site rots the
+    moment that call site moves.
+    """
+    sec6 = _section(SEC6)
+    assert sec6, f"§6 {SEC6!r} not found — the heading moved and this test is blind"
+    # Both sides graded on whitespace-normalised prose: the retired sentence
+    # wrapped across four source lines, so a raw check would let a re-flow of the
+    # same false claim through.
+    flat = " ".join(sec6.split())
+    retired = ("on the failed-runs input only", "nor the `max_enqueue_per_tick` key")
+    # Control before bans: the retired text has to trip both phrases and the
+    # extractor has to see the sentence they sit in. An empty pattern against an
+    # empty corpus passes, and that is what this line is for.
+    old = " ".join(RETIRED_CAP_SENTENCE.split())
+    assert all(r in old for r in retired), (
+        "the verbatim retired sentence no longer trips its own bans, so the two "
+        "checks below are vacuous and would pass on any text")
+    assert "capped at" in old and "max_enqueue_per_tick" in _cap_sentence(old), (
+        "the cap-sentence extractor cannot see the retired sentence, so scoping "
+        "§6 to it would silently grade nothing")
+
+    for phrase in retired:
+        assert phrase not in flat, (
+            f"§6 still says {phrase!r} — true until #1712 threaded the cap, and "
+            "the sentence that has to be rewritten in the same sha as the fix")
+
+    # The live scope is graded inside the cap sentence alone: the key's name
+    # occurs in the retired prose as well, so a section-wide token check could
+    # read as satisfied by the sentence the node just banned.
+    cap = _cap_sentence(flat)
+    for live in ("each capped at", "`MAX_ENQUEUE_PER_TICK`", "max_enqueue_per_tick",
+                 "FAILURE_WINDOW_DAYS", "both selectors"):
+        assert live in cap, (
+            f"the cap sentence no longer states {live!r}: {cap[:220]!r} — the "
+            "false sentence must be replaced by the true one, not deleted")
+
+    src = _BENCH_MINE_SRC.read_text(encoding="utf-8")
+    assert "_enqueue_ledger_losers(queue, src_cfg, limit)" in src, (
+        "§6 says the resolved value reaches both selectors; the ledger input no "
+        "longer receives it, so the paragraph is false again")
+    assert re.search(r"days=FAILURE_WINDOW_DAYS,\s*limit=limit", src), (
+        "§6 says the ledger selector gets FAILURE_WINDOW_DAYS as well as the "
+        "cap; the call site stopped passing it as named arguments, so either the "
+        "prose or the threading has moved")

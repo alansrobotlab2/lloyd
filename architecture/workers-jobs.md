@@ -821,10 +821,15 @@ window to 2026-09-11 and no longer reproduces.
 
 ### `bench-mine` — new bench tasks from failure signal
 
-**Wakes** every 7200 s with two deliberately independent inputs, capped at
-`MAX_ENQUEUE_PER_TICK` (3) on the failed-runs input only — the ledger input is
-offered by `_recent_ledger_losers` at its own default `limit=5`, so neither that
-constant nor the `max_enqueue_per_tick` key bounds it (filed): **failed autonomy runs**
+**Wakes** every 7200 s with two deliberately independent inputs, each capped at
+`MAX_ENQUEUE_PER_TICK` (3): `enqueue_if_due` resolves
+`workers.sources.bench-mine.max_enqueue_per_tick` once and passes that one
+number, with `FAILURE_WINDOW_DAYS` (7 days), to both selectors, so the key
+bounds every item the source offers. Until #1712 it reached the failed-runs
+selector alone, and the ledger input — the one that actually fires, 138 of the
+139 `bench-mine` queue items all-time to 2026-09-28 — ran at
+`_recent_ledger_losers`'s own default `limit=5`, overrunning the declared
+budget on 24 of the 36 enqueue ticks in that window. The inputs: **failed autonomy runs**
 (`autonomy-runs/**/run_*.md` with `status: failed`, 7-day window) and **ledger
 losers** (bench tasks the baseline scored under 0.6). **Executes** a direct turn
 on the primary (`workers.sources.bench-mine.max_turns`, 12 since 2026-09-24;

@@ -64,8 +64,16 @@ DEFAULT_PRIORITY = 80
 from app.paths import AUTONOMY_RUNS_DIR, PIPELINE_DIR
 LEDGER_PATH = PIPELINE_DIR / "research" / "ledger.jsonl"
 
-#: Queue items per tick, per input. Two worker slots shared with the nightly
-#: chain; this source is not the reason anyone is waiting.
+#: Queue items one tick may offer from each of this source's two inputs. The
+#: operator's number is `workers.sources.bench-mine.max_enqueue_per_tick`, and
+#: this constant is only its default: `enqueue_if_due` resolves that key once
+#: and hands the one value to BOTH selectors — `_recent_ledger_losers` and
+#: `_recent_failed_runs` — so the key bounds every item the source offers.
+#: It used to reach the failed-runs selector alone, which left this number
+#: half-read and left the input that actually fires (138 of the 139 `bench-mine`
+#: queue items all-time as of 2026-09-28) running at the selector's own
+#: default 5 against a declared 3 (#1712). Two worker slots shared with the
+#: nightly chain; this source is not the reason anyone is waiting.
 MAX_ENQUEUE_PER_TICK = 3
 #: Iteration ceiling for one mining turn, when `workers.sources.bench-mine`
 #: names no `max_turns`. It was a literal at both call sites, so no config
@@ -126,6 +134,16 @@ USABLE_TRACE_STATUSES = frozenset({"success"})
 
 
 def _recent_ledger_losers(days: int = 7, limit: int = 5) -> list[dict]:
+    """Baseline losers inside `days`, worst first, at most `limit` of them.
+
+    The enqueue path passes BOTH values explicitly (`_enqueue_ledger_losers`
+    threads `FAILURE_WINDOW_DAYS` and the resolved `max_enqueue_per_tick`), so
+    neither number here is what production runs at. They stayed defaults rather
+    than required args because the six direct selector calls and the four
+    `lambda *a, **k` stubs in `tests/test_workers_sources.py` call this bare —
+    and #1712 is precisely that a bare-call fallback became the live budget
+    because the one caller stopped passing it.
+    """
     if not LEDGER_PATH.exists():
         return []
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
@@ -266,12 +284,16 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
     transcripts under `AUTONOMY_RUNS_DIR` stayed at zero items for its whole
     life.
     """
+    # One number, both inputs. `limit` used to be passed to the failed-runs
+    # input alone while the ledger input ran at `_recent_ledger_losers`'s own
+    # default 5 — the input that actually fires was the one the key did not
+    # bound (#1712).
     limit = int(src_cfg.get("max_enqueue_per_tick", MAX_ENQUEUE_PER_TICK))
-    await _enqueue_ledger_losers(queue, src_cfg)
+    await _enqueue_ledger_losers(queue, src_cfg, limit)
     await _enqueue_failed_runs(queue, src_cfg, limit)
 
 
-async def _enqueue_ledger_losers(queue: WorkQueue, src_cfg: dict) -> None:
+async def _enqueue_ledger_losers(queue: WorkQueue, src_cfg: dict, limit: int) -> None:
     # Cheap mtime gate before the expensive parse. The ledger is 11 MB and is
     # fully json-parsed line by line; it is appended to only by an autoresearch
     # round, which is far rarer than this source's two-hour tick, so almost
@@ -301,12 +323,18 @@ async def _enqueue_ledger_losers(queue: WorkQueue, src_cfg: dict) -> None:
     # event loop so it can't stall HTTP/UI. See [[project_gap_fill_event_loop_freeze]].
     #
     # Filtered after the slice, on purpose. Marked rows still consume the
-    # selector's `limit = 5`, so a tick whose whole slate is marked enqueues
-    # nothing: the input goes quiet until those rows age out of the 7-day window
-    # or a new sub-0.6 baseline row appears. Asking the selector for more rows to
-    # make up the difference is a selection-budget decision #1711 leaves to the
-    # owed-check job, not something this filter may smuggle in as a loop.
-    losers = await asyncio.to_thread(_recent_ledger_losers)
+    # selection budget, so a tick whose whole slate is marked enqueues nothing:
+    # the input goes quiet until those rows age out of the `FAILURE_WINDOW_DAYS`
+    # window or a new sub-0.6 baseline row appears. Asking the selector for more
+    # rows to make up the difference is a selection-budget decision #1711 leaves
+    # to the owed-check job, not something this filter may smuggle in as a loop.
+    #
+    # Both kwargs are passed by name, the way `_enqueue_failed_runs` passes its
+    # pair positionally: `days` and `limit` are both ints, so a swapped
+    # positional slip here would still run and just mine a wider or narrower
+    # slate — which is how a knob reads as working while it is not (#1712).
+    losers = await asyncio.to_thread(_recent_ledger_losers,
+                                     days=FAILURE_WINDOW_DAYS, limit=limit)
     queue.wm_set(NAME, "ledger_mtime", repr(mtime))
     if not losers:
         return

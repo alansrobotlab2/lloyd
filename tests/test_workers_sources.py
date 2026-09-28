@@ -802,6 +802,128 @@ def test_the_id_the_writer_mints_is_the_id_the_selector_selects(tmp_path, monkey
 
 
 # ---------------------------------------------------------------------------
+# bench-mine: one key bounds BOTH inputs (#1712)
+#
+# `enqueue_if_due` resolved `max_enqueue_per_tick` into `limit` and handed it to
+# `_enqueue_failed_runs` alone, while the ledger input called
+# `_recent_ledger_losers()` bare and so ran at that function's own signature
+# defaults `days=7, limit=5`. The input the key skipped is the one that fires:
+# `workers.db` held 139 `bench-mine` items all-time on 2026-09-28, 138 of kind
+# `mine` against 1 of `mine-run`, and bucketing `enqueued_at` into 10-second
+# ticks gave {1:5, 2:5, 3:2, 4:2, 5:22} — 24 of the 36 ticks above the declared
+# per-tick budget of 3, 22 of them at the selector's own 5.
+#
+# These go through `enqueue_if_due`, not the selector: the bug was one caller
+# forgetting to pass a value, and calling `_recent_ledger_losers(days=…, limit=…)`
+# directly would pin the selector's arithmetic while the live path stayed bare.
+# ---------------------------------------------------------------------------
+
+
+def _five_unmarked_losers() -> list[dict]:
+    """Five qualifying baseline losers, one per `(task, round)` pair.
+
+    Five and not three because clause 2 has to tell a cap of 3 from the
+    selector's own default of 5: a fixture of three enqueues three whether the
+    cap is threaded or not, and the test would pass on the bug.
+
+    Distinct `task_id`s because the enqueue dedup key is
+    `bench-mine:{task_id}:{round_id}` — five rounds of one task would survive
+    dedup too, but distinct tasks are also what keeps a dropped item visible as
+    a count rather than as a collision. Scores 0.10-0.50 are all under the 0.6
+    loser line, and `_ledger_row`'s default `trace_status="success"` is what
+    makes each row usable signal rather than a harness failure (#625).
+    """
+    return [_ledger_row(f"BASELINE_{n}", f"bench_cap_{n}", 0.1 * n, round_id=f"R_{n}")
+            for n in range(1, 6)]
+
+
+def _ledger_items(q) -> list:
+    return [i for i in q.list_items(source=BM.NAME) if i.kind == BM.KIND_LEDGER]
+
+
+async def test_max_enqueue_per_tick_bounds_the_ledger_input(tmp_path, monkeypatch, q):
+    """Clause 1: an operator who sets the key to 1 gets one item, not five.
+
+    Pre-fix this enqueued 3-or-more: `limit` never reached the ledger selector,
+    so the key's value was read and thrown away on this input.
+    """
+    _fixture_ledger(tmp_path, monkeypatch, _five_unmarked_losers())
+
+    await BM.enqueue_if_due(q, {"max_enqueue_per_tick": 1})
+
+    items = _ledger_items(q)
+    assert len(items) == 1, (
+        f"`max_enqueue_per_tick: 1` enqueued {len(items)} {BM.KIND_LEDGER} items. "
+        "The clause allows at most one; exactly one is asserted so the test cannot "
+        "pass by the ledger input going quiet instead of being capped.")
+
+
+async def test_the_default_cap_bounds_the_ledger_input_too(tmp_path, monkeypatch, q):
+    """Clause 2: with no key set, the ledger input answers to
+    `MAX_ENQUEUE_PER_TICK` (3), not to the selector's own default 5.
+
+    The other half of the knob being half-read: an operator who sets nothing
+    still gets the declared budget, because the declaration is now the value the
+    caller passes rather than a number the caller ignores.
+    """
+    assert BM.MAX_ENQUEUE_PER_TICK < 5, (
+        "five fixture rows only discriminate a cap of 3 from the selector's "
+        f"default 5 while MAX_ENQUEUE_PER_TICK is below 5; it is "
+        f"{BM.MAX_ENQUEUE_PER_TICK}, so this test can no longer tell the two apart")
+
+    _fixture_ledger(tmp_path, monkeypatch, _five_unmarked_losers())
+
+    await BM.enqueue_if_due(q, {})
+
+    items = _ledger_items(q)
+    assert len(items) == BM.MAX_ENQUEUE_PER_TICK == 3, (
+        f"`src_cfg={{}}` enqueued {len(items)} {BM.KIND_LEDGER} items against the "
+        f"declared {BM.MAX_ENQUEUE_PER_TICK}: the bare call is back to running at "
+        "the selector's own default")
+
+
+async def test_the_ledger_window_is_failure_window_days(tmp_path, monkeypatch, q):
+    """Clause 3: the ledger input's window IS `FAILURE_WINDOW_DAYS`, not the `7`
+    in the selector's signature.
+
+    `days` threading is behaviour-neutral at the shipped value (signature
+    default 7 == `FAILURE_WINDOW_DAYS` 7), so no fixture built at 7 days can
+    tell a threaded call from a bare one. The only observable pin is to move the
+    constant and watch the slate move with it: monkeypatched to 30, a loser
+    stamped 10 days ago becomes eligible, and the same fixture under the shipped
+    7 must not offer it.
+
+    Both halves run against one ledger, with a fresh loser in it as the positive
+    control — an empty offered set under 7 would otherwise read as the window
+    working when it is really the mtime gate never opening.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    old = _ledger_row("BASELINE_900", "bench_window_old", 0.30, round_id="R_old",
+                      created_at=(datetime.now(timezone.utc)
+                                  - timedelta(days=10)).isoformat())
+    fresh = _ledger_row("BASELINE_901", "bench_window_fresh", 0.40, round_id="R_fresh")
+    ledger = _fixture_ledger(tmp_path, monkeypatch, [old, fresh])
+
+    await BM.enqueue_if_due(q, {})
+    offered = {i.payload["loser_task_id"] for i in _ledger_items(q)}
+    assert offered == {"bench_window_fresh"}, (
+        f"under the shipped FAILURE_WINDOW_DAYS=7 the offered set was {offered}; "
+        "the fresh control must be offered and the 10-day-old loser must not be")
+
+    monkeypatch.setattr(BM, "FAILURE_WINDOW_DAYS", 30)
+    import os
+    os.utime(ledger, (time.time() + 10, time.time() + 10))   # re-open the mtime gate
+    await BM.enqueue_if_due(q, {})
+
+    offered = {i.payload["loser_task_id"] for i in _ledger_items(q)}
+    assert offered == {"bench_window_fresh", "bench_window_old"}, (
+        f"with FAILURE_WINDOW_DAYS monkeypatched to 30 the offered set was "
+        f"{offered}: the ledger input is still reading the selector's literal 7, "
+        "so widening the constant would widen nothing")
+
+
+# ---------------------------------------------------------------------------
 # bench-mine: the failed-autonomy-run input (#522)
 #
 # The ledger is not an input this source can rely on — it only grows during an
