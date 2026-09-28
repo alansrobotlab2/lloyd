@@ -169,6 +169,7 @@ s.edges.adjacency() / .degree()        # cached on data_version
 s.aliases.resolve(name) / .set(surface, canonical, kind=…, origin=…)
 s.entities.register(name) / .lookup(name) / .kinds()
 s.facts_idx.for_entity(name, …) / .reindex(paths=None)
+s.facts_idx.for_session(sid) / .count_by_session(sid)   # who wrote it (#1709)
 
 s.export_json(dir)    # legacy shape; called only by the one-shot migration and
                       # the pre-rebuild freeze, into timestamped dirs under

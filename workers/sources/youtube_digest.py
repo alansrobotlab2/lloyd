@@ -66,7 +66,7 @@ from app.paths import LLOYD_HOME, VAULT_ROOT
 from workers.queue import WorkQueue, QueueItem
 from workers.sources._common import (
     WORKER_AUTOMOD_BAN, DrainActive, TurnTimeout, build_skill_prompt,
-    run_prompt_in_session,
+    reconcile_fact_writes, run_prompt_in_session,
 )
 
 logger = logging.getLogger("lloyd-workers.youtube-digest")
@@ -743,8 +743,14 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     stop_reason = run.get("stop_reason")
     parsed = parse_verdict(text, run.get("structured"))
     structured_error = str(run.get("structured_error") or "")
+    # #1709: this source keeps `fact_add` too (its deny list names only the
+    # browser and registry writers), and a digest turn reads a page's own prose.
+    # Its RESULT block claims no fact count, so there is nothing to disagree
+    # with — recording `facts_written` alone is what turns a fact a page talked
+    # the turn into from an invisible row into one named in `runs.meta_json`.
     verdict_meta = {"verdict_source": parsed["source"] if parsed else "none",
-                    "structured_error": structured_error}
+                    "structured_error": structured_error,
+                    **await asyncio.to_thread(reconcile_fact_writes, session_id, "")}
     on_disk = await asyncio.to_thread(_note_is_real, note_path, video_id)
     unexpected = await asyncio.to_thread(_unexpected_vault_writes, vault_before)
 

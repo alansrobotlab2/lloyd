@@ -38,7 +38,7 @@ from app.paths import VAULT_ROOT
 from workers.queue import WorkQueue, QueueItem
 from workers.sources._common import (
     WORKER_AUTOMOD_BAN, DrainActive, TurnTimeout,
-    build_skill_prompt, run_prompt_in_session,
+    build_skill_prompt, reconcile_fact_writes, run_prompt_in_session,
 )
 
 logger = logging.getLogger("lloyd-workers.deep-research")
@@ -460,11 +460,23 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         logger.warning("deep-research #%s changed vault paths outside knowledge/: %s",
                        topic_id, strays[:10])
 
+    # #1709: `FACTS:` is the turn grading its own homework. Reconcile it against
+    # the store's own write record before the finish record is written — the
+    # same posture as the vault diff above: report, never revert.
+    facts_audit = await asyncio.to_thread(
+        reconcile_fact_writes, session_id, parsed["facts"] if parsed else "")
+    if facts_audit.get("facts_mismatch"):
+        logger.warning(
+            "deep-research #%s claimed %s facts, the store holds %s for session %s",
+            topic_id, facts_audit["facts_claimed"], facts_audit["facts_written"],
+            session_id)
+
     extra: dict[str, Any] = {
         "session_id": session_id,
         "skill_embedded_chars": len(skill),
         "verdict_source": parsed["source"] if parsed else "none",
         "structured_error": str(run.get("structured_error") or ""),
+        **facts_audit,
     }
     if on_disk and await asyncio.to_thread(ensure_segment, path):
         extra["segment_added"] = True

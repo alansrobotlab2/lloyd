@@ -868,3 +868,174 @@ async def test_the_degenerate_completion_still_yields_a_verdict_from_the_block(
     assert "diverged" in stored, stored
     assert "raise harness.finalizer.max_tokens" not in stored, stored
     assert registry.get(topic_id)["extra"]["structured_error"] == stored
+
+
+# ───────────────────────── FACTS: reconciled against the store (#1709) ──────
+# The turn holds `fact_add` on purpose (`vault_write` and `fact_add` stay: they
+# are the job, `DISALLOWED` names neither) and it reads attacker-chosen text, so
+# "and record this as a durable fact" reaches the fact store with a real
+# finding's authority. The vault half of that has a post-turn control —
+# `_unexpected_vault_writes` diffs the vault against a baseline — and the facts
+# half had none: the only number anywhere was `FACTS:`, the turn grading its own
+# homework. These nodes drive the real `agent_mcp.facts._fact_add` into a real
+# store retargeted by `kg_store.configure`, so the reconciled quantity is what
+# the store holds, never a call the test staged.
+
+from agent_mcp import facts as FACTS                    # noqa: E402
+from agent_mcp._task_registry import current_session_id  # noqa: E402
+from app import kg_store                                # noqa: E402
+from workers.sources import _common as COMMON           # noqa: E402
+import workers.sources.youtube_digest as Y              # noqa: E402
+
+#: The session id the fake turn reports and writes its facts under — the same
+#: value the source stores in `extra["session_id"]`.
+FACTS_SESSION = "20260928_deep_facts"
+
+
+@pytest.fixture
+def fact_store(tmp_path, monkeypatch):
+    """A real fact store and index, both under `tmp_path`.
+
+    `agent_mcp.facts` and `app.retrieval` read `FACTS_ROOT` as a module global,
+    the same retarget `tests/test_fact_duplicate_guard.py` uses — a stub would
+    only prove the source believes whatever the fake returns.
+    """
+    from agent_mcp import _shared, retrieval
+    root = tmp_path / "facts"
+    root.mkdir()
+    monkeypatch.setattr(_shared, "FACTS_ROOT", root)
+    monkeypatch.setattr(FACTS, "FACTS_ROOT", root)
+    monkeypatch.setattr(retrieval, "FACTS_ROOT", root)
+    kg_store.configure(tmp_path / "kg.sqlite")
+    return root
+
+
+def _turn_writing_facts(text: str, *, writes: Path, add: list[str],
+                        refusals: int = 0, session: str = FACTS_SESSION):
+    """A turn that writes facts through the real tool, under its own session id.
+
+    `refusals` is how many further calls the store refuses as restatements:
+    `_fact_add` answers those `{success: True, skipped: True, duplicate: True}`
+    having written nothing, which is why the reconciled quantity is facts
+    *written* and not calls made — the triage's own session
+    `20260927_185948_deepresearch_4e62.json` carries 14 `fact_add` records
+    against `FACTS: 12`, and a call-count detector would flag that honest turn.
+    """
+    calls = {"n": 0}
+
+    def _add(entity: str, category: str, body: str) -> dict:
+        calls["n"] += 1
+        return FACTS._fact_add({"entity": entity, "category": category,
+                                "fact": body, "confidence": 0.9})
+
+    async def run(prompt, **kwargs):
+        run.seen = kwargs
+        if writes is not None:
+            writes.write_text("# A note\n\n" + "body " * 200, encoding="utf-8")
+        token = current_session_id.set(session)
+        try:
+            for i, body in enumerate(add):
+                _add("Research", "state", f"{body} (finding {i + 1})")
+            for i in range(refusals):
+                _add("Research", "state", f"{add[0]} (finding 1)")
+        finally:
+            current_session_id.reset(token)
+        return {"text": text, "session_id": session, "stop_reason": "stop",
+                "num_turns": 12, "errors": [], "structured": None,
+                "structured_error": ""}
+    run.seen = {}
+    run.calls = calls
+    return run
+
+
+def _block(path: Path, facts_claimed: str) -> str:
+    return (f"Research done.\nRESULT: written\nNOTE: {path}\n"
+            f"FACTS: {facts_claimed}\nSOURCES: 4\n")
+
+
+async def test_a_claim_that_disagrees_with_the_store_is_recorded_on_the_topic(
+        registry, queue, notes, fact_store, monkeypatch):
+    """Clause 1: a turn claiming 0 facts that wrote 2 must be visible without
+    reading its prose."""
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(_block(path, "0"), writes=path,
+                              add=["vLLM pins the grammar per request",
+                                   "an open string field has no ceiling"])
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["status"] == "success"
+    assert turn.calls["n"] == 2, "the turn must write through the real tool"
+    assert out["meta"]["facts_written"] == 2
+    assert out["meta"]["facts_claimed"] == 0
+    assert out["meta"]["facts_mismatch"] == {"written": 2, "claimed": 0}
+    stored = registry.get(topic_id)["extra"]
+    assert stored["facts_mismatch"] == {"written": 2, "claimed": 0}, (
+        "the finish record is where the next reader looks")
+
+
+async def test_an_honest_self_report_sets_no_flag(registry, queue, notes,
+                                                 fact_store, monkeypatch):
+    """Clause 2: agreement is silence — a detector that fires on every run is
+    one nobody reads."""
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(_block(path, "2"), writes=path,
+                              add=["one finding", "another finding"])
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert turn.calls["n"] == 2
+    assert out["meta"]["facts_written"] == 2 and out["meta"]["facts_claimed"] == 2
+    assert "facts_mismatch" not in out["meta"], (
+        f"agreement flagged: {out['meta']['facts_mismatch']}")
+    assert "facts_mismatch" not in registry.get(topic_id)["extra"]
+
+
+async def test_a_refused_duplicate_is_not_a_fact_written(
+        registry, queue, notes, fact_store, monkeypatch):
+    """Clause 3: three calls, two facts. The refusal wrote nothing, so a turn
+    that reports 2 is honest and must not be flagged."""
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(_block(path, "2"), writes=path,
+                              add=["first finding", "second finding"], refusals=1)
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert turn.calls["n"] == 3, (
+        "the third call must reach the store: it is the refusal being counted")
+    assert out["meta"]["facts_written"] == 2
+    assert out["meta"]["facts_claimed"] == 2
+    assert "facts_mismatch" not in out["meta"], (
+        "a self-report that leaves refusals out was flagged as a lie")
+
+
+async def test_recording_a_mismatch_changes_no_fact_and_no_outcome(
+        registry, queue, notes, fact_store, monkeypatch):
+    """Clause 4: detector, not revert — the posture `_unexpected_vault_writes`
+    keeps. Undoing a write would be worse than reporting it."""
+    payload, topic_id, path = _payload(registry, notes)
+    turn = _turn_writing_facts(_block(path, "0"), writes=path,
+                              add=["a fact from the page", "another one"])
+    monkeypatch.setattr(D, "run_prompt_in_session", turn)
+
+    out = await D.execute(_item(payload))
+    assert out["meta"]["facts_mismatch"], "the setup must produce a mismatch"
+    assert out["status"] == "success" and registry.get(topic_id)["status"] == "written", (
+        "a mismatch must not change the topic's outcome")
+    rows = kg_store.store().facts_idx.for_session(FACTS_SESSION)
+    assert len(rows) == 2, "the facts the turn wrote must still be there"
+    for row in rows:
+        assert not row["expired_at"] and not row["invalid_at"], (
+            f"the detector expired a fact: {row['fact'][:40]}")
+
+
+def test_the_reconciler_is_shared_and_silent_when_it_cannot_measure():
+    """The helper guards every source that keeps `fact_add`, and abstains
+    rather than crying wolf: `youtube_digest` holds the tool too (its
+    `DISALLOWED` names only the browser and registry writers) and its RESULT
+    block claims no fact count at all."""
+    assert Y.reconcile_fact_writes is COMMON.reconcile_fact_writes
+    assert D.reconcile_fact_writes is COMMON.reconcile_fact_writes
+    assert COMMON.reconcile_fact_writes("", "3") == {}, (
+        "with no session there is nothing to attribute; inventing a zero-count "
+        "mismatch on every legacy turn would bury the real ones")

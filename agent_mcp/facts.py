@@ -68,6 +68,7 @@ from agent_mcp._shared import (
     _token_overlap,
     _wrap,
     _write_fact_frontmatter,
+    get_bound_session,
 )
 from app.atomic_io import locked_file
 from app.fact_ids import assign_ids as _assign_fact_ids, category_prefix, next_fact_id
@@ -646,6 +647,18 @@ def _fact_add(params: dict) -> dict:
                         "id": fact_id, "created_at": now_iso, "valid_at": params.get("valid_at"),
                         "invalid_at": None, "expired_at": None, "provenance": provenance,
                         "source_doc": source_doc}
+            # #1709: which session wrote this. Stamped on the markdown row, not
+            # only on `facts_idx`, because that table is rebuilt wholesale from
+            # these files (`reindex()` `DELETE FROM facts_idx` first) and a
+            # column alone would be wiped by the next rebuild — the same shape
+            # as the 2026-08-22 loss this module's docstring refuses. It is the
+            # bound session id from the tool call's `_meta`, not a caller
+            # argument: a turn cannot attribute its writes to somebody else.
+            # Empty when the caller has no session (a CLI or a pipeline job),
+            # and then the fact is simply unattributed.
+            writer = get_bound_session()
+            if writer:
+                new_fact["session_id"] = writer
             existing.append(new_fact)
             _assign_fact_ids(existing, category)
             frontmatter["last_updated"] = now_iso

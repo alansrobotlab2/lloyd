@@ -712,3 +712,59 @@ def test_normalize_types_leaves_expired_rows_as_history(db):
     assert db.edges.normalize_types()["candidates"] == 0
     assert db.edges.by_id(old)["type"] == "related-to"
     assert db.edges.by_id(old)["expired_reason"] == "superseded before the migration"
+
+
+# ──────────────── which session wrote a fact, across a rebuild (#1709) ───────
+# A worker turn that keeps `fact_add` has to be reconciliable against its own
+# self-report, which needs per-turn attribution. `facts_idx` is derived and
+# rebuilt wholesale — `reindex()` runs `DELETE FROM facts_idx` first — so a
+# column stamped only at write time would read correctly until the next rebuild
+# wiped it. The value therefore lives in the markdown fact row; the column is a
+# projection of it.
+
+
+def test_a_session_attribution_survives_a_reindex(db, tmp_path):
+    """Clause 5: a fact added under a session is still attributable after
+    `reindex()` rebuilds the index from the markdown."""
+    root = tmp_path / "facts"
+    _fact_file(root, "Lloyd", "state", [
+        {"id": "s-001", "fact": "runs on vLLM", "session_id": "20260928_deep_facts"},
+        {"id": "s-002", "fact": "written by a pipeline job with no session"},
+    ])
+    db.facts_idx.reindex(root=root)
+
+    rows = db.facts_idx.for_session("20260928_deep_facts")
+    assert [r["fact_id"] for r in rows] == ["s-001"], (
+        "the row with no session in its frontmatter must belong to nobody")
+    assert db.facts_idx.count_by_session("20260928_deep_facts") == 1
+    assert db.facts_idx.for_session("") == [] and db.facts_idx.count_by_session("") == 0, (
+        "an empty session id must not match the unattributed rows")
+
+    # The rebuild is the case that matters: `reindex()` deletes every row and
+    # re-reads the files, so this asserts the value came back from the markdown
+    # rather than from anything the writer passed in.
+    db.conn.execute("DELETE FROM facts_idx")
+    assert db.facts_idx.count_by_session("20260928_deep_facts") == 0
+    db.facts_idx.reindex(root=root)
+    assert db.facts_idx.count_by_session("20260928_deep_facts") == 1, (
+        "attribution was lost with the rows it was stored on — the stamp has to "
+        "be in the fact row, or a rebuild silently unattributes every write")
+
+
+def test_an_older_database_gains_the_session_column(db):
+    """A live `kg.sqlite` predates the column and `CREATE TABLE IF NOT EXISTS`
+    will never add it, so the additive migration has to."""
+    # Rebuild the pre-#1709 shape. The index goes first: sqlite will not drop a
+    # column an index depends on.
+    db.conn.execute("DROP INDEX facts_session")
+    db.conn.execute("ALTER TABLE facts_idx DROP COLUMN session_id")
+    assert "session_id" not in {r[1] for r in db.conn.execute(
+        "PRAGMA table_info(facts_idx)")}
+
+    db._init_schema()
+    assert "session_id" in {r[1] for r in db.conn.execute("PRAGMA table_info(facts_idx)")}, (
+        "an open on an existing store left the column absent: every writer would "
+        "then fail its insert, or silently attribute nothing")
+    assert "facts_session" in {r[0] for r in db.conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'")}, (
+        "the migration added the column but left its index behind")

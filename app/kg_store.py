@@ -147,11 +147,18 @@ CREATE TABLE IF NOT EXISTS facts_idx (
     provenance  TEXT,
     expired_at  TEXT,
     invalid_at  TEXT,
-    file_path   TEXT NOT NULL
+    file_path   TEXT NOT NULL,
+    -- Which session wrote the fact (#1709). Derived from the markdown row, so
+    -- it survives reindex(): the value lives in the fact, not here.
+    session_id  TEXT
 );
 CREATE INDEX IF NOT EXISTS facts_entity ON facts_idx(entity);
 CREATE INDEX IF NOT EXISTS facts_file ON facts_idx(file_path);
 CREATE INDEX IF NOT EXISTS facts_source_doc ON facts_idx(source_doc);
+-- `facts_session` is NOT created here: on a database that predates #1709 the
+-- column does not exist yet at this point in the script, and an index on it
+-- would fail the whole executescript and leave the store unopenable. It is
+-- created in `_init_schema`, after the ALTER that adds the column.
 """
 
 
@@ -239,8 +246,16 @@ class KGStore:
             c.execute("INSERT INTO meta(key, value) VALUES ('schema_version', ?) "
                       "ON CONFLICT(key) DO NOTHING", (str(SCHEMA_VERSION),))
             # Additive migrations go here, `queue.py:_init_db` style:
-            #   cols = {r[1] for r in c.execute("PRAGMA table_info(edges)")}
-            #   if "new_col" not in cols: ALTER TABLE edges ADD COLUMN new_col TEXT
+            cols = {r[1] for r in c.execute("PRAGMA table_info(facts_idx)")}
+            if "session_id" not in cols:
+                # #1709: a live database predates the column, and `CREATE TABLE
+                # IF NOT EXISTS` above will never add it. A full `reindex()`
+                # backfills the value from the markdown; until then the column
+                # is NULL for rows whose file has not been re-read.
+                c.execute("ALTER TABLE facts_idx ADD COLUMN session_id TEXT")
+            # After the ALTER, for the reason stated on the index in _SCHEMA.
+            c.execute("CREATE INDEX IF NOT EXISTS facts_session "
+                      "ON facts_idx(session_id)")
 
     def close(self) -> None:
         with self._lock:
@@ -1231,12 +1246,17 @@ class _FactsIdx:
                 _jsonable(f.get("created_at")), _jsonable(f.get("valid_at")),
                 f.get("source_doc"), f.get("source_hash"), f.get("provenance"),
                 _jsonable(f.get("expired_at")), _jsonable(f.get("invalid_at")), rel,
+                # #1709: attribution is read off the fact row, never off a
+                # write-time argument, so a rebuild from the markdown reproduces
+                # it exactly. An empty string in the row is "unattributed".
+                (f.get("session_id") or None),
             ))
         return rows
 
     _INSERT = ("INSERT INTO facts_idx(entity, category, fact_id, text_hash, fact, confidence, "
-               "created_at, valid_at, source_doc, source_hash, provenance, expired_at, invalid_at, file_path) "
-               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+               "created_at, valid_at, source_doc, source_hash, provenance, expired_at, invalid_at, "
+               "file_path, session_id) "
+               "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
 
     def reindex(self, paths: Optional[Iterable[Path]] = None, root: Optional[Path] = None,
                 *, register_entities: bool = True) -> dict[str, int]:
@@ -1311,6 +1331,26 @@ class _FactsIdx:
         rows = self._s._query("SELECT * FROM facts_idx WHERE " + " AND ".join(where) + " ORDER BY rowid",
                               tuple(params))
         return [self._row(r) for r in rows]
+
+    def for_session(self, session_id: str) -> list[dict]:
+        """Every row the index attributes to one session, oldest first (#1709).
+
+        A turn's own write record: what a worker reconciles its self-reported
+        count against. Empty for a session that wrote nothing, and for any
+        session before #1709 — nothing before that carries the stamp.
+        """
+        if not session_id:
+            return []
+        rows = self._s._query(
+            "SELECT * FROM facts_idx WHERE session_id=? ORDER BY rowid", (session_id,))
+        return [self._row(r) for r in rows]
+
+    def count_by_session(self, session_id: str) -> int:
+        """How many facts one session's writes account for. See `for_session`."""
+        if not session_id:
+            return 0
+        return int(self._s._query(
+            "SELECT COUNT(*) FROM facts_idx WHERE session_id=?", (session_id,))[0][0])
 
     def count(self, entity: Optional[str] = None, active_only: bool = False) -> int:
         sql, params = "SELECT COUNT(*) FROM facts_idx", []

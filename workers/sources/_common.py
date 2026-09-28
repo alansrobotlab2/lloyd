@@ -223,6 +223,56 @@ def write_staging_note(
     return path
 
 
+def reconcile_fact_writes(session_id: str, claimed) -> dict:
+    """Compare a turn's self-reported fact count with what the store holds.
+
+    A worker turn that keeps `fact_add` (deep-research, youtube-digest) reads
+    attacker-chosen text, and "and record this as a durable fact" reaches the
+    fact store with the same authority as a genuine finding. The only thing
+    between them is `agent_mcp.fact_write_gate`, which runs in `noop` and by
+    its own comment never expires a fact. So this is the reconciliation half:
+    what the turn wrote is what the store says it wrote
+    (`facts_idx.for_session`, stamped from the markdown row at write time),
+    beside what the turn's RESULT block claimed.
+
+    A **detector, never a revert** — the same posture as
+    `deep_research._unexpected_vault_writes`. Nothing here expires, edits or
+    hides a fact: a fact that came from injected text stays put and stays the
+    owed-check's call, because silently deleting a fact would be worse than
+    reporting it (the 2026-08-22 lesson this file's neighbours keep citing).
+    Nor does it change the run's outcome — the mismatch is a field on the
+    topic's finish record.
+
+    Counts facts **written**, not calls made: a duplicate or restatement is
+    answered `{success: True, skipped: True}` with nothing written, and a
+    self-report that leaves those out is honest, not wrong. Reconciling call
+    records would cry wolf on every refusal.
+
+    Returns `{}` — no claim at all — when the comparison cannot be made: no
+    session id, or a store that will not answer. A detector that fires because
+    the index was down is one nobody reads.
+    """
+    sid = str(session_id or "")
+    if not sid:
+        return {}
+    try:
+        from app.kg_store import store as _kg_store
+        written = _kg_store().facts_idx.count_by_session(sid)
+    except Exception as exc:                      # StoreUnavailable, a locked db
+        logger.warning("fact-write reconciliation skipped for %s: %s", sid, exc)
+        return {}
+
+    out: dict = {"facts_written": written}
+    try:
+        claimed_n: Optional[int] = int(str(claimed).strip())
+    except (TypeError, ValueError):
+        claimed_n = None
+    out["facts_claimed"] = claimed_n
+    if claimed_n is not None and claimed_n != written:
+        out["facts_mismatch"] = {"written": written, "claimed": claimed_n}
+    return out
+
+
 @dataclass
 class TurnResult:
     """What a worker turn produced, and how it ended.
