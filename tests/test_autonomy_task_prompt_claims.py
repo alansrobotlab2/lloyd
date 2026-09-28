@@ -17,7 +17,7 @@ files is dead text — is owned by `~/obsidian/backlog/951-*.md`. What this file
 pins is the #47 instance and the seam's delivery property, so that neither can
 quietly come back.
 
-Six of the ten tests read the live `~/obsidian` and carry `@live_vault`, which
+Seven of the fourteen tests read the live `~/obsidian` and carry `@live_vault`, which
 the gate deselects (`pytest.ini:6-13`). The record, measured 2026-09-13: EVERY
 automated pytest invocation in the tree passes `-m "not live_vault"`
 (`gate.py:290`, `gate.py:918`, and the review rung's sandbox command at
@@ -25,14 +25,26 @@ automated pytest invocation in the tree passes `-m "not live_vault"`
 or for a review that writes its own command. That gap is not this item's to fix and
 is already owned, with a measured case list, by **backlog #979**
 (`~/obsidian/backlog/979-live-vault-tests-run-on-no-automated-rung-so-a-pin.md`);
-until it closes, read the six live nodes as pins a human or a review executes, and
-read the four vault-free nodes below as the part the loop enforces by itself: the
+until it closes, read the seven live nodes as pins a human or a review executes, and
+read the seven vault-free nodes below as the part the loop enforces by itself: the
 extractor self-check, the `_build_task_prompt` mechanism test, the end-to-end
-`run_task` delivery test, and the `CLAUSE_NODES` self-check. (The round branch also
+`run_task` delivery test, the two #1633 long-skill delivery nodes, the `CLAUSE_NODES`
+self-check and the mark-scope self-check. (The round branch also
 carried a clause-5 diff test and its surface-filter self-check; both read the
 round's own `git diff` and were dropped when the file was landed by hand, #1413.
 `fact_check` was retired from the tool catalog on 2026-09-23, so the fixtures below
 use `fact_get` where the branch used it.)
+
+What #1633 adds is not a claim about the task file but about the SKILL.md's length.
+`app/skill_embed.py:4-8` records as prose that the chat route clips a skill to
+`prefetch.SKILL_BODY_MAX` (6,000 characters) while the autonomy route "splice[s] the
+whole file in with no cap". Nothing tested the second half, and the longest skill body
+any vault-free node here hands to `_build_task_prompt` was `_SKILL_999`, 57 characters,
+so a clip anywhere on the autonomy route would have dropped 10,915 of the 16,915
+characters of `~/obsidian/skills/kg-mention-classifier/SKILL.md` — its whole Report
+contract — with this file green. The `# ── #1633` section below the `run_task` node
+carries why the enforced assertion is whole-body delivery rather than the preflight
+facts this item was worded as grepping for.
 
 Red was measured with `-m ""`, `pytest tests/test_autonomy_task_prompt_claims.py`,
 on 2026-09-13 against the pre-fix vault (`git -C ~/obsidian checkout HEAD --` those
@@ -78,7 +90,7 @@ from pathlib import Path
 
 import pytest
 
-from app import autonomy
+from app import autonomy, prefetch
 
 live_vault = pytest.mark.live_vault
 
@@ -449,7 +461,12 @@ def _drive_one_run(monkeypatch, tmp_path, *, task, skill_text):
     monkeypatch.setattr("app.event_log.EVENT_LOGS_DIR", tmp_path / "events")
     monkeypatch.setattr("app.event_log.BLOBS_DIR", tmp_path / "events" / "blobs")
 
-    asyncio.run(autonomy.run_task(_TASK_999["id"]))
+    # The id comes off the task the caller passed, not off `_TASK_999`: #1633's
+    # long-skill node drives this same helper with its own task, and the id selects
+    # the run-record directory (`runs/<id>/`) and the evidence-pilot branch of
+    # `_evidence_prompt` (`app/autonomy.py`, `EVIDENCE_PILOT_TASK_IDS`). Both callers
+    # use a non-pilot id, so what the engine receives is the built prompt unchanged.
+    asyncio.run(autonomy.run_task(task["id"]))
     return captured
 
 
@@ -563,6 +580,204 @@ def test_the_runner_delivers_the_skill_and_records_what_it_delivered(monkeypatch
         "margin on the synthetic prompt: 19 chars (marker at 480, window 499 of a "
         "573-char prompt); if the silent-hint preamble grew, that is the cause, not "
         "this item")
+
+
+# ── #1633: how much of the SKILL.md survives the trip ─────────────────────────
+#
+# `app/skill_embed.py:4-8` is the only place that states, and states as prose, how
+# much of a SKILL.md each route carries: the chat turn-start injection clips to
+# `prefetch.SKILL_BODY_MAX` (`app/prefetch.py:54`, pinned by the chat route at
+# `tests/test_prefetch.py:1219-1233`), while `autonomy._build_task_prompt`
+# "splice[s] the whole file in with no cap and carr[ies] it for the run". No node
+# tested the second half of that sentence, and the `run_task` node above drives a
+# 57-character fixture skill — so a clip added anywhere on the autonomy route would
+# have cut #74's 16,915-character `skills/kg-mention-classifier/SKILL.md`
+# (`~/obsidian`, measured 2026-09-28) down to its first 6,000 characters with this
+# file green: 10,915 characters, 65% of the file, the whole Report contract.
+#
+# Why the tail and not the preflight facts the item names: those facts sit at
+# characters 3,577 (`## Preflight facts`), 3,815 (`127.0.0.1:8096`), 4,387
+# (`_endpoint_alive`) and 5,218 (`ps -eo pid,etime,cmd`) — every one of them INSIDE
+# a 6,000-character clip. A grep for the markers alone would therefore stay green
+# through exactly the regression that motivated the item, which is why the two nodes
+# below pin whole-body delivery (subsuming the markers) and the live node under #979
+# pins the markers individually.
+
+#: Imported, not transcribed, so the fixture straddles whatever the cap is today and
+#: a re-tuned cap reddens the fixture's own self-check rather than hiding it.
+_CAP = prefetch.SKILL_BODY_MAX
+
+#: One marker on each side of the cap. The head marker is what a clip KEEPS — its
+#: presence proves nothing — and the tail marker is what a clip drops, so the tail is
+#: the only one of the pair with teeth. The head exists to make the fixture's own
+#: straddle check in `_long_skill` meaningful.
+_LONG_HEAD_MARKER = "## Head clause 4a1e — inside the cap"
+_LONG_TAIL_MARKER = "## Tail clause 9f3c — past the cap"
+
+_LONG_TASK = {
+    "id": 997, "name": "long-skill seam probe", "skill_name": "long-fixture",
+    "description": "Reports today's classifier verdicts.",
+    "body": "Append the archive index by hand.",   # never rendered: #463 / #951
+}
+
+
+def _long_skill() -> str:
+    """A synthetic SKILL.md of the same order as #74's, with a marker either side of
+    the cap.
+
+    Sized against the file whose silent loss produced the item (16,915 characters,
+    17,037 bytes, 2026-09-28) rather than against a round number, because the defect
+    being pinned is proportional: at #74's size a 6,000-character cap is a 65% loss,
+    and at 6,001 it is a rounding error. The three asserts at the end are the
+    fixture's own teeth — a fixture that quietly stopped straddling the cap would
+    otherwise turn both nodes below into a test that cannot fail.
+    """
+    filler = "".join(
+        f"step {i:03d}: report the classifier's verdict, never the probe's exit "
+        "code, and cite the file every row came from.\n"
+        for i in range(140))
+    skill = ("# long-fixture\n\n"
+             f"{_LONG_HEAD_MARKER}\nThis section is what a clip keeps.\n\n"
+             + filler + "\n"
+             f"{_LONG_TAIL_MARKER}\n"
+             "This section is what a clip drops, and it is the Report contract.\n")
+    assert skill.index(_LONG_HEAD_MARKER) < _CAP, (
+        f"the head marker moved to {skill.index(_LONG_HEAD_MARKER)}, past the "
+        f"{_CAP}-character cap, so it no longer marks the half a clip keeps")
+    assert len(skill) > _CAP + 6000, (
+        f"the fixture is {len(skill)} characters, not meaningfully past the "
+        f"{_CAP}-character cap — it has to stay long enough to stand in for #74's "
+        "16,915-character skill or this node stops measuring the loss it names")
+    assert skill.index(_LONG_TAIL_MARKER) > _CAP, (
+        f"the tail marker sits at {skill.index(_LONG_TAIL_MARKER)}, inside the "
+        f"{_CAP}-character cap: a clip would keep it, and the two nodes below could "
+        "not fail")
+    return skill
+
+
+def test_a_skill_past_the_chat_cap_reaches_the_built_prompt_whole():
+    """#1633 clause 1: the autonomy prompt is built from a long skill WHOLE, because
+    today the only thing that says so is a sentence in `app/skill_embed.py`.
+
+    `skill in prompt` is the assertion #463's gate review struck from the live node
+    below, on the grounds that `_build_task_prompt` concatenates its argument and the
+    substring test pinned the function's shape. That objection does not reach here:
+    the claim being graded THERE was about tool names, for which whole-body presence
+    said nothing, while the claim HERE *is* whole-body delivery. The node fails the
+    instant a clip appears anywhere between the SKILL.md and the prompt — at the call
+    site (`app/autonomy.py:3524`, where `record_skill_embed` currently records
+    `embedded_chars=len(skill_content)` as a claim rather than a measurement) or
+    inside the builder itself.
+
+    Red was measured in this round's worktree, not argued. Putting
+    `skill_content = skill_content[:6000]` at the top of the builder reddens this node
+    on the tail assertion first, and 11 of the file's other 13 nodes stay green — the
+    short-skill mechanism test and the short-skill delivery test among them, because a
+    57-character fixture cannot be clipped. That is the gap this node exists to close,
+    and `test_the_runner_delivers_a_long_skill_whole_to_engine_and_store` measured the
+    mirror case. No vault read; the gate runs it.
+    """
+    skill = _long_skill()
+    prompt = autonomy._build_task_prompt(_LONG_TASK, skill)
+
+    assert _LONG_TAIL_MARKER in prompt, (
+        f"the prompt stops at the cap: bytes past {_CAP} of a {len(skill)}-character "
+        "skill are gone, which on #74's real skill is 65% of the file — the whole "
+        "Report contract. `app/skill_embed.py:4-8` promises this route splices the "
+        "whole file in uncapped; either keep that promise or fix the sentence and "
+        "#624's cost model with it")
+    assert skill in prompt, (
+        f"the skill body reached the prompt only in part ({len(prompt)} chars built "
+        f"from a {len(skill)}-char skill): no clip is expected on this route")
+    assert _LONG_HEAD_MARKER in prompt, (
+        "even the part inside the cap is gone, so this is a different failure from "
+        "the one above — the skill stopped reaching the prompt at all")
+    assert "Reports today's classifier verdicts." in prompt, (
+        "the description stopped reaching a long-skill prompt")
+
+
+def test_the_runner_delivers_a_long_skill_whole_to_engine_and_store(monkeypatch,
+                                                                   tmp_path):
+    """#1633 clause 2: the same promise across the two boundaries a clip can sit
+    behind, with the real `run_task`.
+
+    The node above pins the built string. A cap could equally be applied after the
+    builder and before the engine, or the engine could be handed the whole prompt
+    while the session store recorded a window of it — the second is not hypothetical,
+    since the run record already records only `prompt[:500]` (`app/autonomy.py`).
+    This drives the real runner with the same fixture and asserts the two artefacts
+    that matter: the message list the engine received, and the session's stored user
+    row, which the file's own docstring calls the only on-disk artefact an ABSENCE
+    claim can be made from.
+
+    Measured the other way round from clause 1's node: clipping the delivered message
+    to `prompt[:6000]` at `app/autonomy.py`'s message list reddens THIS node alone
+    (1 failed, 13 passed), because the builder still returns the whole body. The pair
+    is what covers the route — neither node sees the other's cut point. No vault read;
+    the gate runs it.
+    """
+    skill = _long_skill()
+    out = _drive_one_run(monkeypatch, tmp_path, task=_LONG_TASK, skill_text=skill)
+    assert out.get("messages"), "run_task never reached the engine"
+
+    delivered = out["messages"][0]["content"]
+    assert isinstance(delivered, str) and delivered, (
+        f"engine message content is {type(delivered).__name__}, not the string the "
+        "assertions below assume — re-read how `run_task` builds its message list "
+        "before trusting any of them")
+    assert skill in delivered, (
+        f"the engine was handed less than the {len(skill)}-character skill: a clip on "
+        "the delivery route is invisible to the builder-level node above, which is "
+        "why this node exists")
+    assert _LONG_TAIL_MARKER in delivered, (
+        "the tail of the skill never reached the worker: everything it was supposed "
+        "to do past the cap is dead text, and #74's preflight facts would be the "
+        "first casualty on the real task")
+    assert "Append the archive index by hand." not in delivered, (
+        "the task body reached the worker on a long-skill prompt too: the #463 "
+        "mechanism moved, see #951 before changing this")
+
+    sessions = list((tmp_path / "sessions").glob("*.json"))
+    assert len(sessions) == 1, f"expected one session, got {len(sessions)}"
+    stored = json.loads(sessions[0].read_text(encoding="utf-8"))
+    user_rows = [m for m in stored["messages"] if m.get("role") == "user"]
+    assert user_rows, "the session stored no user row"
+    stored_text = "\n".join(c.get("text", "") for c in user_rows[0]["content"])
+    assert stored_text == delivered, (
+        f"the store kept {len(stored_text)} of the {len(delivered)} characters that "
+        "were delivered, so the transcript a reviewer or an owed-check reads is no "
+        "longer what the worker read")
+    assert len(stored_text) > _CAP, (
+        f"the stored user row is {len(stored_text)} characters, at or under the "
+        f"{_CAP}-character chat cap: the store became a window, and an absence claim "
+        "made from it (the #1563 post-run check, the `:8000` re-derivation) is now "
+        "unsound")
+
+    # The run record, asserted for what it CANNOT show. Its `## Prompt` is a
+    # `prompt[:500]` window; measured here it is 499 characters and the skill begins
+    # at 476, so the record displays 23 characters of a 15,731-character skill and
+    # neither marker survives the cut (the head marker starts at 492, eight characters
+    # from the edge). A reviewer who reads `## Prompt` to decide whether a run got its
+    # skill is reading a prefix that looks identical whether the body arrived or not —
+    # exactly the reading #1563's owed post-run check would take if it read the record
+    # instead of the session row. Pinned, not commented.
+    records = list((tmp_path / "runs" / str(_LONG_TASK["id"])).glob("run_*.md"))
+    assert len(records) == 1, f"expected one run record, got {len(records)}"
+    record = records[0].read_text(encoding="utf-8")
+    assert "## Prompt" in record, "the record stopped showing what it delivered"
+    head = record.split("## Prompt", 1)[1].split("## Response")[0]
+    quoted = head.strip().rstrip(".").rstrip()
+    assert quoted and delivered.startswith(quoted), (
+        "the record's `## Prompt` is no longer the head of the prompt it delivered")
+    assert len(quoted) <= 500, (
+        f"the record shows {len(quoted)} characters, past the documented 500-char "
+        "slice: the assertion below assumes the window cannot reach the skill's tail")
+    assert _LONG_TAIL_MARKER not in head, (
+        "the record window now reaches the skill's tail, so `## Prompt` can be read "
+        "as evidence of whole-body delivery after all: re-check #1633's owed post-run "
+        "check (written to read the session row for exactly this reason) before "
+        f"treating this red as a defect, then update it with the measured window — now "
+        f"{len(quoted)} characters")
 
 
 @live_vault
@@ -693,6 +908,124 @@ def test_the_contract_lives_in_files_tracked_on_the_vault_main():
     for rel in (TASK_FILE.relative_to(VAULT), SKILL_FILE.relative_to(VAULT)):
         assert git("ls-files", "--error-unmatch", str(rel)).returncode == 0, (
             f"{rel} is not tracked in the vault — the land would commit nothing")
+
+
+#: #74's three preflight facts, each with what it stops a run from getting wrong.
+#: Transcribed from `~/obsidian/skills/kg-mention-classifier/SKILL.md`, which is where
+#: `~/obsidian` commit `5afb1fd4` ("make kg-mention-classifier SKILL.md the
+#: authoritative run-to-run surface", #1563) put them: the 09-26 run had re-derived
+#: `:8000` from memory and reported an outage that did not exist.
+_PREFLIGHT_FACTS = {
+    "127.0.0.1:8096": "the endpoint the run must probe",
+    "_endpoint_alive": "the skill's own words for the only honest probe",
+    "ps -eo pid,etime,cmd": "the writer check that tells a quiet window apart from a "
+                            "dead pipeline",
+}
+
+
+@live_vault
+def test_the_preflight_facts_of_the_kg_classifier_skill_reach_the_prompt():
+    """#1633 clause 3, against the live skill, with each fact pinned by name.
+
+    `_load_skill_content` and `_build_task_prompt` are two of the three calls the
+    scheduler makes in `run_task`; the third, `_parse_task_file`, is exercised against
+    the live tree by `test_every_fact_tool_the_dream_task_claims_reaches_the_prompt`.
+
+    READ THE MARK — it is not decoration here. Every automated pytest invocation in
+    this tree passes `-m "not live_vault"` (the `pytest.ini` markers block; measured
+    node-by-node at the top of this file), so NO gate rung executes this node. An
+    author editing these three facts out of the skill stays unpinned until #979
+    closes, and that is the half of #1633 the item records as a ruling still owed, not
+    as work this round did. What the loop DOES enforce is that the whole body survives
+    the trip — the two nodes above — which is the property these markers depend on:
+    they sit at characters 3,577 to 5,218 of a 16,915-character file, all inside the
+    6,000-character chat cap, so no cap regression can take them and no marker-only
+    test can see one.
+    """
+    skill = autonomy._load_skill_content("kg-mention-classifier")
+    assert skill, (
+        "kg-mention-classifier did not load. `_load_skill_content` resolves a slug to "
+        "~/obsidian/skills/<slug>/SKILL.md and task #74 names it as its `skill_name`, "
+        "so a real run would have died at `Skill not found` before a prompt was built")
+    assert len(skill) > _CAP, (
+        f"the live skill is {len(skill)} characters, no longer past the {_CAP}-char "
+        "chat cap, so #1633's loss model (65% of the file) and the two enforced nodes "
+        "standing in for it both need re-measuring")
+    prompt = autonomy._build_task_prompt(
+        {"id": 74, "name": "KG mention classifier",
+         "skill_name": "kg-mention-classifier", "description": ""}, skill)
+    assert skill in prompt, (
+        f"the live skill reached the prompt only in part: {len(prompt)} characters "
+        f"built from a {len(skill)}-character skill. The uncapped promise of "
+        "`app/skill_embed.py:4-8` broke, and everything past the cut is dead text for "
+        "the run")
+    for fact, why in sorted(_PREFLIGHT_FACTS.items()):
+        assert fact in prompt, (
+            f"the #74 prompt no longer carries {fact!r} — {why}. Commit 5afb1fd4 put "
+            "it in the skill because the 2026-09-26 run re-derived the endpoint from "
+            "memory and reported an outage that was not there; removing it re-arms "
+            "that failure. (#1633 clause 3 — and no automated rung runs this node; "
+            "see #979)")
+
+
+#: The nodes that read the live `~/obsidian`, and the nodes that do not — transcribed
+#: from the decorators below in the same spirit as `PINNED_CLAUSES` above, so a mark
+#: appearing or disappearing is a red rather than a quiet change to which half the
+#: loop enforces. #1633 clause 4 is exactly this split: of the three nodes that round
+#: added, only the preflight-facts node is on the live list, because the two delivery
+#: nodes are synthetic and have to fire on every gate.
+LIVE_VAULT_NODES = frozenset({
+    "test_every_fact_tool_the_dream_task_claims_reaches_the_prompt",
+    "test_the_dream_task_instructs_no_fact_tool_the_skill_lacks",
+    "test_kg_contradiction_resolution_has_exactly_one_named_owner",
+    "test_the_dream_skill_keeps_the_fact_store_out_of_scope",
+    "test_the_contract_lives_in_files_tracked_on_the_vault_main",
+    "test_the_map_covers_every_clause_the_item_numbers",
+    "test_the_preflight_facts_of_the_kg_classifier_skill_reach_the_prompt",
+})
+
+ENFORCED_NODES = frozenset({
+    "test_the_claim_extractor_actually_extracts",
+    "test_the_prompt_is_built_from_the_skill_and_description_never_the_body",
+    "test_the_runner_delivers_the_skill_and_records_what_it_delivered",
+    "test_a_skill_past_the_chat_cap_reaches_the_built_prompt_whole",
+    "test_the_runner_delivers_a_long_skill_whole_to_engine_and_store",
+    "test_every_clause_names_a_node_that_exists",
+    "test_only_the_nodes_that_read_the_vault_carry_the_live_mark",
+})
+
+
+def test_only_the_nodes_that_read_the_vault_carry_the_live_mark():
+    """#1633 clause 4: which half of this file the loop enforces is itself asserted,
+    not commented.
+
+    Both directions are real failures. A mark dropped from a vault-reading node puts a
+    file the round cannot control onto a hard gate, where it reddens the next author
+    for a nightly writer's edit — the reason the `pytest.ini` marker block exists. A
+    mark added to a synthetic node retires a pin in silence, which is the shape of
+    the gap this item was filed from: the promise that the autonomy route carries a
+    skill whole lived only in `app/skill_embed.py`'s docstring, where no rung reads
+    it. `test_the_map_covers_every_clause_the_item_numbers` is the vault-reading twin
+    of this check; this one needs no vault, so the gate runs it.
+    """
+    import sys
+    mod = sys.modules[__name__]
+    tests = {n for n in vars(mod)
+             if n.startswith("test_") and callable(getattr(mod, n, None))}
+    assert tests, "the module holds no test callables; this scan is measuring nothing"
+    marked = {n for n in tests
+              if any(getattr(m, "name", "") == "live_vault"
+                     for m in getattr(getattr(mod, n), "pytestmark", ()))}
+    assert marked == set(LIVE_VAULT_NODES), (
+        f"the mark moved: {sorted(marked ^ set(LIVE_VAULT_NODES))} changed hands "
+        "between the enforced half and the human half. A mark removed from a "
+        "vault-reading node puts the vault on the gate; a mark added to a fixture node "
+        "retires a pin nobody will notice. Reconcile the decorator with the two lists")
+    enforced = tests - marked
+    assert enforced == set(ENFORCED_NODES), (
+        f"the enforced set drifted: {sorted(enforced ^ set(ENFORCED_NODES))}. The two "
+        "lists are a transcription of the module's own nodes, and the module "
+        "docstring's counts (\"Seven of the fourteen\") are a transcription of these")
 
 
 def test_every_clause_names_a_node_that_exists():
