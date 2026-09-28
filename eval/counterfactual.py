@@ -668,6 +668,42 @@ def score_pair(record: dict, orig_result: dict, orig_seeds: list[str],
     }
 
 
+def unobserved_pins(block: dict | None) -> list[str]:
+    """Declared pins that matched no retrieved row in EITHER arm.
+
+    #1640's companion to `counterfactual_pinned_rate`. `score_pair` can only
+    compare a pin it can see: `was` and `now` are the pin's presence in each arm,
+    the churn test sits behind `if was != now` and the fact-churn test behind
+    `if was and now`. A pin neither arm attributed has `was == now == False`,
+    matches neither branch, and so is never appended to `pinned_failures` — the
+    query's `counterfactual_pinned` stays True and the query is counted in
+    `counterfactual_n_pinned`. On nightly-20260927-20260927-060304 that is 18 of
+    the 52 scored pins, on a run that published a pinned rate of 0.962. The rate
+    is therefore an observed agreement over the rest, and this names how much of
+    it was never observed.
+
+    Pure over the block `score_pair` already wrote — `expected_pinned`,
+    `retrieved`, `retrieved_variant` — so every baseline in the trend window
+    re-summarizes from its stored artifact with no retrieval re-run and no
+    per-record rewrite. The two candidate sets come back normalized because
+    `_retrieved` normalized them on the way in, and `_match` normalizes only the
+    needle; `_norm` is applied here to make the two meet.
+
+    An empty list is NOT a claim that every pin was seen. A record that declares no
+    pin returns [] for the same reason it returns `pinned_unscored: True`, and a
+    pin that was observed and broken is in `pinned_failures`, not here. The count
+    is read beside `counterfactual_n_pinned`, never alone — which is why it counts
+    pins while that counts records, and the two coincide exactly while every
+    scored query declares one pin (true of every nightly artifact so far).
+    """
+    pins = list((block or {}).get("expected_pinned") or [])
+    if not pins:
+        return []
+    arms = [set(map(_norm, block.get(key) or []))
+            for key in ("retrieved", "retrieved_variant")]
+    return [pin for pin in pins if not any(_match(pin, arm) for arm in arms)]
+
+
 def label_failures(records: list[dict]) -> list[dict]:
     """Cause labels over the per-query counterfactual blocks.
 

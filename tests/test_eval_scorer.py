@@ -1614,3 +1614,126 @@ def test_no_gold_bearing_companion_survives_in_the_artifact_or_on_the_page(capsy
     ev.print_table(_mixed_gold_records(), ev.summarize(_mixed_gold_records()))
     out = capsys.readouterr().out
     assert "gold_bearing" not in out, out
+
+
+# ── #1640: the unobserved-pin companion on the counterfactual pinned leg ───────
+#
+# `score_pair` guards its only pin comparison with `if was and now`, so a pin no
+# arm attributed is a PASS and sits inside `counterfactual_n_pinned`: 18 of the 52
+# scored pins on nightly-20260927-20260927-060304 observed nothing, on a run that
+# published `counterfactual_pinned_rate` 0.962. #1640's ruling is the #1600 shape —
+# publish the companion denominator beside the shipped metric and explicitly leave
+# the headline alone — with the difference that the remainder here is never moved
+# into the rate: the trend window is not to be rewritten (#541 reserved the gold
+# file, and re-basing a rate is a person's call, not a round's).
+
+def _pin_record(qid: str, pins: list[str], retrieved: list[str],
+                variant: list[str], *, pinned=True) -> dict:
+    """A record shaped like a nightly one, with a stored counterfactual block.
+
+    Only the three keys the companion reads are load-bearing
+    (`expected_pinned`, `retrieved`, `retrieved_variant`); `scoring` is filled in
+    because `summarize` averages the rest of the legs off it, and `pinned` is the
+    verdict `score_pair` reached for the same pin list, so the fixture states the
+    pin leg and its stored evidence in one place.
+    """
+    return {"id": qid, "query": f"query {qid}", "category": "single",
+            "seeds_extracted": [], "result_summary": {}, "error": None,
+            "latency_ms": 10.0,
+            "expected": {"entities": ["Some Entity"], "docs": ["knowledge/x.md"]},
+            "scoring": {"entity_hit": True, "doc_hit": True, "entity_recall": 1.0,
+                        "doc_recall": 1.0, "rr_doc": 1.0, "ndcg10": 1.0,
+                        "fact_entity_recall": 1.0, "first_doc_rank": 1,
+                        "counterfactual_moved_rate": 1.0,
+                        "counterfactual_pinned_rate": (
+                            None if pinned is None else (1.0 if pinned else 0.0))},
+            "counterfactual": {"expected_pinned": list(pins),
+                               "retrieved": sorted(retrieved),
+                               "retrieved_variant": sorted(variant),
+                               "counterfactual_pinned": pinned}}
+
+
+def _unobserved_run_records() -> list[dict]:
+    """Five queries covering every state a scored pin can be in.
+
+    Three pins observed nothing (one query declaring one, another declaring two),
+    one pin was observed and failed, one query declares no pin at all — so the
+    companion count, the rate and the two denominators are all DIFFERENT numbers
+    here (3, 0.75, 4 and 5), and no two of them can be satisfied by the same
+    implementation bug.
+    """
+    return [
+        _pin_record("pin-seen", ["lloyd"], ["lloyd", "vllm"], ["lloyd", "tensorrt-llm"]),
+        _pin_record("pin-missed", ["supervisor"], ["lloyd", "vllm"],
+                    ["tensorrt-llm", "lloyd"]),
+        _pin_record("both-pins-missed", ["qmd", "browser"], ["lloyd"],
+                    ["tensorrt-llm"]),
+        _pin_record("pin-churned", ["kg"], ["kg", "lloyd"], ["lloyd"], pinned=False),
+        _pin_record("no-pin-declared", [], ["lloyd"], ["tensorrt-llm"], pinned=None),
+    ]
+
+
+def test_summarize_publishes_the_unobserved_pin_count_beside_the_four_rates():
+    """Clause 2: the count of scored pins that observed nothing is a key of
+    `summary.overall`, computed over the records `summarize` is already handed.
+
+    No retrieval and no per-record rewrite — the three keys it reads are the ones
+    every nightly artifact has stored since #541, which is what lets the whole
+    trend window be re-summarized from disk. And `None`, never 0, when the run
+    scored no pin at all: an artifact from before the block, or the automod baseline
+    arm, has no reading to report rather than a clean one.
+    """
+    overall = ev.summarize(_unobserved_run_records())["overall"]
+    for key in ("counterfactual_moved_rate", "counterfactual_pinned_rate",
+                "counterfactual_n_moved", "counterfactual_n_pinned",
+                "counterfactual_n_unobserved_pins"):
+        assert key in overall, key
+    assert overall["counterfactual_n_unobserved_pins"] == 3
+    assert overall["counterfactual_n_pinned"] == 4
+    assert overall["n_queries"] == 5
+
+    # The count comes off data already IN the record, so it survives the artifact
+    # round trip: the records written to JSON and read back re-summarize to the same
+    # companion. That is the property that lets a baseline already in the trend
+    # window be re-read — nightly-20260927 re-summarizes to 18 — without re-running
+    # retrieval against a vault that has moved since.
+    revived = ev.summarize(json.loads(json.dumps(_unobserved_run_records())))["overall"]
+    assert revived["counterfactual_n_unobserved_pins"] == 3
+
+    no_pins = ev.summarize([_pin_record("no-pin-declared", [], ["lloyd"],
+                                        ["tensorrt-llm"], pinned=None)])["overall"]
+    assert no_pins["counterfactual_n_pinned"] == 0
+    assert no_pins["counterfactual_n_unobserved_pins"] is None, (
+        "a run that scored no pin has no verdict, not a measured zero")
+
+
+def test_the_published_counterfactual_rates_do_not_move_when_the_companion_lands():
+    """Clause 3, mirroring `test_the_published_hit_rates_do_not_move_when_the_companion_lands`.
+
+    The four shipped keys keep their values AND their definitions, recomputed here
+    from the same records the summary was built from rather than compared to a
+    remembered number — so the node goes red the moment anyone reclassifies the
+    unobserved pins instead of only reporting them. On this record set three of the
+    four scored pins observed nothing, and the rate still counts all four:
+    `counterfactual_pinned_rate` is 0.75 (the one churned pin is the only observed
+    failure), not 0.25 and not a mean over the single pin that was seen in both
+    arms, and `counterfactual_n_pinned` is still 4, not 1.
+
+    That is the ruling on #1640: either remedy moves every prior night's
+    comparison, which the item forbids, so this change reports and nothing more.
+    """
+    records = _unobserved_run_records()
+    overall = ev.summarize(records)["overall"]
+    pinned_vals = [r["scoring"]["counterfactual_pinned_rate"] for r in records]
+    moved_vals = [r["scoring"]["counterfactual_moved_rate"] for r in records]
+    scored = [v for v in pinned_vals if v is not None]
+
+    assert overall["counterfactual_n_pinned"] == len(scored) == 4
+    assert overall["counterfactual_pinned_rate"] == round(sum(scored) / len(scored), 3)
+    assert overall["counterfactual_n_moved"] == len(moved_vals) == 5
+    assert overall["counterfactual_moved_rate"] == round(
+        sum(moved_vals) / len(moved_vals), 3)
+    # The three unobserved pins are reported as the companion and nowhere else: the
+    # vacuous passes are still passes, and the pinned denominator still holds them.
+    assert overall["counterfactual_n_unobserved_pins"] == 3
+    assert overall["counterfactual_pinned_rate"] == 0.75

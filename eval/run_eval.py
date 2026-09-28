@@ -1325,6 +1325,15 @@ def summarize(records: list[dict], *,
     # of wall clock and not a score.
     moved_vals = [_cf(r, "counterfactual_moved_rate") for r in records]
     pinned_vals = [_cf(r, "counterfactual_pinned_rate") for r in records]
+    # #1640: of the pins the scoreable queries declared, how many matched no row in
+    # either arm — the vacuous passes `score_pair` cannot see (its one comparison is
+    # guarded by `if was and now`). Read over the SAME `pinned_vals` population
+    # `counterfactual_n_pinned` counts, from the block each record already stores:
+    # one denominator for the companion and the rate it qualifies (#1600's defect
+    # was precisely two readers of one numerator), no retrieval, no rewrite.
+    n_pinned = len([v for v in pinned_vals if v is not None])
+    pins_unobserved = sum(len(cf.unobserved_pins(r.get("counterfactual")))
+                          for r, v in zip(records, pinned_vals) if v is not None)
     anchorless = anchorless_queries(records)
 
     overall = {
@@ -1362,7 +1371,17 @@ def summarize(records: list[dict], *,
         "counterfactual_moved_rate": avg([v for v in moved_vals]),
         "counterfactual_pinned_rate": avg([v for v in pinned_vals]),
         "counterfactual_n_moved": len([v for v in moved_vals if v is not None]),
-        "counterfactual_n_pinned": len([v for v in pinned_vals if v is not None]),
+        "counterfactual_n_pinned": n_pinned,
+        # #1640's companion, published BESIDE those four and changing none of them:
+        # how many of the pins inside `counterfactual_n_pinned` observed nothing, so
+        # `pinned_rate 0.962 (n=52)` can be read as an agreement over 34 observed
+        # pins plus 18 that no arm attributed. The rate's denominator is deliberately
+        # untouched — moving them out would re-base every prior night, which the
+        # item's ruling reserves to a person. None when nothing was pinned at all:
+        # no verdict, never a measured zero, the rule `_fmt_rate` and the null
+        # `gold_doc_*` fields already hold.
+        "counterfactual_n_unobserved_pins": (None if n_pinned == 0
+                                             else pins_unobserved),
     }
     # No `<metric>_gold_bearing` companion is emitted any more (#1663). #1600 added
     # those six keys to publish the gold-bearing reading beside a headline that
@@ -1643,9 +1662,21 @@ def print_table(records: list[dict], summary: dict) -> None:
           f"(the rest came only from `seeds_extracted`)")
     mv, pn = o.get("counterfactual_moved_rate"), o.get("counterfactual_pinned_rate")
     total = o.get("n_queries", 0)
+    # #1640's companion, out of the PINNED denominator rather than out of the query
+    # total, because the remainder belongs to that leg: `unobserved=18/52` reads as
+    # "of the 52 records pinned_rate counts, 18 of its pins matched no row in either
+    # arm", so the page decomposes one reading instead of opening a third population.
+    # `null`, not `0`, when the run scored no pin at all — a baseline predating the
+    # block, a `--no-counterfactual` run, or the automod baseline arm — where 0 would
+    # claim every pin was observed. The key is absent or None on all three, and the
+    # formatter's own null-vs-zero rule (`_fmt_rate`) is the one being followed.
+    n_pinned = o.get("counterfactual_n_pinned", 0)
+    unobserved = o.get("counterfactual_n_unobserved_pins")
+    unobserved_txt = "null" if unobserved is None else f"{unobserved}/{n_pinned}"
     print(f"         counterfactual: moved={_fmt_rate(mv)} "
           f"(n={o.get('counterfactual_n_moved', 0)}/{total})  "
-          f"pinned={_fmt_rate(pn)} (n={o.get('counterfactual_n_pinned', 0)}/{total})")
+          f"pinned={_fmt_rate(pn)} (n={n_pinned}/{total})  "
+          f"unobserved={unobserved_txt}")
     print("\nBy category:")
     for cat, s in summary["by_category"].items():
         # `_fmt_rate`/`_fmt_rate3`, not a bare `:.2f`. A category is a run inside the

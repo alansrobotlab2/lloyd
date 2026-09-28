@@ -1162,3 +1162,180 @@ def test_no_id_keyed_surface_names_a_query_the_gold_set_does_not_carry():
     assert retired & set(cf.PLAN) == set(), sorted(retired & set(cf.PLAN))
     assert retired & set(records) == set(), sorted(retired & set(records))
     assert retired & gold == set(), "the five must be gone from gold too"
+
+
+# ── #1640: pins that were scored but never observed ───────────────────────────
+#
+# `score_pair` compares a pin only where it can see one: `was` and `now` are the
+# pin's presence in each arm, the churn test sits behind `if was != now` and the
+# fact-churn test behind `if was and now`. A pin NEITHER arm attributed has
+# `was == now == False`, so it matches no branch, the pin is never appended to
+# `pinned_failures`, and the query's `counterfactual_pinned` stays True — a PASS
+# that observed nothing, inside `counterfactual_n_pinned`. #1640's ruling is to
+# REPORT that remainder beside the shipped rate and leave the rate alone, so the
+# nodes below pin both halves: the helper that names the pins, and a printed line
+# that shows the count without moving the rate above it.
+
+def _pin_block(pins, orig_entities, var_entities):
+    """A stored `counterfactual` block, written by the rater itself.
+
+    Built through `score_pair` rather than typed by hand: the companion reads the
+    three keys the rater emits (`expected_pinned`, `retrieved`,
+    `retrieved_variant`), and a fixture that hand-copied that schema would keep
+    passing if the rater renamed one of them.
+    """
+    return cf.score_pair(
+        {"axis_changed": "entity", "old_value": "vLLM", "new_value": "TensorRT-LLM",
+         "expected_to_move": ["TensorRT-LLM"], "expected_pinned": list(pins)},
+        _result(orig_entities), ["vLLM"], _result(var_entities), ["TensorRT-LLM"])
+
+
+def test_an_unobserved_pin_is_one_neither_arm_attributed():
+    """Clause 1: `unobserved_pins` names the declared pins that matched no retrieved
+    row in EITHER arm — and only those.
+
+    The distinction it must keep is between a pin the run OBSERVED and failed
+    (`was != now`, which `score_pair` already reports in `pinned_failures`) and a
+    pin it never saw at all, which the shipped rate currently passes. Both cases
+    below use the same pin text, so the helper cannot be passing as a renamed
+    "pinned is False".
+    """
+    both = _pin_block(["lloyd"], ["vLLM", "Lloyd"], ["TensorRT-LLM", "Lloyd"])
+    assert both["counterfactual_pinned"] is True
+    assert cf.unobserved_pins(both) == []
+
+    churned = _pin_block(["lloyd"], ["vLLM", "Lloyd"], ["TensorRT-LLM"])
+    assert churned["counterfactual_pinned"] is False
+    assert churned["pinned_failures"], "expected an observed-and-broken pin"
+    assert cf.unobserved_pins(churned) == [], (
+        "a pin one arm attributed was observed: reporting it here would double-"
+        "count #541's churn failures as unobserved ones")
+
+    variant_only = _pin_block(["lloyd"], ["vLLM"], ["TensorRT-LLM", "Lloyd"])
+    assert cf.unobserved_pins(variant_only) == [], (
+        "the variant arm attributing the pin is still an observation")
+
+    unseen = _pin_block(["lloyd"], ["vLLM", "QMD"], ["TensorRT-LLM", "QMD"])
+    assert unseen["counterfactual_pinned"] is True, (
+        "the vacuous pass this names has to still be a pass — #1640 reports the "
+        "remainder, it does not reclassify it")
+    assert cf.unobserved_pins(unseen) == ["lloyd"]
+
+    # Naming WHICH pins, in declared order, so the artifact carries a work list and
+    # not only a count the next reader cannot decompose.
+    two = _pin_block(["supervisor", "lloyd"], ["vLLM"], ["TensorRT-LLM"])
+    assert cf.unobserved_pins(two) == ["supervisor", "lloyd"]
+
+    # Tolerance to the store's canonical spelling stays `_match`'s job, not a raw
+    # string compare: this pin IS attributed, under a longer canonical name.
+    canonical = _pin_block(["Semantic Entity Resolution"],
+                           ["semantic-entity-resolution-via-graph-embeddings"],
+                           ["semantic-entity-resolution-via-graph-embeddings"])
+    assert cf.unobserved_pins(canonical) == []
+
+
+def test_a_record_that_declares_no_pins_has_nothing_to_observe():
+    """Clause 1's second half: no declared pins, no unobserved pins.
+
+    This is the case `pinned_unscored` already marks, and the two must not be
+    conflated — an unscored query never enters `counterfactual_n_pinned`, while an
+    unobserved pin sits inside it. A helper that fell back to the whole pin list (or
+    to a non-empty answer) when the list was empty would report every PLAN entry
+    that declares no pin as a retrieval failure, including the
+    `PINS_ABSENT_BY_DESIGN` queries, which declare none on purpose.
+    """
+    empty = _pin_block([], ["vLLM"], ["TensorRT-LLM"])
+    assert empty["pinned_unscored"] is True
+    assert cf.unobserved_pins(empty) == []
+    assert cf.unobserved_pins({}) == []
+    assert cf.unobserved_pins(None) == [], (
+        "a query whose perturbation arm errored stores no block at all, and "
+        "`summarize` runs over old baselines that predate the block too")
+
+
+def test_the_printed_counterfactual_line_carries_the_unobserved_pin_count(monkeypatch,
+                                                                         capsys):
+    """Clause 4: the console line prints the companion OUT OF `counterfactual_n_pinned`.
+
+    `unobserved=18/52` beside `pinned=… (n=52/86)`, on the same line #763 clause 3
+    put the two out-of-total fractions on. Out of the pinned denominator and not
+    out of the query total because the remainder belongs to that leg: the count is
+    of pins among the records `counterfactual_n_pinned` already counts, so the two
+    numbers decompose one reading instead of introducing a third population.
+
+    Run through the production loop with only the retriever stubbed, so the printed
+    pair is the pair `summarize` published from real records — not a fixture that
+    agrees with itself.
+    """
+    specs = _specs()
+    records, summary = _stubbed_run(monkeypatch, specs)
+    ev.print_table(records, summary)
+    out = capsys.readouterr().out
+    o = summary["overall"]
+    line = next((ln for ln in out.splitlines() if "counterfactual:" in ln), None)
+    assert line is not None, out
+
+    found = re.search(r"unobserved=(\d+)/(\d+)", line)
+    assert found, line
+    assert int(found.group(2)) == o["counterfactual_n_pinned"], line
+    # Not vacuously zero: on this corpus the stub attributes some declared pins in
+    # neither arm, so a formatter that printed a bare 0 (or dropped the count and
+    # let the regex match another field) fails here instead of agreeing with an
+    # empty count.
+    assert int(found.group(1)) == o["counterfactual_n_unobserved_pins"] > 0, line
+
+    # The shipped reading is still on the line, unchanged: `pinned`'s rate and its
+    # out-of-total fraction, exactly as #763 clause 3 specifies them.
+    assert f"pinned={ev._fmt_rate(o['counterfactual_pinned_rate'])}" in line, line
+    assert f"(n={o['counterfactual_n_pinned']}/{o['n_queries']})" in line, line
+    assert re.findall(r"\(n=(\d+)/(\d+)\)", line) == [
+        (str(o["counterfactual_n_moved"]), str(o["n_queries"])),
+        (str(o["counterfactual_n_pinned"]), str(o["n_queries"]))], line
+
+
+def test_the_unobserved_pin_count_is_no_verdict_when_nothing_was_pinned(capsys):
+    """Clause 4's other half: a run with no scoreable pinned leg prints no verdict.
+
+    `unobserved=0/0` would claim every pin was observed on a run that scored none.
+    That is the "absent is not zero" rule `_fmt_rate` and the null `gold_doc_*`
+    fields already hold, and it is the rule that matters most on this leg, because
+    a record with no `counterfactual` block — every baseline before #541, and the
+    automod baseline arm — has an honest count of nothing.
+    """
+    records = [{"id": f"no-cf-{i}", "category": "single", "latency_ms": 10.0,
+                "error": None,
+                "scoring": {"entity_hit": True, "doc_hit": True, "entity_recall": 1.0,
+                            "doc_recall": 1.0, "rr_doc": 1.0, "ndcg10": 1.0,
+                            "fact_entity_recall": 1.0, "first_doc_rank": 1}}
+               for i in range(2)]
+    summary = ev.summarize(records)
+    assert summary["overall"]["counterfactual_n_pinned"] == 0
+    assert summary["overall"]["counterfactual_n_unobserved_pins"] is None
+    ev.print_table(records, summary)
+    out = capsys.readouterr().out
+    line = next((ln for ln in out.splitlines() if "counterfactual:" in ln), None)
+    assert line is not None, out
+    assert "unobserved=null" in line, line
+    assert "unobserved=0" not in line, line
+
+    # The other route to an empty pinned leg: blocks that DO exist and declare no
+    # pin at all, which is what `counterfactual_pinned: None` / `pinned_unscored`
+    # already mean, and what the `PINS_ABSENT_BY_DESIGN` queries do on purpose. It
+    # must render the same way — an empty pin list is not a run of empty pins.
+    unpinned = [{"id": "no-pin-declared", "category": "single", "latency_ms": 10.0,
+                 "error": None,
+                 "scoring": {"entity_hit": True, "doc_hit": True, "entity_recall": 1.0,
+                             "doc_recall": 1.0, "rr_doc": 1.0, "ndcg10": 1.0,
+                             "fact_entity_recall": 1.0, "first_doc_rank": 1,
+                             "counterfactual_moved_rate": 1.0,
+                             "counterfactual_pinned_rate": None},
+                 "counterfactual": {"expected_pinned": [], "pinned_unscored": True,
+                                    "retrieved": ["lloyd"],
+                                    "retrieved_variant": ["tensorrt-llm"]}}]
+    summary2 = ev.summarize(unpinned)
+    assert summary2["overall"]["counterfactual_n_pinned"] == 0
+    assert summary2["overall"]["counterfactual_n_unobserved_pins"] is None
+    ev.print_table(unpinned, summary2)
+    line2 = next((ln for ln in capsys.readouterr().out.splitlines()
+                  if "counterfactual:" in ln), None)
+    assert line2 is not None and "unobserved=null" in line2, line2
