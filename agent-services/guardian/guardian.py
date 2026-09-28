@@ -46,6 +46,7 @@ import gstate            # noqa: E402
 import logtail           # noqa: E402
 import notify as notify_mod  # noqa: E402
 import policy            # noqa: E402
+import poolwatch         # noqa: E402
 import probes            # noqa: E402
 import rollback as rb    # noqa: E402
 import vaultwatch        # noqa: E402
@@ -132,6 +133,13 @@ class Guardian:
         self._strays_checked_at = 0.0
         self._snapshots_checked_at = 0.0
         self.mem = memwatch.MemWatch(self.gdir, memwatch.unit_cgroup(policy.SUPERVISORD_UNIT))
+        # Every alarm the worker fleet has lives inside `WorkerPool._scheduler_loop`
+        # (#1682), so the one that notices those alarms being switched off cannot
+        # live there too. Same backend, same state dir, this process: no new
+        # service, no new endpoint, no new config key. Built once per guardian
+        # process, which is what makes its grace streak mean "consecutive ticks".
+        self.pool = poolwatch.PoolWatch(
+            self.gdir, base_url=self.backend_url.rsplit("/health", 1)[0])
 
         self.tick_n = 0
         self._tick_events: list[dict] = []
@@ -198,6 +206,7 @@ class Guardian:
         except SupervisordUnreachable as exc:
             snap["supervisord"] = "unreachable"
             snap["supervisord_error"] = str(exc)[:200]
+            snap["backend_health"] = self._backend_health(snap)
             return snap
 
         for program in self.programs:
@@ -211,7 +220,26 @@ class Guardian:
             url = self._url_for(program)
             if url:
                 snap["probes"][program] = probes.probe(url, policy.PROBE_TIMEOUT_SECONDS)
+        snap["backend_health"] = self._backend_health(snap)
         return snap
+
+    def _backend_health(self, snap: dict) -> dict:
+        """This tick's verdict for the backend's own `/health`, published for
+        whatever downstream has to know whether the backend is answering before it
+        concludes anything about what the backend is doing (#1747: a backend that
+        is down is not a worker pool that is stopped, and the pool watch that
+        cannot tell those apart pages twice per outage).
+
+        Reuses the program probe that already hit this URL rather than asking twice
+        a moment apart — the two readings must agree, and `poolwatch` is handed one
+        value, not two chances to disagree. Probed directly only when no watched
+        program maps to this backend, which is the case a guardian started with
+        `--programs` narrowed still has to survive.
+        """
+        for program, result in snap["probes"].items():
+            if result is not None and self._url_for(program) == self.backend_url:
+                return result
+        return probes.probe(self.backend_url, policy.PROBE_TIMEOUT_SECONDS)
 
     def evaluate_liveness(self, snap: dict) -> tuple[bool, str]:
         for program in self.programs:
@@ -779,6 +807,44 @@ class Guardian:
         except Exception as exc:
             log(f"notifier failed (continuing): {exc}")
 
+    # ── worker-pool silence ────────────────────────────────────────────
+    def check_pool(self, snap: dict) -> None:
+        """Alarm when the worker pool is not running while the backend answers
+        ok (`poolwatch.py`). This is the alarm the pool cannot host: since #1682
+        the dispatch and fleet watches live inside `WorkerPool._scheduler_loop`,
+        so the routes that stop that loop — `workers.enabled: false` at boot,
+        `POST /api/workers/enable {"enabled": false}` — stop the reporting of the
+        problem along with the work.
+
+        Placed with `check_vault`/`check_data`, above the `infra_down`, `broken`
+        and `paused` early returns in `tick()`, for the reason their comment
+        already gives: a check seated below those returns is a check that does not
+        run in the states where things are going wrong.
+
+        Fan-out is the existing one — `self.alert` → notifier → `ALERT.md`, the
+        ledger and the daily note. The watermark that bounds the repeat is on disk
+        in `gdir`, not in `_alert_seen`, because the silence outlives a guardian
+        restart and that dict does not.
+        """
+        try:
+            report = self.pool.tick(snap.get("backend_health"))
+        except Exception as exc:  # noqa: BLE001 — same rule as the watches above
+            log(f"poolwatch failed (continuing): {exc}")
+            return
+        alert = report.get("alert")
+        if alert:
+            self.alert(alert["level"], alert["title"], alert["body"],
+                       evidence=alert["evidence"])
+        elif report.get("reason") == "running":
+            # The condition cleared, so the retraction goes on the surface the
+            # alarm used (#1536). `resolve` is idempotent and writes nothing when
+            # no section of ours is open, so the healthy tick after the first is
+            # silent — and a pool that was never reported cannot be un-reported.
+            self.notifier.resolve(
+                poolwatch.ALERT_TITLE,
+                "the worker pool reports running on the latest check — the "
+                "instructions above are stale, nothing further to enable")
+
     # ── memory-pressure evidence ───────────────────────────────────────
     def check_memory(self) -> None:
         """Record who holds the memory while pressure builds toward an oomd
@@ -1149,6 +1215,12 @@ class Guardian:
         # with nothing under observation — every state the returns below mean.
         self.check_vault()
         self.check_data()
+        # Also above the returns, and for the item's own reason: the state this
+        # watch exists for is a supported configuration that reports nothing, and
+        # `paused` in particular is a state the pool-silence reading must survive —
+        # the vault tripwire pauses workers, and a pool stopped by `workers.enabled`
+        # while the guardian is paused would otherwise never be noticed by anyone.
+        self.check_pool(snap)
         # And again: pressure building while supervisord is unreachable or the
         # stack is BROKEN is the moment the evidence is for.
         self.check_memory()

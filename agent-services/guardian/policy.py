@@ -53,6 +53,15 @@ PROBE_HTTP_ERROR_STREAK = 36     # 36 x 5s = 3 minutes of answering, badly
 # try to restart the unit. Never a code-rollback trigger.
 SUPERVISORD_DOWN_STREAK = 3
 
+# Consecutive ticks `/api/workers/status` must report no running pool, with
+# `/health` answering ok throughout, before the silence becomes an alert. Two
+# intervals of grace — the same budget `SUPERVISORD_DOWN_STREAK` gets, for the
+# same reason: `POST /api/workers/enable` stops the old pool and starts the new
+# one inside one request, and a restart is the pool working, not an alarm being
+# switched off. At 1 this fires on the tick a backend takes to boot its workers;
+# at 6 a real silence is three minutes of nothing noticing. #1747.
+POOL_SILENT_STREAK = 3
+
 # Consecutive ticks an aggregator verdict must hold before it reverts code.
 # `mcp_degraded_is_fatal` fires on a body reporting zero tools, and an
 # aggregator answering mid-restart parses to exactly that — so without a
