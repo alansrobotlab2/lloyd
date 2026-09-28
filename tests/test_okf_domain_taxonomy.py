@@ -8,13 +8,18 @@ the filesystem cannot widen, an alias map for the named near-duplicates, a
 validator that warns (never fails) on an out-of-set value, and the
 ``vault_write`` guard that refuses an invented domain.
 
-Everything runs over scratch trees in ``tmp_path`` except the one
-``live_vault`` test at the bottom, which pins clause 5: the schema doc and the
-four research skills' domain tables name only canonical or aliased domains and
-no longer tell a writer to "create if needed".
+The second section is #1642's tranche: the off-set spellings whose subject one of
+those 47 members already names became aliases, the members whose subject has no
+home stayed warnings, and the set itself was not widened by one value.
+
+Everything runs over scratch trees in ``tmp_path`` except the ``live_vault`` test
+at the bottom, which pins #949's clause 5: the schema doc and the four research
+skills' domain tables name only canonical or aliased domains and no longer tell a
+writer to "create if needed".
 """
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import types
@@ -180,7 +185,6 @@ def test_the_domain_guard_governs_only_knowledge(scratch):
 # --- clause 5: the guidance a writer reads names only the closed set -------
 
 import pwd  # noqa: E402
-import re  # noqa: E402
 
 # The vault is read off the passwd home, never Path.home(): under a gate's
 # isolated HOME that name is the round's symlink farm (CLAUDE.md §4.3a).
@@ -204,6 +208,246 @@ def _named_domains(text: str) -> set[str]:
             named.update(_BARE_DIR_RE.findall(line))
     named.discard("knowledge")  # the segment root, `knowledge/`, is no domain
     return named
+
+
+# ── #1642: the alias tranche, and the closed set it may not widen ───────────────
+#
+# #949 shipped the 47-member set and 10 aliases; the rest of the census was left
+# unstarted. Measured on the live vault before this tranche: 2759 `.md` under
+# `knowledge/`, 2553 carrying a non-empty `domain:`, 145 distinct values — 46
+# canonical (2366 files), 8 aliased (77 files) and **91 values across 110 files
+# off-set**. This section pins the tranche that closed 16 of those 91 values / 24
+# of those 110 files (off-set is now 75 values / 86 files, and `DOMAIN_ALIASES`
+# holds 26 keys) without touching the set, and pins that the rest still warn.
+
+SHIPPED_47 = frozenset({
+    "agent-lloyd", "agents", "ai", "application", "asimov", "aveva", "books",
+    "browser", "computer-vision", "distributed-systems", "evaluation", "foundational",
+    "general", "hardware", "inference", "infrastructure", "inner-voice", "llm",
+    "llm-inference", "llm-serving", "lloyd", "machine-learning", "misc",
+    "mission-control", "ml", "ml-inference", "neuroscience", "observability",
+    "openclaw", "opentelemetry", "ops", "papers", "patterns", "reading", "research",
+    "robotics", "security", "software", "stack-updates", "synthesis", "system",
+    "systems", "thinking", "tools", "video-summaries", "vllm", "youtube",
+})
+
+# The tranche this round adds: every value the item names plus the census spellings
+# whose subject one member already names (see the rule in `DOMAIN_ALIASES`).
+TRANCHE_1642 = {
+    "local-llm-serving": "llm-serving",
+    "local-llm": "llm-serving",
+    "model-serving": "llm-serving",
+    "serving": "llm-serving",
+    "llm-evaluation": "evaluation",
+    "model-architecture": "ml",
+    "model-optimization": "ml",
+    "3d-printing-robotics": "robotics",
+    "humanoid-robotics": "robotics",
+    "quadruped-robotics": "robotics",
+    "robotic-perception": "robotics",
+    "robotics-perception": "robotics",
+    "cv": "computer-vision",
+    "miscellaneous": "misc",
+    "infra": "infrastructure",
+    "llm-agents": "agents",
+}
+
+# The 10 keys `767f72d5` (#949) shipped. Held apart from `TRANCHE_1642` so "every
+# newly added key" stays a derived question — a live-tree node that iterated this
+# literal would silently stop covering a key someone adds next month.
+LEGACY_949 = ("ai-agentic", "ai-agents", "ai-coding", "ai-eigenvectors",
+              "ai-engineering", "ai-inference", "ai-llms", "ai-research",
+              "Robotics", "robots")
+
+# Values the census found whose SUBJECT has no member of its own. Naming them here
+# is what makes clause 4 checkable: these are the warnings this round must not
+# silence, and #1642 owed 1 is the human ruling that decides their fate.
+RESIDUAL_NO_HOME = (
+    "tts-voice", "voice-tts", "embodied-ai", "gpu", "rag", "databases", "science",
+    "skills", "autonomy", "nightly", "vlm", "voting", "web", "entrepreneurship",
+    "reverse-proxy",
+)
+
+
+def test_the_1642_tranche_all_reads_as_a_shipped_canonical_member():
+    """Clause 1: each new key is known AND folds onto a member that was already in
+    the set — `is_known_domain` alone would also be true of a value minted as a
+    48th canonical, which is exactly what the item forbids.
+
+    The literal is pinned against the map first: a key added to `DOMAIN_ALIASES`
+    without being added here fails this node, rather than quietly escaping every
+    assertion that iterates the tranche."""
+    assert set(T.DOMAIN_ALIASES) - set(LEGACY_949) == set(TRANCHE_1642), (
+        f"unpinned new keys: {sorted(set(T.DOMAIN_ALIASES) - set(LEGACY_949) - set(TRANCHE_1642))}; "
+        f"keys not in the map: {sorted(set(TRANCHE_1642) - set(T.DOMAIN_ALIASES))}")
+    for alias, target in TRANCHE_1642.items():
+        assert T.DOMAIN_ALIASES[alias] == target, alias
+        assert T.is_known_domain(alias) is True, alias
+        folded = T.normalize_domain(alias)
+        assert folded == target, f"{alias} folded to {folded!r}, not {target!r}"
+        assert folded in SHIPPED_47, f"{alias} -> {folded} is not a shipped member"
+    # Separators and case fold the same way for the new keys as for the old ones.
+    assert T.normalize_domain("Local_LLM_Serving") == "llm-serving"
+    assert T.normalize_domain("ROBOTICS-PERCEPTION") == "robotics"
+
+
+def test_the_closed_set_is_the_same_47_values_that_shipped():
+    """Clause 2, pinned by duplication rather than by a count.
+
+    `SHIPPED_47` above is the set as `767f72d5` wrote it, transcribed into the test
+    on purpose: a `len() == 47` assertion would still pass if this round promoted an
+    off-set value and dropped a shipped one, and promotion-by-accident is the failure
+    the whole clause exists to catch. Two places to edit is the cost of making a
+    silent widening loud.
+    """
+    assert T.CANONICAL_DOMAINS == SHIPPED_47, (
+        f"added: {sorted(T.CANONICAL_DOMAINS - SHIPPED_47)}; "
+        f"removed: {sorted(SHIPPED_47 - T.CANONICAL_DOMAINS)}")
+    assert len(T.CANONICAL_DOMAINS) == 47, len(T.CANONICAL_DOMAINS)
+    # And the tranche specifically promoted nothing: every key it aliased is still
+    # outside the set, so its subject is reachable only through the alias map.
+    for alias in TRANCHE_1642:
+        assert alias not in T.CANONICAL_DOMAINS, alias
+    for residual in RESIDUAL_NO_HOME:
+        assert residual not in T.CANONICAL_DOMAINS, residual
+
+
+def test_no_alias_key_shadows_another_or_diverges_from_a_canonical_member():
+    """Two hazards in how the lookup map is built (`_DOMAIN_ALIAS_LOOKUP` keys
+    `_lookup_form(k)`, and `normalize_domain` returns at the canonical check before it
+    reads the map):
+
+    * two keys whose folded forms collide overwrite each other, so one of the two
+      spellings silently stops folding — 26 keys must produce 26 distinct forms;
+    * a key whose folded form IS a canonical member is unreachable through the alias
+      map. That is only harmless when the alias target is that same member, as it is
+      for `Robotics` -> `robotics`; a key shadowing a *different* member would mean
+      the two routes give different answers for one spelling.
+    """
+    forms = {}
+    for key, target in T.DOMAIN_ALIASES.items():
+        forms.setdefault(T._lookup_form(key), []).append(key)
+    assert len(T._DOMAIN_ALIAS_LOOKUP) == len(T.DOMAIN_ALIASES) == 26, forms
+    assert [f for f, ks in forms.items() if len(ks) > 1] == [], forms
+    divergent = [(k, T._lookup_form(k), t) for k, t in T.DOMAIN_ALIASES.items()
+                 if T._lookup_form(k) in T.CANONICAL_DOMAINS
+                 and T._lookup_form(k) != t]
+    assert divergent == [], divergent
+    # `Robotics` is the one identity-shadowed key, and it still folds correctly:
+    # `normalize_domain` answers `robotics` from the canonical check, which is what
+    # the alias said anyway.
+    assert T.normalize_domain("Robotics") == T.DOMAIN_ALIASES["Robotics"] == "robotics"
+
+
+def _alias_tree(tmp_path: Path, values) -> Path:
+    """A scratch vault with one knowledge note per value, and nothing else that can
+    warn — so the warning list out of the validator is exactly the set under test."""
+    root = tmp_path / "v"
+    for i, value in enumerate(values):
+        p = root / "knowledge" / "domain-aliases" / f"n{i:02d}.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"---\ntype: research\ndomain: {value}\n---\n")
+    return root
+
+
+def test_every_alias_key_clears_the_validator_warning(tmp_path):
+    """Clause 3: all 26 keys of `DOMAIN_ALIASES` — the 10 from #949 and the 16 from
+    #1642 — run through the real `validate_okf.py` over a fixture tree, and not one
+    of them may draw an `unknown domain` warning.
+
+    Driven as a subprocess through the shipped script rather than through
+    `is_known_domain` because the clause is about the file a weekly job reads: the
+    validator imports the predicate (`validate_okf.py` must not restate the set), and
+    that import is the seam here.
+
+    `--strict` is what makes this measurable rather than vacuous. Non-strict only
+    counts warnings on the summary line and names nothing, so asserting the absence of
+    the words `unknown domain` against it would pass whatever the vocabulary did;
+    `--strict` prints each warning and exits 2. The assertion is therefore `warnings:
+    0` plus exit 0 under `--strict` — a key that stopped folding cannot hide.
+    """
+    keys = sorted(T.DOMAIN_ALIASES)
+    assert len(keys) == 26, keys
+    root = _alias_tree(tmp_path, keys)
+    # The denominator beside the verdict: `warnings : 0` over a tree that silently
+    # held fewer notes than keys would be a measurement of nothing.
+    written = list((root / "knowledge" / "domain-aliases").glob("*.md"))
+    assert len(written) == len(keys), (len(written), len(keys))
+    assert "scanned 26 concept files" in _validate(root).stdout, _validate(root).stdout
+    strict = _validate(root, "--strict")
+    assert strict.returncode == 0, (
+        "an aliased domain still warns, so --strict refuses the tree:\n" + strict.stdout)
+    assert "VIOLATIONS : 0" in strict.stdout, strict.stdout
+    assert "warnings   : 0" in strict.stdout, strict.stdout
+    assert "unknown domain" not in strict.stdout, strict.stdout
+    # And the same tree non-strict: warnings counted, exit still 0.
+    out = _validate(root)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert "warnings   : 0" in out.stdout, out.stdout
+
+
+def test_a_value_with_no_canonical_home_still_warns(tmp_path):
+    """Clause 4: aliasing 15 spellings did not make the vocabulary accept anything.
+
+    The residuals are pinned by name, and `embodied-ai` is the one the clause names —
+    2 files on the live vault, off-set before this tranche and off-set after it. The
+    assertion is on the EXACT set of warned values, read out of `--strict` output
+    because non-strict names nothing, so a surface widened to swallow the tranche fails
+    here as loudly as one narrowed past the residuals. Two near-misses of my own
+    selection are in the pinned set for the same reason: `tooling-infra` is the value
+    the write guard and the older tests use as their invention, and `local-inference`
+    is the spelling deliberately left off-set because three shipped members already
+    name inference — both must still warn.
+    """
+    values = sorted(set(RESIDUAL_NO_HOME) | {"tooling-infra", "local-inference"})
+    root = _alias_tree(tmp_path, values)
+    strict = _validate(root, "--strict")
+    warned = set(re.findall(r"unknown domain '([^']+)'", strict.stdout))
+    assert warned == set(values), (sorted(warned), sorted(values))
+    assert "embodied-ai" in warned, strict.stdout
+    assert strict.returncode == 2, strict.stdout
+    # And it stays a warning, never a violation: the gate must still exit 0.
+    out = _validate(root)
+    assert out.returncode == 0, out.stdout + out.stderr
+    assert f"warnings   : {len(values)}" in out.stdout, out.stdout
+    assert "VIOLATIONS : 0" in out.stdout, out.stdout
+
+
+def test_the_tranche_is_measured_on_the_live_vault_not_only_on_fixtures(tmp_path):
+    """The census this tranche was selected by, re-run against the real vault.
+
+    The fixtures prove what the alias map does; only the live tree proves the map was
+    written against the values that are actually on disk. Measured before the tranche:
+    91 off-set values across 110 files, of which these 16 keys cover 24 files, leaving
+    75 values / 86 files. What this node asserts is the part of that which stays true
+    as the vault grows: no key of the alias map is still off-set, every value the
+    human has not ruled on is still off-set, and the set is still 47.
+
+    Skips, never fails, when `~/obsidian` is not readable — a vault it cannot see would
+    make the census a measurement of nothing, which reads exactly like a pass.
+    """
+    if not (LIVE_VAULT / "knowledge").is_dir():
+        pytest.skip("live ~/obsidian not readable from this tree")
+    fm_re = re.compile(r"^---\n(.*?)\n---", re.S)
+    dom_re = re.compile(r"^domain:[ \t]*(.*?)[ \t]*$", re.M)
+    values: set[str] = set()
+    for path in (LIVE_VAULT / "knowledge").rglob("*.md"):
+        m = fm_re.match(path.read_text(encoding="utf-8", errors="replace"))
+        if not m:
+            continue
+        d = dom_re.search(m.group(1))
+        if d and d.group(1).strip().strip("\"'"):
+            values.add(d.group(1).strip().strip("\"'"))
+    off_set = {v for v in values if not T.is_known_domain(v)}
+    assert len(T.CANONICAL_DOMAINS) == 47
+    assert off_set.isdisjoint(T.DOMAIN_ALIASES), (
+        f"aliased values still counted off-set: {sorted(off_set & set(T.DOMAIN_ALIASES))}")
+    # Derived, not the literal: a key added to the map next month is covered by this
+    # node only if the node asks the map which keys are new.
+    for alias in sorted(set(T.DOMAIN_ALIASES) - set(LEGACY_949)):
+        assert alias not in off_set, alias
+    for residual in RESIDUAL_NO_HOME:
+        assert residual in off_set, residual
 
 
 @pytest.mark.live_vault

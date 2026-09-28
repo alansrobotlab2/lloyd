@@ -340,10 +340,37 @@ CANONICAL_DOMAINS = frozenset({
     "distributed-systems", "browser", "agent-lloyd",
 })
 
-# Retired spelling -> canonical domain. Only the near-duplicates #949 names:
-# the ``ai*`` family (nine directories for one subject) and the empty case and
-# plural twins of ``robotics``. Keys are listed as they appear on disk; lookup
-# goes through ``_lookup_form``, so ``Robotics`` and ``ROBOTS`` fold the same.
+# Retired spelling -> canonical domain. Keys are listed as they appear on disk;
+# lookup goes through ``_lookup_form``, so ``Robotics`` and ``ROBOTS`` fold the
+# same.
+#
+# The rule for a new key, added for #1642's tranche: a value joins this map only
+# when the SUBJECT IT NAMES is already one of the 47 members and exactly one
+# member can be its home. A modifier in front of a member's subject
+# (``local-llm-serving``, ``humanoid-robotics``), an abbreviation or a synonym of
+# one (``cv``, ``miscellaneous``, ``infra``), or the same head noun carrying the
+# ``ai``/``llm`` prefix the family already carries both ways (``llm-agents``) all
+# qualify. A value with no member of its own — ``tts-voice``, ``embodied-ai``,
+# ``gpu``, ``rag``, ``databases``, ``science``, ``skills``, ``autonomy``,
+# ``nightly``, ``vlm``, ``voting``, ``web``, ``entrepreneurship``,
+# ``reverse-proxy`` — keeps warning: promoting it, or guessing which member it
+# should fold into, is the human ruling ``okf_taxonomy`` records as not made
+# (#1642 owed 1), and an alias is a promotion by another name.
+#
+# The same rule excludes values that ARE on disk, so each exclusion is a decision
+# and not an oversight (file counts from the #1642 census, re-run per value):
+#   ``3d-printing`` (1) — no member names printing, and ``hardware`` would be a guess.
+#   ``quantization``, ``llm-quantization``, ``model-quantization`` (1 each) — the
+#   ``model-optimization`` -> ``ml`` fold above is the item's own ruling, but whether a
+#   technique note belongs to ``ml`` or to one of the three members that name inference
+#   is owed 1, not a spelling fix.
+#   ``youtube-highlights`` (1) — TWO members are candidates, ``youtube`` and
+#   ``video-summaries``; choosing between them is a ruling, so it is not a fold.
+#   ``tooling-infra`` (1) — left off-set on purpose: the write guard and the validator
+#   tests use it as the pinned invention, and aliasing it would delete their witness.
+# An inference-prefixed spelling is NOT excluded for lack of a candidate (three members
+# name inference) but because the census found none on disk today: ``local-inference``
+# and ``gpu-inference`` have zero files, so nothing waits on that call yet.
 DOMAIN_ALIASES: dict[str, str] = {
     "ai-agentic": "ai",
     "ai-agents": "ai",
@@ -355,6 +382,32 @@ DOMAIN_ALIASES: dict[str, str] = {
     "ai-research": "ai",
     "Robotics": "robotics",
     "robots": "robotics",
+    # The serving family: five spellings for the one member `llm-serving`
+    # (12 files). `serving`, `model-serving` and `local-llm` are that head noun
+    # with its qualifier moved or dropped, which is how the free-text era wrote
+    # it (#1642).
+    "local-llm-serving": "llm-serving",
+    "local-llm": "llm-serving",
+    "model-serving": "llm-serving",
+    "serving": "llm-serving",
+    # Scoring an LLM is the member `evaluation`; the model-* family is `ml`.
+    "llm-evaluation": "evaluation",
+    "model-architecture": "ml",
+    "model-optimization": "ml",
+    # Robotics, five spellings including the two empty directories #949 aliased
+    # above: `-robotics` compounds and the perception sub-subject alike.
+    "3d-printing-robotics": "robotics",
+    "humanoid-robotics": "robotics",
+    "quadruped-robotics": "robotics",
+    "robotic-perception": "robotics",
+    "robotics-perception": "robotics",
+    # Abbreviations and a synonym, each with exactly one member to fold onto.
+    "cv": "computer-vision",
+    "miscellaneous": "misc",
+    "infra": "infrastructure",
+    # `ai-agents` already folds onto `ai`; this is that head noun with the other
+    # prefix, and `agents` is a member in its own right (#1642 census, 1 file).
+    "llm-agents": "agents",
 }
 _DOMAIN_ALIAS_LOOKUP = {_lookup_form(k): v for k, v in DOMAIN_ALIASES.items()}
 
