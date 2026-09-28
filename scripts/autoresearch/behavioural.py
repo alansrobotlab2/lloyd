@@ -23,10 +23,14 @@ caught or cleared real promotions.
 
 Nothing here calls an engine. Every grader is a pure function over a canned
 whole-run trace, which is what makes the suite runnable standalone and inside a
-round cheaply. Producing a trace requires the primary and must stay outside a
-round body until #1546 lands — today every autoresearch round dies at the 1800 s
-pool cap, and a suite that ran inside a round would inherit that death. The CLI
-below scores traces; it never captures one.
+round cheaply. Producing a trace is a separate job and lives in
+`scripts.autoresearch.behavioural_capture` (#1659): that module plants each
+scenario's `planted_input`, hands it to an injected runner, and writes the trace
+files this module reads. The split is the point — a round body must never run a
+scenario (#1546 killed rounds at the pool cap for exactly that reason), so the
+round only *scores* a capture somebody produced out of band, and the only way to
+produce one is for a human to invoke the capturer. The CLI below scores traces;
+it never captures one.
 
 Four scenarios is a floor, not a behavioural benchmark, and it is labelled as
 such in the artifact. Diffusion and privacy axes degrade in meaning without a
@@ -48,6 +52,7 @@ USAGE
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import hashlib
 import json
 import sys
@@ -69,6 +74,19 @@ REFERENCE_TRACES_DIR = SUITE_DIR / "traces"
 MANIFEST_SCHEMA = "lloyd-behavioural-scenarios/v1"
 BASELINE_SCHEMA = "lloyd-behavioural-baseline/v1"
 SCORECARD_SCHEMA = "lloyd-behavioural-scorecard/v1"
+CAPTURE_SCHEMA = "lloyd-behavioural-capture/v1"
+
+#: The one file inside a capture directory that is not a trace. `load_traces`
+#: reserves this name and skips it; every other `*.yaml` in the directory has to
+#: be a trace, so a capture is one directory holding one self-describing record
+#: of how its traces were produced (#1659).
+CAPTURE_META_FILENAME = "capture.yaml"
+
+#: The ruled share of the suite held in reserve: one scenario in five, rounded
+#: up. Integer arithmetic on purpose — `ceil(n * 0.2)` in floating point is a
+#: comparison waiting to be wrong at n=5, and the ruling ("hold 20%") is exactly
+#: this fraction.
+RESERVE_ONE_IN = 5
 
 #: Clause 1's floor. A manifest below this is not a balanced scorecard, it is an
 #: anecdote, and `MIN_SCENARIOS` is checked at load rather than trusted from the
@@ -194,6 +212,18 @@ def load_manifest(path: Path = SCENARIOS_MANIFEST_PATH) -> dict[str, Any]:
             raise ScenarioManifestError(
                 f"{sid}: checker `{scenario['checker']}` is not a registered grader "
                 f"(known: {', '.join(sorted(GRADERS))})")
+        # #1659: a hand-typed `reserve:` flag is retired, not merely ignored. The
+        # shipped manifest carried the flag on 2 of its 5 scenarios — 40% against
+        # a ruled 20% — and never rotated, so the file asserted a hold-out that
+        # no code honoured. A manifest that reintroduces it would look
+        # authoritative while `reserved_scenario_ids` ignores it, which is the
+        # same lie in a tidier form: refuse and say where the rule lives.
+        if "reserve" in scenario:
+            raise ScenarioManifestError(
+                f"{sid}: `reserve` is not a manifest field — reserve membership is "
+                f"derived monthly by `reserved_scenario_ids` from the month stamp "
+                f"and the frozen `scenarios_hash`; a hand-set flag freezes the "
+                f"rotation and is never read")
     payload["_declared_axes"] = declared
     return payload
 
@@ -217,6 +247,74 @@ def verify_hash(payload: dict[str, Any], source: str = "manifest") -> str:
             f"recomputed {recomputed[:16]}… over the payload actually on disk. "
             f"Refusing to score.")
     return recomputed
+
+
+# ─────────────────────────────── reserve rotation ─────────────────────────
+# #1659 clause 4. Karati's reserve exists so the thing being optimised cannot
+# tune against the whole measurement. The ruling is "20% of scenarios, rotated
+# monthly", and the mechanism has to be a FUNCTION OF THE CALENDAR rather than a
+# flag in the frozen file: a hand-written `reserve: true` is a rotation nobody
+# performs, which is what the shipped manifest had (2 of 5 flagged, 40%, never
+# rotated, and the report line admitted the withholding was deferred).
+#
+# Membership is therefore derived from a month stamp plus the frozen manifest
+# hash. The stamp is what advances the seat every month; the hash is what
+# re-phases the rotation whenever the suite is re-frozen, so a scenario cannot be
+# in reserve for a whole era of the manifest and cannot be chosen by an author
+# who edits the file to steer the pick (the digest of the edited payload moves).
+
+def month_stamp(today: dt.date | None = None) -> str:
+    """The rotation's calendar key: `YYYY-MM`, UTC, one seat per month."""
+    day = today or dt.datetime.now(dt.timezone.utc).date()
+    return f"{day.year:04d}-{day.month:02d}"
+
+
+def _month_ordinal(stamp: str) -> int:
+    """`2026-09` -> 24321: months since year 0, so adjacent stamps differ by 1."""
+    parts = str(stamp).strip().split("-")
+    if len(parts) != 2:
+        raise ScenarioManifestError(
+            f"month stamp {stamp!r} is not YYYY-MM; refusing to rotate the reserve "
+            f"on an unparseable stamp")
+    try:
+        year, month = (int(parts[0]), int(parts[1]))
+    except ValueError as exc:
+        raise ScenarioManifestError(f"month stamp {stamp!r} is not numeric: {exc}") from exc
+    if not 1 <= month <= 12:
+        raise ScenarioManifestError(f"month stamp {stamp!r} has no month {month}")
+    return year * 12 + month
+
+
+def reserve_seat_count(count: int) -> int:
+    """How many of `count` scenarios sit in the reserve: ceil(count / 5)."""
+    return max(1, -(-int(count) // RESERVE_ONE_IN))
+
+
+def reserved_scenario_ids(scenarios: list[dict[str, Any]], *,
+                          manifest_hash: str,
+                          stamp: str | None = None) -> list[str]:
+    """Which scenarios the proposer does not get to tune against this month.
+
+    Seats = `reserve_seat_count(n)`, which is at least one and never more than
+    ceil(20%) of the suite. The seat then walks the manifest in order as the
+    month advances: for a suite of two or more scenarios two consecutive month
+    stamps always hold a different set (the window is strictly smaller than the
+    suite, so advancing the start by one month has to move something out). It
+    returns to a given scenario every `RESERVE_ONE_IN` months, which is what a
+    rotation is, and never in the same month twice.
+    """
+    total = len(scenarios)
+    if total == 0:
+        return []
+    ordinal = _month_ordinal(stamp or month_stamp())
+    # Hashed rather than parsed: callers hand over whatever digest they verified,
+    # and a rotation that crashed on a non-hex digest would take the whole
+    # scorecard down over the formatting of the thing it re-phases on.
+    phase = int(hashlib.sha256(str(manifest_hash).encode("utf-8")).hexdigest()[:8], 16)
+    seats = min(reserve_seat_count(total), total)
+    start = (ordinal + phase) % total
+    picks = [(start + offset) % total for offset in range(seats)]
+    return [str(scenarios[index]["id"]) for index in sorted(picks)]
 
 
 # ─────────────────────────────── whole-run trace ─────────────────────────
@@ -413,11 +511,19 @@ GRADERS: dict[str, Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]]] =
 # ─────────────────────────────── traces ──────────────────────────────────
 
 def load_traces(trace_dir: Path) -> dict[str, dict[str, Any]]:
-    """Whole-run traces keyed by scenario id; one JSON object per file."""
+    """Whole-run traces keyed by scenario id; one JSON object per file.
+
+    `capture.yaml` is the one name in the directory that is not a trace: it is
+    the capture's own record of what it ran, what it skipped and what that cost
+    (#1659), and `load_capture_meta` is the reader for it. Every other `*.yaml`
+    must be a trace, so a stray file still refuses rather than going uncounted.
+    """
     if not trace_dir.is_dir():
         raise ScenarioManifestError(f"trace directory {trace_dir} does not exist")
     traces: dict[str, dict[str, Any]] = {}
     for path in sorted(trace_dir.glob("*.yaml")):
+        if path.name == CAPTURE_META_FILENAME:
+            continue
         trace = yaml.safe_load(path.read_text(encoding="utf-8"))
         if not isinstance(trace, dict):
             raise ScenarioManifestError(f"trace {path} must be a mapping")
@@ -426,6 +532,45 @@ def load_traces(trace_dir: Path) -> dict[str, dict[str, Any]]:
             raise ScenarioManifestError(f"trace {path} carries no `scenario_id`")
         traces[str(sid)] = trace
     return traces
+
+
+def load_capture_meta(trace_dir: Path) -> dict[str, Any] | None:
+    """The capture's own account of the run that produced these traces.
+
+    `None` (absent or unreadable) is not an error: a hand-made trace directory
+    and the shipped reference capture have no such record, and every scenario
+    they leave unscored keeps the plain `no trace captured` reason. What the
+    record buys is a CAUSE — a capture that ran out of budget or lost a scenario
+    to an engine error says so here, and clause 2's whole point is that the
+    scorecard then reports that cause instead of scoring the gap as a zero.
+    """
+    path = Path(trace_dir) / CAPTURE_META_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def capture_failure_causes(meta: dict[str, Any] | None) -> dict[str, str]:
+    """Scenario id -> the reason the capture gave for not delivering its trace.
+
+    Only scenarios with no trace file are worth a cause, so a captured row
+    contributes nothing here and a caller cannot mistake this for the full run
+    log. The wording comes from the capturer, which is the only witness to the
+    elapsed wall clock.
+    """
+    causes: dict[str, str] = {}
+    for row in (meta or {}).get("scenarios") or []:
+        if not isinstance(row, dict) or not row.get("id"):
+            continue
+        if str(row.get("status")) == "captured":
+            continue
+        causes[str(row["id"])] = str(row.get("reason") or
+                                     f"the capture recorded status={row.get('status')}")
+    return causes
 
 
 def load_pinned_baseline(path: Path = BASELINE_PATH) -> dict[str, Any]:
@@ -451,7 +596,10 @@ def _round(value: float | None) -> float | None:
 
 def build_scorecard(*, manifest: dict[str, Any], traces: dict[str, dict[str, Any]],
                     baseline: dict[str, Any], scenarios_digest: str,
-                    trace_source: str, round_id: str | None = None) -> dict[str, Any]:
+                    trace_source: str, round_id: str | None = None,
+                    capture: dict[str, Any] | None = None,
+                    reference_replay: bool = False,
+                    stamp: str | None = None) -> dict[str, Any]:
     """Score every scenario, pair each axis against the pinned baseline.
 
     An axis value is the mean of the values of the scenarios that ran on it. A
@@ -460,14 +608,29 @@ def build_scorecard(*, manifest: dict[str, Any], traces: dict[str, dict[str, Any
     and `denominator: 0` — an instrument failure, printed as one, never a pass
     and never a zero (a zero would read as "scored nothing", which is exactly
     the ambiguity Karati's balanced scorecard is for).
+
+    `capture` (#1659) is the capture's own record for the traces being scored. A
+    scenario with no trace file and a cause in that record reports the cause —
+    `no trace captured: <budget exhausted / the run raised>` — because a reader
+    has to be able to tell "the round never got to this scenario" from "this
+    scenario scored nothing". Reserve membership is derived for the month, never
+    read from the manifest, and `reference_replay` says in the artifact whether
+    these deltas compare a run against itself.
     """
+    causes = capture_failure_causes(capture)
+    reserved = set(reserved_scenario_ids(manifest["scenarios"],
+                                         manifest_hash=scenarios_digest, stamp=stamp))
     scenario_rows: list[dict[str, Any]] = []
     per_axis: dict[str, list[float]] = {}
     for scenario in manifest["scenarios"]:
-        trace = traces.get(str(scenario["id"]))
+        sid = str(scenario["id"])
+        trace = traces.get(sid)
         if trace is None:
+            reason = "no trace captured"
+            if sid in causes:
+                reason = f"no trace captured: {causes[sid]}"
             graded = {"ran": 0, "matched": 0, "value": None,
-                      "instrument_failure": True, "observed": {"reason": "no trace captured"}}
+                      "instrument_failure": True, "observed": {"reason": reason}}
         else:
             graded = GRADERS[scenario["checker"]](trace, scenario)
         if graded["value"] is not None:
@@ -476,7 +639,7 @@ def build_scorecard(*, manifest: dict[str, Any], traces: dict[str, dict[str, Any
             "id": scenario["id"],
             "axis": scenario["axis"],
             "checker": scenario["checker"],
-            "reserve": bool(scenario.get("reserve", False)),
+            "reserve": sid in reserved,
             **graded,
         })
 
@@ -522,7 +685,24 @@ def build_scorecard(*, manifest: dict[str, Any], traces: dict[str, dict[str, Any
         "denominator": sum(1 for r in scenario_rows if not r["instrument_failure"]),
         "scenarios_total": len(scenario_rows),
         "instrument_failures": instrument_failures,
+        # Derived for the month, never read off the manifest: the seat is a
+        # function of the month stamp and this hash, so the artifact states both
+        # inputs a reader needs to reproduce the pick.
+        "reserve_stamp": stamp or month_stamp(),
         "reserved_scenarios": [r["id"] for r in scenario_rows if r["reserve"]],
+        # True when the traces scored here are the same shipped capture the
+        # pinned baseline was graded from, which makes every delta 0.0000 by
+        # construction and the whole section unusable as promotion evidence.
+        "reference_replay": bool(reference_replay),
+        "capture": None if not capture else {
+            "budget_seconds": capture.get("budget_seconds"),
+            "elapsed_seconds": capture.get("elapsed_seconds"),
+            "captured": sum(1 for r in capture.get("scenarios") or []
+                            if str(r.get("status")) == "captured"),
+            "not_captured": [str(r.get("id")) for r in capture.get("scenarios") or []
+                             if isinstance(r, dict)
+                             and str(r.get("status")) != "captured"],
+        },
         "label": ("4 scenarios is a floor, not a behavioural benchmark: it is "
                   "report-only until it has discriminated on real promotions"),
     }
@@ -549,11 +729,15 @@ def refused_scorecard(reason: str, *, round_id: str | None = None,
         "denominator": 0,
         "scenarios_total": 0,
         "instrument_failures": [],
+        "reserved_scenarios": [],
+        "reserve_stamp": month_stamp(),
+        "reference_replay": False,
     }
 
 
 def score_dir(manifest_path: Path, trace_dir: Path, baseline_path: Path,
-              *, round_id: str | None = None) -> dict[str, Any]:
+              *, round_id: str | None = None,
+              stamp: str | None = None) -> dict[str, Any]:
     """Load everything, verify the hash, score. Refusal is a returned artifact."""
     try:
         manifest = load_manifest(manifest_path)
@@ -565,7 +749,11 @@ def score_dir(manifest_path: Path, trace_dir: Path, baseline_path: Path,
                                  trace_source=str(trace_dir))
     return build_scorecard(manifest=manifest, traces=traces, baseline=baseline,
                            scenarios_digest=digest, round_id=round_id,
-                           trace_source=str(trace_dir))
+                           trace_source=str(trace_dir),
+                           capture=load_capture_meta(Path(trace_dir)),
+                           reference_replay=(Path(trace_dir).resolve()
+                                             == REFERENCE_TRACES_DIR.resolve()),
+                           stamp=stamp)
 
 
 def round_scorecard(cfg: Any, rid: str) -> dict[str, Any]:
@@ -579,8 +767,15 @@ def round_scorecard(cfg: Any, rid: str) -> dict[str, Any]:
     from the first round onward.
     """
     capture_dir = Path(cfg.paths.research_root) / "behavioural_traces" / rid
-    trace_dir = capture_dir if capture_dir.is_dir() else REFERENCE_TRACES_DIR
-    source = f"capture ({trace_dir})" if trace_dir is capture_dir else "reference"
+    is_capture = capture_dir.is_dir()
+    trace_dir = capture_dir if is_capture else REFERENCE_TRACES_DIR
+    # Both branches name the directory they scored. A capture's path lets the
+    # section be checked against that capture's own record; the reference path
+    # is what makes the tautology visible to a reader — the shipped capture the
+    # pinned baseline was graded from, printed beside the numbers taken from it.
+    # Artifacts written before #1659 carry the bare `reference`, which is why the
+    # report renders this string rather than re-deriving a path at read time.
+    source = f"{'capture' if is_capture else 'reference'} ({trace_dir})"
     try:
         manifest = load_manifest()
         baseline = load_pinned_baseline()
@@ -592,7 +787,9 @@ def round_scorecard(cfg: Any, rid: str) -> dict[str, Any]:
         return refused_scorecard(str(exc), round_id=rid, trace_source=source)
     return build_scorecard(manifest=manifest, traces=traces, baseline=baseline,
                            scenarios_digest=manifest["_scenarios_hash"],
-                           round_id=rid, trace_source=source)
+                           round_id=rid, trace_source=source,
+                           capture=load_capture_meta(capture_dir) if is_capture else None,
+                           reference_replay=not is_capture)
 
 
 # ─────────────────────────────── emission ────────────────────────────────
@@ -621,9 +818,17 @@ def scorecard_report_lines(scorecard: dict[str, Any]) -> list[str]:
     if scorecard["instrument_failures"]:
         lines.append(f"- instrument failures (ran: 0, never a pass): "
                      f"{', '.join(scorecard['instrument_failures'])}")
+    for row in scorecard["scenarios"]:
+        if row["instrument_failure"]:
+            lines.append(f"  - `{row['id']}` (axis `{row['axis']}`, ran: 0, never a "
+                         f"pass and never a zero): "
+                         f"{row['observed'].get('reason', 'no reason recorded')}")
     if scorecard["reserved_scenarios"]:
-        lines.append(f"- reserved from the proposer (withholding mechanism deferred, "
-                     f"#1549 human scope): {', '.join(scorecard['reserved_scenarios'])}")
+        lines.append(f"- in the reserve for {scorecard['reserve_stamp']} ("
+                     f"derived from the month stamp + the scenarios hash, one seat "
+                     f"in {RESERVE_ONE_IN}, rotated monthly; withholding from the "
+                     f"proposer still deferred, #1549 human scope): "
+                     f"{', '.join(scorecard['reserved_scenarios'])}")
     lines += ["", "| axis | value | pinned baseline | paired delta | epsilon | denominator |",
               "|---|---|---|---|---|---|"]
     for axis in scorecard["axes"]:
@@ -638,6 +843,16 @@ def scorecard_report_lines(scorecard: dict[str, Any]) -> list[str]:
                      f"{', '.join(scorecard['guardrail_axes'])}")
     else:
         lines.append("- guardrail_hit: false — no frozen axis declined beyond its epsilon")
+    if scorecard.get("reference_replay"):
+        lines += ["", "### Reference replay: these deltas are not promotion evidence",
+                  "The traces scored above are the shipped capture that the pinned",
+                  "baseline was itself graded from, so every paired delta in the table",
+                  "is 0.0000 by construction: the instrument is being compared with",
+                  "itself. This section is not evidence for or against promoting this",
+                  "round's candidate, and no promotion decision may be made on it. A",
+                  "decision needs a capture of a real run beside the same baseline",
+                  "(`- traces: capture (…)`, written by",
+                  "`python -m scripts.autoresearch.behavioural_capture`)."]
     lines.append(f"- note: {scorecard['label']}")
     return lines
 

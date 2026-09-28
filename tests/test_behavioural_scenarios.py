@@ -27,6 +27,10 @@ from scripts.autoresearch import behavioural as B
 # artifact than the one a round scores against, and the suite is only frozen if
 # the checked-in bytes are the ones that load.
 RAW_MANIFEST = yaml.safe_load(B.SCENARIOS_MANIFEST_PATH.read_text(encoding="utf-8"))
+#: The frozen digest, which is one of the two inputs a reserve seat is derived
+#: from; the other is the month stamp. Tests that pin the seat name it explicitly
+#: so a re-frozen manifest moves the seat rather than breaking the node.
+DIGEST = B.scenarios_hash(RAW_MANIFEST)
 
 
 def write_manifest(tmp_path: Path, payload: dict, *, name: str = "scenarios.yaml") -> Path:
@@ -214,3 +218,128 @@ def test_a_missing_manifest_file_is_a_refusal(tmp_path):
     with pytest.raises(B.ScenarioManifestError) as exc:
         B.load_manifest(tmp_path / "nope.json")
     assert "not found" in str(exc.value)
+
+
+# ── #1659 clause 4: reserve seats are derived from month + hash, and rotate ───
+
+def _synthetic(count: int) -> dict:
+    """A re-signed manifest-shaped payload with `count` ids, to size the seat."""
+    payload = copy.deepcopy(RAW_MANIFEST)
+    payload["scenarios"] = [
+        copy.deepcopy(RAW_MANIFEST["scenarios"][0]) | {"id": f"sc-{i}"}
+        for i in range(count)]
+    payload["scenarios_hash"] = B.scenarios_hash(payload)
+    return payload
+
+
+@pytest.mark.parametrize("count,expected", [(1, 1), (5, 1), (6, 2), (10, 2),
+                                            (11, 3), (12, 3), (15, 3)])
+def test_the_seat_is_ceil_twenty_percent_and_never_empty(count, expected):
+    """20% of the suite rounded up, and at least one scenario whatever its size.
+
+    The floor is the load-bearing half at this suite's size: 20% of 5 rounds to
+    one, and a rule that produced zero would quietly retire the hold-out. The
+    ceiling is what stops the shipped manifest's 2-of-5 (40%) coming back.
+    """
+    manifest = _synthetic(count)
+    digest = B.scenarios_hash(manifest)
+    for stamp in ("2026-08", "2026-12", "2031-01"):
+        seat = B.reserved_scenario_ids(manifest["scenarios"], manifest_hash=digest,
+                                       stamp=stamp)
+        assert len(seat) == expected, (
+            f"{count} scenarios at {stamp}: expected ceil(20%) = {expected} "
+            f"reserved, got {seat}")
+        assert set(seat) <= {s["id"] for s in manifest["scenarios"]}
+
+
+def test_the_seat_rotates_every_month_across_the_whole_suite():
+    """Five consecutive months hold out five different scenarios.
+
+    Rotation is the reason a seat exists: a fixed 20% is a scenario that stops
+    being measured, not one measured out of sight of whoever proposes changes.
+    With five scenarios and a one-scenario seat, one full cycle has to cover the
+    suite exactly once — and the same month has to give the same answer twice.
+    """
+    manifest = B.load_manifest()
+    ids = [str(s["id"]) for s in manifest["scenarios"]]
+    months = ["2026-08", "2026-09", "2026-10", "2026-11", "2026-12"]
+    seats = [frozenset(B.reserved_scenario_ids(manifest["scenarios"],
+                                               manifest_hash=DIGEST, stamp=m))
+             for m in months]
+
+    assert len(set(seats)) == len(months), (
+        f"the seat repeated across consecutive months, so it is not rotating: {seats}")
+    assert set().union(*seats) == set(ids), (
+        "one full cycle of the rotation did not cover the suite: "
+        f"{sorted(set(ids) - set().union(*seats))} were never held out")
+    assert B.reserved_scenario_ids(manifest["scenarios"], manifest_hash=DIGEST,
+                                    stamp="2026-10") == \
+        B.reserved_scenario_ids(manifest["scenarios"], manifest_hash=DIGEST,
+                                    stamp="2026-10"), \
+        "the seat is drawn per call rather than derived from its inputs"
+
+
+def test_the_seat_moves_when_the_frozen_manifest_hash_moves():
+    """The hash is a real input, so re-freezing the suite reseats the rotation."""
+    manifest = B.load_manifest()
+    seats = {B.reserved_scenario_ids(manifest["scenarios"], manifest_hash=f"{i:064x}",
+                                     stamp="2026-10")[0]
+             for i in range(1, 13)}
+    assert len(seats) > 1, (
+        "the reserved scenario did not move across twelve different manifest "
+        f"hashes ({seats}), so the hash is not an input to the seat")
+
+
+def test_the_shipped_manifest_carries_no_hand_set_reserve_flags():
+    """The seats the file used to hand out are gone; the rule lives in code.
+
+    Three of the five scenarios declared `reserve:` by hand and two said true —
+    40% of the suite against a ruled 20% — and no code read the flag, so the file
+    asserted a hold-out nobody performed. A field nothing honours is worse than no
+    field, because it reads as a control that is in place.
+    """
+    assert [s["id"] for s in RAW_MANIFEST["scenarios"] if "reserve" in s] == []
+    assert RAW_MANIFEST["scenarios_hash"] != \
+        "b5e57afd14bc030b0a64ff0cd9ce418388c0ad37c3a4d06cbbc94f48d949bcdc", \
+        "retiring the flags has to move the frozen digest, or the digest in the " \
+        "file is not the digest of the file"
+
+
+def test_a_manifest_that_sets_reserve_by_hand_is_refused(tmp_path):
+    """The flag is retired, so a manifest reintroducing it is rejected by name.
+
+    Ignoring it silently would leave the file claiming a hold-out that
+    `reserved_scenario_ids` does not perform — the state #1549 shipped in, and
+    the reason the rotation was owed.
+    """
+    path = tamper(lambda p: scenario_with(p, "source-retention").__setitem__(
+        "reserve", True), tmp_path)
+    with pytest.raises(B.ScenarioManifestError) as exc:
+        B.load_manifest(path)
+    message = str(exc.value)
+    assert "source-retention" in message, message
+    assert "reserved_scenario_ids" in message, (
+        "the refusal has to point at the rule that replaced the flag")
+
+
+def test_the_scorecard_reports_the_seat_it_derived_and_the_month_it_derived_it_for():
+    """`reserve_stamp` plus the seat, so a reader can reproduce the pick.
+
+    The report used to print 'withholding mechanism deferred' beside a list that
+    had been hand-set in a YAML file. A derived seat names its month, and the
+    per-scenario flags have to agree with the derived set.
+    """
+    manifest = B.load_manifest()
+    scorecard = B.build_scorecard(manifest=copy.deepcopy(manifest), traces={},
+                                  baseline=B.load_pinned_baseline(),
+                                  scenarios_digest=manifest["_scenarios_hash"],
+                                  trace_source="reference", stamp="2026-11")
+    seat = B.reserved_scenario_ids(manifest["scenarios"],
+                                   manifest_hash=manifest["_scenarios_hash"],
+                                   stamp="2026-11")
+
+    assert scorecard["reserve_stamp"] == "2026-11"
+    assert scorecard["reserved_scenarios"] == seat
+    flagged = sorted(row["id"] for row in scorecard["scenarios"] if row["reserve"])
+    assert flagged == sorted(seat), (
+        f"the rows marked reserved disagree with the derived seat: {flagged} vs {seat}")

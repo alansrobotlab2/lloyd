@@ -5,13 +5,15 @@ schema: lloyd-behavioural-baseline/v1
 suite: v1
 source: reference capture eval/behavioural_scenarios/v1/traces, scored by scripts/autoresearch.behavioural
   on the frozen scenarios.json
-scenarios_hash: b5e57afd14bc030b0a64ff0cd9ce418388c0ad37c3a4d06cbbc94f48d949bcdc
+scenarios_hash: eb67dcc71a5a06925fb1553cc6549521d08a45103cccfba17f21978bf02d2c79
 axes:
   uncertainty_preservation: 0.5
   source_retention: 1.0
   action_consistency: 0.875
   stale_fact_action: 0.333333
-note: Pinned by re-grading the shipped reference traces, so a round scoring those same traces reports
-  all-zero paired deltas and guardrail_hit false. Re-pin it whenever the traces or a grader's meaning
-  changes; tests/test_behavioural_scorecard.py fails if this file and a fresh grading of the reference
-  traces disagree.
+note: 'Hash re-anchored by #1659 to the manifest that retired the hand-set `reserve`
+  flags; the axis values below are untouched because no grader reads that field. Pinned
+  by re-grading the shipped reference traces, so a round scoring those same traces reports
+  all-zero paired deltas and guardrail_hit false. Re-pin it whenever the traces or a
+  grader''s meaning changes; tests/test_behavioural_scorecard.py fails if this file and a
+  fresh grading of the reference traces disagree.'

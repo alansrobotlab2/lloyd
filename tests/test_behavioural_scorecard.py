@@ -346,3 +346,111 @@ def test_a_round_with_a_guardrail_tripping_capture_reports_it_and_still_holds_it
 
     assert _decisions_block(dirty_report) == clean_decisions, (
         "a guardrail hit must not move a promotion verdict by one byte")
+
+
+# ── #1659 clause 3: the section says what it scored, and a replay says it is
+# not evidence ────────────────────────────────────────────────────────────────
+
+def _section(scorecard: dict) -> str:
+    return "\n".join(B.scorecard_report_lines(scorecard))
+
+
+def test_the_report_section_names_the_trace_source_it_scored(tmp_path):
+    """The section states the source, and a capture names the directory.
+
+    `trace_source: capture` on its own would not let a reader open the capture's
+    own record and check it, which is the only reason to distinguish a capture
+    from a replay in the first place.
+    """
+    directory = tmp_path / "behavioural_traces" / "R_report"
+    scorecard = B.build_scorecard(
+        manifest=copy.deepcopy(MANIFEST_FRESH),
+        traces=B.load_traces(B.REFERENCE_TRACES_DIR), baseline=BASELINE,
+        scenarios_digest=MANIFEST_FRESH["_scenarios_hash"],
+        trace_source=f"capture ({directory})", round_id="R_report")
+    section = _section(scorecard)
+
+    assert f"traces: capture ({directory})" in section, section
+    assert str(directory) in section
+
+
+def test_a_reference_replay_says_in_words_that_its_deltas_are_not_evidence():
+    """A replay of the traces the baseline came from is a tautology, and must say so.
+
+    Before #1659 the four rounds of 2026-09-27 each printed `delta: 0.0000` on all
+    four axes and `guardrail_hit: false`, which reads exactly like a clean bill of
+    behavioural health. It was the reference capture scored against a baseline
+    derived from those same traces. The artifact now carries the flag and the
+    section spells out what a zero means here.
+    """
+    scorecard = B.build_scorecard(
+        manifest=copy.deepcopy(MANIFEST_FRESH),
+        traces=B.load_traces(B.REFERENCE_TRACES_DIR), baseline=BASELINE,
+        scenarios_digest=MANIFEST_FRESH["_scenarios_hash"],
+        trace_source="reference", round_id="R_replay", reference_replay=True)
+    section = _section(scorecard)
+
+    assert scorecard["reference_replay"] is True
+    assert "### Reference replay: these deltas are not promotion evidence" in section
+    assert "shipped capture" in section, section
+    assert "by construction" in section, (
+        "the section has to say WHY every delta is 0.0000, not merely that it is")
+    assert "not evidence for or against promoting this" in section, section
+    assert "no promotion decision may be made on it" in section, section
+    assert "behavioural_capture" in section, (
+        "the section has to send the reader to the source that CAN answer the "
+        f"promotion question, got: {section}")
+
+
+def test_a_capture_section_does_not_carry_the_reference_disclaimer(tmp_path):
+    """The disclaimer is about the replay, not a blanket line on every section.
+
+    Putting "these deltas are not evidence" above a real capture's numbers would
+    make the capture's record as unreadable as the replay's, which is the opposite
+    of why #1659 exists.
+    """
+    directory = tmp_path / "behavioural_traces" / "R_real"
+    scorecard = B.build_scorecard(
+        manifest=copy.deepcopy(MANIFEST_FRESH),
+        traces=B.load_traces(B.REFERENCE_TRACES_DIR), baseline=BASELINE,
+        scenarios_digest=MANIFEST_FRESH["_scenarios_hash"],
+        trace_source=f"capture ({directory})", round_id="R_real",
+        reference_replay=False)
+    section = _section(scorecard)
+
+    assert scorecard["reference_replay"] is False
+    assert "Reference replay" not in section, section
+    assert "Report-only" in section, (
+        "the section is still report-only whatever it scored")
+
+
+def test_a_real_round_scoring_the_reference_says_so_in_its_report(round_env):
+    """The round's own report, read off disk, carries both halves of the clause.
+
+    This is the boundary that matters: `run_round` emits the section and nobody
+    re-reads the artifact afterwards. A round that today prints four 0.0000 deltas
+    and a false guardrail must print the words that stop a human reading them as
+    behavioural evidence.
+    """
+    result = asyncio.run(run_round.run(targets=["prompts"], bench_limit=2))
+    assert "error" not in result, result
+
+    report = round_report(round_env, result).read_text(encoding="utf-8")
+    section = report[report.index("## Behavioural scorecard"):]
+
+    artifact = json.loads(
+        (round_env.paths.rounds_dir / result["behavioural_scorecard"]).read_text())
+    assert artifact["trace_source"] == \
+        f"reference ({B.REFERENCE_TRACES_DIR})", (
+        "the artifact and the section must name the same directory; the section "
+        "is what a human reads and the artifact is what a later job reads")
+    assert artifact["reference_replay"] is True
+
+    assert f"- traces: reference ({B.REFERENCE_TRACES_DIR})" in section, (
+        "the replay has to name the directory it scored — the shipped capture "
+        "the baseline was graded from — or a reader cannot see the tautology")
+    assert "### Reference replay: these deltas are not promotion evidence" in section
+    assert "no promotion decision may be made on it" in section, section
+    assert "## Promotion decisions" in report, (
+        "the disclaimer belongs to the behavioural section only; the verdict "
+        "itself is unchanged by it")
