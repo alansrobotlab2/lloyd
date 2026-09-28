@@ -144,15 +144,17 @@ def test_a_called_out_metric_still_has_to_name_a_most_likely_cause():
         "vault commit ca43ca6b removed it and this round must put it back")
 
 
-# ── #1600: the gold-bearing companions the writer emits ─────────────────────
+# ── #1600 / #1663: one rate per leg, over the gold-bearing subset ────────────
 
 def _overall_with_gold_mixed_in() -> dict:
     """A real `summarize()` pass over two queries — one carrying entity gold, one
-    not — so the field names checked below come out of what the writer emits, not
-    out of a list this test wrote.
+    carrying none — so the field names and the numbers checked below come out of
+    what the writer emits, not out of a list this test wrote.
 
-    Imported here rather than at module scope: the rest of this file is pure text
-    and stays that way.
+    The second query is the interesting one: it has no entity gold, so since #1663
+    it is absent from the entity leg's denominator entirely while still counting on
+    the document leg. Imported here rather than at module scope: the rest of this
+    file is pure text and stays that way.
     """
     import sys
     sys.path.insert(0, str(ROOT))
@@ -173,52 +175,86 @@ def _overall_with_gold_mixed_in() -> dict:
     ])["overall"]
 
 
-def test_the_skill_names_the_gold_bearing_fields_the_eval_emits():
-    """#1600 clause 5: the nightly report has to print each hit leg's
-    gold-bearing rate beside the headline, and a report told to quote some other
-    name quotes nothing.
+RATE_LEGS = ("entity_hit_rate", "entity_hit_rate_retrieval_carried",
+             "doc_hit_rate", "mrr_doc", "ndcg10")
 
-    The names are taken from `summarize()`'s own keys, so the writer renaming a
-    companion fails this test along with the prose — the failure mode #696 pinned
-    for `ci95` (`a report told to quote `confidence` while eval/run_eval.py writes
-    `ci` quotes nothing`) applied to the new fields. The exact-name assert below is
-    the positive control: were the writer emitting no companions at all, the loop
-    over `emitted` would have nothing to check and would pass.
+
+def test_the_skill_names_the_denominator_field_the_eval_emits():
+    """#1663 clauses 1 and 4: the artifact now carries ONE rate per leg plus its
+    gold-bearing denominator in `ci95`, and the skill names that field.
+
+    The names come from `summarize()`'s own keys, so the writer renaming or
+    re-introducing a field fails this test along with the prose — #696's failure
+    mode (`a report told to quote `confidence` while eval/run_eval.py writes `ci`
+    quotes nothing`). The exact-value asserts are the positive control: were the
+    writer emitting no `ci95` block at all, the loop over the five legs would have
+    nothing to check and would pass.
+
+    The values are the re-base in two queries: the entity leg is 1.0 over the one
+    query that carries entity gold (`ci95.entity_hit_rate.n == 1`), where the
+    all-records denominator gave 0.5 over two; the document leg is unchanged at 1.0
+    over two, because both queries carry doc gold.
     """
     overall = _overall_with_gold_mixed_in()
-    emitted = sorted(k for k in overall
-                     if k.endswith("_gold_bearing") or k.endswith("_gold_bearing_n"))
-    assert emitted == [
-        "doc_hit_rate_gold_bearing", "doc_hit_rate_gold_bearing_n",
-        "entity_hit_rate_gold_bearing", "entity_hit_rate_gold_bearing_n",
-        "entity_hit_rate_retrieval_carried_gold_bearing",
-        "entity_hit_rate_retrieval_carried_gold_bearing_n",
-    ], emitted
-    # The values the section's example numbers describe: the empty-gold query
-    # leaves the entity companion at 1.0 over one query while the headline is
-    # 0.5 over two.
-    assert overall["entity_hit_rate"] == 0.5
-    assert overall["entity_hit_rate_gold_bearing"] == 1.0
-    assert overall["entity_hit_rate_gold_bearing_n"] == 1
-    for name in emitted:
-        assert f"`{name}`" in TEXT, f"skill does not name the field the writer emits: {name}"
+    assert not [k for k in overall
+                if k.endswith("_gold_bearing") or k.endswith("_gold_bearing_n")], (
+        "a companion key is back beside a headline that is now the same reading")
+    assert overall["entity_hit_rate"] == 1.0
+    assert overall["entity_hit_rate_retrieval_carried"] == 1.0
+    assert overall["doc_hit_rate"] == 1.0
+    ci = overall["ci95"]
+    assert [ci[m]["n"] for m in RATE_LEGS] == [1, 1, 2, 2, 2], ci
+    for metric in RATE_LEGS:
+        assert f"`ci95.{metric}.n`" in TEXT, (
+            f"skill does not name the denominator the writer emits: {metric}")
 
 
-def test_the_skill_tells_the_report_to_print_the_companion_beside_the_headline():
-    """#1600 clause 5's instruction half, scoped to its own section so a mention
-    in `## Notes` cannot stand in for the report step saying it."""
-    body = section("Which population each hit rate was divided over")
+def test_the_skill_carries_one_number_per_leg_and_no_companion_instruction():
+    """#1663 clause 4, the page half: the skill section that used to tell the
+    nightly to print a companion beside the headline now tells it to print the rate
+    with its `n`, and says out loud that the companions are gone.
+
+    Scoped to its own section so a stray mention in `## Notes` cannot stand in for
+    the report step. The negative asserts are the point: "print the gold-bearing
+    rate beside the headline" surviving in the section would have the report print
+    one leg twice, which after the re-base is either a duplicate or a contradiction.
+    """
+    body = section("Which population each scored rate is divided over")
     low = body.lower()
-    assert "print the gold-bearing rate beside the headline" in low, body[:400]
-    assert "own `n`" in body, body[:400]
-    # A leg the corpus asked nothing of is null and prints the interval block's
-    # own no-verdict — the rule that keeps "nothing scored" off the page as 0.000.
+    assert "quote each rate with its `n`" in low, body[:400]
+    assert "beside the headline" not in low, body[:400]
+    assert "companions are gone" in low, body[:400]
     assert "null" in low and "never `0.0`" in body, body[:400]
     assert "no verdict" in body, body[:400]
-    # And the section says out loud that the denominator policy is not this job's
-    # to take, which is the clause that keeps a future run from re-basing it.
-    assert "reserves" in low, body[-600:]
-    assert "mrr_doc" in body and "no" in low, body[-600:]
+    # #1600's two escape clauses are retired: the section may no longer claim the
+    # denominator policy is un-owned, nor that the rank scores were left behind.
+    assert "reserves" not in low, body[-900:]
+    assert "no companion" not in low, body[-900:]
+
+
+def test_the_skill_books_the_denominator_re_base_by_date():
+    """#1663 clause 5: a denominator change is invisible to the trend tool, so the
+    skill's dated re-base list is the only record of it, and it has to say which
+    night is the first one scored the new way.
+
+    `scripts/eval_trend_stats.py` joins nights by `records[].id` and diffs the
+    `corpus` block, so five rates re-based over a stable 86-query corpus prints
+    nothing: the break is `entity_hit_rate` 0.488 → 0.636 with every id intact. This
+    is the same shape as the 2026-09-26 seed re-base, which is why the bullet has to
+    sit in the same list rather than in the section that explains the fields.
+    """
+    notes = TEXT[TEXT.index("## Notes"):]
+    seed = notes.index("The seed definition moved under the entity leg")
+    rebase_at = notes.index("The denominator definition moved on 2026-09-28")
+    assert rebase_at > seed, "the #1663 bullet is not in the re-base list"
+    bullet = notes[rebase_at:notes.index("\n- ", rebase_at) + 1]
+    for metric in RATE_LEGS:
+        assert metric in bullet, (metric, bullet[:200])
+    assert "nightly-20260929" in bullet, bullet
+    assert "pre-re-base" in bullet, bullet
+    # The prose #1600 wrote to refuse the re-base must not survive it.
+    assert "Why this is a companion and not a re-base" not in TEXT
+    assert "have **no** companion" not in TEXT
 
 
 # ── #1599: the unreturnable-gold fields the writer emits ────────────────────

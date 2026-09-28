@@ -1350,16 +1350,26 @@ def test_the_artifact_spread_is_the_only_place_the_seeding_is_written():
         "the record must say both things the reader bands by, not one")
 
 
-# ── #1600: which population each hit rate was divided over ──────────────────
+# ── #1600 / #1663: which population each scored rate is divided over ─────────
 #
 # `_score` guards a RECALL against empty gold and returns None, so a recall's
-# denominator has always been the gold-bearing subset. It does not guard the hit
-# booleans: a query with `expect_entities: []` records `entity_hit: False` and
-# `summarize` divides that False over every record, so on nightly-20260927 the
-# entity leg read 0.488 over all 86 queries and 0.636 over the 66 carrying entity
-# gold — two populations of one numerator, only one of them published. The
-# companions below are the second reading; the headline keeps the all-records
-# denominator, because re-basing it is a decision #1600 reserves for a person.
+# denominator has always been the gold-bearing subset. It never guarded the hit
+# booleans or the rank scores: a query with `expect_entities: []` recorded
+# `entity_hit: False` and one with `expect_docs: []` recorded `rr_doc`/`ndcg10` =
+# 0.0, and `summarize` divided those zeros over EVERY record. Two populations of
+# one numerator, only one published: on nightly-20260928 `entity_hit_rate` read
+# 0.488 over all 86 queries and 0.636 over the 66 carrying entity gold, `mrr_doc`
+# 0.305 over 86 against 0.332 over the 79 carrying doc gold.
+#
+# #1600 published the second reading as a `<metric>_gold_bearing` companion and
+# explicitly left the headline to a person. #1663 IS that ruling: option (b),
+# extended to `mrr_doc`/`ndcg10`, on the ground that a query the corpus never
+# asked about measures the LABEL set and not retrieval. The five rates now divide
+# over the gold-bearing subset as the recalls always did, `ci95[<metric>].n` IS
+# that subset, a leg with nothing to divide is null, and the companions went with
+# the page line that printed them — one number per leg. The trend break is booked
+# by date in `skills/retrieval-eval/SKILL.md`, because `scripts/eval_trend_stats.py`
+# joins nights by record id and cannot see a denominator move on an unchanged corpus.
 
 def _gold_record(qid: str, expect_entities: list[str], expect_docs: list[str],
                  result: dict, seeds: list[str]) -> dict:
@@ -1377,142 +1387,230 @@ def _gold_record(qid: str, expect_entities: list[str], expect_docs: list[str],
 
 
 def _mixed_gold_records() -> list[dict]:
-    """Three queries: two carry entity gold and hit on it, the third carries NO
-    entity gold at all and hits on the doc leg.
+    """Four queries covering the four shapes a leg can be in (#1663 clauses 1 and 2).
 
-    That third query is the whole finding — it was never asked an entity question
-    and is nonetheless an entity miss — and its doc hit is why it is described as
-    a query that hits rather than one that failed.
+    Every rate this run produces has a DIFFERENT denominator or a different value
+    under the two conventions, so a test that passes on the new policy cannot pass
+    on the old one by coincidence:
+
+      `fact-carried`    entity gold the retrieval fact leg carries, doc gold it hits
+      `seed-only`       entity gold only the query's own seed carries, doc gold it hits
+      `doc-miss`        entity gold it hits, doc gold it does NOT retrieve
+      `no-gold-at-all`  neither leg asked: the query the old policy scored as a
+                        double miss and the new one excludes from both legs
+
+    n=4 queries; entity leg n=3 (`entity_hit_rate` 1.000, old 0.750);
+    retrieval_carried 0.667 (old 0.500); doc leg n=3 (`doc_hit_rate` 0.667,
+    old 0.500); `mrr_doc` and `ndcg10` 0.667 (old 0.500).
     """
     return [
         _gold_record("fact-carried", [CARIED_BY_FACT], ["knowledge/kg.md"],
                      _legged_result(), seeds=["Unrelated Seed"]),
         _gold_record("seed-only", [SEED_ONLY_GOLD], ["knowledge/kg.md"],
                      _legged_result(), seeds=[SEED_ONLY_GOLD]),
-        _gold_record("no-entity-gold", [], ["knowledge/kg.md"],
+        _gold_record("doc-miss", [CARIED_BY_FACT], ["nowhere-indexed.md"],
                      _legged_result(), seeds=["Unrelated Seed"]),
+        _gold_record("no-gold-at-all", [], [], _legged_result(),
+                     seeds=["Unrelated Seed"]),
     ]
 
 
-def test_each_hit_leg_carries_a_gold_bearing_companion_with_its_own_n():
-    """Clause 1 of #1600: all three hit legs get a companion over only the
-    gold-bearing records, each with its own n, and that n is the denominator ci95
-    already reports for the leg.
+ENTITY_LEGS = ("entity_hit_rate", "entity_hit_rate_retrieval_carried")
+DOC_LEGS = ("doc_hit_rate", "mrr_doc", "ndcg10")
 
-    On this 3-query set the empty-gold query HITS (on docs) and is still excluded
-    from the entity companion, which is 1.0 over n=2 — the clause's own numbers.
-    The clause's `n=2` is also what fixes which ci95 denominator it means:
-    `ci95.entity_hit_rate.n` is every record (3 here, 86 on the nightly corpus),
-    while the leg's recall entry `ci95.entity_recall_avg.n` is the gold-bearing
-    subset, because `_score` nulls a recall exactly when that gold list is empty.
+
+def test_entity_leg_rates_divide_over_the_gold_bearing_queries_only():
+    """#1663 clause 1: `entity_hit_rate` and `entity_hit_rate_retrieval_carried`
+    average over the 3 queries that carry entity gold, not the 4 in the run.
+
+    1.0 and 2/3, where the all-records denominator gave 0.75 and 0.5. The fourth
+    query was never asked an entity question, so counting it as a miss measured the
+    label set and not retrieval — that is the 2026-09-27 ruling, and the +0.148 the
+    live corpus moved by (0.488 over n=86 against 0.636 over n=66) is this same gap
+    at corpus scale.
     """
     overall = ev.summarize(_mixed_gold_records())["overall"]
-    assert overall["entity_hit_rate_gold_bearing"] == 1.0
-    assert overall["entity_hit_rate_gold_bearing_n"] == 2
-    # Same gold leg, narrower numerator: only `fact-carried` was retrieval-carried.
-    assert overall["entity_hit_rate_retrieval_carried_gold_bearing"] == 0.5
-    assert overall["entity_hit_rate_retrieval_carried_gold_bearing_n"] == 2
-    # Every query carries doc gold here, so the doc companion's n is the whole run.
-    assert overall["doc_hit_rate_gold_bearing"] == 1.0
-    assert overall["doc_hit_rate_gold_bearing_n"] == 3
-    # The two instruments agree on the population, which is the cross-check the
-    # clause asks for and the reason a companion cannot quietly drift.
-    assert overall["entity_hit_rate_gold_bearing_n"] == overall["ci95"]["entity_recall_avg"]["n"] == 2
-    assert overall["doc_hit_rate_gold_bearing_n"] == overall["ci95"]["doc_recall_avg"]["n"] == 3
-    # ...and the headline's own interval is still over every record. That is the
-    # asymmetry, stated rather than left to be discovered.
-    assert overall["ci95"]["entity_hit_rate"]["n"] == 3
-    assert overall["ci95"]["doc_hit_rate"]["n"] == 3
+    assert overall["entity_hit_rate"] == pytest.approx(1.0)
+    assert overall["entity_hit_rate"] != pytest.approx(0.75, abs=1e-6), (
+        "the entity leg is back on the all-records denominator")
+    assert overall["entity_hit_rate_retrieval_carried"] == pytest.approx(2 / 3,
+                                                           abs=0.001)
 
 
-def test_the_published_hit_rates_do_not_move_when_the_companion_lands():
-    """Clause 2 of #1600: adding the companion changes no published number.
+def test_ci95_n_is_the_gold_bearing_denominator_of_the_rate_it_bounds():
+    """#1663 clause 1's visible half: all five denominators are IN the artifact, as
+    the `n` of that rate's own interval — 3 of 4 queries on every leg of this run.
 
-    `entity_hit_rate` stays 0.667 on this set — the empty-gold query is still
-    counted as a miss — and `doc_hit_rate` stays 1.0. The `round(rate * n)` line is
-    the guard on the reserved decision: if anyone later guarded the hit booleans
-    (option (b), which lifts the published entity rate by 0.148 on the nightly
-    corpus), `entity_hit_rate` becomes 1.0 here and that line fails.
+    `ci95[m].n` is the count of non-None readings in `metric_series(records, m)` and
+    the headline is the mean of those same readings, so an interval and the number it
+    bounds cannot come from two populations of one corpus — the #1589 defect, which
+    the re-base closes by construction because both readings now go through one
+    reader. Before #1663 a reader had to recompute a denominator by hand to ask this
+    question at all, which is the instrument #1600 had to fall back on.
     """
-    overall = ev.summarize(_mixed_gold_records())["overall"]
-    assert overall["n_queries"] == 3
-    assert overall["entity_hit_rate"] == pytest.approx(2 / 3, abs=0.001)
-    assert overall["doc_hit_rate"] == pytest.approx(1.0)
-    assert round(overall["entity_hit_rate"] * overall["n_queries"]) == 2
-    assert round(overall["doc_hit_rate"] * overall["n_queries"]) == 3
-    # The companion is a different denominator over the same numerator, not a
-    # second headline: on this set the two entity readings differ.
-    assert overall["entity_hit_rate"] < overall["entity_hit_rate_gold_bearing"]
-    # And the two legs #1600 leaves alone keep no companion: `mrr_doc` and `ndcg10`
-    # score a no-gold query as 0.0 (`run_eval.py:484-485`) and whether they should
-    # share a companion is a corpus-definition call this round may not make.
-    assert "mrr_doc_gold_bearing" not in overall
-    assert "ndcg10_gold_bearing" not in overall
+    records = _mixed_gold_records()
+    summary = ev.summarize(records)
+    overall, ci = summary["overall"], summary["overall"]["ci95"]
+    assert [ci[m]["n"] for m in ENTITY_LEGS] == [3, 3]
+    assert [ci[m]["n"] for m in DOC_LEGS] == [3, 3, 3]
+    for metric in (*ENTITY_LEGS, *DOC_LEGS):
+        known = [v for v in ev.metric_series(records, metric) if v is not None]
+        assert ci[metric]["n"] == len(known), metric
+        assert overall[metric] == pytest.approx(sum(known) / len(known),
+                                                abs=0.001), metric
 
 
-def test_a_leg_no_query_carries_gold_for_is_null_and_prints_no_verdict(capsys):
-    """Clause 3 of #1600: a leg no query carries gold for is null, never 0.0, and
-    the page says so in the interval block's own words.
+def test_mrr_and_ndcg_divide_over_the_queries_with_doc_gold():
+    """#1663 clause 2: `mrr_doc` and `ndcg10` are the mean of `scoring.rr_doc` and
+    `scoring.ndcg10` over ONLY the records whose `expected.docs` is non-empty.
 
-    The doc-leg half runs through `print_table` so the printer is what is pinned;
-    the positive control sits in the same captured line — the entity leg of that
-    corpus IS measured and prints a number — so the null assertion cannot pass on
-    a formatter that prints nothing at all.
+    2/3 here against 0.5 under the old denominator. This is the half the 2026-09-27
+    ruling ADDED to option (b): `_ndcg_at_k` returns 0.0 on empty gold and `rr_doc`
+    is 0.0 when nothing matched, so a doc-less query was a MEASURED zero for the rank
+    scores while the recalls beside it in the same record were absent values — one
+    leg, two populations, one artifact.
     """
-    docs_free = [_gold_record("entity-only", [CARIED_BY_FACT], [],
-                              _legged_result(), seeds=["Unrelated Seed"])]
-    overall = ev.summarize(docs_free)["overall"]
-    assert overall["doc_hit_rate_gold_bearing"] is None
-    assert overall["doc_hit_rate_gold_bearing_n"] == 0
-    # The published rate is unchanged by all this and is a 0.0 over one record.
-    assert overall["doc_hit_rate"] == 0.0
-
-    ev.print_table(docs_free, ev.summarize(docs_free))
-    page = capsys.readouterr().out
-    line = [ln for ln in page.splitlines() if ln.strip().startswith("gold_bearing")]
-    assert len(line) == 1, page
-    assert "doc_hit=null [no verdict] n=0" in line[0], line[0]
-    assert "doc_hit=0.000" not in line[0], line[0]
-    assert "entity_hit=1.000 n=1" in line[0], line[0]
-
-    # An ENTITY leg with no gold-bearing query renders the same way, through the
-    # same formatter. `print_table` is not usable for that corpus: its
-    # by-category block formats `entity_recall_avg` with `:.2f` and cannot render
-    # a corpus carrying no entity gold anywhere — a pre-existing limitation of
-    # that line, named on #1600 rather than fixed here.
-    entity_free = [_gold_record("doc-only", [], ["knowledge/kg.md"],
-                                _legged_result(), seeds=["Unrelated Seed"])]
-    eo = ev.summarize(entity_free)["overall"]
-    assert eo["entity_hit_rate_gold_bearing"] is None
-    assert eo["entity_hit_rate_retrieval_carried_gold_bearing"] is None
-    printed = ev.gold_bearing_line(eo)
-    assert "entity_hit=null [no verdict] n=0" in printed, printed
-    assert "retrieval_carried=null [no verdict] n=0" in printed, printed
-    assert "entity_hit=0.000" not in printed, printed
-    assert "doc_hit=1.000 n=1" in printed, printed
-
-
-def test_a_corpus_with_gold_on_every_query_makes_companion_and_headline_equal():
-    """Clause 4 of #1600: with gold on every query the companion IS the published
-    rate, so the new field cannot become a second, silently different headline on
-    a complete corpus.
-
-    Hits are 2 of 3 here, not 3 of 3 and not 0: on a set where every rate is 1.0 or
-    0.0 an always-1.0 or always-0.0 companion would pass by accident.
-    """
-    records = [
-        _gold_record("fact-carried", [CARIED_BY_FACT], ["knowledge/kg.md"],
-                     _legged_result(), seeds=["Unrelated Seed"]),
-        _gold_record("seed-only", [SEED_ONLY_GOLD], ["knowledge/kg.md"],
-                     _legged_result(), seeds=[SEED_ONLY_GOLD]),
-        _gold_record("miss", ["Nonexistent Entity"], ["nope/missing.md"],
-                     _legged_result(), seeds=["Unrelated Seed"]),
-    ]
+    records = _mixed_gold_records()
     overall = ev.summarize(records)["overall"]
-    assert overall["n_queries"] == 3
-    for metric in ("entity_hit_rate", "entity_hit_rate_retrieval_carried", "doc_hit_rate"):
-        assert overall[metric] == overall[f"{metric}_gold_bearing"], metric
-        assert overall[f"{metric}_gold_bearing_n"] == 3, metric
-    assert overall["entity_hit_rate"] == pytest.approx(2 / 3, abs=0.001)
-    assert overall["doc_hit_rate"] == pytest.approx(2 / 3, abs=0.001)
-    assert overall["entity_hit_rate_retrieval_carried"] == pytest.approx(1 / 3, abs=0.001)
+    doc_bearing = [r for r in records if r["expected"]["docs"]]
+    assert len(doc_bearing) == 3, doc_bearing
+    assert overall["mrr_doc"] == pytest.approx(
+        sum(r["scoring"]["rr_doc"] for r in doc_bearing) / len(doc_bearing),
+        abs=0.001)
+    assert overall["ndcg10"] == pytest.approx(
+        sum(r["scoring"]["ndcg10"] for r in doc_bearing) / len(doc_bearing),
+        abs=0.001)
+    assert overall["mrr_doc"] == pytest.approx(2 / 3, abs=0.001)
+    assert overall["ndcg10"] == pytest.approx(2 / 3, abs=0.001)
+
+
+def _no_doc_gold_run() -> list[dict]:
+    """Two queries that hit on the entity leg and carry no doc gold at all: the
+    whole document leg of this run measures nothing (`doc_hit_rate`, `mrr_doc` and
+    `ndcg10` have no denominator)."""
+    return [
+        _gold_record(f"ent-{i}", [CARIED_BY_FACT], [], _legged_result(),
+                     seeds=["Unrelated Seed"])
+        for i in (1, 2)
+    ]
+
+
+def _no_entity_gold_run() -> list[dict]:
+    """Two queries that hit on the doc leg and carry no entity gold at all: the
+    entity leg of this run measures nothing, and unlike the doc leg it also has no
+    page — this corpus used to be unprintable."""
+    return [
+        _gold_record(f"doc-{i}", [], ["knowledge/kg.md"], _legged_result(),
+                     seeds=["Unrelated Seed"])
+        for i in (1, 2)
+    ]
+
+
+@pytest.mark.parametrize("leg", [*DOC_LEGS, *ENTITY_LEGS])
+def test_a_leg_no_query_counts_on_is_null_in_the_summary_and_never_zero(leg):
+    """#1663 clause 3: when no query in the run carries gold for a leg, that leg's
+    rate is null in `summary.overall` — never 0.0.
+
+    Two corpora, one per leg, so the two sides of the distinction are both pinned in
+    one test: a leg nothing asked about is None, and the OTHER leg in the same
+    summary still reports. 0.0 is the worst value the instrument could print for the
+    first case — indistinguishable from "every query was asked and none retrieved",
+    and it would put queries that are not in the denominator back into it.
+    """
+    doc_run = ev.summarize(_no_doc_gold_run())["overall"]
+    ent_run = ev.summarize(_no_entity_gold_run())["overall"]
+    if leg in DOC_LEGS:
+        assert doc_run[leg] is None
+        assert ent_run[leg] is not None
+    else:
+        assert ent_run[leg] is None
+        assert doc_run[leg] is not None
+
+
+@pytest.mark.parametrize("leg", [*DOC_LEGS, *ENTITY_LEGS])
+def test_a_leg_with_no_denominator_prints_n_zero_and_no_interval(leg):
+    """#1663 clause 3's other half: the null's denominator is VISIBLE as `n: 0` in
+    `ci95`, and its interval carries no bound — but the key is still there.
+
+    A reader must be able to tell "this leg divided by nothing" from "this leg is
+    not a leg I know about", which is what `_fmt_ci` renders as
+    `null [no verdict] n=0` (#1260). A leg the summariser stopped reporting entirely
+    would look identical to a leg it never had, and that is the difference between a
+    no-verdict night and a schema change.
+    """
+    records = _no_doc_gold_run() if leg in DOC_LEGS else _no_entity_gold_run()
+    entry = ev.summarize(records)["overall"]["ci95"][leg]
+    assert entry["n"] == 0, entry
+    assert entry["ci"] is None or all(b is None for b in entry["ci"]), entry
+
+
+def test_print_table_renders_a_run_whose_document_leg_measured_nothing(capsys):
+    """#1663 clause 3, the seam the triage named: a null leg must not take the page
+    down with it.
+
+    Every document-leg number in that summary is null, so the `:.3f` formats in the
+    by-category block are exactly what would raise inside the printer. They are
+    `_fmt_rate`/`_fmt_rate3` now: the leg prints `null`, and the per-query row prints
+    `—` on cells nothing measured while the entity leg still prints its real 1.00.
+    """
+    records = _no_doc_gold_run()
+    ev.print_table(records, ev.summarize(records))
+    out = capsys.readouterr().out
+    assert "entity_hit=1.00" in out, out
+    assert "doc_hit=null" in out, out
+    assert "MRR=null" in out, out
+    assert "NDCG10=null" in out, out
+    assert "0.000" not in out, "a null reached the page as a measured zero"
+    row = next(ln for ln in out.splitlines() if ln.startswith("ent-1"))
+    assert row.split()[3] == "—", row
+
+
+def test_print_table_renders_a_run_whose_entity_leg_measured_nothing(capsys):
+    """#1663 clause 3, the entity side — and the regression the old page failed.
+
+    `entity_hit=None` in a category block used to raise on the bare `:.2f`, which is
+    why this corpus was described as unprintable; and the per-query row used to print
+    `✗` for a query that was never asked. The row now reads `—` on both entity cells,
+    and the doc leg still prints its measured 1.00 beside it.
+    """
+    records = _no_entity_gold_run()
+    ev.print_table(records, ev.summarize(records))
+    out = capsys.readouterr().out
+    assert "entity_hit=null" in out, out
+    assert "doc_hit=1.00" in out, out
+    assert "✗" not in out, "an unasked leg printed as a miss"
+    row = next(ln for ln in out.splitlines() if ln.startswith("doc-1"))
+    assert row.split()[2] == "—", row
+
+
+def test_print_table_keeps_a_measured_zero_as_a_zero(capsys):
+    """#1663 clause 3, the other direction: `—` and `null` are for legs that were
+    not asked, and a query that WAS asked and failed still prints 0.00 and `✗`.
+
+    `doc-miss` carries doc gold and retrieves none of it; `no-gold-at-all` carries no
+    gold at all. Same page, opposite verdicts — and collapsing the second into the
+    first is how a label edit used to look like a retrieval move.
+    """
+    records = _mixed_gold_records()
+    ev.print_table(records, ev.summarize(records))
+    out = capsys.readouterr().out
+    miss = next(ln for ln in out.splitlines() if ln.startswith("doc-miss"))
+    free = next(ln for ln in out.splitlines() if ln.startswith("no-gold-at-all"))
+    cols = miss.split()
+    assert cols[3] == "✗" and cols[7] == "0.00", miss
+    assert free.split()[2] == "—" and free.split()[3] == "—", free
+
+
+def test_no_gold_bearing_companion_survives_in_the_artifact_or_on_the_page(capsys):
+    """#1663 clause 4, the removal half of the one-number-per-leg rule.
+
+    Re-based headline plus a `<metric>_gold_bearing` companion is the same reading
+    under two names, so the companions went: the key map, the emitter, the printed
+    line and its formatter. What stays is the denominator itself, as `ci95[*].n`.
+    """
+    overall = ev.summarize(_mixed_gold_records())["overall"]
+    assert not [k for k in overall if k.endswith("_gold_bearing")
+                or k.endswith("_gold_bearing_n")], sorted(overall)
+    ev.print_table(_mixed_gold_records(), ev.summarize(_mixed_gold_records()))
+    out = capsys.readouterr().out
+    assert "gold_bearing" not in out, out

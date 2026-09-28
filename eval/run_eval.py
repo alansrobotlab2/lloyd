@@ -888,71 +888,107 @@ CI_METRICS = {
 }
 
 
-#: The three hit-side rates, each with the gold list that makes it scoreable
-#: (#1600). A query with an empty `expect_entities` asks NOTHING of the entity
-#: leg, yet `_score` records `entity_hit: bool([])` = False for it and `summarize`
-#: divides that False over EVERY record — while a recall for the same query comes
-#: back None (`:501-502`) and leaves its own average. So the same artifact
-#: reported two halves of one leg over two populations: on the 2026-09-27 corpus
-#: `entity_hit_rate` is 0.488 over all 86 queries and 0.636 over the 66 that carry
-#: entity gold, 0.148 apart, and only the first was published. `doc_hit_rate` moved
-#: 0.628 / 0.684 (n=86 / 79) the same way.
+#: The five scored rates, each with the gold list that makes a query countable on
+#: its leg (#1663, adopting option (b) of #1600's ruling). A query with an empty
+#: `expect_entities` asks NOTHING of the entity leg, yet `_score` records
+#: `entity_hit: bool([])` = False for it, and a query with an empty `expect_docs`
+#: scores `rr_doc`/`ndcg10` as 0.0 (`_ndcg_at_k` returns 0.0 on empty gold) — while
+#: a RECALL for the same query comes back None (`:501-502`) and leaves its own
+#: average. One leg, two populations: on nightly-20260928 `entity_hit_rate` read
+#: 0.488 over all 86 queries and 0.636 over the 66 carrying entity gold, `doc_hit_rate`
+#: 0.616 over 86 against 0.671 over 79, `mrr_doc` 0.305 against 0.332 and `ndcg10`
+#: 0.360 against 0.392. From this commit the five rates follow the recalls, because
+#: a query the corpus never asked is a measurement of the LABEL set, not of
+#: retrieval. `ci95[<metric>].n` is the gold-bearing subset, so the denominator
+#: travels with the number instead of having to be re-derived by hand.
 #:
-#: The companion below publishes the second reading beside the first. It does not
-#: re-base the first: guarding the hit booleans instead would divide every prior
-#: night in the trend window against a different definition, and #1600 reserves
-#: that denominator-policy decision for a person.
+#: The `<metric>_gold_bearing` companions #1600 shipped are REMOVED here rather than
+#: kept beside the re-based headline: after the re-base they are the same number
+#: under a second name, and the artifact and the page carry one number per leg.
+#: The dated re-base is booked in `skills/retrieval-eval/SKILL.md`, because
+#: `scripts/eval_trend_stats.py` joins nights by `records[].id` and a denominator
+#: change on an unchanged corpus is invisible to it.
 GOLD_BEARING_LEGS = {
     "entity_hit_rate": "entities",
-    # Same gold list, narrower numerator (#1548) — so both entity companions
-    # carry the entity leg's n, and a reader can multiply either back out.
+    # Same gold list, narrower numerator (#1548) — so both entity rates divide over
+    # the entity leg's n, and a reader can multiply either back out.
     "entity_hit_rate_retrieval_carried": "entities",
     "doc_hit_rate": "docs",
+    # #1663 extends #1600's ruling to the two rank-based doc legs, which share
+    # `doc_hit_rate`'s and `doc_recall_avg`'s population.
+    "mrr_doc": "docs",
+    "ndcg10": "docs",
 }
+
+#: The rates that score a query as a hit or a miss, as opposed to averaging the
+#: per-query score the scorer wrote. `_metric_value` branches on this.
+HIT_RATE_METRICS = ("entity_hit_rate", "entity_hit_rate_retrieval_carried",
+                    "doc_hit_rate")
 
 
 def _leg_hit(rec: dict, metric: str) -> bool:
     """This query's hit on one hit leg, asked the SAME way the published rate
     asks it.
 
-    The companion and the headline are one numerator over two denominators, so
-    both go through here rather than through two comprehensions that can drift
-    apart. `entity_hit_rate_retrieval_carried` keeps #1548's fallback through
-    `scoring.entity_legs`, so an artifact predating that field reads as
-    not-carried in the headline and in the companion alike — never one way in one
-    and the other way in the other.
+    The rate and its interval are one numerator over one denominator, so both go
+    through here rather than through two comprehensions that can drift apart.
+    `entity_hit_rate_retrieval_carried` keeps #1548's fallback through
+    `scoring.entity_legs`, so an artifact predating that field reads as not-carried
+    in the rate and in the interval alike — never one way in one and the other way
+    in the other.
     """
     if metric == "entity_hit_rate_retrieval_carried":
         return _retrieval_entity_hit(rec)
     return bool((rec.get("scoring") or {}).get(CI_METRICS[metric][0]))
 
 
-def gold_bearing_rates(records: list[dict]) -> dict:
-    """Each hit leg re-divided over only the queries that carry gold for it.
+def _counts_on_leg(rec: dict, metric: str) -> bool:
+    """Does this artifact state that `rec` carries gold for `metric`'s leg?
 
-    Returns ``{published_metric: {"rate": float | None, "n": int, "k": int}}``.
-    `n` counts the records whose gold list for that leg is non-empty — the same
-    population `ci95` already divides that leg's RECALL over, because `_score`
-    nulls a recall exactly when the list is empty, so a reader can check the two
-    denominators against each other instead of taking either on trust.
-
-    Excluding an empty-gold query is the ONLY difference from the headline, which
-    keeps scoring it as a miss. `rate` is None, never 0.0, when no query carries
-    gold for the leg: that leg scored nothing on this corpus, and 0.0 would report
-    the absence as a measured zero — the rule `_fmt_rate` and `_fmt_ci` already
-    follow on the printed page and `METRIC_NAN_POLICY` in the artifact.
-
-    `expected` is read the way `anchorless_queries` reads it, so an artifact with
-    no `expected` block (a synthetic record) is not scored for the leg rather than
-    guessed at: a missing input is not a zero-gold query.
+    An ABSENT `expected` block is not an empty gold set. `summarize` runs over
+    baselines written before the block existed, over the automod baseline arm, and
+    over synthetic fixtures that never carried one; a missing input cannot license
+    dropping the query, so such a record stays in the denominator exactly as it
+    always did. A block that is PRESENT and names no label for the leg is the
+    artifact saying this query asked nothing of that leg — that is the query that
+    leaves. Every nightly record has carried `expected` since at least
+    nightly-20260925, so on real traffic the two cases never trade places.
     """
-    out: dict = {}
-    for metric, leg in GOLD_BEARING_LEGS.items():
-        scored = [r for r in records if ((r.get("expected") or {}).get(leg) or [])]
-        k = sum(1 for r in scored if _leg_hit(r, metric))
-        out[metric] = {"rate": (round(k / len(scored), 3) if scored else None),
-                       "n": len(scored), "k": k}
-    return out
+    leg = GOLD_BEARING_LEGS.get(metric)
+    if leg is None:
+        return True
+    expected = rec.get("expected")
+    if not isinstance(expected, dict):
+        return True
+    return bool(expected.get(leg))
+
+
+def _metric_value(rec: dict, metric: str):
+    """One record's contribution to `metric`, or None when it does not count.
+
+    THE reader of a per-query value: the headline rate in `summarize` and the
+    interval plus `n` in `confidence_intervals` both go through here, so a rate and
+    its denominator cannot be computed over two different query sets. That
+    divergence was the whole #1600 finding — one numerator, two denominators, only
+    one of them published — and two code paths reading the same metric is how it
+    stayed alive.
+    """
+    if not _counts_on_leg(rec, metric):
+        return None
+    if metric in HIT_RATE_METRICS:
+        return 1.0 if _leg_hit(rec, metric) else 0.0
+    return (rec.get("scoring") or {}).get(CI_METRICS[metric][0])
+
+
+def metric_series(records: list[dict], metric: str) -> list:
+    """Every record's value for `metric`, with a non-counting query as None.
+
+    `avg()` and `confidence_intervals` both drop None, so handing this one list to
+    both is what keeps a rate, its interval and its `n` on the same population. A
+    leg no query counts on comes back all-None, which is what makes the rate null
+    rather than 0.0 — the absence of a measurement is not a measured zero.
+    """
+    return [_metric_value(r, metric) for r in records]
 
 
 def confidence_intervals(records: list[dict], *,
@@ -961,12 +997,16 @@ def confidence_intervals(records: list[dict], *,
     """The 95 % interval beside each of the seven overall metrics.
 
     Entry shape: ``{"ci": [lo, hi], "n": int, "kind": "wilson"|"bootstrap"}``,
-    plus `k` (the hit count) on the two rates. Every entry carries its own `n`
+    plus `k` (the hit count) on the three hit rates. Every entry carries its own `n`
     because a 20-query run is not one denominator: `fact_entity_recall_avg` is
-    scored only where the corpus HAS the entity row, and a query whose
-    expectation list is empty scores None for a recall (#541) and leaves that
-    metric's average. Averaging over 4 of 20 and reporting an interval over 20
-    would be the zero-denominator failure in a new costume.
+    scored only where the corpus HAS the entity row, and a query whose expectation
+    list is empty scores None for a recall (#541) and leaves that metric's average.
+    Since #1663 the five scored rates leave it the same way, through the one reader
+    `metric_series` — so `ci95[<rate>].n` IS the population that rate divided, and a
+    reader can check a headline against its own interval instead of re-deriving a
+    denominator by hand, which is the instrument #1600 had to fall back to.
+    Averaging over 4 of 20 and reporting an interval over 20 would be the
+    zero-denominator failure in a new costume.
 
     `ci` is `[null, null]` — not `[0, 0]`, not `[1, 1]` — when there is nothing
     to bound: a `NaN` is not valid JSON and a baseline artifact has to stay
@@ -983,8 +1023,14 @@ def confidence_intervals(records: list[dict], *,
     delta between two nights is the misuse clause 5 of #696 names out loud.
     """
     out: dict = {}
-    for metric, (field, method) in CI_METRICS.items():
-        vals = [r["scoring"].get(field) for r in records]
+    for metric, (_field, method) in CI_METRICS.items():
+        # `metric_series`, not `records[].scoring[field]`: the interval has to be
+        # resampled over exactly the queries the headline averaged, or `n` and the
+        # number it bounds are two measurements of two different runs of the same
+        # corpus. `entity_hit_rate_retrieval_carried` in particular cannot be read
+        # off `scoring` at all — it is `entity_hit AND a retrieval-side carrier`
+        # (#1548), so the old direct field read silently bounded `entity_hit`.
+        vals = metric_series(records, metric)
         known = [v for v in vals if v is not None]
         if method == "wilson":
             n = len(known)
@@ -1025,50 +1071,6 @@ def _fmt_ci(metric: str, overall: dict) -> str:
     return f"  [{ci[0]:.3f},{ci[1]:.3f}] n={n}"
 
 
-#: Short name for each hit leg on the printed page, so #1600's companion line
-#: reads against the rates whose population it narrows instead of repeating
-#: `_rate` three times.
-GOLD_BEARING_LABELS = {
-    "entity_hit_rate": "entity_hit",
-    "entity_hit_rate_retrieval_carried": "retrieval_carried",
-    "doc_hit_rate": "doc_hit",
-}
-
-
-def _fmt_gold_bearing(value, n: int) -> str:
-    """One leg's gold-bearing rate for the page: `0.636 n=66`, or the interval's
-    own `no verdict` when NO query carries gold for that leg.
-
-    null and 0.000 are different facts here exactly as they are in `_fmt_rate`: a
-    leg with no gold-bearing query scored nothing, and printing 0.000 would report
-    that nothing as a measured zero — the same failure `_fmt_ci` refuses for the
-    bracket beside it (#1260). Three decimals rather than two because the gap
-    between a leg's two readings is the whole point of the line (0.488 against
-    0.636 on the 2026-09-27 corpus), and a 2 dp page can round such a pair to one
-    number and make the companion look like the headline.
-    """
-    if value is None or not n:
-        return f"null [no verdict] n={n or 0}"
-    return f"{value:.3f} n={n}"
-
-
-def gold_bearing_line(overall: dict) -> str:
-    """The companion line for all three hit legs (#1600):
-
-      gold_bearing      entity_hit=0.636 n=66  retrieval_carried=0.621 n=66  doc_hit=0.684 n=79
-
-    Printed immediately under the metric lines, so each companion sits beside the
-    headline rate it narrows. A leg the corpus asked nothing of prints
-    `null [no verdict] n=0`.
-    """
-    parts = []
-    for metric in GOLD_BEARING_LEGS:
-        value = overall.get(f"{metric}_gold_bearing")
-        n = overall.get(f"{metric}_gold_bearing_n") or 0
-        parts.append(f"{GOLD_BEARING_LABELS[metric]}={_fmt_gold_bearing(value, n)}")
-    return f"  {'gold_bearing':<20}" + "  ".join(parts)
-
-
 #: How many `query -> label` pairs the printed line names before pointing at the
 #: artifact for the rest. Three: a nightly whose corpus is badly broken would
 #: otherwise bury the rest of the summary in a hundred-character line, and the
@@ -1081,8 +1083,9 @@ def gold_doc_line(overall: dict) -> str:
 
       gold_docs           unreturnable=5 of 14 deployed collections: harness-system-prompt-frozen -> lloyd-architecture/harness.md, ...
 
-    Directly under `gold_bearing`, because it is the other half of why the document
-    leg is the number it is: #1600 says which queries the leg was divided over, and
+    Directly under the interval block, because it is the other half of why the
+    document leg is the number it is: `ci95[<metric>].n` says which queries the leg
+    was divided over (#1663 folded in what #1600 published as a companion line), and
     this says which of its gold could never have been found. Three states print here
     and are never conflated — a nonzero list is a FINDING about the corpus, an empty
     one is the check having run and passed against the count it checked, and `None` is
@@ -1310,16 +1313,16 @@ def summarize(records: list[dict], *,
         # arm carry no perturbation block, and summarize runs over both.
         return rec["scoring"].get(key)
 
-    # Some rates average only the queries that were scoreable for that half, so
-    # the denominators travel with the numbers: a pinned_rate over 4 of 20 queries
-    # is not comparable to one over 18, and the whole point of #541 is that a low
-    # number here is a finding rather than a malfunction. WHICH rates do is not
-    # uniform, and saying "each" was wrong until #1600: the recalls, the
-    # counterfactual rates and `fact_entity_recall_avg` all drop a query that was
-    # never scoreable, while the three hit rates below score such a query as a
-    # miss and divide over every record. That asymmetry is what the
-    # `<metric>_gold_bearing` companions published alongside them are for — see
-    # `GOLD_BEARING_LEGS`.
+    # Every scoreable rate averages only the queries that were scoreable for its
+    # half, so the denominators travel with the numbers: a pinned_rate over 4 of 20
+    # queries is not comparable to one over 18, and the whole point of #541 is that
+    # a low number here is a finding rather than a malfunction. Since #1663 that
+    # rule is UNIFORM across the seven scored metrics — the recalls always dropped a
+    # query the corpus never asked about, and now the three hit rates and
+    # `mrr_doc`/`ndcg10` do too, through one reader (`metric_series`, keyed by
+    # `GOLD_BEARING_LEGS`). What is left over is the counterfactual pair, which
+    # reads its own `expected_pinned` block, and `latency_ms_avg`, which is a count
+    # of wall clock and not a score.
     moved_vals = [_cf(r, "counterfactual_moved_rate") for r in records]
     pinned_vals = [_cf(r, "counterfactual_pinned_rate") for r in records]
     anchorless = anchorless_queries(records)
@@ -1329,10 +1332,14 @@ def summarize(records: list[dict], *,
         # The seed-side ceiling, beside the number it bounds. `entity_hit_rate`
         # cannot exceed (n - anchorless)/n until the residue has a recall arm to
         # reach it with (#1164); a run whose count moved is a run whose extractor
-        # changed, not one whose search got better.
+        # changed, not one whose search got better. The ceiling's denominator is the
+        # whole run while `entity_hit_rate`'s is now the entity leg's gold-bearing
+        # subset, so read the ceiling as a property of the corpus and the ratio
+        # beside it as approximate — the two counts differ by every query that
+        # carries no entity gold.
         "anchorless_query_count": len(anchorless),
         "anchorless_query_ids": anchorless,
-        "entity_hit_rate": avg([1.0 if _leg_hit(r, "entity_hit_rate") else 0.0 for r in records]),
+        "entity_hit_rate": avg(metric_series(records, "entity_hit_rate")),
         # #1548: retrieval-only, by construction — a hit counts here only if a
         # fact, a graph-expanded fact or a graph neighbour carried a matched
         # entity. <= `entity_hit_rate` on any record set, and the difference is
@@ -1341,13 +1348,13 @@ def summarize(records: list[dict], *,
         # carry it). Read alongside `fact_entity_recall_avg`, whose denominator is
         # the fact leg and which therefore cannot be seed-inflated either.
         "entity_hit_rate_retrieval_carried": avg(
-            [1.0 if _leg_hit(r, "entity_hit_rate_retrieval_carried") else 0.0 for r in records]),
-        "doc_hit_rate": avg([1.0 if _leg_hit(r, "doc_hit_rate") else 0.0 for r in records]),
-        "entity_recall_avg": avg([r["scoring"]["entity_recall"] for r in records]),
-        "doc_recall_avg": avg([r["scoring"]["doc_recall"] for r in records]),
-        "mrr_doc": avg([r["scoring"]["rr_doc"] for r in records]),
-        "ndcg10": avg([r["scoring"]["ndcg10"] for r in records]),
-        "fact_entity_recall_avg": avg([r["scoring"]["fact_entity_recall"] for r in records]),
+            metric_series(records, "entity_hit_rate_retrieval_carried")),
+        "doc_hit_rate": avg(metric_series(records, "doc_hit_rate")),
+        "entity_recall_avg": avg(metric_series(records, "entity_recall_avg")),
+        "doc_recall_avg": avg(metric_series(records, "doc_recall_avg")),
+        "mrr_doc": avg(metric_series(records, "mrr_doc")),
+        "ndcg10": avg(metric_series(records, "ndcg10")),
+        "fact_entity_recall_avg": avg(metric_series(records, "fact_entity_recall_avg")),
         # ...and each with its 95 % interval and its own denominator (#696).
         "ci95": confidence_intervals(records),
         "latency_ms_avg": avg([r["latency_ms"] for r in records]),
@@ -1357,19 +1364,12 @@ def summarize(records: list[dict], *,
         "counterfactual_n_moved": len([v for v in moved_vals if v is not None]),
         "counterfactual_n_pinned": len([v for v in pinned_vals if v is not None]),
     }
-    # Which population each hit rate above was divided over (#1600). The headline
-    # keys keep their all-records denominator UNCHANGED — a query that carries no
-    # gold for a leg stays a miss on that leg, which is the denominator policy a
-    # person owns — and each gains a companion re-dividing the same numerator over
-    # only the gold-bearing queries, with its own `n`. Both readings are in every
-    # artifact from here on, because the composition of the GOLD, not of the
-    # retrieval, is what moves a headline hit rate under this convention: on the
-    # 2026-09-27 corpus the entity leg reads 0.488 (n=86) and 0.636 (n=66), and a
-    # gold edit that emptied one more query's `expect_entities` would have moved
-    # the first number with retrieval held perfectly still.
-    for _gb_metric, _gb in gold_bearing_rates(records).items():
-        overall[f"{_gb_metric}_gold_bearing"] = _gb["rate"]
-        overall[f"{_gb_metric}_gold_bearing_n"] = _gb["n"]
+    # No `<metric>_gold_bearing` companion is emitted any more (#1663). #1600 added
+    # those six keys to publish the gold-bearing reading beside a headline that
+    # divided over every record; this function now publishes ONLY the gold-bearing
+    # reading, so a companion would be the same number under a second name and the
+    # artifact would carry two numbers for one leg. The denominator each rate used
+    # is `ci95[<metric>].n`, and a leg nothing counts on is null there and here.
     # Which gold the DOCUMENT leg could not be answered from at all (#1599). A label
     # no deployed collection indexes is subtracted from `doc_hit_rate`, `doc_recall`,
     # `mrr_doc` and `ndcg10` by every future run, and until now the artifact carried
@@ -1409,16 +1409,20 @@ def summarize(records: list[dict], *,
 
     per_cat = {}
     for cat, rs in by_cat.items():
+        # The SAME reader as `overall`, so a category's rate cannot be divided over
+        # one population while the headline is divided over another and both print
+        # on the page together (#1663). A category whose queries carry no gold for a
+        # leg gets null there, exactly as `overall` does.
         per_cat[cat] = {
             "n": len(rs),
-            "entity_hit_rate": avg([1.0 if r["scoring"]["entity_hit"] else 0.0 for r in rs]),
+            "entity_hit_rate": avg(metric_series(rs, "entity_hit_rate")),
             "entity_hit_rate_retrieval_carried": avg(
-                [1.0 if _retrieval_entity_hit(r) else 0.0 for r in rs]),
-            "doc_hit_rate": avg([1.0 if r["scoring"]["doc_hit"] else 0.0 for r in rs]),
-            "entity_recall_avg": avg([r["scoring"]["entity_recall"] for r in rs]),
-            "mrr_doc": avg([r["scoring"]["rr_doc"] for r in rs]),
-            "ndcg10": avg([r["scoring"]["ndcg10"] for r in rs]),
-            "fact_entity_recall_avg": avg([r["scoring"]["fact_entity_recall"] for r in rs]),
+                metric_series(rs, "entity_hit_rate_retrieval_carried")),
+            "doc_hit_rate": avg(metric_series(rs, "doc_hit_rate")),
+            "entity_recall_avg": avg(metric_series(rs, "entity_recall_avg")),
+            "mrr_doc": avg(metric_series(rs, "mrr_doc")),
+            "ndcg10": avg(metric_series(rs, "ndcg10")),
+            "fact_entity_recall_avg": avg(metric_series(rs, "fact_entity_recall_avg")),
             "counterfactual_moved_rate": avg([_cf(r, "counterfactual_moved_rate") for r in rs]),
             "counterfactual_pinned_rate": avg([_cf(r, "counterfactual_pinned_rate") for r in rs]),
         }
@@ -1428,7 +1432,11 @@ def summarize(records: list[dict], *,
 def _fmt_rate(value) -> str:
     """null and 0.0 are different facts and must not print the same. A run with
     no perturbation block reads 'null'; a run where nothing moved reads '0.00',
-    and only one of those is a finding about retrieval."""
+    and only one of those is a finding about retrieval.
+
+    Since #1663 the hit rates reach this null too: a leg no query in the run counts
+    on (every `expect_entities` empty, say) has no mean, and 0.00 there would report
+    an unasked question as a measured failure to retrieve."""
     return "null" if value is None else f"{value:.2f}"
 
 
@@ -1468,9 +1476,10 @@ def anchorless_queries(records: list[dict]) -> list[str]:
 
 
 def _fmt_rate3(value) -> str:
-    """`_fmt_rate` at the three decimals the fact metric is reported at. Same
-    rule: `fact_entity_recall_avg` is null on a run whose fact leg read nothing
-    (#1250), and a null must not print as 0.000."""
+    """`_fmt_rate` at the three decimals the fact and rank metrics are reported at.
+    Same rule: `fact_entity_recall_avg` is null on a run whose fact leg read nothing
+    (#1250), `mrr_doc`/`ndcg10` are null on a run whose document leg read nothing
+    (#1663), and a null must not print as 0.000 in either case."""
     return "null" if value is None else f"{value:.3f}"
 
 
@@ -1497,12 +1506,26 @@ def print_table(records: list[dict], summary: dict) -> None:
     print("-" * 118)
     for r in records:
         s = r["scoring"]
-        eh = "✓" if s["entity_hit"] else "✗"
-        dh = "✓" if s["doc_hit"] else "✗"
+        # A query that carries no gold for a leg prints `—` on that leg's cells
+        # (#1663), because `✗` and `0.00` both claim the leg was asked and failed.
+        # `_counts_on_leg` is the same predicate that drops the query from the
+        # aggregate above, so the row and the summary line cannot disagree about
+        # which queries were measurements. The recalls already had this — `None` from
+        # `_score` renders `—` — and the hit booleans and rank scores are now the
+        # legs that follow the rule instead of the two that broke it.
+        on_ent = _counts_on_leg(r, "entity_hit_rate")
+        on_doc = _counts_on_leg(r, "doc_hit_rate")
+        eh = ("✓" if s["entity_hit"] else "✗") if on_ent else "—"
+        dh = ("✓" if s["doc_hit"] else "✗") if on_doc else "—"
         er = f"{s['entity_recall']:.2f}" if s["entity_recall"] is not None else "—"
         dr = f"{s['doc_recall']:.2f}" if s["doc_recall"] is not None else "—"
-        rk = str(s["first_doc_rank"]) if s["first_doc_rank"] else "—"
-        ndcg = f"{s['ndcg10']:.2f}"
+        rk = (str(s["first_doc_rank"]) if (on_doc and s["first_doc_rank"]) else "—")
+        # `.get` and the None branch: a per-query score that is absent prints `—`,
+        # it does not raise inside the printer. `summarize` no longer needs the
+        # per-query value to be a float to average correctly, so a scorer that nulls
+        # an unscoreable leg cannot take the whole nightly page down with it.
+        ndcg = (f"{s.get('ndcg10'):.2f}"
+                if on_doc and s.get("ndcg10") is not None else "—")
         fer = f"{s['fact_entity_recall']:.2f}" if s["fact_entity_recall"] is not None else "—"
         cfx = r.get("counterfactual") or {}
         mv = ("✓" if cfx.get("counterfactual_moved") else "✗") if cfx else "—"
@@ -1573,12 +1596,11 @@ def print_table(records: list[dict], summary: dict) -> None:
             suffix = (f"   score/ceiling={'null' if norm is None else norm}"
                       f" (ceiling={cap} kind={kind})")
         print(f"  {label:<20}{fmt(o.get(metric))}{_fmt_ci(metric, o)}{suffix}")
-    # Each hit rate's OTHER denominator, directly under the rates themselves
-    # (#1600). An empty-gold query is a miss in `entity_hit_rate` above and is not
-    # in `entity_hit_rate_gold_bearing` here, so the two are one numerator over two
-    # populations, and printing only the first lets a gold edit read as a retrieval
-    # move — which is how `entity_hit` 0.488 and 0.636 came to be the same leg.
-    print(gold_bearing_line(o))
+    # No `gold_bearing` companion line any more (#1663): the rates printed above are
+    # the gold-bearing means, and `n=` at the end of each bracket is how many queries
+    # that leg was divided over, so the page cannot show one leg twice over two
+    # denominators. #1600 shipped the second reading as a separate line precisely
+    # because the rates above divided over every record; that is the half that went.
     # ...and which of its gold no deployed collection indexes at all (#1599), so a
     # `doc_hit` that a label pins at zero arrives naming the label.
     print(gold_doc_line(o))
@@ -1626,9 +1648,16 @@ def print_table(records: list[dict], summary: dict) -> None:
           f"pinned={_fmt_rate(pn)} (n={o.get('counterfactual_n_pinned', 0)}/{total})")
     print("\nBy category:")
     for cat, s in summary["by_category"].items():
-        print(f"  {cat:<10} n={s['n']:<3} entity_hit={s['entity_hit_rate']:.2f}  "
-              f"doc_hit={s['doc_hit_rate']:.2f}  ent_recall={s['entity_recall_avg']:.2f}  "
-              f"MRR={s['mrr_doc']:.3f}  NDCG10={s['ndcg10']:.3f}  "
+        # `_fmt_rate`/`_fmt_rate3`, not a bare `:.2f`. A category is a run inside the
+        # run, and since #1663 a leg inside one of them can have nothing to divide:
+        # a category whose every query carries no doc gold has NO document-leg
+        # measurement, and formatting that null raised inside the printer — which is
+        # why an entity-gold-free corpus used to be unprintable here and the page
+        # that says `null` is now the page that renders.
+        print(f"  {cat:<10} n={s['n']:<3} entity_hit={_fmt_rate(s['entity_hit_rate'])}  "
+              f"doc_hit={_fmt_rate(s['doc_hit_rate'])}  "
+              f"ent_recall={_fmt_rate(s['entity_recall_avg'])}  "
+              f"MRR={_fmt_rate3(s['mrr_doc'])}  NDCG10={_fmt_rate3(s['ndcg10'])}  "
               f"fER={_fmt_rate3(s['fact_entity_recall_avg'])}")
 
 
