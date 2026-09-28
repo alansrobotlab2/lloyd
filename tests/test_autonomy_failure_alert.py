@@ -11,6 +11,8 @@ were missing: a duration-shaped signal, and a surface that works here.
 """
 import asyncio
 import datetime as dt
+import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -494,3 +496,208 @@ async def test_the_dropped_alert_never_raises_even_when_the_note_cannot_be_writt
     await discord_notify.discord_alert("alarm that has nowhere to go")
     assert not _bullet_lines(), "nothing landed, and that is the passing case"
 
+
+
+# ── #1736: a returned True has to mean the line is in the note ────────────────
+#
+# `2026-09-27 21:14:20,838 [ERROR] lloyd-workers.fleet_watchdog` and its paired
+# `discord_alert (no channel/token configured)` WARNING are both in
+# `~/lloyd-data/logs/server.err`; `grep -c "21:14 PDT" ~/obsidian/memory/2026-09-27.md`
+# returns 0, `git -C ~/obsidian log -S '21:14 PDT' -- memory/2026-09-27.md` is empty,
+# and `grep -c "refused the alert too\|daily-note fallback failed" ~/lloyd-data/logs/server.err`
+# returns 0 — so neither fallback warning the contract promises was emitted either.
+# All three facts are one return value: `append_daily_alert_line` wrote, believed the
+# syscall, said True, and its caller had no reason left to speak.
+
+ALERT_SHAPE = re.compile(r"^- \d{2}:\d{2} [A-Z]{2,5} — ")
+
+NOTE_BODY_BEFORE = (
+    "---\nsegment: memory\ntags: [memory, daily-notes]\ntype: note\n"
+    "timestamp: '2026-09-27T20:00:00'\n---\n\n"
+    "# 2026-09-27 Daily Notes\n\n"
+    "## Decisions\n\n- decided the round order for tomorrow\n\n"
+    "## Session\n\n- pre-existing session capture, the note was not empty\n")
+
+
+def _seed_note_with_body() -> Path:
+    """A note that already has prose in it, written before the alert is appended.
+
+    Every case below needs this because the read-back must never be proved against an
+    empty file: a note whose entire content is the one appended line would come back
+    correct after a clobber that happened to keep the header, and the pre-existing
+    text is what makes "the line is in the note" a claim about the note rather than
+    about a scratch file we just made.
+    """
+    path = _note_file(autonomy)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(NOTE_BODY_BEFORE, encoding="utf-8")
+    return path
+
+
+def _error_lines(caplog) -> list[str]:
+    """ERROR records from the autonomy logger only, so the assertion is about this writer."""
+    return [r.getMessage() for r in caplog.records
+            if r.name == "lloyd-autonomy" and r.levelno == logging.ERROR]
+
+
+def test_a_returned_true_means_the_line_is_readable_back_from_the_note(aut):
+    """Clause 1, the positive control: True now implies a readable-back line.
+
+    The exact text asserted is what `append_daily_alert_line` formats — `- HH:MM %Z —
+    <body>`, America/Los_Angeles — matched through the timestamp wildcard rather than
+    a literal the test hand-built, so a change to the line format has to be a change
+    this test notices. The pre-existing body is asserted twice, before and after:
+    before, because an empty scratch file proves nothing; after, because the alert
+    that lands by erasing the note's own prose is not an alert that landed.
+    """
+    path = _seed_note_with_body()
+    assert "pre-existing session capture" in path.read_text(encoding="utf-8"), (
+        "the note has no body, so a read-back proved nothing about a real note")
+
+    assert autonomy.append_daily_alert_line("fleet watchdog says the fleet is silent")
+
+    after = path.read_text(encoding="utf-8")
+    assert "pre-existing session capture" in after, "the append cost the note its own body"
+    hit = [ln for ln in after.splitlines()
+           if ALERT_SHAPE.match(ln) and "fleet watchdog says the fleet is silent" in ln]
+    assert len(hit) == 1, f"the appended line is not readable back: {after!r}"
+
+
+def test_a_note_clobbered_after_the_write_returns_false_and_says_so_at_error(
+        aut, monkeypatch, caplog):
+    """Clause 2, in the incident's own shape: the write lands, then something rewrites it.
+
+    Mechanism (b) of the two the item names is `a later whole-file rewrite composed
+    from a pre-21:14 snapshot` — the note's mtime was 21:24, ten minutes after the
+    alert, with content byte-identical to HEAD, which is exactly what a no-net-diff
+    snapshot write looks like. Reproduced here by letting the append happen for real
+    and restoring the pre-call bytes when the file handle closes, so the sequence the
+    function sees is: write succeeded, verify, line is not there. The assertion that
+    the file on disk is the snapshot again is what keeps this from being a test of a
+    failed write — the write did not fail, and under the old body that was invisible.
+    """
+    path = _seed_note_with_body()
+    snapshot = path.read_text(encoding="utf-8")
+    real_open = open
+
+    class _Clobbered:
+        """The real handle, with someone else's snapshot rewrite at close."""
+
+        def __init__(self, handle):
+            self._handle = handle
+
+        def write(self, text):
+            return self._handle.write(text)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+            path.write_text(snapshot, encoding="utf-8")
+            return False
+
+    def open_that_clobbers(file, mode="r", *args, **kwargs):
+        handle = real_open(file, mode, *args, **kwargs)
+        return _Clobbered(handle) if "a" in mode else handle
+
+    monkeypatch.setattr(autonomy, "open", open_that_clobbers, raising=False)
+    caplog.set_level(logging.ERROR, logger="lloyd-autonomy")
+
+    assert autonomy.append_daily_alert_line("the alarm that vanished on 2026-09-27") is False
+    errors = _error_lines(caplog)
+    assert len(errors) == 1, f"the mismatch must be reported at ERROR exactly once: {errors}"
+    assert str(path) in errors[0], f"the ERROR has to name the note it checked: {errors[0]}"
+    assert path.read_text(encoding="utf-8") == snapshot, (
+        "the write was not clobbered, so this stopped being the case it claims")
+
+
+def test_a_note_whose_write_is_discarded_returns_false_without_mocking_anything(
+        aut, caplog):
+    """Clause 2 again, with no seam intercepted: a note that swallows what it is given.
+
+    `memory/<today>.md` as a symlink to `/dev/null` makes every part of the contract
+    real — `exists()` is true so the append branch runs, `open(..., "a")` succeeds, the
+    `write()` returns a count, and the re-read finds nothing. It is the same observable
+    state as the 09-27 instance from the writer's side, which is the only side this
+    function can see, and it proves the check does not depend on the interception
+    above being wired correctly.
+    """
+    path = _note_file(autonomy)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink(missing_ok=True)
+    path.symlink_to("/dev/null")
+    caplog.set_level(logging.ERROR, logger="lloyd-autonomy")
+
+    assert autonomy.append_daily_alert_line("an alarm written somewhere that keeps nothing") is False
+    errors = _error_lines(caplog)
+    assert len(errors) == 1, f"expected one ERROR naming the discard: {errors}"
+
+
+def test_a_note_that_cannot_be_read_back_costs_a_log_and_no_exception(
+        aut, monkeypatch, caplog):
+    """Clause 3: the verification is never allowed to become the outage it reports.
+
+    The mode goes on the note file from the moment the append handle closes, so the
+    write itself is unharmed and it is the re-open that raises `PermissionError`. The
+    note *directory* is the other way to break a read, but taking write permission off
+    a directory does not stop an append to a file already in it — file permission does
+    — so a directory mode would be an unfalsifiable stage on the append that runs
+    first. Running as root would make the mode inert rather than the check inert, which
+    is why this skips instead of passing.
+    """
+    if os.geteuid() == 0:
+        pytest.skip("root ignores file modes, so the re-open would not raise")
+    path = _seed_note_with_body()
+    real_open = open
+
+    class _UnreadableAfter:
+        def __init__(self, handle):
+            self._handle = handle
+
+        def write(self, text):
+            return self._handle.write(text)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._handle.close()
+            path.chmod(0o000)
+            return False
+
+    monkeypatch.setattr(autonomy, "open",
+                        lambda file, mode="r", *a, **kw: _UnreadableAfter(real_open(file, mode, *a, **kw))
+                        if "a" in mode else real_open(file, mode, *a, **kw),
+                        raising=False)
+    caplog.set_level(logging.ERROR, logger="lloyd-autonomy")
+    try:
+        assert autonomy.append_daily_alert_line("an alarm whose note went unreadable") is False
+    finally:
+        path.chmod(0o644)
+    errors = _error_lines(caplog)
+    assert len(errors) == 1, (
+        f"the failed re-read has to be reported, not swallowed: {errors}")
+    assert path.exists(), "the note is still there; only the read failed"
+
+
+def test_two_alerts_the_same_day_both_stay_readable_because_this_is_no_dedupe(aut):
+    """Clause 4: the read-back must not quietly become a marker check.
+
+    Both alerts carry the SAME body, which is the only text that could collide with a
+    marker: `~/obsidian/memory/2026-09-27.md` carries 13 same-shaped `Scheduler alert
+    not delivered` lines from one day, and #1727's triage established that every
+    producer already paces itself — so a presence test used as a dedupe key would have
+    dropped 12 legitimate re-fires. The read-back asks only whether THIS line is in the
+    file, so the second call has to append, not agree.
+    """
+    _seed_note_with_body()
+    body = "fleet watchdog says the fleet is silent (twice)"
+
+    assert autonomy.append_daily_alert_line(body)
+    assert autonomy.append_daily_alert_line(body)
+
+    hits = [ln for ln in _note_file(autonomy).read_text(encoding="utf-8").splitlines()
+            if body in ln and ALERT_SHAPE.match(ln)]
+    assert len(hits) == 2, (
+        f"two alerts, two lines — the read-back dropped or merged one: {hits}")

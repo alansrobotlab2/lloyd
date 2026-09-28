@@ -3051,7 +3051,39 @@ def _daily_note_dir() -> Path:
 
 
 def append_daily_alert_line(body: str) -> bool:
-    """Append `- HH:MM %Z — <body>` to today's daily note. True if it landed.
+    """Append `- HH:MM %Z — <body>` to today's daily note. True if it is in the note.
+
+    True means one specific, checkable thing (#1736): **the line was readable back
+    from the note at the moment this returned.** It used to mean "a `write()` syscall
+    returned", which on 2026-09-27 was a claim about a line no reader ever saw —
+    the 21:14 fleet-watchdog ERROR is in `~/lloyd-data/logs/server.err` and its note
+    line is not in `~/obsidian/memory/2026-09-27.md`, was not in any committed state
+    of that file, and produced neither of the two fallback warnings this contract
+    promises, because the writer had already said True and the caller believes it.
+
+    The scope limit, stated because the fix does not buy more than this: a read-back
+    taken here can only see a mismatch that is TRUE AT RETURN TIME. If the loss is a
+    later whole-file rewrite composed from an older snapshot — the note's mtime was
+    21:24, ten minutes on, with content byte-identical to `HEAD`, which is that
+    signature — this check returns True and the alarm is still gone. So the claim is
+    "a returned True means the line was there when we returned", NOT "an alarm can no
+    longer be lost". Settling which of the two mechanisms the 09-27 instance was is
+    owed on #1736; no instrument on this box witnesses these appends today
+    (`~/obsidian/memory/audit/writes.jsonl` records only the `vault_write` route).
+
+    A mismatch is logged at ERROR, not WARNING, and the return value is the other
+    half of it: `app.discord_notify._survive_the_dropped_alert` reads False and emits
+    `the daily note refused the alert too; it exists only in this log line`, which is
+    the warning whose absence above is half of how the incident stayed silent. A
+    second person-facing surface for the mismatch is an owed ruling on #1736, not a
+    code change this round can make: `discord.home_channel` is null and the token
+    empty by Alan's decision, and `config.yaml` is off-limits to the loop.
+
+    There is deliberately no marker or dedupe check here (#1727's triage: every
+    producer already paces itself). `~/obsidian/memory/2026-09-27.md` carries 13
+    same-shaped alert lines in one day, so a presence test used as a dedupe key would
+    have dropped 12 legitimate re-fires; the read-back asks only whether THIS line is
+    in the file, never whether one like it already was.
 
     The one writer of the `LLOYD_DAILY_NOTE_DIR` route. Two callers, one
     destination: `_append_fast_failure_alert` (#1209), which reached the daily note
@@ -3064,7 +3096,9 @@ def append_daily_alert_line(body: str) -> bool:
     Never raises, and that is load-bearing rather than tidy: the caller is a
     scheduler tick or a run's failure path, and a note that could not be written
     must not change what the run record, the retry budget or the next tick says.
-    Every failure is logged and returned as False.
+    Every failure is logged and returned as False — including the new verification,
+    whose own re-open raising is the same False plus an ERROR log and never an
+    exception into the tick.
 
     The `body` carries its own prose and its own reason, so every alarm in the
     note reads the way the fast-failure line already does: `- HH:MM %Z — …`,
@@ -3095,6 +3129,24 @@ def append_daily_alert_line(body: str) -> bool:
         else:
             with open(path, "a", encoding="utf-8") as handle:
                 handle.write(entry)
+        # Read-back (#1736): `write()` returning is not the line being in the file.
+        # The whole note is re-read rather than a tail window — a live note is ~6 KB
+        # (`~/obsidian/memory/2026-09-27.md` is 6,342 B carrying 13 alert lines plus
+        # the session captures), so this costs one read of a file the function just
+        # opened, and a substring test over it cannot lose a line to an offset. An
+        # unreadable note counts as NOT delivered: an unverified alarm is not an
+        # alarm, and the choice is only which log line it survives in.
+        why = "it is absent from the file its write claimed to land it in"
+        try:
+            landed = entry in path.read_text(encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001 — unverified is not delivered
+            landed, why = False, f"the file could not be read back to check ({exc})"
+        if not landed:
+            logger.error("daily-note alert line is NOT confirmed in %s because %s — "
+                         "the alarm reaches no file a person reads, only this log "
+                         "line, and the caller is told to say so: %r",
+                         path, why, entry.strip())
+            return False
         return True
     except Exception as exc:  # noqa: BLE001 — a note is never worth the run
         logger.warning("could not write a daily-note alert line: %s", exc)
