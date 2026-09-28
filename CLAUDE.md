@@ -106,6 +106,42 @@ The sync registration is guarded the same way (`app/harness/sync_registration.py
 running, and never re-link sync to a remote that holds an incident's
 deletions.** Long version: `architecture/vault-protection.md`.
 
+## Install provenance and advisory scan
+
+`app/harness/supply_chain.py`. **A background session's `pip install <name>` for a
+distribution new to this repo's dependency set is refused at dispatch, from three
+facts read off PyPI: never published, first released under 90 days ago, or fewer
+than 2 releases.** A chat session is never refused (the operator already decides
+what runs) and pays no registry lookup; a name the check could not examine — npm
+or cargo, a `git+` URL, an unreachable or timing-out PyPI — is reported UNVETTED,
+never as clean. An override is `LLOYD_DEP_OVERRIDE="<why>"` on that one command:
+it lets the install through and is recorded per distribution name, so the
+overrides are countable rather than folklore.
+
+`check_bash_command` refuses in a fixed order — protected-delete deny-set,
+sync-registration, service-restart (#1455), protected-write deny-set (#1530) —
+and install provenance is last and the only one of them that consults the
+network. Ordering is not cosmetic: the paired corpus in
+`tests/unit/test_harness_safety.py` pins which guard answers each true positive,
+so a new refusal placed earlier would re-label commands another guard owns.
+What the shape matcher alone misses is why a provenance check exists at all
+rather than a longer regex: `install -m 644 foo /usr/local/bin` clears every
+guard on the Bash lane — measured on this tree,
+`safety.check_bash_command('install -m 644 foo /usr/local/bin',
+session_id='background:probe', at_dispatch=True)` returns `None`, and
+`git grep -n "install.*-m" -- app/harness/protected_paths.py` has no hit —
+because `install` is not one of the install verbs and no package name is parsed
+from it. It is refused, if at all, on the `Write` lane as a write to a protected
+path, which is a different question. A name that IS parsed (`pip3 install
+<unpublished>`) is refused here, on the registry fact.
+
+The advisory half is not wired into any path yet: `scan_requirements()` reads
+lockfiles, runs an offline OSV scan when the binary is installed, and records the
+MISSING BINARY as a coverage gap in `eval/supply-chain/baseline.yaml` — never as
+zero advisories. `osv-scanner` is not installed on this machine
+(`command -v osv-scanner` → empty), so the advisory count on this box is
+permanently UNKNOWN, and that is the finding, not an all-clear.
+
 ## Automod (self-modification)
 
 Lloyd changes his own code through a gated loop with automatic rollback.

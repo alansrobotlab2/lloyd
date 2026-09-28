@@ -1,0 +1,2240 @@
+schema: lloyd-supply-chain-fixtures/1
+authored: '2026-09-24'
+evaluated_at: '2026-09-24T12:00:00Z'
+planted:
+- name: graphy
+  shape: invented
+  expect: block
+  facts:
+    exists: true
+    first_release: '2010-03-18T18:40:09+00:00'
+    release_count: 1
+    measured: true
+    observed_at: '2026-09-24T05:53:53.340927+00:00'
+  reality:
+    measured: true
+    exists: true
+    first_release: '2010-03-18T18:40:09+00:00'
+    release_count: 1
+    observed_at: '2026-09-24T05:53:53.340927+00:00'
+  expected_blocked: true
+- name: pydanticx
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:54:45.238794+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:45.238794+00:00'
+  expected_blocked: true
+- name: numpytools
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:54:45.426275+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:45.426275+00:00'
+  expected_blocked: true
+- name: fastflow
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:53.695859+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:53.695859+00:00'
+  expected_blocked: true
+- name: langchain-plus
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:53.862260+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:53.862260+00:00'
+  expected_blocked: true
+- name: openaipro
+  shape: invented
+  expect: block
+  facts:
+    exists: true
+    first_release: '2023-02-15T11:30:47+00:00'
+    release_count: 1
+    measured: true
+    observed_at: '2026-09-24T05:53:54.041051+00:00'
+  reality:
+    measured: true
+    exists: true
+    first_release: '2023-02-15T11:30:47+00:00'
+    release_count: 1
+    observed_at: '2026-09-24T05:53:54.041051+00:00'
+  expected_blocked: true
+- name: requestsx
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:54.170062+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:54.170062+00:00'
+  expected_blocked: true
+- name: scikit-learn-plus
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:54.346787+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:54.346787+00:00'
+  expected_blocked: true
+- name: transformersx
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:54.529023+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:54.529023+00:00'
+  expected_blocked: true
+- name: pandasx
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:54:45.603854+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:45.603854+00:00'
+  expected_blocked: true
+- name: websearch-pro
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:54.904596+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:54.904596+00:00'
+  expected_blocked: true
+- name: youtube-dl2
+  shape: invented
+  expect: block
+  facts:
+    exists: true
+    first_release: '2020-10-24T07:00:04+00:00'
+    release_count: 1
+    measured: true
+    observed_at: '2026-09-24T05:53:55.082402+00:00'
+  reality:
+    measured: true
+    exists: true
+    first_release: '2020-10-24T07:00:04+00:00'
+    release_count: 1
+    observed_at: '2026-09-24T05:53:55.082402+00:00'
+  expected_blocked: true
+- name: pineconex
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:55.202376+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:55.202376+00:00'
+  expected_blocked: true
+- name: serper-dev
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:55.371849+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:55.371849+00:00'
+  expected_blocked: true
+- name: brave-search-api
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:55.553085+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:55.553085+00:00'
+  expected_blocked: true
+- name: pymupdf2
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:55.725496+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:55.725496+00:00'
+  expected_blocked: true
+- name: trafilatura2
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:55.911980+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:55.911980+00:00'
+  expected_blocked: true
+- name: sherpa-onnx2
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:56.090868+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:56.090868+00:00'
+  expected_blocked: true
+- name: fastapi-server
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:56.234181+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:56.234181+00:00'
+  expected_blocked: true
+- name: agentmail-lite
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:56.395640+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:56.395640+00:00'
+  expected_blocked: true
+- name: tensorboards
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:54:45.782065+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:45.782065+00:00'
+  expected_blocked: true
+- name: chromadb2
+  shape: invented
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:56.711281+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:56.711281+00:00'
+  expected_blocked: true
+- name: fastapii
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:56.889738+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:56.889738+00:00'
+  expected_blocked: true
+- name: fastapai
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:57.040453+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:57.040453+00:00'
+  expected_blocked: true
+- name: uvicornn
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:57.214206+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:57.214206+00:00'
+  expected_blocked: true
+- name: uvicprn
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:57.392524+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:57.392524+00:00'
+  expected_blocked: true
+- name: httpxs
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:57.566758+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:57.566758+00:00'
+  expected_blocked: true
+- name: httpcx
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:57.734727+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:57.734727+00:00'
+  expected_blocked: true
+- name: sqlalchemi
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:54:45.956298+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:45.956298+00:00'
+  expected_blocked: true
+- name: mc1p
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:57.993997+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:57.993997+00:00'
+  expected_blocked: true
+- name: pyamll
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:58.155156+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:58.155156+00:00'
+  expected_blocked: true
+- name: pyymal
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:58.336962+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:58.336962+00:00'
+  expected_blocked: true
+- name: playwrigt
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:58.496345+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:58.496345+00:00'
+  expected_blocked: true
+- name: pyarroww
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:58.682174+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:58.682174+00:00'
+  expected_blocked: true
+- name: pymupddf
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:58.869530+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:58.869530+00:00'
+  expected_blocked: true
+- name: trafilaturra
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:59.046554+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:59.046554+00:00'
+  expected_blocked: true
+- name: sherpaonn
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:59.239866+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:59.239866+00:00'
+  expected_blocked: true
+- name: ddgz
+  shape: typosquat
+  expect: block
+  facts:
+    exists: true
+    first_release: '2025-05-03T14:34:32+00:00'
+    release_count: 1
+    measured: true
+    observed_at: '2026-09-24T05:53:59.423693+00:00'
+  reality:
+    measured: true
+    exists: true
+    first_release: '2025-05-03T14:34:32+00:00'
+    release_count: 1
+    observed_at: '2026-09-24T05:53:59.423693+00:00'
+  expected_blocked: true
+- name: pytest-xdist2
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:59.544245+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:59.544245+00:00'
+  expected_blocked: true
+- name: youtube-transcriptap
+  shape: typosquat
+  expect: block
+  facts:
+    exists: false
+    first_release: null
+    release_count: null
+    measured: true
+    observed_at: '2026-09-24T05:53:59.715761+00:00'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:59.715761+00:00'
+  expected_blocked: true
+- name: grapphy
+  shape: typosquat
+  expect: block
+  facts:
+    exists: true
+    first_release: '2020-12-17T10:17:19Z'
+    release_count: 1
+    measured: true
+  reality:
+    measured: true
+    exists: true
+    first_release: '2020-12-17T10:17:19+00:00'
+    release_count: 1
+    observed_at: '2026-09-24T05:54:48.311420+00:00'
+  expected_blocked: true
+- name: fastflowx
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release: '2026-08-03T13:43:39Z'
+    release_count: 1
+    measured: true
+  reality:
+    measured: true
+    exists: true
+    first_release: '2026-08-03T13:43:39+00:00'
+    release_count: 1
+    observed_at: '2026-09-24T05:54:46.879330+00:00'
+  expected_blocked: true
+- name: zephyr-flow-control
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 6
+    release_count: 1
+    measured: false
+    first_release: '2026-09-18T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:53:59.880033+00:00'
+  expected_blocked: true
+- name: quillmesh
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 11
+    release_count: 1
+    measured: false
+    first_release: '2026-09-13T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:00.050006+00:00'
+  expected_blocked: true
+- name: orbitfetch-pro
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 3
+    release_count: 3
+    measured: false
+    first_release: '2026-09-21T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:00.235322+00:00'
+  expected_blocked: true
+- name: tinyvectorlite
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 30
+    release_count: 2
+    measured: false
+    first_release: '2026-08-25T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:00.416690+00:00'
+  expected_blocked: true
+- name: promptmesh
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 45
+    release_count: 1
+    measured: false
+    first_release: '2026-08-10T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:00.587039+00:00'
+  expected_blocked: true
+- name: fastapi-guardrail-lite
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 14
+    release_count: 1
+    measured: false
+    first_release: '2026-09-10T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:00.779046+00:00'
+  expected_blocked: true
+- name: ollamafast
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 21
+    release_count: 1
+    measured: false
+    first_release: '2026-09-03T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:00.959982+00:00'
+  expected_blocked: true
+- name: llmcache-lite
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 60
+    release_count: 2
+    measured: false
+    first_release: '2026-07-26T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:01.142716+00:00'
+  expected_blocked: true
+- name: tokenscope2
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 89
+    release_count: 9
+    measured: false
+    first_release: '2026-06-27T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:01.446171+00:00'
+  expected_blocked: true
+- name: raglite2
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 1
+    release_count: 1
+    measured: false
+    first_release: '2026-09-23T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:01.582512+00:00'
+  expected_blocked: true
+- name: swiftpypi
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 2
+    release_count: 1
+    measured: false
+    first_release: '2026-09-22T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:01.763435+00:00'
+  expected_blocked: true
+- name: quickhttpx
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 40
+    release_count: 1
+    measured: false
+    first_release: '2026-08-15T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:01.943214+00:00'
+  expected_blocked: true
+- name: modelhub-lite
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 10
+    release_count: 1
+    measured: false
+    first_release: '2026-09-14T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:02.086051+00:00'
+  expected_blocked: true
+- name: streamlate
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 75
+    release_count: 1
+    measured: false
+    first_release: '2026-07-11T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:02.258508+00:00'
+  expected_blocked: true
+- name: cachemesh-pro
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 50
+    release_count: 1
+    measured: false
+    first_release: '2026-08-05T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:02.437818+00:00'
+  expected_blocked: true
+- name: graphlite-pro
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 80
+    release_count: 1
+    measured: false
+    first_release: '2026-07-06T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:02.610601+00:00'
+  expected_blocked: true
+- name: evalmesh
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 33
+    release_count: 1
+    measured: false
+    first_release: '2026-08-22T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:02.800423+00:00'
+  expected_blocked: true
+- name: dataproc-lite
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 90
+    release_count: 1
+    measured: false
+    first_release: '2026-06-26T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:02.979403+00:00'
+  expected_blocked: true
+- name: httpclient-pro
+  shape: fresh
+  expect: block
+  facts:
+    exists: true
+    first_release_age_days: 87
+    release_count: 1
+    measured: false
+    first_release: '2026-06-29T12:00:00Z'
+  reality:
+    measured: true
+    exists: false
+    first_release: null
+    release_count: null
+    observed_at: '2026-09-24T05:54:03.144107+00:00'
+  expected_blocked: true
+control:
+- name: aiofiles
+  facts:
+    exists: true
+    first_release: '2015-04-06T22:55:01+00:00'
+    release_count: 16
+    measured: true
+    observed_at: '2026-09-24T05:54:03.320112+00:00'
+- name: aiohappyeyeballs
+  facts:
+    exists: true
+    first_release: '2023-12-09T18:33:52+00:00'
+    release_count: 46
+    measured: true
+    observed_at: '2026-09-24T05:54:03.388335+00:00'
+- name: aiohttp
+  facts:
+    exists: true
+    first_release: '2013-10-25T18:17:03+00:00'
+    release_count: 312
+    measured: true
+    observed_at: '2026-09-24T05:54:03.453176+00:00'
+- name: aiosignal
+  facts:
+    exists: true
+    first_release: '2019-08-28T22:04:31+00:00'
+    release_count: 10
+    measured: true
+    observed_at: '2026-09-24T05:54:03.673341+00:00'
+- name: annotated-doc
+  facts:
+    exists: true
+    first_release: '2023-12-11T00:06:11+00:00'
+    release_count: 5
+    measured: true
+    observed_at: '2026-09-24T05:54:03.726955+00:00'
+- name: annotated-types
+  facts:
+    exists: true
+    first_release: '2022-05-02T17:42:49+00:00'
+    release_count: 9
+    measured: true
+    observed_at: '2026-09-24T05:54:03.781275+00:00'
+- name: anthropic
+  facts:
+    exists: true
+    first_release: '2023-02-09T06:19:01+00:00'
+    release_count: 220
+    measured: true
+    observed_at: '2026-09-24T05:54:03.856392+00:00'
+- name: anyio
+  facts:
+    exists: true
+    first_release: '2018-10-12T10:06:03+00:00'
+    release_count: 72
+    measured: true
+    observed_at: '2026-09-24T05:54:03.935174+00:00'
+- name: attrs
+  facts:
+    exists: true
+    first_release: '2015-02-21T10:42:56+00:00'
+    release_count: 36
+    measured: true
+    observed_at: '2026-09-24T05:54:03.995028+00:00'
+- name: audioread
+  facts:
+    exists: true
+    first_release: '2011-11-12T01:31:44+00:00'
+    release_count: 29
+    measured: true
+    observed_at: '2026-09-24T05:54:04.049455+00:00'
+- name: av
+  facts:
+    exists: true
+    first_release: '2013-11-11T07:12:16+00:00'
+    release_count: 57
+    measured: true
+    observed_at: '2026-09-24T05:54:04.177023+00:00'
+- name: babel
+  facts:
+    exists: true
+    first_release: '2011-03-18T07:38:04+00:00'
+    release_count: 46
+    measured: true
+    observed_at: '2026-09-24T05:54:04.265888+00:00'
+- name: certifi
+  facts:
+    exists: true
+    first_release: '2011-12-28T07:27:42+00:00'
+    release_count: 76
+    measured: true
+    observed_at: '2026-09-24T05:54:04.323989+00:00'
+- name: cffi
+  facts:
+    exists: true
+    first_release: '2012-06-18T14:53:58+00:00'
+    release_count: 80
+    measured: true
+    observed_at: '2026-09-24T05:54:04.383857+00:00'
+- name: charset-normalizer
+  facts:
+    exists: true
+    first_release: '2019-08-02T16:03:53+00:00'
+    release_count: 65
+    measured: true
+    observed_at: '2026-09-24T05:54:04.496122+00:00'
+- name: click
+  facts:
+    exists: true
+    first_release: '2014-04-28T11:22:51+00:00'
+    release_count: 65
+    measured: true
+    observed_at: '2026-09-24T05:54:04.701134+00:00'
+- name: courlan
+  facts:
+    exists: true
+    first_release: '2020-08-27T17:40:50+00:00'
+    release_count: 32
+    measured: true
+    observed_at: '2026-09-24T05:54:04.762509+00:00'
+- name: cryptography
+  facts:
+    exists: true
+    first_release: '2014-01-08T23:17:39+00:00'
+    release_count: 159
+    measured: true
+    observed_at: '2026-09-24T05:54:04.884784+00:00'
+- name: ctranslate2
+  facts:
+    exists: true
+    first_release: '2021-04-29T09:23:45+00:00'
+    release_count: 62
+    measured: true
+    observed_at: '2026-09-24T05:54:05.024671+00:00'
+- name: cuda-bindings
+  facts:
+    exists: true
+    first_release: '2025-01-25T03:27:26+00:00'
+    release_count: 27
+    measured: true
+    observed_at: '2026-09-24T05:54:05.120664+00:00'
+- name: cuda-pathfinder
+  facts:
+    exists: true
+    first_release: '2025-07-16T23:18:01+00:00'
+    release_count: 31
+    measured: true
+    observed_at: '2026-09-24T05:54:05.263613+00:00'
+- name: cuda-toolkit
+  facts:
+    exists: true
+    first_release: '2025-06-29T17:20:42+00:00'
+    release_count: 41
+    measured: true
+    observed_at: '2026-09-24T05:54:05.395774+00:00'
+- name: dateparser
+  facts:
+    exists: true
+    first_release: '2014-11-24T17:43:15+00:00'
+    release_count: 37
+    measured: true
+    observed_at: '2026-09-24T05:54:05.519284+00:00'
+- name: ddgs
+  facts:
+    exists: true
+    first_release: '2025-07-06T15:43:49+00:00'
+    release_count: 45
+    measured: true
+    observed_at: '2026-09-24T05:54:05.578488+00:00'
+- name: decorator
+  facts:
+    exists: true
+    first_release: '2011-04-22T14:36:49+00:00'
+    release_count: 39
+    measured: true
+    observed_at: '2026-09-24T05:54:05.692256+00:00'
+- name: defusedxml
+  facts:
+    exists: true
+    first_release: '2013-02-19T15:05:02+00:00'
+    release_count: 13
+    measured: true
+    observed_at: '2026-09-24T05:54:05.742867+00:00'
+- name: discord-py
+  facts:
+    exists: true
+    first_release: '2015-08-23T09:10:27+00:00'
+    release_count: 88
+    measured: true
+    observed_at: '2026-09-24T05:54:05.794636+00:00'
+- name: distro
+  facts:
+    exists: true
+    first_release: '2016-04-21T05:55:47+00:00'
+    release_count: 16
+    measured: true
+    observed_at: '2026-09-24T05:54:05.914441+00:00'
+- name: docstring-parser
+  facts:
+    exists: true
+    first_release: '2018-04-17T13:30:36+00:00'
+    release_count: 26
+    measured: true
+    observed_at: '2026-09-24T05:54:05.965345+00:00'
+- name: execnet
+  facts:
+    exists: true
+    first_release: '2009-10-01T18:28:04+00:00'
+    release_count: 34
+    measured: true
+    observed_at: '2026-09-24T05:54:06.024053+00:00'
+- name: fastapi
+  facts:
+    exists: true
+    first_release: '2018-12-08T08:14:13+00:00'
+    release_count: 317
+    measured: true
+    observed_at: '2026-09-24T05:54:06.080500+00:00'
+- name: faster-whisper
+  facts:
+    exists: true
+    first_release: '2023-03-22T19:57:38+00:00'
+    release_count: 21
+    measured: true
+    observed_at: '2026-09-24T05:54:06.169563+00:00'
+- name: filelock
+  facts:
+    exists: true
+    first_release: '2014-07-06T10:37:55+00:00'
+    release_count: 121
+    measured: true
+    observed_at: '2026-09-24T05:54:06.233757+00:00'
+- name: flatbuffers
+  facts:
+    exists: true
+    first_release: '2018-06-11T19:57:50+00:00'
+    release_count: 26
+    measured: true
+    observed_at: '2026-09-24T05:54:06.291817+00:00'
+- name: frozenlist
+  facts:
+    exists: true
+    first_release: '2019-08-28T19:45:46+00:00'
+    release_count: 18
+    measured: true
+    observed_at: '2026-09-24T05:54:06.403230+00:00'
+- name: fsspec
+  facts:
+    exists: true
+    first_release: '2019-01-02T17:57:07+00:00'
+    release_count: 102
+    measured: true
+    observed_at: '2026-09-24T05:54:06.508044+00:00'
+- name: google-api-core
+  facts:
+    exists: true
+    first_release: '2017-10-26T21:59:01+00:00'
+    release_count: 168
+    measured: true
+    observed_at: '2026-09-24T05:54:06.567121+00:00'
+- name: google-api-python-client
+  facts:
+    exists: true
+    first_release: '2011-02-26T20:49:51+00:00'
+    release_count: 288
+    measured: true
+    observed_at: '2026-09-24T05:54:06.626238+00:00'
+- name: google-auth
+  facts:
+    exists: true
+    first_release: '2016-10-10T20:38:41+00:00'
+    release_count: 201
+    measured: true
+    observed_at: '2026-09-24T05:54:06.702597+00:00'
+- name: google-auth-httplib2
+  facts:
+    exists: true
+    first_release: '2016-10-28T20:23:23+00:00'
+    release_count: 13
+    measured: true
+    observed_at: '2026-09-24T05:54:06.769001+00:00'
+- name: googleapis-common-protos
+  facts:
+    exists: true
+    first_release: '2015-12-16T22:10:46+00:00'
+    release_count: 84
+    measured: true
+    observed_at: '2026-09-24T05:54:06.845549+00:00'
+- name: greenlet
+  facts:
+    exists: true
+    first_release: '2006-01-10T03:13:41+00:00'
+    release_count: 69
+    measured: true
+    observed_at: '2026-09-24T05:54:06.918876+00:00'
+- name: h11
+  facts:
+    exists: true
+    first_release: '2016-05-14T01:29:43+00:00'
+    release_count: 14
+    measured: true
+    observed_at: '2026-09-24T05:54:07.038408+00:00'
+- name: hf-xet
+  facts:
+    exists: true
+    first_release: '2025-01-10T23:31:32+00:00'
+    release_count: 43
+    measured: true
+    observed_at: '2026-09-24T05:54:07.115202+00:00'
+- name: htmldate
+  facts:
+    exists: true
+    first_release: '2017-08-25T12:59:57+00:00'
+    release_count: 60
+    measured: true
+    observed_at: '2026-09-24T05:54:07.193283+00:00'
+- name: httpcore
+  facts:
+    exists: true
+    first_release: '2019-04-04T17:44:38+00:00'
+    release_count: 64
+    measured: true
+    observed_at: '2026-09-24T05:54:07.315397+00:00'
+- name: httpcore2
+  facts:
+    exists: true
+    first_release: '2026-05-11T09:18:45+00:00'
+    release_count: 18
+    measured: true
+    observed_at: '2026-09-24T05:54:07.378147+00:00'
+- name: httplib2
+  facts:
+    exists: true
+    first_release: '2012-03-02T17:45:35+00:00'
+    release_count: 45
+    measured: true
+    observed_at: '2026-09-24T05:54:07.436173+00:00'
+- name: httpx
+  facts:
+    exists: true
+    first_release: '2019-07-19T14:23:35+00:00'
+    release_count: 77
+    measured: true
+    observed_at: '2026-09-24T05:54:07.494168+00:00'
+- name: httpx-sse
+  facts:
+    exists: true
+    first_release: '2023-02-05T00:07:59+00:00'
+    release_count: 8
+    measured: true
+    observed_at: '2026-09-24T05:54:07.553170+00:00'
+- name: httpx2
+  facts:
+    exists: true
+    first_release: '2026-05-11T06:12:34+00:00'
+    release_count: 18
+    measured: true
+    observed_at: '2026-09-24T05:54:07.614234+00:00'
+- name: huggingface-hub
+  facts:
+    exists: true
+    first_release: '2020-12-23T09:22:13+00:00'
+    release_count: 323
+    measured: true
+    observed_at: '2026-09-24T05:54:07.679310+00:00'
+- name: idna
+  facts:
+    exists: true
+    first_release: '2013-07-16T19:29:45+00:00'
+    release_count: 43
+    measured: true
+    observed_at: '2026-09-24T05:54:07.763673+00:00'
+- name: importlib-metadata
+  facts:
+    exists: true
+    first_release: '2018-05-17T17:47:55+00:00'
+    release_count: 130
+    measured: true
+    observed_at: '2026-09-24T05:54:07.832183+00:00'
+- name: iniconfig
+  facts:
+    exists: true
+    first_release: '2010-10-12T17:42:07+00:00'
+    release_count: 11
+    measured: true
+    observed_at: '2026-09-24T05:54:07.905507+00:00'
+- name: jinja2
+  facts:
+    exists: true
+    first_release: '2008-06-09T16:50:19+00:00'
+    release_count: 52
+    measured: true
+    observed_at: '2026-09-24T05:54:07.962037+00:00'
+- name: jiter
+  facts:
+    exists: true
+    first_release: '2024-05-16T23:37:46+00:00'
+    release_count: 22
+    measured: true
+    observed_at: '2026-09-24T05:54:08.017350+00:00'
+- name: joblib
+  facts:
+    exists: true
+    first_release: '2008-10-26T14:11:28+00:00'
+    release_count: 109
+    measured: true
+    observed_at: '2026-09-24T05:54:08.163457+00:00'
+- name: jsonschema
+  facts:
+    exists: true
+    first_release: '2012-01-02T03:52:12+00:00'
+    release_count: 109
+    measured: true
+    observed_at: '2026-09-24T05:54:08.272217+00:00'
+- name: jsonschema-specifications
+  facts:
+    exists: true
+    first_release: '2022-12-27T19:39:53+00:00'
+    release_count: 25
+    measured: true
+    observed_at: '2026-09-24T05:54:08.348712+00:00'
+- name: justext
+  facts:
+    exists: true
+    first_release: '2013-08-26T18:57:30+00:00'
+    release_count: 8
+    measured: true
+    observed_at: '2026-09-24T05:54:08.416364+00:00'
+- name: lazy-loader
+  facts:
+    exists: true
+    first_release: '2022-03-01T21:01:22+00:00'
+    release_count: 12
+    measured: true
+    observed_at: '2026-09-24T05:54:08.530434+00:00'
+- name: librosa
+  facts:
+    exists: true
+    first_release: '2013-12-14T22:17:51+00:00'
+    release_count: 47
+    measured: true
+    observed_at: '2026-09-24T05:54:08.586075+00:00'
+- name: livekit
+  facts:
+    exists: true
+    first_release: '2023-06-06T00:02:02+00:00'
+    release_count: 119
+    measured: true
+    observed_at: '2026-09-24T05:54:08.639328+00:00'
+- name: livekit-api
+  facts:
+    exists: true
+    first_release: '2023-10-23T20:52:59+00:00'
+    release_count: 34
+    measured: true
+    observed_at: '2026-09-24T05:54:08.721180+00:00'
+- name: livekit-protocol
+  facts:
+    exists: true
+    first_release: '2023-11-07T22:08:24+00:00'
+    release_count: 49
+    measured: true
+    observed_at: '2026-09-24T05:54:08.827779+00:00'
+- name: llvmlite
+  facts:
+    exists: true
+    first_release: '2014-12-17T21:36:45+00:00'
+    release_count: 64
+    measured: true
+    observed_at: '2026-09-24T05:54:08.953144+00:00'
+- name: lxml
+  facts:
+    exists: true
+    first_release: '2007-07-03T21:39:17+00:00'
+    release_count: 130
+    measured: true
+    observed_at: '2026-09-24T05:54:09.050113+00:00'
+- name: lxml-html-clean
+  facts:
+    exists: true
+    first_release: '2024-02-26T13:18:41+00:00'
+    release_count: 13
+    measured: true
+    observed_at: '2026-09-24T05:54:09.205240+00:00'
+- name: markdown-it-py
+  facts:
+    exists: true
+    first_release: '2020-03-25T17:41:23+00:00'
+    release_count: 45
+    measured: true
+    observed_at: '2026-09-24T05:54:09.318142+00:00'
+- name: markupsafe
+  facts:
+    exists: true
+    first_release: '2010-06-22T19:55:49+00:00'
+    release_count: 35
+    measured: true
+    observed_at: '2026-09-24T05:54:09.376953+00:00'
+- name: mcp
+  facts:
+    exists: true
+    first_release: '2024-11-20T11:37:34+00:00'
+    release_count: 72
+    measured: true
+    observed_at: '2026-09-24T05:54:09.460191+00:00'
+- name: mcp-types
+  facts:
+    exists: true
+    first_release: '2025-06-21T09:00:18+00:00'
+    release_count: 11
+    measured: true
+    observed_at: '2026-09-24T05:54:09.521138+00:00'
+- name: mdurl
+  facts:
+    exists: true
+    first_release: '2021-07-20T16:01:55+00:00'
+    release_count: 4
+    measured: true
+    observed_at: '2026-09-24T05:54:09.570916+00:00'
+- name: mpmath
+  facts:
+    exists: true
+    first_release: '2007-09-28T04:45:34+00:00'
+    release_count: 40
+    measured: true
+    observed_at: '2026-09-24T05:54:09.614371+00:00'
+- name: msgpack
+  facts:
+    exists: true
+    first_release: '2018-01-06T18:07:36+00:00'
+    release_count: 34
+    measured: true
+    observed_at: '2026-09-24T05:54:09.678416+00:00'
+- name: multidict
+  facts:
+    exists: true
+    first_release: '2016-02-19T10:29:42+00:00'
+    release_count: 153
+    measured: true
+    observed_at: '2026-09-24T05:54:09.790497+00:00'
+- name: networkx
+  facts:
+    exists: true
+    first_release: '2007-04-13T01:49:38+00:00'
+    release_count: 98
+    measured: true
+    observed_at: '2026-09-24T05:54:09.937149+00:00'
+- name: nodeenv
+  facts:
+    exists: true
+    first_release: '2011-04-17T17:08:32+00:00'
+    release_count: 75
+    measured: true
+    observed_at: '2026-09-24T05:54:09.999265+00:00'
+- name: numba
+  facts:
+    exists: true
+    first_release: '2012-08-15T17:20:59+00:00'
+    release_count: 137
+    measured: true
+    observed_at: '2026-09-24T05:54:10.060779+00:00'
+- name: numpy
+  facts:
+    exists: true
+    first_release: '2006-12-02T02:07:43+00:00'
+    release_count: 151
+    measured: true
+    observed_at: '2026-09-24T05:54:10.228459+00:00'
+- name: nvidia-cublas
+  facts:
+    exists: true
+    first_release: '2020-09-18T22:47:41+00:00'
+    release_count: 22
+    measured: true
+    observed_at: '2026-09-24T05:54:10.379948+00:00'
+- name: nvidia-cuda-cupti
+  facts:
+    exists: true
+    first_release: '2020-09-18T22:47:44+00:00'
+    release_count: 15
+    measured: true
+    observed_at: '2026-09-24T05:54:10.498877+00:00'
+- name: nvidia-cuda-nvrtc
+  facts:
+    exists: true
+    first_release: '2020-09-18T22:47:50+00:00'
+    release_count: 14
+    measured: true
+    observed_at: '2026-09-24T05:54:10.623092+00:00'
+- name: nvidia-cuda-runtime
+  facts:
+    exists: true
+    first_release: '2020-09-18T22:47:53+00:00'
+    release_count: 14
+    measured: true
+    observed_at: '2026-09-24T05:54:10.726725+00:00'
+- name: nvidia-cudnn-cu13
+  facts:
+    exists: true
+    first_release: '2025-04-09T19:29:52+00:00'
+    release_count: 37
+    measured: true
+    observed_at: '2026-09-24T05:54:10.793082+00:00'
+- name: nvidia-cufft
+  facts:
+    exists: true
+    first_release: '2020-09-18T22:48:01+00:00'
+    release_count: 14
+    measured: true
+    observed_at: '2026-09-24T05:54:10.912125+00:00'
+- name: nvidia-cufile
+  facts:
+    exists: true
+    first_release: '2025-04-04T15:45:30+00:00'
+    release_count: 12
+    measured: true
+    observed_at: '2026-09-24T05:54:11.030907+00:00'
+- name: nvidia-curand
+  facts:
+    exists: true
+    first_release: '2020-09-18T22:48:04+00:00'
+    release_count: 13
+    measured: true
+    observed_at: '2026-09-24T05:54:11.094899+00:00'
+- name: nvidia-cusolver
+  facts:
+    exists: true
+    first_release: '2020-09-18T22:48:07+00:00'
+    release_count: 15
+    measured: true
+    observed_at: '2026-09-24T05:54:11.235549+00:00'
+- name: nvidia-cusparse
+  facts:
+    exists: true
+    first_release: '2020-09-18T22:48:09+00:00'
+    release_count: 15
+    measured: true
+    observed_at: '2026-09-24T05:54:11.348036+00:00'
+- name: nvidia-cusparselt-cu13
+  facts:
+    exists: true
+    first_release: '2025-04-09T20:30:18+00:00'
+    release_count: 5
+    measured: true
+    observed_at: '2026-09-24T05:54:11.402637+00:00'
+- name: nvidia-nccl-cu13
+  facts:
+    exists: true
+    first_release: '2025-04-09T20:43:44+00:00'
+    release_count: 13
+    measured: true
+    observed_at: '2026-09-24T05:54:11.528323+00:00'
+- name: nvidia-nvjitlink
+  facts:
+    exists: true
+    first_release: '2025-04-04T15:45:35+00:00'
+    release_count: 12
+    measured: true
+    observed_at: '2026-09-24T05:54:11.647698+00:00'
+- name: nvidia-nvshmem-cu13
+  facts:
+    exists: true
+    first_release: '2025-04-09T21:57:37+00:00'
+    release_count: 11
+    measured: true
+    observed_at: '2026-09-24T05:54:11.775551+00:00'
+- name: nvidia-nvtx
+  facts:
+    exists: true
+    first_release: '2020-09-18T22:49:21+00:00'
+    release_count: 14
+    measured: true
+    observed_at: '2026-09-24T05:54:11.890896+00:00'
+- name: onnxruntime
+  facts:
+    exists: true
+    first_release: '2018-09-21T19:19:30+00:00'
+    release_count: 62
+    measured: true
+    observed_at: '2026-09-24T05:54:12.009166+00:00'
+- name: opentelemetry-api
+  facts:
+    exists: true
+    first_release: '2019-10-01T00:35:15+00:00'
+    release_count: 84
+    measured: true
+    observed_at: '2026-09-24T05:54:12.119258+00:00'
+- name: opentelemetry-instrumentation
+  facts:
+    exists: true
+    first_release: '2020-06-11T04:41:37+00:00'
+    release_count: 73
+    measured: true
+    observed_at: '2026-09-24T05:54:12.181625+00:00'
+- name: opentelemetry-instrumentation-mcp
+  facts:
+    exists: true
+    first_release: '2025-04-30T08:09:00+00:00'
+    release_count: 78
+    measured: true
+    observed_at: '2026-09-24T05:54:12.241969+00:00'
+- name: opentelemetry-sdk
+  facts:
+    exists: true
+    first_release: '2019-10-01T00:35:55+00:00'
+    release_count: 83
+    measured: true
+    observed_at: '2026-09-24T05:54:12.356379+00:00'
+- name: opentelemetry-semantic-conventions
+  facts:
+    exists: true
+    first_release: '2021-04-20T21:28:30+00:00'
+    release_count: 61
+    measured: true
+    observed_at: '2026-09-24T05:54:12.412960+00:00'
+- name: opentelemetry-semantic-conventions-ai
+  facts:
+    exists: true
+    first_release: '2023-09-14T09:17:52+00:00'
+    release_count: 51
+    measured: true
+    observed_at: '2026-09-24T05:54:12.466629+00:00'
+- name: openwakeword
+  facts:
+    exists: true
+    first_release: '2022-12-30T17:09:13+00:00'
+    release_count: 8
+    measured: true
+    observed_at: '2026-09-24T05:54:12.591018+00:00'
+- name: packaging
+  facts:
+    exists: true
+    first_release: '2014-09-05T00:26:05+00:00'
+    release_count: 54
+    measured: true
+    observed_at: '2026-09-24T05:54:12.718553+00:00'
+- name: platformdirs
+  facts:
+    exists: true
+    first_release: '2021-05-13T11:43:36+00:00'
+    release_count: 77
+    measured: true
+    observed_at: '2026-09-24T05:54:12.775139+00:00'
+- name: playwright
+  facts:
+    exists: true
+    first_release: '2021-02-24T01:38:28+00:00'
+    release_count: 85
+    measured: true
+    observed_at: '2026-09-24T05:54:12.841523+00:00'
+- name: pluggy
+  facts:
+    exists: true
+    first_release: '2015-05-07T09:35:45+00:00'
+    release_count: 24
+    measured: true
+    observed_at: '2026-09-24T05:54:12.930094+00:00'
+- name: pooch
+  facts:
+    exists: true
+    first_release: '2018-07-20T20:47:39+00:00'
+    release_count: 35
+    measured: true
+    observed_at: '2026-09-24T05:54:12.990665+00:00'
+- name: primp
+  facts:
+    exists: true
+    first_release: '2024-07-27T06:50:55+00:00'
+    release_count: 34
+    measured: true
+    observed_at: '2026-09-24T05:54:13.049575+00:00'
+- name: propcache
+  facts:
+    exists: true
+    first_release: '2024-10-02T14:22:36+00:00'
+    release_count: 13
+    measured: true
+    observed_at: '2026-09-24T05:54:13.176804+00:00'
+- name: proto-plus
+  facts:
+    exists: true
+    first_release: '2018-10-03T15:12:24+00:00'
+    release_count: 85
+    measured: true
+    observed_at: '2026-09-24T05:54:13.282483+00:00'
+- name: protobuf
+  facts:
+    exists: true
+    first_release: '2008-07-10T22:36:09+00:00'
+    release_count: 222
+    measured: true
+    observed_at: '2026-09-24T05:54:13.340983+00:00'
+- name: psutil
+  facts:
+    exists: true
+    first_release: '2013-09-28T09:48:01+00:00'
+    release_count: 104
+    measured: true
+    observed_at: '2026-09-24T05:54:13.447455+00:00'
+- name: py-spy
+  facts:
+    exists: true
+    first_release: '2018-08-01T17:39:52+00:00'
+    release_count: 41
+    measured: true
+    observed_at: '2026-09-24T05:54:13.557656+00:00'
+- name: pyarrow
+  facts:
+    exists: true
+    first_release: '2017-03-16T22:17:57+00:00'
+    release_count: 65
+    measured: true
+    observed_at: '2026-09-24T05:54:13.686483+00:00'
+- name: pyasn1
+  facts:
+    exists: true
+    first_release: '2009-11-23T22:41:54+00:00'
+    release_count: 42
+    measured: true
+    observed_at: '2026-09-24T05:54:13.795627+00:00'
+- name: pyasn1-modules
+  facts:
+    exists: true
+    first_release: '2011-03-06T15:36:57+00:00'
+    release_count: 27
+    measured: true
+    observed_at: '2026-09-24T05:54:13.873701+00:00'
+- name: pycparser
+  facts:
+    exists: true
+    first_release: '2011-02-18T08:15:41+00:00'
+    release_count: 24
+    measured: true
+    observed_at: '2026-09-24T05:54:13.942065+00:00'
+- name: pydantic
+  facts:
+    exists: true
+    first_release: '2017-05-03T20:58:44+00:00'
+    release_count: 206
+    measured: true
+    observed_at: '2026-09-24T05:54:14.009655+00:00'
+- name: pydantic-core
+  facts:
+    exists: true
+    first_release: '2022-04-20T16:59:49+00:00'
+    release_count: 159
+    measured: true
+    observed_at: '2026-09-24T05:54:14.121257+00:00'
+- name: pydantic-settings
+  facts:
+    exists: true
+    first_release: '2019-08-19T16:44:41+00:00'
+    release_count: 45
+    measured: true
+    observed_at: '2026-09-24T05:54:14.444334+00:00'
+- name: pyee
+  facts:
+    exists: true
+    first_release: '2011-07-17T01:27:54+00:00'
+    release_count: 55
+    measured: true
+    observed_at: '2026-09-24T05:54:14.506300+00:00'
+- name: pyflakes
+  facts:
+    exists: true
+    first_release: '2009-01-30T16:27:09+00:00'
+    release_count: 43
+    measured: true
+    observed_at: '2026-09-24T05:54:14.566015+00:00'
+- name: pygments
+  facts:
+    exists: true
+    first_release: '2006-10-30T10:24:29+00:00'
+    release_count: 69
+    measured: true
+    observed_at: '2026-09-24T05:54:14.620633+00:00'
+- name: pyjwt
+  facts:
+    exists: true
+    first_release: '2011-02-24T21:50:33+00:00'
+    release_count: 57
+    measured: true
+    observed_at: '2026-09-24T05:54:14.686698+00:00'
+- name: pymupdf
+  facts:
+    exists: true
+    first_release: '2017-11-27T18:53:13+00:00'
+    release_count: 138
+    measured: true
+    observed_at: '2026-09-24T05:54:14.740727+00:00'
+- name: pyparsing
+  facts:
+    exists: true
+    first_release: '2007-06-30T14:42:51+00:00'
+    release_count: 89
+    measured: true
+    observed_at: '2026-09-24T05:54:14.849656+00:00'
+- name: pyright
+  facts:
+    exists: true
+    first_release: '2021-06-20T14:50:29+00:00'
+    release_count: 209
+    measured: true
+    observed_at: '2026-09-24T05:54:14.916183+00:00'
+- name: pytest
+  facts:
+    exists: true
+    first_release: '2010-11-25T21:00:27+00:00'
+    release_count: 192
+    measured: true
+    observed_at: '2026-09-24T05:54:15.011069+00:00'
+- name: pytest-asyncio
+  facts:
+    exists: true
+    first_release: '2015-04-11T13:41:21+00:00'
+    release_count: 76
+    measured: true
+    observed_at: '2026-09-24T05:54:15.092511+00:00'
+- name: pytest-xdist
+  facts:
+    exists: true
+    first_release: '2010-01-18T16:18:00+00:00'
+    release_count: 71
+    measured: true
+    observed_at: '2026-09-24T05:54:15.169853+00:00'
+- name: python-dateutil
+  facts:
+    exists: true
+    first_release: '2008-08-06T19:11:48+00:00'
+    release_count: 34
+    measured: true
+    observed_at: '2026-09-24T05:54:15.232481+00:00'
+- name: python-dotenv
+  facts:
+    exists: true
+    first_release: '2014-09-08T08:21:18+00:00'
+    release_count: 51
+    measured: true
+    observed_at: '2026-09-24T05:54:15.291200+00:00'
+- name: python-multipart
+  facts:
+    exists: true
+    first_release: '2013-03-26T00:49:56+00:00'
+    release_count: 32
+    measured: true
+    observed_at: '2026-09-24T05:54:15.354971+00:00'
+- name: pytz
+  facts:
+    exists: true
+    first_release: '2005-08-19T06:03:07+00:00'
+    release_count: 124
+    measured: true
+    observed_at: '2026-09-24T05:54:15.402162+00:00'
+- name: pyyaml
+  facts:
+    exists: true
+    first_release: '2011-07-01T22:59:26+00:00'
+    release_count: 40
+    measured: true
+    observed_at: '2026-09-24T05:54:15.472823+00:00'
+- name: referencing
+  facts:
+    exists: true
+    first_release: '2022-11-21T23:15:52+00:00'
+    release_count: 108
+    measured: true
+    observed_at: '2026-09-24T05:54:15.559862+00:00'
+- name: regex
+  facts:
+    exists: true
+    first_release: '2010-02-17T13:59:04+00:00'
+    release_count: 368
+    measured: true
+    observed_at: '2026-09-24T05:54:15.628470+00:00'
+- name: requests
+  facts:
+    exists: true
+    first_release: '2011-02-14T08:49:42+00:00'
+    release_count: 163
+    measured: true
+    observed_at: '2026-09-24T05:54:15.867648+00:00'
+- name: resemblyzer
+  facts:
+    exists: true
+    first_release: '2019-08-19T16:48:48+00:00'
+    release_count: 4
+    measured: true
+    observed_at: '2026-09-24T05:54:15.939070+00:00'
+- name: rich
+  facts:
+    exists: true
+    first_release: '2019-11-10T15:57:05+00:00'
+    release_count: 207
+    measured: true
+    observed_at: '2026-09-24T05:54:16.054337+00:00'
+- name: rpds-py
+  facts:
+    exists: true
+    first_release: '2023-03-01T06:30:10+00:00'
+    release_count: 71
+    measured: true
+    observed_at: '2026-09-24T05:54:16.140931+00:00'
+- name: scikit-learn
+  facts:
+    exists: true
+    first_release: '2011-09-22T00:03:10+00:00'
+    release_count: 76
+    measured: true
+    observed_at: '2026-09-24T05:54:16.280721+00:00'
+- name: scipy
+  facts:
+    exists: true
+    first_release: '2010-07-27T18:45:05+00:00'
+    release_count: 108
+    measured: true
+    observed_at: '2026-09-24T05:54:16.380476+00:00'
+- name: setuptools
+  facts:
+    exists: true
+    first_release: '2006-05-12T22:42:21+00:00'
+    release_count: 625
+    measured: true
+    observed_at: '2026-09-24T05:54:16.545568+00:00'
+- name: shellingham
+  facts:
+    exists: true
+    first_release: '2018-06-14T20:16:37+00:00'
+    release_count: 23
+    measured: true
+    observed_at: '2026-09-24T05:54:16.646901+00:00'
+- name: sherpa-onnx
+  facts:
+    exists: true
+    first_release: '2023-11-21T07:17:36+00:00'
+    release_count: 28
+    measured: true
+    observed_at: '2026-09-24T05:54:16.701494+00:00'
+- name: sherpa-onnx-core
+  facts:
+    exists: true
+    first_release: '2025-08-22T07:24:36+00:00'
+    release_count: 55
+    measured: true
+    observed_at: '2026-09-24T05:54:16.870659+00:00'
+- name: six
+  facts:
+    exists: true
+    first_release: '2010-06-29T19:56:36+00:00'
+    release_count: 29
+    measured: true
+    observed_at: '2026-09-24T05:54:16.996532+00:00'
+- name: sniffio
+  facts:
+    exists: true
+    first_release: '2018-07-31T04:16:34+00:00'
+    release_count: 6
+    measured: true
+    observed_at: '2026-09-24T05:54:17.060471+00:00'
+- name: soundfile
+  facts:
+    exists: true
+    first_release: '2015-10-21T15:52:54+00:00'
+    release_count: 13
+    measured: true
+    observed_at: '2026-09-24T05:54:17.120947+00:00'
+- name: soxr
+  facts:
+    exists: true
+    first_release: '2021-05-09T10:01:41+00:00'
+    release_count: 38
+    measured: true
+    observed_at: '2026-09-24T05:54:17.177859+00:00'
+- name: sse-starlette
+  facts:
+    exists: true
+    first_release: '2020-02-21T12:42:33+00:00'
+    release_count: 80
+    measured: true
+    observed_at: '2026-09-24T05:54:17.345500+00:00'
+- name: starlette
+  facts:
+    exists: true
+    first_release: '2018-06-25T13:13:07+00:00'
+    release_count: 203
+    measured: true
+    observed_at: '2026-09-24T05:54:17.402295+00:00'
+- name: sympy
+  facts:
+    exists: true
+    first_release: '2008-04-26T21:47:51+00:00'
+    release_count: 67
+    measured: true
+    observed_at: '2026-09-24T05:54:17.470563+00:00'
+- name: threadpoolctl
+  facts:
+    exists: true
+    first_release: '2019-06-03T13:48:32+00:00'
+    release_count: 13
+    measured: true
+    observed_at: '2026-09-24T05:54:17.526475+00:00'
+- name: tld
+  facts:
+    exists: true
+    first_release: '2013-05-11T19:34:11+00:00'
+    release_count: 53
+    measured: true
+    observed_at: '2026-09-24T05:54:17.589659+00:00'
+- name: tokenizers
+  facts:
+    exists: true
+    first_release: '2019-11-01T23:35:40+00:00'
+    release_count: 103
+    measured: true
+    observed_at: '2026-09-24T05:54:17.715176+00:00'
+- name: torch
+  facts:
+    exists: true
+    first_release: '2018-12-07T18:56:01+00:00'
+    release_count: 50
+    measured: true
+    observed_at: '2026-09-24T05:54:17.824587+00:00'
+- name: tqdm
+  facts:
+    exists: true
+    first_release: '2013-10-26T20:06:45+00:00'
+    release_count: 151
+    measured: true
+    observed_at: '2026-09-24T05:54:17.915311+00:00'
+- name: trafilatura
+  facts:
+    exists: true
+    first_release: '2019-07-17T11:13:14+00:00'
+    release_count: 52
+    measured: true
+    observed_at: '2026-09-24T05:54:17.988025+00:00'
+- name: triton
+  facts:
+    exists: true
+    first_release: '2021-05-26T00:26:25+00:00'
+    release_count: 22
+    measured: true
+    observed_at: '2026-09-24T05:54:18.111927+00:00'
+- name: truststore
+  facts:
+    exists: true
+    first_release: '2022-03-10T14:29:26+00:00'
+    release_count: 16
+    measured: true
+    observed_at: '2026-09-24T05:54:18.232015+00:00'
+- name: typer
+  facts:
+    exists: true
+    first_release: '2019-12-20T15:37:05+00:00'
+    release_count: 90
+    measured: true
+    observed_at: '2026-09-24T05:54:18.285114+00:00'
+- name: types-protobuf
+  facts:
+    exists: true
+    first_release: '2021-02-02T20:53:10+00:00'
+    release_count: 127
+    measured: true
+    observed_at: '2026-09-24T05:54:18.352897+00:00'
+- name: typing
+  facts:
+    exists: true
+    first_release: '2015-06-01T16:38:52+00:00'
+    release_count: 15
+    measured: true
+    observed_at: '2026-09-24T05:54:18.496601+00:00'
+- name: typing-extensions
+  facts:
+    exists: true
+    first_release: '2017-09-17T12:25:17+00:00'
+    release_count: 52
+    measured: true
+    observed_at: '2026-09-24T05:54:18.605539+00:00'
+- name: typing-inspection
+  facts:
+    exists: true
+    first_release: '2025-02-13T10:25:04+00:00'
+    release_count: 10
+    measured: true
+    observed_at: '2026-09-24T05:54:18.665690+00:00'
+- name: tzlocal
+  facts:
+    exists: true
+    first_release: '2012-09-11T13:30:04+00:00'
+    release_count: 53
+    measured: true
+    observed_at: '2026-09-24T05:54:18.726637+00:00'
+- name: uritemplate
+  facts:
+    exists: true
+    first_release: '2012-05-11T03:59:52+00:00'
+    release_count: 13
+    measured: true
+    observed_at: '2026-09-24T05:54:18.855013+00:00'
+- name: urllib3
+  facts:
+    exists: true
+    first_release: '2009-12-11T08:47:22+00:00'
+    release_count: 109
+    measured: true
+    observed_at: '2026-09-24T05:54:18.903563+00:00'
+- name: uvicorn
+  facts:
+    exists: true
+    first_release: '2017-06-05T11:32:15+00:00'
+    release_count: 203
+    measured: true
+    observed_at: '2026-09-24T05:54:18.964177+00:00'
+- name: watchdog
+  facts:
+    exists: true
+    first_release: '2011-01-20T05:53:53+00:00'
+    release_count: 54
+    measured: true
+    observed_at: '2026-09-24T05:54:19.043782+00:00'
+- name: webrtcvad
+  facts:
+    exists: true
+    first_release: '2016-04-24T04:33:30+00:00'
+    release_count: 12
+    measured: true
+    observed_at: '2026-09-24T05:54:19.124697+00:00'
+- name: websockets
+  facts:
+    exists: true
+    first_release: '2013-11-14T16:29:28+00:00'
+    release_count: 53
+    measured: true
+    observed_at: '2026-09-24T05:54:19.242299+00:00'
+- name: wrapt
+  facts:
+    exists: true
+    first_release: '2013-09-06T21:23:22+00:00'
+    release_count: 117
+    measured: true
+    observed_at: '2026-09-24T05:54:19.361850+00:00'
+- name: yarl
+  facts:
+    exists: true
+    first_release: '2016-08-30T04:46:56+00:00'
+    release_count: 139
+    measured: true
+    observed_at: '2026-09-24T05:54:19.536898+00:00'
+- name: youtube-transcript-api
+  facts:
+    exists: true
+    first_release: '2018-07-03T11:41:00+00:00'
+    release_count: 35
+    measured: true
+    observed_at: '2026-09-24T05:54:20.053500+00:00'
+- name: zipp
+  facts:
+    exists: true
+    first_release: '2018-11-15T22:02:57+00:00'
+    release_count: 64
+    measured: true
+    observed_at: '2026-09-24T05:54:20.190005+00:00'
+measured_at: '2026-09-24T12:00:00+00:00'

@@ -1,0 +1,32 @@
+# Supply-chain baseline for the current tree (#688). Committed, offline, regenerated with
+#   .venvs/lloyd/bin/python -m app.harness.supply_chain scan --write-baseline
+# scan_status: scanner_absent means NO scanner ran and advisory_count is therefore null —
+# it is a coverage gap, and must never be read as 'this tree has no vulnerabilities'.
+schema: lloyd-supply-chain-baseline/1
+generated_at: '2026-09-24T05:55:29.937615Z'
+scan_status: scanner_absent
+verdict: none_recorded
+scanner:
+  name: null
+  version: null
+  path: null
+  argv: []
+offline: true
+coverage_gap: true
+database:
+  directory: null
+  freshness: null
+duration_seconds: null
+advisory_count: null
+advisories: []
+dependency_set:
+- path: requirements.txt
+  packages: 13
+  sha256: 57498c9633776d29
+- path: requirements.lock
+  packages: 181
+  sha256: 0bbecd0e8f9cc2cd
+reason: 'no offline advisory scanner available: osv-scanner: not on PATH; pip-audit:
+  not on PATH. Install osv-scanner (e.g. `uv tool install osv-scanner`) and mirror
+  its database into OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY; this record is a coverage
+  gap, not a clean tree.'

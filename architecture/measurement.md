@@ -69,6 +69,7 @@ a row naming a deleted arm both fail.
 | `memory_eval` | memory-recall question set `v1` | `eval/memory_eval_build.py`, `eval/run_memory_eval.py` |
 | `review_calibration` | labelled review-rung outcomes, including a first cut and a deliberately test-stripped one, so the grader can be calibrated against known verdicts | `scripts/automod/review_tools.py` |
 | `secondary-routing` | keep/raise/revert decisions per job class for routing generation to the secondary engine | `eval/secondary_routing_eval.py`, `app/secondary_models.py` |
+| `supply-chain` | whether the install-provenance predicate blocks the distribution names that do not exist without blocking one that does, and whether an advisory scan ran at all — 61 planted names replayed through the shipped code against a faked registry and a pinned clock, over 180 of the repo's 181 declared dependencies as the false-block control, 0 of them blocked (#1610) | `app/harness/supply_chain.py` (`run-fixtures-eval`, `scan --write-baseline`), `tests/test_supply_chain_provenance_fixtures.py` |
 | `uptake` | whether injected context reached the turn that needed it, with hand labels under `eval/uptake/labels/` | `app/uptake.py` |
 
 The corpora are the point of the arms; the scripts that read them mostly live one

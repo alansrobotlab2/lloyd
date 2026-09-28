@@ -379,7 +379,14 @@ def check_bash_command(command: str, cwd: str | None = None, *,
     session: a background session (worker, autonomy, bench — by id shape,
     a `task:*` subagent by its parent through `parent_of`) may not restart
     or stop an engine or a service; a chat session may. Callers that do not
-    know the session pass none and that check is skipped. The regex table above catches the
+    know the session pass none and that check is skipped. The fifth,
+    `supply_chain`, also needs the session: a background turn may not install a
+    distribution that is new to the repo's dependency set and fails a registry
+    fact — unpublished, first released under 90 days ago, or fewer than two
+    releases — because the slop-squat attack builds, runs and passes tests, so
+    no other rung can see it (#688). A chat session may; `LLOYD_DEP_OVERRIDE="<why>"`
+    carried on the command lets a background turn through with a printed reason.
+    The regex table above catches the
     catastrophic-anywhere shapes; `protected_paths` parses the command and
     refuses a delete, move or `git clean` that takes out the vault, the lloyd
     tree or $HOME wholesale — the spellings the regex table let through on
@@ -429,7 +436,7 @@ def check_bash_command(command: str, cwd: str | None = None, *,
         if len(excerpt) > 80:
             excerpt = excerpt[:80] + "..."
         return (f"service control: {why}", excerpt)
-    # Fifth, last: the write deny-set. Ordering is not cosmetic — the paired
+    # Fifth: the write deny-set. Ordering is not cosmetic — the paired
     # corpus (`tests/unit/test_harness_safety.py`) pins which check answers each
     # true positive, so a new refusal placed earlier would re-label commands the
     # other four already refuse. Nothing here is reached by a command the others
@@ -443,6 +450,18 @@ def check_bash_command(command: str, cwd: str | None = None, *,
         if len(excerpt) > 80:
             excerpt = excerpt[:80] + "..."
         return (f"protected write: {why}", excerpt)
+
+    # Last: where the package came from. Returns a refusal only for a
+    # background session, and only on a measured registry fact — an
+    # unreachable registry is never a denial (see app/harness/supply_chain.py).
+    from app.harness.supply_chain import check_install_provenance
+    provenance = check_install_provenance(command, session_id, parent_of=parent_of)
+    if provenance.refusal:
+        excerpt = command.strip().splitlines()[0]
+        if len(excerpt) > 80:
+            excerpt = excerpt[:80] + "..."
+        return (f"install provenance: {provenance.refusal}", excerpt)
+
     return None
 
 
