@@ -13,12 +13,20 @@ GET  /api/desktop/state  — SSE: current frame + lease, then each push.
 GET  /api/desktop/frame  — the latest frame as JSON, while it is still fresh.
 
 A retained frame is Alan's whole screen — the JPEG plus the element names on
-it — and until devices are enrolled in ``agent-services/cert/clients.json`` the
-only gate in front of these reads is the peer address. So every read of
-``_latest`` goes through :func:`_frame_is_fresh`: past
-``desktop.frame_ttl_seconds`` (default 120 s) the frame answers as if nobody had
-captured, here and in ``latest_frame_summary``, which is what
-``mc_navigate(tab="desktop")`` puts in the model's context (#1418).
+it. The access boundary in front of these reads is the peer address
+``server.ApiPeerGate`` decides on: loopback, or a network in
+``server.trusted_networks``. No read path here carries a device identity, and
+that is a ruling rather than an omission — #683 decided "no per-device token
+for now" on 2026-09-27, by which point mutual TLS had already been dropped
+from the Vite dev server on 2026-06-14 — so there is no stricter gate these
+reads are waiting on. What bounds the exposure is what is built: the
+loopback-only publisher above, and every read of ``_latest`` going through
+:func:`_frame_is_fresh` — past ``desktop.frame_ttl_seconds`` (default 120 s)
+the frame answers as if nobody had captured, here and in
+``latest_frame_summary``, which is what ``mc_navigate(tab="desktop")`` puts in
+the model's context (#1418). A tab that is already open keeps the last frame it
+was pushed until it reloads; that is the decided display behaviour, not a
+render gap.
 GET  /api/desktop/lease  — who holds the seat.
 POST /api/desktop/lease  — ``{op: grant, minutes}`` / ``{op: revoke}``. Human
                            only: ``safety.check_bash_command`` and the

@@ -11,13 +11,18 @@ anything could put a frame on the Desktop tab.
 
 The gate in front of these routes is ``server.ApiPeerGate``'s peer-address rule
 (loopback, or ``server.trusted_networks``, default Tailscale's CGNAT range), the
-backend binds ``0.0.0.0``, and ``agent-services/cert/clients.json`` enrols no
-devices — so no read carried an identity and nothing bounded the retention. What
-code can do is stop retaining the screen past the turn that captured it and stop
-letting a non-local peer feed it. Gating the *reads* on a real device identity
-stays a human action (enrol the devices); the live SSE stream therefore remains
-reachable to a trusted peer, and the TTL is the mitigation, not a claim that the
-read path is closed.
+backend binds ``0.0.0.0``, and ``agent-services/cert/clients.json`` is ``{}`` —
+so no read carried an identity and nothing bounded the retention. What code
+could do, it did: stop retaining the screen past the turn that captured it, and
+stop letting a non-local peer feed it. Gating the *reads* on a real device
+identity is not owed — #683 ruled "no per-device token for now" on 2026-09-27,
+by which point mutual TLS had already been dropped from the Vite dev server on
+2026-06-14 — so no read path can carry one, and the peer-address gate is the
+designed boundary rather than a placeholder for a stricter one. The live SSE
+stream therefore stays reachable to a trusted peer, and
+``desktop.frame_ttl_seconds`` plus the loopback-only publisher are the
+mitigation, not a claim that the read path is closed. A tab that is already open
+keeps the last frame it was pushed until it reloads, by decision.
 
 Two boundaries, both crossed rather than grepped.
 
@@ -316,10 +321,11 @@ def test_a_remote_peer_cannot_open_a_mirror_that_is_not_there_yet(local):
 def test_the_lease_route_still_answers_a_trusted_peer(local):
     """This round narrows the frame mirror, not the lease.
 
-    The lease GET is what the Desktop tab reads from a browser over the tailnet,
-    and gating reads on a device identity is the enrolled-devices decision the
-    item leaves to a person — so it must keep answering a peer this route does
-    not gate.
+    The lease GET is what the Desktop tab reads from a browser over the tailnet.
+    Its boundary is the peer address ``server.ApiPeerGate`` decides on (loopback,
+    or ``server.trusted_networks``), not a device identity: #683 ruled "no
+    per-device token for now" on 2026-09-27, so there is no stricter gate this
+    route is waiting on. It must keep answering a peer the gate trusts.
     """
     assert _client(TAILNET).get(LEASE_ROUTE).status_code == 200
     assert local.get(LEASE_ROUTE).status_code == 200
@@ -433,3 +439,96 @@ class TestPublisherIdentityUnderTheProducer:
             body = (await reader.get(FRAME_ROUTE)).json()
         assert body["active"] is True, body
         assert body["image_b64"] == "QUJD" * 400
+
+
+# ── the prose that describes the boundary ─────────────────────────────────
+#
+# Backlog #1671. #1418 shipped its access boundary described as unfinished
+# business: this file and ``app/routers/desktop.py`` both told the next reader
+# that gating the reads on a real device identity was still owed. The ruling
+# that settled the question is #683 (2026-09-27: no per-device token for now),
+# and because the sentence outlived the ruling, an owed-human sweep read the
+# sentence instead of the ruling and regenerated the action. Prose is the only
+# surface that claim can live on, so the pin below is prose too — over the same
+# extent the sweep greps, with a positive control beside it.
+
+#: The declined recommendation, assembled rather than spelled out. The check is
+#: a case-insensitive substring over the *whole* source of both files, so a
+#: literal here would put the token back into one of the two files it measures.
+DECLINED_DEVICE_GATE = "en" + "rol"
+
+#: What each of the two module docstrings must now carry: the gate and the
+#: network rule that together are the boundary, and both halves of the
+#: mitigation that actually exists.
+BOUNDARY_TOKENS = ("ApiPeerGate", "server.trusted_networks", "frame_ttl_seconds",
+                   "loopback", "publisher")
+
+DESKTOP_ROUTER_SRC = ROOT / "app" / "routers" / "desktop.py"
+THIS_TEST_SRC = Path(__file__).resolve()
+
+
+def test_the_desktop_docs_state_the_peer_boundary_ruling_out_a_device_gate():
+    """#1671: the boundary these routes have is the one that is built.
+
+    The declined sentence rested on a premise that no longer holds, measured
+    rather than remembered: the Vite dev server dropped mutual TLS on
+    2026-06-14 (``web/vite.config.ts:38-49``), so a tab's request carries no
+    client certificate and the still-wired ``clientCertHeaders()`` there
+    injects no ``x-client-fingerprint``; ``agent-services/cert/clients.json``
+    is ``{}`` at 3 bytes; and ``ApiPeerGate`` decides on the peer address,
+    running the allowlist only after the network rule and only for
+    cert-bearing peers, so its own docstring says a copied fingerprint
+    "buys nothing on its own". No read path can carry a device identity even
+    in principle, so naming one as owed is a false instruction.
+
+    Half one is the absence, over the whole source text of both files — the
+    same extent the sweep greps — and each positive control says the 0 hits
+    are an absence, not an unread or emptied file. Half two is the substance,
+    read off the runtime ``__doc__`` of each module and of
+    :func:`test_the_lease_route_still_answers_a_trusted_peer`, so the assert
+    grades the docstrings themselves rather than a copy: they name the gate,
+    and they cite #683 inside the statement that rules the device identity
+    out. Deleting any of that wording turns this node red.
+    """
+    sources = {
+        "app/routers/desktop.py": DESKTOP_ROUTER_SRC.read_text(),
+        "tests/test_desktop_frame_mirror.py": THIS_TEST_SRC.read_text(),
+    }
+    for label, src in sources.items():
+        assert DECLINED_DEVICE_GATE not in src.lower(), (
+            f"{label} still names the declined device-identity step as a human "
+            "action that is owed")
+    assert "/api/desktop/lease" in sources["app/routers/desktop.py"], (
+        "positive control: the router source read back empty, so the absence "
+        "above proves nothing")
+    assert "def test_the_lease_route_still_answers_a_trusted_peer" \
+        in sources["tests/test_desktop_frame_mirror.py"], (
+        "positive control: this file read back empty, so the absence above "
+        "proves nothing")
+
+    docstrings = {
+        "app/routers/desktop.py": desktop_router.__doc__ or "",
+        "tests/test_desktop_frame_mirror.py": __doc__ or "",
+    }
+    for label, doc in docstrings.items():
+        flat = " ".join(doc.split())
+        for token in BOUNDARY_TOKENS:
+            assert token in flat, f"{label}'s module docstring omits {token}"
+        cited = [s for s in flat.split(".") if "#683" in s]
+        assert cited and any("device" in s or "identity" in s for s in cited), (
+            f"{label} cites #683 but not inside the statement that rules a "
+            "device identity out")
+
+    lease_doc = " ".join(
+        test_the_lease_route_still_answers_a_trusted_peer.__doc__.split())
+    assert "ApiPeerGate" in lease_doc, (
+        "the lease route's own test does not name the gate that answers the peer")
+    assert "peer address" in lease_doc.lower(), (
+        "the lease route's own test does not state the boundary as a peer address")
+    lease_cited = [s for s in lease_doc.split(".") if "#683" in s]
+    assert lease_cited and any("device" in s or "identity" in s for s in lease_cited), (
+        "the lease route's own test cites #683 but not as the reason its reads "
+        "carry no device identity")
+    for deferred in ("human action", "leaves to a person", "left to a person"):
+        assert deferred not in lease_doc.lower(), (
+            f"the lease route's own test still defers the boundary ({deferred!r})")
