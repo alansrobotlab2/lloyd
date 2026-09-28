@@ -145,12 +145,13 @@ It is still one definition, now with two enforcement points: the harness hook
 and the aggregator's `call_tool`. The aggregator check matters because a caller
 that builds its own `HookRegistry` without the safety hook is still checked.
 
-The module now answers **two questions, and each is enforced on one lane**:
+The module now answers **two questions, and each is enforced on every lane that
+can land the write**:
 
 | Predicate | Question | Enforced by |
 |---|---|---|
 | `protected_roots()` / `check_protected_delete` | does this command *take out* the vault, the lloyd tree or `$HOME`? | the Bash lane: the hook and `main.call_tool` |
-| `PROTECTED_WRITE_ROOTS` / `write_deny_reason` | may this file be *written* at all? | the file-tool lane only: `agent_mcp/builtin_fs._gate_check` (#1049, landed `485fa6c0`) |
+| `PROTECTED_WRITE_ROOTS` / `write_deny_reason` | may this file be *written* at all? | three lanes, one predicate: the file tools `agent_mcp/builtin_fs._gate_check` (#1049, landed `485fa6c0`), Bash via `check_bash_write_denied` (#1620), and `vault_write` via `agent_mcp/vault._protected_write_refusal` (#1757). `automod_vault_land` is the remaining exemption — it validates before it writes, which is what the refusal text routes a writer to |
 
 The write deny-set is four entries — `~/.openclaw`, `~/lloyd/agent-services`,
 `~/lloyd/.venvs`, `~/obsidian/lloyd/SOUL.md` — and it runs ahead of
@@ -327,10 +328,13 @@ that pass so Lloyd's own writes do not read as downloads.
   `eval/run_preserve_thinking_eval.py:267` is covered by a literal in the
   parametrised table, so renaming that prefix would leave its sessions
   unsandboxed with a green suite (#1333).
-- **The write deny-set stops at the file-tool lane** — see 2.3. Bash reaches
-  `SOUL.md`, `~/.openclaw` and `agent-services/` with no location rule, and
-  that route also skips the lock, the change ledger and the audit a
-  `vault_write` of the same path takes (#1049).
+- **A route that is none of the three lanes.** The write deny-set is now asked by
+  every MCP lane that can land a path — the file tools, Bash since #1620, and
+  `vault_write` since #1757, which was the open hole (#1049's remaining half). What
+  is left uncovered is a write that reaches the file by none of them: a compiled
+  binary, a path assembled across commands 2.3 does not parse, or the sanctioned
+  `automod_vault_land` / autoresearch promotion routes, which validate by contract
+  instead of by location.
 
 ## Review log
 

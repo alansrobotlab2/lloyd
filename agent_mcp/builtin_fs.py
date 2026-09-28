@@ -251,10 +251,10 @@ def _protected_path_refusal(mut: _Mutation) -> str | None:
     return json.dumps({
         "error": (
             f"{'Write' if mut.kind == 'write' else 'Edit'} refused: {mut.path} "
-            f"is protected ({label}). This lane refuses it for every session. "
-            f"Land the change through the route that validates it — "
-            f"`vault_write` or `automod_vault_land` for vault and prompt "
-            f"surfaces, an automod round for code — or ask Alan."
+            f"is protected ({label}). This lane refuses it for every session, and "
+            f"so does `vault_write`. Land the change through the route that "
+            f"validates it — `automod_vault_land` for vault and prompt surfaces, "
+            f"an automod round for code — or ask Alan."
         ),
         "code": ErrorCode.PROTECTED_PATH,
     })

@@ -633,7 +633,7 @@ re-implements the caps.
 | Tool | Properties | Required | Does |
 |---|---|---|---|
 | `vault_read` | RO | `path` | Read a vault file by vault-relative path |
-| `vault_write` | ID | `path`, `content` | Create or overwrite a vault file (audit-logged) |
+| `vault_write` | ID | `path`, `content` | Create or overwrite a vault file (audit-logged). Refuses a write deny-set path — `lloyd/SOUL.md` today — without an `allow_protected_writes` grant, like `Write`/`Edit` (#1757) |
 | `vault_overview` | RO | — | File counts per segment, or the most-linked notes |
 | `vault_search` | RO | `query` | BM25 + vector search over the vault |
 | `vault_recall` | RO | `query` | Vault search plus entity facts in parallel; carries the djev rerank arm and shadow seam. Its seven eval knobs (`RECALL_EVAL_KNOBS`: graph expansion and rerank, djev rerank) are read from params in process only; `call_tool` strips them, and the schema no longer lists them |

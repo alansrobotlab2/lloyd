@@ -403,24 +403,42 @@ def test_the_deny_set_is_consulted_from_one_place_in_the_write_path():
     assert "PROTECTED_PATH" in src, "the refusal must carry the standard code"
 
 
-def test_no_other_write_lane_consults_the_deny_set():
-    """`vault_write` and `automod_vault_land` are sanctioned writers with their
-    own root checks and their own validation, and the 06:00 nightly job runs on
-    them; the deny-set stops at the fs lane so it cannot fail that run.
+def test_every_lane_that_reaches_a_denied_path_consults_the_deny_set():
+    """The property is "one module decides, every lane that can land a write asks
+    it" — and until #1757 the vault lane did not ask, while its own root check let
+    `vault_write(path="lloyd/SOUL.md")` land the one file the set names. A guard on
+    one of two write surfaces is not a guard, so this test used to pin the hole
+    ("the deny-set stops at the fs lane") and now pins the enumeration instead: the
+    lanes that ask are exactly the lanes that write.
 
-    The name being scanned is why the Bash lane added by #1620 is not in this
-    list's trouble: `safety.check_bash_command` refuses those writes through
-    `protected_paths.check_bash_write_denied`, which owns the predicate, so no
-    dispatch or writer module spells the set or its predicate itself. That is the
-    property under test — one module decides, everyone else calls it — and the
-    Bash behaviour is pinned by `tests/test_bash_write_guard.py`."""
-    for rel in ("agent_mcp/vault.py", "agent_mcp/automod.py", "agent_mcp/facts.py",
-                "app/harness/safety.py", "app/harness/mcp_pool.py", "agent_mcp/main.py"):
+    `agent_mcp/automod.py` stays out of the caller list on purpose:
+    `automod_vault_land` is the route the refusal text offers, and
+    `scripts/automod/vault_round.py` validates before it writes — exempt by
+    design, not by oversight, which is why it is named here as well as below.
+    The Bash lane is out for the reason its own docstring gives:
+    `safety.check_bash_command` refuses through
+    `protected_paths.check_bash_write_denied`, which owns the predicate, and
+    `tests/test_bash_write_guard.py` pins that behaviour.
+    """
+    ASKERS = ("agent_mcp/builtin_fs.py",        # Write / Edit
+              "agent_mcp/vault.py",             # vault_write, since #1757
+              "app/harness/protected_paths.py")  # the owner, and the Bash route
+    EXEMPT = ("agent_mcp/automod.py", "agent_mcp/facts.py",
+              "app/harness/safety.py", "app/harness/mcp_pool.py", "agent_mcp/main.py")
+    for rel in ASKERS:
+        src = (REPO / rel).read_text(encoding="utf-8")
+        assert "write_deny_reason" in src, f"{rel} is a write lane that never asks"
+    for rel in EXEMPT:
         path = REPO / rel
         assert path.exists(), rel
         src = path.read_text(encoding="utf-8")
         assert "write_deny_reason" not in src, rel
-        assert "PROTECTED_WRITE_ROOTS" not in src, rel
+    # No lane may restate the set: a second copy is a set that diverges, which is
+    # what the four earlier spellings of "protected" on this box did.
+    for rel in ASKERS + EXEMPT:
+        if rel == "app/harness/protected_paths.py":
+            continue
+        assert "PROTECTED_WRITE_ROOTS" not in (REPO / rel).read_text(encoding="utf-8"), rel
 
 
 def test_the_wake_miss_corpus_is_inside_the_delete_guard(tree):

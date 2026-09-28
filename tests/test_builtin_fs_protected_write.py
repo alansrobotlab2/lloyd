@@ -1,4 +1,5 @@
-"""The Write/Edit lane refuses the write deny-set, and nothing else does.
+"""The Write/Edit lane refuses the write deny-set, and now so does every other
+lane that reaches the same files.
 
 Backlog #1049. The failure this pins is the shortest route to the identity
 file: `Read ~/obsidian/lloyd/SOUL.md`, then `Write` it back with different
@@ -23,12 +24,14 @@ target; the deny-set is home-relative and moves with `HOME`, which is also why
 The allow half is as load-bearing as the deny half. An automod round edits its
 own worktree, which contains directories named like deny entries; the nightly
 knowledge-write job edits the loaded-memory files that sit *beside* the denied
-identity file; `vault_write` is a separate lane with its own root check. A
-predicate that refused any of those would not be a fix, it would be an outage.
+identity file; `vault_write` asks the same predicate since #1757 and lands those
+neighbours while refusing the one file. A predicate that refused any of those
+would not be a fix, it would be an outage.
 
 Since #1620 the Bash lane asks the same predicate of what a command writes, so
 the last two tests here run `check_bash_command` as well as `Write`: one grant
-contextvar, both lanes, and the allow half above holds on the shell route too.
+contextvar, three lanes (fs, Bash, vault), and the allow half above holds on every
+one of them.
 """
 
 from __future__ import annotations
@@ -422,26 +425,138 @@ async def test_a_sibling_named_like_an_entry_still_lands(home):
     assert f.read_text() == "hi\n"
 
 
-async def test_the_vault_write_lane_still_writes_the_file_the_fs_lane_refuses(
-        home, monkeypatch, tmp_path):
-    """`vault_write` is a separate lane with its own root check
-    (`agent_mcp/vault.py`), and the nightly job that lands prompt surfaces
-    goes through it. The deny-set must not reach it."""
+def _vault_lane(home, monkeypatch, tmp_path):
+    """Point `agent_mcp.vault` at the scratch vault, off the change ledger.
+
+    Nothing else is stubbed. In particular the two OKF guards are left wired:
+    both short-circuit on `path.startswith("knowledge/")`, so a `lloyd/` path
+    never reaches them, and stubbing them here (as this lane's test used to)
+    implied the type guard would otherwise interfere — it would not, and a
+    reader could take that as "the real lane is blocked anyway".
+    """
     from agent_mcp import vault as V
-    # The OKF taxonomy guard is orthogonal to path protection and imports
-    # `scripts.vault`, which demands the vault-derived store — absent in a
-    # round worktree. Pass it through: this test is about which lane a write
-    # travels, not about note front matter.
-    monkeypatch.setattr(V, "_guard_knowledge_type",
-                        lambda path, content: (content, None, None))
     vault_root = home / "obsidian"
     monkeypatch.setattr(V, "VAULT", vault_root)
     audit_dir = tmp_path / "audit"
     monkeypatch.setattr(V, "AUDIT_LOG_DIR", audit_dir)
     monkeypatch.setattr(V, "AUDIT_LOG_FILE", audit_dir / "writes.jsonl")
-    res = V._vault_write({"path": "lloyd/SOUL.md", "content": "SANCTIONED WRITE"})
+    return V, vault_root
+
+
+async def test_the_vault_write_lane_refuses_the_file_the_fs_lane_refuses(
+        home, monkeypatch, tmp_path):
+    """#1757, clause 1: the third lane onto the identity file asks the deny-set.
+
+    `vault_write` used to be the one lane that did not: `_vault_write` gated a
+    path on normalisation, two `knowledge/`-only OKF guards, containment under
+    `VAULT` and `memory_write_error` (which maps only MEMORY.md/USER.md/
+    `topics/<slug>`), so `vault_write(path="lloyd/SOUL.md")` landed the identity
+    file from an ordinary turn — the write the fs lane refuses with
+    `PROTECTED_PATH` and whose refusal text pointed here.
+
+    The blanket exemption was pinned on the ground that the nightly prompt-landing
+    job walks this lane. It does not: `scripts/autoresearch/promote.py::apply_overlay`
+    writes SOUL/MEMORY/USER with `shutil.copy2` after `check_contract`, and
+    `automod_vault_land` is its own validated lane. No scheduled job is changed by
+    this refusal.
+    """
+    V, vault_root = _vault_lane(home, monkeypatch, tmp_path)
+    target = vault_root / "lloyd" / "SOUL.md"
+    res = V._vault_write({"path": "lloyd/SOUL.md", "content": "UNSANCTIONED WRITE"})
+    assert res.get("success") is not True, (
+        f"the vault lane landed the identity file with no grant: {res}")
+    assert res.get("code") == "PROTECTED_PATH", res
+    assert "protected" in res["error"] and "automod_vault_land" in res["error"], res
+    assert target.read_text() == ORIGINAL, (
+        "the refusal must leave the identity file's bytes exactly as they were")
+
+
+async def test_the_vault_write_lane_lands_that_file_under_a_grant(
+        home, monkeypatch, tmp_path):
+    """#1757, clause 2: the lane stays, the exemption narrows to a grant.
+
+    Same call, same path, one in-process `allow_protected_writes` around it
+    narrowed to that path — the mechanism the Bash and fs lanes already agree
+    on, and a `ContextVar` no tool argument can set. This is the allow half: a
+    denial with no route through it is an outage, not a guard.
+    """
+    V, vault_root = _vault_lane(home, monkeypatch, tmp_path)
+    target = vault_root / "lloyd" / "SOUL.md"
+    with PP.allow_protected_writes("test: the vault lane's sanctioned write",
+                                   paths=[str(target)]):
+        res = V._vault_write({"path": "lloyd/SOUL.md", "content": "SANCTIONED WRITE"})
     assert res.get("success") is True, res
-    assert (vault_root / "lloyd" / "SOUL.md").read_text() == "SANCTIONED WRITE"
+    assert target.read_text() == "SANCTIONED WRITE"
+
+
+async def test_the_vault_write_denial_survives_the_aggregator_trip(
+        home, monkeypatch, tmp_path):
+    """The seam, for this lane: `main.call_tool` dispatches `vault_write` by
+    module table, so the refusal has to arrive as an error result there and not
+    as a success whose text happens to be JSON."""
+    V, vault_root = _vault_lane(home, monkeypatch, tmp_path)
+    await M.list_tools()
+    res = await M.call_tool("vault_write",
+                            {"path": "lloyd/SOUL.md", "content": "UNSANCTIONED WRITE"},
+                            {"lloyd/session_id": SID})
+    assert res.is_error is True, _text(res)
+    assert _code(res) == "PROTECTED_PATH", _text(res)
+    assert (vault_root / "lloyd" / "SOUL.md").read_text() == ORIGINAL
+
+
+async def test_a_grant_narrowed_elsewhere_still_refuses_on_the_vault_lane(
+        home, monkeypatch, tmp_path):
+    """A grant lifted for one location is not a grant for the identity file."""
+    V, vault_root = _vault_lane(home, monkeypatch, tmp_path)
+    target = vault_root / "lloyd" / "SOUL.md"
+    elsewhere = home / "lloyd" / "agent-services" / "supervisor" / "conf.d" / "agent-backend.conf"
+    with PP.allow_protected_writes("test: granted the service unit only",
+                                   paths=[str(elsewhere)]):
+        res = V._vault_write({"path": "lloyd/SOUL.md", "content": "WRONG GRANT"})
+    assert res.get("code") == "PROTECTED_PATH", res
+    assert target.read_text() == ORIGINAL
+
+
+async def test_the_vault_lane_allow_half_lands_the_file_beside_the_denied_one(
+        home, monkeypatch, tmp_path):
+    """The exemption narrowed to a grant must not become a freeze. `lloyd/MEMORY.md`
+    sits in the same directory as the denied identity file and is the file the
+    exemption was originally justified by (#1049: the 06:00 knowledge-write job
+    lands USER.md/MEMORY.md, and that item closed with them staying *out* of the
+    deny-set) — so it is the sharpest possible test that the guard refuses one file
+    and not the directory. Clause 3's twin here; `tests/test_mcp_layer.py` pins the
+    same thing over the aggregator."""
+    V, vault_root = _vault_lane(home, monkeypatch, tmp_path)
+    (vault_root / "lloyd" / "MEMORY.md").write_text("# old\n", encoding="utf-8")
+    res = V._vault_write({"path": "lloyd/MEMORY.md", "content": "# new\n"})
+    assert res.get("success") is True, res
+    assert (vault_root / "lloyd" / "MEMORY.md").read_text(encoding="utf-8") == "# new\n"
+
+
+# ── clause 4: the refusal text must not route a writer to a lane that refuses ─
+
+async def test_the_refusal_no_longer_offers_the_vault_lane_as_the_way_through(home):
+    """The protected lane's own text used to read "Land the change through the route
+    that validates it — `vault_write` or `automod_vault_land` …", which sent a writer
+    refused here straight to the lane that refused nothing. #1757 closes that lane,
+    so the sentence may only offer routes that will land the write.
+
+    Asserted positionally rather than by absence: naming `vault_write` *as also
+    refusing* is worth the tokens, because a writer that has just been refused and
+    told nothing else goes and tries it. What may not happen is the offer — and the
+    offered routes are the ones after "…validates it".
+    """
+    target = home / DENIED["identity file"]
+    res = await FS.call_tool("Write", {"file_path": str(target), "content": "x"})
+    err = _json(res)["error"]
+    offered = err.split("validates it", 1)[1]
+    assert "vault_write" not in offered, (
+        f"the refusal still offers the vault lane as a route through: {offered}")
+    assert "automod_vault_land" in offered, (
+        f"the refusal must still name a route that validates the write: {offered}")
+    assert err.count("vault_write") == 1, (
+        f"`vault_write` may be named once, as also refusing: {err}")
+    assert err.index("vault_write") < err.index("validates it"), err
 
 
 # ── the seam: the refusal arrives at the top of the aggregator ───────────────

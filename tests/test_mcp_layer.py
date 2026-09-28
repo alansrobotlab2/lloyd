@@ -1044,3 +1044,71 @@ def test_no_module_tool_is_left_off_the_wire(tools):
         "the advertised catalog is not what the modules declare: "
         f"held back={sorted(declared - advertised)}, "
         f"never declared={sorted(advertised - declared)}")
+
+
+# ── #1757: closing the vault lane onto the deny-set must not narrow the lane ──
+#
+# `vault_write` is the tool the nightly knowledge-write turns and the research
+# writers use for ordinary notes, and it is also the only handler in `agent_mcp`
+# that takes an arbitrary vault path. #1757 wires it to `write_deny_reason` — one
+# file in the set today, `lloyd/SOUL.md` — so the load-bearing question is what
+# still works. These run the write over the aggregator, which is the trip a real
+# turn crosses: `_meta` carries the session id, `_dispatch` picks the module.
+
+#: A scratch `$HOME` needs the identity file present for the deny-set to be the
+#: same set it is on the live box (`PROTECTED_WRITE_ROOTS` is home-relative and
+#: resolved per call, #1049).
+_VAULT_LANE_SID = "20260928_1757_vault_lane"
+
+
+@pytest.fixture
+def vault_lane(tmp_path, monkeypatch):
+    """A scratch vault with the denied identity file and its two neighbours."""
+    import agent_mcp.vault as V
+    import app.memory_ceiling as ceiling
+    from agent_mcp import _change_ledger
+
+    home = tmp_path / "home"
+    mems = home / "obsidian" / "lloyd"
+    mems.mkdir(parents=True)
+    (mems / "SOUL.md").write_text("ORIGINAL IDENTITY FILE", encoding="utf-8")
+    (mems / "MEMORY.md").write_text("# Lloyd Long-Term Memory\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    # The ceiling's root is a `Path.home()` literal frozen at import, so it does
+    # not follow HOME; move it with the vault or a memory-file write resolves
+    # outside it and is allowed for the wrong reason (#1010's shape).
+    monkeypatch.setattr(ceiling, "MEMORIES_DIR", mems)
+    monkeypatch.setattr(V, "VAULT", home / "obsidian")
+    monkeypatch.setattr(V, "AUDIT_LOG_DIR", tmp_path / "audit")
+    monkeypatch.setattr(V, "AUDIT_LOG_FILE", tmp_path / "audit" / "writes.jsonl")
+    monkeypatch.setattr(_change_ledger, "enabled", lambda: False)
+    return V, home / "obsidian"
+
+
+async def test_a_vault_note_still_lands_over_the_aggregator(vault_lane):
+    """Clause 3: a path outside the deny-set is written exactly as before the
+    guard was wired in — same success shape, same bytes on disk."""
+    _V, vault = vault_lane
+    res = await M.call_tool("vault_write", {
+        "path": "knowledge/software/vault-lane.md",
+        "content": "---\ntype: reference\ndomain: software\n---\n\nbody\n"},
+        {"lloyd/session_id": _VAULT_LANE_SID})
+    assert res.is_error is False, res.content[0].text
+    assert json.loads(res.content[0].text)["success"] is True
+    assert (vault / "knowledge" / "software" / "vault-lane.md").read_text(
+        encoding="utf-8").endswith("body\n")
+
+
+async def test_the_memory_file_beside_the_denied_one_still_lands(vault_lane):
+    """The neighbour that the blanket exemption was originally justified by
+    (#1049: the 06:00 knowledge-write job lands MEMORY.md/USER.md, which stayed
+    out of the deny-set). Same directory as `SOUL.md`, one call, no grant."""
+    _V, vault = vault_lane
+    res = await M.call_tool("vault_write", {
+        "path": "lloyd/MEMORY.md", "content": "# Lloyd Long-Term Memory\n\nA note.\n"},
+        {"lloyd/session_id": _VAULT_LANE_SID})
+    assert res.is_error is False, res.content[0].text
+    assert (vault / "lloyd" / "MEMORY.md").read_text(encoding="utf-8") == (
+        "# Lloyd Long-Term Memory\n\nA note.\n")
+    assert (vault / "lloyd" / "SOUL.md").read_text(encoding="utf-8") == (
+        "ORIGINAL IDENTITY FILE")

@@ -724,9 +724,11 @@ def referenced_paths(command: str, cwd: str | None = None, _depth: int = 0) -> l
 # one blob hands back `<cwd>/s/a/b` — a path that exists nowhere — while the
 # file it actually rewrites is the second positional.
 #
-# One deny-set, one predicate, both lanes: `write_deny_reason` is called on the
-# resolved target exactly as the file lane calls it. That is what makes an
-# `allow_protected_writes` lift cover Bash as well as `Write`, and it also means
+# One deny-set, one predicate, every lane that can land a write: `write_deny_reason`
+# is called on the resolved target exactly as the file lane calls it — Bash since
+# #1620, and `vault_write` since #1757, which was the last MCP lane that asked
+# nothing and so could land `lloyd/SOUL.md` from an ordinary turn. That is what makes
+# an `allow_protected_writes` lift cover all three as one, and it also means
 # realpath semantics carry over — a symlink out of the set, like
 # `.venvs/lloyd/bin/python` → the uv-managed interpreter, is outside the set
 # here as it is on the file lane. Widening that is a membership decision (left

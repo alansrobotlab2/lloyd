@@ -1592,10 +1592,55 @@ def _guard_knowledge_domain(path: str, content: str) -> tuple[str, dict | None, 
     return rewritten, None, replaced
 
 
+def _protected_write_refusal(path: str) -> dict | None:
+    """The write deny-set's answer for this vault-relative path, or None to allow.
+
+    The third lane onto the identity file (#1757). The write deny-set names
+    `~/obsidian/lloyd/SOUL.md` — its one entry that is a vault path — and the other
+    two lanes that reach it ask the same predicate: Write/Edit
+    (`agent_mcp/builtin_fs.py`, `_protected_path_refusal`) and Bash
+    (`app/harness/protected_paths.py`). This lane asked nothing at all: its gates
+    were normalisation, containment under `VAULT`, the two `knowledge/`-only OKF
+    guards and `memory_write_error`, which maps only MEMORY.md/USER.md/
+    `topics/<slug>`. So a turn refused `Write` on the identity file could land the
+    same bytes one call later through here, and the refusal text told it to.
+
+    Runs ahead of every other check here, including the OKF guards: this is a rule
+    about *where* a write may land, not about what is in it, and the file it refuses
+    is not a `knowledge/` note. It calls `write_deny_reason` rather than restating
+    the set — one module decides, everyone else calls it — so the grant
+    (`allow_protected_writes`, a `ContextVar` no tool argument can set) is honoured
+    identically on all three lanes, which is what keeps the sanctioned in-process
+    writer working while an ordinary turn cannot lift its own denial.
+
+    Fails closed, like the fs lane: a deny-set that cannot load is not a deny-set
+    that passed, and "every write silently proceeded while the checker was broken"
+    is the hole #1049 exists to close.
+    """
+    try:
+        from app.harness.protected_paths import write_deny_reason
+        label = write_deny_reason(str(VAULT / path))
+    except Exception:  # noqa: BLE001 — an unloadable checker must not read as a pass
+        logger.exception("protected-path check unavailable for vault path %s", path)
+        return _err(f"vault_write refused: the protected-path check could not run, "
+                    f"so {path} is not being written. Report this rather than "
+                    f"working around it.", ErrorCode.PROTECTED_PATH)
+    if label is None:
+        return None
+    return _err(f"vault_write refused: {path} is protected ({label}). This lane "
+                f"refuses it for every session, like `Write` and `Edit`. Land the "
+                f"change through the route that validates it — `automod_vault_land` "
+                f"for vault and prompt surfaces, an automod round for code — or ask "
+                f"Alan.", ErrorCode.PROTECTED_PATH)
+
+
 def _vault_write(params: dict) -> dict:
     path, norm_err = _normalize_vault_path(params.get("path", ""))
     if norm_err:
         return _err(norm_err, ErrorCode.MISSING_PARAM if "required" in norm_err else ErrorCode.PATH_ESCAPE)
+    refusal = _protected_write_refusal(path)
+    if refusal is not None:
+        return refusal
     content = params.get("content", "")
     try:
         content, type_err, replaced = _guard_knowledge_type(path, content)
