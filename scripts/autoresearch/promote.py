@@ -151,9 +151,12 @@ def slice_metrics(
     # rather than left to whichever spelling of a comment is nearest.
     # Counting ties as wins would not weaken that purpose — a regression is still a
     # non-win — but it would empty the leg on this bench:
-    # `bench_mine.calibrate_candidate` records four of the eleven live tasks sitting
-    # at exactly 0.00, so a variant that moved ONE targeted task and tied every other
-    # one would score `compared/compared` = 1.00 and clear the threshold outright.
+    # `bench_mine.calibrate_candidate` exists for the same reason: a task the model
+    # always fails sits at mean composite exactly 0.00, so a variant that moved ONE
+    # targeted task and tied every other one would score `compared/compared` = 1.00
+    # and clear the threshold outright. Which live tasks are on that floor today is a
+    # measurement and not a fact to keep here: zero of the 11 tasks with BASELINE_*
+    # rows were, measured 2026-09-28 (#1710).
     # And 0.5 is a measured operating point: `promotion_fp_rate.py` derived its
     # false-positive rate over the live promoted-round corpus under exactly these
     # strict semantics, and #549's strict held-out legs below refuse a tie for the

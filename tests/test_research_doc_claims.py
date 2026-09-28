@@ -1017,3 +1017,101 @@ def test_the_staging_leaf_is_the_directory_a_note_actually_lands_in(tmp_path, mo
             "a staged note without frontmatter is unpromotable: the Review tab "
             "reads review_status and source out of it")
 
+
+# ---------------------------------------------------------------------------
+# #1710 — the judge's full-marks-for-no-checks award is a convention, not a
+# service to a caller, and the sentence saying otherwise is what this pins.
+# ---------------------------------------------------------------------------
+
+_JUDGE = Path(__file__).resolve().parents[1] / "scripts" / "autoresearch" / "judge.py"
+
+_BENCH_MINE = re.compile(r"bench[-_]mine", re.I)
+_RELIES = re.compile(r"\b(rel(?:y|ies|ying|ied)|depend(?:s|ing|ed)?\s+on)\b", re.I)
+# The corrected prose names the same module and the same incident, so matching on
+# the name alone would flag the fix. A reliance verb is the claim.
+_NEGATION = re.compile(r"\b(not|never|nothing|no longer|neither)\b", re.I)
+
+
+def _bench_mine_relies_claim(sentence: str) -> bool:
+    """Does this sentence assert that bench-mine leans on the no-checks award?"""
+    if not _BENCH_MINE.search(sentence):
+        return False
+    return bool(_RELIES.search(sentence)) and not _NEGATION.search(sentence)
+
+
+def _prose_sentences(path: Path) -> list[str]:
+    """Every sentence of docstring and `#` comment prose in `path`.
+
+    Consecutive comment lines are joined before splitting: a wrapped comment is
+    one sentence wearing three lines, and a guard that reads line by line misses
+    the clause that matters — which is where the claim this node retires lived.
+    """
+    text = path.read_text(encoding="utf-8")
+    out: list[str] = []
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef,
+                             ast.ClassDef)):
+            doc = ast.get_docstring(node)
+            if doc:
+                out += [s for s in
+                        re.split(r"(?<=[.!?])\s+", " ".join(doc.split())) if s]
+    run: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#") and not stripped.startswith("#!"):
+            run.append(stripped.lstrip("#").strip())
+            continue
+        if run:
+            out += [s for s in re.split(r"(?<=[.!?])\s+", " ".join(run)) if s]
+            run = []
+    if run:
+        out += [s for s in re.split(r"(?<=[.!?])\s+", " ".join(run)) if s]
+    return out
+
+
+def test_the_judge_stops_claiming_bench_mine_calibration_relies_on_the_award():
+    """`scripts/autoresearch/judge.py:496-497` read: a task declaring no checks
+    "keeps its conventional full marks, which is what `workers/bench_mine`
+    calibration relies on". Nothing relied on it — it WAS the defect. Calibration
+    scored the staging envelope, the envelope declares no `objective_checks`, so
+    half of all 1190 calibration trials' composites was awarded and the
+    capability-edge gate could not reject at the bottom of `EDGE_BAND`. A docstring
+    naming a dependent is a claim about that dependent, and this one pointed a
+    reader at the bug as if it were the design (#1710).
+
+    Checked over the module's whole prose — docstrings AND comments — because a
+    claim moved from one to the other is the same claim. The behaviour half is
+    pinned in `tests/test_workers_sources.py`; what is pinned HERE is that the
+    award is no longer offered as something a caller may lean on.
+    """
+    sentences = _prose_sentences(_JUDGE)
+    assert len(sentences) > 40, (
+        f"{len(sentences)} prose sentences extracted from judge.py — the extractor "
+        "matched almost nothing, so the assertion below would pass on silence")
+
+    offenders = [s for s in sentences if _bench_mine_relies_claim(s)]
+    assert not offenders, (
+        f"judge.py still asserts that bench-mine relies on the no-checks award: "
+        f"{offenders}")
+
+
+def test_the_reliance_guard_trips_on_the_sentence_it_was_filed_against():
+    """Negative control for the node above: a prose guard that cannot see the
+    sentence it was filed for is a guard the next inconvenienced reader deletes.
+
+    Two paraphrases are included because the node matches on a reliance VERB, not
+    on the string "relies on" — a rewrite to "depends on" is the same claim.
+    """
+    shipped = ("A task declaring no checks at all keeps its conventional full "
+               "marks, which is what `workers/bench_mine` calibration relies on.")
+    paraphrase = "`workers/bench_mine` calibration depends on this award."
+    hyphenated = "bench-mine calibration relied on the full marks for no checks."
+    for sentence in (shipped, paraphrase, hyphenated):
+        assert _bench_mine_relies_claim(sentence), (
+            f"the guard missed a reliance claim: {sentence!r}")
+
+    corrected = ("`workers/sources/bench_mine.py` now requires checks in the task "
+                 "it calibrates, which is what #1710 changed.")
+    assert not _bench_mine_relies_claim(corrected), (
+        "the guard flags the corrected prose, which means it is matching the "
+        "module name rather than the claim")

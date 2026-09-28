@@ -565,17 +565,66 @@ async def _bench_composites(tasks: list[dict], *, model: str = "") -> list[float
     return composites
 
 
-async def calibrate_candidate(path: Path, *, runs: int = CALIBRATION_RUNS,
+def _indiscriminable(task) -> str:
+    """Why this dict must not be spent a trial on, or "" when it may be.
+
+    One trial is a real bench run plus a rubric judgement, and the composite is
+    `0.5 * objective + 0.5 * rubric`. A dict with no `objective_checks` has its
+    objective half AWARDED, because `_score_objective` gives full marks to an
+    empty check list — so its mean can never fall below 0.5 and the lower edge of
+    `EDGE_BAND` is arithmetically unreachable. That is a gate reporting a verdict
+    it cannot justify, and it is what happened to every candidate until #1710: the
+    staged note's envelope declares no checks, so all 119 notes measured in the six
+    staging days came back `ok` with means of 0.51 to 1.00. A dict with no prompt
+    cannot be run at all. Either way the answer is zero trials, not a measurement
+    of the wrong object.
+    """
+    if not isinstance(task, dict):
+        return "no task dict to calibrate"
+    if not str(task.get("prompt") or "").strip():
+        return "no prompt to run"
+    checks = task.get("objective_checks")
+    if not isinstance(checks, list) or not checks:
+        return ("no non-empty objective_checks: the judge awards that layer full "
+                "marks, so no mean from it can discriminate")
+    return ""
+
+
+def _trial_task(task: dict, path: Path) -> dict:
+    """The candidate as `_bench_composites` needs it: an id to pair traces by.
+
+    `load_bench_tasks` substitutes the file stem for a task file whose front matter
+    omits `id`, and `_bench_composites` pairs each returned trace back to its task
+    by that id rather than by position — so a candidate without one collects zero
+    composites and the calibration reports "not a measurement of the task". Same
+    substitution, one source of truth (#1710).
+    """
+    if str(task.get("id") or "").strip():
+        return task
+    return {**task, "id": Path(path).stem}
+
+
+async def calibrate_candidate(path: Path, *, task: Optional[dict] = None,
+                              runs: int = CALIBRATION_RUNS,
                               trials: Optional[Callable] = None) -> dict:
     """Is this task capable of discriminating? N trials, one composite each.
 
     A task the model always passes and a task it always fails both move the
     bench mean by noise, not by signal — which is the defect #344 diagnosed as
     "structurally hard to beat" and the reason `min_bench_win_fraction` is
-    unreachable. Four of the eleven live tasks sit at exactly 0.00 today. So a
-    candidate is kept only when its mean composite is strictly inside
-    EDGE_BAND, and the individual composites are recorded either way so the
-    noise is visible to the human who promotes it.
+    unreachable. So a candidate is kept only when its mean composite is strictly
+    inside EDGE_BAND, and the individual composites are recorded either way so
+    the noise is visible to the human who promotes it.
+
+    `task` is the parsed candidate, and passing it is the point of the parameter.
+    A staged note's FIRST front matter block is `write_staging_note`'s envelope —
+    `source`, `confidence`, `review_status` — while the mined task sits in the
+    body, so a calibration that re-reads the path spends its trials on the
+    envelope: no prompt, no checks, the objective half awarded. #1710.
+    `_stage_and_calibrate` therefore hands over the dict it had already parsed,
+    and a caller that omits `task` lands in the refusal below instead of getting a
+    verdict on the wrong document. `task_id` records what the trials were run
+    against, so a human reading the note can see which task a mean describes.
 
     An engine that will not answer is not a verdict on the task: `in_band`
     stays None and the candidate survives for a later run.
@@ -583,12 +632,22 @@ async def calibrate_candidate(path: Path, *, runs: int = CALIBRATION_RUNS,
     trials = trials or _bench_composites
     out: dict[str, Any] = {"runs": int(runs), "composites": [], "mean": None,
                            "min": None, "max": None, "in_band": None,
+                           "task_id": None,
                            "status": "error", "error": "", "band": list(EDGE_BAND)}
-    try:
+    if task is None:
         task = _load_candidate(path)
-        if task is None:
-            out["error"] = "candidate does not parse as a bench task"
-            return out
+    if task is None:
+        out["error"] = "candidate does not parse as a bench task"
+        return out
+    problem = _indiscriminable(task)
+    if problem:
+        out["error"] = problem
+        logger.warning("bench-mine: no trials spent on %s: %s",
+                       Path(path).name, problem)
+        return out
+    task = _trial_task(task, path)
+    out["task_id"] = str(task["id"])
+    try:
         composites = [c for c in await trials([task] * int(runs))
                       if isinstance(c, (int, float))]
     except Exception as exc:
@@ -610,7 +669,14 @@ async def calibrate_candidate(path: Path, *, runs: int = CALIBRATION_RUNS,
 
 
 def _load_candidate(path: Path) -> Optional[dict]:
-    """The staged file parsed by the real bench loader, not a second parser."""
+    """A TASK FILE parsed by the real bench loader, not a second parser.
+
+    This is the fallback, and it is only correct for a file that IS a bench task.
+    On a staged note it returns the staging envelope — `load_bench_tasks` reads the
+    first front matter block and the mined task is in the body — which is why
+    `calibrate_candidate` takes the parsed candidate from its caller and refuses
+    what this returns for a note rather than spending ten GPU trials on it (#1710).
+    """
     from scripts.autoresearch.common import load_bench_tasks
 
     name = Path(path).name
@@ -701,7 +767,10 @@ async def _stage_and_calibrate(item: QueueItem, turn, *, slug: str, rationale: s
     direction = str((fm or {}).get("edge_direction") or "")
     if direction not in EDGE_DIRECTIONS:
         direction = ""
-    calibration = await calibrate_candidate(path)
+    # The dict the miner already parsed, not a re-read of `path`: the first front
+    # matter block of the file written above is the staging envelope, so a
+    # calibration that resolved the path would measure the envelope (#1710).
+    calibration = await calibrate_candidate(path, task=fm)
     _record_calibration(path, calibration, direction)
     _mark_done(_item_key(item), "mined")
     verdict = {True: "at the edge", False: "out of band", None: "uncalibrated"}[

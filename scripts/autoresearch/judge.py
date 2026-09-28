@@ -494,7 +494,12 @@ def _score_objective(task: dict[str, Any], trace: dict[str, Any]) -> tuple[float
     `score` is None when the task declares checks and none of them could be
     measured — the task is not-rankable (#416) and a caller must not turn that
     into 0.0. A task declaring no checks at all keeps its conventional full
-    marks, which is what `workers/bench_mine` calibration relies on.
+    marks. That is a convention for tasks with no mechanical layer, not a
+    service to a caller: anything that needs this half to DISCRIMINATE has to
+    require checks in the task it hands in, which is what
+    `workers/sources/bench_mine.py` now does for the candidate it calibrates
+    (#1710 — over 119 staged notes it scored the staging envelope, found no
+    checks here, and the free 0.5 made the lower edge of its band unreachable).
     """
     checks = task.get("objective_checks") or []
     if not checks:

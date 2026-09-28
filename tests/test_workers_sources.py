@@ -908,7 +908,17 @@ async def test_a_candidate_with_no_mechanical_check_is_not_staged(tmp_path, monk
 
 async def test_a_candidate_is_kept_only_at_the_capability_edge(tmp_path):
     """A task the model always passes and a task it always fails both move the
-    mean by noise. Four of the eleven live tasks are pinned at 0.00."""
+    bench mean by noise, which is why a candidate is kept only inside the band.
+
+    The dated count that used to sit in this docstring claimed four live tasks
+    were pinned at that floor; measured 2026-09-28 against the research ledger,
+    none of the 11 tasks carrying `BASELINE_*` rows has a mean composite of 0.00
+    (lowest is bench_019 at 0.013). How many sit on the floor is a query against
+    a moving store, not a fact to carry in prose (#1710).
+
+    These two calls pass no `task=`, so they also pin the fallback: given a file
+    that IS a bench task, `_load_candidate` still resolves it.
+    """
     p = tmp_path / "candidate.md"
     p.write_text(_CANDIDATE, encoding="utf-8")
 
@@ -938,6 +948,255 @@ async def test_a_calibration_error_does_not_lose_the_candidate(tmp_path, monkeyp
 
     assert result["in_band"] is None, "an unmeasured task was reported as in or out of band"
     assert "vLLM" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Capability-edge calibration (#1710): trials are spent on the mined TASK
+# ---------------------------------------------------------------------------
+#
+# Every one of the 119 notes staged between 2026-09-23 and 2026-09-28 recorded
+# `calibration.status: ok` with means of 0.51 to 1.00 and 118 of them `in_band:
+# true`, because `_load_candidate` resolved the staged FILE and a staged note's
+# first front matter block is `write_staging_note`'s envelope — `source`,
+# `confidence`, `review_status` — while the mined task sits in the body. So the
+# dict in front of the judge had no `objective_checks`, `_score_objective` awards
+# that layer in full (judge.py: "no objective layer -> full marks"), and with
+# `composite = 0.5*objective + 0.5*rubric` the mean could not fall below 0.50
+# while EDGE_BAND opens at 0.05: the lower half of the band was arithmetically
+# unreachable and the one rejection on record was a mean of exactly 1.0. The
+# gate could only ever reject at the very top.
+#
+# The test above escaped this for the same reason every earlier one did: it
+# handed `trials` a synthetic series, and a series does not care what task it was
+# scored against. These nodes assert on the dict the trials were handed.
+
+
+def _staged_note(dirn: Path, *, body: str = _CANDIDATE) -> Path:
+    """A staged note: the staging envelope first, the mined task in the body.
+
+    Written by hand into `dirn` rather than through `write_staging_note`, whose
+    directory is the live staging root a human reads. The envelope's key set is
+    pinned against the real writer by
+    `test_the_test_helper_still_mirrors_the_real_staging_note`, because this
+    file's whole claim is about that shape.
+    """
+    dirn.mkdir(parents=True, exist_ok=True)
+    envelope = {
+        "source": "bench-mine",
+        "confidence": 0.5,
+        "review_status": "pending",
+        "rationale": "baseline loss on bench_020",
+        "source_refs": ["~/obsidian/lloyd/bench/bench_020_x.md"],
+        "generated_at": "2026-09-28T00:00:00+00:00",
+    }
+    p = dirn / "101010-mined-run-24-pipeline-timeout.md"
+    p.write_text(
+        "---\n" + yaml.dump(envelope, default_flow_style=False, allow_unicode=True)
+        + "---\n\n" + body + "\n", encoding="utf-8")
+    return p
+
+
+def _envelope_keys(path: Path) -> list[str]:
+    """The keys of a note's FIRST front matter block — what a loader reads."""
+    raw = path.read_text(encoding="utf-8")
+    assert raw.startswith("---"), "a staged note must open with front matter"
+    end = raw.find("\n---\n", 3)
+    return sorted((yaml.safe_load(raw[3:end]) or {}).keys())
+
+
+def test_the_test_helper_still_mirrors_the_real_staging_note(tmp_path, monkeypatch):
+    """The node that keeps the eight below honest.
+
+    Every claim this file makes about the bug is a claim about the SHAPE of a
+    staged note: envelope first, mined task in the body. So the helper is
+    compared against the real `write_staging_note`, run into a redirected
+    STAGING_ROOT — front-matter keys and body position — and the path-based
+    loader is shown reading the envelope out of BOTH files. A helper allowed to
+    drift into a file the loader parses correctly would un-pin every node here
+    without a single one of them failing.
+    """
+    import workers.sources._common as _c
+
+    root = tmp_path / "staging"
+    monkeypatch.setattr(_c, "STAGING_ROOT", root)
+    real = _c.write_staging_note(
+        "bench-mine", "mined-run-24-pipeline-timeout", _CANDIDATE,
+        confidence=0.5, rationale="baseline loss on bench_020",
+        source_refs=["~/obsidian/lloyd/bench/bench_020_x.md"])
+    mine = _staged_note(tmp_path / "mine")
+
+    assert _envelope_keys(real) == _envelope_keys(mine), (
+        "the helper's envelope no longer matches what write_staging_note emits")
+
+    raw = real.read_text(encoding="utf-8")
+    assert raw.index("id: bench_200") > raw.index("source: bench-mine"), (
+        "the mined task no longer comes AFTER the envelope in a real note — the "
+        "bug this section describes is gone and these nodes should be retired")
+
+    for path in (real, mine):
+        got = BM._load_candidate(path)
+        assert got is not None and "confidence" in got and not got.get("prompt"), (
+            f"{path.name}: the first front matter block is no longer the envelope, "
+            "so the fixture below is no longer reproducing the shipped failure")
+
+
+def _trial_recorder(score: float):
+    """A `trials` stand-in that records the tasks it was asked to run."""
+    seen: list[list[dict]] = []
+
+    async def _trials(tasks, **kw):
+        seen.append(list(tasks))
+        return [score] * len(tasks)
+
+    _trials.seen = seen
+    return _trials
+
+
+async def test_the_trials_are_spent_on_the_mined_task_not_its_envelope(tmp_path):
+    """The gate is a measurement of the candidate or it is nothing.
+
+    Before/after, this is the probe from the item: the dict in front of the
+    judge must carry the candidate's own id, its prompt and its two
+    `objective_checks`, so `_score_objective` has failing-able checks to grade
+    instead of an empty list to award.
+    """
+    from scripts.autoresearch.judge import _score_objective
+
+    path = _staged_note(tmp_path)
+    # Why the parameter exists: read the same file the way the old code did and
+    # the envelope is what comes back, with no prompt and no checks.
+    envelope = BM._load_candidate(path)
+    assert envelope is not None and not str(envelope.get("prompt") or "").strip(), (
+        "a staged note's first front matter block stopped being the envelope, so "
+        "this node no longer describes what the fix had to work around")
+    assert _score_objective(envelope, {})[0] == 1.0, (
+        "the award of an empty objective layer changed — the arithmetic below is "
+        "written against it")
+
+    trials = _trial_recorder(0.5)
+    result = await BM.calibrate_candidate(
+        path, task=BM._candidate_frontmatter(_CANDIDATE), runs=10, trials=trials)
+
+    assert len(trials.seen) == 1 and len(trials.seen[0]) == 10
+    task = trials.seen[0][0]
+    assert task["id"] == "bench_200_mined_run_24_pipeline_timeout", (
+        f"trials ran against {task.get('id')!r}, not the mined candidate")
+    assert str(task.get("prompt") or "").strip(), "trials ran with no prompt"
+    assert len(task["objective_checks"]) == 2, (
+        "the objective layer is being awarded again, which is what pinned every "
+        "calibration mean at or above 0.50")
+    # The clause's own check: a candidate that declares failing-able checks does
+    # not get the objective half handed to it.
+    assert _score_objective(task, {"tool_calls": []})[0] < 1.0
+    assert result["task_id"] == "bench_200_mined_run_24_pipeline_timeout"
+    assert result["status"] == "ok" and result["in_band"] is True
+
+
+async def test_a_task_that_cannot_discriminate_spends_zero_trials(tmp_path):
+    """No GPU trial is spent on a dict that cannot produce a discriminating mean.
+
+    Three shapes, all of which arrived as `status: ok` in the staged corpus: no
+    prompt, an empty `objective_checks`, and no `objective_checks` at all. The
+    trials callable must never be reached, and the note must not read as a
+    verdict — `in_band: None` with an `error` that names what is missing.
+    """
+    base = BM._candidate_frontmatter(_CANDIDATE)
+    cases = {
+        "blank prompt": {**base, "prompt": "   "},
+        "empty checks": {**base, "objective_checks": []},
+        "no checks key": {k: v for k, v in base.items() if k != "objective_checks"},
+    }
+    path = _staged_note(tmp_path)
+    for name, task in cases.items():
+        trials = _trial_recorder(0.5)
+        result = await BM.calibrate_candidate(path, task=task, runs=10, trials=trials)
+        assert trials.seen == [], f"{name}: trials were spent anyway"
+        assert result["status"] == "error" and result["in_band"] is None
+        assert result["error"], f"{name} was refused with no reason recorded"
+        assert ("prompt" in result["error"] if "prompt" in name
+                else "objective_checks" in result["error"]), result["error"]
+        assert result["composites"] == [] and result["mean"] is None
+
+    # Positive control, in the same call shape: a complete candidate does spend
+    # its trials, so the four refusals above are not a refusal of everything.
+    ok = _trial_recorder(0.5)
+    passed = await BM.calibrate_candidate(path, task=base, runs=10, trials=ok)
+    assert len(ok.seen) == 1, "the guard stopped a calibratable candidate too"
+    assert passed["status"] == "ok" and passed["composites"], passed["error"]
+
+
+async def test_the_staged_note_records_which_task_the_mean_describes(tmp_path,
+                                                                     monkeypatch):
+    """End to end: a human reading the note sees what the calibration measured.
+
+    The note is the whole reason the calibration exists — the promotion step
+    reads the file, not the run record — so the id goes into the front matter
+    beside the mean, and it is the parsed candidate's id rather than the file
+    stem the loader would otherwise substitute.
+    """
+    root = tmp_path / "pending"
+    # `write_staging_note` is imported into bench_mine's namespace but resolves
+    # its directory through `_common.STAGING_ROOT` at call time, so the one
+    # redirect that keeps this test out of the live staging tree is on `_common`.
+    monkeypatch.setattr(C, "STAGING_ROOT", root)
+    runs = _bm_inputs(tmp_path, monkeypatch)
+    p = _run_file(runs, "run_24_20260908_235954")
+    monkeypatch.setattr(BM, "run_prompt_on_primary", _candidate_turn(_CANDIDATE))
+    trials = _trial_recorder(0.5)
+    monkeypatch.setattr(BM, "_bench_composites", trials)
+
+    out = await BM.execute(_item(payload={
+        "run_id": "run-24", "run_path": str(p), "task_id": "24",
+        "summary": "timed out"}))
+    assert out["status"] == "success", out
+
+    notes = sorted(root.rglob("*.md"))
+    assert len(notes) == 1
+    fm = yaml.safe_load(notes[0].read_text(encoding="utf-8").split("---")[1])
+    cal = fm["calibration"]
+    assert cal["task_id"] == "bench_200_mined_run_24_pipeline_timeout", (
+        f"the note records a mean for {cal.get('task_id')!r}")
+    assert cal["status"] == "ok" and cal["in_band"] is True
+    assert trials.seen and trials.seen[0][0]["id"] == cal["task_id"], (
+        "the note names a task the trials were not run against")
+    # The substituted id was the other half of the bug's evidence trail: a mean
+    # recorded under the file stem could never be looked up in the ledger.
+    assert cal["task_id"] != notes[0].stem
+
+
+def test_the_band_premise_is_stated_without_a_dated_task_count():
+    """#705 removed the dated counts from this module's prose; #1710 found two
+    left, one in `calibrate_candidate`'s docstring and one in the test above it,
+    both claiming that four of the live bench tasks were pinned at a mean
+    composite of zero. Measured 2026-09-28 against the research ledger: 11 tasks
+    carry BASELINE_* rows and none of them scores 0.00 (lowest is bench_019 at
+    0.013). A count of a moving store inside a code comment is not a fact, it is
+    a claim that quietly becomes false.
+
+    Asserted over the two files a reader of this gate actually opens — the module
+    and this test — by the same grep the item names.
+    """
+    import subprocess
+
+    # Each needle is assembled from fragments: a guard that spells the phrase it
+    # is hunting would find its own file and fail for the wrong reason — which is
+    # exactly how this node read on its first run.
+    for needle in ("of the " "eleven live " "tasks",
+                   "eleven " "live tasks",
+                   "sit at exactly " "0.00"):
+        out = subprocess.run(
+            ["git", "grep", "-n", needle, "--", "workers/", "tests/"],
+            cwd=str(Path(BM.__file__).resolve().parents[2]),
+            capture_output=True, text=True).stdout
+        assert not out.strip(), f"{needle!r} is still in this area's prose:\n{out}"
+
+    doc = BM.calibrate_candidate.__doc__ or ""
+    assert "EDGE_BAND" in doc, (
+        "the premise the band encodes must stay stated; only the count goes")
+    assert "0.00" not in doc and "eleven" not in doc
+    assert "envelope" in doc, (
+        "the docstring must say why the parsed task is a parameter — a later "
+        "reader who 'simplifies' it back to a path re-opens #1710")
 
 
 # ---------------------------------------------------------------------------
