@@ -67,6 +67,37 @@ the transcript scratch home from backlog #566:
     file with no writer left can have, and the window is uniform so the pair leaves on the
     same clock as the stores around it.
 
+11. ~/lloyd-work/<round_id>/ — the self-mod loop's round worktree homes, the store
+    outside the data root (#1644, from #1037's ruling). `worktree.remove()` rmtree's a
+    round's directory at close, but a round the gate refused or a human aborted keeps it,
+    and `worktree.prune_orphans` runs `git worktree prune` plus a listing — it never
+    removes a directory. Reclaim a round's directory WORKTREE_DIR_MAX_AGE_DAYS (7) after
+    that round's NEWEST event in `promotions.jsonl`, and never while `git worktree list`
+    names a path under it or while `current.json` names the round: an in-flight round is
+    never a candidate whatever its age. A directory with no ledger row at all is never
+    deleted either — its age is unknowable, and a test scratch dir (`SM_TEST`, `SM_T`) is
+    indistinguishable from a round whose row was lost — and its count is reported as its
+    own named number, never folded into the reclaimed count or hidden behind a `0`.
+
+12. refs/heads/automod/<round_id> — the round branches, 226 of them at triage against
+    82 at filing. DELETE a branch BRANCH_MAX_AGE_DAYS (30) after the round settled, and
+    only when `git merge-base --is-ancestor <tip> main` holds: that is the state that
+    says the work is in the tree, and it is what makes an irreversible delete
+    forensic-safe. A tip that is not reachable from main is a refused or aborted round
+    whose branch is the ONLY record of what it attempted, so it is held — past
+    BRANCH_UNREACHABLE_HOLD_DAYS (90) it is reported as due for the ruling #1644 owes on
+    whether those branches are ever deletable, and this sweep deletes none of them.
+
+Neither store is under `DATA_ROOT`, and the second is not even on the filesystem: it is
+the live repo's refs. That is the hazard the production-checkout guard exists for — a
+round's worktree shares those refs, so `git branch -D` run from inside a gate would
+delete production branches. `automod_rung_refusal()` therefore refuses both rungs unless
+the tree this script was loaded from IS the production checkout (`app.data_root`'s own
+two predicates for that, not a restatement), and `--apply` exits
+NOT_PRODUCTION_EXIT (2) naming the tree it resolved, in the manner of the
+`.lloyd-data-root` refusal above. A dry run still exits 0 from any tree, because it
+deletes nothing and the root it reports is the point of running it (#1415).
+
 Age signal: sessions are aged by the `last_active` field in the JSON
 (mtime lies — any reprocessing touches the file); task logs and transcript
 scratch by mtime (a transcript is written once and only ever read back); a
@@ -96,6 +127,7 @@ Usage:
 import argparse
 import gzip
 import json
+import os
 import re
 from datetime import datetime, timedelta, timezone
 import shutil
@@ -121,6 +153,16 @@ except ModuleNotFoundError:
     # tests/test_retention_sweep.py pins both against the one resolver.
     from data_root import (DataRootMissing, resolve_data_root_for_tree,
                            vault_root)
+try:
+    # The same module as an OBJECT, for the two predicates the automod rungs'
+    # production guard reads. Through the module rather than by name, so a caller
+    # that redirects `app.data_root.live_checkout` — as
+    # `tests/test_retention_sweep.py::_load` already does for the data-root rules —
+    # redirects this guard too. A name imported here would have been a frozen copy
+    # of the pre-patch function, and the guard would have been untestable.
+    from app import data_root as _DATA_ROOT_MODULE
+except ModuleNotFoundError:  # pragma: no cover - same fallback as above
+    import data_root as _DATA_ROOT_MODULE
 
 # The runtime data root — `app.paths.DATA_ROOT`'s three rules, read from the one
 # copy of them (#1415). It used to be restated here as
@@ -690,6 +732,459 @@ def sweep_groundskeeper_queue(apply: bool, now: float) -> tuple[int, int]:
     return count, freed
 
 
+# ---------------------------------------------------------------------------
+# automod round residue — the two stores the loop leaves outside the data root
+# ---------------------------------------------------------------------------
+#
+# Every rung above bounds something under `DATA_ROOT`. The self-modification loop
+# leaves two things that are not under it and that nothing in this repository has
+# ever deleted (#1644, carrying #1037's ruling):
+#
+#   ~/lloyd-work/<round_id>/   The round's worktree home. `worktree.remove()`
+#                              rmtree's it at round close, but a round the gate
+#                              refused or a human aborted keeps it, and
+#                              `worktree.prune_orphans` is `git worktree prune` plus a
+#                              listing — it never removes a directory. Measured at
+#                              triage (2026-09-27): 525 MB across 12 dirs, the oldest
+#                              (SM_20260910_104045, 272 MB) 17 days past its last
+#                              ledger event and unregistered in `git worktree list`.
+#   refs/heads/automod/<rid>   The round's branch. `abort()` keeps it deliberately —
+#                              "it is the only forensic record of what was attempted" —
+#                              and outside a resume nothing has ever deleted one.
+#                              Measured: 226 branches at triage, 82 at filing.
+#
+# `~/.local/state/lloyd-automod/rounds/` (825 dirs / 24 MB) is deliberately NOT a
+# store here: #1037's ruling keeps the state dirs indefinitely, so `AUTOMOD_STATE_ROUNDS`
+# exists only so a test can point at the place and prove an `--apply` left it standing.
+
+#: Reclaim a settled round's `~/lloyd-work/<round_id>/` directory this many days after
+#: that round's newest ledger event (#1037's ruling, as recorded on #1644).
+WORKTREE_DIR_MAX_AGE_DAYS = 7
+#: Delete an `automod/<round_id>` branch this many days after the round settled — but
+#: only once its tip is an ancestor of `main`, which is the state that says the work is
+#: in the tree and is what makes an irreversible delete forensic-safe.
+BRANCH_MAX_AGE_DAYS = 30
+#: An unreachable tip is HELD, never deleted, and past this age it is reported as due
+#: for the ruling #1644 owes. The horizon is the ruling's "keep unlanded branches 90 d",
+#: and the measured reason it is a hold rather than a deadline: of the 226 branch tips
+#: at triage, 37 are ancestors of `main` and 0 are reachable from `refs/automod/rounds/*`
+#: — `squash_onto` keeps the PRE-squash HEAD at the keep-ref while the branch moves to
+#: the squashed commit — so the unreachable set is 189 refused and aborted rounds whose
+#: branch is the only thing left saying what they tried. Deleting it is owed ruling 3 on
+#: that item, not this round's decision.
+BRANCH_UNREACHABLE_HOLD_DAYS = 90
+#: The ref a branch tip must be an ancestor of to count as landed.
+MAIN_REF = "main"
+#: Round ids are `SM_<YYYYMMDD>_<HHMMSS>`; the prefix also covers the `SM_TEST`,
+#: `SM_T`, `SM_TRIAL`, `SM_SEAM`, `SM_PINS` scratch dirs the loop's own tests leave
+#: behind, which is deliberate — they fall into the no-ledger-row bucket below.
+ROUND_ID_PREFIX = "SM_"
+#: The loop's own branch namespace, spelled as `worktree.py:128` and `:383` spell it.
+BRANCH_NAMESPACE = "automod/"
+#: Exit status for an `--apply` that refused, the same status the `.lloyd-data-root`
+#: refusal at the top of this file exits with.
+NOT_PRODUCTION_EXIT = 2
+
+
+class AutomodStoreUnavailable(RuntimeError):
+    """An automod store could not be READ, so its count would mean nothing.
+
+    The same reason `worktree.list_registered` raises instead of returning `[]`:
+    a `git` call that failed and a call that came back empty arrive at this rung
+    as the same zero, and "nothing is due" is the opposite of "nothing could be
+    checked". A rung that cannot read its store says so and deletes nothing.
+    """
+
+
+def _automod_module(name: str):
+    """Import one `scripts.automod` helper, or None if this tree cannot give it.
+
+    Imported rather than restated for three rules this file would otherwise
+    duplicate: where `~/lloyd-work` is, how a branch is named for a round, and how
+    the registered worktrees are read (that reader raises on a failed `git` call,
+    which is the behaviour this rung needs and would not get from a local copy).
+    Cron and autonomy task #79 run this file with a bare `python3`, and
+    `scripts.automod.worktree` / `.state` are stdlib-only, so the import is
+    available — but it is not ASSUMED: a tree that cannot give it gets the skip
+    note below, never a guessed path.
+    """
+    try:
+        return __import__(f"scripts.automod.{name}", fromlist=["*"])
+    except Exception:  # noqa: BLE001 - absence is a state, not a bug
+        return None
+
+
+def _automod_paths() -> dict[str, Path]:
+    """Where the loop keeps its state, resolved by the loop's own module.
+
+    `scripts.automod.state` reads `LLOYD_AUTOMOD_STATE` at import, so pointing
+    that variable is the sanctioned way to run this sweep against a copy — the
+    same shape as `LLOYD_VAULT_ROOT` for the vault-touching rung. Falls back to
+    `state.py`'s own formula (`~/.local/state/lloyd-automod`) when the module is
+    unavailable, and says which it used by printing the resolved paths.
+    """
+    state = _automod_module("state")
+    if state is not None:
+        return {"ledger": Path(state.LEDGER_PATH), "current": Path(state.CURRENT_PATH),
+                "rounds": Path(state.ROUNDS_DIR)}
+    root = Path(os.environ.get("LLOYD_AUTOMOD_STATE",
+                               Path.home() / ".local" / "state" / "lloyd-automod"))
+    return {"ledger": root / "promotions.jsonl", "current": root / "current.json",
+            "rounds": root / "rounds"}
+
+
+def _automod_work_root() -> Path:
+    """`~/lloyd-work`, by `scripts.automod.worktree.WORK_ROOT` — not a copy of it."""
+    worktree = _automod_module("worktree")
+    if worktree is not None:
+        return Path(worktree.WORK_ROOT)
+    return Path.home() / "lloyd-work"
+
+
+_paths = _automod_paths()
+
+#: The round worktree homes. Named `_ROOT`, not `_DIR`, for the honest reason: it is
+#: not under `DATA_ROOT`, so it must not be swept into the set
+#: `test_the_one_resolution_owns_every_directory_the_sweep_touches` holds to that root.
+#: `tests/test_retention_sweep.py`'s fixture redirects it anyway — its guard is
+#: name-blind and every `Path` in here is a delete target by default.
+AUTOMOD_WORK_ROOT = _automod_work_root()
+#: The loop's append-only audit trail — the only thing that says when a round settled.
+AUTOMOD_LEDGER = _paths["ledger"]
+#: Which round is landing RIGHT NOW. Deleted at settle, so a missing file means no
+#: round is in flight, not that the check was skipped.
+AUTOMOD_CURRENT = _paths["current"]
+#: The state dirs the ruling keeps indefinitely. Not a store: no rung writes here, and
+#: a test holds this path to prove `--apply` walked past it.
+AUTOMOD_STATE_ROUNDS = _paths["rounds"]
+#: The checkout whose refs the branch arm may delete from. Separate from the tree this
+#: script was loaded from on purpose: `_TREE` is a sys.path detail and the
+#: `tests/test_retention_sweep.py` fixture guard enumerates module `Path` constants, so
+#: the one place a `git branch -D` can be aimed has to be enumerable by that guard.
+#: Defaulting it to the tree the script lives in is the production behaviour — the
+#: groundskeeper runs from the live checkout, which is exactly the case the guard below
+#: admits and no other.
+AUTOMOD_REPO = Path(_TREE)
+
+
+def automod_rung_refusal(tree: Path | None = None) -> str | None:
+    """Why the automod rungs must not run from this tree, or None if they may.
+
+    The hazard is specific: a round's worktree shares the LIVE repository's refs, so a
+    `git branch -D` issued from inside a gate removes production branches — and unlike
+    every file store above, there is no data root between this rung and the thing it
+    destroys. So the rung runs only where the code tree IS the production checkout,
+    decided by the same two predicates `app.data_root.resolve_data_root` uses for that
+    word (the tree equals `<passwd home>/lloyd`, and it is not a linked worktree),
+    called through the module so `LLOYD_DATA`-style test redirection reaches them.
+
+    Returned as a sentence naming both trees because the refusal is the report line: an
+    operator who ran `--apply` from a sandbox has to be able to see, from the line
+    alone, which root it declined.
+    """
+    here = _TREE if tree is None else Path(tree)
+    production = _DATA_ROOT_MODULE.live_checkout()
+    if _DATA_ROOT_MODULE.tree_is_worktree(here):
+        return (f"REFUSED: this sweep is running from {here}, a linked git worktree, "
+                f"not the production checkout {production} — its refs are the live "
+                f"repo's, so no branch or round directory was touched")
+    if here.resolve() != Path(production).resolve():
+        return (f"REFUSED: this sweep is running from {here}, not the production "
+                f"checkout {production} — no branch or round directory was touched")
+    return None
+
+
+def _settle_times(ledger: Path) -> dict[str, float]:
+    """`round_id` -> seconds-since-epoch of that round's NEWEST ledger event.
+
+    Newest, not first: a round that was gated twice or resumed has several events, and
+    the age that matters for "is this residue still wanted" is when the loop last
+    touched it. A row with no numeric `ts` falls back to its `created_at` ISO stamp; a
+    row with neither, or an undecodable line, is skipped rather than guessed at — the
+    ledger is append-only under a lock and this rung must not be the reason a
+    malformed line becomes an age.
+    """
+    out: dict[str, float] = {}
+    try:
+        text = ledger.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        rid = row.get("round_id")
+        if not isinstance(rid, str) or not rid:
+            continue
+        seconds = row.get("ts")
+        if not isinstance(seconds, (int, float)):
+            seconds = _iso_seconds(row.get("created_at"))
+        if seconds is None:
+            continue
+        if seconds > out.get(rid, float("-inf")):
+            out[rid] = float(seconds)
+    return out
+
+
+def _iso_seconds(value) -> float | None:
+    """Seconds for the ledger's `created_at` form, or None if it is not one."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _current_round(current: Path) -> str | None:
+    """The round `current.json` names, or None when no round is in flight."""
+    try:
+        doc = json.loads(current.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    rid = doc.get("round_id") if isinstance(doc, dict) else None
+    return rid if isinstance(rid, str) and rid else None
+
+
+def _bytes_under(dir: Path) -> int:
+    """Total file size under `dir`, following no symlink and never raising.
+
+    Only ever called on directories this rung has already decided to remove, so the
+    walk is bounded by what a reclaim was going to delete anyway.
+    """
+    total = 0
+    for root, _dirs, files in os.walk(dir):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def _names_registered(dir: Path, registered: list[str]) -> bool:
+    """Whether `git worktree list` named any path at or under `dir`.
+
+    Both sides go through `realpath` because the round layout is a symlink farm by
+    design (`worktree.ensure_round_home` links into the live tree), and a registered
+    path spelled through a link would otherwise read as "not registered" while the
+    worktree is live — the one mistake this guard exists to make impossible.
+    """
+    real = Path(os.path.realpath(dir))
+    for path in registered:
+        candidate = Path(os.path.realpath(path))
+        if candidate == real or real in candidate.parents:
+            return True
+    return False
+
+
+def _registered_worktrees(repo: Path) -> list[str]:
+    """The loop's own reader, which raises rather than returning `[]` on a failed read."""
+    worktree = _automod_module("worktree")
+    if worktree is None:
+        raise AutomodStoreUnavailable(
+            "scripts.automod.worktree is not importable from this tree, so the "
+            "registered worktrees cannot be read")
+    try:
+        return list(worktree.list_registered(repo))
+    except Exception as exc:  # WorktreeListUnavailable and any git failure
+        raise AutomodStoreUnavailable(str(exc)) from exc
+
+
+def sweep_automod_worktrees(apply: bool, now: float, *, work_root: Path | None = None,
+                            ledger: Path | None = None, current: Path | None = None,
+                            repo: Path | None = None,
+                            registered: list[str] | None = None) -> dict:
+    """Reclaim `~/lloyd-work/<round_id>/` past WORKTREE_DIR_MAX_AGE_DAYS.
+
+    Returns the counts the report line prints, with `skip` non-empty when the store
+    could not be read at all. The keys are each a NAMED outcome, because the failure
+    this rung has to avoid is a `0 reclaimed` that means four different things:
+
+      reclaimed   directories removed (under `--apply`) or due for removal (dry run)
+      bytes       their total file size
+      young       settled inside the horizon — kept, still recent forensics
+      untracked   NO ledger row, so no settle time — never deleted (clause 3)
+      registered  `git worktree list` names a path under it — never deleted, any age
+      live        the round `current.json` names — never deleted, any age
+      not_a_round an entry whose name is not a round id, or a symlink — never touched
+      failed      `rmtree` refused (permissions, a busy mount) — reported, not swallowed
+    """
+    root = Path(work_root if work_root is not None else AUTOMOD_WORK_ROOT)
+    times = _settle_times(Path(ledger if ledger is not None else AUTOMOD_LEDGER))
+    live = _current_round(Path(current if current is not None else AUTOMOD_CURRENT))
+    out = {"reclaimed": 0, "bytes": 0, "young": 0, "untracked": 0, "registered": 0,
+           "live": 0, "not_a_round": 0, "failed": 0, "skip": ""}
+    if not root.is_dir():
+        return out
+    if registered is None:
+        try:
+            registered = _registered_worktrees(Path(repo if repo is not None else _TREE))
+        except AutomodStoreUnavailable as exc:
+            out["skip"] = f"SKIPPED (registered worktrees unreadable: {exc})"
+            return out
+    cutoff = now - WORKTREE_DIR_MAX_AGE_DAYS * 86400
+    try:
+        entries = sorted(root.iterdir(), key=lambda p: p.name)
+    except OSError as exc:
+        out["skip"] = f"SKIPPED ({root} unreadable: {exc})"
+        return out
+    for dir in entries:
+        try:
+            if dir.is_symlink() or not dir.is_dir() or not dir.name.startswith(ROUND_ID_PREFIX):
+                out["not_a_round"] += 1
+                continue
+            if live is not None and dir.name == live:
+                out["live"] += 1
+                continue
+            if _names_registered(dir, registered):
+                out["registered"] += 1
+                continue
+            settled = times.get(dir.name)
+            if settled is None:
+                out["untracked"] += 1
+                continue
+            if settled > cutoff:
+                out["young"] += 1
+                continue
+            size = _bytes_under(dir)
+            if apply:
+                try:
+                    shutil.rmtree(dir)
+                except OSError as exc:
+                    print(f"  ! skip {dir.name}: {exc}", file=sys.stderr)
+                    out["failed"] += 1
+                    continue
+            out["reclaimed"] += 1
+            out["bytes"] += size
+        except OSError as exc:
+            print(f"  ! skip {dir.name}: {exc}", file=sys.stderr)
+            out["failed"] += 1
+    return out
+
+
+def _branch_tips(repo: Path) -> dict[str, str]:
+    """Every `automod/*` branch and its tip, in one `for-each-ref` call.
+
+    Raises when the read fails: an empty dict from a failed call and an empty dict
+    from a repo with no automod branches look identical, and the first one must not
+    arrive as `0 deleted`.
+    """
+    worktree = _automod_module("worktree")
+    if worktree is None:
+        raise AutomodStoreUnavailable(
+            "scripts.automod.worktree is not importable from this tree, so its "
+            "`git` runner is unavailable")
+    # `refs/heads/` is prefixed here and not inside the constant: `BRANCH_NAMESPACE`
+    # is how a branch is NAMED (`automod/<round_id>`, the spelling `worktree.py` uses
+    # in `git branch -D`), and the test below asserts the enumerated names against
+    # that spelling. The full ref path is this call's business.
+    r = worktree.git(repo, "for-each-ref", "--format=%(refname:lstrip=2)\t%(objectname)",
+                     f"refs/heads/{BRANCH_NAMESPACE.rstrip('/')}/")
+    if r.returncode != 0:
+        raise AutomodStoreUnavailable(
+            f"git -C {repo} for-each-ref failed rc={r.returncode}: "
+            f"{(r.stderr or '').strip()[:200]}")
+    tips: dict[str, str] = {}
+    for line in r.stdout.splitlines():
+        name, _, sha = line.partition("\t")
+        if name.startswith(BRANCH_NAMESPACE) and sha:
+            tips[name] = sha.strip()
+    return tips
+
+
+def _commits_reachable_from(repo: Path, ref: str) -> set[str]:
+    """Every commit reachable from `ref`, in one call.
+
+    Membership in this set IS `git merge-base --is-ancestor <tip> main`, and
+    `tests/test_retention_sweep.py` asserts it against that very command for every
+    seeded branch rather than trusting the equivalence. One `rev-list` is 1,638 lines
+    and 6 ms on this repository against one `merge-base` per branch (233 at triage);
+    the reason it is worth a pinned test instead of the loop of calls is that the
+    command names the predicate, so a change here that broke the identity could not
+    pass unnoticed.
+    """
+    worktree = _automod_module("worktree")
+    if worktree is None:
+        raise AutomodStoreUnavailable("scripts.automod.worktree is unavailable")
+    r = worktree.git(repo, "rev-list", ref)
+    if r.returncode != 0:
+        raise AutomodStoreUnavailable(
+            f"git -C {repo} rev-list {ref} failed rc={r.returncode}: "
+            f"{(r.stderr or '').strip()[:200]}")
+    return {line.strip() for line in r.stdout.splitlines() if line.strip()}
+
+
+def sweep_automod_branches(apply: bool, now: float, *, ledger: Path | None = None,
+                           current: Path | None = None, repo: Path | None = None,
+                           work_root: Path | None = None,
+                           registered: list[str] | None = None,
+                           main_ref: str = MAIN_REF) -> dict:
+    """Delete `automod/<round_id>` past BRANCH_MAX_AGE_DAYS when its tip is in main.
+
+    The tip condition is the whole safety story: branch deletion is irreversible, and
+    an ancestor of `main` is a round whose content is in the tree, so the branch is
+    scaffolding. An unreachable tip is held and counted (`held_unreachable`, of which
+    `due_ruling` are past BRANCH_UNREACHABLE_HOLD_DAYS), because for a refused or
+    aborted round that branch is the only record of what was attempted and whether it
+    is ever deletable is the ruling #1644 owes, not this rung's call.
+
+    Same named-outcome shape as the worktree rung, plus `deleted`/`failed` for the
+    `git branch -D` itself, whose exit status is checked by `worktree.delete_branch`
+    and a refusal is counted, never ignored.
+    """
+    root = Path(work_root if work_root is not None else AUTOMOD_WORK_ROOT)
+    here = Path(repo if repo is not None else _TREE)
+    times = _settle_times(Path(ledger if ledger is not None else AUTOMOD_LEDGER))
+    live = _current_round(Path(current if current is not None else AUTOMOD_CURRENT))
+    out = {"deleted": 0, "young": 0, "held_unreachable": 0, "due_ruling": 0,
+           "untracked": 0, "registered": 0, "live": 0, "failed": 0, "skip": ""}
+    try:
+        tips = _branch_tips(here)
+        reachable = _commits_reachable_from(here, main_ref)
+        if registered is None:
+            registered = _registered_worktrees(here)
+    except AutomodStoreUnavailable as exc:
+        out["skip"] = f"SKIPPED ({exc})"
+        return out
+    delete_cutoff = now - BRANCH_MAX_AGE_DAYS * 86400
+    hold_cutoff = now - BRANCH_UNREACHABLE_HOLD_DAYS * 86400
+    for branch, tip in sorted(tips.items()):
+        rid = branch[len(BRANCH_NAMESPACE):]
+        if live is not None and rid == live:
+            out["live"] += 1
+            continue
+        if _names_registered(root / rid, registered):
+            out["registered"] += 1
+            continue
+        settled = times.get(rid)
+        if settled is None:
+            out["untracked"] += 1
+            continue
+        if settled > delete_cutoff:
+            out["young"] += 1
+            continue
+        if tip not in reachable:
+            out["held_unreachable"] += 1
+            if settled <= hold_cutoff:
+                out["due_ruling"] += 1
+            continue
+        if apply:
+            worktree = _automod_module("worktree")
+            if worktree is None or not worktree.delete_branch(here, branch):
+                print(f"  ! skip {branch}: git branch -D refused", file=sys.stderr)
+                out["failed"] += 1
+                continue
+        out["deleted"] += 1
+    return out
+
+
 # --------------------------------------------------------------------------
 # workers.db — the queue's own run history
 # --------------------------------------------------------------------------
@@ -829,6 +1324,51 @@ def _prune_db_rows(apply: bool, now: float, *, db: Path | None, busy_timeout_ms:
         conn.close()
 
 
+def _worktree_line(w: dict) -> str:
+    """One report line for the round-directory store, identical in both modes.
+
+    Every kept count is named, because a bare `0 reclaimed` is the number four
+    different states produce: the horizon held nothing, no directory has a ledger row,
+    every worktree is registered, or the directory list could not be read. Only the
+    first of those is a clean bill.
+    """
+    if w["skip"]:
+        return f"  ~/lloyd-work round dirs >{WORKTREE_DIR_MAX_AGE_DAYS}d: " \
+               f"{w['skip']} — nothing reclaimed"
+    kept = [f"{w['young']} <{WORKTREE_DIR_MAX_AGE_DAYS}d",
+            f"{w['untracked']} no ledger row",
+            f"{w['registered']} registered", f"{w['live']} live round"]
+    if w["not_a_round"]:
+        kept.append(f"{w['not_a_round']} not a round id")
+    if w["failed"]:
+        kept.append(f"{w['failed']} FAILED to remove")
+    return (f"  ~/lloyd-work round dirs >{WORKTREE_DIR_MAX_AGE_DAYS}d: "
+            f"{w['reclaimed']} reclaimed, {w['bytes'] / 1024 / 1024:.1f} MiB freed "
+            f"(kept: {', '.join(kept)})")
+
+
+def _branch_line(b: dict) -> str:
+    """One report line for the branch store, identical in both modes.
+
+    The unreachable count is the one an operator reads first: at triage it is 189 of
+    226 tips, and it is the number the owed ruling on #1644 has to be made about. The
+    `past 90d` figure beside it is that ruling's due count — held, not deleted.
+    """
+    if b["skip"]:
+        return (f"  automod/* branches >{BRANCH_MAX_AGE_DAYS}d & ancestor of "
+                f"{MAIN_REF}: {b['skip']} — nothing deleted")
+    kept = [f"{b['young']} <{BRANCH_MAX_AGE_DAYS}d",
+            f"{b['held_unreachable']} unreachable held "
+            f"({b['due_ruling']} past {BRANCH_UNREACHABLE_HOLD_DAYS}d held for the"
+            " ruling #1644 owes)",
+            f"{b['untracked']} no ledger row", f"{b['registered']} registered",
+            f"{b['live']} live round"]
+    if b["failed"]:
+        kept.append(f"{b['failed']} FAILED to delete")
+    return (f"  automod/* branches >{BRANCH_MAX_AGE_DAYS}d & ancestor of {MAIN_REF}: "
+            f"{b['deleted']} deleted (kept: {', '.join(kept)})")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -845,6 +1385,22 @@ def main() -> int:
     # them approvable, and is the only line that says which tree they describe.
     print(f"[retention-sweep] {mode}")
     print(f"  data root: {DATA_ROOT}")
+
+    # The two automod stores answer to a different question than the data root above:
+    # is THIS TREE the production checkout? One of them is the live repo's refs, and a
+    # round's worktree shares them, so a `git branch -D` from inside a gate would delete
+    # production branches with no data root in between. The refusal is therefore printed
+    # in both modes — a rung that simply vanished from the dry run's list is a rung the
+    # operator never saw missing — and an `--apply` that was refused ends the run
+    # `NOT_PRODUCTION_EXIT`, the status the `.lloyd-data-root` refusal above exits with.
+    # A dry run still ends 0 from any tree: it deletes nothing, and the root it names is
+    # the reason for running it (#1415, pinned by
+    # `test_a_bare_interpreter_reports_the_root_it_resolved`).
+    refusal = automod_rung_refusal()
+    dirs = branches = None
+    if refusal is None:
+        dirs = sweep_automod_worktrees(args.apply, now, repo=AUTOMOD_REPO)
+        branches = sweep_automod_branches(args.apply, now, repo=AUTOMOD_REPO)
 
     logs_n, logs_b = sweep_task_logs(args.apply, now)
     sess_n, sess_b = sweep_sessions(args.apply, now)
@@ -900,6 +1456,15 @@ def main() -> int:
         print(f"{queue_label}: {wq_skip} — nothing pruned")
     else:
         print(f"{queue_label}: {wq_n} deleted, {wq_b / 1024:.0f} KiB freed")
+    # Last, so the two lines that can name a production ref are the last thing an
+    # operator reads before deciding whether the run did what they asked.
+    if refusal:
+        print(f"  automod stores: {refusal}")
+    else:
+        print(_worktree_line(dirs))
+        print(_branch_line(branches))
+    if refusal and args.apply:
+        return NOT_PRODUCTION_EXIT
     return 0
 
 

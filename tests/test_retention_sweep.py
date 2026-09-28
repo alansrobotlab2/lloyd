@@ -93,11 +93,48 @@ def rs(tmp_path, monkeypatch):
         # every test in this file a candidate it did not ask for.
         ("GROUNDSKEEPER_QUEUE_FILE", "groundskeeper-queue.json", False),
         ("GROUNDSKEEPER_WRITES_FILE", "groundskeeper-writes.jsonl", False),
+        # The automod stores (#1644). The worktree homes get created — an absent
+        # `~/lloyd-work` is the state of a machine that has never run the loop, and
+        # every test here is about what happens to directories that exist. The other
+        # three are not created: a loop that has never written a ledger row must read
+        # as "no round has settled", and the guard in
+        # `test_a_round_dir_with_no_ledger_row_is_never_deleted_and_is_named` turns on
+        # a MISSING row, which a fixture that pre-wrote one would erase.
+        # `AUTOMOD_STATE_ROUNDS` is redirected although no rung writes there: the test
+        # that holds it to surviving an `--apply` needs it somewhere a test can seed.
+        ("AUTOMOD_WORK_ROOT", "lloyd-work", True),
+        ("AUTOMOD_LEDGER", "automod-state/promotions.jsonl", False),
+        ("AUTOMOD_CURRENT", "automod-state/current.json", False),
+        ("AUTOMOD_STATE_ROUNDS", "automod-state/rounds", False),
+        # The checkout the branch arm is allowed to delete refs from. Redirected to a
+        # path with no git repository behind it, which is the safest default a fixture
+        # can hold for a store this file exists to bound: a ref store it cannot
+        # enumerate is a store it will not delete. Every node that wants refs builds
+        # its own repo and names it here.
+        ("AUTOMOD_REPO", "repo", False),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
             if make_dir:
                 (tmp_path / sub).mkdir(exist_ok=True)
+    # The redirected ref store gets `git init`'d, rather than left as a plain directory.
+    # A store the rung cannot enumerate makes every node below print a SKIPPED line
+    # whose message quotes the store path — and that path is a pytest tmp dir NAMED
+    # AFTER THE TEST, so a node that selects its own report line by a substring of the
+    # store name (`"spill" in ln`) would match three lines and fail on another store's
+    # skip. An empty repository is the true default state of a machine with no rounds:
+    # zero branches, no registrations, and nothing to reclaim.
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path / "repo")],
+                   capture_output=True, text=True, check=True)
+    # `--allow-empty`, and a commit that exists: an empty repository has no `main` at
+    # all, so the branch arm's `git rev-list main` dies and the report line for that
+    # store becomes a SKIPPED quoting the store path — and that path is a pytest tmp dir
+    # NAMED AFTER THE TEST, so a node selecting its own line by a substring of the store
+    # name (`"spill" in ln`) matched three lines and failed on another store's skip.
+    subprocess.run(["git", "-C", str(tmp_path / "repo"),
+                    "-c", "user.email=lloyd@example.invalid", "-c", "user.name=lloyd",
+                    "commit", "-q", "--allow-empty", "-m", "empty root"],
+                   capture_output=True, text=True, check=True)
     # Fail loudly if the module grows a new destructive root that this fixture
     # does not cover, rather than letting it reach the real filesystem.
     unredirected = _unredirected_destructive_paths(mod, tmp_path)
@@ -112,6 +149,17 @@ def rs(tmp_path, monkeypatch):
     assert mod.DATA_ROOT == paths.DATA_ROOT, (
         f"the sweep resolved {mod.DATA_ROOT}, app.paths resolved {paths.DATA_ROOT}")
     assert mod.DATA_ROOT != paths.PRODUCTION_DATA_ROOT
+    # The two automod rungs ask a question the data root does not: is THIS TREE the
+    # production checkout, since its refs are shared by every worktree cut off it? In
+    # here the honest answer is no — the suite runs inside a linked worktree — and
+    # `test_an_automod_rung_refuses_outside_the_production_checkout` is the node that
+    # pins that refusal, with those two predicates left alone. This fixture answers
+    # yes anyway, because otherwise a node about `sessions/*.json` ends on exit 2 for
+    # a branch delete it never asked about. It is safe to answer that way only because
+    # every automod path constant above is redirected: the tree these rungs reach has
+    # no refs and no rounds in it.
+    monkeypatch.setattr(dr, "live_checkout", lambda: mod._TREE)
+    monkeypatch.setattr(dr, "tree_is_worktree", lambda tree: False)
     return mod
 
 
@@ -933,6 +981,17 @@ def _seed_runs_db(path: Path, rows=_RUNS_ROWS) -> Path:
     return path
 
 
+#: The exit status a bare `--apply` ends on from the tree this suite runs in, which is
+#: a linked git worktree: 2, where it was 0 before #1644. The nine data-root stores were
+#: bounded by that run; the two automod stores refused, because a round's worktree
+#: shares the live repository's refs and `git branch -D` from inside a gate would delete
+#: production branches. A zero there would be the bug — task #79 reads the status and
+#: reports success on one, so a sweep that did only part of its job has to be loud.
+#: `test_an_automod_rung_refuses_outside_the_production_checkout` is the clause that
+#: asks for it, and it names the root the refusal resolved.
+_APPLY_STATUS_FROM_A_WORKTREE = 2
+
+
 def _store_line(stdout: str, store: str) -> str:
     """The one report line naming `store`, from a captured `main()` stdout.
 
@@ -1319,7 +1378,8 @@ def test_the_bare_invocation_prunes_the_store_it_resolves(tmp_path):
 
     applied = subprocess.run([py3, str(_SCRIPT), "--apply"], capture_output=True,
                              text=True, env=env, cwd="/", timeout=120)
-    assert applied.returncode == 0, applied.stderr[-800:]
+    assert applied.returncode == _APPLY_STATUS_FROM_A_WORKTREE, applied.stderr[-800:]
+    assert _store_line(applied.stdout, "REFUSED"), applied.stdout[-400:]
     assert "Traceback" not in applied.stdout + applied.stderr
     assert _store_line(applied.stdout, "workers.db runs") == dry_line, (
         "the line an operator approved in dry-run must be the line apply prints")
@@ -1583,7 +1643,8 @@ def test_the_bare_invocation_deletes_the_pair_it_resolves(tmp_path):
 
     applied = subprocess.run([py3, str(_SCRIPT), "--apply"], capture_output=True,
                              text=True, env=env, cwd="/", timeout=120)
-    assert applied.returncode == 0, applied.stderr[-800:]
+    assert applied.returncode == _APPLY_STATUS_FROM_A_WORKTREE, applied.stderr[-800:]
+    assert _store_line(applied.stdout, "REFUSED"), applied.stdout[-400:]
     assert "Traceback" not in applied.stdout + applied.stderr
     assert _groundskeeper_line(applied.stdout) == dry_line, (
         "the line cron approved in dry run is not the line its --apply printed")
@@ -1593,7 +1654,7 @@ def test_the_bare_invocation_deletes_the_pair_it_resolves(tmp_path):
 
     again = subprocess.run([py3, str(_SCRIPT), "--apply"], capture_output=True,
                            text=True, env=env, cwd="/", timeout=120)
-    assert again.returncode == 0, again.stderr[-800:]
+    assert again.returncode == _APPLY_STATUS_FROM_A_WORKTREE, again.stderr[-800:]
     assert "0 deleted" in _groundskeeper_line(again.stdout)
 
 
@@ -1846,3 +1907,405 @@ def test_a_section_below_the_activity_log_is_not_swept(rs):
     assert "A paragraph of real notes below the log." in text
     assert "- a bullet in that section" in text
     assert BARE_JUNK not in text
+
+
+
+# ── #1644: the two automod stores — round worktree homes, and round branches ───
+#
+# Everything below runs against a fixture git repository and a fixture `~/lloyd-work`,
+# and the deletes are real: `git branch -D` here removes a ref that actually exists,
+# which is the only honest way to test an irreversible operation whose whole safety
+# story is a reachability proof. A mock would keep passing with that proof deleted.
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=lloyd@example.invalid",
+         "-c", "user.name=lloyd", *args],
+        capture_output=True, text=True)
+
+
+def _git_ok(repo: Path, *args: str) -> None:
+    r = _git(repo, *args)
+    assert r.returncode == 0, f"git {' '.join(args)} failed: {r.stderr[:300]}"
+
+
+@pytest.fixture
+def automod(rs, tmp_path, monkeypatch):
+    """A repository to hold round branches, alongside the fixture work root and ledger
+    the `rs` fixture already redirected.
+
+    The branch arm needs a real repo and needs it NAMED: `AUTOMOD_REPO` is the one
+    constant in this module that a `git branch -D` can be aimed at, and leaving it at
+    its default would point every node below at the live checkout's 233 branches.
+    `rs` leaves the tree reading as non-production, which is the state every node here
+    inherits unless it says otherwise; the refusal is pinned by its own node rather
+    than assumed away by this fixture.
+    """
+    repo = tmp_path / "branch-store"      # not `repo`: `rs` already owns that name
+    repo.mkdir()
+    _git_ok(repo, "init", "-q", "-b", "main")
+    (repo / "file.txt").write_text("first\n")
+    _git_ok(repo, "add", "-A")
+    _git_ok(repo, "commit", "-q", "-m", "first")
+    rs.AUTOMOD_LEDGER.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(rs, "AUTOMOD_REPO", repo)
+    return repo
+
+
+def _say_this_tree_is_production(rs, monkeypatch, tree: Path) -> None:
+    """Answer yes to the one question the automod rungs ask before deleting anything:
+    is `tree` the production checkout? `rs` already answers it that way for the whole
+    file, so this exists for the node that has to answer NO and for prose that says
+    which state a node is in.
+
+    Named as a claim rather than left to the fixture on purpose: the refusal node's
+    subject is exactly this answer, and a helper that quietly handed it out would leave
+    the guard untested while every other node stayed green.
+    """
+    monkeypatch.setattr(dr, "live_checkout", lambda: tree)
+    monkeypatch.setattr(dr, "tree_is_worktree", lambda path: False)
+
+
+def _settle(rs, rid: str, days: float, event: str = "round_aborted") -> None:
+    """One ledger row: the round's NEWEST event happened `days` ago.
+
+    Written the way the ledger writes — `ts` epoch plus `event` plus `round_id` —
+    because `_settle_times` reads `ts` and a fixture that invented its own key would
+    test the fallback rather than the store.
+    """
+    with rs.AUTOMOD_LEDGER.open("a") as fh:
+        fh.write(json.dumps({"ts": time.time() - days * 86400, "event": event,
+                             "round_id": rid}) + "\n")
+
+
+def _workdir(rs, rid: str, *, size: int = 100, registered_at: Path | None = None) -> Path:
+    """`~/lloyd-work/<rid>/home/lloyd` holding `size` bytes, as `worktree.create`
+    leaves it.
+
+    The nested `home/lloyd` is not ceremony: it is the path `git worktree list` prints
+    for a round, and a flat fixture could not tell a registered round from an
+    unregistered one. Pass `registered_at` (the fixture repository) to make that
+    registration real rather than described: the directory is created BY
+    `git worktree add`, which refuses a path that exists, and both rungs decide
+    liveness from what `git worktree list` answers — not from anything this file can
+    see.
+
+    Returns `<rid>`'s own directory, the thing the rung is being asked about.
+    """
+    home = rs.AUTOMOD_WORK_ROOT / rid
+    inner = home / "home" / "lloyd"
+    if registered_at is not None:
+        inner.parent.mkdir(parents=True)
+        _git_ok(registered_at, "worktree", "add", "-q", "--detach", str(inner), "main")
+    else:
+        inner.mkdir(parents=True)
+    (inner / "payload.txt").write_text("x" * size)
+    return home
+
+
+def _branch(repo: Path, rid: str, *, landed: bool) -> str:
+    """Create `automod/<rid>` at `main`'s tip (landed) or at a commit of its own, and
+    return its tip sha.
+
+    `landed=True` is the state the 30-day arm acts on: the tip is an ancestor of
+    `main`, the content is already in the tree, and the branch is scaffolding.
+    `landed=False` is a refused or aborted round — its tip exists nowhere else, which
+    is what the 90-day hold is for.
+    """
+    if landed:
+        _git_ok(repo, "branch", f"automod/{rid}", "main")
+        return _git(repo, "rev-parse", f"automod/{rid}").stdout.strip()
+    # `git worktree add` creates the directory itself and refuses one that exists, so
+    # the attempt's checkout is written INTO the tree git just made.
+    work = repo.parent / f"attempt-{rid}"
+    _git_ok(repo, "worktree", "add", "-q", "--detach", str(work), "main")
+    (work / "attempt.txt").write_text("work that never landed\n")
+    _git_ok(work, "add", "-A")
+    _git_ok(work, "commit", "-q", "-m", f"{rid}: unlanded attempt")
+    tip = _git(work, "rev-parse", "HEAD").stdout.strip()
+    _git_ok(repo, "branch", f"automod/{rid}", tip)
+    _git_ok(repo, "worktree", "remove", "--force", str(work))
+    return tip
+
+
+def _branches(repo: Path) -> set[str]:
+    return set(_git(repo, "for-each-ref", "--format=%(refname:lstrip=2)",
+                    "refs/heads/automod/").stdout.split())
+
+
+def test_both_automod_stores_get_one_line_each_in_both_modes(rs, automod, capsys,
+                                                            monkeypatch):
+    """Clause 1: one report line per automod store in dry run and in `--apply`, and the
+    dry run moves nothing.
+
+    Both modes are asserted against the SAME seeded state in one node, because the
+    failure this guards is mode-dependent in two opposite directions: a line printed
+    only under `--apply` is invisible to the dry run task #79 shows the operator
+    before approving a delete, and a line printed only in dry run reports numbers that
+    no run ever acted on.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    _settle(rs, "SM_RECLAIM", 10)
+    _workdir(rs, "SM_RECLAIM")
+    _settle(rs, "SM_RECENT", 1)
+    _workdir(rs, "SM_RECENT")
+    _settle(rs, "SM_HELD", 40)
+    _branch(automod, "SM_HELD", landed=False)      # aged, but its tip is nowhere in main
+    _settle(rs, "SM_LANDED", 31)
+    _branch(automod, "SM_LANDED", landed=True)     # aged AND its tip is inside main
+
+    before_dirs = sorted(p.name for p in rs.AUTOMOD_WORK_ROOT.iterdir())
+    before_branches = _branches(automod)
+    assert "automod/SM_HELD" in before_branches
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0, "a dry run must exit 0 (#1415)"
+    dry = capsys.readouterr().out
+    dirs_line = _store_line(dry, "lloyd-work round dirs")
+    branch_line = _store_line(dry, "automod/* branches")
+    assert "DRY RUN" in dry
+    assert "1 reclaimed" in dirs_line, dirs_line
+    assert "1 deleted" in branch_line, branch_line
+    assert "1 unreachable held" in branch_line, branch_line
+    assert sorted(p.name for p in rs.AUTOMOD_WORK_ROOT.iterdir()) == before_dirs, \
+        "a dry run removed a round home"
+    assert _branches(automod) == before_branches, "a dry run deleted a branch"
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == 0, "an `--apply` that was not refused must exit 0"
+    applied = capsys.readouterr().out
+    assert "1 reclaimed" in _store_line(applied, "lloyd-work round dirs")
+    # The same numbers as the dry run above: a store whose dry count and apply count
+    # differ, when neither tree changed between them, is a count nobody approved.
+    assert _store_line(applied, "automod/* branches") == branch_line, applied
+    assert not (rs.AUTOMOD_WORK_ROOT / "SM_RECLAIM").exists()
+    assert (rs.AUTOMOD_WORK_ROOT / "SM_RECENT").is_dir()
+    surviving = _branches(automod)
+    assert "automod/SM_LANDED" not in surviving, (
+        "the branch the report counted as deleted is still a ref")
+    # The unreachable branch is still there after `--apply` at 40 days: the 30-day arm
+    # needs the age AND a tip inside `main`, and this one has only the age.
+    assert "automod/SM_HELD" in surviving
+
+
+def test_a_round_dir_is_reclaimed_at_the_horizon_and_never_while_registered(rs,
+                                                                           automod):
+    """Clause 2: `~/lloyd-work/<rid>` goes at 7 days after the round's newest ledger
+    event, and a directory `git worktree list` names is never removed whatever its age.
+
+    The registered round is seeded 400 days past the horizon deliberately. A guard that
+    only has to beat a young directory passes by accident; this one fails the moment
+    the age test is weighted above the registration test, because on this state the
+    age says `reclaim` and only the registration can say `no`.
+    """
+    assert rs.WORKTREE_DIR_MAX_AGE_DAYS == 7, "#1037's ruled horizon, as carried by #1644"
+    now = time.time()
+    _settle(rs, "SM_OVER", 8)
+    _workdir(rs, "SM_OVER")
+    _settle(rs, "SM_UNDER", 6)
+    _workdir(rs, "SM_UNDER")
+    # Two live rounds, both far past the horizon, distinguished only by HOW they are
+    # live: one is registered in `git worktree list`, the other is the round
+    # `current.json` names. Clause 2 names the first and clause 4 the second, and a
+    # 400-day-old directory of either kind is a round that exists.
+    _settle(rs, "SM_LIVE", 400)
+    live = _workdir(rs, "SM_LIVE", registered_at=automod)
+    _settle(rs, "SM_IN_FLIGHT", 400)
+    in_flight = _workdir(rs, "SM_IN_FLIGHT")
+    rs.AUTOMOD_CURRENT.write_text(json.dumps({"round_id": "SM_IN_FLIGHT",
+                                             "branch": "automod/SM_IN_FLIGHT"}))
+
+    counted = rs.sweep_automod_worktrees(apply=False, now=now, repo=automod)
+    assert counted["reclaimed"] == 1, counted
+    assert counted["young"] == 1 and counted["registered"] == 1, counted
+    assert counted["live"] == 1, counted
+    assert counted["bytes"] == 100, (
+        "only the due round's bytes count as freed; counting the registered one would "
+        "overstate what `--apply` gives back")
+    assert (rs.AUTOMOD_WORK_ROOT / "SM_OVER").is_dir(), "a dry run deleted"
+
+    out = rs.sweep_automod_worktrees(apply=True, now=now, repo=automod)
+    assert out["reclaimed"] == 1 and out["failed"] == 0, out
+    assert not (rs.AUTOMOD_WORK_ROOT / "SM_OVER").exists()
+    assert (rs.AUTOMOD_WORK_ROOT / "SM_UNDER").is_dir()
+    assert (live / "home" / "lloyd" / "payload.txt").is_file(), (
+        "a registered worktree is a round that exists, whatever the ledger says")
+    assert in_flight.is_dir(), (
+        "the round current.json names is mid-flight: its worktree is where the gate is "
+        "running, and reclaiming it would destroy the round in progress")
+    assert out["registered"] == 1 and out["live"] == 1, out
+
+
+def test_a_round_dir_with_no_ledger_row_is_never_deleted_and_is_named(rs, capsys,
+                                                                     monkeypatch,
+                                                                     automod):
+    """Clause 3: no `promotions.jsonl` row means the round cannot be dated, so the
+    directory is kept and its count gets its own words in the report line.
+
+    `SM_20260920_105946` is the measured case #1644 cites: 27 MB on disk and zero rows
+    in the ledger, which is why the skip has to be a named number. Both halves are
+    asserted, because the failure has two halves: deleting these directories would
+    destroy the only local record of a round the sweep cannot date, and reporting
+    `0 reclaimed` with no further word would read to task #79 as "nothing is due" —
+    the zero-denominator class this file keeps being called back for.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    now = time.time()
+    _settle(rs, "SM_DATED", 10)
+    _workdir(rs, "SM_DATED")
+    orphan = _workdir(rs, "SM_20260920_105946")     # no ledger row, as in the field
+    scratch = _workdir(rs, "SM_TEST")               # the loop's own scratch directories
+    _backdate(orphan, 30)
+    _backdate(scratch, 30)
+
+    # The report line first, from a dry run: after an `--apply` the dated round is gone
+    # and the line correctly says `0 reclaimed`, which is not the number this node is
+    # about. One state per observation, so neither mode can be graded off the other's.
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0
+    line = _store_line(capsys.readouterr().out, "lloyd-work round dirs")
+    assert "2 no ledger row" in line, line
+    assert "1 reclaimed" in line, line
+
+    out = rs.sweep_automod_worktrees(apply=True, now=now, repo=automod)
+    assert out["reclaimed"] == 1 and out["untracked"] == 2, out
+    assert orphan.is_dir() and scratch.is_dir(), "a round that cannot be dated was deleted"
+    assert not (rs.AUTOMOD_WORK_ROOT / "SM_DATED").exists()
+
+
+def test_a_branch_goes_only_at_thirty_days_and_only_when_its_tip_is_in_main(rs,
+                                                                           automod):
+    """Clause 4: the 30-day arm requires `git merge-base --is-ancestor <tip> main`; an
+    unreachable tip is held past the 90-day hold rather than deleted; and neither the
+    round named in `current.json` nor a round with a registered worktree is touched.
+
+    The rung decides reachability by membership in one `git rev-list main` — a call
+    cost measured at 0.09 s against 233 tips, where 233 subprocesses would be
+    minutes — so the first assertions below check that set against the command the
+    clause names, for every branch this node seeds. That is the process boundary: two
+    git commands that agree today disagree the moment one is handed a wrong ref, and
+    the disagreement is a branch deleted that should have been kept.
+    """
+    assert rs.BRANCH_MAX_AGE_DAYS == 30 and rs.BRANCH_UNREACHABLE_HOLD_DAYS == 90, \
+        "#1037's ruled horizons, as carried by #1644"
+    now = time.time()
+    tips = {
+        "SM_DUE": _branch(automod, "SM_DUE", landed=True),
+        "SM_YOUNG": _branch(automod, "SM_YOUNG", landed=True),
+        "SM_HELD": _branch(automod, "SM_HELD", landed=False),
+        "SM_ANCIENT": _branch(automod, "SM_ANCIENT", landed=False),
+        "SM_CURRENT": _branch(automod, "SM_CURRENT", landed=True),
+        "SM_WORKING": _branch(automod, "SM_WORKING", landed=True),
+    }
+    for rid, days in (("SM_DUE", 31), ("SM_YOUNG", 29), ("SM_HELD", 40),
+                      ("SM_ANCIENT", 120), ("SM_CURRENT", 40), ("SM_WORKING", 40)):
+        _settle(rs, rid, days)
+    rs.AUTOMOD_CURRENT.write_text(json.dumps({"round_id": "SM_CURRENT",
+                                             "branch": "automod/SM_CURRENT"}))
+    _workdir(rs, "SM_WORKING", registered_at=automod)
+
+    reachable = rs._commits_reachable_from(automod, rs.MAIN_REF)
+    for rid, tip in tips.items():
+        check = _git(automod, "merge-base", "--is-ancestor", tip, rs.MAIN_REF)
+        assert (tip in reachable) is (check.returncode == 0), (
+            f"{rid}: membership in `git rev-list {rs.MAIN_REF}` disagrees with "
+            f"`git merge-base --is-ancestor {tip[:8]} {rs.MAIN_REF}` — the rung and the "
+            f"clause no longer test the same predicate")
+
+    out = rs.sweep_automod_branches(apply=True, now=now, repo=automod)
+    assert out["deleted"] == 1 and out["failed"] == 0, out
+    surviving = _branches(automod)
+    assert "automod/SM_DUE" not in surviving, "a 31-day branch whose tip is in main survived"
+    for rid, why in (("SM_YOUNG", "29 days is inside the 30-day horizon"),
+                     ("SM_HELD", "an unreachable tip is held at 40 days, not deleted"),
+                     ("SM_ANCIENT", "past the 90-day hold it is owed a ruling, not a delete"),
+                     ("SM_CURRENT", "current.json names this round as in flight"),
+                     ("SM_WORKING", "a registered worktree means the round is live")):
+        assert f"automod/{rid}" in surviving, f"{why} — but the branch was deleted"
+    assert out["young"] == 1, out
+    assert out["held_unreachable"] == 2, out
+    assert out["due_ruling"] == 1, (
+        "SM_ANCIENT is past the 90-day hold and must be counted as owed the ruling "
+        "#1644 defers, not folded into the held total")
+    assert out["live"] == 1 and out["registered"] == 1, out
+
+
+def test_an_automod_rung_refuses_outside_the_production_checkout(rs, automod, capsys,
+                                                                monkeypatch,
+                                                                tmp_path):
+    """Clause 5: run from anywhere but the production checkout, the automod rungs refuse
+    BEFORE any delete, name the root they resolved, and `--apply` exits non-zero.
+
+    The hazard is not the data root. A round's worktree shares the live repository's
+    refs, so a `git branch -D` issued from a gate or a sandbox deletes production
+    branches, and unlike every other store in this sweep there is no root marker in
+    front of them: the refs are the live repo's whether or not the tree is. So the
+    refusal is printed in both modes — a rung that simply vanished from the dry run's
+    list is a rung the operator never saw missing — and an `--apply` that was refused
+    ends on the same status as the `.lloyd-data-root` refusal, because task #79 reads
+    the exit status and reports success on a zero.
+
+    Seeded with a directory and a branch that BOTH qualify for deletion, so a refusal
+    that merely declined to print would still fail here: the point is that nothing was
+    touched.
+    """
+    production = tmp_path / "production-checkout"
+    production.mkdir()
+    _settle(rs, "SM_QUALIFIES", 31)
+    qualifies = _workdir(rs, "SM_QUALIFIES")
+    _settle(rs, "SM_LANDED", 31)
+    _branch(automod, "SM_LANDED", landed=True)
+
+    monkeypatch.setattr(dr, "live_checkout", lambda: production)
+    monkeypatch.setattr(dr, "tree_is_worktree", lambda path: False)
+    refusal = rs.automod_rung_refusal()
+    assert refusal is not None, (
+        "the fixture tree reads as the production checkout, so there is nothing to refuse"
+    )
+    assert str(rs._TREE) in refusal, f"the refusal must name the tree: {refusal}"
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"])
+    assert rs.main() == 0, "a dry run still exits 0 and still reports the refusal (#1415)"
+    line = _store_line(capsys.readouterr().out, "REFUSED")
+    assert "not the production checkout" in line, line
+
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py", "--apply"])
+    assert rs.main() == rs.NOT_PRODUCTION_EXIT, (
+        "an `--apply` that refused must not exit 0: task #79 reports success on a zero, "
+        "and an unbounded store reported as bounded is the failure this file exists to "
+        "prevent")
+    assert str(rs._TREE) in _store_line(capsys.readouterr().out, "REFUSED")
+    assert qualifies.is_dir(), "the refused run still reclaimed a round home"
+    assert "automod/SM_LANDED" in _branches(automod), "the refused run still deleted a branch"
+
+    monkeypatch.setattr(dr, "tree_is_worktree", lambda path: True)
+    assert "linked git worktree" in rs.automod_rung_refusal(), (
+        "a tree that IS the live checkout but is a linked worktree is the case that "
+        "actually bites: a round's own tree shares the live refs, and #1037's whole "
+        "hazard is the gate deleting production branches from inside itself")
+
+
+def test_the_state_dirs_the_ruling_keeps_are_never_touched(rs, automod, monkeypatch):
+    """The kept half of the ruling, in one line of code and one of test: the
+    `lloyd-automod/rounds` state dirs (24 MB, 914 of them) are NOT a store.
+
+    Nothing in this module writes there, so the only meaningful assertion is that an
+    `--apply` which reclaims everything else walks past them. It is here because the
+    cheapest way to satisfy a retention ticket is to point the sweep at every directory
+    with a round id in its name, and the 24 MB it would free is the evidence a refused
+    round left behind — the same reason the branch arm holds unreachable tips.
+    """
+    _say_this_tree_is_production(rs, monkeypatch, rs._TREE)
+    now = time.time()
+    kept = rs.AUTOMOD_STATE_ROUNDS / "SM_20260910_104045"
+    kept.mkdir(parents=True)
+    (kept / "gate.json").write_text("{}")
+    _backdate(kept, 400)
+    _settle(rs, "SM_20260910_104045", 400)
+    _workdir(rs, "SM_20260910_104045")
+
+    rs.sweep_automod_worktrees(apply=True, now=now, repo=automod)
+    assert not (rs.AUTOMOD_WORK_ROOT / "SM_20260910_104045").exists(), (
+        "the worktree home should have been reclaimed; it is not the state dir")
+    assert (kept / "gate.json").is_file(), (
+        "the sweep reached into the state dirs the ruling keeps indefinitely")
