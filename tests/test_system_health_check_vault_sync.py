@@ -30,10 +30,13 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
 import textwrap
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -250,7 +253,8 @@ def rig(tmp_path):
             return self.registry / vid
 
         def plant_state_db(self, *, local=(), server=(), folders=("work", "facts"),
-                           vault_id=None, sidecars=False):
+                           vault_id=None, sidecars=False, version="19582",
+                           synced_ago=None, pending=0):
             """Write a stand-in client manifest into the live registration directory.
 
             Real sqlite, with the schema the shipped client uses — one `path` plus
@@ -267,6 +271,16 @@ def rig(tmp_path):
             main file is a bare header — which is what the manifest looks like
             beside a running client, and what a copy that forgets the sidecars
             would read as an empty vault.
+
+            `version` is the `meta` table's `version` counter and `synced_ago` the
+            `synctime` (epoch **milliseconds**, the client's unit) written into each
+            local row's `data`, in seconds before now — the real client keeps
+            `synctime` inside the JSON blob, not in a column, so a probe that asks
+            for a `synctime` column dies with `no such column`. `synced_ago=None`,
+            the default, writes no `synctime` at all: a manifest that records no
+            upload, which is what every #1753 plant is, and which must not read as
+            a client that synced a moment ago. `pending` rows go into
+            `pending_files`, the queue the client still has to push.
             """
             reg = self.plant_live_registration(vault_id)
             build = self.base / "manifest-build"
@@ -281,15 +295,25 @@ def rig(tmp_path):
                 conn.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
                 conn.execute("CREATE TABLE local_files (path TEXT PRIMARY KEY, data TEXT NOT NULL)")
                 conn.execute("CREATE TABLE server_files (path TEXT PRIMARY KEY, data TEXT NOT NULL)")
-                conn.execute("INSERT INTO meta VALUES ('version', '19582')")
+                conn.execute("CREATE TABLE pending_files (uid INTEGER PRIMARY KEY,"
+                             " path TEXT, data TEXT NOT NULL)")
+                conn.execute("INSERT INTO meta VALUES ('version', ?)", (version,))
+                newest_ms = None if synced_ago is None else int((time.time() - synced_ago) * 1000)
+                self.planted_newest_sync_ms = newest_ms
                 for path in [*folders, *local]:
+                    row = {"path": path, "folder": path in folders}
+                    if newest_ms is not None:
+                        row["synctime"] = newest_ms
                     conn.execute("INSERT INTO local_files VALUES (?, ?)",
-                                 (path, json.dumps({"path": path,
-                                                    "folder": path in folders})))
+                                 (path, json.dumps(row)))
                 for path in server:
                     conn.execute("INSERT INTO server_files VALUES (?, ?)",
                                  (path, json.dumps({"path": path,
                                                     "device": "goliath-headless"})))
+                for n in range(pending):
+                    queued = f"lloyd/queued-{n}.md"
+                    conn.execute("INSERT INTO pending_files (path, data) VALUES (?, ?)",
+                                 (queued, json.dumps({"path": queued})))
                 conn.commit()
 
                 def snapshot():
@@ -1170,3 +1194,139 @@ def test_the_manifest_copy_is_opened_read_only_outside_the_registration(rig, mon
         assert uri_mode is True, uri
         assert uri.startswith("file:") and "mode=ro" in uri, uri
         assert str(rig.registry) not in uri, f"opened inside the registration: {uri}"
+
+
+# ---------------------------------------------------------------- #1752 clauses 1-4
+# "`--component vault_sync` with no round-trip flag names a non-green state that
+#  reports what the live client's state.db actually records, instead of printing
+#  'sync itself is unproven' about a sync that commits every ~30 s; `synced` remains
+#  reachable only by an observed sentinel round trip; the round trip rail is
+#  untouched; `last_sync_success.json` keeps meaning an observed round trip."
+#
+# The whole point of the state is that its every number comes out of the manifest,
+# so no value in these tests is one the script could print from a literal: the
+# version is a planted 4242, the newest upload time is rendered from a planted
+# `synctime`, and the two shapes that would disqualify the record (a queue, a
+# markdown file with no server row) are planted one at a time to take the state away
+# again. Nothing here pins today's live figures — `meta.version`, the row counts and
+# the log's `Uploading` total all drift within an hour.
+
+# Everything present on both sides: a manifest like this records a client with
+# nothing left to push, which is the evidence the new state is allowed to claim.
+RECORDED = ["lloyd/a.md", "lloyd/b.md", "skills/autolink/autolink.py"]
+RECORDED_ID = "deadbeefcafe1234567"      # a vault id no literal in the script knows
+
+
+def test_a_recorded_client_state_is_a_state_of_its_own_not_roundtrip_skipped(rig):
+    """Clause 1: a fresh client record produces `synced-as-recorded`, which is not
+    `roundtrip-skipped`, is not green, and is printed the same way in both formats.
+    """
+    rig.plant_state_db(local=RECORDED, server=RECORDED, synced_ago=90)
+    payload, proc = rig.json("--component", "vault_sync")
+    block = payload["vault_sync"]
+    assert block["state"] == shc.VAULT_SYNC_AS_RECORDED, block
+    assert shc.VAULT_SYNC_AS_RECORDED == "synced-as-recorded"
+    assert block["state"] != shc.VAULT_SYNC_ROUNDTRIP_SKIPPED, block
+    assert block["healthy"] is False, block
+    assert block["kind"] != "green", block
+    # Not `cannot-sync` either: the client is syncing, so the row belongs in the
+    # "weaker evidence" class beside `roundtrip-skipped`, not with the failures.
+    assert block["kind"] == "unproven", block
+    assert shc.VAULT_SYNC_AS_RECORDED not in shc.VAULT_SYNC_CANNOT_SYNC
+    # The overall rollup still keys on the one green state (#1752's owed ruling), so
+    # a named record changes the row, not the box's exit status.
+    assert payload["overall_status"] == "degraded" and proc.returncode == DEGRADED_EXIT
+
+    text = rig.run("--component", "vault_sync", fmt="text").stdout
+    assert f"obsidian-sync — {shc.VAULT_SYNC_AS_RECORDED}" in text, text
+    assert block["detail"] in text, text            # the same record, both formats
+    assert "sync itself is unproven" not in text, text
+    assert "sync itself is unproven" not in block["detail"], block
+
+
+def test_the_recorded_row_carries_the_four_measurements_and_the_inbound_gap(rig):
+    """Clause 2: the detail carries the manifest version, the newest recorded upload,
+    the queue depth and the count of local markdown with no server row — read from a
+    manifest found at run time under a vault id that appears nowhere in the script —
+    and it says out loud that inbound replication has never been exercised here."""
+    rig.plant_state_db(local=RECORDED, server=RECORDED, synced_ago=90,
+                       version="4242", vault_id=RECORDED_ID)
+    detail = rig.json("--component", "vault_sync",
+                      spec=rig.spec(vault_id=RECORDED_ID))[0]["vault_sync"]["detail"]
+    newest = datetime.fromtimestamp(rig.planted_newest_sync_ms / 1000, timezone.utc)
+    assert "4242" in detail, detail                                  # meta.version
+    assert newest.strftime("%Y-%m-%dT%H:%M:%SZ") in detail, detail   # newest synctime
+    assert re.search(r"\b0\b[^.]{0,30}(queued|pending)", detail), detail
+    assert re.search(r"\b0\b[^.]{0,40}markdown", detail), detail
+    assert "inbound" in detail.lower() and "never" in detail.lower(), detail
+    # Neither the logs nor `ob` supplied any of it: the fake client prints no time at
+    # all, and the only commands issued are the two read-only ones.
+    assert {call[0] for call in rig.logged()} <= {"sync-status", "sync-list-remote"}
+
+
+@pytest.mark.parametrize("shape", ["no-sync-time", "stale-record",
+                                   "queue-not-empty", "markdown-without-server-row"])
+def test_a_record_that_is_stale_queued_or_incomplete_earns_no_new_state(rig, shape):
+    """Clause 3's other half, per measurement: the new state is claimed only when the
+    record actually says the client is keeping up — it has uploaded something,
+    recently, with nothing queued and no markdown left behind — and each failing
+    shape falls back to the old `roundtrip-skipped` verdict with its old wording.
+    """
+    kwargs = {"local": RECORDED, "server": RECORDED, "synced_ago": 90}
+    if shape == "no-sync-time":
+        kwargs.pop("synced_ago")
+    elif shape == "stale-record":
+        kwargs["synced_ago"] = 3 * 86400
+    elif shape == "queue-not-empty":
+        kwargs["pending"] = 3
+    else:
+        kwargs["local"] = [*RECORDED, "lloyd/never-uploaded.md"]
+    rig.plant_state_db(**kwargs)
+    block = rig.json("--component", "vault_sync")[0]["vault_sync"]
+    assert block["state"] == shc.VAULT_SYNC_ROUNDTRIP_SKIPPED, (shape, block)
+    assert block["reason"] == "round-trip-not-attempted", (shape, block)
+    assert "sync itself is unproven" in block["detail"], (shape, block)
+    assert block["healthy"] is False, block
+    if shape == "markdown-without-server-row":
+        # #1753's count and this state read one manifest: the file that disqualifies
+        # the record is the same file the uncovered-markdown figure names.
+        assert block["uncovered_files"]["markdown"] == 1, block
+
+
+def test_a_fresh_record_with_no_sentinel_produces_the_new_state_and_never_synced(rig):
+    """Clause 3: fresh, nothing queued, every local `.md` present server-side and no
+    sentinel observed — the row must say `synced-as-recorded`, and must not say
+    `synced`, because only an observed round trip earns that word."""
+    rig.plant_state_db(local=RECORDED, server=RECORDED, synced_ago=90)
+    block = rig.json("--component", "vault_sync")[0]["vault_sync"]
+    assert block["state"] == shc.VAULT_SYNC_AS_RECORDED, block
+    assert block["state"] != shc.VAULT_SYNC_GREEN and block["healthy"] is False, block
+    assert rig.state_file.exists() is False, "the record was written without a round trip"
+
+    # And with the same manifest in place, the green word still needs the flag:
+    # the round trip is the only thing that can produce it.
+    again = rig.json("--component", "vault_sync",
+                     spec=rig.spec(registry=True, replicate=True), round_trip=True
+                     )[0]["vault_sync"]
+    assert again["state"] == shc.VAULT_SYNC_GREEN, again
+    assert again["healthy"] is True, again
+
+
+def test_the_recorded_state_writes_no_last_sync_success_record(rig):
+    """Clause 4: `last_sync_success.json` has a header line `observed_by: system
+    health_check round trip`, so it may only be written by an observed round trip —
+    a run that reports the client's own record must leave the file exactly as it
+    found it, and both halves are asserted here."""
+    rig.plant_state_db(local=RECORDED, server=RECORDED, synced_ago=90)
+    assert rig.state_file.exists() is False
+    block = rig.json("--component", "vault_sync")[0]["vault_sync"]
+    assert block["state"] == shc.VAULT_SYNC_AS_RECORDED, block
+    assert rig.state_file.exists() is False, "state.db evidence wrote the round-trip record"
+    assert block["last_observed_sync"]["status"] == shc.LAST_SYNC_NONE, block
+
+    # The control that keeps the field honest: an observed trip does write it, and
+    # says what observed it.
+    rig.json("--component", "vault_sync", spec=rig.spec(registry=True, replicate=True),
+             round_trip=True)
+    assert rig.state_file.exists() is True
+    assert "round trip" in json.loads(rig.state_file.read_text())["observed_by"]
