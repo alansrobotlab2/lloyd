@@ -68,6 +68,7 @@ from pathlib import Path
 from app import lint_findings
 from scripts.automod import canary as C
 from scripts.automod import canary_smoke as CS
+from scripts.automod import frontend_probe as _fe_probe
 from scripts.automod import spec, state as S, testpaths as TP, vet as V, worktree as W
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -1257,11 +1258,17 @@ class Gate:
         build is absolute — it passes on the live tree today and must keep
         passing.
 
-        There is deliberately no runtime probe to pair this with. A broken
-        `src` change is a browser-side error the Vite dev server serves with a
-        200, so a guardian probe of :5173 would measure liveness of a process
-        the change cannot kill and nothing the change can break. The build is
-        where a frontend change can be verified, so the build is the gate.
+        There is no probe of the `:5173` dev server, for the reason this
+        docstring has always given: that server serves the LIVE tree, so a probe
+        of it mid-gate grades a tree the diff is not in. What there IS now is a
+        probe of the runtime this build produced — the same output, the tree the
+        round wrote — which is the thing a `src` change actually breaks and the
+        build cannot see: a component that throws on mount, an import that
+        resolves at bundle time and fails at run time, a click path that dies.
+        See `scripts/automod/frontend_probe.py`. Observe-only this increment: the
+        verdict is recorded on the rung detail and in the ledger row, and never
+        turns this rung red, because the false-block rate has to be measured
+        before a block is honest (`vet`'s precedent, and #623's grade-only one).
         """
         changed_web = [p for p in self.report.changed_paths if p.startswith("web/")]
         if not changed_web:
@@ -1281,8 +1288,13 @@ class Gate:
             return False, (f"{sum(new.values())} new tsc error(s): "
                            f"{sorted(new)[:4]}"), {"new": sorted(new)}
         out_dir = Path(_run(["mktemp", "-d"]).stdout.strip())
+        probe: dict = {}
         try:
             ok, tail = _vite_build(web, out_dir)
+            if ok:
+                # Probe the output THIS build produced, while it is still on disk.
+                # Never :5173 — that dev server serves the live tree (docstring).
+                probe = self._frontend_probe(out_dir)
         finally:
             shutil.rmtree(out_dir, ignore_errors=True)
         if not ok:
@@ -1292,9 +1304,42 @@ class Gate:
             return False, f"vitest failed: {vt_tail}", {"changed_web": changed_web}
         unit = "vitest ok" if tested else f"vitest SKIPPED ({vt_tail})"
         return True, (f"tsc: no new errors ({sum(head.values())} pre-existing); "
-                      f"vite build ok; {unit}; {len(changed_web)} frontend file(s)"), {
+                      f"vite build ok; {unit}; {_fe_probe.summary(probe)}; "
+                      f"{len(changed_web)} frontend file(s)"), {
                           "changed_web": changed_web, "vitest": tested,
+                          "probe": probe,
                           **({} if tested else {"vitest_skipped": vt_tail})}
+
+    def _frontend_probe(self, built_dir: Path) -> dict:
+        """Load the build this rung just produced in a headless browser (#1601).
+
+        The verdict is recorded, never believed enough to block: this is `vet`'s
+        observe-only shape, and the false-block rate over ≥20 real landings is the
+        thing that has to exist before a block means anything.
+
+        Everything that stops it being OBSERVED is named as a skip and the rung
+        still passes — no chromium, no build output, no playwright, a browser that
+        cannot start — because a probe whose absence reads as silence would teach
+        a future reader to trust the absence (`_vitest_run`'s None-skip is the
+        same shape, and #1028's whole ledger is what silence costs). The one
+        exception is a real verdict with failing checks: it is a finding, recorded
+        with its evidence, and the rung is still green this increment.
+        """
+        why = _fe_probe.unavailable(built_dir)
+        if why:
+            return {"skipped": why}
+        # Screenshots and the evidence artifact go under the automod state dir
+        # (`state.STATE_DIR`), never into the build dir: the rung `rmtree`s that in
+        # its own `finally`, so a capture written there is gone before anything
+        # reads it, and a record naming a deleted path is worse than one that
+        # admits there is none (#721: a block must carry evidence a fresh session
+        # can open). `gate.json` is copied at landing and then dies with the
+        # worktree, so the artifact file is what survives beside the ledger.
+        shots = S.STATE_DIR / "frontend_probe"
+        verdict = _fe_probe.run(built_dir, shots_dir=shots)
+        if not verdict.get("ok") and not verdict.get("skipped"):
+            verdict["artifact"] = str(_fe_probe.write_artifact(self.round_id, verdict))
+        return verdict
 
     # Files whose edit changes what the model is *told*, rather than what the
     # code does. A behavioural regression here passes every other rung: the

@@ -435,6 +435,151 @@ def test_frontend_rung_refuses_when_the_live_tree_has_no_install(live_repo, tmp_
     assert not ok and "npm install" in reason
 
 
+# ── the runtime probe (#1601): observe-only, and silent about nothing ───────
+# `vite build` proves the app COMPILES; it cannot see a component that throws on
+# mount, because a production bundle turns that into a browser-side error. The
+# rung now loads the build output it just made in a headless browser and RECORDS
+# what happened. Three properties these nodes pin, and the middle one is the
+# whole point of this increment:
+#   - the probe is handed the directory the build just wrote, not `:5173`, whose
+#     dev server serves the live tree the diff is not in;
+#   - a failing verdict never fails the rung, because the false-block rate is
+#     still unmeasured (`vet`'s observe-only precedent, and #623's grade-only one);
+#   - anything that stops the probe being OBSERVED is named in the detail, since
+#     a check whose absence reads as silence teaches the next reader to trust the
+#     absence — the ledger shape #1028 is full of.
+# The probe's own detection is tested with a real chromium in
+# tests/test_automod_frontend_probe.py; what is stubbed here is the rung's wiring
+# around a verdict, plus the two skip paths, which run through the real
+# `frontend_probe.run()` and need no browser to be described.
+
+def _probe_verdict(ok=True, checks=(), **extra):
+    v = {"ok": ok, "checks": list(checks), "metrics": {"root_children": 2,
+                                                       "body_text_length": 412}}
+    v.update(extra)
+    return v
+
+
+def _fake_build(marker="<html>built</html>"):
+    """A `_vite_build` stand-in that writes into the outDir it is handed, so a
+    test can see WHICH directory the rung considers the build output. It writes a
+    script as well as the shell, because `frontend_probe` refuses to probe an
+    output with neither — that check is the build lying about its output, and a
+    test that tripped it would be measuring the wrong skip reason."""
+    def build(web, out_dir, timeout=600):
+        (out_dir / "index.html").write_text(marker)
+        (out_dir / "bundle.js").write_text("console.log('built')\n")
+        return True, ""
+    return build
+
+
+def test_the_rung_probes_the_build_it_just_made_and_records_a_failing_verdict_without_failing(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 4: with a `web/` path changed the rung probes the build output,
+    puts the verdict in the detail and the audit record, and still PASSES — an
+    unmeasured false-block rate is not worth a stalled landing. The recorded
+    directory is the one the fake build wrote into, which is the assertion that
+    rules out a probe pointed at something else."""
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/App.tsx"],
+                           head={}, base={})
+    monkeypatch.setattr(G, "_vite_build", _fake_build())
+    # What the probe could see AT CALL TIME. The rung `rmtree`s the build dir in
+    # its own `finally`, so an assertion on the path AFTER `rung_frontend()`
+    # returns can only ever prove a string was passed; the substance of clause 4 is
+    # that the probe runs while that directory still holds the build. An outDir
+    # handed over empty is a probe silently checking nothing, and it reads exactly
+    # like a pass — which is the shape this round was most likely to introduce.
+    seen: list = []
+
+    def fake_probe(built_dir):
+        d = Path(built_dir)
+        seen.append({"had_index": (d / "index.html").exists(),
+                     "had_asset": any(x.suffix in (".js", ".css")
+                                      for x in d.rglob("*") if x.is_file())})
+        return _probe_verdict(ok=False, checks=[{
+            "check": "console-error",
+            "problem": "a console error was logged: TypeError: boom in App",
+            "screenshot": "/tmp/state/frontend_probe/broken.png"}])
+    monkeypatch.setattr(g, "_frontend_probe", fake_probe)
+    ok, detail, res = g.rung_frontend()
+    assert ok, "observe-only: a failing probe must never refuse the round"
+    assert len(seen) == 1, seen
+    assert seen[0]["had_index"] and seen[0]["had_asset"], (
+        "the probe must receive the build output the rung just produced, while it "
+        "still exists — not a path to a directory already cleaned up", seen)
+    assert "probe FAILED: 1 check(s) [console-error]" in detail, detail
+    assert "boom in App" in detail, "the evidence text belongs in the rung detail too"
+    assert res["probe"]["ok"] is False and res["probe"]["checks"][0]["check"] == "console-error"
+
+
+def test_the_rung_records_a_healthy_probe_verdict_in_the_detail(live_repo, tmp_path, monkeypatch):
+    """The same path with a clean verdict: `probe ok` and the metrics, so a green
+    line says what was checked rather than being indistinguishable from a probe
+    that never ran."""
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/App.tsx"],
+                           head={}, base={})
+    monkeypatch.setattr(G, "_vite_build", _fake_build())
+    monkeypatch.setattr(g, "_frontend_probe", lambda d: _probe_verdict())
+    ok, detail, res = g.rung_frontend()
+    assert ok and "probe ok (2 root children, 412 chars of text" in detail, detail
+    assert res["probe"]["ok"] is True and res["probe"]["checks"] == []
+
+
+def test_the_rung_runs_no_probe_and_keeps_the_recorded_skip_without_a_web_change(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 4, second half: the probe costs a browser launch, so a round that
+    touched no frontend file must not pay it — and the rung's existing named
+    `SKIPPED` record has to survive, not become an empty pass."""
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["app/router.py"],
+                           head={}, base={})
+    def explode(*_a, **_k):
+        raise AssertionError("a non-frontend round must not launch a probe")
+    monkeypatch.setattr(g, "_frontend_probe", explode)
+    monkeypatch.setattr(G, "_vite_build", explode)
+    ok, detail, res = g.rung_frontend()
+    # The skip the rung already recorded is kept verbatim — `"no frontend changed"`
+    # with `{"skipped": True, "reason": "no web/ path"}` — and the probe's word
+    # appears nowhere in it. 93 rounds ran this rung non-skipped and the rest land
+    # on the strength of that skip reading as honest; a probe that decorated it
+    # would make an unexamined landing look examined.
+    assert ok and res.get("skipped") is True and res.get("reason") == "no web/ path"
+    assert detail == "no frontend changed", detail
+    assert "probe" not in detail.lower(), detail
+
+
+def test_an_unprobeable_build_output_is_a_named_skip_from_the_real_probe(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 5, through the real seam: nothing is stubbed below the rung except
+    the build, and the build's own output is empty — the case where `vite build`
+    exited 0 and left no `index.html`. The rung passes (the build is green and
+    that is what it gates) and says out loud that it could not look."""
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/App.tsx"],
+                           head={}, base={})
+    monkeypatch.setattr(G, "_vite_build", lambda web, out_dir, timeout=600: (True, ""))
+    ok, detail, res = g.rung_frontend()
+    assert ok, "an unobservable probe is a skip, never a refusal"
+    assert "probe SKIPPED (no build output" in detail or "index.html" in detail, detail
+    assert res["probe"]["skipped"], res
+
+
+def test_a_missing_chromium_is_a_named_probe_skip_and_the_rung_passes(
+        live_repo, tmp_path, monkeypatch):
+    """Clause 5, the other reason: the build is real, the browser is not. The
+    skip must name the browser and its path, because "the box lost chromium" and
+    "the build is broken" are different failures told apart at different layers —
+    and neither may read as a verified frontend."""
+    g, wt = _frontend_gate(live_repo, tmp_path, monkeypatch, changed=["web/src/App.tsx"],
+                           head={}, base={})
+    monkeypatch.setattr(G, "_vite_build", _fake_build())
+    (tmp_path / "index.html")  # build stub writes into the rung's own outDir
+    monkeypatch.setattr(G._fe_probe, "CHROMIUM", "/nonexistent/chromium")
+    ok, detail, res = g.rung_frontend()
+    assert ok, "no browser is an environment gap, not the round's defect"
+    assert "probe SKIPPED (no chromium at /nonexistent/chromium)" in detail, detail
+    assert "no chromium" in res["probe"]["skipped"]
+    assert "ok" not in res["probe"], "a probe that never ran must not report a verdict"
+
+
 # ---------------------------------------------------------------------------
 # The base probe: is this failure the round's fault, or was the tree red?
 #
