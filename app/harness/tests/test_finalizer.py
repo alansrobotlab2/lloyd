@@ -25,6 +25,46 @@ SCHEMA = {
     "additionalProperties": False,
 }
 
+# A schema with an open-ended string, which is what autotriage actually sends:
+# `TRIAGE_VERDICT_SCHEMA`'s `check`, `evidence` and `acceptance` carry no
+# maxLength (tests/test_structured_verdict.py::test_no_maxlength_in_the_schema
+# pins that). Only such a schema can legitimately need more room, so it is the
+# one whose truncation still gets the budget advice (#1706).
+UNBOUNDED = {
+    "type": "object",
+    "title": "verdict",
+    "properties": {"verdict": {"type": "string", "enum": ["confirmed", "rejected"]},
+                   "evidence": {"type": "string"}},
+    "required": ["verdict", "evidence"],
+    "additionalProperties": False,
+}
+
+# Every string field capped: an enum, or a finite maxLength. This is
+# `deep_research.RESULT_SCHEMA` after #1706 — its grammar cannot ask for more
+# than the caps add up to, so a completion that runs past them is the model
+# writing junk inside a field, not the budget being too small.
+BOUNDED = {
+    "type": "object",
+    "title": "deep_research_result",
+    "properties": {
+        "result": {"type": "string", "enum": ["written", "nothing_found", "duplicate"]},
+        "note": {"type": "string", "maxLength": 200},
+        "duplicate_of": {"type": "string", "maxLength": 200},
+        "facts": {"type": "string", "maxLength": 8},
+        "sources": {"type": "string", "maxLength": 8},
+    },
+    "required": ["result", "note", "duplicate_of", "facts", "sources"],
+    "additionalProperties": False,
+}
+
+# The 200 characters of run_deep-research_20260928_032533_df61c0's completion
+# that its own `structured_error` captured: a valid object through
+# `"duplicate_of": ""`, then `"facts": ` followed by newlines, spaces and junk
+# that never closes. It ran to the 8192-token cap.
+DEGENERATE = ('{"result": "written", "note": "/home/alansrobotlab/obsidian/knowledge/'
+              'research/2026-09-28-answer-option-order-sensitivity-in-constrained-'
+              'llm-decision-.md", "duplicate_of": "", "facts": \n\n       "}: 8,')
+
 MESSAGES = [
     {"role": "system", "content": "you are lloyd"},
     {"role": "user", "content": "triage item 42"},
@@ -308,23 +348,74 @@ async def test_a_cut_off_object_is_reported_as_truncated_not_as_not_json():
     mid-string and were recorded "output is not JSON" — the same message a
     model that wrote prose would get, which hid a budget problem behind a
     model-behaviour one for two days. The engine says `finish_reason: length`;
-    when it does not, an unclosed `{` is the tell."""
+    when it does not, an unclosed `{` is the tell.
+
+    Run against `UNBOUNDED`, the schema this failure actually happened to:
+    triage's open-ended `evidence` field can need room, so the budget is the
+    right advice there. Under a schema that caps every field it is not, and
+    #1706 split those two cases apart — see the two nodes below."""
     _Client.responses = [_ok('{"verdict":"confirmed","check":"ls _pipe',
                              usage={"completion_tokens": 1024},
                              finish_reason="length")]
-    parsed, error, usage = await _run()
+    parsed, error, usage = await _run(schema=UNBOUNDED)
     assert parsed is None
     assert "truncated at 1024 tokens" in error and "max_tokens" in error
     assert usage["output_tokens"] == 1024
 
     _Client.responses = [_ok('{"verdict":"confirmed","evidence":"…',
                              finish_reason="")]
-    parsed, error, _ = await _run()
+    parsed, error, _ = await _run(schema=UNBOUNDED)
     assert parsed is None and "truncated" in error
 
     _Client.responses = [_ok("I think the verdict is confirmed.")]
-    parsed, error, _ = await _run()
+    parsed, error, _ = await _run(schema=UNBOUNDED)
     assert parsed is None and "not JSON" in error and "truncated" not in error
+
+
+async def test_a_cut_under_a_schema_that_caps_every_field_is_a_divergence():
+    """#1706: deep-research sent a 5-field object and 6 of 12 post-#710 runs
+    died at `output truncated at 8192 tokens — raise harness.finalizer.max_tokens`,
+    which sent every reader to a config knob that cannot help. With `maxLength`
+    on every string the grammar has a ceiling far below 8192, so a completion
+    that reaches the cap anyway is the model writing whitespace and junk inside
+    a field — a generation failure, and naming a budget for it is a lie."""
+    _Client.responses = [_ok(DEGENERATE, usage={"completion_tokens": 8192},
+                             finish_reason="length")]
+    parsed, error, usage = await _run(schema=BOUNDED)
+    assert parsed is None
+    assert "generation diverged" in error, error
+    assert "raise harness.finalizer.max_tokens" not in error, (
+        "the reason still sends the operator to the budget: " + error)
+    assert "8192 tokens" in error, "the reason must still say how far it ran"
+    assert usage["output_tokens"] == 8192
+
+
+async def test_an_unclosed_bounded_object_without_the_length_reason_diverges_too():
+    """The engine does not always say `finish_reason: length`, so the unclosed
+    `{` is the only tell — and under a bounded grammar it means the same
+    divergence, not a budget."""
+    _Client.responses = [_ok(DEGENERATE, finish_reason="")]
+    parsed, error, _ = await _run(schema=BOUNDED)
+    assert parsed is None
+    assert "generation diverged" in error and "max_tokens" not in error, error
+
+
+async def test_a_completion_that_never_left_thinking_is_still_the_budget():
+    """The control on the two nodes above, and a shape that is real: thinking
+    is on for the finalizer (#1431) and its tokens come out of the same
+    `max_tokens`, so a 200-token probe on the live engine returned
+    `finish_reason: length` with no content at all, every token of it
+    reasoning. That IS the budget even under a bounded grammar, and the advice
+    to raise it is correct — so the divergence message may not swallow it."""
+    _Client.responses = [_ok(None, usage={
+        "completion_tokens": 200,
+        "completion_tokens_details": {"reasoning_tokens": 200}},
+        finish_reason="length")]
+    parsed, error, usage = await _run(schema=BOUNDED)
+    assert parsed is None
+    assert "truncated at 200 tokens" in error and "max_tokens" in error, error
+    assert "diverged" not in error
+    assert usage["reasoning_tokens"] == 200
 
 
 def test_the_default_budget_is_8192_and_config_agrees():

@@ -11,11 +11,14 @@ turn cannot reach the tools a fetched web page would want.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 from pathlib import Path
 
 import pytest
 
 from app import research_store as R
+from app.harness import finalizer as F
 from workers.queue import QueueItem, WorkQueue
 from workers.sources import deep_research as D
 from workers.sources import _common as C
@@ -650,3 +653,218 @@ async def test_a_structured_verdict_never_takes_the_no_block_branch(
     assert "result_block_missing" not in registry.get(topic_id)["extra"]
     assert "no RESULT block" not in out["summary"]
     assert out["meta"]["verdict_source"] == "structured"
+
+
+# ---------------------------------------------------------------------------
+# The bounded grammar (#1706): the schema path was losing to the fallback, and
+# the run record blamed a token budget that was never the cause
+# ---------------------------------------------------------------------------
+
+#: The first 200 characters of run_deep-research_20260928_032533_df61c0's
+#: finalizer completion, recovered from that run's own `structured_error` (the
+#: same literal `app/harness/tests/test_finalizer.py` pins): a valid object
+#: through `"duplicate_of": ""`, then `"facts": ` followed by newlines, spaces
+#: and `"}: 8,` — never closed, and it ran to the 8192-token cap.
+DEGENERATE = ('{"result": "written", "note": "/home/alansrobotlab/obsidian/knowledge/'
+              'research/2026-09-28-answer-option-order-sensitivity-in-constrained-'
+              'llm-decision-.md", "duplicate_of": "", "facts": \n\n       "}: 8,')
+
+_STRINGS = ("note", "duplicate_of", "facts", "sources")
+
+
+def _bound(field: str) -> int:
+    """The schema's cap on one string field, read off the schema itself so no
+    test here restates a number the source does not carry."""
+    cap = D.RESULT_SCHEMA["properties"][field].get("maxLength")
+    assert isinstance(cap, int) and not isinstance(cap, bool) and cap > 0, (
+        f"{field} has no finite maxLength, so the grammar is open there and a "
+        "degenerate continuation can run to the completion cap again — which is "
+        "the failure that cost 6 of 12 verdicts their schema path")
+    return cap
+
+
+def _comment_above(marker: str) -> str:
+    """The `#:` block immediately above `marker` in the source."""
+    src = Path(inspect.getsourcefile(D)).read_text(encoding="utf-8")
+    lines = src[:src.index(marker)].rstrip("\n").split("\n")
+    block = []
+    while lines and lines[-1].lstrip().startswith("#"):
+        block.append(lines.pop())
+    return "\n".join(reversed(block))
+
+
+def test_every_string_field_of_the_schema_is_bounded():
+    """The hole was `facts`: with an open string the guided decoder will accept
+    any continuation, and six completions took it all the way to 8192 tokens.
+    `result` needs no cap because its enum is one."""
+    from app.harness import finalizer as F
+
+    for field in _STRINGS:
+        cap = _bound(field)
+        assert cap <= 200, f"{field} is capped at {cap}, which is not a bound"
+    for count in ("facts", "sources"):
+        assert _bound(count) <= 16, f"{count} is a count, not an essay"
+
+    s = D.RESULT_SCHEMA
+    assert s["properties"]["result"]["enum"] == list(D._RESULTS)
+    assert s["additionalProperties"] is False
+    assert set(s["required"]) == set(s["properties"])
+    assert F._schema_is_bounded(s), (
+        "the finalizer still reads this schema as open-ended, so a truncated "
+        "completion there would be blamed on harness.finalizer.max_tokens")
+
+
+def test_the_note_bound_is_a_vault_note_path_with_room():
+    """200 is a measured number, not a round one: `_slug` caps the filename at
+    60 and the tree is fixed, so the longest path this source can name is
+    ~122 characters (and exactly that is the longest in `runs.artifact_path`).
+    A cap below the longest producible path would trade a loud truncation for a
+    silent one, so the worst case has to stay inside it."""
+    worst = str(D.note_path_for("q" * 400))
+    assert len(worst) <= _bound("note"), (
+        f"the worst-case note path is {len(worst)} chars and the schema cap "
+        "would cut it — the bound is the bug now")
+    assert worst.endswith(".md")
+
+
+def test_the_schema_comment_names_the_bound_and_what_it_makes_impossible():
+    """The comment used to read "No `maxLength`: the guided decoder would stop
+    mid-sentence at it", which is true of the decoder and was the wrong trade:
+    stopping at the cap is the point when the alternative is 8192 tokens of
+    whitespace. The replacement has to say both halves or the next reader
+    reverts it."""
+    comment = _comment_above("RESULT_SCHEMA: dict")
+    assert comment, "no comment above RESULT_SCHEMA to grade"
+    assert "No `maxLength`" not in comment, (
+        "the comment still bans a bound; #1706 put one on every string field")
+    assert "maxLength" in comment and "8192" in comment, (
+        "the comment must name the cap and the runaway it prevents")
+
+
+def test_an_object_sitting_at_every_bound_is_still_a_structured_verdict():
+    """A cap the model cannot actually reach is decoration; a cap that rejects
+    a legitimate verdict is a new bug. `_from_structured` collapses whitespace
+    and strips quotes and backticks — none of which may eat a field that is
+    exactly at its cap."""
+    at = {"result": "written",
+          "note": "/" + ("n" * (_bound("note") - 1)),
+          "duplicate_of": "d" * _bound("duplicate_of"),
+          "facts": "9" * _bound("facts"),
+          "sources": "8" * _bound("sources")}
+    assert len(at["note"]) == _bound("note")
+    assert len(at["facts"]) == _bound("facts") == _bound("sources")
+
+    parsed = D.parse_verdict("RESULT: nothing_found\n", at)
+    assert parsed is not None and parsed["source"] == "structured", (
+        "a verdict at the bounds fell out of the schema path")
+    assert parsed["result"] == "written"
+    assert parsed["note"] == at["note"] and parsed["duplicate_of"] == at["duplicate_of"]
+    assert parsed["facts"] == at["facts"] and parsed["sources"] == at["sources"]
+
+
+class _EngineResp:
+    """One OpenAI-shaped completion response."""
+
+    def __init__(self, content, finish_reason, completion_tokens):
+        self.status_code = 200
+        self.text = ""
+        self._content = content
+        self._finish = finish_reason
+        self._tokens = completion_tokens
+
+    def json(self):
+        return {"choices": [{"message": {"content": self._content},
+                             "finish_reason": self._finish}],
+                "usage": {"completion_tokens": self._tokens}}
+
+
+def _fake_engine(content, *, finish_reason="stop", completion_tokens=180):
+    """The engine, minus the network: whatever the finalizer asks, it answers
+    with `content`. `app/harness/tests/test_finalizer.py` fakes it the same way."""
+    resp = _EngineResp(content, finish_reason, completion_tokens)
+
+    class _Cli:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, headers=None, json=None):
+            return resp
+
+    return _Cli
+
+
+def _turn_through_the_real_finalizer(text, *, writes):
+    """A stand-in for the loop that keeps the part that matters.
+
+    `_turn` above hands `structured` to the source directly, which is how every
+    test in this file drove the schema path — and so none of them ever ran
+    `app.harness.finalizer` against `RESULT_SCHEMA`, which is exactly why 7 of
+    the 12 fallbacks to the text parser went unnoticed while this file was
+    green. Here the turn's `structured` is whatever the real finalizer returns
+    for the schema THIS source passes as `final_schema`. Only the HTTP leg is
+    faked.
+    """
+    async def run(prompt, **kwargs):
+        run.seen = kwargs
+        run.prompt = prompt
+        if writes is not None:
+            writes.write_text("# A note\n\n" + "body " * 200, encoding="utf-8")
+        structured, error, _usage = await F.run_finalizer(
+            base_url="http://engine:8096", model="primary",
+            chat_messages=[{"role": "user", "content": prompt}], tools=None,
+            schema=kwargs.get("final_schema") or D.RESULT_SCHEMA)
+        return {"text": text, "session_id": "20260928_deep_x",
+                "stop_reason": "stop", "num_turns": 19, "errors": [],
+                "structured": structured, "structured_error": error}
+    run.seen = {}
+    run.prompt = ""
+    return run
+
+
+async def test_a_run_whose_finalizer_answers_with_the_object_records_structured(
+        registry, queue, notes, monkeypatch):
+    """The verdict the engine sent back as a valid object has to reach that
+    run's `meta_json` as `verdict_source: structured` — the field production
+    reads, and the one nothing here used to pin end to end."""
+    payload, topic_id, path = _payload(registry, notes)
+    monkeypatch.setattr(F.httpx, "AsyncClient", _fake_engine(json.dumps(
+        {"result": "written", "note": str(path), "duplicate_of": "",
+         "facts": "3", "sources": "5"})))
+    monkeypatch.setattr(D, "run_prompt_in_session", _turn_through_the_real_finalizer(
+        f"The research is done.\nRESULT: written\nNOTE: {path}\n", writes=path))
+
+    out = await D.execute(_item(payload))
+    assert out["meta"]["verdict_source"] == "structured", (
+        "the schema path answered and the run does not say so")
+    assert registry.get(topic_id)["extra"]["verdict_source"] == "structured"
+    assert out["meta"]["structured_error"] == ""
+    assert out["meta"]["result"] == "written"
+
+
+async def test_the_degenerate_completion_still_yields_a_verdict_from_the_block(
+        registry, queue, notes, monkeypatch):
+    """The captured failure, replayed: the finalizer returns junk, so the
+    fallback must still answer, the run must record which path did, and the
+    reason it stores must not send the next reader to a budget that is already
+    8192 and was never the problem."""
+    payload, topic_id, path = _payload(registry, notes)
+    monkeypatch.setattr(F.httpx, "AsyncClient", _fake_engine(
+        DEGENERATE, finish_reason="length", completion_tokens=8192))
+    monkeypatch.setattr(D, "run_prompt_in_session", _turn_through_the_real_finalizer(
+        f"The research is done.\nRESULT: written\nNOTE: {path}\n", writes=path))
+
+    out = await D.execute(_item(payload))
+    assert out["status"] == "success" and out["meta"]["result"] == "written"
+    assert out["meta"]["verdict_source"] == "regex", (
+        "the block is the fallback, and the run has to say it was used")
+    stored = out["meta"]["structured_error"]
+    assert stored, "the reason the schema path failed is not in the meta"
+    assert "diverged" in stored, stored
+    assert "raise harness.finalizer.max_tokens" not in stored, stored
+    assert registry.get(topic_id)["extra"]["structured_error"] == stored

@@ -98,6 +98,60 @@ def _payload_llamacpp(schema: dict) -> dict:
     return {"json_schema": schema}
 
 
+_SCALAR_CAPS = frozenset({"integer", "number", "boolean", "null"})
+
+
+def _node_is_bounded(node: Any) -> bool:
+    """Can this schema node emit only a finite amount of text?
+
+    A cap is an `enum` (the longest member), a positive `maxLength`, or simply
+    not being prose. Descends into `items` and nested `properties`, because one
+    open-ended string anywhere is enough to make the whole completion
+    open-ended — `TRIAGE_VERDICT_SCHEMA`'s `acceptance_clauses` is a list of
+    unbounded strings and is exactly that case.
+    """
+    if not isinstance(node, dict):
+        return False
+    if node.get("enum"):
+        return True
+    kind = node.get("type")
+    if kind in _SCALAR_CAPS:
+        return True
+    if kind == "string":
+        max_len = node.get("maxLength")
+        return isinstance(max_len, int) and not isinstance(max_len, bool) and max_len > 0
+    if kind == "array" or (kind is None and "items" in node):
+        items = node.get("items")
+        if isinstance(items, list):
+            return bool(items) and all(_node_is_bounded(i) for i in items)
+        return _node_is_bounded(items)
+    if kind == "object" or "properties" in node:
+        inner = node.get("properties")
+        return bool(inner) and all(_node_is_bounded(v) for v in inner.values())
+    for key in ("anyOf", "oneOf", "allOf"):
+        if isinstance(node.get(key), list) and node[key]:
+            return all(_node_is_bounded(s) for s in node[key])
+    return False
+
+
+def _schema_is_bounded(schema: dict) -> bool:
+    """True when the guided decoder has a ceiling it is obliged to stop at.
+
+    vLLM enforces `maxLength` in the grammar — measured on the primary on
+    2026-09-28, a `facts` field capped at 3 came back `"far"` when the prompt
+    asked for a whole sentence — so a schema that caps every string bounds the
+    completion's length. Reaching `max_tokens` anyway is the model writing junk
+    inside a field, and the budget advice would be a false lead.
+
+    A schema with no `properties` is not bounded: it admits anything, which is
+    the conservative answer (keep the old advice).
+    """
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(props, dict) or not props:
+        return False
+    return all(_node_is_bounded(v) for v in props.values())
+
+
 async def run_finalizer(
     *,
     base_url: str,
@@ -197,13 +251,32 @@ async def run_finalizer(
         try:
             parsed = json.loads(content)
         except (ValueError, TypeError):
-            # Two failures used to share one message, and they call for
-            # different fixes. A well-formed object cut mid-string is the
-            # budget (`finish_reason: length`, or an unclosed `{` when the
-            # engine does not say); anything else is the model not producing
-            # an object at all. 14 of the first 34 verdicts were the former
-            # and read as the latter.
+            # Three failures, three different fixes, and two of them used to
+            # share one message. 14 of the first 34 verdicts were a
+            # well-formed object cut mid-string recorded as "output is not
+            # JSON" — a model-behaviour label hiding a budget problem — so
+            # `finish_reason: length` or an unclosed `{` became the budget
+            # message (#581). #1706 splits that message in two, because for a
+            # schema that caps every string it is no longer the budget:
+            # deep-research's 5-field object has a grammar ceiling of a few
+            # hundred tokens and still ran to 8192, its `facts` value become
+            # newlines and junk. Telling that reader to raise the budget sends
+            # them to a knob that cannot help; the generation diverged.
+            #
+            # An empty completion is the exception that keeps the advice:
+            # thinking is on for the finalizer (#1431) and its tokens come out
+            # of the same `max_tokens`, so a run can spend all of it reasoning
+            # and emit no content at all — measured on the live engine, 200
+            # tokens of `reasoning` and `finish_reason: length` with
+            # `content: null`. That is the budget whatever the grammar says.
             if finish_reason == "length" or content.lstrip().startswith("{"):
+                if content.strip() and _schema_is_bounded(schema):
+                    return None, (f"finalizer failed: generation diverged at "
+                                  f"{usage.get('output_tokens', '?')} tokens — "
+                                  f"every field this schema admits is capped, so "
+                                  f"the object running past them is malformed "
+                                  f"output, not a budget "
+                                  f"({content[:200]!r})"), usage
                 return None, (f"finalizer failed: output truncated at "
                               f"{usage.get('output_tokens', '?')} tokens — "
                               f"raise harness.finalizer.max_tokens "

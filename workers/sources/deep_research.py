@@ -93,18 +93,29 @@ _FIELD_RE = re.compile(r"^(RESULT|NOTE|DUPLICATE_OF|FACTS|SOURCES):\s*(.*)$", re
 
 #: The RESULT block as the harness finalizer's schema (app/harness/finalizer.py).
 #: The enum is `_RESULTS`, not a restatement of it, so an outcome the text
-#: parser does not know cannot reach the grammar. No `maxLength`: the guided
-#: decoder would stop mid-sentence at it.
+#: parser does not know cannot reach the grammar. Every string field carries a
+#: finite `maxLength` (#1706): an open string is a hole in the grammar the
+#: decoder can fall through, and 6 of the 12 verdicts after #710 ended at
+#: `output truncated at 8192 tokens` with the object sound up to `"facts": `
+#: and whitespace and junk after it — the budget that message names was never
+#: the cause and cannot be, at these caps. Both numbers sit above anything this
+#: source can emit (200 for a path: `_slug` caps the filename at 60 and the
+#: longest one in `runs.artifact_path` is 122; 8 for a count), so the bound
+#: costs nothing and makes the runaway ungrammatical instead of merely
+#: expensive.
 RESULT_SCHEMA: dict = {
     "type": "object",
     "title": "deep_research_result",
     "properties": {
         "result": {"type": "string", "enum": list(_RESULTS)},
-        "note": {"type": "string", "description": "The note path, for written; else empty."},
-        "duplicate_of": {"type": "string",
+        "note": {"type": "string", "maxLength": 200,
+                 "description": "The note path, for written; else empty."},
+        "duplicate_of": {"type": "string", "maxLength": 200,
                          "description": "What already covers the topic, for duplicate; else empty."},
-        "facts": {"type": "string", "description": "How many fact_add calls were made."},
-        "sources": {"type": "string", "description": "How many sources were read."},
+        "facts": {"type": "string", "maxLength": 8,
+                  "description": "How many fact_add calls were made."},
+        "sources": {"type": "string", "maxLength": 8,
+                    "description": "How many sources were read."},
     },
     "required": ["result", "note", "duplicate_of", "facts", "sources"],
     "additionalProperties": False,
