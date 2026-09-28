@@ -22,8 +22,11 @@ Nothing in this module but `evaluate_promotion` decides a promotion.
 validity lint does not call broken and logs the pair beside the decision — both
 numbers, and whether they disagree — but it is advisory and its own docstring
 says why. Do not read a `promote_valid` as a gate, and do not make it one while
-the bench's lint-valid pool is empty of scored tasks, which on the live bench it
-is (`tests/test_bench_lint.py::test_the_live_valid_pool_is_empty_once_the_real_judge_scores_it`).
+the bench's lint-valid pool happens to be small. It is no longer empty of scored
+tasks: re-measured 2026-09-28, 7 of the pinned corpus's 13 tasks are scored AND
+lint-valid (`tests/test_bench_lint.py::test_the_pinned_valid_pool_has_seven_scored_tasks_once_the_real_judge_scores_it`),
+up from 0, because #1607 tightened the seven lazy-passing tasks so they are no
+longer excluded as trivially satisfiable.
 """
 
 from __future__ import annotations
@@ -434,16 +437,19 @@ def validity_report(
     promotion the all-task leg allowed. Making the valid-only mean authoritative
     is #646's own deferred step, which waits on a human deciding per task whether
     to tighten a check or retire the task; until then the bench's lint-valid pool
-    is small (4 of 13 as measured) and a veto from it would be a veto from four
-    numbers. What this function does now is put both numbers, and the agreement
+    is small (7 of 13 scored AND lint-valid, re-measured 2026-09-28 after #1607
+    tightened the seven lazy-passing tasks; 0 before it) and a veto from it would be
+    a veto from those numbers. What this function does now is put both numbers, and the agreement
     between them, in the log, the round report and the ledger row.
 
     Read `reason_valid: valid_pool_too_small` carefully in a live round, because
     its cause is not the one its wording suggests. The pool is small after the
-    scored filter, not after the bench: the 4 tasks the lint does not invalidate
-    are exactly the ones whose only checks are tool-behaviour checks that no
+    scored filter, not after the bench: most of the tasks the lint does not
+    invalidate are the ones whose only checks are tool-behaviour checks that no
     configured arm measures, so #416 has already dropped their trials and they
-    carry no `per_task` row to restrict. The two exclusions are complementary
+    carry no `per_task` row to restrict. (#1607 moved this: before it, the tasks
+    the lint kept were ALL unmeasurable, so the pool was 0; the seven it tightened
+    are now both kept and scored.) The two exclusions are complementary
     halves of one defect — the lint invalidates the tasks the harness CAN read
     (keyword presence boilerplate passes), and the harness cannot read the tasks
     the lint leaves alone — and their intersection is empty, which is a sharper
