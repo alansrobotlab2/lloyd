@@ -66,6 +66,52 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
+# Bind interface: loopback, by default. This listener answers /v1/voices and
+# POST /v1/audio/speech with no credential of any kind, so the interface it
+# binds is the only access control it has. The exec below used to name the wide
+# value explicitly, which no commit ever asked for: `git log -S'--host'` on this
+# file returns only a3833043, "move agent-services into lloyd". The result was
+# :8090 answering unauthenticated on 192.168.50.0/24 — the range server.py:77-78
+# declines to trust for /api/*, and the 1b050d82 gate there is middleware in
+# another process; this is a second uvicorn with none. start-cosyvoice-tts.sh and
+# start-orpheus-tts.sh already pass 127.0.0.1 for this same port, and every
+# client in the repo points at loopback (config.yaml tts.api_url,
+# agent-services/guardian/speak.py, agent-services/livekit_worker.py): 638 of the
+# 642 access lines in agent-tts.log on 2026-09-27 came from 127.0.0.1, the other
+# 4 from this box's own tailnet address, none from a third host.
+#
+# The check that proves it, once agent-tts has been restarted (192.168.50.108
+# was this box's LAN address as measured 2026-09-27; take `hostname -I`'s first
+# if the lease has moved):
+#   ss -ltn | grep :8090                                   -> 127.0.0.1:8090
+#   curl --max-time 5 http://192.168.50.108:8090/v1/voices  -> no connection
+#   curl --max-time 5 http://127.0.0.1:8090/v1/voices       -> 200
+#
+# `${VAR:-default}`, so loopback is a default and not a hard-coded flag — same
+# shape as TTS_LAZY_LOAD above, and here the narrow side is the one that can
+# strand somebody. To serve a tailnet device or Voice Studio directly, put
+# HOST="0.0.0.0", or the single address to serve, on conf.d/agent-tts.conf's
+# `environment=` line and supervisor hands it to this script before bash runs.
+#
+# Do not "simplify" that into dropping the flag: `--host "$HOST"` is the only
+# thing carrying it. uvicorn's CLI does not read HOST — its auto_envvar_prefix is
+# UVICORN (main.py:62), so the env name it would honour is UVICORN_HOST — and the
+# CLI's own --host default is already 127.0.0.1 (main.py:64-67). Measured
+# 2026-09-27 in the venv that runs this service: HOST=0.0.0.0 with --host omitted
+# bound 127.0.0.1:8099. Dropping the flag would therefore strand the override
+# rather than widen anything, which is also why the wide value below is not
+# uvicorn's: 0.0.0.0 is what the *app module* resolves for its own entry point,
+# `HOST = os.getenv("HOST", "0.0.0.0")` at api/main.py:72 feeding
+# uvicorn.run(host=HOST) at api/main.py:304-306 — the `python api/main.py` path,
+# not this one.
+#
+# A HOST that turns out not to be a local address is no silent wide bind either:
+# uvicorn exits on the bind OSError (config.py:536-539, and server.py:172-182 on
+# the create_server route), and main.py:614 exits 3 if the server never started,
+# so a mistyped or inherited value fails the boot loudly — startretries=3 on this
+# conf makes it FATAL.
+export HOST="${HOST:-127.0.0.1}"
+
 exec "$VENV/bin/python" -m uvicorn api.main:app \
-    --host 0.0.0.0 \
+    --host "$HOST" \
     --port 8090
