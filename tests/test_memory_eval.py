@@ -4,6 +4,8 @@ self-judging refusal. Hermetic: no engine, no djev, no facts store."""
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -421,6 +423,187 @@ def test_a_run_names_the_channel_store_it_used_inside_its_own_out_dir(tmp_path, 
     # the name the channel carries when nothing overrides it — the file a real
     # morning turn reads.
     assert used != nsn.DATA_ROOT / nsn.FILE_NAME, "the run pointed the arm at the live channel"
+
+# ── #1631: the committed write-up of the channel (eval/measurements/sleep-notes-*.md) ──
+#
+# #1516 left a deployment decision owed — keep the next-session channel or delete
+# it — and the decision was to be made on a paired-bootstrap number that did not
+# exist. These nodes read the COMMITTED report rather than a synthetic run, so a
+# write-up that dropped a category, printed a CI it never computed, or quietly
+# pointed the arm at the live channel fails here. Nothing is taken on trust: `n`
+# is checked against the frozen dev slice, Δ against the two rates printed beside
+# it, the interval against the Δ it sits over, and the clears-0 verdict against
+# that interval.
+
+MEASUREMENTS = ROOT / "eval" / "measurements"
+#: Each `correct_strict` comparison in the report is a `### ` section at exactly
+#: this heading, so a reader gets the pair it asked for and not whichever
+#: `sleep_notes` table happens to come first.
+CI_SECTION = {(other, metric): f"### {M.SLEEP_NOTES_ARM} vs {other} — {metric} (dev slice)"
+              for other in ("prefetch", "prefetch_rel")
+              for metric in ("correct_strict", "evidence_in_context")}
+#: Fixed column order of every comparison table in the report.
+CI_COLUMNS = ("category", "n", "a", "b", "diff", "ci", "clears")
+#: Δ, both arm rates and both CI bounds are printed to three decimals, so two
+#: independently rounded rates can differ from a Δ computed on the unrounded
+#: means by a thousandth. A transcription slip is bigger than that.
+ROUND = 0.0015
+
+
+def _report() -> tuple[Path, str]:
+    """The newest committed sleep-notes write-up, globbed rather than named
+    because the file carries the date its run answered on. No file is the
+    failure it looks like: the measurement #1516 owed has not been written up."""
+    files = sorted(MEASUREMENTS.glob("sleep-notes-*.md"))
+    assert files, (f"nothing matches {MEASUREMENTS}/sleep-notes-*.md: the "
+                   f"paired-bootstrap run that decides the #1516 channel has not "
+                   f"been written up")
+    path = files[-1]
+    return path, path.read_text(encoding="utf-8")
+
+
+def _section(md: str, other_arm: str, metric: str) -> str:
+    """One comparison's slice of the report: its heading to the next heading."""
+    heading = CI_SECTION[(other_arm, metric)]
+    if heading not in md:
+        raise AssertionError(f"the report has no section headed {heading!r}")
+    return md.split(heading, 1)[1].split("\n### ")[0]
+
+
+def _check_report_section(md: str, other_arm: str, metric: str,
+                          cats=("multi_session", "knowledge_update")) -> dict[str, dict]:
+    """Both categories the item names, in one report section, each surviving
+    `_check_ci_row`. Returns the parsed table so a caller can say more about it."""
+    body = _section(md, other_arm, metric)
+    table, verdicts, counts = _ci_table(body), _verdict_lines(body), _dev_counts()
+    for cat in cats:
+        assert cat in table, (CI_SECTION[(other_arm, metric)], cat, sorted(table))
+        assert cat in verdicts, (CI_SECTION[(other_arm, metric)], cat, sorted(verdicts))
+        _check_ci_row(cat, table[cat], verdicts[cat], counts)
+    return table
+
+
+def _ci_table(body: str) -> dict[str, dict]:
+    """{category: row} of one comparison table (see `CI_COLUMNS`)."""
+    rows: dict[str, dict] = {}
+    for line in body.split("\n"):
+        if not line.startswith("|"):
+            continue
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) != len(CI_COLUMNS) or cells[0] in ("category", "---", ""):
+            continue
+        ci = re.fullmatch(r"\[(-?\d+\.\d+), (-?\d+\.\d+)\]", cells[5])
+        assert ci, f"unparseable 95% CI {cells[5]!r} in the {cells[0]!r} row"
+        rows[cells[0]] = {"n": int(cells[1]), "a": float(cells[2]), "b": float(cells[3]),
+                          "diff": float(cells[4]), "ci": (float(ci.group(1)), float(ci.group(2))),
+                          "clears": cells[6]}
+    return rows
+
+
+def _verdict_lines(body: str) -> dict[str, tuple]:
+    """The one-line clears-0 statement per category under one comparison."""
+    out: dict[str, tuple] = {}
+    for line in body.split("\n"):
+        m = re.fullmatch(r"- (\w+) \(n=(\d+)\): CI \[(-?\d+\.\d+), (-?\d+\.\d+)\] "
+                         r"(clears 0|does not clear 0)", line.strip())
+        if m:
+            out[m.group(1)] = (int(m.group(2)), (float(m.group(3)), float(m.group(4))), m.group(5))
+    return out
+
+
+def _dev_counts() -> dict[str, int]:
+    """Per-category n of the frozen dev slice, off the set the runner loads."""
+    counts: dict[str, int] = {}
+    for q in M.load_set(M.SET_ROOT / M.DEFAULT_VERSION, view="tuning").dev:
+        counts[q.category] = counts.get(q.category, 0) + 1
+    return counts
+
+
+def _check_ci_row(cat: str, row: dict, verdict: tuple, counts: dict[str, int]) -> None:
+    """What a printed row has to survive to be a measurement at all: enough
+    questions to be a number rather than `insufficient`, an n that IS the frozen
+    slice's, a Δ that is the difference of the two rates it prints, an interval
+    that covers that Δ, and a verdict the interval actually supports."""
+    assert row["n"] >= M.MIN_CATEGORY_N, (cat, row)
+    assert row["n"] == counts[cat], (cat, row["n"], counts[cat])
+    assert abs(row["diff"] - (row["b"] - row["a"])) <= ROUND, (cat, row)
+    assert row["ci"][0] - ROUND <= row["diff"] <= row["ci"][1] + ROUND, (cat, row)
+    assert verdict[0] == row["n"] and verdict[1] == row["ci"], (cat, row, verdict)
+    assert verdict[2] == ("clears 0" if (row["ci"][0] > 0 or row["ci"][1] < 0)
+                          else "does not clear 0"), (cat, row, verdict)
+
+
+def test_the_committed_report_carries_the_ship_no_ship_ci_for_both_named_categories():
+    """Clause 1. The dev-slice paired-bootstrap CI of the channel against the
+    arm its own docstring names, in `multi_session` and `knowledge_update`, each
+    with its n and a one-line statement of whether the interval clears 0. Both
+    legs the report prints are read — `correct_strict` and the
+    `evidence_in_context` retrieval leg — so a number that appears only in prose
+    cannot pass for a measured one."""
+    path, md = _report()
+    for metric in ("correct_strict", "evidence_in_context"):
+        table = _check_report_section(md, "prefetch", metric)
+        assert table["multi_session"]["n"] == _dev_counts()["multi_session"], (path.name, metric)
+
+
+def test_the_committed_report_names_the_command_and_a_store_that_is_not_the_live_channel():
+    """Clause 2. The run has to be re-runnable as written — under the SHARED
+    primary lock, with its own label — and the file its notes went through has
+    to be inside that run's out dir. A report whose arm wrote
+    `~/lloyd-data/next-session-notes.json` handed a synthetic "what to know
+    today" note to the next real chat turn."""
+    path, md = _report()
+    block = re.search(r"```bash\n(.*?)```", md, re.S)
+    assert block, f"{path.name} records no reproduction command"
+    cmd = block.group(1)
+    assert "flock -s ~/.local/state/lloyd-automod/primary.lock" in cmd, cmd
+    assert "eval/run_memory_eval.py run" in cmd, cmd
+    assert re.search(r"--label\s+\S*sleep-notes-\d{4}-\d{2}-\d{2}", cmd), cmd
+    arms = set(re.search(r"--arms\s+(\S+)", cmd).group(1).split(","))
+    assert arms == {"prefetch", "prefetch_rel", M.SLEEP_NOTES_ARM}, cmd
+
+    from app import next_session_notes as nsn
+    out = Path(os.path.expanduser(re.search(r"--out-dir\s+(\S+)", cmd).group(1)))
+    stated = re.search(r"^sleep_notes_store:\s*(\S+)$", md, re.M)
+    assert stated, f"{path.name} never says which file the arm's notes went through"
+    used = Path(stated.group(1))
+    assert used.parent == out, (str(used), str(out))
+    assert used.name.startswith("sleep-notes-store-"), used
+    assert used != nsn.DATA_ROOT / nsn.FILE_NAME, "the run pointed the arm at the live channel"
+
+
+def test_the_channel_is_priced_against_the_ranking_production_ships(tmp_path, monkeypatch):
+    """Clause 3. A CI against `prefetch` alone cannot justify wiring a producer,
+    because live turns order `<facts>` by relevance: `prefetch` is an arm no
+    running system renders. So the channel owes a second row against
+    `prefetch_rel`, which needs the pair list to name it, a three-arm run to
+    emit it, and the committed report to print it."""
+    assert (M.SLEEP_NOTES_ARM, "prefetch_rel") in M.DEV_COMPARISON_PAIRS
+
+    from app import next_session_notes as nsn
+    monkeypatch.setenv(nsn.STORE_PATH_ENV, str(tmp_path / "store.json"))
+    root = make_set(tmp_path, {"multi_session": 22, "knowledge_update": 22})
+    rep = M.run(["--set", str(root), "--arms", f"prefetch,prefetch_rel,{M.SLEEP_NOTES_ARM}",
+                 "--judge", "rules", "--label", "s", "--out-dir", str(tmp_path / "runs")],
+                complete=_fake_complete(lambda m: "no idea"),
+                primary=("http://x", "fake"),
+                blocks_fn=_facts_blocks(["- [A] Relay listens on port 8182"]))
+    art = json.loads(Path(rep["_path"]).read_text())
+    pairs = {(c["a"], c["b"]) for c in art["dev_comparisons"]}
+    assert {(M.SLEEP_NOTES_ARM, "prefetch"), (M.SLEEP_NOTES_ARM, "prefetch_rel")} <= pairs, pairs
+    strict = [c for c in art["dev_comparisons"]
+              if (c["a"], c["b"], c["metric"]) == (M.SLEEP_NOTES_ARM, "prefetch_rel", "correct_strict")]
+    assert len(strict) == 1 and strict[0]["by_category"]["knowledge_update"]["n"] == 22, strict
+
+    path, md = _report()
+    for metric in ("correct_strict", "evidence_in_context"):
+        _check_report_section(md, "prefetch_rel", metric)
+    answered = re.search(r"^\| arms answered \| (.+) \|$", md, re.M)
+    assert answered, "the report never records which arms the run answered"
+    assert {"prefetch", "prefetch_rel", M.SLEEP_NOTES_ARM} <= set(answered.group(1).split(", ")), (
+        "the report's row against the shipped ranking is not from a run that "
+        f"answered that arm: {answered.group(1)!r}")
+
 
 # ── #1556: prefetch_rawspan — the facts prefetch_rel renders, as their own source ──
 #

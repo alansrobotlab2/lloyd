@@ -1046,6 +1046,28 @@ def _rate(k: int, n: int) -> dict:
 
 METRICS = ("correct", "correct_strict", "mentioned", "stale", "abstain", "evidence_in_context")
 
+#: Arm pairs every dev run compares, on every metric in `METRICS`, whenever both
+#: arms are in `--arms`. Module level because the ship/no-ship ruling for the
+#: #1516 channel is only as good as the arm it is priced against, and a pair
+#: list buried in `run` cannot be pinned by a test.
+#:
+#: The #1516 pair is BOTH shipped rankings, not just the old one: production
+#: orders `<facts>` by relevance (`config.yaml`: `prefetch.rank: relevance`), so
+#: a CI that clears 0 against `prefetch` alone would compare the channel with an
+#: arm no live turn renders. `prefetch` stays in the list because it is the arm
+#: the channel's own docstring names, and because the pair against the
+#: confidence order is what tells a reader whether a gain is the transport or
+#: merely the ordering.
+DEV_COMPARISON_PAIRS = (
+    ("closed_book", "history"),
+    ("closed_book", "prefetch"),
+    ("prefetch", "prefetch_rel"),
+    RENDER_PAIR,
+    ("recall", "recall_episodic"),
+    (SLEEP_NOTES_ARM, "prefetch"),
+    (SLEEP_NOTES_ARM, "prefetch_rel"),
+)
+
 
 def summarize_arm(rows: list[dict]) -> dict:
     out: dict = {}
@@ -1249,8 +1271,7 @@ def run(argv: list[str] | None = None, *, complete=None, djev_ask=None, primary=
     dev_rows = [r for r, j in zip(rows, jobs) if j["leg"] == "dev"]
     report["dev"] = {arm: summarize_arm([r for r in dev_rows if r["arm"] == arm]) for arm in arms}
     comps = []
-    for a, b in (("closed_book", "history"), ("closed_book", "prefetch"), ("prefetch", "prefetch_rel"),
-                 RENDER_PAIR, ("recall", "recall_episodic"), (SLEEP_NOTES_ARM, "prefetch")):
+    for a, b in DEV_COMPARISON_PAIRS:
         if a in arms and b in arms:
             for metric in ("correct_strict", "correct", "evidence_in_context"):
                 comps.append(compare(dev_rows, a, b, metric))
