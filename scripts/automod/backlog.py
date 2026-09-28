@@ -2994,7 +2994,8 @@ _CLOSE_SWEEP_LOCK = threading.Lock()
 
 
 def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOARDS, *,
-                        close_members: bool = True) -> list[dict]:
+                        close_members: bool = True, backlog_dir: Path | None = None,
+                        dry_run: bool = False) -> list[dict]:
     """The sweep: note every settled landing on its item, close the ones whose
     round said the acceptance check was met.
 
@@ -3004,19 +3005,44 @@ def close_settled_items(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_B
     because the round predates the finalizer — is noted and left for a human.
     A closed item is never re-triaged, which is why the default is to leave
     it open rather than guess.
+
+    Since #1675 the sweep can be rehearsed. `backlog_dir` reads the candidate
+    items from that directory instead of the module's `BACKLOG_DIR`, which is
+    what makes a copy of the board a thing you can run this against; the ledger
+    is still whatever you pass, so the landings under test can be real.
+    `dry_run` decides and reports without writing. It returns one row per landing
+    the sweep would act on, keyed like the `item_landed` ledger row it would have
+    appended — `item_id`, `closed`, `acceptance`, `reason`, `round_id`, `commit`,
+    `vault`, `acceptance_source`, `human_clauses` — plus `written: False`, and one
+    row per umbrella member it would fold, carrying `via` with the umbrella's id
+    alongside those fields. Nothing is touched: not the item files
+    (`close_landed` stamps `automod_landed` and rewrites the whole file, and would
+    append a `## Automod landed` section), not the owed list, not the ledger.
+    Skipping only the status flip would be worse than not rehearsing at all: the
+    stamp is what makes the next real sweep skip that landing as already-noted.
+    So a dry row is an unsaved ledger row, which is why it carries the detail the
+    live sweep's return value does not — that one stays the three-key summary its
+    three callers read, because what it decided is on disk beside it.
+
+    Both knobs default to what the sweep has always done. #1626's copy-and-strip
+    replay is the case to watch: `open_items` skips `done`, so a copied item must
+    be reset off `done` *and* cleared of its landed marker, or the rehearsal
+    reports zero closures and looks like the pass it asked for.
     """
     # One sweep at a time. Housekeeping runs it in a worker thread and
     # `autocode.execute` runs it at the end of a vault-landing turn; the
     # landed-marker check and the write are not atomic, so two overlapping
     # sweeps could both record the same landing.
     with _CLOSE_SWEEP_LOCK:
-        return _close_settled_items(ledger, boards, close_members=close_members)
+        return _close_settled_items(ledger, boards, close_members=close_members,
+                                    backlog_dir=backlog_dir, dry_run=dry_run)
 
 
 def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
-                         close_members: bool) -> list[dict]:
+                         close_members: bool, backlog_dir: Path | None,
+                         dry_run: bool) -> list[dict]:
     from scripts.automod import state as S
-    by_id = {i.id: i for i in open_items(boards)}
+    by_id = {i.id: i for i in open_items(boards, backlog_dir=backlog_dir)}
     done: list[dict] = []
     for landing in settled_landings(ledger):
         item = by_id.get(landing["item_id"])
@@ -3089,25 +3115,31 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
         else:
             close, why = False, ("the round recorded no structured outcome, and the review rung "
                                  "did not grade every clause met; a human decides")
-        close_landed(item, commit=landing["commit"], round_id=landing["round_id"],
-                     settled_at=str(landing.get("settled_at") or ""), close=close, why=why,
-                     tags=tags)
-        if acc == "met" and (human or paths_owed):
-            from scripts.automod import owed as O
-            O.add_owed(item.path, human, kind="check", activity="owed after landing")
-            O.add_owed(item.path, paths_owed, kind="path", activity="owed after landing")
-        S.append_event({"event": "item_landed", "item_id": item.id,
-                        "round_id": landing["round_id"], "commit": landing["commit"],
-                        "vault": landing["vault"], "closed": close,
-                        "acceptance": acc, "reason": why[:300],
-                        "acceptance_source": outcome.get("source") or "round",
-                        "human_clauses": human + paths_owed}, path=ledger)
-        done.append({"item_id": item.id, "closed": close, "acceptance": acc})
+        # The row this landing would be recorded as. Built once so the dry run
+        # reports exactly the row the live sweep appends — the rehearsal is only
+        # worth having if a `closed` here is the `closed` on the ledger.
+        row = {"item_id": item.id, "closed": close, "acceptance": acc,
+               "round_id": landing["round_id"], "commit": landing["commit"],
+               "vault": landing["vault"], "reason": why[:300],
+               "acceptance_source": outcome.get("source") or "round",
+               "human_clauses": human + paths_owed}
+        if dry_run:
+            done.append({**row, "written": False})
+        else:
+            close_landed(item, commit=landing["commit"], round_id=landing["round_id"],
+                         settled_at=str(landing.get("settled_at") or ""), close=close, why=why,
+                         tags=tags)
+            if acc == "met" and (human or paths_owed):
+                from scripts.automod import owed as O
+                O.add_owed(item.path, human, kind="check", activity="owed after landing")
+                O.add_owed(item.path, paths_owed, kind="path", activity="owed after landing")
+            S.append_event({**row, "event": "item_landed"}, path=ledger)
+            done.append({"item_id": item.id, "closed": close, "acceptance": acc})
         # An umbrella that closed `met` closes the members it consolidated.
         # `not_met`, `deferred` and no-outcome leave them folded: the
         # umbrella's own note says why, and a human can `unfold_umbrella`.
         if close and close_members and item.members:
-            by_all = {i.id: i for i in open_items(None)}
+            by_all = {i.id: i for i in open_items(None, backlog_dir=backlog_dir)}
             for mid in item.members:
                 member = by_all.get(int(mid))
                 if member is None:
@@ -3115,9 +3147,17 @@ def _close_settled_items(ledger: Path, boards: tuple[str, ...] | None, *,
                 mfm, _ = _split_frontmatter(member.path.read_text(encoding="utf-8"))
                 if mfm.get(LANDED_MARKER):
                     continue
+                fold = {"item_id": member.id, "closed": True, "acceptance": "met",
+                        "via": item.id, "round_id": landing["round_id"],
+                        "commit": landing["commit"],
+                        "reason": f"landed via umbrella #{item.id} as "
+                                  f"{landing['commit'][:8]}"}
+                if dry_run:
+                    done.append({**fold, "written": False})
+                    continue
                 close_landed(member, commit=landing["commit"], round_id=landing["round_id"],
                              settled_at=str(landing.get("settled_at") or ""), close=True,
-                             why=f"landed via umbrella #{item.id} as {landing['commit'][:8]}")
+                             why=fold["reason"])
                 S.append_event({"event": "item_closed", "item_id": member.id, "by": "umbrella",
                                 "umbrella_id": item.id, "round_id": landing["round_id"],
                                 "commit": landing["commit"]}, path=ledger)

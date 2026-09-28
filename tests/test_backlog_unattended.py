@@ -4256,3 +4256,263 @@ def test_a_reverted_landing_back_on_main_is_not_reopened(isolated, monkeypatch):
     monkeypatch.setattr(B, "_on_live_main", lambda c: True)
     assert B.reopen_reverted_landings(S.LEDGER_PATH) == []
     assert _fm(p)["status"] == "done"
+
+
+# ===========================================================================
+# Rehearsing the close sweep (#1675): `backlog_dir` and `dry_run`
+# ===========================================================================
+
+#: The keys an `item_landed` ledger row carries. Measured over the 241 such rows in
+#: `~/.local/state/lloyd-automod/promotions.jsonl` since `7e054cdd` shipped, and
+#: beside the writer itself: a dry row is that row unsaved, so it is graded against
+#: the same fields rather than a thinner shape invented for the rehearsal.
+LANDED_ROW_FIELDS = {"item_id", "closed", "acceptance", "reason", "round_id",
+                     "commit", "vault", "acceptance_source", "human_clauses"}
+
+#: A round that judged the acceptance unmet. `summary` and `clause_outcomes` are
+#: not decoration: `outcome_carries_no_claim` treats an outcome that asserts
+#: nothing as no outcome at all, and a bare `acceptance: not_met` with an empty
+#: summary reaches the sweep as *"the round recorded no structured outcome"* — a
+#: row with the wrong reason that still happens to be `closed=False`.
+NOT_MET = {"acceptance": "not_met", "landed": True, "deferred_to": [],
+           "summary": "clause 1 still red at HEAD", "spawned": [],
+           "clause_outcomes": [{"clause": 1, "outcome": "not_met",
+                                "evidence": "grep still returns 4 hits"}]}
+
+#: The `met` landing that also owes a check: the only shape that reaches the third
+#: write a rehearsal has to hold back. The debt is the *item's* — `human_clauses` in
+#: its front matter is where triage and the round record what only a person or a
+#: later job can settle, and a `met` close mints one owed entry per clause
+#: (`backlog.py:3078-3082`). Plain `MET` closes an item and mints nothing, so with it
+#: the owed half of the byte-for-byte node below compares an empty list with an empty
+#: list and passes whatever the sweep does.
+MET_WITH_A_CHECK = {"acceptance": "met", "landed": True, "deferred_to": [],
+                    "summary": "shipped; the live-ledger count is still owed",
+                    "spawned": []}
+
+#: What #601 owes in the items below: a post-landing check, in the front-matter key
+#: the sweep reads (`human_clauses_of`, called at `backlog.py:3069`).
+OWED_CHECK = "run the dry run against the live ledger once and compare the count"
+
+
+def _sha(n: int) -> str:
+    """A 12-hex commit per item id, so a landing reads as a real promotion."""
+    return format(n, "x") * 4
+
+
+def _board(d: Path, *specs) -> dict[int, Path]:
+    """Write items into `d`, which need not be the module's `BACKLOG_DIR`.
+
+    Each spec is `write_item`'s kwargs plus `id`, and three front-matter keys the
+    sweep reads: `members` and `group` for the umbrella relation, and
+    `human_clauses`, which is what turns on the owed entries a `met` landing mints —
+    the third write a rehearsal has to hold back.
+    """
+    out: dict[int, Path] = {}
+    for spec in specs:
+        spec = dict(spec)
+        item_id = spec.pop("id")
+        extra = {k: spec.pop(k) for k in ("members", "group", "human_clauses")
+                 if k in spec}
+        path = write_item(d, item_id, **spec)
+        if extra.get("members"):
+            B.update_frontmatter(path, {"members": list(extra["members"])},
+                                 add_tags=("umbrella",))
+        if extra.get("group"):
+            B.update_frontmatter(path, {"group": extra["group"]}, add_tags=("grouped",))
+        if extra.get("human_clauses"):
+            B.update_frontmatter(path, {"human_clauses": list(extra["human_clauses"])})
+        out[item_id] = path
+    return out
+
+
+def test_backlog_dir_decides_which_board_the_sweep_reads(isolated, tmp_path):
+    """#1675 clause 1: the candidate set comes from the board the caller names.
+
+    Before the parameter existed, the read fell through to the module constant
+    `BACKLOG_DIR`, and the only way to point the sweep at a copy was to monkeypatch
+    that constant — available to a test fixture and to nobody standing at a terminal
+    who wants to see what a changed sweep would do before it runs.
+
+    Three settled `met` landings, one item of each shape:
+
+      601 on both boards — which copy moves shows which board was read;
+      602 only in the copy, and acted on, because a copy may carry work the live
+          board does not, which is the point of the parameter;
+      603 only on the live board, and untouched, though its landing is identical.
+
+    A board *inside* `D` rather than a copy of one, because the clause is about
+    resolution: an item whose id exists only in `D` is the only thing that can tell
+    `backlog_dir` from `BACKLOG_DIR`, and an empty scratch board answers identically
+    to a sweep pointed at a directory that does not exist.
+
+    The live board's bytes are the proof: had the read not moved, 601 and 603 would
+    both carry a landed marker.
+
+    #50 and #2 pin the second read. An umbrella's member lookup is its own
+    `open_items` call (`backlog.py:3142`), so a `backlog_dir` threaded into only the
+    candidate read would resolve members from the live tree — invisible here unless
+    the two boards differ about #2, which they do: the live #2 already carries a
+    landed marker and the sweep skips a marked member, so only a member read that
+    actually moved can produce the fold row asserted below.
+    """
+    copy = tmp_path / "copy"
+    copy.mkdir()
+    live = _board(isolated, {"id": 601}, {"id": 603},
+                  {"id": 2, "name": "Member 2"})
+    B.update_frontmatter(live[2], {B.LANDED_MARKER: "ffff11112222"})
+    in_copy = _board(copy, {"id": 601}, {"id": 602},
+                     {"id": 50, "status": "up_next", "members": [2]},
+                     {"id": 2, "name": "Member 2", "group": 50})
+    for item_id in (601, 602, 603, 50):
+        _landed(item_id, f"SM_{item_id}", _sha(item_id), outcome=MET)
+    live_before = {p: p.read_bytes() for p in live.values()}
+
+    out = B.close_settled_items(S.LEDGER_PATH, backlog_dir=copy)
+
+    assert sorted(r["item_id"] for r in out) == [2, 50, 601, 602], out
+    fold = [r for r in out if r["item_id"] == 2][0]
+    assert fold["via"] == 50 and fold["closed"] is True, fold
+    assert _fm(in_copy[601])["status"] == "done" and _fm(in_copy[602])["status"] == "done"
+    assert _fm(in_copy[2])["status"] == "done", "the folded member is not the copy's"
+    assert {p: p.read_bytes() for p in live.values()} == live_before, (
+        "the sweep wrote the board named by the module constant as well as the one "
+        "named by the caller, so the read never moved")
+
+
+def test_a_dry_run_reports_each_landing_with_the_ledger_row_it_would_write(isolated):
+    """#1675 clause 2: the report is the ledger row, decided and not yet written.
+
+    One of every acceptance the sweep can be handed, all settled, in one call:
+
+      `met`             -> `closed=True`, the only acceptance that closes anything;
+      `not_met`         -> `closed=False`, noted and left for a human;
+      no outcome at all -> `closed=False` with `acceptance: None`, which is how a
+                           round predating the finalizer already reads on the ledger.
+
+    Every row carries the fields an `item_landed` row carries, so a rehearsal is read
+    with the same eyes as the record it stands in for. `reason` is asserted to its
+    exact string per acceptance because it is the sentence a person decides on: a
+    rehearsal that said only True/False would not tell them why an item stays open.
+    """
+    _board(isolated, {"id": 601}, {"id": 602}, {"id": 603})
+    _landed(601, "SM_601", _sha(601), outcome=MET)
+    _landed(602, "SM_602", _sha(602), outcome=NOT_MET)
+    _landed(603, "SM_603", _sha(603), outcome=None)
+
+    rows = B.close_settled_items(S.LEDGER_PATH, dry_run=True)
+
+    decided = {r["item_id"]: r for r in rows}
+    assert sorted(decided) == [601, 602, 603]
+    for row in rows:
+        assert LANDED_ROW_FIELDS <= set(row), (row["item_id"], sorted(row))
+        assert row["written"] is False, row
+    assert decided[601]["closed"] is True and decided[601]["acceptance"] == "met"
+    assert decided[602]["closed"] is False and decided[602]["acceptance"] == "not_met"
+    # `None`, not a string: a round that predates the finalizer records no verdict,
+    # and the row must say so the way the ledger row says it — inventing "none" for
+    # the rehearsal would make the two records unreadable side by side.
+    assert decided[603]["closed"] is False and decided[603]["acceptance"] is None
+    # Each `reason` to its exact string, taken from the writer's branches
+    # (`backlog.py:3099-3118`) rather than paraphrased: this sentence is what a
+    # person decides on, and a rehearsal whose reason reads plausibly but does not
+    # match the record it stands in for is the failure mode to catch here.
+    assert decided[601]["reason"] == ("the round reported the acceptance check met"
+                                     " — done")
+    assert decided[601]["round_id"] == "SM_601" and decided[601]["commit"] == _sha(601)
+    # NOT_MET names clause 1 in its own clause list, and `unmet_clauses` puts that
+    # in the reason — the rehearsal has to carry the pointer, not just the verdict.
+    assert decided[602]["reason"] == (
+        "the round landed but reported the acceptance check not met (clause(s) [1]); "
+        "offered again for those")
+    assert decided[603]["reason"] == (
+        "the round recorded no structured outcome, and the review rung did not grade "
+        "every clause met; a human decides")
+
+
+def test_a_dry_run_writes_no_marker_no_status_no_section_no_owed_row(isolated):
+    """#1675 clause 3: "reports without writing" owes three effects, not one.
+
+    `close_landed` is not a single write. It stamps `automod_landed` and `updated`
+    and rewrites the whole file from its raw front matter, it appends a
+    `## Automod landed — <date>` body section, and on a close it flips `status` to
+    `done` and sets `completed`; the sweep then mints owed entries for a `met` landing
+    carrying post-landing clauses, and appends the `item_landed` row. A dry path that
+    held back only the status flip would still stamp the marker — and the marker is
+    precisely what makes the next real sweep skip that landing as already-noted, so
+    such a rehearsal would quietly cancel the landings it was there to rehearse.
+
+    So the assertion is on bytes, per item file, plus the ledger beside them — and it
+    is made non-vacuous by the live call that follows: the same sweep, un-rehearsed,
+    changing every one of those bytes and minting the owed entry. Silence before that
+    control is nothing; silence beside it is evidence.
+
+    #601 is the landing that reaches all three writes: `MET_WITH_A_CHECK` on an item
+    carrying `human_clauses`, which is how a `met` close comes to mint an owed entry
+    at all. With a plain `MET` it would still stamp, still flip the status and still
+    append the landed section, and the owed assertion below would be comparing an
+    empty list with an empty list.
+    """
+    items = _board(isolated, {"id": 601, "human_clauses": [OWED_CHECK]},
+                   {"id": 50, "status": "up_next", "members": [2]},
+                   {"id": 2, "name": "Member 2", "group": 50})
+    _landed(601, "SM_601", _sha(601), outcome=MET)
+    _landed(50, "SM_50", _sha(50), outcome=MET)
+    before = {p: p.read_bytes() for p in items.values()}
+    ledger_before = len(S.read_events(path=S.LEDGER_PATH))
+
+    dry = B.close_settled_items(S.LEDGER_PATH, dry_run=True)
+    assert {r["item_id"] for r in dry} == {50, 2, 601}, "nothing was there to rehearse"
+
+    assert {p: p.read_bytes() for p in items.values()} == before
+    for path in items.values():
+        text = path.read_text(encoding="utf-8")
+        fm = B._split_frontmatter(text)[0]
+        assert "## Automod landed" not in text, path.name
+        assert "automod_landed" not in fm and "completed" not in fm, path.name
+        assert fm["status"] != "done", path.name
+        assert O.entries_of(fm) == [], path.name
+    assert len(S.read_events(path=S.LEDGER_PATH)) == ledger_before, "a dry row was saved"
+
+    assert B.close_settled_items(S.LEDGER_PATH) != [], "the control found nothing to do"
+    assert {p: p.read_bytes() for p in items.values()} != before
+    landed = _fm(items[601])
+    assert landed["status"] == "done" and landed["automod_landed"] == _sha(601)
+    assert "## Automod landed" in items[601].read_text(encoding="utf-8")
+    owed_after = O.entries_of(landed)
+    assert [e["kind"] for e in owed_after] == ["check"], owed_after
+    assert [e["what"] for e in owed_after] == [OWED_CHECK], owed_after
+    assert O.entries_of(_fm(items[50])) == [], (
+        "the umbrella closes met with nothing owed, so it must mint nothing")
+    assert _fm(items[2])["status"] == "done"
+    assert len(S.read_events(path=S.LEDGER_PATH)) > ledger_before
+
+
+def test_the_rehearsal_predicts_the_closures_the_real_sweep_writes(isolated):
+    """#1675 clause 4: the dry report has to agree with the sweep it predicts.
+
+    One ledger, one board, two calls — the rehearsal first, so the real sweep still
+    has its landings to act on, then the same call un-rehearsed. Compared on `closed`,
+    item for item, because that one field decides whether an item stops being
+    re-triaged for ever.
+
+    The set covers both sides of the decision and both row shapes: a `met` landing, a
+    `not_met` one, and an umbrella with the member it folds. And the real sweep's
+    True/False is checked against the status on disk, so what is compared is a
+    prediction and a fact, not two return values nodding at each other.
+    """
+    items = _board(isolated, {"id": 601}, {"id": 602},
+                   {"id": 50, "status": "up_next", "members": [2]},
+                   {"id": 2, "name": "Member 2", "group": 50})
+    _landed(601, "SM_601", _sha(601), outcome=MET)
+    _landed(602, "SM_602", _sha(602), outcome=NOT_MET)
+    _landed(50, "SM_50", _sha(50), outcome=MET)
+
+    rehearsal = {r["item_id"]: r["closed"]
+                 for r in B.close_settled_items(S.LEDGER_PATH, dry_run=True)}
+    real = {r["item_id"]: r["closed"] for r in B.close_settled_items(S.LEDGER_PATH)}
+
+    assert rehearsal == real, {"dry": rehearsal, "real": real}
+    assert real == {601: True, 602: False, 50: True, 2: True}
+    for item_id, will_close in real.items():
+        assert (_fm(items[item_id])["status"] == "done") is will_close, item_id
