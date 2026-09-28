@@ -610,3 +610,222 @@ async def test_the_parse_scan_keeps_its_30_minute_cadence(
     assert calls["scan"] == 2, "the scan never re-ran, so it is still a one-shot"
     assert len(alerts) == 1, (
         f"the same broken file alerted again on the second scan: {alerts}")
+
+
+# ── #1735 — the next_run alert cooldown survives the process that set it ─────
+#
+# `_state["nextrun_alerted_at"]` is the instant the `next_run` alarm last reached a
+# person, and it lived only in a module-global dict. A new process therefore starts
+# having never alerted, reaches its own 5-tick streak on the same board, and posts
+# the alert again: `~/lloyd-data/logs/server.err` shows pool starts at 21:10:13 and
+# 22:16:18 on 2026-09-27 with next_run alerts posted at 21:14:20 and 22:20:28 —
+# 4 min 07 s and 4 min 10 s after each boot, which is exactly
+# `_STALL_NEXTRUN_TICKS` x the pool's 60 s scheduler interval. The 24 h cooldown was
+# a property of one process's uptime. These tests drive two processes against ONE
+# queue, because the reset is the defect and a test that reuses one process proves
+# nothing.
+
+
+def _fresh_process_state(monkeypatch) -> dict:
+    """Replace `_state` with what a second watchdog process actually starts with.
+
+    Every key of the module's own default literal, at its default value — not the
+    state the first batch of ticks left behind, which is the thing under test. The
+    key-set assertion is what keeps this honest: a `_state` that gained a key would
+    silently stop being "a fresh process" and the no-re-alert assertion below would
+    then be measuring a fixture rather than the durable read.
+    """
+    fresh = {"unparseable_scan_at": None, "unparseable_alerted": set(),
+             "stall_streak": 0, "stall_alerted_at": None,
+             "nextrun_streak": 0, "nextrun_alerted_at": None,
+             "nextrun_parked_logged_at": None}
+    assert set(fresh) == set(fw._state), (
+        f"fleet_watchdog._state has keys {sorted(fw._state)}, so this is no longer a "
+        f"fresh process's surveillance state")
+    monkeypatch.setattr(fw, "_state", fresh)
+    return fresh
+
+
+def _durable_alert_instants(queue: WorkQueue) -> list[tuple[str, dt.datetime]]:
+    """Every watermark row under the watchdog's own source whose value is an instant.
+
+    Read through the queue's public API (`wm_keys`/`wm_get`) rather than a key name
+    the module keeps private: the claim being tested is that the alert instant is
+    DURABLE QUEUE STATE, and a test that hardcoded the row's key would still pass if
+    the value moved somewhere unreadable. Rows that do not parse as an instant — any
+    pacing cursor another part of the source keeps beside it — are not the alert
+    instant and are skipped.
+    """
+    found = []
+    for key in queue.wm_keys(fw.NAME):
+        value = queue.wm_get(fw.NAME, key)
+        try:
+            found.append((key, dt.datetime.fromisoformat(value)))
+        except (TypeError, ValueError):
+            continue
+    return found
+
+
+async def test_a_restart_inside_the_cooldown_does_not_re_post_the_nextrun_alarm(
+        board, monkeypatch, tmp_path):
+    """Clauses 1 + 2: one alert per 24 h, measured across two processes.
+
+    A late un-parked task, five ticks for the first process, and — the part clause 2
+    exists for — the assertion that the first process posted exactly one alert
+    NAMING THE TASK before any no-re-alert claim is made. Against that, a second
+    process with the fresh module default in hand ticks five more times over the
+    SAME queue: its streak reaches `_STALL_NEXTRUN_TICKS` again, so the only thing
+    that can hold the alert back is the instant the first process recorded. One
+    alert total.
+
+    The queue is a `WorkQueue` on a real file, not a mock, because the thing being
+    survived is a restart of the process that owns the in-memory dict.
+    """
+    _pacing_constants_unchanged()
+    write_task(board, 706, frequency="daily", last_run=None, next_run=_ago(days=2))
+    q = WorkQueue(tmp_path / "restart.db")
+    assert fw._next_run_stalled(q) and fw._grossly_overdue(q) == [], (
+        "the fixture is not a board only the `next_run` alarm sees, so the alert "
+        "counts below would not be attributable to it")
+
+    first = _fresh_process_state(monkeypatch)
+    alerts = _watch_alerts(monkeypatch)
+
+    for _ in range(fw._STALL_NEXTRUN_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 1 and "706" in alerts[0], (
+        f"the first process did not post exactly one alert naming the late task: "
+        f"{alerts}. Nothing below can be assessed until it does")
+    assert first["nextrun_alerted_at"] is not None, alerts
+    assert len(_durable_alert_instants(q)) == 1, (
+        "the alert instant is not durable queue state, so the next process cannot "
+        "read it and the 24 h cooldown still dies with this one")
+
+    second = _fresh_process_state(monkeypatch)
+    assert second["nextrun_alerted_at"] is None, (
+        "the fixture did not hand the second process a fresh cooldown")
+    for _ in range(fw._STALL_NEXTRUN_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 1, (
+        f"a process with a fresh `_state` re-posted the `next_run` alarm inside "
+        f"{fw._STALL_NEXTRUN_ALERT_INTERVAL_SECONDS}s (24 h) of the first one: {alerts}")
+
+
+async def test_an_expired_watermark_alerts_the_same_board_again(
+        board, monkeypatch, tmp_path):
+    """Clause 3: persistence is a cooldown, not a mute.
+
+    The durable instant aged past `_STALL_NEXTRUN_ALERT_INTERVAL_SECONDS`, on the
+    same still-late un-parked board and in a fresh process: the alarm fires again.
+    The ageing goes through `wm_set` with an older instant as the value, which is the
+    same write the alarm itself makes — nothing reaches for raw SQL, so what is aged
+    is the row the alarm reads and not a copy of it. The second process is what a
+    day-old row is actually met by, and it also keeps the in-process cache, which
+    still holds the un-aged instant, out of the answer.
+    """
+    _pacing_constants_unchanged()
+    write_task(board, 707, frequency="daily", last_run=None, next_run=_ago(days=2))
+    q = WorkQueue(tmp_path / "expired.db")
+    assert fw._next_run_stalled(q), "the board is not late, so no alert could fire"
+
+    _fresh_process_state(monkeypatch)
+    alerts = _watch_alerts(monkeypatch)
+    for _ in range(fw._STALL_NEXTRUN_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 1, f"the first alert did not fire: {alerts}"
+
+    rows = _durable_alert_instants(q)
+    assert len(rows) == 1, rows
+    key, posted = rows[0]
+    aged = posted - dt.timedelta(seconds=fw._STALL_NEXTRUN_ALERT_INTERVAL_SECONDS + 60)
+    q.wm_set(fw.NAME, key, aged.isoformat())
+
+    _fresh_process_state(monkeypatch)
+    for _ in range(fw._STALL_NEXTRUN_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 2, (
+        f"a persisted alert instant older than "
+        f"{fw._STALL_NEXTRUN_ALERT_INTERVAL_SECONDS}s did not alert again, so the "
+        f"watermark is a permanent mute: {alerts}")
+
+
+async def test_a_parked_only_board_never_spends_the_durable_alert_instant(
+        board, monkeypatch, tmp_path):
+    """Clause 4: #1661's invariant, moved into the durable row.
+
+    A board whose only late task declares its own park posts nothing, and must also
+    leave the durable alert instant unwritten — a suppression that wrote it would
+    spend a day of cooldown on a park and mute the first genuinely late task for 24 h
+    in a state the whole fleet sits in. The watermark is asserted empty, not assumed
+    so, and the phase below shows the cooldown is genuinely unspent rather than
+    merely unreadable: an un-parked late task added to the same queue in a fresh
+    process alerts on its own streak, having never met a watermark.
+    """
+    _pacing_constants_unchanged()
+    write_task(board, 708, frequency="daily", status="draft", last_run=None,
+               next_run=_ago(days=3), parked="parked by Alan's 2026-09-17 ruling")
+    q = WorkQueue(tmp_path / "parked.db")
+
+    flagged = fw._next_run_stalled(q)
+    assert [(e["id"], bool(fw._parked_note(e))) for e in flagged] == [(708, True)], (
+        "the board is not parked-only, so the silence asserted below could be the "
+        f"silence of no late task at all: {[(e['id'], e['parked']) for e in flagged]}")
+    assert fw._grossly_overdue(q) == [], (
+        "the due-ness alarm also sees this board, so an empty alert list here would "
+        "say nothing about the nextrun alarm")
+
+    _fresh_process_state(monkeypatch)
+    alerts = _watch_alerts(monkeypatch)
+    for _ in range(fw._STALL_NEXTRUN_TICKS):
+        await fw.tick(q)
+    assert alerts == [], (
+        f"a board whose every late task declares its own park reached the alert "
+        f"route: {alerts}")
+    assert fw._state["nextrun_alerted_at"] is None, alerts
+    assert _durable_alert_instants(q) == [], (
+        "the parked-only scan wrote the durable alert instant, so a park has spent "
+        "the day's cooldown and the first genuinely late task is muted for 24 h")
+
+    write_task(board, 709, frequency="daily", last_run=None, next_run=_ago(days=2))
+    _fresh_process_state(monkeypatch)
+    for _ in range(fw._STALL_NEXTRUN_TICKS):
+        await fw.tick(q)
+    assert len(alerts) == 1 and "709" in alerts[0], (
+        f"the un-parked late task did not alert after the parked-only scan, so the "
+        f"park did spend the cooldown: {alerts}")
+    # The helper can see a row on THIS queue, so the empty assertion above was a
+    # finding and not an unreadable store.
+    assert len(_durable_alert_instants(q)) == 1, (
+        "the alert route wrote no durable instant on this queue either, so "
+        "`_durable_alert_instants` returning [] above proved nothing")
+
+
+async def test_an_absent_or_unreadable_watermark_alerts_as_it_does_today(
+        board, monkeypatch, tmp_path):
+    """Clause 5: the durable read may be missing or broken, the alarm may not be.
+
+    Both shapes in one node, parametrised by monkeypatching the read itself. With no
+    row at all the alarm behaves exactly as it did before persistence — five ticks,
+    one alert. With `wm_get` raising, the tick must not raise either: this runs
+    inside the scheduler loop, and a `next_run` watermark that cannot be read is a
+    reason to say so and alert, not a reason to stop watching the fleet.
+    """
+    _pacing_constants_unchanged()
+    write_task(board, 710, frequency="daily", last_run=None, next_run=_ago(days=2))
+    q = WorkQueue(tmp_path / "unreadable.db")
+    assert fw._next_run_stalled(q), "the board is not late, so no alert could fire"
+
+    _fresh_process_state(monkeypatch)
+    alerts = _watch_alerts(monkeypatch)
+    assert _durable_alert_instants(q) == [], "the fixture started with a watermark"
+
+    def _boom(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(WorkQueue, "wm_get", _boom)
+    await fw.tick(q)          # the read is on the alert path; must not raise here
+    for _ in range(fw._STALL_NEXTRUN_TICKS - 1):
+        await fw.tick(q)
+    assert len(alerts) == 1 and "710" in alerts[0], (
+        f"an unreadable watermark stopped the alarm rather than being read as "
+        f"'never alerted': {alerts}")

@@ -78,6 +78,12 @@ _STALL_ALERT_INTERVAL_SECONDS = 6 * 3600
 # streak is a separate counter so neither alarm can reset the other's.
 _STALL_NEXTRUN_TICKS = 5
 _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS = 24 * 3600
+#: Where the `next_run` alarm's last-reached-a-person instant is persisted: the
+#: queue's own watermark table, under this source, in the same row pattern the
+#: operator pause uses (`workers/pool.py:PAUSE_WM_SOURCE`). See
+#: `_last_nextrun_alert` for why the instant is the VALUE rather than the row's
+#: `updated_at`.
+_NEXTRUN_WM_KEY = "nextrun_alerted_at"
 
 # How often to re-scan the task files for ones the scheduler cannot parse (#939).
 # This used to be a one-shot per process: the flag was set on the first tick and
@@ -108,7 +114,11 @@ _state = {
           # PERSON, and is written only on that route. A scan that found nothing but
           # declared parks never reaches one, so it writes the key beside it instead —
           # its own log cadence, so the record repeats at the alarm's interval without
-          # spending the alert cooldown that a real stall will need (#1661).
+          # spending the alert cooldown that a real stall will need (#1661). Of these
+          # keys only this one is mirrored into the queue (`_NEXTRUN_WM_KEY`), because
+          # it is the only one whose promise spans a restart: "once per 24 h" outlives
+          # the process that posted the message, while a streak and a log slot are
+          # this tick's business (#1735).
           "nextrun_streak": 0, "nextrun_alerted_at": None,
           "nextrun_parked_logged_at": None}
 
@@ -412,6 +422,76 @@ def _parse_iso_safe(value):
     from app import autonomy
     return autonomy._parse_iso(value)
 
+
+def _last_nextrun_alert(queue: WorkQueue):
+    """When the `next_run` alarm last reached a person, as the FLEET knows it.
+
+    The later of what this process remembers and what the queue's watermark row
+    says, because the alarm's 24 h cooldown is a fact about the fleet and `_state`
+    is a fact about one process's uptime. That is #1735: `nextrun_alerted_at` lived
+    only in the module-global dict, so a new process satisfied "never alerted"
+    immediately, reached its own `_STALL_NEXTRUN_TICKS` streak on the same late
+    board, and re-posted — `~/lloyd-data/logs/server.err` has pool starts at
+    21:10:13 and 22:16:18 on 2026-09-27 with next_run alerts at 21:14:20 and
+    22:20:28, 4 min 07 s and 4 min 10 s after each boot, which is exactly five of the
+    pool's 60 s scheduler ticks.
+
+    Why the LATER of two reads rather than the row alone: `_state` keeps the key as
+    this process's own cache, so the two can disagree only by one being behind, and
+    the later one is the sentence "we already told someone". Reading the row alone
+    would let a process that had just alerted, on a queue it cannot read, hand the
+    day's silence back and re-post; reading `_state` alone is the defect.
+
+    Why the instant is the row's VALUE and not its `updated_at`, which is where
+    `workers/pool.operator_pause_state` reads its clock: that row's value is a
+    boolean, so `updated_at` is the only place the instant can go, and #1550 put it
+    there so the alert and the Mission Control panel quote one accessor. Here the
+    instant IS the payload — `wm_set` writes value and stamp in the same statement,
+    so they cannot disagree — and storing it as the value is what keeps the row
+    aged through the public API. A row whose `updated_at` is the only clock can only
+    be made to look a day old with raw SQL against `workers.db`, which is precisely
+    the workaround `wm_updated_at`'s own docstring names as the reason it exists.
+
+    An unreadable or unparseable row is read as no durable knowledge, loudly, and
+    the in-process answer stands: this runs inside the scheduler loop, and a
+    watermark this tick cannot read is not a reason to stop watching the fleet.
+    """
+    in_process = _state.get("nextrun_alerted_at")
+    try:
+        raw = queue.wm_get(NAME, _NEXTRUN_WM_KEY)
+    except Exception:
+        logger.exception("nextrun stall alarm: could not read the persisted alert "
+                         "instant; falling back to this process's own record")
+        return in_process
+    persisted = _parse_iso_safe(raw)
+    if raw and persisted is None:
+        logger.warning("nextrun stall alarm: the persisted alert instant %r under "
+                       "(%s, %s) does not parse; ignoring it",
+                       raw, NAME, _NEXTRUN_WM_KEY)
+    if persisted is None or (in_process is not None and in_process > persisted):
+        return in_process
+    return persisted
+
+
+def _record_nextrun_alert(queue: WorkQueue, when) -> None:
+    """Say that the `next_run` alarm reached a person, here and durably.
+
+    Both halves of one fact, written on the one route that reaches a person — a
+    scan that found nothing but declared parks never gets here (#1661), so a park
+    cannot spend the cooldown. The write is guarded and the alert still goes out if
+    it fails: an alarm that could not record itself is still an alarm, and the
+    failure it produces is the old one — a later process may re-post — rather than a
+    silenced one.
+    """
+    _state["nextrun_alerted_at"] = when
+    try:
+        queue.wm_set(NAME, _NEXTRUN_WM_KEY, when.isoformat())
+    except Exception:
+        logger.exception("nextrun stall alarm: alert posted but its instant could "
+                         "not be persisted; a restart inside the cooldown may "
+                         "re-post it")
+
+
 async def _alert(message: str) -> None:
     try:
         from app.discord_notify import discord_alert
@@ -548,11 +628,15 @@ async def tick(queue: WorkQueue) -> None:
         # `_parked_note`, so a task cannot be counted as suppressed by the string and
         # still counted as late by the trigger.
         if any(not _parked_note(e) for e in stalled):
-            last_nextrun = _state.get("nextrun_alerted_at")
+            last_nextrun = _last_nextrun_alert(queue)
             if (last_nextrun is None
                     or (nr_now - last_nextrun).total_seconds()
                     >= _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS):
-                _state["nextrun_alerted_at"] = nr_now
+                # Recorded before the message is dispatched, so a failed send still
+                # spends the cooldown rather than handing the next process a fresh
+                # day (#1704's ordering), and recorded durably as well as here, so
+                # the next PROCESS is included in that same sentence (#1735).
+                _record_nextrun_alert(queue, nr_now)
                 msg = _nextrun_alert_message(stalled)
                 logger.error("%s", msg)
                 await _alert(msg)
