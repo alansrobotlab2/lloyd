@@ -561,3 +561,212 @@ def test_the_restart_skill_cites_the_gate_by_symbol_and_quotes_the_shared_number
     assert [int(x) for x in sweep.groups()] == [values["SWEEP_RAM_WAIT_GIB"],
                                                 values["SWEEP_RAM_ABORT_GIB"]]
     assert "ram-boot-gate.sh" in text, "the skill does not point at the one definition"
+
+
+# ---------------------------------------------------------------------------
+# #1625 — the engine-output integrity canary on the sweep route
+#
+# bootfacts reads the KV dtype and the pool size off the boot log; the boot guard
+# counts engine inits. Neither reads a token, and AI21's two vLLM bugs — both in
+# the Mamba state cache this hybrid runs on — produce confident WRONG output with
+# no crash, no warning and no error line. So an arm could pass everything above
+# the canary and still be serving corrupted output under a config that looks
+# identical in the log. The canary replays eval/engine_output/corpus.yaml (21
+# prompts, temperature 0) and compares it to one named reference record.
+# ---------------------------------------------------------------------------
+
+CANARY_START = "# --- engine-output integrity canary"
+CANARY_END = "# SKIP_BENCH=1 stops here"
+
+
+def _canary_statements() -> list[str]:
+    """The block's executable statements: comment lines dropped, backslash
+    continuations joined into the one statement they are.
+
+    Assertions about a *call* have to see a call as bash sees it. Grepping raw
+    lines splits the two probe invocations across their continuation lines, which
+    reads as "the flag is missing" and "the status guard is missing" when both are
+    present, and a bare `| head` scan matches the prose that warns against it."""
+    joined = _canary_block().replace("\\\n", " ")
+    return [ln for ln in joined.splitlines(keepends=True)
+            if not ln.lstrip().startswith("#")]
+
+
+def _statement(match: str) -> str:
+    """The one executable statement containing `match` — asserted unique, so a
+    second call that dodges the checks cannot be silently skipped over."""
+    hits = [s for s in _canary_statements() if re.search(match, s)]
+    assert len(hits) == 1, f"expected exactly one statement matching {match!r}, got {hits}"
+    return hits[0]
+
+
+def _canary_block() -> str:
+    """The canary's own lines, lifted out of the arm script.
+
+    Everything the tests below assert is then asserted about the code that runs,
+    not about a copy: the block is executed by real bash in `_canary_run`, so a
+    status that escaped into the script's own exit, or a verdict line that lost
+    its label, fails the way it would fail an arm.
+    """
+    text = ARM.read_text()
+    start = text.index(CANARY_START)
+    end = text.index(CANARY_END, start)
+    return text[start:end]
+
+
+def _canary_run(tmp_path: Path, *, run_rc: int, cmp_rc: int,
+                emit_record: bool = True) -> "subprocess.CompletedProcess":
+    """Run the extracted canary block under `set -euo pipefail` — STRICTER than
+    the arm script's own `set -uo pipefail` — against a fake root whose python is
+    a stub returning the given statuses.
+
+    The strictness is the assertion: an arm may not be abortable by its own
+    canary even under a header it might one day gain, and any status that the
+    block fails to swallow kills the harness before the tail echo. The harness
+    ends with the arm script's literal tail line so `reaches done` is measured,
+    not inferred.
+    """
+    root = tmp_path / "fakeroot"
+    (root / ".venvs/lloyd/bin").mkdir(parents=True)
+    (root / "eval/engine_output/idle").mkdir(parents=True)
+    (root / "eval/engine_output/idle/20260924T211316Z_idle-5.json").write_text("{}\n")
+    stub = root / ".venvs/lloyd/bin/python"
+    stub.write_text("""#!/usr/bin/env bash
+set -uo pipefail
+case "$2" in
+  run)
+    if [[ "$STUB_EMIT_RECORD" == "1" ]]; then
+      echo "wrote /tmp/arm-record.json  (21 prompts, engine stub)"
+    fi
+    echo "engine_output_probe: cannot decide — the engine refused the corpus"
+    exit "$STUB_RUN_RC"
+    ;;
+  compare)
+    echo "reference $4: stub vllm 0.11.2 kv fp8 pool 555776"
+    echo "current   /tmp/arm-record.json: stub vllm 0.11.2 kv fp8 pool 555776"
+    echo "3 of 21 prompts past their idle floor"
+    exit "$STUB_CMP_RC"
+    ;;
+esac
+exit 9
+""", encoding="utf-8")
+    stub.chmod(0o755)
+    script = tmp_path / "canary-under-test.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        f'ROOT="{root}"\n'
+        'LABEL=fp8kv\n'
+        + _canary_block() + '\necho "=== arm $LABEL done ==="\n',
+        encoding="utf-8")
+    return subprocess.run(
+        ["bash", str(script)], capture_output=True, text=True, timeout=60,
+        env={"PATH": "/usr/bin:/bin", "STUB_RUN_RC": str(run_rc),
+             "STUB_CMP_RC": str(cmp_rc),
+             "STUB_EMIT_RECORD": "1" if emit_record else "0"})
+
+
+def test_the_output_canary_sits_below_the_boot_guard_and_above_the_bench():
+    """Clause 1: ordering is the safety property, not the invocation.
+
+    Above the boot guard, a probe would send its corpus to a resurrected engine
+    running production defaults — the failure the crash-guard comment above
+    records as poisoning a 2026-09-08 arm with a fake 120.7 tok/s. Below the
+    SKIP_BENCH exit, a probe-only arm (the admission sweeps, which never
+    benchmark) would carry no integrity verdict at all. Both halves, and the
+    label: a record nobody can attribute to an arm cannot be compared across a
+    sweep."""
+    text = ARM.read_text()
+    guard = text.index('echo "boot guard: 1 engine init, no startup failures')
+    skip = text.index('if [[ "${SKIP_BENCH:-0}" == "1" ]]; then')
+    assert CANARY_START in text, "no engine-output canary in the arm route"
+    assert guard < text.index(CANARY_START) < skip, (
+        "the canary must run after the boot guard proves which engine is "
+        "serving and before SKIP_BENCH can exit the arm")
+
+    run_call = _statement(r'"\$ENGINE_OUTPUT_PROBE" run')
+    assert '--label "arm-$LABEL"' in run_call, run_call
+    assert '"$ROOT/.venvs/lloyd/bin/python"' in run_call, run_call
+    assert not any("--base-url" in s for s in _canary_statements()), (
+        "the probe defaults to 127.0.0.1:8096, the port this script polls /health on")
+
+
+def test_the_canary_reports_every_probe_status_and_never_aborts_the_arm(tmp_path):
+    """Clauses 2 and 4, in real bash: five statuses, three verdicts, zero aborts.
+
+    exit 1 from `compare` is a finding ABOUT the engine — the bench is about to
+    measure the same engine, so stopping here would trade a measurement for an
+    alarm. exit 2 means the instrument could not decide, which is even less
+    reason to stop. Each row must therefore print a verdict naming the arm label
+    and the decision, and still reach the arm script's own tail line, under
+    `set -euo pipefail`."""
+    cases = [
+        dict(run_rc=0, cmp_rc=0, decision="within-floor"),
+        dict(run_rc=0, cmp_rc=1, decision="DIVERGED"),
+        dict(run_rc=0, cmp_rc=2, decision="could-not-decide"),
+        dict(run_rc=2, cmp_rc=0, decision="could-not-decide"),
+        dict(run_rc=0, cmp_rc=0, emit_record=False, decision="could-not-decide"),
+    ]
+    for case in cases:
+        want = case.pop("decision")
+        r = _canary_run(tmp_path / str(abs(hash(str(case)))), **case)
+        assert r.returncode == 0, f"{case}: the canary aborted the arm\n{r.stdout}{r.stderr}"
+        assert "=== arm fp8kv done ===" in r.stdout, f"{case}: {r.stdout}"
+        line = [ln for ln in r.stdout.splitlines() if ln.startswith("engine-output canary:")]
+        assert len(line) == 1, f"{case}: expected one verdict line, got {line}"
+        assert "arm fp8kv" in line[0], f"{case}: verdict does not name the arm: {line[0]}"
+        assert want in line[0], f"{case}: wanted {want}, got {line[0]}"
+    divergence = _canary_run(tmp_path / "diverged", run_rc=0, cmp_rc=1)
+    assert "3 of 21 prompts past their idle floor" in divergence.stdout, (
+        "a divergence verdict without the comparator's reason is an alarm with "
+        "nothing to act on")
+
+
+def test_the_canary_names_its_reference_rather_than_taking_the_newest(tmp_path):
+    """Clause 3: `compare --reference` defaults to "the newest other record in
+    the current's directory", and every arm's record lands in one directory — so
+    a defaulted sweep grades arm N against arm N-1, and drift across a sweep is
+    invisible by construction.
+
+    Pinned three ways: the call passes `--reference "$ENGINE_OUTPUT_REF"`; that
+    variable's default is a file that exists in the committed corpus directory
+    (a reference that has been moved or renamed turns every arm into exit 2,
+    which is exactly the silent-blind state this canary exists to close); and it
+    is NOT inside the probe's own output dir, where the newest-other-record
+    default lives."""
+    text = ARM.read_text()
+    compare_call = _statement(r'"\$ENGINE_OUTPUT_PROBE" compare')
+    assert '--reference "$ENGINE_OUTPUT_REF"' in compare_call, compare_call
+    assert "--current" in compare_call, compare_call
+    default = re.search(r'ENGINE_OUTPUT_REF="\$\{ENGINE_OUTPUT_REF:-(.*?)\}"', text)
+    assert default, "ENGINE_OUTPUT_REF has no default to name"
+    ref = Path(default.group(1).replace("$ROOT", str(ROOT)))
+    assert ref.is_file(), f"the named reference record does not exist: {ref}"
+    assert "engine_output" in ref.parts, ref
+    out_dir = re.search(r'DEFAULT_OUT_DIR\s*=\s*([^#]+)',
+                        (ROOT / "eval/engine_output_probe.py").read_text())
+    assert out_dir and "EVAL_BASELINES_DIR" in out_dir.group(1), (
+        "the probe's output dir changed; re-check that the named reference is "
+        "not inside it")
+    assert str(ref).startswith(str(ROOT / "eval/engine_output")), (
+        f"the reference sits where arm records land: {ref}")
+
+
+def test_the_canary_status_capture_survives_a_header_that_gains_set_e():
+    """The one line that decides clause 2, pinned as a pattern rather than as a
+    behaviour: `RC=$?` on the line AFTER a failing assignment aborts under
+    `set -e`, and `sed | head -1` under `pipefail` can leave a pipeline at 141.
+
+    Both forms read as "the status was captured" and neither is: the first
+    returns the arm script's exit status through the canary, the second can kill
+    the arm before the verdict is printed."""
+    statements = _canary_statements()
+    for var in ("RUN", "CMP"):
+        call = _statement(rf'CANARY_{var}_OUT=\$\(')
+        assert f"|| CANARY_{var}_RC=$?" in call, (
+            f"the {var.lower()} call must carry its own status guard: {call}")
+    assert not any(re.fullmatch(r"\s*CANARY_(RUN|CMP)_RC=\$\?\n", s) for s in statements), (
+        "reading $? on its own line aborts the arm under set -e")
+    assert not any(re.search(r"\|\s*head\b", s) for s in statements), (
+        "a pipe into head can return 141 under pipefail")
+    assert "awk" in _statement(r"CANARY_RECORD="), (
+        "the record path must be pulled out in one process, not a pipeline")

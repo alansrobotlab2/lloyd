@@ -135,6 +135,60 @@ if grep -qa -E "EngineCore failed to start|Worker failed with error" /tmp/arm-bo
 fi
 echo "boot guard: 1 engine init, no startup failures — this arm is what is serving."
 
+# --- engine-output integrity canary (#1268 owed → #1625) --------------------
+# Everything above reads CONFIG: bootfacts greps the KV dtype and the pool size
+# off the boot log, the boot guard counts engine inits. Neither one reads a
+# token. AI21's two vLLM bugs — both in the Mamba state cache this hybrid runs on
+# — produced confident WRONG output with no crash, no warning and no error line,
+# so an arm could clear every check above and still be serving corrupted output
+# under a config that looks identical in the log. This replays the committed
+# 21-prompt corpus at temperature 0 against the engine that actually booted.
+#
+# NON-FATAL BY DESIGN, which is why both statuses are captured instead of being
+# allowed to stand alone: exit 1 is "output moved past the floor" — a finding
+# ABOUT the engine, which is what the bench is about to measure — and exit 2 is
+# "the instrument could not decide" (engine busy on a probe-only arm, no
+# logprobs, floor or reference file missing). Either way the arm prints a verdict
+# and continues. A canary that aborts an arm makes the sweep depend on the
+# instrument more than on the engine, and aborting on a busy port would cost the
+# sweep its measurement while proving nothing about the build.
+#
+# The reference is NAMED, never defaulted: `compare --reference` defaults to "the
+# newest other record in the current's directory", and every arm's record lands
+# in one directory — so a defaulted sweep would grade arm N against arm N-1 and
+# drift across a sweep would be invisible by construction. The named reference is
+# one of the five committed idle repeats: the arm's replay is un-salted like
+# those, and the tiered floor is leave-one-out clean at 0 of 90 on exactly these
+# records. Override ENGINE_OUTPUT_REF after a rebaseline.
+ENGINE_OUTPUT_PROBE="${ENGINE_OUTPUT_PROBE:-$ROOT/eval/engine_output_probe.py}"
+ENGINE_OUTPUT_REF="${ENGINE_OUTPUT_REF:-$ROOT/eval/engine_output/idle/20260924T211316Z_idle-5.json}"
+# Each status is captured on the call itself (`|| RC=$?`) rather than by reading
+# `$?` on the next line: that form aborts under `set -e`, and this script's header
+# could gain the flag one day the way every other script's did. Same reason the
+# record path is pulled out with one awk process instead of `sed | head -1` —
+# under `pipefail` a `head` that closes the pipe early leaves the pipeline 141.
+CANARY_RUN_RC=0
+CANARY_RUN_OUT=$("$ROOT/.venvs/lloyd/bin/python" "$ENGINE_OUTPUT_PROBE" run \
+                   --label "arm-$LABEL" 2>&1) || CANARY_RUN_RC=$?
+CANARY_RECORD=$(printf '%s\n' "$CANARY_RUN_OUT" | awk '/^wrote /{print $2; exit}')
+if [ "$CANARY_RUN_RC" -ne 0 ] || [ -z "$CANARY_RECORD" ]; then
+  # `run` exits 2 when the engine refused the corpus, and prints no `wrote` line
+  # when it wrote nothing. Neither is a verdict about the engine's output, so it
+  # reports as the instrument not deciding rather than as a clean pass.
+  echo "engine-output canary: arm $LABEL could-not-decide (run rc=$CANARY_RUN_RC, $(printf '%s\n' "$CANARY_RUN_OUT" | tail -1))"
+else
+  CANARY_CMP_RC=0
+  CANARY_CMP_OUT=$("$ROOT/.venvs/lloyd/bin/python" "$ENGINE_OUTPUT_PROBE" compare \
+                     --current "$CANARY_RECORD" --reference "$ENGINE_OUTPUT_REF" 2>&1) \
+    || CANARY_CMP_RC=$?
+  case "$CANARY_CMP_RC" in
+    0) echo "engine-output canary: arm $LABEL within-floor ($CANARY_RECORD vs $ENGINE_OUTPUT_REF)" ;;
+    1) echo "engine-output canary: arm $LABEL DIVERGED from $ENGINE_OUTPUT_REF: $(printf '%s\n' "$CANARY_CMP_OUT" | grep -m1 'past their .* floor')"
+       printf '%s\n' "$CANARY_CMP_OUT" | sed 's/^/  canary: /' ;;
+    *) echo "engine-output canary: arm $LABEL could-not-decide (compare rc=$CANARY_CMP_RC, $(printf '%s\n' "$CANARY_CMP_OUT" | tail -1))" ;;
+  esac
+fi
+
 # SKIP_BENCH=1 stops here with the arm serving. bench-flash-next.py measures
 # decode and defeats the prefix cache, so it has nothing to say about an arm
 # whose question is admission — the Layer 3 max_num_batched_tokens sweep
