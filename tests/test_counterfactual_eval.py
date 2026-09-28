@@ -105,11 +105,17 @@ def test_cli_check_reports_no_drift():
     in-process comparison, so a `--write` that emits something `--check` cannot
     reproduce — a header, a key order, a path the generator would not write — is
     caught here.
+
+    #1662 wired the dangling-id audit into this same entry point, and this node is
+    where that is proven at the CLI rather than only in-process: the exit code now
+    fails on an id-keyed surface naming a query the gold set no longer carries, and
+    the `dangling ids:` line is the evidence the audit ran instead of being skipped.
     """
     out = subprocess.run([sys.executable, str(GENERATOR), "--check"],
                          capture_output=True, text=True, timeout=600)
     assert out.returncode == 0, out.stdout + out.stderr
     assert "records match the generator" in out.stdout, out.stdout
+    assert "dangling ids: 0" in out.stdout, out.stdout
 
 
 # ── the --verify audit, over a real store ────────────────────────────────────
@@ -1106,3 +1112,53 @@ def test_a_substring_gold_label_in_a_served_collection_is_not_reported(tmp_path)
     assert overall["gold_doc_unreturnable"] == [
         {"query": "sibling", "label": "nothing-indexed/absent.md"}], overall
     assert overall["gold_doc_collections"] == 1, overall
+
+
+def test_no_id_keyed_surface_names_a_query_the_gold_set_does_not_carry():
+    """Every query id the rater keys on exists in the gold file, and the function
+    that says so can report a dangler.
+
+    #1662 retired five gold queries — #1354's checkout-doc set, unanswerable by any
+    deployed collection — and the item's triage found them still named in
+    `eval/counterfactual.py`'s perturbation table and still carried as records in
+    `eval/counterfactual_perturbations.yaml`. A record whose query is gone scores
+    nothing and is skipped by every join on the gold ids, so the rater covers fewer
+    questions than the trend line's denominator claims while every count inside the
+    file still reads self-consistent. `build_perturbations` already refuses a plan
+    entry with no query, but only when regeneration runs, and the records file is a
+    checked-in artifact that nothing re-checks against a gold REMOVAL. So the
+    cross-reference is asserted here over all three id-keyed surfaces at once.
+
+    Must be able to fail, so each half is calibrated on a gold set with one real id
+    withdrawn: the plan, the records and the exemptions must each name exactly that
+    id and nothing else.
+    """
+    specs = _specs()
+    gold = {s["id"] for s in specs}
+    records = cf.load_records(RECORDS)
+
+    assert cf.dangling_references(specs, records) == {}, (
+        f"id-keyed surfaces naming queries the gold set does not carry: "
+        f"{cf.dangling_references(specs, records)}")
+
+    # Each half reports a dangler when one exists, on one real id withdrawn from the
+    # gold specs — so a clean dict above is a measurement and not a no-op.
+    stolen = sorted(gold)[0]
+    thinned = [s for s in specs if s["id"] != stolen]
+    assert cf.dangling_references(thinned, records)[
+        "plan"] == [stolen], "a plan entry whose query vanished went unreported"
+    assert cf.dangling_references(specs, {**records, "not-a-gold-query": {}})[
+        "records"] == ["not-a-gold-query"], (
+        "a record whose query is absent from gold went unreported")
+    assert cf.dangling_references(specs, records, pins_absent=(
+        "not-a-gold-query",))["pins_absent"] == ["not-a-gold-query"], (
+        "an exemption naming a query that no longer exists went unreported")
+
+    # And the retired five are gone from BOTH surfaces rather than re-pointed at
+    # nothing: an id that left the gold file must not survive in either.
+    retired = {"harness-system-prompt-frozen", "automod-gate-rungs",
+               "recall-doc-pool-ordering", "qmd-embed-model-switch",
+               "djev-rank-not-gate"}
+    assert retired & set(cf.PLAN) == set(), sorted(retired & set(cf.PLAN))
+    assert retired & set(records) == set(), sorted(retired & set(records))
+    assert retired & gold == set(), "the five must be gone from gold too"

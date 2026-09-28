@@ -1865,23 +1865,54 @@ def test_the_document_label_guard_fails_on_an_unresolvable_label(tmp_path):
 CHECKOUT_DOCS_REQUIRED = ("harness.md", "automod.md", "retrieval.md", "qmd.md", "djev.md")
 
 
-def test_the_corpus_asks_questions_the_checkout_architecture_docs_answer():
-    """>= 5 gold queries whose labels resolve to CURRENT checkout docs, and the
-    guard says the checkout — not the vault — is what satisfied each (#1354)."""
+def test_a_checkout_rooted_label_is_attributed_to_the_checkout_and_never_the_vault(
+        tmp_path):
+    """A checkout-prefixed label resolves against the CHECKOUT, not the vault — the
+    half of #1354 clause 1 that outlives the five queries it was written on.
+
+    This node used to read
+    `test_the_corpus_asks_questions_the_checkout_architecture_docs_answer` and asserted
+    ">= 5 gold queries resolve to current checkout docs", which was #1354's deliverable.
+    Alan's ruling on #1662 — "(c) Drop or relabel the five now: the labels are the bug"
+    — retires those five (#1354's own, whose answer lives in `~/lloyd/architecture/`,
+    which no deployed collection indexes), so the presence assertion is now false by
+    design and re-pointing it is required. What stays is the mechanism the presence
+    happened to exercise: `projects/lloyd/architecture/qmd.md` sitting in the VAULT is a
+    stale copy, and a label that matches it must never be reported satisfied by the
+    vault. The trap does not need the five queries to exist to be reachable, so it is
+    exercised here on a fixture tree.
+
+    The live corpus is asserted empty of checkout-rooted labels, which is #1662's
+    positive claim, and the fixture is what makes that emptiness a measurement rather
+    than an untested default.
+    """
     rep = _doc_label_satisfiability_report()
     by_checkout = [d for d in rep["satisfied_by"] if d["root"] == "checkout"]
-    covered = {d["label"].rsplit("/", 1)[-1] for d in by_checkout}
-    assert set(CHECKOUT_DOCS_REQUIRED) <= covered, (
-        f"checkout-rooted labels cover {sorted(covered)}; #1354 needs "
-        f"{CHECKOUT_DOCS_REQUIRED}")
-    assert len({d["query"] for d in by_checkout}) >= 5, by_checkout
-    # Every checkout-prefixed label was resolved against the checkout: none was
-    # answered by the vault (the stale-copy trap).
-    for d in rep["satisfied_by"]:
-        if d["label"].startswith(tuple(CHECKOUT_LABEL_ROOTS)):
-            assert d["root"] == "checkout", d
-    # And the vault-rooted labels still say so, or the root field is decoration.
-    assert any(d["root"] == "vault" for d in rep["satisfied_by"]), rep["satisfied_by"][:3]
+    assert by_checkout == [], (
+        f"labels resolved against the checkout: {by_checkout}. #1662 retired the five "
+        "that were there, so a new one means either a collection was deployed (then "
+        "the retirement note in the gold file and the five ids it names are stale too) "
+        "or a checkout doc was indexed by nothing and the query scores a permanent miss")
+
+    # The calibration that makes the emptiness above mean something: `root` has to be
+    # capable of reading "checkout" at all, or `by_checkout == []` is a property of the
+    # guard rather than of the corpus. One fixture query naming a doc the fixture
+    # checkout holds — the stale-vault-copy trap is the neighbouring node's business,
+    # not this one's.
+    vault, checkout = _two_root_fixture(tmp_path)
+    fixture = _doc_label_satisfiability_report(
+        specs_path=_write_corpus(tmp_path, [
+            {"id": "checkout-side", "query": "how does the harness freeze its prompt",
+             "expect_docs": ["lloyd-architecture/harness.md"]},
+            {"id": "vault-side", "query": "what does the live note say",
+             "expect_docs": ["knowledge/live-note.md"]}]),
+        vault_root=vault, checkout_root=checkout)
+    resolved = {d["query"]: d["root"] for d in fixture["satisfied_by"]}
+    assert resolved == {"checkout-side": "checkout", "vault-side": "vault"}, (
+        f"expected the fixture's checkout-prefixed label to resolve against the "
+        f"checkout and its vault-rooted label against the vault — `root` is only "
+        f"evidence if it can say both; got {fixture['satisfied_by']} "
+        f"/ dead={fixture['dead']}")
 
 
 def _two_root_fixture(tmp_path: Path) -> tuple[Path, Path]:
@@ -2345,7 +2376,7 @@ def test_a_label_that_resolves_but_no_deployed_collection_covers_it_is_unsearcha
             "root": "checkout"} in rep2["satisfied_by"], rep2["satisfied_by"]
 
 
-def test_the_committed_corpus_reports_three_states_with_no_dead_label():
+def test_the_committed_corpus_reports_three_states_with_no_dead_label(tmp_path):
     """Clause 1's committed-corpus half: with the live collection list the corpus
     still has NO dead label, and every label lands in exactly one of the three
     states.
@@ -2355,8 +2386,15 @@ def test_the_committed_corpus_reports_three_states_with_no_dead_label():
     named for that prefix then EVERY label under it is a permanent doc miss — so
     they must all be reported as unsearchable, never satisfied. That conditional
     needs no knowledge of the five ids, so a sixth checkout label filed tomorrow is
-    covered by the same line, which is the recurrence #1599 exists to stop. The
-    five are then named directly as the current corpus's instance of it.
+    covered by the same line, which is the recurrence #1599 exists to stop.
+
+    #1662 then retired the five, which is what the conditional was instantiated on.
+    The corpus has no checkout-prefixed label left, so `under` is legitimately empty
+    here and the loop reads as an implication with no antecedent — which is exactly
+    how a guard goes quietly toothless. The injection at the end of this node is what
+    keeps the conditional honest: a label named on a real checkout doc that no query
+    ever referenced must come back `unsearchable` while no collection is named for
+    the prefix, and the same label must be `satisfied_by` once one is.
     """
     colls = _deployed_collections()
     assert colls, "no deployed collection list readable; the check has no denominator"
@@ -2390,18 +2428,68 @@ def test_the_committed_corpus_reports_three_states_with_no_dead_label():
                  if _doc_norm(c["name"]) == _doc_norm(prefix.rstrip("/"))]
         under = {k for k in total if k[1].startswith(prefix)}
         if not named:
-            assert under and under <= states["unsearchable"], (
+            assert under <= states["unsearchable"], (
                 f"{len(under)} labels resolve under the checkout prefix {prefix} "
                 f"while no collection is named {prefix!r}, so each is a permanent "
                 f"doc miss; reported: {sorted(states['unsearchable'])}")
+            # Vacuity stated, not assumed. On the committed corpus `under` is EMPTY
+            # since #1662 retired the five, so the assertion above has no antecedent
+            # here — which is precisely how a guard of this shape goes silent. Two
+            # things keep it honest: the injection at the end of this node, which
+            # manufactures a label to prove the conditional bites, and this line,
+            # which fails the moment a checkout-prefixed label reappears with no
+            # collection behind it, i.e. the moment the retirement is undone.
+            assert under == set(), (
+                f"{sorted(k[1] for k in under)}: a checkout-prefixed label is in the "
+                f"corpus while no deployed collection is named {prefix!r}. Each such "
+                f"label scores a permanent doc miss — the state #1662 retired five "
+                f"queries to clear. Name the collection or retire the label.")
+    # Post-#1662 the corpus asserts no permanent doc miss at all. This is NOT the
+    # assertion #1599 left here, which named the five query ids as the corpus's
+    # instance of the condition: those queries are retired, so that set is empty by
+    # construction and an `<=`-style inclusion over it would have gone red for
+    # doing the work and green for not reading the file.
     unsearched = {d["query"] for d in rep["unsearchable"]}
-    assert {"harness-system-prompt-frozen", "automod-gate-rungs",
-            "recall-doc-pool-ordering", "qmd-embed-model-switch",
-            "djev-rank-not-gate"} <= unsearched, (
-        f"the five labels #1599 filed are not all reported unsearchable; got "
-        f"{sorted(unsearched)}")
+    assert unsearched == set(), (
+        f"{len(unsearched)} gold queries score a doc leg no deployed collection can "
+        f"answer: {sorted(states['unsearchable'])}. #1662 retired the five that were "
+        "here; a new one is either the same bug again or the collection still is not "
+        "deployed, and both are a finding, not a corpus to keep")
     assert unsearched <= {str(s.get("id")) for s in
                           yaml.safe_load(CORPUS.read_text())["queries"]}, unsearched
+
+    # The implication above must be able to FAIL, and after the drop nothing in the
+    # corpus can make it. So the sixth label is manufactured: the first checkout doc
+    # in file order under `architecture/` — a real file in this tree, one no query has
+    # ever named, so it is a label that has never existed in the corpus and the
+    # conditional is being asked about a case the corpus itself cannot supply — under
+    # the checkout prefix, against the live list, which still names no
+    # `lloyd-architecture` collection. Reported `unsearchable` is the conditional
+    # firing; a label that came back `satisfied_by` here would mean the guard had
+    # quietly stopped resolving the prefix, which is how the five went unnoticed for
+    # four days.
+    docs = sorted(p.name for p in (LLOYD_HOME / "architecture").glob("*.md"))
+    assert docs, f"no checkout docs under {LLOYD_HOME / 'architecture'} to inject"
+    injected_label = f"lloyd-architecture/{docs[0]}"
+    corpus6 = tmp_path / "sixth-label.yaml"
+    corpus6.write_text(yaml.safe_dump({"queries": [{
+        "id": "sixth-checkout-label", "query": "injected", "category": "technical",
+        "expect_entities": [], "expect_docs": [injected_label]}]}, sort_keys=False))
+    six = _doc_label_satisfiability_report(specs_path=corpus6, collections=colls)
+    assert [(d["query"], d["label"]) for d in six["unsearchable"]] == [
+        ("sixth-checkout-label", injected_label)], six
+    assert six["satisfied_by"] == [], (
+        f"{injected_label} read satisfied with no collection named for the prefix, "
+        "so the checkout half of the walk is not being resolved as a second root")
+    # And registering the collection is the fix, not a re-label: same injected
+    # corpus, one more collection, and the finding is gone through the same rule
+    # #1662's whole premise rested on.
+    served = _doc_label_satisfiability_report(
+        specs_path=corpus6,
+        collections=colls + [{"name": "lloyd-architecture",
+                              "root": str(LLOYD_HOME / "architecture")}])
+    assert served["unsearchable"] == [], served
+    assert [d["label"] for d in served["satisfied_by"]] == [injected_label], served
     # Bounded against the corpus size the way #606 insists a gold-side finding be.
     # 5 of 144 labels is a work list; 144 of 144 is an empty or broken collection
     # list, and the two must not be printable as the same sentence — a reader told
@@ -2490,14 +2578,19 @@ def test_the_guard_and_the_eval_agree_on_which_collections_are_deployed(tmp_path
     assert doc_corpus.deployed_collections(index_path=tmp_path / "absent.sqlite") is None
 
 
-#: The five gold doc labels #1599 found unreturnable, pinned as EXPECTED TO EXIST in
-#: the corpus — not pinned as unsearchable. Their STATE may change tomorrow: a person
-#: registering the collection they name (option (a), which no round may do) moves all
-#: five to `satisfied_by`, and that is the fix. Only taking them out of the corpus
-#: removes them from the document leg, and that is the move this file refuses to let
-#: anyone make quietly — #606's words: "shrinking the gold set is the easy way to
-#: raise every rate, and the rates rising is the evidence that something is wrong".
-RETIRABLE_GOLD_LABELS = (
+#: The five gold doc labels #1599 found unreturnable, recorded as RETIRED. #1662
+#: carried Alan's ruling on the item — "(c) Drop or relabel the five now: the labels
+#: are the bug. File (a) as its own proposal, deployed only if it measurably helps
+#: Lloyd's code-work recall" — and the drop is what landed, so the five are no longer
+#: in `queries:`. This tuple is the difference between a decision and a disappearance:
+#: in a diff an absent query and a retired one are the same five deleted blocks, and
+#: only one of them can be audited afterwards. #1599 pinned these ids as EXPECTED TO
+#: EXIST while the question was open; the question is closed, and what is pinned now is
+#: the record. Option (a) is still a person's call — registering an
+#: `lloyd-architecture` collection is what would make these five answerable, and a
+#: corpus that re-adds them behind a deployed collection is that option being taken,
+#: not this record being broken.
+RETIRED_GOLD_LABELS_1662 = (
     ("harness-system-prompt-frozen", "lloyd-architecture/harness.md"),
     ("automod-gate-rungs", "lloyd-architecture/automod.md"),
     ("recall-doc-pool-ordering", "lloyd-architecture/retrieval.md"),
@@ -2505,39 +2598,267 @@ RETIRABLE_GOLD_LABELS = (
     ("djev-rank-not-gate", "lloyd-architecture/djev.md"),
 )
 
+#: What the corpus file itself must carry for the ids above to read as retired. A
+#: retirement that lives only in a test file is a claim; one written where the queries
+#: used to be is a record a reader of the corpus finds.
+#: Anchored on the block heading rather than the bare item number: the number appears
+#: in the file's size note too, and a window opened there would read the wrong note.
+RETIREMENT_NOTE_WHO = "checkout-doc queries: RETIRED by #1662"
 
-def test_the_unreturnable_labels_may_be_served_but_never_deleted():
-    """#1599: the tripwire on the finding itself, so it cannot be made true by
-    deleting what it is about.
 
-    An `unsearchable` count goes to zero three ways, and only one of them is a fix:
-    register the collection, re-point the labels onto an indexed copy behind a prefix
-    no vault path contains, or delete the queries. The first two leave the label in
-    the corpus and the artifact; the third raises `doc_hit_rate` with retrieval
-    standing still, which is the number this whole instrument exists to keep honest.
-    So the assertion is about PRESENCE in the corpus, never about state: the same
-    labels are still here whatever the deployment decides to be, exactly as
-    `test_the_gold_set_may_only_grow` pins the query ids for the same reason.
+def test_the_five_checkout_doc_queries_are_retired_by_record_and_still_a_tripwire(
+        tmp_path):
+    """#1662 clause 3: the presence tripwire becomes a retirement record.
+
+    #1599 wrote this node to stop its own finding being made true by deleting what it
+    was about, and pinned the five as expected to EXIST. Alan's ruling then chose
+    exactly that option — the labels are the bug — so the pin had to be re-pointed
+    rather than removed: what stays is (a) the five ids, visible as retired, with the
+    authority that retired them named, and (b) the tripwire's actual purpose, which was
+    never "these five exist" but "a checkout-prefixed gold label must not sit in the
+    corpus unserved without anyone noticing". That half is exercised here by injection,
+    because after the drop the corpus contains no checkout-prefixed label at all and the
+    rule would otherwise be asserted over an empty set forever.
+
+    The injection is a label that has never existed in the corpus, so the node can
+    fail; the deletion it guards against is checked two ways, since the queries are
+    gone and a missing entry is otherwise indistinguishable from the file having never
+    had one.
     """
+    raw = CORPUS.read_text()
+    specs = yaml.safe_load(raw)["queries"]
+    ids = {str(s.get("id")) for s in specs}
+    labels = {str(d) for s in specs for d in (s.get("expect_docs") or [])}
+
+    # (a) retired, not re-pointed: the ids are out of `queries:`, and so is every
+    # checkout-prefixed label they carried. Re-pointing one onto some in-corpus
+    # document would have kept the query and quietly changed what it tests.
+    still_there = [qid for qid, _label in RETIRED_GOLD_LABELS_1662 if qid in ids]
+    assert still_there == [], (
+        f"{still_there} are back in {CORPUS} with no retirement note changed, so "
+        "either option (a) was taken by someone who did not update this record or "
+        "the drop is being undone quietly — both are a person's decision, and the "
+        "note in the corpus is where it has to be written")
+    checkout_labels = [d for d in labels if any(
+        d.startswith(prefix) for prefix in CHECKOUT_LABEL_ROOTS)]
+    assert checkout_labels == [], (
+        f"{checkout_labels} resolve under a checkout prefix while no collection is "
+        "named for it, which is the permanent doc miss #1599 filed and #1662 retired")
+
+    # (b) the record: the file the queries were dropped from says so, names the
+    # authority, and names all five ids. Deleting gold and deleting the note that
+    # explained the deletion is the same edit to a reader six weeks on, so the note
+    # is asserted with the same weight the presence of the queries used to be.
+    assert RETIREMENT_NOTE_WHO in raw, (
+        f"{CORPUS} carries no note naming {RETIREMENT_NOTE_WHO}: the five are absent "
+        "and nothing in the corpus says why, which is a silent shrink by another name")
+    note = raw[raw.index(RETIREMENT_NOTE_WHO):]
+    unrecorded = [f"{qid} -> {label}" for qid, label in RETIRED_GOLD_LABELS_1662
+                  if qid not in note or label not in note]
+    assert unrecorded == [], (
+        f"{unrecorded} are gone from the corpus and named nowhere near the retirement "
+        f"note in {CORPUS}")
+    # The five docs the record retires are #1354's five, and each is a REAL file in
+    # this checkout — the retirement is therefore recorded against documents that
+    # exist and could be answered again under option (a), not against labels that
+    # never resolved. A fact about the tree, not a second literal: the same basename
+    # list is checked for existence here and named by the note above.
+    absent = [b for b in (label.rsplit("/", 1)[-1]
+                          for _, label in RETIRED_GOLD_LABELS_1662)
+              if not (LLOYD_HOME / "architecture" / b).is_file()]
+    assert absent == [], (
+        f"{absent}: the retirement names a document that is not in "
+        f"{LLOYD_HOME / 'architecture'}, so the record points at nothing to restore")
+    assert ({label.rsplit("/", 1)[-1] for _, label in RETIRED_GOLD_LABELS_1662}
+            == set(CHECKOUT_DOCS_REQUIRED)), CHECKOUT_DOCS_REQUIRED
+
+    # (c) the tripwire, still able to bite. One injected corpus, three labels: a
+    # checkout doc that exists but no collection serves (the exact shape #1599
+    # found), a checkout-prefixed name no root holds at all (so the node does not
+    # depend on a file anyone might add), and a vault-served label that must stay
+    # clean or the check would be reporting the whole corpus.
+    served_doc = sorted(p.name for p in (LLOYD_HOME / "architecture").glob("*.md"))
+    assert served_doc, f"{LLOYD_HOME / 'architecture'} has no docs to inject"
+    corpus_x = tmp_path / "tripwire.yaml"
+    corpus_x.write_text(yaml.safe_dump({"queries": [
+        {"id": "re-added", "query": "q", "category": "technical",
+         "expect_entities": [], "expect_docs": [f"lloyd-architecture/{served_doc[0]}"]},
+        {"id": "never-written", "query": "q", "category": "technical",
+         "expect_entities": [], "expect_docs": ["lloyd-architecture/no-such-doc.md"]},
+        {"id": "served", "query": "q", "category": "technical",
+         "expect_entities": [], "expect_docs": ["knowledge/"]},
+    ]}, sort_keys=False))
+    colls = _deployed_collections()
+    assert colls, "no deployed collection list readable; the tripwire has no denominator"
+    rep = _doc_label_satisfiability_report(specs_path=corpus_x, collections=colls)
+    fired = {d["query"] for k in ("unsearchable", "dead") for d in rep[k]}
+    assert fired == {"re-added", "never-written"}, rep
+    assert [d["query"] for d in rep["satisfied_by"]] == ["served"], rep
+
+    # And the fix is a deployment, not a re-label: register the collection the prefix
+    # names and the existing doc stops being a finding, while the name no root holds
+    # stays one. The two must move differently or the report is conflating a dead
+    # label with an unserved one.
+    fixed = _doc_label_satisfiability_report(
+        specs_path=corpus_x,
+        collections=colls + [{"name": "lloyd-architecture",
+                              "root": str(LLOYD_HOME / "architecture")}])
+    assert "re-added" not in {d["query"] for k in ("unsearchable", "dead")
+                              for d in fixed[k]}, fixed
+    assert "never-written" in {d["query"] for d in fixed["dead"]}, fixed
+
+
+def test_no_gold_query_scores_a_doc_leg_no_deployed_collection_can_answer():
+    """#1662 clause 1: the gold set carries no `expect_docs` label a deployed
+    collection could never return — run through the instrument's own predicate, not
+    the guard's private copy of it.
+
+    The guard elsewhere in this file re-implements the collection read and the
+    covering rule so it cannot be green by agreeing with the code it guards, and that
+    split is pinned against itself by
+    `test_the_guard_and_the_eval_agree_on_which_collections_are_deployed`. This node is
+    deliberately the opposite: `eval/run_eval.py::gold_docs_unreturnable` is the
+    function whose output the nightly artifact prints, so the acceptance is measured on
+    it, against `app.doc_corpus.deployed_collections()` — the live list, the same one
+    the artifact names as its denominator. The two readings agreeing on the live corpus
+    is the whole point of having both.
+
+    `gold_docs_unreturnable` reads gold off each record's `expected.docs`, the way
+    `anchorless_queries` and `gold_bearing_rates` do, so the records built here
+    normalise `expect_docs` into that shape rather than feeding the function a key it
+    ignores.
+
+    An unreadable index SKIPS this node and prints no verdict. It does not pass:
+    `deployed_collections()` answers None precisely so that "the index would not
+    open" cannot be filed as "every label is returnable", which is the same three-state
+    discipline the artifact keeps for `gold_doc_unreturnable: null`.
+    """
+    import eval.run_eval as ev
+    from app import doc_corpus
+
+    colls = doc_corpus.deployed_collections()
+    if colls is None:
+        pytest.skip(
+            "no deployed qmd collection list could be read: the returnability of a "
+            "gold label is a fact about the deployment, and a corpus asserted clean "
+            "against an unreadable index would be a clean bill printed by the thing "
+            "that could not read it")
+    assert colls, "an empty collection list is not a deployment to check against"
+
     specs = yaml.safe_load(CORPUS.read_text())["queries"]
-    present = {(str(s.get("id")), str(d))
-               for s in specs for d in (s.get("expect_docs") or [])}
-    missing = [f"{qid} -> {label}" for qid, label in RETIRABLE_GOLD_LABELS
-               if (qid, label) not in present]
-    assert missing == [], (
-        f"{len(missing)} of the {len(RETIRABLE_GOLD_LABELS)} gold doc labels #1599 "
-        f"found unreturnable are gone from {CORPUS}: {missing}. A dropped query turns "
-        "a permanent doc miss into an absence and lifts `doc_hit_rate` with retrieval "
-        "unchanged; dropping gold is this item's option (c) and a person's call. "
-        "Registering the collection they name is the other way out, and it keeps "
-        "these labels right where they are.")
-    # Whatever the deployment says today, it says it about labels that are still here.
-    rep = _doc_label_satisfiability_report(collections=_deployed_collections())
-    classified = ({(d["query"], d["label"]) for k in
-                   ("satisfied_by", "unsearchable", "dead") for d in rep[k]})
-    assert set(RETIRABLE_GOLD_LABELS) <= classified, (
-        "a pinned label is in the corpus but in none of the three states, so the "
-        "report is not reading it at all")
+    records = [{"id": s.get("id"), "expected": {"docs": list(s.get("expect_docs") or [])}}
+               for s in specs]
+    assert records, f"{CORPUS} carries no queries to check"
+    bad = ev.gold_docs_unreturnable(records, colls)
+    assert bad == [], (
+        f"{len(bad)} gold labels no deployed collection can return: "
+        + "; ".join(f"{b['query']} <- {b['label']}" for b in bad)
+        + ". Each is a permanent doc miss: the query scores 0 on the document leg "
+        "however good retrieval gets, so it drags doc_hit_rate, doc_recall_avg, "
+        "mrr_doc and ndcg10 as a standing penalty and a trend can never clear it")
+
+    # The check must be able to fail. `[]` is also what a rule that matches nothing,
+    # or a pool walk that found no paths, prints — so the same call is given one
+    # record it must name: a retired checkout label, which is the exact string #1662
+    # removed and the exact string `lloyd-architecture/harness.md` that no vault-rooted
+    # collection serves.
+    pool = ev.indexed_paths(colls)
+    assert pool, "the deployed collections yielded no paths, so nothing below is a test"
+    named = ev.gold_docs_unreturnable(
+        records + [{"id": "injected-checkout-label",
+                    "expected": {"docs": ["lloyd-architecture/harness.md"]}}], colls)
+    assert [n["query"] for n in named] == ["injected-checkout-label"], named
+
+    # ...and one it must not: a label copied straight out of the live pool. Without
+    # this the injection above could be satisfied by a predicate that calls everything
+    # unreturnable, which is the failure #1599's first draft actually had (it called 12
+    # queries unreturnable off a `Path.exists()` test over substring labels, on a corpus
+    # of the 86 queries the file held then).
+    good = sorted(pool)[0]
+    assert ev.gold_docs_unreturnable(
+        [{"id": "injected-served-label", "expected": {"docs": [good]}}], colls) == [], (
+        f"{good} was taken from the pool the check itself was given, so the rule is "
+        "not reading that pool")
+
+
+def test_the_gold_file_states_the_size_it_actually_has(tmp_path):
+    """#1662 clause 5: the header's stated query count equals the count the file
+    carries.
+
+    The note #1354 left said "81 -> 86 queries ... DO NOT COMPARE ABSOLUTE VALUES
+    ACROSS THIS POINT" beside the five queries it had just added. Retiring them makes
+    that sentence a lie in two directions at once — the size is 81 again and the
+    discontinuity it warns about is now the wrong one — and a stale size line is worse
+    than none, because the next reader trusts the number instead of counting. So the
+    count is asserted against the file rather than against a constant: this node passes
+    at 81 today and at 82 whenever a query is added, and fails on the day the line and
+    the file disagree, which is the only thing that makes the line worth keeping.
+
+    The #1748 label-policy prose is asserted in the same read, because the edit that
+    rewrites a header is the edit that casually deletes the paragraph above it.
+    """
+    stated, actual = _gold_header_size()
+    assert stated is not None, (
+        f"{CORPUS} carries no '# GOLD SET SIZE:' line; the header's count is where a "
+        "reader gets the denominator before they count, and #1662 is the reason it has "
+        "to be re-measured rather than re-copied")
+    assert stated == actual, (
+        f"the gold header states {stated} queries and the file carries {actual}")
+
+    raw = CORPUS.read_text()
+    after = raw.split("# GOLD SET SIZE:", 1)[1].split("\nqueries:", 1)[0]
+    assert "DO NOT COMPARE ABSOLUTE VALUES" in after, (
+        "the size line carries no do-not-compare warning, so a reader comparing "
+        "tonight's doc means with 2026-09-27's has nothing telling them the "
+        "denominator moved")
+    assert "1662" in after, (
+        "the discontinuity is not attributed to the change that caused it")
+    assert "LABEL POLICY (#1748)" in raw, (
+        "the one-way ratchet on gold label shape was dropped with the size note; it is "
+        "what stops an unreturnable label being widened until it passes")
+
+    # Must be able to fail, three ways a stale line actually goes stale: the count
+    # left behind by a query added elsewhere, the line deleted outright, and a
+    # do-not-compare note dropped while the number survives. Each is asserted on a
+    # copy, because the file itself is the thing under test.
+    stale = raw.replace(f"# GOLD SET SIZE: {stated} queries",
+                        f"# GOLD SET SIZE: {stated + 1} queries", 1)
+    assert _gold_header_size(_write_text(tmp_path, "stale.yaml", stale)) \
+        == (stated + 1, actual)
+    gone = raw.replace(f"# GOLD SET SIZE: {stated} queries", "# GOLD SET SIZE: ?", 1)
+    assert _gold_header_size(_write_text(tmp_path, "unreadable.yaml", gone))[0] is None
+    # The warning assertion above can only fail if the region it reads is the size
+    # block and not the whole header — an earlier note at the top of this file carries
+    # the same all-caps phrase, and a slice that ran to the end of the file would find
+    # that one instead. So the slice is calibrated: it starts at the size marker, ends
+    # at the body, and is a small fraction of the file.
+    assert after.startswith(f" {stated} queries"), after[:80]
+    assert "\nqueries:" not in after and len(after) < len(raw) // 4, (
+        f"the size block was read over {len(after)} of {len(raw)} chars, so the "
+        "do-not-compare phrase it found may be some other note's")
+    missing_line = "\n".join(ln for ln in raw.splitlines()
+                             if not ln.startswith("# GOLD SET SIZE: "))
+    assert _gold_header_size(_write_text(tmp_path, "nolines.yaml", missing_line)) \
+        == (None, actual), "a file with no size line must read as None, not as 0"
+
+
+def _write_text(tmp_path: Path, name: str, text: str) -> Path:
+    p = tmp_path / name
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def _gold_header_size(path: Path = CORPUS) -> tuple:
+    """(the count the header states, the count of `- id:` entries), or (None, n)."""
+    raw = path.read_text()
+    body = raw.split("\nqueries:", 1)
+    actual = sum(1 for ln in (body[1] if len(body) > 1 else raw).splitlines()
+                 if ln.startswith("  - id:"))
+    for ln in raw.splitlines():
+        if ln.startswith("# GOLD SET SIZE: "):
+            head = ln.split("# GOLD SET SIZE: ", 1)[1].split(" ")[0]
+            return (int(head) if head.isdigit() else None), actual
+    return None, actual
 
 # ── #1748: the gold LABEL shape is a one-way ratchet, not a whole-file rule ───
 #

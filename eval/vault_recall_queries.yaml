@@ -65,6 +65,32 @@
 #   was written before any recall run on its query: a gold label read off what the
 #   retriever currently returns manufactures the passing eval this growth exists to
 #   prevent, which is why the spot-check is owed by a person and not by this file.
+#
+# GOLD SET SIZE: 81 queries — the count of `- id:` entries below, which is the
+#   denominator the nightly's document-leg means are taken over. Read as a measurement
+#   and not a memo: tests/test_eval_corpus_guard.py
+#   ::test_the_gold_file_states_the_size_it_actually_has re-counts the entries on every
+#   run and fails if this line disagrees, which is the only thing that makes a stated
+#   count worth the bytes it sits on.
+#
+#   2026-09-28 (#1662) — five queries RETIRED, 86 → 81. THIS IS A RE-BASE POINT FOR THE
+#   DOCUMENT LEG: DO NOT COMPARE ABSOLUTE VALUES ACROSS THIS POINT. The five (#1354)
+#   named documents in the lloyd checkout that no deployed qmd collection indexes, so
+#   each of them counted on the document leg and scored 0 there on every run: removing
+#   them lifts doc_hit_rate, doc_recall_avg, mrr_doc and ndcg10 with retrieval standing
+#   exactly still, which is a mean moving because its population did. No pre/post pair
+#   of this step is quoted here, because a number this file cannot measure is a number
+#   nobody checked. The ENTITY and TERM legs do NOT step here, and that half is
+#   verifiable rather than measured: all five carried `expect_entities: []` and no
+#   `expect_terms`, which is the block-present-names-no-label case `run_eval.py`'s
+#   `_counts_on_leg` already drops from those denominators, so `entity_hit_rate`,
+#   `term_hit_rate` and their retrieval-carried companions are unchanged by the drop.
+#   Paired comparisons hold regardless — scripts/eval_trend_stats.py and the A/B in
+#   workers/sources/automod_regression.py join on ids present in both arms — and the
+#   original 20 remain byte-identical at the head of the file, so the #1319 re-base
+#   above still describes the population underneath this one. The five queries, the
+#   ruling that retired them, and what guards the convention now are recorded in place
+#   at the end of this file.
 
 queries:
   # --- Single-entity lookups (basic retrieval) ---
@@ -934,73 +960,46 @@ queries:
       - 'backlog/733-app-paths-anchors-lloyd-home-to-the-imported-tree-.md'  # relabelled 2026-09-21 (gold audit): the old label did not answer the query
     notes: "A relative artifact path lands in the worktree and disappears with it."
 
-  # --- #1354: questions whose answer is a CURRENT doc in the lloyd checkout ---
+  # --- #1354's checkout-doc queries: RETIRED by #1662 on Alan's ruling (2026-09-28) ---
   #
-  # 2026-09-24. Every label above is vault-rooted. The five below are the first
-  # whose answer lives in `~/lloyd/architecture/` — the checkout's own docs, which
-  # no qmd collection indexes today (deploying one is #1354's human half, blocked
-  # on #1301). Written from the docs themselves, never from recall output.
+  # This block held five queries whose `expect_docs` named a document in
+  # `~/lloyd/architecture/` — the lloyd CHECKOUT's own docs — under the prefix
+  # `lloyd-architecture/`, which is the name of the qmd collection that would have to
+  # index them for anything to return them. No such collection was ever deployed
+  # (#1354's human half, blocked on #1301), so each of the five scored `doc_hit` 0 and
+  # `doc_recall` 0 on every nightly: not a hard question, a permanent doc miss. The
+  # guard reported them as `unsearchable` for four days (#1599) while the number that
+  # let them sit here unnoticed was `doc_hit_rate`, a rate five questions were
+  # structurally unable ever to earn.
   #
-  # LABEL CONVENTION — `lloyd-architecture/<file>.md` means `architecture/<file>.md`
-  # IN THE LLOYD CHECKOUT, and nothing in the vault. The prefix is the name of the
-  # qmd collection that would index those docs, so it is exactly the path the
-  # scorer sees: `vault_recall` returns `<collection>/<relative path>`
-  # (`qmd://lloyd-architecture/harness.md` -> `lloyd-architecture/harness.md`), and
-  # `eval/run_eval.py::_doc_pair_satisfied` is a normalised substring test. The
-  # hyphen is the anchor: normalised, the label reads `lloyd_architecture/…`, which
-  # no vault path contains, so the stale copies under the vault's
-  # `projects/lloyd/architecture/` (which holds a `qmd.md`) and `architecture/`
-  # can never score as the answer. A bare `lloyd/architecture/qmd.md` label would
-  # be satisfied by `projects/lloyd/architecture/qmd.md` — that is the trap.
-  # `tests/test_eval_corpus_guard.py` resolves this prefix against the checkout
-  # only (`CHECKOUT_LABEL_ROOTS`), and records which root satisfied each label.
+  # RETIRED under the authority recorded on #1662 by the owed-human sweep, 2026-09-27:
+  #   "(c) Drop or relabel the five now: the labels are the bug. File (a) as its own
+  #   proposal, deployed only if it measurably helps Lloyd's code-work recall."
+  # A relabel onto these same filenames was not available: the vault's only
+  # `architecture` collection is rooted at ~/obsidian/architecture, which holds none of
+  # these five docs, so a re-point would have been a different question, not this one
+  # answered. What was dropped, and the checkout doc each answered from:
+  #   harness-system-prompt-frozen -> lloyd-architecture/harness.md   (§Invariants)
+  #   automod-gate-rungs           -> lloyd-architecture/automod.md   (§4, the gate)
+  #   recall-doc-pool-ordering     -> lloyd-architecture/retrieval.md (§1, the pipeline)
+  #   qmd-embed-model-switch       -> lloyd-architecture/qmd.md       (§3, models)
+  #   djev-rank-not-gate           -> lloyd-architecture/djev.md      (§7.2, accuracy)
+  # The questions were good ones. They are unanswerable BY THIS CORPUS, which is a fact
+  # about the corpus's reach and not about retrieval, and option (a) — registering
+  # ~/lloyd/architecture as a collection — is what would make them answerable: a
+  # person's call plus an eval over live traffic, not a round's. Re-adding them behind a
+  # deployed prefix is that option being taken; leave this note in place when it is.
   #
-  # HOW THE NIGHTLY SCORES THEM UNTIL THE COLLECTION EXISTS: as honest doc misses.
-  # The runner needs no change and does not crash — they are ordinary labels — but
-  # nothing can return them yet, so each of the five scores doc_hit 0 and
-  # doc_recall 0 until a collection named exactly `lloyd-architecture` is deployed
-  # and added to `VAULT_SEGMENTS` with `path` kept as `<collection>/<rel>`. Adding
-  # them moves the absolute doc_hit/doc_recall/ndcg means once (81 -> 86 queries):
-  # DO NOT COMPARE ABSOLUTE VALUES ACROSS THIS POINT. Paired comparisons join on
-  # ids present in both nights, so they are unaffected; the paired A/B in
-  # `workers/sources/automod_regression.py` scores both arms on this one file.
-  # They carry no expect_entities: they test the document leg, which is the gap.
-  - id: harness-system-prompt-frozen
-    query: "Why does the agent loop never rebuild the system prompt in the middle of a turn, and how does it update state like the todo list instead?"
-    category: technical
-    expect_entities: []
-    expect_docs:
-      - 'lloyd-architecture/harness.md'  # #1354: checkout doc, §Invariants "Position 0 is frozen for the turn"
-    notes: "The position-0 rule: the prompt prefix stays KV-cached, and mid-turn state is appended via state_anchor."
-
-  - id: automod-gate-rungs
-    query: "What checks does the automod gate run on a self-modification before it can land, and which one asks whether the change did what the item asked?"
-    category: technical
-    expect_entities: []
-    expect_docs:
-      - 'lloyd-architecture/automod.md'  # #1354: checkout doc, §4 "The gate" rung table and §4.5 the review rung
-    notes: "The rung ladder, cheapest first, fail-closed; the review rung is the one that reads the item's clauses."
-
-  - id: recall-doc-pool-ordering
-    query: "How does vault recall build its pool of candidate documents, and what orders them before the top results come back?"
-    category: technical
-    expect_entities: []
-    expect_docs:
-      - 'lloyd-architecture/retrieval.md'  # #1354: checkout doc, §1 "The pipeline today" (fused head + floors, djev orders)
-    notes: "Global fusion head plus per-collection floors, ordered by djev, with the cross-encoder as the fallback."
-
-  - id: qmd-embed-model-switch
-    query: "Where is the embedding model for qmd configured, and what happens to the index when you change it?"
-    category: technical
-    expect_entities: []
-    expect_docs:
-      - 'lloyd-architecture/qmd.md'  # #1354: checkout doc, §3 "Models, and the one place they are set"
-    notes: "models: in ~/.config/qmd/index.yml beats the env var; a change is a full re-embed that starts by itself."
-
-  - id: djev-rank-not-gate
-    query: "Why is djev only used to rank candidates and never trusted as a yes-or-no gate with a fixed cutoff?"
-    category: technical
-    expect_entities: []
-    expect_docs:
-      - 'lloyd-architecture/djev.md'  # #1354: checkout doc, §7.2 "Accuracy — the reason nothing gates"
-    notes: "Listwise capacity and label_mass collapse; thresholds belong to one frozen schema, so rank with it, do not gate on it."
+  # WHAT GUARDS THIS NOW, since the queries that made it testable are gone:
+  # tests/test_eval_corpus_guard.py
+  #   ::test_the_five_checkout_doc_queries_are_retired_by_record_and_still_a_tripwire
+  # holds these five ids as retired (absent from `queries:`, named here with their
+  # authority) and INJECTS a checkout-prefixed label to prove the returnability guard
+  # still reddens on a sixth one, plus
+  #   ::test_no_gold_query_scores_a_doc_leg_no_deployed_collection_can_answer
+  # which runs the eval's own predicate over every remaining record. So the convention
+  # below is a comment for whoever re-adds these under option (a), not the last trace
+  # of a rule: `CHECKOUT_LABEL_ROOTS` still resolves the prefix against the checkout
+  # only, and the hyphen is still the anchor — normalised to `lloyd_architecture/…` it
+  # matches no vault path, which is why `projects/lloyd/architecture/qmd.md` could
+  # never satisfy `lloyd-architecture/qmd.md`.

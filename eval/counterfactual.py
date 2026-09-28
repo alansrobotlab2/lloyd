@@ -274,18 +274,15 @@ PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
     "eval-corpus-naming-conventions": ("artifact", "baseline artifacts",
                                        "session transcripts", [], ["naming rules"]),
 
-    # ── #1354: questions answered by the lloyd checkout's architecture docs ──
-    # No expect_entities and no sibling: one modifier or artifact swap each, the
-    # pin being the system the question is about.
-    "harness-system-prompt-frozen": ("qualifier", "never rebuild", "always rebuild",
-                                     [], ["agent loop"]),
-    "automod-gate-rungs": ("qualifier", "before it can land", "after it has landed",
-                           [], ["automod"]),
-    "recall-doc-pool-ordering": ("artifact", "candidate documents",
-                                 "candidate entities", [], ["vault recall"]),
-    "qmd-embed-model-switch": ("artifact", "embedding model", "reranking model",
-                               [], ["qmd"]),
-    "djev-rank-not-gate": ("qualifier", "fixed cutoff", "learned cutoff", [], ["djev"]),
+    # The #1354 block that stood here held five entries — harness-system-prompt-frozen,
+    # automod-gate-rungs, recall-doc-pool-ordering, qmd-embed-model-switch,
+    # djev-rank-not-gate — perturbation plans for the five queries #1662 retired, and it
+    # went with them. The ids stay named here because the table is the surface that
+    # silently rots: a plan entry whose query left the gold file is skipped by
+    # `build_perturbations`'s loop over the specs, so it survives as an entry that
+    # generates nothing while `set(PLAN)` still counts it. What catches that now is
+    # `dangling_references` below, and the records file's counterpart in
+    # tests/test_counterfactual_eval.py::test_no_id_keyed_surface_names_a_query_the_gold_set_does_not_carry.
 }
 
 
@@ -380,6 +377,42 @@ PINS_ABSENT_BY_DESIGN = (
     "self-referential-check-catalogue",  # pins "note"; named in no query text
     "skill-mining-to-promotion",  # pins "promotion step"; prose says "which loop decides"
 )
+
+
+def dangling_references(specs: list[dict], records: dict[str, dict] | None = None,
+                        plan: dict[str, tuple] | None = None,
+                        pins_absent: tuple[str, ...] = PINS_ABSENT_BY_DESIGN,
+                        ) -> dict[str, list[str]]:
+    """{surface: the query ids it names that the gold set does not carry}.
+
+    The drop half of an id-keyed surface, which this file otherwise guards in only
+    one direction. `build_perturbations` refuses a gold query with no plan entry AND a
+    plan entry with no query, so growing or re-generating cannot leave a dangling pair
+    — but nothing of that kind runs when a query is REMOVED from the gold file, and the
+    records are a checked-in artifact. That is how the five #1354 queries could be
+    retired in one file and stay referenced in two others: a reference to a query that
+    no longer exists scores nothing, is skipped by every loop that joins on the gold
+    ids, and leaves the rater covering fewer questions than the trend line's
+    denominator claims while every count still looks self-consistent.
+
+    Three surfaces, because the ids are keyed in three places: the plan this file
+    builds from, the records file it writes, and `PINS_ABSENT_BY_DESIGN`'s exemptions.
+    Pure — the gold specs and the loaded records come in as arguments, so a caller can
+    hand it a corpus of its own and see whether it reports anything at all. An empty
+    dict is the clean answer. `records=None` means the caller loaded no records, which
+    is not the same claim as a records file with no danglers, and is reported as
+    absence of that key rather than as an empty list.
+
+    #1662 retired the first five ids this catches.
+    """
+    gold = {s["id"] for s in specs}
+    out = {
+        "plan": sorted(set(PLAN if plan is None else plan) - gold),
+        "pins_absent": sorted(set(pins_absent) - gold),
+    }
+    if records is not None:
+        out["records"] = sorted(set(records) - gold)
+    return {k: v for k, v in out.items() if v}
 
 
 def pins_absent_from_their_own_swap(specs: list[dict],
@@ -718,7 +751,17 @@ def main(argv: list[str]) -> int:
         print(f"pin audit: {len(offenders)} entries pin a term their own swap "
               f"deletes, {len(unexpected)} of them outside "
               f"PINS_ABSENT_BY_DESIGN")
-        return 1 if (drift or unexpected) else 0
+        # The other half of drift, which the comprehension above cannot see: it walks
+        # the ids the generator produces, so a committed record the generator no longer
+        # produces — a query retired from the gold file, a plan entry left behind — is
+        # simply absent from its iteration and prints nothing. #1662 retired five
+        # queries and this is the entry point that would have said so.
+        danglers = dangling_references(specs, committed)
+        for surface, ids in sorted(danglers.items()):
+            print(f"  DANGLING {surface}: {ids} — names no gold query, so it scores "
+                  "nothing while every count that includes it stays self-consistent")
+        print(f"dangling ids: {sum(len(v) for v in danglers.values())}")
+        return 1 if (drift or unexpected or danglers) else 0
     print("usage: counterfactual.py --write | --check | --verify")
     return 2
 

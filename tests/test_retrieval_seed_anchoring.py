@@ -426,6 +426,13 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
     2026-09-24 (#1354): five queries answered by the checkout's architecture docs
     carry no gold entities, so they cannot be anchorless — the residue stays 25 and
     only the denominator moves, 25 of 86, ceiling 0.709.
+
+    2026-09-28 (#1662): those five queries are retired, and the same thing happens
+    again for the same reason — they never carried entity gold, so no id joins or
+    leaves the residue and only the denominator moves, now 25 of 81, ceiling 0.691.
+    The id list above is unchanged byte for byte, which is what makes that safe to
+    re-pin: a residue that changed MEMBERSHIP is a different finding and needs its own
+    argument, not a tuple edit.
     """
     out = _run_against_the_live_corpus(_CORPUS_SCRIPT)
     assert out["anchorless_first20"] == [
@@ -446,7 +453,7 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
     ], out["anchorless"]
     ceiling = (out["n_queries"] - len(out["anchorless"])) / out["n_queries"]
     assert (len(out["anchorless"]), out["n_queries"], round(ceiling, 3)) == (
-        25, 86, 0.709
+        25, 81, 0.691
     ), f"{len(out['anchorless'])} anchorless of {out['n_queries']} queries"
 
 
