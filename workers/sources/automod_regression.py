@@ -51,9 +51,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from app import doc_corpus
 from app.djev import REPLAY_FAILURES, replay_env, replay_stats
 from eval import retrieval_holdout
-from scripts.automod.evalpin import PinError, PinnedCorpus
+from scripts.automod.evalpin import PinError, PinnedCorpus, pin_index_path
 from workers.queue import WorkQueue, QueueItem
 
 logger = logging.getLogger("lloyd-workers.automod-regression")
@@ -872,6 +873,54 @@ def _run_arm(tree: Path, label: str, env: dict, timeout: float = 900.0, *,
             or _load_run(Path(tree) / "eval" / "baselines", label))
 
 
+class NoiseEnvironmentError(RuntimeError):
+    """The noise floor could not be measured because the environment it
+    measures was not there (#1749): the pinned document corpus answered zero
+    vectors, or answered no count at all. Carries the probe that decided it,
+    so the ledger row can say what the pin held — an empty snapshot and a
+    probe that misread a healthy pin are different repairs, and only the
+    numbers on the row can tell them apart."""
+
+    def __init__(self, message: str, probe: dict):
+        super().__init__(message)
+        self.probe = probe
+
+
+def probe_noise_corpus(pin) -> dict:
+    """The document-corpus count the eval's own #1374 guard will read, asked
+    of this pin BEFORE any noise arm is launched.
+
+    `doc_corpus.collect` / `doc_corpus.vectors_of` are the exact functions
+    `eval/run_eval.py`'s empty-corpus guard consumes — `vecIndex.vectors` at
+    the /health of the daemon the pin's overlay points the recall at — so the
+    refresh cannot disagree with the arms it is about to launch about what
+    "empty" means. `vectors` is None when the daemon answered no count at
+    all: unprovable, which #1749 treats as un-launchable, never as zero.
+    """
+    query_url = f"http://localhost:{pin.port}/query"
+    index_path = pin_index_path(pin.name)
+    block = doc_corpus.collect(query_url, index_path=index_path)
+    return {
+        "vectors": doc_corpus.vectors_of({doc_corpus.DOC_KEY: block}),
+        "health_url": (block or {}).get("health_url") or doc_corpus.health_url_for(query_url),
+        "index_path": str(index_path),
+        "documents": (getattr(pin, "provenance", None) or {}).get("documents"),
+    }
+
+
+def _corpus_env_error(probe: dict) -> NoiseEnvironmentError:
+    docs = f"pin snapshot documents={probe.get('documents')}, index={probe.get('index_path')}"
+    url = probe.get("health_url") or "?"
+    if probe.get("vectors") == 0:
+        why = f"document corpus is empty: vectors=0 on the pinned daemon at {url}"
+    else:
+        why = (f"document corpus vector count unprovable: the pinned daemon at {url} "
+               "answered no vector count")
+    return NoiseEnvironmentError(
+        f"{why} ({docs}) — the failing half is the document corpus, not the fact "
+        "half; no noise arm launched (#1749)", probe)
+
+
 def measure_noise(trials: int = 5, fresh_trials: int = 5) -> dict:
     """Record mean/stdev per metric on an unchanged tree. Run once, by hand.
 
@@ -880,6 +929,13 @@ def measure_noise(trials: int = 5, fresh_trials: int = 5) -> dict:
     describes a different experiment from the one it is used to judge — which
     is exactly how the doc-side metrics came to be armed on a "stdev 0.0000"
     that did not hold when it mattered.
+
+    Before any arm runs it warms the pin — the same warm-up a promotion check
+    does — and probes the document corpus (#1749): an empty or unprovable
+    vector count raises `NoiseEnvironmentError` carrying the probe, and no
+    arm is launched. Nine arms each dying inside the eval's own empty-corpus
+    guard left only "too few samples per metric (0 < 3)" in the ledger, which
+    named neither the corpus nor the half of it that had failed.
 
     Two floors, because the check has two conditions (`ranker_reading`):
 
@@ -903,6 +959,12 @@ def measure_noise(trials: int = 5, fresh_trials: int = 5) -> dict:
     ranker: dict = {}
     try:
         with PinnedCorpus(work) as pin:
+            warm = getattr(pin, "warm_up", None)
+            if callable(warm):
+                warm()
+            probe = probe_noise_corpus(pin)
+            if not probe["vectors"]:
+                raise _corpus_env_error(probe)
             env = pin.env_for(code_root=LIVE_ROOT)
             plan = [(f"trial-{i}", anchor, i == 0, True) for i in range(trials)]
             plan += [(f"fresh-{j}", f"fresh-{j}", False, False) for j in range(1, fresh_trials)]
@@ -933,7 +995,7 @@ def measure_noise(trials: int = 5, fresh_trials: int = 5) -> dict:
         shutil.rmtree(work, ignore_errors=True)
     return _summarise_noise(samples, trials, dropped=dropped,
                             fresh_samples=fresh_samples, fresh_trials=fresh_trials,
-                            ranker=ranker)
+                            ranker=ranker, corpus_probe=probe)
 
 
 def _accumulate(samples: dict, overall: dict) -> None:
@@ -958,7 +1020,7 @@ def queries_fingerprint() -> str:
 
 def _summarise_noise(samples: dict, trials: int, *, dropped: list[str] | None = None,
                      fresh_samples: dict | None = None, fresh_trials: int | None = None,
-                     ranker: dict | None = None) -> dict:
+                     ranker: dict | None = None, corpus_probe: dict | None = None) -> dict:
     def summary(bucket: dict) -> dict:
         return {k: {"mean": statistics.fmean(v),
                     "stdev": (statistics.stdev(v) if len(v) > 1 else 0.0),
@@ -973,6 +1035,13 @@ def _summarise_noise(samples: dict, trials: int, *, dropped: list[str] | None = 
         "pinned": True,
         "metrics": summary(samples),
     }
+    if corpus_probe:
+        # Provenance for the next run (#1749): what the pin's snapshot held and
+        # what its daemon's vector count answered. An empty snapshot and a
+        # probe that misread a healthy pin leave different marks here.
+        noise["pin_documents"] = corpus_probe.get("documents")
+        noise["doc_vectors"] = corpus_probe.get("vectors")
+        noise["doc_health_url"] = corpus_probe.get("health_url")
     if fresh_samples:
         noise["fresh_trials"] = fresh_trials
         noise["metrics_fresh_ranker"] = summary(fresh_samples)
@@ -1419,6 +1488,17 @@ def refresh_stale_floor() -> dict | None:
     so a measurement that keeps failing costs one run and one announcement, not
     one per landing. A result with too few samples is not published: the old
     artifact is put back, and the checks stay honestly stale.
+
+    An attempt that could not start at all is a different thing (#1749). Since
+    09-27 every attempt died inside the eval's own empty-corpus guard, and the
+    row said only "too few samples per metric (0 < 3)" — which named neither
+    the corpus nor its failing half — while the guard at the top of this
+    function refused that fingerprint forever, so the floor could not come
+    back by itself. An `env_failure` row (zero or unprovable document-corpus
+    vectors, or a pin that never came up) still announces loudly on every
+    drained run, but it does not spend the fingerprint: the next drained run
+    tries the same question set again, and the floor returns when the daemon
+    does. A too-thin measurement is still a measurement, and still spends it.
     """
     from scripts.automod import promote as P, state as S
     live = queries_fingerprint()
@@ -1429,29 +1509,49 @@ def refresh_stale_floor() -> dict | None:
         return None     # no floor at all is `_skip`'s case, with its own message
     if not live or old_fp == live:
         return None
+    # An env_failure row did not get to measure anything, so it did not earn
+    # the fingerprint (#1749); any other row — ok or not — spent it once.
     if any(e.get("event") == "noise_refreshed" and e.get("queries_fingerprint") == live
+           and (e.get("ok") or not e.get("env_failure"))
            for e in S.read_events(limit=4000)):
         return None
     logger.info("noise floor is stale (%s, questions now %s); re-measuring", old_fp, live)
     started = time.time()
-    error, noise = "", None
+    error, noise, env_failure, probe = "", None, False, {}
     try:
         noise = measure_noise()
+    except NoiseEnvironmentError as exc:
+        env_failure, error, probe = True, str(exc)[:300], exc.probe
+    except PinError as exc:
+        # A pin that never came up is the environment too: the row names the
+        # daemon, and the fingerprint stays retryable (#1749).
+        env_failure, error = True, f"the pinned corpus never came up: {exc}"[:300]
     except Exception as exc:  # noqa: BLE001 — recorded below, and the old floor kept
         error = repr(exc)[:300]
     counts = [m.get("n", 0) for m in ((noise or {}).get("metrics") or {}).values()]
     ok = bool(counts) and min(counts) >= MIN_FLOOR_SAMPLES
     if not ok:
         NOISE_PATH.write_text(old_text, encoding="utf-8")
-        error = error or f"too few samples per metric ({min(counts) if counts else 0} < {MIN_FLOOR_SAMPLES})"
+        if not env_failure:
+            error = error or f"too few samples per metric ({min(counts) if counts else 0} < {MIN_FLOOR_SAMPLES})"
+    art = noise or {}
     row = {"event": "noise_refreshed", "ok": ok, "queries_fingerprint": live,
            "previous_fingerprint": old_fp, "seconds": round(time.time() - started, 1),
-           "dropped_trials": (noise or {}).get("dropped_trials") or [], "error": error}
+           "dropped_trials": art.get("dropped_trials") or [], "env_failure": env_failure,
+           "pin_documents": art.get("pin_documents", probe.get("documents")),
+           "doc_vectors": art.get("doc_vectors", probe.get("vectors")),
+           "error": error}
     S.append_event(row)
     if ok:
         P.announce("Regression floor re-measured",
                    f"The eval's question set changed ({old_fp} -> {live}); the noise floor "
                    f"was re-measured and regression checks can decide again.")
+    elif env_failure:
+        P.announce("Regression floor is stale",
+                   f"The eval's question set changed ({old_fp} -> {live}) and the floor "
+                   f"could not be re-measured because of the environment: {error} This "
+                   f"question set was not consumed: the next drained regression run "
+                   f"holding the lock will try it again. Checks stay report-only meanwhile.")
     else:
         P.announce("Regression floor is stale",
                    f"The eval's question set changed ({old_fp} -> {live}) and re-measuring "
@@ -2139,6 +2239,16 @@ def main(argv: list[str] | None = None) -> int:
             return 3
         try:
             print(json.dumps(measure_noise(args.trials, args.fresh_trials), indent=2))
+        except NoiseEnvironmentError as exc:
+            # The cause named on stdout (#1749), not a traceback ending in
+            # "empty corpus" three processes down. `finally` releases the lock.
+            print(json.dumps({"env_failure": True, "error": str(exc), "probe": exc.probe},
+                             indent=2))
+            return 1
+        except PinError as exc:
+            print(json.dumps({"env_failure": True,
+                              "error": f"the pinned corpus never came up: {exc}"}, indent=2))
+            return 1
         finally:
             lock.release()
         return 0

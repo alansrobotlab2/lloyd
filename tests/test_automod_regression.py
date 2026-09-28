@@ -336,7 +336,10 @@ def test_missing_metrics_are_skipped_not_assumed_good():
 
 class _FakePin:
     """Stands in for the pinned corpus. The real one snapshots 1 GB and starts
-    a daemon; these tests are about `execute`'s decisions, not the pin."""
+    a daemon; these tests are about `execute`'s decisions, not the pin.
+    `measure_noise` now probes this pin's corpus before arming (#1749), so the
+    three tests that drive it patch a health answer through `_noise_health`."""
+    name = "evalpin"
     provenance = {"index": "/fake/evalpin.sqlite", "documents": 11756}
     port = 8182
 
@@ -695,6 +698,7 @@ def test_measure_noise_drops_a_trial_the_daemon_did_not_answer(monkeypatch, tmp_
     """A flake inside the floor would widen every tolerance by the flake."""
     monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _FakePin())
     monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "noise.json")
+    _noise_health(monkeypatch, 39210)   # the corpus is scoreable; the flake is one trial
     runs = iter([_arm(2, []), _arm(2, ["q1"], doc_hit_rate=0.3), _arm(2, [])])
     monkeypatch.setattr(R, "_run_arm", lambda *a, **k: next(runs))
     noise = R.measure_noise(3, fresh_trials=1)
@@ -1175,6 +1179,7 @@ def test_measure_noise_records_both_floors(monkeypatch, tmp_path):
     djev on their own and carry its spread."""
     monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _FakePin())
     monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "noise.json")
+    _noise_health(monkeypatch, 39210)   # scoreable corpus: the arms are what this tests
     seen: list = []
 
     def run(_tree, label, env):
@@ -1197,6 +1202,7 @@ def test_measure_noise_records_both_floors(monkeypatch, tmp_path):
 def test_measure_noise_drops_a_trial_djev_did_not_answer(monkeypatch, tmp_path):
     monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _FakePin())
     monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "noise.json")
+    _noise_health(monkeypatch, 39210)   # scoreable corpus; djev is what drops the trial
     monkeypatch.setattr(R, "_run_arm", _replay_arms(
         {"trial-1": {"unreachable": 2}},
         {"baseline": _arm(2, []), "current": _arm(2, [], doc_hit_rate=0.1),
@@ -1562,13 +1568,19 @@ def floor_env(monkeypatch, tmp_path):
     import scripts.automod.state as S
     events: list = []
     said: list = []
+    bodies: list = []
     monkeypatch.setattr(S, "append_event", lambda row, **kw: events.append(row))
     monkeypatch.setattr(S, "read_events", lambda **kw: list(events))
-    monkeypatch.setattr(P, "announce", lambda title, body="", **kw: said.append(title))
+
+    def announce(title, body="", **kw):
+        said.append(title)
+        bodies.append(body)
+    monkeypatch.setattr(P, "announce", announce)
     monkeypatch.setattr(R, "NOISE_PATH", tmp_path / "noise.json")
     monkeypatch.setattr(R, "queries_fingerprint", lambda: "new-fp")
+    monkeypatch.delenv("LLOYD_QMD_HEALTH_URL", raising=False)  # doc_corpus.health_url_for override
     (tmp_path / "noise.json").write_text(json.dumps({"queries_fingerprint": "old-fp", "metrics": {}}))
-    return {"events": events, "said": said, "path": tmp_path / "noise.json"}
+    return {"events": events, "said": said, "bodies": bodies, "path": tmp_path / "noise.json"}
 
 
 def _measured(n):
@@ -1609,3 +1621,243 @@ def test_a_thin_measurement_keeps_the_old_floor(floor_env, monkeypatch):
     assert row["ok"] is False and "too few samples" in row["error"]
     assert json.loads(floor_env["path"].read_text())["queries_fingerprint"] == "old-fp", \
         "a floor too thin to be a σ must not be published"
+
+
+# ---------------------------------------------------------------------------
+# A refresh that could not even start: the corpus, said by name (#1749)
+# ---------------------------------------------------------------------------
+#
+# Since 2026-09-27 every refresh attempt died inside `eval/run_eval.py`'s
+# #1374 empty-corpus guard: all nine noise arms drew `vectors=0` from the
+# pinned daemon and died in ~1 s each, the ledger row said only "too few
+# samples per metric (0 < 3)" — naming neither the corpus nor which half of
+# the guard had failed — and the guard at the top of `refresh_stale_floor`
+# then refused that fingerprint forever, so a stale floor could never come
+# back by itself. The refresh now reads the SAME document-corpus count that
+# guard consumes (`doc_corpus.collect`/`vectors_of`, the pin daemon's own
+# /health), BEFORE any arm launches, records the pin's document and vector
+# counts on the row, and treats an un-launchable corpus as an environment
+# failure that does not spend the one-attempt-per-fingerprint budget.
+
+_UNPROBEABLE = object()
+
+
+class _NoisePin:
+    """The pinned corpus as a noise refresh sees it. The daemon's /health
+    answer is supplied per-test through `_noise_health`, because that answer's
+    `vecIndex.vectors` is the count the eval's own #1374 guard reads: the
+    refresh crosses the same HTTP seam through the same `doc_corpus.collect`
+    and `vectors_of` functions, with only the socket replaced."""
+
+    name = "evalpin"
+    port = 8182
+    PIN_DOCUMENTS = 11979
+
+    def __init__(self, trace: list | None = None):
+        self.trace = trace if trace is not None else []
+        self.provenance = {"index": "/fake/evalpin.sqlite", "documents": self.PIN_DOCUMENTS,
+                           "bytes": 642445312, "port": 8182}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def warm_up(self):
+        self.trace.append("warm")   # the same warm-up a promotion check does
+
+    def env_for(self, base=None, *, code_root=None):
+        return {"LLOYD_CONFIG_OVERLAY": "/fake/overlay.yaml",
+                "LLOYD_CODE_ROOT": str(code_root or "/fake/tree")}
+
+    def discard(self):
+        pass
+
+
+def _noise_health(monkeypatch, vectors, trace: list | None = None):
+    """What the pinned daemon's /health answers for `vecIndex.vectors`;
+    `_UNPROBEABLE` means it answered no count at all."""
+    def fetch(url, timeout=None):
+        (trace if trace is not None else []).append("health")
+        if vectors is _UNPROBEABLE:
+            raise OSError("connection refused")
+        return {"vectors": _NoisePin.PIN_DOCUMENTS, "vecIndex": {"vectors": vectors}}
+    monkeypatch.setattr(R.doc_corpus, "fetch_json", fetch)
+
+
+def test_the_probe_reads_the_count_the_eval_guard_reads(monkeypatch):
+    """The pre-arm probe asks the pin's own daemon, on the pin's own port,
+    through the eval guard's own reader functions — not a constant."""
+    monkeypatch.delenv("LLOYD_QMD_HEALTH_URL", raising=False)
+    _noise_health(monkeypatch, 39210)
+    probe = R.probe_noise_corpus(_NoisePin())
+    assert probe == {"vectors": 39210, "health_url": "http://localhost:8182/health",
+                     "index_path": str(R.pin_index_path("evalpin")),
+                     "documents": _NoisePin.PIN_DOCUMENTS}
+
+
+def test_an_empty_doc_corpus_launches_no_arm_and_names_the_failing_half(floor_env, monkeypatch):
+    """Clause 1 + 2: vectors=0 at the pin's /health means no arm is ever
+    launched, and the row and the announcement name the document half, the
+    count and its health url — not "too few samples"."""
+    trace: list = []
+    _noise_health(monkeypatch, 0, trace)
+    monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _NoisePin(trace))
+    monkeypatch.setattr(R, "_run_arm", lambda *a, **k: pytest.fail(
+        "a noise arm launched against a zero-vector document corpus"))
+    row = R.refresh_stale_floor()
+
+    assert row["ok"] is False and row["env_failure"] is True
+    assert row["pin_documents"] == _NoisePin.PIN_DOCUMENTS and row["doc_vectors"] == 0
+    assert trace == ["warm", "health"], "the pin was warmed and probed, and no arm ran"
+    err = row["error"]
+    assert "vectors=0" in err and "http://localhost:8182/health" in err
+    assert "document corpus" in err and "not the fact half" in err
+    assert "too few samples" not in err
+    assert json.loads(floor_env["path"].read_text())["queries_fingerprint"] == "old-fp", \
+        "an environment failure must leave the published floor alone"
+    assert floor_env["said"] == ["Regression floor is stale"]
+    assert "vectors=0" in floor_env["bodies"][0] and "too few samples" not in floor_env["bodies"][0]
+
+
+def test_an_unprobeable_doc_corpus_still_yields_a_row_naming_the_health_url(floor_env, monkeypatch):
+    """Clause 2 + 5: a daemon that answers no count is unprovable, and
+    unprovable is un-launchable — a row naming the health url, never a
+    silent None that reads as "nothing happened"."""
+    _noise_health(monkeypatch, _UNPROBEABLE)
+    monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _NoisePin())
+    monkeypatch.setattr(R, "_run_arm", lambda *a, **k: pytest.fail(
+        "a noise arm launched against an unprobeable document corpus"))
+    row = R.refresh_stale_floor()
+
+    assert row is not None, "an unprobeable pin must never read as 'nothing happened'"
+    assert row["ok"] is False and row["env_failure"] is True and row["doc_vectors"] is None
+    assert row["pin_documents"] == _NoisePin.PIN_DOCUMENTS
+    assert "unprovable" in row["error"] and "http://localhost:8182/health" in row["error"]
+    assert "too few samples" not in row["error"]
+    assert floor_env["said"] == ["Regression floor is stale"]
+    assert "http://localhost:8182/health" in floor_env["bodies"][0]
+
+
+def test_an_environment_failure_does_not_spend_the_question_set(floor_env, monkeypatch):
+    """Clause 3: after an env-failed attempt a later refresh at the SAME
+    live fingerprint attempts again, and every attempt announces loudly."""
+    _noise_health(monkeypatch, 0)
+    monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _NoisePin())
+    monkeypatch.setattr(R, "_run_arm", lambda *a, **k: pytest.fail("an arm launched on an empty corpus"))
+    first = R.refresh_stale_floor()
+    second = R.refresh_stale_floor()
+
+    assert first["env_failure"] is True
+    assert second is not None and second["env_failure"] is True, \
+        "an environment failure must leave the fingerprint retryable"
+    rows = [e for e in floor_env["events"] if e["event"] == "noise_refreshed"]
+    assert len(rows) == 2 and all(r["queries_fingerprint"] == "new-fp" for r in rows)
+    assert floor_env["said"] == ["Regression floor is stale"] * 2, \
+        "every attempt still announces; never silent gating"
+
+
+def test_a_pin_that_never_came_up_is_an_environment_failure_too(floor_env, monkeypatch):
+    from scripts.automod.evalpin import PinError
+
+    def dead(workdir, **kw):
+        raise PinError("the pinned daemon did not come up")
+    monkeypatch.setattr(R, "PinnedCorpus", dead)
+    row = R.refresh_stale_floor()
+
+    assert row["ok"] is False and row["env_failure"] is True
+    assert "pinned corpus never came up" in row["error"]
+    assert R.refresh_stale_floor() is not None, "a dead pin must not spend the fingerprint"
+
+
+def test_a_full_refresh_against_an_answerable_corpus_publishes_the_floor(floor_env, monkeypatch):
+    """Clause 5's healthy half and clause 4's publish gate: all nine arms
+    run, every metric has n = 5 >= MIN_FLOOR_SAMPLES, the artifact and the
+    row carry the pin's counts, and the floor goes live."""
+    trace: list = []
+    _noise_health(monkeypatch, 39210, trace)
+    monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _NoisePin(trace))
+    good = {"overall": {"doc_hit_rate": 0.6, "ndcg10": 0.4}, "corpus_ok": True,
+            "corpus": {}, "n_records": 81, "empty_doc_queries": []}
+    arms: list = []
+
+    def arm(tree, label, env, **kw):
+        arms.append(label)
+        assert env.get("LLOYD_CONFIG_OVERLAY"), "an arm ran without the pinned overlay"
+        return {**good, "overall": dict(good["overall"])}
+    monkeypatch.setattr(R, "_run_arm", arm)
+
+    row = R.refresh_stale_floor()
+    assert row["ok"] is True and not row["env_failure"]
+    assert len(arms) == 9, f"five replayed and four fresh arms must all run: {arms}"
+    assert row["pin_documents"] == _NoisePin.PIN_DOCUMENTS and row["doc_vectors"] == 39210
+    art = json.loads(floor_env["path"].read_text())
+    assert art["queries_fingerprint"] == "new-fp"
+    assert art["doc_vectors"] == 39210 and art["pin_documents"] == _NoisePin.PIN_DOCUMENTS
+    assert min(m["n"] for m in art["metrics"].values()) >= R.MIN_FLOOR_SAMPLES
+    assert floor_env["said"] == ["Regression floor re-measured"]
+
+
+def test_a_thin_full_refresh_publishes_nothing_and_spends_the_fingerprint(floor_env, monkeypatch):
+    """Clause 4 through the real arm path, and the other half of clause 3:
+    a measurement below MIN_FLOOR_SAMPLES is not published, keeps the old
+    artifact, says "too few samples" — and, being a measurement, spends the
+    fingerprint exactly as it always did."""
+    _noise_health(monkeypatch, 39210)
+    monkeypatch.setattr(R, "PinnedCorpus", lambda workdir, **kw: _NoisePin())
+
+    def arm(tree, label, env, **kw):
+        if not label.endswith("trial-0"):
+            return None       # the arm died (rc != 0), exactly as `_run_arm` returns
+        return {"overall": {"doc_hit_rate": 0.6}, "corpus_ok": True, "corpus": {},
+                "n_records": 81, "empty_doc_queries": []}
+    monkeypatch.setattr(R, "_run_arm", arm)
+
+    row = R.refresh_stale_floor()
+    assert row["ok"] is False and row["env_failure"] is False
+    assert "too few samples per metric (1 < 3)" in row["error"]
+    assert row["doc_vectors"] == 39210 and row["pin_documents"] == _NoisePin.PIN_DOCUMENTS
+    assert json.loads(floor_env["path"].read_text())["queries_fingerprint"] == "old-fp", \
+        "below MIN_FLOOR_SAMPLES the floor must not be published"
+    assert R.refresh_stale_floor() is None, "a measurement this thin still spends the fingerprint"
+
+
+def test_the_refresh_runs_only_from_a_drained_run_holding_the_lock(monkeypatch):
+    """Clause 3's other half: the refresh is reached only from `run_pending`
+    inside `regression.lock` after the queue drains — and NOT when the last
+    check requested a rollback, which lets the guardian act first."""
+    import scripts.automod.state as S
+    trace: list = []
+
+    class _FakeLock:
+        def __init__(self, *a, **kw):
+            pass
+
+        def acquire(self):
+            trace.append("lock")
+            return self
+
+        def release(self):
+            trace.append("unlock")
+
+    monkeypatch.setattr(S, "Lock", _FakeLock)
+    monkeypatch.setattr(R, "sweep_stale_scratch", lambda: trace.append("sweep"))
+    monkeypatch.setattr(R, "_arm_watchdog", lambda c: None)
+    monkeypatch.setattr(R, "_disarm_watchdog", lambda: None)
+    monkeypatch.setattr(R, "refresh_stale_floor", lambda: trace.append("refresh") or None)
+
+    monkeypatch.setattr(R, "pending_promotions", lambda: [])
+    R.run_pending()
+    assert trace == ["lock", "sweep", "refresh", "unlock"], \
+        "the refresh runs inside the regression lock, after the queue drains"
+
+    trace.clear()
+    queue: list = [[{"commit": "a" * 40, "parent": "b" * 40}], []]
+    monkeypatch.setattr(R, "pending_promotions", lambda: queue.pop(0) if queue else [])
+    monkeypatch.setattr(R, "check_promotion",
+                        lambda item, stage: trace.append("checked") or {"status": "measured",
+                                                                        "regressed": True})
+    out = R.run_pending()
+    assert out and out[-1]["regressed"] is True
+    assert "refresh" not in trace, "a requested rollback precedes the floor refresh"
