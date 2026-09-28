@@ -1774,3 +1774,296 @@ def test_approve_calls_the_store_unreadable_instead_of_zero_edges(
     out = capsys.readouterr().out
     assert "Conversation edges in the store: UNKNOWN" in out, out
     assert "Conversation edges in the store: 0" not in out, out
+
+
+# ---------------------------------------------------------------------------
+# #1653 — the 0.70-0.84 band, admitted by rank and expirable
+# ---------------------------------------------------------------------------
+#
+# `auto_approve_strong` had one gate: `DEFAULT_AUTO_APPROVE_THRESHOLD = 0.85`. A
+# scored row under it got an `awaiting_review` stamp and stayed `pending`
+# forever, because the review that stamp names does not exist and nobody is
+# going to staff one. The ruling this section implements (#1653): let the band
+# in as INFERRED edges that expire on their own, behind a flag that is off by
+# default, and keep them only if the recall eval says they cost nothing.
+#
+# Two properties the tests below hold hardest:
+#   * `confidence` is an ordering, not a probability, so admission is BY RANK
+#     under a cap. Measured 2026-09-27 across the live proposals file, the 22
+#     dead-end rows sit in exactly two modes, 11 @ 0.53 and 11 @ 0.80 — a fixed
+#     0.70 floor would admit half the pool and call that a policy.
+#   * A band edge must be enumerable apart from a floor edge from the row alone
+#     (`accepted_by: auto_band` + `band_admission`), because the A/B has to be
+#     able to ask which gate landed what.
+
+def _band_pool(cr, confidences: list[float]) -> list[dict]:
+    """Aged, LLM-scored `pending` rows at the given confidences, all distinct
+    pairs so the store cannot merge them and hide a rank decision."""
+    pool = []
+    for i, conf in enumerate(confidences):
+        pool.append(_classified_proposal(
+            cr, source=f"knowledge/band-{i}.md", target=f"knowledge/partner-{i}.md",
+            confidence=conf))
+    return pool
+
+
+def test_the_band_flag_off_leaves_a_080_row_pending_and_the_line_unchanged(cr):
+    """Clause 1 (flag off, the default): a 0.80 scored row is untouched — same
+    `status: pending`, same `awaiting_review` mark #1364 gave it — and
+    `format_acceptance_band` prints the #1364 sentence with nothing appended."""
+    row = _classified_proposal(cr, confidence=0.80)
+    proposals = [row]
+
+    assert cr.auto_approve_strong(proposals) == 0, "the default admits no band row"
+    assert row["status"] == "pending"
+    assert row["awaiting_review"] == \
+        "below_auto_approve_floor@0.85, no review route exists"
+    assert "band_admission" not in row and "accepted_by" not in row
+
+    line = cr.format_acceptance_band(proposals)
+    assert line == ("Auto-approve floor 0.85: auto-approved 0 "
+                    "| 1 LLM-classified below the floor, awaiting a review that "
+                    "does not exist"), line
+
+
+def test_the_band_admits_by_rank_under_the_cap_and_leaves_the_floor_alone(cr):
+    """Clause 2 (flag on): admission is the top `band_cap` rows by confidence.
+
+    The fixture is the live shape: rows at 0.80 and rows at 0.53 (the two modes
+    measured 2026-09-27), plus one row above the floor so the >= 0.85 path is
+    seen running at the same time. The cap is 2, so exactly the two highest
+    in-band rows flip; the 0.53 rows keep their dead-end mark, and
+    `DEFAULT_AUTO_APPROVE_THRESHOLD` is still 0.85 — the band did not move the
+    floor it sits under.
+    """
+    assert cr.DEFAULT_AUTO_APPROVE_THRESHOLD == 0.85
+    pool = _band_pool(cr, [0.80, 0.80, 0.53, 0.53]) + [
+        _classified_proposal(cr, source="knowledge/strong.md",
+                             target="knowledge/partner-strong.md", confidence=0.95)]
+
+    approved = cr.auto_approve_strong(pool, band=True, band_cap=2)
+
+    in_band = [p for p in pool if 0.70 <= p["confidence"] < 0.85]
+    assert len(in_band) == 2 and all(p["status"] == "approved" for p in in_band), in_band
+    assert all("awaiting_review" not in p for p in in_band), (
+        "an admitted row must not keep saying it waits for a review")
+    below = [p for p in pool if p["confidence"] == 0.53]
+    assert all(p["status"] == "pending" and p["awaiting_review"] for p in below), (
+        "0.53 is under the band floor: it stays the dead end it was, marked")
+    strong = [p for p in pool if p["confidence"] == 0.95][0]
+    assert strong["status"] == "approved" and strong["accepted_by"] == cr.AUTO_ACCEPTED_BY
+    assert approved == 3, "2 band rows plus the 1 above the floor"
+
+    # The two gates are counted separately in the run's own report line, because
+    # a band-enabled night must not read as a floor night: the 0.53 rows still
+    # sit below the floor, and the 2 admitted rows are not `auto_approved`.
+    line = cr.format_acceptance_band(pool)
+    assert line.startswith("Auto-approve floor 0.85: auto-approved 1"), line
+    assert "2 LLM-classified below the floor" in line, line
+    assert "2 admitted by the 0.7-0.85 band (rank-capped, expiring)" in line, line
+
+
+def test_the_band_cap_admits_the_highest_ranked_rows_when_the_pool_exceeds_it(cr):
+    """Clause 2's rank half with the cap actually binding: 3 in-band rows at
+    0.80 / 0.78 / 0.71 and a cap of 2 admits 0.80 and 0.78 and leaves 0.71
+    pending. Rank, not the score, decided — the same two rows would be refused
+    at a cap of 2 if their confidences were swapped with the 0.53 mode."""
+    pool = _band_pool(cr, [0.80, 0.78, 0.71])
+
+    cr.auto_approve_strong(pool, band=True, band_cap=2)
+
+    admitted = sorted(p["confidence"] for p in pool if p["status"] == "approved")
+    assert admitted == [0.78, 0.80], pool
+    refused = [p for p in pool if p["status"] == "pending"]
+    assert len(refused) == 1 and refused[0]["confidence"] == 0.71, refused
+    assert refused[0]["awaiting_review"], "the refused row keeps naming its gate"
+
+
+def test_a_band_admitted_row_names_the_band_as_its_admitting_gate(cr):
+    """Clause 3: from the row alone, without the store, you can tell which gate
+    admitted it. A band row carries `accepted_by: auto_band` and a
+    `band_admission` marker quoting 0.7-0.85 and the age; a floor row carries
+    `accepted_by: auto` and `auto_acceptance`. The two values are what make the
+    edge sets enumerable apart for the recall A/B."""
+    pool = _band_pool(cr, [0.80]) + [
+        _classified_proposal(cr, source="knowledge/strong.md",
+                             target="knowledge/partner-strong.md", confidence=0.95)]
+    cr.auto_approve_strong(pool, band=True, band_cap=5)
+
+    band_row, floor_row = pool[0], pool[1]
+    assert band_row["accepted_by"] == "band", band_row
+    assert band_row["band_admission"] == "band_admitted@0.7-0.85, unreviewed", band_row
+    assert "auto_acceptance" not in band_row
+    assert floor_row["accepted_by"] == "auto" and floor_row["auto_acceptance"] == \
+        "auto_approved@0.85, unreviewed", floor_row
+    assert "band_admission" not in floor_row
+
+    # The same separation through the edge-field join the landing path uses.
+    assert cr.acceptance_fields(band_row) == {
+        "accepted_by": "band",
+        "band_admission": "band_admitted@0.7-0.85, unreviewed"}
+    assert cr.acceptance_fields(floor_row)["accepted_by"] == "auto"
+
+
+def test_a_band_edge_lands_inferred_and_expiring_while_a_floor_edge_does_not(cr, store):
+    """Clause 4: across the store boundary. The band row's edge is INFERRED and
+    carries a non-null `expired_at` whose reason names the band, so the owed
+    rollback is one bulk expiry over one marker rather than a forensic search.
+    The >= 0.85 row lands exactly as it did before this change: DERIVED, and
+    `expired_at` NULL."""
+    pool = _band_pool(cr, [0.80]) + [
+        _classified_proposal(cr, source="knowledge/strong.md",
+                             target="knowledge/partner-strong.md", confidence=0.95)]
+    cr.auto_approve_strong(pool, band=True, band_cap=5)
+    assert cr.land_approved_edges(pool) == 2
+
+    # Read by id, not `find_active`: a band row's `expired_at` is non-null the
+    # moment it lands, and every active reader selects `expired_at IS NULL`.
+    band_edge = store.edges.by_id(pool[0]["edge_id"])
+    floor_edge = store.edges.find_active("knowledge/strong.md",
+                                         "knowledge/partner-strong.md", "related_to")
+    assert band_edge and floor_edge, "neither row landed"
+
+    assert band_edge["provenance"] == "INFERRED", band_edge
+    assert band_edge["expired_at"], "a band edge has to arrive with its removal date"
+    assert band_edge["expired_reason"] == "band_admission_ttl", band_edge["expired_reason"]
+    assert band_edge["accepted_by"] == "band" and band_edge["band_admission"] == \
+        "band_admitted@0.7-0.85, unreviewed", band_edge
+    assert band_edge["origin"] == "conversation", band_edge
+
+    # The >= 0.85 path is unchanged in every field #773 wrote, and expires
+    # nothing. (Its provenance was already INFERRED before this item; only the
+    # acceptance marker distinguishes the two routes.)
+    assert floor_edge["provenance"] == "INFERRED", floor_edge
+    assert floor_edge["expired_at"] is None, (
+        "the >= 0.85 path is unchanged: an auto-approved edge does not expire")
+    assert floor_edge["accepted_by"] == "auto" and "band_admission" not in floor_edge
+
+
+def test_the_band_never_touches_an_unscored_row_even_in_the_confidence_range(cr, store):
+    """A row Stage 2 never scored has no confidence of its own, so rank cannot
+    decide it. It stays pending and lands nothing — the same protection the
+    floor gate has, and the reason `auto_approve_strong` asks
+    `classification_source` before it looks at a score."""
+    unscored = _aged_proposal(cr, confidence=0.80, source="knowledge/x.md",
+                              target="knowledge/y.md")
+    assert "classification_source" not in unscored
+
+    assert cr.auto_approve_strong([unscored], band=True, band_cap=5) == 0
+    assert unscored["status"] == "pending" and "accepted_by" not in unscored
+    assert cr.land_approved_edges([unscored]) == 0
+
+
+def test_the_cli_passes_the_band_flag_into_the_approve_run(cr, monkeypatch):
+    """Clause 5's code half, across the argv boundary: `--approve-strong
+    --approve-band` reaches `cmd_approve` as `band=True`, and plain
+    `--approve-strong` reaches it with the band off, so the nightly line is what
+    turns the band on and nothing else is."""
+    seen: list = []
+    monkeypatch.setattr(cr, "cmd_approve", lambda **kw: seen.append(kw))
+    argvs = [["prog", "--approve-strong"],
+             ["prog", "--approve-strong", "--approve-band"],
+             ["prog", "--approve-strong", "--approve-band", "--band-cap", "3"]]
+    for argv in argvs:
+        monkeypatch.setattr(sys, "argv", argv)
+        cr.main()
+
+    assert seen == [{"band": False, "band_cap": cr.BAND_DEFAULT_CAP},
+                    {"band": True, "band_cap": cr.BAND_DEFAULT_CAP},
+                    {"band": True, "band_cap": 3}], seen
+
+
+def test_cmd_approve_announces_which_gate_ran(cr, store, monkeypatch, capsys):
+    """Clause 5's report half: the run prints its own admission mode, because
+    task #51 reports what this command printed and a band-enabled night must be
+    distinguishable in the report, not only in the command line. With the band
+    off the report line is the #1364/#1584 sentence unchanged."""
+    monkeypatch.setattr(cr, "PROPOSALS_FILE", cr.Path(cr.__file__).parent / "p.json")
+    monkeypatch.setattr(cr, "RELATIONS_INDEX", cr.Path(cr.__file__).parent / "i.json")
+    pool = _band_pool(cr, [0.80])
+    (cr.Path(cr.__file__).parent / "p.json").write_text(
+        json.dumps({"watermark": {}, "proposals": pool, "stats": {}}), encoding="utf-8")
+
+    cr.cmd_approve()
+    off = capsys.readouterr().out
+    assert "Band admission: ON" not in off, off
+    assert "Auto-approve floor 0.85: auto-approved 0 | 1 LLM-classified below " \
+        "the floor, awaiting a review that does not exist" in off, off
+
+    cr.cmd_approve(band=True)
+    on = capsys.readouterr().out
+    assert "Band admission: ON" in on, on
+    assert "band_admitted=auto_band" in on or "band" in on, on
+
+
+def test_the_band_bounds_are_inclusive_at_the_floor_and_exclusive_at_the_ceiling(cr):
+    """The band's own range, with no cap to hide behind (cap 10, four rows): 0.69
+    stays the marked dead end, 0.70 and 0.84 are admitted by the band, and 0.85
+    goes through the floor gate instead — so the band never claims a row the
+    >= 0.85 path owns, and the admitted set is decided by the numbers alone.
+
+    A row at 0.53 in a pool whose cap excludes it proves nothing about the range;
+    this pool has no such row, so removing the range check has to fail here.
+    """
+    pool = _band_pool(cr, [0.69, 0.70, 0.84, 0.85])
+
+    approved = cr.auto_approve_strong(pool, band=True, band_cap=10)
+
+    by_conf = {p["confidence"]: p for p in pool}
+    assert by_conf[0.69]["status"] == "pending", by_conf[0.69]
+    assert by_conf[0.69]["awaiting_review"], "0.69 is below the band floor"
+    assert "accepted_by" not in by_conf[0.69]
+
+    for conf in (0.70, 0.84):
+        row = by_conf[conf]
+        assert row["status"] == "approved" and row["accepted_by"] == "band", row
+        assert row["band_expires_at"], row
+
+    floor_row = by_conf[0.85]
+    assert floor_row["status"] == "approved" and floor_row["accepted_by"] == "auto", floor_row
+    assert "band_admission" not in floor_row and "band_expires_at" not in floor_row
+    assert approved == 3, "2 band rows + 1 floor row, and 0.69 refused"
+
+    # The ceiling half read on the predicate itself, over rows the run above has
+    # not flipped (it requires `status: pending`, so a decided row answers False
+    # whatever its score): the band's own range stops below 0.85, so it can
+    # never claim a row the floor gate owns.
+    fresh = _band_pool(cr, [0.70, 0.84, 0.85])
+    assert cr.in_acceptance_band(fresh[0]) and cr.in_acceptance_band(fresh[1])
+    assert not cr.in_acceptance_band(fresh[2])
+
+
+def test_the_nightly_approve_command_in_the_skill_carries_the_band_flag(cr, monkeypatch):
+    """Clause 5: the nightly job runs whatever command this skill prints — task
+    #51 declares no command of its own — so a flag that is not on that line
+    means the band is off in production no matter what the code can do. Read
+    from `vault_root()`, which `app/data_root.py` derives the way `app.paths`
+    does; asserting rather than skipping when the file is absent, because a
+    skipped cross-surface check is an unenforced one.
+
+    The same line is then executed against the real `main()` parser, so the
+    assertion is about a command that actually runs and not about a substring
+    somebody wrote.
+    """
+    from app.data_root import vault_root
+
+    skill = vault_root() / "skills" / "conversation-relation-linking" / "SKILL.md"
+    text = skill.read_text(encoding="utf-8")
+
+    approve_lines = [ln.strip() for ln in text.splitlines()
+                     if "conversation_relations.py --approve" in ln]
+    assert approve_lines, f"{skill} prints no approve command"
+    assert all("--approve-band" in ln for ln in approve_lines), approve_lines
+
+    # And the flags on that line are real flags of this script that reach the
+    # approve run: argv from the doc through the real `main()`, with only
+    # `cmd_approve` stubbed so nothing touches the live proposals file.
+    doc_argv = approve_lines[0].split()
+    assert doc_argv[0] == "python3", doc_argv
+    assert doc_argv[1].endswith("conversation_relations.py"), doc_argv
+    seen: list = []
+    monkeypatch.setattr(cr, "cmd_approve", lambda **kw: seen.append(kw))
+    monkeypatch.setattr(sys, "argv", doc_argv[1:])
+    cr.main()
+    assert seen and seen[0]["band"] is True, seen
+    assert seen[0]["band_cap"] == cr.BAND_DEFAULT_CAP, seen

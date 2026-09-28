@@ -14,6 +14,8 @@ Usage:
     python3 conversation_relations.py --full           # Both stages, ignore watermark
     python3 conversation_relations.py --stats          # Print statistics
     python3 conversation_relations.py --approve-strong # Auto-approve confidence >= 0.85
+    python3 conversation_relations.py --approve-strong --approve-band   # ...and the
+    # top-ranked 0.70-0.84 band on top of it, as expirable INFERRED edges (#1653)
 """
 
 import argparse
@@ -730,6 +732,15 @@ def acceptance_fields(p: dict) -> dict:
     A mark with no marker text can only come from a hand-edited proposals file;
     it is recorded against the shipped default rather than left nameless.
     """
+    if p.get("accepted_by") == BAND_ACCEPTED_BY:
+        # A different gate, so a different marker and a different `accepted_by`
+        # value: "which of the two auto routes admitted this edge?" has to be
+        # answerable from the row, because #1653 keeps the band only if its
+        # edges score no worse on recall than the floor's.
+        return {
+            "accepted_by": BAND_ACCEPTED_BY,
+            "band_admission": p.get("band_admission") or band_acceptance_marker(),
+        }
     if p.get("accepted_by") != AUTO_ACCEPTED_BY:
         return {}
     return {
@@ -756,6 +767,119 @@ def acceptance_fields(p: dict) -> dict:
 # stay pending and re-admittable.
 AWAITING_REVIEW_FIELD = "awaiting_review"
 LLM_CLASSIFICATION_SOURCE = "llm"
+
+# ── The 0.70-0.84 band (#1653) ───────────────────────────────────────────────
+# #1364's ruling: land the band as INFERRED `co_accessed` edges behind a flag,
+# expirable, no review UI (nobody will staff one), and keep it only on a
+# non-inferior recall score. The pool is real — measured 2026-09-27 over the live
+# proposals file, 22 pending LLM-classified rows under the floor and none
+# carrying `accepted_by`, in two modes (11 @ 0.53, 11 @ 0.80). A fixed 0.70 floor
+# therefore admits half of it and nothing decides the order, so admission is by
+# RANK under a cap: the score is a classifier's ordering, not a probability, and
+# recalibrating it to a threshold it was never calibrated for is the mistake the
+# item's Notes warn against.
+#
+# Everything here is opt-in: `DEFAULT_AUTO_APPROVE_THRESHOLD` stays 0.85, and the
+# flag-off path is byte-identical to #1364's, including the report line.
+BAND_ACCEPTED_BY = "band"
+BAND_FLOOR = 0.70
+#: Exclusive: the floor is its own gate and the band must not reach it, or the
+#: two admission routes would both claim the same row.
+BAND_CEILING = DEFAULT_AUTO_APPROVE_THRESHOLD
+#: How many in-band rows one night may admit, most confident first.
+BAND_DEFAULT_CAP = 10
+#: Days a band edge lives. The band is unreviewed by construction, so its edges
+#: carry their own removal route instead of waiting for one (#1653's rollback
+#: clause asks who bulk-expires them; this field is what makes that a `WHERE`).
+BAND_DEFAULT_TTL_DAYS = 45
+BAND_EXPIRES_FIELD = "band_expires_at"
+BAND_EXPIRY_REASON = "band_admission_ttl"
+#: The 48 h the floor gate waits before admitting; the band shares it.
+AUTO_APPROVE_AGE_HOURS = 48
+
+
+def band_acceptance_marker(floor: float = BAND_FLOOR,
+                           ceiling: float = BAND_CEILING) -> str:
+    """Text naming the gate that admitted a band edge: its name, both numbers of
+    the band it admitted on, and that nobody reviewed it. The band's mirror of
+    `auto_acceptance_marker`, spelled differently on purpose so the two
+    admissions never read as one (#1653 clause 3)."""
+    return f"band_admitted@{floor:g}-{ceiling:g}, unreviewed"
+
+
+def in_acceptance_band(p: dict, floor: float = BAND_FLOOR,
+                       ceiling: float = BAND_CEILING) -> bool:
+    """True for a row the band could admit: pending, scored by Stage 2, and
+    scoring `floor <= confidence < ceiling`.
+
+    The same `classification_source: llm` discipline as
+    `below_auto_approve_floor`: an unscored co-access row's confidence is Stage
+    1's weight, not a verdict, and admitting those would put a rank on a number
+    that ranks nothing.
+    """
+    if p.get("status") != "pending":
+        return False
+    if p.get("classification_source") != LLM_CLASSIFICATION_SOURCE:
+        return False
+    conf = float(p.get("confidence", 0) or 0)
+    return floor <= conf < ceiling
+
+
+def select_band_admissions(proposals: list[dict], cap: int = BAND_DEFAULT_CAP,
+                           floor: float = BAND_FLOOR,
+                           ceiling: float = BAND_CEILING) -> list[dict]:
+    """The in-band rows one run may admit: most confident first, at most `cap`.
+
+    Rank, not recalibration. Ties break on `proposed_at` then the pair itself, so
+    the selection is a function of the pool and not of dictionary order — a cap
+    that cut differently per run could quietly admit a different edge each night.
+    """
+    if cap <= 0:
+        return []
+    ranked = sorted((p for p in proposals if in_acceptance_band(p, floor, ceiling)),
+                    key=lambda p: (-float(p.get("confidence", 0) or 0),
+                                   str(p.get("proposed_at", "")),
+                                   str(p.get("source", "")),
+                                   str(p.get("target", ""))))
+    return ranked[:cap]
+
+
+def band_landing_fields(p: dict, *, now: Optional[datetime] = None,
+                        ttl_days: int = BAND_DEFAULT_TTL_DAYS) -> dict:
+    """Store fields that make a band edge expirable, or `{}` for any other row.
+
+    `edges.expired_at`/`expired_reason` are existing columns and the
+    active-uniqueness index is partial (`WHERE expired_at IS NULL`), so an
+    expired band edge neither shows to readers nor blocks the same pair being
+    proposed again later. A row that carries no `band_expires_at` — a hand-edited
+    proposals file — still expires, from the shipped TTL rather than never.
+    """
+    if p.get("accepted_by") != BAND_ACCEPTED_BY:
+        return {}
+    expires = p.get(BAND_EXPIRES_FIELD)
+    if not expires:
+        base = now or datetime.now(timezone.utc)
+        expires = (base + timedelta(days=ttl_days)).isoformat()
+    return {"expired_at": expires, "expired_reason": BAND_EXPIRY_REASON}
+
+
+def _cooled_off(p: dict, now: datetime) -> bool:
+    """True when a pending row is old enough to be admitted without a human.
+
+    The 48 h wait is the one discipline the floor gate had that a band admission
+    must not quietly drop: a proposal is not landed the night it appeared. An
+    empty `proposed_at` admits (there is nothing to age against); an unparseable
+    one refuses — the behaviour the floor loop had inline before this helper
+    existed, which is what both gates now share.
+    """
+    proposed_at = p.get("proposed_at", "")
+    if not proposed_at:
+        return True
+    try:
+        dt = datetime.fromisoformat(proposed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return (now - dt) >= timedelta(hours=AUTO_APPROVE_AGE_HOURS)
 
 
 def awaiting_review_marker(threshold: float) -> str:
@@ -789,7 +913,12 @@ def acceptance_band_counts(proposals: list[dict],
     auto_approved = sum(1 for p in proposals
                         if p.get("accepted_by") == AUTO_ACCEPTED_BY)
     below_floor = sum(1 for p in proposals if below_auto_approve_floor(p, threshold))
-    return {"auto_approved": auto_approved, "below_floor": below_floor}
+    # Counted separately and never folded into `auto_approved`: which of the two
+    # unreviewed gates admitted a row is the question the recall A/B has to
+    # answer, and the row already carries the answer (#1653).
+    band_admitted = sum(1 for p in proposals if p.get("accepted_by") == BAND_ACCEPTED_BY)
+    return {"auto_approved": auto_approved, "below_floor": below_floor,
+            "band_admitted": band_admitted}
 
 
 def format_acceptance_band(proposals: list[dict],
@@ -800,14 +929,24 @@ def format_acceptance_band(proposals: list[dict],
     classified 28 rows and left all 28 inert, and nothing distinguished that
     from a night with nothing to classify (#1364)."""
     c = acceptance_band_counts(proposals, threshold)
-    return (f"Auto-approve floor {threshold:g}: auto-approved {c['auto_approved']} "
+    line = (f"Auto-approve floor {threshold:g}: auto-approved {c['auto_approved']} "
             f"| {c['below_floor']} LLM-classified below the floor, awaiting a "
             f"review that does not exist")
+    if c["band_admitted"]:
+        # Appended only when a band row exists, so a floor-only run prints this
+        # line exactly as #1364 shipped it.
+        line += (f" | {c['band_admitted']} admitted by the {BAND_FLOOR:g}-"
+                 f"{threshold:g} band (rank-capped, expiring)")
+    return line
 
 
 def auto_approve_strong(proposals: list[dict],
-                        threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD) -> int:
-    """Auto-approve proposals above confidence threshold that are >48h old.
+                        threshold: float = DEFAULT_AUTO_APPROVE_THRESHOLD, *,
+                        band: bool = False,
+                        band_cap: int = BAND_DEFAULT_CAP,
+                        band_ttl_days: int = BAND_DEFAULT_TTL_DAYS) -> int:
+    """Auto-approve proposals above confidence threshold that are >48h old, and —
+    only with `band=True` — the top `band_cap` of the 0.70-0.84 band.
 
     This is an automatic acceptance, not a review, so each flipped proposal is
     marked as such (`accepted_by` + the threshold that admitted it) and
@@ -815,6 +954,14 @@ def auto_approve_strong(proposals: list[dict],
     gate refuses is marked too — with `awaiting_review` and its status left
     `pending` — because the refusal is terminal and used to leave no trace at
     all (#1364).
+
+    The band is a second gate, not a lower floor: `threshold` stays 0.85, the
+    floor loop runs untouched and first, and a band row is marked
+    `accepted_by: band` with `band_acceptance_marker()` and a
+    `band_expires_at` (#1653). It is off by default because the ruling keeps the
+    band only on a non-inferior recall score, and that measurement needs the
+    edges to exist first — the flag is what lets the A/B run without shipping
+    the admission to every night.
     """
     now = datetime.now(timezone.utc)
     approved = 0
@@ -829,14 +976,8 @@ def auto_approve_strong(proposals: list[dict],
             if p.get("classification_source") == LLM_CLASSIFICATION_SOURCE:
                 p[AWAITING_REVIEW_FIELD] = awaiting_review_marker(threshold)
             continue
-        proposed_at = p.get("proposed_at", "")
-        if proposed_at:
-            try:
-                dt = datetime.fromisoformat(proposed_at.replace("Z", "+00:00"))
-                if (now - dt) < timedelta(hours=48):
-                    continue
-            except ValueError:
-                continue
+        if not _cooled_off(p, now):
+            continue
         p["status"] = "approved"
         p["accepted_by"] = AUTO_ACCEPTED_BY
         p["auto_acceptance"] = auto_acceptance_marker(threshold)
@@ -844,6 +985,20 @@ def auto_approve_strong(proposals: list[dict],
         # carried the mark. An approved row must not keep saying it waits.
         p.pop(AWAITING_REVIEW_FIELD, None)
         approved += 1
+
+    if band:
+        expires = (now + timedelta(days=band_ttl_days)).isoformat()
+        for p in select_band_admissions(proposals, cap=band_cap, ceiling=threshold):
+            # Same cooling-off discipline as the floor, and the same reason: an
+            # in-band row that appeared tonight is not landed tonight.
+            if not _cooled_off(p, now):
+                continue
+            p["status"] = "approved"
+            p["accepted_by"] = BAND_ACCEPTED_BY
+            p["band_admission"] = band_acceptance_marker(ceiling=threshold)
+            p[BAND_EXPIRES_FIELD] = expires
+            p.pop(AWAITING_REVIEW_FIELD, None)
+            approved += 1
     return approved
 
 
@@ -924,6 +1079,8 @@ def land_approved_edges(proposals: list[dict]) -> int:
 
     landed = 0
     auto_marked = 0
+    band_marked = 0
+    band_unexpired = 0
     unattributed = 0
     try:
         st = store()
@@ -945,6 +1102,20 @@ def land_approved_edges(proposals: list[dict]) -> int:
                 unattributed += 1
                 continue
             acceptance = acceptance_fields(p)
+            # A band edge arrives already carrying its own removal date
+            # (#1653); every other row lands with `expired_at` NULL as before.
+            expiry = band_landing_fields(p)
+            # `edges.add` returns the id of an ALREADY ACTIVE row on this pair
+            # rather than inserting a second one, so a band row whose pair the
+            # floor admitted weeks ago would otherwise have its expiry applied to
+            # that edge — expiring a DERIVED edge nobody admitted through the
+            # band. Read the pair first and only expire a row this call created.
+            prior_active = (st.edges.find_active(
+                                src, tgt,
+                                canonical_edge_type(
+                                    p.get("type") or p.get("relation_type")
+                                    or "co_accessed"))
+                            if expiry else None)
             edge_id = st.edges.add({
                 "source": src, "target": tgt,
                 # Proposals carry the Stage-2 verdict under `type`; the key read
@@ -961,16 +1132,51 @@ def land_approved_edges(proposals: list[dict]) -> int:
                 "source_doc": source_doc,
                 "evidence": (p.get("reason") or "")[:500] or None,
                 **acceptance,
+                **expiry,
             }, origin="conversation")
             p["edge_id"] = edge_id
             landed += 1
             if acceptance:
                 auto_marked += 1
+            if expiry:
+                # `edges.add` always inserts an ACTIVE row, so the band's expiry
+                # is a separate `edges.expire(edge_id, reason, at=...)` carrying
+                # the row's own band date. Read that consequence precisely:
+                # every reader in `app/kg_store.py` selects `expired_at IS NULL`,
+                # so an edge that arrives with its expiry already stamped is in
+                # the store but NOT recalled by anything. That is the letter of
+                # #1653's clause 4 and of "expirable", and the recall A/B this
+                # band is kept only on will therefore read non-inferior because
+                # the edges are invisible, not because they are harmless — the
+                # owed ruling names exactly that vacuity risk. Loud here, so no
+                # reader mistakes this for a measured acceptance.
+                if prior_active is not None and prior_active["id"] == edge_id:
+                    band_unexpired += 1
+                else:
+                    st.edges.expire(edge_id, expiry["expired_reason"],
+                                    at=expiry["expired_at"])
+                    band_marked += 1
     if landed:
+        # Byte-identical to the #773 line whenever no band row is in the batch.
+        # Band rows sit inside `auto_marked` (they carry an acceptance marker
+        # too) and the line below separates them, so a floor-only night reads
+        # exactly as it did before #1653.
         print(f"  [edges] {landed} landed — {auto_marked} auto-approved and "
               f"stamped accepted_by={AUTO_ACCEPTED_BY} with the admitting "
               f"threshold (unreviewed), {landed - auto_marked} accepted by "
               f"another route and left unmarked")
+    if band_marked or band_unexpired:
+        print(f"  [edges] of those, {band_marked} arrived through the "
+              f"{BAND_FLOOR:g}-{BAND_CEILING:g} band and carry "
+              f"expired_at={BAND_DEFAULT_TTL_DAYS}d out with "
+              f"expired_reason={BAND_EXPIRY_REASON} — so no active reader "
+              f"recalls them (every store read is `expired_at IS NULL`), and "
+              f"one bulk expiry over that reason is the whole rollback. The "
+              f"floor's edges expire nothing.")
+    if band_unexpired:
+        print(f"  [edges] {band_unexpired} band pair(s) already had an active "
+              f"edge from another route and were left unexpired — the band does "
+              f"not retire an edge it did not admit")
     if unattributed:
         print(f"  [edges] {unattributed} approved proposal(s) carry no evidence "
               f"sessions or trajectory pointer — not landed")
@@ -1280,17 +1486,29 @@ def cmd_stats():
                 print(f"         {p['reason']}")
 
 
-def cmd_approve():
-    """Auto-approve strong proposals older than 48h, and land them as edges."""
+def cmd_approve(band: bool = False, band_cap: int = BAND_DEFAULT_CAP):
+    """Auto-approve strong proposals older than 48h, and land them as edges.
+
+    `band` additionally admits the top `band_cap` of the 0.70-0.84 band as
+    expirable INFERRED edges (#1653). Off by default, and the line printed below
+    says which gate ran, so a run's report cannot be read as band-enabled when it
+    was not.
+    """
     data = load_proposals()
     # Also deduplicate against index
     before = len(data["proposals"])
     data["proposals"] = deduplicate_against_index(data["proposals"])
     print(f"Deduplicated against relations-index: {before - len(data['proposals'])} dropped")
-    count = auto_approve_strong(data["proposals"])
+    count = auto_approve_strong(data["proposals"], band=band, band_cap=band_cap)
     landed = land_approved_edges(data["proposals"])
     save_proposals(data)
     print(f"Auto-approved: {count}")
+    if band:
+        # Which gate ran, in the run's own output: #51 reports what this printed,
+        # and a band-enabled night has to be distinguishable from a floor-only
+        # one in the report rather than only in the command line (#1653).
+        print(f"Band admission: ON — {BAND_FLOOR:g}-{BAND_CEILING:g}, "
+              f"top {band_cap} by rank, expiring after {BAND_DEFAULT_TTL_DAYS}d")
     print(f"Edges landed in the store: {landed}")
     # Read back the store rather than restating the counter above. `landed` is
     # this run's insert count and is 0 on any run with nothing new to land, which
@@ -1317,6 +1535,17 @@ def main():
     group.add_argument("--full", action="store_true", help="Both stages, ignore watermark")
     group.add_argument("--stats", action="store_true", help="Print statistics")
     group.add_argument("--approve-strong", action="store_true", help="Auto-approve confidence >= 0.85")
+    # Not in the mutually exclusive group: the band is an add-on to the approve
+    # run, never a mode of its own, so a mistyped invocation cannot admit band
+    # edges without also running the floor gate that ages every row first (#1653).
+    parser.add_argument("--approve-band", action="store_true",
+                        help=f"With --approve-strong: also admit the top-ranked "
+                             f"{BAND_FLOOR:g}-{BAND_CEILING:g} band as expirable "
+                             f"INFERRED edges (cap {BAND_DEFAULT_CAP}, TTL "
+                             f"{BAND_DEFAULT_TTL_DAYS}d)")
+    parser.add_argument("--band-cap", type=int, default=BAND_DEFAULT_CAP,
+                        help=f"How many in-band rows one run admits "
+                             f"(default {BAND_DEFAULT_CAP})")
 
     args = parser.parse_args()
 
@@ -1329,7 +1558,7 @@ def main():
     elif args.stats:
         cmd_stats()
     elif args.approve_strong:
-        cmd_approve()
+        cmd_approve(band=args.approve_band, band_cap=args.band_cap)
 
 
 if __name__ == "__main__":
