@@ -36,6 +36,8 @@ already uses; arch-review refreshes that one).
 | Doc | Covers |
 |---|---|
 | [[harness]] | `run_query`: events, the position-0 rule, preserved thinking, tool pool, summaries, thinking trace, finalizer, subagents |
+| [[context-window]] | the four layers that fit a session to the model's window: microcompaction, the persisted summary, LLM summarisation, truncate — one token meter with three readers, the manual `/compact`, and the prefix-cache misses each fold costs |
+| [[authority-surfaces]] | every guard in one list, in the order an action meets it: the Bash denies, protected trees and the write deny-set, the tool sandbox, unattended tool bans, grants, egress, the browser guard, RPC policy, the desktop lease, and where one rule is spelled twice |
 | [[tools]] | the lloyd-mcp aggregator: routes and credential, the dispatch path in order, tool properties and what each decides, every tool with its properties |
 | [[desktop]] | desktop computer use: `desktop_capture`/`desktop_act` over Alan's real Hyprland desktop, the lease only a human grants, chat sessions only, screenshots as refs never base64 |
 | [[editing-safeguards]] | read-before-edit gates, edit diagnostics and blast radius, the change and effect ledgers, the code graph |
@@ -69,6 +71,7 @@ already uses; arch-review refreshes that one).
 | [[autonomy-jobs]] | what each scheduled job is *for* — the reflection chain, trace2skill, the graph chain, vault hygiene, inbound signal |
 | [[automod]] | self-modification: worktree, the gate ladder, review rung, promoter, guardian rollback, triage/implement, clustering, group triage |
 | [[testing]] | the ~8,700-test suite: synthetic vs live-data tests and the rule for the second, when a live check is retired rather than skipped, the gate's three floors and why the skip cap is not the thing to raise, marks the gate deselects, parallel isolation |
+| [[measurement]] | the eval and bench surface: each arm and what it scores, the repo root versus `$LLOYD_DATA/eval/baselines/`, the bench task corpus, and the one arm that stands between a round and landing |
 | [[backlog]] | the markdown kanban at `~/obsidian/backlog/` and its tools |
 | [[arch-review]] | the pass that keeps these docs honest: a picklist of docs and functional groups, one session each, the doc edits itself |
 
@@ -77,6 +80,7 @@ already uses; arch-review refreshes that one).
 | Doc | Covers |
 |---|---|
 | [[mission-control]] | the tabs and the four lists that must agree on them, the dashboard endpoint, sessions and titles, the agent's view of the UI, the browser SSRF guard |
+| [[browser-side-panel]] | the Chrome side panel: one Lloyd session per tab and page, created only by "Check it out, Lloyd", the URL rule behind "same page", the loopback call that needs no client cert, and why the built output in git will not load on its own |
 
 ## GPU allocation
 
