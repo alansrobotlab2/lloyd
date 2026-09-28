@@ -25,6 +25,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 ARCH = ROOT / "architecture"
 INDEX = ARCH / "index.md"
@@ -41,6 +43,48 @@ def _docs_on_disk() -> set[str]:
 
 def _docs_linked() -> set[str]:
     return set(_LINK.findall(INDEX.read_text(encoding="utf-8")))
+
+
+#: The section that records a retirement. Its heading is matched by prefix so the
+#: parenthetical about where the files live can be reworded without blinding this.
+_RETIRED_HEADING = "## Retired"
+#: How that section records one: a name in backticks. A `[[slug]]` is a promise
+#: that `architecture/<slug>.md` is behind it, so the retired list may not use it.
+_BACKTICKED = re.compile(r"`([a-z0-9][a-z0-9-]*)`")
+
+
+def _retired_section(text: str) -> str:
+    """The Retired section's body, up to the next `##` heading.
+
+    Asserts the section is there: a green must not come from a scan that found
+    nowhere to look.
+    """
+    start = text.find(_RETIRED_HEADING)
+    assert start >= 0, "index.md has no Retired section to record a retirement in"
+    rest = text[start:]
+    end = rest.find("\n## ", len(_RETIRED_HEADING))
+    return rest if end < 0 else rest[:end]
+
+
+def _retirement_problems(text: str) -> list[str]:
+    """Every way `index.md` breaks the retirement convention, as messages.
+
+    A retired doc is *named* under Retired and linked from no table, so the two
+    forms must stay disjoint: a retired name that is also a `[[link]]` is the
+    stale promise that went red in #1704, and a retired name whose doc is back on
+    disk belongs in a table. The list itself is asserted non-empty — a retired
+    section emptied out would make both checks pass on nothing.
+    """
+    retired = set(_BACKTICKED.findall(_retired_section(text)))
+    assert retired, (
+        "the Retired section names no doc at all, so there is no convention "
+        "here to check — the list cannot be empty and the check be meaningful")
+    linked, on_disk = _docs_linked(), _docs_on_disk()
+    return (
+        [f"{name}: retired under 'Retired' and still linked as [[{name}]]"
+         for name in sorted(retired & linked)]
+        + [f"{name}: retired under 'Retired' but architecture/{name}.md is on disk"
+           for name in sorted(retired & on_disk)])
 
 
 def test_every_architecture_doc_is_linked_from_the_index():
@@ -84,3 +128,48 @@ def test_the_parity_check_can_see_a_missing_doc(tmp_path, monkeypatch):
     assert _OWNED_COUNT.findall("each of the 32 scheduled jobs; the 9-rung gate; 9 rungs") == [
         "32 scheduled jobs", "9-rung", "9 rungs"]
     assert _OWNED_COUNT.findall("the ~8,700-test suite; 3 rows; 2026-09-11") == []
+
+
+def test_a_retired_doc_is_named_under_retired_and_linked_from_no_table():
+    """A retirement is a name under Retired, never a `[[link]]` (#1704).
+
+    `4a6cdd54` deleted `architecture/recall-research-2026-09-24.md` and left its
+    table row in place, so the index kept promising a doc that had stopped
+    existing — the failure above. The remedy it names is the convention checked
+    here, over every retired name rather than that one: each must appear under
+    Retired and in no link table, so recording a retirement cannot quietly
+    re-create the stale promise, and a doc that came back cannot hide in the
+    retired list.
+    """
+    assert _retirement_problems(INDEX.read_text(encoding="utf-8")) == []
+
+
+def test_the_retirement_check_fires_on_a_retired_name_that_is_live_again(tmp_path,
+                                                                        monkeypatch):
+    """Negative control: both problem branches must fire, and the guards that
+    make this check meaningful must refuse an unreadable section rather than
+    report an empty problem list.
+    """
+    import sys
+    fake_arch = tmp_path / "architecture"
+    fake_arch.mkdir()
+    # One problem each: alpha is retired yet still linked (no file behind it, so
+    # only that branch fires); beta is retired and genuinely gone, which is the
+    # clean case; gamma is retired while its doc is back on the directory.
+    (fake_arch / "index.md").write_text(
+        "| [[alpha]] | a |\n\n" + _RETIRED_HEADING + " (untracked)\n\n"
+        "`alpha` and `beta` and `gamma` went.\n\n## Review log\n", encoding="utf-8")
+    (fake_arch / "gamma.md").write_text("# gamma\n", encoding="utf-8")
+    mod = sys.modules[__name__]
+    monkeypatch.setattr(mod, "ARCH", fake_arch)
+    monkeypatch.setattr(mod, "INDEX", fake_arch / "index.md")
+    problems = _retirement_problems((fake_arch / "index.md").read_text(encoding="utf-8"))
+    assert sorted(p.split(":")[0] for p in problems) == ["alpha", "gamma"], problems
+    assert any("still linked" in p for p in problems), problems
+    assert any("on disk" in p for p in problems), problems
+    # A retired section with no names, and no retired section at all, are both
+    # hard failures: neither may read as "nothing to complain about".
+    with pytest.raises(AssertionError, match="names no doc"):
+        _retirement_problems("## Retired\n\nnothing named here\n")
+    with pytest.raises(AssertionError, match="no Retired section"):
+        _retirement_problems("# index\n\nno retired section at all\n")

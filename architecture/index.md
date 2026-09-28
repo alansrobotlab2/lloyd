@@ -45,7 +45,6 @@ already uses; arch-review refreshes that one).
 | [[subliminal]] | pre-call context retrieval: skills, facts, vault docs, sessions, backlog |
 | [[qmd]] | the vault search engine: Lloyd's fork, the daemon, index, config and models, its REST API, maintenance, eval pins |
 | [[retrieval]] | vault recall's document leg: qmd fusion (OR keyword leg, Qwen3 vectors), djev ranking, the gold set, every measured change |
-| [[recall-research-2026-09-24]] | the whole recall stack reviewed against the frontier on 2026-09-24: the map as measured, what the literature says, the proposals filed from it, what was not proposed and why |
 | [[ambient-context-injection]] | how background producers surface context into the active chat |
 | [[skills]] | on-demand SKILL.md procedures from the vault |
 | [[voice]] | the whole voice-to-voice round trip: LiveKit transport, wake word, ASR, speaker id, the cloned TTS voice and its client-side shaping |
@@ -87,7 +86,7 @@ already uses; arch-review refreshes that one).
 | 1 | RTX PRO 6000 96 GB | primary LLM (vLLM) |
 | 2 | RTX 3090 24 GB | secondary LLM (llama.cpp) |
 
-## Retired (in `.archive/`, not tracked)
+## Retired (in `.archive/`, or in git history alone)
 
 `agents`, `background-monitoring`, `evaluation-engine`, `exploration-engine`,
 `harness-comparison`, `improvement-planner`, `intelligence-pipeline`,
@@ -118,6 +117,18 @@ about a handful of the fleet's scheduled jobs, which left most of it with no
 description anywhere — over-documenting a quarter of the fleet and ignoring the
 rest. One doc per *job family* replaces them, and [[autonomy]] keeps the
 mechanism.
+
+`recall-research-2026-09-24` was the fourth kind: neither obsolete nor folded
+but in the wrong register. The 2026-09-24 recall research pass reviewed the
+whole recall stack against the frontier on that day — the map as measured, what
+the literature says, the proposals filed from it, what was not proposed and why
+— and `4a6cdd54` (2026-09-27) took it out of `architecture/` because a research
+pass describes a day's reading, not the running system this directory
+documents. Nothing in it was lost by the move: the sixteen proposals are
+#1480–#1495 on the board, and the measurements it made are recorded where they
+belong, in [[retrieval]] and [[subliminal]]. Unlike the names above it is not in
+`.archive/` either — the file is gone from the tree, so its text is only in git
+history at `git show 4a6cdd54^:architecture/recall-research-2026-09-24.md`.
 
 ## Review log
 
