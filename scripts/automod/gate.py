@@ -1866,6 +1866,12 @@ class Gate:
         from scripts.automod import review as RV
         contract, head, attempt = ctx["contract"], ctx["head"], ctx["attempt"]
         changed, changed_tests, pre = ctx["changed"], ctx["changed_tests"], ctx["pre"]
+        # Said out loud in whatever this rung returns, so a PASS that leaned on a
+        # demoted finding and a PASS with nothing to demote are two different
+        # sentences in `gate.json` and in the landing report, not one identical
+        # "5 met of 5". Empty string when the round does not edit the checker.
+        honesty_note = str(ctx.get("honesty_note") or "")
+        honesty_suffix = f" [honesty: {honesty_note}]" if honesty_note else ""
         test_counts = next((r.data for r in self.report.rungs if r.name == "tests"), {}) or {}
         # Failures the tests rung passed over because they predate the round:
         # the grader is told, and a `met` that leans on one does not stand.
@@ -2027,9 +2033,11 @@ class Gate:
                        if attempt < RV.REVIEW_MAX_PER_ROUND else
                        "abort and report — the item comes back with these findings and your branch")
                 shown = f"{attempt}/{RV.REVIEW_MAX_PER_ROUND}"
-            return False, (f"review sent it back ({shown}; {nxt}){tree_note}: {findings}"), {
+            return False, (f"review sent it back ({shown}; {nxt}){tree_note}: {findings}"
+                           f"{honesty_suffix}"), {
                 "review_retry": True, "review_findings": findings[:1500],
-                "review_attempt": attempt, "review_session": res.get("session_id"), **validated}
+                "review_attempt": attempt, "review_session": res.get("session_id"),
+                "honesty_note": honesty_note, **validated}
         # On a PASS, record the grader's `post_landing` clauses onto the item.
         # Written here rather than by the implementer because it is a fact the
         # grader established about a change that is about to land, not a claim
@@ -2064,12 +2072,13 @@ class Gate:
         except Exception as exc:  # noqa: BLE001 — a note is not the gate
             print(f"[warn] could not record review advisories: {exc}")
         return True, (f"review: {RV.summarize_clauses(parsed)} of {len(contract['clauses'])} "
-                      f"clause(s); {parsed['summary'][:160]}"), {
+                      f"clause(s); {parsed['summary'][:160]}{honesty_suffix}"), {
                           "review_session": res.get("session_id"),
                           "clauses": parsed["clauses"], "review_attempt": attempt,
                           "post_landing_clauses": marked,
                           "advisory_seams": advisory_seams,
                           "advisory_findings": advisory_findings,
+                          "honesty_note": honesty_note,
                           "amendments_ratified": [a.get("clause") for a in amendments],
                           **validated}
 
@@ -2201,12 +2210,22 @@ class Gate:
                                "review_findings": str(last.get("findings") or "")[:1500]}
         changed = list(self.report.changed_paths)
         changed_tests = TP.pick_test_files(changed, self.worktree)
-        pre = RV.honesty_prechecks(self.worktree, self.base, changed,
-                                   n_clauses=len(contract["clauses"]))
+        # The checker behind these findings is the LIVE module: `RV` was imported
+        # by a gate process running from `~/lloyd`, because a round worktree has no
+        # `.venvs/` to run under, so only the file ARGUMENTS point at the round.
+        # When the round's own diff edits `review.py`, the code deciding whether its
+        # tests can fail is the version the round replaces, and that version has no
+        # standing to refuse it — the wrapper demotes its blocking findings to
+        # advisory and hands back the sentence that says why (#1755; SM_20260928_
+        # 210355 spent its second and last review attempt on four of its own
+        # fixture strings).
+        pre, honesty_note = RV.honesty_prechecks_with_standing(
+            self.worktree, self.base, changed, n_clauses=len(contract["clauses"]))
         return {"contract": contract, "head": head, "attempt": attempt,
                 "patch_id": patch_id, "pending_amendments": pending_amendments,
                 "item_history": item_history, "changed": changed,
-                "changed_tests": changed_tests, "pre": pre}
+                "changed_tests": changed_tests, "pre": pre,
+                "honesty_note": honesty_note}
 
     @staticmethod
     def _review_key(ctx: dict) -> dict:
@@ -2228,6 +2247,12 @@ class Gate:
                       "attempt": ctx["attempt"], "head": head, "grader_model": "primary",
                       "snapshot": bool(snapshot), "snapshot_note": snap_note,
                       "prechecks": ctx["pre"],
+                      # Why a `blocking` honesty finding may not appear here: the
+                      # sentence names the module the round edits and the findings
+                      # it demoted. Recorded, not merely applied, so the next
+                      # reader of a passing review can tell "no dishonest tests"
+                      # from "the checker had no standing to call them that".
+                      "honesty_note": ctx.get("honesty_note") or "",
                       "validated_head": head, "validated_worktree": str(grade_root),
                       # A refusal shown an amendment is a judgment of a new
                       # contract; `backlog.review_disagreement` reads this so

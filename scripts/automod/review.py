@@ -279,6 +279,18 @@ _HONESTY_PATTERNS: tuple[tuple[str, str, str], ...] = (
     (r"pytest\.mark\.xfail", "a new xfail marker", "blocking"),
 )
 
+#: The modules whose own rounds cannot honestly be REFUSED on the findings this
+#: module computes (#1755). The gate process imports this file from the LIVE
+#: checkout — a round worktree has no `.venvs/` to run under — so only the file
+#: ARGUMENTS point at the round while the CHECKER CODE is the running system's.
+#: When a round's diff edits the checker, the code answering "is this test unable
+#: to fail?" is the version the round is replacing: it cannot see the rule the
+#: round is adding, and a round that tests a detector is refused for quoting the
+#: detector it is fixing. SM_20260928_210355 lost its second and last review
+#: attempt exactly that way, on four fixture strings. The findings are kept and
+#: demoted, never dropped — the grader still reads every one.
+HONESTY_STALE_MODULES = ("scripts/automod/review.py", "scripts/automod/review_tools.py")
+
 # A skip with a condition in front of it is a judgment, not a fact. Over the
 # week to 2026-09-17, 27 of 134 review refusals had every clause graded `met`
 # and were refused by the skip patterns alone — a `live_vault` test that skips
@@ -751,6 +763,65 @@ def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
                                 "the item has acceptance clauses to pin"),
                     "severity": _NO_NEW_TEST_SEVERITY})
     return out
+
+
+def stale_honesty_modules(changed_paths: list[str]) -> list[str]:
+    """Which of :data:`HONESTY_STALE_MODULES` this round's own diff edits."""
+    return sorted({str(p) for p in (changed_paths or [])
+                   if str(p) in HONESTY_STALE_MODULES})
+
+
+def demote_stale_honesty(prechecks: list[dict],
+                         changed_paths: list[str]) -> tuple[list[dict], str]:
+    """Strip the standing a stale checker does not have, and say so in words.
+
+    Returns `(findings, note)`. `note` is empty — nothing to explain — when the
+    round does not edit the checker, or when it edits it and nothing was
+    `blocking`. Otherwise every blocking entry becomes `advisory`, carrying
+    `demoted_from` and a suffix on `problem` so the record shows what it was, and
+    the note names the modules, the count and the files.
+
+    Two failure modes this is between. Refusing on the pre-change checker is a
+    false verdict the round can never clear — the fix that would stop it is the
+    diff it is being refused (that is how #1755 describes SM_20260928_210355,
+    refused on four of its own fixture strings). Silently skipping the check
+    whenever `review.py` is in the diff would be the opposite: a round escapes
+    test-honesty review by editing one line of the checker. So the finding
+    survives as advisory, where `decide` cannot refuse on it but the grader and
+    a human reading the review event still see it.
+    """
+    stale = stale_honesty_modules(changed_paths)
+    out = [dict(p) for p in (prechecks or [])]
+    hits = [p for p in out if str(p.get("severity") or "") == "blocking"]
+    if not stale or not hits:
+        return out, ""
+    for p in hits:
+        p["severity"] = "advisory"
+        p["demoted_from"] = "blocking"
+        p["problem"] = (f"{p.get('problem')} (advisory: the round edits the honesty "
+                        f"checker itself, so the live checker grading it is the "
+                        f"version it replaces)")
+    files = sorted({str(p.get("file")) for p in hits})
+    note = (f"honesty checker stale-by-construction: this round edits "
+            f"{', '.join(stale)} and the gate runs the LIVE copy of it, so "
+            f"{len(hits)} blocking finding(s) on {', '.join(files)} were demoted to "
+            f"advisory — the checker that produced them is the version this round "
+            f"replaces and cannot refuse it; the grader still sees each one")
+    return out, note
+
+
+def honesty_prechecks_with_standing(worktree: Path, base: str, changed_paths: list[str],
+                                    *, n_clauses: int = 0) -> tuple[list[dict], str]:
+    """`honesty_prechecks` plus the standing rule, as one call for every caller.
+
+    One function rather than a rule each caller re-implements, because the two
+    callers (the gate's review rung and the offline backfill) must not drift: a
+    demotion the gate applies and the backfill does not would make the scorecard
+    measure a different rung than the one that lands code.
+    """
+    return demote_stale_honesty(
+        honesty_prechecks(worktree, base, changed_paths, n_clauses=n_clauses),
+        changed_paths)
 
 
 # ── the grader ───────────────────────────────────────────────────────────

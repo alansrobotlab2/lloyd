@@ -166,3 +166,45 @@ def test_a_harness_only_test_change_is_a_changed_test_to_the_backfill(world):
     RT.grade_commit(repo=repo, item_id=9, parent=parent, commit=commit,
                     changed_paths=paths, label="h2", grader=grade, strip_tests=True)
     assert grade.calls[0]["changed_paths"] == ["app/m.py"], "the harness test is stripped"
+
+
+def test_the_backfill_grants_the_same_standing_and_no_more(world, tmp_path):
+    """The after-the-fact route must measure the rung that lands code (#1755, clause 3).
+
+    `world`'s round adds `assert True or True`, which the deterministic precheck
+    calls `blocking` and `decide` refuses on. Here the same quoted pattern is
+    committed a second time, in a landing that also edits the checker itself: the
+    LIVE module that scored it is then the version that landing replaced, so the
+    finding survives as `advisory` and the scorecard records a pass. Without the
+    rule the backfill would grade history against a verdict that round could never
+    have got, and the gate and the backfill would disagree on the same diff.
+    """
+    repo = world["repo"]
+    (repo / "scripts" / "automod").mkdir(parents=True, exist_ok=True)
+    (repo / "scripts" / "automod" / "review.py").write_text("PATTERN = 2\n", encoding="utf-8")
+    # The pattern has to be in THIS commit's added lines: the parent is the round
+    # above, so an unchanged test file would add nothing for the precheck to see.
+    (repo / "tests" / "test_m.py").write_text(
+        "def test_v():\n    assert True or True\n\n"
+        "def test_v_again():\n    assert True or True\n", encoding="utf-8")
+    git(repo, "add", "-A"); git(repo, "commit", "-q", "-m", "round that edits the checker")
+    editing = git(repo, "rev-parse", "HEAD").stdout.strip()
+    paths = ["scripts/automod/review.py", "app/m.py", "tests/test_m.py"]
+
+    out = RT.grade_commit(repo=repo, item_id=9, parent=world["commit"], commit=editing,
+                          changed_paths=paths, label="stale", grader=_stub(_met()))
+    hits = [p for p in out["prechecks"] if p.get("demoted_from") == "blocking"]
+    assert hits and {p["severity"] for p in hits} == {"advisory"}, out["prechecks"]
+    assert out["kind"] == "pass", f"a demoted finding cannot decide it alone: {out}"
+    assert "scripts/automod/review.py" in out["honesty_note"], out["honesty_note"]
+    assert RV.stale_honesty_modules(paths) == ["scripts/automod/review.py"], \
+        "the two callers turn on one shared module list" 
+
+    # The identical pattern, in the landing that left the checker alone: still
+    # blocking, still a retry, and nothing to explain.
+    keep = RT.grade_commit(repo=world["repo"], item_id=9, parent=world["parent"],
+                           commit=world["commit"], changed_paths=["app/m.py", "tests/test_m.py"],
+                           label="clean", grader=_stub(_met()))
+    assert all(p["severity"] == "blocking" for p in keep["prechecks"] if "or True" in p["problem"]), keep["prechecks"]
+    assert all("demoted_from" not in p for p in keep["prechecks"]), keep["prechecks"]
+    assert keep["kind"] == "retry" and keep["honesty_note"] == "", keep["kind"]

@@ -1670,3 +1670,127 @@ def test_the_tests_rung_partial_narrowing_counts_a_harness_test_as_a_test(tmp_pa
     run("commit", "-qam", "code")
     g.report.head = run("rev-parse", "HEAD").stdout.strip()
     assert g._tests_delta_only() is None, "a code path in the delta is a full run"
+
+
+# ── #1755: the honesty checker has no standing to refuse its own round ───────
+
+_CLAIMED = [{"clause": i, "verdict": "met", "evidence_path": "app/x.py",
+             "evidence_line": 3, "test_node_id": "tests/test_target.py::test_new_pattern",
+             "how_verified": "read", "note": "read it"} for i in (1, 2)]
+
+
+def _checker_round(tmp_path, *, touch_checker: bool):
+    """A committed round that adds a test quoting a dishonesty shape in CODE.
+
+    `assert True` and `or True` are matched by the live `_HONESTY_PATTERNS`
+    exactly as written here, so the fixture needs no string concatenation to be
+    found: what differs between the two cases is only whether the same commit
+    also edits `scripts/automod/review.py`, which is the one fact the standing
+    rule turns on.
+    """
+    live = tmp_path / "live"
+    (live / "app").mkdir(parents=True)
+    (live / "tests").mkdir()
+    (live / "scripts" / "automod").mkdir(parents=True)
+    git(tmp_path, "init", "-q", "-b", "main", str(live))
+    git(live, "config", "user.email", "t@e.com")
+    git(live, "config", "user.name", "t")
+    (live / "app" / "x.py").write_text("".join(f"V{i} = {i}\n" for i in range(1, 11)),
+                                       encoding="utf-8")
+    (live / "scripts" / "automod" / "review.py").write_text("PATTERN = 1\n", encoding="utf-8")
+    (live / "tests" / "test_target.py").write_text(
+        "def test_existing():\n    assert 1 + 1 == 2\n", encoding="utf-8")
+    git(live, "add", "-A")
+    git(live, "commit", "-q", "-m", "base")
+    base = git(live, "rev-parse", "HEAD").stdout.strip()
+
+    (live / "app" / "x.py").write_text("".join(f"V{i} = {i}\n" for i in range(1, 12)),
+                                       encoding="utf-8")
+    (live / "tests" / "test_target.py").write_text(
+        "def test_existing():\n    assert 1 + 1 == 2\n\n"
+        "def test_new_pattern():\n    ok = 1 or True\n    assert True\n", encoding="utf-8")
+    changed = ["app/x.py", "tests/test_target.py"]
+    if touch_checker:
+        (live / "scripts" / "automod" / "review.py").write_text("PATTERN = 2\n", encoding="utf-8")
+        changed.insert(0, "scripts/automod/review.py")
+    git(live, "add", "-A")
+    git(live, "commit", "-q", "-m", "round: adds a test that quotes the pattern")
+    return live, base, changed
+
+
+def _review_rung(tmp_path, monkeypatch, live, base, changed):
+    """Run the real review rung over `live` with only the model turn stubbed.
+
+    `honesty_prechecks_with_standing` is deliberately NOT stubbed: which severity
+    a finding ends up with, and whether `decide` may refuse on it, is what these
+    two tests are about, and stubbing it would test the stub.
+    """
+    from scripts.automod import backlog as _BK, review as RV
+    events: list[dict] = []
+    monkeypatch.setattr(G.S, "append_event", lambda e, **k: events.append(e))
+    monkeypatch.setattr(G.S, "read_events", lambda limit=100: [])
+    monkeypatch.setattr(G.S, "is_halted", lambda: False)
+    monkeypatch.setattr(G.S, "is_broken", lambda: False)
+    monkeypatch.setattr(G.S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(G.W, "round_dir", lambda rid: tmp_path / "round")
+    monkeypatch.setattr(RV, "item_contract", lambda iid, ledger=None: {
+        "id": iid, "title": "t", "body": "b",
+        "clauses": ["clause one holds", "clause two holds"], "path": ""})
+    monkeypatch.setattr(RV, "grade", lambda **kw: {
+        "ok": True, "error": "", "session_id": "sess_h", "structured_error": "",
+        "structured": {"premise": "sound", "summary": "APPROVE — both clauses met",
+                       "clauses": _CLAIMED, "test_honesty": [], "seams_unverified": []},
+        "text": "", "stop_reason": "stop", "duration_s": 1.0})
+    # `rung_review` imports `backlog` inside the method, so the patch goes on the
+    # module object rather than an attribute of `gate`, and the item these rounds
+    # would write is the live one.
+    noted: list[list] = []
+    monkeypatch.setattr(_BK, "note_review_advisories", lambda *a, **k: noted.append(list(a)))
+    monkeypatch.setattr(_BK, "orphan_stale_amendments", lambda *a, **k: [])
+    monkeypatch.setattr(_BK, "retriage_marks", lambda p: {})
+    g = G.Gate("SM_STALE", live, base, live_root=live, item_id=7)
+    g.report.changed_paths = changed
+    g.report.rungs.append(G.RungResult("tests", True, "ok", 1.0, {"passed": 10}))
+    ok, detail, data = g.rung_review()
+    return ok, detail, data, events, noted
+
+
+def test_a_round_editing_the_checker_is_not_refused_by_the_checker_it_replaces(tmp_path, monkeypatch):
+    """The pre-change detector cannot convict the diff that changes it (#1755, clause 1).
+
+    SM_20260928_210355 lost its second and last review attempt to four findings of
+    exactly this kind: it was editing `honesty_prechecks`, and the LIVE module —
+    the version with the rule it was adding — called its own new test fixtures
+    `assert True` and `a new skip marker`. The finding is kept as advisory here,
+    not dropped, and the demotion is said in the rung's recorded detail.
+    """
+    from scripts.automod import review as RV
+    live, base, changed = _checker_round(tmp_path, touch_checker=True)
+    ok, detail, data, events, _ = _review_rung(tmp_path, monkeypatch, live, base, changed)
+
+    pre = [p for p in events[-1]["prechecks"] if p.get("demoted_from") == "blocking"]
+    assert pre, f"the round's own pattern is still found, demoted: {events[-1]['prechecks']}"
+    assert {p["severity"] for p in pre} == {"advisory"}, pre
+    assert "scripts/automod/review.py" in RV.stale_honesty_modules(changed), \
+        "the rule keys off the round's own changed paths"
+    assert ok is True, f"a demoted finding cannot alone refuse the round: {detail}"
+    assert "stale-by-construction" in detail, detail
+    assert "scripts/automod/review.py" in detail, detail
+    assert data["honesty_note"] and "demoted to advisory" in data["honesty_note"], data
+
+
+def test_the_same_quoted_pattern_still_refuses_a_round_that_leaves_the_checker_alone(tmp_path, monkeypatch):
+    """The other half: touching nothing but the test still costs the round (#1755, clause 2).
+
+    Without this the fix would be an escape hatch — any round could add one line
+    to `review.py` and stop answering the honesty check. The two rounds differ in
+    exactly one changed path, and the verdict differs.
+    """
+    live, base, changed = _checker_round(tmp_path, touch_checker=False)
+    ok, detail, data, events, _ = _review_rung(tmp_path, monkeypatch, live, base, changed)
+
+    blocking = [p for p in events[-1]["prechecks"] if p["severity"] == "blocking"]
+    assert blocking, f"an unedited checker keeps its standing: {events[-1]['prechecks']}"
+    assert all("demoted_from" not in p for p in blocking), blocking
+    assert ok is False and "review sent it back" in detail, detail
+    assert data["honesty_note"] == "", "nothing to explain when nothing was demoted"

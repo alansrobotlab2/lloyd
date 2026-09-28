@@ -138,7 +138,14 @@ def grade_commit(*, repo: Path, item_id: int, parent: str, commit: str, changed_
     wt = checkout(repo, commit, where, strip_tests=tests if strip_tests else None)
     try:
         paths = [p for p in changed_paths if not (strip_tests and p in tests)]
-        pre = RV.honesty_prechecks(wt, parent, paths, n_clauses=len(contract["clauses"]))
+        # The same standing rule as the live rung, through the same wrapper, so
+        # the backfill measures the rung that lands code rather than a stricter
+        # ancestor of it: a historical landing that edited the honesty checker was
+        # graded by the checker it replaced, and counting its blocking findings
+        # here would score the grader against a verdict that round could never
+        # have cleared (#1755).
+        pre, honesty_note = RV.honesty_prechecks_with_standing(
+            wt, parent, paths, n_clauses=len(contract["clauses"]))
         res = grader(round_id=f"backfill:{label}", worktree=wt, base=parent, contract=contract,
                      changed_paths=paths, test_counts={}, python=python,
                      child_env=child_env(wt, scratch), scratch_dir=scratch)
@@ -163,6 +170,10 @@ def grade_commit(*, repo: Path, item_id: int, parent: str, commit: str, changed_
         seams_policy = seams_policy or RV.seams_policy()
         kind, findings = RV.decide(parsed, pre, policy=seams_policy)
         return {**parsed, "kind": kind, "findings": findings, "prechecks": pre,
+                # Named in the record beside the demoted findings, so a backfilled
+                # `pass` on a round that edited the checker reads differently from
+                # one where the checker found nothing.
+                "honesty_note": honesty_note,
                 "seams_policy": seams_policy,
                 "session_id": res.get("session_id"), "clauses_total": len(contract["clauses"])}
     finally:
