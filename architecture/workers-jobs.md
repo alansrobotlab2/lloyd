@@ -739,12 +739,18 @@ same program twice, and that is worth saying once rather than twice:
 
 - **A direct turn on the primary** through `run_prompt_on_primary`. No session,
   no Inner Voice, no transcript anyone reviews.
-- **A turn budget hard-coded at the call site** — 15 and 8 — rather than
-  read from `src_cfg` the way every session-backed source reads it. `bench-mine`
-  got fixed (#896, 2026-09-24: the budget rides the queue payload and a config
-  key moves it); `session-distill`'s 15 is still a literal no key moves.
+- **A turn budget read from `src_cfg` and carried in the queue payload.** Both
+  started with a literal at the call site (15 and 8); `bench-mine` got the key
+  first (#896, 2026-09-24) and `session-distill` followed (#1460, 2026-09-25),
+  so today `workers.sources.session-distill.max_turns` (15) and
+  `workers.sources.bench-mine.max_turns` (12) are the only way to move either,
+  over code defaults of 15 and 8. An item runs under the budget it was enqueued
+  under (`_turn_budget` reads the payload, not the live config).
 - **`_common.write_staging_note(source=NAME, …)` at the end**, which fixes the path to
-  `pending-research/<source>/<date>/` and stamps `review_status: pending`. The
+  `pending-research/<source>/<date>/` and stamps `review_status: pending`.
+  `bench-mine` then overwrites that field itself: `_record_calibration` writes
+  `pending` or `out_of_band` from the edge verdict, so for that source the
+  staging helper's stamp is only the initial value. The
   Review tab is what promotes them; only `bench-mine` has a default destination
   in `_DEFAULT_DEST`, so for `session-distill` a human must name where it goes.
 
@@ -753,15 +759,27 @@ directory that does not exist** — `distill/` and `bench/<date>/`, from before
 the path was centralised. Harmless, and the kind of drift that makes a grep for
 the real path fail; `tests/test_research_doc_claims.py` pins the real leaf now.
 
-This is the family that does not work: the two fail 42% and 82% of their runs,
-both at `max_turns` with nothing written. One shared shape, one shared defect —
-§2 has the numbers. The family's third member, `gap-fill`, never ran at all and
+This was the family that did not work: measured over the 7 days to 2026-09-11
+it failed 42% and 82% of its runs, both at `max_turns` with nothing written, and
+§2 still carries those numbers in the present tense (filed). The two config keys
+above are what closed it. Over the 7 days to 2026-09-28 `session-distill` is 28
+ok of 29 runs and `bench-mine` 118 ok of 163, and of `bench-mine`'s 32 failures
+30 are one `ConnectError` burst on 2026-09-24, not cap deaths — 2 runs in the
+whole window died at the ceiling with nothing written. The shared shape is still
+the diagnosis, but the defect that shape now shares is not the budget: it is a
+`done:` marker the ledger input writes and never reads, and a calibration gate
+that scores the staging envelope instead of the candidate. Both are named in the
+`bench-mine` subsection below. The family's third member, `gap-fill`, never ran at all and
 was retired on 2026-09-24 (§7).
 
 ### `session-distill` — mine a finished chat for patterns
 
-**Wakes** every 1800 s, scans `~/lloyd-data/sessions/*.json` and enqueues one item
-per eligible session. **Executes** a direct turn on the primary (`max_turns=15`)
+**Wakes** every 1800 s, scans `~/lloyd-data/sessions/*.json` (`app.paths.SESSIONS_DIR`
+— the data root, not the code tree) and enqueues one item
+per eligible session.
+**Executes** a direct turn on the primary (`workers.sources.session-distill.max_turns`,
+15 since #1460 landed 2026-09-25; the code's `DEFAULT_MAX_TURNS` is 15 too, so the
+key exists to move it, not to hold a different value)
 and writes findings to `pending-research/session-distill/<date>/`.
 
 A session is distilled **once**, **after it goes quiet** (30 min since the
@@ -783,13 +801,17 @@ wrote it**. Each gate is scar tissue:
   mined back in as observations about the user before this gate existed.
   `sessions_io.NON_USER_PLATFORMS` is the one definition.
 
-**Current state:** 154 of 369 runs in the window failed at `max_turns` with
-nothing written. See §2.
+**Current state (7 days to 2026-09-28):** 1 of 29 runs failed, and it was not a
+cap death — an empty turn that stopped under the ceiling (`stop_reason=stop`,
+14 of 15). 28 notes staged; 1.3 GPU-hours. The 154-of-369 figure in §2 is the
+window to 2026-09-11 and no longer reproduces.
 
 ### `bench-mine` — new bench tasks from failure signal
 
 **Wakes** every 7200 s with two deliberately independent inputs, capped at
-`MAX_ENQUEUE_PER_TICK` (3): **failed autonomy runs**
+`MAX_ENQUEUE_PER_TICK` (3) on the failed-runs input only — the ledger input is
+offered by `_recent_ledger_losers` at its own default `limit=5`, so neither that
+constant nor the `max_enqueue_per_tick` key bounds it (filed): **failed autonomy runs**
 (`autonomy-runs/**/run_*.md` with `status: failed`, 7-day window) and **ledger
 losers** (bench tasks the baseline scored under 0.6). **Executes** a direct turn
 on the primary (`workers.sources.bench-mine.max_turns`, 12 since 2026-09-24;
@@ -810,24 +832,51 @@ other session sources' — #896) and stages a candidate task under
   `trace_status` is `success`, since `judge_trace` in
   `scripts/autoresearch/judge.py` scores an incomplete trace
   0.0 and every errored baseline row is therefore a "loser" for harness rather
-  than model reasons. #876 has since cleared, the ledger is appending again (291
-  rows on 2026-09-19), and 104 baseline losers sit inside the 7-day window — so
-  the input should fire now, which production has yet to confirm: the queue held
-  0 rows of kind `mine` as of 2026-09-19.
+  than model reasons. The input fires now: 1,678 ledger rows and 238 baseline
+  rows on 2026-09-28, 38 usable losers inside the 7-day window, and 132 completed
+  queue items of kind `mine` in that window against 0 on 2026-09-19. It fires too
+  often. 128 of those 132 items are one task — `bench_007_skill_invocation`,
+  baseline 0.05 — offered 24 to 29 times per round across 5 rounds, because
+  `_enqueue_ledger_losers` never consults the `done:` markers this source writes
+  (all 10 current `done:ledger:*` keys exist, the earliest of them before most of
+  those runs) and `mark_completed` releases the dedup key behind it. The
+  failed-runs input does read that watermark; the ledger input is the half of the
+  module that skipped its own "a failure corpus is an infinite loop without
+  markers" rule (filed).
 - **Every candidate carries a `calibration` block** — N trials against the
   canonical prompt, and whether the composite landed strictly inside the
   capability edge. A task the learner always passes and one it always fails both
-  move the bench mean by noise rather than signal; four of the eleven live tasks
-  sit at exactly 0.00.
+  move the bench mean by noise rather than signal; of the 11 tasks with baseline
+  rows in the ledger, none sits at mean 0.00 on 2026-09-28, and the live corpus is
+  20 files, not the eleven this line used to count (filed). **And as measured it
+  scores the wrong document**: `_load_candidate` hands `load_bench_tasks` the
+  staging *directory*, so the thing given 10 real trials is `write_staging_note`'s
+  envelope — no `prompt`, no `objective_checks`, the layer the judge then awards
+  full marks for. All 118 notes staged in the 7 days to 2026-09-28 carry
+  `status: ok` with an empty `error`, and 145 of the 146 staged notes across the
+  family are `pending` against one `out_of_band`; the recorded means span 0.51 to
+  1.00, which includes a perfect score ten times over on a candidate mined from a
+  task the baseline scored 0.05. The edge gate is decorative and
+  it is the expensive step: 10 real bench trials per candidate, 6.4 GPU-hours for
+  the source in the window (filed).
 - **The human promotion step is the honesty gate.** Lloyd writing the tasks
   that grade Lloyd is the known self-grading failure mode; the human gate, the
   mechanical-check requirement, and mining from real failures rather than
-  invented ones are what hold against it.
+  invented ones are what hold against it. As of 2026-09-28 the gate has never
+  opened: none of the 20 live tasks under `~/obsidian/lloyd/bench/` carries a
+  staging provenance field, against 118 `bench-mine` candidates sitting staged —
+  113 of them the same slug, `mined-from-bench-007-skill-invocation`. The only
+  consumer of this group's output is a Review tab that has taken nothing from it.
 - The idea is copied from Terminal-Universe (arXiv:2609.04148): a recorded
   trajectory, *including the failed ones*, reconstructed into a task with a
   deterministic pass/fail check.
 
-**Current state:** 49 of 60 runs in the window failed at `max_turns`. See §2.
+**Current state (7 days to 2026-09-28):** 163 runs, 118 ok, 32 failed — 30 of
+those one `ConnectError` burst on 2026-09-24 and 2 genuine cap deaths — plus 13
+skipped, 11 of them "no parseable bench-task frontmatter", again on
+`bench_007_skill_invocation`. 6.42 GPU-hours. The failure that matters is not in
+the failed column: it is 118 successes writing 113 copies of one candidate. §2's
+49-of-60 is the window to 2026-09-11.
 
 ---
 
