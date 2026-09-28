@@ -540,6 +540,16 @@ def _writes_enabled() -> bool:
         return True
 
 
+#: Provenances that declare a *pass*, not a person, produced the claim. Each one
+#: has to name what it read: a fact with no `source_doc` can never be attributed
+#: to the run that wrote it or selectively reverted, which is the property
+#: `kg_hygiene.provenance_coverage` gates a rebuild on at 100% (#1743).
+#: `STATED` and `AMBIGUOUS` stay exempt — a chat turn states facts with no
+#: document behind them, and requiring one there would refuse ordinary
+#: conversation writes across the whole tool surface.
+_MACHINE_DERIVED_PROVENANCE = ("EXTRACTED", "INFERRED")
+
+
 def _fact_add(params: dict) -> dict:
     if not _writes_enabled():
         return _err(
@@ -555,6 +565,19 @@ def _fact_add(params: dict) -> dict:
     if not raw_entity or not category or not fact_text:
         return _err("entity, category, and fact are required", ErrorCode.MISSING_PARAM)
     source_doc = params.get("source_doc")
+    # #1743: refused here, before an entity is minted or a file is opened, so a
+    # refusal leaves nothing behind. The session-distill prompt told its turn to
+    # call `fact_add` and never mentioned this field, and the handler used to
+    # write the absent value straight through as NULL — 9 facts with no handle
+    # on where they came from.
+    prov_declared = params.get("provenance", "STATED")
+    if prov_declared in _MACHINE_DERIVED_PROVENANCE and not str(source_doc or "").strip():
+        return _err(
+            f"source_doc is required when provenance is {prov_declared}: a "
+            "machine-derived fact with no source can never be attributed or "
+            "reverted. Pass the document or transcript it was extracted from.",
+            ErrorCode.MISSING_PARAM,
+        )
     if _is_junk_entity(raw_entity, source_doc):
         return _err(
             f"'{raw_entity}' looks like a filename, a code fragment or a pipeline "

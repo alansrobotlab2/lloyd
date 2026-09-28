@@ -8,6 +8,8 @@ format. The extractor has gone through `gate_entity_name` since #537; this
 pins that `fact_add` does too, without the extractor's refusal of an untyped
 name — a caller naming a new thing is declaring it.
 """
+import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -101,3 +103,76 @@ def test_the_reindex_after_a_write_registers_nothing(tree):
     st = kg_store.store()
     st.facts_idx.update_file(d / "Loose Dir-state.md", root=tree, register_entities=False)
     assert _row("Loose Dir") is None
+
+
+# ---------------------------------------------------------------------------
+# #1743 — a machine-derived fact has to name the document it came from
+#
+# The session-distill prompt told its turn to call `fact_add` and never mentioned
+# `source_doc`, the handler wrote the field through as `None`, and 9 rows reached
+# `facts_idx` with it NULL. A fact with no source cannot be attributed to the run
+# that wrote it or selectively reverted, which is exactly the property
+# `kg_hygiene.provenance_coverage` gates a rebuild on at 100%. The refusal is
+# scoped to the two provenances that declare *a pass, not a person, produced
+# this*: `STATED` is the default and a chat turn states facts with no document
+# behind them, so requiring a source there would refuse ordinary conversation
+# writes across the whole tool surface.
+# ---------------------------------------------------------------------------
+
+def test_an_extracted_fact_with_no_source_doc_is_refused(tree):
+    out = _add("Tidewell Relay", provenance="EXTRACTED")
+    assert out.get("code") == "MISSING_PARAM", out
+    assert not out.get("success")
+    assert "source_doc" in out.get("error", ""), (
+        "the refusal has to name the field the caller left out")
+    assert not (tree / "Tidewell Relay").exists(), (
+        "a refusal must not leave a minted entity directory behind")
+
+
+def test_an_inferred_fact_with_no_source_doc_is_refused(tree):
+    out = _add("Tidewell Relay", provenance="INFERRED")
+    assert out.get("code") == "MISSING_PARAM", out
+    assert not out.get("success")
+    assert not (tree / "Tidewell Relay").exists()
+
+
+def test_the_refusal_reaches_the_turn_through_the_mcp_wrapper(tree):
+    """The boundary the leak actually crossed: a distill turn calls this tool over
+    MCP, so the refusal has to arrive as an MCP error the turn can read rather
+    than as a successful-looking payload whose text happens to mention `error`.
+    Testing only the handler would leave the wrapper unexercised."""
+    wrapped = asyncio.run(facts.call_tool(
+        "fact_add", {"entity": "Tidewell Relay", "category": "state",
+                     "fact": "pins its control port at 9453",
+                     "provenance": "EXTRACTED"}))
+    assert wrapped.is_error is True
+    payload = json.loads(wrapped.content[0].text)
+    assert payload["code"] == "MISSING_PARAM", payload
+    assert "source_doc" in payload["error"], payload
+    assert not (tree / "Tidewell Relay").exists()
+
+
+def test_an_extracted_fact_with_a_blank_source_doc_is_refused(tree):
+    # Whitespace is the shape a templated path takes when the value under it is
+    # empty, so a field that is present but says nothing cannot satisfy the rule.
+    out = _add("Tidewell Relay", provenance="EXTRACTED", source_doc="   ")
+    assert out.get("code") == "MISSING_PARAM", out
+    assert not (tree / "Tidewell Relay").exists()
+
+
+def test_an_extracted_fact_with_a_source_doc_still_writes(tree):
+    out = _add("Tidewell Relay", provenance="EXTRACTED",
+               source_doc="sessions/20260928_005437_distill.json")
+    assert out.get("success") is True, out
+    rows = kg_store.store().facts_idx.for_entity("Tidewell Relay")
+    assert [r["source_doc"] for r in rows] == ["sessions/20260928_005437_distill.json"]
+
+
+def test_an_unsourced_stated_fact_still_writes(tree):
+    """The exemption that keeps this a scoped rule rather than a tool-wide one:
+    a chat turn states a fact with no document behind it, and that stays
+    writable — default provenance, no `source_doc`, still indexed."""
+    out = _add("Tidewell Relay")
+    assert out.get("success") is True, out
+    rows = kg_store.store().facts_idx.for_entity("Tidewell Relay")
+    assert [r["source_doc"] for r in rows] == [None]

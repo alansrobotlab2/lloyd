@@ -1983,3 +1983,170 @@ def test_the_check_resolves_against_the_data_root_and_not_the_cwd(monkeypatch, t
     (root / "autonomy-runs" / "77" / "x.md").write_text("record", encoding="utf-8")
     assert ST._artifact_on_disk("autonomy-runs/77/x.md") is True
     assert ST._artifact_on_disk("") is False
+
+
+# ---------------------------------------------------------------------------
+# #1743 — a distill run names the transcript its facts came from, and counts
+# the ones that landed with nowhere
+#
+# The prompt told the turn to call `fact_add` (`:246`/`:249` before this round)
+# and never once mentioned `source_doc`; the MCP handler read the parameter as
+# absent and wrote `NULL` through, so 9 facts reached `facts_idx` unattributed —
+# un-revertable, because the only handle on a fact is the document it names.
+# Clause 1 is the instruction the run was never given; clause 3 is the leak
+# surfacing on the run that caused it instead of in tomorrow's health report.
+# ---------------------------------------------------------------------------
+
+#: The session id the fake distill turn reports and writes its facts under —
+#: the value #1709 stamps onto `facts_idx.session_id`, which is what makes a
+#: run able to count its own writes at all.
+_DISTILL_SESSION = "20260928_112400_distill"
+
+
+@pytest.fixture
+def fact_store(tmp_path, monkeypatch):
+    """A real fact tree and index under `tmp_path`.
+
+    The count has to be read back out of the store the facts were really
+    written to: a stubbed index would agree with whatever the source claimed,
+    which is the same thing the turn's own prose was already doing.
+    """
+    from agent_mcp import _shared, facts as FACTS, retrieval
+    from app import kg_store
+
+    root = tmp_path / "facts"
+    root.mkdir()
+    monkeypatch.setattr(_shared, "FACTS_ROOT", root)
+    monkeypatch.setattr(FACTS, "FACTS_ROOT", root)
+    monkeypatch.setattr(retrieval, "FACTS_ROOT", root)
+    monkeypatch.setattr(_shared, "_entity_dirs_cache", None)
+    kg_store.configure(tmp_path / "kg.sqlite")
+    return root
+
+
+def _distill_turn(seen_prompts: list, add: list[dict], *, ok_text: str = "## Struggles\n- none\n",
+                  session: str = _DISTILL_SESSION):
+    """A distill turn that writes through the real `fact_add`, under its own id.
+
+    Each entry of `add` is the kwargs of one call, so a test can put a
+    source-less fact in the middle of an otherwise clean run and see what the
+    run then reports about it. `write_gate: off` keeps the dedupe gate out of
+    these tests — they are about provenance, and it asks a model.
+    """
+    from agent_mcp import facts as FACTS
+    from agent_mcp._task_registry import current_session_id
+
+    async def _turn(prompt, *a, **k):
+        seen_prompts.append(prompt)
+        token = current_session_id.set(session)
+        try:
+            for kwargs in add:
+                FACTS._fact_add(dict(entity="Tidewell Relay", category="state",
+                                     write_gate="off", **kwargs))
+        finally:
+            current_session_id.reset(token)
+        return C.TurnResult(text=ok_text, stop_reason="stop", num_turns=4,
+                            session_id=session)
+    return _turn
+
+
+def _arm_success_path(monkeypatch, tmp_path, q):
+    """Keep a successful distill inside `tmp_path`: the staging note and the
+    `done:` watermark both live outside the source otherwise."""
+    import workers.queue as Q
+    monkeypatch.setattr(Q, "_queue_instance", q, raising=False)
+    monkeypatch.setattr(SD, "write_staging_note",
+                        lambda **kw: tmp_path / "note.md")
+
+
+async def test_the_distill_prompt_names_the_transcript_as_the_fact_source(tmp_path, monkeypatch):
+    """Clause 1: the instruction every leaked fact is missing."""
+    seen: list = []
+    monkeypatch.setattr(SD, "run_prompt_on_primary", _distill_turn(seen, []))
+
+    await SD.execute(_item({"session_path": str(tmp_path / "20260927_chat.json")}))
+
+    assert len(seen) == 1, seen
+    prompt = seen[0]
+    assert str(tmp_path / "20260927_chat.json") in prompt, (
+        "the path has to be in the prompt literally — the turn reads a "
+        "placeholder as an instruction to make one up")
+    assert "source_doc" in prompt, "the field name itself, not a paraphrase of it"
+
+
+async def test_the_distill_prompt_tells_the_turn_what_an_unsourced_call_costs(tmp_path, monkeypatch):
+    seen: list = []
+    monkeypatch.setattr(SD, "run_prompt_on_primary", _distill_turn(seen, []))
+
+    await SD.execute(_item({"session_path": str(tmp_path / "20260927_chat.json")}))
+
+    assert "fact_add" in seen[0] and "refuse" in seen[0].lower(), (
+        "a turn that does not know the call is refused retries it with a made-up path")
+
+
+async def test_a_distill_run_reports_the_facts_it_wrote_with_no_source(
+        tmp_path, monkeypatch, q, fact_store):
+    """Clause 3: one clean write and one leak, and the run says so itself."""
+    seen: list = []
+    turn = _distill_turn(seen, [
+        {"fact": "the relay pins its control port at 9453",
+         "provenance": "EXTRACTED", "source_doc": "sessions/20260927_chat.json"},
+        {"fact": "the relay was rewired in September"},
+    ])
+    monkeypatch.setattr(SD, "run_prompt_on_primary", turn)
+    _arm_success_path(monkeypatch, tmp_path, q)
+
+    out = await SD.execute(_item({"session_path": str(tmp_path / "20260927_chat.json")}))
+
+    assert out["status"] == "success", out
+    assert out["meta"]["facts_without_source"] == 1, out["meta"]
+
+
+async def test_a_distill_run_that_stamped_every_fact_reports_zero(
+        tmp_path, monkeypatch, q, fact_store):
+    """The pair that makes the count able to fail: 0 and 1 both come from the
+    store, so neither is a constant the source prints on its way past."""
+    seen: list = []
+    turn = _distill_turn(seen, [
+        {"fact": "the relay pins its control port at 9453",
+         "provenance": "EXTRACTED", "source_doc": "sessions/20260927_chat.json"},
+        {"fact": "the relay was rewired in September",
+         "provenance": "EXTRACTED", "source_doc": "sessions/20260927_chat.json"},
+    ])
+    monkeypatch.setattr(SD, "run_prompt_on_primary", turn)
+    _arm_success_path(monkeypatch, tmp_path, q)
+
+    out = await SD.execute(_item({"session_path": str(tmp_path / "20260927_chat.json")}))
+
+    assert out["meta"]["facts_without_source"] == 0, out["meta"]
+
+
+async def test_a_failed_distill_still_reports_what_its_turn_wrote(
+        tmp_path, monkeypatch, q, fact_store):
+    """A turn that dies at `max_turns` can still have written facts first, and
+    the leak does not stop being a leak because the run failed."""
+    seen: list = []
+    turn = _distill_turn(seen, [{"fact": "the relay was rewired in September"}],
+                         ok_text="")
+    monkeypatch.setattr(SD, "run_prompt_on_primary", turn)
+    monkeypatch.setattr("workers.queue._queue_instance", q, raising=False)
+
+    out = await SD.execute(_item({"session_path": str(tmp_path / "20260927_chat.json")}))
+
+    assert out["status"] == "failed", out
+    assert out["meta"]["facts_without_source"] == 1, out["meta"]
+
+
+def test_the_count_abstains_when_the_store_cannot_be_read(monkeypatch):
+    """`None` and `0` are not the same answer, and only one of them is honest
+    when the index would not open. A zero here reads as a clean run to the
+    health report that would otherwise notice."""
+    from app import kg_store
+
+    def _boom(*a, **k):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(kg_store, "store", _boom)
+    assert SD._facts_without_source(_DISTILL_SESSION) is None
+    assert SD._facts_without_source("") is None, (
+        "a run with no session id has no write record; that is unknown, not clean")

@@ -44,6 +44,7 @@ logger = logging.getLogger("lloyd-workers.session_distill")
 
 NAME = "session-distill"
 DEFAULT_PRIORITY = 70
+from app import kg_store  # read here to count this run's own writes (#1743)
 from app.paths import SESSIONS_DIR  # anchored to DATA_ROOT, not $HOME/lloyd
 
 _MAX_ENQUEUE_PER_TICK = 3
@@ -214,6 +215,33 @@ async def enqueue_if_due(queue: WorkQueue, src_cfg: dict) -> None:
                     enqueued, len(candidates), len(done))
 
 
+def _facts_without_source(session_id: str) -> int | None:
+    """How many facts this run's session wrote that landed with no `source_doc`.
+
+    The leak is #1743: the prompt told the turn to call `fact_add` and never told
+    it to stamp a source, and 9 rows reached `facts_idx` with `source_doc IS
+    NULL` — a fact with no source has no handle to revert it by, and the only
+    surface that noticed was the next knowledge health report, a day later. This
+    is the run's own write record instead: `facts_idx` attributes rows by the
+    session id the harness forwards in the call's `_meta` (#1709), so the run that
+    leaks is the run that says so.
+
+    `None`, never `0`, when there is nothing to read. An index that will not open
+    or a turn that never got a session id produced no measurement, and a zero
+    here is a claim of a clean run — the failure shape this whole function exists
+    to prevent is a check that reports success because it measured nothing.
+    """
+    if not session_id:
+        return None
+    try:
+        rows = kg_store.store().facts_idx.for_session(session_id)
+    except Exception as exc:  # noqa: BLE001 — an unreadable index is not a clean run
+        logger.warning("session-distill: could not read the write record for %s: %s",
+                       session_id, exc)
+        return None
+    return sum(1 for r in rows if not str(r.get("source_doc") or "").strip())
+
+
 def _turn_budget(item: QueueItem) -> int:
     """The iteration budget this item was enqueued under.
 
@@ -247,6 +275,12 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         f"technologies, concepts) — never for the session, the conversation, or "
         f"metadata about the interaction. If the session has no substantive topics, "
         f"return the distillation sections with '- none' and do NOT call fact_add.\n\n"
+        f"PROVENANCE: every fact_add call you make must pass `source_doc` set to the "
+        f"transcript you are distilling — {session_path}. Pass that path verbatim, "
+        f"in full, and do not substitute a vault note, an entity name or an empty "
+        f"string. A fact with no `source_doc` cannot be attributed to this run or "
+        f"reverted later, so the tool refuses one declared EXTRACTED or INFERRED: "
+        f"omitting the field does not skip the check, it loses the fact.\n\n"
         f"Return in this structure:\n"
         f"## Struggles\n- ...\n\n## Gaps\n- ...\n\n## Skill Candidates\n- ...\n\n"
         f"## Durable Facts\n- ...\n\n## Confidence\n<0.0-1.0>: <justification>\n"
@@ -254,6 +288,10 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     turn = await run_prompt_on_primary(
         prompt, max_turns=_turn_budget(item), source=NAME,
         title=f"distill {session_name}")
+    # The turn may have written facts before it died, so the leak count belongs on
+    # both outcomes — a run that hit `max_turns` after three unsourced writes is
+    # still the run that made them (#1743).
+    without_source = _facts_without_source(turn.session_id)
     if not turn.ok:
         # 135 of this source's 356 notes have the body "(no response)". An
         # empty turn is a failed run, and the retry is this source's own: the
@@ -265,8 +303,14 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         return {"status": "failed",
                 "summary": f"{session_name}: {turn.failure_summary()}",
                 "meta": {"empty_response": True, "stop_reason": turn.stop_reason,
-                         "num_turns": turn.num_turns}}
+                         "num_turns": turn.num_turns,
+                         "facts_without_source": without_source}}
 
+    if without_source:
+        # Loud in the log as well as on the run row: this is the field the next
+        # knowledge health report would otherwise be the first to notice.
+        logger.warning("session-distill %s: %s fact(s) landed with no source_doc",
+                       session_name, without_source)
     conf = parse_confidence(turn.text)
     path = write_staging_note(
         source=NAME,
@@ -283,7 +327,8 @@ async def execute(item: QueueItem) -> dict[str, Any]:
         "summary": f"distilled {session_name}",
         "response": turn.text,
         "artifact_path": str(path),
-        "meta": {"stop_reason": turn.stop_reason, "num_turns": turn.num_turns},
+        "meta": {"stop_reason": turn.stop_reason, "num_turns": turn.num_turns,
+                 "facts_without_source": without_source},
     }
 
 
