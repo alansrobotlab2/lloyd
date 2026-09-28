@@ -16,7 +16,12 @@ either moved. Since #1627 it has a third duty, which is the one that bites:
   §6.1's own baseline — quote numbers the extract cannot cover, and they are
   labelled history in the text;
 * the fleet shape §10 names is read from `config.yaml`, the gate from the same
-  file, and the ring's retention from `app/engine_pressure`.
+  file, and the ring's retention from `app/engine_pressure`;
+* and since #1720 it holds §10's accepted-loss ruling on the non-churn misses to
+  account: the deferral sentence that got the question re-filed three times stays
+  gone, and the two re-open triggers are pinned to the same derivations as the
+  criteria — trigger one to `chat_turns_with_misses`, trigger two to §6.1's
+  per-day budget — so neither figure can be re-cut by hand when it suits.
 """
 
 from __future__ import annotations
@@ -245,6 +250,104 @@ def test_the_draft_group_branch_still_names_this_window(reading, derived):
     partial = d["miss_events"] - d["cold_events"]
     assert f"{partial} of the day's {d['miss_events']} misses still read part of " \
            f"their prompt from cache" in reading
+
+
+# ── #1720: the accepted-loss ruling on the non-churn misses, and what re-opens it ─
+#
+# Three sweeps asked the same question (#1339's owed clause 2 → #1627's owed entry
+# 2 → this item) because §10 closed the eviction bullet by parking the call on a
+# person, and `aa68ea74` ("nothing parks on Alan — owed work is settled by Lloyd")
+# edited this page without touching that line. owed-check run
+# `20260927_232609_owedcheck_46d6` ruled it on 2026-09-28; these nodes are what
+# keeps the ruling and, more importantly, the two figures it re-opens on from
+# drifting into hand-edited prose. Every number below comes out of `derived` or
+# out of `_per_day_budget`, so a figure edited in the doc without the data moving
+# fails here the same way a counted figure already does.
+
+#: The predicate criterion (a) is marked on, spelled once so the trigger and the
+#: criterion cannot quietly come to mean different things.
+_A_PREDICATE = "carries a prefix miss"
+
+_TRIGGER_CHAT_RE = re.compile(rf"any counted window in which a chat turn ({_A_PREDICATE})")
+_TRIGGER_BUDGET_RE = re.compile(
+    r"any counted day exceeding §6\.1's per-day budget of (\d+) misses / ([\d.]+)M "
+    r"re-prefilled tokens")
+
+
+def test_the_accepted_loss_ruling_replaced_the_deferral(s10, reading, derived):
+    """The deferral sentence is gone and the decision it stood in for is in the
+    text, in the ruling's own words, with the reason the ruling gives for it."""
+    assert "Alan's call, not a round's" not in s10, "the sentence owed-check ruled on is still standing"
+    assert "Whether to chase that upstream" not in s10
+    assert "accepted as a bounded, documented loss" in reading
+    assert "the upstream unannotated draft-group annotation is not chased" in reading
+    assert "unmeasured rather than merely unfinished" in reading
+    assert "does not claim reuse is disabled" in reading
+    assert "capability chase with no measured gain" in reading
+    partial = derived["miss_events"] - derived["cold_events"]
+    assert f"the day's {partial} partial misses show reuse works" in reading, \
+        "the reason cites this day's partial misses, so it cites their derived count"
+
+
+def test_the_ruling_names_both_reopen_triggers(reading):
+    """A loss is only *bounded* if something bounded re-opens it, and the two
+    conditions the ruling named are the whole of that bound."""
+    assert _TRIGGER_CHAT_RE.search(reading), \
+        "trigger one — a counted window in which a chat turn carries a prefix miss — is missing"
+    assert _TRIGGER_BUDGET_RE.search(reading), \
+        "trigger two — a counted day over §6.1's per-day budget — is missing"
+
+
+def test_reopen_trigger_two_s_figures_are_the_budget_derived_from_six_one(reading):
+    """The half that makes the bound a measurement: edit `97` or `10.3` in the
+    trigger without moving §6.1's baseline and this fails, and move §6.1's
+    baseline and the trigger has to move with it."""
+    miss_budget, token_budget = _per_day_budget(_section(6))
+    m = _TRIGGER_BUDGET_RE.search(reading)
+    assert m, "the second trigger must state both figures, not gesture at the budget"
+    assert int(m.group(1)) == miss_budget, \
+        f"§10's trigger says {m.group(1)} misses; §6.1 derives {miss_budget} a day"
+    assert float(m.group(2)) == token_budget, \
+        f"§10's trigger says {m.group(2)}M; §6.1 derives {token_budget}M a day"
+
+
+def test_reopen_trigger_one_is_the_measurement_criterion_a_is_marked_on(reading, derived):
+    """The trigger and the criterion read one number. (a) is marked from
+    `chat_turns_with_misses`; the trigger has to fire on that same count and use
+    that same predicate, or a day could pass (a) and re-open the branch at the
+    same time."""
+    d = derived
+    m = _TRIGGER_CHAT_RE.search(reading)
+    assert m, "trigger one is missing from the counted reading"
+    assert m.group(1) == _A_PREDICATE
+    assert f"{d['chat_turns_with_misses']} of the day's {d['chat_turns']} chat turns " \
+           f"{_A_PREDICATE}" in reading, "(a) is no longer marked on that count"
+    fired = d["chat_turns_with_misses"] > 0
+    assert (_verdict(reading, "a") == "fails") == fired, (
+        "the trigger and (a)'s mark read the same count and disagree")
+
+
+def test_the_ruling_breaks_nothing_the_suite_already_pins(reading, derived):
+    """The ruling was inserted into a bullet two other nodes already read, inside
+    the span that may carry exactly one verdict mark per criterion. The rewritten
+    bullet keeps both derived phrases, and the new prose added no second mark for
+    a, b, c or d."""
+    d = derived
+    assert f"The other {d['miss_events'] - d['misses_gap_churned_free_pool']} misses" in reading
+    partial = d["miss_events"] - d["cold_events"]
+    assert f"{partial} of the day's {d['miss_events']} misses still read part of " \
+           f"their prompt from cache" in reading
+    for letter in CRITERIA:
+        _verdict(reading, letter)
+
+
+def test_both_triggers_need_nothing_the_derivation_does_not_already_return(derived):
+    """Why no script change was needed, and the check that stays true: each
+    trigger counts something `derive` already emits over the extract — (i) the
+    chat-turn miss count, (ii) the day's misses and re-prefilled tokens. A
+    trigger the derivation cannot count is a trigger nobody will ever fire."""
+    for key in ("chat_turns_with_misses", "misses", "reprefill_tokens"):
+        assert key in derived, f"the triggers need `{key}`, which derive no longer emits"
 
 
 # ── what must not come back ───────────────────────────────────────────────

@@ -810,8 +810,17 @@ has still not been run as of 2026-09-11.
   queue is LRU, and only in **3 of 46** gaps did the engine compute at least
   as many tokens as the free pool held at the gap's tightest, which is the
   most that could have reclaimed a paused prefix. The other 43 misses have no
-  churn to explain them and are the candidates for the branch below. Whether
-  to chase that upstream or accept the loss is Alan's call, not a round's.
+  churn to explain them and are the candidates for the branch below, and that
+  branch is decided rather than parked (owed-check `20260927_232609_owedcheck_46d6`,
+  #1720): **the non-churn misses are accepted as a bounded, documented loss, and
+  the upstream unannotated draft-group annotation is not chased**. The causal
+  attribution is unmeasured rather than merely unfinished — this build's warning
+  does not claim reuse is disabled, and the day's 4 partial misses show reuse
+  works — so filing an upstream issue against a build at `dff1bde` would be a
+  capability chase with no measured gain. Re-open conditions, both countable from
+  a future counted window: (i) any counted window in which a chat turn carries a
+  prefix miss, or (ii) any counted day exceeding §6.1's per-day budget of 97
+  misses / 10.3M re-prefilled tokens.
 - **Two-request windows, and what (d) counts.** `two_request_throughput`
   reads every status line the window has. Lines with `Running:` 2 or more:
   **2,895**, median **2464.8 tok/s** combined, slowest **9.2**. Lines under the
