@@ -463,6 +463,57 @@ def stale_coverage(entities: dict) -> tuple[int, int]:
     return unevaluable, active_total
 
 
+#: The key a resolved contradiction leaves on the loser
+#: (`agent_mcp.facts._CONTRADICTION_TRACE`), spelled exactly as the canonical edge
+#: type it stands for (`app.kg_store.EDGE_TYPES`), so this count and the edge table
+#: are counting one relation (#1596).
+CONTRADICTION_TRACE_KEY = "conflicts_with"
+
+
+def contradiction_trace_coverage(entities: dict) -> tuple[int, int]:
+    """Return (fact records carrying a `conflicts_with` trace, all fact records).
+
+    The trace shipped in #1544 with nothing counting it, so "is the number rising?"
+    was answered by a hand-run grep over ~32k files and the instrument that would
+    answer it nightly did not exist (#1596). This is that measurement.
+
+    Over EVERY fact record, active or retired, and that is deliberate: a trace only
+    ever exists on the loser of a pair, which the same write has just marked
+    `invalid_at`. A counter filtered through `is_fact_active` would report 0 over a
+    corpus made entirely of resolutions, which is the #841 class — a verdict printed
+    for an input the check silently excluded. `is_fact_active` is not called here.
+
+    Report-only by construction: `_alarms()` takes `(store_stats, hygiene,
+    duplicate_id_files, baseline)` and none of those is this, so the line can rise
+    from 0 to 10,000 without touching the exit code the scheduler reads. It measures
+    whether resolutions are happening at all; it does not judge them.
+    """
+    traced = 0
+    total = 0
+    for _entity_name, category_entries in entities.items():
+        for entry in category_entries:
+            for fact in entry["facts"]:
+                if not isinstance(fact, dict):
+                    continue
+                total += 1
+                if fact.get(CONTRADICTION_TRACE_KEY):
+                    traced += 1
+    return traced, total
+
+
+def _trace_coverage_cell(tc: tuple[int, int] | None) -> str:
+    """The row's cell: the count beside its denominator, zero printed as zero.
+
+    `0 of 118,343 fact records` is a measurement; a blank or an omitted row is what
+    a zero would otherwise read as, and the whole point of counting a store-wide
+    zero is that it is the state a first real resolution moves.
+    """
+    if tc is None:
+        return "not measured"
+    traced, total = tc
+    return f"{traced:,} of {total:,} fact records"
+
+
 def compute_hygiene(entities: dict, now: datetime, regrowth_days: int = 7,
                     baseline_path=None) -> dict:
     """Contamination, near-duplicate clusters and regrowth.
@@ -584,6 +635,7 @@ def generate_report(
     stale_unevaluable: tuple[int, int] | None = None,
     duplicate_id_files: int | None = None,
     copy_gaps: list | None = None,
+    trace_coverage: tuple[int, int] | None = None,
 ) -> str:
     """Generate the markdown health report.
 
@@ -600,6 +652,13 @@ def generate_report(
     `copy_gaps` is `reflection_archive.copy_gaps` over the reflection directory:
     a report naming an archive copy the directory lacks is a lost cycle (#1227).
     None means not measured, and the section says that too.
+
+    `trace_coverage` is the `(n, m)` pair from `contradiction_trace_coverage`: how
+    many of the m fact records carry a `conflicts_with` resolution trace (#1596).
+    It rides in the Hygiene table because it is a corpus measurement with a real
+    zero, not a verdict: the row prints `0 of 118,343 fact records` rather than
+    disappearing, since the zero is the finding. None means the caller did not
+    measure it.
     """
     lines: list[str] = []
     date_str = now.strftime("%Y-%m-%d")
@@ -827,6 +886,15 @@ def generate_report(
         dup_cell = ("not measured" if duplicate_id_files is None
                     else str(duplicate_id_files))
         lines.append(f"| Files with duplicate fact IDs | {dup_cell} |")
+        # The count of resolved contradictions the corpus actually holds. Kept in
+        # this table rather than Summary Stats because it belongs beside the other
+        # two corpus-wide fact counts, and because Summary Stats is read as the
+        # store's size while this is read as its activity (#1596). It is the number
+        # `fact_resolve_apply`'s `traces_written` reports per call and nobody
+        # totalled: 0 on the live corpus as of 2026-09-28, and a rising line is the
+        # first evidence that the resolve path is being used at all.
+        lines.append(f"| Fact records carrying a `conflicts_with` resolution trace | "
+                     f"{_trace_coverage_cell(trace_coverage)} |")
         lines.append("")
         if hygiene["contaminated"]:
             lines.append("**Contamination must be 0.** A rise means an entity merge fused two different things; "
@@ -1167,13 +1235,16 @@ def main():
     hygiene = compute_hygiene(entities, now)
     fact_dups = fact_duplicate_stats()
     dup_id_files = _duplicate_id_files(entities)
+    # Over the entities already parsed above — no second walk of the tree.
+    trace_coverage = contradiction_trace_coverage(entities)
     reflection_dir = DEFAULT_OUTPUT_DIR
     gaps = _copy_gaps(reflection_dir, _reports_in(reflection_dir))
 
     # Generate report
     report = generate_report(entity_stats, rel_stats, edges, stale_facts, now, hygiene,
                              fact_dups=fact_dups, stale_unevaluable=stale_unevaluable,
-                             duplicate_id_files=dup_id_files, copy_gaps=gaps)
+                             duplicate_id_files=dup_id_files, copy_gaps=gaps,
+                             trace_coverage=trace_coverage)
 
     # Write output
     output_dir = args.output_dir

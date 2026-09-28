@@ -615,7 +615,7 @@ shown. `†` marks a hint set by the module itself rather than the table (see §
 | `fact_get` | RO | `entity` | An entity's facts, capped per category (10; 0 = none), most recent or ranked by `query`; optionally as of a date or including expired. Absorbed `fact_profile` |
 | `fact_add` | FX | `entity`, `category`, `fact` | Add one fact to an entity's markdown fact file and index it |
 | `fact_resolve` | RO | `entity` | Report contradictions. It marks nothing (#1326) |
-| `fact_resolve_apply` | FX | `entity` | Mark the lower-confidence side of each pair `invalid_at` (never expired). Was `fact_resolve`'s `auto_resolve` |
+| `fact_resolve_apply` | FX | `entity` | Mark the lower-confidence side of each pair `invalid_at` (never expired), leaving a `conflicts_with` resolution trace on the loser that names the winning fact, and report how many it wrote in `traces_written`. Was `fact_resolve`'s `auto_resolve` |
 | `fact_invalidate` | DX ID | `entity` | Expire facts that stopped being true. Refuses an unscoped call; `ended` defaults to today. Absorbed `forget` |
 | `fact_relate` | FX | `source`, `target`, `type` | Add a typed edge between two entities |
 | `fact_relationships` | RO | `entity` | An entity's inbound and outbound edges; `min_confidence` (default 0.0 = keep all) drops weaker ones |

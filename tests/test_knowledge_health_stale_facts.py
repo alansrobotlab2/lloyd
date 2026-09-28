@@ -626,3 +626,129 @@ def test_alarms_take_no_edge_type_input():
     assert list(inspect.signature(khr._alarms).parameters) == [
         "store_stats", "hygiene", "duplicate_id_files", "baseline"]
     assert khr._alarms({"edges_active": 100}, {}, 0, 0) == []
+
+
+# ── #1596: the conflicts_with resolution trace is counted, and counted only ───
+#
+# `fact_resolve_apply` has written a `conflicts_with` trace onto each loser since
+# #1544, and nothing anywhere counted the records that carry one, so the only
+# answer to "is the resolve path being used, and is the number rising?" was a
+# hand-run grep over ~32,000 fact files. The live corpus measures 0 today —
+# `contradiction_trace_coverage` over ~/lloyd-data/_pipeline/vault-derived/facts
+# returned (0, 118,343) on 2026-09-28, over 12,483 entity dirs, with
+# `stale_coverage` returning (2, 118,336) on the same load as the control that says
+# the walk really read the facts. A line whose first job is to print a real zero is
+# a measurement, so it prints its denominator beside its count (#841/#1543) and it
+# never moves the exit code.
+
+TRACE_COVERAGE_RE = re.compile(
+    r"Fact records carrying a `conflicts_with` resolution trace \| "
+    r"([\d,]+) of ([\d,]+) fact records")
+
+
+def _settled_pair(root: Path, *, traced: bool) -> Path:
+    """One entity, two records: a winner and a loser `fact_resolve_apply` settled.
+
+    The loser carries `invalid_at` because the mark and the trace are one write, so
+    a counter that walked only ACTIVE facts would report 0 over a corpus made of
+    nothing but resolutions — the failure mode this fixture's shape exists to catch.
+    `traced=False` is the same pair with the trace key stripped: the state the live
+    corpus is in, and the state that must still print a number.
+    """
+    loser = {"fact": "the feature is disabled", "confidence": 0.5,
+             "created_at": _iso(30), "invalid_at": _iso(1),
+             "invalid_reason": "fact_resolve_apply: opposing_terms:enabled/disabled"}
+    if traced:
+        loser[khr.CONTRADICTION_TRACE_KEY] = {
+            "type": "conflicts_with", "entity": "Lloyd",
+            "file": "Lloyd/Lloyd-state.md", "fact_id": "stat-001",
+            "fact": "the feature is enabled", "confidence": 0.9,
+            "reason": "opposing_terms:enabled/disabled", "resolved_at": _iso(1)}
+    return _write(root, "Lloyd", "state", [
+        {"fact": "the feature is enabled", "confidence": 0.9, "created_at": _iso(2)},
+        loser])
+
+
+def _hygiene_report(entities: dict) -> str:
+    """The report with the Hygiene section rendered and the trace line measured."""
+    return khr.generate_report(
+        khr.compute_entity_stats(entities),
+        khr.compute_relationship_stats([], entities),
+        [],
+        khr.find_stale_facts(entities, NOW, THRESH),
+        NOW,
+        hygiene=_clean_hygiene(),
+        stale_unevaluable=khr.stale_coverage(entities),
+        trace_coverage=khr.contradiction_trace_coverage(entities))
+
+
+def test_one_traced_loser_in_a_corpus_reports_one(tmp_path):
+    """Clause 2: one traced loser plus untraced records reports 1, in the report."""
+    root = tmp_path / "facts"
+    _settled_pair(root, traced=True)
+    # A record whose TEXT merely mentions the key is the live corpus's only `
+    # conflicts_with` hit (SkillDAG-state.md is prose about the paper's own edge
+    # vocabulary), so it is the control: counted, the number would be 2 not 1.
+    _write(root, "SkillDAG", "state",
+           [{"fact": "the paper's conflicts_with edge type", "created_at": _iso(3)}])
+    entities = khr.load_entities(root)
+    loser = [f for f in entities["Lloyd"][0]["facts"]
+             if f["fact"] == "the feature is disabled"][0]
+    assert not khr.is_fact_active(loser), (
+        "the trace must sit on a retired record: it only ever exists on the loser "
+        "of a pair, which the same write just invalidated")
+    assert khr.contradiction_trace_coverage(entities) == (1, 3), (
+        "counted once, over every record whether active or retired, and not out of "
+        "a fact's text")
+    m = TRACE_COVERAGE_RE.search(_hygiene_report(entities))
+    assert m is not None, "the report prints no resolution-trace line at all"
+    assert (m.group(1), m.group(2)) == ("1", "3"), m.groups()
+
+
+def test_an_untraced_corpus_prints_zero_beside_its_label(tmp_path):
+    """Clause 3, zero half: 0 renders as a measurement, not as an absent row."""
+    root = tmp_path / "facts"
+    _settled_pair(root, traced=False)
+    entities = khr.load_entities(root)
+    assert khr.contradiction_trace_coverage(entities) == (0, 2), (
+        "the settled pair with its trace key stripped reads 0: the counter keys on "
+        "the field, never on `invalid_at`, which the live corpus holds 115,911 of")
+    m = TRACE_COVERAGE_RE.search(_hygiene_report(entities))
+    assert m is not None, "a zero must still print the line"
+    assert (m.group(1), m.group(2)) == ("0", "2"), m.groups()
+    assert "not measured" not in m.group(0)
+
+
+def test_the_trace_line_never_moves_the_alarm_exit_code(tmp_path, monkeypatch):
+    """Clause 3, end to end: a corpus holding a real resolution exits EXIT_OK,
+    posts no alarm, and `_alarms()` has no parameter able to carry the number.
+
+    The alarm baseline is the real one (`active_edges` 37,867 on 2026-09-28), so
+    the faked store reports above half of it and the exit code under test is about
+    the trace and nothing else.
+    """
+    root = tmp_path / "facts"
+    out = tmp_path / "out"
+    _settled_pair(root, traced=True)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(khr, "_kg_store", lambda: _FakeStore(
+        [{"source": "Lloyd", "target": "Other", "type": "uses"}],
+        {"edges_active": 53416, "edges_total": 53416}))
+    monkeypatch.setattr(khr, "fact_duplicate_stats",
+                        lambda: {"unavailable": True, "reason": "store faked in test"})
+    alerts: list = []
+    monkeypatch.setattr(khr, "_alert", lambda alarms, path: alerts.append(alarms))
+    monkeypatch.setattr(sys, "argv", ["knowledge-health-report.py",
+                                      "--facts-dir", str(root),
+                                      "--output-dir", str(out)])
+
+    rc = khr.main()
+
+    assert rc == khr.EXIT_OK, f"a traced record moved the exit code: rc={rc}"
+    assert alerts == []
+    text = next(out.glob("knowledge-health-*.md")).read_text()
+    m = TRACE_COVERAGE_RE.search(text)
+    assert m is not None and m.group(1) == "1", text
+    assert list(inspect.signature(khr._alarms).parameters) == [
+        "store_stats", "hygiene", "duplicate_id_files", "baseline"], (
+        "_alarms() gained an input that can carry the trace count to the exit code")

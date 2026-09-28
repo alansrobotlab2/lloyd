@@ -2130,8 +2130,9 @@ def test_the_cli_exits_2_and_writes_nothing_when_apply_meets_an_absent_store(tmp
 # (`app/kg_store.py:704-705`). Measured the same day: 12,244 entity dirs, 0 of
 # them holding more than one distinct `entity`; 48,488 edge rows, 0 with
 # `source = target` in any state. Which shape an intra-entity contradiction takes
-# in the graph — a relaxed self-loop refusal, or fact-granularity node ids — is
-# #1593's ruling, so `test_a_resolution_mints_no_edge_row_while_1593_is_unruled`
+# in the graph — a relaxed self-loop refusal, or fact-granularity node ids — is a
+# ruling #1596 now carries (split from #1593, which closed 2026-09-27 with the
+# ruling unmade), so `test_a_resolution_mints_no_edge_row_while_1593_is_unruled`
 # fences the half this round deliberately did not build.
 
 TRACE_KEY = "conflicts_with"          # the canonical edge type's own spelling
@@ -2265,10 +2266,11 @@ def test_a_resolution_mints_no_edge_row_while_1593_is_unruled(world):
 
     A `conflicts_with` edge for an intra-entity pair needs either `EdgeStore.add`
     to stop refusing self-loops or fact-granularity node ids — the two designs
-    #1593 puts to a person, each of which acts on all 48,488 edge rows and on
+    #1596 puts to a person (the closed #1593 is where they were first written
+    down), each of which acts on all 48,488 edge rows and on
     `edges.nodes()`, from which `fact_neighbors` and `fact_search` derive their
     nodes. This node is the fence: the trace shipped, the edge did not, and when
-    #1593's ruling lands this is the test that has to change.
+    #1596's ruling lands this is the test that has to change.
     """
     facts_root, st, _vault = world
     _write_adjudicable_pair(facts_root)
@@ -2276,3 +2278,82 @@ def test_a_resolution_mints_no_edge_row_while_1593_is_unruled(world):
     assert out["traces_written"] == 1, out
     assert st.edges.active(types=[TRACE_KEY]) == []
     assert st.edges.count(active_only=False) == 0, "the resolve path wrote an edge row"
+
+
+# ── #1596: the trace is on the advertised surface, not only in the write ──────
+#
+# `fact_resolve_apply` has left a `conflicts_with` trace on every loser since
+# #1544, and neither surface a client reads said so: the registered description
+# promised only "mark `invalid_at` … and report which facts in which files it
+# marked", and the `architecture/tools.md` row said the same in fewer words, while
+# the result carried `traces_written` and the loser carried the winning fact. A
+# caller therefore had to read the handler to learn that a resolution is
+# recoverable at all (#1596 clause 1).
+
+TRACE_COUNT_KEY = "traces_written"     # the key the result reports the count under
+
+
+def _registered_tool(name: str):
+    """One tool exactly as an MCP client receives it from `list_tools()`."""
+    tools = {t.name: t for t in asyncio.run(facts.list_tools())}
+    assert name in tools, sorted(tools)
+    return tools[name]
+
+
+def _tools_md_row(tool_name: str) -> str:
+    """The single `architecture/tools.md` table row for `tool_name`."""
+    rows = [ln for ln in (ROOT / "architecture" / "tools.md").read_text(
+                encoding="utf-8").splitlines()
+            if ln.startswith(f"| `{tool_name}` |")]
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def test_the_registered_description_names_the_trace_and_its_count():
+    """Clause 1, first half: what a client can learn without reading the handler."""
+    desc = _registered_tool("fact_resolve_apply").description or ""
+    assert f"`{facts._CONTRADICTION_TRACE}`" in desc, (
+        f"the advertised surface never names the trace key: {desc}")
+    assert TRACE_COUNT_KEY in desc, (
+        f"the advertised surface never names the returned count: {desc}")
+    assert "loser" in desc, desc
+
+
+def test_the_advertised_names_are_the_ones_the_write_produces(world):
+    """Clause 1, the join: the description describes THIS handler's output.
+
+    A description naming a key the result does not carry is worse than one naming
+    nothing, so both promised names are checked against a real resolve run — the
+    MCP registration on one side of the seam, the fact tree on the other.
+    """
+    facts_root, _st, _vault = world
+    _write_adjudicable_pair(facts_root)
+    desc = _registered_tool("fact_resolve_apply").description or ""
+    out = facts._fact_resolve_apply({"entity": "Lloyd"})
+    assert out["resolved"] == 1 and out[TRACE_COUNT_KEY] == 1, out
+    assert f"`{facts._CONTRADICTION_TRACE}`" in desc, desc
+    assert _traced_facts(facts_root) == [("Lloyd-state.md", "stat-002")], (
+        "the description promises a trace the write does not leave")
+
+
+def test_the_tools_md_row_says_the_same_thing():
+    """Clause 1, second half: the human-readable row names trace and count too."""
+    row = _tools_md_row("fact_resolve_apply")
+    assert facts._CONTRADICTION_TRACE in row, row
+    assert TRACE_COUNT_KEY in row, row
+    assert "invalid_at" in row, "the row still has to say what the mark is"
+
+
+def test_the_endpoint_ruling_is_pointed_at_the_open_item():
+    """Every shipped pointer here named #1593 as the authority for the endpoint
+    representation, and that item closed 2026-09-27 with the ruling unmade — so
+    the code pointed a live question at a closed item. It names #1596, which is
+    open, now.
+    """
+    doc = inspect.getdoc(facts._contradiction_trace) or ""
+    assert "#1596" in doc, doc
+    assert "#1593 carries" not in doc, (
+        "the shipped docstring still points the ruling at the closed item")
+    src = Path(facts.__file__).read_text(encoding="utf-8")
+    assert "#1596's endpoint design" in src, (
+        "the trace-key comment still points at the closed item")
