@@ -72,10 +72,16 @@ Six invariants:
   appending keep the copy a
   superset of the live file; neither keeps the *live* file honest, so `check` also
   compares the two latest-per-key tables every run and prints `MIRROR_MISSING`,
-  `LEDGER_LOST` or `LEDGER_MIRROR_CONFLICT` per disagreeing key
-  (`check_against_mirror`). Without that, a copy that quietly fell behind — or a live
-  ledger that quietly lost one line while still existing — prints precisely the counts
-  two healthy trees would.
+  `LEDGER_LOST`, `LEDGER_MIRROR_LAGGED` (the copy simply never got the newest append) or
+  `LEDGER_MIRROR_CONFLICT` (the two trees hold *different verdicts*) per diverging key,
+  then one tally naming both classes against `keys_compared:` (`check_against_mirror`).
+  Without that, a copy that quietly fell behind — or a live ledger that quietly lost one
+  line while still existing — prints precisely the counts two healthy trees would. The lag
+  and the disagreement are separate labels because merging them cost a day: on
+  2026-09-28 the 79 lines `check` printed were 54 of the first and 25 of the second, all
+  one shape, so the case the detector was built for was invisible inside it (#1717).
+  `sync` is the bring-up that closes a gap once one exists, and it refuses to write a
+  ledger that has no copy of its own through the production one.
 
 Stickiness is capped, because a verdict that outlives its evidence becomes a veto on
 real work: a terminal verdict reopens itself `REOPEN_AFTER_DAYS` after it was
@@ -96,6 +102,9 @@ Usage:
     skill_verdicts.py repair                      # append the corrections the moved data
                                                   # root broke, and name the ones only a
                                                   # re-derivation can fix (#1588)
+    skill_verdicts.py sync                        # bring the durable copy up to the live
+                                                  # ledger; idempotent, refuses a --store
+                                                  # with no copy of its own (#1717)
 """
 
 from __future__ import annotations
@@ -285,6 +294,29 @@ def _mirror_target(live: Path) -> Path | None:
     return DEFAULT_MIRROR if live == DEFAULT_STORE else None
 
 
+#: Prefix of the line a single-tree write prints (#1717). Named as a constant because the
+#: nightly greps it: 79 rows written on 2026-09-27 landed in the live ledger alone and
+#: nothing on any surface said so, so the first requirement is a string to grep for.
+MIRROR_NOT_WRITTEN = "MIRROR_NOT_WRITTEN"
+
+
+def mirror_skip_notice(live: Path) -> str:
+    """The line naming the durable copy a write to `live` did NOT reach (#1717 clause 2).
+
+    `mirror_for`'s own policy is record-anyway-and-say-so, never refuse: the ledger is the
+    live artifact and an unwritable vault costs the second copy, not the decision. That
+    policy is only honest if the *saying* half happens, and until #1717 it did not — the
+    2026-09-27 repair pass appended 79 rows through this branch in silence, so the vault
+    half of #772 (the reasons and falsifiers "that live nowhere else") was the half that
+    went missing, and `check` spent its divergence alarm on the resulting lag.
+    """
+    return (f"{MIRROR_NOT_WRITTEN} {live} :: the durable copy {DEFAULT_MIRROR} was NOT "
+            f"written, because this ledger is not the default {DEFAULT_STORE} and "
+            f"$SKILL_VERDICTS_MIRROR is unset (`_mirror_target` refuses to push an "
+            "off-default ledger through the production vault copy). The live row is "
+            "recorded; it exists in one tree only (#1717)")
+
+
 def resolve_verdict_source(store: Path | str | None = None) -> tuple[Path, bool]:
     """Where to read verdicts from now: `(path, fell_back_to_mirror)`.
 
@@ -411,41 +443,135 @@ def load_verdicts(store: Path) -> dict[str, dict]:
     return verdicts
 
 
-def divergence_lines(live_table: dict[str, dict], durable_table: dict[str, dict],
-                     durable: Path) -> list[str]:
-    """One line per key where the two trees no longer hold the same latest verdict.
+#: The two labels for "both trees hold this key and their latest rows differ" (#1717
+#: clause 3). They were one label until #1717, and that merger is why the real ones went
+#: unseen: on 2026-09-28 the live ledger and its vault copy printed 79 identically-shaped
+#: `LEDGER_MIRROR_CONFLICT` lines, 54 of which were the copy merely keeping behind (same
+#: verdict, older stamp, the append never reached it) and 25 of which were the two trees
+#: holding *different decisions* for one key — the case the detector exists to find,
+#: byte-indistinguishable from the other 54.
+LAGGED = "LAGGED"
+DISAGREEING = "DISAGREEING"
 
-    Three shapes, because the ledger is append-only latest-wins and a disagreement has
-    three causes: the durable copy never received a line (`MIRROR_MISSING` — a writer
-    appended to the live file without going through `record`, which is the only
-    two-tree writer), the live file *lost* a line the copy still holds
-    (`LEDGER_LOST` — the file's only documented writer appends, but that is a convention
-    and not an enforcement, and `resolve_verdict_source` cannot see the gap while the file
-    still exists), or both trees hold the key with
-    different content (`LEDGER_MIRROR_CONFLICT` — one side took a reopen the other did
-    not). An empty list is the only healthy answer, and it is also the case that makes
-    this worth printing: two silently-diverging copies are exactly the state #772
-    describes, where a restore would look like it worked.
+
+def divergence_class(live_row: dict, durable_row: dict) -> str:
+    """`LAGGED` or `DISAGREEING` for one key both trees hold, judged on the verdict first.
+
+    Same verdict with the live row stamped *newer* is plain lag: `record` appends to both
+    trees, so a copy that never got the append is behind and nothing was decided
+    differently. Everything else that differs is `DISAGREEING` and gets the loud label — a
+    different verdict, a durable copy stamped *newer* than live (which no append-only
+    writer produces), or a pair whose stamps cannot be read, since a row whose date is
+    unparseable cannot be *proved* to be lag. The asymmetry is the safety of the split:
+    `LAGGED` is the class `sync` copies unattended, so only what the evidence supports may
+    land there, and an unexplained difference never does.
+    """
+    if live_row.get("verdict") != durable_row.get("verdict"):
+        return DISAGREEING
+    live_at = _parse_ts(live_row.get("decided_at") or "")
+    durable_at = _parse_ts(durable_row.get("decided_at") or "")
+    if live_at is not None and durable_at is not None and live_at > durable_at:
+        return LAGGED
+    return DISAGREEING
+
+
+def divergence_report(live_table: dict[str, dict], durable_table: dict[str, dict],
+                      durable: Path) -> dict:
+    """Every key where the two trees diverge, as lines *and* the counts that size them.
+
+    `keys_compared` is the denominator (#1717 clause 4): the number of keys both trees were
+    asked about. `LAGGED`, `DISAGREEING`, `missing` and `lost` are the classes. Counts next
+    to the lines are the point — 79 look-alike lines cannot be sized by a reader and hid
+    the 25 lines inside them that meant something else, and a wall of them stays hidden no
+    matter who reads it, while `lagged: 54 disagreeing: 25` cannot.
+
+    Four shapes, because the ledger is append-only latest-wins and a divergence has four
+    causes: the durable copy never received a line (`MIRROR_MISSING` — a writer appended to
+    the live file without going through `record`, which is the only two-tree writer), the
+    live file *lost* a line the copy still holds (`LEDGER_LOST` — the file's only documented
+    writer appends, but that is a convention and not an enforcement, and
+    `resolve_verdict_source` cannot see the gap while the file still exists), or both trees
+    hold the key with different content, split here into `LEDGER_MIRROR_LAGGED` (same
+    verdict, the copy simply never got the newest append — a `sync` fixes it) and
+    `LEDGER_MIRROR_DISAGREEING` (a different decision, or a difference that cannot be
+    explained as lag, which one side has to justify). An empty `lines` is the only healthy
+    answer, and it is also the case that makes this worth printing: two silently-diverging
+    copies are exactly the state #772 describes, where a restore would look like it worked.
     """
     lines: list[str] = []
+    counts = {"keys_compared": len(set(live_table) | set(durable_table)),
+              LAGGED: 0, DISAGREEING: 0, "missing": 0, "lost": 0}
     for key in sorted(set(live_table) | set(durable_table)):
         live_row, durable_row = live_table.get(key), durable_table.get(key)
         if durable_row is None:
+            counts["missing"] += 1
             lines.append(
                 f"MIRROR_MISSING {key} :: {live_row.get('verdict')} decided "
                 f"{live_row.get('decided_at')} is in the live ledger but not in the "
                 f"durable copy {durable}")
         elif live_row is None:
+            counts["lost"] += 1
             lines.append(
                 f"LEDGER_LOST {key} :: {durable_row.get('verdict')} decided "
                 f"{durable_row.get('decided_at')} is in the durable copy {durable} "
                 f"but the live ledger no longer holds it")
         elif live_row != durable_row:
-            lines.append(
-                f"LEDGER_MIRROR_CONFLICT {key} :: live={live_row.get('verdict')} "
-                f"durable={durable_row.get('verdict')} decided "
-                f"{live_row.get('decided_at')}/{durable_row.get('decided_at')}")
-    return lines
+            kind = divergence_class(live_row, durable_row)
+            counts[kind] += 1
+            if kind == LAGGED:
+                lines.append(
+                    f"LEDGER_MIRROR_{LAGGED} {key} :: {live_row.get('verdict')} in both "
+                    f"trees, durable copy is behind: live decided "
+                    f"{live_row.get('decided_at')}, durable "
+                    f"{durable_row.get('decided_at')} (`sync` copies it)")
+            else:
+                # The `LEDGER_MIRROR_CONFLICT` token is kept: the nightly and this item's
+                # own acceptance grep it, and re-naming it would make that grep go quiet
+                # for the wrong reason. What changes is that it now fires on this class
+                # only, so its count means *disagreements* rather than *any difference*.
+                lines.append(
+                    f"LEDGER_MIRROR_CONFLICT {key} :: {DISAGREEING} "
+                    f"live={live_row.get('verdict')} "
+                    f"durable={durable_row.get('verdict')} decided "
+                    f"{live_row.get('decided_at')}/{durable_row.get('decided_at')}")
+    counts["lines"] = lines
+    counts["durable"] = durable
+    return counts
+
+
+def divergence_lines(live_table: dict[str, dict], durable_table: dict[str, dict],
+                     durable: Path) -> list[str]:
+    """`divergence_report`'s lines alone, for a caller that only prints them."""
+    return divergence_report(live_table, durable_table, durable)["lines"]
+
+
+def mirror_tally_line(report: dict) -> str:
+    """The one-line tally that puts the two classes beside their denominator (#1717 clause 4).
+
+    Shared by `check` and `sync` so the two surfaces cannot state the same comparison in two
+    shapes and have one of them believed. The class counts come *before* the paths because
+    the numbers are what a reader sizes the finding by: on 2026-09-28 `check` emitted 79
+    lines under one label and a reader could not tell whether that was one problem or 79,
+    which is how 25 verdict disagreements sat inside it unnoticed for a day.
+    """
+    return (f"ledger_mirror: keys_compared: {report['keys_compared']}  "
+            f"lagged: {report[LAGGED]}  disagreeing: {report[DISAGREEING]}  "
+            f"missing: {report['missing']}  lost: {report['lost']}  "
+            f"durable: {report['durable']}")
+
+
+def check_against_mirror_report(live: Path, live_table: dict[str, dict]) -> dict | None:
+    """`divergence_report` for this ledger's own copy, or None when there is nothing to compare.
+
+    No mirror for this ledger, or none on disk yet, is not a divergence — it is the pre-#772
+    single-copy state, and `check` would otherwise alarm on every scratch `--store`. None,
+    as distinct from an empty report, is what lets `check` say *not compared* rather than
+    printing a denominator of `keys_compared: 0` for a comparison it never ran.
+    """
+    durable = _mirror_target(live)
+    if durable is None or durable == live or not durable.is_file():
+        return None
+    return divergence_report(live_table, load_verdicts(durable), durable)
 
 
 def check_against_mirror(live: Path, live_table: dict[str, dict]) -> list[str]:
@@ -453,15 +579,12 @@ def check_against_mirror(live: Path, live_table: dict[str, dict]) -> list[str]:
 
     `resolve_verdict_source` answers from the mirror only when the live file is *entirely*
     absent, so a one-line disappearance prints the same counts as if nothing happened
-    (#772). This is the companion that has no fallback in it: it compares the two trees
-    on every run and returns what to print. No mirror for this ledger, or none on disk
-    yet, is not a divergence — it is the pre-#772 single-copy state, and `check` would
-    otherwise alarm on every scratch `--store`.
+    (#772). This is the companion that has no fallback in it: it compares the two trees on
+    every run and returns what to print. `check` calls the `_report` variant for the counts
+    as well; this one stays the lines-only accessor for a caller that prints them.
     """
-    durable = _mirror_target(live)
-    if durable is None or durable == live or not durable.is_file():
-        return []
-    return divergence_lines(live_table, load_verdicts(durable), durable)
+    report = check_against_mirror_report(live, live_table)
+    return report["lines"] if report else []
 
 
 def is_terminal(row: dict | None) -> bool:
@@ -565,7 +688,11 @@ def record_verdict(
     seeded from the ledger first so a verdict recorded before the mirror existed is in
     it too. A script the new `evidence_cmd` names is copied beside the mirror.
     Mirroring never refuses the record: the ledger is the live artifact, and a vault
-    that cannot be written must not lose a decision.
+    that cannot be written must not lose a decision. It never goes *quiet* either
+    (#1717): when there is no durable copy for this ledger, the skip is named on stderr
+    by `mirror_skip_notice` before the function returns, so a pass that wrote 79 rows
+    into one tree cannot report a clean night. `repair_verdicts` carries the same fact in
+    its returned tally as `mirror_skipped`, which is what `cmd_repair` prints and counts.
     """
     if not (pattern_key := pattern_key.strip()):
         raise ValueError("pattern_key is required")
@@ -635,12 +762,26 @@ def record_verdict(
     line = json.dumps(row, ensure_ascii=False) + "\n"
     # Seed first, then append to both (`mirror_for` says why the order is load-bearing).
     durable = mirror_for(path)
-    for target in (path, durable):
-        if target is None:
-            continue
-        with target.open("a", encoding="utf-8") as fh:
+    # One and the same file under two names is not a second tree: appending twice to it
+    # would put the newest verdict on disk twice and leave every later reader counting a
+    # duplicate, which is what `check_against_mirror`'s `durable == live` guard already
+    # declines to call a divergence.
+    same_file = durable is not None and Path(durable).resolve() == path.resolve()
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line)
+    if durable is not None and not same_file:
+        with durable.open("a", encoding="utf-8") as fh:
             fh.write(line)
-    if durable is not None:
+    elif durable is None:
+        # #1717: the half that used to be missing. `mirror_for` returning None is a
+        # legitimate state — an off-default `--store` with no `$SKILL_VERDICTS_MIRROR` must
+        # not push scratch rows through the production vault copy — and the policy is to
+        # record anyway. But the 2026-09-27 repair pass took this branch for all 79 of its
+        # appends and printed nothing, so the reasons and falsifiers #772 keeps a second
+        # copy *for* ended up in one tree, and `check` spent its divergence alarm on the
+        # lag. Saying so costs one line and is what makes the silence unforgivable again.
+        print(mirror_skip_notice(path), file=sys.stderr)
+    if durable is not None and not same_file:
         for script in named_scripts(evidence_cmd):
             _mirror_script(script, durable.parent)
     return row
@@ -1014,8 +1155,9 @@ def repair_verdicts(store: str | Path | None = None, *, dry_run: bool = False,
     conservatively; the default fixes bookkeeping and touches nothing else.
     """
     table = load_verdicts(store)
-    out: dict[str, list[str]] = {"repaired": [], "disposed": [], "reanchored": [],
-                                 "needs_rerecord": [], "unparseable": [], "refused": []}
+    out: dict[str, list] = {"repaired": [], "disposed": [], "reanchored": [],
+                            "needs_rerecord": [], "unparseable": [], "refused": [],
+                            "mirror_skipped": [], "single_tree_rows": 0}
     for key in sorted(table):
         row = table[key]
         cls, new_cmd, detail = falsifier_repair(row, timeout=timeout, rewrites=rewrites)
@@ -1065,6 +1207,97 @@ def repair_verdicts(store: str | Path | None = None, *, dry_run: bool = False,
                        evidence_cmd=TOMBSTONE_TEMPLATE.format(input=pinned),
                        occurrences=None, decided_by=DISPOSE_DECIDED_BY,
                        source_candidate=row.get("source_candidate") or "")
+    # Carried in the returned tally, not only on `record_verdict`'s stderr, because this
+    # pass is the writer that produced #1717: 79 appends, one tree, no line anywhere that a
+    # nightly could have grepped. `single_tree_rows` is the count of rows this pass wrote
+    # into the ledger alone — a caller that finished "repaired: 79" while that was nonzero
+    # reported a repair and delivered half of one.
+    written = (len(out["repaired"]) + len(out["reanchored"]) + len(out["disposed"]))
+    if written and not dry_run and _mirror_target(store_path(store)) is None:
+        out["mirror_skipped"] = [f"{mirror_skip_notice(store_path(store))} "
+                                 f"rows_this_pass={written}"]
+        out["single_tree_rows"] = written
+    return out
+
+
+def sync_durable_copy(store: str | Path | None = None, *, dry_run: bool = False,
+                      hold_disagreements: bool = False) -> dict:
+    """Append the live ledger's latest-per-key rows the durable copy does not hold.
+
+    The re-runnable route the 79 one-tree writes need (#1717): `check` can now tell lag
+    from disagreement and `record` can no longer write one tree silently, but neither
+    puts the missing rows back, and the copy that is 79 lines behind is a restore that
+    quietly loses 79 decisions — which is the exact failure #772 was filed for.
+
+    What it writes is the live ledger's **latest row for the key, byte for byte**, appended
+    to the copy. Never a rewrite, never a deletion: the copy is append-only for the same
+    reason the ledger is, so its own history survives, and a key the copy holds that live
+    has lost (`LEDGER_LOST`) is left standing — appending cannot answer a live-side
+    disappearance, and deleting the surviving copy of a decision to make two files look
+    alike would be the cure killing the patient.
+
+    Idempotent by construction: a row is offered only when the copy's latest row for that
+    key is absent or differs, so the second run has nothing to offer and adds 0 lines.
+
+    Refuses, appending nothing, when this ledger has no durable copy of its own — a
+    non-default `--store` with `$SKILL_VERDICTS_MIRROR` unset (`_mirror_target`'s guard).
+    That guard exists so scratch decisions cannot reach the production vault copy, and a
+    `sync` that wrote them there would be the loudest way to defeat it.
+
+    `hold_disagreements=True` leaves a `DISAGREEING` key for a human instead of adopting
+    the live verdict as the durable answer. The default copies it — the live ledger is the
+    tree the pipeline reads, and #1717 asks for the two to be brought together — but the
+    tally prints each such key with both verdicts, so a run that meant to preview the
+    relabels has the flag rather than a re-derivation to do.
+    """
+    live = store_path(store)
+    out: dict[str, object] = {"copied": [], LAGGED: 0, DISAGREEING: 0, "missing": 0,
+                              "held": [], "refused": []}
+    if not live.is_file():
+        out["refused"] = [f"SYNC_REFUSED {live} :: the live ledger is not there to sync "
+                          "from. The durable copy is left alone: an absent live file is "
+                          "the incident #772 exists for, not an instruction to stop "
+                          "keeping the copy current."]
+        return out
+    durable = mirror_for(live)
+    if durable is None:
+        out["refused"] = [f"SYNC_REFUSED {live} :: this ledger has no durable copy of its "
+                          f"own to write: it is not the default {DEFAULT_STORE} and "
+                          "$SKILL_VERDICTS_MIRROR is unset, so pointing `sync` at a "
+                          f"scratch store must not append scratch rows through the "
+                          f"production vault copy {DEFAULT_MIRROR}. Name the copy you "
+                          "mean with $SKILL_VERDICTS_MIRROR, or run this against the "
+                          "default ledger."]
+        return out
+    if Path(durable).resolve() == live.resolve():
+        out["refused"] = [f"SYNC_REFUSED {live} :: the durable copy resolves to the ledger "
+                          "itself, so there is one tree here and nothing to bring together."]
+        return out
+
+    live_table, durable_table = load_verdicts(live), load_verdicts(durable)
+    lines: list[str] = []
+    for key in sorted(live_table):
+        live_row, durable_row = live_table[key], durable_table.get(key)
+        if durable_row is None:
+            kind, label = "missing", "MIRROR_MISSING"
+        elif durable_row == live_row:
+            continue
+        else:
+            kind = divergence_class(live_row, durable_row)
+            label = kind
+        if kind == DISAGREEING and hold_disagreements:
+            out["held"].append(f"{key} :: live={live_row.get('verdict')} "
+                               f"durable={durable_row.get('verdict')}")
+            continue
+        out["copied"].append(f"{key} :: {live_row.get('verdict')} {label}")
+        out[kind] = out[kind] + 1
+        lines.append(json.dumps(live_row, ensure_ascii=False) + "\n")
+    if lines and not dry_run:
+        with Path(durable).open("a", encoding="utf-8") as fh:
+            fh.writelines(lines)
+    out["durable"] = durable
+    out["rows"] = 0 if dry_run else len(lines)
+    out["would_copy"] = len(lines)
     return out
 
 
@@ -1159,8 +1392,16 @@ def cmd_check(args: argparse.Namespace) -> int:
     # runbook and the nightly greps read the counts off `splitlines()[-1]`, so a
     # warning that displaced them would break a reader that is not looking for it.
     if not fell_back:  # when the copy *is* the source there is nothing to compare it with
-        for line in check_against_mirror(live, table):
-            print(line)
+        report = check_against_mirror_report(live, table)
+        if report is not None:
+            for line in report["lines"]:
+                print(line)
+            # The tally beside the classes (#1717 clause 4). Printed whether or not
+            # anything diverged: `lagged: 0 disagreeing: 0` is the healthy answer, and a
+            # denominator that only appears with findings cannot tell a clean night from a
+            # comparison nobody ran. 2026-09-28's state is what the split is for — 79 lines
+            # of one label, of which 54 were lag and 25 were the real thing.
+            print(mirror_tally_line(report))
     for key in sorted({r["pattern_key"] for r in skipped}):
         rc, detail = evidence_cmd_status(table.get(key) or {})
         if rc == UNRUNNABLE:
@@ -1299,6 +1540,12 @@ def cmd_repair(args: argparse.Namespace) -> int:
         print(f"UNPARSEABLE {key}")
     for line in tally["refused"]:
         print(f"REFUSED {line}")
+    # Above the tally, not inside it: the last line's shape is this subcommand's contract
+    # with the nightly (`splitlines()[-1]`), and #1717 asks only that the skipped half be
+    # *named*. It is now named with the count of rows that went out single-tree, which is
+    # the number the 2026-09-27 pass printed no line for while writing 79 of them.
+    for line in tally["mirror_skipped"]:
+        print(line)
     # Under `--dry-run` nothing was appended, so every key the pass would have written is
     # still outstanding — the same thing `audit` measures by. A caller that checks `$?`
     # has to be reading the ledger's state, not the rehearsal's politeness, or a dry run
@@ -1314,6 +1561,52 @@ def cmd_repair(args: argparse.Namespace) -> int:
           f"unparseable: {len(tally['unparseable'])}  refused: {len(tally['refused'])}  "
           f"keys: {len(load_verdicts(store))}")
     return 1 if outstanding else 0
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    """Bring the durable copy up to the live ledger, and name every key it copied.
+
+    Why a route and not just a fix: the 79 rows #1717 is about are already on disk in one
+    tree, and no amount of correct future writing puts them in the other. `check` now
+    reports the two classes separately (`lagged:` and `disagreeing:` against
+    `keys_compared:`) instead of 79 look-alike lines, and `record` now refuses to go quiet
+    about a skipped copy — but the copy itself needs a re-runnable bring-up, because
+    running it twice is the property that makes it safe to put in a nightly at all. It is
+    idempotent: the second run finds each key's latest row already matching and adds 0
+    lines.
+
+    Output shape is the same contract as `repair`: one finding line per key, then the tally
+    as the LAST line, and the tally repeats the same class words `check` prints so one
+    number is not stated two ways by the two surfaces that compute it. Exit 1 on a refusal:
+    a caller that asked for a sync and got none has to be able to tell from `$?`, which is
+    exactly the mistake the 2026-09-27 pass made in the other direction (it wrote half the
+    pairs and exited clean).
+    """
+    out = sync_durable_copy(args.store, dry_run=args.dry_run,
+                            hold_disagreements=args.hold_disagreements)
+    tag = " (dry-run)" if args.dry_run else ""
+    for key_line in out["copied"]:
+        print(f"SYNCED{tag} {key_line}")
+    for key_line in out["held"]:
+        print(f"SYNC_HELD {key_line} (left for a human: --hold-disagreements)")
+    for line in out["refused"]:
+        print(line)
+    if out["refused"]:
+        print("synced: 0  refused: 1  "
+              f"durable: {out.get('durable', 'unresolved')}")
+        return 1
+    print(f"synced: {out['rows']}  lagged: {out[LAGGED]}  "
+          f"disagreeing: {out[DISAGREEING]}  missing: {out['missing']}  "
+          f"held: {len(out['held'])}  "
+          f"durable: {out['durable']}")
+    if not args.dry_run:
+        # Re-read both trees after the append rather than reporting what the loop counted:
+        # the claim this subcommand exists to make is that the two files agree *on disk*,
+        # and only a fresh read of them says so.
+        report = divergence_report(load_verdicts(store_path(args.store)),
+                                   load_verdicts(Path(out["durable"])), Path(out["durable"]))
+        print(mirror_tally_line(report))
+    return 0
 
 
 def cmd_record(args: argparse.Namespace) -> int:
@@ -1478,6 +1771,22 @@ def main(argv: list[str] | None = None) -> int:
                                "for the keys whose dead path sits inside a script or "
                                "inside quotes; each is executed before it is appended")
     p_repair.set_defaults(func=cmd_repair)
+
+    # The bring-up half of #1717: `check` reports the two classes of divergence and
+    # `record` no longer writes one tree silently, but the copy that is already behind
+    # needs a route that closes the gap and can be run twice.
+    p_sync = with_store(sub.add_parser(
+        "sync", help="append to the durable copy the live ledger's latest-per-key rows it "
+                     "does not hold; idempotent, and refuses a --store with no copy of its "
+                     "own rather than writing through the production vault copy"))
+    p_sync.add_argument("--dry-run", dest="dry_run", action="store_true",
+                        help="name the keys it would copy and append nothing")
+    p_sync.add_argument("--hold-disagreements", dest="hold_disagreements",
+                        action="store_true",
+                        help="copy lagged and missing keys but leave a key whose two trees "
+                             "hold *different verdicts* for a human, instead of adopting "
+                             "the live one as the durable answer")
+    p_sync.set_defaults(func=cmd_sync)
 
     # The same guard as the pass, on one key, for the shapes the pass cannot substitute.
     p_reanchor = with_store(sub.add_parser(

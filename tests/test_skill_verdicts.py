@@ -1258,8 +1258,13 @@ def test_check_names_a_verdict_the_two_trees_do_not_agree_on(tmp_path, store, mi
     assert sv.main(["check", "--candidates", str(cands), "--store", str(store)]) == 0
     final = capsys.readouterr().out.splitlines()
     conflict = [ln for ln in final if ln.startswith("LEDGER_MIRROR_CONFLICT")]
+    # The line carries the class word `DISAGREEING` since #1717 clause 3, which is what
+    # tells it apart from a `LEDGER_MIRROR_LAGGED` line (the copy keeping behind with the
+    # *same* verdict). The `LEDGER_MIRROR_CONFLICT` token itself is deliberately unchanged:
+    # the nightly and this item's acceptance grep it, and re-naming it would have made that
+    # grep go quiet for the wrong reason rather than because the divergence is gone.
     assert conflict == [
-        f"LEDGER_MIRROR_CONFLICT Bash/timeout :: live=noise "
+        f"LEDGER_MIRROR_CONFLICT Bash/timeout :: DISAGREEING live=noise "
         f"durable=reviewed_no_skill decided 2026-09-19T12:00:00Z/"
         f"{sv.load_verdicts(mirror)['Bash/timeout']['decided_at']}"], conflict
     assert final[-1] == "checked: 0  skipped_by_verdict: 0", \
@@ -2209,6 +2214,419 @@ def run_repair(store: Path, dead: str, live: str, *extra) -> tuple[int, str]:
     with contextlib.redirect_stdout(buf):
         rc = sv.main(["repair", "--store", str(store), "--rewrite", dead, live, *extra])
     return rc, buf.getvalue()
+
+
+# ── #1717: the two trees are written together, or the skip is said out loud ──────
+#
+# On 2026-09-27 a repair pass appended 79 rows to the live ledger and none of them to the
+# vault copy, and nothing on any surface said so. `check` then spent its whole divergence
+# alarm on that lag: 79 lines of one label, 25 of which were the two trees holding
+# *different verdicts* — the case the detector was built for, hidden inside noise its own
+# blind spot produced. Three separate failures are pinned below: the silent single-tree
+# write, the merged label, and the missing bring-up route.
+
+def _pair(key: str, verdict: str, at: str, **extra) -> dict:
+    """One ledger row with the fields these fixtures need, spelled once."""
+    row = {"pattern_key": key, "verdict": verdict, "reason": "fixture grounds",
+           "evidence_cmd": "grep -c '^status:' /dev/null || true",
+           "occurrences_at_decision": 4, "decided_at": at, "decided_by": "test"}
+    row.update(extra)
+    return row
+
+
+def _write_rows(path: Path, rows: list[dict]) -> Path:
+    """Create a ledger (or its durable copy) holding exactly `rows`, oldest line first."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return path
+
+
+def _lines(path: Path) -> list[str]:
+    """The file's raw lines — what the two trees have to agree on, byte for byte."""
+    return path.read_text(encoding="utf-8").splitlines()
+
+
+def test_a_lagged_key_is_labelled_lagged_and_a_relabelled_key_is_not(tmp_path):
+    """Clause 3, at the classifier: the shapes, both directions, plus the tie-break.
+
+    `LAGGED` is the class `sync` copies without asking anyone, so the burden sits on it: a
+    key qualifies only when the verdicts match AND the live stamp is provably newer. Every
+    other difference — a different verdict, a copy stamped *newer* than the ledger (which no
+    append-only writer produces), or a date that cannot be parsed — is `DISAGREEING`,
+    because an unexplained difference must never be filed where an unattended job will
+    overwrite it.
+    """
+    lag_live = _pair("Bash/timeout", "rejected_unverifiable", "2026-09-27T08:59:12Z")
+    lag_durable = _pair("Bash/timeout", "rejected_unverifiable", "2026-09-20T09:00:00Z")
+    assert sv.divergence_class(lag_live, lag_durable) == sv.LAGGED
+
+    relabelled = _pair("Read/logic", "rejected_unverifiable", "2026-09-27T08:59:12Z")
+    durable_view = _pair("Read/logic", "reviewed_no_skill", "2026-09-20T09:00:00Z")
+    assert sv.divergence_class(relabelled, durable_view) == sv.DISAGREEING
+
+    # Both cases below carry the SAME verdict on both sides, each paired with a control
+    # that is the same two rows the other way round and LAGGED. Otherwise the verdict check
+    # answers them first and the stamp rule — the only thing these assertions are about —
+    # is never reached.
+    ahead_live = _pair("Bash/err", "noise", "2026-09-20T09:00:00Z")
+    ahead_durable = _pair("Bash/err", "noise", "2026-09-27T08:59:12Z")
+    assert sv.divergence_class(ahead_live, ahead_durable) == sv.DISAGREEING, (
+        "a copy stamped ahead of the ledger is not lag in either direction")
+    assert sv.divergence_class(ahead_durable, ahead_live) == sv.LAGGED, (
+        "control: the same two rows the other way round ARE lag, so the verdicts agree "
+        "here and the stamp rule is what decides")
+
+    unreadable = _pair("Bash/timeout", "noise", "not a date")
+    readable_ahead = _pair("Bash/timeout", "noise", "2026-09-20T09:00:00Z")
+    readable_behind = _pair("Bash/timeout", "noise", "2026-09-10T09:00:00Z")
+    assert sv.divergence_class(unreadable, readable_ahead) == sv.DISAGREEING, (
+        "an unparseable stamp cannot be *proved* to be lag, so it is not filed as lag")
+    assert sv.divergence_class(readable_ahead, readable_behind) == sv.LAGGED, (
+        "control: same verdicts, readable stamps, live ahead — the verdicts agree too")
+
+    # One lagged row cannot be reported under the disagreeing label, or the other way
+    # round: both counts come out of one loop over the same two trees.
+    report = sv.divergence_report(
+        {"Bash/timeout": lag_live, "Read/logic": relabelled},
+        {"Bash/timeout": lag_durable, "Read/logic": durable_view},
+        tmp_path / "durable.jsonl")
+    assert report[sv.LAGGED] == 1 and report[sv.DISAGREEING] == 1, report
+    assert report["keys_compared"] == 2, report
+    joined = "\n".join(report["lines"])
+    assert "LEDGER_MIRROR_LAGGED Bash/timeout" in joined, report
+    assert "LEDGER_MIRROR_CONFLICT Read/logic" in joined, report
+    assert "LEDGER_MIRROR_CONFLICT Bash/timeout" not in joined, (
+        "the lagged key must not also appear under the disagreement label")
+    assert "LEDGER_MIRROR_LAGGED Read/logic" not in joined, report
+    assert sv.divergence_lines({"Bash/timeout": lag_live}, {"Bash/timeout": lag_live},
+                              tmp_path / "durable.jsonl") == []
+
+
+def test_check_separates_lag_from_disagreement_and_prints_both_counts(
+        store, mirror, capsys):
+    """Clauses 3 and 4 on the printed surface: #1717's 54-lag/25-disagreement night, small.
+
+    Two lagged keys, one relabelled key, and one the copy never got. Before this change the
+    first three printed the same string and there was no denominator at all, which is how a
+    third of that night's lines were real disagreements nobody could pick out. Now the
+    CONFLICT token fires only on the relabelled key, the two classes are two numbers, and
+    those numbers sit against the number of keys compared.
+    """
+    _write_rows(store, [
+        _pair("Bash/timeout", "rejected_artifact_class", "2026-09-10T09:00:00Z"),
+        _pair("Bash/timeout", "rejected_artifact_class", "2026-09-27T08:59:09Z"),
+        _pair("Bash/err", "rejected_artifact_class", "2026-09-10T09:00:00Z"),
+        _pair("Bash/err", "rejected_artifact_class", "2026-09-27T08:59:10Z"),
+        _pair("Read/logic", "reviewed_no_skill", "2026-09-10T09:00:00Z"),
+        _pair("Read/logic", "rejected_unverifiable", "2026-09-27T08:59:11Z"),
+        _pair("Grep/formatting", "reviewed_no_skill", "2026-09-11T09:00:00Z"),
+    ])
+    _write_rows(mirror, [
+        _pair("Bash/timeout", "rejected_artifact_class", "2026-09-10T09:00:00Z"),
+        _pair("Bash/err", "rejected_artifact_class", "2026-09-10T09:00:00Z"),
+        _pair("Read/logic", "reviewed_no_skill", "2026-09-10T09:00:00Z"),
+    ])
+    cands = store.parent / "candidates"
+    cands.mkdir()
+
+    assert sv.main(["check", "--candidates", str(cands), "--store", str(store)]) == 0
+    out = capsys.readouterr().out
+
+    assert out.count("LEDGER_MIRROR_CONFLICT") == 1, out
+    assert "LEDGER_MIRROR_CONFLICT Read/logic" in out, out
+    assert "live=rejected_unverifiable durable=reviewed_no_skill" in out, out
+    assert out.count("LEDGER_MIRROR_LAGGED") == 2, out
+    assert "LEDGER_MIRROR_LAGGED Bash/timeout" in out, out
+    assert "MIRROR_MISSING Grep/formatting" in out, out
+    tally = [ln for ln in out.splitlines() if ln.startswith("ledger_mirror:")]
+    assert tally == ["ledger_mirror: keys_compared: 4  lagged: 2  disagreeing: 1  "
+                     f"missing: 1  lost: 0  durable: {mirror}"], out
+    assert out.splitlines()[-1] == "checked: 0  skipped_by_verdict: 0", \
+        "the count line stays last: the nightly parses splitlines()[-1]"
+
+
+def test_reanchor_lands_the_identical_row_in_both_trees(store, mirror):
+    """Clause 1, first half: the single-key re-anchor appends the same bytes to both trees.
+
+    Six of the 79 one-tree rows were written through `reanchor_verdict`; the other 73 came
+    from the pass around it, which is the next test. A row that exists in only one tree is
+    the exact failure #772 keeps a second copy to prevent, so the assertion is on the lines
+    themselves — the two files ending byte-identical is what "the same row" has to mean for
+    a restore — and on the decision the re-anchor is not allowed to change.
+    """
+    genuine = store.parent / "genuine.md"
+    genuine.parent.mkdir(parents=True, exist_ok=True)
+    genuine.write_text("one signature line that survived the move\n", encoding="utf-8")
+    stored_row(store, "Bash/timeout", "grep -c x '/nonexistent/shape/*.md' | head",
+               verdict="reviewed_no_skill", reason="hand-authored re-anchor", occurrences=7)
+    _write_rows(mirror, [json.loads(ln) for ln in _lines(store)])
+
+    rc = sv.main(["reanchor", "--store", str(store), "--pattern", "Bash/timeout",
+                  "--evidence-cmd", f"grep -c 'survived' {genuine}"])
+
+    assert rc == 0, "an authored falsifier that executes is accepted"
+    assert len(_lines(store)) == len(_lines(mirror)) == 2, "each tree gained exactly one row"
+    assert _lines(store) == _lines(mirror), "the two trees hold different bytes"
+    assert sv.load_verdicts(store) == sv.load_verdicts(mirror)
+    latest = sv.load_verdicts(store)["Bash/timeout"]
+    assert latest["decided_by"] == sv.REANCHOR_DECIDED_BY, latest
+    assert latest["verdict"] == "reviewed_no_skill", "a re-anchor keeps the decision"
+
+
+def test_the_repair_pass_writes_both_trees_for_every_class_it_records(
+        store, mirror, tmp_path):
+    """Clause 1, second half: fixing `reanchor_verdict` alone would have reached 6 of 79.
+
+    The live-only rows split 46 `root-move-repair` + 27 `root-move-repair-disposal` + 6
+    `root-move-repair-reanchor`, so the path under test has to be the shared one — the pass,
+    driving all three of its recording buckets in one run: a key whose moved root a
+    substitution reaches, one whose dated corpus retention already pruned (disposed to a
+    tombstone), and one whose dead path sits inside a script only an authored command can
+    reach. The two files are byte-identical when it finishes.
+    """
+    dead, live = nested_root_pair(tmp_path)
+    root_move_row(store, "Bash/timeout", dead, "candidate-x-20260927")   # substitution
+    root_move_row(store, "Bash/err", dead, "candidate-x-20260908")       # retention pruned
+    stored_row(store, "ledger/evidence_cmd_syntax", f"python3 {dead}/skills/tools/m.py",
+               verdict="reviewed_no_skill", reason="guard lives in the tool", occurrences=7)
+    authored = store.parent / "reanchors.json"
+    authored.write_text(json.dumps({"ledger/evidence_cmd_syntax":
+                                    f"grep -c . {live}/skills/tools/m.py"}),
+                        encoding="utf-8")
+    _write_rows(mirror, [json.loads(ln) for ln in _lines(store)])
+
+    rc, out = run_repair(store, dead, live, "--dispose-unverifiable",
+                         "--reanchor-file", str(authored))
+
+    assert rc == 0, out
+    assert "repaired: 1  reanchored: 1  disposed: 1" in out, out
+    assert _lines(store) == _lines(mirror), out
+    assert len(_lines(store)) == 6, "three rows in, three appended, none in one tree only"
+    assert sv.MIRROR_NOT_WRITTEN not in out, "a copy was attached, so none was skipped"
+
+
+def test_a_repair_with_no_durable_copy_names_the_copy_it_could_not_write(
+        store, monkeypatch, tmp_path):
+    """Clause 2: record anyway, and *say* so — the policy `mirror_for`'s docstring states.
+
+    Deliberately no mirror: a tmp `--store` with `$SKILL_VERDICTS_MIRROR` unset is the
+    legitimate state, and `_mirror_target` refuses to push an off-default ledger through the
+    production vault copy. Refusing the record instead would lose a decision, which clause 1
+    and that docstring both forbid — so the half left standing is the announcement, carrying
+    the count of rows that went out single-tree. This is the shape the 2026-09-27 pass ran
+    in for all 79 of its appends, and the pass's stdout is where a nightly could have seen
+    it and did not.
+    """
+    dead, live = moved_root(tmp_path)
+    root_move_row(store, "Bash/timeout", dead, "candidate-x-20260927")
+    monkeypatch.delenv("SKILL_VERDICTS_MIRROR", raising=False)
+    assert sv.mirror_for(store) is None, "the fixture must be in the skipped shape"
+
+    rc, out = run_repair(store, dead, live)
+
+    assert rc == 0, out
+    assert sv.MIRROR_NOT_WRITTEN in out, out
+    assert str(store) in out and str(sv.DEFAULT_MIRROR) in out, out
+    assert "rows_this_pass=1" in out, out
+    assert len(_lines(store)) == 2, "the live row was still recorded"
+    assert out.splitlines()[-1].startswith("repaired: 1"), \
+        "the tally line stays last: the nightly parses splitlines()[-1]"
+
+
+def test_record_verdict_says_which_copy_it_could_not_write(tmp_path, monkeypatch, capfd):
+    """Clause 2 at the single writer, not only at the pass: stderr, one row, no exception.
+
+    Every caller that is not `repair` — `record`, `dispose`, a runbook — gets the notice
+    from here rather than from a tally it does not have, so the announce lives in
+    `record_verdict` itself. The row still lands: the ledger is the live artifact, and an
+    unwritable vault costs the second copy, not the decision.
+    """
+    scratch = tmp_path / "scratch" / "verdicts.jsonl"
+    monkeypatch.delenv("SKILL_VERDICTS_MIRROR", raising=False)
+
+    sv.record_verdict(scratch, pattern_key="Bash/timeout", verdict="noise",
+                      reason="fixture grounds",
+                      evidence_cmd="grep -c '^status:' /dev/null || true")
+
+    err = capfd.readouterr().err
+    assert sv.MIRROR_NOT_WRITTEN in err, err
+    assert str(scratch) in err and str(sv.DEFAULT_MIRROR) in err, err
+    assert len(_lines(scratch)) == 1, "the live row was recorded anyway"
+
+
+def test_sync_brings_the_copy_up_to_the_ledger_and_adds_nothing_twice(
+        store, mirror, capsys):
+    """Clause 5, first half: a route for the 79 rows already on disk, runnable twice.
+
+    No amount of correct future writing puts rows into a copy that is 79 lines behind, so
+    #1717 needs a bring-up: it appends the live ledger's latest row per key — byte for byte,
+    the copy's own history intact — and the second run finds every key already matching and
+    adds 0 lines, which is the property that makes it safe to put in a nightly at all.
+    """
+    _write_rows(store, [
+        _pair("Bash/timeout", "rejected_artifact_class", "2026-09-10T09:00:00Z"),
+        _pair("Bash/timeout", "rejected_artifact_class", "2026-09-27T08:59:09Z"),
+        _pair("Read/logic", "reviewed_no_skill", "2026-09-10T09:00:00Z"),
+        _pair("Read/logic", "rejected_unverifiable", "2026-09-27T08:59:11Z"),
+        _pair("Grep/formatting", "reviewed_no_skill", "2026-09-11T09:00:00Z"),
+    ])
+    _write_rows(mirror, [
+        _pair("Bash/timeout", "rejected_artifact_class", "2026-09-10T09:00:00Z"),
+        _pair("Read/logic", "reviewed_no_skill", "2026-09-10T09:00:00Z"),
+    ])
+    copy_before = _lines(mirror)
+
+    rc = sv.main(["sync", "--store", str(store)])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert out.count("SYNCED ") == 3, out
+    assert "SYNCED Bash/timeout :: rejected_artifact_class LAGGED" in out, out
+    assert "SYNCED Read/logic :: rejected_unverifiable DISAGREEING" in out, out
+    assert "SYNCED Grep/formatting :: reviewed_no_skill MIRROR_MISSING" in out, out
+    assert _synced_line(out).startswith(
+        "synced: 3  lagged: 1  disagreeing: 1  missing: 1  held: 0"), out
+    assert ("ledger_mirror: keys_compared: 3  lagged: 0  disagreeing: 0  missing: 0  "
+            "lost: 0") in out, out
+
+    after = _lines(mirror)
+    assert after[:len(copy_before)] == copy_before, \
+        "the copy stays append-only: its own history survives the bring-up"
+    assert [json.loads(ln) for ln in after[len(copy_before):]] == [
+        sv.load_verdicts(store)[k]
+        for k in ("Bash/timeout", "Grep/formatting", "Read/logic")], \
+        "what landed is the live ledger's latest row per key, unmodified"
+    assert sv.load_verdicts(store) == sv.load_verdicts(mirror)
+
+    rc2 = sv.main(["sync", "--store", str(store)])
+    out2 = capsys.readouterr().out
+    assert rc2 == 0, out2
+    assert "SYNCED " not in out2, out2
+    assert _synced_line(out2).startswith(
+        "synced: 0  lagged: 0  disagreeing: 0  missing: 0  held: 0"), out2
+    assert _lines(mirror) == after, "a second run added lines"
+
+
+def test_sync_holds_a_relabelled_key_when_told_to(store, mirror, capsys):
+    """Clause 5's `--hold-disagreements`: lag is copied, a relabel is left for a human.
+
+    #1717's owed ruling is whether the 25 keys the repair pass relabelled to
+    `rejected_unverifiable` should become the durable answer unreviewed. This flag is what
+    makes that ruling executable rather than a re-derivation: the same run still closes the
+    lag gap, and the relabelled key is printed with both verdicts and left untouched.
+    """
+    _write_rows(store, [
+        _pair("Bash/timeout", "noise", "2026-09-10T09:00:00Z"),
+        _pair("Bash/timeout", "noise", "2026-09-27T08:59:09Z"),
+        _pair("Read/logic", "rejected_unverifiable", "2026-09-27T08:59:11Z"),
+    ])
+    _write_rows(mirror, [
+        _pair("Bash/timeout", "noise", "2026-09-10T09:00:00Z"),
+        _pair("Read/logic", "reviewed_no_skill", "2026-09-10T09:00:00Z"),
+    ])
+    before = _lines(mirror)
+
+    rc = sv.main(["sync", "--store", str(store), "--hold-disagreements"])
+    out = capsys.readouterr().out
+
+    assert rc == 0, out
+    assert "SYNCED Bash/timeout :: noise LAGGED" in out, out
+    assert "SYNC_HELD Read/logic :: live=rejected_unverifiable " \
+           "durable=reviewed_no_skill" in out, out
+    assert _synced_line(out).startswith(
+        "synced: 1  lagged: 1  disagreeing: 0  missing: 0  held: 1"), out
+    assert len(_lines(mirror)) == len(before) + 1, out
+    assert sv.load_verdicts(mirror)["Read/logic"]["verdict"] == "reviewed_no_skill", \
+        "the held key keeps the verdict the human has not yet ruled on"
+
+
+def test_sync_refuses_to_write_the_production_copy_for_an_off_default_ledger(
+        store, monkeypatch, tmp_path, capsys):
+    """Clause 5, second half: a `--store` never reaches the vault copy through a sync.
+
+    The ledger here is a tmp file and `$SKILL_VERDICTS_MIRROR` is unset, so `_mirror_target`
+    has no durable copy for it — the guard that exists precisely so a scratch run cannot
+    push scratch decisions into `~/obsidian/memory/skill-verdicts/`. A sync that wrote them
+    there anyway would be the loudest possible way to defeat it, so it appends nothing and
+    exits 1. The pair to this test is the one above: name a copy with
+    `$SKILL_VERDICTS_MIRROR` and the same run writes it.
+    """
+    _write_rows(store, [_pair("Bash/timeout", "noise", "2026-09-20T09:00:00Z")])
+    monkeypatch.delenv("SKILL_VERDICTS_MIRROR", raising=False)
+    assert sv.mirror_for(store) is None, "the fixture must be in the refused shape"
+    # The production copy re-aimed at a tmp file, so "nothing was written to it" is a claim
+    # about a file this test owns: asserted against the real path it says nothing at all
+    # whenever the vault copy happens not to exist, which is the state a fresh round home
+    # runs in.
+    pretend_vault = tmp_path / "production-copy.jsonl"
+    monkeypatch.setattr(sv, "DEFAULT_MIRROR", pretend_vault)
+
+    rc = sv.main(["sync", "--store", str(store)])
+    out = capsys.readouterr().out
+
+    assert rc == 1, out
+    assert "SYNC_REFUSED" in out, out
+    assert str(store) in out and "$SKILL_VERDICTS_MIRROR" in out, out
+    assert str(pretend_vault) in out, out
+    assert out.splitlines()[-1] == "synced: 0  refused: 1  durable: unresolved", out
+    assert len(_lines(store)) == 1, "a refusal appended to the ledger it was given"
+    assert not pretend_vault.exists(), (
+        "the refusal created the copy it refused to write")
+
+
+def test_the_shipped_cli_keeps_its_tally_last_and_names_both_classes(tmp_path, mirror):
+    """Seam, not clause: the nightly parses the CHILD's stdout, and that surface changed.
+
+    Every other test in this section calls `sv.main` in-process, so none proves what the
+    shipped module prints through a real interpreter in a real environment — which is the
+    boundary the runbook reads, and the one whose `splitlines()[-1]` contract the new
+    `ledger_mirror:` tally could have broken. Asserted across it: the two classes are two
+    numbers, the counts line is still the last line, `sync`'s own tally is well formed, and
+    the same parse after a sync reports `disagreeing: 0` with no CONFLICT line left.
+    """
+    store = tmp_path / "cli" / "verdicts.jsonl"
+    _write_rows(store, [
+        _pair("Bash/timeout", "rejected_artifact_class", "2026-09-10T09:00:00Z"),
+        _pair("Bash/timeout", "rejected_artifact_class", "2026-09-27T08:59:09Z"),
+        _pair("Read/logic", "rejected_unverifiable", "2026-09-27T08:59:11Z"),
+    ])
+    _write_rows(mirror, [
+        _pair("Bash/timeout", "rejected_artifact_class", "2026-09-10T09:00:00Z"),
+        _pair("Read/logic", "reviewed_no_skill", "2026-09-10T09:00:00Z"),
+    ])
+    cands = tmp_path / "candidates"
+    cands.mkdir()
+    env = dict(os.environ, SKILL_VERDICTS_MIRROR=str(mirror))
+    run = lambda *args: subprocess.run(
+        [sys.executable, "-m", "scripts.skill_verdicts", *args],
+        cwd=_ROOT, env=env, capture_output=True, text=True, timeout=120)
+
+    checked = run("check", "--candidates", str(cands), "--store", str(store))
+    assert checked.returncode == 0, checked.stderr
+    assert checked.stdout.count("LEDGER_MIRROR_CONFLICT") == 1, checked.stdout
+    assert checked.stdout.count("LEDGER_MIRROR_LAGGED") == 1, checked.stdout
+    assert ("ledger_mirror: keys_compared: 2  lagged: 1  disagreeing: 1  missing: 0  "
+            f"lost: 0  durable: {mirror}") in checked.stdout, checked.stdout
+    assert checked.stdout.splitlines()[-1] == "checked: 0  skipped_by_verdict: 0", \
+        "the tally must not become the last line: the runbook parses splitlines()[-1]"
+
+    synced = run("sync", "--store", str(store))
+    assert synced.returncode == 0, synced.stderr
+    assert _synced_line(synced.stdout).startswith(
+        "synced: 2  lagged: 1  disagreeing: 1  missing: 0  held: 0"), synced.stdout
+
+    after = run("check", "--candidates", str(cands), "--store", str(store))
+    assert after.returncode == 0, after.stderr
+    assert "LEDGER_MIRROR_CONFLICT" not in after.stdout, after.stdout
+    assert "LEDGER_MIRROR_LAGGED" not in after.stdout, after.stdout
+    assert ("ledger_mirror: keys_compared: 2  lagged: 0  disagreeing: 0  missing: 0  "
+            "lost: 0") in after.stdout, after.stdout
+    assert after.stdout.splitlines()[-1] == "checked: 0  skipped_by_verdict: 0", after.stdout
+
+
+def _synced_line(out: str) -> str:
+    """The `sync` tally line, wherever it sits among the findings above it."""
+    return [ln for ln in out.splitlines() if ln.startswith("synced: ")][0]
 
 
 def test_the_default_rewrites_point_at_the_live_data_root_not_the_code_tree():
