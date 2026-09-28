@@ -852,6 +852,72 @@ def test_the_rollup_still_separates_success_from_interruption(q):
     assert rollup["fail_rate"] == pytest.approx(1 / 3)
 
 
+def _seed_run(q, source: str, status: str, response_json: str) -> None:
+    """One completed run in the current window with `response_json` as its
+    stored result — the blob `workers/pool.py` writes from the source's own
+    return value, and the only place a `deadline_stopped` round is recorded."""
+    q.record_run(run_id=new_run_id(source), queue_id=None, source=source,
+                 status=status, started_at="2000-01-01T00:00:00+00:00",
+                 completed_at=datetime.now(timezone.utc).isoformat(),
+                 duration_seconds=60.0, response_json=response_json)
+
+
+def test_the_rollup_counts_runs_whose_matrix_never_finished(q):
+    """#1687 clause 1: `ok` says a run returned, not that it measured anything.
+
+    Five autoresearch rounds completed and every one of them stopped before the
+    end of its trial matrix, so all five sat inside `health.ok` and the source
+    read as a healthy week of work while it was promoting nothing. The flag is
+    already in the stored result — `deadline_stopped` true, or a
+    `matrix_dropped_tasks` list the projection shrank — so the rollup has to
+    count it beside ok/failed/skipped.
+    """
+    for i in range(5):
+        _seed_run(q, "autoresearch", "success", json.dumps(
+            {"round_id": f"R_{i}", "deadline_stopped": True,
+             "tasks_not_reached": ["bench_015", "bench_010"]}))
+    # Shrunk by the projection (#1605) rather than cut at the deadline: the
+    # matrix still did not run to its end, and that is what the count is about.
+    _seed_run(q, "autoresearch", "success", json.dumps(
+        {"round_id": "R_dropped", "deadline_stopped": False,
+         "matrix_dropped_tasks": ["bench_017"]}))
+    # A round that ran its whole matrix: the only one of the seven that is not
+    # counted, and the reason the count is not simply a rename of `ok`.
+    _seed_run(q, "autoresearch", "success", json.dumps(
+        {"round_id": "R_clean", "deadline_stopped": False,
+         "matrix_dropped_tasks": [], "promoted": True}))
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")["autoresearch"]
+    assert rollup["unfinished_matrix"] == 6
+    assert (rollup["total"], rollup["ok"]) == (7, 7), \
+        "the existing buckets must keep counting every run as before"
+
+
+def test_the_unfinished_matrix_count_needs_a_stored_result(q):
+    """Two ways a run says nothing about its matrix, and neither is "finished".
+
+    A truncated or absent `response_json` is the common case, not an edge case:
+    1348 of the 1365 runs in the 7-day window as measured on 2026-09-28 hold
+    something sqlite cannot parse — 1011 of them the empty string the pool
+    writes by default — and
+    `SUM(json_extract(response_json,'$.deadline_stopped'))` over that window
+    raises `malformed JSON` rather than returning a number. So the count has to
+    read an unparseable blob as unflagged instead of raising — a raising
+    expression here takes the whole rollup with it, and `/api/workers/health`
+    catches that exception and serves `health: null` for every source, which is
+    the panel reading a working week as no data at all.
+    """
+    _seed_run(q, "autoresearch", "success", "")
+    _seed_run(q, "autoresearch", "failed", 'not json at all')
+    _seed_run(q, "autoresearch", "success", '{"deadline_stopped": tru')
+    _seed_run(q, "arch-review", "success", '{"doc_update_rejected": ""}')
+
+    rollup = q.run_rollup_by_source("2000-01-01T00:00:00+00:00")
+    assert rollup["autoresearch"]["unfinished_matrix"] == 0
+    assert rollup["arch-review"]["unfinished_matrix"] == 0, \
+        "a source that never had a trial matrix reads as zero, not missing"
+
+
 # ---------------------------------------------------------------------------
 # Inspection, runs and watermarks
 # ---------------------------------------------------------------------------

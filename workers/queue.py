@@ -1062,11 +1062,36 @@ class WorkQueue:
         # outside ok/failed/skipped would report a source whose runs keep being
         # killed as though it never ran them at all — depressing `fail_rate`
         # exactly when the panel most needs it to rise.
+        # `unfinished_matrix` (#1687) is a run's own verdict on whether it
+        # measured anything, and it lives in `response_json`, not `status`: a
+        # round that stopped before the end of its trial matrix returns cleanly,
+        # so it is a `success`. autoresearch proved the reading wrong five runs
+        # running — every completed round on 2026-09-27 carried
+        # `"deadline_stopped": true` with 2-3 bench tasks never reached, which
+        # `scripts/autoresearch/run_round.py` turns into `should=False` for every
+        # variant, so `ok: 5, failed: 0, fail_rate: 0.0` described a source that
+        # had been unable to promote anything since the cap fix.
+        #
+        # `json_valid` is load-bearing, not hygiene: `response_json` defaults to
+        # the empty string, and 1348 of the 1365 runs in the 7-day window as
+        # measured on 2026-09-28 hold something sqlite cannot parse, so a bare
+        # `json_extract` over this table raises `malformed JSON` — which `/api/workers/health` catches and
+        # answers with `health: null` for every source, trading a working week
+        # for no data at all. `json_extract` gives an array back as its own JSON
+        # text, so `<> '[]'` is the non-empty test and a missing key is NULL,
+        # which both `IS 1` and `IS NOT NULL` read as 0.
         q = """SELECT source,
                       COUNT(*)                                   AS total,
                       SUM(status = 'success')                     AS ok,
                       SUM(status IN ('failed','interrupted'))     AS failed,
                       SUM(status = 'skipped')                     AS skipped,
+                      SUM(CASE WHEN json_valid(response_json) THEN
+                              json_extract(response_json, '$.deadline_stopped') IS 1
+                              OR (json_extract(response_json,
+                                               '$.matrix_dropped_tasks') IS NOT NULL
+                                  AND json_extract(response_json,
+                                               '$.matrix_dropped_tasks') <> '[]')
+                           ELSE 0 END)                            AS unfinished,
                       SUM(COALESCE(duration_seconds, 0))          AS seconds,
                       MAX(completed_at)                           AS last_completed
                FROM runs WHERE completed_at >= ? GROUP BY source"""
@@ -1081,6 +1106,11 @@ class WorkQueue:
                 "ok": int(r["ok"] or 0),
                 "failed": failed,
                 "skipped": int(r["skipped"] or 0),
+                # Emitted beside `total` on purpose: the same integer is the
+                # opposite reading at 2 of 40 and at 2 of 2, and a source with no
+                # run in the window gets no dict at all from this method rather
+                # than a 0 that reads as "looked, nothing incomplete".
+                "unfinished_matrix": int(r["unfinished"] or 0),
                 # A rate over zero runs is not 0.0, it is unknown — and
                 # rendering "0% failing" for a source that has never run is
                 # the reading this panel exists to prevent.

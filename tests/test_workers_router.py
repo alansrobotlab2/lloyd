@@ -134,6 +134,7 @@ from fastapi import FastAPI as _FastAPI  # noqa: E402
 from fastapi.testclient import TestClient as _TestClient  # noqa: E402
 
 from scripts.autoresearch.common import load_bench_tasks  # noqa: E402
+from workers.queue import WorkQueue, new_run_id  # noqa: E402
 
 TASK_ID = "bench_012_replay_report_deliverable"
 
@@ -1039,3 +1040,101 @@ def test_health_dispatch_agrees_with_the_watch_and_survives_its_failure(
     assert _row(body2, "dead")["dispatch"] is None, (
         "an unreadable dispatch section must not 500 the health page")
     assert body2["sources"], "and the rest of the page still has its rows"
+
+# ── /api/workers/health counts runs whose matrix never finished (#1687) ─────
+
+_STOPPED = '{"round_id": "%s", "deadline_stopped": true, ' \
+           '"tasks_not_reached": ["bench_015", "bench_010"]}'
+_FINISHED = '{"round_id": "%s", "deadline_stopped": false, ' \
+            '"matrix_dropped_tasks": [], "promoted": false}'
+
+
+def _matrix_client(monkeypatch, tmp_path, in_window: dict[str, list[tuple[bool, str]]],
+                   *, outside_window: list[str] = ()):
+    """A health endpoint over a REAL `WorkQueue`, not a stand-in.
+
+    `in_window` maps a source name to `(stopped, round_id)` pairs, one per run
+    completed now; `outside_window` names sources that get exactly one
+    `deadline_stopped` run dated 2020, so they are configured but unseen by the
+    window. The count these tests pin is computed by SQL over the stored
+    `response_json`, which the hand-written rollup dicts the fake queues in this
+    file return cannot exercise: it needs the real table, the real query and the
+    real serialised body.
+    """
+    queue = WorkQueue(tmp_path / "workers.db")
+
+    def record(source, response, completed_at):
+        queue.record_run(run_id=new_run_id(source), queue_id=None, source=source,
+                         status="success", started_at=completed_at,
+                         completed_at=completed_at, duration_seconds=1500.0,
+                         response_json=response)
+
+    for name, runs in in_window.items():
+        for stopped, round_id in runs:
+            record(name, (_STOPPED if stopped else _FINISHED) % round_id,
+                   datetime.now(timezone.utc).isoformat())
+    for name in outside_window:
+        record(name, _STOPPED % "R_old", "2020-01-01T00:01:00+00:00")
+
+    client = _client(monkeypatch, tmp_path)
+    monkeypatch.setattr(router, "get_queue", lambda: queue)
+    sources = {n: {"enabled": True, "interval_seconds": 14400}
+               for n in sorted(set(in_window) | set(outside_window))}
+    monkeypatch.setattr(router, "CONFIG", {"workers": {"sources": sources}},
+                        raising=False)
+    return client
+
+
+def _health_of(client, name: str):
+    body = client.get("/api/workers/health?days=7&runs=0").json()
+    return next(s for s in body["sources"] if s["name"] == name)["health"]
+
+
+def test_the_health_block_reports_matrix_incomplete_beside_ok(monkeypatch, tmp_path):
+    """Clause 2: five "successful" runs that measured nothing report 5, not ok: 5.
+
+    Every autoresearch round in the window completed and stopped before the end
+    of its trial matrix, so this block read `{total: 5, ok: 5, failed: 0,
+    fail_rate: 0.0}` — the exact shape of a source doing good work, while in
+    fact it had promoted nothing at all since the cap fix. The count now travels
+    in the same block, beside `ok`.
+    """
+    client = _matrix_client(monkeypatch, tmp_path,
+                            {"autoresearch": [(True, f"R_{i}") for i in range(5)]})
+
+    health = _health_of(client, "autoresearch")
+    assert (health["total"], health["ok"], health["failed"]) == (5, 5, 0)
+    assert health["unfinished_matrix"] == 5, \
+        "all five stopped short of the end of their matrix, and `ok: 5` alone " \
+        "is what made that invisible"
+    assert health["unfinished_matrix"] <= health["total"], \
+        "it is a subset of the window's runs, never a second tally"
+
+
+def test_the_health_incomplete_count_is_never_invented_for_a_source_with_no_run(
+        monkeypatch, tmp_path):
+    """Clause 3: `unfinished_matrix: 0` must mean "looked, none", never "no data".
+
+    Three readings in one response, because the distinction is the whole use of
+    the number: 1 of 3 runs stopped for `autoresearch`, a genuine 0 of 2 for
+    `youtube-digest`, and `health: null` for `arch-review`, whose one stopped
+    round predates the window. A zero standing in for no observation is the same
+    error this endpoint already refuses for `fail_rate`, which it reports as
+    null rather than 0% over zero runs.
+    """
+    client = _matrix_client(
+        monkeypatch, tmp_path,
+        {"autoresearch": [(True, "R_a"), (False, "R_b"), (False, "R_c")],
+         "youtube-digest": [(False, "Y_0"), (False, "Y_1")]},
+        outside_window=["arch-review"])
+
+    stopped = _health_of(client, "autoresearch")
+    assert (stopped["unfinished_matrix"], stopped["total"]) == (1, 3), \
+        "the count is emitted beside the window's run total, so 1 of 3 reads " \
+        "as a fraction of real traffic rather than as a bare number"
+    clean = _health_of(client, "youtube-digest")
+    assert (clean["unfinished_matrix"], clean["total"]) == (0, 2), \
+        "a zero here is an observation: two runs, both finished their matrix"
+    assert _health_of(client, "arch-review") is None, \
+        "a source with no run in the window gets no block at all, so there is " \
+        "no zero anywhere for a reader to mistake for 'checked, all complete'"
