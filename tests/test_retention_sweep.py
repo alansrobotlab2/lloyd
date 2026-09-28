@@ -12,11 +12,13 @@ import gzip
 import importlib.util
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -2309,3 +2311,204 @@ def test_the_state_dirs_the_ruling_keeps_are_never_touched(rs, automod, monkeypa
         "the worktree home should have been reclaimed; it is not the state dir")
     assert (kept / "gate.json").is_file(), (
         "the sweep reached into the state dirs the ruling keeps indefinitely")
+
+
+# --------------------------------------------------------------------------------------
+# The one corpus this sweep deliberately does NOT bound (backlog #1733, #1674's ruling)
+#
+# `_pipeline/trajectories` is the mined trajectory corpus: the rows
+# `tests/test_conversation_relations.py` measures its floors against. #1674 ruled it
+# stays unbounded, and nothing in the tree recorded that — the ruling lived on the
+# board, so the next widening pass (stores have been added by #566, #1018, #1466,
+# #1574, #1644, each against a store the previous pass called complete) would find no
+# exclusion anywhere near the code it is editing.
+#
+# The closest existing guard cannot catch this: `test_the_bare_invocation_deletes_the_pair_it_resolves`
+# plants `pipeline/not-the-store.json`, a SIBLING of the corpus directory, so a store
+# naming `_pipeline/trajectories` itself — or a glob over `_pipeline` that descends into
+# it — passes that suite today. Hence a planted file INSIDE the directory, run through
+# the shipped script rather than through the fixture, plus a path check over every store
+# the module resolves.
+# --------------------------------------------------------------------------------------
+
+#: A day-file older than the oldest window in the script. The widest age this sweep
+#: applies is `SESSION_ARCHIVE_AGE_DAYS` = 90; 400 days is past every one of them, so
+#: a surviving file is a file no window could have reached, not a file that happened to
+#: sit inside the horizon.
+_CORPUS_STALE_DAYS = 400
+
+
+def _corpus_under(root: Path) -> Path:
+    """The corpus path relative to a data root, spelled as `conversation_relations`
+    spells it (`PIPELINE_DIR / "trajectories"`)."""
+    return root / "_pipeline" / "trajectories"
+
+
+def _exclusion_paragraph(doc: str) -> str:
+    """The module docstring's exclusion paragraph, sliced on its own heading.
+
+    The slice ends at the paragraph's blank-line terminator, so what is graded is the
+    paragraph and not the whole docstring: a qualifier relocated into the Usage block
+    below would otherwise keep this finder's output unchanged.
+    """
+    start = doc.find("Deliberately NOT a store")
+    assert start >= 0, (
+        "the sweep's docstring no longer carries the paragraph that records the "
+        "trajectory corpus as excluded — the ruling is on the board and nowhere else")
+    rest = doc[start:]
+    end = rest.find("\n\n")
+    assert end > 0, "the exclusion paragraph runs to the end of the docstring"
+    return rest[:end]
+
+
+def _paths_landing_on(mod, corpus: Path) -> list[str]:
+    """Names of `mod`'s module-level path constants that ARE the corpus or sit under it.
+
+    Deliberately the same shape as `_unredirected_destructive_paths` above — every
+    `Path` the module holds, exemptions by name only — because a suffix rule (`_DIR`,
+    `_DIR` + `_DB`) is only as wide as the last name somebody thought of, and
+    `TRAJECTORIES` / `MINED_CORPUS` / `TRAJ_ARCHIVE` would each walk straight through a
+    suffix rule. `DATA_ROOT` and `_TREE` stay exempt for the reasons written there: the
+    root is entered, never removed, and the corpus is inside it.
+    """
+    return sorted(
+        f"{name} -> {value}" for name, value in vars(mod).items()
+        if isinstance(value, Path) and not name.startswith("__")
+        and name not in NON_TARGET_PATHS
+        and (value == corpus or corpus in value.parents))
+
+
+def test_the_docstring_records_the_trajectory_corpus_as_deliberately_unbounded(rs):
+    """Clause 1: the exclusion is recorded where a widening pass would read it, dated,
+    with its reason and its alternative, and without a store count.
+
+    The count is the part that rots. This docstring's own numbered list already skips
+    four, five and six and never numbers `AUTONOMY_RUNS_DIR`, `AUTONOMY_TASKS_DIR` or
+    `CANDIDATES_DIR` at all, and the sweep's store count has moved twice since the
+    paragraph this one replaces would have said nine. A paragraph that repeats a number
+    is a paragraph that goes false the next time a store is added, so the ban is
+    asserted rather than asked for.
+    """
+    para = _exclusion_paragraph(rs.__doc__ or "")
+    flat = " ".join(para.split())
+
+    assert "_pipeline/trajectories" in flat, (
+        "the paragraph does not name the corpus by path, so a grep of this file for "
+        "the exclusion still finds only store 2's session-gzip rationale")
+    assert "deliberately" in para.lower(), (
+        "the exclusion is stated as a fact rather than a decision, which is the word "
+        "a widening pass needs to see before it edits")
+    # The dependency, with its numbers, because "someone decided this" does not stop a
+    # widening pass — the floor that breaks does.
+    assert "conversation_relations" in flat, (
+        "the paragraph lost the consumer whose floors the corpus feeds")
+    assert "5 day-files" in flat and "200 raw" in flat and "100 aggregate" in flat, (
+        "the volume and pair floors are not quoted, so the paragraph cannot say what "
+        f"an mtime window would break: {flat}")
+    assert "2026-09-22" in flat and "cannot be rebuilt" in flat, (
+        "the 2026-09-22 deletion precedent is gone — the only evidence that this corpus "
+        "is unrecoverable once archived past its readers")
+    # The alternative, so a future pass narrows the corpus instead of mtime-archiving it.
+    assert "pair-preserving compaction" in flat, (
+        "the paragraph no longer names the discipline that replaces mtime archiving")
+    assert "mtime" in flat, "the rejected approach is no longer named, so it can be re-proposed"
+
+    counted = re.findall(r"(?i)\b(?:one|two|three|four|five|six|seven|eight|nine|ten|"
+                         r"eleven|twelve|thirteen|\d+)\s+stores?\b", rs.__doc__ or "")
+    assert not counted, (
+        f"the docstring counts stores ({counted}); the count moves every time a store "
+        "is added, which is how the last such paragraph went false")
+
+
+def test_a_backdated_trajectory_day_file_survives_the_shipped_apply_run(tmp_path):
+    """Clause 2: the shipped script, run the way cron runs it, leaves a 400-day-old file
+    inside the corpus byte-identical — and is proven to have been destructive on the
+    same run.
+
+    The fixture-based tests cannot answer this: they supply the store paths, so they can
+    only report what the fixture chose. This runs the file with no venv and no pytest
+    against a data root of its own, and plants a store the sweep DOES own
+    (`groundskeeper-queue.json`, past its 30-day window) beside the corpus file. Without
+    that decoy an `--apply` that found nothing at all would satisfy every assertion here,
+    which is the false-green this file's own pair test guards the same way.
+    """
+    py3 = shutil.which("python3")
+    if not py3:
+        pytest.skip("no bare python3 to prove the no-venv path against")
+    root = tmp_path / "data"
+    corpus = _corpus_under(root)
+    corpus.mkdir(parents=True)
+    day = corpus / "2026-01-01.jsonl"
+    payload = (json.dumps({"session_id": "s1", "docs": ["a.md", "b.md"]}) + "\n").encode()
+    day.write_bytes(payload)
+    _backdate(day, _CORPUS_STALE_DAYS)
+    stale_mtime = day.stat().st_mtime
+    # The decoy store: named by the script, past its window, and expected to GO. Its
+    # deletion is what proves the corpus file survived a sweep that was actually applying.
+    queue = root / "_pipeline" / "groundskeeper-queue.json"
+    queue.write_bytes(b"x" * 2048)
+    _backdate(queue, 31)
+
+    env = dict(os.environ)
+    env["LLOYD_DATA"] = str(root)
+    env["LLOYD_VAULT_ROOT"] = str(tmp_path / "no-vault")
+
+    def run(*args):
+        return subprocess.run([py3, str(_SCRIPT), *args], capture_output=True,
+                              text=True, env=env, cwd="/", timeout=120)
+
+    dry = run()
+    assert dry.returncode == 0, dry.stderr[-800:]
+    assert day.is_file(), "a dry run deleted the corpus"
+
+    applied = run("--apply")
+    assert applied.returncode == _APPLY_STATUS_FROM_A_WORKTREE, applied.stderr[-800:]
+    assert not queue.exists(), (
+        "this run deleted nothing at all, so the corpus surviving it is not evidence "
+        "that the sweep would leave it alone")
+    assert day.is_file(), "the sweep archived or deleted the mined trajectory corpus"
+    assert day.read_bytes() == payload, "the corpus file was rewritten, not left alone"
+    assert day.stat().st_mtime == stale_mtime, "a store touched the corpus file's mtime"
+    assert sorted(p.name for p in corpus.iterdir()) == ["2026-01-01.jsonl"], (
+        "something appeared in the corpus directory — an archived copy is as good as an "
+        "archive once the reader globs *.jsonl")
+    # The report is the operator's list of what got bounded, so a corpus line in it means
+    # a store was added whatever this file's prose says. The `data root:` line is excluded
+    # and nothing else is: under pytest it carries `tmp_path`, whose directory name is
+    # THIS test's own id — `test_a_backdated_trajectory_da0` — so a whole-stdout scan
+    # would find the word inside the path the sweep was told to use.
+    for out in (dry.stdout, applied.stdout):
+        named = [ln for ln in out.splitlines()
+                 if "trajector" in ln.lower() and not ln.startswith("  data root:")]
+        assert not named, f"the sweep reported a trajectories store: {named}"
+
+
+def test_no_store_the_sweep_resolves_lands_on_the_trajectory_corpus(tmp_path, monkeypatch):
+    """Clause 3: no path the sweep module resolves is the corpus or anything under it.
+
+    The behavioural test above proves the CURRENT script leaves the corpus alone; this one
+    is the earlier tripwire, and it costs milliseconds. It reads the constants off a fresh
+    import with `LLOYD_DATA` pointed at a scratch root — the resolution, not the
+    fixture's redirections — so a store added as `DATA_ROOT / "_pipeline" / "trajectories"`
+    is caught whether or not a future fixture remembers to redirect it. `WORKERS_DB` is in
+    scope by the same rule: it is a `Path` the module holds, and the fixture treats it as
+    deletable for exactly that reason.
+    """
+    mod = _load(monkeypatch, lloyd_data=tmp_path / "data")
+    corpus = _corpus_under(mod.DATA_ROOT)
+
+    resolved = {name for name, value in vars(mod).items()
+                if isinstance(value, Path) and not name.startswith("__")}
+    assert {"SESSIONS_DIR", "TASKS_DIR", "TRANSCRIPT_SCRATCH_DIR", "CANDIDATES_DIR",
+            "GROUNDSKEEPER_QUEUE_FILE", "WORKERS_DB"} <= resolved, (
+        f"the enumeration found only {sorted(resolved)}: too few to be the sweep's "
+        "stores, so a green below would be an empty scan rather than an absence")
+    assert _paths_landing_on(mod, corpus) == [], (
+        "a store the sweep resolves now points at the corpus this script deliberately "
+        f"does not bound: {_paths_landing_on(mod, corpus)}")
+
+    decoy = types.SimpleNamespace(TRAJECTORIES_DIR=corpus / "2026-01-01.jsonl",
+                                  SESSIONS_DIR=mod.DATA_ROOT / "sessions")
+    named = _paths_landing_on(decoy, corpus)
+    assert len(named) == 1 and named[0].startswith("TRAJECTORIES_DIR"), (
+        f"the finder does not even name a corpus path planted in a stand-in module: {named}")

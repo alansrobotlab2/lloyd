@@ -119,6 +119,30 @@ not one — the last `ACTIVITY_LOG_MAX_ENTRIES` entry bullets are kept and every
 non-blank line under the heading is removed, because a line the entry cap does not
 count is a line the cap could never remove (#845).
 
+Deliberately NOT a store: ~/lloyd-data/_pipeline/trajectories — the mined trajectory
+corpus, `scripts/memory/conversation_relations.py`'s TRAJECTORY_DIR. No rung here opens
+it, and that exclusion is a ruling rather than an omission (#1674, recorded on the board
+2026-09-28 and nowhere in the tree until this paragraph). It is the corpus the live
+conversation-relations floors are measured against, and `tests/test_conversation_relations.py`
+requires at least 5 day-files, at least 200 raw co-access pairs and at least 100 aggregate
+pairs out of these very files. So an mtime window here would bound a store that a green
+suite cannot see: `test_the_bare_invocation_deletes_the_pair_it_resolves` plants its
+untouched-`_pipeline` decoy as a SIBLING of this directory, and nothing planted inside it,
+so a store naming the corpus would sweep it and report a line every test still liked.
+And unlike every store above, it cannot be rebuilt after the fact. Mining reads session
+transcripts, and store 2 gzips those out of the `*.json` globs the extractors use — the
+2026-09-22 deletion took `_pipeline/trajectories` and the 09-11..09-22 mining window with
+it, which is why that test now calls an absent corpus "a fact about the machine".
+Nor is there pressure to bound it: measured 2026-09-28 the corpus is 7 day-files, 31 MB,
+about 4.4 MB a day, sitting at 2,374 raw and 225 aggregate pairs against the same floors.
+When it does need bounding, the discipline is pair-preserving compaction inside the corpus
+— merging day-files so the co-access pairs survive — and never an mtime archive: the corpus
+is daily-grained, so any window short of its span breaks the 5-file volume gate in days,
+long before the pair floors bind. `tests/test_retention_sweep.py` is what keeps this
+paragraph from rotting into a comment: it runs the shipped script over a corpus planted
+inside the data root, and it refuses any store path this module resolves that lands on or
+under the directory.
+
 Usage:
     retention-sweep.py            # dry run — report only
     retention-sweep.py --apply    # actually delete/gzip
