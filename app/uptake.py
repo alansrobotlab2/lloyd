@@ -157,6 +157,15 @@ GLOSSARY = {
                           "`rows_null_weight`, `max_weight`. The four numbers that "
                           "make a cross-channel comparison impossible, published "
                           "instead of leaving the reader to discover them.",
+    # Explains its own absence, like `scorer_generation` above: the tables that
+    # cleared every floor are the common case and carry no marker, so a reader has
+    # to be able to tell "no marker, so it passed" from "this file is stamped".
+    "audit_only": "ABSENT means this table cleared every floor and is citable. "
+                  "Present means the run did NOT clear them and the operator asked "
+                  "for the table anyway (`--ignore-precision-floor`); read "
+                  "`audit_only_reason` for which figures were weak. Every dispute "
+                  "count in it is an unvalidated classifier's guess: read the shape "
+                  "of the window, cite nothing, and never archive an entry on it.",
 }
 #: How tightly a skill row's presence is bounded, tightest last. A row must name
 #: one: "this skill was injected into that very turn" and "some turn of that
@@ -899,6 +908,58 @@ def classifier_clears_floors(metrics: Mapping[str, Any] | None) -> bool:
     return precision >= PRECISION_FLOOR and recall >= RECALL_FLOOR
 
 
+def floor_failures(report: Mapping[str, Any] | None) -> list[str]:
+    """Every measured floor this report misses, named. Empty list means all clear.
+
+    This is the **floor half** of `measurement_clears_floors`, split out so the
+    probe's documented audit escape hatch can reach the numbers and nothing else:
+    one implementation of the gate is what keeps an operator's `--ignore-precision-floor`
+    table honest about which figures it is publishing through, and an inline copy of
+    the expression in the probe would leave the gate itself untested (#1676).
+
+    The **labels check is deliberately absent**. It is not a floor and no flag may
+    wave it through: it is the only condition here that does not take the label
+    file's own word for being hand-labeled, so a run whose labels no longer resolve
+    has not measured precision weakly — it has not measured anything gradable, and
+    a table built on it attributes disputes on the strength of a file nobody can
+    re-anchor. `measurement_clears_floors` ANDs the two halves together; a caller
+    that publishes the floor half alone has to stamp the artifact as audit-only.
+
+    Each entry is a sentence, because it is copied verbatim into the emitted
+    artifact: a marker that says only `below_floor: true` leaves the next reader
+    to guess which figure was weak, and they will guess the flattering one.
+    """
+    if not report:
+        return ["no measurement report at all"]
+    fails: list[str] = []
+
+    m = report.get("classifier")
+    if not classifier_clears_floors(m):
+        mm = m or {}
+        if mm.get("measured") is not True:
+            why = mm.get("unmeasured_reason")
+            fails.append("deployed classifier not measured" + (f": {why}" if why else ""))
+        elif mm.get("precision") is None or mm.get("recall") is None:
+            fails.append("deployed classifier precision or recall unmeasured "
+                         "(nothing scored into the positive class)")
+        else:
+            if mm["precision"] < PRECISION_FLOOR:
+                fails.append(f"deployed precision {mm['precision']:.2f} "
+                             f"< {PRECISION_FLOOR}")
+            if mm["recall"] < RECALL_FLOOR:
+                fails.append(f"deployed recall {mm['recall']:.2f} < {RECALL_FLOOR}")
+
+    for key in ("holdout", "zero_shot"):
+        b = report.get(key)
+        if not b or b.get("measured") is not True:
+            fails.append(f"{key} not measured")
+        elif b.get("precision") is None:
+            fails.append(f"{key} precision unmeasured (no positives scored)")
+        elif b["precision"] < PRECISION_FLOOR:
+            fails.append(f"{key} precision {b['precision']:.2f} < {PRECISION_FLOOR}")
+    return fails
+
+
 def measurement_clears_floors(report: Mapping[str, Any] | None) -> bool:
     """The stop condition for step 2, across every way precision was measured.
 
@@ -921,20 +982,17 @@ def measurement_clears_floors(report: Mapping[str, Any] | None) -> bool:
     most labeled disputes (holdout recall 0.43 vs the classifier's 0.52), and the
     item's stop condition is about the classifier. Its recall is what the table's
     lower-bound note is computed from, and that is where it belongs.
+
+    Exactly `labels_ok AND not floor_failures(report)`: the split is in
+    `floor_failures`, and it exists so the probe's audit flag can publish the floor
+    half while this function keeps refusing on both. Do not re-inline either half
+    here — a second copy of the gate is a gate the tests are not run against.
     """
     if not report:
         return False
     if not report.get("labels_ok"):
         return False
-    if not classifier_clears_floors(report.get("classifier")):
-        return False
-    for key in ("holdout", "zero_shot"):
-        m = report.get(key)
-        if not m or m.get("measured") is not True:
-            return False
-        if m.get("precision") is None or m["precision"] < PRECISION_FLOOR:
-            return False
-    return True
+    return not floor_failures(report)
 
 
 def classify_dispute(prev_assistant: str | None, user_text: str, *,
@@ -1042,6 +1100,10 @@ def validate_labels(labels: Sequence[Mapping[str, Any]],
     branch on; a label that cannot be resolved is a failure, not a skip — a corpus
     that silently shrinks as transcripts roll off the store would quietly re-weight
     the precision figure the acceptance criterion is quoted on.
+
+    `n_unresolved` and `n_excerpt_mismatch` are the uncapped totals; the two
+    `*_turn_ids` lists are capped at 20 each, so the extent of the loss is readable
+    only from the counts.
     """
     unresolved: list[str] = []
     mismatch: list[str] = []
@@ -1071,6 +1133,14 @@ def validate_labels(labels: Sequence[Mapping[str, Any]],
         "ok": not unresolved and not mismatch,
         "n": len(labels),
         "n_resolved": len(labels) - len(unresolved),
+        # Uncapped totals, beside the id lists that are NOT (#1676). Both lists
+        # truncate to 20, so with a 46-label set `n=46, n_resolved=0` and
+        # `n=46, n_resolved=41` print the same 20 ids — and "the whole set rolled
+        # off the transcript store" versus "a handful aged out" are different
+        # verdicts on different remedies. A capped list is for opening a turn in
+        # the transcript; only a count can say how much of the corpus is gone.
+        "n_unresolved": len(unresolved),
+        "n_excerpt_mismatch": len(mismatch),
         "unresolved_turn_ids": unresolved[:20],
         "excerpt_mismatch_turn_ids": mismatch[:20],
         "note": (

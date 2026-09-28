@@ -12,6 +12,14 @@ request. Below the floor this exits 3 and emits only the classifier report —
 that report is the honest artifact, and there is deliberately no uptake table
 for a run that failed the gate.
 
+`--ignore-precision-floor` is the operator's audit exception to that, and it is
+narrower than it sounds: it waves through the FLOORS (deployed / holdout / zero-shot
+precision and recall) and writes the table stamped `audit_only: true` with
+`audit_only_reason` naming which figures were weak. It does not wave through the
+label re-anchor check, because that check is the only thing here which does not take
+the labels file's own word for being hand-labeled — a run whose labels no longer
+resolve to transcripts exits 3 with the flag set, exactly as it does without it (#1676).
+
 Two costs worth knowing before scheduling it nightly: every candidate is one
 request to the secondary engine (roughly a second each at `max_tokens=16`), and
 the labeled eval is bounded by the committed corpus, not by traffic, so its
@@ -423,6 +431,13 @@ def run_classifier_eval(cache: dict[str, Any] | None = None, *,
     passed = uptake.measurement_clears_floors(gate_report)
     return stamp_engine({
         "metrics": metrics,
+        # The gate's own view, returned beside the numbers it was built from:
+        # `gate_report["classifier"]` IS `metrics`, the same object, so when
+        # `stamp_engine` marks a block unmeasured the auditor's view moves with it
+        # and cannot disagree with the block the table quotes. `main` asks
+        # `uptake.floor_failures` against THIS dict — the one shape the gate
+        # accepts — rather than re-assembling it from the return's own keys (#1676).
+        "gate_report": gate_report,
         "passed": passed,
         "labels_check": label_check,
         "labels_ok": label_check["ok"],
@@ -497,7 +512,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="print, do not write the table")
     ap.add_argument("--out-dir", default=None, help="default <repo>/eval/uptake")
     ap.add_argument("--ignore-precision-floor", action="store_true",
-                    help="emit a table even below the 0.70 floor (audit only)")
+                    help="emit a table even below the 0.70 floor, stamped "
+                         "audit_only; does NOT bypass the label re-anchor check")
     args = ap.parse_args(argv)
 
     cache: dict[str, Any] = {}
@@ -520,9 +536,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"deployed pipeline(screen + classifier): precision={_r(pl['precision'])} "
           f"recall={_r(pl['recall'])} screened={pl.get('screened')} "
           f"tp={pl['tp']} fp={pl['fp']} fn={pl['fn']} tn={pl['tn']}")
+    # The uncapped counts, not `len(..._turn_ids)`: both id lists truncate to 20, so
+    # this line used to print "20 mismatched" for a 46-label set and read exactly
+    # like a few labels having rolled off the store (#1676).
     print(f"labels re-anchored to transcripts: ok={report['labels_ok']} "
           f"({report['labels_check']['n_resolved']}/{report['labels_check']['n']} resolved, "
-          f"{len(report['labels_check']['excerpt_mismatch_turn_ids'])} mismatched)")
+          f"{report['labels_check']['n_unresolved']} unresolved, "
+          f"{report['labels_check']['n_excerpt_mismatch']} mismatched)")
     out_dir = Path(args.out_dir) if args.out_dir else (REPO / "eval" / "uptake")
     classifier_block = {
         "engine": report["engine"], "labels_file": report["labels_file"],
@@ -580,22 +600,59 @@ def main(argv: list[str] | None = None) -> int:
     if args.eval_only:
         return 0 if report["passed"] else 3
 
+    # The audit escape hatch, which until #1676 was declared and read nowhere: the
+    # flag's own help text promised "a table even below the 0.70 floor (audit only)"
+    # and the run exited 3 having written only the classifier report, so an operator
+    # who followed that text got a refusal and no artifact.
+    #
+    # What the flag may publish is the floor half of the gate — `uptake.floor_failures`
+    # — and the emitted table has to say so in its own bytes, because the reason the
+    # floor exists is that a classifier which cannot tell a correction from a new
+    # request attributes disputes to memory entries at random. What the flag may
+    # NEVER reach is `labels_check`: that is the one condition in this run which does
+    # not take the label file's own word for being hand-labeled, and a run whose
+    # labels no longer resolve to transcripts has not measured the floor badly — it
+    # has no gradable corpus to measure at all. So the labels refusal below stands
+    # with the flag set, unchanged.
+    audit: dict[str, Any] | None = None
     if not report["passed"]:
-        which = ("labels did not re-resolve to their transcripts"
-                 if not report["labels_ok"] else
-                 "deployed classifier below a floor"
-                 if not uptake.classifier_clears_floors(m) else
-                 "holdout and/or zero-shot precision below "
-                 f"{uptake.PRECISION_FLOOR} — the in-sample number is not trusted")
-        print(f"STOP: {which}. No uptake table written. Fix the classifier before "
-              f"attributing disputes.", file=sys.stderr)
-        if not args.dry_run:
-            out_dir.mkdir(parents=True, exist_ok=True)
-            (out_dir / "classifier-report.json").write_text(
-                json.dumps({"classifier": classifier_block,
-                            "note": "emitted because the run did not clear the floor; "
-                                    "no uptake table exists for this run"}, indent=2) + "\n")
-        return 3
+        failed_floors = uptake.floor_failures(report["gate_report"])
+        if not report["labels_ok"] or not args.ignore_precision_floor:
+            which = ("labels did not re-resolve to their transcripts"
+                     if not report["labels_ok"] else
+                     "deployed classifier below a floor"
+                     if not uptake.classifier_clears_floors(m) else
+                     "holdout and/or zero-shot precision below "
+                     f"{uptake.PRECISION_FLOOR} — the in-sample number is not trusted")
+            print(f"STOP: {which}. No uptake table written. Fix the classifier before "
+                  f"attributing disputes."
+                  + ("" if not args.ignore_precision_floor else
+                     " (--ignore-precision-floor does not reach the label check)"),
+                  file=sys.stderr)
+            if not args.dry_run:
+                out_dir.mkdir(parents=True, exist_ok=True)
+                (out_dir / "classifier-report.json").write_text(
+                    json.dumps({"classifier": classifier_block,
+                                "note": "emitted because the run did not clear the floor; "
+                                        "no uptake table exists for this run"}, indent=2) + "\n")
+            return 3
+        audit = {
+            "audit_only": True,
+            "audit_only_reason": (
+                f"emitted under --ignore-precision-floor: the labels re-resolved "
+                f"({report['labels_check']['n_resolved']}/{report['labels_check']['n']}) "
+                f"but these floors were missed — {'; '.join(failed_floors)}. The floors "
+                f"are what make a dispute attribution citable, so these counts are for "
+                f"reading the shape of a window only: cite nothing from them and do "
+                f"not archive a memory entry on them."),
+        }
+        # Retrieval is measured independently of the classifier, so an audit table
+        # carries the gate block like every other table this probe emits — its
+        # absence would be a second, undocumented difference between the two.
+        attach_retrieval_gate(classifier_block)
+        print(f"AUDIT-ONLY: {'; '.join(failed_floors)} — writing the table anyway "
+              f"because --ignore-precision-floor was set, stamped audit_only.",
+              file=sys.stderr)
 
     table, candidates = run(args.days, cache)
     stores = uptake.store_sizes()
@@ -610,7 +667,7 @@ def main(argv: list[str] | None = None) -> int:
     # text is its NAME with a constant under it, and a note row's was its TITLE. A
     # definition owned by whoever prints the table can drift from the table; it did.
     path = uptake.write_table(table, out_dir=out_dir, classifier=classifier_block,
-                              stores=stores)
+                              stores=stores, extra=audit)
     # Printed, not just stored: the pooled headline is the mistake a reader reaches
     # for first, and the per-channel maxima are what show why it is one.
     bps = table["coverage"].get("by_presence_source", {})

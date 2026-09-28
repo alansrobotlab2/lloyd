@@ -1272,6 +1272,184 @@ def test_probe_stops_below_the_precision_floor_and_writes_no_uptake_table(tmp_pa
     assert report["classifier"]["passed"] is False
 
 
+# ------------------------------------------------ audit-only emission (#1676) --
+#
+# `--ignore-precision-floor` was declared and read nowhere: at HEAD
+# `grep -c "args.ignore_precision_floor" scripts/uptake_probe.py` returns 0, while
+# the five flags that ARE read in the same file (`args.out_dir` :526,
+# `args.eval_only` :580, `args.dry_run` :592 and :602, `args.days` :600) are all
+# live. So the documented audit escape hatch exited 3 and wrote only
+# `classifier-report.json`, and an operator who followed the flag's own help text
+# got a refusal and no artifact. The two tests below are the two halves of the fix:
+# the flag must reach the floor, and must not reach the label check.
+
+#: The fake classifier's cue. A turn whose user text carries this marker is
+#: predicted a dispute; the hand labels are what the corpus actually says.
+_AUDIT_MARK = "[flagged]"
+
+
+def _audit_corpus():
+    """Six turns + six hand labels whose confusion matrix is exactly known.
+
+    Predicted positive (marker present): turns 1, 2, 4, 5. Labeled positive: turns
+    1, 2, 3. So tp=2, fp=2, fn=1, tn=1 — precision 2/4 = 0.50, under
+    `PRECISION_FLOOR` (0.70), and recall 2/3 = 0.67, over `RECALL_FLOOR` (0.50). The
+    failure this flag exists to publish is therefore the precision floor and nothing
+    else, and a marker quoting "deployed precision 0.50" can be re-derived by hand
+    from these six rows.
+    """
+    specs = [(1, 1, True), (2, 1, True), (3, 1, False),
+             (4, 0, True), (5, 0, True), (6, 0, False)]
+    turns, labels = [], []
+    for ordinal, label, predicted in specs:
+        text = ("you marked this one as the correction, so the fake engine sees it"
+                if predicted else
+                "an ordinary request that names nothing already held in memory")
+        text = f"{_AUDIT_MARK} {text}" if predicted else text
+        turn = uptake.Turn(session="s1", session_source=None,
+                           ts=f"2026-09-20T0{ordinal}:00:00+00:00",
+                           user_text=text,
+                           prev_assistant="I built it the way I described and shipped it.",
+                           ordinal=ordinal)
+        turns.append(turn)
+        labels.append({"turn_id": turn.turn_id, "label": label,
+                       "user_text": text, "prev_assistant": turn.prev_assistant})
+    return turns, labels
+
+
+def _audit_env(monkeypatch, *, labels_resolve: bool) -> None:
+    """Drive the probe over that corpus, with the engine and provenance pinned.
+
+    `engine_provenance` is pinned non-rerouted on purpose: the committed
+    `config.yaml` ships `secondary_enabled: false`, so on any worktree the real
+    provenance marks the run rerouted and `stamp_engine` forces `measured: False` —
+    the refusal would then be about the retired engine slot, not about the
+    precision floor clause 1 is about. Restoring that slot is a human path owed on
+    #1676, so the slot's state must not decide what this test measures.
+
+    The attribution half of the run reads live stores (memory docs, skill event
+    logs, the kg db); those are pinned empty here, so the emitted table is a
+    fixture and not a snapshot of whoever's machine ran the suite.
+    """
+    import scripts.uptake_probe as probe
+
+    turns, labels = _audit_corpus()
+    index = {t.turn_id: t for t in turns}
+    if not labels_resolve:
+        # The same hand-labeled file, and a transcript store holding none of
+        # these turns: what a data-root cutover leaves behind (#1676).
+        index = {f"rolledoff#{t.ordinal}": t for t in turns}
+
+    monkeypatch.setattr(probe, "_corpus_index", lambda days=900: dict(index))
+    monkeypatch.setattr(probe, "collect_turns", lambda days=30: list(turns))
+    monkeypatch.setattr(uptake, "load_labels", lambda *a, **kw: list(labels))
+    monkeypatch.setattr(probe, "engine_provenance", lambda: {
+        "alias": uptake.SECONDARY_MODEL, "endpoint": "http://127.0.0.1:9/v1",
+        "resolved_model": uptake.SECONDARY_MODEL, "rerouted": False})
+
+    def fake(prev_assistant, user_text, *, transport=None, examples=True):
+        return _AUDIT_MARK in user_text
+
+    def fake_raw(prev_assistant, user_text, *, transport=None, examples=True):
+        verdict = fake(prev_assistant, user_text)
+        return verdict, "YES" if verdict else "NOT"
+
+    monkeypatch.setattr(uptake, "classify_dispute", fake)
+    monkeypatch.setattr(uptake, "classify_dispute_raw", fake_raw)
+    monkeypatch.setattr(uptake, "memory_entries", lambda *a, **kw: [])
+    monkeypatch.setattr(uptake, "skill_evidence_by_session", lambda *a, **kw: {})
+    monkeypatch.setattr(uptake, "active_skill_names", lambda *a, **kw: [])
+    monkeypatch.setattr(uptake, "store_sizes", lambda *a, **kw: {})
+
+
+def test_ignore_precision_floor_emits_the_table_stamped_audit_only(tmp_path, monkeypatch):
+    """Clause 1: the flag does what its help text says, and says it in the bytes.
+
+    The labels re-resolve and deployed precision is 0.50 — below the 0.70 floor —
+    so with the flag set the run writes `uptake-<date>.json` and exits 0. Without
+    the flag the same fixture must still exit 3 and write no table: that half is
+    what keeps this from being a test of a fixture that always emits, since the two
+    runs differ by one argv token and nothing else.
+
+    The marker is read back out of the file's own bytes rather than from a printed
+    line, because the artifact is what the nightly job opens days later and the
+    operator is long gone by then.
+    """
+    import scripts.uptake_probe as probe
+
+    _audit_env(monkeypatch, labels_resolve=True)
+    out = tmp_path / "uptake"
+
+    r = probe.run_classifier_eval()
+    assert r["labels_ok"] is True, r["labels_check"]
+    assert r["metrics"]["precision"] == 0.50, r["metrics"]
+    # The view the flag reports on is the view the gate read, and one object — a
+    # marker naming a different block than the table quotes would be the flattering
+    # kind of wrong.
+    assert r["gate_report"]["classifier"] is r["metrics"], r["gate_report"].keys()
+    assert uptake.floor_failures(r["gate_report"]) == [
+        "deployed precision 0.50 < 0.7",
+        "holdout precision 0.50 < 0.7",
+        "zero_shot precision 0.50 < 0.7"], uptake.floor_failures(r["gate_report"])
+
+    assert probe.main(["--out-dir", str(out), "--days", "30"]) == 3, \
+        "the flag not set must still refuse: clearing the floor is the default"
+    assert not list(out.glob("uptake-*.json")), "table written with the flag unset"
+
+    assert probe.main(["--out-dir", str(out), "--days", "30",
+                       "--ignore-precision-floor"]) == 0
+    tables = sorted(out.glob("uptake-*.json"))
+    assert tables, "the flag was set and no uptake table was written"
+    j = json.loads(tables[-1].read_text())
+    assert j["audit_only"] is True, sorted(j)
+    reason = j["audit_only_reason"]
+    assert "deployed precision 0.50" in reason, reason
+    assert "--ignore-precision-floor" in reason, reason
+    # The classifier block still records the number it published through, stamped
+    # as a failure. The marker says "audit only"; it does not launder the figure.
+    assert j["classifier"]["precision"] == 0.50, j["classifier"]
+    assert j["classifier"]["passed"] is False, j["classifier"]
+    assert j["classifier"]["labels_check"]["ok"] is True, j["classifier"]["labels_check"]
+    # And the glossary that travels with every table explains the marker, so a
+    # reader who finds `audit_only` in a file months from now is not guessing.
+    assert "ABSENT" in uptake.GLOSSARY["audit_only"], uptake.GLOSSARY["audit_only"]
+
+
+def test_ignore_precision_floor_never_reaches_the_label_re_anchor_check(tmp_path,
+                                                                       monkeypatch,
+                                                                       capsys):
+    """Clause 2: the flag is an escape hatch for a floor, not for the label check.
+
+    Same fixture, same flag, one difference: the transcript store no longer holds
+    the labeled turns. `labels_check` is the only condition in this run that does
+    not take the label file's own word for being hand-labeled, and the floor the
+    flag waves through exists precisely because an untrusted classifier attributes
+    disputes to memory entries at random — so a table whose labels cannot be
+    re-anchored would put the flag above the reason the gate was built. Exit 3,
+    only `classifier-report.json`, never a table.
+    """
+    import scripts.uptake_probe as probe
+
+    _audit_env(monkeypatch, labels_resolve=False)
+    out = tmp_path / "uptake"
+
+    r = probe.run_classifier_eval()
+    assert r["labels_ok"] is False and r["labels_check"]["n_unresolved"] == 6, \
+        r["labels_check"]
+
+    assert probe.main(["--out-dir", str(out), "--days", "30",
+                       "--ignore-precision-floor"]) == 3
+    assert not list(out.glob("uptake-*.json")), \
+        "a table was written over labels that no longer re-anchor"
+    report = json.loads((out / "classifier-report.json").read_text())
+    assert report["classifier"]["labels_check"]["ok"] is False, report["classifier"]
+    err = capsys.readouterr().err
+    assert "labels did not re-resolve to their transcripts" in err, err
+    # The operator is told the flag is not the way past this, rather than left to
+    # read the refusal as the flag having been ignored by mistake.
+    assert "--ignore-precision-floor does not reach the label check" in err, err
+
+
 
 
 def test_coverage_states_the_reach_of_the_note_half(tmp_path):
@@ -1594,6 +1772,66 @@ def test_validate_labels_fails_on_a_fabricated_or_stale_label(tmp_path, monkeypa
     assert len(long_prefix) >= 40
     assert uptake.validate_labels([{**good, "prev_assistant": long_prefix}],
                                   index)["ok"] is True
+
+
+def test_labels_check_reports_the_uncapped_loss_and_not_a_truncated_id_list():
+    """Clause 3: `n=46, n_resolved=0` has to be tellable apart from a few having
+    rolled off, and it was not.
+
+    Both id lists truncate to 20 (`unresolved_turn_ids[:20]`,
+    `excerpt_mismatch_turn_ids[:20]`), so the committed report for a 46-label set
+    whose transcripts are all gone printed 20 ids — the same 20 a set that had lost
+    only 20 labels would print, and with no `n_unresolved` field a reader could not
+    tell "the whole instrument is spent" (a scope decision) from "a few sessions
+    aged out" (a relabel). The counts are what the check reports; the lists are
+    only pointers for opening a turn in the store, so the cap stays and the counts
+    go beside it.
+    """
+    real = uptake.Turn(session="s9", ts="2026-09-01T00:00:00+00:00",
+                       user_text="the retry budget is not what you said it is",
+                       prev_assistant="I raised the retry budget to 5 and rebuilt the "
+                                      "client so the timeout no longer compounds.",
+                       ordinal=1, session_source=None)
+
+    def spent(n, start=2):
+        """`n` labels naming turns `s9#<start..>`, none of which are in the store."""
+        return [{"turn_id": f"s9#{i}", "label": 1, "user_text": "was here",
+                 "prev_assistant": "was here"} for i in range(start, start + n)]
+
+    # The live state of `eval/uptake/labels/hand-2026-09-11.json`: 46 labels, 0
+    # resolving. `ok` was already False; what was missing is the EXTENT.
+    out = uptake.validate_labels(spent(46), index={})
+    assert out["ok"] is False and out["n"] == 46 and out["n_resolved"] == 0, out
+    assert out["n_unresolved"] == 46, out
+    assert len(out["unresolved_turn_ids"]) == 20, \
+        "the id list is a pointer, not the count — if this cap moved, so did the bug"
+
+    # A partial loss is a different verdict, and now prints differently: 5 gone is
+    # 5 ids and a count of 5, where the whole-set case prints 20 ids and 46.
+    partial = uptake.validate_labels([{"turn_id": "s9#1", "label": 1,
+                                       "user_text": real.user_text,
+                                       "prev_assistant": real.prev_assistant}]
+                                     + spent(5),
+                                     index={"s9#1": real})
+    assert partial["n"] == 6 and partial["n_resolved"] == 1, partial
+    assert partial["n_unresolved"] == 5 and len(partial["unresolved_turn_ids"]) == 5, \
+        partial
+
+    # The other capped list carries the same defect, so it gets the same count: a
+    # label that resolves but whose stored excerpt is not what the turn says is
+    # exactly as gone as one that does not resolve at all.
+    fabricated = [{"turn_id": "s9#1", "label": 1,
+                   "user_text": "a sentence no transcript contains " + "x" * 40,
+                   "prev_assistant": real.prev_assistant}] + spent(24)
+    out = uptake.validate_labels(fabricated, index={"s9#1": real})
+    # `n_resolved` counts labels that FOUND their turn (25 total, 24 of them not
+    # there), not labels that matched it — the mismatch is the other count's job.
+    assert out["n"] == 25 and out["n_resolved"] == 1 and out["n_unresolved"] == 24, out
+    assert out["n_excerpt_mismatch"] == 1 and out["excerpt_mismatch_turn_ids"] == ["s9#1"], out
+    many = uptake.validate_labels([{**l, "user_text": "not the real turn " + "y" * 40}
+                                   for l in spent(25)],
+                                  index={f"s9#{i}": real for i in range(2, 27)})
+    assert many["n_excerpt_mismatch"] == 25 and len(many["excerpt_mismatch_turn_ids"]) == 20, many
 
 
 def test_live_engine_scores_the_corpus_and_reports_every_way_precision_was_measured():
