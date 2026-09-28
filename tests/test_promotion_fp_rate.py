@@ -251,6 +251,43 @@ def measure_world(world, **over):
     )
 
 
+@pytest.fixture
+def no_promotions(tmp_path):
+    """The live post-re-arm corpus's shape: decision rows and scores, zero promotions.
+
+    What ``Counter(repr(r.get("promoted")))`` over the real
+    ``_pipeline/research/ledger.jsonl`` held when #1608 was triaged on 2026-09-28:
+    106 decision rows in the window, none with ``promoted`` truthy, and enough
+    rounds carrying baseline means to give a real null population. The published
+    command died on *that* corpus — not on a missing file — so the fixture has to
+    carry rows and per-task scores and still promote nothing. An empty file would
+    prove a different failure.
+    """
+    root = tmp_path / "research"
+    rounds_dir, ledger = root / "rounds", root / "ledger.jsonl"
+    evals, decisions = {}, []
+    for i in range(5):
+        rid = f"R_2026010{i}_000000"
+        write_round(rounds_dir, rid, 0.60)
+        evals[rid] = {"BASELINE_V": score(rid, 0.60)}
+        decisions.append(
+            {
+                "round_id": rid,
+                "event": "decision",
+                "variant_id": "V_other",
+                "should_promote": False,
+                "promoted": False,
+                "reason": "insufficient_delta (+0.0100 < 0.05)",
+            }
+        )
+    write_ledger(ledger, evals, decisions)
+    return {"ledger": ledger, "rounds": rounds_dir, "root": root}
+
+
+def measure_no_promotions(no_promotions):
+    return pfr.measure(ledger_path=no_promotions["ledger"], rounds_dir=no_promotions["rounds"])
+
+
 # ── the denominator ──────────────────────────────────────────────────────────
 
 
@@ -489,11 +526,11 @@ def test_the_tie_split_added_to_a_refusal_is_never_read_as_a_promotion(tmp_path)
         "two report shapes diverge for no reader")
 
 
-def test_a_window_with_no_null_rounds_refuses_to_invent_a_floor(tmp_path):
-    """Every round promoted ⇒ no non-promoted rounds to measure noise against.
+def all_promoted_world(tmp_path):
+    """Four rounds, every one of them promoted — the window with no null rounds.
 
-    A silent fallback to some assumed constant would print an FP rate with no
-    noise control, which is the exact thing backlog #428 was filed to stop.
+    Nothing non-promoted is left to measure noise against, so the floor has no
+    population. It is the second of the two no-data shapes #1608 clause 3 names.
     """
     rounds_dir, ledger = tmp_path / "rounds", tmp_path / "ledger.jsonl"
     for i in range(4):
@@ -506,8 +543,172 @@ def test_a_window_with_no_null_rounds_refuses_to_invent_a_floor(tmp_path):
             for i in range(4)
         ],
     )
-    with pytest.raises(ValueError, match="no null population"):
-        pfr.measure(ledger_path=ledger, rounds_dir=rounds_dir, data_cutoff="R_3")
+    return {"ledger": ledger, "rounds": rounds_dir}
+
+
+def test_a_window_with_no_null_rounds_refuses_to_invent_a_floor(tmp_path):
+    """Every round promoted ⇒ no non-promoted rounds to measure noise against.
+
+    A silent fallback to some assumed constant would print an FP rate with no
+    noise control, which is the exact thing backlog #428 was filed to stop.
+
+    What this test asserted changed on purpose (#1608 clause 3): it used to read
+    ``with pytest.raises(ValueError, match="no null population")``, which pinned
+    the run *dying* — and because the report dict is built last, dying there meant
+    no artifact and no stdout, which is how the instrument came to have no
+    re-measurement on disk. Acceptance clause 3 is that this window "exits 0 with
+    ``floor``, ``best_null_floor`` and every ``null_population`` field reported as
+    null". So the assertion is now on the fields: no floor is invented, and the
+    absence is reported instead of raised. The refusal the name promises is still
+    what is pinned — ``floor`` is ``None``, not 0.0 and not a constant.
+    """
+    world = all_promoted_world(tmp_path)
+    result = pfr.measure(ledger_path=world["ledger"], rounds_dir=world["rounds"], data_cutoff="R_3")
+    assert result["floor"] is None, "no population must not become a floor of 0.0"
+    assert result["null_population"] == {
+        "n": 0, "mean": None, "median": None, "std": None, "mad_std": None,
+        "p95": None, "max": None,
+    }
+    assert result["band"] == pfr.INSUFFICIENT_DATA_BAND
+    assert result["fp_rate"] is None and result["fp_count"] is None
+    assert "no null population" in result["no_data_reason"]
+
+
+def test_promoted_rounds_with_no_null_population_still_exit_zero(tmp_path):
+    """Clause 3: the same no-data treatment through the CLI, with promotions present.
+
+    The distinct half of the clause is that the *drop* side is measured here — four
+    promoted rounds each have a drop — while every floor-shaped field is null,
+    because there is no population to set the floor from. `best_null_floor` is not a
+    top-level field: it surfaces as ``gain_side.winner_null.p95``, and the two
+    ``rounds_at_or_below`` fields consume it, so those are what a null band has to
+    reach. The same guard the ``best_null_floor`` line already applied to itself.
+    """
+    world = all_promoted_world(tmp_path)
+    out = tmp_path / "rep.json"
+    rc = pfr.main(
+        [
+            "--ledger", str(world["ledger"]),
+            "--rounds-dir", str(world["rounds"]),
+            "--data-cutoff", "R_3",
+            "--out", str(out),
+        ]  # fmt: skip
+    )
+    assert rc == 0, "an unmeasurable floor is reported, not raised"
+    result = json.loads(out.read_text())
+    assert result["denominator"] == 4
+    assert result["floor"] is None
+    assert result["null_population"] == {
+        "n": 0, "mean": None, "median": None, "std": None, "mad_std": None,
+        "p95": None, "max": None,
+    }
+    winner_null = result["gain_side"]["winner_null"]
+    assert winner_null == {"n": 0, "median": None, "p95": None}
+    assert result["gain_side"]["rounds_at_or_below_winner_null_p95"] is None
+    assert result["gain_side"]["rounds_at_or_below_fraction"] is None
+    # The drops are real: the report is null where the data is missing, not null
+    # everywhere, which is what separates this from the empty-denominator window.
+    # Three of the four, not four — the window's last round has no following rounds,
+    # so its own drop is unmeasurable and pre-existing `scored` behaviour leaves it
+    # out of the dispersion. The denominator stays 4 either way.
+    assert result["promoted_drops"]["n"] == 3
+    assert result["promoted_drops"]["mean"] is not None
+    assert [r["drop"] is not None for r in result["rounds"]] == [True, True, True, False]
+
+
+# ── an empty window is a result, not a crash (#1608 clauses 1, 2, 4) ─────────
+#
+# Two independent no-data conditions meet here. The denominator can be empty
+# (nothing landed), which is the live corpus today; or the null population can be
+# empty (everything landed), which `test_a_window_with_no_null_rounds_refuses_to_
+# invent_a_floor` above covers. Both used to abort the run while it was assembling
+# the report dict — after every count existed, before any of it was written — so
+# the instrument could not even report that it had no measurement, and left no
+# artifact to show it had been run at all.
+
+
+def test_the_published_command_exits_zero_when_nothing_was_promoted(no_promotions):
+    """Clause 1: ``python -m …promotion_fp_rate``, defaults, over an un-promoted ledger.
+
+    A fresh interpreter and the OS-level exit code, because the clause is about the
+    published form of the command and the thing it used to do was exit 1:
+    ``statistics.StatisticsError: fmean requires at least one data point`` out of the
+    ``promoted_drops`` mean at the bottom of ``measure()``. No ``--data-cutoff``, no
+    ``--window``, no ``--out`` — the defaults are what is under test.
+    """
+    proc = subprocess.run(
+        [
+            sys.executable, "-m", "scripts.autoresearch.promotion_fp_rate",
+            "--ledger", str(no_promotions["ledger"]),
+            "--rounds-dir", str(no_promotions["rounds"]),
+        ],  # fmt: skip
+        cwd=pfr.REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert proc.returncode == 0, f"exit {proc.returncode}: {proc.stderr[-2000:]}"
+    assert "Traceback" not in proc.stderr
+    report = json.loads(proc.stdout)  # the report is printed, not just promised
+    assert report["denominator"] == 0
+    assert report["band"] == pfr.INSUFFICIENT_DATA_BAND
+    assert report["decision_rows"] == 5
+
+
+def test_zero_promoted_rounds_is_reported_as_insufficient_data(no_promotions):
+    """Clause 2: the empty denominator is stated in the fields, not omitted.
+
+    The trap this pins is ``0.0``. A zero rate is what the measurement prints when
+    it looked at every promoted round and found no false positives, and it is one of
+    the three #352 bands' inputs — so an empty window that reported ``0.0`` /
+    ``"keep 0.5"`` would be read as evidence for the keep/raise/revert decision.
+    """
+    result = measure_no_promotions(no_promotions)
+    assert result["denominator"] == 0
+    assert result["fp_rate_fraction"] == "0/0"
+    assert result["band"] == pfr.INSUFFICIENT_DATA_BAND
+    assert result["fp_rate"] is None and result["fp_count"] is None
+    assert result["fp_rounds"] == []
+    drops = result["promoted_drops"]
+    assert drops["mean"] is None and drops["median"] is None and drops["max"] is None
+    assert drops["count_positive"] is None
+    # Present, and showing which side of the fraction is empty — the key does not
+    # disappear when its numerator's population does.
+    assert drops["count_positive_fraction"] == "0/0"
+    assert "no promoted round" in result["no_data_reason"]
+    # The null population is *not* empty here (four of the five rounds have a
+    # following window), so the floor is a real number: the two no-data conditions
+    # stay independently diagnosable rather than collapsing into one null.
+    assert result["null_population"]["n"] == 4
+    assert result["floor"] == 0.0
+
+
+def test_a_run_with_no_out_flag_still_leaves_the_json_artifact(no_promotions, capsys):
+    """Clause 4: omitting ``--out`` cannot leave an unrecorded run.
+
+    ``--out`` used to default to ``None`` with the write behind ``if args.out:``, so
+    every bare run of the published command printed a report and recorded nothing —
+    which is why the figure in the #428 note is frozen at ``R_20260908_181458`` and
+    no artifact newer than 2026-09-24 exists to check it against.
+    """
+    rc = pfr.main(
+        [
+            "--ledger", str(no_promotions["ledger"]),
+            "--rounds-dir", str(no_promotions["rounds"]),
+        ]  # fmt: skip
+    )
+    assert rc == 0
+    artifact = no_promotions["root"] / pfr.DEFAULT_REPORT_NAME
+    assert artifact.exists(), "a run that printed but recorded nothing is the gap #1608 closes"
+    assert json.loads(artifact.read_text()) == json.loads(capsys.readouterr().out)
+    # The published command passes no ``--ledger`` either, so where the artifact
+    # lands by default is part of the published contract: the research directory of
+    # the data root, beside the ledger it measured. ``test_main_writes_the_report_
+    # the_note_publishes`` above pins that an explicit ``--out`` still wins.
+    from app.paths import PIPELINE_DIR
+
+    assert pfr.DEFAULT_OUT == PIPELINE_DIR / "research" / pfr.DEFAULT_REPORT_NAME
+    assert pfr.report_path_for(pfr.DEFAULT_LEDGER) == pfr.DEFAULT_OUT
 
 
 # ── the noise floor and the false-positive rule ──────────────────────────────

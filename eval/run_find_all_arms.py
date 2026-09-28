@@ -18,7 +18,13 @@ Arms:
 Judge independence is read off the same rows: the rubric judge runs on the
 engine being graded, so its score is set beside the deterministic P x R.
 
-    flock <primary.lock> python eval/run_find_all_arms.py --trials 2 --out DIR
+    flock <primary.lock> python eval/run_find_all_arms.py --trials 2 --out DIR \
+        --max-turns 8
+
+`--max-turns` is the per-task agent-turn budget (#1608): it goes to
+`run_bench_sdk`'s `max_agent_turns` and is recorded on every trial row as
+`turn_budget`, so a reply that hit the cap is distinguishable from one that
+answered and stopped.
 """
 from __future__ import annotations
 
@@ -31,7 +37,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from scripts.autoresearch.bench_runner_sdk import require_tool_sandbox, run_bench_sdk  # noqa: E402
+from scripts.autoresearch.bench_runner_sdk import (  # noqa: E402
+    DEFAULT_MAX_AGENT_TURNS, require_tool_sandbox, run_bench_sdk)
 from scripts.autoresearch.common import load_bench_tasks, load_config  # noqa: E402
 from scripts.autoresearch.judge import judge_trace  # noqa: E402
 from scripts.autoresearch.variant_sandbox import materialize_baseline  # noqa: E402
@@ -71,10 +78,20 @@ PADDING = {
 }
 
 
-def _row(arm: str, trial: int, task: dict, trace: dict, score: dict) -> dict:
+def _row(arm: str, trial: int, task: dict, trace: dict, score: dict,
+         turn_budget: int | None = None) -> dict:
+    """One trial as it lands in `trials.jsonl`.
+
+    `turn_budget` is the cap this trial ran under, written beside `turns` (#1608
+    clause 5). The two together are what a later reader needs: `turns` alone cannot
+    say whether a reply that stopped at 12 turns answered the task or ran out of
+    budget, and a find-all task that gets cut off mid-enumeration reads as low
+    recall rather than as truncation. `summarise` averages `turns` and never this.
+    """
     return {"arm": arm, "trial": trial, "task_id": task["id"],
             "session_id": trace.get("session_id"), "status": trace.get("status"),
-            "turns": trace.get("turns"), "tool_calls": len(trace.get("tool_calls") or []),
+            "turns": trace.get("turns"), "turn_budget": turn_budget,
+            "tool_calls": len(trace.get("tool_calls") or []),
             "denied_calls": len(trace.get("denied_calls") or []),
             "bench_probe_count": trace.get("bench_probe_count"),
             "duration_s": round(trace.get("duration_seconds") or 0.0, 1),
@@ -110,23 +127,31 @@ async def main_async(args) -> int:
         for trial in range(args.trials):
             for arm in ("all", "one"):
                 arm_tasks = [t for a, t in plan if a == arm]
+                # `max_agent_turns` named explicitly (#1608 clause 5): leaving it out
+                # silently inherited the runner's global, so the only way to run a
+                # set-shaped task under a different budget was to edit the runner. A
+                # find-all arm whose reply is truncated at the cap is a different
+                # measurement from one that answered and stopped, and the cap has to
+                # be a parameter of the arm, not an accident of the harness version.
                 traces = await run_bench_sdk(cfg, [baseline], arm_tasks, model=model,
                                              max_parallel=args.parallel,
-                                             per_task_timeout=args.timeout)
+                                             per_task_timeout=args.timeout,
+                                             max_agent_turns=args.max_turns)
                 for trace in traces:
                     task = next(t for t in arm_tasks if t["id"] == trace["task_id"])
                     score = judge_trace(task, trace, rubric_model=model)
-                    row = _row(arm, trial, task, trace, score)
+                    row = _row(arm, trial, task, trace, score, turn_budget=args.max_turns)
                     fh.write(json.dumps(row) + "\n")
                     fh.flush()
                     print(f"[{time.time() - t0:6.0f}s] {arm:4} {task['id']:44} "
                           f"P={row['precision']} R={row['recall']} rubric={row['rubric']} "
-                          f"turns={row['turns']}", flush=True)
+                          f"turns={row['turns']}/{row['turn_budget']}", flush=True)
                     if arm == "all":
                         padded = dict(trace, final_text=(trace.get("final_text") or "")
                                       + "\n" + "\n".join(PADDING[task["id"]]))
                         pscore = judge_trace(task, padded, rubric_model=model)
-                        fh.write(json.dumps(_row("spam", trial, task, padded, pscore)) + "\n")
+                        fh.write(json.dumps(_row("spam", trial, task, padded, pscore,
+                                                 turn_budget=args.max_turns)) + "\n")
                         fh.flush()
     return 0
 
@@ -184,16 +209,30 @@ def summarise(rows: list[dict]) -> dict:
                                    if graded else None}}
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """The driver's flags, as a function so the defaults are readable without a run.
+
+    A trial costs engine time, so the contract a caller cares about — what budget a
+    run defaults to — has to be inspectable without starting one.
+    """
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--trials", type=int, default=2)
     ap.add_argument("--parallel", type=int, default=2)
     ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--max-turns", type=int, default=DEFAULT_MAX_AGENT_TURNS,
+                    help=f"per-task agent-turn budget, handed to run_bench_sdk's "
+                         f"max_agent_turns and recorded on every trial row as "
+                         f"turn_budget (default: the runner's own "
+                         f"DEFAULT_MAX_AGENT_TURNS = {DEFAULT_MAX_AGENT_TURNS})")
     ap.add_argument("--model", default=None)
     ap.add_argument("--out", required=True)
     ap.add_argument("--summarise", action="store_true",
                     help="read <out>/trials.jsonl and print the arm summary; runs nothing")
-    args = ap.parse_args()
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     if args.summarise:
         rows = [json.loads(line) for line in (Path(args.out) / "trials.jsonl").open()]
         print(json.dumps(summarise(rows), indent=2))

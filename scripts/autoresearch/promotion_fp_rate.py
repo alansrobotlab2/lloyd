@@ -56,6 +56,20 @@ reproduce every number in the note, and later rounds cannot silently change it.
 Nothing here edits the threshold. The keep / raise / revert call is human-only
 (``config.yaml`` is on the self-modification loop's never-touch list); this
 module only reports which band the number lands in.
+
+An empty window is a result, not a crash (backlog #1608)
+    A window with no promoted round, or with no null round to set the noise floor
+    against, has no false-positive rate to report. It used to die while *building
+    the report dict* — after every count had been computed and before any of them
+    were written — on ``statistics.StatisticsError: fmean requires at least one
+    data point`` at the ``promoted_drops`` mean, or on the ``ValueError`` the empty
+    null population raised. Either way the run exited 1 with nothing on stdout and
+    nothing on disk. It now exits 0 with ``denominator: 0`` and
+    ``band: "insufficient_data"``, the affected statistics ``null`` and
+    ``no_data_reason`` naming which population was empty, and the artifact written
+    regardless. Zero promoted rounds is not a false-positive rate of zero: ``0.0``
+    is what the measurement prints when it looked and found nothing, and an empty
+    window must not be able to claim that.
 """
 
 from __future__ import annotations
@@ -76,12 +90,41 @@ from app.paths import PIPELINE_DIR  # noqa: E402
 DEFAULT_LEDGER = PIPELINE_DIR / "research" / "ledger.jsonl"
 DEFAULT_ROUNDS_DIR = PIPELINE_DIR / "research" / "rounds"
 
+#: Filename for the JSON report when ``--out`` is omitted (#1608 clause 4). Every
+#: run of this instrument before 2026-09-24 passed no ``--out``, and ``--out``
+#: defaulted to ``None``, so nothing was written anywhere: the owed re-run named in
+#: the #428 note is owed for the third time because no run left a trace. A default
+#: of ``None`` meant the instrument could measure without recording, which is what
+#: this constant retires. The path is derived from the ledger being measured — see
+#: :func:`report_path_for` — so pointing ``--ledger`` at a copy writes beside the
+#: copy and a test can exercise the real default without touching the live store.
+DEFAULT_REPORT_NAME = "promotion_fp_rate_report.json"
+DEFAULT_OUT = DEFAULT_LEDGER.parent / DEFAULT_REPORT_NAME
+
 #: Backlog #352's decision bands, carried verbatim so no reader re-invents them.
 BANDS = (
     (0.20, "keep 0.5"),
     (0.40, "consider raising to 0.575"),
     (float("inf"), "revert to 0.6"),
 )
+
+#: Shown instead of a #352 band when the window cannot yield a rate at all (#1608
+#: clause 2). It is deliberately not one of the three band labels: ``"keep 0.5"``
+#: is the label a zero rate earns, and an empty window reporting it would read as
+#: evidence for the keep/raise/revert decision when it is evidence of nothing.
+INSUFFICIENT_DATA_BAND = "insufficient_data"
+
+
+def report_path_for(ledger_path: Path, out: Path | None = None) -> Path:
+    """Where this run's JSON artifact goes — never nowhere (#1608 clause 4).
+
+    ``--out`` wins; otherwise the report lands beside the ledger it measures. It is
+    derived rather than hard-coded so the default is one rule, not two: a run over
+    the live store writes into the live research directory, a run over a copy writes
+    beside the copy, and the published ``-m`` command can be exercised from a test
+    without that test writing into the store it is reading.
+    """
+    return out or (ledger_path.parent / DEFAULT_REPORT_NAME)
 
 #: The two controls backlog #428's method step 2 named, with their evidence.
 UNAVAILABLE_CONTROLS = {
@@ -325,6 +368,34 @@ def band_for(rate: float) -> str:
     return BANDS[-1][1]  # pragma: no cover - the last band is open-ended
 
 
+def dispersion(values: list[float]) -> dict:
+    """Dispersion over a population that may be empty (#1608 clauses 2 and 3).
+
+    Every key is always present and every statistic is ``null`` when there is
+    nothing to disperse. Two reasons, both load-bearing:
+
+    * the shape of the artifact must not depend on the data — a missing key reads
+      like a field the report dropped, and a reader cannot tell that from "no
+      population", which is how this instrument's runs went unauditable before;
+    * ``statistics.fmean``/``median``/``pstdev``/``max`` raise
+      ``StatisticsError``/``ValueError`` on an empty list, and one such call at the
+      bottom of :func:`measure` was the whole of the crash: the report dict was
+      built last, so raising there wrote no artifact and printed nothing.
+    """
+    if not values:
+        return {"n": 0, "mean": None, "median": None, "std": None,
+                "mad_std": None, "max": None}
+    med = statistics.median(values)
+    return {
+        "n": len(values),
+        "mean": round(statistics.fmean(values), 4),
+        "median": round(med, 4),
+        "std": round(statistics.pstdev(values), 4),
+        "mad_std": round(1.4826 * statistics.median([abs(d - med) for d in values]), 4),
+        "max": round(max(values), 4),
+    }
+
+
 def measure(
     *,
     ledger_path: Path = DEFAULT_LEDGER,
@@ -378,14 +449,14 @@ def measure(
     null_values = sorted(
         d for d in (drop(rid) for rid in sequence if rid not in promoted) if d is not None
     )
-    if not null_values:
-        raise ValueError(
-            f"no null population in the window ending {cutoff}: every round with a baseline "
-            f"mean was promoted, or the window has no rounds after its rounds. "
-            f"The floor is measured against rounds nothing was landed in, so it cannot be "
-            f"estimated here — widen --data-cutoff or --window rather than assuming a floor."
-        )
-    floor = percentile(null_values, 1 - alpha)
+    # An empty null population is a reported condition, not a raised exception
+    # (#1608 clause 3). It used to `raise ValueError` here, which meant the shape
+    # the live corpus can present — every round in the window promoted, or a window
+    # with no non-degenerate rounds after its own — killed the run before it wrote
+    # anything. A missing floor is now `None` all the way down, and nothing may
+    # read that as a floor of zero: `measurable` below is what stops a rate being
+    # derived from it. The reason text moved into the report as `no_data_reason`.
+    floor = percentile(null_values, 1 - alpha) if null_values else None
 
     def score_group(members: dict[str, list[str]]) -> list[dict]:
         records = []
@@ -402,43 +473,79 @@ def measure(
                         max(0, min(window, len(sequence) - index[rid] - 1)) if rid in index else 0
                     ),
                     "drop": None if value is None else round(value, 4),
-                    "is_fp": value is not None and value > floor,
+                    # With no floor there is no noise control, so a drop cannot be
+                    # judged beyond-noise: the round is neither a false positive nor
+                    # exonerated, and the rate over it is reported unmeasurable
+                    # rather than as zero.
+                    "is_fp": value is not None and floor is not None and value > floor,
                 }
             )
         return records
 
     promoted_records = score_group(promoted)
     scored = [r for r in promoted_records if r["drop"] is not None]
+    denominator = len(promoted_records)
+
+    # One flag decides every rate-shaped field, so no path can report a rate that
+    # its own inputs do not support (#1608 clause 2). Two independent conditions
+    # make the rate unmeasurable: no promoted round to divide by (the denominator),
+    # and no null round to set the noise floor against. Either one used to produce
+    # a number anyway — `0.0`, which is the label for "measured, found none".
+    measurable = bool(denominator) and floor is not None
+
+    def no_data_reason_text() -> str | None:
+        if measurable:
+            return None
+        if not denominator:
+            return (
+                f"no promoted round in the window ending {cutoff}: {len(decisions)} "
+                f"decision rows and none with `promoted` truthy, so the denominator "
+                f"of the false-positive rate is empty. A corpus with nothing landed "
+                f"is not a clean bill of health — re-run once the loop promotes "
+                f"something, and widen --data-cutoff to reach an older window that "
+                f"did."
+            )
+        return (
+            f"no null population in the window ending {cutoff}: every round with a "
+            f"baseline mean was promoted, or the window has no non-degenerate rounds "
+            f"after its own. The floor is measured against rounds nothing was landed "
+            f"in, so no drop can be judged beyond noise — widen --data-cutoff or "
+            f"--window rather than assuming a floor."
+        )
 
     def summarise(records: list[dict], denominator: int, all_records: list[dict] | None = None) -> dict:  # noqa: E501
         hits = [r["round_id"] for r in records if r["is_fp"]]
-        rate = len(hits) / denominator if denominator else 0.0
+        # `measurable` is read from the enclosing scope: it is a property of the
+        # window (denominator and floor), not of the record subset being summarised.
+        rate = len(hits) / denominator if measurable else None
         return {
             "rounds_total": len(all_records if all_records is not None else records),
             "measurable_rounds": len(records),
-            "fp_count": len(hits),
-            "fp_rate": round(rate, 4),
-            "fp_rate_fraction": f"{len(hits)}/{denominator}",
-            "fp_rounds": hits,
-            "band": band_for(rate),
+            # null, not 0: `0` is a measurement that found nothing, `None` says no
+            # measurement was possible. The fraction keeps the real denominator so
+            # a reader sees `0/0` and knows which side is empty.
+            "fp_count": len(hits) if measurable else None,
+            "fp_rate": None if rate is None else round(rate, 4),
+            "fp_rate_fraction": f"{len(hits) if measurable else 0}/{denominator}",
+            "fp_rounds": hits if measurable else [],
+            "band": band_for(rate) if measurable else INSUFFICIENT_DATA_BAND,
             "drops": {r["round_id"]: r["drop"] for r in records},
         }
 
-    denominator = len(promoted_records)
     primary = summarise(scored, denominator, promoted_records)
     drops = [r["drop"] for r in scored]
 
     sensitivities = {}
     for name, value in (alt_floors or {}).items():
         hits = [r["round_id"] for r in scored if r["drop"] > value]
-        rate = len(hits) / denominator if denominator else 0.0
+        rate = len(hits) / denominator if measurable else None
         sensitivities[name] = {
             "floor": round(value, 4),
-            "fp_count": len(hits),
-            "fp_rate": round(rate, 4),
-            "fp_rate_fraction": f"{len(hits)}/{denominator}",
-            "band": band_for(rate),
-            "rounds": hits,
+            "fp_count": len(hits) if measurable else None,
+            "fp_rate": None if rate is None else round(rate, 4),
+            "fp_rate_fraction": f"{len(hits) if measurable else 0}/{denominator}",
+            "band": band_for(rate) if measurable else INSUFFICIENT_DATA_BAND,
+            "rounds": hits if measurable else [],
         }
 
     paired, best_null = paired_deltas(table, set(rounds), promoted)
@@ -499,29 +606,29 @@ def measure(
         },
         "rounds_excluded_zero_baseline": len(collapsed),
         "denominator": denominator,
-        "floor": round(floor, 4),
+        # Stated in words beside the fields that went null, so the artifact carries
+        # its own reason: the instrument that produced the frozen 0/65 note cannot
+        # be distinguished from one that ran on an empty window by field values
+        # alone, and before #1608 the latter printed a traceback and left nothing.
+        "no_data_reason": no_data_reason_text(),
+        "floor": round(floor, 4) if floor is not None else None,
         "floor_definition": (
             f"{round((1 - alpha) * 100)}th percentile of the drop statistic over the "
             f"null (non-promoted, non-collapsed) rounds in the window; each round's "
-            f"baseline mean is the mean of its BASELINE_* per-task composite_score rows"
+            f"baseline mean is the mean of its BASELINE_* per-task composite_score "
+            f"rows. null when the window holds no null round — no population, no "
+            f"percentile, and no floor to clear"
         ),
+        # `p95` is the floor itself: null with it, and the rest null with the
+        # population. One helper on both sides so the two blocks can never disagree
+        # about what "no data" looks like.
         "null_population": {
-            "n": len(null_values),
-            "mean": round(statistics.fmean(null_values), 4),
-            "median": round(statistics.median(null_values), 4),
-            "std": round(statistics.pstdev(null_values), 4),
-            "mad_std": round(
-                1.4826 * statistics.median([abs(d - statistics.median(null_values)) for d in null_values]),
-                4,
-            ),
-            "p95": round(floor, 4),
-            "max": round(max(null_values), 4),
+            **dispersion(null_values),
+            "p95": round(floor, 4) if floor is not None else None,
         },
         "promoted_drops": {
-            "mean": round(statistics.fmean(drops), 4),
-            "median": round(statistics.median(drops), 4),
-            "max": round(max(drops), 4),
-            "count_positive": sum(1 for d in drops if d > 0),
+            **dispersion(drops),
+            "count_positive": sum(1 for d in drops if d > 0) if drops else None,
             "count_positive_fraction": f"{sum(1 for d in drops if d > 0)}/{denominator}",
         },
         "fp_count": primary["fp_count"],
@@ -558,9 +665,14 @@ def measure(
                 "median": round(statistics.median(best_null), 4) if best_null else None,
                 "p95": round(best_null_floor, 4) if best_null_floor is not None else None,
             },
-            "rounds_at_or_below_winner_null_p95": len(inside),
+            # Same rule as the floor these two are measured against: with no
+            # winner-null population there is no band, and "0 of 4 gains inside the
+            # noise band" would be a claim about a band that does not exist. Clause
+            # 3 names `best_null_floor`; these are the two fields that consume it.
+            "rounds_at_or_below_winner_null_p95": len(inside) if best_null else None,
             "rounds_at_or_below_fraction": (
-                f"{len(inside)}/{denominator}" if denominator else None
+                f"{len(inside)}/{denominator}"
+                if denominator and best_null else None
             ),
             "per_round": gain,
         },
@@ -577,7 +689,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--window", type=int, default=3, help="control rounds taken after each round")
     ap.add_argument("--alpha", type=float, default=0.05)
     ap.add_argument("--alt-floor", action="append", default=[], metavar="NAME=VALUE")
-    ap.add_argument("--out", type=Path, default=None, help="write the JSON report here too")
+    ap.add_argument(
+        "--out", type=Path, default=None,
+        help=f"path for the JSON report; with no flag it is written beside the ledger "
+             f"as {DEFAULT_REPORT_NAME} — a run always leaves the artifact (#1608)",
+    )
     args = ap.parse_args(argv)
 
     alt = {}
@@ -594,8 +710,16 @@ def main(argv: list[str] | None = None) -> int:
         alt_floors=alt,
     )
     text = json.dumps(result, indent=2, sort_keys=True)
-    if args.out:
-        args.out.write_text(text + "\n")
+    # Unconditional, and before the print (#1608 clause 4). ``--out`` used to default
+    # to ``None`` and the write was behind ``if args.out:``, so the bare published
+    # command printed a report and recorded nothing — which is why every run before
+    # 2026-09-24 left no artifact and the re-run named in the note went owed a third
+    # time. Writing first means a consumer that pipes stdout away still finds the
+    # file; a failed write raises, so a run that could not record itself is loud
+    # rather than silently unrecorded.
+    report_path = report_path_for(args.ledger, args.out)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(text + "\n")
     print(text)
     return 0
 
