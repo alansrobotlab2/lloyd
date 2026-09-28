@@ -38,6 +38,12 @@ What this script does, from the ``records[]`` already stored in
   every transition, printing ``drift unknown`` — never ``0`` — when a baseline
   has no ``corpus`` key at all. A drift term that reads ``0`` when the truth is
   unmeasured is the failure mode this whole file exists to remove.
+* the ``labels_sha256`` gold-label fingerprint (#1637). Two nights whose
+  ``records[].id`` sets are identical but whose fingerprints differ are reported
+  **INCOMPARABLE**, with both values named and no delta, p-value or interval: the
+  id join cannot see a gold answer being re-pointed, and ``9b028e9`` re-pointed 22
+  of them while every id stayed put. Equal fingerprints, or either night carrying
+  no fingerprint (every artifact written before #1637), report exactly as before.
 * how many of the transitions' written verdicts would have been **withheld**, and
   the query count needed to detect a 0.10 paired change at 80 % power, computed
   from the discordance actually observed rather than from taste.
@@ -45,9 +51,10 @@ What this script does, from the ``records[]`` already stored in
   built in; ``--claim`` adds more.
 
 Exit status is 0 for an audit that found things — an audit that reports "every
-verdict would have been withheld" has succeeded. ``--strict`` makes an
-unjoinable pair a non-zero exit instead, for a caller that wants to treat it as
-a failure of the caller's own data.
+verdict would have been withheld" has succeeded. ``--strict`` makes a pair this
+audit could not adjudicate a non-zero exit instead, whether the ids did not join or
+the gold labels moved under an id set that did (#1637), for a caller that wants to
+treat it as a failure of the caller's own data.
 
 Measured on the shipped baselines of 2026-09-19 (2026-09-04 .. 2026-09-17, 12
 transitions), which is the headline of backlog #608:
@@ -128,6 +135,14 @@ REPORTING_CONTRACT = (
 #: ``corpus_diff`` used to print ``corpus identical`` through.
 CORPUS_KEYS = ("facts", "edges_active", "entities")
 
+#: Key of the gold-label fingerprint (#1637). The writer is `eval/run_eval.py`, where
+#: the same string is `GOLD_LABELS_KEY`; the two modules share no import, because this
+#: one has to run in a gate worktree with no retrieval stack, so
+#: `tests/test_eval_label_agreement.py` asserts the two spellings are one string
+#: instead of importing it. A key the writer wrote and the reader looked for under a
+#: different name would read as a legacy artifact forever, silently.
+GOLD_LABELS_KEY = "labels_sha256"
+
 #: Nightly claims written into a run summary, re-scored by default. Each is a
 #: verdict that was published without an interval; the audit re-runs the test
 #: the sentence implicitly claims to have passed.
@@ -179,6 +194,11 @@ class Night:
     corpus: dict | None
     #: query id -> scoring dict
     scores: dict[str, dict] = field(default_factory=dict)
+    #: The gold-label fingerprint this run recorded (#1637), or None for "this
+    #: artifact predates the field". Absent and null are the same state here: the
+    #: writer emits null only for a run that scored no gold at all, and either way
+    #: there is nothing to compare, so the guard stays silent.
+    labels_sha256: str | None = None
 
     @property
     def ids(self) -> list[str]:
@@ -224,7 +244,13 @@ def load_night(path: Path) -> Night:
             raise ValueError(f"{path.name}: record {rid!r} has no scoring block")
         scores[rid] = scoring
     corpus = doc.get("corpus") if isinstance(doc.get("corpus"), dict) else None
-    return Night(label=label, path=Path(path), ran_at=ran_at, corpus=corpus, scores=scores)
+    # Absent, null and empty all mean "this artifact records no gold fingerprint";
+    # only a non-empty string is a stamp, and a guard that read `""` as a value would
+    # refuse every pair of artifacts written before #1637.
+    gold = doc.get(GOLD_LABELS_KEY)
+    return Night(label=label, path=Path(path), ran_at=ran_at, corpus=corpus,
+                 scores=scores,
+                 labels_sha256=gold if isinstance(gold, str) and gold else None)
 
 
 def load_window(baselines_dir: Path, since: str | None = None,
@@ -381,6 +407,23 @@ class Transition:
     drift: dict | None
     joinable: bool = True
     error: str | None = None
+    #: Why this pair may not be compared *even though its ids join* (#1637): the two
+    #: recorded gold-label fingerprints, both named. None is every pair the guard has
+    #: no finding about — an equal pair, and a pair where either night carries no
+    #: fingerprint at all, which is every artifact written before #1637.
+    incomparable: str | None = None
+
+    @property
+    def auditable(self) -> bool:
+        """Ids join AND the gold did not move: the pairs a number may be printed for.
+
+        ``joinable`` alone was sufficient before #1637 because a re-pointed gold
+        answer left no trace an id join could see. It is not sufficient now, and
+        every count of transitions this audit actually adjudicated reads this, so a
+        gold-moved pair can never be tallied as an audited pair that merely found
+        nothing.
+        """
+        return self.joinable and self.incomparable is None
 
     @property
     def drift_moved(self) -> bool | None:
@@ -451,6 +494,38 @@ class Transition:
                 and self.doc_drift_moved is False)
 
 
+def _gold_moved(prev: Night, cur: Night, ids: list[str]) -> str | None:
+    """The #1637 guard: identical id set, differing gold fingerprints -> the sentence
+    that refuses the pair, naming both fingerprints. None means compare.
+
+    It fires on one condition only, and every other shape returns None so the pair is
+    printed exactly as this script printed it before the guard existed:
+
+      * either night carries no fingerprint. That is a legacy artifact — every file
+        written before #1637 — or a run that scored no gold. Annotating every legacy
+        pair would bury the one line per window that matters, and a missing stamp is
+        not evidence that anything moved;
+      * the fingerprints are equal, which is what two consecutive nights normally
+        look like, since the corpus of questions moves far more often than a gold
+        answer does;
+      * the id sets differ, in which case ``join_ids`` has already refused the pair
+        for a reason a reader can act on.
+
+    ``ids`` is passed only to say how many queries the two different benchmarks
+    share, which is the number a reader needs to judge how much of the window the
+    refusal costs.
+    """
+    if not prev.labels_sha256 or not cur.labels_sha256:
+        return None
+    if prev.labels_sha256 == cur.labels_sha256:
+        return None
+    if sorted(prev.scores) != sorted(cur.scores):
+        return None
+    return (f"gold labels moved under an unchanged query-id set of {len(ids)}: "
+            f"{GOLD_LABELS_KEY}={prev.labels_sha256} in {prev.label}, "
+            f"{GOLD_LABELS_KEY}={cur.labels_sha256} in {cur.label}")
+
+
 def audit_transition(prev: Night, cur: Night, reps: int = BOOT_REPS,
                      seed: int = SEED) -> Transition:
     try:
@@ -458,6 +533,13 @@ def audit_transition(prev: Night, cur: Night, reps: int = BOOT_REPS,
     except UnjoinableQueries as exc:
         return Transition(prev=prev, cur=cur, n=0, legs={}, drift=corpus_diff(prev, cur),
                           joinable=False, error=str(exc))
+    # Before any statistic: a pair whose gold answers differ is two benchmarks, and
+    # a McNemar pair over two benchmarks is not a score that changed. Checked after
+    # the id join because an unjoinable pair already says the louder thing.
+    gold = _gold_moved(prev, cur, ids)
+    if gold:
+        return Transition(prev=prev, cur=cur, n=len(ids), legs={},
+                          drift=corpus_diff(prev, cur), incomparable=gold)
     legs: dict[str, dict] = {}
     for label, key in BINARY_LEGS:
         prev_bits = [_bit(prev.scores[i], key) for i in ids]
@@ -495,11 +577,16 @@ def _mean(xs: list[int]) -> float:
 
 
 def observed_discordance(transitions: list[Transition]) -> dict:
-    """Pooled per-query discordance across every audited transition, both binary legs."""
+    """Pooled per-query discordance across every audited transition, both binary legs.
+
+    ``auditable``, not ``joinable``: a pair the gold-label guard refused (#1637) has
+    no legs at all, so reading its ``legs[label]`` would be a KeyError, and its
+    id count is not evidence about discordance in the first place.
+    """
     disc = tot = 0
     max_disc = 0
     for t in transitions:
-        if not t.joinable:
+        if not t.auditable:
             continue
         for label, _ in BINARY_LEGS:
             leg = t.legs[label]
@@ -508,7 +595,7 @@ def observed_discordance(transitions: list[Transition]) -> dict:
             max_disc = max(max_disc, leg["m"])
     return {"discordant": disc, "pairs": tot,
             "rate": (disc / tot) if tot else float("nan"),
-            "max_per_leg": max_disc, "legs": sum(1 for t in transitions if t.joinable) * len(BINARY_LEGS)}
+            "max_per_leg": max_disc, "legs": sum(1 for t in transitions if t.auditable) * len(BINARY_LEGS)}
 
 
 def power_exact(n: int, p_discord: float, q: float, detect: float,
@@ -552,8 +639,12 @@ def joined_paired_n(transitions: list[Transition]) -> int | None:
     median rather than the maximum because the block describes the window most
     verdicts were reached on, not the largest pair in it. None when no transition
     joined, which the caller must print as no-verdict rather than as n = 0.
+
+    ``auditable`` here too (#1637): a pair whose gold labels moved shares ids, but
+    no verdict was computed over them, so its id count belongs in the denominator of
+    a power claim exactly as much as an unjoinable pair's does — which is not at all.
     """
-    ns = sorted(t.n for t in transitions if t.joinable and t.n)
+    ns = sorted(t.n for t in transitions if t.auditable and t.n)
     return ns[len(ns) // 2] if ns else None
 
 
@@ -635,6 +726,20 @@ def print_transition(t: Transition, alpha: float = ALPHA) -> None:
         print("  no delta printed: a benchmark that changed questions is not a score that changed")
         print("  verdict: WITHHELD (cannot evaluate; not 'no change')")
         return
+    if t.incomparable:
+        # Same shape as the unjoinable branch, because it is the same kind of fact: a
+        # benchmark whose gold answers moved is not a score that moved. The numbers
+        # are not printed at all rather than printed with a caveat, because the
+        # failure this exists for is a quiet pair — identical hit patterns either side
+        # of a re-label, p = 1.000, and "no change" is the one sentence that would be
+        # wrong here. Both fingerprints are named so a reader can find the edit.
+        print(f"\n{head}  (n={t.n} query ids shared, gold labels differ)")
+        print(f"  corpus diff: {fmt_drift(t.drift)}")
+        print(f"  INCOMPARABLE: {t.incomparable}")
+        print("  no delta printed: two nights judged against different gold answers are two")
+        print("  benchmarks; a paired test across them scores the re-label, not the system")
+        print("  verdict: WITHHELD (cannot evaluate; not 'no change')")
+        return
     print(f"\n{head}  (n={t.n} paired queries)")
     print(f"  corpus diff: {fmt_drift(t.drift)}")
     for label, _ in BINARY_LEGS:
@@ -685,7 +790,13 @@ def print_transition(t: Transition, alpha: float = ALPHA) -> None:
 
 def print_totals(transitions: list[Transition], alpha: float = ALPHA) -> dict:
     total = len(transitions)
-    audited = [t for t in transitions if t.joinable]
+    # `auditable`, not `joinable`: a pair the gold-label guard refused (#1637) joins
+    # its ids and still gets no number, so counting it as audited would put it in the
+    # denominator of the two "legs rejecting (of N)" lines below — where it has no
+    # legs — and would report a window of refused pairs as a window that was measured.
+    audited = [t for t in transitions if t.auditable]
+    unjoinable = sum(1 for t in transitions if not t.joinable)
+    gold_moved = sum(1 for t in transitions if t.incomparable)
     withheld = sum(1 for t in transitions if t.withheld)
     rejected = [t for t in audited if t.rejected]
     marginal_only = [t for t in audited if t.marginal and not t.rejected]
@@ -705,8 +816,11 @@ def print_totals(transitions: list[Transition], alpha: float = ALPHA) -> dict:
     print("SUMMARY")
     print(f"  transitions in window:      {total}")
     print(f"  transitions audited:        {len(audited)}"
-          + (f"  ({total - len(audited)} unjoinable by records[].id)"
-             if total != len(audited) else ""))
+          + (f"  ({unjoinable} unjoinable by records[].id"
+             if unjoinable else "")
+          + (f"{'; ' if unjoinable else ''}{gold_moved} incomparable: gold labels moved "
+             "under an unchanged id set (#1637)" if gold_moved else "")
+          + (")" if (unjoinable or gold_moved) else ""))
     print(f"  withheld: {withheld} of {total} transitions"
           "  (no paired test rejected the null at the stated confidence)")
     if marginal_only:
@@ -730,6 +844,7 @@ def print_totals(transitions: list[Transition], alpha: float = ALPHA) -> dict:
           "   <- document half (qmd vectors the doc leg searched)")
     print(f"  verdicts admissible under the drift-controlled contract: {admissible} of {total}")
     return {"total": total, "audited": len(audited), "withheld": withheld,
+            "incomparable": gold_moved,
             "rejected": len(rejected), "marginal_only": len(marginal_only),
             "binary_sig": binary_sig, "cont_sig": cont_sig,
             "admissible": admissible, "drift_unknown": drift_unknown,
@@ -757,6 +872,16 @@ def rescore_claim(claim: dict, by_label: dict[str, Night], reps: int, seed: int,
         t = audit_transition(prev, cur, reps=reps, seed=seed)
         if not t.joinable:
             print(f"  {prev_label} -> {cur_label}: ERROR unjoinable ({t.error}) -> cannot evaluate")
+            all_support = False
+            continue
+        if t.incomparable:
+            # Named before the metric is read, because `t.legs` is empty for exactly
+            # this reason: a claim re-scored across a gold re-label would otherwise
+            # key a leg that was never computed, and the claim's own verdict is not
+            # what the guard is for. The two fingerprints are printed so the reader
+            # can find the edit that moved the gold.
+            print(f"  {prev_label} -> {cur_label}: INCOMPARABLE ({t.incomparable}) "
+                  "-> cannot evaluate")
             all_support = False
             continue
         leg = t.legs[metric]
@@ -803,7 +928,9 @@ def main(argv: list[str] | None = None) -> int:
                          "entity_hit:decline:nightly-20260908:nightly-20260909")
     ap.add_argument("--no-claims", action="store_true")
     ap.add_argument("--strict", action="store_true",
-                    help="exit non-zero if any pair of nights is unjoinable")
+                    help="exit non-zero if any pair of nights is unjoinable by "
+                         "records[].id or refused as incomparable (gold labels moved "
+                         "under an unchanged id set, #1637)")
     args = ap.parse_args(argv)
 
     if args.days:

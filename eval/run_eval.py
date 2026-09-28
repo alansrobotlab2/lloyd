@@ -87,6 +87,17 @@ try:
 except ImportError:  # pragma: no cover - script-dir invocation
     import retrieval_holdout as holdout
 
+# The gold-label fingerprint's definition (#1637). Imported rather than restated
+# because the clause names the function: the baseline must carry the value
+# `label_agreement_ceiling.labels_sha256` computes, and a second hash function with
+# a second opinion about normalisation is how a gold edit reads as no edit. The
+# module is stdlib-only, so this adds no dependency to the runner. Same dual
+# spelling as `stats` and `holdout` above.
+try:
+    from eval import label_agreement_ceiling as lac
+except ImportError:  # pragma: no cover - script-dir invocation
+    import label_agreement_ceiling as lac
+
 # The DOCUMENT half of the corpus this run scores (#1374). Owned by its own
 # stdlib module because `scripts/eval_trend_stats.py` has to read the same key
 # with the same meaning: the writer and the reader disagreeing about what an
@@ -1210,6 +1221,47 @@ def _ceiling_absent_fields(reason: str) -> dict:
     return fields
 
 
+#: Key of the gold-label fingerprint in a baseline artifact (#1637). Spelled here
+#: and asserted equal to `scripts/eval_trend_stats.py`'s copy in
+#: `tests/test_eval_label_agreement.py`: the audit must stay runnable without the
+#: retrieval stack, so the two sides share the name by contract, not by import.
+GOLD_LABELS_KEY = "labels_sha256"
+
+
+def gold_label_fingerprint(queries: list[dict], scored_ids: list[str]) -> str | None:
+    """The #1637 gold-label fingerprint: `labels_sha256` over the SCORED queries.
+
+    Written into every baseline that has gold, whether or not a label-agreement
+    artifact exists. The one fingerprint that existed before this was the
+    `expect_labels_sha256` argument of `load_artifact`, which guards the ceiling
+    DIVISOR — so with no artifact on disk (production's state until #1655's run) it
+    could never fire, and `9b028e9`'s 22 re-pointed entity names stayed invisible to
+    a trend audit that joins two nights on `records[].id`. This value needs no
+    engine, no second labelling and no artifact: it is a hash of the query file.
+
+    Restricted to `scored_ids`, not the whole corpus, because that is the set the
+    trend audit can join: a stamp over 87 queries while the run scored 20 of them
+    would move when a query nobody scored moved, and then refuse a pair whose gold
+    really did not change. Sorting by id makes it order-independent, which is what
+    makes a reordered file and a moved label distinguishable — #1354's append at the
+    end of the file must not read as a moved benchmark.
+
+    None when no scored query carries a gold label: `labels_sha256([])` is a constant
+    equal for every unlabelled corpus, so recording it would stamp "no gold exists"
+    with an instrument that cannot disagree with anything, and clause 3's
+    "no fingerprint" leg would have no way to tell an unlabelled corpus from a
+    labelled one.
+    """
+    wanted = set(scored_ids)
+    labelled = [q for q in queries
+                if isinstance(q, dict) and q.get("id") in wanted
+                and any(q.get(k) for k in ("expect_entities", "expect_facts",
+                                           "expect_sources", "expect_docs"))]
+    if not labelled:
+        return None
+    return lac.labels_sha256(sorted(labelled, key=lambda q: str(q["id"])))
+
+
 def _normalize_against_ceiling(fields: dict, overall: dict) -> None:
     """Fill `<metric>_normalized = score / ceiling` for each metric that has a
     ceiling, once the raw aggregates exist. Mutates `fields` in place.
@@ -1907,6 +1959,15 @@ def main() -> int:
         # seed term was never in it.
         **build_run_config(args),
         "demote_daily_logs": RECALL_DEMOTE_DAILY_LOGS,
+        # Which gold this run was scored against (#1637), recorded whether or not a
+        # label-agreement artifact exists. The only fingerprint that existed before
+        # was `load_artifact`'s `expect_labels_sha256`, which guards the ceiling
+        # divisor and so can never fire while no artifact is on disk; `9b028e9`
+        # re-pointed 22 gold entity names under ids that never changed, and an audit
+        # that joins two nights on `records[].id` could not see it. The reader is
+        # `scripts/eval_trend_stats.py`, which key-matches this spelling by contract.
+        GOLD_LABELS_KEY: gold_label_fingerprint(
+            queries, [r["id"] for r in records if r.get("id")]),
         "corpus": corpus,
         "corpus_ok": corpus_ok,
         # What the fact leg read (#1250), recorded on EVERY run — including the

@@ -1206,3 +1206,301 @@ def test_the_labelling_command_refuses_to_choose_an_engine_for_you(tmp_path):
     assert not list(out.glob(lac.ARTIFACT_GLOB)), (
         "a run with no labeler wrote an artifact: that file is what a later reader "
         "loads as the ceiling")
+
+
+# ===========================================================================
+# #1637 — the gold-label fingerprint on every baseline, and the guard on a
+# benchmark whose labels moved under an unchanged id set.
+#
+#   Seam 5: `eval/run_eval.py` -> baseline JSON -> `scripts/eval_trend_stats.py`.
+#
+# Commit `9b028e9` re-pointed 22 gold entity names while every query id stayed
+# put. The trend audit joins two nights on `records[].id`, so it saw an unchanged
+# benchmark and printed a delta anyway; the only fingerprint that existed,
+# `load_artifact(expect_labels_sha256=...)`, guards the CEILING divisor, and with
+# no artifact on disk (#1655 owns the first labelling run) it can never fire. So
+# the fingerprint has to be written by the run itself, from the query file, and
+# read by the audit from the artifact — one value crossing one process boundary,
+# which is what the three tests below drive rather than mock.
+# ===========================================================================
+
+import scripts.eval_trend_stats as ts  # noqa: E402
+
+#: Two fingerprints in the writer's own shape: `hexdigest()[:16]`.
+_FP_A = "a1b2c3d4e5f60718"
+_FP_B = "0f1e2d3c4b5a6978"
+
+
+def _gold_run_baseline(tmp_path, monkeypatch, queries, label):
+    """Run `eval/run_eval.py`'s `main()` for real and hand back the baseline it wrote.
+
+    In-process, with the two injected seams `tests/test_eval_scorer.py` uses — the
+    recall and the store — and the label-agreement directory pointed at an empty
+    directory, so every test here runs in the state the item says production is in:
+    no ceiling artifact anywhere. What the run is NOT is a hand-built dict: the
+    clause is about the bytes `main()` writes, so `main()` writes them.
+    """
+    import sys as _sys
+
+    qf = tmp_path / f"{label}-queries.yaml"
+    lines = ["queries:"]
+    for q in queries:
+        lines.append(f"  - id: {q['id']}")
+        lines.append(f"    query: {json.dumps(q['query'])}")
+        lines.append("    category: entity")
+        if q.get("expect_entities"):
+            lines.append(f"    expect_entities: {json.dumps(q['expect_entities'])}")
+        if q.get("expect_docs"):
+            lines.append(f"    expect_docs: {json.dumps(q['expect_docs'])}")
+    qf.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    gold = (queries[0].get("expect_entities") or ["Gold Entity"])[0]
+
+    def fake_recall(params, **kw):
+        return {"entities": [], "facts": [{"entity": gold, "text": "t",
+                                           "source": "memory/x.md"}],
+                "documents": [], "graph_expanded_facts": [],
+                "graph_neighbors_used": [],
+                "fact_read_coverage": {"attempted": 1, "read": 1},
+                "graph_expansion": {}}
+
+    def fake_store():
+        class _S:
+            def stats(self):
+                return {"entities_total": 1, "edges_total": 1, "edges_active": 1,
+                        "aliases": 0, "facts": 1}
+            def resolve(self, text):
+                return text
+            def active_edges(self):
+                return []
+            def neighbours(self, *a, **k):
+                return {}
+        return _S()
+
+    out_dir = tmp_path / f"{label}-baselines"
+    monkeypatch.setattr(ev, "_recall_seeds", lambda q, k: [gold])
+    monkeypatch.setattr(ev, "_semantic_seed_k", lambda: 1)
+    monkeypatch.setattr(ev, "_vault_recall", fake_recall)
+    monkeypatch.setattr(ev, "store", fake_store)
+    monkeypatch.setattr(ev, "EVAL_BASELINES_DIR", out_dir)
+    monkeypatch.setattr(ev, "LLOYD_CODE_ROOT", tmp_path)
+    # The state production is in: nothing has ever labelled the corpus.
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path / "no-artifacts-here"))
+    monkeypatch.setattr(_sys, "argv", [
+        "run_eval.py", "--queries", str(qf), "--label", label, "--limit", "9",
+        "--no-counterfactual", "--allow-empty-corpus"])
+    assert ev.main() == 0, "the run itself refused; the fingerprint never got written"
+    return next(iter(sorted(out_dir.glob(f"{label}-*.json"))))
+
+
+def _labelled_queries():
+    return [
+        {"id": "fp-alpha", "query": "what re-points a gold label",
+         "category": "entity", "expect_entities": ["Backlog Item #1637"],
+         "expect_docs": ["backlog/1637-gold-label-fingerprint.md"]},
+        {"id": "fp-beta", "query": "which engine labels the corpus",
+         "category": "entity", "expect_entities": ["Nightly Retrieval Eval"],
+         "expect_docs": ["knowledge/software/nightly-retrieval-eval.md"]},
+    ]
+
+
+def _baseline_doc(label, day, ids, entity_bits, labels_sha256=_FP_A, corpus=True):
+    """One baseline file in the shape `eval/run_eval.py` writes, gold stamp optional.
+
+    `labels_sha256` is passed through verbatim, and `None` means the key is absent
+    — which is what a legacy night looks like, and a key present-with-null is a
+    different artifact that must not be silently confused with it.
+    """
+    doc = {
+        "label": label,
+        "ran_at": f"2026-01-{day:02d}T13:00:00+00:00",
+        "records": [
+            {"id": q, "query": f"query {q}",
+             "scoring": {"entity_hit": bool(e), "doc_hit": bool(e),
+                         "ndcg10": 1.0 if e else 0.0, "rr_doc": 1.0 if e else 0.0}}
+            for q, e in zip(ids, entity_bits)
+        ],
+        "summary": {"overall": {"n_queries": len(ids)}},
+        "corpus": {"facts": 200000, "edges_active": 4000, "entities": 23600},
+    }
+    if labels_sha256 is not None:
+        doc["labels_sha256"] = labels_sha256
+    return doc
+
+
+def _write_baselines(tmp_path, docs):
+    d = tmp_path / "baselines"
+    d.mkdir(parents=True, exist_ok=True)
+    for name, doc in docs:
+        (d / f"{name}.json").write_text(json.dumps(doc), encoding="utf-8")
+    return d
+
+
+def test_a_scored_run_records_its_gold_labels_without_any_ceiling_artifact(tmp_path,
+                                                                           monkeypatch,
+                                                                           capsys):
+    """Clause 1, at the file boundary: the bytes `run_eval` writes.
+
+    Three things have to be true of the written artifact at once, and a test that
+    only reads one of them would pass on a wrong implementation:
+
+      1. `<GOLD_LABELS_KEY>` equals `lac.labels_sha256` over THIS run's scored
+         queries — the clause names that function as the value, so it is the oracle;
+      2. the same artifact still reports `ceiling.kind: null` with the
+         no-artifact reason beside it, which is what makes the stamp independent of
+         the ceiling rather than a copy of a field the ceiling block already has;
+      3. re-pointing one gold name, ids untouched, moves the value — the `9b028e9`
+         property, and the only reason the field exists.
+
+    A corpus carrying no gold at all yields no fingerprint — the hash of an empty
+    label set is the hash of nothing, equal for every such corpus, and a stamp that
+    cannot disagree with anything is not an instrument. That boundary is pinned on
+    the writer directly, for the reason in the last block below.
+    """
+    queries = _labelled_queries()
+    path = _gold_run_baseline(tmp_path, monkeypatch, queries, "goldfp")
+    blob = json.loads(path.read_text(encoding="utf-8"))
+    capsys.readouterr()
+
+    assert ev.GOLD_LABELS_KEY == "labels_sha256" == ts.GOLD_LABELS_KEY, (
+        "writer and reader fell out over the key spelling; the audit would then "
+        "read a legacy absence and stay silent forever")
+    assert blob[ev.GOLD_LABELS_KEY] == lac.labels_sha256(
+        sorted(queries, key=lambda q: q["id"])), (
+        "the recorded fingerprint is not the one label_agreement_ceiling computes "
+        "over the scored queries' labels")
+    assert blob[ev.GOLD_LABELS_KEY] != lac.labels_sha256([]), (
+        "a stamp over no labels reads as a measurement of the gold")
+
+    overall = blob["summary"]["overall"]
+    assert overall["ceiling"]["kind"] is None
+    assert "no label-agreement artifact" in overall["ceiling"]["reason"], (
+        "the fingerprint arrived only because a ceiling did, which is the coupling "
+        "clause 1 exists to break")
+
+    # The reader's half of the seam: the audit sees the same value off disk.
+    assert ts.load_night(path).labels_sha256 == blob[ev.GOLD_LABELS_KEY]
+
+    moved = [dict(queries[0], expect_entities=["Backlog Item #999"])] + queries[1:]
+    moved_path = _gold_run_baseline(tmp_path, monkeypatch, moved, "goldfpmoved")
+    moved_blob = json.loads(moved_path.read_text(encoding="utf-8"))
+    assert moved_blob[ev.GOLD_LABELS_KEY] != blob[ev.GOLD_LABELS_KEY], (
+        "re-pointing a gold entity name under an unchanged id left the stamp "
+        "alone: this is exactly the `9b028e9` edit the field must make visible")
+
+    # The no-gold boundary, pinned at the writer rather than through a whole run:
+    # `print_report` has a pre-existing crash on a corpus with no gold at all
+    # (`by_category`'s `entity_recall_avg` is None and the category table formats it
+    # with `:.2f`, run_eval.py:1628-1633), which is a different defect on a path this
+    # item does not touch — recorded on #1637 rather than fixed here.
+    bare = [{"id": "fp-alpha", "query": "what re-points a gold label",
+             "category": "entity"}]
+    assert ev.gold_label_fingerprint(bare, ["fp-alpha"]) is None, (
+        "an unlabelled corpus recorded the hash of an empty label set as though it "
+        "were a gold fingerprint")
+    assert ev.gold_label_fingerprint(queries, []) is None, (
+        "a run that scored none of the labelled queries still stamped the labels it "
+        "did not measure")
+
+
+def test_the_audit_refuses_a_pair_whose_ids_match_but_whose_gold_moved(tmp_path,
+                                                                      capsys):
+    """Clause 2: ids equal + fingerprints differ -> refusal naming both, no delta.
+
+    The scores are identical here on purpose: the pair a reader must never be given
+    is one that looks quiet. Both nights report the same hit pattern, so the McNemar
+    discordance is zero, p = 1.000, and the audit could print "no change" — while
+    every one of those hits was judged against a different gold answer. "Nothing
+    moved" would be the most misleading sentence in the file.
+    """
+    ids = tuple(f"q{i}" for i in range(1, 9))
+    bits = [1, 1, 0, 1, 0, 1, 1, 0]
+    d = _write_baselines(tmp_path, [
+        ("nightly-20260101", _baseline_doc("nightly-20260101", 1, ids, bits, _FP_A)),
+        ("nightly-20260102", _baseline_doc("nightly-20260102", 2, ids, bits, _FP_B)),
+    ])
+    prev, cur = ts.load_window(d)
+    assert prev.ids == cur.ids, "fixture: the id set is the half that did NOT move"
+
+    t = ts.audit_transition(prev, cur, reps=200)
+    assert t.joinable, "the ids do join; this is not the unjoinable case"
+    assert t.incomparable, "a moved gold label set must not come back comparable"
+    assert _FP_A in t.incomparable and _FP_B in t.incomparable, t.incomparable
+    assert t.legs == {}, "no test may run over two different benchmarks"
+    assert t.rejected == [] and t.withheld and not t.admissible
+
+    assert ts.main(["--baselines", str(d), "--no-claims", "--reps", "200"]) == 0
+    out = capsys.readouterr().out
+    assert "INCOMPARABLE" in out and _FP_A in out and _FP_B in out, out
+    assert "no delta printed" in out, out
+    assert "verdict: WITHHELD" in out, out
+    # The transition's own block only: past the first `=` rule sits the summary,
+    # whose column labels mention McNemar and resampling for the window as a whole.
+    body = out.split("TRANSITION nightly-20260101")[1].split("=" * 78)[0]
+    assert not re.search(r"(entity_hit|doc_hit)\s+delta", body), (
+        "the refused pair still printed per-leg deltas")
+    assert "resampling approximation" not in body, "a bootstrap ran over the refused pair"
+    assert "McNemar" not in body, "a McNemar test ran over the refused pair"
+    assert "1 incomparable" in out, out
+
+
+def test_the_audit_is_unchanged_when_the_fingerprints_agree_or_are_absent(tmp_path,
+                                                                         capsys):
+    """Clause 3: the guard fires for one condition only, so equality and silence
+    must print exactly what they printed before it existed.
+
+    Pinned by rendering, not by a flag: the whole transition block for a pair
+    carrying equal stamps, and for each of the three absent shapes (both absent,
+    earlier only, later only), is compared byte for byte against the same pair with
+    no stamp at all. A guard that annotated a legacy pair, or that quietly stopped
+    a matching pair, fails here even if it still reported a correct delta — and a
+    key present with a null value is checked separately, because "recorded as null"
+    is a fourth state the writer never produces and the reader must not invent.
+    """
+    ids = tuple(f"q{i}" for i in range(1, 9))
+    bits = [1, 1, 0, 1, 0, 1, 1, 0]
+    moved = [1, 1, 1, 1, 0, 1, 1, 0]
+
+    slots = iter(str(i) for i in range(20))
+
+    def render(docs):
+        d = _write_baselines(tmp_path / f"pair-{next(slots)}", docs)
+        capsys.readouterr()
+        assert ts.main(["--baselines", str(d), "--no-claims", "--reps", "200"]) == 0
+        return capsys.readouterr().out
+
+    def block(out):
+        body = out.split("TRANSITION nightly-20260101")[1]
+        return body.split("TRANSITION")[0].split("=" * 78)[0]
+
+    plain = render([("nightly-20260101",
+                     _baseline_doc("nightly-20260101", 1, ids, bits, None)),
+                    ("nightly-20260102",
+                     _baseline_doc("nightly-20260102", 2, ids, moved, None))])
+    assert "INCOMPARABLE" not in plain and "delta " in plain, plain
+
+    assert block(render([
+        ("nightly-20260101", _baseline_doc("nightly-20260101", 1, ids, bits, _FP_A)),
+        ("nightly-20260102", _baseline_doc("nightly-20260102", 2, ids, moved, _FP_A)),
+    ])) == block(plain), "equal fingerprints changed the report"
+
+    # Three legacy shapes, named by the one that is missing the key: one-sided on
+    # each side, and neither side carrying it.
+    for where, fp_prev, fp_cur in (
+            ("absent on the later night", _FP_A, None),
+            ("absent on the earlier night", None, _FP_B),
+            ("absent on either side", None, None)):
+        got = render([
+            ("nightly-20260101", _baseline_doc(
+                "nightly-20260101", 1, ids, bits, fp_prev)),
+            ("nightly-20260102", _baseline_doc(
+                "nightly-20260102", 2, ids, moved, fp_cur)),
+        ])
+        assert block(got) == block(plain), (
+            f"a pair whose fingerprint is {where} is no longer the report it used to be")
+
+    nullish = _baseline_doc("nightly-20260102", 2, ids, moved, None)
+    nullish["labels_sha256"] = None
+    assert ts.load_night(_write_baselines(
+        tmp_path / "nullish", [("nightly-20260102", nullish)]) / "nightly-20260102.json"
+    ).labels_sha256 is None, "a recorded null must read as no fingerprint, not as ''"
