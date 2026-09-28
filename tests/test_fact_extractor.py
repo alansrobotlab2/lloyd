@@ -1146,6 +1146,100 @@ def test_a_long_name_merely_containing_a_citation_is_not_refused_by_this_rule():
     assert en.looks_like_junk_entity(name) is True
 
 
+# ── #1643: a whole name that is ONLY a number is the same pointer ────────────
+# #743 anchored `_CITATION_RE` to `backlog|board … #N`, which leaves the other
+# spelling of the same pointer wide open: a name whose every character is the
+# number. Measured on the live store 2026-09-28 through `app.kg_store.store()`:
+# 112 entity rows whose whole name matches `#?\d+` — 87 bare digits, 25 `#N` —
+# carrying 442 live (unexpired) facts, and 16 of those rows were minted AFTER
+# the 09-23 rebuild wrote the other 96: 4 on 09-24, 11 on 09-25, 1 on
+# 2026-09-27T05:30Z, 107 of the 112 `kind='task'`. That last pattern is the
+# proof the mint is still live rather than legacy: `task` is what the extraction
+# prompt asks for, and a bare number answers to it. Counts move with every
+# nightly rebuild, so the post-landing check is rows created after this landing,
+# never a flat total.
+
+#: Both number-only spellings, one of each width the store actually holds.
+NUMBER_ONLY_SPELLINGS = ("1051", "#1051", "294", "#294", "002")
+
+
+# ── #1643 clause 1: the predicate refuses the number itself ──────────────────
+
+def test_a_whole_name_that_is_only_a_number_is_refused_by_both_predicates():
+    """`is_backlog_citation_entity` is the mint site's predicate and
+    `looks_like_junk_entity` is the extractor's, and a name that is nothing but
+    a number is a pointer to a tracker row under both."""
+    for name in NUMBER_ONLY_SPELLINGS:
+        assert en.is_backlog_citation_entity(name) is True, name
+        assert en.looks_like_junk_entity(name) is True, name
+    assert en.is_valid_entity_name("1051") is False
+    # No `projects/` escape hatch, for the reason #743 gave: a citation is a
+    # citation whoever wrote the note.
+    for source_doc in (None, "", PROJECT_NOTE):
+        for name in NUMBER_ONLY_SPELLINGS:
+            assert en.looks_like_junk_entity(name, source_doc) is True, (name, source_doc)
+
+
+def test_extraction_refuses_a_bare_number_typed_as_a_task(extractor, sidecar, monkeypatch):
+    """The mint boundary, not the predicate: the same walk that put
+    `facts/1051/1051-overview.md` on disk (`entity: '1051'`, `kind='task'`,
+    created 2026-09-25T01:35:32Z) has to end at the candidates sidecar instead
+    of at a registered row. Driven through the extractor AND the gate, because
+    `write_fact_file` reaches the gate without passing the extractor's check."""
+    e = extractor
+    number = "7441051"
+    monkeypatch.setattr(e, "_call_llm", _answer({
+        "entity": "Lloyd", "entity_type": "system", "category": "state",
+        "facts": [_fact("the note refers to the item by number only",
+                        entity=number, entity_type="task")]}))
+
+    out = e.extract_from_document(Path(PROJECT_NOTE), "see 7441051 for the fix\n")
+
+    assert out["facts"] == [], "the number-named fact was filed anyway"
+    assert not (e.facts_dir / number).exists(), (
+        f"the extractor still minted facts/{number}/ — the shape the live store holds")
+    assert kg_store.store().entities.lookup(number) is None
+    cands = _candidates(sidecar)
+    assert [c["name"] for c in cands] == [number], cands
+    assert cands[0]["declared_type"] == "task"
+
+    # The gate is the mint site, so the `#N` spelling is refused there too, and
+    # a caller that skips extraction entirely gets the same verdict.
+    entity, verdict = en.gate_entity_name("#7441052", declared_type="task",
+                                          source_doc=PROJECT_NOTE)
+    assert (entity, verdict) == ("", "candidate")
+    assert kg_store.store().entities.lookup("#7441052") is None
+    assert e.write_fact_file("7441053", "state", {"facts": [_fact("x")]},
+                             source_doc=PROJECT_NOTE) is None
+    assert not (e.facts_dir / "7441053").exists()
+
+
+# ── #1643 clause 2: precision — names that merely carry digits ───────────────
+
+def test_the_number_rule_still_passes_names_that_carry_digits_without_being_one():
+    """Every real name the graph needs has a digit in it somewhere and is not a
+    number: `1Password` leads with one, `PyTorch 2.7` ends with a version, and
+    `Triage of backlog item #338` mentions a citation inside a name. Refusing a
+    name that CONTAINS digits would take the release-name and version entities
+    with it, so the rule is `fullmatch` on the whole name and nothing looser."""
+    for name in ("Backlog System", "1Password", "PyTorch 2.7",
+                 "Triage of backlog item #338", "Ubuntu 24.04", "CUDA 12.6",
+                 "Backlog", "Backlog Item", "GPT-4"):
+        assert en.is_backlog_citation_entity(name) is False, name
+        assert en.looks_like_junk_entity(name) is False, name
+    # Positive control that the refusals above are the rule firing and not this
+    # module refusing everything with a digit in it.
+    assert en.looks_like_junk_entity("1051") is True
+
+    # The rebuild seam. `kg_rebuild.py:240` and `:692` call
+    # `looks_like_junk_entity(name, source_doc)`, and that second argument is what
+    # relaxes `_EXHAUST_RE` under `projects/` notes — so the refusal has to survive
+    # it, or the next rebuild re-mints exactly the rows #743's sweep is expiring.
+    for name in ("1051", "#1051"):
+        assert en.looks_like_junk_entity(name, PROJECT_NOTE) is True
+    assert en.looks_like_junk_entity("PyTorch 2.7", PROJECT_NOTE) is False
+
+
 # ── clause 4: the mint is refused before the typed_new branch ────────────────
 
 def test_extraction_refuses_a_fresh_backlog_citation_typed_as_a_task(extractor, sidecar,

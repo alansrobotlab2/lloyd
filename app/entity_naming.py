@@ -110,19 +110,43 @@ _EXHAUST_RE = re.compile(
 # Unlike `_EXHAUST_RE` this rule is NOT relaxed under `projects/`: a citation is
 # a citation whoever wrote the note, and two of the rows the 09-15 triage
 # counted came from `projects/` prose.
+#
+# The second alternative is the number on its own (#1643). #743 refused the name
+# that SAYS the noun (`backlog item #338`) and left the name that is only the
+# id, so the mint kept going after that landing shipped: on the live store on
+# 2026-09-28, 112 entity rows whose whole name is `#?\d+` (87 bare, 25 with a
+# `#`) carrying 442 unexpired facts, 16 of them created after the 2026-09-23
+# rebuild that produced the other 96 — newest 2026-09-27T05:30Z, 107 of the 112
+# `kind='task'`, which is the type the extraction prompt asks for. The store
+# cannot distinguish those rows from a real entity, and `agent_mcp/retrieval.py`
+# can only de-score them (`_NUMERIC_SEED_MAX_SCORE`, #1025), so the write side is
+# where they stop. Same two-ends anchor and same no-`projects/` exemption as the
+# first alternative, and precision comes from `fullmatch`-style anchoring:
+# `1Password`, `PyTorch 2.7` and `Triage of backlog item #338` are names that
+# contain digits, not names that ARE one, and stay writable. Widening this does
+# not reach any row the store already has — an existing name resolves to `alias`
+# before this branch and stays retrievable (#1025's no-evict ruling); what stops
+# is the minting of new ones and, through `looks_like_junk_entity`, the rebuild
+# filter's re-minting of them.
 _CITATION_RE = re.compile(
     r"^(?:backlog|board)[\s_-]*(?:item|task)?[\s_-]*#?\d+$", re.IGNORECASE)
+_TRACKER_ID_RE = re.compile(r"^#?\d+$")
 
 
 def is_backlog_citation_entity(name: str) -> bool:
-    """True if the WHOLE name is a backlog / board-item citation.
+    """True if the WHOLE name is a tracker pointer: a backlog / board-item
+    citation, or the bare id one of those trackers assigns (`1051`, `#1051`).
 
     The narrow, digits-required, both-ends-anchored test behind the entry in
     :func:`looks_like_junk_entity`. Exposed because the mint site needs to
     distinguish "this name is a pointer" from "this name is junk" — a pointer
-    belongs in the candidates sidecar for review, a filename does not.
+    belongs in the candidates sidecar for review, a filename does not. Both
+    alternatives are one decision (#1643): a name that is only a number points at
+    a tracker row exactly as `backlog item #338` does, and minting it produced
+    `facts/1051/1051-overview.md` — "1051 is a design owner…" — on the live tree.
     """
-    return bool(_CITATION_RE.match((name or "").strip()))
+    s = (name or "").strip()
+    return bool(_CITATION_RE.match(s) or _TRACKER_ID_RE.match(s))
 
 
 # An identifier, not a name: `_fact_add`, `run_query`, `handle_tool_use`.
@@ -155,10 +179,13 @@ def looks_like_junk_entity(name: str, source_doc: str | None = None) -> bool:
     # Template / placeholder markers.
     if "{" in s or "}" in s or "<" in s or "YYYY-MM-DD" in s or "YYYY-MM" in s:
         return True
-    # A tracker citation. Checked here, above the `.md` short-circuit and above
-    # the `projects/` exemption below, because neither may excuse it: this rule
-    # ignores `source_doc` entirely (#743).
-    if _CITATION_RE.match(s):
+    # A tracker citation, or a bare tracker id (#1643). Called through
+    # `is_backlog_citation_entity` rather than re-matching the patterns, so the
+    # extractor's predicate and the mint site's cannot drift to different
+    # spellings — that gap is what left `1051` writable after #743. Checked here,
+    # above the `.md` short-circuit and above the `projects/` exemption below,
+    # because neither may excuse it: this rule ignores `source_doc` entirely (#743).
+    if is_backlog_citation_entity(s):
         return True
     # Function/method-call fragment: `query()`, `models.load_lora_adapter()`.
     m = _CODE_CALL_RE.search(s)

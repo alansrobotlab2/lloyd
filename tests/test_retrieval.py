@@ -268,6 +268,48 @@ def test_a_numeric_row_keeps_only_its_overlap_score_and_a_word_row_its_bonus(wor
     assert max(both, key=both.get) == WORD_SEED, both
 
 
+def test_a_numeric_row_still_reads_at_the_capped_score_and_by_its_bare_id(world):
+    """#1643 clause 5: de-score stays de-score — capped, and still readable.
+
+    #1643 widens the WRITE-side guard (`app/entity_naming.py`) to refuse a whole
+    name that is a bare or `#`-prefixed number, and ships a sweep that expires
+    the facts already filed under such a name. Neither may turn the de-score into
+    an eviction, and this node is the pin on that boundary rather than a re-run of
+    the ranking tests above it: the row must still be IN the candidate set at
+    `<= 0.5`, and the same name must still resolve through the read path a person
+    and the agent actually use (`fact_get`, which is `_get_facts_sync` under it).
+
+    It runs against an unexpired fixture, which is the point. #1643's sweep is
+    owed a run against the live store, where those 442 facts will carry an
+    `expired_at`; the behaviour pinned here is that a numeric name remains a
+    resolvable row that ranks below every real entity, which is exactly why
+    eviction stays out of scope (#1025's ruling, measured: 0 of the 112 live
+    numeric rows has a non-numeric alias twin, so dropping the row would orphan
+    everything filed under it).
+    """
+    root, _ = world
+    _numeric_seed_tree(root)
+
+    ranked = dict(retrieval.extract_entities_from_query(f"tell me about {NUMERIC_SEED}"))
+    assert NUMERIC_SEED in ranked, (
+        f"{NUMERIC_SEED} was dropped from the candidate set, not de-scored: {ranked}")
+    assert ranked[NUMERIC_SEED] <= NUMERIC_ROW_MAX, (
+        f"a numeric name scored {ranked[NUMERIC_SEED]}, above the "
+        f"{NUMERIC_ROW_MAX} ceiling #1025 shipped")
+
+    # And readable by that same bare id, through both read paths, at a score no
+    # query ever had to reach: the facts are filed under the name, so the name is
+    # how anybody gets to them.
+    expected = [f"{NUMERIC_SEED} was a YAML scanner false positive on 2026-08-30"]
+    direct = [f["fact"] for f in
+              (facts_mod._get_facts_sync(NUMERIC_SEED).get("facts") or [])]
+    assert direct == expected, f"_get_facts_sync({NUMERIC_SEED!r}) read {direct}"
+    through_tool = [f["fact"] for f in
+                    (facts_mod._fact_get({"entity": NUMERIC_SEED}).get("facts") or [])]
+    assert through_tool == expected, (
+        f"fact_get({NUMERIC_SEED!r}) read {through_tool} through the same read path")
+
+
 def test_no_gold_entity_in_the_eval_corpus_is_numeric_shaped():
     """Clause 4's precondition, pinned rather than asserted in prose.
 
