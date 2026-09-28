@@ -9,6 +9,7 @@ outcome: a confident, tested, gated change that solves a problem nobody has.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -200,6 +201,113 @@ def test_the_prompt_states_that_retiring_is_a_good_outcome():
 def test_the_prompt_demands_evidence_and_an_acceptance_check():
     assert "Quote your evidence" in M.PROMPT
     assert "ACCEPTANCE:" in M.PROMPT
+
+
+# ---------------------------------------------------------------------------
+# #1738: the prompt must bound the scan, because nothing else does
+#
+# Before-count, from the 2026-09-28 signal report's shape-gated scan (408 session
+# files, mtime >= 2026-09-27T05:00:00Z): 27 payload-gated `timed out after`
+# results, 26 naming 120000 ms, 15 of them autotriage — the job on top. Triage's
+# wider re-count (every unbounded Bash call, 655 files in the same window) got 58,
+# 26 of them autotriage, and 19 payload-gated with 9 autotriage in the 4.5 hours
+# after filing. "Payload-gated" means the call carried neither `timeout` nor
+# `run_in_background`, so it died on `agent_mcp/builtin_bash.py:53`
+# DEFAULT_TIMEOUT_MS = 120_000.
+#
+# The prompt is the only surface that reaches this job. `build_skill_prompt`
+# (`workers/sources/_common.py:62`) is called only by `deep_research.py:425` and
+# `youtube_digest.py:336`, so a SKILL.md edit under `skills/backlog-premise-triage/`
+# is a placebo; and `app/prompt_builder.py:471-479` already injects a generic
+# "pass run_in_background=true for any long-running command" into every session
+# including these, which plainly is not enough — it never names the ceiling the
+# command is crossing, so nothing tells the model that a repo-wide grep is on the
+# far side of it.
+# ---------------------------------------------------------------------------
+
+CEILING_HEAD = "- **Bound a scan that can outlive the Bash call's 120 s ceiling.**"
+
+
+def _ceiling_rule(text: str) -> str:
+    """The Bash-ceiling bullet of `text`, running to the next bullet.
+
+    Reading the bullet rather than the whole prompt is what makes the assertions
+    about a *bound* mean something: a `600000` elsewhere in a 13,682-character
+    prompt would be coincidence, and a bound stated in the guidance is not.
+    """
+    assert CEILING_HEAD in text, (
+        "the prompt carries no Bash-ceiling budget line at all")
+    start = text.index(CEILING_HEAD)
+    tail = text[start + len(CEILING_HEAD):]
+    end = tail.find("\n- ")
+    return text[start:start + len(CEILING_HEAD) + (len(tail) if end == -1 else end)]
+
+
+def test_the_prompt_names_the_bash_ceiling_by_number_and_its_remedy():
+    """Clause 1: the number is the missing half, not the existence of backgrounding.
+
+    `app/prompt_builder.py:471-479` has told every session about
+    `run_in_background=true` all along and 27 calls still died in-window, so a
+    line that only repeated it would have been the same placebo in a different
+    file. The remedy has to be consumed too, which is what `output_file` is for —
+    a backgrounded scan nobody reads back is a scan that did not happen.
+    """
+    rule = _ceiling_rule(M.PROMPT)
+    assert "120 s" in rule, "the ceiling has to be named in the unit the model plans in"
+    assert "120000 ms" in rule, "and in the unit the error message and the arg use"
+    assert "run_in_background=true" in rule
+    assert "output_file" in rule, "the remedy has to say where the answer turns up"
+    assert "Read" in rule, "and that reading it back is part of it"
+
+
+def test_the_ceiling_rule_survives_rendering_even_over_a_truncated_body(backlog_dir, ledger):
+    """Clause 2: the guidance reaches the model, not just the module constant.
+
+    The body is truncated to `body_chars` (default 30,000) by `render_prompt`, so a
+    rule that lived inside the candidate's text would be cut here; rendering an
+    item whose body runs to 40,000 characters with `body_chars=200` is what proves
+    the line is part of the template every triage turn gets. The two strings are
+    compared byte for byte, so a formatting difference — a stray line continuation
+    lost through `.format`, say — cannot slip through as a passing substring test.
+    """
+    write_item(backlog_dir, 1738, body="Do it.\n\n" + ("x" * 40_000), name="Long item")
+    text = M.render_prompt(B.item_by_id(1738), ledger=ledger, body_chars=200)
+    assert _ceiling_rule(text) == _ceiling_rule(M.PROMPT)
+
+
+def test_the_prompt_bounds_the_scan_and_never_answers_a_ceiling_with_a_bigger_one():
+    """Clause 3: option (b) — a smarter platform default — is out of scope, and a
+    prompt that told the model to raise `timeout` would have shipped it anyway.
+
+    Asserted as the set of millisecond figures the rule contains: exactly the
+    120000 default it is warning about. Any 6-digit ms bound added as guidance
+    ("or pass `timeout: 600000`", the tool's own cap) makes that set disagree, and
+    the second half keeps the figure out of the rest of the prompt too.
+    """
+    rule = _ceiling_rule(M.PROMPT)
+    assert set(re.findall(r"\b\d{6,}\b", rule)) == {"120000"}, rule
+    assert "600000" not in M.PROMPT
+    assert "run_in_background=true" in rule, (
+        "with the ceiling the only bound, the background route must be the remedy")
+
+
+def test_the_ceiling_rule_names_the_two_command_shapes_that_actually_time_out():
+    """Clause 4: recognition is the whole point of putting this in the prompt.
+
+    Sampled from the 9 in-window autotriage timeouts: `grep -rn "timed out after"
+    --include=*.py .` issued at `~/lloyd`, where the walk sweeps the vendored
+    trees, and a `grep -l ... *.json` over the 2,590-file
+    `~/lloyd-data/sessions`. A rule naming only a number and a flag is advice the
+    model cannot match to the command it is about to press Return on — and the
+    bullet two above this one already scopes those same greps for *correctness*
+    (`git grep` instead of `grep -r`), which is why this one has to say the shapes
+    are still too big to wait for even when scoped.
+    """
+    rule = _ceiling_rule(M.PROMPT)
+    assert "grep -r" in rule, "the recursive grep shape"
+    assert "`~/lloyd`" in rule, "under Lloyd's own tree"
+    assert "~/lloyd-data/sessions" in rule and "*.json" in rule, "and the sessions scan"
+    assert "vendored" in rule, "the vendored walk is why scoping does not fix the time"
 
 
 def test_summarize_counts_retirements_separately(backlog_dir, tmp_path):

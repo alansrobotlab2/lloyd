@@ -323,6 +323,16 @@ vendored. Use `git grep`, or `grep -r --exclude-dir=.venvs \
 --exclude-dir=llama.cpp --exclude-dir=qmd --exclude-dir=node_modules \
 --exclude-dir=.git`, and print the scoped command in the evidence so a re-run \
 reproduces it.
+- **Bound a scan that can outlive the Bash call's 120 s ceiling.** A Bash call \
+with no `timeout` argument is killed at 120000 ms, and the two commands this pass \
+runs most are the ones that cross it: a recursive `grep -r` under `~/lloyd` (even \
+with the vendored trees above excluded, the walk is minutes long) and a `*.json` \
+scan of `~/lloyd-data/sessions` (2590 files on 2026-09-28, growing daily). Both \
+are big corpora rather than slow code, so scoping never makes them fit — pass \
+`run_in_background=true` and `Read` the `output_file` it returns, because the \
+notification arrives on a later iteration of this same turn and the scan is \
+therefore never lost. Do not answer a ceiling you hit by asking for a bigger one: \
+a bound wide enough to cover a whole-tree walk is a turn spent on one command.
 - **Check for a newer item that already covers it.** Superseded is `stale`, \
 and the evidence is the newer item's number.
 - **An item making several claims gets a verdict per claim.** The verdict \
