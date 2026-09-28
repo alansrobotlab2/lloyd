@@ -931,8 +931,7 @@ counts as filed under #n. Never file "X is not built" against a doc you \
 classified `aspirational` — that is what the classification is for.
 
 **4. Fix the doc.** Edit **only** `{doc_path}`{section_rule}. Rules:
-  - Keep the front matter block intact and refresh its date field \
-(`date:` or `updated:`, whichever the doc uses) to {today}.
+{front_matter_rule}
   - `current` or `stale`: correct what is wrong, in place. Prefer the smallest \
 true edit — this is a correction pass, not a rewrite.
   - `superseded` or `aspirational`: do **not** rewrite the body. Add one \
@@ -1020,6 +1019,27 @@ _STATUS_RULE_GROUP = (
     "A section is `current` or `stale` only; a whole document is what gets "
     "retired, not one of its functional groups.")
 
+#: Step 4's first bullet, and it cannot be one shared bullet (#1686).
+#: The front matter is the `---` block opening the file — lines 1-7 of
+#: `architecture/autonomy-jobs.md`, whose `date:` is line 6 — while a group's
+#: section always starts far below it. So the one thing the old shared bullet
+#: told every unit to do, refresh that date field, is exactly the hunk
+#: `check_doc_bound` refuses for a group: `hunk @@ -6,1 falls outside section
+#: lines 135-220` (group:autonomy-jobs:Ingest) threw away a whole correction
+#: pass, in-section edits included, and it did so on 2 of the 9 group runs in
+#: the 2026-09-27 review window. A whole doc is the only unit whose lines
+#: include the block, so only a whole doc is told to refresh it.
+_FM_RULE_DOC = """\
+  - Keep the front matter block intact and refresh its date field \
+(`date:` or `updated:`, whichever the doc uses) to {today} — of the units that \
+review this doc, you are the only one whose lines include the front matter."""
+_FM_RULE_GROUP = """\
+  - Leave the front matter block (the `---` block opening the file) alone: it is \
+another unit's text, and the whole-doc review of `{slug}.md` is what owns and \
+refreshes its `date:` field. Every front-matter line sits above your section, so \
+a hunk there falls outside your lines and the bound throws the entire correction \
+pass away, your in-section corrections included."""
+
 _BIG_DOC_HINT = """\
 This doc is {lines} lines — read it in sections with Read's offset/limit \
 rather than in one call, and spend your budget on the paths, numbers and \
@@ -1071,6 +1091,8 @@ def build_prompt(unit: dict, *, head: str, last_reviewed: str, doc_lines: int,
                       f'never the "{heading}" heading line itself, never the tables above '
                       f'it, never another section' if is_group and section else ""),
         today=today,
+        front_matter_rule=(_FM_RULE_GROUP.format(slug=slug) if is_group
+                           else _FM_RULE_DOC.format(today=today)),
         doc_log_rule=(_GROUP_LOG_RULE if is_group else _DOC_LOG_RULE),
         max_delta_lines=max_delta_lines, max_shrink_pct=max_shrink_pct,
         section_bound_hint=("any hunk outside your section" if is_group

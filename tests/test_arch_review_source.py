@@ -459,6 +459,43 @@ def test_a_group_prompt_carries_the_three_lenses_and_its_own_lines(tree):
     assert "Review log" not in p, "a group must not add a log section to a shared doc"
 
 
+#: The one sentence of the shared prompt a group can never obey. `check_doc_bound`
+#: throws a group's whole doc edit away on any hunk outside its section, and the
+#: front matter sits above every section — so the group that refreshed the date
+#: line lost its in-section corrections with it. Measured live 2026-09-27: 2 of 9
+#: group runs died on exactly `hunk @@ -6,1 falls outside section lines …`.
+DOC_DATE_RULE = ("Keep the front matter block intact and refresh its date field "
+                 "(`date:` or `updated:`, whichever the doc uses) to 2026-09-11")
+
+
+def test_a_group_prompt_leaves_the_front_matter_to_the_doc_unit(tree):
+    """#1686: the shared prompt told *every* unit to refresh the doc's `date:`
+    field, while a group's bound discards any hunk outside its own section and
+    the front matter sits at lines 1-5, far above any `## ` section. The two
+    instructions are mutually exclusive and the rail wins, so obeying the prompt
+    threw the whole correction pass away. A group prompt must now say the front
+    matter is another unit's text and must not ask for a date edit."""
+    p = _joined(_prompt_for(tree, "workers-jobs", "group", "Dispatch"))
+    assert DOC_DATE_RULE not in p, \
+        "a group cannot land a front-matter hunk, so it must not be asked to make one"
+    assert "refresh its date field" not in p
+    assert "Leave the front matter block" in p
+    assert "another unit's text" in p, "clause 1: it must name the block as not the group's"
+    assert "falls outside your lines" in p, \
+        "and name the consequence, or the next edit re-adds the instruction"
+
+
+def test_the_whole_doc_prompt_still_owns_the_front_matter_date(tree):
+    """The date refresh has to survive somewhere, or `architecture/*.md` goes
+    stale for good: #1686 moved the instruction out of the shared prompt into
+    the whole-doc shape, which is the only unit whose lines include the front
+    matter — the whole-doc unit is what has ever written that line."""
+    p = _joined(_prompt_for(tree, "memory", "doc"))
+    assert DOC_DATE_RULE in p, "clause 2: the doc unit still refreshes the date to today"
+    assert "you are the only one whose lines include the front matter" in p, \
+        "and says why only this shape may edit the block"
+
+
 def test_provenance_keys_on_the_configured_name_not_the_decorated_heading(tree):
     """The heading lists the group's members and changes whenever one does —
     which is exactly what `heading_key` exists to ignore. Keying the
@@ -891,6 +928,27 @@ async def test_editing_the_heading_line_itself_is_thrown_away(tree, monkeypatch)
                            _edit(doc, "## 3. Dispatch — one door", "## 3. Dispatch — THE door"))
     assert "outside section" in out["meta"]["doc_update_rejected"]
     assert "one door" in doc.read_text()
+
+
+async def test_a_front_matter_hunk_still_throws_the_group_edit_away(tree, monkeypatch):
+    """#1686 resolved the contradiction by changing the prompt, not this rail. A
+    group that touches the `date:` line anyway must still lose the entire doc
+    edit: the front matter is shared text, and the bound that protects it is the
+    same one that stops seven groups sharing one file from re-opening each
+    other's sections. The filings survive, as under every other bound."""
+    doc = tree["arch"] / "workers-jobs.md"
+    before = doc.read_text()
+
+    def edits():
+        _write_item(tree["backlog"], 900, slug="workers-jobs", name="Dispatch")
+        _edit(doc, "date: 2026-01-01", "date: 2026-09-28")()
+    monkeypatch.setattr(A, "run_prompt_in_session",
+                        _turn(_block(grouping="holds", filed="#900"), edits=edits))
+    out = await A.execute(_item(_payload("group:workers-jobs:Dispatch", "group",
+                                        "workers-jobs", "Dispatch")))
+    assert "falls outside section" in out["meta"]["doc_update_rejected"]
+    assert doc.read_text() == before, "the bound is unrelaxed: the edit is reverted whole"
+    assert out["meta"]["filed"] == [900], "and the finding still stands"
 
 
 async def test_an_insertion_at_either_end_of_the_section_is_inside_it(tree, monkeypatch):
