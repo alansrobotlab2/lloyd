@@ -810,6 +810,52 @@ def test_human_only_acceptances_are_never_handed_to_the_implementer(isolated):
     assert B.human_only_ids(S.LEDGER_PATH) == {1: "human-only: needs config.yaml `agent.max_turns` raised"}
 
 
+# #1698: the triage prompt shows the marker inside a markdown code span
+# (`workers/sources/autotriage.py`: "begin ACCEPTANCE with `human-only:` and
+# name the path"), so the model reproduces the backticks and every reader of
+# the marker used to miss it. Each node below is one acceptance clause.
+
+def test_is_human_only_accepts_the_marker_wrapped_in_a_code_span():
+    """Clause 1: the wrapped marker parses, and the bare form still does."""
+    assert B.is_human_only("`human-only: ~/lloyd-data/x.jsonl` (siblings)") is True
+    assert B.is_human_only("`human-only: ~/lloyd-data/x.jsonl`") is True
+    assert B.is_human_only("human-only: ~/lloyd-data/x.jsonl") is True
+    assert B.is_human_only('"human-only: scripts/automod/spec.py"') is True
+    assert B.is_human_only("'human-only: config.yaml'") is True
+
+
+def test_a_backticked_human_only_row_is_skipped_end_to_end(isolated):
+    """Clause 2: a confirmed ledger row carrying the wrapped marker reaches the
+    ledger's human-only id set and is never offered to the implementer."""
+    write_item(isolated, 1, days_old=50)
+    write_item(isolated, 2, days_old=40)
+    acc = ("`human-only: ~/lloyd-data/_pipeline/trajectories/2026-09-23.jsonl` "
+           "(and the sibling buckets)")
+    _confirm(1, acceptance=acc)
+    _confirm(2)
+    assert B.human_only_ids(S.LEDGER_PATH) == {1: acc}
+    picked = B.select_confirmed(S.LEDGER_PATH)
+    assert picked is not None and picked[0].id == 2, (
+        "the backticked human-only row was offered to the implementer")
+
+
+def test_acceptance_clauses_of_keeps_a_backticked_human_only_contract_whole():
+    """Clause 3: the wrapped marker is not split into lettered clauses a round
+    could be graded on — the acceptance comes back as one clause, unsplit."""
+    acc = ("`human-only: ~/lloyd-data/x.jsonl` — (a) run the approved append "
+           "over the frozen rows; (b) re-count the corpus afterwards")
+    assert B.acceptance_clauses_of({"acceptance": acc}) == [" ".join(acc.split())], (
+        "a human-only acceptance was lettered and graded as clauses")
+
+
+def test_the_marker_normalisation_does_not_match_it_mid_sentence():
+    """Clause 4: only the wrapper comes off. An acceptance that reaches the
+    marker after other leading text is still a contract a round can own."""
+    assert B.is_human_only("raise `agent.max_turns` (human-only: config.yaml)") is False
+    assert B.is_human_only("confirm the flag, then human-only: edit config.yaml") is False
+    assert B.is_human_only("not human-only: a person may still land this") is False
+
+
 def test_the_implementer_prompt_has_a_vault_route_and_renders_the_surface(isolated, monkeypatch):
     write_item(isolated, 2, status="up_next")   # confirmed items sit in the implement pool
     S.append_event({"event": "backlog_triage", "item_id": 2, "verdict": "confirmed",

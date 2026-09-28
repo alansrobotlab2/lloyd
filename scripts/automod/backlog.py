@@ -241,9 +241,31 @@ SURFACES = ("code", "frontend", "vault", "mixed", "external")
 # exactly what #278 spent nine iterations on before web/src was allowed.
 HUMAN_ONLY_PREFIX = "human-only:"
 
+# Backtick and quote characters: the wrapper a markdown code span puts around
+# the marker. The triage prompt renders the marker as a code span in its own
+# instruction ("begin ACCEPTANCE with `human-only:` and name the path",
+# `workers/sources/autotriage.py`), and the model copies the backticks. Two
+# live rows arrived that way — #1376 and #1693, both recorded as
+# "`human-only: …` (siblings)" — so the skip above never fired for them, and
+# #1693 spent its one unattended attempt on a fix that is one shell command
+# over runtime data. Only wrapper characters come off, never a word: an
+# acceptance that reaches the marker after other leading text stays the
+# round's contract (#1698).
+HUMAN_ONLY_WRAPPERS = "\"'`\u2018\u2019\u201c\u201d"
+
 
 def is_human_only(acceptance) -> bool:
-    return str(acceptance or "").strip().lower().startswith(HUMAN_ONLY_PREFIX)
+    """Does this acceptance open with the human-only marker?
+
+    Tolerates the markdown wrapping the prompt documents the marker in (see
+    `HUMAN_ONLY_WRAPPERS`). Normalising here rather than at the call sites is
+    what makes every reader agree: the dispatch skip in `select_confirmed`,
+    the ledger's `human_only_ids`, `acceptance_clauses_of`' clause splitting,
+    `record_verdict`'s parking decision and the autotriage hold-on gate all
+    ask this one question (#1698).
+    """
+    text = str(acceptance or "").strip()
+    return text.strip(HUMAN_ONLY_WRAPPERS).strip().lower().startswith(HUMAN_ONLY_PREFIX)
 
 # Verdicts that retire an item rather than producing work. Both are wins.
 RETIRING = {"already_done", "stale"}
