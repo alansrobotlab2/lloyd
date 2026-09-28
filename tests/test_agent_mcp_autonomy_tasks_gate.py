@@ -1,0 +1,346 @@
+"""The `autonomy_tasks` MCP listing gates the autonomy directory on ONE name rule — #1692.
+
+`agent_mcp/autonomy.py::_handle_tasks` is the payload behind the `autonomy_tasks`
+tool, so its count is the number an agent quotes when it asks how many scheduled
+jobs exist. Until #1692 it walked `AUTONOMY_DIR.glob("*.md")`, excluded exactly one
+filename by literal, and accepted everything `_parse_task_file` returned — which is
+a record for any file with frontmatter, whatever it is. Measured on the live vault
+before the change (the probe in this item's acceptance check):
+
+    33 tasks listed against 32 `NN-*.md` task files, `[0]` blank-name entries.
+
+The extra row was `meta-analysis-2026-06-03.md` — a prose note carrying
+`segment: autonomy`, `type: autonomy` and a timestamp, and no `id:`, `name:` or
+`status:` key — which `_parse_task_file` projects to
+`{id: 0, name: "", status: "draft", type: "autonomy"}` over an 8875-character
+report body. `_config.md` is a second such file: it parses as a task and was kept
+out only by the name literal, so the next note anyone writes into that directory
+walks straight through.
+
+The fix reuses the predicate #1594 introduced — `app/routers/autonomy.py::_TASK_NAME_RE`
+(`re.compile(r"\\d+-")`, applied with `.match`, so `^\\d+-`) — by importing it. The
+sibling file `tests/test_mc_summarize_autonomy_gate.py` (#1594) pins the same rule on
+the Mission Control tab; this one pins it on the agent-facing tool, which is the
+reader that was never enumerated.
+
+Every test here writes a scratch autonomy directory and patches
+`agent_mcp.autonomy.AUTONOMY_DIR` ONCE. `_handle_tasks` reads that module global, so
+without the patch the assertions would be measuring the live vault — and a test that
+measures the live vault passes or fails on what someone filed that day, not on the
+code under test.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import agent_mcp.autonomy as MCP  # noqa: E402
+from app.routers import autonomy as ROUTER  # noqa: E402
+
+REPO = Path(__file__).resolve().parent.parent
+
+#: A task-shaped file: `NN-slug.md`, legal frontmatter, a status a task can carry.
+TASK_42 = """---
+id: 42
+name: Morning brief triage
+status: up_next
+frequency: daily
+---
+
+# body
+"""
+
+#: A report-shaped file whose frontmatter is *legal* and whose `status:` is a real
+#: status — the frontmatter the vault-maintenance "fix missing frontmatter" step
+#: would add. To the pre-#1692 gate it was indistinguishable from a task.
+REPORT_WITH_LEGAL_FRONTMATTER = """---
+name: Skill Lint Report
+status: up_next
+tags:
+- autonomy
+- skill-lint
+segment: autonomy
+type: note
+timestamp: '2026-09-27T00:42:52'
+---
+
+# Skill Lint Report — 2026-09-27T00:42:52
+"""
+
+#: Shaped from the file that produced the live phantom, `meta-analysis-2026-06-03.md`
+#: read through `_parse_task_file`: frontmatter that parses, and no `id:`, `name:` or
+#: `status:` key. Those three defaults are what turns the note into
+#: `{id: 0, name: "", status: "draft"}`.
+REPORT_SHAPED_LIKE_THE_PHANTOM = """---
+tags:
+- autonomy
+- meta-analysis
+segment: autonomy
+type: autonomy
+timestamp: '2026-07-06T14:36:37'
+---
+# Autonomy System Meta-Analysis & Remediation — 2026-06-03
+
+Review of all autonomy tasks plus a system-wide meta-analysis.
+"""
+
+#: The config block: frontmatter with a settings map. `agent_mcp.autonomy` reads it
+#: through `_read_config`, and it parses as a task too.
+CONFIG_WITH_LEGAL_FRONTMATTER = """---
+segment: autonomy
+type: note
+---
+
+_settings:
+  max_parallel: 3
+"""
+
+#: Frontmatter opened and never closed. `_parse_task_file` splits on `"---\\n"` and
+#: bails on `len(parts) < 3`, so this is the case the listing legitimately drops.
+TASK_WITH_UNCLOSED_FENCE = """---
+id: 44
+name: Unclosed fence
+status: up_next
+"""
+
+#: Frontmatter that closes but is not valid YAML (the indented line breaks the
+#: mapping, and the flow sequence it opens never closes). This one is NOT dropped:
+#: the graduated recovery from #1014 extracts the fields by regex and flags the
+#: record `_yaml_broken: True`, because a task the scheduler still dispatches must
+#: stay visible to the reader a human asks "why has this job been silent". The
+#: fallback extracts scalars as written, so its `id` arrives as the string "45".
+TASK_WITH_MALFORMED_YAML = """---
+id: 45
+name: Malformed but closed
+ bad_indent: [unclosed
+status: up_next
+---
+
+# body
+"""
+
+#: The projection `_handle_tasks` emits, as of #1692. Clause 4 is a no-shape-change
+#: clause, so the shape is pinned literally: a key added or dropped from the
+#: projection has to be a deliberate edit to this list, not a side effect of
+#: whatever the next round was doing to the listing.
+TASK_DICT_KEYS = [
+    "_yaml_broken", "agent_id", "auto_advance", "body", "created_at", "cron_id",
+    "depends_on", "description", "expected_error_patterns", "failure_count",
+    "frequency", "id", "infra_failure_count", "infra_rest_until", "inner_voice",
+    "last_attempt", "last_run", "max_retries", "model", "name", "next_run",
+    "notify_on_complete", "pipeline", "preemptible", "preferred_hours", "priority",
+    "requires_slot", "run_count", "runs_per_day", "scheduled_at", "skill_name",
+    "stale_bypass_hours", "status", "timeout_seconds", "type", "updated_at",
+]
+
+
+@pytest.fixture
+def autonomy_tree(tmp_path, monkeypatch):
+    """An empty autonomy directory at the path `_handle_tasks` reads; writer-shaped."""
+    dirn = tmp_path / "autonomy"
+    dirn.mkdir()
+    monkeypatch.setattr(MCP, "AUTONOMY_DIR", dirn)
+    return dirn
+
+
+def _write(dirn: Path, **files: str) -> Path:
+    """Write `{"42-task.md": text}` into the patched directory — a dict because
+    hyphenated filenames cannot be keyword arguments."""
+    for name, text in files.items():
+        (dirn / name).write_text(text, encoding="utf-8")
+    return dirn
+
+
+def _tasks_via_mcp_seam() -> list[dict]:
+    """The listing across the seam a caller actually crosses.
+
+    `agent_mcp.autonomy.call_tool` is what `agent_mcp.main` routes an MCP tool call
+    into, so this is the `autonomy_tasks` tool's answer and not just the function's.
+    """
+    result = asyncio.run(MCP.call_tool("autonomy_tasks", {}))
+    assert not getattr(result, "isError", False), result
+    return json.loads(result.content[0].text)["tasks"]
+
+
+def _blank_name_ids(tasks: list[dict]) -> list:
+    """The filter from the live acceptance probe: ids of entries with no usable name."""
+    return [t["id"] for t in tasks if not str(t.get("name", "")).strip()]
+
+
+def test_unnumbered_files_with_legal_frontmatter_are_not_listed(autonomy_tree):
+    """Clause 1: the name decides the listing, not the frontmatter.
+
+    `report.md` and `_config.md` are each a file the parser turns into a record with
+    a real status — clause 2 below shows that directly for the phantom shape — so
+    the only thing that can exclude them is the gate. `42-task.md` is the one entry
+    that survives.
+    """
+    _write(autonomy_tree, **{
+        "42-task.md": TASK_42,
+        "report.md": REPORT_WITH_LEGAL_FRONTMATTER,
+        "_config.md": CONFIG_WITH_LEGAL_FRONTMATTER,
+    })
+
+    tasks = _tasks_via_mcp_seam()
+
+    assert [t["id"] for t in tasks] == [42], (
+        f"a file whose name is not `NN-slug.md` was listed as a task: "
+        f"{[(t['id'], t['name']) for t in tasks]}"
+    )
+    payload = json.dumps(tasks)
+    assert "Skill Lint Report" not in payload, "report.md was listed as a task"
+    assert "max_parallel" not in payload, "the config block was listed as a task"
+
+
+def test_the_phantom_row_and_its_blank_name_are_gone(autonomy_tree):
+    """Clause 2: the count-and-blank-name filter the live probe runs.
+
+    One numbered task plus one frontmattted report — the live tree's shape at a
+    32nd-of-the-size. The pre-fix answer was `(2, [0])`: the report counted, and its
+    missing `name:` came back as the entry with no name to quote. The live tree
+    measured `(33, [0])` for the same reason against 32 task files.
+
+    The second half is what keeps this test from passing for the wrong reason:
+    `_parse_task_file` must STILL return a task-shaped record for that report. If it
+    ever returns None the exclusion would be the parser's doing and the name gate
+    would be unobserved, which is the difference between a gate and a coincidence.
+    """
+    _write(autonomy_tree, **{
+        "42-task.md": TASK_42,
+        "meta-analysis-2026-06-03.md": REPORT_SHAPED_LIKE_THE_PHANTOM,
+    })
+
+    tasks = _tasks_via_mcp_seam()
+
+    assert (len(tasks), _blank_name_ids(tasks)) == (1, []), (
+        f"the listing carries a blank-name phantom: "
+        f"{[(t['id'], t['name'], t['status']) for t in tasks]}"
+    )
+    phantom = MCP._parse_task_file(autonomy_tree / "meta-analysis-2026-06-03.md")
+    assert phantom is not None, (
+        "the parser stopped producing a record for the report, so the assertion "
+        "above no longer exercises the name gate at all"
+    )
+    assert (phantom["id"], phantom["name"], phantom["status"]) == (0, "", "draft"), (
+        "the report no longer projects to the phantom row, so the fixture no longer "
+        "reproduces what the live probe measured"
+    )
+
+
+def test_the_gate_is_the_shared_predicate_and_not_a_name_literal():
+    """Clause 3: one rule, imported, and applied in the loop that lists.
+
+    Identity, not equality: `is` proves `agent_mcp` is reading the same compiled
+    pattern the route compiles, so a change to either reader's rule is now one edit.
+    The source assertions are the behavioural half — an imported constant nobody
+    uses would satisfy `is` and leave the phantom exactly where it was.
+    """
+    assert MCP._TASK_NAME_RE is ROUTER._TASK_NAME_RE, (
+        "agent_mcp carries its own copy of the task-name rule instead of importing "
+        "`app.routers.autonomy._TASK_NAME_RE`"
+    )
+
+    source = inspect.getsource(MCP._handle_tasks)
+    assert "_config.md" not in source, (
+        "`_handle_tasks` still excludes a filename by literal; the exclusion is the "
+        "shared predicate's job now"
+    )
+    assert "_TASK_NAME_RE" in source, (
+        "`_handle_tasks` no longer applies the shared predicate to the glob it "
+        "walks, so the import is decoration"
+    )
+
+
+def test_a_numbered_file_that_cannot_be_parsed_is_dropped_and_a_valid_one_keeps_its_shape(
+        autonomy_tree):
+    """Clause 4: exclusions only — the drop rule and the row shape are unchanged.
+
+    "Cannot be parsed" is the unclosed-fence case: `_parse_task_file` splits on
+    `"---\\n"` and returns None under `len(parts) < 3`, so `44-unclosed.md` is not a
+    row. A *closed* but YAML-invalid block is a different case and stays listed with
+    `_yaml_broken: True` — the graduated recovery of #1014, pinned here so nobody
+    "fixes" the drop into swallowing the files that recovery exists to surface.
+
+    The valid row is compared key-for-key against `TASK_DICT_KEYS`: this change is
+    supposed to remove entries from the listing and nothing else, and a projection
+    that quietly gained or lost a field would otherwise ride along with it.
+    """
+    _write(autonomy_tree, **{
+        "42-task.md": TASK_42,
+        "44-unclosed.md": TASK_WITH_UNCLOSED_FENCE,
+        "45-malformed.md": TASK_WITH_MALFORMED_YAML,
+    })
+
+    tasks = _tasks_via_mcp_seam()
+
+    assert MCP._parse_task_file(autonomy_tree / "44-unclosed.md") is None, (
+        "an unclosed fence now parses to something, so the exclusion above is not "
+        "the drop the clause pins"
+    )
+    # Keyed by name, not id: the regex fallback hands back scalars as written, so
+    # the recovered record's `id` is the string "45" and its sort key would not
+    # compare against the integer 42 the YAML path produces.
+    by_name = {t["name"]: t for t in tasks}
+    assert sorted(by_name) == ["Malformed but closed", "Morning brief triage"], (
+        "the drop rule or the recovery rule moved: "
+        f"{[(t['name'], t['_yaml_broken']) for t in tasks]}"
+    )
+
+    recovered = by_name["Malformed but closed"]
+    assert recovered["_yaml_broken"] is True
+    assert str(recovered["id"]) == "45"
+
+    row = by_name["Morning brief triage"]
+    assert sorted(row) == TASK_DICT_KEYS, (
+        f"the listing's row shape changed beyond dropping rows: "
+        f"added {sorted(set(row) - set(TASK_DICT_KEYS))}, "
+        f"dropped {sorted(set(TASK_DICT_KEYS) - set(row))}"
+    )
+    assert (row["id"], row["name"], row["status"], row["frequency"]) == (
+        42, "Morning brief triage", "up_next", "daily")
+    assert (row["type"], row["_yaml_broken"]) == ("autonomy", False)
+
+
+def test_the_architecture_sentence_about_the_name_rule_names_its_exceptions():
+    """Clause 5: `architecture/autonomy.md` may no longer claim the rule is universal.
+
+    The paragraph that opens "Every one of them skips a file whose name does not
+    start with a digit" was false of the row directly above it in the reader table —
+    `agent_mcp/autonomy.py` — and is still false of `app/routers/dashboard.py`, which
+    gates on `path.name[:1].isdigit()` and so accepts `9x-notes.md`, a name the
+    shared regex rejects because it also requires the hyphen after the digits. The
+    sentence survives only as a claim with those exceptions named next to it.
+    """
+    doc = (REPO / "architecture" / "autonomy.md").read_text(encoding="utf-8")
+    paragraphs = [p for p in doc.split("\n\n")
+                  if "does not start with a digit" in p]
+
+    assert paragraphs, (
+        "the discussion of the name rule has been deleted rather than qualified; "
+        "the sentence is the only place the divergences are written down"
+    )
+    for para in paragraphs:
+        assert "Every one of them skips" not in para, (
+            "the unqualified universal claim is still standing: it is false of the "
+            "dashboard's gate and was false of agent_mcp until #1692"
+        )
+        assert "isdigit" in para, (
+            "the paragraph does not name `app/routers/dashboard.py`'s "
+            "`path.name[:1].isdigit()`, the reader that still counts a name the "
+            "shared regex rejects"
+        )
+        assert "hyphen" in para, (
+            "the paragraph does not say the shared regex requires a hyphen after "
+            "the digits, which is what makes it stricter than a leading digit"
+        )
+        assert "_TASK_NAME_RE" in para, (
+            "the paragraph does not name the one pattern the rule lives in"
+        )

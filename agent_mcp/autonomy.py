@@ -23,6 +23,16 @@ from mcp.types import Tool
 from agent_mcp._shared import (
     AUTONOMY_TASK_FIELDS, parse_frontmatter_text, text_result, with_body_contract)
 
+# One name rule for the one directory: a task file is `NN-slug.md`, and anything
+# else that lives in `~/obsidian/autonomy/` is a report, a note, or the config
+# block — whatever its frontmatter says. #1594 wrote that rule into
+# `app/routers/autonomy.py::_TASK_NAME_RE` and this reader was pointed at it in
+# the architecture table, but the import never happened, so `_handle_tasks` went
+# on globbing the directory and excluding one filename by literal (#1692).
+# Imported rather than copied: object identity is the thing that stops the two
+# listings disagreeing again, and a test pins it.
+from app.routers.autonomy import _TASK_NAME_RE
+
 AUTONOMY_DIR = Path.home() / "obsidian" / "autonomy"
 
 
@@ -523,7 +533,14 @@ def _handle_tasks(params: dict) -> str:
     agent_id = params.get("agent_id", "")
     tasks = []
     for path in AUTONOMY_DIR.glob("*.md"):
-        if path.name == "_config.md":
+        # `matched at the start`, so this is `^\d+-`. Until #1692 the only thing
+        # this loop excluded by name was the config block, and everything else it
+        # accepted on frontmatter alone — so `meta-analysis-2026-06-03.md`, a prose
+        # note with legal frontmatter and no `name:` key, reached the agent calling
+        # `autonomy_tasks` as a task with `id: 0`, `name: ""` and `status: "draft"`:
+        # 33 rows for the 32 task files on disk. The config block parses fine as a
+        # task too; it was kept out by its name, not by any rule.
+        if not _TASK_NAME_RE.match(path.name):
             continue
         task = _parse_task_file(path)
         if task is None:

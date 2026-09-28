@@ -58,16 +58,42 @@ extension, the idler daemon):
 | `app/routers/dashboard.py::_autonomy` | the overdue/held split on Mission Control |
 | `app/routers/mc_ui.py::_summarize_autonomy` | the tab summary the agent reads |
 
-Every one of them skips a file whose name does not start with a digit, so
-`_config.md` and the stray reports in that directory are not tasks. That sentence
-was a description of six independent gates until #1594: `mc_ui._summarize_autonomy`
-gated on frontmatter instead, counted a prose note as a task, and dropped three real
-tasks whose frontmatter ran past its 2000-byte read window — 32 task files reported
-as 30. It now calls `app/routers/autonomy.py::autonomy_task_files()` /
-`list_parsed_tasks()`, so the rule lives once (`_TASK_NAME_RE`) and the last row of
-the table above is the first three rows' enumeration rather than its own. The walk is
-`glob("*.md")` and never `rglob`, which is why `_archived/` — 14 retired tasks —
-is invisible to the scheduler rather than merely inactive.
+**The rule is one sentence, and it is written down in three shapes.** A task file is
+named `NN-slug.md`, so the config block and the stray reports in that directory are not
+tasks whatever their frontmatter says. It is NOT true that every reader skips a file
+whose name does not start with a digit: the shared pattern `_TASK_NAME_RE` also needs a
+**hyphen** after the digits, `app/routers/dashboard.py:668` settles for
+`path.name[:1].isdigit()`, and `agent_mcp/autonomy.py` skipped exactly one filename by
+literal until #1692. The three shapes:
+
+* **Shared** — `app/routers/autonomy.py::_TASK_NAME_RE` (`re.compile(r"\d+-")`, applied
+  with `.match`, so effectively `^\d+-`) gates the task route, the tab summary
+  `mc_ui._summarize_autonomy` through `autonomy_task_files()` / `list_parsed_tasks()`
+  (#1594), and since #1692 `agent_mcp/autonomy.py::_handle_tasks` — the reader #1594
+  did not enumerate. It globbed the directory, excluded one filename by literal, and
+  accepted everything else on frontmatter alone, so `meta-analysis-2026-06-03.md`, a
+  prose note with legal frontmatter and no `name:` key, reached every `autonomy_tasks`
+  call as `{id: 0, name: "", status: "draft"}`: 33 rows for the 32 task files on disk.
+  Pinned by `tests/test_agent_mcp_autonomy_tasks_gate.py`.
+* **Re-spelled inline** — the identical pattern appears four times in the scheduler as
+  `re.match(r"\d+-", path.name)`: `recover_stuck_tasks` (`app/autonomy.py:102`),
+  `_find_task_file` (`:167`), `_all_board_tasks` (`:1012`), `_iter_task_files`
+  (`:4116`). Same behaviour, four more copies of the literal, none of them importing
+  the constant. `workers/sources/scheduled_task.py` has no gate of its own; it reaches
+  the fleet through `app.autonomy` and inherits these.
+* **Looser by one character** — `app/routers/dashboard.py:668`, inside `_autonomy()`,
+  gates on `path.name[:1].isdigit()`. Because the shared regex requires the hyphen,
+  a file named `9x-notes.md` counts on the Mission Control panel and is not a task to
+  the route, the tab or the MCP tool. (`:812` is the same idiom over the *backlog*
+  directory, where nothing dispatches on the difference.) The two id allocators,
+  `_autonomy_next_id` and `_next_task_id`, parse the numeric prefix themselves and
+  still skip the config block by literal.
+
+The walk is `glob("*.md")` and never `rglob`, which is why `_archived/` — 14 retired
+tasks — is invisible to the scheduler rather than merely inactive. #1594 closed a
+different divergence in this same discussion: `mc_ui._summarize_autonomy` used to gate
+on frontmatter, count a prose note as a task, and drop three real tasks whose
+frontmatter ran past its 2000-byte read window — 32 task files reported as 30.
 
 ## Every run is recorded (2026-09-10)
 
