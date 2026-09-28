@@ -85,8 +85,12 @@ def _model_health_url(model: str) -> str:
 # minutes off the probe's streak rather than counting its own ticks (#1683).
 # Neither surface writes a guardian ledger row for an engine outage — the probe
 # announces (journal and toast, no bookkeeping) and this path is `logger.error`
-# plus discord — and whether one should is an open ruling, not a gap to close by
-# accident here.
+# plus discord — and that is a SETTLED ruling (#1683, ruled by owed-check
+# 2026-09-28), not a gap to close by accident here. The reason it stays that way:
+# the only route to a guardian ledger row is `notify.alert`, which also rewrites
+# ALERT.md with `write_text` (last-writer-wins) and can file a backlog task, so an
+# engine outage would clobber a live rollback's record to buy a telemetry line.
+# Both watchers therefore stay announce-shaped by design.
 #
 # 45 min is long enough to sit past a vLLM restart (the n-gram table alone takes
 # minutes to load) and short enough that a person hears about it within an hour.
@@ -177,9 +181,12 @@ async def _note_vllm_outage() -> None:
     `agent-services/guardian/policy.py` still watches only
     `lloyd-backend`/`lloyd-mcp`. NEITHER surface writes a guardian ledger row
     for an engine outage — the probe announces (journal and toast, no
-    bookkeeping by design) and this path is a log line plus discord — and
-    whether one should exist is a ruling for a person, not this function
-    (#1683)."""
+    bookkeeping by design) and this path is a log line plus discord — and that is
+    a SETTLED ruling (#1683, owed-check 2026-09-28), not one this function is
+    waiting on. The reason: the only route to a guardian ledger row is
+    `notify.alert`, which also rewrites ALERT.md with `write_text`
+    (last-writer-wins) and can file a backlog task, so an engine outage would
+    clobber a live rollback's record to buy a telemetry line."""
     import datetime as _dt
     from workers import service_probe
 

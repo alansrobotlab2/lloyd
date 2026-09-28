@@ -51,8 +51,14 @@ supervisord, the gate watches /health — which is why that fallback is not dead
 code: a wedged vLLM holding an open socket never gets a streak here. And
 NEITHER surface writes a guardian ledger row for an engine outage: this file
 announces (journal and toast, no bookkeeping), the gate writes `logger.error`
-plus discord. Whether one should exist is an open ruling, not something either
-watcher decides.
+plus discord — and that is a SETTLED ruling (#1683, owed-check 2026-09-28), not
+something either watcher decides. It is settled because of what a row would
+cost: the only route to a guardian ledger row is `notify.alert`, which also
+rewrites ALERT.md with `write_text` (last-writer-wins) and can file a backlog
+task, so an engine outage would clobber a live rollback's record to buy a
+telemetry line. Announce-not-alert is therefore the design for both watchers of
+:8096 — `workers/service_probe.py` here, `workers/sources/scheduled_task.py`
+there.
 """
 from __future__ import annotations
 

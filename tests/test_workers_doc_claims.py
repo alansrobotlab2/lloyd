@@ -60,9 +60,19 @@ def _section(heading: str) -> str:
 
 
 SEC2 = "## 2. What actually ran"
+SEC3 = "## 3. Dispatch — one door onto the autonomy fleet"
 SEC5 = "## 5. Intake — the outside world in"
 SEC6 = "## 6. Mining"
 SEC7 = "## 7. Retired and renamed"
+
+#: §Dispatch's invariant exactly as #1682 wrote it (#1744). The clause is kept
+#: verbatim so the bans below can be shown to bite: a ban on a phrase the retired
+#: text does not contain is a ban on nothing, which is the vacuity this file's
+#: other nodes control for before they assert.
+DISPATCH_INVARIANT_BEFORE_1744 = """  - **The invariant across both** (#938): an outage of the model server pauses
+    dispatch, never the watching. The vLLM gate stays here because it is dispatch;
+    the detectors above are read-only and never probe the model server.
+"""
 
 
 def test_intake_states_where_the_infra_path_spacing_lives_and_its_bound():
@@ -599,3 +609,129 @@ def test_workers_jobs_states_the_cap_over_both_inputs():
         "§6 says the ledger selector gets FAILURE_WINDOW_DAYS as well as the "
         "cap; the call site stopped passing it as named arguments, so either the "
         "prose or the threading has moved")
+
+
+#: The clause #1682 wrote the vLLM gate with, and therefore the anchor for the
+#: bullet #1744 has to name the co-watcher inside.
+GATE_BULLET_MARK = "The vLLM gate stays here"
+
+
+def _invariant_bullet(sec: str) -> str:
+    """The §Dispatch invariant bullet — the one carrying the vLLM-gate sentence.
+
+    #1744 clause 1 puts the co-watcher BESIDE that sentence, so the pair is
+    graded inside this bullet and not across §3: a section-wide token check
+    passes with the filename two bullets away from the gate it belongs to, and
+    "named somewhere in the section" is precisely the state §3 was in for
+    `workers/fleet_watchdog.py` and not for the probe.
+    """
+    if GATE_BULLET_MARK not in sec:
+        return ""
+    rest = sec[sec.index(GATE_BULLET_MARK):]
+    end = rest.find("\n\n")
+    return rest if end < 0 else rest[:end]
+
+
+def test_dispatch_names_the_probe_as_co_watcher_of_the_primary_port():
+    """#1744 clause 1: §Dispatch has to name BOTH watchers of :8096, with the
+    pair of thresholds that make one outage two lines.
+
+    #1682 rewrote this section and carried `workers/fleet_watchdog.py` into it
+    while leaving `workers/service_probe.py` out, so the section that exists to
+    explain who watches what read as "nothing watches the model server" — the
+    exact #1683 defect reproduced inside the doc that triggered it. The pair is
+    pinned to the constants it describes rather than to the prose alone: a doc
+    that keeps the right sentence while a number moves underneath it is the
+    failure mode this file exists for, and the ordering the bullet claims (the
+    probe's line first) is only true because the grace is strictly below the
+    gate's threshold.
+    """
+    from workers.service_probe import GRACE_S, PRIMARY_ENGINE
+    from workers.sources.scheduled_task import _VLLM_DOWN_ALERT_SECONDS
+
+    sec3 = _section(SEC3)
+    assert sec3, f"§3 {SEC3!r} not found — the heading moved and this test is blind"
+    flat = " ".join(sec3.split())
+
+    # Control before bans: the retired bullet has to trip the phrase this node
+    # forbids, and must genuinely be the version that named only one watcher.
+    old = " ".join(DISPATCH_INVARIANT_BEFORE_1744.split())
+    assert "never probe the model server" in old, (
+        "the retired invariant no longer trips its own ban, so the check below "
+        "is vacuous and would pass on any text")
+    assert "service_probe" not in old, (
+        "the quoted bullet already names the co-watcher, so it is not the "
+        "#1682 text this node is meant to exclude")
+    assert "never probe the model server" not in flat, (
+        "§Dispatch is back to denying that anything probes the model server — "
+        "the sentence a fresh arch review reads as an open coverage gap (#1683)")
+
+    # Graded inside the bullet that carries the gate sentence, for the reason in
+    # `_invariant_bullet`: the clause is about the pairing, not the section.
+    gate = " ".join(_invariant_bullet(sec3).split())
+    assert "the vllm gate stays here" in gate.lower(), (
+        f"{GATE_BULLET_MARK!r} has left §Dispatch, so this node has lost its "
+        "anchor and would be grading an empty window")
+
+    assert "workers/service_probe.py" in gate, (
+        "§Dispatch no longer names the co-watcher of the primary's port beside "
+        "the vLLM-gate sentence — the pairing is what stops the next arch review "
+        "reading §3 as an unprobed model server (#1683)")
+    assert ":8096" in gate, (
+        "§Dispatch names a second watcher without saying which port they share")
+    assert "TWO watchers" in gate, (
+        "§Dispatch does not say the gate is one of two watchers, which is the "
+        "claim the next arch review needs to see stated")
+
+    # The pair, each with its own threshold and its own surface.
+    assert "45 min" in gate and "`logger.error`" in gate and "discord" in gate, (
+        f"the gate sentence no longer states its threshold and its two surfaces: {gate!r}")
+    assert "30 min grace" in gate and "journal" in gate and "toast" in gate, (
+        f"the co-watcher sentence no longer states the grace and that it lands "
+        f"in the journal and a toast: {gate!r}")
+
+    # ...and the numbers are the code's, not the doc's memory of them.
+    assert f"{GRACE_S[PRIMARY_ENGINE] // 60} min grace" in gate, (
+        f"§Dispatch says 30 min grace but `GRACE_S[{PRIMARY_ENGINE!r}]` is "
+        f"{GRACE_S[PRIMARY_ENGINE] // 60} min — the prose has to follow the "
+        "constant, and only their agreement is the ordering claim")
+    assert f"{_VLLM_DOWN_ALERT_SECONDS // 60} min" in gate, (
+        f"§Dispatch says 45 min but `_VLLM_DOWN_ALERT_SECONDS` is "
+        f"{_VLLM_DOWN_ALERT_SECONDS // 60} min")
+    assert GRACE_S[PRIMARY_ENGINE] < _VLLM_DOWN_ALERT_SECONDS, (
+        "the probe's grace no longer sits strictly below the gate's threshold, "
+        "so the bullet's 'the probe line first' is false — and one outage would "
+        "read as two incidents")
+
+
+def test_every_probe_mention_in_the_doc_names_the_probe_file():
+    """#1744 clause 2: in a doc that finally names the probe, no line may get to
+    say the word without naming it.
+
+    The old bullet's damage was one verb — "never probe the model server" — in a
+    section that omitted the thing it named. Deleting that sentence alone would
+    leave the same trap one edit away, so the pin is the shape rather than the
+    sentence: every line of this doc that contains "probe" is a line that
+    identifies `workers/service_probe.py`. The invariant the bullet carries is
+    asserted at the same time, because clause 2 rewords it ("never touch the
+    model server") rather than dropping it — deleting the read-only guarantee to
+    get past the ban would satisfy this node's letter and undo its point.
+    """
+    text = (ARCH / "workers-jobs.md").read_text(encoding="utf-8")
+    hits = [(n, ln) for n, ln in enumerate(text.splitlines(), 1)
+            if "probe" in ln.lower()]
+    # Positive control: the doc still mentions the probe at all. Zero hits makes
+    # the loop below vacuously true, and zero hits would itself be the regression.
+    assert hits, (
+        "architecture/workers-jobs.md mentions no probe anywhere, so the loop "
+        "below proves nothing — and a doc that lost the co-watcher sentence "
+        "altogether is precisely the #1744 regression")
+    for n, ln in hits:
+        assert "service_probe" in ln, (
+            f"architecture/workers-jobs.md:{n} uses the word probe without "
+            f"naming the probe file: {ln.strip()!r}")
+    flat = " ".join(text.split())
+    assert "read-only and never touch the model server" in flat, (
+        "the §Dispatch invariant is gone rather than reworded: clause 2 asks "
+        "that 'probe' stop being a verb about the model server, not that the "
+        "detectors' read-only guarantee stop being stated")

@@ -181,8 +181,17 @@ Four behaviours are load-bearing:
     `next_run` one, for a task whose own `next_run` is a full period stale with no
     queue row at all, after its own streak, rate-limited 24 h.
   - **The invariant across both** (#938): an outage of the model server pauses
-    dispatch, never the watching. The vLLM gate stays here because it is dispatch;
-    the detectors above are read-only and never probe the model server.
+    dispatch, never the watching. The vLLM gate stays here because it is dispatch,
+    and its own threshold is 45 min of failed `/health` before `logger.error`
+    plus discord. It is one of TWO watchers of the primary's `:8096`: the other is
+    `workers/service_probe.py`, which watches the PORT under supervisord rather
+    than `/health` and announces the closed port to the journal and a toast at its
+    own 30 min grace, from the pool's scheduler loop and outside this gate. One
+    outage therefore produces two lines at two thresholds, the
+    `workers/service_probe.py` line first, and the gate reads its elapsed minutes
+    off that watcher's streak rather than counting its own ticks (#1683). Both are
+    announcement-shaped: neither writes a guardian ledger row for an engine
+    outage. The detectors above are read-only and never touch the model server.
 
 Long version: [[autonomy]] for the mechanism, [[autonomy-jobs]] for the 36
 jobs it dispatches — the reflection chain, trace2skill, the graph chain, vault

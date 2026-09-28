@@ -3049,6 +3049,15 @@ async def test_a_parked_upstream_keeps_its_dependent_out_of_the_queue(
 # (journal + toast) and this gate logs plus alerts to discord (#1683, pinned by
 # `test_the_unwatched_model_server_claim_names_the_probe_and_the_ledger_gap`).
 #
+# And no ledger row is the SETTLED ruling (#1683, ruled closed by owed-check on
+# 2026-09-28), not a question the next session re-opens. The reason is what a row
+# would cost, not whether an outage deserves one: the only route to a guardian
+# ledger row is `notify.alert`, which also rewrites ALERT.md with `write_text`
+# (last-writer-wins) and can file a backlog task, so an engine outage would
+# clobber a live rollback's record to buy a telemetry line. #1744 is the node
+# below holding those three sentences to the ruling, so they cannot rot back into
+# calling it open.
+#
 # Every other stall test in this file forces the gate OPEN
 # (`_vllm_healthy` → True), so the outage path had no coverage and the suite
 # could not see the detectors going un-called. These tests are the inverse: the
@@ -3534,34 +3543,90 @@ def test_the_unwatched_model_server_claim_names_the_probe_and_the_ledger_gap():
     both halves are here: the sentence is gone, AND each of the three names
     `workers/service_probe.py` as the co-watcher and states that an engine
     outage writes no ledger row.
+
+    #1744 added the other half of the same rot. Each of those sentences went on
+    to call the no-ledger-row fact an open question, and owed-check ruled it
+    closed on 2026-09-28: no guardian ledger row for an engine outage, by
+    design, because the only route to a row is `notify.alert` — which also
+    rewrites ALERT.md last-writer-wins and can file a backlog task, so an outage
+    would clobber a live rollback's record to buy a telemetry line. So every
+    place now has to state the ruling AND its reason and stop calling it open,
+    which is why the scan is four places, not three: #1744 clause 3 names
+    `workers/service_probe.py`'s own module docstring. The header target is the
+    note block alone — each assertion below names the literal it demands, so a
+    target wide enough to include the assertions would be satisfied by its own
+    source, which is the vacuity this file's #938 note is written to avoid.
     """
     import inspect
     from pathlib import Path
     import workers.sources.scheduled_task as st
+    import workers.service_probe as sp
 
     src = inspect.getsource(st)
     doc = st._note_vllm_outage.__doc__ or ""
+    probe_doc = sp.__doc__ or ""
     here = Path(__file__).read_text(encoding="utf-8")
     head = here[:here.index("# ── The run record vetoes")]
-    header = head[head.index("# ── #938:"):]
+    block = head[head.index("# ── #938:"):]
+    header = block[:block.index("\ndef ")]
 
-    # The claim is assembled here rather than written out, because the third
-    # scan below reads this file: a test that contained the sentence it forbids
-    # could never pass, which is the same trap as a forbid that forbids itself.
+    def flat(text: str) -> str:
+        """Whitespace-normalised prose: every sentence here wraps in its source,
+        and a phrase check on raw text lets a re-flow of the same claim pass."""
+        return " ".join(text.lower().split())
+
+    # The forbidden sentences are assembled rather than written out, because two
+    # of the scans below read this file: a test that contained the sentence it
+    # forbids could never pass, which is the same trap as a forbid that forbids
+    # itself.
     claim = "no other " + "watcher"
+    still_open = "open " + "ruling"
+    for_person = "ruling for a " + "person"
     for label, text in (("scheduled_task.py", src),
                         ("_note_vllm_outage's docstring", doc),
+                        ("workers/service_probe.py's header", probe_doc),
                         ("this file's outage header", here)):
-        assert claim not in text.lower(), (
+        assert claim not in flat(text), (
             f"{label} still asserts that nothing else watches the model server")
+
+    # #1744: owed-check closed the ledger question on 2026-09-28. Prose that
+    # still calls it open is stale prose, and stale prose is what a later session
+    # re-files as a gap (#1683 is the ruling; #1744 is this pin).
     for label, text in (("scheduled_task.py", src),
                         ("_note_vllm_outage's docstring", doc),
+                        ("workers/service_probe.py's header", probe_doc),
+                        ("this file's outage header", here)):
+        low = flat(text)
+        assert still_open not in low, (
+            f"{label} is back to calling the no-ledger-row decision an open "
+            "question — owed-check ruled it closed on 2026-09-28")
+        assert for_person not in low, (
+            f"{label} hands the ruling to a person instead of recording the one "
+            "that was made (#1744)")
+
+    for label, text in (("scheduled_task.py", src),
+                        ("_note_vllm_outage's docstring", doc),
+                        ("workers/service_probe.py's header", probe_doc),
                         ("this file's outage header", header)):
-        assert "workers/service_probe.py" in text, (
+        low = flat(text)
+        assert "workers/service_probe.py" in low, (
             f"{label} does not name the co-watcher #1359 added")
-        assert "ledger row" in text.lower(), (
+        assert "ledger row" in low, (
             f"{label} does not state that neither surface writes a ledger row "
             "for an engine outage")
+        # The ruling, and the reason that settles it (#1744 clause 3/4). A place
+        # that says "settled" without the mechanism is one the next reader re-
+        # opens anyway, so both halves are demanded.
+        assert "settled ruling" in low, (
+            f"{label} does not say the no-ledger-row decision is a settled "
+            "ruling, so the next reader re-opens what owed-check closed")
+        for reason in ("notify.alert", "alert.md", "last-writer-wins",
+                       "backlog task", "clobber"):
+            assert reason in low, (
+                f"{label} states the ruling but not what settles it — "
+                f"{reason!r} is missing, and the reason is that the only route "
+                "to a guardian ledger row is `notify.alert`, which also rewrites "
+                "ALERT.md last-writer-wins and can file a backlog task")
 
 
 # ── The run record vetoes a second dispatch of a period that already ran ──────
