@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -1083,7 +1084,12 @@ class _PromptRecordingScript(_StreamScript):
         return super().__call__(**kwargs)
 
 
-def _drive_cli(monkeypatch, capsys, argv: list[str]) -> list[str]:
+#: `--record`'s destination when a test does not care about the row (#1705).
+NO_LEDGER = Path("/nonexistent-cli-ledger.jsonl")
+
+
+def _drive_cli(monkeypatch, capsys, argv: list[str], *,
+               ledger: Path = NO_LEDGER) -> list[str]:
     """Run `bench_runner_sdk.main()` with `argv`; return the prompts the trial
     loop handed the model, one entry per completion.
 
@@ -1094,6 +1100,12 @@ def _drive_cli(monkeypatch, capsys, argv: list[str]) -> list[str]:
     travels argv → argparse → `_cli` → `run_bench_sdk` → `run_trial` →
     `stream_chat`: a broken link anywhere along that chain shows up here as the
     planted sentence missing from the returned text.
+
+    `ledger` is the file `--record` appends to. It defaults to a path that
+    cannot exist because the two prompt tests below never read a row, and a
+    real file would let them pass while the row was wrong; a test that asserts
+    on the row passes a `tmp_path` file, since asserting against an unwritable
+    path could only ever prove nothing was written.
     """
     _patch_off_vault(monkeypatch)
     script = _PromptRecordingScript([("all clear", [])])
@@ -1101,7 +1113,7 @@ def _drive_cli(monkeypatch, capsys, argv: list[str]) -> list[str]:
 
     class _Paths:
         bench_dir = Path("/nonexistent-cli-bench")
-        ledger_path = Path("/nonexistent-cli-ledger.jsonl")
+        ledger_path = ledger
 
         def ensure(self) -> None:
             pass
@@ -1154,3 +1166,83 @@ def test_the_cli_without_the_planted_probe_flag_hands_no_planted_prompt(monkeypa
 
     assert ORDINARY_PROMPT in seen, seen
     assert PLANTED_PROBE_PROMPT not in seen, seen
+
+
+# #1705 — the `--record` half of the same route. #1666's closing condition is a
+# non-zero `bench_probe_count` from ONE real `--planted-probe --record` run, and
+# `ledger_append` is best-effort by contract (`common.py`: "Best-effort — never
+# raises"), so a run that wrote no row exited 0 anyway. With the row's destination
+# stubbed to `/nonexistent-cli-ledger.jsonl` the two tests above could not see that,
+# and the real ledger's 1751 rows carry no `CLI_` round_id at all: every control run
+# anyone has reported so far would have looked like "the model did not probe", which
+# is the reading the control exists to make unavailable. These two drive the same
+# `main()` against a ledger that really exists.
+#
+# The row's SHAPE is not the gap — `ledger_row_for` is pinned as a pure function
+# above (`CLI_test` and its five counts). The gap is the wiring only the CLI owns:
+# `--record` → `cli_round = f"CLI_{now_iso()}"` (bench_runner_sdk.py:804) →
+# `ledger_append(cfg.paths.ledger_path, ...)` (bench_runner_sdk.py:843).
+
+#: The keys #1666's closing re-check consumes off a `CLI_` row.
+RECHECK_KEYS = ("tool_call_count", "denied_call_count", "bench_probe_count",
+                "corpus_read_attempts", "corpus_reads_succeeded")
+
+
+def _ledger_rows(ledger: Path) -> list[dict[str, Any]]:
+    """Every JSONL row at `ledger`, or none if the file was never created."""
+    if not ledger.is_file():
+        return []
+    return [json.loads(line) for line in
+            ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_record_appends_one_cli_row_carrying_the_recheck_keys(monkeypatch, capsys,
+                                                             tmp_path):
+    """Clauses 1 + 2, with-arm: `--record` lands exactly one `CLI_` row, and it
+    carries the five counts the closing re-check reads.
+
+    The ledger is a real `tmp_path` file because the assertion is about bytes on
+    disk at the path `cfg.paths.ledger_path` names: against the default
+    `/nonexistent-…` path this test could only ever assert that nothing arrived.
+    Exactly one row, not at-least-one: the CLI runs one patched task, and a second
+    row would mean the trial loop appending behind `--record`'s back, which is the
+    same ledger a scheduled round writes to.
+    """
+    ledger = tmp_path / "cli-ledger.jsonl"
+
+    _drive_cli(monkeypatch, capsys, ["--planted-probe", "--record"], ledger=ledger)
+
+    rows = _ledger_rows(ledger)
+    assert len(rows) == 1, f"expected exactly one row, got {len(rows)}: {rows}"
+    row = rows[0]
+    assert re.match(r"^CLI_", row["round_id"]), row["round_id"]
+    missing = [key for key in RECHECK_KEYS if key not in row]
+    assert not missing, f"row lacks {missing}; a re-check would read them as zero"
+    # `composite_score` is present-but-null with no `--judge`, and the row still
+    # has to be the trial's: its task is the patched one, its harness is the SDK.
+    assert row["task_id"] == "bench_010_safety_destructive", row
+    assert row["harness"] == "sdk", row
+
+
+def test_record_is_what_appends_the_row_and_not_the_trial_itself(monkeypatch, capsys,
+                                                                 tmp_path):
+    """Clause 3, without-arm: the same run with no `--record` appends nothing, so
+    the row above is caused by the flag rather than by an unconditional append.
+
+    Not decoration — `--record` is what tells a scored trial's row apart from a
+    scratch measurement, and a `ledger_append` outside the `if record:` guard would
+    fill the real ledger with every hand-run trial. The positive control is in the
+    same test: after the zero-row run, `--record` against the *same* file does
+    append, so the absence above is the flag and not a ledger that was never
+    writable in the first place.
+    """
+    ledger = tmp_path / "cli-ledger.jsonl"
+
+    _drive_cli(monkeypatch, capsys, ["--planted-probe"], ledger=ledger)
+
+    assert _ledger_rows(ledger) == [], "a run without --record wrote to the ledger"
+
+    _drive_cli(monkeypatch, capsys, ["--planted-probe", "--record"], ledger=ledger)
+
+    rows = _ledger_rows(ledger)
+    assert len(rows) == 1 and re.match(r"^CLI_", rows[0]["round_id"]), rows
