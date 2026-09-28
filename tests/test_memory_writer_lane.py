@@ -1859,3 +1859,156 @@ def test_vault_write_reports_lock_timeout_on_the_real_path(tmp_path, off_tree):
     assert target.read_text(encoding="utf-8") == prior, (
         "the timed-out vault write landed anyway"
     )
+
+
+# ── #1729: a destination named under any key but `file` must not be written ──
+#
+# The 2026-09-28 nightly knowledge-write run called `memory_add` five times with
+# its destination under `file_path` — the destination key of `builtin_fs._write`
+# and `_edit`, the tools the same job had been calling two steps earlier — and
+# every call answered `{"success": true, "file": "MEMORY.md"}` while appending
+# 2,290 B to the LOADED index (`~/obsidian/lloyd/MEMORY.md`, 20,299 B against the
+# live 25,600 B ceiling). `_memory_add` defaults an absent `file` to MEMORY.md and
+# the schema does not require it, so the mis-named key was dropped in silence.
+# Cleaning up then called `memory_remove`, which deleted the matched BYTES and
+# left five lines shaped `- [project]  | why: z | checked: d` in that same loaded
+# file. `_resolve_file`'s `topics/<slug>` route was never the defect.
+
+MISROUTE_LINE = (f"- [project] (2026-09-28) anchor: `{ZORKMID}` "
+                 "| why: because | checked: 2026-09-28")
+INDEX_BEFORE = f"# Lloyd Long-Term Memory\n{MISROUTE_LINE}\n"
+
+
+def _index_file(text: str) -> Path:
+    """The scratch `MEMORY.md`, holding `text`, under this test's pinned root."""
+    mem = SESSION.MEMORIES_ROOT / "MEMORY.md"
+    mem.write_text(text, encoding="utf-8")
+    return mem
+
+
+@pytest.mark.parametrize("alias", ["file_path", "path", "filepath", "file_name",
+                                   "filename", "memory_file", "destination", "target"])
+def test_memory_add_refuses_a_destination_named_under_any_key_but_file(alias):
+    """Clause 1: the incident's own call shape, refused before a file is opened.
+
+    Asserted on the loaded file's bytes after the call as well as on the message,
+    because "returned an error" and "wrote nothing to the loaded index" are
+    different claims: the guard has to run before `_resolve_file` can fall back to
+    the MEMORY.md default, and the error has to name `file` — the run retried the
+    same wrong key five times, which a bare INVALID_PARAM is what invited.
+    """
+    mem = _index_file(INDEX_BEFORE)
+    res = SESSION._memory_add({alias: "topics/user-md-ledger",
+                               "entry": f"- {ZORKMID} ledger row"})
+    assert res.get("code") == "INVALID_PARAM", res
+    assert "`file`" in res["error"], res
+    assert alias in res["error"], res
+    assert mem.read_text(encoding="utf-8") == INDEX_BEFORE, "a refused add wrote the index"
+    assert not (SESSION.MEMORIES_ROOT / "memory" / "user-md-ledger.md").exists()
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+@pytest.mark.parametrize("alias", ["file_path", "path"])
+@pytest.mark.parametrize("tool", ["_memory_replace", "_memory_remove"])
+def test_memory_replace_and_memory_remove_refuse_the_same_shape(tool, alias):
+    """Clause 2: both writers default `file` the way `_memory_add` did.
+
+    Same refusal, same silence on the filesystem — the clean-up calls the 2026-09-28
+    run made afterwards passed no `file` key at all, so a guard on the append tool
+    alone would have left the two tools that were fixing the mess free to repeat it.
+    """
+    mem = _index_file(INDEX_BEFORE)
+    params: dict = {alias: "topics/user-md-ledger"}
+    if tool == "_memory_replace":
+        params.update({"old_text": "because", "new_text": "since it was ruled"})
+    else:
+        params["entry"] = "because"
+    res = getattr(SESSION, tool)(params)
+    assert res.get("code") == "INVALID_PARAM", res
+    assert "`file`" in res["error"], res
+    assert mem.read_text(encoding="utf-8") == INDEX_BEFORE, "a refused call wrote the index"
+    assert not (SESSION.MEMORIES_ROOT / "memory" / "user-md-ledger.md").exists()
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+def test_the_writers_still_write_when_the_destination_is_under_file_or_defaulted():
+    """The positive control for both refusals: an alias guard that refused every
+    call would pass them.
+
+    `file` keeps its MEMORY.md default — dropping the default entirely is the owed
+    ruling on #1729, not this change — and an unrecognised argument that does not
+    read as a destination must stay tolerated, because `summary` rides on every
+    tool call the harness dispatches.
+    """
+    mem = _index_file(INDEX_BEFORE)
+    assert SESSION._memory_add({"entry": f"- {ZORKMID} default lane",
+                                "summary": "note it",
+                                "tool_call_id": "call_1"})["success"]
+    assert mem.read_text(encoding="utf-8").endswith(f"- {ZORKMID} default lane\n")
+    assert SESSION._memory_add({"file": "topics/user-md-ledger",
+                                "entry": f"- {ZORKMID} topic row"})["success"]
+    assert SESSION._memory_replace({"file": "MEMORY.md",
+                                    "old_text": f"- {ZORKMID} default lane",
+                                    "new_text": f"- {ZORKMID} ruled lane"})["success"]
+    assert SESSION._memory_remove({"file": "MEMORY.md",
+                                   "entry": f"{ZORKMID} ruled lane"})["success"]
+    after = mem.read_text(encoding="utf-8")
+    assert after == INDEX_BEFORE, f"the round trip left {after!r}"
+    assert (SESSION.MEMORIES_ROOT / "memory" / "user-md-ledger.md").exists()
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+def test_memory_remove_deletes_the_entry_line_that_contains_the_match():
+    """Clause 3: substring deletion was the shipped unit, and it is the wrong one.
+
+    `content.replace(entry, "", 1)` removing `anchor: `X`` from
+    `- [project] (2026-09-28) anchor: `X` | why: because | checked: 2026-09-28`
+    produced `- [project] (2026-09-28)  | why: because | checked: 2026-09-28`, and
+    that remnant is what the nightly run then had to restore with a whole-line
+    `Edit`. An entry is one line, so the line containing the match is what goes.
+    """
+    body = ("# Lloyd Long-Term Memory\n"
+            f"- [project] (2026-09-28) anchor: `{ZORKMID}` | why: because | checked: 2026-09-28\n"
+            "- [project] (2026-09-28) anchor: `keeper` | why: stays | checked: 2026-09-28\n")
+    mem = _index_file(body)
+    res = SESSION._memory_remove({"file": "MEMORY.md", "entry": f"anchor: `{ZORKMID}`"})
+    assert res["success"] is True, res
+    after = mem.read_text(encoding="utf-8")
+    assert "| why: because" not in after, f"remnant left behind: {after!r}"
+    assert after == ("# Lloyd Long-Term Memory\n"
+                     "- [project] (2026-09-28) anchor: `keeper` "
+                     "| why: stays | checked: 2026-09-28\n"), after
+    assert len(after.splitlines()) == 2, after
+    _assert_live_memory_files_clean(ZORKMID)
+
+
+def test_memory_remove_deletes_the_matched_line_even_when_it_is_the_last_one():
+    """The other edge of the cut: a match on the final line, which has no trailing
+    newline to stop the deletion on, and a full-entry match that must keep working
+    exactly as it did under substring deletion."""
+    mem = _index_file("# Index\n- [project] keeper entry\n- [project] doomed entry")
+    assert SESSION._memory_remove({"file": "MEMORY.md",
+                                   "entry": "- [project] doomed entry"})["success"]
+    assert mem.read_text(encoding="utf-8") == "# Index\n- [project] keeper entry\n"
+
+
+async def test_the_memory_tool_wire_payload_refuses_a_mis_named_destination_key():
+    """The seam a worker reads: `call_tool` → `_wrap` → the serialized body.
+
+    These handlers are served by the `lloyd-mcp` process, so the JSON text is what
+    ships and the Python dict is not. The argument set is the incident's verbatim
+    `['entry', 'file_path', 'summary', 'type']`: `summary` is the harness's own
+    caption key and must stay tolerated, while `file_path` must be the key the
+    error names.
+    """
+    mem = _index_file(INDEX_BEFORE)
+    res = await SESSION.call_tool("memory_add", {
+        "entry": f"- {ZORKMID} ledger backfill", "file_path": "topics/user-md-ledger",
+        "summary": "append the ledger rows", "type": "project"})
+    assert res.is_error is True, res
+    body = json.loads(res.content[0].text)
+    assert body["code"] == "INVALID_PARAM", body
+    assert "`file`" in body["error"], body
+    assert "file_path" in body["error"], body
+    assert mem.read_text(encoding="utf-8") == INDEX_BEFORE
+    _assert_live_memory_files_clean(ZORKMID)

@@ -85,6 +85,49 @@ def _check_injection(text: str) -> Optional[str]:
 _INVALID_FILE = ("Invalid file. Must be MEMORY.md, USER.md, or topics/<slug> "
                  "(slug: 1-48 of a-z, 0-9, '-')")
 
+# ── #1729: the destination may only ever be named under `file` ───────────────
+#
+# Argument keys that read like a destination but are not the one these three
+# writers take. The 2026-09-28 nightly knowledge-write run passed its topic file
+# under `file_path` — which IS the destination key of the tools it had been
+# calling two steps earlier (`builtin_fs._write`/`_edit` take `file_path`,
+# `vault_write` takes `path`) — so the key was dropped as unknown, `file` fell
+# back to its `MEMORY.md` default, and five ledger rows were appended to the
+# LOADED index (20,299 B → 22,589 B, against the live 25,600 B ceiling) while
+# every call answered `{"success": true, "file": "MEMORY.md"}`. `_resolve_file`
+# was never broken; the argument surface is what mis-routes.
+#
+# Only destination-shaped keys are refused. A stray unknown key is normal on this
+# surface — the harness adds `summary` to every tool call — so refusing every
+# unrecognised argument would break the transport instead of the bug.
+_DESTINATION_ALIASES = ("file_path", "filepath", "file_name", "filename",
+                        "path", "memory_file", "destination", "target")
+
+
+def _misnamed_destination(params: dict) -> Optional[str]:
+    """The key `params` names its destination under, when that key is not `file`.
+
+    None when no alias key is present. `file` itself stays optional — its
+    `MEMORY.md` default has callers, and dropping the default is the owed ruling
+    on #1729, not this change — but a call that supplies a destination-looking
+    key has stated where it meant to write, and quietly writing the loaded index
+    instead is the defect. Checked before the path is resolved or opened, so a
+    refused call cannot touch a file at all.
+    """
+    for key in _DESTINATION_ALIASES:
+        if key in params:
+            return key
+    return None
+
+
+def _destination_error(key: str) -> dict:
+    """Refusal for `_misnamed_destination`, naming the key it accepts instead."""
+    return _err(
+        f"Unknown argument {key!r}: the memory tools take the destination under "
+        f"`file` (MEMORY.md, USER.md, or topics/<slug>). Nothing was written — "
+        f"re-send it with `file` instead of `{key}`.",
+        ErrorCode.INVALID_PARAM)
+
 
 def _resolve_file(file: str) -> Optional[Path]:
     """The path a memory tool's `file` names, or None when it names nothing legal.
@@ -200,6 +243,9 @@ def _typed_entry(entry: str, etype: str, *, stamp: bool) -> str:
 
 
 def _memory_add(params: dict) -> dict:
+    bad_key = _misnamed_destination(params)
+    if bad_key:
+        return _destination_error(bad_key)
     file = params.get("file", "MEMORY.md").strip()
     entry = params.get("entry", "").strip()
     etype = str(params.get("type") or "").strip().lower() or _default_entry_type(file)
@@ -248,10 +294,18 @@ def _memory_add(params: dict) -> dict:
             write_text_durable(filepath, updated)
     except TimeoutError as exc:
         return _err(str(exc), ErrorCode.LOCK_TIMEOUT)
-    return {"success": True, "file": file}
+    # #1729: report the absolute path, not only the `file` argument. Each of the
+    # five mis-routed calls answered `{"success": true, "file": "MEMORY.md"}` — a
+    # result whose wrongness the caller had to notice for itself. The path it
+    # wrote is the half it cannot misread, and a write aimed at a topic can never
+    # print MEMORY.md.
+    return {"success": True, "file": file, "path": str(filepath)}
 
 
 def _memory_replace(params: dict) -> dict:
+    bad_key = _misnamed_destination(params)
+    if bad_key:
+        return _destination_error(bad_key)
     file = params.get("file", "MEMORY.md").strip()
     old_text = params.get("old_text", "")
     new_text = params.get("new_text", "")
@@ -287,10 +341,33 @@ def _memory_replace(params: dict) -> dict:
             write_text_durable(filepath, updated)
     except TimeoutError as exc:
         return _err(str(exc), ErrorCode.LOCK_TIMEOUT)
-    return {"success": True, "file": file}
+    # `path` for the reason given in `_memory_add`.
+    return {"success": True, "file": file, "path": str(filepath)}
+
+
+def _drop_entry_line(content: str, needle: str) -> str:
+    """Delete the WHOLE line that holds the first match for `needle`.
+
+    #1729: `content.replace(entry, "", 1)` deleted the matched bytes and left the
+    rest of the line standing, so removing `anchor: `X`` from
+    `- [project] (2026-09-28) anchor: `X` | why: because` left
+    `- [project]  | why: because` — junk in the loaded index that took a
+    whole-line `Edit` and a `git diff` to clear. An entry is one line, so what a
+    caller means by a partial match is the entry containing it; deleting the line
+    is what the tool description has always promised. A `needle` that spans lines
+    takes every line it spans.
+    """
+    start = content.index(needle)
+    line_start = content.rfind("\n", 0, start) + 1
+    end = content.find("\n", start + len(needle))
+    line_end = len(content) if end == -1 else end + 1
+    return content[:line_start] + content[line_end:]
 
 
 def _memory_remove(params: dict) -> dict:
+    bad_key = _misnamed_destination(params)
+    if bad_key:
+        return _destination_error(bad_key)
     file = params.get("file", "MEMORY.md").strip()
     entry = params.get("entry", "").strip()
     filepath = _resolve_file(file)
@@ -305,12 +382,15 @@ def _memory_remove(params: dict) -> dict:
             content = filepath.read_text(encoding="utf-8")
             if entry not in content:
                 return _err("entry not found in file", ErrorCode.NO_MATCH, matched=False)
-            updated = content.replace(entry, "", 1)
+            updated = _drop_entry_line(content, entry)
+            # Whole-line deletion cannot itself leave a gap, but a line sitting
+            # alone between two blanks leaves the two blanks adjacent.
             updated = re.sub(r"\n{3,}", "\n\n", updated)
             write_text_durable(filepath, updated)
     except TimeoutError as exc:
         return _err(str(exc), ErrorCode.LOCK_TIMEOUT)
-    return {"success": True, "file": file}
+    # `path` for the reason given in `_memory_add`.
+    return {"success": True, "file": file, "path": str(filepath)}
 
 
 # ── Session recall ───────────────────────────────────────────────────────────
@@ -686,8 +766,8 @@ async def list_tools():
             "type": "object", "properties": {"file": _FILE_PARAM, "entry": {"type": "string", "description": "Text to append"}, "type": {"type": "string", "enum": list(ENTRY_TYPES), "description": "What kind of entry: feedback (a ruling or correction from the user), user (a fact about the user), project (working state; default for MEMORY.md and topics), reference (where something lives). Default user for USER.md."}}, "required": ["entry"]}),
         Tool(name="memory_replace", description="Replace text in a cross-session memory file by substring match. Fails if old_text is absent, so a stale edit is reported rather than silently skipped.", inputSchema={
             "type": "object", "properties": {"file": _FILE_PARAM, "old_text": {"type": "string", "description": "Existing text to find (substring, must appear exactly once)"}, "new_text": {"type": "string", "description": "Replacement text"}}, "required": ["old_text", "new_text"]}),
-        Tool(name="memory_remove", description="Use to drop a memory entry that is wrong or obsolete; to correct it in place use memory_replace. Remove an entry from MEMORY.md, USER.md or a topics/<slug> file (substring match).", inputSchema={
-            "type": "object", "properties": {"file": _FILE_PARAM, "entry": {"type": "string", "description": "Text to remove"}}, "required": ["entry"]}),
+        Tool(name="memory_remove", description="Use to drop a memory entry that is wrong or obsolete; to correct it in place use memory_replace. Remove that entry from MEMORY.md, USER.md or a topics/<slug> file: `entry` is matched as a substring, and the whole line holding it goes, so a partial phrase cannot leave half an entry behind.", inputSchema={
+            "type": "object", "properties": {"file": _FILE_PARAM, "entry": {"type": "string", "description": "Text to find; the whole entry line containing it is removed"}}, "required": ["entry"]}),
         Tool(name="session_recall", description="Search recent session transcripts for topics, decisions, or discussions from past sessions. Use for cross-session context like 'what did we work on today?' or 'what was decided about X?'", inputSchema={
             "type": "object", "properties": {"query": {"type": "string", "description": "Search query"}, "days": {"type": "integer", "description": "Days back to search (default: 7)"}, "limit": {"type": "integer", "description": "Max results (default: 5)"}}, "required": ["query"]}),
     ]

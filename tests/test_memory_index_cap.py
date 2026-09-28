@@ -424,3 +424,51 @@ def test_every_topic_probe_names_answer_terms(tmp_path):
     bad.write_text(yaml.safe_dump({"probes": probes}))
     with pytest.raises(ProbeRejected, match="answer_terms"):
         load_probes(bad)
+
+
+# ── #1729: what a writer reports, and the route the guard must not break ─────
+
+def test_each_memory_writer_reports_the_absolute_path_it_wrote(memories_root):
+    """Clause 4: the result has to name the file, not echo the `file` argument.
+
+    Each of the five mis-routed calls answered `{"success": true, "file":
+    "MEMORY.md"}` — true, and about a file the caller never asked for, so the
+    wrongness was something the run had to notice for itself. The absolute path is
+    the half it cannot misread, and a write aimed at a topic can never print
+    MEMORY.md in it.
+    """
+    session, root = memories_root
+    (root / "MEMORY.md").write_text("# Lloyd Long-Term Memory\n- [project] one\n",
+                                    encoding="utf-8")
+    add = session._memory_add({"file": "MEMORY.md", "entry": "- [project] two"})
+    replace = session._memory_replace({"file": "MEMORY.md", "old_text": "two",
+                                       "new_text": "three"})
+    remove = session._memory_remove({"file": "MEMORY.md", "entry": "three"})
+    for res in (add, replace, remove):
+        assert res.get("success") is True, res
+        assert res["path"] == str(root / "MEMORY.md"), res
+        assert Path(res["path"]).is_absolute(), res
+    topic = session._memory_add({"file": "topics/user-md-ledger", "entry": "- a row"})
+    assert topic["path"] == str(root / "memory" / "user-md-ledger.md"), topic
+    assert "MEMORY.md" not in topic["path"], topic
+
+
+def test_a_topic_write_still_lands_under_memory_with_the_index_untouched(memories_root):
+    """Clause 5: the route the argument-surface change must not break.
+
+    `topics/<slug>` resolution was never the defect — `file="topics/<slug>"` was
+    answering correctly the whole time — so after the alias guard a topic write
+    still lands at `<root>/memory/<slug>.md`, still reports that path, and leaves
+    the loaded index byte for byte as it found it.
+    """
+    session, root = memories_root
+    index = ("# Lloyd Long-Term Memory\n"
+             "- [project] ledger → topics/user-md-ledger\n")
+    (root / "MEMORY.md").write_text(index, encoding="utf-8")
+    res = session._memory_add({"file": "topics/user-md-ledger",
+                               "entry": "- why: the ledger backfill rows"})
+    assert res.get("success") is True, res
+    topic = root / "memory" / "user-md-ledger.md"
+    assert topic.read_text(encoding="utf-8").endswith("- why: the ledger backfill rows\n")
+    assert res["path"] == str(topic), res
+    assert (root / "MEMORY.md").read_text(encoding="utf-8") == index
