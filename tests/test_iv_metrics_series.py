@@ -41,6 +41,7 @@ import pytest
 import yaml
 
 from tests._live_data import require_live_data
+from tests.fixture_checkout import copy_app_import_chain  # noqa: E402
 from app.paths import production_data_root  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -207,11 +208,22 @@ def _copy_app_paths(repo: Path) -> None:
     not the live checkout keeps its data under `<repo>/.lloyd-data` (rule 3)."""
     (repo / "app").mkdir(parents=True, exist_ok=True)
     (repo / "app" / "__init__.py").write_text("")
-    shutil.copy2(ROOT / "app" / "paths.py", repo / "app" / "paths.py")
-    # `paths.py` imports `app.data_root` at module scope since #1415 — the data-root
-    # rules live there so a script with no venv can read them — so a synthetic
-    # checkout holding one file and not the other cannot import `app.paths` at all.
-    shutil.copy2(ROOT / "app" / "data_root.py", repo / "app" / "data_root.py")
+    # The `app` modules the grader reaches at import time are listed once, in
+    # `tests/fixture_checkout.py`, rather than per fixture file — see there for
+    # why (#1415, #1656).
+    copy_app_import_chain(ROOT, repo)
+    # The same failure mode one import later (#1656): `iv_grade.py` reads a
+    # session's messages through `app.inner_voice.session_input`, which withholds
+    # a session that recorded a fabricated reasoning trace, and that verdict
+    # comes from `app.thinking_fidelity`. Both are stdlib-only, so the synthetic
+    # checkout can carry the whole chain — and a missing file here is a loud
+    # ImportError in every test that pipes the grader, which is the one property
+    # that keeps a hand-listed copy set honest.
+    (repo / "app" / "inner_voice").mkdir(parents=True, exist_ok=True)
+    for rel in ("app/inner_voice/__init__.py",
+                "app/inner_voice/session_input.py",
+                "app/thinking_fidelity.py"):
+        shutil.copy2(ROOT / rel, repo / rel)
 
 
 def _make_db(repo: Path, rows: list[dict]) -> Path:

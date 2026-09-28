@@ -63,6 +63,7 @@ from typing import Any
 _LLOYD_HOME = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_LLOYD_HOME))
 
+from app.inner_voice import session_input  # noqa: E402
 from app.paths import SESSIONS_DIR, USAGE_DB  # noqa: E402
 
 DB_PATH = USAGE_DB
@@ -142,13 +143,18 @@ def _rows(conn: sqlite3.Connection, where: str, params: list) -> list[dict]:
 
 
 def _session_messages(session_id: str) -> list[dict]:
-    p = SESSIONS_DIR / f"{session_id}.json"
-    if not p.exists():
-        return []
-    try:
-        return json.loads(p.read_text()).get("messages") or []
-    except Exception:
-        return []
+    """One session's messages as grader input — or nothing, if it is excluded.
+
+    The grader decides an observer's recall by reading the user's follow-up
+    message out of the transcript, so this is IV scoring input and goes through
+    `app.inner_voice.session_input`: a session that recorded a fabricated
+    reasoning trace (#1510, #1656) contributes no messages to it. Its rows stay
+    in the LLM-call and latency tallies, which never read the transcript, so
+    excluding one shrinks only the denominators that are built from recorded
+    thinking — which is exactly what `_grade_terminal_noops` reports as
+    `terminal_noops_with_a_following_user_message`.
+    """
+    return session_input.read_session_messages(SESSIONS_DIR / f"{session_id}.json")
 
 
 def _text_of(msg: dict) -> str:

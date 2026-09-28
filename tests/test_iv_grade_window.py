@@ -44,6 +44,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 GRADER = ROOT / "scripts" / "iv_grade.py"
+from tests.fixture_checkout import copy_app_import_chain  # noqa: E402
 
 #: Copied verbatim from the live table quoted in #835 — the two rows that *are*
 #: the discriminating pair at the `04:00:00` bound, sub-second precision included.
@@ -65,11 +66,9 @@ def _make_repo(tmp_path: Path) -> Path:
     # the live checkout keeps its data under `<repo>/.lloyd-data` (rule 3).
     (repo / "app").mkdir()
     (repo / "app" / "__init__.py").write_text("")
-    shutil.copy2(GRADER.parents[1] / "app" / "paths.py", repo / "app" / "paths.py")
-    # `paths.py` imports `app.data_root` at module scope since #1415 — the data-root
-    # rules live there so a script with no venv can read them — so a synthetic
-    # checkout holding one file and not the other cannot import `app.paths` at all.
-    shutil.copy2(GRADER.parents[1] / "app" / "data_root.py", repo / "app" / "data_root.py")
+    # The `app` modules the grader imports are listed once, in
+    # `tests/fixture_checkout.py`, instead of per fixture file (#1415, #1656).
+    copy_app_import_chain(GRADER.parents[1], repo)
     (repo / ".lloyd-data").mkdir()
     return repo
 

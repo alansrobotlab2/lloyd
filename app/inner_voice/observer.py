@@ -32,6 +32,7 @@ from app.component_manifest import record_request
 from app.config import CONFIG, _get_model_cfg, resolve_model_alias
 from app.inner_voice import guards as _guards
 from app.inner_voice import observer_prompt as _prompt
+from app.inner_voice import session_input
 from app.inner_voice.lever_tools import (
     GOAL_COMPLETION_TOOL_NAME,
     GOAL_COMPLETION_TOOLS,
@@ -222,16 +223,18 @@ def _load_todos_from_session(session_id: str) -> list[dict[str, Any]]:
     through its committed plan. Cheap on a hot path (one JSON read), and
     lock-free is fine — the session JSON is written via mutate_session
     which provides atomicity at the file level.
+
+    The read goes through `session_input`, the one place that decides whether a
+    session is fit to be IV input at all (#1656): a session carrying a
+    fabricated reasoning trace contributes nothing to the observer's view of
+    it, and a helper that read the file itself would be a second writer of that
+    rule. One parse, not two, because this is the tool_result hot path.
     """
     if not session_id:
         return []
-    p = SESSIONS_DIR / f"{session_id}.json"
-    if not p.exists():
-        return []
-    try:
-        return json.loads(p.read_text()).get("todos") or []
-    except Exception:
-        return []
+    todos = session_input.read_session_field(
+        SESSIONS_DIR / f"{session_id}.json", "todos", [])
+    return todos if isinstance(todos, list) else []
 
 
 def _resolve_endpoint(model_alias: str | None = None) -> tuple[str, str]:

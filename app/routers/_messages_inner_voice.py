@@ -26,6 +26,7 @@ from app.harness import HookRegistry
 from app.paths import SESSIONS_DIR
 from app.inner_voice import guards as _guards
 from app.inner_voice import observer_prompt as _prompt
+from app.inner_voice import session_input
 from app.inner_voice.observer import (
     ObserverState,
     _observer_cfg,
@@ -184,18 +185,19 @@ def _recent_exchanges_for_goal_extraction(
     "yeah do it" or "still broken" so it can resolve them against the
     prior thread instead of producing an empty goal card.
 
-    Returns [] on any miss (no session yet, parse error, no prior turns).
+    The session's own recorded thinking has to be trustworthy to be worth
+    resolving a follow-up against: `session_input.read_session_messages`
+    returns [] for a session carrying a fabricated reasoning trace
+    (`app/thinking_fidelity`, #1656), which is the same "no prior turns"
+    answer a parse error gives. A card built from the current message alone
+    is thin; one that anchors on a turn that never happened is wrong.
+
+    Returns [] on any miss (no session yet, parse error, no prior turns, or a
+    session excluded for untrustworthy reasoning).
     """
     if not session_id:
         return []
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
-    if not meta_path.exists():
-        return []
-    try:
-        data = json.loads(meta_path.read_text())
-    except Exception:
-        return []
-    msgs = data.get("messages") or []
+    msgs = session_input.read_session_messages(SESSIONS_DIR / f"{session_id}.json")
     out: list[dict[str, str]] = []
     # Walk backwards collecting user/assistant text. Stop after we drop
     # the trailing current-user-message and find max_messages priors.
@@ -291,11 +293,7 @@ def _goal_source_text(session_id: str, user_request: str, turn_source: str,
     text = _guards.strip_injected_blocks(user_request)
     if turn_source != "ambient" or producer_source == "inner_voice_goal":
         return text or user_request
-    meta_path = SESSIONS_DIR / f"{session_id}.json"
-    try:
-        msgs = json.loads(meta_path.read_text()).get("messages") or []
-    except Exception:  # noqa: BLE001
-        return text or user_request
+    msgs = session_input.read_session_messages(SESSIONS_DIR / f"{session_id}.json")
     for m in reversed(msgs):
         if m.get("role") != "user" or (m.get("source") or "user") != "user":
             continue

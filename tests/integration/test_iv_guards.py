@@ -28,6 +28,7 @@ from unittest.mock import patch
 LLOYD_HOME = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(LLOYD_HOME))
 
+from tests.fixture_checkout import copy_app_import_chain  # noqa: E402
 from app.harness.hooks import HookRegistry
 from app.inner_voice import guards
 from app.inner_voice import observer as obs_mod
@@ -733,11 +734,11 @@ def _iv_repo(root: str) -> Path:
     # production keeps its data under `<repo>/.lloyd-data` (rule 3).
     (repo / "app").mkdir()
     (repo / "app" / "__init__.py").write_text("")
-    shutil.copy2(LLOYD_HOME / "app" / "paths.py", repo / "app" / "paths.py")
-    # `paths.py` imports `app.data_root` at module scope since #1415 — the data-root
-    # rules live there so a script with no venv can read them — so a synthetic
-    # checkout holding one file and not the other cannot import `app.paths` at all.
-    shutil.copy2(LLOYD_HOME / "app" / "data_root.py", repo / "app" / "data_root.py")
+    # The `app` modules the grader imports are listed once, in
+    # `tests/fixture_checkout.py`, instead of per fixture file: the same list had
+    # to be edited in four places when #1415 moved the data-root rules and again
+    # when #1656 put the fidelity verdict behind the session read.
+    copy_app_import_chain(LLOYD_HOME, repo)
     (repo / ".lloyd-data").mkdir()
     return repo
 
