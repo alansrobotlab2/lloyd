@@ -50,7 +50,12 @@ import workers.fleet_watchdog as fw  # noqa: E402  (#1682: where the alarms live
 _SURVEILLANCE_KEYS = frozenset({
     "unparseable_scan_at", "unparseable_alerted",
     "stall_streak", "stall_alerted_at",
-    "nextrun_streak", "nextrun_alerted_at"})
+    "nextrun_streak", "nextrun_alerted_at",
+    # #1661: the log-only slot a parked-only board writes instead of the alert
+    # cooldown. Unlisted here it would be seeded onto the DISPATCH dict, where it
+    # does nothing and the test below that depends on the slot staying empty passes
+    # for the wrong reason — the exact failure this routing exists to prevent.
+    "nextrun_parked_logged_at"})
 
 
 def seed_state(monkeypatch, **over):
@@ -4641,8 +4646,11 @@ def test_the_alert_reports_a_suppressed_park_instead_of_going_silent(
         f"it: {msg!r}")
 
     # And the case the count exists for: a board whose ONLY late task is parked. The
-    # alert still fires (the caller triggers on the scan's list, parks included) and
-    # its message is not the message a healthy board would produce.
+    # trigger is still the scan's list, parks included, so that board still gets this
+    # message — since #1661 what changed is where the message goes: the alert route is
+    # skipped and the same string is logged, so the distinction asserted here is the
+    # one the log record carries. See
+    # test_a_parked_only_board_is_logged_and_not_posted for the route itself.
     parked_only = _nextrun_alert_message(
         [e for e in _next_run_stalled(q) if e["id"] == 920])
     assert "0 task(s) more than one period past" in parked_only, (
@@ -4652,6 +4660,179 @@ def test_the_alert_reports_a_suppressed_park_instead_of_going_silent(
     assert parked_only != _nextrun_alert_message([]), (
         "a board of nothing but declared parks and a board with nothing late "
         f"produce the same sentence: {parked_only!r}")
+
+
+#: The logger `workers/fleet_watchdog.py` writes to (`logger = getLogger(...)` at its
+#: top). Named here so a record is matched against the emitting logger and not against
+#: whatever else the tick's own executor threads happened to log.
+_FW_LOGGER = "lloyd-workers.fleet_watchdog"
+
+
+def _spy_the_alert_route(monkeypatch) -> list:
+    """Capture what reaches `discord_alert`, the one call that reaches a person.
+
+    Spied one level below `capture_alerts`, which stubs the watchdog's own `_alert`:
+    #1661 is about whether the alarm arrives at all, and the route it must not arrive
+    at runs `fleet_watchdog._alert` → `app.discord_notify.discord_alert` → the
+    daily-note fallback that writes `memory/<date>.md`. Stubbing `_alert` would leave
+    that whole tail unexercised, and a change that moved the suppression a level
+    deeper — or a `_alert` that began posting by itself — would pass it green.
+    `discord_alert` is imported INSIDE `_alert`, so patching the module attribute is
+    the attribute the call actually resolves on its tick.
+    """
+    from app import discord_notify
+
+    posted: list[str] = []
+
+    async def _spy(message, *args, **kwargs):
+        posted.append(message)
+
+    monkeypatch.setattr(discord_notify, "discord_alert", _spy)
+    return posted
+
+
+def _parked_only_board(aut):
+    """The live board's shape: exactly one late task, and it declares its own park.
+
+    `_parked_fleet` writes three late tasks, two of which say nothing about
+    themselves — those are the ones the message must keep naming. Pulling 921 and 922
+    inside their own period leaves one flagged task, #920, which is what #68's
+    `parked:` declaration makes the real fleet right now, and the reason the note line
+    is permanent rather than transient.
+    """
+    late = PIN - dt.timedelta(days=90)
+    for task_id in (921, 922):
+        write_task(aut, task_id, status="draft", frequency="every-15min",
+                   last_run=late.isoformat(),
+                   next_run=(PIN + dt.timedelta(days=1)).isoformat())
+
+
+async def test_a_parked_only_board_is_logged_and_not_posted(
+        aut, monkeypatch, tmp_path, caplog):
+    """#1661 clauses 1 and 2, across the seam the item is actually about.
+
+    A tick whose `next_run` scan flags nothing but tasks that declare their own park
+    must not reach the alert route: `discord_alert` is never called, so the
+    `_survive_the_dropped_alert` fallback never opens the daily note and writes no
+    line. That is the whole item — #68 sits parked under a standing ruling, so this
+    board is the fleet's steady state and the line returned on every restart.
+
+    What is suppressed is the route, not the finding. The scan's confirmation is still
+    written to the log, carrying the message `_nextrun_alert_message` builds for this
+    board, and that message is still not the one a healthy board produces — clause 2,
+    asserted here at the surface the record exists for rather than only at the string
+    builder: "nothing is late" and "everything late was parked" stay two sentences in
+    the log, which is the silence #1121 was filed about.
+
+    The alert watermark is asserted empty, not assumed so. A route suppression that
+    wrote `nextrun_alerted_at` on its way past would spend a day of cooldown on a park
+    and mute the first genuinely late task for 24 h — the suppression would have
+    bought silence of exactly the wrong kind.
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+    from workers.fleet_watchdog import (_next_run_stalled, _nextrun_alert_message,
+                                        _parked_note)
+
+    _pin(aut, monkeypatch)
+    _parked_fleet(aut)
+    _parked_only_board(aut)
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    seed_state(monkeypatch, unparseable_scan_at=_scan_not_due(),
+               stall_streak=0, stall_alerted_at=None,
+               nextrun_streak=0, nextrun_alerted_at=None,
+               nextrun_parked_logged_at=None)
+    posted = _spy_the_alert_route(monkeypatch)
+    caplog.set_level("WARNING", logger=_FW_LOGGER)
+
+    q = WorkQueue(tmp_path / "parked-only-route.db")
+    # Two non-vacuity controls before any tick: the board really is the parked-only
+    # shape (one flagged task, and it declares a park), and the NOISY due-ness alarm
+    # sees none of it, so a post below is attributable to this alarm and not a sum.
+    flagged = _next_run_stalled(q)
+    assert [(e["id"], bool(_parked_note(e))) for e in flagged] == [(920, True)], (
+        "the board is not parked-only, so the absence asserted below could be an "
+        f"absence of any late task at all: {[(e['id'], e['parked']) for e in flagged]}")
+    assert fw._grossly_overdue(q) == [], (
+        "the due-ness alarm also sees this board, so a zero post count here would "
+        "say nothing about the nextrun alarm")
+
+    for _ in range(fw._STALL_NEXTRUN_TICKS):
+        await scheduler_tick(q, {"max_duration_seconds": 1800})
+
+    assert posted == [], (
+        f"a board whose every late task declares its own park reached the alert "
+        f"route on tick {fw._STALL_NEXTRUN_TICKS}: {posted}. That route ends in the "
+        "daily note, so this is the line #1661 exists to stop")
+    assert fw._state["nextrun_alerted_at"] is None, (
+        "the parked-only board consumed the alert cooldown it never used, so the "
+        "next genuinely late task would be silent for a day")
+
+    logged = [r.getMessage() for r in caplog.records
+              if r.name == _FW_LOGGER and "declared parks only" in r.getMessage()]
+    assert len(logged) == 1, (
+        f"the scan looked, found only declared parks, and left nothing in the log — "
+        f"a suppressed route must not read as a scan that never ran: {logged}")
+    assert _nextrun_alert_message(flagged) in logged[0], (
+        f"the log record is not the message the route would have carried, so the "
+        f"alert and the log can drift apart: {logged[0]!r}")
+    assert "0 task(s) more than one period past" in logged[0], logged[0]
+    assert "1 task(s) suppressed as declared parked" in logged[0], logged[0]
+
+
+async def test_the_first_genuinely_late_task_alerts_the_tick_after_a_parked_board(
+        aut, monkeypatch, tmp_path):
+    """#1661 clause 3, on the same ticks, and the half clause 1 must not cost.
+
+    The same board until one task that says nothing about itself goes late. The alert
+    must then arrive on that tick — the parked-only ticks before it may not have spent
+    its cooldown — and the text must be today's sentence byte for byte: the same head
+    with the status-named count, the named task, and the suppression tail still
+    attached. Suppressing the park is licence to drop it from the count, never to
+    reword the sentence about the task that really is late.
+    """
+    from workers.queue import WorkQueue
+    import workers.sources.scheduled_task as st
+    from workers.fleet_watchdog import _next_run_stalled, _nextrun_alert_message
+
+    _pin(aut, monkeypatch)
+    _parked_fleet(aut)
+    _parked_only_board(aut)
+    monkeypatch.setattr(st, "_vllm_healthy", lambda *a, **k: True)
+    seed_state(monkeypatch, unparseable_scan_at=_scan_not_due(),
+               stall_streak=0, stall_alerted_at=None,
+               nextrun_streak=0, nextrun_alerted_at=None,
+               nextrun_parked_logged_at=None)
+    posted = _spy_the_alert_route(monkeypatch)
+
+    q = WorkQueue(tmp_path / "parked-then-late.db")
+    for _ in range(fw._STALL_NEXTRUN_TICKS):
+        await scheduler_tick(q, {"max_duration_seconds": 1800})
+    assert posted == [], (
+        f"the parked-only phase posted, so the tick below is not the first real "
+        f"alert: {posted}")
+
+    # #921 goes late: no `parked:` key in its file, which is precisely the shape of
+    # the accidental `up_next -> draft` flip #1121 was filed for.
+    write_task(aut, 921, status="draft", frequency="every-15min",
+               last_run=(PIN - dt.timedelta(days=90)).isoformat(),
+               next_run=(PIN - dt.timedelta(days=90)).isoformat())
+    await scheduler_tick(q, {"max_duration_seconds": 1800})
+
+    assert len(posted) == 1, (
+        f"a non-parked task one period past its own next_run posted "
+        f"{len(posted)} alert(s) on the tick it appeared — the parked-only ticks "
+        f"before it must not spend the cooldown: {posted}")
+    # The route posts what the builder returns, unaltered…
+    assert posted[0] == _nextrun_alert_message(_next_run_stalled(q)), posted[0]
+    # …and the builder's sentence is still the one readers match on: head with the
+    # status-named count, then the named task, then the tail counting the park.
+    assert posted[0].startswith(
+        "1 draft task(s) more than one period past their own next_run, which the "
+        "due-ness stall alarm cannot see: #921 (task921) is "), posted[0]
+    assert posted[0].endswith(
+        " | 1 task(s) suppressed as declared parked in their own file (`parked:`) "
+        "and not counted above"), posted[0]
 
 
 def test_the_parked_field_is_read_by_the_recoverer(aut):

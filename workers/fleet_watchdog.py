@@ -104,7 +104,13 @@ _state = {
           # set nor a healthy one sends a message every half hour.
           "unparseable_scan_at": None, "unparseable_alerted": set(),
           "stall_streak": 0, "stall_alerted_at": None,
-          "nextrun_streak": 0, "nextrun_alerted_at": None}
+          # `nextrun_alerted_at` is the instant the `next_run` alarm last REACHED A
+          # PERSON, and is written only on that route. A scan that found nothing but
+          # declared parks never reaches one, so it writes the key beside it instead —
+          # its own log cadence, so the record repeats at the alarm's interval without
+          # spending the alert cooldown that a real stall will need (#1661).
+          "nextrun_streak": 0, "nextrun_alerted_at": None,
+          "nextrun_parked_logged_at": None}
 
 
 def _source_cfg() -> dict:
@@ -522,21 +528,46 @@ async def tick(queue: WorkQueue) -> None:
     # streak, separate cooldown, separate message: nothing about the noisy
     # alarm's exclusions or text moved.
     #
-    # The trigger below stays on the scan's own list, declared parks included, and
-    # that is what lets `_nextrun_alert_message` suppress them at all: filtering here
-    # would make a board whose only late tasks are parked indistinguishable from a
-    # healthy one, which is the silence #1121 was filed about. The message says
-    # "0 …| 1 suppressed" for that board instead of saying nothing.
+    # The streak below stays on the scan's own list, declared parks included, so a
+    # board whose only late tasks are parked is still a board the scan CONFIRMED late.
+    # Filtering the scan would make it indistinguishable from a healthy one, which is
+    # the silence #1121 was filed about. What is suppressed here is the ROUTE, not the
+    # finding (#1661): a board that flags nothing but tasks which declare their own
+    # park has nothing a person has not already written down, and on this fleet that is
+    # the steady state — #68 is parked by a standing ruling — so posting it was one
+    # daily-note line per restart on the one surface the fallback exists to reach.
+    # The finding is logged instead, carrying the same message, so "nothing is late"
+    # and "everything late was parked" remain two different sentences in the log as
+    # they are in the alert.
     stalled = await loop.run_in_executor(None, _next_run_stalled, queue)
     _state["nextrun_streak"] = (
         (_state.get("nextrun_streak", 0) + 1) if stalled else 0)
     if stalled and _state["nextrun_streak"] >= _STALL_NEXTRUN_TICKS:
-        last_nextrun = _state.get("nextrun_alerted_at")
         nr_now = _dt.datetime.now(_dt.timezone.utc)
-        if (last_nextrun is None
-                or (nr_now - last_nextrun).total_seconds()
-                >= _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS):
-            _state["nextrun_alerted_at"] = nr_now
-            msg = _nextrun_alert_message(stalled)
-            logger.error("%s", msg)
-            await _alert(msg)
+        # One test decides both branches, and it is the test the message applies:
+        # `_parked_note`, so a task cannot be counted as suppressed by the string and
+        # still counted as late by the trigger.
+        if any(not _parked_note(e) for e in stalled):
+            last_nextrun = _state.get("nextrun_alerted_at")
+            if (last_nextrun is None
+                    or (nr_now - last_nextrun).total_seconds()
+                    >= _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS):
+                _state["nextrun_alerted_at"] = nr_now
+                msg = _nextrun_alert_message(stalled)
+                logger.error("%s", msg)
+                await _alert(msg)
+        else:
+            # Nothing late is unaccounted for, so no alert is posted and the ALERT
+            # cooldown is deliberately not consumed: spending a day's silence on a
+            # park would mute the first genuinely late task for 24 h, which is the
+            # silence this file exists to prevent. The log record has its own slot at
+            # the same interval, so the scan says it looked without becoming a line
+            # every 60 s for as long as the park stands.
+            last_parked_log = _state.get("nextrun_parked_logged_at")
+            if (last_parked_log is None
+                    or (nr_now - last_parked_log).total_seconds()
+                    >= _STALL_NEXTRUN_ALERT_INTERVAL_SECONDS):
+                _state["nextrun_parked_logged_at"] = nr_now
+                logger.warning(
+                    "nextrun stall alarm not posted, declared parks only: %s",
+                    _nextrun_alert_message(stalled))
