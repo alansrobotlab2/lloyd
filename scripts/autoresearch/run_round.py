@@ -15,6 +15,7 @@ import json
 import logging
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +40,11 @@ from .common import (
     _run_spec_from_cfg,
 )
 from .hypothesis_generator import propose_variants
+# The same numpy-free linear-interpolated percentile the promotion-false-rate
+# analysis uses, so the prior and that analysis cannot disagree about what "p90"
+# means on the same rows. Aliased because the derivation's own parameter is the
+# quantile, and a function and its argument cannot share one name here.
+from .promotion_fp_rate import percentile as _percentile_of
 from .judge import aggregate_variant, configured_rubric_mode, judge_trace, rankability_fields
 from . import bench_split
 # #1549: the behavioural scorecard. Report-only by construction — this import is
@@ -430,13 +436,145 @@ def complete_matrix(traces: list[dict[str, Any]], variant_ids: list[str],
 # deleted the only evidence a promotion could be justified on.
 #
 # So the matrix is costed BEFORE it starts, each arm the way it actually runs, and
-# what does not fit is dropped up front and named. The priors are deliberately
-# pessimistic against those measurements — direct at its p90, the agent-loop arm at
-# the runner's own 90 s `SDK_MIN_TRIAL_SECONDS` floor, the smallest slice of window
-# that arm can spend on one trial — because over-estimating defers a task to the
-# next round while under-estimating is the cut this section exists to end.
+# what does not fit is dropped up front and named.
+#
+# What these two numbers ARE since #1715: the fallback. The priors a round actually
+# costs itself at come from `derive_trial_priors`, which reads this same ledger's
+# per-trial `duration_seconds` and takes each arm's p90. They used to be claimed
+# "deliberately pessimistic against those measurements — direct at its p90", and
+# that claim was false in the direction that mattered: measured over the rows the
+# ledger holds on 2026-09-28 (direct n=1473, sdk n=67), the p90 is 27.9 s on the
+# direct arm and 183.7 s on the agent-loop arm. A 5 s direct prior is not that
+# arm's p90, and a 90 s agent-loop prior is HALF of it, so a matrix could be
+# reported `fits yes` and be cut anyway — which is what happened to both
+# post-landing scheduled rounds (`R_20260928_041936.md`: 1180 s projected, 1431 s
+# window, fits yes, then 1370 s of trials and one task not reached).
+#
+# Where the fallback values come from: 5.0 is the `direct` arm's measured mean over
+# the 2026-09-27 window (4.7 s over 224 trials) rounded up; 90.0 is
+# `SDK_MIN_TRIAL_SECONDS` below, the runtime runner's own floor, so a trial that
+# finishes under it is not scored and cannot honestly be costed cheaper. Neither is
+# a percentile of anything, which is exactly why the derivation replaced them.
 DIRECT_TRIAL_SECONDS = 5.0
 SDK_TRIAL_SECONDS = 90.0
+
+# The derivation's two knobs. p90 and not the mean because the serial arm is
+# long-tailed on the same 67 rows (median 76.2 s, p90 183.7 s, max 280.8 s), and a
+# mean-sized serial trial is not the trial that is still running when the deadline
+# lands. 20 rows is the smallest n whose p90 is an interpolation between two real
+# observations rather than one observation dressed as a percentile; both arms are
+# already far over it on live traffic, so a scheduled round never waits on it.
+PRIOR_PERCENTILE = 0.9
+MIN_PRIOR_ROWS = 20
+
+
+@dataclass(frozen=True)
+class ArmPrior:
+    """One arm's per-trial cost, with the evidence that produced it.
+
+    `n`, `measured` and `percentile` are required rather than defaulted: a prior
+    that reaches a projection has to say whether it was measured or is the
+    fallback constant, and a default would let it arrive silent about which.
+    """
+
+    seconds: float
+    n: int
+    measured: bool
+    percentile: float = PRIOR_PERCENTILE
+
+    @property
+    def source(self) -> str:
+        return "measured p90" if self.measured else "fallback constant"
+
+    def __str__(self) -> str:
+        if self.measured:
+            return f"{self.seconds:.1f} s {self.source} (n={self.n})"
+        # A fallback has to say how far short it is, or `90.0 s fallback constant`
+        # on a round report reads as though the ledger were empty forever rather
+        # than a handful of rows short of being trusted.
+        return (f"{self.seconds:.1f} s {self.source} "
+                f"(n={self.n} measured rows, {MIN_PRIOR_ROWS} needed)")
+
+
+@dataclass(frozen=True)
+class TrialPriors:
+    """Both arms, as one value. One object so the round derives once and threads
+    one thing; `fallback()` is the only way to build the constants, so a caller
+    cannot silently cost itself at them by omitting the argument."""
+
+    direct: ArmPrior
+    sdk: ArmPrior
+
+    @classmethod
+    def fallback(cls) -> "TrialPriors":
+        return cls(
+            direct=ArmPrior(DIRECT_TRIAL_SECONDS, 0, False),
+            sdk=ArmPrior(SDK_TRIAL_SECONDS, 0, False),
+        )
+
+    def arms(self) -> tuple[ArmPrior, ArmPrior]:
+        return (self.direct, self.sdk)
+
+    def provenance(self) -> str:
+        """What the report prints beside the projection: the prior per arm, and
+        whether the ledger measured it or the constant stood in."""
+        return f"priors — direct {self.direct}, agent-loop {self.sdk}"
+
+
+def _arm_prior(durations: list[float], fallback_seconds: float, *,
+               percentile: float = PRIOR_PERCENTILE,
+               min_rows: int = MIN_PRIOR_ROWS) -> ArmPrior:
+    if len(durations) < min_rows:
+        return ArmPrior(fallback_seconds, len(durations), False, percentile)
+    return ArmPrior(_percentile_of(list(durations), percentile), len(durations),
+                    True, percentile)
+
+
+def derive_trial_priors(ledger_path: Path, *, percentile: float = PRIOR_PERCENTILE,
+                        min_rows: int = MIN_PRIOR_ROWS) -> TrialPriors:
+    """Per-arm per-trial cost priors measured from the ledger's own trial rows.
+
+    Importable on purpose: the round, a test and an operator question must be
+    answerable by the same query over the same rows. Rows are matched the way the
+    writer emits them — `scripts/autoresearch/runner.py:64` stamps `harness` and
+    `duration_seconds` onto every trial row, and `_append_ledger` here is the other
+    half — so the population is exactly what a round already writes, not a second
+    measurement of it.
+
+    An arm with fewer than `min_rows` rows falls back to the module constant and
+    says so in its `source`; a missing file is the same fallback for both arms
+    rather than a crash, because a round with no history is the normal state of a
+    first round, not an error. Non-positive durations are dropped: the runner
+    floors a real trial at `SDK_MIN_TRIAL_SECONDS`, so a zero is a row that never
+    ran, and costing a round on those is how a prior gets optimistic again.
+    """
+    durations: dict[str, list[float]] = {"direct": [], "sdk": []}
+    try:
+        text = Path(ledger_path).read_text(encoding="utf-8")
+    except OSError:
+        text = ""
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if row.get("variant_id") is None:      # spec / split / decision / summary
+            continue
+        arm = str(row.get("harness") or "direct")
+        if arm not in durations:
+            continue
+        secs = row.get("duration_seconds")
+        if isinstance(secs, (int, float)) and not isinstance(secs, bool) and secs > 0:
+            durations[arm].append(float(secs))
+    return TrialPriors(
+        direct=_arm_prior(durations["direct"], DIRECT_TRIAL_SECONDS,
+                          percentile=percentile, min_rows=min_rows),
+        sdk=_arm_prior(durations["sdk"], SDK_TRIAL_SECONDS,
+                       percentile=percentile, min_rows=min_rows),
+    )
 
 #: Fraction of the trial window a projected matrix may claim. The window already
 #: gives the judge its reserve (#1546); this is the margin for the gap between the
@@ -456,8 +594,7 @@ def _waves(trials: int, max_parallel: int) -> int:
 
 def project_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto",
                    max_parallel: int = 4, *, window_seconds: float | None = None,
-                   direct_trial_seconds: float = DIRECT_TRIAL_SECONDS,
-                   sdk_trial_seconds: float = SDK_TRIAL_SECONDS) -> dict[str, Any]:
+                   priors: TrialPriors) -> dict[str, Any]:
     """Project the wall cost of the (variant × task) matrix, arm by arm.
 
     `arms` is the number of things benched — the baseline plus every surviving
@@ -471,11 +608,19 @@ def project_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto"
     `trial_deadline` left; `fits` is the projection against it under
     `PROJECTION_MARGIN`, and stays None when there is no window — a hand-run round
     with no budget has nothing to fit into.
+
+    `priors` is required, and required as a `TrialPriors` rather than as two floats
+    defaulting to the module constants. That is the whole of #1715: #1605 shipped
+    exactly those two defaulted floats, a call site that never passed them was
+    indistinguishable from one that meant not to, and the constants quietly became
+    the round's opinion about its own runtime. Now costing a matrix at the fallback
+    is a deliberate act — `TrialPriors.fallback()` — and it carries the word
+    "fallback" into the report line this projection prints.
     """
     direct_tasks, sdk_tasks, _skipped = split_tasks_by_harness(tasks, harness)
     arms = max(int(arms), 0)
-    direct_seconds = _waves(arms * len(direct_tasks), max_parallel) * direct_trial_seconds
-    sdk_seconds = arms * len(sdk_tasks) * sdk_trial_seconds
+    direct_seconds = _waves(arms * len(direct_tasks), max_parallel) * priors.direct.seconds
+    sdk_seconds = arms * len(sdk_tasks) * priors.sdk.seconds
     out: dict[str, Any] = {
         "arms": arms,
         "tasks": len(tasks),
@@ -486,8 +631,11 @@ def project_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto"
         "direct_seconds": round(direct_seconds, 1),
         "sdk_seconds": round(sdk_seconds, 1),
         "projected_seconds": round(direct_seconds + sdk_seconds, 1),
-        "direct_trial_seconds": direct_trial_seconds,
-        "sdk_trial_seconds": sdk_trial_seconds,
+        # The object the cost was made from, not just the two numbers, so the
+        # report can name where each came from next to the line it priced.
+        "priors": priors,
+        "direct_trial_seconds": priors.direct.seconds,
+        "sdk_trial_seconds": priors.sdk.seconds,
         "window_seconds": None,
         "fits": None,
     }
@@ -553,8 +701,9 @@ def _drop_preference(task: dict[str, Any], valid_ids: set[str] | None,
 
 def fit_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto",
                max_parallel: int = 4, window_seconds: float | None = None,
-               valid_ids: set[str] | None = None) -> tuple[list[dict[str, Any]],
-                                                           dict[str, Any], list[str]]:
+               valid_ids: set[str] | None = None,
+               *, priors: TrialPriors) -> tuple[list[dict[str, Any]],
+                                                dict[str, Any], list[str]]:
     """The largest matrix that fits the window, the projection that says so, and
     the task ids dropped to get there.
 
@@ -571,13 +720,27 @@ def fit_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto",
     """
     kept = order_tasks_for_coverage(list(tasks), valid_ids)
     if window_seconds is None or not kept:
-        return kept, project_matrix(arms, kept, harness, max_parallel), []
+        return kept, project_matrix(arms, kept, harness, max_parallel,
+                                    priors=priors), []
 
     def cost(pool: list[dict[str, Any]]) -> float:
-        return project_matrix(arms, pool, harness, max_parallel)["projected_seconds"]
+        return project_matrix(arms, pool, harness, max_parallel,
+                             priors=priors)["projected_seconds"]
 
-    proj = project_matrix(arms, kept, harness, max_parallel, window_seconds=window_seconds)
+    proj = project_matrix(arms, kept, harness, max_parallel,
+                          window_seconds=window_seconds, priors=priors)
     dropped: list[str] = []
+    # The smallest step worth taking: the slack `PROJECTION_MARGIN` already holds
+    # back of the window — 10% of it, 143.1 s on the live 1431 s window. A step
+    # that frees less than the slack the round is deliberately not spending has
+    # bought no window at all, and it has paid with an arm's evidence on a task.
+    # At the measured priors this is the ordinary case, not a corner: one
+    # runtime-routed task frees 4 arms x 200.6 s = 802.4 s, while one direct task
+    # frees about 19 s, so once every runtime task is held out, every step left is
+    # a nibble far below what the margin is already holding — and the old loop
+    # took those nibbles anyway, silently, down to `MIN_MATRIX_TASKS`.
+    step_floor = round(float(window_seconds) * (1.0 - PROJECTION_MARGIN), 1)
+    stopped_early: dict[str, Any] | None = None
     while proj["fits"] is False and len(kept) > MIN_MATRIX_TASKS:
         here = proj["projected_seconds"]
         # `_drop_preference`: a held-out task is deferred while any non-held-out task
@@ -597,10 +760,33 @@ def fit_matrix(arms: int, tasks: list[dict[str, Any]], harness: str = "auto",
                                                best_outside),
                               pair[0]))
         victim = victims[0][1]
+        if savings[id(victim)] < step_floor:
+            # Nothing left worth spending: the cheapest task the preference order
+            # would give up frees less than the margin already holds back, so
+            # every further drop would remove evidence and add no window. Stop and
+            # let the report say the matrix is over-window — the honest answer at
+            # a truthful prior is a round that defers, not a matrix stripped to
+            # one task to keep the projection green.
+            stopped_early = {
+                "step_floor_seconds": step_floor,
+                "next_step_saves_seconds": round(savings[id(victim)], 1),
+                "next_step_id": str(victim.get("id")),
+                "tasks_still_in_matrix": len(kept),
+                "over_budget_seconds": round(
+                    proj["projected_seconds"]
+                    - proj["window_seconds"] * PROJECTION_MARGIN, 1),
+            }
+            break
         kept = [t for t in kept if t is not victim]
         dropped.append(str(victim.get("id")))
         proj = project_matrix(arms, kept, harness, max_parallel,
-                              window_seconds=window_seconds)
+                              window_seconds=window_seconds, priors=priors)
+    if stopped_early is not None:
+        # Carried on the projection so the report can say the matrix is still
+        # over-window, that shrinking stopped, and what stopped it. Silently
+        # returning a `fits: False` projection was the old floor's tell: the report
+        # said "started instead at N s" as if a fit had been found.
+        proj["shrink_stopped_early"] = stopped_early
     return kept, proj, dropped
 
 
@@ -621,14 +807,28 @@ def _lint_valid_ids(bench_dir: Path) -> set[str] | None:
 
 
 def _projection_text(proj: dict[str, Any]) -> str:
-    """One line describing a projected matrix, shared by the log and the report."""
+    """One line describing a projected matrix, shared by the log and the report, and
+    the provenance of the priors that priced it.
+
+    Provenance rides on the same line rather than getting one of its own because the
+    line is what a reader of `rounds/<id>.md` reads and stops at: `×90 s each,
+    serial` reads like a measured figure, and for four scheduled rounds it was
+    exactly the number that turned `fits yes` into a cut at the deadline. So the
+    line that says what a trial cost now also says whether the ledger measured it
+    or a constant stood in — `TrialPriors.provenance()`, the one formatter, so the
+    report and the log cannot disagree about what was known.
+
+    Everything the line said before still reads the same way: the provenance is
+    appended after `= 1180 s projected`.
+    """
     return (f"{proj['arms']} arm(s) × {proj['tasks']} task(s): "
             f"{proj['direct_trials']} direct trial(s) ≈ {proj['direct_seconds']:.0f} s "
             f"(×{proj['direct_trial_seconds']:.0f} s each, "
             f"{proj['direct_tasks']} task(s) in parallel) + "
             f"{proj['sdk_trials']} agent-loop trial(s) ≈ {proj['sdk_seconds']:.0f} s "
             f"(×{proj['sdk_trial_seconds']:.0f} s each, serial) "
-            f"= {proj['projected_seconds']:.0f} s projected")
+            f"= {proj['projected_seconds']:.0f} s projected; "
+            f"{proj['priors'].provenance()}")
 
 
 # ── ledger rows, as functions ────────────────────────────────────────────────────
@@ -908,10 +1108,20 @@ async def run(
     # baseline included, which is what the runners will loop over.
     valid_ids = _lint_valid_ids(cfg.paths.bench_dir)
     window = (deadline - time.monotonic()) if deadline is not None else None
+    # #1715: the round's one reading of its own measured per-trial cost, taken
+    # before anything is planned and passed to the projection AND the shrink from
+    # here, so no cost on either path can fall back to the module constants by
+    # forgetting an argument. One derivation per round, not one per call: a shrink
+    # costed at a different prior than the projection it is shrinking is the same
+    # disagreement this section is about, moved one line down. A reader who wants
+    # to check the report's "p90 of n=67" runs the same function over the same
+    # rows — `derive_trial_priors(cfg.paths.ledger_path)` is importable.
+    priors = derive_trial_priors(cfg.paths.ledger_path)
     planned = project_matrix(len(variant_pairs), tasks, harness, max_parallel,
-                             window_seconds=window)
+                             window_seconds=window, priors=priors)
     tasks, projection, matrix_dropped = fit_matrix(
-        len(variant_pairs), tasks, harness, max_parallel, window, valid_ids)
+        len(variant_pairs), tasks, harness, max_parallel, window, valid_ids,
+        priors=priors)
     logger.info("trial matrix: %s (window %s, fits %s)", _projection_text(projection),
                 "no budget" if window is None else f"{window:.0f} s", projection["fits"])
     if matrix_dropped:
@@ -921,6 +1131,24 @@ async def run(
                        "no budget" if window is None else f"{window:.0f}",
                        f"{projection['projected_seconds']:.0f} s",
                        ", ".join(matrix_dropped))
+    shrink_stopped = projection.get("shrink_stopped_early") or {}
+    if shrink_stopped:
+        # Loud on purpose. This is the state where the round WILL be cut at the
+        # deadline and knows it: the honest answer at a truthful prior, but only
+        # if it reaches the log rather than hiding behind `fits: NO`.
+        logger.warning(
+            "matrix over window and shrinking stopped: %s s projected against a %s s "
+            "budget (%s s over); the next step %s would free %.0f s, under the %.0f s "
+            "floor a PROJECTION_MARGIN of headroom is already holding back, so %d "
+            "task(s) stay in the matrix and the deadline will cut some of them",
+            f"{projection['projected_seconds']:.0f}",
+            f"{projection['window_seconds'] * PROJECTION_MARGIN:.0f}",
+            f"{shrink_stopped['over_budget_seconds']:.0f}",
+            shrink_stopped["next_step_id"],
+            shrink_stopped["next_step_saves_seconds"],
+            shrink_stopped["step_floor_seconds"],
+            shrink_stopped["tasks_still_in_matrix"],
+        )
 
     # Fan out (variant × task), split by harness routing (#353)
     logger.info("running %d variants × %d tasks = %d trials (harness=%s)",
@@ -1094,6 +1322,22 @@ async def run(
            f"{_projection_text(planned)} would not fit the window; started instead at "
            f"{projection['projected_seconds']:.0f} s: {', '.join(matrix_dropped)}"]
            if matrix_dropped else []),
+        # #1715: the case #1605's loop had no words for. The matrix is over window,
+        # shrinking has stopped, and the reason is not that it ran out of tasks — it
+        # is that every step left frees less than the margin already holds back, so
+        # dropping one more task would cost an arm's evidence and buy no window.
+        # Saying "fits NO" alone would read as a bug in the shrink; the point is that
+        # the round now knows it is going to be cut, and why it stopped helping.
+        *([f"- matrix over window, shrinking stopped: {shrink_stopped['tasks_still_in_matrix']} "
+           f"task(s) left projecting {projection['projected_seconds']:.0f} s against "
+           f"{projection['window_seconds'] * PROJECTION_MARGIN:.0f} s of budget "
+           f"({shrink_stopped['over_budget_seconds']:.0f} s over); the next step "
+           f"{shrink_stopped['next_step_id']} would free only "
+           f"{shrink_stopped['next_step_saves_seconds']:.0f} s, less than the "
+           f"{shrink_stopped['step_floor_seconds']:.0f} s a PROJECTION_MARGIN of "
+           f"headroom already holds back, so the matrix was not shrunk further and "
+           f"the deadline will cut some of these tasks"]
+           if shrink_stopped else []),
         f"- trials took: {trial_seconds:.0f} s (direct "
         + ("n/a" if arm_seconds.get("direct_seconds") is None
            else f"{arm_seconds['direct_seconds']:.0f} s")

@@ -626,3 +626,264 @@ def test_a_safety_task_is_given_up_only_when_nothing_outside_the_veto_can_fit(ro
     assert result["matrix_dropped_tasks"] == ["bench_r1"]
     assert handed == ["bench_a1", "bench_a2"]
     assert result["deadline_stopped"] is False and result["tasks_run"] == 2
+
+
+
+# ── the priors a round costs itself on (#1715) ────────────────────────────────
+# Everything above took the per-trial cost on trust: `project_matrix` and
+# `fit_matrix` defaulted it to the module constants, and on both post-landing
+# scheduled rounds that trust printed `fits yes` and the deadline took a task
+# anyway — `rounds/R_20260928_041936.md:9-12`, 1180 s projected against a 1431 s
+# window, 1370 s of trials spent, 1 task not reached. The priors were 5 s and 90 s;
+# the same ledger the round appends to says p90 27.9 s (n=1473) and 183.7 s (n=67).
+# So the priors are now derived from those rows, read once per round at one call
+# site, named with their provenance beside the line they priced, and a shrink step
+# that would buy less window than `PROJECTION_MARGIN` already holds back is refused
+# out loud instead of taken all the way down to `MIN_MATRIX_TASKS`.
+
+def _prior_ledger(path: Path, *, direct_secs: float, sdk_secs: float,
+                  n_direct: int = 30, n_sdk: int = 25) -> Path:
+    """A ledger carrying the per-trial durations the derivation reads.
+
+    `harness` and `duration_seconds` are exactly the two keys a round writes on a
+    trial row, and one row per arm per task per variant is what the live file holds,
+    so the derivation meets the shape it will meet in production. Durations are
+    uniform within an arm because a percentile of identical values is that value,
+    which is what lets the asserts below name a number rather than a range.
+    """
+    rows = []
+    for arm, secs, n in (("direct", direct_secs, n_direct), ("sdk", sdk_secs, n_sdk)):
+        for i in range(n):
+            rows.append({"round_id": "R_priors", "variant_id": f"V_{i}",
+                         "task_id": f"bench_{arm}_{i}", "harness": arm,
+                         "trace_status": "success", "duration_seconds": secs,
+                         "composite_score": 0.5})
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return path
+
+
+_LIVE = run_round.TrialPriors(
+    direct=run_round.ArmPrior(27.9, 1473, True),
+    sdk=run_round.ArmPrior(200.6, 67, True))
+
+
+def _write_tasks(bench: Path, n: int, *, prefix: str = "bench",
+                 runtime: bool = False):
+    """Write `n` bench task files and hand back the task dicts `load_bench_tasks`
+    would read from them. `requires_runtime` is what routes a task to the serial arm
+    under `auto`, so a test that wants the matrix split across both arms asks for it
+    here rather than hand-building a dict the loader would never produce."""
+    bench.mkdir(exist_ok=True)
+    out = []
+    for i in range(n):
+        tid = f"{prefix}{i}"
+        (bench / f"{tid}.md").write_text(
+            f"---\nid: {tid}\ncategory: audit\n"
+            + ("requires_runtime: true\n" if runtime else "")
+            + f"---\n\nprompt for {tid}\n", encoding="utf-8")
+        out.append({"id": tid, "category": "audit",
+                    **({"requires_runtime": True} if runtime else {})})
+    return out
+
+
+def test_the_priors_are_the_p90_of_the_ledgers_rows_and_it_says_which(tmp_path):
+    """Clause 1: per-arm p90 with the n that produced it, the constant below the
+    precondition, and the report saying which arm got which. `MIN_PRIOR_ROWS` is
+    asserted against rather than the literal 20 repeated into the seeds, so moving
+    the precondition moves the test with it."""
+    ledger = tmp_path / "ledger.jsonl"
+
+    got = run_round.derive_trial_priors(_prior_ledger(
+        ledger, direct_secs=27.9, sdk_secs=200.6))
+    assert got.sdk.measured is True and got.sdk.n == 25
+    assert got.sdk.seconds == pytest.approx(200.6)
+    assert got.sdk.percentile == run_round.PRIOR_PERCENTILE
+    assert got.direct.measured is True and got.direct.n == 30
+    assert got.direct.seconds == pytest.approx(27.9)
+
+    thin = run_round.derive_trial_priors(_prior_ledger(
+        ledger, direct_secs=27.9, sdk_secs=200.6, n_direct=run_round.MIN_PRIOR_ROWS,
+        n_sdk=run_round.MIN_PRIOR_ROWS - 1))
+    assert thin.direct.measured is True, "the precondition is at least 20, not more"
+    assert thin.sdk.measured is False
+    assert thin.sdk.seconds == run_round.SDK_TRIAL_SECONDS
+    assert thin.sdk.n == run_round.MIN_PRIOR_ROWS - 1
+
+    absent = run_round.derive_trial_priors(tmp_path / "nope.jsonl")
+    assert (absent.direct.seconds, absent.sdk.seconds) == (
+        run_round.DIRECT_TRIAL_SECONDS, run_round.SDK_TRIAL_SECONDS)
+    assert absent.direct.measured is False and absent.direct.n == 0
+
+    text = absent.provenance()
+    assert "fallback constant" in text and "20 needed" in text, text
+    assert "measured p90" not in text
+    assert "n=30" in got.provenance() and "fallback" not in got.provenance()
+
+
+def test_no_cost_on_the_shrink_path_can_fall_back_to_the_module_constants(
+        tmp_path, monkeypatch):
+    """Clause 2: one derived value in, the same value out of every cost the shrink
+    takes. The spy sits on `project_matrix` itself, so a shrink path that rebuilt
+    the priors from the constants — or dropped the argument and let a default do it
+    — is caught by name rather than inferred from a total that happened to differ."""
+    seen: list[run_round.TrialPriors] = []
+    real = run_round.project_matrix
+
+    def spy(*args, **kwargs):
+        assert "priors" in kwargs, "a projection was costed without priors at all"
+        seen.append(kwargs["priors"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(run_round, "project_matrix", spy)
+    tasks = (_write_tasks(tmp_path, 15) + _write_tasks(tmp_path, 5, prefix="bench_rt", runtime=True))
+    kept, proj, dropped = run_round.fit_matrix(4, tasks, "auto", 15,
+                                              window_seconds=1431.0, priors=_LIVE)
+    assert len(seen) >= 3, f"the shrink took {len(seen) - 1} step(s), too few to mean anything"
+    assert all(p is _LIVE for p in seen), "a cost on the shrink path used other priors"
+    assert proj["priors"] is _LIVE
+    assert proj["direct_trial_seconds"] == 27.9 and proj["sdk_trial_seconds"] == 200.6
+    # The number that comes out is the measured one: four runtime tasks go, the
+    # fifth stays, 914 s against the same window. At the 90 s constant the identical
+    # matrix keeps three runtime tasks and calls itself 1100 s — which is the
+    # 2026-09-28 round, and it was cut.
+    assert dropped == ["bench_rt4", "bench_rt3", "bench_rt2", "bench_rt1"], dropped
+    assert proj["projected_seconds"] == pytest.approx(914.0)
+    same_at_constant = run_round.project_matrix(4, tasks, "auto", 15,
+                                                window_seconds=1431.0,
+                                                priors=run_round.TrialPriors.fallback())
+    assert same_at_constant["projected_seconds"] < run_round.project_matrix(
+        4, tasks, "auto", 15, window_seconds=1431.0, priors=_LIVE)["projected_seconds"], \
+        "the constants cost the identical matrix LESS: they are the optimistic ones"
+
+    src = Path(run_round.__file__).read_text(encoding="utf-8").splitlines()
+    calls = [ln.strip() for ln in src
+             if "derive_trial_priors(" in ln and not ln.strip().startswith(("#", "def "))]
+    assert calls == ["priors = derive_trial_priors(cfg.paths.ledger_path)"], \
+        f"the round must read its own cost at exactly one call site, got {calls}"
+
+
+def test_the_report_line_names_the_prior_per_arm_beside_where_it_came_from(
+        round_env, tmp_path, monkeypatch):
+    cfg = round_env
+    assert cfg.paths.ledger_path == tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(run_round, "load_config", lambda: cfg)
+    """Clause 3: the projection line and the provenance are one line. `×90 s each,
+    serial` on its own reads like a measured figure; four scheduled rounds printed
+    it and were cut on the strength of it."""
+    _prior_ledger(tmp_path / "ledger.jsonl", direct_secs=27.9, sdk_secs=183.7,
+                  n_direct=30, n_sdk=25)
+    _quiet_proposer(monkeypatch, 0)
+    result = asyncio.run(run_round.run(targets=["prompts"], dry_run=False,
+                                       budget_minutes=30))
+    body = (cfg.paths.rounds_dir / f"{result['round_id']}.md").read_text()
+    line = [ln for ln in body.splitlines() if ln.startswith("- trial matrix:")][0]
+    assert "s projected; priors — " in line, line
+    assert "direct 27.9 s measured p90 (n=30)" in line, line
+    assert "agent-loop 183.7 s measured p90 (n=25)" in line, line
+    assert "fallback" not in line, line
+
+    # The fixture's ledger holds the 55 rows the run above read, so the fallback is
+    # shown by emptying that file rather than with a second fixture: the point is
+    # that a fallback is legible in the same place a measured prior is.
+    (tmp_path / "ledger.jsonl").write_text("", encoding="utf-8")
+    plain = asyncio.run(run_round.run(targets=["prompts"], dry_run=False,
+                                      budget_minutes=30))
+    body = (cfg.paths.rounds_dir / f"{plain['round_id']}.md").read_text()
+    line = [ln for ln in body.splitlines() if ln.startswith("- trial matrix:")][0]
+    assert "direct 5.0 s fallback constant (n=0 measured rows, 20 needed)" in line, line
+    assert "agent-loop 90.0 s fallback constant" in line, line
+
+
+def test_shrinking_stops_when_a_step_buys_less_window_than_the_margin_holds(tmp_path):
+    """Clause 4: the floor is on what a step frees, not on how many tasks are left.
+    34 direct tasks in a 150 s window at 17 s each projects 170 s against a 135 s
+    budget, and every step left frees exactly 17 s — less than the 15 s the margin is
+    already declining to spend, so the old loop would have taken 33 of them and
+    arrived at `MIN_MATRIX_TASKS` having bought nothing but lost 33 tasks' evidence.
+    (The arithmetic is exact here: 17 >= 15 is why the step IS taken at a 180 s
+    window, so the window is the thing under test, not the count.)"""
+    priors = run_round.TrialPriors(
+        direct=run_round.ArmPrior(17.0, 30, True),
+        sdk=run_round.ArmPrior(183.7, 25, True))
+    kept, proj, dropped = run_round.fit_matrix(4, _write_tasks(tmp_path, 34), "auto", 15,
+                                              window_seconds=150.0, priors=priors)
+    assert proj["fits"] is False, "the premise: 34 direct tasks do not fit 150 s"
+    stopped = proj["shrink_stopped_early"]
+    assert stopped["step_floor_seconds"] == pytest.approx(15.0)
+    assert stopped["next_step_saves_seconds"] < stopped["step_floor_seconds"], stopped
+    assert dropped == ["bench33"], \
+        "one step was worth taking (17 s >= the 15 s floor); only the next is not"
+    assert len(kept) == 33 > run_round.MIN_MATRIX_TASKS, "stopped by the floor, not at it"
+    assert proj["projected_seconds"] > 150.0 * run_round.PROJECTION_MARGIN
+
+
+def test_the_say_so_line_is_written_when_a_shrink_stops_with_the_matrix_over_window(
+        round_env, tmp_path, monkeypatch):
+    """Clause 4's report half. `fits NO` alone reads like a bug in the shrink; what
+    has to be in the file is that the matrix is over window, that shrinking stopped,
+    what stopped it, and that the deadline will therefore take tasks."""
+    cfg = round_env
+    monkeypatch.setattr(run_round, "load_config", lambda: cfg)
+    _quiet_proposer(monkeypatch, 0)
+    _prior_ledger(tmp_path / "ledger.jsonl", direct_secs=14.0, sdk_secs=183.7)
+    _write_tasks(cfg.paths.bench_dir, 34)
+    result = asyncio.run(run_round.run(targets=["prompts"], dry_run=False,
+                                       budget_minutes=5))
+    body = (cfg.paths.rounds_dir / f"{result['round_id']}.md").read_text()
+    line = [ln for ln in body.splitlines() if "matrix over window" in ln]
+    assert len(line) == 1, body
+    # 34 written + the 3 the `round_env` fixture seeds = the 37-task matrix; 14 s is
+    # what one direct task frees at the derived prior, 15 s the margin's own slack.
+    assert "shrinking stopped" in line[0] and "37 task(s) left" in line[0], line[0]
+    assert "projecting 140 s against 135 s of budget (5 s over)" in line[0], line[0]
+    assert "would free only" in line[0] and "headroom already holds back" in line[0]
+    assert "the deadline will cut some of these tasks" in line[0], line[0]
+    assert result["matrix_dropped_tasks"] == []
+
+
+def test_a_matrix_that_reports_fits_yes_fits_at_the_priors_it_named(tmp_path, monkeypatch):
+    """Clause 5: 20 tasks over 4 arms at the live `auto` routing — 15 parallel, 5
+    `requires_runtime` on the serial arm — against the window a 30-minute round
+    derives (1440 s, so 1296 s of it is spendable), with the priors derived from a
+    ledger carrying live-like durations (direct p90 28.0 s, agent-loop p90 200.6 s).
+
+    Two things have to hold at once, and the first is the one the old code passed
+    while a round was being cut: a matrix reported `fits yes` must re-cost under
+    window x PROJECTION_MARGIN at the priors the report names. The second is that a
+    mid-matrix cut still takes lint-INVALID tasks: `order_tasks_for_coverage` is the
+    same function the runners start from, so the tail it leaves at the end is what a
+    deadline takes, and that tail must share no task with what the lint calls valid.
+    """
+    priors = run_round.derive_trial_priors(_prior_ledger(
+        tmp_path / "ledger.jsonl", direct_secs=28.0, sdk_secs=200.6))
+    bench = tmp_path / "bench"
+    bench.mkdir()
+    tasks = (_write_tasks(bench, 15) + _write_tasks(bench, 5, prefix="bench_rt", runtime=True))
+    window = 1431.0
+    kept, proj, dropped = run_round.fit_matrix(4, tasks, "auto", 15,
+                                              window_seconds=window, priors=priors)
+    assert proj["priors"] is priors
+    if proj["fits"]:
+        recount = run_round.project_matrix(4, kept, "auto", 15,
+                                           window_seconds=window, priors=priors)
+        assert recount["projected_seconds"] <= window * run_round.PROJECTION_MARGIN
+        assert recount["direct_trial_seconds"] == priors.direct.seconds
+        assert recount["sdk_trial_seconds"] == priors.sdk.seconds
+    else:
+        assert proj["shrink_stopped_early"], \
+            "a matrix that stops fitting has to say why shrinking stopped"
+
+    # The lint's own rules are not what is under test here — which end of the order
+    # a cut takes is — so the valid pool is stubbed the way the deadline test above
+    # stubs it: the first 15 ids valid, the 5 runtime ones not. `valid_task_ids` is
+    # the function `run()` calls, so the stub is the same seam production uses.
+    valid = {t["id"] for t in tasks[:15]}
+    import sys as _sys
+    import types
+    stub = types.ModuleType("scripts.autoresearch.bench_lint")
+    stub.valid_task_ids = lambda _d: set(valid)
+    monkeypatch.setitem(_sys.modules, "scripts.autoresearch.bench_lint", stub)
+    ordered = run_round.order_tasks_for_coverage(tasks, valid)
+    cut = ordered[-5:]                                    # a cut that takes 5
+    assert not ({t["id"] for t in cut} & valid), [t["id"] for t in cut]
+    assert {t["id"] for t in cut} == {t["id"] for t in tasks[-5:]}
