@@ -1,9 +1,20 @@
 """Guardian failure predicates — the arithmetic of when to roll back.
 
 These are pure functions of a snapshot dict precisely so every branch is
-table-testable without a running system. The drill
-(`scripts/guardian_drill.py`) proves the guardian *acts*; this file proves it
-*decides* correctly.
+table-testable without a running system. What used to be named here as the proof
+that the guardian *acts* — a drill script under `scripts/` — has never existed in
+git history, so this file was the only place that script was ever referenced. The
+drill that does exist is the automod gate's `drill` rung,
+`scripts/automod/rehearse.py`, and it deliberately does NOT file: it passes
+`--no-external-alerts` (`agent-services/guardian/guardian.py:1390`) so a rehearsal
+cannot put a phantom item on the board, which is what
+`test_the_drill_passes_no_external_alerts` pins.
+
+So the filing path is proven here, not by a drill:
+`test_the_guardians_captured_body_files_itself_through_the_real_route` replays the
+guardian's own POST body through the real
+`app/routers/backlog.py::backlog_task_create` and asserts the task file the route
+wrote. This file proves the guardian *decides* correctly.
 
 Process-info dicts here are shaped like real `getAllProcessInfo` output,
 including the `start`/`now`/`spawnerr`/`group` fields the predicate reads.
@@ -1288,6 +1299,209 @@ def test_a_defaulted_name_from_the_board_reads_as_a_failed_filing(tmp_path):
     assert res["backlog"] is False, (
         "a board that answered with someone else's task was reported as a "
         "delivered guardian filing")
+
+
+# ── The guardian-to-board contract, replayed through the real route (#1703) ───
+#
+# `notify.py` and `app/routers/backlog.py` run in different processes and share one
+# thing: a JSON shape. Until #1703 each half was pinned only against a stand-in for
+# the other — the tests above POST into `_stub_board`, which answers a hand-written
+# dict and never writes a file, while the route-side tests
+# (`tests/test_backlog_okf_frontmatter.py`, `tests/test_backlog_route_cache.py`)
+# POST payloads they wrote themselves and name `notify.py` only in a docstring. So
+# an edit to either side that desynchronised the keys passed the gate green: the two
+# sets of fixtures never met. These tests meet them in one run — the guardian's
+# captured bytes go into the real route.
+
+
+class _CapturedRequest:
+    """The one thing `backlog_task_create` asks of its argument: `await request.json()`.
+
+    It holds on to the object it was handed — `received` — so a test can assert the
+    route was given the guardian's captured body *itself*. Rebuilding the payload
+    from a literal would satisfy every other assertion in the file and leave this
+    seam unpinned, which is the failure mode the whole section exists to close.
+    """
+
+    def __init__(self, payload: dict):
+        self.received = payload
+
+    async def json(self) -> dict:
+        return self.received
+
+
+def _replay_on_the_route(payload: dict, board_dir, monkeypatch):
+    """Feed `payload` to the real `backlog_task_create` and return (request, reply dict).
+
+    Two monkeypatches, both required: `_BACKLOG_DIR` is where the file lands (the
+    real one is the live vault board), and `_backlog_board_map()` is a corpus scan of
+    the whole vault that the route consults for the board name — patched to empty
+    exactly as `tests/test_backlog_okf_frontmatter.py::http_board` does it, so a
+    guardian create carrying no `board` key resolves to `DEFAULT_BOARD` without
+    reading the real corpus.
+    """
+    import asyncio
+    import json
+
+    import app.routers.backlog as BR
+
+    monkeypatch.setattr(BR, "_BACKLOG_DIR", board_dir)
+    monkeypatch.setattr(BR, "_backlog_board_map", lambda: {})
+    request = _CapturedRequest(payload)
+    response = asyncio.run(BR.backlog_task_create(request))
+    assert response.status_code == 200, response.body
+    return request, json.loads(response.body)
+
+
+def _filed_task(path):
+    """(front matter dict, first line of the body) for a file the route wrote."""
+    import re
+
+    import yaml
+
+    fence = re.compile(r"\A---\n(.*?)\n---\n", re.S)
+    text = path.read_text(encoding="utf-8")
+    match = fence.match(text)
+    assert match, f"{path.name} opens with no front matter fence:\n{text[:200]}"
+    return yaml.safe_load(match.group(1)), text[match.end():].lstrip().splitlines()[0]
+
+
+def _assert_reply_reads_as_a_filing(reply: dict) -> None:
+    """The verdict `notify.py:547-551` reaches, stated once, for both of its tests.
+
+    `_backlog_task` returns True only on `success is True` AND an `id` that is an
+    `int`, not a `bool`, and greater than zero. Shared by the route replay below and
+    by `test_a_reply_of_success_false_with_a_positive_id_fails_the_verdict`, whose
+    whole point is that a positive id is not enough — a reply of
+    `{"success": false, "id": 7}` has to fail *this* assertion, not a looser one
+    written beside it.
+    """
+    assert reply.get("success") is True, f"`success` is not True: {reply!r}"
+    row_id = reply.get("id")
+    assert (isinstance(row_id, int) and not isinstance(row_id, bool)
+            and row_id > 0), f"`id` is not a positive non-bool int: {reply!r}"
+
+
+def test_the_guardians_captured_body_files_itself_through_the_real_route(
+        tmp_path, monkeypatch):
+    """Clauses 1-3 of #1703: one payload, generated by the guardian, read by the route.
+
+    The request is produced by the real thing — `Notifier.alert` over the loopback
+    seam in `_stub_board`, whose `seen["body"]` is the decoded JSON the guardian
+    actually sent — and those bytes, unedited, are what the real
+    `backlog_task_create` receives. Nothing here copies a dict.
+
+    The reply is then asserted with the same helper the guardian's own decision uses
+    (clause 2), and the file the route wrote is asserted too (clause 3), because the
+    reply alone cannot see key drift: the endpoint defaults a nameless create to
+    `"New Task"` (`app/routers/backlog.py:707`) and answers 200 with an id either
+    way. The second half of this test demonstrates that on the same route — a payload
+    sending `title`/`body` instead of `name`/`description` still gets `success: true`
+    and a positive id, and writes `# New Task` at `status: draft`. Only the file
+    assertion tells those two filings apart, which is why it is in the test and why
+    production drift detection stays owed ruling 2 on #1612.
+    """
+    with _stub_board(tmp_path, {"success": True, "id": 999}) as (server, seen):
+        res = _board_notifier(server, tmp_path).alert(
+            "error", "Service down, but no promotion to revert", NEEDS_HUMAN_BODY)
+    assert res["backlog"] is True, f"the guardian did not report a filing: {res}"
+    assert seen.get("path") == "/api/backlog/task-create", seen
+
+    request, reply = _replay_on_the_route(
+        seen["body"], tmp_path / "board", monkeypatch)
+    assert request.received is seen["body"], (
+        "the route was handed something other than the guardian's captured body, so "
+        "what follows describes a payload the guardian never sent")
+    _assert_reply_reads_as_a_filing(reply)
+
+    written = sorted((tmp_path / "board").glob("*.md"))
+    assert len(written) == 1, f"the route wrote {len(written)} files: {written}"
+    fm, h1 = _filed_task(written[0])
+    assert h1 == "# [guardian] Service down, but no promotion to revert", (
+        f"the filed item's H1 is not the alert's title: {h1!r}")
+    assert fm["status"] == "up_next", fm
+    assert fm["priority"] == "high", fm
+    assert "needs a human" in written[0].read_text(encoding="utf-8"), (
+        "the `description` key did not reach the file's body, so the alert text the "
+        "board shows a human is not the alert text the guardian wrote")
+
+    # The falsifying half, on the same route and the same helpers: the drifted keys
+    # the reply cannot see. `status` is absent because a payload renamed wholesale
+    # sends no status either, and the route defaults that field to `draft`.
+    drifted_payload = {"title": seen["body"]["name"],
+                       "body": seen["body"]["description"]}
+    drifted_request, drifted_reply = _replay_on_the_route(
+        drifted_payload, tmp_path / "board-drifted", monkeypatch)
+    assert drifted_request.received is drifted_payload
+    _assert_reply_reads_as_a_filing(drifted_reply)
+    drifted = sorted((tmp_path / "board-drifted").glob("*.md"))
+    assert len(drifted) == 1, drifted
+    drifted_fm, drifted_h1 = _filed_task(drifted[0])
+    assert drifted_h1 == "# New Task", (
+        "the drifted payload was supposed to show the reply's blindness to a "
+        f"defaulted name, got {drifted_h1!r}")
+    assert drifted_fm["status"] == "draft", drifted_fm
+
+
+def test_a_reply_of_success_false_with_a_positive_id_fails_the_verdict(tmp_path):
+    """Clause 4 of #1703: a positive id is not a filing on its own.
+
+    `{"success": false, "id": 7}` is the reply the pre-#1612 guard accepted — it read
+    a `name` the endpoint never sends, took the `if name else True` default, and
+    never consulted `success`. It is also not in the existing parametrised reply
+    table further down this file, which pairs a false `success` with no id at all
+    (`test_a_board_reply_saying_it_failed_is_not_delivered_though_it_was_2xx`); the
+    id on the row is what makes it a distinct case, since the id is now one of the
+    two fields the verdict is made of.
+
+    Both halves are asserted: the guardian's own verdict across the loopback seam is
+    False, and the shared assertion the route replay is graded by
+    (`_assert_reply_reads_as_a_filing`) fails on it. Proving only the first would
+    leave clause 2's assertion free to pass a reply the guardian rejects.
+    """
+    reply = {"success": False, "id": 7}
+
+    assert _board_verdict(tmp_path, reply) is False, (
+        "a board that answered it failed, while handing back an id, read as a "
+        "delivered guardian filing")
+
+    with pytest.raises(AssertionError, match="not True"):
+        _assert_reply_reads_as_a_filing(reply)
+
+
+def test_the_module_docstring_names_the_drill_that_exists_not_the_phantom():
+    """Clause 5 of #1703: the file's own header may not cite a script that never was.
+
+    `git log --all --oneline -- '*guardian_drill*'` returns nothing and no tracked
+    path matches it — until #1703 this docstring was the sole reference to that file
+    anywhere in the tree, which is the sort of claim a reader trusts and a future
+    round then writes a test against. The replacement sentence has to hold up too, so
+    the script it does name is checked to exist and to send the flag it is cited as
+    sending. The check is scoped to the module docstring rather than the whole file
+    because this test has to spell the phantom's name to rule it out.
+    """
+    import sys
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parent.parent
+    doc = sys.modules[__name__].__doc__ or ""
+    assert "guardian_drill" not in doc, (
+        "the module docstring cites scripts/guardian_drill.py again; `git log --all "
+        "-- '*guardian_drill*'` is empty — that script has never existed")
+    assert "scripts/automod/rehearse.py" in doc, (
+        "the docstring does not name the drill that really runs the guardian")
+    assert "--no-external-alerts" in doc, (
+        "the docstring does not record that the drill deliberately does not file")
+    assert "guardian.py:1390" in doc, (
+        "the docstring does not point at where that flag is parsed")
+    assert (repo / "scripts" / "automod" / "rehearse.py").is_file(), (
+        "scripts/automod/rehearse.py, named by the docstring, is not on disk")
+    guardian_src = (repo / "agent-services" / "guardian" /
+                    "guardian.py").read_text(encoding="utf-8")
+    assert "--no-external-alerts" in guardian_src, (
+        "guardian.py no longer parses the flag the docstring says the drill passes")
+    assert ("test_the_guardians_captured_body_files_itself_through_the_real_route"
+            in doc), "the docstring does not name the test that proves the filing"
 
 
 def test_the_three_sites_that_cannot_act_all_ask_for_a_human():
