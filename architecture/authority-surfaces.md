@@ -63,16 +63,16 @@ the useful part of the doc.
   asks `write_deny_reason`, so membership in the set does not mean the file is
   closed. The prompt's copy of the same rule is still prose, and prose is checked by
   `tests/test_prompt_surface_guard.py`, not by the code.
-- **Loopback.** mTLS was dropped on 2026-06-14 (`server.py:73-75`,
+- **Loopback.** mTLS was dropped on 2026-06-14 (`server.py:75-76`,
   [[mission-control]]), so no origin presents a certificate: the control is
-  `ApiPeerGate`, which admits `/api/*` from a loopback peer or a peer inside
-  `server.trusted_networks` (default Tailscale's `100.64.0.0/10`) and checks the
+  `ApiPeerGate`, which decides on the peer address and nothing else
+  (`_is_trusted_peer`) and admits `/api/*` from a loopback peer or a peer inside
+  `server.trusted_networks` (default Tailscale's `100.64.0.0/10`), checking the
   per-device allowlist only when a `x-client-fingerprint` arrives anyway.
   `chrome-extension`'s service worker reaches `http://127.0.0.1:8080` because it
-  is loopback, not because a cert was waived for it ([[browser-side-panel]] still
-  says the former — filed). The egress
-  policy and the browser guard both reason about private ranges, from separate
-  code.
+  is loopback, not because a cert was waived for it ([[browser-side-panel]]). The
+  egress policy and the browser guard both reason about private ranges, from
+  separate code.
 - **Compaction thresholds.** The values live in `config.yaml`; `app/compaction.py`
   carries `setdefault` fallbacks, and the two already differ
   (`context-window.md` names the pair). Same shape, different subject.
@@ -138,3 +138,11 @@ spends an unattended round discovering that.
   write deny-set (it does not, by test-pinned design — filed), and the two
   `protected_paths.py` line numbers; row 5's reader count and the never-write
   path set's enforcement point (`spec.py::DENIED_GLOBS`) were made precise.
+- **2026-09-28 — #1759 (follow-up on the same row).** The Loopback bullet now says
+  out loud what it decides on (the peer address, `_is_trusted_peer`) and its
+  `server.py` citation was re-rooted to the lines holding the drop; the note
+  recording that [[browser-side-panel]] still carried the old claim is gone, that
+  doc being corrected by the same change. Both docs are now in
+  `tests/test_stale_mtls_comment_claims.py`, whose ban is on the claim shape — an
+  exemption for some peer, or a surviving requirement to produce a certificate —
+  so the history above stays writable while the drift cannot come back.

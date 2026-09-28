@@ -1,4 +1,5 @@
-"""The two client trees must not describe a middleware that no longer exists.
+"""Client code and the architecture docs must not describe a certificate
+exemption that no longer exists.
 
 Both `chrome-extension/src/background/lloyd-client.ts` and `web/src/api.ts` told
 a reader that loopback works because it "bypasses the mTLS middleware at
@@ -15,6 +16,18 @@ sentence verbatim and is in the same shape, but `chrome-extension/**` is not in
 carries that comment edit and the header node that goes with it. Add the path
 back to `CORPUS` when it lands: a corpus narrowed by a scope rule is the one
 thing here that is not about the comments.
+
+The corpus widened to two architecture docs (#1759): `architecture/browser-side-panel.md`
+carried the same false mechanism ("`server.py` skips mTLS for loopback") in the
+section a reader goes to for "why is plain HTTP to :8080 allowed", and
+`architecture/authority-surfaces.md` — the doc whose own last line warns that
+"two docs describing one guard in full is how one gets corrected and the other
+does not" — carried it too. Those two are a SEPARATE corpus with a different ban,
+because the true history must stay readable in them: `infrastructure.md`,
+`mission-control.md` and the Loopback row all say "mTLS was dropped on
+2026-06-14", which is prose about a dead mechanism and has to survive. What is
+forbidden there is the claim shape — an exemption for loopback, or an origin that
+still has to present a certificate — not the word.
 
 These tests pin the corrected wording and then forbid the stale shape, and the
 corpus is asserted tracked and non-empty before anything is searched, with a
@@ -46,6 +59,45 @@ STALE_MECHANISM = re.compile(r"mtls", re.IGNORECASE)
 #: reference, the line number is the one that moves under an unrelated edit.
 LINE_CITATION = re.compile(r"server\.py\s*:\s*\d")
 
+BROWSER_PANEL = "architecture/browser-side-panel.md"
+AUTHORITY = "architecture/authority-surfaces.md"
+
+#: The two docs that restate the network boundary (#1759). Separate from
+#: `CORPUS` on purpose: the correct drop history has to stay findable in them, so
+#: what is banned here is the claim, not the mechanism's name.
+#: `authority-surfaces.md` owns the rule and `browser-side-panel.md` answers "why
+#: is plain HTTP to :8080 allowed" — which is why the copy in the panel doc is
+#: load-bearing and why it may not copy the list.
+ARCH_DOCS = (BROWSER_PANEL, AUTHORITY)
+
+#: "server.py skips mTLS for loopback": an exemption for one peer from a check
+#: that asks nobody anything. The mechanism died 2026-06-14; `ApiPeerGate` has
+#: decided on `scope["client"]` since 2026-09-20.
+STALE_EXEMPTION = re.compile(
+    r"skip\w*\s+mTLS|mTLS[^.]{0,60}skip\w*|bypass\w*[^.]{0,60}\bcert", re.IGNORECASE)
+#: The surviving half of the same claim: that some other origin is still required
+#: to produce a certificate, and so that the certless panel call is an exception.
+STALE_CERT_REQUIRED = re.compile(
+    r"must\s+present\s+(?:one|a\s+cert|a\s+certificate|a\s+client\s+cert)", re.IGNORECASE)
+#: A CIDR literal. The trusted-network list has one home
+#: (`server.trusted_networks`, described once in `authority-surfaces.md`); a
+#: second copy in prose is the thing that went stale here.
+CIDR = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}/\d{1,2}\b")
+
+#: The two sentences as this item found them, kept so the patterns above are
+#: proven to fire on the wording that actually shipped rather than on a
+#: paraphrase. The first is `browser-side-panel.md` at `07f90d8b`
+#: (`git grep -n "skips mTLS" architecture/`); the second is the older Loopback
+#: bullet of `authority-surfaces.md`, quoted from the item.
+STALE_SAMPLES = (
+    "`server.py` skips mTLS for loopback, so loopback is the only origin that "
+    "reaches the API without a cert, and an extension's service worker cannot "
+    "present one.",
+    "so `chrome-extension`'s service worker can call `http://127.0.0.1:8080` "
+    "with no client certificate ([[browser-side-panel]]) while every other "
+    "origin must present one.",
+)
+
 
 def _tracked_text(rel_path: str) -> str:
     """Read one corpus file, asserting first that it is really in the corpus.
@@ -76,6 +128,22 @@ def _comment_block_above(text: str, anchor: str) -> str:
     block = "\n".join(lines[start:idx])
     assert block.strip(), f"no comment block above {anchor!r} — the anchor moved"
     return block
+
+
+def _section(text: str, heading: str, stops: tuple[str, ...] = ("\n## ",)) -> str:
+    """One block of a markdown doc, from `heading` to the earliest of `stops`.
+
+    Asserted rather than returned empty — a renamed or deleted heading would
+    otherwise hand the caller a blank string and a test that passes on it. The
+    caller names the stop so a bullet-level claim is not satisfied by prose in
+    the bullets or paragraphs sitting after it.
+    """
+    start = text.find(heading)
+    assert start >= 0, f"{heading!r} vanished from the doc — the heading was renamed"
+    rest = text[start:]
+    ends = [rest.find(stop, len(heading)) for stop in stops]
+    ends = [e for e in ends if e >= 0]
+    return rest[:min(ends)] if ends else rest
 
 
 def test_web_api_base_comment_states_the_peer_rule_for_loopback():
@@ -131,3 +199,114 @@ def test_web_api_file_carries_no_stale_mechanism_or_line_citation():
     assert any(name == "server.py" or name.startswith("architecture/") for name in outside), (
         "the live description of the drop (server.py / architecture/) must remain findable"
     )
+
+
+# ── #1759: the same stale claim, in the docs that describe the guard ────────── #
+
+
+def test_the_architecture_doc_bans_fire_on_the_wording_that_shipped():
+    """Negative control for the two claim patterns: they must match the sentences
+    this item found on the tree, verbatim. Without this the 0-hit assertions
+    below could be satisfied by a pattern that matches nothing, which is the
+    failure mode the doc drift itself is an instance of."""
+    assert len(STALE_SAMPLES) == 2, "the fixtures are the two shipped sentences; do not pad them"
+    assert STALE_EXEMPTION.search(STALE_SAMPLES[0]), (
+        "`skips mTLS for loopback` no longer trips the exemption ban — the ban went vacuous")
+    assert STALE_CERT_REQUIRED.search(STALE_SAMPLES[1]), (
+        "`every other origin must present one` no longer trips the requirement ban "
+        "— the ban went vacuous")
+    assert STALE_CERT_REQUIRED.search(STALE_SAMPLES[0]) or STALE_EXEMPTION.search(STALE_SAMPLES[0]), (
+        "the panel-doc sentence must trip at least one ban")
+
+
+def test_no_architecture_doc_claims_a_certificate_skip_or_a_cert_requirement():
+    """Clause 3 (the drift ban), and the acceptance check written down: no doc
+    under `architecture/` may claim that client-certificate auth is skipped or
+    bypassed for a peer, or that some origin still has to present a certificate.
+
+    The positive control is the half that makes a 0-hit meaningful: the mechanism
+    name must STILL be findable under `architecture/`, because
+    `infrastructure.md` and `mission-control.md` carry the true history ("mTLS
+    was dropped on 2026-06-14") and a later sweep that 'fixes' those into silence
+    would turn every assertion here green and the docs unreadable."""
+    for rel_path in ARCH_DOCS:
+        text = _tracked_text(rel_path)
+        exempted = STALE_EXEMPTION.search(text)
+        assert not exempted, (
+            f"{rel_path} describes a certificate exemption again: {exempted.group(0)!r} — "
+            "the control is ApiPeerGate's peer-address rule, which skips nothing")
+        required = STALE_CERT_REQUIRED.search(text)
+        assert not required, (
+            f"{rel_path} says some origin must still present a certificate: "
+            f"{required.group(0)!r} — the mechanism was dropped 2026-06-14")
+
+    listing = subprocess.run(
+        ["git", "-C", str(REPO), "grep", "-i", "-l", "mtls", "--", "architecture/"],
+        capture_output=True, text=True,
+    )
+    assert listing.returncode == 0, (
+        f"`git grep -i -l mtls -- architecture/` found nothing at all: {listing.stderr.strip()}")
+    hits = {ln.strip() for ln in listing.stdout.splitlines() if ln.strip()}
+    carriers = hits - set(ARCH_DOCS)
+    assert carriers, (
+        "no architecture doc outside the two under ban mentions the dropped mechanism: the "
+        "true history ('mTLS was dropped on 2026-06-14') has to stay findable somewhere, or "
+        "the 0 hits above are a doc set gone silent rather than a claim corrected"
+    )
+    assert "architecture/infrastructure.md" in carriers or "architecture/mission-control.md" in carriers, (
+        f"the docs that carry the drop history are not among the hits: {sorted(hits)}")
+
+
+def test_panel_doc_names_the_peer_gate_that_admits_the_loopback_call():
+    """Clause 1: §Getting to the backend must name the live control by symbol —
+    `ApiPeerGate`, deciding through `_is_trusted_peer` on the peer address — since
+    that section is the answer to "why does the panel get to use plain HTTP".
+    Naming the symbols is also what keeps the sentence true when the line numbers
+    around them move."""
+    # Flattened: markdown wraps, and a phrase pinned across a hard wrap would
+    # fail for a reason that has nothing to do with its claim.
+    section = " ".join(_section(_tracked_text(BROWSER_PANEL),
+                               "## Getting to the backend").split()).lower()
+    assert "apipeergate" in section, "the section must name ApiPeerGate as what admits the call"
+    assert "_is_trusted_peer" in section, "the section must name the decision function"
+    assert "loopback" in section, "the section must cover the loopback case"
+    assert "peer address" in section, "the section must say the rule is the peer address"
+    assert "no client certificate" in section, (
+        "the section must say the panel presents no certificate and none is asked")
+
+
+def test_panel_doc_defers_the_network_list_and_the_cert_history():
+    """Clause 4: the panel doc points at `[[authority-surfaces]]` for the boundary
+    and `[[mission-control]]` for the certificate history, and copies neither. A
+    CIDR literal in this file is a second definition of the trusted set, which is
+    exactly what drifted the first time."""
+    text = _tracked_text(BROWSER_PANEL)
+    copied = CIDR.search(text)
+    assert not copied, (
+        f"{BROWSER_PANEL} restates the trusted-network list ({copied.group(0)!r}) instead "
+        "of deferring it to [[authority-surfaces]]")
+    assert "[[authority-surfaces]]" in text, "the network rule belongs to [[authority-surfaces]]"
+    assert "[[mission-control]]" in text, "the certificate history belongs to [[mission-control]]"
+
+    # Control over the ban itself: the pattern does fire on a CIDR, and the one
+    # place it is allowed to fire is the doc that owns the list.
+    authority = _tracked_text(AUTHORITY)
+    assert CIDR.search(authority), (
+        f"{AUTHORITY} no longer carries the trusted-network default, so the ban above "
+        "is firing on an empty pattern rather than on a doc that kept its copy")
+
+
+def test_authority_loopback_bullet_states_the_peer_address_rule():
+    """Clause 2: the row that owns the boundary has to state it as the peer
+    address — loopback, or a network in `server.trusted_networks` — and name both
+    halves of the live control (`ApiPeerGate`, deciding through
+    `_is_trusted_peer`). This is the bullet `browser-side-panel.md` defers to, so
+    if it goes vague the deferral points at nothing."""
+    bullet = " ".join(_section(_tracked_text(AUTHORITY), "- **Loopback.**",
+                              stops=("\n- ", "\n## ")).split()).lower()
+    assert "apipeergate" in bullet, "the bullet must name the gate"
+    assert "_is_trusted_peer" in bullet, "the bullet must name the decision function"
+    assert "peer address" in bullet, "the bullet must say the rule is the peer address"
+    assert "loopback" in bullet, "the bullet must cover the loopback case"
+    assert "server.trusted_networks" in bullet, (
+        "the bullet must name the config key that widens the trusted set")

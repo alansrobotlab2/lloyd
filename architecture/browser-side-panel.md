@@ -74,11 +74,17 @@ like "same page" for every malformed URL.
 ## Getting to the backend
 
 `lloyd-client.ts` and the panel both talk to `http://127.0.0.1:8080/api` with no
-client certificate. That is not an exception made for the extension: `server.py`
-skips mTLS for loopback, so loopback is the only origin that reaches the API
-without a cert, and an extension's service worker cannot present one. See
-[[mission-control]] for the certificate story and [[authority-surfaces]] for why
-that exemption is the surface it is.
+client certificate, and none is asked of them. What admits the call is
+`ApiPeerGate` in `server.py`, which decides on the peer address and nothing else
+(`_is_trusted_peer`, never a `Host` or `X-Forwarded-For`): loopback is trusted, and
+so is any network the backend is configured to trust. That is why the extension's
+service worker gets through — its requests arrive from loopback — and it is why a
+browser on the tailnet with no certificate gets through too. Neither is an
+exception made for the panel, and the panel is not the only certless caller.
+Which networks are trusted, and what certificate mechanism was retired and when,
+belong to [[authority-surfaces]] (the Loopback entry) and to the transport history
+in [[mission-control]] and [[infrastructure]]; this doc points at them rather than
+copying them, so a change to the boundary has one place to be corrected.
 
 ## Build, and what is in git
 
@@ -130,3 +136,13 @@ re-check.
   `architecture/background-runs.md` mentions the side panel, by two words rather
   than the compound, so the true claim was "no doc owns it". The manifest
   absence above was measured in this worktree, not inferred from the item.
+- **2026-09-28 — corrected (#1759).** §Getting to the backend claimed
+  `server.py` skips client-certificate auth for loopback, and that an extension
+  could not present one anyway. Neither is true: the mechanism was retired for
+  everyone on 2026-06-14 and `ApiPeerGate` has decided on the peer address since
+  2026-09-20, so the sentence described a control that had not existed for
+  fifteen months, in the one place a reader asks why plain HTTP to `:8080` is
+  allowed. The copy in [[authority-surfaces]] was corrected by the review pass
+  that filed this; the panel's copy survived it, which is that doc's own
+  two-docs-one-guard failure. `tests/test_stale_mtls_comment_claims.py` now
+  covers both files, and keeps the true history in the two docs that tell it.
