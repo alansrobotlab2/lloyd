@@ -53,14 +53,17 @@ Three things keep the verdict worth reading
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import secrets
 import shlex
 import subprocess
 import time
+import tokenize
 import urllib.error
 import urllib.request
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -441,13 +444,267 @@ def added_test_denials(parsed: dict, *, added_tests: int) -> list[str]:
     return out
 
 
+# ── the constant-mirroring assertion ────────────────────────────────────────
+# The five literal patterns spell "cannot fail" the way a person writes it when
+# they give up. Pocock's first shape never gives up:
+#
+#     EXPECTED_TITLE = "widget"                  # same file, top of it
+#     def test_parse():
+#         assert parse(open_body()) == EXPECTED_TITLE
+#
+# The assertion can fail and never will: the constant and the expectation were
+# both written by reading the same implementation, so the test pins the reading
+# rather than the behaviour — change the code and the "expected" value moves
+# with it. No regex in `_HONESTY_PATTERNS` sees it, and the only thing that ever
+# did is the token-priced `test_honesty` class. Over 2026-09-11→09-27 the ledger
+# carries 708 events with a grader-authored `test_honesty` list against 73
+# carrying any deterministic precheck line at all, so this moves one shape out
+# of the priced half and into the free one.
+#
+# The shape a pattern CAN pin cheaply, and the only one pinned here: the
+# compared operand is a bare NAME, that NAME is bound by a module-level ALL_CAPS
+# assignment in the SAME file, and what it is compared against holds a call.
+# A name imported from the module under test (`from app.m import MAX_ITEMS`) is
+# the ordinary way to assert a public contract and stays silent, so does a
+# literal typed into the assertion itself, and so does an `in`/`not in` against
+# a constant table — a membership table is usually the point of the test, not a
+# mirror of it. Everything else Pocock names (indexes grepped out of source
+# text, a mock that deletes an API's error modes) needs to understand what the
+# code means, which is the grader's job and stays its job.
+#
+# Advisory severity, deliberately: #866 and #1204 are what a `blocking` one
+# costs, and whether this earns a refusal is settled by a week of real rounds,
+# not by the commit that adds it.
+_CONSTANT_MIRROR_SEVERITY = "advisory"
+_CONSTANT_ASSIGN_RX = re.compile(r"^(?P<name>[A-Z][A-Z0-9_]*)\s*(?::[^=]+)?=(?!=)")
+_IMPORT_STMT_RX = re.compile(r"^(?:from\s[\w.]+\s)?import\b")
+_ASSERT_STMT_RX = re.compile(r"assert\b")
+# Longest spelling first, so `<=` is never read as `<` and `is not` never as
+# `is`. No `in`/`not in`: see the note above.
+_COMPARISON_OPS: tuple[str, ...] = ("==", "!=", "<=", ">=", "is not", "is", "<", ">")
+# The operand holds a call — `foo(`, `obj.foo(`, `f(g(` — which is what makes
+# the compared value something the code produced rather than something the test
+# already had in hand.
+_CALL_RX = re.compile(r"[^\W\d_]\s*\(")
+
+
+# Token types whose text is prose rather than code. Python 3.12 splits an
+# f-string into start/middle/end, so the literal prose between the braces is a
+# token of its own and gets blanked like any other literal, while the
+# expressions inside the braces stay visible.
+_BLANKED_TOKENS: set[int] = {tokenize.STRING, tokenize.COMMENT}
+for _fstring in ("FSTRING_START", "FSTRING_MIDDLE", "FSTRING_END"):
+    _tok_type = getattr(tokenize, _fstring, None)
+    if _tok_type is not None:
+        _BLANKED_TOKENS.add(_tok_type)
+
+
+def _blank_literals(text: str) -> str:
+    """`text` with every string literal and `#` comment blanked to spaces,
+    keeping the line numbering one newline for one — a caller reports the line
+    a finding is on, and a blanked file that reflowed would name the wrong one.
+
+    Off `tokenize`, deliberately, and not off a char-wise quote scan: a
+    docstring holding a double quote — a three-quote opener, then the word
+    `widget` inside a pair of double quotes, then the closer — moves such a
+    scanner's idea of where the literal ends, the flipped state then runs to
+    the end of the file, and which way it hurts depends on the parity of the
+    quotes it saw. The first version of this pass blanked the real
+    `pytest.skip(` at `tests/_live_data.py:136` out of the skip patterns'
+    reach, and in the other direction read a round's own test fixtures as newly
+    dishonest code and refused the round for testing the thing that refused it.
+
+    Returns `text` unchanged when the tokenizer cannot walk it (an
+    unterminated literal, a file cut mid-statement): overcounting is the
+    failure a reader notices, a silent miss is not.
+    """
+    if not text:
+        return text
+    body = text if text.endswith("\n") else text + "\n"
+    try:
+        toks = list(tokenize.generate_tokens(io.StringIO(body).readline))
+    except (tokenize.TokenError, IndentationError, SyntaxError, ValueError):
+        return text
+    rows = [list(ln) for ln in body.splitlines(keepends=True)]
+    for tok in toks:
+        if tok.type not in _BLANKED_TOKENS:
+            continue
+        (srow, scol), (erow, ecol) = tok.start, tok.end
+        for r in range(srow, min(erow, len(rows)) + 1):
+            row = rows[r - 1]
+            lo, hi = (scol if r == srow else 0), (ecol if r == erow else len(row))
+            for c in range(max(lo, 0), min(hi, len(row))):
+                if row[c] not in "\r\n":
+                    row[c] = " "
+    return "".join("".join(r) for r in rows)[:len(text)]
+
+
+def _open_depth(code: str) -> int:
+    """Brackets still open at the end of already-blanked `code`."""
+    return (code.count("(") - code.count(")") + code.count("[") - code.count("]")
+            + code.count("{") - code.count("}"))
+
+
+def _code_only(text: str) -> tuple[str, int]:
+    """`text` reduced to its code — literals and comments blanked, see
+    `_blank_literals` — and the bracket depth still open at its end. Being
+    blind inside literals and comments is the point: it is the difference
+    between reading `assert f(x) == N` and reading the `==` inside `f("a == b")`,
+    the `(` inside `f("(")`, or the `== EXPECTED` in the comment beside an
+    assertion that already does."""
+    code = _blank_literals(text)
+    return code, _open_depth(code)
+
+
+def _module_constants(code: str) -> dict[str, int]:
+    """`{NAME: line}` for each module-level ALL_CAPS binding in blanked `code`.
+    Indent-zero is what "module-level" means: a test-local `TOTAL = 3` is not a
+    module constant. An import line is skipped outright — a name imported from
+    the module under test is how you assert its public contract. Taking the
+    blanked text is what keeps a `SOME_THING = ...` line written inside a
+    docstring or a comment out of the table.
+    """
+    out: dict[str, int] = {}
+    for i, ln in enumerate(code.splitlines(), 1):
+        if _IMPORT_STMT_RX.match(ln):
+            continue
+        m = _CONSTANT_ASSIGN_RX.match(ln)
+        if m:
+            out.setdefault(m.group("name"), i)
+    return out
+
+
+def _assertion_statements(code: str) -> list[tuple[int, str]]:
+    """Every `assert` statement in blanked `code`, joined across continuation
+    lines, as `(1-based first line, statement text)`. A statement is unfinished
+    while a bracket is open or the line ends in a backslash, so an assertion
+    written over three lines is still the one expression it is to Python. The
+    input is already blanked, so an `assert` that only exists in a docstring,
+    or a `>>>` doctest line, is not in it.
+    """
+    lines = code.splitlines()
+    out: list[tuple[int, str]] = []
+    i, n = 0, len(lines)
+    while i < n:
+        if _ASSERT_STMT_RX.match(lines[i].lstrip()):
+            stmt = lines[i]
+            j = i
+            while j + 1 < n and (_open_depth(stmt) > 0
+                                 or stmt.rstrip().endswith("\\")):
+                j += 1
+                stmt += "\n" + lines[j]
+            out.append((i + 1, stmt))
+            i = j + 1
+            continue
+        i += 1
+    return out
+
+
+def _match_comparison(text: str, i: int) -> str:
+    """The comparison operator starting at `i`, or "" — longest first, and a
+    word operator only at a word boundary, so `assert issue == 1` is read once
+    and not twice."""
+    for op in _COMPARISON_OPS:
+        if not text.startswith(op, i):
+            continue
+        if op[0].isalpha():
+            before = text[i - 1] if i else ""
+            after = (text[i + len(op)] if i + len(op) < len(text) else "")
+            if before.isalnum() or before == "_" or after.isalnum() or after == "_":
+                continue
+        return op
+    return ""
+
+
+def _comparison_operands(code: str) -> list[str]:
+    """The depth-0 operands of the comparison in `code`, in order, or `[]` when
+    it holds none. Depth-0 is the whole point: `assert f(a == b) == EXPECTED`
+    compares ONE thing, and the `==` inside the call belongs to the argument.
+    `code` is `_code_only`'s output, so a literal has already been blanked —
+    which is what the caller wants, because an inline literal is not a name.
+    """
+    parts: list[str] = []
+    start, depth, i, n = 0, 0, 0, len(code)
+    while i < n:
+        ch = code[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth == 0:
+            op = _match_comparison(code, i)
+            if op:
+                parts.append(code[start:i])
+                start = i + len(op)
+                i += len(op)
+                continue
+        i += 1
+    parts.append(code[start:])
+    if len(parts) < 2:
+        return []
+    return [p.strip() for p in parts]
+
+
+def _mirrored_assertions(code: str) -> list[tuple[int, int, str, str]]:
+    """`(assertion line, constant line, constant name, statement)` for each
+    assertion in blanked `code` (see `_code_only`) that mirrors one of its own
+    file's module constants: a bare constant name on one side of a comparison,
+    a call on the other. The statement text is the delta's identity — an
+    assertion whose text is unchanged between base and HEAD is the base's, not
+    this round's.
+    """
+    constants = _module_constants(code)
+    if not constants:
+        return []
+    out: list[tuple[int, int, str, str]] = []
+    for line, stmt in _assertion_statements(code):
+        operands = _comparison_operands(stmt)
+        for k, operand in enumerate(operands):
+            const_line = constants.get(operand)
+            if const_line is None:
+                continue
+            neighbours = [operands[j] for j in (k - 1, k + 1) if 0 <= j < len(operands)]
+            if not any(_CALL_RX.search(nb) for nb in neighbours):
+                continue
+            out.append((line, const_line, operand, " ".join(stmt.split())))
+            break
+    return out
+
+
+def _constant_mirror_findings(rel: str, post_code: str, pre_code: str) -> list[dict]:
+    """The mirrored assertions this round ADDED, delta-scoped the way the five
+    patterns are, over the two blanked versions of the file: the identity of a
+    mirrored assertion is its text, so a base that already carried N of them is
+    blamed for none, and an increase is blamed once, at the first assertion the
+    base did not already have."""
+    post_mirrors = _mirrored_assertions(post_code)
+    if not post_mirrors:
+        return []
+    surplus = (Counter((n, s) for _, _, n, s in post_mirrors)
+               - Counter((n, s) for _, _, n, s in _mirrored_assertions(pre_code)))
+    out: list[dict] = []
+    for line, const_line, name, norm in post_mirrors:
+        key = (name, norm)
+        if not surplus.get(key):
+            continue
+        surplus[key] -= 1
+        out.append({"file": rel, "line": line,
+                    "problem": (f"the assertion mirrors {name}, the same file's "
+                                f"module-level constant at line {const_line}, "
+                                f"instead of pinning the value the code produces"),
+                    "severity": _CONSTANT_MIRROR_SEVERITY})
+        break
+    return out
+
+
 def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
                       *, n_clauses: int = 0) -> list[dict]:
     """Findings no model is needed for, on the round's changed test files.
 
     Each pattern is counted in the post-image and in the base version and only
     an INCREASE is reported: a tolerated `xfail` that predates the round is not
-    this round's. The `def test_` delta is checked when the item has clauses —
+    this round's. The same delta arithmetic covers the constant-mirroring
+    detector. The `def test_` delta is checked when the item has clauses —
     a change to code under a contract that adds no test cannot have pinned it.
     """
     out: list[dict] = []
@@ -457,22 +714,33 @@ def honesty_prechecks(worktree: Path, base: str, changed_paths: list[str],
     added_tests = def_test_delta(worktree, base, changed_paths)
     for rel in tests:
         post, pre = _post_and_base(worktree, base, rel)
+        # The five patterns are counted in CODE, not in the file's prose. A
+        # round that adds a test FOR this checker has to write `pytest.skip(`,
+        # `assert True` and `or True` inside the source strings of that test —
+        # and this function runs on the round's own changed test files, so a
+        # file-level count read that round's fixtures as newly dishonest code
+        # and refused it for testing the thing that refused it. The same
+        # spellings as real code are still counted (see
+        # `test_a_pattern_spelled_in_a_string_is_not_counted_as_new_dishonest_code`).
+        post_code, _ = _code_only(post)
+        pre_code, _ = _code_only(pre)
         for pat, why, severity in _HONESTY_PATTERNS:
             rx = re.compile(pat, re.M)
-            n_post, n_pre = len(rx.findall(post)), len(rx.findall(pre))
+            n_post, n_pre = len(rx.findall(post_code)), len(rx.findall(pre_code))
             if n_post > n_pre:
-                if why in _SKIP_PROBLEMS and (_unconditional_skips(post, rx)
-                                              <= _unconditional_skips(pre, rx)):
+                if why in _SKIP_PROBLEMS and (_unconditional_skips(post_code, rx)
+                                              <= _unconditional_skips(pre_code, rx)):
                     severity = "advisory"
                     why += " (conditional; the grader judges the condition)"
                 # Name the first new occurrence's line.
                 line = 0
-                for i, ln in enumerate(post.splitlines(), 1):
+                for i, ln in enumerate(post_code.splitlines(), 1):
                     if rx.search(ln):
                         line = i
                         break
                 out.append({"file": rel, "line": line, "problem": why,
                             "severity": severity})
+        out.extend(_constant_mirror_findings(rel, post_code, pre_code))
         added_tests += max(0, len(re.findall(r"^\s*(?:async\s+)?def test_", post, re.M))
                            - len(re.findall(r"^\s*(?:async\s+)?def test_", pre, re.M)))
     code_changed = any(p.endswith(".py") and not TP.is_test_file(p, worktree)

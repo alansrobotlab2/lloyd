@@ -41,6 +41,37 @@ def _seams_first(monkeypatch):
 
 
 ROOT = Path(__file__).resolve().parent.parent
+HONESTY_FIXTURES = ROOT / "tests" / "fixtures" / "honesty"
+
+
+def _fixture(name: str) -> str:
+    """A measured test file's body, read from `tests/fixtures/honesty/`.
+
+    The bodies the honesty prechecks are measured against live there rather than
+    inline here because this file is itself one of the files `honesty_prechecks`
+    runs on, and the review rung computes them with the LIVE checkout's
+    `review.py` (#1755) — a round that changes that checker is graded by the
+    version it replaces, and the one still running counts the five dishonesty
+    patterns in the raw text of every changed test file, prose and string
+    literals included. A fixture spelled inline is therefore counted as newly
+    dishonest code and refuses the round that added it: that is how
+    `SM_20260928_210355` spent its second review attempt. A `.txt` is not a test
+    file (`testpaths.is_test_file` asks for `.py`), so each shape stays readable
+    in the code it is, and the node measures the real thing.
+    """
+    return (HONESTY_FIXTURES / name).read_text(encoding="utf-8")
+
+
+def _why(rx_fragment: str) -> str:
+    """The problem string the pattern table attaches to the pattern whose
+    regular expression contains `rx_fragment` — looked up off the table rather
+    than quoted here, for the same reason `_fixture` reads its bodies off disk.
+    Pass a fragment of the REGEX as `review.py` writes it (`skip\\(`, not the
+    spelling), and it is unique by construction: two matches is a table this
+    file can no longer read, and the node says so."""
+    hits = [why for pat, why, _sev in RV._HONESTY_PATTERNS if rx_fragment in pat]
+    assert len(hits) == 1, (rx_fragment, hits, [p for p, _w, _s in RV._HONESTY_PATTERNS])
+    return hits[0]
 
 
 def git(repo, *args):
@@ -440,6 +471,346 @@ def test_prechecks_notice_a_code_change_with_no_new_test(repo):
     out = RV.honesty_prechecks(r, base, ["tests/test_a.py", "app/m.py"], n_clauses=1)
     assert any("no test function was added" in o["problem"] for o in out)
     assert RV.honesty_prechecks(r, base, ["tests/test_a.py", "app/m.py"], n_clauses=0) == []
+
+
+# ── the constant-mirroring assertion (#1678) ───────────────────────────────
+# Pocock's first shape, and the one a deterministic check CAN pin: an
+# assertion comparing a call's result against a constant defined at the top of
+# the SAME test file. The five literal patterns spell "cannot fail" the way a
+# person writes it when they give up; a mirrored constant never gives up, it
+# just moves with the code, and the only thing that has ever caught it is the
+# token-priced `test_honesty` grader. The ledger for 2026-09-11→09-27 carries
+# 708 events with a grader-authored `test_honesty` list against 73 carrying a
+# deterministic precheck line (9.7x), and 0 of the 1965 recorded entries name
+# one of the five patterns' own problem strings. This moves one shape out of
+# the priced half and into the free one.
+
+
+def test_a_docstring_that_quotes_itself_hides_no_real_skip(tmp_path):
+    """Why the blank pass runs on `tokenize` and not on a char-wise quote scan:
+    a docstring holding a lone double quote plus an apostrophe desynchronises
+    the scan's idea of where the literal ends, the flipped state runs to the end
+    of the file, and what happens next depends on quote parity. At
+    `tests/_live_data.py` the first version of the pass blanked that file's real
+    unconditional skip at line 136 out of the skip pattern's reach — the shape
+    that refuses a skipless round, invisible in exactly the files that skip
+    most. The fixture is that shape: a docstring quoting itself, then one
+    unconditional skip below it, which must still be found, at its own line."""
+    r, base = _delta_repo(
+        tmp_path, tag="parity", base_src=_MIRROR_BASE,
+        post_src=_fixture("quote_heavy_docstring_skip.txt"))
+    out = RV.honesty_prechecks(r, base, ["tests/test_a.py"], n_clauses=0)
+    hits = [o for o in out if "pytest.skip" in o["problem"]]
+    assert len(hits) == 1, out
+    assert hits[0]["severity"] == "blocking", "an unconditional skip still refuses"
+    assert hits[0]["line"] == 4, "the skip is code below the docstring, not prose in it"
+
+
+def test_prose_that_looks_like_code_binds_no_constant(tmp_path):
+    """An ALL_CAPS assignment written inside a docstring is documentation, not
+    a binding, so the assertion below it compares against nothing the file
+    defines. The detector reads the blanked text for exactly this reason — and
+    the control at the end of this node proves the silence is the blanking and
+    not a dead detector: the same assertion under a real module-level binding
+    fires."""
+    r, base = _delta_repo(
+        tmp_path, tag="prosecode", base_src=_MIRROR_BASE,
+        post_src='"""\n'                                                      # 1
+                 'SOME_LIMIT = 5   documented here, bound nowhere\n'          # 2
+                 '"""\n'                                                      # 3
+                 '\n'                                                         # 4
+                 'def test_the_docstring_one():\n'                            # 5
+                 '    assert count(open_body()) == SOME_LIMIT\n')             # 6
+    assert _mirrors(RV.honesty_prechecks(r, base, ["tests/test_a.py"],
+                                         n_clauses=1)) == []
+    r2, base2 = _delta_repo(
+        tmp_path, tag="prosectl", base_src=_MIRROR_BASE,
+        post_src='SOME_LIMIT = 5\n'                                           # 1
+                 '\n'                                                         # 2
+                 'def test_the_bound_one():\n'                                # 3
+                 '    assert count(open_body()) == SOME_LIMIT\n')             # 4
+    found = _mirrors(RV.honesty_prechecks(r2, base2, ["tests/test_a.py"], n_clauses=1))
+    assert len(found) == 1, found
+    assert found[0]["line"] == 4 and "line 1" in found[0]["problem"], found
+
+
+def test_a_comment_beside_an_assertion_is_not_a_second_comparison(tmp_path):
+    """A trailing `# was parse(y) == EXPECTED_CHAR` puts a second `==` at depth
+    zero on the same physical line as a real assertion. Un-commented, that
+    comment supplies both the call and the constant name, and the round is
+    blamed for an assertion nobody wrote."""
+    r, base = _delta_repo(
+        tmp_path, tag="comment", base_src=_MIRROR_BASE,
+        post_src="EXPECTED_CHAR = 'x'\n"                                      # 1
+                 '\n'                                                         # 2
+                 'def test_ok():\n'                                           # 3
+                 "    assert parse(open_body()) == 'x'  # was parse(y) == EXPECTED_CHAR\n")
+    assert _mirrors(RV.honesty_prechecks(r, base, ["tests/test_a.py"],
+                                         n_clauses=1)) == []
+    # Control: the same file with the assertion comparing against the name the
+    # comment only mentioned is exactly the thing being reported.
+    r2, base2 = _delta_repo(
+        tmp_path, tag="commentctl", base_src=_MIRROR_BASE,
+        post_src="EXPECTED_CHAR = 'x'\n"                                      # 1
+                 '\n'                                                         # 2
+                 'def test_ok():\n'                                           # 3
+                 "    assert parse(open_body()) == EXPECTED_CHAR\n")          # 4
+    found = _mirrors(RV.honesty_prechecks(r2, base2, ["tests/test_a.py"], n_clauses=1))
+    assert len(found) == 1, found
+    assert found[0]["line"] == 4 and "EXPECTED_CHAR" in found[0]["problem"], found
+
+
+def test_an_assertion_written_over_three_lines_is_still_one_comparison(tmp_path):
+    """The call and the compared name on different physical lines: a
+    line-by-line read sees an unclosed `(` on the assert line and no comparison
+    at all, so the mirror goes unreported. The statement is joined to Python's
+    bracket rule and reported at the `assert` line."""
+    r, base = _delta_repo(
+        tmp_path, tag="split", base_src=_MIRROR_BASE,
+        post_src="EXPECTED_TITLE = 'widget'\n"      # 1
+                 "\n"                               # 2
+                 "def test_it():\n"                 # 3
+                 "    assert parse(\n"              # 4
+                 "        open_body()\n"            # 5
+                 "    ) == EXPECTED_TITLE\n")       # 6
+    found = _mirrors(RV.honesty_prechecks(r, base, ["tests/test_a.py"], n_clauses=1))
+    assert len(found) == 1, found
+    assert found[0]["line"] == 4, "the assertion's own line, not the closing bracket's"
+    assert "EXPECTED_TITLE" in found[0]["problem"] and "line 1" in found[0]["problem"]
+
+
+def _delta_repo(tmp_path, *, base_src, post_src, pytest_ini=None, new_files=None,
+                tag="dr"):
+    """A repo whose base commit holds `base_src` and whose HEAD holds
+    `post_src` (plus `new_files`), so a delta is measured across real git
+    objects rather than a stubbed `_git`. `tag` names the subdirectory, because
+    one test measures several base/HEAD pairs side by side."""
+    r = tmp_path / tag
+    (r / "tests").mkdir(parents=True)
+    (r / "app").mkdir()
+    git(tmp_path, "init", "-q", "-b", "main", str(r))
+    git(r, "config", "user.email", "t@e.com")
+    git(r, "config", "user.name", "t")
+    (r / "tests" / "test_a.py").write_text(base_src)
+    (r / "app" / "m.py").write_text("def parse(s):\n    return s\n")
+    if pytest_ini:
+        (r / "pytest.ini").write_text(pytest_ini)
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "base")
+    base = git(r, "rev-parse", "HEAD").stdout.strip()
+    (r / "tests" / "test_a.py").write_text(post_src)
+    for rel, src in (new_files or {}).items():
+        p = r / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src)
+    git(r, "add", "-A")
+    git(r, "commit", "-q", "-m", "round")
+    return r, base
+
+
+_MIRROR_BASE = "import pytest\n\n\ndef test_old():\n    assert parse('a') == 'a'\n"
+
+
+def _mirrors(out):
+    return [o for o in out if "mirrors" in o["problem"]]
+
+
+def test_prechecks_flag_an_assertion_that_mirrors_its_own_module_constant(tmp_path):
+    """Clause 1: the finding names the constant's line AND the assertion's
+    line, and says the test mirrors the value instead of pinning it."""
+    r, base = _delta_repo(
+        tmp_path, base_src=_MIRROR_BASE,
+        post_src="from app.m import parse\n"                      # 1
+                 "\n"                                             # 2
+                 "EXPECTED_TITLE = 'widget'\n"                    # 3
+                 "\n"                                             # 4
+                 "def test_title_is_the_module_default():\n"      # 5
+                 "    assert parse(open_body()) == EXPECTED_TITLE\n")   # 6
+    out = RV.honesty_prechecks(r, base, ["tests/test_a.py", "app/m.py"], n_clauses=2)
+    found = _mirrors(out)
+    assert len(found) == 1, out
+    assert found[0]["file"] == "tests/test_a.py"
+    assert found[0]["line"] == 6, "the assertion's own line"
+    assert "EXPECTED_TITLE" in found[0]["problem"]
+    assert "line 3" in found[0]["problem"], "and the line the constant is bound on"
+    assert "instead of pinning" in found[0]["problem"], found[0]["problem"]
+
+
+def test_prechecks_stay_silent_on_an_imported_name_or_an_inline_literal(tmp_path):
+    """Clause 2: the ordinary way to assert a public contract must not fire.
+    A name imported from the module under test is not a value the test wrote,
+    and neither is a literal typed into the assertion itself — even when the
+    same file also defines a constant holding that same value. The control adds
+    the fourth shape to that same file — the file's own constant compared against
+    a call — and the run reports exactly that one, so the three silences above
+    are selective and not a detector that never fires."""
+    silent = ("from app.m import MAX_ITEMS, parse\n"               # 1
+              "\n"                                                 # 2
+              "EXPECTED_TITLE = 'widget'\n"                        # 3
+              "\n"                                                 # 4
+              "def test_the_imported_contract_value():\n"          # 5
+              "    assert parse(open_body()) == MAX_ITEMS\n"       # 6  imported
+              "\n"                                                 # 7
+              "def test_the_inline_literal():\n"                   # 8
+              "    assert parse(open_body()) == 'widget'\n"        # 9  literal
+              "\n"                                                 # 10
+              "def test_a_value_the_test_handed_round():\n"        # 11
+              "    parsed = 'widget'\n"                            # 12
+              "    assert parsed == EXPECTED_TITLE\n")             # 13  no call
+    r, base = _delta_repo(tmp_path, base_src=_MIRROR_BASE, post_src=silent)
+    out = RV.honesty_prechecks(r, base, ["tests/test_a.py", "app/m.py"], n_clauses=2)
+    assert _mirrors(out) == [], out
+    r2, base2 = _delta_repo(
+        tmp_path, tag="ctl", base_src=_MIRROR_BASE,
+        post_src=silent
+                 + "\n"                                            # 14
+                 "def test_the_mirror_control():\n"                # 15
+                 "    assert parse(open_body()) == EXPECTED_TITLE\n")   # 16
+    found = _mirrors(RV.honesty_prechecks(r2, base2, ["tests/test_a.py"], n_clauses=2))
+    assert len(found) == 1, found
+    assert found[0]["line"] == 16 and "EXPECTED_TITLE" in found[0]["problem"], found
+
+
+def test_a_bracket_in_a_string_or_a_filter_inside_a_call_moves_nothing(tmp_path):
+    """The scan reads the assertion the way Python reads it, not the way a line
+    grep does. A bracket that lives inside a string literal does not open an
+    argument list, so the assertion after it still splits and still fires; a
+    comparison buried inside a call is not what the `assert` compares, so it
+    fires nothing. One finding, at line 4, is both halves at once."""
+    r, base = _delta_repo(
+        tmp_path, base_src=_MIRROR_BASE,
+        post_src="EXPECTED_CHAR = '('\n"                          # 1
+                 "\n"                                             # 2
+                 "def test_the_bracket_is_a_string():\n"          # 3
+                 "    assert parse('(') == EXPECTED_CHAR\n"       # 4  fires
+                 "\n"                                             # 5
+                 "def test_a_filter_is_not_the_assertion():\n"    # 6
+                 "    assert sum(1 for t in titles if t == EXPECTED_CHAR) == 0\n")
+    out = RV.honesty_prechecks(r, base, ["tests/test_a.py"], n_clauses=1)
+    found = _mirrors(out)
+    assert len(found) == 1, out
+    assert found[0]["line"] == 4, found
+    assert "EXPECTED_CHAR" in found[0]["problem"] and "line 1" in found[0]["problem"]
+
+
+def test_a_constant_mirror_the_base_already_carried_is_not_blamed(tmp_path):
+    """Clause 3: the delta is the same arithmetic as the five patterns. A base
+    that already carried one mirrored assertion is blamed for none, and one
+    that adds a second is blamed for exactly that one — at the new line."""
+    carried = ("EXPECTED_TITLE = 'widget'\n"
+               "\n"
+               "def test_title_is_the_module_default():\n"
+               "    assert parse(open_body()) == EXPECTED_TITLE\n")
+    r, base = _delta_repo(tmp_path, tag="same", base_src=carried, post_src=carried)
+    assert _mirrors(RV.honesty_prechecks(r, base, ["tests/test_a.py"], n_clauses=1)) == []
+    # Same assertion twice over: still nothing new this round blamed for.
+    r, base = _delta_repo(tmp_path, tag="twice", base_src=carried * 2, post_src=carried * 2)
+    assert _mirrors(RV.honesty_prechecks(r, base, ["tests/test_a.py"], n_clauses=1)) == []
+    # One MORE mirrored assertion is exactly one finding, naming the new node.
+    r, base = _delta_repo(
+        tmp_path, tag="more", base_src=carried,
+        post_src=carried + "\nMAX_RETRIES = 3\n"                  # 6
+                         "\n"                                     # 7
+                         "def test_retry_default():\n"            # 8
+                         "    assert load_config().retries == MAX_RETRIES\n")   # 9
+    found = _mirrors(RV.honesty_prechecks(r, base, ["tests/test_a.py"], n_clauses=1))
+    assert len(found) == 1, found
+    assert found[0]["line"] == 9, "the increase is the finding, not the carried one"
+    assert "MAX_RETRIES" in found[0]["problem"] and "line 6" in found[0]["problem"]
+
+
+def test_the_five_literal_patterns_still_refuse_after_the_new_detector(tmp_path):
+    """Clause 5, first half: widening the check may not soften the five. The
+    fixture is one round's worth of every one of them added to a file that had
+    none, and each is still reported, once, at the severity its own table entry
+    carries — `blocking`, which the last assertion here pins rather than trusts.
+    The table is read rather than quoted so a softened or swapped entry fails
+    this node instead of quietly agreeing with it."""
+    expected = (r"\bor\s+True\b", r"^\s*assert\s+True\b", r"pytest\.skip\(",
+                r"pytest\.mark\.skip", r"pytest\.mark\.xfail")
+    assert tuple(p for p, _w, _s in RV._HONESTY_PATTERNS) == expected
+    r, base = _delta_repo(tmp_path, base_src=_MIRROR_BASE,
+                          post_src=_fixture("five_literal_patterns.txt"))
+    out = RV.honesty_prechecks(r, base, ["tests/test_a.py", "app/m.py"], n_clauses=2)
+    for _pat, why, severity in RV._HONESTY_PATTERNS:
+        hit = [o for o in out if o["problem"] == why]
+        assert len(hit) == 1, (why, out)
+        assert hit[0]["severity"] == severity == "blocking", (why, out)
+
+
+def test_a_pattern_spelled_in_a_string_is_not_counted_as_new_dishonest_code(tmp_path):
+    """The prechecks run on the round's OWN changed test files, so a round that
+    adds a test for this checker has to put the five shapes inside the source
+    strings of that test. Prose about a pattern is not the pattern — and the
+    control at the end is the same file with one of them written as code, which
+    still refuses, on the code's own line. This is the shape that refused
+    `SM_20260928_210355` for adding the tests that pin it."""
+    prose = _fixture("patterns_named_in_prose_base.txt")
+    r, base = _delta_repo(
+        tmp_path, tag="prose", base_src=prose,
+        post_src=prose + _fixture("patterns_named_in_prose_added.txt"))
+    assert RV.honesty_prechecks(r, base, ["tests/test_a.py"], n_clauses=0) == []
+    r, base = _delta_repo(
+        tmp_path, tag="code", base_src=prose,
+        post_src=prose + _fixture("real_assert_true_added.txt"))
+    out = RV.honesty_prechecks(r, base, ["tests/test_a.py"], n_clauses=0)
+    hits = [o for o in out if o["problem"] == _why(r"assert\s+True")]
+    assert len(hits) == 1, out
+    assert hits[0]["severity"] == "blocking" and hits[0]["line"] == 8, out
+
+
+def test_a_pattern_in_a_docstring_is_prose_and_the_line_reported_is_the_code_s(tmp_path):
+    """The blank pass has to be blind across MULTIPLE lines, not just across a
+    quoted word, and it may not move the lines it reports: a three-line
+    docstring that names a skip call and a bare-true assertion is prose, and the
+    one real assertion below it is on line 6 however many lines the docstring
+    swallowed."""
+    r, base = _delta_repo(
+        tmp_path, tag="doc", base_src=_MIRROR_BASE,
+        post_src=_fixture("multiline_docstring_then_real_assert.txt"))
+    out = RV.honesty_prechecks(r, base, ["tests/test_a.py"], n_clauses=0)
+    assert len(out) == 1, out
+    assert out[0]["problem"] == _why(r"assert\s+True"), out
+    assert out[0]["line"] == 6, "the code's line, not the one the blanking left"
+
+
+def test_a_conditional_skip_is_still_demoted_to_advisory(tmp_path):
+    """Clause 5, second half — the #1204 fix. 27 of 134 refusals were skip-only
+    with every clause graded met; a skip behind a condition is a judgment and
+    goes to the grader as advice, not as a refusal."""
+    r, base = _delta_repo(tmp_path, base_src=_MIRROR_BASE,
+                          post_src=_fixture("conditional_skip.txt"))
+    out = RV.honesty_prechecks(r, base, ["tests/test_a.py"], n_clauses=0)
+    skips = [o for o in out if o["problem"].startswith(_why(r"skip\("))]
+    assert len(skips) == 1, out
+    assert skips[0]["severity"] == "advisory", out
+    assert "conditional" in skips[0]["problem"], out
+
+
+def test_the_new_detector_scans_the_files_testpaths_owns(tmp_path):
+    """Clause 5, third half: the file→test mapping is `TP.pick_test_files`'s
+    answer read from `pytest.ini` — the same one the patterns and #1322's
+    met-node rail read — not a `tests/` prefix and no new resolver. A mirrored
+    assertion in a harness test under a second testpath is reported; one in
+    ordinary code under no testpath is not."""
+    mirrored = "EXPECTED_TITLE = 'widget'\n" \
+               "\n" \
+               "def test_title_is_the_module_default():\n" \
+               "    assert parse(open_body()) == EXPECTED_TITLE\n"
+    r, base = _delta_repo(
+        tmp_path, base_src=_MIRROR_BASE,
+        post_src=_MIRROR_BASE + "\n" + mirrored,
+        pytest_ini="[pytest]\ntestpaths = tests app/harness/tests scripts\n",
+        new_files={"app/harness/tests/test_h.py": mirrored,
+                   "app/code.py": mirrored})
+    out = RV.honesty_prechecks(r, base,
+                               ["tests/test_a.py", "app/harness/tests/test_h.py",
+                                "app/code.py", "app/m.py"], n_clauses=1)
+    files = sorted({o["file"] for o in _mirrors(out)})
+    assert files == ["app/harness/tests/test_h.py", "tests/test_a.py"], out
+    assert [p for p in RV.TP.pick_test_files(
+        ["tests/test_a.py", "app/harness/tests/test_h.py", "app/code.py"], r)] == \
+        ["tests/test_a.py", "app/harness/tests/test_h.py"]
 
 
 # ── every citation is validated, whatever verdict carries it (#1442) ───────

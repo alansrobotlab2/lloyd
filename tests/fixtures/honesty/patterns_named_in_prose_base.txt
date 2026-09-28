@@ -1,0 +1,4 @@
+"""Notes on pytest.skip( and @pytest.mark.xfail and `or True`."""
+
+def test_old():
+    assert parse("a") == "a"  # not `assert True`

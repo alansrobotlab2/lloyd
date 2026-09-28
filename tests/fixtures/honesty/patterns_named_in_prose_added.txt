@@ -1,0 +1,5 @@
+
+
+def test_new():
+    """Still prose: pytest.skip( and or True."""
+    assert parse("b") == "b"

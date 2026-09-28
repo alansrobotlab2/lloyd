@@ -1,0 +1,8 @@
+import pytest
+
+HAVE_YAML = False
+
+def test_needs_yaml():
+    if not HAVE_YAML:
+        pytest.skip('no yaml in this venv')
+    assert parse(open_body()) == 'a'

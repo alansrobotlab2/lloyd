@@ -1,0 +1,6 @@
+"""Notes.
+pytest.skip() and assert True are both patterns
+End."""
+
+def test_old():
+    assert True

@@ -205,6 +205,85 @@ def test_the_no_new_test_precheck_is_advisory(tmp_path, monkeypatch):
     assert kind == "pass"
 
 
+def test_a_constant_mirroring_precheck_is_advisory_and_passes_a_met_round(
+        tmp_path, monkeypatch):
+    """#1678: Pocock's mirrored constant is worth a note, not a refusal. The
+    #866/#1204 storms are what a `blocking` severity costs, so the new
+    detector rides `honesty_prechecks` at `advisory`, `decide` records it in
+    the findings, and the round whose clauses are all met passes. And the
+    decision is the precheck SEVERITY rule and nothing else: the same finding
+    marked `blocking` refuses the same round, which a rule keyed on this
+    detector's own wording could not do.
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t.py").write_text(
+        "EXPECTED = 7\n"
+        "\n"
+        "def test_a():\n"
+        "    assert compute() == EXPECTED\n")
+    monkeypatch.setattr(
+        RV, "_git",
+        lambda *a, **k: "def test_a():\n    assert compute() is not None\n")
+    out = RV.honesty_prechecks(tmp_path, "BASE", ["tests/t.py", "app/x.py"],
+                               n_clauses=1)
+    mirrors = [o for o in out if "mirrors" in o["problem"]]
+    assert len(mirrors) == 1, out
+    assert mirrors[0]["severity"] == "advisory", out
+    assert mirrors[0]["line"] == 4 and "line 1" in mirrors[0]["problem"], out
+    kind, findings = RV.decide(_parsed(clauses=[_clause(1, "met")]), out)
+    assert kind == "pass", findings
+    assert "EXPECTED" in findings, findings
+    # And the decision is the precheck SEVERITY rule and nothing else: the same
+    # finding, same wording, one field changed to `blocking`, refuses the same
+    # round. A new rule keyed to this detector's own problem string could not
+    # track a severity field it never reads.
+    kind, findings = RV.decide(
+        _parsed(clauses=[_clause(1, "met")]),
+        [dict(o, severity="blocking") if "mirrors" in o["problem"] else o
+         for o in out])
+    assert kind == "retry", findings
+    assert "EXPECTED" in findings, findings
+
+
+def test_the_mirror_advisory_reaches_the_ledger_text_before_the_cut(
+        tmp_path, monkeypatch):
+    """The seam the review rung named on the previous round: `gate.py:2204`
+    computes the prechecks, `RV.decide` merges them into ONE findings string,
+    and the gate event persists `findings[:2000]` (`gate.py:2012`) — so a
+    precheck advisory has no field of its own on that event and survives by its
+    position in the slice. Position is therefore behaviour, and this pins it
+    across the decide boundary: a precheck line is appended before any of the
+    grader's own advisory entries, so it is inside the first 2000 characters
+    even when twenty grader advisories push the string well past the cut. (The
+    `review` event does carry the whole precheck list structured, as
+    `prechecks` at `gate.py:2230`; giving the gate event its own field is the
+    owed follow-up #1678 names, not this round's.)
+    """
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "t.py").write_text(
+        "EXPECTED = 7\n"
+        "\n"
+        "\n"
+        "def test_a():\n"
+        "    assert compute() == EXPECTED\n")
+    monkeypatch.setattr(
+        RV, "_git",
+        lambda *a, **k: "def test_a():\n    assert compute() is not None\n")
+    out = RV.honesty_prechecks(tmp_path, "BASE", ["tests/t.py", "app/x.py"],
+                               n_clauses=1)
+    mirror = next(o for o in out if "mirrors" in o["problem"])
+    padded = _parsed(
+        clauses=[_clause(1, "met")], summary="",
+        test_honesty=[{"file": "tests/t.py", "line": n, "severity": "advisory",
+                       "problem": f"grader note {n}: " + "padding " * 20}
+                      for n in range(1, 21)])
+    kind, findings = RV.decide(padded, out)
+    assert kind == "pass", findings
+    assert len(findings) > 2000, "the padding has to actually cross the cut"
+    assert f"advisory {mirror['file']}:{mirror['line']}" in findings[:2000], \
+        findings[:200]
+
+
 # ── a grader that denies tests the diff demonstrably added (#1442) ─────────
 # The review that refused round SM_20260924_104307's last attempt wrote "This
 # round's diff adds no such test" about a diff whose own `git diff --stat

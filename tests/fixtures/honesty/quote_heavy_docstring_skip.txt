@@ -1,0 +1,4 @@
+"""The "live" corpus, and it isn't the whole one."""
+
+def test_needs_the_corpus():
+    pytest.skip(f"{len(rows())} rows, no floor")
