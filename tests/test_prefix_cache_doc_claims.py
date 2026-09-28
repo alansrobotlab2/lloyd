@@ -55,7 +55,10 @@ header before it judges what the comment now says.
 from __future__ import annotations
 
 import ast
+import os
 import re
+import stat as statmod
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -95,6 +98,24 @@ def _trap_one() -> str:
     end = rest.find("\n  2. ")
     assert end > 0, "trap #2 vanished: PASSES = 5 has no stated reason left"
     return rest[:end]
+
+
+def _trap_two() -> str:
+    """Trap #2's bullet: its heading to the end of the module docstring.
+
+    The mirror of `_trap_one()`, and the same positive control applies -- the
+    assert below is that the split point exists, so a finder that located
+    nothing fails loudly instead of reading as "the qualifier is missing".
+    """
+    doc = _bench_doc()
+    start = doc.find("\n  2. ")
+    assert start > 0, "trap #2 vanished: PASSES = 5 has no stated reason left"
+    return doc[start:]
+
+
+def _flat(text: str) -> str:
+    """One space between every token, so a rewrapped bullet is the same text."""
+    return " ".join(text.split())
 
 
 def _sentences(text: str) -> list[str]:
@@ -192,6 +213,95 @@ def test_bench_still_runs_five_passes():
     """PASSES >= 3 is trap #2's requirement and the item says leave it at 5."""
     assert re.search(r"(?m)^PASSES = 5(\s+#.*)?$", BENCH.read_text()), (
         "PASSES moved off 5; trap #2's two warm-up passes need three more")
+
+
+# ── #1635: trap #2's constant is dated, and the script still executes ────
+#
+# #605 rewrote trap #1 -- re-read, re-timed, dated to the hour -- and left trap
+# #2 as the bare 2026-09-06 constant beside it, so one docstring offered a
+# measured claim and an unmeasured one in the same numbered list. These nodes
+# hold the qualifier, its evidence, and the mode bit that same landing dropped.
+
+def test_trap_two_dates_the_two_pass_figure_as_unverified_on_this_build():
+    """Clause 1: the figure may stay, but only beside a date and a statement that
+    this build has never confirmed it.
+
+    Deleting the constant is not the fix -- `test_bench_still_runs_five_passes`
+    needs PASSES = 5 to keep a stated reason, and the next reader still needs to
+    know what the run is guarding against -- so the qualifier is checked *beside*
+    the claim it qualifies, and the three requirements (the word unverified, a
+    date, and "current build") have to land in one sentence: scattered words pin
+    nothing.
+    """
+    bullet = _flat(_trap_two())
+    assert "TWO warm-up passes" in bullet, (
+        "trap #2 no longer states the figure that needs qualifying; a qualifier "
+        "parked next to a deleted claim pins nothing")
+    qualified = [s for s in _sentences(bullet) if "unverified" in s.lower()]
+    assert qualified, (
+        "trap #2 states the two-warm-up-pass figure with no statement that it is "
+        "unverified")
+    assert any("current build" in s.lower()
+               and re.search(r"\b20\d\d-\d\d-\d\d\b", s) for s in qualified), (
+        "no sentence says the figure is unverified on the CURRENT build and dates "
+        "that statement, so the number still reads as measured on this boot")
+    assert "2026-09-06" in bullet, (
+        "the date the constant was written on is gone, so nothing tells a reader "
+        "which boot it was measured under")
+
+
+def test_trap_two_carries_the_2026_09_21_measurement_that_contradicts_the_count():
+    """Clause 2: the qualifier has to hold the measurement, not only the doubt.
+
+    "Unverified" tells a reader to distrust the number; the dated table tells them
+    why, and in which direction it is wrong. Each figure is required inside the
+    sentence naming the run it came from, so a rewording that keeps the words and
+    drops the evidence -- or parks the numbers in an unrelated line -- goes red.
+    """
+    bullet = _flat(_trap_two())
+    cited = [s for s in _sentences(bullet) if "2026-09-21" in s]
+    assert cited, "trap #2 cites no 2026-09-21 observation as its reason"
+    assert any("54,400" in s and "60,005" in s for s in cited), (
+        "the 2026-09-21 citation lost the pass-2 figures -- cached_tokens 54,400 "
+        "of that pass's own 60,005-token prompt -- and is an accusation rather "
+        "than a measurement")
+    assert any("pass 1" in s and "pass 2" in s for s in cited), (
+        "nothing says which passes were cold in the run being cited")
+    assert any(s.lower().count("one cold pass") for s in cited), (
+        "the run is cited without saying what it shows: ONE cold pass, not two")
+    evicted = [s for s in _sentences(bullet) if "1,349,507" in s]
+    assert evicted and any("pass 5" in s for s in evicted), (
+        "pass 5 returning to cached_tokens 0 after 1,349,507 tokens of other "
+        "traffic is gone, so the cited table has nothing explaining a cached "
+        "count that falls back to zero")
+
+
+def test_the_bench_script_keeps_its_exec_bit():
+    """Clause 3: `fb962366` landed this script at 100644 and the whole suite was
+    green -- `git show --raw fb962366` records `:100755 100644` for the path.
+
+    The round's prepared tag held the bit restored via `git update-index
+    --chmod=+x` and the squash-landing dropped that as well; no `prepared-*` tag
+    survives in this checkout (`git tag -l | grep -c prepared` is 0), so the one
+    artifact a later reader can actually run is `git show --raw fb962366`.
+    Nothing else in the suite can see the bit, for the reason `test_llm_slot_vram_preflight.py::test_the_launchers_keep_their_exec_bits`
+    gives for pinning the launchers: this file's Usage header runs it through
+    `.venvs/lloyd/bin/python`, so every doc-claim test in this file stays green at
+    100644 while the direct-exec form its own shebang advertises -- and the form
+    the owed idle-boot run will be typed as -- fails with EACCES before pass 1.
+    Working file and committed tree are both checked, because the regression was
+    committed rather than local.
+    """
+    mode = BENCH.stat().st_mode
+    assert mode & statmod.S_IXUSR, f"{BENCH.name} lost its exec bit (mode {oct(mode)})"
+    assert os.access(BENCH, os.X_OK), f"{BENCH.name} is not executable for this user"
+    rel = BENCH.relative_to(ROOT).as_posix()
+    tree = subprocess.run(["git", "-C", str(ROOT), "ls-tree", "HEAD", rel],
+                          capture_output=True, text=True).stdout.strip()
+    assert tree, f"git ls-tree HEAD named no entry for {rel}: it is not tracked"
+    assert tree.startswith("100755 blob "), (
+        f"HEAD holds {rel} at {tree.split()[0]}, not 100755 -- the mode bit the "
+        "fb962366 landing dropped and no rung could see")
 
 
 # ── clause 2: the caveat sits at the _RATIOS mapping ───────────────────

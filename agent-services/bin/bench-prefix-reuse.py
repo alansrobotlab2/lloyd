@@ -54,6 +54,22 @@ Two traps this script exists to avoid:
      pass 3+ hits ~96% and runs ~18x faster. A 2-pass A/B reports 0% on both arms
      and proves nothing. Hence PASSES = 5 below; do not lower it.
 
+     UNVERIFIED ON THE CURRENT BUILD as of 2026-09-28. That two-pass figure is a
+     2026-09-06 constant, written on the qwen4_exp MTP boot (9a0a1d8) and never
+     re-timed since on an idle current-build boot -- and #605's 2026-09-21 pass
+     table, taken on a primary carrying production traffic, contradicts it as
+     written: cached_tokens 0 on pass 1 but 54,400 of that pass's own 60,005-token
+     prompt already on pass 2 (d_hits 54,400, 90.7%), ONE cold pass rather than
+     two, and cached_tokens 0 again on pass 5 after 1,349,507 tokens of other
+     traffic crossed its window. Load swings it the other way as well: the
+     2026-09-13 probe under production load read 0% reuse for all 5 passes on both
+     endpoints while lifetime reuse read 85.9%. How many passes start cold is
+     therefore eviction- and load-dependent, not a property of this build, and
+     PASSES = 5 stands as a safety margin around an unverified figure rather than
+     because two cold passes were measured on it. Settle the figure by running
+     this script against an idle, freshly booted engine and reading cached_tokens
+     per pass -- #1635 owes that run and the ruling on it.
+
 Usage:
     .venvs/lloyd/bin/python agent-services/bin/bench-prefix-reuse.py <tag> [--json out.json]
 
