@@ -724,3 +724,140 @@ def test_a_completion_starved_past_the_close_releases_that_same_window(
             assert reason(aut, bs[tid], stripped, now) == "waiting on #56", (
                 f"#{tid} released at {label} with no bound declared — this test "
                 "would pass whatever the board says")
+
+
+# ── #1739: a chain that COMPLETED reads as a chain that is HELD ───────────────
+#
+# Measured live at 2026-09-28T09:32Z against `dependency_resolution_set()`: all
+# three links of #38 -> #42 -> #39 -> #40 had finished that night's cycle, and
+# `hold_reason` answered `waiting on #38` / `waiting on #42` / `waiting on #39`
+# for them — the same string a link gated by a dead upstream prints, which is
+# the sentence #1737 was filed from. The `last_run` values and run ids below are
+# those tasks' own fields and the records they wrote that night
+# (`autonomy-runs/42/run_42_20260928_050613.md` and its two siblings).
+
+PROBE_0928 = Z(28, 9, 32)                     # 02:32 local: all three windows open
+
+RUNS_COMPLETED_0928 = {                        # dependent -> (run id, completed)
+    42: ("run_42_20260928_050613", Z(28, 5, 13, 15)),
+    39: ("run_39_20260928_080049", Z(28, 8, 20)),
+    40: ("run_40_20260928_090013", Z(28, 9, 6, 2)),
+}
+
+
+def _completed_0928_chain():
+    """The nightly reflection chain as the live board declares it (daily, the
+    same `preferred_hours`, `stale_bypass_hours: 36` on every dependent), with
+    every link completed inside its own window: #38 last at 05:05:31Z."""
+    return [
+        task(38, hours=NIGHT, last=Z(28, 5, 5, 31)),
+        task(42, hours=NIGHT, dep=38, last=RUNS_COMPLETED_0928[42][1],
+             stale_bypass_hours=36),
+        task(39, hours=[1, 2, 3, 4], dep=42, last=RUNS_COMPLETED_0928[39][1],
+             stale_bypass_hours=36),
+        task(40, hours=[2, 3, 4], dep=39, last=RUNS_COMPLETED_0928[40][1],
+             stale_bypass_hours=36),
+    ]
+
+
+def _owed_upstream_board(*, bound=None):
+    """#42 with an upstream that still OWES this window: #38 last succeeded at
+    06:00Z on 09-27, the 26th->27th window occurrence, so at this probe it is
+    27.5 h old and today's run has not happened. `bound` is #42's own
+    `stale_bypass_hours`, and with none declared there is no bound to name."""
+    return [
+        task(38, hours=NIGHT, last=Z(27, 6, 0)),
+        task(42, hours=NIGHT, dep=38, last=RUNS_COMPLETED_0928[42][1],
+             **({"stale_bypass_hours": bound} if bound else {})),
+    ]
+
+
+def test_a_dependent_that_ran_this_period_is_reported_done_not_waiting(
+        aut, monkeypatch):
+    """#1739 clause 1. A dependent whose run record says this period already
+    ran, upstream finished earlier the SAME night, must read `already ran this
+    period` and not `waiting on #38`.
+
+    The refusal it has to beat is the undescribed one: `_dependency_refusal`
+    returns at its "this cycle's output is already consumed" line, so the
+    `_explain` detail is `''` even though `stale_bypass_hours: 36` is declared —
+    `_bypass_hold_detail` is never reached, and there is no clock to name. An
+    empty detail is the absence of a reason, and the run record on disk is the
+    only predicate in `hold_reason` that reads a second account."""
+    board = _completed_0928_chain()
+    b = by_id(board)
+    for tid, (run_id, when) in RUNS_COMPLETED_0928.items():
+        _record(aut, tid, run_id, when)
+    now = at(aut, monkeypatch, PROBE_0928)
+    for tid, upstream in ((42, 38), (39, 42), (40, 39)):
+        # Positive controls beside the string, so the row cannot pass on a
+        # fixture that never plants a record or never reaches the dependency
+        # branch at all.
+        assert aut._already_ran_this_period(b[tid], now=now) == (
+            RUNS_COMPLETED_0928[tid][0]), tid
+        assert aut._dependency_refusal(b[tid], board, now=now,
+                                       _explain=True) == "", tid
+        assert reason(aut, b[tid], board, now) == aut.RUN_SUCCESS_HOLD, (
+            f"#{tid} finished {RUNS_COMPLETED_0928[tid][1].isoformat()} and the "
+            f"board still calls it held by #{upstream}")
+        # Dispatch is untouched: the scheduler already refused this task, at its
+        # OWN last gate, the run record. Only the sentence changes.
+        assert due(aut, b[tid], board, now) is False, tid
+
+
+def test_a_dependent_that_has_not_run_still_prints_what_holds_it(
+        aut, monkeypatch):
+    """#1739 clause 2, the paired negative control. The same two boards at the
+    same instants with NO run record for the dependent, and every string is
+    exactly what it was before #1739: this is the condition the fix is gated on,
+    so a re-order that ignored the run record would flip these rows and fail
+    here while passing the test above.
+
+    Bare when nothing describes the hold — the consumed chain, and an upstream
+    that owes the cycle with no bound declared — and `waiting on #N (detail)`
+    when `_bypass_hold_detail` has a bound to name (#1538 clause 4)."""
+    now = at(aut, monkeypatch, PROBE_0928)
+
+    board = _completed_0928_chain()
+    b = by_id(board)
+    for tid, upstream in ((42, 38), (39, 42), (40, 39)):
+        assert aut._already_ran_this_period(b[tid], now=now) == "", tid
+        assert reason(aut, b[tid], board, now) == f"waiting on #{upstream}", tid
+
+    owed = _owed_upstream_board()
+    bo = by_id(owed)
+    assert aut._already_ran_this_period(bo[42], now=now) == ""
+    age_h = (now - Z(27, 6, 0)).total_seconds() / 3600
+    assert 27.5 < age_h < 27.6, (
+        "#38 must still owe this window here, or the two blocks below pin "
+        "nothing about an upstream that is behind")
+    assert reason(aut, bo[42], owed, now) == "waiting on #38", (
+        "no bound declared, so no bound to name — the bare string is the "
+        "pre-#1538 refusal and must stay bare")
+    bo[42]["stale_bypass_hours"] = 36
+    assert reason(aut, bo[42], owed, now) == (
+        "waiting on #38 (inside its 36 h stale_bypass window: "
+        "#38 ran 27.5 h ago)")
+
+
+def test_a_hold_that_names_its_clock_beats_the_completed_cycle_claim(
+        aut, monkeypatch):
+    """#1739 clause 3. The owed board, the same instant, and now #42 DOES have a
+    successful run record for this period — and the detailed hold still wins,
+    unchanged from the block above.
+
+    This is the other half of the gate: the fix fires on an EMPTY detail, never
+    on the run record alone. A dependent that ran while its upstream still owes
+    the cycle, inside its declared bound, is genuinely waiting for the next
+    link's input, and `waiting on #38 (inside its 36 h ...)` is the sentence
+    that tells a reader which clock has not run out."""
+    owed = _owed_upstream_board(bound=36)
+    b = by_id(owed)
+    _record(aut, 42, RUNS_COMPLETED_0928[42][0], RUNS_COMPLETED_0928[42][1])
+    now = at(aut, monkeypatch, PROBE_0928)
+    assert aut._already_ran_this_period(b[42], now=now) == (
+        RUNS_COMPLETED_0928[42][0])
+    assert reason(aut, b[42], owed, now) == (
+        "waiting on #38 (inside its 36 h stale_bypass window: "
+        "#38 ran 27.5 h ago)"), "the completed-cycle claim overrode a real hold"
+    assert due(aut, b[42], owed, now) is False

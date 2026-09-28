@@ -2319,6 +2319,14 @@ def hold_reason(task: dict, all_tasks: list[dict], *,
     The distinction any display has to draw is between *held* (something is
     deliberately keeping this task from running) and *overdue* (nothing is,
     and it still has not run). Only the second is worth a colour.
+
+    One exception to that order, and it exists only on this side of the seam
+    (#1739): where the dependency gate refuses and its explanation is EMPTY, the
+    run record is consulted before the `waiting on #N` string is returned, so a
+    dependent that already ran this period is reported as having run. An
+    undescribed `waiting on #N` over a completed cycle is a hold with nothing
+    behind it, and it is the claim that manufactured #1737. `_is_task_due`'s
+    order does not move — its own comment says why.
     """
     if (not str(task.get("skill_name") or "").strip()
             and not str(task.get("skill_path") or "").strip()):
@@ -2346,6 +2354,28 @@ def hold_reason(task: dict, all_tasks: list[dict], *,
     # was in (#1538). An empty detail keeps the bare string exactly as it was.
     refusal = _dependency_refusal(task, all_tasks, now=now, _explain=True)
     if refusal is not None:
+        # A completed cycle wins the DISPLAY when the refusal carries no reason
+        # (#1739). `''` is not a claim about the chain, it is the absence of one:
+        # `_dependency_refusal` returns it from its "this cycle's output is
+        # already consumed" line — the dependent's own `last_run` newer than the
+        # upstream's — and from `_bypass_decision` when the dependent declares no
+        # `stale_bypass_hours` for `_bypass_hold_detail` to describe. The first is
+        # the HEALTHY nightly chain: on 2026-09-28 at 09:32Z #42, #39 and #40 had
+        # each finished that night (run records `run_42_20260928_050613`,
+        # `run_39_20260928_080049`, `run_40_20260928_090013`) and the board, the
+        # dashboard and the stall path all printed `waiting on #38` / `#42` / `#39`
+        # for them — the identical string a link gated by a dead upstream prints,
+        # and the sentence #1737 was filed from. `_already_ran_this_period` is the
+        # only predicate in this function that reads the second, independent
+        # account, so for an undescribed hold it is asked here rather than after.
+        # A refusal that DOES describe its clock is untouched: a dependent that
+        # ran while its upstream still owes the cycle, inside its declared bound,
+        # is genuinely waiting, and naming the clock is the point (#1538).
+        # `_is_task_due`'s order does NOT move with this — there the run-record
+        # scan is last because it is the only gate that pays a disk read and
+        # dispatch is not served by a better sentence (#1296).
+        if not refusal and _already_ran_this_period(task, now=now):
+            return RUN_SUCCESS_HOLD
         return (f"waiting on #{task.get('depends_on')}"
                 + (f" ({refusal})" if refusal else ""))
     if not _is_preferred_hour(task):

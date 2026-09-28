@@ -205,6 +205,24 @@ behaving exactly as configured. A nightly task is past due for the eighteen
 hours a day it is not allowed to run, so that counter was never zero and
 therefore said nothing.
 
+One exception to that order, and it exists only on this side of the seam
+(#1739): where the dependency gate bites and its detail comes back EMPTY,
+`hold_reason` consults `_already_ran_this_period` before returning the string, and
+answers `"already ran this period"` instead of `"waiting on #N"`. An undescribed
+`waiting on #N` is not a claim about the chain, it is the absence of one:
+`_dependency_refusal` returns `''` both when the dependent's own `last_run` has
+already consumed this cycle — the HEALTHY chain, seconds after its last link —
+and when the dependent declares no `stale_bypass_hours` for the detail to name. So
+a completed chain and a chain behind a dead upstream printed one identical string:
+measured 2026-09-28T09:32Z, #42, #39 and #40 had each finished that night's cycle
+and `/api/autonomy/tasks`, `dashboard._autonomy` and the stall alert all read
+`waiting on #38` / `#42` / `#39` over their own run records. A detail that names a
+clock still wins, so a dependent that ran while its upstream still owes the cycle
+inside its declared bound keeps `waiting on #N (inside its 36 h ...)`.
+`_is_task_due`'s order is untouched: there the run-record scan stays LAST because
+it is the only gate that pays a disk read, and dispatch is not served by a better
+sentence (#1296).
+
 Both readers call it rather than restating it — `/api/autonomy/tasks` per row
 as `blocked`, and `dashboard._autonomy` to split past-due rows into `overdue`
 (nothing holds it) and `held` (something does). The dashboard reports
