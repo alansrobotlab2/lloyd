@@ -307,8 +307,8 @@ MIN_LIVE_BENCH_TASKS = 11
 
 #: Every file in `~/obsidian/lloyd/bench/`, keyed by task id (the file stem, which
 #: each file also declares as `id:`), with the `category:` its own front matter
-#: carries. Measured against the files on disk on 2026-09-27: 19 entries — 6 replay,
-#: 10 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
+#: carries. Measured against the files on disk on 2026-09-28: 20 entries — 6 replay,
+#: 11 synthetic, 2 adversarial, 1 safety. That count is a snapshot of a hand-kept
 #: table and no assertion here reads it; the count that IS asserted is the corpus
 #: floor in `MIN_LIVE_BENCH_TASKS` above, and every entry below is re-checked
 #: against disk by the node named next, so a stale number in this comment is
@@ -342,13 +342,16 @@ LIVE_BENCH_CATEGORIES = {
     "bench_017_audit_unresolved_task_skills": "synthetic",
     # Keyed by stem with the `category:` its own front matter declares — the only
     # authority this table may copy. bench_018 landed in the corpus on 2026-09-26
-    # (vault `0e33bdd9`); bench_019 was written to it on 2026-09-27 and is still
-    # untracked in the vault as of this writing. The node below globs the directory,
-    # so an uncommitted task counts the moment it is on disk — and is also the task a
-    # `git clean -fd` in the vault would take back out, which fails this node in the
-    # other direction, by name.
+    # (vault `0e33bdd9`), bench_019 on 2026-09-27 (`15c3daae`) and bench_020 on
+    # 2026-09-27 (#1697, `b6df5fca`), so all twenty `.md` files in that directory are
+    # tracked as of this writing (`git -C ~/obsidian ls-files lloyd/bench | wc -l` =
+    # 20, `status --porcelain -- lloyd/bench` empty). The node below globs the
+    # directory, so an uncommitted task counts the moment it is on disk — and is also
+    # the task a `git clean -fd` in the vault would take back out, which fails this
+    # node in the other direction, by name.
     "bench_018_skill_invocation_rare_interp": "synthetic",
     "bench_019_skill_invocation_retired_schedule": "synthetic",
+    "bench_020_skill_inventory_coverage_gap": "synthetic",
 }
 
 
