@@ -15,14 +15,29 @@ writes — the loaded files are written only through the memory tools and `Edit`
 which enforce the ceiling — and answers three questions:
 
 * which loaded lines have no ledger row (backfill owed);
+* which loaded lines have an anchor that NO row can carry (reported apart,
+  because they are not curator backlog — writing more rows changes nothing);
 * which ledger rows name no line that is still loaded (an orphan: the line was
   edited or removed without its row following);
 * how far the file is from its ceiling, and which rows are the stalest checked.
 
 A row is one bullet whose first field is the line's anchor, the first
-`ANCHOR_CHARS` characters of the entry text after the bullet marker:
+`ANCHOR_CHARS` characters of the entry text after the bullet marker. The field
+runs to the first `FIELD_SEP`, the delimiter every later field already uses, and
+is written unwrapped:
 
-    - anchor: `**Scope**: agent memory, knowledge and research notes go in` | why: … | origin: … | retire_when: … | check: `…` | checked: 2026-09-25
+    - anchor: **Scope**: agent memory, knowledge and research notes go in | why: … | origin: … | retire_when: … | check: `…` | checked: 2026-09-25
+
+The delimiter is not a backtick, and #1730 is why: an anchor is the entry's own
+prose, which in these two files is full of code spans, so a backtick-delimited
+capture silently truncated every anchor that crossed one — 19 of the 54 loaded
+`USER.md` lines and 24 of the 85 `MEMORY.md` lines — and a row written in good
+faith from `anchor_of()`'s output came back shorter than it went in and read as
+a permanent orphan. Two shapes still cannot be written, so `status` counts them
+as `unrepresentable` rather than as lines awaiting a row: an anchor containing
+the delimiter, and one that opens AND closes on a backtick, which is
+indistinguishable from the legacy backtick-wrapped row form that
+`_anchor_field` still unwraps.
 
     python3 scripts/memory/memory_ledger.py status            # both files
     python3 scripts/memory/memory_ledger.py status --json
@@ -46,10 +61,14 @@ ANCHOR_CHARS = 60
 HEADROOM_BYTES = 1024
 
 LEDGERS = {"USER.md": "user-md-ledger.md", "MEMORY.md": "memory-md-ledger.md"}
+#: What ends the anchor field. A pipe, not a backtick: the anchor is the loaded
+#: line's own first 60 characters, code spans and all, and every later field in
+#: the row is already pipe-separated (#1730 — see the module docstring).
+FIELD_SEP = "|"
 # `memory_add` writes `- [project] (YYYY-MM-DD) <entry>`, so the type tag and
 # date stamp it prepends are optional in front of `anchor:`.
 _ROW = re.compile(r"^\s*-\s+(?:\[[a-z]+\]\s+)?(?:\(\d{4}-\d{2}-\d{2}\)\s+)?"
-                  r"anchor:\s*`(?P<anchor>[^`]*)`(?P<rest>.*)$")
+                  r"anchor:\s*(?P<field>[^|]*)(?:\s*\|\s*(?P<rest>.*))?$")
 _CHECKED = re.compile(r"checked:\s*(\d{4}-\d{2}-\d{2})")
 
 
@@ -62,6 +81,33 @@ def anchor_of(entry_line: str) -> str:
     body = entry_line.strip()
     body = re.sub(r"^(?:[-*]|>)\s*", "", body)
     return _norm(body)[:ANCHOR_CHARS].rstrip()
+
+
+def _anchor_field(field: str) -> str:
+    """The anchor a row's `anchor:` field carries.
+
+    Rows written before #1730 wrapped the anchor in backticks, so one pair of
+    wrapping backticks is stripped to keep those rows covering their line. The
+    strip is greedy on purpose: for an anchor that ends on a code-span backtick
+    the old wrapper's closing backtick WAS the anchor's own last character, and
+    a non-greedy strip would take that character away as well.
+    """
+    f = field.strip()
+    if len(f) >= 2 and f.startswith("`") and f.endswith("`"):
+        return f[1:-1]
+    return f
+
+
+def representable(anchor: str) -> bool:
+    """Whether a row can carry `anchor` and `ledger_rows` read it back whole.
+
+    Two shapes cannot: one containing the field delimiter, which the row parser
+    cuts at, and one that both opens and closes on a backtick, which no reader
+    can tell from the legacy wrapped form. A line with either is not curator
+    backlog — no row will ever cover it — so `status` counts it separately.
+    """
+    return FIELD_SEP not in anchor and not (anchor.startswith("`")
+                                            and anchor.endswith("`"))
 
 
 def loaded_entries(text: str) -> list[str]:
@@ -87,8 +133,9 @@ def ledger_rows(text: str) -> list[dict]:
     for line in text.splitlines():
         m = _ROW.match(line)
         if m:
-            c = _CHECKED.search(m.group("rest"))
-            rows.append({"anchor": _norm(m.group("anchor")), "checked": c.group(1) if c else None})
+            c = _CHECKED.search(m.group("rest") or "")
+            rows.append({"anchor": _norm(_anchor_field(m.group("field"))),
+                         "checked": c.group(1) if c else None})
     return rows
 
 
@@ -108,6 +155,11 @@ def status(memories_dir: Path) -> dict:
         rows = ledger_rows(lpath.read_text(encoding="utf-8")) if lpath.exists() else []
         have = {r["anchor"] for r in rows}
         live = set(entries)
+        # A line whose anchor no row can carry is not backfill owed: keeping it
+        # out of `without_row` is what stops the curator's bounded work being
+        # spent re-attempting a row that would orphan the moment it landed.
+        unrepresentable = [a for a in entries if not representable(a)]
+        unreachable = set(unrepresentable)
         unchecked = sorted((r for r in rows if r["anchor"] in live),
                            key=lambda r: r["checked"] or "")
         report[name] = {
@@ -115,7 +167,8 @@ def status(memories_dir: Path) -> dict:
             "headroom": None if ceiling is None else ceiling - size,
             "curate": ceiling is not None and size > ceiling - HEADROOM_BYTES,
             "entries": len(entries), "ledger": str(lpath), "rows": len(rows),
-            "without_row": [a for a in entries if a not in have],
+            "without_row": [a for a in entries if a not in have and a not in unreachable],
+            "unrepresentable": unrepresentable,
             "orphan_rows": sorted(have - live),
             "stalest_checked": [r["anchor"] for r in unchecked[:10]],
             "duplicate_anchors": sorted({a for a in entries if entries.count(a) > 1}),
@@ -141,10 +194,13 @@ def main(argv=None) -> int:
         print(f"{name}: {r['bytes']} / {r['ceiling']} B (headroom {r['headroom']}), "
               f"{r['entries']} entries, {r['rows']} ledger rows"
               + ("  -> CURATE" if r["curate"] else ""))
-        print(f"  without a row: {len(r['without_row'])}; orphan rows: {len(r['orphan_rows'])}"
-              f"; duplicate anchors: {len(r['duplicate_anchors'])}")
+        print(f"  without a row: {len(r['without_row'])}; "
+              f"unrepresentable: {len(r['unrepresentable'])}; "
+              f"orphan rows: {len(r['orphan_rows'])}; duplicate anchors: {len(r['duplicate_anchors'])}")
         for a in r["without_row"][:10]:
             print(f"    no row: {a}")
+        for a in r["unrepresentable"][:10]:
+            print(f"    unrepresentable: {a}")
         for a in r["orphan_rows"][:10]:
             print(f"    orphan: {a}")
     return 0
