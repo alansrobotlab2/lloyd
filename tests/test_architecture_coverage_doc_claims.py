@@ -30,6 +30,8 @@ with nothing wrong:
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -274,3 +276,158 @@ def test_each_new_doc_is_a_review_unit_the_moment_it_lands(slug):
     from workers.sources.arch_review import doc_slugs
     assert (ARCH / slug).exists()
     assert slug.removesuffix(".md") in set(doc_slugs(ROOT))
+
+
+# ── #1763: the citation that left main red, and the green it could buy by erasure ──
+
+
+def test_the_identity_file_is_still_cited_and_lands_outside_the_repo():
+    """Row 1 of `authority-surfaces.md` is the vault identity file, and the only
+    spelling of it this resolver can resolve is the one rooted at the vault.
+
+    `_resolve` has three branches (line 138): `$LLOYD_DATA/` to the data root, `~/`
+    to the home directory, everything else to the source tree. The file header says
+    why the second exists — a repo-rooted check calls the moved store absent — and
+    three architecture docs spell vault paths with that prefix (`measurement.md`,
+    `vault-protection.md`, `workers-jobs.md` all cite `~/obsidian/lloyd/bench`).
+    Row 1 spelled the identity file `lloyd/SOUL.md`: no prefix, contains a slash, so
+    `_resolve` took the default branch and asked the source tree for
+    `<repo>/lloyd/SOUL.md`, which exists nowhere — `git ls-files lloyd/` is empty,
+    and the deny-set entry the row is describing is spelled
+    `~/obsidian/lloyd/SOUL.md` in the code (`app/harness/protected_paths.py:154`).
+    That is main's red node, and the fix is the row's root, not a checker that stops
+    looking.
+
+    Asserted in three parts, because deleting the citation is the other way to get
+    a green here and a doc that cites nothing is an all-clear:
+
+    - the row still names the file;
+    - `cited_paths` — the same extraction the graded check runs — lands a path under
+      the home directory for it, and none under the source tree;
+    - the gate's prompt-surface trigger really does key on the bare name, which is
+      the half of the row that needs no root and so is not a claim about paths.
+    """
+    text = _text("authority-surfaces.md")
+    assert "SOUL.md" in text, (
+        "row 1 no longer cites the identity file at all: the checker is green "
+        "because it has nothing left to check")
+
+    cited = cited_paths(text)
+    rooted = HOME / "obsidian" / "lloyd" / "SOUL.md"
+    hits = [p for p, _line in cited if p.name == "SOUL.md"]
+    assert hits == [rooted], (
+        f"the identity-file citation resolves to {[str(h) for h in hits]}, not to "
+        f"{rooted} — a repo-relative spelling is what left main red")
+    assert rooted.exists(), (
+        f"{rooted} is not on disk, so the graded check would be red again for a "
+        "reason this node's own assertion cannot tell apart from the old one")
+
+    # The control that says the checker still rejects an unrooted vault path, so
+    # this node cannot be satisfied by a resolver that stopped caring.
+    unrooted = cited_paths("see `lloyd/SOUL.md` for the classes")
+    assert unrooted == [(ROOT / "lloyd" / "SOUL.md", None)], unrooted
+    assert not unrooted[0][0].exists(), (
+        "the repo-relative spelling resolved, so the red node this item files "
+        "would no longer be red — the positive control has stopped controlling")
+
+    from scripts.automod.gate import Gate
+    assert "SOUL.md" in Gate.PROMPT_SURFACE_VAULT, Gate.PROMPT_SURFACE_VAULT
+
+
+# ── #1763 clause 2: green by fixing, not by hiding ─────────────────────────────
+#
+# The named node failed at base `eb889136`, and a red node stops being red three
+# ways without anything being fixed: mark it out of the gate's mark expression,
+# mark it `skip`/`skipif`/`xfail`, or delete it. This file's graded check is the one
+# an author can defuse from inside the file, so clause 2 is pinned over the seam the
+# gate actually crosses — `scripts/automod/gate.py` builds an argv and a child
+# interpreter runs it (`TESTS_MARK_EXPR` at `scripts/automod/gate.py:326`) — rather
+# than by reading decorators off the source.
+
+THIS_FILE = Path(__file__).resolve().relative_to(ROOT).as_posix()
+
+#: The node #1763 files, spelled with its parametrisation. Named exactly, because
+#: "the check is green" is equally true of a check that is no longer collected.
+NAMED_NODE = ("test_every_path_a_new_doc_cites_resolves_in_the_working_tree"
+              "[authority-surfaces.md]")
+
+#: Anchored to a decorator at the start of a line, or to a call of the runtime
+#: form. A substring scan over the source is not a check: it matches this file's
+#: own prose about the markers it forbids, which is exactly what an author who
+#: wanted to hide a node would write.
+_HIDE_RE = re.compile(
+    r"^\s*@pytest\.mark\.(?:live_vault|fault_injection|skip|skipif|xfail)\b"
+    r"|\bpytest\.(?:skip|skipif|xfail)\s*\("
+    r"|\bpytest\.param\s*\("
+    r"|\bskip(?:if)?\s*=\s*[\"']",
+    re.M)
+
+
+def _pytest(extra: list[str]) -> subprocess.CompletedProcess:
+    """Run pytest in a child interpreter, the way the gate's rung does."""
+    return subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", *extra],
+        cwd=ROOT, capture_output=True, text=True, timeout=300)
+
+
+def test_the_gate_selection_drops_nothing_and_the_named_node_passes():
+    """Clause 2, across the process boundary: pytest's own selection and pytest's
+    own per-node verdicts, not a reading of the source.
+
+    One `-v` run under the gate's mark expression answers every half:
+
+    - `--collect-only` with and without `-m "not live_vault and not
+      fault_injection"` collect the same 23 nodes, so nothing in this file was
+      moved out of the gate's reach;
+    - the run reports **22 PASSED lines**, one per node collected less this one, so
+      a skipped or xfailed node cannot hide inside a passing exit code;
+    - the node #1763 files — `test_every_path_a_new_doc_cites_resolves_in_the_working_tree`
+      `[authority-surfaces.md]` — is among those 22 and is reported PASSED **by
+      name**, which is the verdict this item was filed for;
+    - exit code 0, and no `skipped`/`xfailed` anywhere in the output.
+
+    This node is the one exclusion, and it is a recursion guard, not a dodge: a node
+    that runs its own file runs itself again — measured at 298 live pytest processes
+    before it was bounded. The arithmetic carries that honestly (23 collected, 22
+    reported), and this node's own verdict is what the gate's full-suite run records
+    with no exclusion in it.
+    """
+    from scripts.automod.gate import TESTS_MARK_EXPR
+
+    unfiltered = [ln for ln in (_pytest(["--collect-only", "-q", THIS_FILE]).stdout
+                                .splitlines()) if "::" in ln]
+    gated = [ln for ln in (_pytest(["--collect-only", "-q", "-m", TESTS_MARK_EXPR,
+                                    THIS_FILE]).stdout.splitlines()) if "::" in ln]
+    assert gated == unfiltered, (
+        f"the gate's selection ({TESTS_MARK_EXPR!r}) deselected "
+        f"{len(unfiltered) - len(gated)} of this file's nodes: "
+        f"{sorted(set(unfiltered) - set(gated))}")
+    assert unfiltered, "collection found no nodes at all — the check is empty"
+    assert any(NAMED_NODE in node for node in gated), (
+        f"{NAMED_NODE} is no longer collected: the red node was removed rather "
+        "than fixed")
+
+    src = (ROOT / THIS_FILE).read_text(encoding="utf-8")
+    hidden = _HIDE_RE.findall(src)
+    assert hidden == [], (
+        f"this file carries a marker that takes a node off the hard rung: {hidden}")
+
+    this_node = (f"{THIS_FILE}::"
+                 "test_the_gate_selection_drops_nothing_and_the_named_node_passes")
+    ran = _pytest(["-v", "-m", TESTS_MARK_EXPR, "--deselect", this_node, THIS_FILE])
+    out = ran.stdout + ran.stderr
+    assert ran.returncode == 0, out[-1500:]
+    low = out.lower()
+    assert "skipped" not in low and "xfail" not in low, out[-1500:]
+    assert f"{len(gated) - 1} passed" in out, out[-400:]
+
+    passed = [ln for ln in out.splitlines() if " PASSED" in ln]
+    assert len(passed) == len(gated) - 1, (
+        f"{len(gated)} nodes collected, {len(gated) - 1} run, only {len(passed)} "
+        f"report PASSED — a verdict is missing, not passing: "
+        + "\n".join(ln for ln in out.splitlines()
+                    if "::" in ln and " PASSED" not in ln))
+    named = [ln for ln in passed if NAMED_NODE in ln]
+    assert len(named) == 1, (
+        f"{NAMED_NODE} is not reported PASSED by name, so the node this item was "
+        f"filed for has no recorded verdict: {named}")
