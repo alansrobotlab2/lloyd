@@ -171,6 +171,31 @@ _MERELY_NAMES_THE_SET = [
 ]
 
 
+#: The store the venv interpreter links into (#1741), under the scratch home. The
+#: live spelling — `/home/alansrobotlab/.local/share/uv/python/cpython-3.12…/bin`,
+#: which all five `.venvs/*/pyvenv.cfg` files on this box name — is never a target
+#: here, for the same reason as the rest of this section.
+UV_STORE_BIN = ".local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin"
+
+#: The traffic #1741 must leave allowed: the store read, the store as a `cp`
+#: *source*, a `.venvs`-shaped path in somebody else's project, and one real write
+#: — into the uv *tools* tree beside the store. Not one of them writes into
+#: `~/.local/share/uv/python`, which is the only thing the new entry covers. A rule
+#: keyholed on the word `python`, on a `.venvs` suffix, or widened a directory up
+#: — the three obvious ways to write this fix — loses here while still refusing the
+#: clobber, which is why it lives on the benign side of the file.
+_ALLOWED_AROUND_THE_UV_STORE = [
+    "ls -la ~/.local/share/uv/python",
+    "cp {store}/python3.12 /tmp/x",
+    "echo x > ~/otherproject/.venvs/lloyd/pyvenv.cfg",
+    # The scope rail, as a write: the uv *tools* tree beside the store holds the
+    # supervisorctl automod's own promotion execs
+    # (`scripts/automod/promote.py:97`), so an entry widened one directory up to
+    # `~/.local/share/uv` refuses the parachute with everything else.
+    "echo unit | tee -a ~/.local/share/uv/tools/supervisor/bin/supervisorctl",
+]
+
+
 @pytest.fixture()
 def deny_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -179,6 +204,25 @@ def deny_home(tmp_path, monkeypatch):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("x\n")
     (home / "obsidian" / "knowledge").mkdir(parents=True, exist_ok=True)
+    # The #1741 layout: the venv interpreter is a link into the store, and there
+    # is an ordinary project whose tree merely looks like a protected one.
+    store = home / UV_STORE_BIN
+    store.mkdir(parents=True)
+    (store / "python3.12").write_text("x\n")
+    venv_bin = home / "lloyd" / ".venvs" / "lloyd" / "bin"
+    venv_bin.mkdir(parents=True)
+    (venv_bin / "python").symlink_to(store / "python3.12")
+    (home / "otherproject" / "lloyd" / ".venvs" / "lloyd").mkdir(parents=True)
+    # Two links standing inside a denied directory, one pointing out of the set and
+    # one into it (#1741 clause 5). Built here and nowhere else: the live tree must
+    # not gain an `agent-services/link.conf` to make a test pass, and tmp is the
+    # only tree that may hold one.
+    outside = home / "notes" / "unit.conf"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("x\n")
+    (home / "lloyd" / "agent-services" / "link-out.conf").symlink_to(outside)
+    (home / "lloyd" / "agent-services" / "link-in.conf").symlink_to(
+        home / "obsidian" / "lloyd" / "SOUL.md")
     monkeypatch.setenv("HOME", str(home))
     return home
 
@@ -188,6 +232,71 @@ def test_the_write_check_allows_a_deny_set_path_it_only_names(deny_home, command
     assert safety.check_bash_command(
         command, str(deny_home / "lloyd"),
         session_id="20260927_143507_chatabc") is None, command
+
+
+@pytest.mark.parametrize("command", _ALLOWED_AROUND_THE_UV_STORE)
+def test_the_write_check_allows_the_store_it_was_widened_for(deny_home, command):
+    """#1741's benign arm: widening the deny-set to the uv store changes the answer
+    for no command that does not write into the store.
+
+    Reading the store (`ls`), copying *out* of it (`cp … /tmp/x`) and writing a
+    `.venvs`-shaped path in somebody else's project are ordinary work — the first
+    two are how a person diagnoses an interpreter, the third is what a second
+    checkout looks like to a suffix matcher, and a rule written as a word match on
+    `python` or as a `.venvs` suffix loses on them while still refusing the clobber.
+    The fourth line writes for real, into the uv *tools* tree, and it is the one
+    that answers refused if the entry is ever widened a directory up to
+    `~/.local/share/uv`: automod's own promotion execs
+    `~/.local/share/uv/tools/supervisor/bin/supervisorctl`
+    (`scripts/automod/promote.py:97`), so that widening puts the parachute inside the
+    deny-set. What does start refusing is a write *into* the store, `uv python
+    install` included: that writer is a human command (`SETUP.md:166`) and an agent
+    owes a grant, which is the consequence the item asked for. The attack half of
+    this pair is
+    `tests/test_bash_write_guard.py::test_a_write_to_the_linked_interpreter_is_refused_at_dispatch`.
+    """
+    cmd = command.format(store=deny_home / UV_STORE_BIN)
+    assert safety.check_bash_command(
+        cmd, str(deny_home / "lloyd"),
+        session_id="20260927_143507_chatabc") is None, cmd
+
+
+def test_the_write_check_judges_a_link_by_where_it_points(deny_home, tmp_path):
+    """#1741 clause 5, on the Bash lane, which had no pin for this at all: a link
+    standing inside a denied directory is refused or allowed by its target, because
+    realpath-first is one rule and the deny-set gained its fifth entry precisely
+    because of it.
+
+    Both links are in the `deny_home` scratch home, not in the live tree —
+    `~/lloyd/agent-services/link.conf` is production and nothing here may create
+    it. The pair is what makes the fifth entry honest rather than absolute: the
+    store entry does not extend the set to anything that merely touches a venv, and
+    a link out of the set is still writable, so the fix cannot be "everything under
+    those trees is unwriteable, permanently, by anyone".
+    """
+    out = "echo unit > ~/lloyd/agent-services/link-out.conf"
+    assert safety.check_bash_command(out, str(deny_home / "lloyd"),
+                                     session_id="20260927_143507_chatabc") is None, out
+    soul = deny_home / "obsidian" / "lloyd" / "SOUL.md"
+    assert soul.read_text() == "x\n"
+    refused = "echo unit > ~/lloyd/agent-services/link-in.conf"
+    match = safety.check_bash_command(refused, str(deny_home / "lloyd"),
+                                      session_id="20260927_143507_chatabc")
+    assert match is not None, refused
+    assert soul.read_text() == "x\n", "a refusal must not have run the shell"
+    # The same rule, the other way, for the round's own tree: a path ending in the
+    # `agent-services/…` the entry names, sitting outside the set. Prefix, not
+    # suffix — this is the property `test_the_write_check_lets_a_round_edit_its_own_worktree`
+    # pins for the four original entries, restated for the enlarged set so the
+    # fifth is not assumed to have left it standing.
+    unit = (tmp_path / "lloyd-work" / "SM_20260928_000000" / "home" / "lloyd"
+            / "agent-services" / "supervisord.conf")
+    unit.parent.mkdir(parents=True)
+    unit.write_text("x\n")
+    worktree = f"cp /tmp/unit.conf {unit}"
+    assert safety.check_bash_command(
+        worktree, str(deny_home / "lloyd"),
+        session_id="20260927_143507_chatabc") is None, worktree
 
 
 def test_the_write_check_lets_a_round_edit_its_own_worktree(deny_home, tmp_path):

@@ -49,8 +49,13 @@ from app.harness.safety import check_bash_command  # noqa: E402
 SID = "20260927_143507_chatabc"
 ORIGINAL = "ORIGINAL IDENTITY FILE"
 
-#: One existing file per deny-set entry, vault-relative to the scratch home.
-#: Same four entries `tests/test_builtin_fs_protected_write.py` writes to.
+#: One existing file per deny-set entry as #1049 shipped it, vault-relative to
+#: the scratch home — the four that `tests/test_builtin_fs_protected_write.py`
+#: writes to. The fifth (#1741) is not a file standing under its own name but the
+#: uv store the venv interpreter links into, so it gets its own fixture,
+#: `linked_home`, and the nodes below it: this dict's targets are refused by the
+#: set that was here first, and a node that passes at the base commit pins
+#: nothing.
 DENIED = {
     "identity file": "obsidian/lloyd/SOUL.md",
     "credential tree": ".openclaw/config.json",
@@ -94,6 +99,132 @@ def home(tmp_path, monkeypatch):
     (h / "obsidian" / "knowledge").mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(h))
     return h
+
+
+#: The store layout every `.venvs/*/pyvenv.cfg` on the live box names, spelled
+#: under a scratch home. `.venvs/lloyd/bin/python` is a symlink into it, which is
+#: why the `~/lloyd/.venvs` entry never covered a write to that interpreter:
+#: realpath-first judges the link by where it points, and the target was outside
+#: the set until #1741 put the store in it.
+UV_STORE_BIN = ".local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin"
+
+#: The three spellings of one write: the interpreter every lloyd service runs on.
+#: The tilde form is the live #1741 probe, `cp /tmp/evil
+#: ~/lloyd/.venvs/lloyd/bin/python`, one `HOME` swap away; the second is its own
+#: absolute spelling; the third names the store binary the link resolves to, so
+#: the entry is pinned on both sides of the link and not just the one a person
+#: happens to type. Each writes its target.
+INTERPRETER_WRITES = {
+    "cp-destination-venv-interpreter": "cp /tmp/evil ~/lloyd/.venvs/lloyd/bin/python",
+    "cp-destination-venv-interpreter-absolute": "cp /tmp/evil {repo}/.venvs/lloyd/bin/python",
+    "tee-destination-store-binary": "echo clobbered | tee {store}/python3.12",
+}
+
+#: What the refusal has to name: the fifth entry's own label (#1741).
+STORE_LABEL = "the uv-managed CPython installs the lloyd venvs link to"
+
+
+@pytest.fixture
+def linked_home(tmp_path, monkeypatch):
+    """A scratch `$HOME` whose venv interpreter is the symlink it is on the box.
+
+    Not the plain file the fixture above creates: with a real file standing at
+    `.venvs/lloyd/bin/python`, realpath keeps it inside `~/lloyd/.venvs`, the old
+    four-entry set already refused the write, and every node below would pass at
+    the base commit and prove nothing.
+    """
+    h = tmp_path / "home"
+    store = h / UV_STORE_BIN
+    store.mkdir(parents=True)
+    (store / "python3.12").write_text(ORIGINAL)
+    link = h / "lloyd" / ".venvs" / "lloyd" / "bin"
+    link.mkdir(parents=True)
+    (link / "python").symlink_to(store / "python3.12")
+    (h / "lloyd" / ".venvs" / "pyvenv.cfg").write_text(f"home = {store}\n")
+    for rel in ("obsidian/lloyd/SOUL.md", ".openclaw/credentials.json",
+                "lloyd/agent-services/supervisord.conf"):
+        p = h / rel
+        p.parent.mkdir(parents=True)
+        p.write_text(ORIGINAL)
+    monkeypatch.setenv("HOME", str(h))
+    return h
+
+
+@pytest.mark.parametrize("key", sorted(INTERPRETER_WRITES))
+def test_a_write_to_the_linked_interpreter_is_refused_at_dispatch(linked_home, key):
+    """The dispatch lane, which is the one `agent_mcp.main.call_tool` runs for
+    every Bash call. All three keys are refused only because of the fifth entry:
+    delete that entry and each of these returns None at the base commit — the
+    falsifiable half of this node."""
+    cmd = INTERPRETER_WRITES[key].format(home=linked_home, repo=linked_home / "lloyd",
+                                         store=linked_home / UV_STORE_BIN)
+    match = check_bash_command(cmd, str(linked_home / "lloyd"), at_dispatch=True,
+                               session_id=SID)
+    assert match is not None, cmd
+    assert match[0].startswith("protected write: "), match
+
+
+@pytest.mark.parametrize("key", sorted(INTERPRETER_WRITES))
+def test_a_write_to_the_linked_interpreter_is_refused_by_the_hook(linked_home, key):
+    cmd = INTERPRETER_WRITES[key].format(home=linked_home, repo=linked_home / "lloyd",
+                                         store=linked_home / UV_STORE_BIN)
+    decision, reason = _hook_decision(cmd, str(linked_home / "lloyd"))
+    assert decision == "deny", cmd
+    assert "protected write" in reason, (cmd, reason)
+
+
+def test_the_interpreter_refusal_names_the_store_entry(linked_home):
+    """The refusal an operator sees must name the entry that fired, and here it is
+    the store's, not `~/lloyd/.venvs`'.
+
+    The message quotes the operand as it was typed — `.../lloyd/.venvs/lloyd/bin/python`
+    — while the label it carries is the fifth entry's, because realpath-first moved
+    the target into the store. That combination is what an operator needs: the
+    spelling they typed, and the tree that is actually shut, which is not the one
+    the path is standing in. Before #1741 the same call was refused by neither.
+    """
+    command = "cp /tmp/evil ~/lloyd/.venvs/lloyd/bin/python"
+    match = check_bash_command(command, str(linked_home / "lloyd"), at_dispatch=True,
+                              session_id=SID)
+    assert match is not None, command
+    assert STORE_LABEL in match[0], match[0]
+    assert "the interpreter the lloyd services run on" not in match[0], match[0]
+    assert str(linked_home / "lloyd/.venvs/lloyd/bin/python") in match[0], match[0]
+
+
+def test_the_store_entry_covers_the_link_only_because_the_link_is_a_link(linked_home):
+    """The control that makes the two nodes above mean something: the target is
+    refused *through* the symlink, and the same name as an ordinary file under
+    `.venvs` is refused by the venv entry instead. Drop the fifth entry and the
+    first assertion goes None while the second stays refused — that difference is
+    the whole of #1741, and a fixture that made the interpreter a plain file
+    would hide it."""
+    link = linked_home / "lloyd" / ".venvs" / "lloyd" / "bin" / "python"
+    assert link.is_symlink() and link.resolve() == (linked_home / UV_STORE_BIN
+                                                   / "python3.12").resolve()
+    assert PP.write_deny_reason(str(link)) == STORE_LABEL, "the link, judged by its target"
+    assert PP.write_deny_reason(str(linked_home / "lloyd/.venvs/pyvenv.cfg")) \
+        == "the interpreter the lloyd services run on", "a real file inside the venv"
+
+
+def test_a_grant_naming_the_store_lifts_the_bash_write_and_nothing_else(linked_home):
+    """The pair on the Bash lane: a lift naming the store opens the interpreter
+    write, and leaves `> ~/.openclaw/x` refused, because a narrowed grant is a
+    permission on a location and not on the concept of protected paths."""
+    interpreter = "cp /tmp/evil ~/lloyd/.venvs/lloyd/bin/python"
+    redirect = "echo x > ~/.openclaw/credentials.json"
+    for cmd in (interpreter, redirect):
+        assert check_bash_command(cmd, str(linked_home / "lloyd"), at_dispatch=True,
+                                  session_id=SID) is not None, cmd
+    with PP.allow_protected_writes("test: the uv store lane",
+                                   paths=["~/.local/share/uv/python"]):
+        assert check_bash_command(interpreter, str(linked_home / "lloyd"),
+                                  at_dispatch=True, session_id=SID) is None, interpreter
+        assert check_bash_command(redirect, str(linked_home / "lloyd"),
+                                  at_dispatch=True, session_id=SID) is not None, redirect
+    assert check_bash_command(interpreter, str(linked_home / "lloyd"),
+                              at_dispatch=True, session_id=SID) is not None, \
+        "the lift cannot outlive its scope"
 
 
 def _cmd(template: str, home: Path) -> str:
@@ -158,9 +289,17 @@ _CLOBBERS = [
 
 
 def _run_unguarded(command: str, home: Path, cwd: Path):
-    """Run `command` in a real shell with the write check monkeypatched off, so
-    the byte assertions below are falsifiable: they name commands that *do* reach
-    the target when nothing intercepts them, not commands that write nothing."""
+    """Run `command` in a real shell, unguarded, so the byte assertions below are
+    falsifiable: they name commands that *do* reach the target when nothing
+    intercepts them, not commands that write nothing.
+
+    Unguarded because it is a plain `subprocess.run(shell=True)` in a child that
+    never imports `protected_paths` and never fires the harness hook — the two
+    things that refuse the same string when the harness runs it. Nothing in the
+    parent process can stand this one down, which is exactly why it is the
+    control: if the command below does not write here, no assertion about a
+    refusal protecting those bytes means anything.
+    """
     import subprocess
     env = {**os.environ, "HOME": str(home)}
     return subprocess.run(_cmd(command, home), shell=True, cwd=str(cwd), env=env,
@@ -170,8 +309,15 @@ def _run_unguarded(command: str, home: Path, cwd: Path):
 @pytest.mark.parametrize("template,target", _CLOBBERS)
 def test_the_same_commands_reach_the_bytes_with_the_check_removed(home, template, target):
     """The control that makes the assertion below mean something: unguarded, each
-    command writes. `check_bash_write_denied` is looked up at call time by
-    `check_bash_command`, so patching it here is the only thing standing down."""
+    command writes.
+
+    It writes because of what `_run_unguarded` is — a shell in a child process
+    that never imports `protected_paths`, so neither the in-process predicate nor
+    the PreToolUse hook is in front of it. The assignment below is not what stands
+    the check down here, and never was: `check_bash_command` imports
+    `check_bash_write_denied` at call time, but this node never calls
+    `check_bash_command`. The assignment is left in as the belt-and-braces it is,
+    and the falsifiable content of this node is entirely in the read-back."""
     monkeypatched = PP.check_bash_write_denied
     PP.check_bash_write_denied = lambda command, cwd=None: None
     try:

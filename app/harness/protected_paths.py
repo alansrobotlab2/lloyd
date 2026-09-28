@@ -128,10 +128,29 @@ def protected_roots() -> list[Root]:
 # and a deny-set that followed the code would protect the copy while leaving
 # the live tree open. `Path.home()/"obsidian"` is what `VAULT_ROOT` already is
 # (`app/paths.py:11`), so the vault entry agrees with it on this box today.
+#
+# The fifth entry exists because the fourth one's label promised more than the
+# fourth one covered. `~/.local/share/uv/python` is the store the real
+# interpreter lives in: every `.venvs/*/pyvenv.cfg` on this box names
+# `home = ~/.local/share/uv/python/cpython-<ver>-linux-x86_64-gnu/bin`, and
+# `.venvs/lloyd/bin/python` is a symlink into it, so realpath-first — the rule
+# that lets a round write its own worktree — judged a write to that interpreter
+# by where it *points*, outside the set, and allowed it. All five venvs
+# (lloyd, qwen3-tts, vllm-decider, vllm-djev, vllm-flash-next-main) link the one
+# binary, so that single allowed write was every service's interpreter at once.
+# The entry stops at `uv/python` on purpose: `~/.local/share/uv/tools/supervisor`
+# is a different uv tree, and automod's own promotion path execs
+# `~/.local/share/uv/tools/supervisor/bin/supervisorctl`
+# (`scripts/automod/promote.py:97`) — the broader entry would have put the
+# parachute inside the deny-set. The legitimate writer, `uv python install`, is
+# a human command (`SETUP.md:166`); an agent that needs it owes a grant, which is
+# the point rather than an inconvenience to route around.
 PROTECTED_WRITE_ROOTS: tuple[tuple[str, str], ...] = (
     ("~/.openclaw", "the OpenClaw credential tree"),
     ("~/lloyd/agent-services", "the supervisor, guardian and service units"),
     ("~/lloyd/.venvs", "the interpreter the lloyd services run on"),
+    ("~/.local/share/uv/python",
+     "the uv-managed CPython installs the lloyd venvs link to"),
     ("~/obsidian/lloyd/SOUL.md", "the identity file loaded into every system prompt"),
 )
 

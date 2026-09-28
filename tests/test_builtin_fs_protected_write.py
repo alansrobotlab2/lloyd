@@ -51,12 +51,26 @@ from app.harness.safety import check_bash_command  # noqa: E402
 SID = "20260921_1049_test"
 ORIGINAL = "ORIGINAL IDENTITY FILE"
 
-#: One existing file per deny-set entry, vault-relative to the scratch home.
+#: Where the interpreter the venvs name actually lives: the uv store, spelled
+#: relative to a scratch `$HOME`. Every `.venvs/*/pyvenv.cfg` on this box names this
+#: layout (`home = …/.local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin`) and
+#: `.venvs/lloyd/bin/python` is a symlink into it, which is the hole #1741 closes —
+#: the `~/lloyd/.venvs` entry named "the interpreter the lloyd services run on" while
+#: realpath-first judged a write to that interpreter by the store it points at,
+#: outside the set. The fifth entry is the store, so this is the path it covers.
+UV_STORE_BIN = ".local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin"
+
+#: One existing file per deny-set entry, vault-relative to the scratch home — five
+#: since #1741. The `interpreter` key is the name a person types, and on this box it
+#: is not a file but a link into the fifth entry, which the `home` fixture below
+#: writes as a plain file: `linked_home` restores the link, and the difference is
+#: what that node is for.
 DENIED = {
     "identity file": "obsidian/lloyd/SOUL.md",
     "credential tree": ".openclaw/config.json",
     "service unit": "lloyd/agent-services/supervisor/conf.d/agent-backend.conf",
     "interpreter": "lloyd/.venvs/lloyd/bin/python",
+    "uv store binary": UV_STORE_BIN + "/python3.12",
 }
 
 
@@ -244,6 +258,72 @@ async def test_a_narrowed_grant_lifts_only_what_it_names(home):
                                               "content": "OVERWRITTEN"}), soul)
         assert (await FS.call_tool("Write", {"file_path": str(venv),
                                              "content": "ok"})).is_error is False
+
+
+# ── #1741: the fifth entry, on the lane where it is not a file ──────────────
+
+
+@pytest.fixture
+def linked_home(tmp_path, monkeypatch):
+    """`home`, with the venv interpreter restored to what it is on the box: a link.
+
+    The distinction is the whole of #1741. As a plain file, `.venvs/lloyd/bin/python`
+    is refused by `~/lloyd/.venvs` and a grant naming the uv store changes nothing,
+    so every assertion below would hold at the base commit. As a link, the write is
+    judged by the store — refused by the fifth entry alone, and liftable by a grant
+    naming the fifth entry alone.
+    """
+    h = tmp_path / "home"
+    for rel in DENIED.values():
+        p = h / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(ORIGINAL)
+    binary = h / UV_STORE_BIN / "python3.12"
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    binary.write_text(ORIGINAL)
+    link = h / "lloyd" / ".venvs" / "lloyd" / "bin" / "python"
+    link.unlink()
+    link.symlink_to(binary)
+    monkeypatch.setenv("HOME", str(h))
+    monkeypatch.setattr(FS, "get_bound_session", lambda: SID)
+    return h
+
+
+async def test_a_grant_naming_the_store_lifts_the_interpreter_write_and_nothing_else(
+        linked_home):
+    """#1741 clause 4: the new entry behaves like the four it joined, including
+    being liftable — a deny-set only code can lift, and only into the one location
+    a grant names.
+
+    Both lanes, one grant: the `Write` of the interpreter link (which lands on the
+    store binary, so that is the file whose bytes are checked) and, on the Bash lane
+    beside it, the `> ~/.openclaw/x` redirect the same call must still refuse. The
+    grant names `~/.local/share/uv/python` and nothing else, so if the lift were
+    implemented as a global switch — the shape a `bool` contextvar would have given
+    — the second half goes red; and if the store entry were missing, the first half
+    goes red at the base commit."""
+    link = linked_home / DENIED["interpreter"]
+    binary = linked_home / UV_STORE_BIN / "python3.12"
+    assert link.is_symlink() and link.resolve() == binary.resolve()
+    redirect = "echo x > ~/.openclaw/x"
+    assert not (await FS.call_tool("Read", {"file_path": str(link)})).is_error
+    args = {"file_path": str(link), "content": "GRANTED WRITE"}
+    _refused(await FS.call_tool("Write", args), binary)
+    assert "uv-managed" in _json(await FS.call_tool("Write", args))["error"]
+    assert check_bash_command(redirect, str(linked_home / "lloyd"),
+                              at_dispatch=True, session_id=SID) is not None, redirect
+    with PP.allow_protected_writes("test: the uv store lane",
+                                   paths=["~/.local/share/uv/python"]):
+        assert (await FS.call_tool("Write", args)).is_error is False, \
+            "a grant naming the store must open the write into the store"
+        assert binary.read_text() == "GRANTED WRITE"
+        assert check_bash_command(redirect, str(linked_home / "lloyd"),
+                                  at_dispatch=True, session_id=SID) is not None, \
+            "the same grant may not open the credential tree"
+    assert not (linked_home / ".openclaw" / "x").exists()
+    # And the lift does not outlive its scope.
+    binary.write_text(ORIGINAL)
+    _refused(await FS.call_tool("Write", args), binary)
 
 
 # Acceptance clause 5 of #1620: the grant pair, on the Bash lane beside the lane

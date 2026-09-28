@@ -177,16 +177,43 @@ def wtree(tmp_path, monkeypatch):
     return home
 
 
+#: The four entries #1049 shipped, template to label. A fifth joiner may not
+#: quietly rewrite what one of these promises: the label is the half an operator
+#: reads in a refusal, and the store entry (#1741) arrived by *adding* a line.
+THE_SHIPPED_FOUR = {
+    "~/.openclaw": "the OpenClaw credential tree",
+    "~/lloyd/agent-services": "the supervisor, guardian and service units",
+    "~/lloyd/.venvs": "the interpreter the lloyd services run on",
+    "~/obsidian/lloyd/SOUL.md": "the identity file loaded into every system prompt",
+}
+
+#: #1741: the store the interpreter above is a symlink into.
+UV_STORE_TEMPLATE = "~/.local/share/uv/python"
+
+
 def test_the_write_deny_set_is_exactly_one_constant():
     """Membership is one module-level tuple, and it is the only place a denied
-    write path is spelled."""
+    write path is spelled.
+
+    Five entries since #1741, and the four that #1049 shipped keep their exact
+    template and label: a re-labelled entry is a re-decided boundary, and the
+    refusal string is what a person reads when a job is blocked."""
     entries = dict(PP.PROTECTED_WRITE_ROOTS)
-    assert len(entries) == 4, list(entries)
-    assert set(entries) == {
-        "~/.openclaw", "~/lloyd/agent-services", "~/lloyd/.venvs",
-        "~/obsidian/lloyd/SOUL.md",
-    }, list(entries)
+    assert len(entries) == 5, list(entries)
+    assert set(entries) == set(THE_SHIPPED_FOUR) | {UV_STORE_TEMPLATE}, list(entries)
     assert all(entries.values()), "every entry must say what it is"
+    for template, label in THE_SHIPPED_FOUR.items():
+        assert entries[template] == label, template
+    # The new entry's own label has to say what it covers, or a refusal naming
+    # "the uv store" tells an operator nothing about which binary is shut. Its
+    # template matters just as exactly: one directory up, `~/.local/share/uv`,
+    # also holds the uv *tools* tree, and automod's own promotion execs
+    # `~/.local/share/uv/tools/supervisor/bin/supervisorctl`
+    # (`scripts/automod/promote.py:97`) — an entry widened to it would put the
+    # parachute inside the deny-set. The sibling is refused behaviourally, by
+    # name, in `test_the_uv_store_entry_covers_the_interpreter_and_no_more`.
+    assert "uv" in entries[UV_STORE_TEMPLATE], entries[UV_STORE_TEMPLATE]
+    assert UV_STORE_TEMPLATE == "~/.local/share/uv/python", UV_STORE_TEMPLATE
 
 
 def test_the_write_deny_set_is_not_the_delete_roots(wtree):
@@ -229,6 +256,83 @@ def test_a_symlink_is_judged_by_where_it_points(wtree, tmp_path):
     link = wtree / "obsidian" / "lloyd" / "link-out.md"
     link.symlink_to(real_note)
     assert PP.write_deny_reason(str(link)) is None
+
+
+#: The store layout every `.venvs/*/pyvenv.cfg` on this box names, spelled
+#: relative to a scratch `$HOME` so the node below measures the mechanism.
+UV_STORE_BIN = ".local/share/uv/python/cpython-3.12-linux-x86_64-gnu/bin"
+
+
+@pytest.fixture()
+def linked_home(tmp_path, monkeypatch):
+    """A scratch `$HOME` with the layout the live box actually has.
+
+    `lloyd/.venvs/lloyd/bin/python` is not a file here, exactly as it is not a
+    file on the box: it is a symlink into the uv store, which is why the
+    `~/lloyd/.venvs` entry named "the interpreter the lloyd services run on"
+    without ever covering a write to it. One `HOME` swap away from the live
+    spelling the #1741 probe used — the same convention
+    `tests/test_bash_write_guard.py` states for its own absolute spellings, and
+    the only kind this file can run: `$HOME` is not the account's during a gate
+    run (see `tests/conftest.py:138-146`), so a probe of the real store would be
+    a probe of wherever the gate happened to relocate it.
+    """
+    home = tmp_path / "home"
+    binary = home / UV_STORE_BIN / "python3.12"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    link = home / "lloyd" / ".venvs" / "lloyd" / "bin" / "python"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(binary)
+    (home / "lloyd" / ".venvs" / "pyvenv.cfg").write_text(
+        f"home = {home / UV_STORE_BIN}\n")
+    for rel in ("obsidian/lloyd/SOUL.md", ".openclaw/config.json",
+                "lloyd/agent-services/supervisor/conf.d/agent-backend.conf"):
+        p = home / rel
+        p.parent.mkdir(parents=True)
+        p.write_text("x")
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def test_the_uv_store_entry_covers_the_interpreter_and_no_more(linked_home):
+    """#1741: the fifth entry covers the interpreter the venvs link to, and stops
+    there.
+
+    Half one is the hole: a write to `.venvs/lloyd/bin/python` — the symlink, or
+    the store binary the symlink points at — must answer with the new label.
+    Realpath-first is the reason the hole existed and is also the reason this
+    closes it, so the node pins the shape it is reasoning about first (the link
+    really is a link, and its realpath really is the store binary): without the
+    entry the same call returns None, and with a plain file standing there
+    instead of a link it would return the *venv* label, which is the answer the
+    old four-entry set gave and proves nothing about the store.
+
+    Half two is the scope rail. `~/.local/share/uv/tools` is where uv puts its
+    installed tools, and automod's own promotion execs
+    `~/.local/share/uv/tools/supervisor/bin/supervisorctl`
+    (`scripts/automod/promote.py:97`), so an entry widened one directory up would
+    refuse the parachute; a `.venvs`-shaped path in an unrelated project is
+    ordinary work, and `pyvenv.cfg` inside the real `.venvs` still belongs to the
+    entry that has always covered it.
+    """
+    store_label = dict(PP.PROTECTED_WRITE_ROOTS)[UV_STORE_TEMPLATE]
+    link = linked_home / "lloyd" / ".venvs" / "lloyd" / "bin" / "python"
+    binary = (linked_home / UV_STORE_BIN / "python3.12").resolve()
+    assert link.is_symlink(), "the pin is about a venv link; a plain file tests the old set"
+    assert link.resolve() == binary, (link.resolve(), binary)
+    assert PP.write_deny_reason(str(link)) == store_label, "the venv link into the store"
+    assert PP.write_deny_reason(str(binary)) == store_label, "the store binary itself"
+    # The uv tools tree beside the store: automod's promotion path, and allowed.
+    assert PP.write_deny_reason(
+        str(linked_home / ".local/share/uv/tools/supervisor/bin/supervisorctl")) is None
+    # A `.venvs`-shaped interpreter in another project is not this entry's.
+    assert PP.write_deny_reason(
+        str(linked_home / "otherproject/lloyd/.venvs/lloyd/bin/python")) is None
+    # And the four shipped entries keep their own ground: this file inside
+    # `~/lloyd/.venvs` is still the venv entry's, not the store's.
+    assert PP.write_deny_reason(
+        str(linked_home / "lloyd/.venvs/pyvenv.cfg")) == THE_SHIPPED_FOUR["~/lloyd/.venvs"]
 
 
 def test_granting_lifts_the_set_and_expiring_relifts_it(wtree):
