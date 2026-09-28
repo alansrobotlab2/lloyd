@@ -2653,30 +2653,182 @@ def test_no_gold_label_was_widened_into_a_substring_to_pass_the_returnability_gu
         "doc_hit_rate/doc_recall_avg/mrr_doc/ndcg10 to move at that point")
 
 
+def _gold_header(text: str) -> str:
+    """The leading comment block of a gold-file text, up to its first data line."""
+    lines = text.split("\n")
+    end = next((i for i, ln in enumerate(lines)
+                if ln.strip() and not ln.lstrip().startswith("#")), len(lines))
+    return "\n".join(lines[:end])
+
+
+def _expect_docs_block(header: str) -> str:
+    """The `expect_docs:` schema entry and its continuation lines, nothing else.
+
+    Scoped to this one entry on purpose: a guard that greps the whole comment
+    region is satisfied by any sentence that happens to contain the words, which is
+    the weakness #1748's own review left as an advisory on the first version of
+    this pin.
+    """
+    lines = header.split("\n")
+    start = next((i for i, ln in enumerate(lines)
+                  if ln.lstrip().lstrip("#").strip().startswith("expect_docs:")), None)
+    if start is None:
+        return ""
+    out = [lines[start]]
+    for ln in lines[start + 1:]:
+        body = ln.lstrip()
+        if not body.startswith("#"):
+            break
+        # Indent is counted AFTER the leading `#`, since every comment line has zero
+        # spaces before it. Schema keys sit at `#   key:`; continuations are deeper.
+        after = body[1:]
+        indent = len(after) - len(after.lstrip())
+        if indent <= 3 and ":" in after.strip().split(" ")[0]:
+            break
+        out.append(ln)
+    return "\n".join(out)
+
+
+def _gold_header_problems(text: str) -> list:
+    """Every way a gold-file header fails to carry the #1748 label policy.
+
+    Pure over the file's text, for the same reason `_gold_label_ratchet_violations`
+    is: an instrument whose only passing state is today's file has not been shown
+    able to fail, and the specific state this has to reject is one where the policy
+    EXISTS but the schema line above it still reads as a free pass — which is
+    exactly what `eval/vault_recall_queries.yaml` looked like after the first #1748
+    landing, and the reason the clause was re-offered.
+
+    Three checks, all of them about a reader who stops at the `expect_docs:` line:
+    the match rule there has to disclaim itself, the label rule has to name one
+    document and the shrinking pinned set, and the count the prose quotes has to be
+    the count the guard pins AND the count the corpus actually carries.
+    """
+    import re
+
+    problems: list[str] = []
+    block = _expect_docs_block(_gold_header(text))
+    if not block:
+        return ["the header has no `expect_docs:` schema entry"]
+    # Flatten comment-by-comment: joining raw lines leaves each line's `#` marker in
+    # the prose, and a sentence wrapped across two lines stops matching anything
+    # (measured — "must name one # document").
+    flat = " ".join(ln.lstrip().lstrip("#").strip()
+                    for ln in block.split("\n")).lower()
+
+    # 1. The licence itself. Split at the policy marker: what is ABOVE it is the
+    #    only prose a reader of the schema line alone ever sees.
+    above, sep, below = flat.partition("label policy")
+    if not sep:
+        problems.append("the expect_docs entry states no LABEL POLICY")
+        below = ""
+    if "not a licence" not in above and "not a license" not in above:
+        problems.append(
+            "the match rule at the expect_docs: line still licenses a substring — "
+            "it must say in its own sentence that it scores a label rather than "
+            "permitting one")
+
+    # 2. What the policy has to promise, in the policy's own prose.
+    for needle, what in (
+            ("name one document", "a new label must name one document"),
+            ("legacy", "the 23 are legacy exceptions, not a precedent"),
+            ("pinned", "the legacy set is a pinned set"),
+            ("shrink", "the pinned set may shrink"),
+            ("never grow", "the pinned set may never grow")):
+        if needle not in below:
+            problems.append(f"the label policy does not state: {what}")
+
+    # 3. The quoted count against the two instruments that carry it. A header
+    #    saying 23 over a guard pinning 24 is a second instrument disagreeing with
+    #    the first, and the old pin's `"23" in header` — a substring match over the
+    #    whole comment region — could not tell those apart.
+    counts = {int(n) for n in re.findall(
+        r"(?<![\w.#-])(\d+)\s+(?:labels?\b|substrings?\b)", below)}
+    pinned = len(_PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS)
+    in_corpus = len(_substring_shaped_gold_labels(_gold_label_pairs()))
+    if counts != {pinned}:
+        problems.append(
+            f"the policy quotes {sorted(counts) or 'no'} legacy label count(s); "
+            f"the guard pins {pinned}")
+    if pinned != in_corpus:
+        problems.append(
+            f"the guard pins {pinned} legacy labels but the corpus carries "
+            f"{in_corpus} — the ratchet and its fixture disagree")
+    return problems
+
+
+_HEADER_BEFORE_1748 = """\
+#   expect_docs: substrings any of which should appear in returned document paths
+#     (relative to ~/obsidian/) — at least one match counts as a hit
+"""
+
+_HEADER_POLICY_BENEATH_A_BARE_LICENCE = """\
+#   expect_docs: substrings any of which should appear in returned document paths
+#     (relative to ~/obsidian/) — at least one match counts as a hit
+#     LABEL POLICY (#1748), which that match rule does not state: a NEW or
+#     RE-POINTED expect_docs label must name one document — a path with a `/` and
+#     a `.md` basename, e.g. `knowledge/foo.md`. The 23 labels that predate #1662
+#     and are bare substrings (qmd -> qmd, robotics-projects -> robot, …) are
+#     legacy: they stay legal only as the pinned set in
+#     tests/test_eval_corpus_guard.py::_PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS,
+#     which that guard holds may SHRINK and may NEVER GROW.
+"""
+
+
 def test_the_gold_header_states_the_ratchet_instead_of_licensing_any_substring():
     """#1748 clause 4: the file's own schema line must not read as a free pass.
 
     `expect_docs: substrings any of which should appear in returned document
-    paths` is still true of retrieval semantics and stays, but the header now has
-    to say what a NEW label must look like and that the 23 legacy ones are a
-    shrinking pinned set — otherwise the next round reads one line, adds a
-    substring, and only the test above catches it, after the round has already
-    committed.
+    paths` is still true of retrieval semantics and stays, but it is the MATCH
+    rule, and until now it stood at `:12` as the whole of what a reader of that
+    line sees while the label rule sat underneath it. The next round adds a
+    substring for that reason, and only the ratchet catches it — after that round
+    has committed and re-scored the trend. So the disclaimer lives in the match
+    rule's own sentence now, and this node reads the header the way that reader
+    does: the `expect_docs:` entry and nothing else.
     """
-    raw = _GOLD_YAML.read_text().split("\n")
-    end = next(i for i, ln in enumerate(raw) if ln.strip() and not ln.lstrip().startswith("#"))
-    header = "\n".join(raw[:end])
-    low = header.lower()
-    assert "expect_docs: substrings" in header, "the schema line itself moved"
-    for needle in ("name one document", "legacy", "never grow"):
-        assert needle in low, f"header does not state the ratchet: {needle}"
-    # The policy has to meet a reader AT the schema line, and the count it quotes
-    # has to be the count the guard pins — a header that says "23" over a guard
-    # pinning 24 is a second instrument disagreeing with the first.
-    assert low.index("label policy") > low.index("expect_docs: substrings"), (
-        "the policy is stated before the line it qualifies")
-    assert "23" in header and len(_PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS) == 23, (
-        len(_PRE_1662_SUBSTRING_SHAPED_GOLD_LABELS))
+    problems = _gold_header_problems(_GOLD_YAML.read_text())
+    assert problems == [], problems
+
+
+def test_the_gold_header_guard_reddens_on_a_header_that_only_borrows_the_policy():
+    """Clause 4's fail-both-ways half: the guard must reject the two headers that
+    shipped before this, not merely pass the one that ships now.
+
+    `_HEADER_BEFORE_1748` is the entry as it stood before #1748 touched it, and
+    `_HEADER_POLICY_BENEATH_A_BARE_LICENCE` is verbatim the entry this round
+    replaced — policy present, count correct, and the schema line above it still an
+    unqualified licence. Both must produce the licence problem: that is the state
+    the clause was re-offered over, and a node that only asserted the current
+    file's prose could not have distinguished it from a fix.
+    """
+    bare = _gold_header_problems(_HEADER_BEFORE_1748)
+    assert any("label policy" in p for p in bare), bare
+    assert any("licenses a substring" in p for p in bare), bare
+
+    borrowed = _gold_header_problems(_HEADER_POLICY_BENEATH_A_BARE_LICENCE)
+    assert borrowed == [
+        "the match rule at the expect_docs: line still licenses a substring — "
+        "it must say in its own sentence that it scores a label rather than "
+        "permitting one"], borrowed
+
+
+def test_the_gold_header_guard_reddens_when_the_quoted_count_drifts():
+    """Clause 4's third check, made falsifiable: prose that quotes a count the
+    guard no longer pins is a problem, and so is a guard pinning a count the corpus
+    does not carry.
+
+    The count is rewritten in the fixture header rather than the frozenset, so the
+    disagreement is created in exactly one of the two instruments the assert names.
+    """
+    drifted = _HEADER_POLICY_BENEATH_A_BARE_LICENCE.replace(
+        "The 23 labels", "The 24 labels")
+    problems = _gold_header_problems(drifted)
+    assert any("quotes [24]" in p and "pins 23" in p for p in problems), problems
+
+    empty = _gold_header_problems(_HEADER_POLICY_BENEATH_A_BARE_LICENCE.replace(
+        "The 23 labels", "These legacy labels"))
+    assert any("no legacy label count" in p for p in empty), empty
 
 
 def test_the_gold_label_ratchet_reddens_on_a_new_substring_label():
